@@ -123,17 +123,19 @@ class AgentProfilesTest < Minitest::Test
       model: "google/gemini-2.5-pro", effort: "medium", pin_model: false
     )
     grok = Hive::AgentProfiles.lookup(:grok).identity_arguments(
-      model: "grok-code-fast-1", effort: "high", pin_model: false
+      model: "grok-4.5", effort: "high"
     )
 
     assert_equal %w[--model sonnet --effort medium], claude.native_arguments
     assert_equal [ "--model", "gpt-5.6-terra", "-c", "model_reasoning_effort=high" ],
                  codex.native_arguments
-    [ pi, grok ].each do |result|
-      assert_equal [], result.native_arguments
-      refute result.effort_supported
-      assert_nil result.effective_effort
-    end
+    assert_equal [], pi.native_arguments
+    refute pi.effort_supported
+    assert_nil pi.effective_effort
+    assert_equal [ "--model", "grok-4.5", "--reasoning-effort", "high" ],
+                 grok.native_arguments
+    assert grok.effort_supported
+    assert_equal "high", grok.effective_effort
   end
 
   def test_utility_model_registry_never_crosses_providers
@@ -203,7 +205,38 @@ class AgentProfilesTest < Minitest::Test
     assert_equal "-p", grok.headless_flag
     assert_equal "--always-approve", grok.permission_skip_flag
     assert_equal [ "--output-format", "streaming-json" ], grok.output_format_flags
+    assert_equal :grok_end, grok.structured_output_protocol
     assert grok.headless_supported
+    assert_equal "/ce-code-review", grok.format_skill_invocation("ce-code-review")
+  end
+
+  def test_grok_profile_verifies_native_plugin_skills
+    Dir.mktmpdir do |home|
+      grok_home = File.join(home, ".grok")
+      install = File.join(grok_home, "installed-plugins", "compound-engineering-plugin-abc123")
+      FileUtils.mkdir_p(File.join(install, "skills", "ce-code-review"))
+      File.write(File.join(install, "skills", "ce-code-review", "SKILL.md"), "")
+      FileUtils.mkdir_p(File.join(grok_home, "installed-plugins"))
+      File.write(
+        File.join(grok_home, "installed-plugins", "registry.json"),
+        JSON.generate(
+          "version" => 1,
+          "repos" => {
+            "compound-engineering-plugin-abc123" => {
+              "path" => install,
+              "plugins" => { "compound-engineering" => { "version" => "3.20.0" } }
+            }
+          }
+        )
+      )
+      File.write(File.join(grok_home, "config.toml"), "[plugins]\nenabled = [\"compound-engineering\"]\n")
+
+      with_env("HOME" => home, "GROK_HOME" => grok_home) do
+        status, path = Hive::AgentProfiles.lookup(:grok).verify_skill("/ce-code-review")
+        assert_equal :present, status
+        assert_equal File.join(install, "skills", "ce-code-review", "SKILL.md"), path
+      end
+    end
   end
 
   def test_grok_logged_in_probes_auth_json
@@ -244,9 +277,13 @@ class AgentProfilesTest < Minitest::Test
     end
   end
 
-  def test_grok_logged_in_rejects_relative_auth_path_even_with_api_key
-    with_env("GROK_AUTH_PATH" => "auth.json", "XAI_API_KEY" => "test-key") do
-      refute Hive::AgentProfiles.logged_in?(:grok)
+  def test_grok_logged_in_ignores_unused_relative_paths_with_api_key
+    with_env(
+      "GROK_AUTH_PATH" => "auth.json",
+      "GROK_HOME" => "relative/grok-home",
+      "XAI_API_KEY" => "test-key"
+    ) do
+      assert Hive::AgentProfiles.logged_in?(:grok)
     end
   end
 

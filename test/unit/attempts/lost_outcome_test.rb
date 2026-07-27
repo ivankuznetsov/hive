@@ -19,7 +19,7 @@ class AttemptsLostOutcomeTest < Minitest::Test
     end
   end
 
-  def test_processes_loss_once_captures_worktree_and_projects_error_marker
+  def test_processes_loss_once_and_captures_worktree_without_projecting_a_marker
     with_task do |task, worktree|
       File.write(File.join(worktree, "partial.txt"), "partial\n")
       with_tmp_dir do |root|
@@ -43,10 +43,8 @@ class AttemptsLostOutcomeTest < Minitest::Test
         assert first.fetch("capture_references").all? do |reference|
           Hive::Attempts::OutputReference.verify(reference, root: root)
         end
-        marker = Hive::Markers.current(task.state_file)
-        assert_equal :error, marker.name
-        assert_equal "attempt_lost", marker.attrs.fetch("reason")
-        assert_equal lost.attempt_id, marker.attrs.fetch("attempt_id")
+        assert Hive::Markers.current(task.state_file).none?,
+               "the attempt ledger owns loss recovery; it must not create a second marker lifecycle"
       end
     end
   end
@@ -153,7 +151,7 @@ class AttemptsLostOutcomeTest < Minitest::Test
     end
   end
 
-  def test_competing_annotation_and_marker_projection_failures_are_idempotent
+  def test_competing_annotation_is_idempotent
     with_tmp_dir do |root|
       store = Hive::Attempts::Store.new(root: root)
       lost = lost_without_worker(store)
@@ -167,11 +165,6 @@ class AttemptsLostOutcomeTest < Minitest::Test
       end
       pending = processor.process(lost, now: NOW + 1)
       assert_equal "pending", pending.fetch("status")
-
-      task = Struct.new(:state_file).new("/unwritable/task.md")
-      with_replaced_singleton_method(Hive::Markers, :set, ->(*_args, **_kwargs) { raise Errno::EACCES }) do
-        assert_nil processor.send(:project_marker, task, lost)
-      end
     end
   end
 

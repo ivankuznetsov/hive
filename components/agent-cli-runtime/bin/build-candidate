@@ -1,0 +1,59 @@
+#!/usr/bin/env ruby
+
+require "digest"
+require "fileutils"
+require "json"
+require "open3"
+
+ROOT = File.expand_path("..", __dir__)
+$LOAD_PATH.unshift File.join(ROOT, "lib")
+require "agent_cli_runtime/version"
+
+output_dir = File.expand_path(ARGV.fetch(0, File.join(ROOT, "dist")))
+FileUtils.mkdir_p(output_dir)
+
+gem_name = "agent-cli-runtime-#{AgentCliRuntime::VERSION}.gem"
+gem_path = File.join(output_dir, gem_name)
+abort "candidate already exists: #{gem_path}" if File.exist?(gem_path)
+
+source_commit, git_error, git_status = Open3.capture3(
+  "git", "-C", File.expand_path("../..", ROOT), "rev-parse", "HEAD"
+)
+abort git_error unless git_status.success?
+source_commit = source_commit.strip
+source_dirty, git_error, git_status = Open3.capture3(
+  "git", "-C", File.expand_path("../..", ROOT), "status", "--porcelain"
+)
+abort git_error unless git_status.success?
+
+Dir.chdir(ROOT) do
+  success = system(
+    Gem.ruby, "-S", "gem", "build", "agent-cli-runtime.gemspec",
+    "--output", gem_path
+  )
+  abort "gem build failed" unless success
+end
+
+sha256 = Digest::SHA256.file(gem_path).hexdigest
+manifest = {
+  schema_version: 1,
+  gem: File.basename(gem_path),
+  name: "agent-cli-runtime",
+  version: AgentCliRuntime::VERSION,
+  source_commit: source_commit,
+  source_dirty: !source_dirty.empty?,
+  sha256: sha256
+}
+File.write(
+  File.join(output_dir, "candidate.json"),
+  "#{JSON.pretty_generate(manifest)}\n",
+  mode: "w",
+  perm: 0o600
+)
+File.write(
+  File.join(output_dir, "SHA256SUMS"),
+  "#{sha256}  #{gem_name}\n",
+  mode: "w",
+  perm: 0o600
+)
+puts JSON.generate(manifest.merge("gem_path" => gem_path))

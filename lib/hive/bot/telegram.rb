@@ -108,6 +108,12 @@ module Hive
         client.api.edit_message_reply_markup(params)
       end
 
+      def edit_message_text(chat_id:, message_id:, text:, reply_markup: nil)
+        params = { chat_id: chat_id, message_id: message_id, text: text }
+        params[:reply_markup] = inline_keyboard(reply_markup) if reply_markup
+        client.api.edit_message_text(params)
+      end
+
       # Dismisses the spinner on a tapped inline button. Required by the
       # Telegram Bot API on every callback_query update — without it the
       # button shows a perpetual loading state for the operator. Pass an

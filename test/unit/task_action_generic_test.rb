@@ -113,8 +113,8 @@ class TaskActionGenericTest < Minitest::Test
     assert_equal :skip, policy_decision(action)
 
     completed = action_for("approval", :complete, descriptor: human_workflow)
-    assert_equal "human_complete", completed.key
-    assert_equal "Human workflow complete", completed.label
+    assert_equal "archived", completed.key
+    assert_equal "Archived", completed.label
     assert_nil completed.command
   end
 

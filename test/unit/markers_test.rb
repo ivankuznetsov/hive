@@ -166,6 +166,24 @@ class MarkersTest < Minitest::Test
     end
   end
 
+  def test_recovery_marker_id_upgrade_is_compare_and_swap
+    with_tmp_dir do |dir|
+      file = File.join(dir, "x.md")
+      File.write(file, "# Task\n<!-- ERROR reason=timeout -->\n")
+      observed = Hive::Markers.current(file)
+
+      assert Hive::Markers.upgrade_recovery_marker_id(file, observed: observed)
+      upgraded = Hive::Markers.current(file)
+      assert_equal "timeout", upgraded.attrs.fetch("reason")
+      assert_match(/\A[0-9a-f]{16}\z/, upgraded.attrs.fetch("marker_id"))
+
+      File.write(file, "# Task\n<!-- ERROR reason=newer marker_id=newer-id -->\n")
+      refute Hive::Markers.upgrade_recovery_marker_id(file, observed: observed)
+      assert_equal "newer-id", Hive::Markers.current(file).attrs.fetch("marker_id"),
+                   "a migration read must never overwrite a newer marker generation"
+    end
+  end
+
   def test_review_recovery_markers_get_unique_marker_ids
     with_tmp_dir do |dir|
       file = File.join(dir, "x.md")
@@ -184,10 +202,10 @@ class MarkersTest < Minitest::Test
     end
   end
 
-  def test_error_recovery_match_attr_prefers_marker_id_alone_when_no_reason
+  def test_recovery_match_attr_prefers_marker_id_alone_when_no_reason
     attrs = { "exit_code" => "70", "marker_id" => "err-70" }
 
-    assert_equal "marker_id=err-70", Hive::Markers.error_recovery_match_attr(attrs)
+    assert_equal "marker_id=err-70", Hive::Markers.recovery_match_attr(attrs)
   end
 
   # `marker_id` keeps its primary "race-safe clear guard" role, but the
@@ -197,17 +215,17 @@ class MarkersTest < Minitest::Test
   # reply. Encode both as comma-separated pairs; `marker_id` stays the
   # leading token so AlertStore.parse_match_attr's first-token guard
   # still operates on it.
-  def test_error_recovery_match_attr_encodes_marker_id_and_reason_when_both_present
+  def test_recovery_match_attr_encodes_marker_id_and_reason_when_both_present
     attrs = { "reason" => "ensure_clean_on_exit_failed", "marker_id" => "err-70" }
 
     assert_equal "marker_id=err-70,reason=ensure_clean_on_exit_failed",
-                 Hive::Markers.error_recovery_match_attr(attrs)
+                 Hive::Markers.recovery_match_attr(attrs)
   end
 
-  def test_error_recovery_match_attr_falls_back_to_reason_and_exit_code
+  def test_recovery_match_attr_rejects_idless_legacy_marker
     attrs = { "reason" => "agent_failed", "exit_code" => "70" }
 
-    assert_equal "reason=agent_failed,exit_code=70", Hive::Markers.error_recovery_match_attr(attrs)
+    assert_nil Hive::Markers.recovery_match_attr(attrs)
   end
 
   def test_display_attrs_hides_internal_marker_id
@@ -356,6 +374,7 @@ class MarkersTest < Minitest::Test
       state = Hive::Markers.current(file)
       assert_equal :review_ci_stale, state.name
       assert_equal "3", state.attrs["attempts"]
+      assert_match(/\A[0-9a-f]{16}\z/, state.attrs.fetch("marker_id"))
     end
   end
 
@@ -366,6 +385,7 @@ class MarkersTest < Minitest::Test
       state = Hive::Markers.current(file)
       assert_equal :review_stale, state.name
       assert_equal "4", state.attrs["pass"]
+      assert_match(/\A[0-9a-f]{16}\z/, state.attrs.fetch("marker_id"))
     end
   end
 

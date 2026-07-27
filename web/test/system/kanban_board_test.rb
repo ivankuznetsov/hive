@@ -3,6 +3,30 @@ require "application_system_test_case"
 class KanbanBoardTest < ApplicationSystemTestCase
   teardown { StatusBroadcaster.stop! }
 
+  test "operator follows an ordinary hidden summary into the complete archive and task detail" do
+    project = create_hive_project!("kanban-archive-app")
+    slug = create_task!(project, "Keep the complete archive reachable")
+    source = stage_dir(project, "1-inbox").join(slug)
+    archived = stage_dir(project, "9-done").join(slug)
+    FileUtils.mv(source, archived)
+    archived.join("task.md").write("<!-- COMPLETE -->\n")
+    Hive::TaskMeta.rewrite(
+      archived.to_s,
+      completed_at: Time.now.utc - (4 * Hive::ArchiveFilter::SECONDS_PER_DAY)
+    )
+
+    visit dev_login_path(as: "alice")
+
+    assert_no_selector ".kanban-card[data-task-slug='#{slug}']"
+    find(".archive-summary a", text: "… and 1 older archived task (hive archive to view)").click
+    assert_current_path archive_path(project:)
+    assert_selector "#status-archive [data-task-slug='#{slug}']"
+
+    find("[data-task-slug='#{slug}'] a", text: "Keep the complete archive reachable").click
+    assert_current_path task_path(project, slug, source: "archive")
+    assert_selector ".task-header", text: "Keep the complete archive reachable"
+  end
+
   test "operator switches between the live board and grid without losing the preference" do
     project = create_hive_project!("kanban-browser-app")
     slug = create_task!(project, "Move through a native board")
@@ -267,7 +291,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
       assert_selector "#status-stream-source[connected]", visible: :all, wait: 10
       board_token = status_page_token
 
-      find(".kanban-card[data-task-slug='#{original_slug}'] a").click
+      find(".kanban-card[data-task-slug='#{original_slug}'] .kanban-card-heading a").click
       assert_current_path task_path(project, original_slug)
       execute_script("document.querySelector('#status-stream-owner').remove()")
       wait_for_status_subscribers(0)
@@ -296,7 +320,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
 
       start_status_navigation_request_tracking
       with_status_catch_up_observer do |catch_ups|
-        find(".kanban-card[data-task-slug='#{slug}'] a").click
+        find(".kanban-card[data-task-slug='#{slug}'] .kanban-card-heading a").click
         assert_current_path task_pathname, wait: 10
         assert_selector "#status-stream-source[connected]", visible: :all, wait: 10
         catch_up = Timeout.timeout(10) { catch_ups.pop }
@@ -324,7 +348,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
       start_status_navigation_request_tracking
       with_replaced_singleton_method(StatusBroadcaster, :current_version?, ->(_token) { false }) do
         with_status_catch_up_observer do |catch_ups|
-          find(".kanban-card[data-task-slug='#{slug}'] a").click
+          find(".kanban-card[data-task-slug='#{slug}'] .kanban-card-heading a").click
           assert_current_path task_pathname, wait: 10
 
           first = Timeout.timeout(10) { catch_ups.pop }
@@ -355,50 +379,64 @@ class KanbanBoardTest < ApplicationSystemTestCase
       project = create_hive_project!("kanban-changing-token-app")
       slug = create_task!(project, "Reconcile across changing tokens")
       original_snapshot = StatusBroadcaster.method(:snapshot_with_version)
+      original_current_snapshot = StatusBroadcaster.method(:current_page_snapshot)
       sequence = 0
       sequence_mutex = Mutex.new
-      changing_snapshot = lambda do
-        page_snapshot = original_snapshot.call
+      changing_version = lambda do |page_snapshot|
         version = sequence_mutex.synchronize do
           sequence += 1
           "render-token-#{sequence}"
         end
-        StatusBroadcaster::PageSnapshot.new(payload: page_snapshot.payload, version:)
+        StatusBroadcaster::PageSnapshot.new(
+          payload: page_snapshot.payload,
+          version: version,
+          availability: page_snapshot.availability,
+          last_success_at: page_snapshot.last_success_at,
+          error: page_snapshot.error
+        )
+      end
+      changing_snapshot = -> { changing_version.call(original_snapshot.call) }
+      changing_current_snapshot = lambda do
+        changing_version.call(original_current_snapshot.call || original_snapshot.call)
       end
 
       with_replaced_singleton_method(StatusBroadcaster, :snapshot_with_version, changing_snapshot) do
-        visit dev_login_path(as: "alice")
-        assert_selector "#status-stream-source[connected]", visible: :all, wait: 10
-        task_pathname = task_path(project, slug)
+        with_replaced_singleton_method(
+          StatusBroadcaster, :current_page_snapshot, changing_current_snapshot
+        ) do
+          visit dev_login_path(as: "alice")
+          assert_selector "#status-stream-source[connected]", visible: :all, wait: 10
+          task_pathname = task_path(project, slug)
 
-        start_status_navigation_request_tracking
-        with_replaced_singleton_method(StatusBroadcaster, :current_version?, ->(_token) { false }) do
-          with_status_catch_up_observer do |catch_ups|
-            find(".kanban-card[data-task-slug='#{slug}'] a").click
-            assert_current_path task_pathname, wait: 10
+          start_status_navigation_request_tracking
+          with_replaced_singleton_method(StatusBroadcaster, :current_version?, ->(_token) { false }) do
+            with_status_catch_up_observer do |catch_ups|
+              find(".kanban-card[data-task-slug='#{slug}'] .kanban-card-heading a").click
+              assert_current_path task_pathname, wait: 10
 
-            first = Timeout.timeout(10) { catch_ups.pop }
-            page.document.synchronize(10) do
-              loads = evaluate_script("window.statusNavigationLoads")
-              raise Capybara::ElementNotFound, "targeted catch-up refresh did not finish" if loads < 2
+              first = Timeout.timeout(10) { catch_ups.pop }
+              page.document.synchronize(10) do
+                loads = evaluate_script("window.statusNavigationLoads")
+                raise Capybara::ElementNotFound, "targeted catch-up refresh did not finish" if loads < 2
+              end
+              execute_script(<<~JS)
+                const source = document.querySelector("#status-stream-source")
+                source.subscriptionConnected(source.statusConnection)
+              JS
+              second = Timeout.timeout(10) { catch_ups.pop }
+
+              refute_equal first.fetch("status_version"), second.fetch("status_version"),
+                           "the reconciliation response must exercise a different render token"
+              refute first.fetch("refresh_attempted")
+              assert second.fetch("refresh_attempted"),
+                     "the same-URL refresh-cycle latch must not depend on token equality"
             end
-            execute_script(<<~JS)
-              const source = document.querySelector("#status-stream-source")
-              source.subscriptionConnected(source.statusConnection)
-            JS
-            second = Timeout.timeout(10) { catch_ups.pop }
-
-            refute_equal first.fetch("status_version"), second.fetch("status_version"),
-                         "the reconciliation response must exercise a different render token"
-            refute first.fetch("refresh_attempted")
-            assert second.fetch("refresh_attempted"),
-                   "the same-URL refresh-cycle latch must not depend on token equality"
           end
-        end
-        requests = status_request_count_after_quiet(task_pathname)
+          requests = status_request_count_after_quiet(task_pathname)
 
-        assert_equal 2, requests,
-                     "a changing HTTP token must not let a lagging worker start another refresh GET"
+          assert_equal 2, requests,
+                       "a changing HTTP token must not let a lagging worker start another refresh GET"
+        end
       end
     end
   end
@@ -482,7 +520,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
       JS
 
       with_status_catch_up_observer do |catch_ups|
-        find(".kanban-card[data-task-slug='#{slug}'] a").click
+        find(".kanban-card[data-task-slug='#{slug}'] .kanban-card-heading a").click
         assert_current_path task_path(project, slug), wait: 10
         assert_equal board_token, status_page_token,
                      "route-only navigation should preserve the semantic status token"

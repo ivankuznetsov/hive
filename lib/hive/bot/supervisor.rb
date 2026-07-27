@@ -49,6 +49,7 @@ module Hive
         { command: "approve", description: "Approve a task at its current stage: /approve <id|slug>" },
         { command: "autofix", description: "Retry a stuck task: /autofix <id|slug>" },
         { command: "details", description: "Show diagnostic detail: /details <id|slug>" },
+        { command: "close",   description: "Verify delivered work before archiving: /close <id|slug>" },
         { command: "done",    description: "Mark a brainstorm as done after answering" },
         { command: "help",    description: "Show available commands" }
       ].freeze
@@ -472,6 +473,25 @@ module Hive
         nil
       end
 
+      def safe_edit_message(update, text:, reply_markup: nil)
+        return safe_send_message(
+          chat_id: update.chat_id, text: text, reply_markup: reply_markup
+        ) unless update.respond_to?(:message_id) && update.message_id
+
+        @telegram.edit_message_text(
+          chat_id: update.chat_id,
+          message_id: update.message_id,
+          text: text,
+          reply_markup: reply_markup
+        )
+      rescue StandardError => e
+        @logger.event(
+          :send_failure, source: "edit_message_text",
+          chat_id: update.chat_id, error_class: e.class.name, message: e.message
+        )
+        nil
+      end
+
       def execute_result(result, update)
         case result.action
         when :noop
@@ -479,10 +499,14 @@ module Hive
         when :reply
           safe_send_message(chat_id: update.chat_id, text: result.text,
                             reply_markup: result.reply_markup)
+        when :edit_reply
+          safe_edit_message(update, text: result.text, reply_markup: result.reply_markup)
         when :dispatch_then_reply
           execute_dispatch(result, update)
         when :dispatch_commands
           dispatch_command_sequence(result, update)
+        when :dispatch_recovery
+          execute_recovery(result, update)
         when :start_answer
           start_answer(result, update)
         when :write_answer_then_reply
@@ -839,10 +863,10 @@ module Hive
         commands = Array(result.commands)
         reset_pending = !@dry_run && needs_alert_reset?(result)
 
-        # If every command in the sequence is queue-routable, write only
-        # the first request and keep the rest as a daemon-promoted
-        # continuation. The retry command is not visible to the daemon until
-        # `markers clear` exits 0.
+        # If every command in the sequence is queue-routable, write only the
+        # first request and keep the rest as a daemon-promoted continuation.
+        # This is used for ordinary multi-command workflows such as findings
+        # disposition; recovery uses execute_recovery instead.
         if commands.all? { |argv| queue_routable?(argv) }
           return enqueue_command_sequence(commands, result, update)
         end
@@ -857,7 +881,10 @@ module Hive
           )
           last_pid = execute_dispatch(per_command, update)
           if idx < commands.length - 1 && last_pid.is_a?(Integer)
-            unless wait_for_child_success(last_pid, deadline: Time.now + (@config.fetch("clear_retry_grace_sec", 30)))
+            unless wait_for_child_success(
+              last_pid,
+              deadline: Time.now + (@config.fetch("command_sequence_grace_sec", 30))
+            )
               safe_send_message(chat_id: update.chat_id, text: "Stopped because the previous command failed.")
               failed = true
               break
@@ -871,11 +898,49 @@ module Hive
         reset_alert_for_result(result) if reset_pending && !failed
       end
 
+      def execute_recovery(result, update)
+        clear_inline_keyboard(update) if result.respond_to?(:clear_keyboard) && result.clear_keyboard
+        receipt = @dispatch_request_writer.recover!(
+          row: result.recovery,
+          project: result.project,
+          requestor: "bot",
+          chat_id: update.chat_id,
+          update_id: update.update_id
+        )
+        reset_alert_for_result(result) if %w[queued running terminal].include?(receipt.status)
+        @logger.event(
+          :dispatched_command,
+          project: result.project,
+          slug: result.slug,
+          command: "recovery",
+          update_id: update.update_id,
+          via: "recovery_coordinator",
+          request_id: receipt.request_id,
+          attempt_id: receipt.attempt_id,
+          dispatch_status: receipt.status
+        )
+        safe_send_message(chat_id: update.chat_id, text: receipt.human_summary)
+        receipt
+      rescue StandardError => e
+        @logger.event(
+          :send_failure,
+          source: "execute_recovery",
+          chat_id: update.chat_id,
+          slug: result.slug,
+          error_class: e.class.name,
+          message: e.message
+        )
+        safe_send_message(
+          chat_id: update.chat_id,
+          text: "Current state unavailable — #{e.class}; reopen /queue and retry."
+        )
+        nil
+      end
+
       # Queue path for `dispatch_command_sequence`: write only the FIRST
       # request and store the remaining argv list as a continuation sidecar.
       # The daemon promotes that continuation only after the current request
-      # exits 0, preserving the old `markers clear` -> retry dependency while
-      # keeping the daemon as the sole process spawner.
+      # exits 0. Recovery never uses this generic sequence path.
       def enqueue_command_sequence(commands, result, update)
         first, *remaining = commands
         request_id = @dispatch_request_writer.generate_request_id
@@ -1114,16 +1179,16 @@ module Hive
       # before that request is visible to the daemon.
       def enqueue_dispatch_request(result, update, request_id: nil)
         writer_method = request_id.nil? && @dispatch_request_writer.respond_to?(:dispatch!) ? :dispatch! : :write!
-        written = @dispatch_request_writer.public_send(
-          writer_method,
+        writer_arguments = {
           project: result.project,
           slug: result.slug,
           argv: Array(result.command_argv),
           chat_id: update.chat_id,
           update_id: update.update_id,
-          trigger: trigger_for_result(result),
-          request_id: request_id
-        )
+          trigger: trigger_for_result(result)
+        }
+        writer_arguments[:request_id] = request_id if request_id
+        written = @dispatch_request_writer.public_send(writer_method, **writer_arguments)
         reference = written if written.respond_to?(:request_id)
         request_id = reference ? reference.request_id : written
         @logger.event(:dispatched_command,
@@ -1162,7 +1227,7 @@ module Hive
         intent = result.respond_to?(:intent) ? result.intent : nil
         case intent
         when :slash_done then "slash_done"
-        when :callback_autofix, :callback_clear_and_retry then "autofix"
+        when :callback_autofix then "autofix"
         when :callback_approve, :callback_approve_plan then "callback_approve"
         when :callback_rerun then "callback_rerun"
         when :callback_findings_accept_all then "findings_accept"

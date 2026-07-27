@@ -139,9 +139,16 @@ input_fingerprint: 3f...
 
 Automation may add `--idempotency-key KEY --json`. Hive stores the opaque key
 with a fingerprint of the normalized input, resolved workflow, dependency, and
-base branch. For owner-authored workflows the fingerprint also covers the
+base branch. Idempotent attachments are copied once into a private temporary
+snapshot; the fingerprint and task asset both use those bytes, and the final
+copy is digest-verified. A pathname replacement or source edit between lookup
+and task creation therefore cannot make metadata describe different captured
+content. For owner-authored workflows the fingerprint also covers the
 descriptor and complete instruction tree, so changed owner content conflicts
-instead of reusing an older task. Metadata admission fails closed if any
+instead of reusing an older task. Hive rechecks that authored digest inside the
+commit boundary before lookup reuse and again before metadata publication; a
+mid-creation edit aborts and removes the candidate instead of binding a stale
+fingerprint to a different graph. Metadata admission fails closed if any
 candidate task metadata is malformed or unreadable. The managed-workflow
 mutation lock is acquired before the state commit lock, matching lifecycle
 writers. One commit lock now covers the state-wide key lookup, exclusive

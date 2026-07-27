@@ -37,6 +37,7 @@ class WorkflowNewTest < Minitest::Test
       assert_includes stdout.string, "hive new #{File.basename(project_root)} --workflow my-flow"
 
       assert File.file?(descriptor_path)
+      assert_includes File.read(descriptor_path), "archive_visibility_retention_days: 3"
       assert_equal "Edit this file to define what the `work` stage should do.\n", File.read(instruction_path)
       assert File.file?(File.join(File.dirname(instruction_path), "README.md"))
       assert File.file?(File.join(File.dirname(instruction_path), "honeycomb.yml"))
@@ -156,6 +157,7 @@ class WorkflowNewTest < Minitest::Test
 
       # The descriptor carries the SAMPLE's multi-stage shape, renamed to the id.
       workflow = Hive::Workflows::DescriptorParser.parse_file(File.join(workflows, "brief.yml"))
+      assert_includes File.read(File.join(workflows, "brief.yml")), "archive_visibility_retention_days: 3"
       assert_equal %w[inbox gather synthesize report done], workflow.stage_names
       assert_equal %i[inert agent agent agent inert], workflow.stages.map(&:kind)
 
@@ -406,6 +408,31 @@ class WorkflowNewTest < Minitest::Test
     end
   end
 
+  def test_interrupted_scaffold_commit_clears_staged_entries_and_owned_files
+    with_initialized_project do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      runner = method(:run!)
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:hive_commit) do |pathspecs:, **|
+        runner.call("git", "-C", hive_state, "add", "--", *pathspecs)
+        raise Interrupt, "stop"
+      end
+      fake_ops.define_singleton_method(:run_git!) { |*args| runner.call("git", *args) }
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(_root) { fake_ops }) do
+        assert_raises(Interrupt) do
+          Hive::Commands::Workflow.new!(
+            "interrupted-flow", project_root: project_root, stdout: StringIO.new
+          )
+        end
+      end
+
+      refute File.exist?(File.join(hive_state, "workflows", "interrupted-flow.yml"))
+      refute File.exist?(File.join(hive_state, "workflows", "interrupted-flow"))
+      assert_empty run!("git", "-C", hive_state, "diff", "--cached", "--name-only")
+    end
+  end
+
   def test_json_concurrent_run_error_payload_classifies_concurrent
     with_initialized_project do |project_root|
       out, err, status = with_replaced_singleton_method(
@@ -426,14 +453,14 @@ class WorkflowNewTest < Minitest::Test
   def test_json_disk_write_error_rides_the_envelope_as_error_kind
     with_initialized_project do |project_root|
       out, err, status = with_replaced_singleton_method(
-        FileUtils, :mkdir_p, ->(*_args) { raise Errno::EACCES, "denied" }
+        Dir, :mkdir, ->(*_args) { raise Errno::EACCES, "denied" }
       ) do
         with_captured_exit do
           Hive::Commands::Workflow.new("new", "disk-flow", project_root: project_root, json: true).call
         end
       end
 
-      # The disk fault from write_scaffold!'s mkdir_p must ride the JSON envelope
+      # The disk fault from write_scaffold!'s exclusive mkdir must ride the JSON envelope
       # (error_kind=error, no raw backtrace on stderr), not escape to bin/hive.
       assert_empty err
       payload = JSON.parse(out)
@@ -535,6 +562,32 @@ class WorkflowNewTest < Minitest::Test
 
       refute File.exist?(File.join(project_root, ".hive-state", "workflows", "broken-helper-flow.yml"))
       refute File.exist?(File.join(project_root, ".hive-state", "workflows", "broken-helper-flow"))
+    end
+  end
+
+  def test_scaffold_race_preserves_a_foreign_descriptor
+    with_initialized_project do |project_root|
+      workflows = File.join(project_root, ".hive-state", "workflows")
+      instruction_dir = File.join(workflows, "raced-flow")
+      descriptor = File.join(workflows, "raced-flow.yml")
+      original_mkdir = Dir.method(:mkdir)
+
+      replacement = lambda do |path, *args|
+        result = original_mkdir.call(path, *args)
+        File.write(descriptor, "foreign descriptor\n") if path == instruction_dir
+        result
+      end
+      with_replaced_singleton_method(Dir, :mkdir, replacement) do
+        assert_raises(Errno::EEXIST) do
+          Hive::Commands::Workflow.scaffold_files!("raced-flow", project_root: project_root)
+        end
+      end
+
+      assert_equal "foreign descriptor\n", File.read(descriptor)
+      refute File.exist?(instruction_dir),
+             "rollback should remove only the instruction directory this invocation created"
+    ensure
+      FileUtils.rm_f(descriptor) if descriptor
     end
   end
 

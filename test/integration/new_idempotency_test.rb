@@ -5,9 +5,6 @@ require "hive/commands/approve"
 require "hive/commands/init"
 require "hive/commands/new"
 require "hive/commands/workflow"
-# Load the sibling command with the same lexical constant name before task
-# fingerprinting, matching the full-suite command load order.
-require "hive/commands/digest"
 require "hive/task_meta"
 
 class NewIdempotencyTest < Minitest::Test
@@ -118,6 +115,39 @@ class NewIdempotencyTest < Minitest::Test
     end
   end
 
+  def test_idempotent_attachment_fingerprint_and_task_use_one_byte_snapshot
+    with_initialized_project do |project_root, project|
+      with_tmp_dir do |dir|
+        source = File.join(dir, "source.png")
+        File.binwrite(source, "original-bytes")
+        command = Hive::Commands::New.new(
+          project, "task with raced image", slug_override: "raced-attachment-task",
+          idempotency_key: "creator:raced-attachment", json: true,
+          attachments: [ [ source, "source.png" ] ]
+        )
+        original_lookup = command.method(:find_idempotent_task!)
+        command.define_singleton_method(:find_idempotent_task!) do |*args|
+          File.binwrite(source, "changed-after-fingerprint")
+          original_lookup.call(*args)
+        end
+
+        out, = capture_io { command.call! }
+        payload = JSON.parse(out)
+        captured = File.join(payload.fetch("task_folder"), "assets", "source.png")
+
+        assert_equal "original-bytes", File.binread(captured)
+
+        File.binwrite(source, "original-bytes")
+        retry_payload = create_json_with(
+          project, "task with raced image", key: "creator:raced-attachment",
+          slug: "raced-attachment-task", attachments: [ [ source, "source.png" ] ]
+        )
+        assert_equal false, retry_payload.fetch("created")
+        assert_equal 1, idempotent_tasks(project_root).size
+      end
+    end
+  end
+
   def test_commit_failure_removes_the_uncommitted_task
     with_initialized_project do |project_root, project|
       fake_ops = Object.new
@@ -147,6 +177,34 @@ class NewIdempotencyTest < Minitest::Test
       )
       assert_empty run!("git", "-C", File.join(project_root, ".hive-state"),
                         "diff", "--cached", "--name-only")
+    end
+  end
+
+  def test_interrupted_commit_removes_the_uncommitted_task
+    with_initialized_project do |project_root, project|
+      fake_ops = Object.new
+      runner = method(:run!)
+      hive_state = File.join(project_root, ".hive-state")
+      fake_ops.define_singleton_method(:hive_commit) do |**|
+        runner.call("git", "-C", hive_state, "add", "--",
+                    "stages/1-inbox/interrupted-task")
+        raise Interrupt, "stop"
+      end
+      fake_ops.define_singleton_method(:run_git!) { |*args| runner.call("git", *args) }
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(_root) { fake_ops }) do
+        assert_raises(Interrupt) do
+          Hive::Commands::New.new(
+            project, "will stop", slug_override: "interrupted-task",
+            idempotency_key: "creator:interrupted", json: true
+          ).call!
+        end
+      end
+
+      refute Dir.exist?(
+        File.join(hive_state, "stages", "1-inbox", "interrupted-task")
+      )
+      assert_empty run!("git", "-C", hive_state, "diff", "--cached", "--name-only")
     end
   end
 
@@ -200,6 +258,32 @@ class NewIdempotencyTest < Minitest::Test
 
       assert_includes error.message, "different input or workflow"
       assert_equal 1, idempotent_tasks(project_root).size
+    end
+  end
+
+  def test_owner_authored_workflow_change_during_creation_aborts_candidate
+    with_initialized_project do |project_root, project|
+      create_authored_workflow(project_root, "editorial")
+      instruction = File.join(
+        project_root, ".hive-state", "workflows", "editorial", "work.md"
+      )
+      command = Hive::Commands::New.new(
+        project, "same request", slug_override: "raced-authored",
+        workflow: "editorial", idempotency_key: "creator:authored-race", json: true
+      )
+      original_lookup = command.method(:find_idempotent_task!)
+      command.define_singleton_method(:find_idempotent_task!) do |*args|
+        File.write(instruction, "Changed during task creation.\n")
+        original_lookup.call(*args)
+      end
+
+      error = assert_raises(Hive::ConcurrentRunError) { command.call! }
+
+      assert_includes error.message, "owner-authored workflow changed"
+      refute Dir.exist?(
+        File.join(project_root, ".hive-state", "stages", "1-inbox", "raced-authored")
+      )
+      assert_empty idempotent_tasks(project_root)
     end
   end
 

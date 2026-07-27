@@ -6,6 +6,9 @@ description: |
   fresh `1-inbox` task. Pinned against the asciinema-captured pane
   state by the same harness as PR #18's existing tui_* scenarios.
 tags: [tui, v2]
+coverage:
+  primary: tui.navigation
+  supporting: []
 steps:
   # Seed a task so the right pane has something to show besides the
   # eventual newly-created idea — keeps the dashboard warm and lets

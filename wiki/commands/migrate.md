@@ -3,13 +3,15 @@ title: hive migrate
 type: command
 source: lib/hive/commands/migrate.rb, lib/hive/stages.rb
 created: 2026-05-21
-updated: 2026-07-23
-tags: [command, migration, config, reviewers, stages, task-id, display-name]
+updated: 2026-07-26
+tags: [command, migration, config, reviewers, stages, task-id, display-name, recovery]
 ---
 
 **TLDR**: `hive migrate [PROJECT_PATH]` is the explicit, idempotent upgrade
 path for legacy project config, tasks created before the PR-first layout and
-later 7-artifacts insertion, and task-id/display-name sidecar additions.
+later 7-artifacts insertion, task-id/display-name sidecar additions, managed
+workflow configuration pins, and the one-off recovery-state and
+recovery-marker identity cutovers.
 
 ## Usage
 
@@ -18,6 +20,12 @@ hive migrate [PROJECT_PATH]
 ```
 
 `PROJECT_PATH` defaults to the current directory. The command requires `<project>/.hive-state/stages/` to exist.
+
+Before project-local changes, the command runs the owner-private recovery-state
+cutover for the current Hive state home. Daemon and bot startup run the same
+cutover before opening their stores or queues. A foreground default attempt
+store fails closed while `attempts/v1` remains, so an upgrade cannot silently
+bypass migration or create competing v2 ownership.
 
 ## Task-folder renames
 
@@ -62,10 +70,82 @@ After any stage-directory movement, or on an otherwise no-op migrated project, `
 
 - Existing numeric ids are skipped and never reassigned.
 - Existing display names are preserved when a null-id sidecar is repaired.
+- Id repair uses `TaskMeta.update_id`, preserving dependency, base-branch, and
+  complete managed workflow provenance rather than reconstructing `meta.yml`.
 - The global counter is first seeded above the maximum existing id in the scanned project, so cloned or partially migrated state continues from the highest committed sidecar id instead of restarting at 1.
 - Backfill order is deterministic: tasks sort by `idea.md` frontmatter `created_at`, then slug; tasks with no parseable `created_at` sort last by slug.
 
 After the locked id/config/stage migration finishes, `hive migrate` also backfills missing/null `display_name` values for every canonical task folder using `Hive::DisplayName::Generator`, the same agent-backed pipeline as `hive generate-name <target>`. Generation runs outside the commit lock because agent naming can take seconds per task; successful names are committed in a separate `.hive-state` commit. Existing display names are skipped, including patrol handoff names such as `Patrol: <finding title>`. A generation failure is fail-soft: that task keeps its null display name and can be retried by rerunning `hive migrate` or `hive generate-name`.
+
+## Recovery marker identity cutover
+
+Recovery v2 recognizes each durable failure by a random `marker_id`; runtime
+code has no mtime/reason fallback. Under the same project commit lock, migrate
+resolves each valid task through its workflow descriptor and inspects only that
+task's authoritative current state file. Historical artifacts and marker-shaped
+examples are not rewritten. If the current marker is `ERROR`, `REVIEW_ERROR`, `REVIEW_STALE`, or
+`REVIEW_CI_STALE` and has no identity, migrate rewrites that occurrence with a
+generated `marker_id`.
+
+The operation is idempotent: existing identities are preserved, non-recoverable
+markers are untouched, and a second run makes no recovery-marker change. An
+installed Hive that reports `recovery_migration_required` is asking for this
+explicit one-off project migration; automatic recovery stays blocked until it
+has run. A task whose workflow descriptor is missing or invalid is left
+unchanged because Hive cannot identify its authoritative state file safely;
+restore the workflow, then rerun migrate.
+
+## Durable recovery schema cutover
+
+Runtime recovery supports only the current shapes: attempt v2, dispatch request
+v4, and dispatch result v2. `Hive::Recovery::Migration` moves
+`$HIVE_HOME/attempts/v1` to `attempts/v2`, rewrites v1 attempt generations,
+strips the obsolete compatibility flag, and migrates pending request v1-v3 and
+result v1 documents. It writes `recovery-migration-v2.json` only after every
+active document is current.
+
+Final compatibility leases are moved to
+`$HIVE_HOME/attempts/legacy-v1-records/` as audit history. A live compatibility
+lease, any other live attempt in the old tree, or simultaneous populated
+`attempts/v1` and `attempts/v2` trees fails closed with an actionable error. A
+pre-cutover reader can recreate only the empty v1 directory skeleton after v2
+is authoritative; migrate removes that inert tree with empty-directory-only
+`rmdir` operations. Any file, symlink, or concurrent writer preserves the
+fail-closed dual-root error. An old detached supervisor retains the explicit v1
+path until it terminalizes, so Hive never moves storage underneath live work or
+guesses which process owns it. The migration is idempotent, and runtime readers
+contain no legacy-schema branches.
+
+## Registered repository identity backfill
+
+When the current project is already registered but its registry row predates
+`repository_identity`, migrate resolves the current `origin`, normalizes it,
+and updates that row under the global config lock. An existing identity is
+never overwritten. Local origins are intentionally stored as `local:<path>`;
+GitHub-only services such as the PR babysitter then skip them without making a
+failing `gh` call. If no origin can be resolved, the row remains unresolved and
+can be repaired after adding `origin` by rerunning `hive migrate`.
+
+## Managed workflow configuration pin cutover
+
+A managed workflow mapping can change agent, model, effort, or profile
+fingerprint without changing the immutable package generation. Existing tasks
+on that same source commit and manifest would otherwise remain pinned to an
+obsolete execution snapshot and fail closed forever after the old profile
+disappears.
+
+`hive migrate` compares each managed task with the currently selected
+configuration. When the workflow name, source commit, and manifest digest
+match, it validates the selected configuration against the installed package
+before changing any task, rewrites only
+`workflow_configuration_digest`, and preserves the rest of `meta.yml`.
+After every candidate validates, it updates all matching tasks and removes
+configuration snapshots that are no longer selected or referenced. Tasks on a
+different package generation are intentionally untouched because changing
+their descriptor or instructions requires a workflow-specific migration.
+
+The cutover is idempotent. Updating one or more pins restarts a running daemon
+so its managed-workflow cache observes the new selection immediately.
 
 ## Commit behavior
 
@@ -74,6 +154,9 @@ All changes run under the project commit lock. The command stages and commits ch
 - `hive: migrate stage directories (N tasks)` for task moves.
 - `hive: migrate config keys (no tasks moved)` for config-only rewrites.
 - `hive: migrate task ids (N tasks)` for id-only backfills.
+- `hive: migrate recovery markers (N tasks)` for recovery-only identity backfills.
+- `hive: migrate managed workflow pins (N tasks)` for a configuration-pin-only cutover.
+- `hive: migrate project state (N ids, M recovery markers, P managed workflow pins)` when multiple non-stage upgrades land together; zero-value categories are omitted.
 - `hive: migrate display names (N tasks)` for display-name-only backfills.
 
 A rerun after successful migration prints that there is nothing to move and keeps the current stage directories in place.
@@ -83,8 +166,13 @@ A rerun after successful migration prints that there is nothing to move and keep
 - `test/unit/commands/migrate_renames_consistency_test.rb` pins the stage rename map against `Hive::Stages::DIRS`.
 - `test/integration/migrate_test.rb` covers stage-dir moves, the legacy
   reviewers relocation/conflict boundary, other config rewrites, task-id
-  backfill order, display-name backfill, idempotency, null-id repair, and
+  backfill order, display-name backfill, `ERROR` / `REVIEW_ERROR` identity
+  backfill, managed same-generation configuration rebinding and all-candidate
+  preflight, repository-identity backfill, idempotency, null-id repair, and
   counter seeding.
+- `test/unit/recovery/migration_test.rb` covers the global schema cutover,
+  receipt idempotency, archived final compatibility records, queue upgrades,
+  empty post-cutover v1 skeleton cleanup, and live/ambiguous-state refusal.
 - Status integration scenarios prove hidden legacy tasks surface before migrate and disappear after migration.
 
 ## Backlinks

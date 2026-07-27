@@ -1,6 +1,9 @@
 name: run_error_envelope
 description: hive run --json against a stale-locked task emits a parseable hive-run ErrorPayload (ok=false, error_kind=concurrent_run, exit_code=75).
 tags: [cli-only, error-envelope]
+coverage:
+  primary: runtime.error_envelope
+  supporting: []
 steps:
   # Plant a 4-execute task with EXECUTE_STALE so the runner can find it.
   - kind: seed_state

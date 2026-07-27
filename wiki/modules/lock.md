@@ -3,7 +3,7 @@ title: Hive::Lock
 type: module
 source: lib/hive/lock.rb
 created: 2026-04-25
-updated: 2026-07-17
+updated: 2026-07-24
 tags: [lock, concurrency, flock, commit-lock]
 ---
 
@@ -11,12 +11,16 @@ tags: [lock, concurrency, flock, commit-lock]
 
 ## Per-task lock
 
-`with_task_lock(task_folder, payload = {})` wraps a block:
+`with_task_lock(task_folder, payload = {}, create: true)` wraps a block:
 
 1. `acquire_task_lock` writes and fsyncs a complete YAML payload to a sibling tempfile, then hard-links it to `<task_folder>/.lock` with no-replace semantics. Readers therefore see either no lock or a complete payload, never an empty/partial newly created lock.
 2. Publication, stale replacement, updates, and release are serialized on the stable `<task_folder>/.lock.tmp.guard` flock. That name is covered by the existing hive-state ignore rule. On `Errno::EEXIST`, acquisition calls `stale_lock?`; if stale, it deletes and retries up to 3 times, otherwise it raises `Hive::ConcurrentRunError`.
 3. The block runs with the lock held.
 4. `release_task_lock` deletes the lock file in `ensure` only when its generated `lock_id` still matches. An old owner cannot delete a replacement generation. If a stage transition moved the task folder while locked, release does not recreate the vanished source; the transition removes the moved lock before commit.
+
+Callers that only operate on an already observed task may pass `create: false`.
+Acquisition then rechecks the task directory and raises `ENOENT` rather than
+recreating a task that moved or was deleted while the caller waited.
 
 `base_payload`:
 ```ruby
@@ -69,11 +73,11 @@ Reads `/proc/<pid>/stat` when procfs is available, splits on `") "` to handle `(
 
 ## Per-project commit lock
 
-`with_commit_lock(project_hive_state_path)`:
+`with_commit_lock(project_hive_state_path, timeout: 30)`:
 
 1. Ensures the directory exists.
 2. Opens `<dir>/.commit-lock` with `RDWR | CREAT, 0o644`.
-3. Polls `flock(LOCK_EX | LOCK_NB)` until it acquires the lock or the 30-second `COMMIT_LOCK_TIMEOUT_SEC` deadline expires.
+3. Polls `flock(LOCK_EX | LOCK_NB)` until it acquires the lock or the caller's bounded deadline expires.
 4. On timeout, raises `Hive::ConcurrentRunError` with `lock_path: <dir>/.commit-lock`.
 5. Yields while the file descriptor is open; closing the descriptor releases the flock.
 

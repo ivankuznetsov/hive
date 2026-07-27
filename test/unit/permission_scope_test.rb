@@ -54,6 +54,25 @@ class PermissionScopeTest < Minitest::Test
     end
   end
 
+  def test_managed_resolution_returns_the_scope_without_the_legacy_claude_gate
+    with_tmp_dir do |dir|
+      scope = Hive::PermissionScope.resolve_managed(
+        {
+          "preset" => "scoped",
+          "tools" => [ "Read", "Edit(./article.md)" ]
+        },
+        task_folder: dir,
+        stage: "managed-workflow"
+      )
+
+      assert_equal "scoped", scope.preset
+      assert_equal [
+        "Read",
+        "Edit(//#{File.expand_path("article.md", dir).delete_prefix("/")})"
+      ], scope.allowed_tools
+    end
+  end
+
   # Fail-closed: a present-but-blank `permissions:` (YAML key with no value →
   # nil) must be a hard error, NOT silently mapped to yolo. A fully-absent key
   # resolves to yolo via Config.permission_spec and never reaches resolve as

@@ -253,8 +253,8 @@ class CiFixTest < Minitest::Test
         result = nil
         with_replaced_singleton_method(
           Hive::ProtectedFiles,
-          :restore_safely,
-          ->(_root, _captured, _names) { [ false, "synthetic restore failure" ] }
+          :restore_paths_safely,
+          ->(_paths, _captured, _labels) { [ false, "synthetic restore failure" ] }
         ) do
           result = Hive::Stages::Review::CiFix.run!(
             cfg: cfg_with(ci),

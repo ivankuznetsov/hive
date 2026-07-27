@@ -24,7 +24,6 @@ require "hive/commands/findings"
 require "hive/commands/finding_toggle"
 require "hive/commands/patrol"
 require "hive/commands/refactor_patrol"
-require "hive/commands/digest"
 require "hive/commands/pairing"
 require "hive/commands/answer_digest"
 require "hive/commands/markers"
@@ -36,6 +35,10 @@ require "hive/commands/setup_agents"
 
 class HiveCliTest < Minitest::Test
   include HiveTestHelper
+
+  def test_prdigest_delivery_command_is_absent
+    refute Hive::CLI.tasks.key?("digest")
+  end
 
   def test_setup_agents_help_exposes_consent_json_and_filters
     out, _err = capture_io { Hive::CLI.start([ "help", "setup-agents" ]) }
@@ -305,15 +308,6 @@ class HiveCliTest < Minitest::Test
                     "init help must derive its JSON contract version from SCHEMA_VERSIONS"
   end
 
-  def test_digest_help_describes_the_pr_only_london_contract
-    out, _err = capture_io { Hive::CLI.start([ "help", "digest" ]) }
-
-    refute_includes out, "--source"
-    assert_includes out, "--repo"
-    assert_includes out, "Europe/London"
-    assert_includes out, "Hive tasks and stage folders never affect inclusion"
-  end
-
   def test_workflow_option_help_does_not_enumerate_project_workflows
     # Plan-central contract: `--workflow` help lists built-ins only and never
     # enumerates active-project descriptors, so the rendered string stays static
@@ -536,6 +530,169 @@ class HiveCliTest < Minitest::Test
     end
   end
 
+  def test_archive_closure_json_emits_read_only_preview
+    task = Struct.new(:project_root).new("/tmp/app")
+    resolver = Struct.new(:task) { def resolve = task }.new(task)
+    payload = {
+      "schema" => "hive-task-closure-input",
+      "schema_version" => 1,
+      "ok" => true,
+      "preview_digest" => "a" * 64
+    }
+    preview = Struct.new(:payload) { def to_h = payload }.new(payload)
+
+    with_replaced_singleton_method(
+      Hive::TaskResolver, :new, ->(*) { resolver }
+    ) do
+      with_replaced_singleton_method(
+        Hive::Config, :registered_projects,
+        -> { [ { "name" => "app", "path" => "/tmp/app" } ] }
+      ) do
+        with_replaced_singleton_method(
+          Hive::TaskClosure, :preview, ->(**) { preview }
+        ) do
+          out, = capture_io do
+            Hive::CLI.start([
+              "archive", "task", "--reason", "already_delivered",
+              "--evidence", "acme/app#42", "--json"
+            ])
+          end
+          assert_equal payload, JSON.parse(out)
+        end
+      end
+    end
+  end
+
+  def test_archive_closure_rejects_noninteractive_confirmation
+    noninteractive_error = assert_raises(Hive::TaskClosure::Unauthorized) do
+      Hive::CLI.start([
+        "archive", "task", "--reason", "already_delivered",
+        "--evidence", "acme/app#42"
+      ])
+    end
+    assert_match(/interactive terminal/, noninteractive_error.message)
+  end
+
+  def test_archive_closure_interactive_confirmation_archives_exact_preview
+    task = Struct.new(:project_root, :slug).new("/tmp/app", "task")
+    resolver = Struct.new(:task) { def resolve = task }.new(task)
+    preview = Struct.new(:preview_digest, :payload) do
+      def valid? = true
+      def to_h = payload
+    end.new(
+      "a" * 64,
+      {
+        "schema" => "hive-task-closure-input",
+        "schema_version" => 1,
+        "ok" => true,
+        "preview_digest" => "a" * 64
+      }
+    )
+    confirmations = []
+    input = StringIO.new("CLOSE aaaaaaaaaaaa\n")
+    input.define_singleton_method(:tty?) { true }
+    previous_stdin = $stdin
+    $stdin = input
+
+    with_replaced_singleton_method(
+      Hive::TaskResolver, :new, ->(*) { resolver }
+    ) do
+      with_replaced_singleton_method(
+        Hive::Config, :registered_projects,
+        -> { [ { "name" => "app", "path" => "/tmp/app" } ] }
+      ) do
+        with_replaced_singleton_method(
+          Hive::TaskClosure, :preview, ->(**) { preview }
+        ) do
+          with_replaced_singleton_method(
+            Hive::TaskClosure, :confirm!, lambda { |**kwargs|
+              confirmations << kwargs
+              {
+                "reason" => "already_delivered",
+                "receipt_digest" => "b" * 64
+              }
+            }
+          ) do
+            out, = capture_io do
+              Hive::CLI.start([
+                "archive", "task", "--reason", "already_delivered",
+                "--evidence", "https://github.com/acme/app/pull/42"
+              ])
+            end
+
+            assert_includes out, "Type CLOSE aaaaaaaaaaaa"
+            assert_includes out, "archived task as already_delivered"
+          end
+        end
+      end
+    end
+
+    assert_equal 1, confirmations.length
+    assert_equal "a" * 64, confirmations.first.fetch(:preview_digest)
+    assert_equal "cli", confirmations.first.fetch(:channel)
+    assert_equal true, confirmations.first.fetch(:authorized)
+  ensure
+    $stdin = previous_stdin
+  end
+
+  def test_archive_closure_interactive_flow_rejects_blocked_preview_and_wrong_phrase
+    task = Struct.new(:project_root, :slug).new("/tmp/app", "task")
+    resolver = Struct.new(:task) { def resolve = task }.new(task)
+    preview_class = Struct.new(:preview_digest, :payload, :valid)
+    previews = [
+      preview_class.new("a" * 64, { "ok" => false }, false),
+      preview_class.new("a" * 64, { "ok" => true }, true)
+    ]
+    previews.each do |preview|
+      preview.define_singleton_method(:to_h) { payload }
+      preview.define_singleton_method(:valid?) { valid }
+    end
+    inputs = [ "ignored\n", "CLOSE wrong\n" ]
+    previous_stdin = $stdin
+
+    with_replaced_singleton_method(
+      Hive::TaskResolver, :new, ->(*) { resolver }
+    ) do
+      with_replaced_singleton_method(
+        Hive::Config, :registered_projects,
+        -> { [ { "name" => "app", "path" => "/tmp/app" } ] }
+      ) do
+        previews.zip(inputs).each do |preview, input_text|
+          input = StringIO.new(input_text)
+          input.define_singleton_method(:tty?) { true }
+          $stdin = input
+          with_replaced_singleton_method(
+            Hive::TaskClosure, :preview, ->(**) { preview }
+          ) do
+            expected = preview.valid? ?
+              Hive::TaskClosure::Unauthorized :
+              Hive::TaskClosure::VerificationFailed
+            assert_raises(expected) do
+              capture_io do
+                Hive::CLI.start([
+                  "archive", "task", "--reason", "already_delivered",
+                  "--evidence", "acme/app#42"
+                ])
+              end
+            end
+          end
+        end
+      end
+    end
+  ensure
+    $stdin = previous_stdin
+  end
+
+  def test_archive_closure_flags_require_target
+    error = assert_raises(Hive::InvalidTaskPath) do
+      Hive::CLI.start([
+        "archive", "--reason", "already_delivered",
+        "--evidence", "acme/app#42"
+      ])
+    end
+    assert_match(/require an archive TARGET/, error.message)
+  end
+
   def test_status_approve_findings_and_finding_toggles_pass_options
     with_command_new_stub(Hive::Commands::Status) do |calls|
       Hive::CLI.start([ "status", "--diagnose", "slug", "--project", "proj", "--stage", "2-gather", "--write", "--force", "--json" ])
@@ -638,33 +795,6 @@ class HiveCliTest < Minitest::Test
       assert_equal true, calls.first.fetch(:kwargs).fetch(:json)
     end
 
-    with_command_new_stub(Hive::Commands::Digest) do |calls|
-      Hive::CLI.start([ "digest", "--date", "2026-06-13", "--dry-run", "--json",
-                        "--repo", "owner/repo" ])
-      assert_equal [], calls.first.fetch(:args)
-      assert_equal({
-        date: "2026-06-13",
-        json: true,
-        dry_run: true,
-        repos: [ "owner/repo" ]
-      }, calls.first.fetch(:kwargs))
-    end
-
-    # Repeated `--repo` must accumulate, not silently keep only the last repo —
-    # the documented multi-repo form (`--repo a/b --repo c/d`).
-    with_command_new_stub(Hive::Commands::Digest) do |calls|
-      Hive::CLI.start([ "digest", "--repo", "owner/repo", "--repo", "other/repo" ])
-      assert_equal [ "owner/repo", "other/repo" ], calls.first.fetch(:kwargs).fetch(:repos),
-                   "repeated --repo flags must accumulate every repo, not overwrite"
-    end
-
-    # The undocumented space-listed form (`--repo a/b c/d`) must also flatten
-    # to the same list of slugs.
-    with_command_new_stub(Hive::Commands::Digest) do |calls|
-      Hive::CLI.start([ "digest", "--repo", "owner/repo", "other/repo" ])
-      assert_equal [ "owner/repo", "other/repo" ], calls.first.fetch(:kwargs).fetch(:repos)
-    end
-
     with_command_new_stub(Hive::Commands::AnswerDigest) do |calls|
       Hive::CLI.start([ "answer-digest", "--date", "2026-06-27", "--dry-run", "--json" ])
       assert_equal [], calls.first.fetch(:args)
@@ -754,6 +884,13 @@ class HiveCliTest < Minitest::Test
   # constant-swap technique web_command_test.rb uses for Puma::Server). This
   # proves the CLI wires bind/port through to the command and invokes #call,
   # without booting a socket.
+  def test_web_help_discloses_force_refresh_and_service_repair
+    out, = capture_io { Hive::CLI.start([ "help", "web" ]) }
+
+    assert_includes out, "refresh managed bundle"
+    assert_includes out, "overwrite differing service unit"
+  end
+
   def test_web_wires_bind_and_port_into_the_web_command
     require "hive/commands/web"
     captured = []

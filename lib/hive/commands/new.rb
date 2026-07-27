@@ -4,6 +4,7 @@ require "time"
 require "erb"
 require "digest"
 require "json"
+require "tmpdir"
 require "hive/config"
 require "hive/git_ops"
 require "hive/lock"
@@ -81,6 +82,7 @@ module Hive
       class IdempotencyConflict < TypedValueError
         def exit_code = Hive::ExitCodes::USAGE
       end
+      PreparedAttachment = Data.define(:snapshot_path, :destination, :name, :sha256)
 
       def initialize(project_name, text, slug_override: nil, body_override: nil, attachments: [], base: nil,
                      depends_on: nil, workflow: nil, idempotency_key: nil, json: false)
@@ -161,6 +163,7 @@ module Hive
         end
 
         @idempotency_key = validate_idempotency_key!
+        prepare_idempotent_attachments! if @idempotency_key
         depends_on = normalize_optional(@depends_on)
         depends_on = validate_dependency!(depends_on) if depends_on
         workflow_info = resolve_workflow(project)
@@ -192,7 +195,9 @@ module Hive
         if @idempotency_key
           result = with_stable_workflow_selection(workflow_info, hive_state) do |stable_selection|
             Hive::Lock.with_commit_lock(hive_state) do
+              validate_stable_authored_workflow!(workflow_info, hive_state)
               existing = find_idempotent_task!(hive_state, @idempotency_key, fingerprint)
+              validate_stable_authored_workflow!(workflow_info, hive_state)
               next { folder: existing.fetch(:folder), created: false } if existing
 
               create_task_candidate!(
@@ -204,7 +209,7 @@ module Hive
               )
               begin
                 ops.hive_commit(stage_name: entry_stage.dir, slug: slug, action: "captured")
-              rescue StandardError
+              rescue StandardError, Interrupt
                 cleanup_failed_task_commit!(ops, hive_state, task_dir)
                 raise
               end
@@ -228,13 +233,15 @@ module Hive
         Hive::Lock.with_commit_lock(hive_state) do
           begin
             ops.hive_commit(stage_name: entry_stage.dir, slug: slug, action: "captured")
-          rescue StandardError
+          rescue StandardError, Interrupt
             cleanup_failed_task_commit!(ops, hive_state, task_dir)
             raise
           end
         end
         spawn_name_generator(task_dir)
         emit_task_result(task_dir, workflow, created: true)
+      ensure
+        cleanup_prepared_attachments!
       end
 
       def create_task_candidate!(task_dir, slug:, entry_stage:, workflow:, depends_on:, base_branch:,
@@ -253,6 +260,7 @@ module Hive
           Hive::Markers.set(idea_path, :waiting, "decision_id" => SecureRandom.hex(8))
         end
         copy_attachments!(task_dir)
+        validate_stable_authored_workflow!(workflow_info, hive_state)
         id = Hive::TaskCounter.next_or_nil
         write_task_meta(
           task_dir, id: id, slug: slug, depends_on: depends_on,
@@ -271,7 +279,7 @@ module Hive
           "slug collision at #{task_dir} (rare; retry the command)",
           value: slug
         )
-      rescue StandardError
+      rescue StandardError, Interrupt
         # Once this invocation owns the directory, any idea, attachment, or
         # metadata failure must remove its uncommitted candidate. An EEXIST
         # contender never owns the directory and therefore never removes it.
@@ -294,11 +302,10 @@ module Hive
 
       def input_fingerprint(workflow_info, depends_on:, base_branch:)
         managed = workflow_info.fetch(:managed)
-        attachments = @attachments.map do |source, destination|
-          path = File.expand_path(source.to_s)
+        attachments = @prepared_attachments.map do |attachment|
           {
-            "destination" => destination.to_s,
-            "sha256" => ::Digest::SHA256.file(path).hexdigest
+            "destination" => attachment.destination,
+            "sha256" => attachment.sha256
           }
         end
         input = {
@@ -408,7 +415,7 @@ module Hive
         {
           descriptor: descriptor, pin: pin,
           managed: managed, managed_cfg: cfg,
-          authored_digest: authored_workflow_digest(project, descriptor)
+          authored_digest: authored_workflow_digest(project.fetch("hive_state_path"), descriptor)
         }
       end
 
@@ -455,8 +462,19 @@ module Hive
         raise Hive::ConcurrentRunError.new("managed workflow selection changed while creating the task")
       end
 
-      def authored_workflow_digest(project, descriptor)
-        workflows = File.join(project.fetch("hive_state_path"), "workflows")
+      def validate_stable_authored_workflow!(workflow_info, hive_state)
+        expected = workflow_info[:authored_digest]
+        return unless expected
+
+        actual = authored_workflow_digest(hive_state, workflow_info.fetch(:descriptor))
+        return if actual == expected
+
+        raise Hive::ConcurrentRunError,
+              "owner-authored workflow changed while creating the task; retry against the current descriptor"
+      end
+
+      def authored_workflow_digest(hive_state, descriptor)
+        workflows = File.join(hive_state, "workflows")
         descriptor_path = File.join(workflows, "#{descriptor.id}.yml")
         return nil unless File.file?(descriptor_path)
 
@@ -643,25 +661,72 @@ module Hive
 
         assets_dir = File.join(task_dir, "assets")
         FileUtils.mkdir_p(assets_dir)
-        @attachments.each do |src, dest_name|
-          name = Hive::Tui::Text.sanitize(dest_name.to_s)
-          # `name != File.basename(name)` rejects directory separators
-          # and the like, but `File.basename(".") == "."` and
-          # `File.basename("..") == ".."` — both would otherwise slip
-          # through and either overwrite `assets/` itself or escape it
-          # via FileUtils.cp's path-join. Reject them explicitly.
-          if name.empty? || name == "." || name == ".." || name != File.basename(name)
-            raise InvalidAttachmentError.new("invalid attachment filename '#{name}'", value: name)
+        if @prepared_attachments
+          @prepared_attachments.each do |attachment|
+            destination = File.join(assets_dir, attachment.name)
+            FileUtils.cp(attachment.snapshot_path, destination)
+            next if ::Digest::SHA256.file(destination).hexdigest == attachment.sha256
+
+            raise InvalidAttachmentError.new(
+              "attachment snapshot changed while creating the task",
+              value: attachment.destination
+            )
           end
-
-          # `attachments:` is a programmatic contract used by the TUI and
-          # tests; callers may pass any absolute source path they captured.
-          # Keep the destination guard strict, but let FileUtils surface
-          # source readability/existence failures directly.
-          src_path = File.expand_path(src.to_s)
-
-          FileUtils.cp(src_path, File.join(assets_dir, name))
+        else
+          @attachments.each do |src, dest_name|
+            name = attachment_name!(dest_name)
+            # `attachments:` is a programmatic contract used by the TUI and
+            # tests; callers may pass any absolute source path they captured.
+            # Keep the destination guard strict, but let FileUtils surface
+            # source readability/existence failures directly.
+            src_path = File.expand_path(src.to_s)
+            FileUtils.cp(src_path, File.join(assets_dir, name))
+          end
         end
+      end
+
+      def prepare_idempotent_attachments!
+        if @attachments.empty?
+          @prepared_attachments = []
+          return
+        end
+
+        @attachment_snapshot_dir = Dir.mktmpdir("hive-new-attachments")
+        @prepared_attachments = @attachments.each_with_index.map do |(source, destination), index|
+          name = attachment_name!(destination)
+          snapshot_path = File.join(@attachment_snapshot_dir, index.to_s)
+          FileUtils.cp(File.expand_path(source.to_s), snapshot_path)
+          PreparedAttachment.new(
+            snapshot_path: snapshot_path,
+            destination: destination.to_s,
+            name: name,
+            sha256: ::Digest::SHA256.file(snapshot_path).hexdigest
+          )
+        end
+      end
+
+      def cleanup_prepared_attachments!
+        return unless @attachment_snapshot_dir
+
+        FileUtils.remove_entry_secure(@attachment_snapshot_dir)
+      rescue Errno::ENOENT
+        nil
+      ensure
+        @attachment_snapshot_dir = nil
+        @prepared_attachments = nil
+      end
+
+      def attachment_name!(destination)
+        name = Hive::Tui::Text.sanitize(destination.to_s)
+        # `name != File.basename(name)` rejects directory separators and the
+        # like, but `File.basename(".") == "."` and `File.basename("..") ==
+        # ".."` — both would otherwise slip through and overwrite or escape
+        # `assets/`.
+        if name.empty? || name == "." || name == ".." || name != File.basename(name)
+          raise InvalidAttachmentError.new("invalid attachment filename '#{name}'", value: name)
+        end
+
+        name
       end
 
       def spawn_name_generator(task_dir)

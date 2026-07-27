@@ -11,19 +11,17 @@ class StagesArtifactsPromptTest < Minitest::Test
 
       prompt = Hive::Stages::Artifacts.render_prompt(task)
 
-      assert_includes prompt, "Visual demo capture"
-      assert_includes prompt, "media/manifest.json"
-      assert_includes prompt, 'status: "skipped"'
-      assert_includes prompt, 'status: "failed"'
-      assert_includes prompt, "screenote_url"
-      assert_includes prompt, "screenote_skipped_reason"
-      refute_includes prompt, "push_to_" + "screenote"
+      assert_includes prompt, "Capture requirement: not_applicable"
+      assert_includes prompt, "media/capture-manifest.json"
+      assert_includes prompt, "hive-artifact-capture"
+      assert_match(/Do not call Screenote or any external upload tool/, prompt)
+      refute_includes prompt, "create_screenshot_upload"
       assert_includes prompt, "Completion — REQUIRED",
                       "the visual contract must not weaken the marker-driven completion guard"
     end
   end
 
-  def test_render_prompt_includes_connected_screenote_mcp_upload_contract
+  def test_render_prompt_cannot_turn_connected_screenote_into_ambient_upload_authority
     Dir.mktmpdir("hive-artifacts-stage") do |dir|
       task = task_for(dir)
 
@@ -37,17 +35,15 @@ class StagesArtifactsPromptTest < Minitest::Test
         }
       )
 
-      assert_includes prompt, "- connected via MCP"
-      assert_includes prompt, "default project_id: proj_123"
-      assert_includes prompt, "`create_screenshot_upload`"
-      assert_includes prompt, 'project_id: "proj_123"'
-      assert_includes prompt, "signed upload URL"
-      assert_includes prompt, "`screenote_url`"
-      assert_includes prompt, "`screenote_skipped_reason`"
+      assert_includes prompt, "Required media remains local"
+      assert_match(/External publication\s+is a separate operator-confirmed action/, prompt)
+      refute_includes prompt, "proj_123"
+      refute_includes prompt, "https://screenote.test"
+      refute_includes prompt, "signed upload URL"
     end
   end
 
-  def test_render_prompt_includes_disconnected_screenote_skip_contract
+  def test_render_prompt_does_not_leak_disconnected_screenote_configuration
     Dir.mktmpdir("hive-artifacts-stage") do |dir|
       task = task_for(dir)
       reason = "Screenote OAuth token expired; run `hive connect screenote`."
@@ -62,11 +58,9 @@ class StagesArtifactsPromptTest < Minitest::Test
         }
       )
 
-      assert_includes prompt, "- not connected: #{reason}"
-      assert_includes prompt, "Screenote upload is unavailable: #{reason}"
-      assert_includes prompt, "Still capture and commit local media."
-      assert_includes prompt, "Leave every `screenote_url` as `null`"
-      assert_includes prompt, "`screenote_skipped_reason`"
+      assert_includes prompt, "Required media remains local"
+      refute_includes prompt, reason
+      refute_includes prompt, "https://screenote.test"
     end
   end
 

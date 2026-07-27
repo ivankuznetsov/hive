@@ -1,4 +1,5 @@
 require "hive/config"
+require "digest"
 require "hive/workflows/descriptor_parser"
 require "hive/workflow_package/managed_store"
 
@@ -76,9 +77,9 @@ module Hive
                 Dir.glob(File.join(workflows_dir, "*", Hive::WorkflowPackage::ManagedStore::LOCK_FILE))
         paths.sort.map do |path|
           stat = File.stat(path)
-          [ path, stat.mtime.to_f, stat.size ]
-        rescue SystemCallError
-          [ path, nil, nil ]
+          [ path, stat.mtime.to_f, stat.size, Digest::SHA256.file(path).hexdigest ]
+        rescue SystemCallError, IOError
+          [ path, nil, nil, nil ]
         end
       end
     end

@@ -1,6 +1,9 @@
 name: incident_provider_limit_retry
 description: Proves provider-limit cooldown and retry ownership prevent repeated daemon ticks from creating a retry storm.
 tags: [incident-regression]
+coverage:
+  primary: recovery.provider_limit
+  supporting: []
 incident_id: provider-limit-retry
 sibling_task_id: "#9770"
 pending: true

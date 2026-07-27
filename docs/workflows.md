@@ -147,7 +147,9 @@ This writes a minimal `inbox -> work -> done` workflow:
 
 The generated descriptor is valid immediately, and the placeholder
 `work.md` is the prompt for the `work` stage. Edit that file to define what the
-agent should do, then validate the production-loaded descriptor:
+agent should do. New scaffolds explicitly set
+`archive_visibility_retention_days: 3`. Then validate the production-loaded
+descriptor:
 
 ```bash
 hive workflow validate my-flow --json
@@ -268,6 +270,7 @@ produce the current `packages/<name>/<version>/manifest.yml` registry contract.
 
 ```yaml
 id: my-flow
+archive_visibility_retention_days: 3
 stages:
   - name: inbox
     kind: terminal
@@ -290,6 +293,16 @@ stages:
 Rules:
 
 - `id` must match the filename stem and `/\A[a-z0-9][a-z0-9-]*\z/`.
+- `archive_visibility_retention_days` accepts only a positive YAML integer or
+  the exact lowercase sentinel `never`. Each integer is a number of full
+  24-hour periods; a task remains visible at the exact boundary and hides only
+  after it. Omission defaults to `3` for legacy descriptors, while an explicit
+  `null`, zero, negative, float, numeric string, boolean, or alternate spelling
+  is invalid. Validation names the workflow, field, received value, and
+  accepted forms.
+- Retention changes ordinary visibility only. `never` keeps completed tasks in
+  ordinary views indefinitely; every policy leaves the dedicated archive
+  complete and never deletes, moves, reopens, or otherwise mutates a task.
 - `kind: terminal` creates an inert stage; it does not spawn an agent.
 - `kind: agent` spawns the generic stage runner.
 - `kind: council` runs a document review council over an input artifact.
@@ -317,7 +330,9 @@ Rules:
 - A human stage declares `input:` plus one or more named `outcomes:`. Every
   outcome has exactly one action: `complete: true` with a required non-empty
   `artifact:` basename, or `to: <stage>`. Human stages cannot declare agent,
-  model, permission, runner, reviewer, or executable command settings.
+  model, permission, runner, reviewer, or executable command settings. A
+  completing outcome writes a durable decision and `completed_at`, then enters
+  the same archive visibility/retention path as other completed workflows.
 - `skill:`, `instruction:`, `agent:`, `model:`, `effort:`, `budget_usd:`,
   `timeout_sec:`, `permissions:`, `input:`, `reviewers:`, `council:`, and
   `deliverable:` are rejected on `kind: terminal` stages.
@@ -332,7 +347,8 @@ Rules:
 - The last stage may be `kind: terminal`, `kind: agent`, `kind: council`, or `kind: human`.
   A terminal agent/council stage is archived only when it has a terminal
   `COMPLETE` marker and a non-empty deliverable. `deliverable:` defaults to the
-  stage's `state_file`.
+  stage's `state_file`. A terminal human stage is archived only after a named
+  completing outcome verifies its declared non-empty artifact.
 
 Council stages declare reviewers and a council policy:
 
@@ -397,6 +413,35 @@ Put `model` and `effort` on the workflow stage descriptor (or use the selected
 agent profile's project-global configuration); a project `work.model` or
 `work.effort` value is not a runtime override.
 
+The built-in top-level `models:` map is deliberately closed and does not accept
+custom stage names. A copyable custom-workflow equivalent is:
+
+```yaml
+id: analysis
+stages:
+  - name: inbox
+    kind: terminal
+    state_file: idea.md
+  - name: investigate
+    kind: agent
+    state_file: report.md
+    instruction: ./analysis/investigate.md
+    agent: codex
+    model: gpt-5.6-sol
+    effort: xhigh
+  - name: done
+    kind: terminal
+    state_file: done.md
+```
+
+Here `investigate.model` and `investigate.effort` remain descriptor-owned.
+Adding `models.investigate` to project config is an error, and built-in family
+inheritance does not cross into this descriptor. A descriptor deliberately
+named for one of the closed built-in identities is the exception: the generic
+agent/council runner recognizes that identity and applies its `models:` overlay
+at the normal profile launch seam. This keeps arbitrary names open for custom
+workflows without making the routing vocabulary open-ended.
+
 Hive rejects arbitrary top-level names, including stage-name lookalikes. The
 stage must be present in a registered descriptor before its override is valid.
 Project review adapters are a separate configuration surface and belong under
@@ -405,9 +450,20 @@ above is nested descriptor data, not a project-config root key.
 
 ## Migration Notes
 
-The automatic implementation-owner policy applies only to the built-in coding workflow's `execute`, `open_pr`, `review.fix`, and `review.ci` boundaries. Descriptor-backed agent and council stages continue to resolve their own optional `agent`, `model`, and `effort` fields, and council reviewers are never inherited from the coding execute owner.
+The automatic implementation-owner policy applies only to the built-in coding
+workflow's `execute`, `open_pr`, `review.fix`, and `review.ci` boundaries.
+Descriptor-backed agent and council stages continue to resolve their own
+optional `agent`, `model`, and `effort` fields, and council reviewers are never
+inherited from the coding execute owner. If such a descriptor uses a recognized
+built-in routing name, its model/effort fields become that call's current
+fallback beneath the exact/coarse `models:` overlay.
 
-Existing workflow descriptors continue to load: all new fields are optional.
+Existing workflow descriptors continue to load: an omitted
+`archive_visibility_retention_days` resolves to `3`. Hive-owned `coding`,
+`content`, and `bench` descriptors and newly generated `blank`/`research`
+descriptors declare `3` explicitly. The Honeycomb-owned Writing package should
+declare the field in its own repository; installed legacy generations remain
+correct through the omission default.
 Stages that omit both `workspace:` and `handoff:` retain task-folder execution
 and their existing completion behavior. The fields may not be enabled
 independently.

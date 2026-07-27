@@ -31,10 +31,10 @@ module Hive
           return selection_from_projection(existing)
         end
 
-        ensure_generation_event!(context)
         selection = @resolver.resolve_execute(
           generation: context.task_generation, attempt_id: context.attempt_id
         )
+        ensure_generation_event!(context)
         @writer.append_idempotent(
           identity_event("implementation_identity_captured", selection, context,
                          reason: "execute_identity_captured"),
@@ -62,27 +62,50 @@ module Hive
       end
 
       def resolve_stage!(stage)
+        stage = stage.to_s
+        unless Resolver::DOWNSTREAM_EFFORT.key?(stage)
+          raise ResolutionError, "#{stage.inspect} is not an implementation-owning downstream stage"
+        end
+
         context = context!
+        if (existing = projected_stage(stage, context.task_generation))
+          return selection_from_projection(existing)
+        end
+
         execute = ensure_execute!
         selection = @resolver.resolve_stage(
           stage, execute_identity: execute, attempt_id: context.attempt_id
         )
-        @writer.append_idempotent(
-          identity_event("implementation_stage_resolved", selection, context,
-                         reason: "implementation_stage_resolved"),
-          idempotency_key: "#{task_key}/#{context.task_generation}/#{stage}/#{context.attempt_id}"
-        )
+        begin
+          @writer.append_idempotent(
+            identity_event("implementation_stage_resolved", selection, context,
+                           reason: "implementation_stage_resolved"),
+            idempotency_key: "#{task_key}/#{context.task_generation}/#{stage}"
+          )
+        rescue Hive::TaskJournal::Conflict
+          @projection_store.rebuild!
+          existing = projected_stage(stage, context.task_generation)
+          raise unless existing
+
+          return selection_from_projection(existing)
+        end
         @projection_store.rebuild!
         selection
       end
 
       def selection_from_projection(identity)
         profile = Hive::AgentProfiles.lookup(identity.fetch("provider"), cfg: @cfg)
-        arguments = profile.identity_arguments(
-          model: identity.fetch("model"), effort: identity["requested_effort"],
-          pin_model: identity.fetch("model_pinned", true)
-        )
-        Selection.new(
+        routing = identity["routing"]
+        native_arguments =
+          if routing
+            []
+          else
+            profile.identity_arguments(
+              model: identity.fetch("model"), effort: identity["requested_effort"],
+              pin_model: identity.fetch("model_pinned", true)
+            ).native_arguments
+          end
+        selection = Selection.new(
           stage: identity.fetch("stage"), provider: identity.fetch("provider"),
           model: identity.fetch("model"), profile_name: identity.fetch("profile_name"),
           launcher_identity: identity.fetch("launcher_identity"), source: identity.fetch("source"),
@@ -92,8 +115,17 @@ module Hive
           effective_effort: identity["effective_effort"],
           effort_supported: identity["effort_supported"],
           model_pinned: identity.fetch("model_pinned", true),
-          native_arguments: arguments.native_arguments
+          native_arguments: native_arguments,
+          routing: routing
         )
+        selection.routing_arguments(profile) if routing
+        selection
+      end
+
+      def projected_stage(stage, generation)
+        identity = @projection_store.read["implementation_identity"]
+        selected = identity&.dig("stages", stage.to_s)
+        selected if selected && selected["generation"] == generation
       end
 
       private

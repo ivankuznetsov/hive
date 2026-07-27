@@ -8,11 +8,19 @@ require "hive/llm_wiki_bootstrap"
 # The workflow creator owns two strict observation routes. They must stay
 # byte-for-byte no-write even when an upgraded binary would otherwise repair
 # scheduler units during process startup.
+init_index = ARGV.index("init")
+workflow_index = ARGV.index("workflow")
 strict_no_write_route =
-  if (workflow_index = ARGV.index("workflow"))
-    ARGV[workflow_index + 1] == "validate"
-  elsif ARGV.include?("init")
-    ARGV.any? { |arg| arg == "--preview" || arg.match?(/\A--preview=true\z/i) }
+  if init_index && (!workflow_index || init_index < workflow_index)
+    ARGV.drop(init_index + 1).any? do |arg|
+      arg == "--preview" || arg.match?(/\A--preview=true\z/i)
+    end
+  elsif workflow_index
+    workflow_subcommands = %w[new validate commit install list update remove publish].freeze
+    workflow_subcommand = ARGV.drop(workflow_index + 1).find do |arg|
+      workflow_subcommands.include?(arg)
+    end
+    workflow_subcommand == "validate"
   else
     false
   end
@@ -364,8 +372,6 @@ def json_usage_error_contract(argv)
     subcommand = json_usage_subcommand(argv, command_index)
     schema = subcommand == "approve" ? "hive-pairing-approve" : "hive-pairing-list"
     return { schema: schema, error_kind: "invalid_arguments" }
-  when "digest"
-    return { reporter: :prdigest }
   when "decide"
     return { schema: "hive-decide", error_kind: "invalid_task_path" }
   when "refactor-patrol"
@@ -481,11 +487,6 @@ def native_web_error_context(schema, argv)
 end
 
 def json_usage_error_payload(contract, error, argv: [])
-  if contract[:reporter] == :prdigest
-    require "hive/prdigest"
-    return Hive::Prdigest.failure_payload(kind: "cli", message: error.message)
-  end
-
   if contract[:reporter] == :refactor_patrol
     version = if refactor_patrol_pr_scoped_argv?(argv)
       Hive::RefactorPatrol::Reporter::V3_SCHEMA_VERSION

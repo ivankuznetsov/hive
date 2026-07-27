@@ -17,6 +17,10 @@ class AgentSkillsManifestTest < Minitest::Test
     assert_equal "/skill:hive", manifest.capability("hive").agent("pi").invocation
     assert_equal "compound-engineering@compound-engineering-plugin",
                  manifest.package("compound-engineering").native_for("claude").package
+    grok_package = manifest.package("compound-engineering").native_for("grok")
+    assert_equal "compound-engineering", grok_package.package
+    assert_equal "EveryInc/compound-engineering-plugin", grok_package.source
+    assert_equal "GROK_HOME", grok_package.config_home
     assert_equal "pr-review-toolkit@claude-plugins-official",
                  manifest.package("pr-review-toolkit").native_for("claude").package
     assert_equal "llm-wiki@aikuznetsov-marketplace",
@@ -24,6 +28,7 @@ class AgentSkillsManifestTest < Minitest::Test
 
     assert_equal "/ce-brainstorm", manifest.capability("ce-brainstorm").agent("claude").invocation
     assert_equal "/ce-code-review", manifest.capability("ce-code-review").agent("codex").invocation
+    assert_equal "/ce-code-review", manifest.capability("ce-code-review").agent("grok").invocation
     assert_equal "/skill:ce-test-browser", manifest.capability("ce-test-browser").agent("pi").invocation
     assert_equal "/pr-review-toolkit:review-pr",
                  manifest.capability("pr-review-toolkit:review-pr").agent("claude").invocation
@@ -95,6 +100,10 @@ class AgentSkillsManifestTest < Minitest::Test
       "unsupported schema versions" => ->(doc) { doc["schema_version"] = 99 },
       "duplicate capability ids" => ->(doc) { doc["capabilities"] << Marshal.load(Marshal.dump(doc["capabilities"].first)) },
       "unsafe sources" => ->(doc) { doc["packages"].first["agents"]["claude"]["source"] = "repo; rm -rf /" },
+      "option-like bare packages" => lambda do |doc|
+        package = doc["packages"].find { |row| row["id"] == "compound-engineering" }
+        package["agents"]["grok"]["package"] = "--help"
+      end,
       "unsafe aliases" => ->(doc) { doc["capabilities"].find { |c| c["id"] == "wiki-plan" }["agents"]["claude"]["alias"]["path"] = "../plan.md" },
       "missing providers" => ->(doc) { doc["packages"].first["agents"]["claude"].delete("provider") },
       "malformed versions" => lambda do |doc|

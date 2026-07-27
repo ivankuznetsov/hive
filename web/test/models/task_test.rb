@@ -54,6 +54,69 @@ class TaskTest < ActiveSupport::TestCase
     assert_equal "idle", Task.new(project:, attributes: {}).status_label
   end
 
+  test "recovery lifecycle controls action availability and truthful context" do
+    project = Project.new("name" => "alpha")
+    queued = Task.new(
+      project:,
+      attributes: {
+        "action" => "error",
+        "recovery" => {
+          "status" => "queued",
+          "request_id" => "request-1",
+          "failure_origin" => "implementer_failed"
+        }
+      }
+    )
+    terminal = Task.new(
+      project:,
+      attributes: {
+        "action" => "error",
+        "recovery" => {
+          "status" => "terminal",
+          "attempt_id" => "attempt-1",
+          "terminal_outcome" => "succeeded",
+          "terminal_at" => "2026-07-25T12:00:00.000000Z"
+        }
+      }
+    )
+    fresh = Task.new(project:, attributes: { "action" => "error" })
+
+    assert queued.recovery_action_visible?
+    refute queued.recovery_action_enabled?
+    assert_equal "Recovery queued", queued.recovery_primary_label
+    assert_includes queued.recovery_context, "request request-1"
+    assert_includes queued.recovery_context, "origin implementer_failed"
+
+    refute terminal.recovery_action_visible?
+    refute terminal.recovery_action_enabled?
+    assert_equal "Completed", terminal.recovery_primary_label
+    assert_includes terminal.recovery_context, "attempt attempt-1"
+    assert_includes terminal.recovery_context, "succeeded"
+
+    assert fresh.recovery_action_visible?
+    assert fresh.recovery_action_enabled?
+  end
+
+  test "max pass review escalation is visible but not directly retryable" do
+    folder = Pathname(Dir.mktmpdir("hive-web-review-escalation"))
+    folder.join("reviews").mkpath
+    folder.join("reviews/escalations-02.md").write("# Questions\n")
+    task = Task.new(
+      project: Project.new("name" => "alpha"),
+      attributes: {
+        "action" => "recover_review",
+        "marker" => "review_stale",
+        "attrs" => { "pass" => "2", "marker_id" => "marker-2" },
+        "folder" => folder.to_s
+      }
+    )
+
+    assert task.recovery_action_visible?
+    refute task.recovery_action_enabled?
+  ensure
+    FileUtils.remove_entry(folder) if folder&.exist?
+  end
+
   test "resolves only plain media filenames inside the real task folder" do
     root = Pathname(Dir.mktmpdir("hive-web-task-model"))
     folder = root.join("task")
@@ -67,8 +130,45 @@ class TaskTest < ActiveSupport::TestCase
     )
 
     assert_equal media.join("still.png").realpath.to_s, task.media_path("still.png")
+    media.join("demo.webm").binwrite("video")
+    assert_equal media.join("demo.webm").realpath.to_s, task.media_path("demo.webm")
     assert_nil task.media_path("../outside.png")
     assert_nil task.media_path("still.rb")
+  ensure
+    FileUtils.remove_entry(root) if root&.exist?
+  end
+
+  test "renders verified capture-manifest artifacts as stills and videos" do
+    root = Pathname(Dir.mktmpdir("hive-web-capture-model"))
+    folder = root.join("task")
+    media = folder.join("media")
+    media.mkpath
+    media.join("state.png").binwrite("png")
+    media.join("demo.webm").binwrite("video")
+    artifacts = %w[state.png demo.webm].map do |name|
+      path = media.join(name)
+      {
+        "file" => name,
+        "bytes" => path.size,
+        "sha256" => Digest::SHA256.file(path).hexdigest
+      }
+    end
+    media.join("capture-manifest.json").write(JSON.generate(
+      "schema" => "hive-artifact-capture",
+      "schema_version" => 1,
+      "status" => "captured",
+      "diagnostic" => nil,
+      "artifacts" => artifacts
+    ))
+    task = Task.new(
+      project: Project.new("name" => "alpha"),
+      attributes: { "slug" => "ship-it-260720-abcd", "folder" => folder.to_s }
+    )
+
+    manifest = task.media_manifest
+
+    assert_equal "captured", manifest.fetch("status")
+    assert_equal %w[still video], manifest.fetch("items").map { |item| item.fetch("type") }
   ensure
     FileUtils.remove_entry(root) if root&.exist?
   end
@@ -164,93 +264,38 @@ class TaskTest < ActiveSupport::TestCase
     assert_equal queued_before, Dir[File.join(Hive::Paths.state_home, "dispatch_requests", "*")]
   end
 
-  test "refuses a diff when the task has no materialized worktree" do
-    task = Task.new(
-      project: Project.new("name" => "alpha"),
-      attributes: { "slug" => "no-worktree-260720-abcd" }
+  test "diff delegates to the typed bounded task-diff service" do
+    project = Project.new(
+      "name" => "alpha", "path" => "/tmp/alpha",
+      "hive_state_path" => "/tmp/alpha/.hive-state"
     )
-
-    error = assert_raises(Hive::InvalidTaskPath) { task.diff }
-
-    assert_equal "no worktree for no-worktree-260720-abcd", error.message
-  end
-
-  test "diff reports a failed git process and removes its tempfile" do
-    worktree = Pathname(Dir.mktmpdir("hive-web-task-diff-failure"))
-    log_path = worktree.join("diff.log")
     task = Task.new(
-      project: Project.new("name" => "alpha"),
+      project: project,
       attributes: {
-        "slug" => "failed-diff-260720-abcd", "worktree_path" => worktree.to_s
+        "slug" => "bounded-diff-260720-abcd",
+        "folder" => "/tmp/alpha/.hive-state/stages/4-execute/bounded-diff-260720-abcd"
       }
     )
-    spawns = []
-    spawn = lambda do |*argv, **options|
-      spawns << [ argv, options ]
-      File.write(options.fetch(:out), "bad worktree")
-      12_345
-    end
-    wait = ->(pid, flags = nil) { [ pid, ProcessStatus.new(false) ] if flags }
-    tempfile = ->(*) { File.open(log_path, File::RDWR | File::CREAT | File::TRUNC, 0o600) }
-
-    with_replaced_singleton_method(Tempfile, :create, tempfile) do
-      with_replaced_singleton_method(Process, :spawn, spawn) do
-        with_replaced_singleton_method(Process, :waitpid2, wait) do
-          error = assert_raises(Hive::Error) { task.diff }
-
-          assert_equal "git diff failed: bad worktree", error.message
-        end
-      end
-    end
-
-    assert_equal 1, spawns.size
-    assert_equal [ "git", "-C", worktree.to_s, "diff", "--" ], spawns.first.fetch(0)
-    assert spawns.first.fetch(1).fetch(:pgroup)
-    refute_path_exists log_path
-  ensure
-    FileUtils.remove_entry(worktree) if worktree&.exist?
-  end
-
-  test "timed out diff kills and reaps its process group" do
-    worktree = Pathname(Dir.mktmpdir("hive-web-task-diff-timeout"))
-    log_path = worktree.join("diff.log")
-    task = Task.new(
-      project: Project.new("name" => "alpha"),
-      attributes: {
-        "slug" => "timed-out-diff-260720-abcd", "worktree_path" => worktree.to_s
-      }
+    result = Hive::Web::TaskDiff::Result.new(
+      state: "unavailable", sections: {}, truncated: false,
+      invalid_encoding: false, reason: "worktree_unavailable",
+      diagnostic: "pointer missing", next_action: "Inspect task status.",
+      http_status: 409
     )
-    signals = []
-    waits = []
-    expired = Task::DIFF_TIMEOUT_SEC + 1.0
-    times = [ 0.0, expired ]
-    spawn = ->(*_argv, **_options) { 54_321 }
-    clock = -> { times.shift || expired }
-    wait = lambda do |pid, flags = nil|
-      waits << [ pid, flags ]
-      flags ? nil : [ pid, ProcessStatus.new(false) ]
-    end
-    kill = ->(signal, pid) { signals << [ signal, pid ] }
-    tempfile = ->(*) { File.open(log_path, File::RDWR | File::CREAT | File::TRUNC, 0o600) }
-
-    with_replaced_singleton_method(Tempfile, :create, tempfile) do
-      with_replaced_singleton_method(Process, :spawn, spawn) do
-        with_replaced_singleton_method(task, :monotonic_now, clock) do
-          with_replaced_singleton_method(Process, :waitpid2, wait) do
-            with_replaced_singleton_method(Process, :kill, kill) do
-              error = assert_raises(Hive::Error) { task.diff }
-
-              assert_equal "git diff timed out after #{Task::DIFF_TIMEOUT_SEC}s", error.message
-            end
-          end
-        end
-      end
+    service = Object.new
+    service.define_singleton_method(:call) { result }
+    options = nil
+    factory = lambda do |**kwargs|
+      options = kwargs
+      service
     end
 
-    assert_equal [ [ "KILL", -54_321 ] ], signals
-    assert_equal [ [ 54_321, Process::WNOHANG ], [ 54_321, nil ] ], waits
-    refute_path_exists log_path
-  ensure
-    FileUtils.remove_entry(worktree) if worktree&.exist?
+    actual = with_replaced_singleton_method(Hive::Web::TaskDiff, :new, factory) do
+      task.diff
+    end
+
+    assert_same result, actual
+    assert_same task, options.fetch(:task)
+    assert_equal Task::DIFF_TIMEOUT_SEC, options.fetch(:timeout_sec)
   end
 end

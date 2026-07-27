@@ -18,6 +18,13 @@
           <span class="muted"><%= pluralize(band.task_count, "active task") %></span>
         </header>
 
+        <% if band.hidden_archived_task_count.positive? %>
+          <p class="archive-summary">
+            <%= link_to hidden_archive_summary(band.hidden_archived_task_count),
+                  archive_path(project: band.project.name) %>
+          </p>
+        <% end %>
+
         <% if band.unavailable? %>
           <div class="state-banner state-banner-error kanban-band-warning" role="status">
             <%= band.availability_message %>
@@ -56,7 +63,8 @@
                         </p>
                       <% end %>
                       <%= render "tasks/primary_actions", task:,
-                            daemon_enabled: band.daemon_enabled, compact: true %>
+                            daemon_enabled: band.daemon_enabled, compact: true,
+                            mutations_enabled: status_fresh %>
                     </article>
                   <% end %>
                 <% end %>

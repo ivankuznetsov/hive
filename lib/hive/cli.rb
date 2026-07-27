@@ -1,6 +1,7 @@
 require "thor"
 require "hive/stages"
 require "hive/workflows/registry"
+require "hive/task_closure_contract"
 
 module Hive
   class CLI < Thor
@@ -747,16 +748,28 @@ module Hive
     option :from, type: :string,
                   desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
-    option :recover_merged_error_reason, type: :string,
-                                          desc: "internal: archive a merged PR despite this finalize ERROR reason"
+    option :reason, type: :string, enum: Hive::TaskClosureContract::REASONS,
+                    desc: "operator closure reason: already_delivered or superseded"
+    option :evidence, type: :array,
+                      desc: "immutable GitHub PR/commit evidence (repeat values after the flag)"
+    option :successor, type: :string,
+                       desc: "registered project:slug that supersedes this task"
+    option :attestation, type: :string,
+                         desc: "operator statement for superseded/cross-repository delivery"
     def archive(target = nil)
       if target.nil?
+        if closure_options?
+          raise Hive::InvalidTaskPath,
+                "closure options require an archive TARGET"
+        end
         if options[:from]
           warn "hive archive: --from is ignored when listing; it only disambiguates same-slug tasks for `hive archive TARGET`"
         end
         require "hive/commands/status"
         return Hive::Commands::Status.new(json: options[:json], project: options[:project], archive: true).call
       end
+
+      return close_task_interactively(target) if closure_options?
 
       run_stage_action("archive", target)
     end
@@ -896,63 +909,6 @@ module Hive
         limit: options[:limit],
         cursor: options[:cursor],
         full: options[:full]
-      ).call
-    end
-
-    desc "digest", "Run PRDigest for Hive's registered GitHub repositories"
-    # wrap: false so the Examples / Exit codes blocks keep their line breaks
-    # instead of being reflowed into one paragraph.
-    long_desc <<~DESC, wrap: false
-      Delegates the complete merged-PR digest to the standalone `prdigest` CLI.
-      Hive resolves its registered github.com repositories, Telegram destination,
-      and existing GitHub authentication, writes a private temporary config, and
-      invokes PRDigest. PRDigest alone fetches, renders, chunks, checkpoints, and
-      sends the digest. Hive tasks and stage folders never affect inclusion.
-
-      Without --date, Hive passes the Europe/London calendar day that just ended.
-      Repeat --repo owner/name to filter the registered repository set; unknown
-      or unregistered repositories fail instead of expanding scope. Use
-      --dry-run to print the exact composed message without Telegram credentials.
-
-      With --json, emits PRDigest's versioned `prdigest-result` document without
-      a Hive wrapper. Its delivery object carries accepted_chunks, total_chunks,
-      failed_chunk, and status. PRDigest exit codes are preserved.
-
-      Examples:
-        hive digest                          # yesterday, send to Telegram
-        hive digest --date 2026-06-13        # a specific London day
-        hive digest --dry-run                # print the composed message, send nothing
-        hive digest --date 2026-06-13 --json # machine-readable prdigest-result
-        hive digest --repo owner/name --repo other/repo --json
-
-      Exit codes:
-        0  completed or dry-run
-        1  unexpected/render failure
-        2  PRDigest CLI/configuration failure
-        3  GitHub failure
-        4  Telegram/delivery-checkpoint failure
-        5  PRDigest cursor-state failure
-        6  failure after earlier durable progress
-        78 Hive adapter configuration failure (unregistered repo/missing binary/auth)
-        64 bad flags / malformed --json (Thor usage error)
-        70 invalid PRDigest output or unexpected adapter error
-    DESC
-    option :date, type: :string, desc: "Europe/London calendar date to digest (YYYY-MM-DD)"
-    option :dry_run, type: :boolean, default: false, desc: "print the digest instead of sending Telegram"
-    # repeatable: true so a repeated `--repo a/b --repo c/d` accumulates
-    # (Thor collects each occurrence into a nested array) instead of the last
-    # flag silently overwriting the earlier ones — the space-listed form
-    # `--repo a/b c/d` still works too. `.flatten` collapses both forms to a
-    # flat list of owner/name slugs for the command.
-    option :repo, type: :array, default: [], repeatable: true,
-                  desc: "filter registered GitHub repositories by owner/name (repeatable)"
-    def digest
-      require "hive/commands/digest"
-      Hive::Commands::Digest.new(
-        date: options[:date],
-        dry_run: options[:dry_run],
-        json: options[:json],
-        repos: options[:repo].flatten
       ).call
     end
 
@@ -1706,14 +1662,20 @@ module Hive
     desc "web [SUBCOMMAND]", "Run or manage the hive web UI"
     option :bind, type: :string, desc: "override web.bind"
     option :port, type: :numeric, desc: "override web.port"
-    option :no_bootstrap, type: :boolean, default: false, desc: "do not install the managed web app if missing"
+    option :no_bootstrap, type: :boolean, default: false, desc: "do not install or refresh the managed web app"
     option :unsafe, type: :boolean, default: false, desc: "allow non-loopback bind without configured owner"
     option :allow_public, type: :boolean, default: false, desc: "alias for --unsafe"
-    option :force, type: :boolean, default: false, desc: "for install: overwrite existing service unit"
+    option :force, type: :boolean, default: false,
+                   desc: "for install: refresh managed bundle and overwrite differing service unit"
     option :detach, type: :boolean, default: false, desc: "for start: start the managed service instead of foreground Rails"
+    option :source_root, type: :string, desc: "for capture/capture-server: exact clean source worktree"
+    option :runtime_root, type: :string, desc: "for capture-server: isolated private runtime directory"
+    option :lifecycle_token, type: :string, desc: "for capture-server: recorder ownership token"
+    option :control_fd, type: :numeric, desc: "for capture-server: inherited lifecycle control file descriptor"
+    option :task_folder, type: :string, desc: "for capture: artifacts-stage task folder"
     def web(subcommand = nil)
       if options[:json]
-        unless %w[install status].include?(subcommand.to_s)
+        unless %w[install status capture-server capture].include?(subcommand.to_s)
           require "json"
           require "hive/commands/web"
           message = "hive web has no JSON output for foreground server commands. " \
@@ -1743,7 +1705,12 @@ module Hive
         unsafe: options[:unsafe] || options[:allow_public],
         force: options[:force],
         json: options[:json],
-        detach: options[:detach]
+        detach: options[:detach],
+        source_root: options[:source_root],
+        runtime_root: options[:runtime_root],
+        lifecycle_token: options[:lifecycle_token],
+        control_fd: options[:control_fd],
+        task_folder: options[:task_folder]
       ).call
     end
 
@@ -1848,6 +1815,63 @@ module Hive
     end
 
     no_commands do
+      def closure_options?
+        options[:reason] || options[:evidence] || options[:successor] || options[:attestation]
+      end
+
+      def close_task_interactively(target)
+        require "hive/task_closure"
+        require "hive/task_resolver"
+        unless options[:json] || $stdin.tty?
+          raise Hive::TaskClosure::Unauthorized,
+                "evidence closure requires an interactive terminal and explicit confirmation"
+        end
+        task = Hive::TaskResolver.new(
+          target, project_filter: options[:project], stage_filter: options[:from]
+        ).resolve
+        project = options[:project] || Hive::Config.registered_projects.find do |entry|
+          File.expand_path(entry.fetch("path")) == task.project_root
+        end&.fetch("name")
+        raise Hive::TaskClosure::Unauthorized, "task is not in a registered project" unless project
+
+        input = {
+          "reason" => options[:reason],
+          "evidence" => Array(options[:evidence]),
+          "successor" => options[:successor],
+          "attestation" => options[:attestation]
+        }
+        if options[:json]
+          preview = Hive::TaskClosure.preview(
+            task: task, project: project, input: input
+          )
+          puts JSON.generate(preview.to_h)
+          return preview.to_h
+        end
+        preview = Hive::TaskClosure.preview(task: task, project: project, input: input)
+        puts JSON.pretty_generate(preview.to_h)
+        unless preview.valid?
+          raise Hive::TaskClosure::VerificationFailed,
+                "closure preview failed; correct its field errors and blockers"
+        end
+
+        $stdout.print "Type CLOSE #{preview.preview_digest[0, 12]} to archive this task: "
+        $stdout.flush
+        confirmation = $stdin.gets.to_s.strip
+        unless confirmation == "CLOSE #{preview.preview_digest[0, 12]}"
+          raise Hive::TaskClosure::Unauthorized, "closure confirmation did not match; task left active"
+        end
+        operator = ENV["USER"].to_s.strip
+        operator = "local-operator" if operator.empty?
+        receipt = Hive::TaskClosure.confirm!(
+          task: task, project: project, input: input,
+          preview_digest: preview.preview_digest,
+          operator: operator, channel: "cli", authorized: true
+        )
+        puts "hive: archived #{task.slug} as #{receipt.fetch('reason')}"
+        puts "  receipt: #{receipt.fetch('receipt_digest')}"
+        receipt
+      end
+
       def run_stage_action(verb, target)
         require "hive/commands/stage_action"
         kwargs = {
@@ -1855,8 +1879,6 @@ module Hive
           from: options[:from],
           json: options[:json]
         }
-        reason = options[:recover_merged_error_reason]
-        kwargs[:recover_merged_error_reason] = reason unless reason.nil?
 
         Hive::Commands::StageAction.new(
           verb,

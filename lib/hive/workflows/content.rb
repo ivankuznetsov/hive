@@ -3,8 +3,17 @@ require "hive/workflow"
 module Hive
   module Workflows
     module Content
+      BUDGET_USD = {
+        "research" => 3.0,
+        "outline" => 1.5,
+        "draft" => 3.0,
+        "critique" => 2.0,
+        "done" => 2.0
+      }.freeze
+
       DESCRIPTOR = Hive::Workflow.new(
         id: :content,
+        archive_visibility_retention_days: 3,
         stages: [
           Hive::Workflow::Stage.new(
             name: "inbox",
@@ -20,7 +29,7 @@ module Hive
             kind: :agent,
             skill: "/deep-research",
             status_mode: :state_file_marker,
-            budget_usd: 3.0,
+            budget_usd: BUDGET_USD.fetch("research"),
             timeout_sec: 1800
           ),
           Hive::Workflow::Stage.new(
@@ -31,7 +40,7 @@ module Hive
             kind: :agent,
             skill: "/seo:research",
             status_mode: :state_file_marker,
-            budget_usd: 0.75,
+            budget_usd: BUDGET_USD.fetch("outline"),
             timeout_sec: 600
           ),
           Hive::Workflow::Stage.new(
@@ -42,7 +51,7 @@ module Hive
             kind: :agent,
             skill: "/write:writer",
             status_mode: :state_file_marker,
-            budget_usd: 1.5,
+            budget_usd: BUDGET_USD.fetch("draft"),
             timeout_sec: 1200
           ),
           Hive::Workflow::Stage.new(
@@ -53,7 +62,7 @@ module Hive
             kind: :agent,
             skill: "/write:editor",
             status_mode: :state_file_marker,
-            budget_usd: 1.0,
+            budget_usd: BUDGET_USD.fetch("critique"),
             timeout_sec: 900
           ),
           Hive::Workflow::Stage.new(
@@ -64,7 +73,7 @@ module Hive
             kind: :agent,
             skill: "/write:writer",
             status_mode: :state_file_marker,
-            budget_usd: 1.0,
+            budget_usd: BUDGET_USD.fetch("done"),
             timeout_sec: 900
           )
         ]

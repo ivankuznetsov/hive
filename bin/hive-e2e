@@ -8,6 +8,7 @@ require "open3"
 require "thor"
 require "hive"
 require "hive/cli_json_options"
+require "coverage_catalog"
 require "runner"
 require "schemas"
 require "path_safety"
@@ -85,17 +86,33 @@ module Hive
 
       desc "run [PATTERN]", "Run e2e scenarios"
       option :filter, type: :string, desc: "run scenarios with the given tag"
+      option :profile, type: :string, desc: "run the required coverage for a semantic profile"
+      option :coverage, type: :string, desc: "run the unique active primary for a coverage ID"
       option :keep_artifacts, type: :boolean, default: false, desc: "keep run-home directories after passing scenarios"
       def run_scenarios(pattern = nil)
-        runner = Runner.new
-        scenarios = runner.select_scenarios(pattern: pattern, tag: options[:filter])
+        catalog = CoverageCatalog.load
+        selection = semantic_selection(catalog, pattern)
+        scenarios = if selection
+                      catalog.scenarios_for(selection)
+                    else
+                      filter_scenarios(catalog.scenarios, pattern: pattern, tag: options[:filter])
+                    end
         if scenarios.empty?
-          exit_with_error("no scenarios match #{pattern || options[:filter] || 'all'}",
+          target = if options[:coverage]
+                     "no runnable scenario for coverage #{options[:coverage]}"
+                   else
+                     "no scenarios match #{pattern || options[:filter] || options[:profile] || 'all'}"
+                   end
+          exit_with_error(target,
                           error_kind: "no_scenarios", exit_code: BinaryExit::USAGE)
         end
 
         Preflight.require_tmux! if scenarios.any? { |scenario| tui_scenario?(scenario) }
-        report = runner.run_all(scenarios: scenarios, keep_artifacts: options[:keep_artifacts])
+        report = Runner.new.run_all(
+          scenarios: scenarios,
+          keep_artifacts: options[:keep_artifacts],
+          selection: selection
+        )
         if options[:json]
           puts JSON.pretty_generate(report)
         else
@@ -108,7 +125,9 @@ module Hive
         summary = report.fetch("summary")
         failed = summary.fetch("failed") + summary.fetch("setup_failed", 0)
         exit(failed.zero? ? BinaryExit::SUCCESS : BinaryExit::FAILURE)
-      rescue PreflightError, ScenarioParser::InvalidScenario, Psych::Exception => e
+      rescue CoverageCatalog::UnknownCoverage => e
+        exit_with_error(e, error_kind: "no_scenarios", exit_code: BinaryExit::USAGE)
+      rescue PreflightError, CoverageCatalog::InvalidCatalog, ScenarioParser::InvalidScenario, Psych::Exception => e
         exit_with_error(e, error_kind: "preflight", exit_code: BinaryExit::CONFIG)
       rescue StandardError => e
         exit_with_error(e, error_kind: "run_failed", exit_code: BinaryExit::FAILURE)
@@ -130,7 +149,7 @@ module Hive
 
       desc "list", "List available e2e scenarios"
       def list
-        scenarios = Runner.new.select_scenarios
+        scenarios = CoverageCatalog.load.scenarios
         if options[:json]
           payload = {
             "schema" => "hive-e2e-scenarios",
@@ -145,8 +164,39 @@ module Hive
             puts "#{scenario.name}#{tags}#{pending}"
           end
         end
-      rescue ScenarioParser::InvalidScenario, Psych::Exception => e
+      rescue CoverageCatalog::InvalidCatalog, ScenarioParser::InvalidScenario, Psych::Exception => e
         exit_with_error(e, error_kind: "preflight", exit_code: BinaryExit::CONFIG)
+      end
+
+      desc "coverage", "Discover semantic e2e coverage"
+      option :match, type: :string, required: true,
+                     desc: "match a coverage ID or catalog/scenario metadata"
+      option :profile, type: :string, desc: "limit discovery to a semantic profile"
+      def coverage
+        catalog = CoverageCatalog.load
+        matches = catalog.search(options[:match], profile: options[:profile])
+        if matches.empty?
+          exit_with_error(
+            "no coverage matches #{options[:match]}",
+            error_kind: "no_scenarios",
+            exit_code: BinaryExit::USAGE
+          )
+        end
+
+        payload = catalog.discovery_payload(
+          query: options[:match],
+          profile: options[:profile],
+          matches: matches
+        )
+        if options[:json]
+          puts JSON.pretty_generate(payload)
+        else
+          render_coverage(matches)
+        end
+      rescue CoverageCatalog::InvalidCatalog, ScenarioParser::InvalidScenario, Psych::Exception => e
+        exit_with_error(e, error_kind: "preflight", exit_code: BinaryExit::CONFIG)
+      rescue ArgumentError => e
+        exit_with_error(e, error_kind: "usage", exit_code: BinaryExit::USAGE)
       end
 
       desc "replay RUN_ID SCENARIO", "Replay a stored scenario repro script"
@@ -218,6 +268,50 @@ module Hive
       end
 
       private
+
+      def semantic_selection(catalog, pattern)
+        selectors = [ options[:profile], options[:coverage] ].compact
+        if selectors.size > 1 || (selectors.any? && (pattern || options[:filter]))
+          exit_with_error(
+            "--profile and --coverage are mutually exclusive and cannot be combined with PATTERN or --filter",
+            error_kind: "usage",
+            exit_code: BinaryExit::USAGE
+          )
+        end
+        return catalog.select_profile(options[:profile]) if options[:profile]
+        return catalog.select_coverage(options[:coverage]) if options[:coverage]
+      end
+
+      def filter_scenarios(scenarios, pattern:, tag:)
+        selected = scenarios
+        if pattern && !pattern.empty?
+          selected = selected.select do |scenario|
+            scenario.name.include?(pattern.to_s) || File.basename(scenario.path).include?(pattern.to_s)
+          end
+        end
+        selected = selected.select { |scenario| scenario.tags.include?(tag.to_s) } if tag && !tag.empty?
+        selected
+      end
+
+      def render_coverage(matches)
+        matches.each_with_index do |match, index|
+          puts if index.positive?
+          puts "#{match.fetch('id')} — #{match.fetch('title')} " \
+               "(#{match.fetch('maturity')}; profiles: #{match.fetch('profiles').join(', ')})"
+          puts "  #{match.fetch('description')}"
+          primary = match.fetch("primary_scenario")
+          puts "  primary: #{primary ? primary.fetch('name') : 'none'}#{primary&.fetch('pending') ? ' (pending)' : ''}"
+          supporting = match.fetch("supporting_scenarios").map { |scenario| scenario.fetch("name") }
+          puts "  supporting: #{supporting.empty? ? 'none' : supporting.join(', ')}"
+          constraints = match.fetch("constraints").flat_map do |kind, values|
+            values.map { |value| "#{kind}=#{value}" }
+          end
+          puts "  constraints: #{constraints.empty? ? 'none' : constraints.join(', ')}"
+          puts "  docs: #{match.fetch('docs').join(', ')}"
+          puts "  code: #{match.fetch('code').join(', ')}"
+          puts "  run: #{match.fetch('runnable_command')}" if match.fetch("runnable_command")
+        end
+      end
 
       def scenario_summary(scenario)
         {

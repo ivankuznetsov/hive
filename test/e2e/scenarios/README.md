@@ -8,7 +8,45 @@ reference and run the harness with:
 bundle exec rake e2e:lib_test
 bin/hive-e2e run
 bin/hive-e2e run --filter incident-regression --json
+bin/hive-e2e coverage --match "provider retry"
+bin/hive-e2e run --coverage workflow.full_pipeline
+bin/hive-e2e run --profile release
 ```
+
+## Semantic coverage
+
+`test/e2e/coverage.yml` is the semantic taxonomy. Every executable scenario
+declares exactly one catalog-backed `coverage.primary` ID and a unique
+`coverage.supporting` list. Tags remain free-form execution filters; coverage
+IDs are stable product-proof names used for discovery and release selection.
+
+Use `bin/hive-e2e coverage --match QUERY [--profile release] [--json]` to
+search IDs, catalog prose, scenario metadata, tags, step kinds, references,
+platforms, and provider constraints. An exact ID wins; substring results are
+lexically ordered. Only a non-pending, non-planned primary receives a runnable
+`bin/hive-e2e run --coverage ID` command. Supporting mappings are discovery
+only.
+
+`run --profile release` executes the unique active primary for every required
+release ID. Advisory and planned IDs remain visible in `selection.json`, but
+do not satisfy or block required proof; a required ID without an active primary
+fails before a run directory or sandbox is created. Semantic runs write the
+versioned `hive-e2e-selection.v1` companion beside the unchanged
+`hive-e2e-report.v1` report. Plain run, positional pattern, filter, and list
+behavior remain unchanged.
+
+The JSON contracts are checked in:
+
+- `schemas/hive-e2e-coverage.v1.json` covers discovery output: catalog digest,
+  query/profile, stable IDs, maturity, constraints, primary/supporting scenario
+  metadata, references, and an optional runnable command.
+- `schemas/hive-e2e-selection.v1.json` covers the run companion: catalog
+  digest, selected profile/coverage IDs/scenarios, visible
+  pending/advisory/planned IDs, and the exact replay command.
+
+`coverage` is discovery-only. `run --coverage` and `run --profile` create a
+normal run directory and execute scenarios; only those semantic run modes add
+`selection.json`.
 
 ## Incident metadata and activation
 

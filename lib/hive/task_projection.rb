@@ -6,6 +6,7 @@ require "hive/conditions/gate_evaluator"
 require "hive/conditions/shadow_audit"
 require "hive/stringify_keys"
 require "hive/task_journal"
+require "hive/work_ledger"
 
 module Hive
   class TaskProjection
@@ -32,19 +33,25 @@ module Hive
     def self.read_journal(path, attempt_store: nil)
       return [] unless File.exist?(path)
 
-      parse_journal(File.readlines(path, chomp: true), attempt_store: attempt_store)
+      replay_journal(File.binread(path), attempt_store: attempt_store).records
     end
 
     def self.parse_journal(lines, attempt_store: nil)
-      seen = {}
-      validator = Hive::TaskJournal::Validator.new(attempt_store: attempt_store)
-      lines.filter_map.with_index do |line, index|
-        next if line.empty?
+      bytes = lines.map { |line| line.end_with?("\n") ? line : "#{line}\n" }.join
+      replay_journal(bytes, attempt_store: attempt_store).records
+    end
 
-        record = JSON.parse(line)
+    def self.replay_journal(bytes, attempt_store: nil)
+      validator = Hive::TaskJournal::Validator.new(attempt_store: attempt_store)
+      Hive::WorkLedger.replay(
+        bytes: bytes,
+        record_id: ->(record) { record["event_id"] },
+        source_label: "journal",
+        record_label: "event_id"
+      ) do |record, line_number|
         unless record["schema"] == Hive::TaskJournal::Envelope::SCHEMA
-          raise InvalidJournal,
-                "unexpected record schema #{record['schema'].inspect} at journal line #{index + 1}"
+          raise Hive::WorkLedger::InvalidRecord,
+                "unexpected record schema #{record['schema'].inspect} at journal line #{line_number}"
         end
         validator.validate!(record)
         if (attempt = validator.attempt_for(record["attempt_id"]))
@@ -53,17 +60,13 @@ module Hive
             durable_attempt_metadata(entry)
           end
         end
-        event_id = record["event_id"]
-        if event_id && seen[event_id]
-          raise InvalidJournal, "duplicate event_id #{event_id.inspect} at journal line #{index + 1}"
-        end
-        seen[event_id] = true if event_id
         record
-      rescue JSON::ParserError => e
-        raise InvalidJournal, "invalid JSON at journal line #{index + 1}: #{e.message}"
       rescue Hive::TaskJournal::Error => e
-        raise InvalidJournal, "invalid authoritative record at journal line #{index + 1}: #{e.message}"
+        raise Hive::WorkLedger::InvalidRecord,
+              "invalid authoritative record at journal line #{line_number}: #{e.message}"
       end
+    rescue Hive::WorkLedger::Error => e
+      raise InvalidJournal, e.message
     end
 
     def self.canonical(value)
@@ -201,6 +204,15 @@ module Hive
         baseline: copy.dig("compatibility", "baseline_present") == true,
         marker: marker
       )
+      self.class.from_data(copy)
+    end
+
+    # Closure is a dedicated task-local authority, not a journal fact. Status
+    # overlays its validated public receipt on a projection after replay so a
+    # corrupt receipt can never alter condition or attempt truth.
+    def with_closure(closure)
+      copy = to_h
+      copy["closure"] = Hive::StringifyKeys.call(closure)
       self.class.from_data(copy)
     end
 
@@ -464,7 +476,7 @@ module Hive
         identity = projected_identity(record)
         identity if identity["generation"] == generation
       end.group_by { |identity| identity.fetch("stage") }
-       .transform_values(&:last)
+       .transform_values(&:first)
       warnings = authoritative.filter_map do |record|
         next unless record["event_type"] == "implementation_identity_fallback"
 

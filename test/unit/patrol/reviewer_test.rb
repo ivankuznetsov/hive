@@ -566,6 +566,38 @@ class HivePatrolReviewerTest < Minitest::Test
     end
   end
 
+  def test_run_agent_wrapper_receives_patrol_review_route
+    with_tmp_dir do |dir|
+      routed_cfg = cfg
+      routed_cfg["patrol"]["agent"] = "codex"
+      routed_cfg["models"] = {
+        "patrol_review" => { "model" => "gpt-5.6-sol", "effort" => "xhigh" }
+      }
+      reviewer = Hive::Patrol::Reviewer.new(dir, cfg: routed_cfg)
+      fake_agent = Object.new
+      def fake_agent.run! = { status: :ok }
+      captured = nil
+      original = Hive::Agent.method(:new)
+      Hive::Agent.define_singleton_method(:new) do |**kwargs|
+        captured = kwargs
+        fake_agent
+      end
+
+      reviewer.send(
+        :run_agent,
+        prompt: "p",
+        output_path: File.join(dir, "out.json"),
+        run_dir: dir
+      )
+
+      assert_equal [
+        "--model", "gpt-5.6-sol", "-c", "model_reasoning_effort=xhigh"
+      ], captured.fetch(:routing_arguments).global_arguments
+    ensure
+      Hive::Agent.define_singleton_method(:new, original) if original
+    end
+  end
+
   def test_run_agent_wrapper_refuses_an_exhausted_patrol_budget
     with_tmp_dir do |dir|
       budget = Object.new

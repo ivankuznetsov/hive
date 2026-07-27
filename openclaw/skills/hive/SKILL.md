@@ -1,6 +1,6 @@
 ---
 name: hive
-description: "Operate Hive task pipelines through its native CLI. Use when an agent needs to answer current Hive or Hive-bench status, identify the exact active task and blocker owner, follow work through bounded transitions, create a new project-local workflow from an ordinary-language request, advance a fresh routine recommendation, diagnose recovery state, initialize or configure Hive, or explain what requires operator action across registered projects."
+description: "Operate Hive task pipelines and pre-release QA through its native CLI. Use when an agent needs to answer current Hive or Hive-bench status, identify the exact active task and blocker owner, follow work through bounded transitions, create a new project-local workflow from an ordinary-language request, inspect candidate QA evidence, advance a fresh routine recommendation, diagnose recovery state, initialize or configure Hive, or explain what requires operator action across registered projects."
 version: "0.1.3"
 user-invocable: true
 metadata:
@@ -17,7 +17,7 @@ metadata:
 platform: openclaw
 invocation: /hive
 skill-version: 0.1.3
-canonical-digest: 57e86964c1b9e1bf22f914851d3bc692cce07ebf6ab4f62ade9f79239ef41ce6
+canonical-digest: f49fae3aaaa1f9c1d0c7f19ebc86f88e3d08ad6069a66133fb43b44ce82e8799
 hive-version: 0.6.9
 -->
 
@@ -61,6 +61,7 @@ Ask before destructive or administrative changes, marker clearing, force/bypass 
 - Read [workflow-schema.md](references/workflow-schema.md), [workflow-stage-design.md](references/workflow-stage-design.md), [workflow-checkpoints.md](references/workflow-checkpoints.md), [workflow-permissions.md](references/workflow-permissions.md), [workflow-testing.md](references/workflow-testing.md), and [workflow-common-mistakes.md](references/workflow-common-mistakes.md) only as needed while authoring or diagnosing a newly scaffolded descriptor.
 - Read [status-and-watch.md](references/status-and-watch.md) for status interpretation, reporting, compatibility, and native watch semantics.
 - Read [workflow-actions.md](references/workflow-actions.md) for task creation, direct workflow verbs, daemon ownership, closed actions, and completion checks.
-- Read [recovery.md](references/recovery.md) for diagnosis, healer ownership, provider holds, stale workers, and guarded marker recovery.
+- Read [recovery.md](references/recovery.md) for diagnosis, coordinator ownership, provider holds, stale workers, migration, and guarded recovery.
 - Read [setup-and-platforms.md](references/setup-and-platforms.md) for installation, initialization, agent-skill setup, and platform invocation conventions.
+- Read [release-candidate-qa.md](references/release-candidate-qa.md) for semantic E2E discovery, local candidate evidence, bounded hosted collection, retry semantics, and the explicit hosted-dispatch boundary.
 - Read [safety.md](references/safety.md) before any admin, force, credential, external-publication, deployment, or release-sensitive operation.

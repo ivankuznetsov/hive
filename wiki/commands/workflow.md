@@ -4,7 +4,7 @@ type: command
 source: lib/hive/cli.rb, lib/hive/commands/workflow.rb, templates/workflows/
 created: 2026-06-21
 updated: 2026-07-24
-tags: [command, workflow, authoring, validation, human-stage, honeycomb, registry]
+tags: [command, workflow, authoring, validation, human-stage, honeycomb, registry, archive, retention]
 ---
 
 **TLDR**: `hive workflow` manages two ownership domains: `new` scaffolds trusted project-authored descriptors, while `install`, `list`, `update`, and `remove` manage immutable reviewed Honeycomb generations; `publish` validates an authored descriptor and opens a registry PR whose status is only `pending_review`.
@@ -191,6 +191,7 @@ token.
 
 ```yaml
 id: my-flow
+archive_visibility_retention_days: 3
 stages:
   - name: inbox
     kind: terminal
@@ -204,6 +205,13 @@ stages:
     kind: terminal
     state_file: done.md
 ```
+
+Every generated descriptor declares
+`archive_visibility_retention_days: 3`. Authors may replace `3` with another
+positive integer (full 24-hour periods) or exact lowercase `never`. Omitted
+legacy fields also resolve to `3`; explicit `null` and every other form are
+rejected. The setting changes ordinary visibility only and never removes a
+task from the dedicated archive.
 
 The placeholder `work.md` says:
 
@@ -291,7 +299,11 @@ stale or conflicting decisions. Matching concurrent retries are rechecked
 under the decision lock and return one apply plus idempotent no-ops. Completing
 outcomes accept only a no-follow regular file inside the task folder. A
 self-targeting outcome records the decision, leaves the task in place, and
-mints a fresh waiting identity instead of reporting a false move.
+mints a fresh waiting identity instead of reporting a false move. Human state
+files are also read no-follow with inode verification. A completing outcome
+writes its decision record and `completed_at` from one clock, classifies as
+archived, and participates in the descriptor's archive visibility retention;
+commit failure or interruption rolls both files back.
 
 Create-only natural-language requests are handled by the canonical `/hive`
 skill's `hive-workflow-creator` route. It gates on the installed version,
@@ -303,6 +315,9 @@ commit is required because `workflow new` commits only the initial scaffold.
 Both `workflow validate` and minimal-init preview bypass startup scheduler
 reconciliation, preserving their strict no-write contract. Scaffold collision
 checks treat dangling descriptor or instruction symlinks as occupied paths.
+Creation claims the instruction directory and descriptor with exclusive
+filesystem operations; rollback removes only paths claimed by that invocation,
+so a concurrent or raced scaffold is never overwritten or deleted.
 If a scaffold commit fails after staging, Hive resets those exact index
 pathspecs under the commit lock before removing the generated files.
 

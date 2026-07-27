@@ -1,6 +1,7 @@
 require "fileutils"
 require "json"
 require "open3"
+require "pathname"
 require "securerandom"
 require "hive/config"
 require "hive/task"
@@ -17,6 +18,8 @@ require "hive/attempts/context"
 require "hive/atomic_file"
 require "hive/conditions/transition_guard"
 require "hive/workflow_package/mutation_lock"
+require "hive/task_meta"
+require "hive/completion_time"
 
 module Hive
   module Commands
@@ -42,6 +45,7 @@ module Hive
     # loops can branch deterministically.
     class Approve
       include Hive::Schemas::EnvelopeEmitter
+      DEFAULT_CLOCK = -> { Time.now.utc }.freeze
 
       VALID_TERMINAL_MARKERS = %i[complete execute_complete review_complete].freeze
 
@@ -60,7 +64,7 @@ module Hive
       end
 
       def initialize(target, to: nil, from: nil, project: nil, force: false, json: false, quiet: false,
-                     observation_guard: nil, commit_lock: true)
+                     observation_guard: nil, commit_lock: true, clock: DEFAULT_CLOCK)
         @target = target
         @to = to
         @from = from
@@ -73,6 +77,7 @@ module Hive
         @quiet = quiet
         @observation_guard = observation_guard
         @commit_lock = commit_lock
+        @clock = clock
       end
 
       def call
@@ -265,6 +270,8 @@ module Hive
         new_folder = nil
         commit_action = nil
         human_state_snapshot = nil
+        completion_snapshot = nil
+        completion_time = nil
         begin
           with_optional_commit_lock(task.hive_state_path) do
             Hive::Lock.with_task_lock(task.folder, slug: task.slug, op: "approve") do
@@ -278,13 +285,20 @@ module Hive
               Hive::Attempts::Context.current&.validate_generation!(task)
               @observation_guard&.call(task)
               human_state_snapshot = initialize_human_destination!(task, dest_stage)
+              if completion_on_terminal_entry?(task, dest_stage)
+                completion_snapshot = Hive::TaskMeta.snapshot(task.folder)
+                completion_time = legacy_completion_time(task)
+              end
               new_folder = move_task!(task, dest_stage)
             end
             cleanup_orphan_task_lock(new_folder)
             commit_action = "approve #{task.stage_index}-#{task.stage_name} -> #{dest_stage}"
-            record_commit_or_rollback!(task, dest_stage, new_folder, commit_action)
+            record_commit_or_rollback!(
+              task, dest_stage, new_folder, commit_action,
+              completion_snapshot: completion_snapshot, completion_time: completion_time
+            )
           end
-        rescue StandardError
+        rescue StandardError, Interrupt
           restore_human_destination!(task, new_folder, human_state_snapshot)
           raise
         end
@@ -353,7 +367,7 @@ module Hive
         if snapshot.fetch(:existed)
           Hive::AtomicFile.write(path, snapshot.fetch(:body))
         else
-          File.delete(path) if File.exist?(path)
+          File.delete(path) if File.exist?(path) || File.symlink?(path)
         end
       end
 
@@ -474,13 +488,17 @@ module Hive
       #      re-created mid-flight). Both errors must surface — the
       #      original commit failure is the cause; the rollback failure
       #      is what actually blocks recovery.
-      def record_commit_or_rollback!(task, dest_stage, new_folder, action)
+      def record_commit_or_rollback!(task, dest_stage, new_folder, action, completion_snapshot: nil,
+                                     completion_time: nil)
+        if completion_snapshot
+          Hive::TaskMeta.write_completed_at_once(new_folder, completion_time || @clock.call)
+        end
         record_hive_commit(task, dest_stage, action)
-      rescue Hive::Error, SystemCallError => e
-        attempt_rollback!(task, new_folder, e)
+      rescue Hive::Error, Hive::TaskMeta::InvalidMetadata, SystemCallError, IOError, ArgumentError, Interrupt => e
+        attempt_rollback!(task, new_folder, e, completion_snapshot: completion_snapshot)
       end
 
-      def attempt_rollback!(task, new_folder, original_error)
+      def attempt_rollback!(task, new_folder, original_error, completion_snapshot: nil)
         # The pre-condition check stays in this caller — the helper only
         # owns the rescue + re-raise contract. If the source path now
         # exists, an undo would clobber it; surface a manual-recovery
@@ -494,7 +512,17 @@ module Hive
 
         Hive::CommitOrRollback.attempt!(
           original_error,
-          on_undo: -> { FileUtils.mv(new_folder, task.folder) },
+          on_undo: lambda do
+            FileUtils.mv(new_folder, task.folder)
+            Hive::TaskMeta.restore(task.folder, completion_snapshot) if completion_snapshot
+            source_rel = File.join("stages", "#{task.stage_index}-#{task.stage_name}", task.slug)
+            destination_rel = Pathname.new(new_folder).relative_path_from(
+              Pathname.new(task.hive_state_path)
+            ).to_s
+            Hive::GitOps.new(task.project_root).run_git!(
+              "-C", task.hive_state_path, "add", "-A", "--", source_rel, destination_rel
+            )
+          end,
           rolled_back_message: lambda do |e|
             "approve aborted; mv rolled back to #{task.folder}. " \
               "underlying: #{e.class}: #{e.message}"
@@ -506,6 +534,18 @@ module Hive
               "rollback error: #{rb.class}: #{rb.message}"
           end
         )
+      end
+
+      def completion_on_terminal_entry?(task, dest_stage)
+        terminal = task.workflow.stages.last
+        terminal.kind == :inert && dest_stage == terminal.dir
+      end
+
+      def legacy_completion_time(task)
+        stored = task.completed_at if task.respond_to?(:completed_at)
+        return stored if stored
+
+        Hive::CompletionTime.discover(task)
       end
 
       # ── Reporting ───────────────────────────────────────────────────────

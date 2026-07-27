@@ -17,10 +17,16 @@ class HiveEvalReasonClassifierTest < Minitest::Test
     status = message_for(source: :handler, intent: :slash_status, text: "1 active task")
     answer = message_for(source: :handler, intent: :callback_answer, text: "Answer mode started for slug-a.")
     ack = message_for(source: :handler, intent: :callback_approve, text: "Queued command pid=20001")
+    recovery = message_for(
+      source: :handler, intent: :callback_autofix,
+      text: "Recovery queued — request eval-req-1"
+    )
 
-    reasons = classify(status, answer, ack).map(&:reason)
+    reasons = classify(status, answer, ack, recovery).map(&:reason)
 
-    assert_equal %w[status_response agent_blocked_question status_response], reasons
+    assert_equal %w[
+      status_response agent_blocked_question status_response status_response
+    ], reasons
   end
 
   def test_contract_reports_unclassified_messages

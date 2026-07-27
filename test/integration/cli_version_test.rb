@@ -29,6 +29,21 @@ class CliVersionTest < Minitest::Test
         )
       end
 
+      with_tmp_git_repo do |project_root|
+        assert_startup_reconcile(
+          project_root, home,
+          [ "init", "--new-workflow", "workflow", "--minimal", "--preview", "--json" ],
+          expected: false
+        )
+      end
+
+      with_tmp_git_repo do |project_root|
+        capture_io { Hive::Commands::Init.new(project_root, agent_skill_preflight: false).call }
+        assert_startup_reconcile(
+          project_root, home, %w[workflow --json validate coding], expected: false
+        )
+      end
+
       assert_startup_reconcile(Dir.pwd, home, [ "--version" ], expected: true)
     end
   end

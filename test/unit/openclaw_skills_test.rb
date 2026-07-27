@@ -83,10 +83,15 @@ class OpenClawSkillsTest < Minitest::Test
 
   def test_projection_keeps_recovery_and_release_authority_guarded
     text = projection_text
+    normalized_text = text.gsub(/\s+/, " ")
 
     %w[markers\ clear approve\ --force daemon\ stop].each do |escaped|
       assert_includes text, escaped.tr("\\", "")
     end
+    assert_includes text, "hive act workflow.retry"
+    assert_includes text, "hive migrate PROJECT_PATH"
+    assert_includes text, "RecoveryCoordinator"
+    assert_includes normalized_text, "not a retry recipe"
     assert_includes text, "obtain explicit confirmation"
     assert_includes text, "separate explicit release request"
     assert_includes text, "Do not create or push a tag"

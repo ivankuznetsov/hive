@@ -8,8 +8,10 @@ class StatusController < ApplicationController
     saved_view = cookies.signed[VIEW_COOKIE].to_s.presence_in(VIEWS)
     @status_view = explicit_view || saved_view || "board"
     page_snapshot = StatusBroadcaster.snapshot_with_version
+    @status_page_snapshot = page_snapshot
     @payload = page_snapshot.payload
     @status_version = page_snapshot.version
+    @status_fresh = page_snapshot.fresh?
     @projects = StatusBroadcaster.projects(@payload)
     requested_project = params[:project].to_s.presence
     @selected_project = @projects.find { |project| project.name == requested_project }
@@ -18,6 +20,16 @@ class StatusController < ApplicationController
     @visible_projects = @selected_project ? [ @selected_project ] : @projects
     @board = Board.new(@visible_projects) if @status_view == "board"
     @daemon_status = daemon_status
+  end
+
+  def archive
+    @payload = StatusBroadcaster.archive_snapshot
+    @projects = StatusBroadcaster.projects(@payload)
+    requested_project = params[:project].to_s.presence
+    @selected_project = @projects.find { |project| project.name == requested_project }
+    return redirect_to status_project_filter_path(nil) if requested_project && !@selected_project
+
+    @visible_projects = @selected_project ? [ @selected_project ] : @projects
   end
 
   private

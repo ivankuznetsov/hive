@@ -1,11 +1,11 @@
 require "test_helper"
+require "digest"
 require "json"
 require "json_schemer"
 require "hive/commands/answer_digest"
 require "hive/commands/approve"
 require "hive/commands/bot"
 require "hive/commands/daemon"
-require "hive/commands/digest"
 require "hive/commands/drop"
 require "hive/commands/doctor"
 require "hive/commands/decide"
@@ -16,6 +16,8 @@ require "hive/commands/prune"
 require "hive/commands/run"
 require "hive/commands/stage_action"
 require "hive/commands/status"
+require "hive/agent_skills/inspector"
+require "hive/agent_skills/provisioner"
 require "hive/patrol/candidate_selector"
 require "hive/patrol/reviewer"
 require "hive/commands/setup_agents"
@@ -309,44 +311,6 @@ class SchemaFilesTest < Minitest::Test
                  doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
   end
 
-  def test_hive_status_v5_schema_remains_for_back_compat
-    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status", version: 5)))
-    assert_equal 5, doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
-    refute_includes doc.dig("$defs", "Task", "properties").keys, "conditions"
-  end
-
-  def test_hive_status_v4_schema_remains_for_back_compat
-    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status", version: 4)))
-    assert_equal 4, doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
-    refute_includes doc.dig("$defs", "Task", "properties").keys, "admission_error"
-  end
-
-  def test_hive_status_v1_schema_remains_for_back_compat
-    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status", version: 1)))
-    assert_equal 1, doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
-    assert_includes doc.dig("$defs", "Task", "properties", "stage", "enum"), "6-pr"
-    assert_includes doc.dig("$defs", "Task", "properties", "action", "enum"), "ready_for_pr"
-  end
-
-  # v3 (the pre-dependency schema) is preserved for external validators
-  # pinned to the release before the task-dependency fields landed in v4.
-  # The daemon fails closed on a v3 payload via schema-skew, so correctness
-  # holds — but unlike hive-approve there was no test guarding v3 against
-  # accidental mutation. v3's Task must NOT carry the v4 dependency fields.
-  def test_hive_status_v3_schema_remains_for_back_compat
-    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status", version: 3)))
-    assert_equal 3, doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
-
-    v3_required = doc.dig("$defs", "Task", "required")
-    v3_props = doc.dig("$defs", "Task", "properties").keys
-    %w[depends_on blocked_by dependency_stage blocked].each do |field|
-      refute_includes v3_required, field,
-                      "v3 Task must not require the v4 dependency field #{field.inspect}"
-      refute_includes v3_props, field,
-                      "v3 Task must not declare the v4 dependency property #{field.inspect}"
-    end
-  end
-
   def test_hive_status_required_keys_match_producer_emission
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
     schema_required = doc.dig("$defs", "SuccessPayload", "required").sort
@@ -400,6 +364,24 @@ class SchemaFilesTest < Minitest::Test
                  doc.dig("$defs", "Task", "properties", "marker", "enum").sort
     assert_equal Hive::Schemas::TaskActionKind::ALL.sort,
                  doc.dig("$defs", "Task", "properties", "action", "enum").sort
+  end
+
+  def test_archive_visibility_counts_are_additive_aggregate_schema_fields
+    status = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
+    project = status.dig("$defs", "Project")
+    count = project.dig("properties", "hidden_archived_task_count")
+    assert_equal "integer", count.fetch("type")
+    assert_equal 0, count.fetch("minimum")
+    refute_includes project.fetch("required"), "hidden_archived_task_count",
+                    "dedicated archive payloads intentionally omit the ordinary-view count"
+
+    operational = JSON.parse(File.read(Hive::Schemas.schema_path("hive-operational-status")))
+    summary = operational.dig("$defs", "SuccessPayload", "properties", "summary")
+    assert_includes summary.fetch("required"), "hidden_archived_task_count"
+    assert_equal(
+      { "type" => "integer", "minimum" => 0 },
+      summary.dig("properties", "hidden_archived_task_count")
+    )
   end
 
   def test_hive_status_admission_error_is_closed_and_matches_reason_codes
@@ -820,26 +802,26 @@ class SchemaFilesTest < Minitest::Test
   end
 
   # Cross-schema Diagnostic equivalence: the Diagnostic block is inlined
-  # in BOTH hive-status.v2.json (the per-task tasks[].diagnostic field)
+  # in BOTH the current hive-status schema (the per-task tasks[].diagnostic field)
   # and hive-status-diagnose.v1.json (the --diagnose envelope's
   # diagnostic field). They must agree on required keys, property types,
   # enum values, patterns, and maxItems — descriptions may differ. A
   # contributor changing one without the other silently breaks consumers
   # that switch between the two envelopes. See PR #84 review row 17.
   def test_diagnostic_definition_is_equivalent_across_status_schemas
-    v2 = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
+    status = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
     diag = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status-diagnose")))
 
-    v2_diagnostic = v2.dig("$defs", "Diagnostic")
+    status_diagnostic = status.dig("$defs", "Diagnostic")
     diag_diagnostic = diag.dig("$defs", "Diagnostic")
-    refute_nil v2_diagnostic, "hive-status.v2 must define $defs.Diagnostic"
+    refute_nil status_diagnostic, "current hive-status must define $defs.Diagnostic"
     refute_nil diag_diagnostic, "hive-status-diagnose must define $defs.Diagnostic"
 
     # Pinned property names AND required-key sets agree.
-    assert_equal v2_diagnostic["required"].sort,
+    assert_equal status_diagnostic["required"].sort,
                  diag_diagnostic["required"].sort,
                  "Diagnostic.required must be identical across schemas"
-    assert_equal v2_diagnostic["properties"].keys.sort,
+    assert_equal status_diagnostic["properties"].keys.sort,
                  diag_diagnostic["properties"].keys.sort,
                  "Diagnostic property keys must be identical across schemas"
 
@@ -847,12 +829,12 @@ class SchemaFilesTest < Minitest::Test
     # ignore descriptions (purely documentation). Skip nil-vs-nil
     # comparisons via `assert` on equality so minitest doesn't suggest
     # assert_nil for absent shared keys.
-    v2_diagnostic["properties"].each do |key, v2_prop|
+    status_diagnostic["properties"].each do |key, status_prop|
       diag_prop = diag_diagnostic["properties"][key]
       %w[type enum pattern maxItems maxLength].each do |attr|
-        assert v2_prop[attr] == diag_prop[attr],
+        assert status_prop[attr] == diag_prop[attr],
                "Diagnostic.#{key}.#{attr} must be identical across schemas " \
-               "(v2=#{v2_prop[attr].inspect}, diagnose=#{diag_prop[attr].inspect})"
+               "(status=#{status_prop[attr].inspect}, diagnose=#{diag_prop[attr].inspect})"
       end
     end
   end
@@ -861,12 +843,12 @@ class SchemaFilesTest < Minitest::Test
   # Diagnostic.generated_by enum as Hive::Schemas::DIAGNOSTIC_GENERATORS.
   # Custom AgentProfiles are a runtime extension point, but generated_by
   # is a published wire contract and must not expand implicitly.
-  def test_hive_status_v2_generated_by_enum_matches_schema_constant
+  def test_hive_status_generated_by_enum_matches_schema_constant
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
     schema_enum = doc.dig("$defs", "Diagnostic", "properties", "generated_by", "enum").sort
     expected = Hive::Schemas::DIAGNOSTIC_GENERATORS.sort
     assert_equal expected, schema_enum,
-                 "hive-status.v2 Diagnostic.generated_by enum must equal " \
+                 "current hive-status Diagnostic.generated_by enum must equal " \
                  "Hive::Schemas::DIAGNOSTIC_GENERATORS"
   end
 
@@ -2437,6 +2419,10 @@ class SchemaFilesTest < Minitest::Test
     assert_includes doc.fetch("required"), "claim_capability_digest"
     assert_includes doc.fetch("required"), "ownership_generation"
     assert_includes doc.fetch("required"), "task_input_epoch"
+    refute_includes doc.fetch("required"), "compatibility"
+    refute_includes doc.fetch("properties").keys, "compatibility"
+    assert_equal 1, doc.fetch("properties").dig("worker_argv", "minItems")
+    assert_equal "string", doc.fetch("properties").dig("claim_capability_digest", "type")
     assert_equal "^[0-9a-f]{64}$", doc.fetch("properties").dig("claim_capability_digest", "pattern")
     receipt_required = doc.dig("$defs", "Receipt", "required")
     %w[attempt_id task_generation ownership_generation task_input_epoch outcome exit_status started_at ended_at final_checkpoint output_references log_reference].each do |key|
@@ -2445,12 +2431,18 @@ class SchemaFilesTest < Minitest::Test
   end
 
 
-  def test_internal_attempt_v1_schema_remains_for_back_compat
-    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-attempt", version: 1)))
+  def test_legacy_recovery_schema_files_are_removed_after_one_off_cutover
+    obsolete = {
+      "hive-attempt" => [ 1 ],
+      "hive-dispatch-request" => [ 1, 2, 3 ],
+      "hive-dispatch-result" => [ 1 ]
+    }
 
-    assert_equal 1, doc.fetch("properties").dig("schema_version", "const")
-    refute_includes doc.fetch("properties").keys, "task_input_epoch"
-    refute_includes doc.fetch("properties").keys, "ownership_generation"
+    obsolete.each do |name, versions|
+      versions.each do |version|
+        refute_path_exists Hive::Schemas.schema_path(name, version: version)
+      end
+    end
   end
 
   def test_refactor_patrol_retains_v1_and_v2_while_v3_is_current
@@ -2575,7 +2567,7 @@ class SchemaFilesTest < Minitest::Test
       request_id exit_code command attempt_id attempt_state receipt
     ].sort
     assert_equal producer_required, schema_required,
-                 "schema/producer required-key drift in hive-dispatch-result.v1.json"
+                 "schema/producer required-key drift in hive-dispatch-result.v2.json"
   end
 
   def test_hive_dispatch_result_producer_round_trip_validates
@@ -2643,14 +2635,23 @@ class SchemaFilesTest < Minitest::Test
 
   # ── agent-first operational contracts ─────────────────────────────────
 
-  def test_operational_status_watch_and_act_schemas_are_published_at_v1
-    %w[hive-operational-status hive-watch-event hive-act].each do |name|
+  def test_recovery_status_contracts_keep_only_the_current_schema
+    {
+      "hive-status" => 7,
+      "hive-operational-status" => 3,
+      "hive-act" => 2
+    }.each do |name, expected_version|
       path = Hive::Schemas.schema_path(name)
       assert File.file?(path), "schema file missing: #{path}"
       document = JSON.parse(File.read(path))
       assert_equal "https://json-schema.org/draft/2020-12/schema", document.fetch("$schema")
-      assert_equal 1, Hive::Schemas::SCHEMA_VERSIONS.fetch(name)
+      assert_equal expected_version, Hive::Schemas::SCHEMA_VERSIONS.fetch(name)
+      1.upto(expected_version - 1) do |legacy_version|
+        refute File.exist?(Hive::Schemas.schema_path(name, version: legacy_version)),
+               "#{name} v#{legacy_version} must not remain after the one-off migration"
+      end
     end
+    assert_equal 1, Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-watch-event")
   end
 
   def test_hive_act_error_enum_matches_producer_and_common_envelope_validates

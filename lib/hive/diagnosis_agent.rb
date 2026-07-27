@@ -5,6 +5,7 @@ require "securerandom"
 require "tempfile"
 require "time"
 require "hive"
+require "hive/agent_runtime"
 require "hive/agent_profiles"
 require "hive/config"
 require "hive/markers"
@@ -71,7 +72,7 @@ module Hive
       @local_diagnostic = local_diagnostic
       # An injected spawn callable owns the agent lifecycle (used by
       # unit tests and any future in-process consumers). When injected,
-      # we deliberately skip profile.check_version! / profile.preflight!
+      # we deliberately skip AgentRuntime.prepare!
       # — those validate the OS-level agent binary (claude / codex / pi / grok)
       # which is irrelevant to the test double AND is missing on stock
       # CI runners. Production callers always go through the default
@@ -84,11 +85,14 @@ module Hive
       with_diagnose_lock do
         cfg = Hive::Config.load(@task.project_root)
         profile = Hive::Stages::Base.stage_profile(cfg, "execute")
+        @routing_arguments = Hive::Stages::Base.model_routing_arguments(
+          cfg, "diagnose", profile,
+          current: Hive::Stages::Base.model_routing_current(cfg["diagnose"])
+        )
         ensure_supported_diagnostic_generator!(profile)
         cwd = diagnose_cwd(cfg)
         unless @injected_spawn
-          profile.check_version!
-          profile.preflight!
+          Hive::AgentRuntime.prepare!(profile)
         end
 
         marker = Hive::Markers.current(@task.state_file)
@@ -376,9 +380,8 @@ module Hive
     # for the full session length. The pattern below mirrors
     # Hive::Tui::Subprocess#bounded_capture3.
     def spawn_profile(profile:, prompt:, cwd:, add_dirs:, timeout_sec:, max_budget_usd:)
-      cmd = build_cmd(profile, prompt, add_dirs, max_budget_usd)
-      stdin_data = profile.prompt_style == :stdin ? prompt : nil
-      run_with_timeout(cmd, cwd, stdin_data, timeout_sec)
+      invocation = compiled_invocation(profile, prompt, add_dirs, max_budget_usd)
+      run_with_timeout(invocation.argv, cwd, invocation.stdin_data, timeout_sec)
     end
 
     def run_with_timeout(cmd, cwd, stdin_data, timeout_sec)
@@ -582,19 +585,20 @@ module Hive
     # (e.g. `--mcp-config`, `--strict-mcp-config`) configure the
     # structured-stream context the diagnose flow doesn't need.
     def build_cmd(profile, prompt, add_dirs, max_budget_usd)
-      cmd = [ profile.bin ]
-      prompt_style = profile.prompt_style || :positional
-      if profile.headless_flag
-        cmd << profile.headless_flag
-        cmd << prompt if prompt_style == :headless_flag_value
-      end
-      cmd << profile.permission_skip_flag if profile.permission_skip_flag
-      if profile.add_dir_flag
-        add_dirs.each { |dir| cmd << profile.add_dir_flag << dir }
-      end
-      cmd << profile.budget_flag << max_budget_usd.to_s if profile.budget_flag && max_budget_usd
-      cmd << (prompt_style == :stdin ? "-" : prompt) unless prompt_style == :headless_flag_value
-      cmd
+      compiled_invocation(profile, prompt, add_dirs, max_budget_usd).argv.dup
+    end
+
+    def compiled_invocation(profile, prompt, add_dirs, max_budget_usd)
+      Hive::AgentRuntime.compile(
+        Hive::AgentRuntime::Request.new(
+          profile: profile,
+          prompt: prompt,
+          add_dirs: add_dirs,
+          max_budget_usd: max_budget_usd,
+          routing_arguments: @routing_arguments,
+          include_output_format: false
+        )
+      )
     end
   end
 end

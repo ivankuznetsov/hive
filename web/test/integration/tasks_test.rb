@@ -1,4 +1,5 @@
 require "test_helper"
+require "open3"
 require "tmpdir"
 require_relative "../../../test/support/workflow_helpers"
 
@@ -16,6 +17,186 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_response :success
     assert_match @slug, response.body
     assert_select "#status-grid", 1
+  end
+
+  test "closure entry requires authentication" do
+    post "/logout"
+
+    get "/tasks/#{@project}/#{@slug}/closure"
+
+    assert_redirected_to "/login"
+  end
+
+  test "closure preview normalizes evidence and renders exact verified facts" do
+    input = {
+      "reason" => "already_delivered",
+      "evidence" => [ "acme/app#42", "b" * 40 ],
+      "successor" => nil,
+      "attestation" => nil
+    }
+    preview = Hive::TaskClosure::Preview.new(
+      input: input,
+      task: { "project" => @project, "slug" => @slug },
+      task_repository: {
+        "identity" => "github.com/acme/app",
+        "host" => "github.com",
+        "repository" => "acme/app",
+        "default_branch" => "main"
+      },
+      evidence: [
+        {
+          "kind" => "pull_request",
+          "repository" => "acme/app",
+          "number" => 42,
+          "oid" => "a" * 40,
+          "url" => "https://github.com/acme/app/pull/42"
+        }
+      ],
+      successor: nil,
+      authority: "remote_merge",
+      evidence_digest: "e" * 64,
+      preview_digest: "d" * 64,
+      errors: [],
+      blockers: []
+    )
+    calls = []
+
+    with_replaced_singleton_method(
+      Hive::TaskClosure, :preview, lambda { |**kwargs|
+        calls << kwargs
+        preview
+      }
+    ) do
+      post "/tasks/#{@project}/#{@slug}/closure", params: {
+        reason: "already_delivered",
+        evidence: [ "acme/app#42\n#{'b' * 40}\n" ]
+      }
+    end
+
+    assert_response :success
+    assert_select ".closure-preview", 1
+    assert_select "form input[name=preview_digest][value=?]", "d" * 64
+    assert_select "a[href='https://github.com/acme/app/pull/42']", text: /42/
+    assert_equal input, calls.first.fetch(:input)
+  end
+
+  test "closure confirmation uses the authenticated web operator" do
+    calls = []
+    confirmer = lambda do |**kwargs|
+      calls << kwargs
+      { "reason" => "already_delivered", "receipt_digest" => "e" * 64 }
+    end
+
+    with_replaced_singleton_method(Hive::TaskClosure, :confirm!, confirmer) do
+      post "/tasks/#{@project}/#{@slug}/closure", params: {
+        reason: "already_delivered",
+        evidence: [ "acme/app#42" ],
+        preview_digest: "d" * 64
+      }
+    end
+
+    assert_redirected_to "/tasks/#{@project}/#{@slug}"
+    assert_equal true, calls.first.fetch(:authorized)
+    assert_equal "web", calls.first.fetch(:channel)
+    assert_equal "alice", calls.first.fetch(:operator)
+    assert_equal "d" * 64, calls.first.fetch(:preview_digest)
+  end
+
+  test "closure confirmation is CSRF protected" do
+    previous = ActionController::Base.allow_forgery_protection
+    ActionController::Base.allow_forgery_protection = true
+
+    post "/tasks/#{@project}/#{@slug}/closure", params: {
+      reason: "already_delivered",
+      evidence: [ "acme/app#42" ],
+      preview_digest: "d" * 64
+    }
+
+    assert_response :unprocessable_entity
+  ensure
+    ActionController::Base.allow_forgery_protection = previous
+  end
+
+  test "task detail renders canonical closure evidence" do
+    receipt = {
+      "schema" => Hive::TaskClosure::SCHEMA,
+      "schema_version" => 1,
+      "reason" => "already_delivered",
+      "authority" => "remote_merge",
+      "receipt_digest" => "d" * 64,
+      "evidence" => [
+        {
+          "repository" => "acme/app",
+          "number" => 42,
+          "oid" => "a" * 40,
+          "url" => "https://github.com/acme/app/pull/42"
+        }
+      ]
+    }
+
+    with_replaced_singleton_method(Hive::TaskClosure, :projection, ->(*, **) { receipt }) do
+      get "/tasks/#{@project}/#{@slug}"
+    end
+
+    assert_response :success
+    assert_select ".task-closure", text: /already delivered/
+    assert_select ".task-closure a[href='https://github.com/acme/app/pull/42']",
+                  text: /42/
+    assert_select ".task-closure code", text: "d" * 64
+  end
+
+  test "an archive link resolves a task omitted from the ordinary snapshot" do
+    folder = stage_dir(@project, "9-done").join(@slug)
+    FileUtils.mv(stage_dir(@project, "1-inbox").join(@slug), folder)
+    Hive::TaskMeta.rewrite(
+      folder.to_s,
+      completed_at: Time.now.utc - (10 * 86_400)
+    )
+    media_fixture!(folder)
+    ordinary = {
+      "projects" => [
+        { "name" => @project, "tasks" => [], "hidden_archived_task_count" => 1 }
+      ]
+    }
+    ordinary_snapshot = lambda do
+      StatusBroadcaster::PageSnapshot.new(payload: ordinary, version: "ordinary-version")
+    end
+    fleet_archive_snapshot = -> { raise "archive task route attempted a fleet scan" }
+
+    with_replaced_singleton_method(StatusBroadcaster, :current_page_snapshot, ordinary_snapshot) do
+      with_replaced_singleton_method(
+        StatusBroadcaster, :archive_snapshot, fleet_archive_snapshot
+      ) do
+        get task_path(@project, @slug)
+        assert_response :not_found
+
+        get task_path(@project, @slug, source: "archive")
+        assert_response :success
+        assert_select "#status-stream-owner[data-status-version='ordinary-version']"
+        assert_select ".task-header", text: /#{Regexp.escape(@slug.sub(/-\d{6}-\h{4}\z/, "").tr("-", " "))}/i
+        assert_select "img[src*='source=archive']", minimum: 1
+        assert_select "form[action*='source=archive']", minimum: 1
+        assert_select(
+          "#task-log[data-controller='poll']",
+          { count: 0 },
+          "an archived task log is immutable and must not trigger status work every 3 seconds"
+        )
+
+        get task_log_path(@project, @slug)
+        assert_response :not_found
+        get task_log_path(@project, @slug, source: "archive")
+        assert_response :success
+
+        get task_media_path(@project, @slug, "01-home.png")
+        assert_response :not_found
+        get task_media_path(@project, @slug, "01-home.png", source: "archive")
+        assert_response :success
+
+        get task_diff_path(@project, @slug, source: "archive")
+        assert_response :conflict
+        assert_match(/worktree unavailable/i, response.body)
+      end
+    end
   end
 
   test "task state renders implementation ownership as pending without mutating legacy state" do
@@ -192,6 +373,20 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_equal jpg_bytes, response.body.b
   end
 
+  test "media route streams retained webm demos inline" do
+    folder = stage_dir(@project, "1-inbox").join(@slug)
+    media_dir = folder.join("media")
+    media_dir.mkpath
+    bytes = "synthetic-webm".b
+    File.binwrite(media_dir.join("demo.webm"), bytes)
+
+    get "/tasks/#{@project}/#{@slug}/media/demo.webm"
+
+    assert_response :success
+    assert_equal "video/webm", response.media_type
+    assert_equal bytes, response.body.b
+  end
+
   test "media responses are privately cached, never shared-proxy cacheable" do
     folder = stage_dir(@project, "1-inbox").join(@slug)
     media_fixture!(folder)
@@ -357,11 +552,21 @@ class TasksTest < ActionDispatch::IntegrationTest
                   message: "a captured manifest with no items must not render a bare Demo heading"
   end
 
-  test "a red task offers Retry which queues the clear-then-rerun pair" do
+  test "a red task offers Retry which queues one identity-bound recovery request" do
     FileUtils.mv(stage_dir(@project, "1-inbox").join(@slug),
                  stage_dir(@project, "6-review").join(@slug))
     folder = stage_dir(@project, "6-review").join(@slug)
-    folder.join("task.md").write("# t\n\n<!-- REVIEW_ERROR phase=triage reason=merge_conflict pass=1 -->\n")
+    state_file = folder.join("task.md")
+    state_file.write("# t\n")
+    Hive::Markers.set(
+      state_file,
+      :review_error,
+      phase: "triage",
+      reason: "merge_conflict",
+      pass: 1
+    )
+    marker_id = Hive::Markers.current(state_file).attrs.fetch("marker_id")
+    File.utime(Time.now - 3600, Time.now - 3600, state_file)
 
     get "/tasks/#{@project}/#{@slug}"
     assert_response :success
@@ -372,12 +577,76 @@ class TasksTest < ActionDispatch::IntegrationTest
 
     post "/tasks/#{@project}/#{@slug}/recover"
     assert_redirected_to "/tasks/#{@project}/#{@slug}"
+    assert_match(/\ARecovery queued — request /, flash[:notice])
     queue = Dir.glob(File.join(ENV["HIVE_HOME"], "**", "dispatch_request*", "**", "*"))
                .select { |f| File.file?(f) }
-    assert queue.any? { |f| File.read(f).include?("markers") },
-           "recover must queue the guarded marker clear"
-    assert queue.any? { |f| content = File.read(f); content.include?("review") && content.include?(@slug) },
-           "recover must queue the stage rerun behind the clear"
+    payload = queue.filter_map do |path|
+      JSON.parse(File.read(path))
+    rescue JSON::ParserError
+      nil
+    end.find { |entry| entry["slug"] == @slug }
+    refute_nil payload
+    assert_equal "web", payload.fetch("requestor")
+    assert_equal "admitted", payload.dig("recovery", "phase")
+    assert_equal marker_id, payload.fetch("expected_marker_id")
+    refute_equal "markers", payload.fetch("argv")[1],
+                 "the web surface must not recreate marker-clear authority"
+  end
+
+  test "recovery lifecycle renders an accessible status and disables duplicate actions" do
+    FileUtils.mv(stage_dir(@project, "1-inbox").join(@slug),
+                 stage_dir(@project, "6-review").join(@slug))
+    state_file = stage_dir(@project, "6-review").join(@slug, "task.md")
+    state_file.write("# t\n\n<!-- REVIEW_ERROR phase=triage reason=merge_conflict pass=1 -->\n")
+    snapshot = StatusBroadcaster.snapshot
+    row = snapshot.fetch("projects")
+                  .find { |project| project["name"] == @project }
+                  .fetch("tasks")
+                  .find { |task| task["slug"] == @slug }
+    row["recovery"] = {
+      "status" => "queued",
+      "request_id" => "recovery-1",
+      "attempt_id" => nil,
+      "phase" => "admitted",
+      "failure_origin" => "merge_conflict",
+      "next_eligible_at" => nil,
+      "owner" => "scheduler",
+      "reason" => nil,
+      "remediation" => nil,
+      "retry_count" => 1,
+      "provider_hint" => nil,
+      "terminal_outcome" => nil,
+      "terminal_at" => nil
+    }
+    replacement = proc do
+      StatusBroadcaster::PageSnapshot.new(payload: snapshot, version: "test-recovery")
+    end
+
+    with_replaced_singleton_method(StatusBroadcaster, :snapshot_with_version, replacement) do
+      get "/tasks/#{@project}/#{@slug}"
+      assert_response :success
+      assert_select ".recovery-lifecycle[role=status][aria-live=polite][data-recovery-status=queued]",
+                    text: /Recovery queued.*request recovery-1.*origin merge_conflict/
+      assert_select ".task-actions form[action=?] button[disabled]",
+                    "/tasks/#{@project}/#{@slug}/recover",
+                    text: "Retry stage",
+                    count: 1
+
+      row["recovery"] = row.fetch("recovery").merge(
+        "status" => "terminal",
+        "phase" => "terminal",
+        "attempt_id" => "attempt-1",
+        "terminal_outcome" => "succeeded",
+        "terminal_at" => "2026-07-25T12:00:00.000000Z"
+      )
+      get "/tasks/#{@project}/#{@slug}"
+      assert_response :success
+      assert_select ".recovery-lifecycle[data-recovery-status=terminal]",
+                    text: /Completed.*attempt attempt-1.*succeeded/
+      assert_select ".task-actions form[action=?]",
+                    "/tasks/#{@project}/#{@slug}/recover",
+                    count: 0
+    end
   end
 
   test "recover on a healthy task is a readable 422, not a hidden run" do
@@ -445,6 +714,32 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_response :not_found
   end
 
+  test "task-local show log diff media and mutation routes perform zero fleet scans" do
+    feed = Object.new
+    feed.define_singleton_method(:current_state) { nil }
+    feed.define_singleton_method(:snapshot_state) { raise "task route triggered a fleet scan" }
+    previous_feed = StatusBroadcaster.feed
+    StatusBroadcaster.feed = feed
+    folder = stage_dir(@project, "1-inbox").join(@slug)
+    media = folder.join("media")
+    media.mkpath
+    File.binwrite(media.join("probe.png"), png_bytes)
+
+    get "/tasks/#{@project}/#{@slug}"
+    assert_response :success
+    get "/tasks/#{@project}/#{@slug}/log"
+    assert_response :success
+    get "/tasks/#{@project}/#{@slug}/diff"
+    assert_response :conflict
+    get "/tasks/#{@project}/#{@slug}/media/probe.png"
+    assert_response :success
+    post "/tasks/#{@project}/#{@slug}/run",
+         params: { action_name: "ready_to_brainstorm", stage: "1-inbox" }
+    assert_redirected_to "/tasks/#{@project}/#{@slug}"
+  ensure
+    StatusBroadcaster.feed = previous_feed if previous_feed
+  end
+
   test "intervene writes the answer into the task" do
     post "/tasks/#{@project}/#{@slug}/approve", params: { from: "1-inbox", force: "1" }
     folder = stage_dir(@project, "2-brainstorm").join(@slug)
@@ -471,22 +766,30 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_equal before, brainstorm.read
   end
 
-  test "task mutation reports a degraded project instead of a false 404" do
+  test "a degraded fleet cache cannot block exact server-side mutation revalidation" do
     snapshot = {
       "projects" => [
         { "name" => @project, "error" => "project_load_failed", "tasks" => [] }
       ]
     }
-    replacement = proc { StatusBroadcaster::PageSnapshot.new(payload: snapshot, version: 1) }
+    replacement = proc do
+      StatusBroadcaster::PageSnapshot.new(
+        payload: snapshot, version: 1, availability: "degraded",
+        last_success_at: "2026-07-25T12:00:00.000000Z",
+        error: "Hive::ConfigError: project load failed"
+      )
+    end
 
-    with_replaced_singleton_method(StatusBroadcaster, :snapshot_with_version, replacement) do
+    with_replaced_singleton_method(StatusBroadcaster, :current_page_snapshot, replacement) do
       post "/tasks/#{@project}/#{@slug}/run",
            params: { action_name: "ready_to_brainstorm", stage: "1-inbox" }
     end
 
-    assert_response :unprocessable_entity
-    assert_match "project #{@project} status is unavailable", response.body
-    assert_match "repair", response.body
+    assert_redirected_to "/tasks/#{@project}/#{@slug}"
+    queue = Dir.glob(File.join(ENV["HIVE_HOME"], "**", "dispatch_requests", "**", "*"))
+               .select { |file| File.file?(file) }
+    assert queue.any? { |file| File.read(file).include?(@slug) },
+           "the exact task resolver must revalidate the current row instead of trusting a degraded cache"
   end
 
   test "run stage dispatches the current stage's verb to the daemon queue" do
@@ -659,18 +962,19 @@ class TasksTest < ActionDispatch::IntegrationTest
   test "an oversized diff renders truncated with a notice, not a memory bomb" do
     FileUtils.mv(stage_dir(@project, "1-inbox").join(@slug),
                  stage_dir(@project, "4-execute").join(@slug))
-    project_payload = StatusBroadcaster.snapshot.fetch("projects", [])
-                                        .find { |p| p["name"] == @project }
-    row = project_payload.fetch("tasks", []).find { |t| t["slug"] == @slug }
-    worktree = row["worktree_path"]
-    FileUtils.mkdir_p(worktree)
-    system("git", "init", "-q", worktree, exception: true)
+    project_root = File.join(ENV.fetch("HIVE_TEST_HOME_ROOT"), "repos", @project)
+    task_folder = stage_dir(@project, "4-execute").join(@slug)
+    File.write(File.join(project_root, "big.txt"), "x\n")
+    system("git", "-C", project_root, "add", "big.txt", exception: true)
+    system("git", "-C", project_root, "commit", "-qm", "seed tracked diff fixture", exception: true)
+    base, base_status = Open3.capture2("git", "-C", project_root, "rev-parse", "HEAD")
+    assert base_status.success?
+    base = base.strip
+    owned = Hive::Worktree.new(project_root, @slug)
+    owned.create!(@slug, default_branch: "master")
+    owned.write_pointer!(task_folder, @slug, execute_base_head: base)
+    worktree = owned.path
     big = File.join(worktree, "big.txt")
-    File.write(big, "x
-")
-    system("git", "-C", worktree, "add", ".", exception: true)
-    system("git", "-C", worktree, "-c", "user.email=t@e.c", "-c", "user.name=T",
-           "commit", "-qm", "seed", exception: true)
     # >512KB of uncommitted change must come back capped, flagged, and fast.
     File.write(big, "y#{SecureRandom.hex(16)}
 " * 25_000)
@@ -679,17 +983,18 @@ class TasksTest < ActionDispatch::IntegrationTest
 
     assert_response :success
     assert_select "nav a.nav-link-active", text: "Status"
-    assert_match "Diff truncated to the first 512", response.body
+    assert_match "Partial diff", response.body
     assert response.body.bytesize < 700 * 1024,
            "the rendered diff must be capped (got #{response.body.bytesize} bytes)"
   ensure
     FileUtils.rm_rf(worktree) if worktree.present?
   end
 
-  test "diff for a task without a worktree is 404 not a crash" do
+  test "diff for a valid task without a worktree is a typed conflict" do
     get "/tasks/#{@project}/#{@slug}/diff"
-    assert_response :not_found
-    assert_match "no worktree", response.body
+    assert_response :conflict
+    assert_match "Diff unavailable", response.body
+    assert_match "Worktree unavailable", response.body
   end
 
   private

@@ -37,20 +37,6 @@ class RunStageActionTest < Minitest::Test
     [ inbox, File.basename(inbox) ]
   end
 
-  def with_fake_gh_state(state)
-    Dir.mktmpdir do |dir|
-      gh = File.join(dir, "gh")
-      File.write(gh, <<~RUBY)
-        #!/usr/bin/env ruby
-        require "json"
-        abort "unexpected gh argv: \#{ARGV.inspect}" unless ARGV == %w[pr view https://github.com/example/repo/pull/42 --json state]
-        puts JSON.generate("state" => #{state.inspect})
-      RUBY
-      FileUtils.chmod(0o755, gh)
-      with_env("PATH" => "#{dir}:#{ENV.fetch('PATH', '')}") { yield }
-    end
-  end
-
   def test_brainstorm_moves_inbox_to_brainstorm_and_runs
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -162,6 +148,88 @@ class RunStageActionTest < Minitest::Test
 
   # ── archive idempotency ────────────────────────────────────────────────
 
+  def test_evidence_receipt_path_can_archive_from_an_active_stage_only_after_guard
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _inbox, slug = seed_inbox(dir)
+        project = File.basename(dir)
+        calls = []
+        guard = lambda do |task, receipt_digest:, project:|
+          calls << [ task.slug, receipt_digest, project ]
+          true
+        end
+
+        with_replaced_singleton_method(
+          Hive::Conditions::TransitionGuard, :validate_closure!, guard
+        ) do
+          capture_io do
+            Hive::Commands::StageAction.new(
+              "archive", slug, project: project,
+              closure_receipt_digest: "a" * 64
+            ).call
+          end
+        end
+
+        done = File.join(dir, ".hive-state", "stages", "9-done", slug)
+        assert File.directory?(done)
+        assert_equal :complete, Hive::Markers.current(File.join(done, "task.md")).name
+        assert_equal [
+          [ slug, "a" * 64, project ],
+          [ slug, "a" * 64, project ]
+        ], calls
+      end
+    end
+  end
+
+  def test_ordinary_archive_still_refuses_an_active_non_finalize_task
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        inbox, slug = seed_inbox(dir)
+
+        _out, err, status = with_captured_exit do
+          Hive::Commands::StageAction.new("archive", slug).call
+        end
+
+        assert_equal Hive::ExitCodes::WRONG_STAGE, status
+        assert_includes err, "archive expects"
+        assert File.directory?(inbox)
+      end
+    end
+  end
+
+  def test_evidence_receipt_is_rechecked_inside_the_atomic_task_move_lock
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        inbox, slug = seed_inbox(dir)
+        project = File.basename(dir)
+        calls = 0
+        guard = lambda do |_task, **_kwargs|
+          calls += 1
+          raise Hive::TaskClosure::InvalidReceipt, "generation changed" if calls == 2
+          true
+        end
+
+        with_replaced_singleton_method(
+          Hive::Conditions::TransitionGuard, :validate_closure!, guard
+        ) do
+          error = assert_raises(Hive::TaskClosure::InvalidReceipt) do
+            Hive::Commands::StageAction.new(
+              "archive", slug, project: project,
+              closure_receipt_digest: "a" * 64
+            ).call
+          end
+          assert_match(/generation changed/, error.message)
+        end
+
+        assert_equal 2, calls
+        assert File.directory?(inbox)
+        refute File.exist?(
+          File.join(dir, ".hive-state", "stages", "9-done", slug)
+        )
+      end
+    end
+  end
+
   def test_archive_on_already_archived_task_is_noop
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -204,39 +272,7 @@ class RunStageActionTest < Minitest::Test
     end
   end
 
-  def test_archive_accepts_matching_merged_error_recovery_reason
-    with_tmp_global_config do
-      with_tmp_git_repo do |dir|
-        inbox, slug = seed_inbox(dir)
-        finalize = File.join(dir, ".hive-state", "stages", "8-finalize", slug)
-        FileUtils.mkdir_p(File.dirname(finalize))
-        FileUtils.mv(inbox, finalize)
-        File.write(File.join(finalize, "pr.md"), <<~MD)
-          ---
-          pr_url: https://github.com/example/repo/pull/42
-          ---
-
-          <!-- ERROR reason=git_status_failed -->
-        MD
-
-        with_fake_gh_state("MERGED") do
-          capture_io do
-            Hive::Commands::StageAction.new(
-              "archive",
-              slug,
-              recover_merged_error_reason: "git_status_failed"
-            ).call
-          end
-        end
-
-        done = File.join(dir, ".hive-state", "stages", "9-done", slug)
-        assert File.directory?(done)
-        assert_equal :complete, Hive::Markers.current(File.join(done, "task.md")).name
-      end
-    end
-  end
-
-  def test_archive_rejects_mismatched_merged_error_recovery_reason
+  def test_archive_rejects_error_marker_even_when_pr_metadata_names_a_merged_pr
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         inbox, slug = seed_inbox(dir)
@@ -252,51 +288,13 @@ class RunStageActionTest < Minitest::Test
         MD
 
         _out, err, status = with_captured_exit do
-          Hive::Commands::StageAction.new(
-            "archive",
-            slug,
-            recover_merged_error_reason: "claude_launch_failed"
-          ).call
+          Hive::Commands::StageAction.new("archive", slug).call
         end
 
         assert_equal Hive::ExitCodes::WRONG_STAGE, status
         assert_includes err, "archive cannot advance"
         assert File.directory?(finalize)
-      end
-    end
-  end
-
-  def test_archive_rejects_matching_recovery_reason_when_pr_is_open
-    with_tmp_global_config do
-      with_tmp_git_repo do |dir|
-        inbox, slug = seed_inbox(dir)
-        finalize = File.join(dir, ".hive-state", "stages", "8-finalize", slug)
-        FileUtils.mkdir_p(File.dirname(finalize))
-        FileUtils.mv(inbox, finalize)
-        File.write(File.join(finalize, "pr.md"), <<~MD)
-          ---
-          pr_url: https://github.com/example/repo/pull/42
-          ---
-
-          <!-- ERROR reason=git_status_failed -->
-        MD
-
-        out = err = nil
-        status = nil
-        with_fake_gh_state("OPEN") do
-          out, err, status = with_captured_exit do
-            Hive::Commands::StageAction.new(
-              "archive",
-              slug,
-              recover_merged_error_reason: "git_status_failed"
-            ).call
-          end
-        end
-
-        assert_equal Hive::ExitCodes::WRONG_STAGE, status
-        assert_empty out
-        assert_includes err, "archive cannot advance"
-        assert File.directory?(finalize)
+        refute File.directory?(File.join(dir, ".hive-state", "stages", "9-done", slug))
       end
     end
   end
@@ -464,7 +462,9 @@ class RunStageActionTest < Minitest::Test
         ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = File.join(artifacts, "artifact.md")
         ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "# Artifacts\nNo extra artifacts.\n<!-- COMPLETE -->\n"
 
-        capture_io { Hive::Commands::StageAction.new("artifacts", slug).call }
+        with_not_applicable_capture_policy do
+          capture_io { Hive::Commands::StageAction.new("artifacts", slug).call }
+        end
 
         assert File.directory?(artifacts), "artifacts must promote 6-review -> 7-artifacts"
         refute File.directory?(review), "source 6-review folder must be gone after promote"
@@ -483,7 +483,9 @@ class RunStageActionTest < Minitest::Test
         ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = File.join(artifacts, "artifact.md")
         ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "# Artifacts\nNo extra artifacts.\n<!-- COMPLETE -->\n"
 
-        capture_io { Hive::Commands::StageAction.new("artifacts", slug, from: "7-artifacts").call }
+        with_not_applicable_capture_policy do
+          capture_io { Hive::Commands::StageAction.new("artifacts", slug, from: "7-artifacts").call }
+        end
 
         assert_equal :complete, Hive::Markers.current(File.join(artifacts, "artifact.md")).name
       end

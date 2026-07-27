@@ -298,7 +298,9 @@ module Hive
       end
 
       def ensure_minimal_target_fresh!(ops)
-        if ops.hive_state_branch_exists? || File.exist?(ops.hive_state_path)
+        if ops.hive_state_branch_exists? ||
+           File.exist?(ops.hive_state_path) ||
+           File.symlink?(ops.hive_state_path)
           raise Hive::AlreadyInitialized,
                 "minimal initialization requires a fresh target with no hive/state branch or .hive-state path"
         end
@@ -464,7 +466,7 @@ module Hive
             )
           end
           scaffold
-        rescue StandardError
+        rescue StandardError, Interrupt
           # Re-derive paths from `scaffold` rather than the local `paths` (bound
           # just above): if scaffold_files! raised before its assignment, the
           # local is unset — the `if scaffold` guard makes this the only safe read.
@@ -487,7 +489,7 @@ module Hive
             write_default_workflow!(cfg_path, id)
             begin
               Hive::Commands::Workflow.commit_workflow_scaffold(ops, slug: id, pathspecs: pathspecs)
-            rescue StandardError
+            rescue StandardError, Interrupt
               # hive_commit stages config.yml + descriptor + instruction dir via
               # a per-pathspec `git add -A -- <path>` before it runs; a failure
               # AFTER staging leaves those entries in the long-lived .hive-state
@@ -504,7 +506,7 @@ module Hive
               raise
             end
           end
-        rescue StandardError
+        rescue StandardError, Interrupt
           # Filesystem-only scaffold teardown stays outside the lock: it removes
           # working-tree files, not index entries, so it cannot be swept into a
           # concurrent commit.
@@ -612,7 +614,7 @@ module Hive
               action: "set to #{next_value}",
               pathspecs: [ "config.yml" ]
             )
-          rescue StandardError
+          rescue StandardError, Interrupt
             restore_config_snapshot(cfg_path, before)
             raise
           end
@@ -802,7 +804,7 @@ module Hive
           registration_written = true
           after_bootstrap&.call
           entry
-        rescue StandardError
+        rescue StandardError, Interrupt
           unless registration_written
             side_effect_snapshot.fetch(:paths).delete(Hive::Config.global_config_path)
           end
@@ -1024,7 +1026,7 @@ module Hive
       # `SystemExit` propagate (Ctrl-C honored as user intent).
       def run_init_preflight!
         cfg = Hive::Config.load(@project_path)
-        inspector = @preflight_inspector || Hive::AgentSkills::Inspector.new(
+        inspector = @preflight_inspector || Hive::AgentSkills.hive_inspector(
           config: cfg,
           project_root: @project_path
         )

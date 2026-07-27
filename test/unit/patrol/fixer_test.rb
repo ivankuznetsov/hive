@@ -1354,6 +1354,33 @@ class HivePatrolFixerTest < Minitest::Test
     end
   end
 
+  def test_run_agent_wrapper_receives_patrol_fix_route
+    with_tmp_git_repo do |repo|
+      routed_cfg = cfg(repo)
+      routed_cfg["patrol"]["agent"] = "codex"
+      routed_cfg["models"] = {
+        "patrol_fix" => { "model" => "gpt-5.6-sol", "effort" => "xhigh" }
+      }
+      fixer = Hive::Patrol::Fixer.new(repo, cfg: routed_cfg)
+      fake_agent = Object.new
+      def fake_agent.run! = { status: :ok }
+      captured = nil
+      original = Hive::Agent.method(:new)
+      Hive::Agent.define_singleton_method(:new) do |**kwargs|
+        captured = kwargs
+        fake_agent
+      end
+
+      fixer.send(:run_agent, prompt: "p", run_dir: repo, worktree_path: repo)
+
+      assert_equal [
+        "--model", "gpt-5.6-sol", "-c", "model_reasoning_effort=xhigh"
+      ], captured.fetch(:routing_arguments).global_arguments
+    ensure
+      Hive::Agent.define_singleton_method(:new, original) if original
+    end
+  end
+
   def test_run_agent_wrapper_refuses_an_exhausted_patrol_budget
     with_tmp_git_repo do |repo|
       budget = Object.new

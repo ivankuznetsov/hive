@@ -3,23 +3,25 @@ title: hive setup-agents
 type: command
 source: skills/hive/, config/agent-skills.yml, lib/hive/agent_skills/, lib/hive/commands/setup_agents.rb
 created: 2026-07-10
-updated: 2026-07-20
+updated: 2026-07-26
 tags: [command, agents, skills, hive, canonical, provisioning, consent]
 ---
 
-**TLDR**: `hive setup-agents` provisions the bundled Hive operating skill and
-other unresolved built-in capabilities for Claude, Codex, and Pi. The Hive
-skill is always part of the supported-agent baseline, independent of project
-stage/reviewer configuration. Setup prints one immutable aggregate preview,
-obtains consent once, revalidates state, publishes whole skill directories or
-uses supported native package operations, and reinspects the result. It never
-provisions arbitrary custom skills or replaces user-owned conflicts.
+**TLDR**: `hive setup-agents` provisions the bundled Hive operating skill for
+Claude, Codex, and Pi plus unresolved built-in native capabilities for those
+agents and Grok. Grok currently participates through native Compound
+Engineering plugin capabilities, not a copied Hive operating-skill projection.
+Setup prints one immutable aggregate preview, obtains consent once, revalidates
+state, publishes whole skill directories or uses supported native package
+operations, and reinspects the result. It never provisions arbitrary custom
+skills or replaces user-owned conflicts.
 
 ## Usage
 
 ```bash
 hive setup-agents
 hive setup-agents --agent claude --skill ce-brainstorm
+hive setup-agents --agent grok --skill ce-code-review
 hive setup-agents --yes
 hive setup-agents --yes --json
 ```
@@ -31,9 +33,11 @@ so a narrow request cannot omit a required package. A prerequisite that cannot
 be inspected, repaired, or proven healthy blocks its dependent operation. With
 no filters, setup addresses every unresolved managed capability in the
 effective coding configuration plus the bundled `hive` capability for every
-supported agent. Filtering to an agent retains that agent's Hive operating
-skill. OpenClaw is deliberately not a setup target: its native/ClawHub state is
-diagnosed read-only and installed through OpenClaw itself.
+agent declared by that bundled package. Filtering to Claude, Codex, or Pi
+retains that agent's Hive operating skill. Grok is native-capability-only, so
+its targets come from effective stage/reviewer configuration. OpenClaw is
+deliberately not a setup target: its native/ClawHub state is diagnosed
+read-only and installed through OpenClaw itself.
 
 ## Consent and lifecycle
 
@@ -87,16 +91,55 @@ install but keep individual verification rows.
 - Codex uses native `plugin marketplace` / `plugin` JSON commands so the CLI
   owns config and cache population.
 - Pi uses native package list/install/update commands.
-- The bundled Hive capability for Claude, Codex, and Pi uses
-  `DirectoryPublisher` against each agent's private user root. It verifies the
-  projection manifest and file digests, stages every file in a private sibling,
-  then swaps the whole `skills/hive` directory atomically.
+- Grok uses native `plugin list`, `inspect`, install-with-trust, enable, and
+  update commands. Runtime inspection executes from the target project and
+  requires the requested skill's reported `source.path` to match the
+  realpath-jailed skill under the expected installed plugin. Durable doctor
+  inspection cross-checks
+  `installed-plugins/registry.json` with `[plugins] enabled`/`disabled` in
+  `config.toml`; a stale, disabled plugin is updated and then enabled in one
+  repair plan, rather than being mistaken for a healthy runtime skill or
+  requiring a second setup run.
+- The bundled Hive capability for Claude, Codex, and Pi uses the supported
+  `Hive::AgentSkills` projection facade against each agent's private user root.
+  It verifies the projection manifest and file digests, stages every file in a
+  private sibling, then swaps the whole `skills/hive` directory atomically.
 
 All commands execute as argv arrays in dedicated process groups. A deadline
 terminates and reaps the command plus descendants before setup reports a
 timeout, so an installer cannot continue mutating after its operation has
 failed. Missing CLIs are `unavailable` skips; Hive does not install or
 authenticate providers.
+
+## Internal Skillpack boundary
+
+`require "hive/agent_skills"` is the supported policy-light Ruby entry point.
+It clean-loads the canonical compiler and atomic directory projection
+mechanism without loading Hive configuration, agent profiles, workflow stages,
+commands, web code, or native package inventory.
+
+The facade exposes four operations:
+
+1. `render(platform, ...)` returns a deterministic `Projection` for the closed
+   OpenClaw, Claude, Codex, or Pi registry.
+2. `inspect(root:, trusted_root:, projection:)` returns a read-only
+   `ProjectionReport`.
+3. `plan(...)` binds that report and its path/tree identities into a frozen
+   `Plan` with `publish`, `noop`, or `refuse`.
+4. `apply(plan)` revalidates the preview and either atomically publishes the
+   complete directory, returns the unchanged healthy report, or raises a typed
+   `StalePlan` / `ForeignContent` error without mutation.
+
+Projection construction copies and freezes every rendered path and byte
+string. Changing caller-owned buffers after preview therefore cannot alter the
+bytes that `apply` publishes.
+
+Hive remains the first consumer. `Inspector`, `Provisioner`, target resolution,
+the package manifest, native CLI adapters, consent, filtering, JSON envelopes,
+and command wording are Hive adapters loaded lazily through the facade; they
+are not supported Skillpack collaborators for commands or web code to require
+or construct directly. This boundary does not add a generic marketplace,
+signature scheme, distribution protocol, gem, or independent version.
 
 ## Ownership and failure safety
 
@@ -163,7 +206,7 @@ hand-edit `openclaw/skills/hive/`.
 
 ## Tests
 
-- `test/unit/agent_skills/{manifest,inspector,provisioner}_test.rb`
+- `test/unit/agent_skills/{facade,manifest,inspector,provisioner}_test.rb`
 - `test/unit/agent_skills/{canonical_skill,directory_publisher}_test.rb`
 - `test/unit/agent_skills/adapters/*_test.rb`
 - `test/unit/commands/setup_agents_test.rb`

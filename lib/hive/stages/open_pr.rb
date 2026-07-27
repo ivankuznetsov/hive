@@ -1,10 +1,10 @@
 require "open3"
 require "hive/dependencies"
 require "hive/dependency_snapshot"
+require "hive/artifact_firewall"
 require "hive/gh"
 require "hive/git_ops"
 require "hive/markers"
-require "hive/protected_files"
 require "hive/secret_patterns"
 require "hive/claude_launcher"
 require "hive/stages/base"
@@ -83,6 +83,7 @@ module Hive
           File.write(task.state_file, pr_md_body(
             pr_url: pr_url,
             pr_number: merged["number"],
+            head_oid: head_oid,
             summary_text: "PR already merged for this task.",
             task_folder: task.folder,
             marker_text: ""
@@ -116,28 +117,43 @@ module Hive
         local_result = handle_secret_scan_result(task, "", local_scan, "open_pr")
         return local_result if local_result
 
-        Hive::Gh.push_branch!(worktree_path, branch, cfg: cfg)
-
-        prompt = render_prompt(task, worktree_path, branch,
-                               base_branch: dependency_pr_base_branch(task, cfg))
         identity = Hive::Stages::Base.implementation_stage_identity(task, cfg, "open_pr")
         profile = if identity
           Hive::AgentProfiles.lookup(identity.provider, cfg: cfg)
         else
           Hive::Stages::Base.stage_profile(cfg, "open_pr")
         end
-        protected_capture = Hive::ProtectedFiles.capture(task.folder)
-        before_sha = Hive::ProtectedFiles.snapshot(task.folder)
-        spawn_open_pr_agent(task, cfg, prompt, profile, worktree_path, identity: identity)
-        after_sha = Hive::ProtectedFiles.snapshot(task.folder)
-        if (tampered = Hive::ProtectedFiles.diff(before_sha, after_sha)).any?
-          restored, restore_error = Hive::ProtectedFiles.restore_safely(
-            task.folder, protected_capture, tampered
+        # Resolve and profile-validate the durable routed identity before the
+        # first remote mutation. Unsupported controls must not push a branch
+        # or leave any other externally visible open-PR effect behind.
+        launch_arguments = Hive::Stages::Base.implementation_launch_arguments(identity, profile)
+
+        Hive::Gh.push_branch!(worktree_path, branch, cfg: cfg)
+
+        prompt = render_prompt(task, worktree_path, branch,
+                               base_branch: dependency_pr_base_branch(task, cfg))
+        custody_manifest = Hive::ArtifactFirewall::Manifest.new(
+          root: task.folder,
+          protected_anchors: Hive::ArtifactFirewall::ORCHESTRATOR_OWNED,
+          permitted_writable_roots: [ task.folder, worktree_path ]
+        )
+        custody_snapshot = Hive::ArtifactFirewall.capture(custody_manifest)
+        begin
+          spawn_open_pr_agent(
+            task, cfg, prompt, profile, worktree_path,
+            identity: identity, launch_arguments: launch_arguments
           )
+        ensure
+          custody_report = Hive::ArtifactFirewall.validate_and_restore(
+            custody_manifest, custody_snapshot
+          )
+        end
+        if custody_report.tampered?
           Hive::Markers.set(task.state_file, :error,
-                            reason: "open_pr_tampered", files: tampered.join(","),
-                            restored: restored,
-                            restore_error: restore_error.to_s[0, 200])
+                            reason: "open_pr_tampered",
+                            files: custody_report.tampered_labels.join(","),
+                            restored: custody_report.restored?,
+                            restore_error: custody_report.restore_diagnostic.to_s[0, 200])
           return { commit: "open_pr_tampered", status: :error }
         end
 
@@ -163,7 +179,10 @@ module Hive
         { commit: "pr_opened_draft", status: :complete }
       end
 
-      def spawn_open_pr_agent(task, cfg, prompt, profile, worktree_path, identity: nil)
+      def spawn_open_pr_agent(task, cfg, prompt, profile, worktree_path,
+                              identity: nil, launch_arguments: nil)
+        launch_arguments ||=
+          Hive::Stages::Base.implementation_launch_arguments(identity, profile)
         scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
           cfg, "open_pr", task, profile,
           default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
@@ -178,7 +197,7 @@ module Hive
           profile: profile,
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :state_file_marker,
-          identity_arguments: identity&.native_arguments
+          **launch_arguments
         }
         if profile.name == :claude
           Hive::Stages::Base.spawn_claude_with_tmux_marker!(
@@ -251,6 +270,25 @@ module Hive
           Hive::Markers.set(task.state_file, :error, reason: "open_pr_not_draft")
           return { commit: "open_pr_not_draft", status: :error }
         end
+        local_head = local_head_oid(worktree_path).to_s.downcase
+        remote_head = real["headRefOid"].to_s.downcase
+        unless local_head.match?(/\A[a-f0-9]{40,64}\z/) &&
+               remote_head == local_head
+          remediate_orphan_pr!(marker_url)
+          Hive::Markers.set(
+            task.state_file, :error,
+            reason: "open_pr_head_mismatch",
+            local_head: local_head.empty? ? "(unavailable)" : local_head,
+            remote_head: remote_head.empty? ? "(unavailable)" : remote_head
+          )
+          return { commit: "open_pr_head_mismatch", status: :error }
+        end
+        Hive::Gh.persist_pr_identity!(
+          task.state_file,
+          pr_url: marker_url,
+          pr_number: real["number"],
+          head_oid: remote_head
+        )
 
         nil
       rescue Hive::GhError => e
@@ -326,6 +364,7 @@ module Hive
         File.write(task.state_file, pr_md_body(
           pr_url: pr_url,
           pr_number: pr_number,
+          head_oid: existing["headRefOid"],
           summary_text: "PR already open for this task.",
           task_folder: task.folder,
           marker_text: "<!-- COMPLETE pr_url=#{pr_url} is_draft=#{is_draft}#{suffix} -->"
@@ -338,12 +377,18 @@ module Hive
       # `Hive::Markers.set` after downstream short-circuit markers land
       # (so a partial failure leaves pr.md non-terminal — see the
       # commit-point comment in `run!`).
-      def pr_md_body(pr_url:, pr_number:, summary_text:, task_folder:, marker_text:)
+      def pr_md_body(pr_url:, pr_number:, head_oid:, summary_text:, task_folder:, marker_text:)
+        normalized_head = head_oid.to_s.downcase
+        head_line = if normalized_head.match?(/\A[a-f0-9]{40,64}\z/)
+          "head_oid: #{normalized_head}\n"
+        else
+          ""
+        end
         <<~MD
           ---
           pr_url: #{pr_url}
           pr_number: #{pr_number}
-          ---
+          #{head_line}---
 
           ## Summary
           #{summary_text}

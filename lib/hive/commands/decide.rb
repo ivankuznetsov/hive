@@ -8,6 +8,7 @@ require "hive/lock"
 require "hive/markers"
 require "hive/task"
 require "hive/task_action"
+require "hive/task_meta"
 require "hive/task_resolver"
 
 module Hive
@@ -20,6 +21,7 @@ module Hive
       include Hive::Schemas::EnvelopeEmitter
 
       RECORD_RE = /<!-- HIVE_DECISION_V1 (?<payload>\{.*\}) -->/.freeze
+      DEFAULT_CLOCK = -> { Time.now.utc }
       SUCCESS_KEYS = %w[
         schema schema_version ok applied noop slug workflow from_stage outcome
         decision_id note decided_at completed artifact artifact_path to
@@ -27,9 +29,11 @@ module Hive
       ].freeze
 
       def self.latest_record(path)
-        return nil unless File.file?(path)
+        latest_record_from_content(read_state_file(path))
+      end
 
-        File.foreach(path).filter_map do |line|
+      def self.latest_record_from_content(content)
+        content.to_s.each_line.filter_map do |line|
           match = RECORD_RE.match(line)
           JSON.parse(match[:payload]) if match
         rescue JSON::ParserError
@@ -37,7 +41,40 @@ module Hive
         end.last
       end
 
-      def initialize(target, outcome, from:, decision_id: nil, note: nil, project: nil, json: false)
+      def self.read_state_file(path, binary: false)
+        stat = File.lstat(path)
+        unless stat.file? && !stat.symlink?
+          raise Hive::InvalidTaskPath,
+                "human stage state file #{File.basename(path).inspect} must be a regular file, not a symlink"
+        end
+
+        flags = File::RDONLY
+        flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+        body = File.open(path, flags) do |file|
+          opened = file.stat
+          unless opened.file? && opened.dev == stat.dev && opened.ino == stat.ino
+            raise Hive::InvalidTaskPath,
+                  "human stage state file #{File.basename(path).inspect} changed while opening it"
+          end
+          file.read
+        end
+        return body if binary
+
+        body.force_encoding(Encoding::UTF_8)
+        unless body.valid_encoding?
+          raise Hive::InvalidTaskPath,
+                "human stage state file #{File.basename(path).inspect} must contain valid UTF-8"
+        end
+        body
+      rescue Errno::ENOENT
+        nil
+      rescue Errno::ELOOP, Errno::EMLINK
+        raise Hive::InvalidTaskPath,
+              "human stage state file #{File.basename(path).inspect} must be a regular file, not a symlink"
+      end
+
+      def initialize(target, outcome, from:, decision_id: nil, note: nil, project: nil, json: false,
+                     clock: DEFAULT_CLOCK)
         @target = target
         @outcome_name = outcome.to_s.strip
         @from = from.to_s.strip
@@ -45,6 +82,7 @@ module Hive
         @note = note
         @project_filter = project
         @json = json
+        @clock = clock
       end
 
       def call
@@ -75,7 +113,8 @@ module Hive
         task = resolve_task
         stage = resolve_human_stage!(task)
         outcome = resolve_outcome!(stage)
-        record = self.class.latest_record(File.join(task.folder, stage.state_file))
+        state_body = self.class.read_state_file(File.join(task.folder, stage.state_file))
+        record = self.class.latest_record_from_content(state_body)
         expected_dir = stage.dir
         actual_dir = "#{task.stage_index}-#{task.stage_name}"
 
@@ -83,7 +122,7 @@ module Hive
           return emit_replay_or_stale!(task, stage, outcome, record)
         end
 
-        marker = Hive::Markers.current(task.state_file)
+        marker = Hive::Markers.current_from_content(state_body)
         if marker.name == :waiting
           current_id = marker.attrs["decision_id"].to_s
           unless current_id.match?(/\A[0-9a-f]{16}\z/) && current_id == @decision_id
@@ -170,6 +209,7 @@ module Hive
       def complete!(task, stage, outcome, decision_id)
         record = nil
         snapshot = nil
+        meta_snapshot = nil
         ops = Hive::GitOps.new(task.project_root)
 
         Hive::Lock.with_commit_lock(task.hive_state_path) do
@@ -188,14 +228,21 @@ module Hive
                 artifact_path: artifact_path, artifact_status: "publish_ready"
               )
               snapshot = snapshot_files(locked.folder, [ stage.state_file ])
+              meta_snapshot = Hive::TaskMeta.snapshot(locked.folder)
+              record["decided_at"] = Hive::TaskMeta.write_completed_at_once(
+                locked.folder, Time.iso8601(record.fetch("decided_at"))
+              )
               write_decision_record(File.join(locked.folder, stage.state_file), record)
             end
             ops.hive_commit(stage_name: stage.dir, slug: task.slug,
                             action: "decide #{stage.name} #{outcome.name}")
-          rescue StandardError
+          rescue StandardError, Interrupt
             if snapshot
               restore_files(task.folder, snapshot)
-              restage_restored_files(task, snapshot)
+              Hive::TaskMeta.restore(task.folder, meta_snapshot) if meta_snapshot
+              restage_restored_files(
+                task, snapshot, extra_names: meta_snapshot ? [ Hive::TaskMeta::FILENAME ] : []
+              )
             end
             raise
           end
@@ -267,7 +314,7 @@ module Hive
             current_record?(replay_record, decision_id)
 
           raise error
-        rescue StandardError
+        rescue StandardError, Interrupt
           folder = File.directory?(task.folder) ? task.folder : File.join(
             task.hive_state_path, "stages", target.dir, task.slug
           )
@@ -304,7 +351,7 @@ module Hive
               stage_name: stage.dir, slug: task.slug,
               action: "decide #{stage.name} #{outcome.name}"
             )
-          rescue StandardError
+          rescue StandardError, Interrupt
             if snapshot
               restore_files(task.folder, snapshot)
               restage_restored_files(task, snapshot)
@@ -318,7 +365,8 @@ module Hive
 
       def validate_current_decision!(task, stage, decision_id)
         actual = "#{task.stage_index}-#{task.stage_name}"
-        marker = Hive::Markers.current(File.join(task.folder, stage.state_file))
+        body = self.class.read_state_file(File.join(task.folder, stage.state_file))
+        marker = Hive::Markers.current_from_content(body)
         return if actual == stage.dir && marker.name == :waiting && marker.attrs["decision_id"] == decision_id
 
         raise Hive::WrongStage.new(
@@ -338,13 +386,13 @@ module Hive
           "artifact_path" => artifact_path,
           "artifact_status" => artifact_status,
           "to" => outcome.to,
-          "decided_at" => Time.now.utc.iso8601
+          "decided_at" => @clock.call.utc.iso8601
         }
       end
 
       def write_decision_record(path, record)
         Hive::Markers.with_markers_lock(path) do
-          body = File.exist?(path) ? File.read(path, encoding: "UTF-8") : ""
+          body = self.class.read_state_file(path) || ""
           complete = Hive::Markers.build_marker(
             "COMPLETE", "decision_id" => record.fetch("decision_id"), "outcome" => record.fetch("outcome")
           )
@@ -359,7 +407,8 @@ module Hive
       def snapshot_files(folder, names)
         names.uniq.to_h do |name|
           path = File.join(folder, name)
-          [ name, { existed: File.exist?(path), body: File.exist?(path) ? File.binread(path) : nil } ]
+          body = self.class.read_state_file(path, binary: true)
+          [ name, { existed: !body.nil?, body: body } ]
         end
       end
 
@@ -369,14 +418,14 @@ module Hive
           if snapshot.fetch(:existed)
             Hive::Markers.write_atomic(path, snapshot.fetch(:body))
           else
-            File.delete(path) if File.exist?(path)
+            File.delete(path) if File.exist?(path) || File.symlink?(path)
           end
         end
       end
 
-      def restage_restored_files(task, snapshots)
+      def restage_restored_files(task, snapshots, extra_names: [])
         ops = Hive::GitOps.new(task.project_root)
-        snapshots.each_key do |name|
+        (snapshots.keys + extra_names).uniq.each do |name|
           rel = File.join("stages", "#{task.stage_index}-#{task.stage_name}", task.slug, name)
           ops.run_git!("-C", task.hive_state_path, "add", "-A", "--", rel)
         end

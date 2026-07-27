@@ -9,33 +9,230 @@ gem, and `hive setup` authenticates and installs the matching web bundle:
   [`ivankuznetsov/homebrew-hive`](https://github.com/ivankuznetsov/homebrew-hive) tap.
 - **AUR** — `yay -S hive-bin` (or `paru -S hive-bin`).
 
-A maintainer's explicit `vX.Y.Z` tag triggers `.github/workflows/release.yml`.
-The workflow requires no model-provider credentials. On GitHub-hosted runners,
-it proves the exact tag candidate as follows:
+## Releasing `agent-cli-runtime`
 
-1. Builds `hive-web-X.Y.Z.tar.gz` once from the tracked `web/` tree and records
-   its SHA-256 before the candidate or install gates run.
-2. Builds one gem, source archive, and deterministic OpenClaw/Claude/Codex/Pi
-   skill archive from the exact tag commit. The candidate verifier checks the
-   manifest digests and compares every packaged projection byte-for-byte with
-   the canonical skill source, then installs and invokes that exact gem.
-3. Installs the proven gem against the exact web archive through
-   consent-approved managed `hive setup --no-init --yes --json` under inert
-   service-manager stubs. It never rebuilds the candidate after this gate.
-4. Gem-installs the exact proven gem on macOS and native arm64 Linux.
-5. Creates and cosign-signs `SHA256SUMS` for the proven gem, four-platform
-   skill archive, and the already-proven web archive. `release-finalize`
-   publishes those same web bytes; it never rebuilds them. The GitHub Release
-   contains those assets and `SHA256SUMS{,.sig,.pem}`.
-6. Dispatches a `hive-release` `repository_dispatch` to the Homebrew tap
-   (gated on `HOMEBREW_TAP_TOKEN`).
-7. Runs the `aur-publish` job (gated on `AUR_SSH_PRIVATE_KEY`): cosign-verifies
-   the released gem, renders `PKGBUILD` from `packaging/aur/PKGBUILD.template`
-   via `packaging/render.rb`, regenerates `.SRCINFO` with
-   `makepkg --printsrcinfo`, and pushes a version bump to the AUR package.
-8. Announces the release on Discord with the supported `hive update` command
-   when `DISCORD_RELEASE_WEBHOOK` is configured. Announcement failures are
-   non-fatal and do not block package publication.
+`agent-cli-runtime` is independently versioned inside this monorepo. Its
+release does not bump, tag, publish, or deploy Hive. Development stays under
+`components/agent-cli-runtime/`; Hive remains the primary consumer, and the
+released package is installed from RubyGems by downstream consumers.
+
+One-time account setup:
+
+1. Create an active GitHub tag ruleset targeting
+   `components/agent-cli-runtime/v*`. Restrict tag creation, update, and
+   deletion to the release maintainers, keep the bypass list equally narrow,
+   and do not rely on the broader Hive `v*` rule to cover component tags.
+2. Create the GitHub environment `agent-cli-runtime-release`. Require at least
+   one release-maintainer reviewer, prevent self-review where the repository
+   plan supports it, and restrict deployments to tags matching
+   `components/agent-cli-runtime/v*`. Those tags are separately protected by
+   the component tag ruleset. This environment is the final human approval
+   boundary before RubyGems OIDC is issued.
+3. Before the first publication, configure a RubyGems pending trusted publisher
+   with exactly:
+
+   - gem: `agent-cli-runtime`
+   - repository owner: `ivankuznetsov`
+   - repository name: `hive`
+   - workflow: `agent-cli-runtime-release.yml`
+   - environment: `agent-cli-runtime-release`
+
+The environment and workflow names are part of the OIDC identity. Do not add a
+long-lived RubyGems API key to GitHub. Before accepting the first component
+release as ready, verify the component tag ruleset and environment protection
+in repository settings; a protected `main` branch alone is insufficient.
+
+To publish an approved version:
+
+1. Update
+   `components/agent-cli-runtime/lib/agent_cli_runtime/version.rb` and its
+   package changelog in a package PR. Run the package tests and exact candidate
+   verifier.
+2. Merge the package PR while leaving `hive.gemspec`, Hive's lockfiles, and
+   Hive's dependency loading unchanged. During the temporary duplication
+   window, any contract correction shared with Hive's internal implementation
+   must land in lockstep and remain covered by package/Hive parity tests.
+3. Record the full protected-`main` commit and verify that the version is not
+   already present on RubyGems. Confirm the component tag ruleset is active and
+   that `agent-cli-runtime-release` still requires the intended reviewers and
+   permits only matching component tags.
+4. Create and push
+   `components/agent-cli-runtime/vX.Y.Z` at that exact commit. The component
+   workflow rejects malformed tags, version mismatches, dirty candidates, and
+   commits not reachable from `main`.
+5. Watch **candidate → install (Linux and macOS) → publish**. Only `publish`
+   receives an OIDC token. It downloads the previously built candidate,
+   revalidates its checksum, and pushes those exact bytes without rebuilding.
+   The candidate is retained for 30 days so an approval delay does not silently
+   replace it with rebuilt bytes; every job has a 15-minute execution timeout.
+6. From a fresh gem home, install `agent-cli-runtime` at the exact version,
+   require `agent_cli_runtime`, run `agent-runtime --version`, and exercise a
+   JSON probe. Compare the downloaded gem checksum and metadata with the
+   workflow candidate before allowing a Hive dependency cutover.
+
+Ordinary path changes and Hive `vX.Y.Z` tags cannot publish this package.
+Component tags cannot enter Hive's root release workflow. If the workflow fails
+before `gem push`, fix the source or release machinery and move the component
+tag only while no registry version exists. If RubyGems accepted the version,
+never overwrite or reuse it: keep Hive's cutover blocked and prepare a
+separately approved fix-forward version. Yanking or transferring ownership
+requires separate explicit authorization.
+
+### Distribution mirror
+
+[`ivankuznetsov/agent-cli-runtime`](https://github.com/ivankuznetsov/agent-cli-runtime)
+is a public, read-only distribution mirror. It gives the gem a focused
+description, topics, source browser, and release history without splitting
+development across repositories. Hive remains the canonical source, issue
+tracker, pull-request surface, and release authority.
+
+The mirror's `main` branch is synchronized one way from
+`components/agent-cli-runtime/` by **Sync from Hive monorepo**, on a six-hour
+schedule or manual dispatch. Each snapshot records its exact canonical
+component commit in `.mirror-source.json`. The sync excludes the component's
+`mirror/` administration directory from the public package tree and installs
+the canonical workflow, contribution, and security files. The workflow
+executes the projector from the canonical Hive checkout, so projector and
+administration changes take effect atomically.
+New mirror-only administration must first be added to the canonical
+`mirror/` allowlist in Hive; unsourced target-only files are removed. Any
+missing canonical admin file fails before mutating the mirror.
+
+Both mirror workflows use the repository-scoped private deploy key in the
+`MIRROR_DEPLOY_KEY` Actions secret for Git pushes. Its public half must be a
+write-enabled deploy key on `ivankuznetsov/agent-cli-runtime`, and the private
+half must not be reused by any other repository. This credential is required
+because GitHub's generated `GITHUB_TOKEN` cannot update files under
+`.github/workflows`, even with `contents: write`. The sync otherwise keeps its
+generated token read-only; the release workflow uses that short-lived token
+only for ruleset inspection and GitHub release creation.
+
+After an approved component version has been published from Hive, manually run
+**Mirror a component release** in the mirror with `vX.Y.Z`. The workflow checks
+out the fully qualified protected
+`refs/tags/components/agent-cli-runtime/vX.Y.Z` ref and runs the component's
+release preflight against canonical `main`. It then verifies the exact version
+is already available from RubyGems and constructs an orphan source snapshot
+locally. An independent Git archive of the canonical tag, excluding only
+`mirror/` and adding the source manifest, defines the expected tree. The
+projected tree must match it before the workflow builds and installs the gem and
+exercises `agent-runtime --version`. Only then does it push the mirror tag and
+create the GitHub release. Existing mirror tags are accepted only when their
+complete tree matches the independently reconstructed canonical snapshot.
+
+The mirror repository must have the `MIRROR_DEPLOY_KEY` credential described
+above and an active tag ruleset targeting `refs/tags/v*` that restricts updates
+and deletion and blocks non-fast-forward movement. Leave initial creation
+available to the verified workflow; never add a bypass that can replace an
+existing release tag. The workflow checks the live ruleset through the GitHub
+API and refuses to create a local release tag when the immutable-tag policy is
+absent.
+
+The mirror workflow never pushes to Hive or RubyGems and cannot choose or
+publish a version. Do not accept issues, pull requests, independent commits, or
+release decisions there. Changes flow through Hive first; running the mirror
+jobs is a distribution follow-up, not release authority. Both mirror workflows
+pin third-party Actions to reviewed commit SHAs.
+
+## Hive pre-release proof and tag handoff
+
+Hive builds and proves release bytes before a tag exists. From a clean checkout
+of the intended protected-`main` commit, first inspect the exact candidate:
+
+```sh
+candidate_sha="$(git rev-parse origin/main)"
+bin/hive-release-candidate plan --sha "$candidate_sha" --json
+```
+
+`plan` is read-only. It reports deterministic blockers, the exact local run
+command, release-asset fetch argv, and—when required—the reviewed offline-cache
+materialization argv. The closure inventories under
+`packaging/release_candidate/baseline_manifests/` pin every RubyGem filename,
+size, and SHA-256. Execute only the returned `baseline_cache.fetch_argv[]`; the
+materializer stages those bytes before historical code runs with networking
+disabled.
+
+The reviewed materializer entry has this shape (copy the plan's exact argv,
+including its resolved Ruby and cache root):
+
+```sh
+ruby packaging/release_candidate/materialize_baseline_cache.rb \
+  "$candidate_sha" \
+  "$PWD/tmp/release-candidates/baseline-cache"
+```
+
+At the time of this implementation, the source version and reviewed
+latest-stable baseline are both 0.6.9. That exact source must report
+`candidate_not_newer` and cannot produce `qa_ready` evidence. Preparing a newer
+version is a separate reviewed release-prep change; the candidate tool never
+chooses or bumps it.
+
+`run`, `resume`, and `rerun` create only local, append-only evidence under
+`tmp/release-candidates/<sha>/`. A passing local scope remains `qa_blocked`.
+The default local CLI does not run a production historical container lane:
+those gates report `compliant_local_upgrade_executor_unavailable` and point to
+the exact hosted dispatch. The fixed executor is injectable for focused tests;
+real blocking upgrade proof belongs to the trusted hosted workflow.
+Only `dispatch` writes to GitHub; the following `collect` is read-only:
+
+```sh
+bin/hive-release-candidate dispatch --sha "$candidate_sha" --json
+bin/hive-release-candidate collect --request "$request_id" \
+  --wait --timeout 7200 --json
+```
+
+The trusted `.github/workflows/release-candidate.yml` run requires no
+model-provider credentials. It builds one manifest-bound gem, committed-source,
+four-platform skill, and managed-web candidate before fan-out; runs the release
+semantic E2E profile, packaging and managed-web checks, three native installs,
+latest-stable upgrades on all supported platforms, the v0.4.1→v0.4.2→candidate
+historical lane, baseline freshness/version checks, and exact protected
+ordinary CI; then publishes digest-bound `trusted_remote` evidence and a
+`hive-release-candidate` Check Run. Missing, duplicate, skipped, cancelled,
+failed, stale, or substituted deterministic rows block QA. Authenticated
+OpenClaw/Claude/Codex/Pi proof is advisory only and cannot replace a required
+row. Each blocking cell rejects candidate-controlled harness drift against the
+protected-main control checkout before execution. Linux historical lanes run
+in digest-pinned, unprivileged, read-only containers with no network or
+capabilities; macOS uses a deny-network sandbox. Both expose only read-only
+trusted-control/cache roots and one writable run root.
+
+Targeted retries preserve the original candidate bytes and predecessor rows:
+
+```sh
+bin/hive-release-candidate dispatch \
+  --retry-workflow-run "$source_run_id" \
+  --retry-attempt "$source_run_attempt" \
+  --failed --json
+```
+
+Use exactly one of `--failed`, `--missing`, or repeated
+`--gate "Required display name"`. The retry's evidence run/attempt is distinct
+from the original candidate artifact producer run/attempt/name/ID/digest; both
+identities are revalidated through chained retries.
+
+A maintainer's separately authorized `vX.Y.Z` tag triggers
+`.github/workflows/release.yml`. Its first `select-candidate` job:
+
+1. Resolves the tag target and selects exactly one successful, digest-bound
+   candidate Check for that SHA.
+2. Revalidates the protected-main workflow/run/attempt, required jobs, ordinary
+   CI, action lock, retry lineage, terminal evidence archive, and original
+   candidate artifact.
+3. Verifies the downloaded Actions archive digests, safely extracts them, and
+   confirms the manifest, source/tag version, and latest-stable comparison.
+4. Restages only the exact manifest-bound gem, skill, and managed-web bytes.
+   The tag workflow has no gem/source/skill/web build and no fallback dispatch.
+
+`install-gate` installs those selected gem bytes natively before
+`release-finalize` creates and cosign-signs `SHA256SUMS`, publishes the exact
+gem/skill/web bytes, dispatches Homebrew when configured, and announces on
+Discord when configured. The existing AUR, multi-architecture Hivebox, and
+post-release verification graph remains downstream.
+
+Implementation status: no real hosted candidate workflow, native-platform
+matrix, or historical package lane was run while adding this machinery. No
+version choice, tag, publication, deployment, or release was authorized.
 
 Both channel templates render through one helper (`packaging/render.rb`), so a
 release's version/sha is substituted identically everywhere.
@@ -65,9 +262,9 @@ depends on the gem via `path: ".."` in a source checkout, so a stale web lock fa
 `bundle install`), bump the `vX.Y.Z` installer-URL refs in `README.md` /
 `install.md`, add a `## X.Y.Z` CHANGELOG section, and merge the release-prep PR.
 Only a separate explicit release decision should create/push `vX.Y.Z` on the
-full protected-main commit. The tag drives the exact offline candidate and
-native install gates in `release.yml` (above). The owner bypasses the `v*`
-tag-protection ruleset.
+full protected-main commit, after trusted pre-tag candidate evidence is
+`qa_ready`. The tag selects and republishes those exact bytes; it does not
+rebuild them. The owner bypasses the `v*` tag-protection ruleset.
 
 **CHANGELOG style:** newest-first `## X.Y.Z` sections with user-facing `-`
 bullets (prefix fixes with "Fixed"); no `[Unreleased]` accumulator and no dates
@@ -227,26 +424,49 @@ version until you bump it manually or set the token.
    test "$(ruby -Ilib -e 'require "hive"; print Hive::VERSION')" = "X.Y.Z"
    ```
 
-4. After the separate explicit release decision, tag that exact commit and
-   push (this is the irreversible public trigger):
+4. Inspect/materialize the reviewed inputs from the exact plan, then dispatch
+   and collect the pre-tag proof:
+
+   ```sh
+   bin/hive-release-candidate plan --sha "$candidate_sha" --json
+   dispatch_json="$(
+     bin/hive-release-candidate dispatch --sha "$candidate_sha" --json
+   )"
+   request_id="$(printf '%s' "$dispatch_json" | jq -er .request_id)"
+   collect_json="$(
+     bin/hive-release-candidate collect --request "$request_id" \
+       --wait --timeout 7200 --json
+   )"
+   test "$(printf '%s' "$collect_json" | jq -r .status)" = terminal
+   test "$(printf '%s' "$collect_json" | jq -r .conclusion)" = success
+   ```
+
+   Confirm the exact-SHA `hive-release-candidate` Check is completed/success
+   and its retained evidence says `trust_scope: trusted_remote`,
+   `qa_status: qa_ready`, with no blockers. A failed or expired proof requires
+   a new full run or a provenance-preserving targeted retry—not a tag-time
+   fallback.
+5. Review the proof. Only after the separate explicit release decision, tag
+   that exact commit and push (this is the irreversible public trigger):
 
    ```sh
    test "$(git rev-parse HEAD)" = "$candidate_sha"
    git tag vX.Y.Z "$candidate_sha"
    git push origin vX.Y.Z
    ```
-5. Watch the run: **web-bundle → candidate-gate → install-gate → release-finalize →
-   aur-publish**. Confirm:
-   - `web-bundle` built the managed archive once and exposed its exact digest.
-   - `candidate-gate` built the tag exactly once, verified all four canonical
-     skill projections and manifest digests offline, installed and invoked the
-     exact gem, then exercised managed setup against the digest-pinned web
-     candidate under the isolated service-manager harness.
+6. Watch the run: **select-candidate → install-gate → release-finalize →
+   downstream channel/image verification**. Confirm:
+   - `select-candidate` chose the exact candidate Check/evidence and original
+     artifact producer for the tag target, verified both archive digests, and
+     restaged the exact manifest-bound gem, skill, and web bytes without a
+     build or fallback dispatch.
+   - `install-gate` installed the selected gem on `macos-15` and native arm64
+     Linux before `release-finalize`.
    - The GitHub Release has `hive-cli-X.Y.Z.gem`, the four-platform Hive skill
      archive, `hive-web-X.Y.Z.tar.gz`, and `SHA256SUMS{,.sig,.pem}`.
    - The tap committed `Formula/hive.rb` at `X.Y.Z` (if `HOMEBREW_TAP_TOKEN` is set).
    - `https://aur.archlinux.org/packages/hive-bin` shows `X.Y.Z` (if `AUR_SSH_PRIVATE_KEY` is set).
-6. Smoke each channel:
+7. Smoke each channel:
 
    ```sh
    brew install ivankuznetsov/hive/hive && hive --version    # macOS / Linuxbrew
@@ -265,25 +485,27 @@ version until you bump it manually or set the token.
 
 ## Install verification
 
-CI does **real installs** of every channel on its native OS (no macOS/Ubuntu
-hardware needed — GitHub-hosted runners + containers). Three layers, all backed
-by `packaging/verify-channel.sh` and the reusable `.github/workflows/install-verify.yml`:
+CI does **real installs** on native OS runners and containers. Four layers feed
+the release and channel graph:
 
-1. **Exact-artifact candidate gate** (`candidate-gate` in `release.yml`) —
-   checks out the exact tag, runs the offline canonical-skill contracts, builds
-   one gem/source/four-platform skill candidate, verifies every manifest digest
-   and projected file against canonical source, then installs and invokes the
-   exact gem. `web-bundle` builds the tracked managed web archive once before
-   this gate; the gate digest-checks it and runs the installed candidate through
-   managed setup. No downstream job rebuilds the proven candidate.
-2. **Pre-release install gate** (`install-gate` in `release.yml`) — `gem
-   install`s the exact proven gem on `macos-15` + `ubuntu-24.04-arm` before
-   publishing. `release-finalize` needs it, so a gem that will not install never
-   reaches brew/AUR. Native runners only.
-3. **Post-release verification** (`post-release-verify` in `release.yml`) — after
+1. **Trusted pre-tag candidate** (`release-candidate.yml`) — builds candidate
+   bytes once, then blocks on the semantic release profile, packaging/managed
+   web, native Linux x86_64/arm64 and macOS arm64 installs, authenticated
+   latest-stable upgrades, the historical v0.4.1→v0.4.2→candidate survivor,
+   baseline freshness/version, and exact ordinary CI. It publishes immutable
+   evidence and a digest-bound Check Run; it does not tag or publish.
+2. **Exact-byte tag selection** (`select-candidate` in `release.yml`) —
+   revalidates the trusted evidence and candidate artifact by server ID/digest,
+   verifies the manifest/source/tag/latest-stable contracts, and restages only
+   exact public bytes. It never rebuilds or dispatches a candidate.
+3. **Pre-publication install gate** (`install-gate` in `release.yml`) —
+   `gem install`s the selected gem on `macos-15` and
+   `ubuntu-24.04-arm` before publishing. `release-finalize` needs it, so a gem
+   that will not install never reaches Homebrew/AUR.
+4. **Post-release verification** (`post-release-verify` in `release.yml`) — after
    publish, runs the **real** `brew install` / `yay -S hive-bin` / `install.sh`
    of the just-released version.
-4. **Weekly canary** (`install-canary.yml`, Mondays 06:00 UTC + `workflow_dispatch`)
+5. **Weekly canary** (`install-canary.yml`, Mondays 06:00 UTC + `workflow_dispatch`)
    — re-installs the latest release to catch dependency / base-image drift.
 
 The Hivebox image gate is daemon-deep: `packaging/docker/smoke.sh` waits for
@@ -322,14 +544,24 @@ Arch-Linux-ARM image).
 
 ## Troubleshooting
 
-- **`candidate-gate` reports projection drift** → regenerate the checked-in
+- **Candidate package verification reports projection drift** → regenerate the checked-in
   projections from `skills/hive/`, inspect the diff, and rerun the focused
   agent-skill tests. Do not edit a generated projection directly.
-- **`candidate-gate` reports a version mismatch** → the tag, `Hive::VERSION`,
-  gem filename, and installed `hive --version` must all name the same version.
+- **`candidate_not_newer`** → the prepared `Hive::VERSION` must be newer than
+  the reviewed `latest_stable` catalog row. Do not edit the baseline or choose
+  a version merely to clear this blocker; use the separately reviewed
+  release-prep change.
+- **`select-candidate` cannot find trusted proof** → do not add a tag-time
+  build or dispatch fallback. Verify the tag target SHA, candidate Check
+  external ID/evidence digest, 30-day artifact retention, workflow/action lock,
+  exact ordinary CI, and original artifact producer identity. Dispatch or
+  target-retry the pre-tag workflow before the explicit tag decision.
+- **`select-candidate` reports a version mismatch** → the tag,
+  `Hive::VERSION`, candidate manifest/source archive, gem filename, and
+  installed `hive --version` must all name the same version.
 - **Optional live-agent job skipped** → its protected environment lacks the
-  provider credential/model configuration. This does not block a release; use
-  the offline candidate gate when no provider keys are available.
+  provider credential/model configuration. This is advisory and does not block
+  deterministic candidate proof.
 - **AUR job skipped** → `AUR_SSH_PRIVATE_KEY` is unset, or `release-finalize`
   failed before its `aur_gate` step. Set the secret / re-run the release.
 - **Tap not updated** → `HOMEBREW_TAP_TOKEN` is unset or expired. Renew the PAT

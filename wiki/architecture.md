@@ -3,7 +3,7 @@ title: Architecture
 type: architecture
 source: lib/hive/, web/, bin/hive, templates/
 created: 2026-04-25
-updated: 2026-07-23
+updated: 2026-07-25
 tags: [architecture, overview]
 ---
 
@@ -259,6 +259,7 @@ bin/hive tui  →  Hive::Tui::App.run_charm
 - **`Hive::Tui::PasteAwareRunner`** (`lib/hive/tui/paste_aware_runner.rb`) — `Bubbletea::Runner` subclass overriding `run_loop` / `process_input` to drain every raw read through `InputDecoder`. Pinned to bubbletea 0.1.4 (boot-time `VERSION` check) because the override touches private superclass instance variables.
 - **`Hive::Tui::InputDecoder`** (`lib/hive/tui/input_decoder.rb`) — stateful byte-level decoder. Exists because the stock `Program#poll_event` parses one event per raw read and drops the rest of the bytes, breaking paste of more than ~16 bytes. The decoder buffers partial escape sequences across reads, brackets paste content with `\e[200~`/`\e[201~`, normalises paste content (CR/LF/TAB → space, C0/DEL stripped), caps `@pending` at 4 KiB and `@paste_buffer` at 1 MiB, and force-flushes a stalled paste after 5 seconds.
 - **`Hive::Tui::Views::Format`** (`lib/hive/tui/views/format.rb`) — shared view formatting helpers. Truncation and left/right padding measure terminal display cells via `unicode-display_width`, so wide glyphs in task names or status icons do not shift fixed TUI columns.
+- **`Hive::Tui::StateSource`** (`lib/hive/tui/state_source.rb`) — shared bounded projection cache. TUI mode keeps the complete archive for its in-process Archive pane; web mode keeps only visible terminal rows because `/archive` reads the unfiltered producer on demand. Idle ticks use fingerprints, liveness ticks parse active stages only, and policy/terminal/retention signals run one authoritative ordinary projection. Immutable cache replacement plus a generation-fenced writer prevents a stale background scan from winning a race.
 
 ### Key seams
 
@@ -289,8 +290,8 @@ hive bot start  →  Hive::Commands::Bot
 
 The trust boundary matches the daemon: the bot is a thin command/draft
 surface, not an alternate approval engine. Stage approvals call workflow
-verbs with `--from <stage> --json`; recovery buttons call
-`hive markers clear`; triage buttons call `hive accept-finding` /
+verbs with `--from <stage> --json`; recovery buttons submit the observed row
+through `Hive::Recovery::API`; triage buttons call `hive accept-finding` /
 `reject-finding`; text-only idea capture calls `hive new`. Two
 in-process writes are intentionally scoped: brainstorm answer insertion,
 which is limited to `### A<N>.` blocks under
@@ -330,9 +331,11 @@ the current owner on every request and evict old sessions when
 ownership rotation. A local GitHub connection remains optional for repository
 listing and cloning and does not claim ownership. Hivebox is the distinct
 container distribution of the same owner-gated surface. Managed local installs
-stage `bundle install` plus a production asset precompile and verify the
-CSS/JavaScript manifest before the atomic bundle swap; same-version installs
-with missing assets are repaired.
+stage a locked Bundler install plus a production asset precompile and verify
+the CSS/JavaScript manifest before the atomic bundle swap; both commands run
+through the locked Bundler and current Ruby without relying on `bundle` or a
+matching Ruby shim on `PATH`. Same-version installs with missing assets are
+repaired.
 Reads render
 `Commands::Status#json_payload` snapshots; live updates flow over Turbo
 Streams, with production Action Cable accepting same-origin-as-host and
@@ -340,7 +343,11 @@ Streams, with production Action Cable accepting same-origin-as-host and
 `StatusBroadcaster` (self-healing subscriber loop) bridges
 `Hive::Web::StatusFeed` — one shared poller, volatile-field-deduped — to a
 broadcast morph refresh plus a targeted composer-selector update over
-solid_cable. Each accepted channel acquires one poller lease and releases it
+solid_cable. `StatusFeed` serializes concurrent Puma callers through
+`CachedStatusCommand`, which reuses a visible-only `StateSource`: its
+five-second hot path is active-task proportional, its missed-signal backstop is
+five minutes, and the complete archive producer runs only for an explicit
+archive request. Each accepted channel acquires one poller lease and releases it
 exactly once; a per-channel synchronized pending/active/closed transition
 prevents socket teardown from racing stream verification into a leak or double
 release without serializing unrelated browser connections. A failed first
@@ -408,8 +415,8 @@ loading. `Hive::StageLabel` gives web and bot surfaces one acronym-aware stage
 formatter. Mutations reuse gem
 primitives: `Commands::Approve` in-process, `Commands::Drop` in-process for
 Advanced hard deletes, daemon dispatch queue for stage runs, the bot's
-`RecoverySequence` for task-page Retry recovery (`markers clear` plus the
-stage rerun as one queued request sequence), `BrainstormAnswerWriter` for Q&A
+recovery-shape helper plus `Hive::Recovery::API` for task-page Retry,
+`BrainstormAnswerWriter` for Q&A
 answers, and `Commands::New` (with the TUI's `attachments:` contract) for the
 idea composer. Repo setup clones via `gh`, reuses the `hive init` prompt seam,
 and normalizes GitHub SSH origins to https so later daemon-owned `5-open-pr`
@@ -488,8 +495,10 @@ removed.
 
 Every task-stage producer resolves through one semantic admission protocol.
 CLI calls admit locally and attach. Bot/web requests remain file-backed
-deliveries, consumed by the daemon when present. Daemon auto-advance and loss
-healing call the same dispatcher. A daemon is optional after acceptance.
+deliveries, consumed by the daemon when present. Daemon auto-advance and
+coordinator-owned recovery call the same dispatcher. Attempt-loss healing is a
+separate ledger successor admission and never projects a recovery marker. A
+daemon is optional after acceptance.
 
 ```text
 CLI ───────────────────────────────┐

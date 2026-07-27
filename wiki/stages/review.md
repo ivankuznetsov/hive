@@ -3,7 +3,7 @@ title: 6-review stage
 type: stage
 source: lib/hive/stages/review.rb, lib/hive/stages/auto_commit.rb, lib/hive/stages/review/{ci_fix,triage,browser_test,fix_guardrail,suppression}.rb, lib/hive/commands/adhoc_review.rb, templates/{fix,ci_fix,browser_test,triage_*}*.erb
 created: 2026-04-26
-updated: 2026-07-24
+updated: 2026-07-25
 tags: [stage, review, autonomous-loop, ci, triage, fix-guardrail]
 ---
 
@@ -21,9 +21,9 @@ tags: [stage, review, autonomous-loop, ci, triage, fix-guardrail]
 | Marker / State | Action |
 |----------------|--------|
 | `:review_complete` | print "already complete; run `hive artifacts` or move this folder to 7-artifacts/", return |
-| `:review_ci_stale` | warn; user fixes CI then `hive markers clear FOLDER --name REVIEW_CI_STALE` and re-runs |
-| `:review_stale` | warn; user clears/re-runs if highest pass lacks `escalations-NN.md`, otherwise trims `reviews/` then clears/re-runs |
-| `:review_error` | warn with attrs; most reasons require user investigation then `hive markers clear FOLDER --name REVIEW_ERROR` and re-run. `reason=limits_reached` is the cooldown exception: when the marker carries `retry_after`, the daemon healer can clear it after the usage window. For legacy pre-fix rows that were actually a provider limit but were written as `triage_failed`, `fix_failed`, or `ci_unrunnable`, clear the stale marker with `hive markers clear <slug> --name REVIEW_ERROR --project <project>` to re-dispatch. |
+| `:review_ci_stale` | warn; user fixes CI, then submits the current observation through the TUI/web/bot retry action or `hive act workflow.retry` |
+| `:review_stale` | warn; if the highest pass lacks `escalations-NN.md`, the incomplete pass can be retried directly; otherwise trim/edit `reviews/`, then force-submit the current observation |
+| `:review_error` | warn with attrs. Every reason enters the shared recovery lifecycle: the daemon submits automatically after the marker-age cooldown when safety permits, and operator surfaces can submit immediately for coordinator assessment. `retry_after` remains a display hint for provider limits, not a separate mechanism. Old id-less rows require one `hive migrate` before retry. |
 | `:review_waiting` | resume — skip Phase 2/3, jump straight to Phase 4 with the user's manually-ticked `[x]` marks |
 | no `worktree.yml` | exit 1 (must come from 4-execute) |
 | `worktree.yml` points at deleted path | exit 1 with `git worktree prune` recovery hint |
@@ -48,7 +48,13 @@ Pass cap (`review.max_passes`, default 2) gates re-entry to Phase 2 — exceedin
 
 ## Implementation ownership in repair phases
 
-CI-fix and Phase 4 fix resolve through the current generation's persisted execute identity and append `implementation_stage_resolved` before each spawn. The synthetic review task carries the durable slug/id, and the identity resolved before the protected-file snapshot is passed directly into the spawn. This avoids a second projection rebuild inside the protected interval while still detecting any journal or projection rewrite by the agent. Automatic `review.ci` and `review.fix` selections keep the exact execute provider/model and request `high` effort. An authored downstream `agent`, `model`, or `effort` replaces only that field and records `explicit_override`; a cross-provider agent-only override resolves the new provider's concrete default model. Execute effort is audit-only and is never inherited.
+CI-fix and Phase 4 fix resolve through the current generation's persisted execute identity and append `implementation_stage_resolved` before each spawn. Phase 4 performs this resolution before writing `REVIEW_WORKING`, emitting the phase-start event, checking Git status, or auto-committing pre-existing residue; an unsupported effective route propagates without replacing the prior marker. The synthetic review task carries the durable slug/id, and the identity resolved before the protected-file snapshot is passed directly into the spawn. This avoids a second projection rebuild inside the protected interval while still detecting any journal or projection rewrite by the agent. Automatic `review.ci` and `review.fix` selections keep the exact execute provider/model and request `high` effort. An authored downstream `agent`, `model`, or `effort` replaces only that field and records `explicit_override`; a cross-provider agent-only override resolves the new provider's concrete default model. Execute effort is audit-only and is never inherited.
+
+When `models.review_ci`, `models.review_fix`, or their coarse `models.review`
+family is active, the first generation-scoped selection stores frozen routing
+metadata. Each repair launcher re-renders it through the selected profile and
+passes typed routed arguments to both headless and Claude/tmux execution.
+Unsupported controls fail before the resolution event or subprocess.
 
 This inheritance is deliberately limited to repair work. Reviewer fan-out, triage, and browser-test profiles continue to use their independently configured identities, preserving independent review signals. The phrase “fix agent” below refers to this resolved identity, not a baked-in Claude default.
 
@@ -73,7 +79,21 @@ After each reviewer file is written, `Review::GithubPublisher.publish!` posts a 
 
 Per-reviewer failures retry up to `max_attempts` (default `Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS = 2`; configurable on each reviewer spec) with exponential backoff capped at 8s (1s, 2s, 4s, 8s, 8s, …). `Hive::Reviewers::Base` owns the adapters' shared retry-budget parsing, including the warning and default used when a direct/custom adapter construction bypasses config validation. After retries are exhausted, the failure is recorded as a one-line entry in `reviews/errors-NN.md` (an orchestrator-owned file — see `ORCHESTRATOR_OWNED_PREFIXES`); the reviewer's own per-pass output file stays absent so `discover_reviewer_files` correctly reports "this reviewer produced nothing this pass" instead of triaging an infra-failure stub as a real `[ ]` finding. `errors-NN.md` is unconditionally deleted at the start of every `run_reviewers` invocation and re-created on the first failure within that invocation (append-with-header-on-first-write thereafter), so a marker-clear-and-rerun that succeeds leaves no file behind and one that re-fails shows only the latest pass-NN failures rather than concatenated history. All reviewers fail → `REVIEW_ERROR phase=reviewers reason=all_failed` (the all-failed safety net is preserved). Empty reviewer list → skip directly to the all-clean branch (Phase 5).
 
-CE skill invocation is profile-aware: `templates/reviewer_claude_ce_code_review.md.erb` and `templates/reviewer_codex_ce_code_review.md.erb` invoke the same logical CE skill (`/ce-code-review`) but render the call syntax according to `profile.skill_syntax_format`. Legacy config values such as `/compound-engineering:ce-code-review` or `compound-engineering:ce-code-review` are normalized to the current bare CE skill before the prompt is rendered. The official `/code-review` command plugin is a separate PR-comment workflow and is not used here because Hive reviewers must write structured `reviews/<reviewer>-NN.md` artifacts for triage.
+CE skill invocation is profile-aware:
+`templates/reviewer_{claude,codex,grok}_ce_code_review.md.erb` invoke the same
+logical CE skill (`/ce-code-review`) but render the call syntax according to
+`profile.skill_syntax_format`. Grok is opt-in rather than part of the
+fresh-project default reviewer set; when selected, Hive verifies and provisions
+the native `compound-engineering` Grok plugin instead of embedding a copied
+review procedure in the prompt. Legacy config values such as
+`/compound-engineering:ce-code-review` or
+`compound-engineering:ce-code-review` are normalized to the current bare CE
+skill before the prompt is rendered. The official `/code-review` command plugin
+is a separate PR-comment workflow and is not used here because Hive reviewers
+must write structured `reviews/<reviewer>-NN.md` artifacts for triage.
+The Grok reviewer prompt treats the diff, plan, and repository as untrusted
+evidence and forbids cross-model/external review, network tools, or repository
+egress beyond the already selected Grok reviewer.
 
 Every reviewer prompt embeds the task's `plan.md` inline through `Hive::Reviewers::PlanContext.render(task_folder, user_supplied_tag)` — wired into `Agent#render_prompt` as the `plan_context_section` template binding and rendered between the `Pass:` header and the `Behavior:` block in all four reviewer templates. The section frames the plan as authoritative on scope and tells reviewers to drop candidate findings that flag deliberate plan-level scope boundaries (e.g. "feature X not implemented" when the plan defers X to a separate downstream task). It also carries a symmetric anti-finding rule: if the plan's **Goals** or **Requirements Trace** lists an item the diff does NOT implement and the plan does NOT defer it, the reviewer must raise that as a High-severity finding — the rule suppresses escalations on plan-deferred gaps, not on plan-required-but-missing gaps. Without this grounding, reviewers re-derive scope from the worktree alone and routinely escalate intentional gaps — driving the same task into REVIEW_STALE pass after pass because the fixer can't resolve a plan-by-design contradiction.
 
@@ -105,7 +125,7 @@ When `review.triage.suppress_no_fix` is not `false` (default on), `Review::Suppr
 
 The triage spawn is wrapped in the same bounded retry as a per-reviewer spawn (`run_triage_with_retries`): a transient `:error` is retried up to `review.triage.max_attempts` (default `Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS = 2`; `1` disables retry; validated as a positive integer in `Config::POSITIVE_INTEGER_KEYS`) with the shared `Hive::Reviewers.backoff_seconds_for` capped exponential backoff, so a single momentary infra blip (a `tmux has-session` read misread as a dead session, an "expected output missing" timeout) no longer parks the whole task on a terminal marker the daemon never auto-retries. `:tampered` and provider-limit outcomes short-circuit the retry (a retry would repeat the tamper, and a limit self-heals via `retry_after`). The retry also honors the review wall-clock budget — before starting another spawn it checks `review.max_wall_clock_sec` and bails to `REVIEW_STALE reason=wall_clock` (mirroring `run_reviewers`), so a high `max_attempts` × the 1800s triage timeout can't overrun the outer cap.
 
-If the triage spawn returns an error carrying raw `limit_text`, a captured message matching `Hive::AgentLimit.limit_reached?`, or a legacy error message in `Hive::AgentLimit`'s own `limits reached for <agent>:` wire format, `mark_review_phase_failure` writes `REVIEW_ERROR phase=triage reason=limits_reached retry_after=<iso8601>`. The daemon healer treats that like the reviewers-phase limit marker and retries after the cooldown. Non-limit triage failures (including timeouts with no provider-limit text) first use the phase-local retry budget, then write `REVIEW_ERROR`; the daemon continues retrying that durable marker after the shared cooldown without an exhaustion cap. Their `reason=` is classified by `Hive::ReviewErrorReason` from the captured output: `merge_conflict`, `network_timeout`, `tool_permission_denied`, `agent_crashed`, or `unknown`. Input-contract caveat: `classify` inspects whatever text the caller hands it and never fetches raw agent output on its own. The current plumbing forwards a condensed wrapper string (`expected output file missing or empty: …`, `tmux_session_terminated before writing …`, `triage agent failed (timeout)`) rather than the agent's raw stdout/stderr, and those wrapper strings match no pattern — so in the field this almost always resolves to `unknown`. The specific buckets fire only when raw output carrying their signal is passed through, which the triage/fix plumbing does not yet do; don't build TUI affordances, healer arms, or metrics that assume the named buckets appear. The marker also carries a `message="<condensed error>"` attr (capped at `REVIEW_PHASE_ERROR_SUMMARY_MAX = 300` chars), so `status.md`, `hive status --json`, and the web diagnostic card show the raw cause even when the classifier falls back to `unknown`. The same helper is used by both triage and fix. CI does not route through this helper, but a CI-fix agent error carrying `limit_text` or the AgentLimit wire format writes `REVIEW_ERROR phase=ci reason=limits_reached message="ci hit a usage/credit limit" retry_after=<iso8601>`; non-limit CI errors still write `reason=ci_unrunnable` directly with no `message=` attr.
+If the triage spawn returns an error carrying raw `limit_text`, a captured message matching `Hive::AgentLimit.limit_reached?`, or a legacy error message in `Hive::AgentLimit`'s own `limits reached for <agent>:` wire format, `mark_review_phase_failure` writes `REVIEW_ERROR phase=triage reason=limits_reached retry_after=<iso8601>`. The daemon scheduler submits that marker after the same cooldown as every other durable error, and `RecoveryCoordinator` owns retry admission. Non-limit triage failures (including timeouts with no provider-limit text) first use the phase-local retry budget, then write `REVIEW_ERROR`; the daemon continues retrying that durable marker after the shared cooldown without an exhaustion cap. Their `reason=` is classified by `Hive::ReviewErrorReason` from the captured output: `merge_conflict`, `network_timeout`, `tool_permission_denied`, `agent_crashed`, or `unknown`. Input-contract caveat: `classify` inspects whatever text the caller hands it and never fetches raw agent output on its own. The current plumbing forwards a condensed wrapper string (`expected output file missing or empty: …`, `tmux_session_terminated before writing …`, `triage agent failed (timeout)`) rather than the agent's raw stdout/stderr, and those wrapper strings match no pattern — so in the field this almost always resolves to `unknown`. The specific buckets fire only when raw output carrying their signal is passed through, which the triage/fix plumbing does not yet do; don't build TUI affordances, reason-specific recovery arms, or metrics that assume the named buckets appear. The marker also carries a `message="<condensed error>"` attr (capped at `REVIEW_PHASE_ERROR_SUMMARY_MAX = 300` chars), so `status.md`, `hive status --json`, and the web diagnostic card show the raw cause even when the classifier falls back to `unknown`. The same helper is used by both triage and fix. CI does not route through this helper, but a CI-fix agent error carrying `limit_text` or the AgentLimit wire format writes `REVIEW_ERROR phase=ci reason=limits_reached message="ci hit a usage/credit limit" retry_after=<iso8601>`; non-limit CI errors still write `reason=ci_unrunnable` directly with no `message=` attr.
 
 Escalations land in `reviews/escalations-<NN>.md` — every line that triage left as `[ ]` gets copied here as a digest for the user.
 
@@ -180,12 +200,28 @@ The sentinel `reviews/fix-success-NN.md` is written by the runner at the two "pa
 
 Recovery flow:
 
-1. If the highest pass is `:fix_incomplete` (most common cause of `REVIEW_STALE` after a wall-clock or interrupted-fix exit): just `hive markers clear FOLDER --name REVIEW_STALE` and `hive run` — Phase 4 retries with the operator's already-applied `[x]` marks. The TUI's `recover_review` Enter binding does this automatically. No manual edit needed.
-2. If `:triage_incomplete`: same — clear and rerun; the loop re-derives escalations from existing reviewer files.
-3. If `:complete` (genuine `max_passes` exhaustion): inspect the highest-NN per-reviewer files; either edit them down (consolidate/trim findings) or rename the highest NN to a lower NN (drops the derived pass count). Then clear and rerun. The TUI surfaces this row with the status `stale pass=N` (where N is `marker.attrs["pass"]`); pressing `Enter` opens the focal `reviews/escalations-NN.md` in `$EDITOR` via the same foreground-takeover machinery `o` and `Enter`-on-`needs_input` use. The browse handler reads `row.attrs["pass"]` to resolve the focal path, falls back to the `reviews/` directory if the focal file is missing, and refuses with `no review files for <slug>` if neither exists. No marker mutation, no auto-continue — clearing remains a deliberate `hive markers clear FOLDER --name REVIEW_STALE` round-trip so the operator owns the resolve decision after reading the findings.
+1. If the highest pass is `:fix_incomplete` (most common cause of `REVIEW_STALE` after a wall-clock or interrupted-fix exit), submit retry through a normal recovery surface. Phase 4 retries with the operator's already-applied `[x]` marks. No manual edit is needed.
+2. If `:triage_incomplete`, use the same recovery route; the loop re-derives escalations from existing reviewer files.
+3. If `:complete` (genuine `max_passes` exhaustion), inspect the highest-NN per-reviewer files and the current `reviews/escalations-NN.md`, then edit the escalation input. The TUI surfaces this row with the status `stale pass=N` (where N is `marker.attrs["pass"]`); pressing `Enter` opens the focal escalation in `$EDITOR`, and the explicit `r` gesture submits the post-edit coordinator request. Ordinary action, web, and bot retry controls stay disabled while that escalation artifact exists, so they cannot skip the human input boundary.
 4. Wall-clock `REVIEW_STALE` (`reason=wall_clock`) can fire **before any reviewer files exist** (e.g. during Phase 1 CI-fix). The TUI treats this shape as auto-retryable regardless of disk state — give it more time via `review.max_wall_clock_sec` if it keeps timing out.
 
-For `REVIEW_CI_STALE` (Phase 1 CI never went green) the equivalent flow is: edit `reviews/ci-blocked.md`, fix the CI failures locally, run `hive markers clear FOLDER --name REVIEW_CI_STALE`, then `hive run`. `REVIEW_ERROR` is normally daemon-owned: after the shared cooldown it clears the exact observed marker generation and reruns the stage, while worktree, protected-file, and credential checks can defer an unsafe retry. Manual guarded clear plus `hive run` remains an explicit operator override after investigating the marker. For the known tmux Stop-hook review-fix failure (`phase=fix reason=fix_failed` plus `claude stop hook did not signal completion`), operators who override the cooldown must first verify the same evidence the fallback requires: `reviews/escalations-NN.md` exists, unresolved escalation count is zero, the worktree is readable, the tmux session was alive, and code-change evidence proves completion (a new commit, a dirty worktree pending auto-commit, or whole-pass no-change where every finding is `RESOLVED/NO-FIX:` with no unapplied `[x] AUTO-FIX:` line). Then clear only that marker with `hive markers clear FOLDER --name REVIEW_ERROR --match-attr phase=fix,reason=fix_failed` and rerun `hive run FOLDER`. `claude.mode: headless` remains the recommended workaround for affected versions and service hosts; Hive does not auto-revert operator config.
+For `REVIEW_CI_STALE` (Phase 1 CI never went green), edit
+`reviews/ci-blocked.md`, fix the CI failures locally, then submit the observed
+marker through a recovery surface. `REVIEW_ERROR` is normally daemon-owned:
+after the shared cooldown it retries the exact observed marker generation,
+while worktree, protected-file, and credential checks can defer an unsafe
+transition. Low-level guarded marker clearing remains an exceptional operator
+repair primitive, not the standard recovery workflow. For the known tmux
+Stop-hook review-fix failure (`phase=fix reason=fix_failed` plus `claude stop
+hook did not signal completion`), an operator who uses that primitive must
+first verify the same evidence the fallback requires:
+`reviews/escalations-NN.md` exists, unresolved escalation count is zero, the
+worktree is readable, the tmux session was alive, and code-change evidence
+proves completion (a new commit, a dirty worktree pending auto-commit, or
+whole-pass no-change where every finding is `RESOLVED/NO-FIX:` with no
+unapplied `[x] AUTO-FIX:` line). `claude.mode: headless` remains the
+recommended workaround for affected versions and service hosts; Hive does not
+auto-revert operator config.
 
 No frontmatter edits required: pass count is filename-derived, not stored.
 

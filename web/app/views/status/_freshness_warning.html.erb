@@ -1,0 +1,23 @@
+<% if availability.present? && availability != "fresh" %>
+  <div class="state-banner status-freshness-warning"
+       role="status"
+       aria-live="polite"
+       aria-atomic="true"
+       data-status-availability="<%= availability %>">
+    <span class="status-dot status-dot-waiting" aria-hidden="true"></span>
+    <span>
+      <% if availability == "degraded" %>
+        <strong>Live status is temporarily unavailable.</strong>
+        Showing the last successful refresh
+        <%= last_success_at.present? ? "from #{last_success_at}" : "from an earlier scan" %>.
+      <% else %>
+        <strong>Live status is unavailable.</strong>
+        No current fleet snapshot has loaded yet.
+      <% end %>
+      Hive will retry automatically. Actions that depend on current task state are disabled.
+      <% if error.present? %>
+        <span class="status-freshness-diagnostic"><%= error %></span>
+      <% end %>
+    </span>
+  </div>
+<% end %>

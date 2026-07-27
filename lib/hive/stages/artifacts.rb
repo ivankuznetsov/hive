@@ -1,5 +1,6 @@
 require "fileutils"
 require "hive/claude_launcher"
+require "hive/artifacts/capture_policy"
 require "hive/markers"
 require "hive/screenote/credential_store"
 require "hive/screenote/mcp_config"
@@ -13,15 +14,47 @@ module Hive
 
       def run!(task, cfg)
         FileUtils.touch(task.state_file) unless File.exist?(task.state_file)
+        capture_policy = Hive::Artifacts::CapturePolicy.for_task(
+          task,
+          project: File.basename(task.project_root)
+        )
+        capture_requirement = capture_policy.ensure!
         marker = Hive::Markers.current(task.state_file)
-        return { commit: nil, status: :complete } if marker.name == :complete
+        if marker.name == :complete
+          return { commit: nil, status: :complete } if capture_policy.capture_satisfied?
+
+          return required_capture_error(task, capture_requirement)
+        end
 
         profile = Hive::Stages::Base.stage_profile(cfg, "artifacts")
-        screenote = screenote_context(cfg)
-        prompt = render_prompt(task, screenote: screenote)
+        # External upload is deliberately outside the stage. Do not read or
+        # inject the operator's Screenote credential during autonomous capture.
+        screenote = build_unavailable_context(
+          "External upload requires a separate operator-confirmed action after local inspection.",
+          cfg
+        )
+        prompt = render_prompt(
+          task,
+          screenote: screenote,
+          capture_requirement: capture_requirement
+        )
         spawn_artifacts_agent(task, cfg, prompt, profile, screenote: screenote)
         marker = Hive::Markers.current(task.state_file)
+        if marker.name == :complete && !capture_policy.capture_satisfied?
+          return required_capture_error(task, capture_requirement)
+        end
         { commit: action_for(marker.name), status: marker.name }
+      end
+
+      def required_capture_error(task, requirement)
+        Hive::Markers.set(
+          task.state_file,
+          :error,
+          reason: "required_capture_missing",
+          capture_requirement: requirement.fetch("result"),
+          remediation: "run supervised local capture and retain media/capture-manifest.json"
+        )
+        { commit: "error", status: :error }
       end
 
       # `screenote:` is required (no `screenote_context(cfg)` default): the
@@ -42,6 +75,10 @@ module Hive
           timeout_sec: cfg.dig("timeout_sec", "artifacts") || Hive::Config::DEFAULTS.dig("timeout_sec", "artifacts"),
           log_label: "artifacts",
           profile: profile,
+          routing_arguments: Hive::Stages::Base.model_routing_arguments(
+            cfg, "artifacts", profile,
+            current: Hive::Stages::Base.model_routing_current(cfg["artifacts"])
+          ),
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :state_file_marker
         }
@@ -87,8 +124,13 @@ module Hive
         end
       end
 
-      def render_prompt(task, screenote: nil)
+      def render_prompt(task, screenote: nil, capture_requirement: nil)
         screenote ||= build_unavailable_context("Screenote is not connected; run `hive connect screenote`.", {})
+        capture_requirement ||= {
+          "result" => "not_applicable",
+          "rationale" => "No precomputed capture requirement was supplied.",
+          "task_generation" => "unknown"
+        }
         Hive::Stages::Base.render(
           "artifacts_prompt.md.erb",
           Hive::Stages::Base::TemplateBindings.new(
@@ -96,6 +138,9 @@ module Hive
             task_folder: task.folder,
             worktree_path: task.worktree_path,
             artifact_file: task.state_file,
+            capture_requirement: capture_requirement.fetch("result"),
+            capture_rationale: capture_requirement.fetch("rationale"),
+            capture_generation: capture_requirement.fetch("task_generation"),
             screenote_connected: screenote[:connected],
             screenote_project_id: screenote[:project_id],
             screenote_base_url: screenote[:base_url],

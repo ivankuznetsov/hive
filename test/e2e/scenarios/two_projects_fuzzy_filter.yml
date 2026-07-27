@@ -1,6 +1,9 @@
 name: two_projects_fuzzy_filter
 description: TUI fuzzy filter and numeric project scope across two registered projects.
 tags: [tui]
+coverage:
+  primary: routing.multi_project
+  supporting: []
 steps:
   - kind: seed_state
     stage: 2-brainstorm

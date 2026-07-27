@@ -99,6 +99,39 @@ class BabysitterPrFixerTest < Minitest::Test
     end
   end
 
+  def test_agent_spawn_receives_babysitter_route
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      worktree_path = File.join(dir, "wt")
+      FileUtils.mkdir_p(worktree_path)
+      routed_cfg = cfg.merge(
+        "execute" => { "agent" => "codex" },
+        "models" => {
+          "babysitter" => { "model" => "gpt-5.6-sol", "effort" => "xhigh" }
+        }
+      )
+      captured = nil
+
+      stub_non_green_context(project, worktree_path) do
+        with_replaced_singleton_method(
+          Hive::Stages::Base,
+          :spawn_agent,
+          lambda { |_task, **kwargs| captured = kwargs; { status: :ok } }
+        ) do
+          outcome = Hive::Babysitter::PrFixer.run(
+            pr, project, routed_cfg, dry_run: false, logger: nil, inflight: Set.new
+          )
+          assert_equal :success, outcome
+        end
+      end
+
+      assert_equal :codex, captured.fetch(:profile).name
+      assert_equal [
+        "--model", "gpt-5.6-sol", "-c", "model_reasoning_effort=xhigh"
+      ], captured.fetch(:routing_arguments).global_arguments
+    end
+  end
+
   def test_agent_failure_labels_comments_and_gives_up
     with_tmp_dir do |dir|
       project = project_entry(dir)

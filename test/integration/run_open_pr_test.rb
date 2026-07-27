@@ -14,6 +14,10 @@ class RunOpenPrTest < Minitest::Test
     ENV["PATH"] = "#{@gh_dir}:#{@prev_path}"
     @gh_log_dir = Dir.mktmpdir("fake-gh-log")
     ENV["HIVE_FAKE_GH_LOG_DIR"] = @gh_log_dir
+    ENV["HIVE_FAKE_GH_PR_EXISTS_URL"] = "https://github.com/acme/app/pull/1"
+    ENV["HIVE_FAKE_GH_PR_EXISTS_NUMBER"] = "1"
+    ENV["HIVE_FAKE_GH_PR_METADATA_URL"] = "https://github.com/acme/app/pull/1"
+    ENV["HIVE_FAKE_GH_PR_METADATA_NUMBER"] = "1"
   end
 
   def teardown
@@ -28,7 +32,7 @@ class RunOpenPrTest < Minitest::Test
         HIVE_FAKE_GH_PR_BODY HIVE_FAKE_GH_PR_STATE
         HIVE_FAKE_GH_PR_ISDRAFT HIVE_FAKE_GH_READY_STDERR
         HIVE_FAKE_GH_PR_EXISTS_FILE HIVE_FAKE_GH_PR_EXISTS_URL HIVE_FAKE_GH_PR_EXISTS_NUMBER
-        HIVE_FAKE_GH_HEAD_REF_OID
+        HIVE_FAKE_GH_HEAD_REF_OID HIVE_FAKE_GH_PR_METADATA_URL HIVE_FAKE_GH_PR_METADATA_NUMBER
       ].each { |k| ENV.delete(k) }
     end
 
@@ -48,7 +52,7 @@ class RunOpenPrTest < Minitest::Test
           capture_io { Hive::Commands::Run.new(task_dir).call }
           pr_md = File.join(task_dir, "pr.md")
           assert_includes File.read(pr_md),
-                          "<!-- COMPLETE pr_url=https://example.com/pr/1 is_draft=false idempotent=true -->"
+                          "<!-- COMPLETE pr_url=https://github.com/acme/app/pull/1 is_draft=false idempotent=true -->"
 
           finalize_dir = File.join(dir, ".hive-state", "stages", "8-finalize", slug)
           FileUtils.mkdir_p(File.dirname(finalize_dir))
@@ -57,14 +61,14 @@ class RunOpenPrTest < Minitest::Test
           ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = pr_md
           ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = <<~MD
 	          ---
-	          pr_url: https://example.com/pr/1
+	          pr_url: https://github.com/acme/app/pull/1
 	          pr_number: 1
 	          ---
 
 	          ## Summary
 	          final body
 
-	          <!-- COMPLETE pr_url=https://example.com/pr/1 is_draft=false -->
+	          <!-- COMPLETE pr_url=https://github.com/acme/app/pull/1 is_draft=false -->
           MD
 
           capture_io { Hive::Commands::Run.new(finalize_dir).call }
@@ -111,6 +115,8 @@ class RunOpenPrTest < Minitest::Test
     File.write(File.join(worktree_path, "f"), "x")
     run!("git", "-C", worktree_path, "add", ".")
     run!("git", "-C", worktree_path, "commit", "-m", "wt", "--quiet")
+    ENV["HIVE_FAKE_GH_HEAD_REF_OID"] =
+      run!("git", "-C", worktree_path, "rev-parse", "HEAD").strip
     File.write(File.join(task_dir, "worktree.yml"),
                { "path" => worktree_path, "branch" => slug }.to_yaml)
     [ task_dir, worktree_path ]
@@ -142,8 +148,8 @@ class RunOpenPrTest < Minitest::Test
 
         capture_io { Hive::Commands::Run.new(task_dir).call }
         pr_md = File.read(File.join(task_dir, "pr.md"))
-        assert_includes pr_md, "https://example.com/pr/1"
-        assert_includes pr_md, "<!-- COMPLETE pr_url=https://example.com/pr/1 is_draft=true idempotent=true -->"
+        assert_includes pr_md, "https://github.com/acme/app/pull/1"
+        assert_includes pr_md, "<!-- COMPLETE pr_url=https://github.com/acme/app/pull/1 is_draft=true idempotent=true -->"
         # Tightened (round-1 finding): assert the agent was NOT
         # invoked — otherwise a regression that double-runs the
         # idempotent path would pass.
@@ -162,19 +168,19 @@ class RunOpenPrTest < Minitest::Test
         ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = pr_md
         ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = <<~MD
           ---
-          pr_url: https://example.com/pr/9
+          pr_url: https://github.com/acme/app/pull/9
           pr_number: 9
           ---
 
           ## Summary
           fix
 
-          <!-- COMPLETE pr_url=https://example.com/pr/9 is_draft=true -->
+          <!-- COMPLETE pr_url=https://github.com/acme/app/pull/9 is_draft=true -->
         MD
         # validate_complete_marker re-runs `gh pr list` after the
         # agent and requires the URL to match. Arm fake-gh to report
         # the PR once fake-claude has run.
-        arm_post_agent_pr_exists(url: "https://example.com/pr/9", number: 9)
+        arm_post_agent_pr_exists(url: "https://github.com/acme/app/pull/9", number: 9)
           capture_io { Hive::Commands::Run.new(task_dir).call }
           assert_equal :complete, Hive::Markers.current(pr_md).name
         end
@@ -260,13 +266,13 @@ class RunOpenPrTest < Minitest::Test
         ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = pr_md
         ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = <<~MD
           ---
-          pr_url: https://example.com/pr/9
+          pr_url: https://github.com/acme/app/pull/9
           pr_number: 9
           ---
 
-          <!-- COMPLETE pr_url=https://example.com/pr/9 is_draft=true -->
+          <!-- COMPLETE pr_url=https://github.com/acme/app/pull/9 is_draft=true -->
         MD
-        arm_post_agent_pr_exists(url: "https://example.com/pr/9", number: 9)
+        arm_post_agent_pr_exists(url: "https://github.com/acme/app/pull/9", number: 9)
 
         capture_io { Hive::Commands::Run.new(task_dir).call }
 
@@ -328,16 +334,16 @@ class RunOpenPrTest < Minitest::Test
         # Agent writes a body containing an Anthropic key pattern.
         ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = <<~MD
           ---
-          pr_url: https://example.com/pr/9
+          pr_url: https://github.com/acme/app/pull/9
           pr_number: 9
           ---
 
           ## Summary
           api_key sk-ant-#{"a" * 30}
 
-          <!-- COMPLETE pr_url=https://example.com/pr/9 is_draft=true -->
+          <!-- COMPLETE pr_url=https://github.com/acme/app/pull/9 is_draft=true -->
         MD
-        arm_post_agent_pr_exists(url: "https://example.com/pr/9", number: 9)
+        arm_post_agent_pr_exists(url: "https://github.com/acme/app/pull/9", number: 9)
 
         _out, _err, status = with_captured_exit { Hive::Commands::Run.new(task_dir).call }
         assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
@@ -347,9 +353,9 @@ class RunOpenPrTest < Minitest::Test
         # Remediation invoked: `gh pr edit ... --body [redacted]` and
         # `gh pr close <url>`. Argv log should contain both.
         log = gh_argv_log
-        assert_match(/arg=edit\n.*arg=https:\/\/example\.com\/pr\/9/m, log,
+        assert_match(%r{arg=edit\n.*arg=https://github\.com/acme/app/pull/9}m, log,
                      "must scrub leaked PR body with gh pr edit")
-        assert_match(/arg=close\n.*arg=https:\/\/example\.com\/pr\/9/m, log,
+        assert_match(%r{arg=close\n.*arg=https://github\.com/acme/app/pull/9}m, log,
                      "must close leaked draft PR")
       end
     end

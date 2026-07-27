@@ -8,6 +8,21 @@
     <span class="task-meta"><%= status_dot(@task) %> <%= @task.status_label %></span>
   </div>
 
+  <% if @task.recovery %>
+    <div class="state-banner recovery-lifecycle"
+         role="status"
+         aria-live="polite"
+         data-recovery-status="<%= @task.recovery["status"] %>">
+      <span class="status-dot"></span>
+      <span>
+        <strong><%= @task.recovery_primary_label %></strong>
+        <% if @task.recovery_context.any? %>
+          — <%= @task.recovery_context.join("; ") %>
+        <% end %>
+      </span>
+    </div>
+  <% end %>
+
   <% if (ownership = @task["implementation_identity"]) %>
     <details class="implementation-identity">
       <summary>Implementation ownership · generation <%= ownership["generation"] %></summary>
@@ -66,7 +81,8 @@
 
   <%# The bot's Autofix, web-shaped, and every other primary task action are
       shared with board cards so both surfaces submit the same native forms. %>
-  <%= render "tasks/primary_actions", task: @task, daemon_enabled: @daemon_enabled %>
+  <%= render "tasks/primary_actions", task: @task, daemon_enabled: @daemon_enabled,
+        mutations_enabled: @status_fresh %>
 
   <% if @questions.any? %>
     <section class="qa">
@@ -81,7 +97,9 @@
       <%# The id is round-keyed for tests/inspection; typing survival across
         morphs is the answers controller's job (see its header for why
         data-turbo-permanent must NOT be used here). %>
-    <%= form_with url: task_answers_path(@project.name, @task["slug"]),
+    <%= form_with url: task_answers_path(
+          @project.name, @task["slug"], source: @task_source
+        ),
           id: "qa-form-#{@questions.map(&:n).join("-")}" do |f| %>
         <% @questions.each do |question| %>
           <div class="qa-item">
@@ -89,10 +107,12 @@
                 would render as a first-line indent. %>
             <p class="qa-question"><span class="qa-number">Q<%= question.n %></span><%= question.text %></p>
             <%= text_area_tag "answers[#{question.n}]", "", placeholder: "Your answer…",
+                  disabled: !@status_fresh,
                   aria: { label: "Answer to question #{question.n}" } %>
           </div>
         <% end %>
-        <p><%= f.submit "Send answers", data: { turbo_submits_with: "Sending…" } %></p>
+        <p><%= f.submit "Send answers", disabled: !@status_fresh,
+              data: { turbo_submits_with: "Sending…" } %></p>
       <% end %>
     </section>
 
@@ -101,11 +121,14 @@
         arbitrary stages, and without an open question it always fails. %>
     <details class="intervene">
       <summary class="muted">Reply free-form instead (fills Q<%= @questions.first.n %>)</summary>
-      <%= form_with url: task_intervene_path(@project.name, @task["slug"]),
+      <%= form_with url: task_intervene_path(
+            @project.name, @task["slug"], source: @task_source
+          ),
             id: "intervene-form" do |f| %>
-        <%= f.text_area :message, required: true,
+        <%= f.text_area :message, required: true, disabled: !@status_fresh,
               placeholder: "Written verbatim as the answer to Q#{@questions.first.n}…" %>
-        <p><%= f.submit "Send", data: { turbo_submits_with: "Sending…" } %></p>
+        <p><%= f.submit "Send", disabled: !@status_fresh,
+              data: { turbo_submits_with: "Sending…" } %></p>
       <% end %>
     </details>
   <% elsif @task["marker"].to_s == "waiting" && !@task.passable? %>

@@ -104,6 +104,32 @@ class InitMinimalTest < Minitest::Test
     end
   end
 
+  def test_interrupted_scaffold_commit_rolls_back_minimal_initialization
+    with_tmp_global_config do
+      with_tmp_git_repo do |project_root|
+        before = repository_snapshot(project_root)
+        replacement = ->(*_args, **_kwargs) { raise Interrupt, "stop" }
+
+        with_replaced_singleton_method(
+          Hive::Commands::Workflow, :commit_workflow_scaffold, replacement
+        ) do
+          assert_raises(Interrupt) do
+            Hive::Commands::Init.new(
+              project_root, new_workflow: "editorial", minimal: true,
+              agent_skill_preflight: false
+            ).call
+          end
+        end
+
+        assert_equal before, repository_snapshot(project_root)
+        refute File.exist?(File.join(project_root, ".hive-state"))
+        refute Hive::Config.registered_projects.any? { |project|
+          File.expand_path(project.fetch("path")) == project_root
+        }
+      end
+    end
+  end
+
   def test_execute_refuses_managed_project_symlinks_without_writing_through_them
     with_tmp_global_config do
       with_tmp_git_repo do |project_root|
@@ -127,6 +153,27 @@ class InitMinimalTest < Minitest::Test
         assert_equal "outside choice\n", File.read(outside)
         assert File.symlink?(managed)
         refute File.exist?(File.join(project_root, ".hive-state"))
+      end
+    end
+  end
+
+  def test_minimal_refuses_a_dangling_hive_state_symlink
+    with_tmp_global_config do
+      with_tmp_git_repo do |project_root|
+        hive_state = File.join(project_root, ".hive-state")
+        outside = File.join(File.dirname(project_root), "missing-hive-state")
+        File.symlink(outside, hive_state)
+
+        error = assert_raises(Hive::AlreadyInitialized) do
+          Hive::Commands::Init.new(
+            project_root, new_workflow: "editorial", minimal: true, preview: true,
+            agent_skill_preflight: false
+          ).call
+        end
+
+        assert_includes error.message, "fresh target"
+        assert File.symlink?(hive_state)
+        refute File.exist?(outside)
       end
     end
   end

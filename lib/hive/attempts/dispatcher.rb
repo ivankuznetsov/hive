@@ -9,6 +9,8 @@ require "hive/workflows"
 module Hive
   module Attempts
     class Dispatcher
+      BRAINSTORM_STAGE_DIR = "2-brainstorm".freeze # coding-scoped: coding brainstorm artifact repair
+
       DEFAULT_LIMITS = { max_global: 3, max_per_project: 3, max_daily: 50 }.freeze
 
       def initialize(store:, launcher:, limits: DEFAULT_LIMITS, clock: -> { Time.now.utc },
@@ -113,7 +115,7 @@ module Hive
             end
 
             exact = records.select { |record| record.task_generation == generation.task_generation }
-            terminal = replayable_terminal(exact, request_id)
+            terminal = replayable_terminal(exact, request_id, task: task)
             if terminal
               result = DispatchResult.new(
                 status: :terminal_replay, attempt: terminal, receipt: terminal.receipt,
@@ -198,10 +200,44 @@ module Hive
       # keep returning its original receipt, including a failure. A different
       # request is a deliberate retry, so only a successful terminal receipt
       # remains the semantic owner of the unchanged generation.
-      def replayable_terminal(records, request_id)
+      def replayable_terminal(records, request_id, task:)
         terminals = records.select { |record| record.state == "terminal" }
-        terminals.reverse.find { |record| record["request_id"] == request_id } ||
-          terminals.reverse.find { |record| record.outcome == "succeeded" }
+        same_request = terminals.select { |record| record["request_id"] == request_id }
+        if brainstorm_artifact_missing?(task, terminals)
+          # A failed receipt remains idempotent for its request even before
+          # the legacy success is considered.
+          same_request_failure = same_request.reverse.find { |record| record.outcome != "succeeded" }
+          return same_request_failure if same_request_failure
+        end
+
+        unless same_request.empty?
+          newest = same_request.last
+          return newest unless newest.outcome == "succeeded"
+          return newest if required_artifact_valid?(task, newest)
+        end
+
+        terminals.reverse.find do |record|
+          record.outcome == "succeeded" && required_artifact_valid?(task, record)
+        end
+      end
+
+      def brainstorm_artifact_missing?(task, records)
+        return false unless coding_brainstorm?(task)
+
+        record = records.find { |candidate| candidate["intended_stage"] == BRAINSTORM_STAGE_DIR }
+        record && !required_artifact_valid?(task, record)
+      end
+
+      def required_artifact_valid?(task, record)
+        return true unless coding_brainstorm?(task) &&
+                           record["intended_stage"] == BRAINSTORM_STAGE_DIR
+
+        require "hive/stages/brainstorm"
+        Hive::Stages::Brainstorm.artifact_valid?(task.state_file)
+      end
+
+      def coding_brainstorm?(task)
+        Hive::Workflows.coding_id?(task.respond_to?(:workflow) ? task.workflow : nil)
       end
 
       # A lost attempt blocks ordinary admission only until its explicit

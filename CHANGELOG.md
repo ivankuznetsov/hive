@@ -4,6 +4,11 @@ All notable changes are documented here, newest first. Hive ships frequent micro
 
 ## 0.6.9
 
+- Added provider-neutral per-stage model and effort routing for Hive's closed
+  built-in workflow surface. Exact and coarse fields inherit independently,
+  implementation-owned retries retain their generation-scoped identity, and
+  provider-native validation/argv rendering happens before effects. Existing
+  configs without `models:` remain migration-free.
 - Fixed managed llm-wiki services timing out during a valid multi-batch drain.
   The outer systemd limit now covers the worker's bounded worst case of three
   agent and indexing batches, while retaining the 4 GiB memory limit, no-swap

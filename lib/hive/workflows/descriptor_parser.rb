@@ -1,5 +1,6 @@
 require "yaml"
 require "hive/agent_profiles"
+require "hive/conditions/policy"
 require "hive/permission_scope"
 require "hive/workflow"
 
@@ -12,7 +13,7 @@ module Hive
     # mid-flight) stay as arguments because they vary within a single parse.
     class DescriptorParser
       SAFE_SLUG = /\A[a-z0-9][a-z0-9-]*\z/
-      TOP_LEVEL_KEYS = %w[id stages].freeze
+      TOP_LEVEL_KEYS = %w[id archive_visibility_retention_days stages].freeze
       STAGE_KEYS = %w[
         name
         kind
@@ -95,12 +96,13 @@ module Hive
         reject_unknown_keys!(descriptor, TOP_LEVEL_KEYS, label: "descriptor")
         id = parse_id(descriptor["id"])
         validate_filename_id!(id)
+        archive_visibility_retention_days = parse_archive_visibility_retention(descriptor, id: id)
         stages = parse_stages(descriptor["stages"], id: id)
         validate_terminal_last_stage!(stages)
         validate_workspace_handoff!(stages)
         validate_deliverable_position!(stages)
 
-        build_workflow(id, stages)
+        build_workflow(id, stages, archive_visibility_retention_days)
       end
 
       private
@@ -194,10 +196,28 @@ module Hive
       # Wrapping the whole parse body (as before) would mislabel an unrelated
       # wrong-kwarg bug in a future Stage.new/Workflow.new signature change as a
       # descriptor error, hiding a genuine code bug from the maintainer.
-      def build_workflow(id, stages)
-        Hive::Workflow.new(id: id.to_sym, stages: stages)
+      def build_workflow(id, stages, archive_visibility_retention_days)
+        Hive::Workflow.new(
+          id: id.to_sym,
+          stages: stages,
+          archive_visibility_retention_days: archive_visibility_retention_days
+        )
       rescue ArgumentError => e
         raise descriptor_error(e.message)
+      end
+
+      def parse_archive_visibility_retention(descriptor, id:)
+        field = "archive_visibility_retention_days"
+        return Hive::Workflow::DEFAULT_ARCHIVE_VISIBILITY_RETENTION_DAYS unless descriptor.key?(field)
+
+        value = descriptor[field]
+        return value if value.is_a?(Integer) && value.positive?
+        return Hive::Workflow::NEVER_ARCHIVE_VISIBILITY_RETENTION if value == "never"
+
+        raise descriptor_error(
+          "workflow #{id.inspect} field #{field} received #{value.inspect}; " \
+          "expected a positive integer or `never`"
+        )
       end
 
       def parse_id(value)

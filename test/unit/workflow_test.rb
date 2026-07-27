@@ -3,6 +3,36 @@ require "hive/workflow"
 require "hive/workflows/registry"
 
 class WorkflowTest < Minitest::Test
+  def test_archive_visibility_retention_defaults_and_normalizes_never
+    stage = Hive::Workflow::Stage.new(name: "done", index: 1, state_file: "done.md", kind: :inert)
+
+    defaulted = Hive::Workflow.new(id: :defaulted, stages: [ stage ])
+    never = Hive::Workflow.new(
+      id: :forever, stages: [ stage ], archive_visibility_retention_days: "never"
+    )
+
+    assert_equal 3, Hive::Workflow::DEFAULT_ARCHIVE_VISIBILITY_RETENTION_DAYS
+    assert_equal 3, defaulted.archive_visibility_retention_days
+    assert_equal :never, never.archive_visibility_retention_days
+  end
+
+  def test_archive_visibility_retention_rejects_invalid_direct_values
+    stage = Hive::Workflow::Stage.new(name: "done", index: 1, state_file: "done.md", kind: :inert)
+
+    [ nil, 0, -1, 1.5, "3", "Never", true ].each do |value|
+      error = assert_raises(ArgumentError) do
+        Hive::Workflow.new(
+          id: :invalid, stages: [ stage ], archive_visibility_retention_days: value
+        )
+      end
+
+      assert_includes error.message, "workflow :invalid"
+      assert_includes error.message, "archive_visibility_retention_days"
+      assert_includes error.message, value.inspect
+      assert_includes error.message, "a positive integer or `never`"
+    end
+  end
+
   def test_stage_dir_joins_index_and_name
     stage = Hive::Workflow::Stage.new(name: "execute", index: 4, state_file: "task.md")
 

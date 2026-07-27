@@ -3,7 +3,7 @@ title: Operating Hive
 type: operating
 source: README.md, bin/hv, install.sh, skills/hive/, lib/hive/commands/{setup,setup_agents,daemon,babysit,bot}.rb, examples/systemd/, examples/launchd/, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-07
-updated: 2026-07-20
+updated: 2026-07-25
 tags: [operating, daemon, bot, systemd, launchd, install, skills]
 ---
 
@@ -193,9 +193,10 @@ aggregate-changelog verification path and tells agents to reserve mutating
 `hive wiki compile-log` runs for merge/rebase cleanup or explicit user requests.
 Its marker-recovery guidance mirrors [[modules/daemon]]: inspect first with
 `hive status --operational --json` and `hive daemon status --json`, wait for known
-healer-managed cooldown/retry signatures, start a stopped daemon with
-`hive daemon start --detach`, and treat manual `hive markers clear` as guarded
-mutation under the skill's Safety Boundaries.
+coordinator cooldown/retry receipts, start a stopped daemon with
+`hive daemon start --detach`, run `hive migrate` when an old marker lacks an
+identity, and use the guarded `workflow.retry` action instead of composing
+marker-clear and stage-run commands.
 Host mutations remain reviewable: package-manager confirmation is never
 suppressed; direct installed-runtime patches and service-manager override
 writes are prohibited; Hive-native diagnosis, dry-run, preview, and repair
@@ -282,8 +283,8 @@ Once per workstation:
   `hive run` children as the interactive CLI; agent invocation is
   unchanged. Verify: `claude --version`.
 - **`gh` authenticated.** The daemon's PR-merge watcher (ADR-024)
-  polls `gh pr view --json state` to detect `MERGED` and auto-archive
-  8-finalize → 9-done. Verify: `gh auth status`.
+  verifies task-bound PRs and reachable merge facts before auto-closing
+  eligible coding tasks in stages 5–8. Verify: `gh auth status`.
 - **`/proc` mounted OR `ps` available.** The daemon refuses to start
   if it can't read its own `process_start_time` (PID-reuse defense).
   Verify: `ls /proc/$$ >/dev/null && echo OK` or `command -v ps`.
@@ -682,11 +683,16 @@ the launchd `~/Library/Logs/hive-daemon.err.log` (macOS) for the
 crash reason.
 
 **The daemon ran my project but didn't auto-archive after I merged.**
-The PR-merge watcher polls every `pr_merge_poll_interval_sec`
-(default 5 min). If `gh auth` lapsed, the watcher logs `:gh_error`
-and after 5 consecutive failures drops the entry. Re-authenticate
-with `gh auth login`, then either restart the daemon or run the
-archive manually: `hive archive <slug>`.
+Task-bound reconciliation polls every `pr_merge_poll_interval_sec`
+(default 5 min). Inspect
+`<project>/.hive-state/daemon/pr-merge-reconciliation.json`: the candidate
+retains its remote, hold, retry, architecture-intake, archive, and bounded
+error state across daemon restarts. GitHub failures never exhaust or drop the
+candidate. Re-authenticate with `gh auth login` when needed, repair the
+reported repository/generation/worktree/admission blocker, and let the next
+eligible tick resume. Corrupt or identity-drifted ledgers are preserved under
+`<project>/.hive-state/daemon/quarantine/pr-merge-reconciliation/`; do not
+delete that evidence to force archive.
 
 **A task is stuck but you want to finish it yourself.**
 Open `hive tui`, focus the row, and press `s`. Hive marks the task

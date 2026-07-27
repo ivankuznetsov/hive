@@ -10,6 +10,7 @@ require_relative "paths"
 class E2ESchemasTest < Minitest::Test
   PRODUCER_FILES = [
     File.join(Hive::E2E::Paths.repo_root, "bin", "hive-e2e"),
+    File.join(Hive::E2E::Paths.e2e_root, "lib", "coverage_catalog.rb"),
     File.join(Hive::E2E::Paths.e2e_root, "lib", "runner.rb"),
     File.join(Hive::E2E::Paths.e2e_root, "lib", "artifact_capture.rb")
   ].freeze

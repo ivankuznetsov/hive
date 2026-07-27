@@ -114,10 +114,11 @@ class DecideTest < Minitest::Test
 
   def test_approve_records_publish_ready_artifact_and_completes_idempotently
     with_editorial_task do |dir, approval, slug|
+      decided_at = Time.now.utc
       out, = capture_io do
         Hive::Commands::Decide.new(
           slug, "approve", from: "approval", decision_id: decision_id_for(approval),
-          note: "Ready for the editor", json: true
+          note: "Ready for the editor", json: true, clock: -> { decided_at }
         ).call
       end
       payload = JSON.parse(out)
@@ -127,16 +128,27 @@ class DecideTest < Minitest::Test
       assert_equal true, payload.fetch("completed")
       assert_equal "draft.md", payload.fetch("artifact")
       assert_equal "3-approval", payload.fetch("current_stage")
+      assert_equal decided_at.iso8601, payload.fetch("decided_at")
       assert_schema_valid("hive-decide", payload)
 
       task = Hive::Task.new(approval)
       assert_equal :complete, Hive::Markers.current(task.state_file).name
+      assert_equal "archived", Hive::TaskAction.for(
+        task, Hive::Markers.current(task.state_file)
+      ).key
+      assert_equal decided_at.iso8601, Hive::TaskMeta.read(approval).fetch(:completed_at)
+      status_out, = capture_io { Hive::Commands::Status.new(json: true).call }
+      status_row = JSON.parse(status_out).fetch("projects").flat_map { |project|
+        project.fetch("tasks")
+      }.find { |row| row.fetch("slug") == slug }
+      assert_equal "archived", status_row.fetch("action")
       record = Hive::Commands::Decide.latest_record(task.state_file)
       assert_equal "approve", record.fetch("outcome")
       assert_equal "Ready for the editor", record.fetch("note")
       assert_equal "draft.md", record.fetch("artifact")
       assert_equal "publish_ready", record.fetch("artifact_status")
       assert_equal "approval", record.fetch("from")
+      assert_equal decided_at.iso8601, record.fetch("decided_at")
       assert File.file?(File.join(approval, "draft.md"))
       refute Dir.exist?(File.join(dir, ".hive-state", "stages", "4-publish"))
 
@@ -198,6 +210,33 @@ class DecideTest < Minitest::Test
         assert File.symlink?(draft)
         assert_equal :waiting, Hive::Markers.current(File.join(approval, "approval.md")).name
         assert_nil Hive::Commands::Decide.latest_record(File.join(approval, "approval.md"))
+      end
+    end
+  end
+
+  def test_decide_refuses_a_symlinked_human_state_file
+    with_editorial_task do |dir, approval, slug|
+      with_tmp_dir do |outside|
+        state = File.join(approval, "approval.md")
+        external = File.join(outside, "external-approval.md")
+        observed_id = decision_id_for(approval)
+        external_body = "private review\n<!-- WAITING decision_id=#{observed_id} -->\n"
+        File.write(external, external_body)
+        File.delete(state)
+        File.symlink(external, state)
+        head_before = run!("git", "-C", File.join(dir, ".hive-state"), "rev-parse", "HEAD")
+
+        error = assert_raises(Hive::InvalidTaskPath) do
+          Hive::Commands::Decide.new(
+            slug, "approve", from: "approval", decision_id: observed_id
+          ).send(:do_call)
+        end
+
+        assert_includes error.message, "must be a regular file, not a symlink"
+        assert_equal external_body, File.read(external)
+        assert File.symlink?(state)
+        assert_equal head_before,
+                     run!("git", "-C", File.join(dir, ".hive-state"), "rev-parse", "HEAD")
       end
     end
   end
@@ -285,6 +324,41 @@ class DecideTest < Minitest::Test
     end
   end
 
+  def test_self_target_outcome_restores_state_when_commit_is_interrupted
+    with_registered_workflow(revision_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          capture_io { Hive::Commands::Init.new(dir, agent_skill_preflight: false).call }
+          project = File.basename(dir)
+          capture_io do
+            Hive::Commands::New.new(
+              project, "review this", workflow: "revision", slug_override: "revision-task"
+            ).call!
+          end
+          folder = File.join(dir, ".hive-state", "stages", "1-approval", "revision-task")
+          state = File.join(folder, "approval.md")
+          before = File.binread(state)
+          fake_ops = Object.new
+          fake_ops.define_singleton_method(:hive_commit) { |**| raise Interrupt, "stop" }
+          fake_ops.define_singleton_method(:run_git!) { |*| nil }
+
+          with_replaced_singleton_method(Hive::GitOps, :new, ->(_root) { fake_ops }) do
+            assert_raises(Interrupt) do
+              Hive::Commands::Decide.new(
+                "revision-task", "revise", from: "approval",
+                decision_id: decision_id_for(folder)
+              ).send(:do_call)
+            end
+          end
+
+          assert_equal before, File.binread(state)
+          assert_nil Hive::Commands::Decide.latest_record(state)
+          assert_equal :waiting, Hive::Markers.current(state).name
+        end
+      end
+    end
+  end
+
   def test_invalid_waiting_identity_and_non_human_from_are_rejected
     with_editorial_task do |_dir, approval, slug|
       Hive::Markers.set(File.join(approval, "approval.md"), :waiting)
@@ -339,6 +413,32 @@ class DecideTest < Minitest::Test
       assert_equal before, File.binread(state)
       assert_nil Hive::Commands::Decide.latest_record(state)
       assert_equal :waiting, Hive::Markers.current(state).name
+      refute Hive::TaskMeta.read(approval).key?(:completed_at)
+    end
+  end
+
+  def test_approve_rolls_back_decision_and_completion_time_when_commit_is_interrupted
+    with_editorial_task do |_dir, approval, slug|
+      state = File.join(approval, "approval.md")
+      state_before = File.binread(state)
+      meta_before = File.binread(File.join(approval, Hive::TaskMeta::FILENAME))
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:hive_commit) { |**| raise Interrupt, "stop" }
+      fake_ops.define_singleton_method(:run_git!) { |*| nil }
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(_root) { fake_ops }) do
+        assert_raises(Interrupt) do
+          Hive::Commands::Decide.new(
+            slug, "approve", from: "approval", decision_id: decision_id_for(approval)
+          ).send(:do_call)
+        end
+      end
+
+      assert_equal state_before, File.binread(state)
+      assert_equal meta_before, File.binread(File.join(approval, Hive::TaskMeta::FILENAME))
+      assert_nil Hive::Commands::Decide.latest_record(state)
+      assert_equal :waiting, Hive::Markers.current(state).name
+      refute Hive::TaskMeta.read(approval).key?(:completed_at)
     end
   end
 
@@ -365,6 +465,36 @@ class DecideTest < Minitest::Test
           ).send(:do_call)
         end
         assert_includes error.message, "move failed"
+      end
+
+      assert_equal approval_before, File.binread(File.join(destination, "approval.md"))
+      assert_equal draft_before, File.binread(File.join(destination, "draft.md"))
+      assert_nil Hive::Commands::Decide.latest_record(File.join(destination, "approval.md"))
+    end
+  end
+
+  def test_reject_rolls_back_both_state_files_when_move_is_interrupted
+    with_editorial_task do |dir, approval, slug|
+      approval_before = File.binread(File.join(approval, "approval.md"))
+      draft_before = File.binread(File.join(approval, "draft.md"))
+      destination = File.join(dir, ".hive-state", "stages", "2-draft", slug)
+
+      replacement = lambda do |_target, **kwargs|
+        fake = Object.new
+        fake.define_singleton_method(:call) do
+          kwargs.fetch(:observation_guard).call(Hive::Task.new(approval))
+          FileUtils.mkdir_p(File.dirname(destination))
+          File.rename(approval, destination)
+          raise Interrupt, "stop"
+        end
+        fake
+      end
+      with_replaced_singleton_method(Hive::Commands::Approve, :new, replacement) do
+        assert_raises(Interrupt) do
+          Hive::Commands::Decide.new(
+            slug, "reject", from: "approval", decision_id: decision_id_for(approval)
+          ).send(:do_call)
+        end
       end
 
       assert_equal approval_before, File.binread(File.join(destination, "approval.md"))

@@ -93,7 +93,7 @@ class HiveBotButtonCoverageTest < Minitest::Test
   # has no branch for it, so it falls through to an empty Resolution on every
   # coherent marker. Inert by construction.
   INERT_KINDS = %w[
-    admission_error agent_running archived human_complete manual_steering recover_draft_pr review_parked
+    admission_error agent_running archived manual_steering recover_draft_pr review_parked
   ].freeze
 
   def test_new_task_action_kind_requires_row_action_decision
@@ -101,7 +101,7 @@ class HiveBotButtonCoverageTest < Minitest::Test
       needs_input recover_draft_pr recover_execute recover_review error ready_to_brainstorm
       ready_to_plan ready_to_develop ready_to_open_pr ready_for_review
       ready_to_artifacts ready_to_finalize ready_to_archive ready_to_advance
-      ready_to_run admission_error agent_running archived human_complete manual_steering review_parked
+      ready_to_run admission_error agent_running archived manual_steering review_parked
     ]
     assert_equal expected.sort, Hive::Schemas::TaskActionKind::ALL.sort,
                  "a new TaskActionKind must be classified as actionable or inert below"

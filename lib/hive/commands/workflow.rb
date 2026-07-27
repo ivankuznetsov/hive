@@ -62,7 +62,7 @@ module Hive
           write_scaffold!(id, paths, template_dir)
           validate_descriptor!(paths.fetch(:descriptor))
           Hive::Workflows::Project.reset!
-        rescue StandardError
+        rescue StandardError, Interrupt
           rollback_scaffold(paths)
           raise
         end
@@ -159,10 +159,18 @@ module Hive
       # refuse_overwrite! "already exists" on the next attempt.
       def self.rollback_scaffold(paths)
         reasons = {}
-        remove_scaffold_path(paths.fetch(:descriptor), reasons)
-        remove_scaffold_path(paths.fetch(:instruction_dir), reasons)
-        warn_failed_scaffold_cleanup(paths, reasons)
+        rollback_targets(paths).reverse_each do |path|
+          remove_scaffold_path(path, reasons)
+        end
+        warn_failed_scaffold_cleanup(paths, reasons, targets: rollback_targets(paths))
       end
+
+      def self.rollback_targets(paths)
+        paths.fetch(:owned_paths) do
+          [ paths.fetch(:instruction_dir), paths.fetch(:descriptor) ]
+        end
+      end
+      private_class_method :rollback_targets
 
       # Remove one scaffold path, recording the underlying errno when a genuine
       # permission/busy fault keeps it on disk. The existence guard makes an
@@ -268,22 +276,49 @@ module Hive
       private_class_method :scaffold_collisions
 
       def self.write_scaffold!(id, paths, template_dir)
-        FileUtils.mkdir_p(paths.fetch(:instruction_dir))
-        File.write(paths.fetch(:descriptor), render_descriptor(id, template_dir))
+        paths[:owned_paths] = []
+        ensure_scaffold_root!(File.dirname(paths.fetch(:instruction_dir)))
+        Dir.mkdir(paths.fetch(:instruction_dir))
+        paths.fetch(:owned_paths) << paths.fetch(:instruction_dir)
+        write_exclusive(paths.fetch(:descriptor), render_descriptor(id, template_dir))
+        paths.fetch(:owned_paths) << paths.fetch(:descriptor)
         template_instruction_files(template_dir).each do |file|
-          File.write(File.join(paths.fetch(:instruction_dir), file), File.read(File.join(template_dir, file)))
+          write_exclusive(
+            File.join(paths.fetch(:instruction_dir), file),
+            File.read(File.join(template_dir, file))
+          )
         end
         write_optional_template_asset(id, template_dir, "README.md.erb", File.join(paths.fetch(:instruction_dir), "README.md"))
         write_optional_template_asset(id, template_dir, "honeycomb.yml.erb", File.join(paths.fetch(:instruction_dir), "honeycomb.yml"))
       end
       private_class_method :write_scaffold!
 
+      def self.ensure_scaffold_root!(path)
+        begin
+          Dir.mkdir(path)
+        rescue Errno::EEXIST
+          nil
+        end
+        stat = File.lstat(path)
+        return if stat.directory? && !stat.symlink?
+
+        raise Hive::ConfigError, "workflow scaffold root #{path} must be a regular directory, not a symlink"
+      end
+      private_class_method :ensure_scaffold_root!
+
+      def self.write_exclusive(path, content)
+        flags = File::WRONLY | File::CREAT | File::EXCL
+        flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+        File.open(path, flags, 0o644) { |file| file.write(content) }
+      end
+      private_class_method :write_exclusive
+
       def self.write_optional_template_asset(id, template_dir, template_name, destination)
         source = File.join(template_dir, template_name)
         return unless File.file?(source)
 
         rendered = ERB.new(File.read(source), trim_mode: "-").result_with_hash(id: id)
-        File.write(destination, rendered)
+        write_exclusive(destination, rendered)
       end
       private_class_method :write_optional_template_asset
 
@@ -304,8 +339,8 @@ module Hive
       # the errno remove_scaffold_path captured per leftover so the operator
       # learns WHY cleanup failed (e.g. EACCES on a read-only parent) instead of
       # a bare path list.
-      def self.warn_failed_scaffold_cleanup(paths, reasons = {})
-        leftovers = [ paths.fetch(:descriptor), paths.fetch(:instruction_dir) ].select { |path| path_present?(path) }
+      def self.warn_failed_scaffold_cleanup(paths, reasons = {}, targets: rollback_targets(paths))
+        leftovers = targets.select { |path| path_present?(path) }
         return if leftovers.empty?
 
         described = leftovers.map do |path|
@@ -343,7 +378,7 @@ module Hive
         # too: previously it escaped to bin/hive as plain stderr, hiding the
         # retryable-vs-terminal distinction from --json agent callers.
         # SystemCallError/IOError are caught for the same reason: a disk-write
-        # fault from write_scaffold!'s mkdir_p/File.write would otherwise escape
+        # fault from write_scaffold!'s exclusive directory/file creation would otherwise escape
         # past `call` to bin/hive (which only handles Errno::EPIPE/Thor::Error/
         # Hive::Error), yielding a raw backtrace instead of the schema'd --json
         # envelope. error_kind_for's else→ERROR arm classifies them.
@@ -386,7 +421,7 @@ module Hive
           # descriptor + instruction files on disk that make the next retry fail
           # in refuse_overwrite!, turning a retryable command into a stuck one.
           commit_scaffold!(id, paths)
-        rescue StandardError
+        rescue StandardError, Interrupt
           self.class.rollback_scaffold(paths)
           raise
         end
@@ -434,7 +469,7 @@ module Hive
               stage_name: "workflows", slug: id, action: "defined",
               pathspecs: pathspecs
             )
-          rescue StandardError
+          rescue StandardError, Interrupt
             ops.run_git!("-C", hive_state_path, "reset", "-q", "HEAD", "--", *pathspecs)
             raise
           end
@@ -501,7 +536,7 @@ module Hive
             self.class.commit_workflow_scaffold(
               ops, slug: id, pathspecs: pathspecs
             )
-          rescue StandardError
+          rescue StandardError, Interrupt
             ops.run_git!("-C", hive_state_path, "reset", "-q", "HEAD", "--", *pathspecs)
             raise
           end

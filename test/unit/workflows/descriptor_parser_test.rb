@@ -3,6 +3,50 @@ require "securerandom"
 require "hive/workflows/descriptor_parser"
 
 class WorkflowsDescriptorParserTest < Minitest::Test
+  def test_archive_visibility_retention_accepts_omission_positive_integer_and_never
+    base = {
+      "id" => "retention",
+      "stages" => [ { "name" => "done", "kind" => "terminal", "state_file" => "done.md" } ]
+    }
+
+    omitted = Hive::Workflows::DescriptorParser.parse_hash(base, path: "/tmp/retention.yml")
+    explicit = Hive::Workflows::DescriptorParser.parse_hash(
+      base.merge("archive_visibility_retention_days" => 3), path: "/tmp/retention.yml"
+    )
+    seven = Hive::Workflows::DescriptorParser.parse_hash(
+      base.merge("archive_visibility_retention_days" => 7), path: "/tmp/retention.yml"
+    )
+    never = Hive::Workflows::DescriptorParser.parse_hash(
+      base.merge("archive_visibility_retention_days" => "never"), path: "/tmp/retention.yml"
+    )
+
+    assert_equal 3, omitted.archive_visibility_retention_days
+    assert_equal omitted.archive_visibility_retention_days, explicit.archive_visibility_retention_days
+    assert_equal 7, seven.archive_visibility_retention_days
+    assert_equal :never, never.archive_visibility_retention_days
+  end
+
+  def test_archive_visibility_retention_rejects_every_other_form_with_actionable_error
+    base = {
+      "id" => "retention",
+      "stages" => [ { "name" => "done", "kind" => "terminal", "state_file" => "done.md" } ]
+    }
+
+    [ nil, 0, -1, 1.5, "3", true, false, "Never", "NEVER", "forever" ].each do |value|
+      error = assert_raises(Hive::ConfigError) do
+        Hive::Workflows::DescriptorParser.parse_hash(
+          base.merge("archive_visibility_retention_days" => value), path: "/tmp/retention.yml"
+        )
+      end
+
+      assert_includes error.message, "/tmp/retention.yml"
+      assert_includes error.message, 'workflow "retention"'
+      assert_includes error.message, "archive_visibility_retention_days"
+      assert_includes error.message, value.inspect
+      assert_includes error.message, "a positive integer or `never`"
+    end
+  end
+
   def test_package_descriptor_binds_workflow_yml_to_expected_package_name
     with_tmp_dir do |dir|
       path = File.join(dir, "workflow.yml")

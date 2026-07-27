@@ -70,7 +70,12 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       "name" => "writero",
       "path" => "/tmp/writero",
       "hive_state_path" => "/tmp/writero/.hive-state",
-      "tasks" => [ task_row(slug: "fix-bug") ]
+      "hidden_archived_task_count" => 3,
+      "tasks" => [
+        task_row(slug: "fix-bug").merge(
+          "pr_url" => "https://github.com/acme/writero/pull/42"
+        )
+      ]
     } ])
     with_fake_status(JSON.generate(payload)) do |bin|
       consumer = Hive::Daemon::StatusConsumer.new(hive_bin: bin)
@@ -82,6 +87,32 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       assert_equal "fix-bug", row.slug
       assert_equal "ready_to_brainstorm", row.action
       assert_equal "hive brainstorm slug", row.suggested_command
+      assert_equal "https://github.com/acme/writero/pull/42", row.pr_url
+      assert_equal 3, result.hidden_archived_task_count
+      assert_equal 3, result.projects.first.hidden_archived_task_count
+    end
+  end
+
+  def test_missing_hidden_archived_count_defaults_to_zero_but_invalid_values_fail
+    legacy = make_envelope(projects: [ {
+      "name" => "legacy", "path" => "/tmp/legacy", "hive_state_path" => "/tmp/legacy/.h",
+      "tasks" => []
+    } ])
+    with_fake_status(JSON.generate(legacy)) do |bin|
+      result = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch
+      assert result.ok
+      assert_equal 0, result.hidden_archived_task_count
+      assert_equal 0, result.projects.first.hidden_archived_task_count
+    end
+
+    malformed = make_envelope(projects: [ {
+      "name" => "bad", "path" => "/tmp/bad", "hive_state_path" => "/tmp/bad/.h",
+      "hidden_archived_task_count" => -1, "tasks" => []
+    } ])
+    with_fake_status(JSON.generate(malformed)) do |bin|
+      result = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch
+      refute result.ok
+      assert_match(/hidden_archived_task_count/, result.error)
     end
   end
 

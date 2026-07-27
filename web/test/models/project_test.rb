@@ -38,6 +38,21 @@ class ProjectTest < ActiveSupport::TestCase
     assert_equal "ship-it-260720-abcd", task.slug
   end
 
+  test "exposes project hidden count without adding fields to task rows" do
+    attributes = {
+      "name" => "alpha",
+      "hidden_archived_task_count" => 2,
+      "tasks" => [ { "slug" => "visible-archive-260720-abcd" } ]
+    }
+    project = Project.new(attributes)
+
+    assert_equal 2, project.hidden_archived_task_count
+    assert_same project.tasks, project.active_tasks
+    assert_same project.tasks, project.archived_tasks
+    refute project.tasks.sole.instance_variable_get(:@attributes).key?("hidden_archived_task_count")
+    assert_equal 0, Project.new("name" => "legacy").hidden_archived_task_count
+  end
+
   test "creates an idea through the project resource" do
     name = create_hive_project!("project-idea-resource")
     project = Project.find!(name)

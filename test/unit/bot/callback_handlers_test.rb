@@ -10,16 +10,24 @@ require "hive/markers"
 # the per-callback methods so changes to reply/argv shape cannot regress
 # silently.
 class HiveBotCallbackHandlersTest < Minitest::Test
+  include HiveTestHelper
+
   Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands,
                       :project, :slug, :stage, :question_n, :answer_text, :mode,
                       :intent, :alert_reset, :clear_keyboard, :format,
-                      :attachment, keyword_init: true)
+                      :attachment, :recovery, keyword_init: true)
   FakeLogger = Struct.new(:events, keyword_init: true) do
     def event(name, **payload)
       events << { name: name, payload: payload }
     end
   end
   StatusRow = Hive::Bot::StatusWatcher::Row
+  ClosurePreview = Struct.new(
+    :input, :evidence, :preview_digest, :errors, :blockers,
+    keyword_init: true
+  ) do
+    def valid? = errors.empty? && blockers.empty?
+  end
 
   def setup
     @pending_ideas = {}
@@ -36,6 +44,10 @@ class HiveBotCallbackHandlersTest < Minitest::Test
 
   def update(callback_data)
     Struct.new(:callback_data).new(callback_data)
+  end
+
+  def closure_callback(prefix, payload)
+    "#{prefix}:#{Base64.urlsafe_encode64(JSON.generate(payload), padding: false)}"
   end
 
   def with_plan_row(marker_name)
@@ -111,6 +123,171 @@ class HiveBotCallbackHandlersTest < Minitest::Test
       assert_equal :reply, result.action
       assert_equal text, result.text
     end
+  end
+
+  def test_closure_preview_reverifies_and_edits_the_message_with_exact_confirm_digest
+    input = {
+      "reason" => "already_delivered",
+      "evidence" => [ "acme/app#42" ],
+      "successor" => nil,
+      "attestation" => nil
+    }
+    payload = closure_callback(
+      "closure_preview",
+      "project" => "app", "slug" => "delivered-task", "input" => input
+    )
+    task = Object.new
+    resolver = Struct.new(:task) { def resolve = task }.new(task)
+    preview = ClosurePreview.new(
+      input: input,
+      evidence: [
+        { "repository" => "acme/app", "number" => 42, "oid" => "a" * 40 }
+      ],
+      preview_digest: "d" * 64,
+      errors: [],
+      blockers: []
+    )
+    calls = []
+
+    with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*) { resolver }) do
+      with_replaced_singleton_method(
+        Hive::TaskClosure, :preview, lambda { |**kwargs|
+          calls << kwargs
+          preview
+        }
+      ) do
+        result = @handlers.handle(
+          :callback_closure_preview,
+          Struct.new(:callback_data, :chat_id, :from_id).new(payload, 7, 8)
+        )
+
+        assert_equal :edit_reply, result.action
+        assert_match(/Verified already delivered/, result.text)
+        assert_match(/Digest d{12}/, result.text)
+        callback = result.reply_markup.first.first.fetch(:callback_data)
+        assert_operator callback.bytesize, :<=, 64
+      end
+    end
+
+    assert_equal task, calls.first.fetch(:task)
+    assert_equal "app", calls.first.fetch(:project)
+    assert_equal input, calls.first.fetch(:input)
+  end
+
+  def test_closure_preview_reports_blockers_and_rejects_unexpected_callback_fields
+    input = {
+      "reason" => "already_delivered",
+      "evidence" => [ "acme/app#42" ],
+      "successor" => nil,
+      "attestation" => nil
+    }
+    task = Object.new
+    resolver = Struct.new(:task) { def resolve = task }.new(task)
+    blocked = ClosurePreview.new(
+      input: input,
+      evidence: [],
+      preview_digest: "d" * 64,
+      errors: [ { "message" => "remote merge is not reachable" } ],
+      blockers: [ { "message" => "a live attempt still owns the task" } ]
+    )
+    payload = closure_callback(
+      "closure_preview",
+      "project" => "app", "slug" => "delivered-task", "input" => input
+    )
+
+    with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*) { resolver }) do
+      with_replaced_singleton_method(
+        Hive::TaskClosure, :preview, ->(**) { blocked }
+      ) do
+        result = @handlers.handle(:callback_closure_preview, update(payload))
+        assert_equal :edit_reply, result.action
+        assert_match(/remote merge is not reachable/, result.text)
+        assert_match(/live attempt/, result.text)
+      end
+    end
+
+    malformed = closure_callback(
+      "closure_preview",
+      "project" => "app", "slug" => "delivered-task", "input" => input,
+      "unexpected" => true
+    )
+    result = @handlers.handle(:callback_closure_preview, update(malformed))
+    assert_equal :edit_reply, result.action
+    assert_match(/Closure preview failed: closure callback is malformed/, result.text)
+  end
+
+  def test_allowlisted_closure_confirmation_uses_bot_operator_identity
+    input = {
+      "reason" => "already_delivered",
+      "evidence" => [ "acme/app#42" ],
+      "successor" => nil,
+      "attestation" => nil
+    }
+    payload = closure_callback(
+      "closure_confirm",
+      "project" => "app", "slug" => "delivered-task", "input" => input,
+      "preview_digest" => "d" * 64
+    )
+    task = Object.new
+    resolver = Struct.new(:task) { def resolve = task }.new(task)
+    calls = []
+    handlers = Hive::Bot::Handlers::CallbackHandlers.new(
+      pending_ideas: {}, set_last_project: ->(_project) { },
+      conversation_store: nil, result_class: Result, logger: @logger,
+      closure_authorizer: ->(_update) { true }
+    )
+    confirmer = lambda do |**kwargs|
+      calls << kwargs
+      { "reason" => "already_delivered", "receipt_digest" => "e" * 64 }
+    end
+
+    with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*) { resolver }) do
+      with_replaced_singleton_method(Hive::TaskClosure, :confirm!, confirmer) do
+        result = handlers.handle(
+          :callback_closure_confirm,
+          Struct.new(:callback_data, :chat_id, :from_id).new(payload, 7, 99)
+        )
+
+        assert_equal :edit_reply, result.action
+        assert_match(/Archived app\/delivered-task/, result.text)
+      end
+    end
+
+    assert_equal true, calls.first.fetch(:authorized)
+    assert_equal "bot", calls.first.fetch(:channel)
+    assert_equal "telegram:99", calls.first.fetch(:operator)
+    assert_equal "d" * 64, calls.first.fetch(:preview_digest)
+  end
+
+  def test_non_allowlisted_closure_confirmation_fails_closed
+    payload = closure_callback(
+      "closure_confirm",
+      "project" => "app", "slug" => "delivered-task",
+      "input" => {
+        "reason" => "already_delivered", "evidence" => [ "acme/app#42" ],
+        "successor" => nil, "attestation" => nil
+      },
+      "preview_digest" => "d" * 64
+    )
+    resolver = Struct.new(:task) { def resolve = task }.new(Object.new)
+    authorizations = []
+    confirmer = lambda do |**kwargs|
+      authorizations << kwargs.fetch(:authorized)
+      raise Hive::TaskClosure::Unauthorized, "not allowlisted"
+    end
+
+    with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*) { resolver }) do
+      with_replaced_singleton_method(Hive::TaskClosure, :confirm!, confirmer) do
+        result = @handlers.handle(
+          :callback_closure_confirm,
+          Struct.new(:callback_data, :chat_id, :from_id).new(payload, 7, 99)
+        )
+
+        assert_equal :edit_reply, result.action
+        assert_match(/confirmation failed: not allowlisted/, result.text)
+      end
+    end
+    assert_equal [ false ], authorizations
   end
 
   def test_legacy_path_a_callbacks_route_to_retirement_notice
@@ -765,95 +942,45 @@ class HiveBotCallbackHandlersTest < Minitest::Test
     )
   end
 
-  def test_clear_and_retry_uses_current_review_stage_name
-    result = @handlers.handle(
-      :callback_clear_and_retry,
-      update("clear_retry:alpha:red-task-260518-cccc:6-review:REVIEW_ERROR")
-    )
-
-    assert_equal(
-      [ "hive", "review", "red-task-260518-cccc", "--from", "6-review", "--project", "alpha", "--json" ],
-      result.commands.last,
-      "clear-and-retry must dispatch the current review-stage verb, not a retired stage map"
-    )
-  end
-
-  def test_clear_and_retry_passes_marker_match_attr_when_present
-    result = @handlers.handle(
-      :callback_clear_and_retry,
-      update("clear_retry:alpha:red-task-260518-cccc:6-review:REVIEW_ERROR:pass=2")
-    )
-
-    assert_equal(
-      [ "hive", "markers", "clear", "red-task-260518-cccc", "--name",
-        "REVIEW_ERROR", "--project", "alpha", "--match-attr", "pass=2", "--json" ],
-      result.commands.first
-    )
-    assert_equal({ project: "alpha", slug: "red-task-260518-cccc", stage: "6-review",
-                   marker: "REVIEW_ERROR", match_attr: "pass=2" }, result.alert_reset)
-  end
-
-  def test_clear_and_retry_none_marker_skips_marker_clear_and_runs_stage
-    result = @handlers.handle(
-      :callback_clear_and_retry,
-      update("clear_retry:alpha:plan-task-260519-abcd:3-plan:NONE")
-    )
-
-    assert_equal :dispatch_commands, result.action
-    assert_equal(
-      [ [ "hive", "plan", "plan-task-260519-abcd", "--from", "3-plan", "--project", "alpha", "--json" ] ],
-      result.commands,
-      "markerless synthetic errors must retry the stage directly instead of clearing a non-existent ERROR marker"
-    )
-  end
-
-  def test_clear_and_retry_replies_when_stage_has_no_retry_verb
-    result = @handlers.handle(
-      :callback_clear_and_retry,
-      update("clear_retry:alpha:done-task-260519-abcd:9-done:REVIEW_ERROR")
-    )
-
-    assert_equal :reply, result.action
-    assert_match(/No retry verb for stage 9-done/, result.text,
-                 "clear_and_retry must short-circuit instead of dispatching zero commands plus an alert_reset")
-    assert_nil result.alert_reset,
-               "with no commands to run, alert_reset must NOT fire (otherwise the alert clears without any retry)"
-  end
-
-  def test_clear_and_retry_refuses_manual_only_marker
-    # P2b: a stale clear_retry: button on a manual-only marker (EXECUTE_STALE)
-    # must refuse, not dispatch markers-clear + a retry verb. Routing through
-    # RecoverySequence.build gives it the same manual-only guard the current
-    # Autofix paths enforce.
-    result = @handlers.handle(
-      :callback_clear_and_retry,
-      update("clear_retry:alpha:stale-task-260519-abcd:4-execute:EXECUTE_STALE")
-    )
-
-    assert_equal :reply, result.action
-    assert_match(/no automatic recovery/, result.text)
-    assert_nil result.commands, "manual-only refusal must not dispatch any commands"
-  end
-
-  def test_autofix_marker_dispatches_clear_then_retry
-    result = @handlers.handle(
+  def test_autofix_marker_dispatches_guarded_recovery
+    row = status_row(slug: "red-task-260518-cccc", attrs: { "pass" => "2" })
+    result = handlers_with_rows([ row ]).handle(
       :callback_autofix,
       update("autofix:alpha:red-task-260518-cccc:6-review:REVIEW_ERROR:pass=2")
     )
 
-    assert_equal :dispatch_commands, result.action
-    assert_equal(
-      [
-        [ "hive", "markers", "clear", "red-task-260518-cccc", "--name",
-          "REVIEW_ERROR", "--project", "alpha", "--match-attr", "pass=2", "--json" ],
-        [ "hive", "review", "red-task-260518-cccc", "--from", "6-review", "--project", "alpha", "--json" ]
-      ],
-      result.commands
-    )
+    assert_equal :dispatch_recovery, result.action
+    assert_same row, result.recovery
+    assert_nil result.commands
     assert_equal({ project: "alpha", slug: "red-task-260518-cccc", stage: "6-review",
                    marker: "REVIEW_ERROR", match_attr: "pass=2" }, result.alert_reset)
     assert_equal true, result.clear_keyboard,
                  "Autofix must request keyboard removal to prevent double-tap dispatch."
+  end
+
+  def test_autofix_rejects_a_callback_for_a_replaced_marker
+    row = status_row(slug: "red-task-260518-cccc", marker: "error")
+    result = handlers_with_rows([ row ]).handle(
+      :callback_autofix,
+      update("autofix:alpha:red-task-260518-cccc:6-review:REVIEW_ERROR")
+    )
+
+    assert_equal :reply, result.action
+    assert_equal "Task status changed - reopen /queue.", result.text
+  end
+
+  def test_autofix_rejects_a_callback_for_replaced_marker_attributes
+    row = status_row(
+      slug: "red-task-260518-cccc",
+      attrs: { "pass" => "3" }
+    )
+    result = handlers_with_rows([ row ]).handle(
+      :callback_autofix,
+      update("autofix:alpha:red-task-260518-cccc:6-review:REVIEW_ERROR:pass=2")
+    )
+
+    assert_equal :reply, result.action
+    assert_equal "Task status changed - reopen /queue.", result.text
   end
 
   def test_autofix_execute_stale_replies_without_dispatch

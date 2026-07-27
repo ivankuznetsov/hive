@@ -1,5 +1,6 @@
 require "securerandom"
 require "hive/attempts/context"
+require "hive/recovery"
 
 module Hive
   module Markers
@@ -33,19 +34,6 @@ module Hive
     # consumer picks it up.
     TERMINAL_MARKER_NAMES = %i[complete execute_complete review_complete].freeze
 
-    # POSIX exit codes produced by signal kills (130 = SIGINT, 137 =
-    # SIGKILL, 143 = SIGTERM). Only ERROR markers shaped as
-    # `reason=exit_code exit_code=<kill-class>` are treated as
-    # interrupted, not "broken" — the file-system state is intact and
-    # the marker is stale. The numeric list is shared by
-    # `Hive::Tui::BubbleModel#auto_heal_kill_class_errors` (background
-    # heal that clears those explicit signal-kill markers) and
-    # `Hive::Tui::KeyMap.error_message` (routes Enter on those rows to
-    # OpenLogTail rather than RecoverError so Enter doesn't race the
-    # auto-healer for the same markers-lock). Adding a new kill-class
-    # code here updates both consumers; previously each module had its
-    # own private copy and would drift on edit.
-    KILL_CLASS_EXIT_CODES = %w[130 137 143].freeze
     INTERNAL_ATTR_KEYS = %w[
       marker_id attempt_id task_generation ownership_generation task_input_epoch
     ].freeze
@@ -61,9 +49,12 @@ module Hive
     def current(state_file_path)
       return State.new(name: :none, attrs: {}, raw: nil) unless File.exist?(state_file_path)
 
-      content = File.read(state_file_path, encoding: "UTF-8")
+      current_from_content(File.read(state_file_path, encoding: "UTF-8"))
+    end
+
+    def current_from_content(content)
       last = nil
-      content.scan(MARKER_RE) do
+      content.to_s.scan(MARKER_RE) do
         match = Regexp.last_match
         last = match
       end
@@ -101,6 +92,30 @@ module Hive
         write_atomic(state_file_path, body)
       end
       new_marker
+    end
+
+    # One-off recovery migration compare-and-swap. The caller supplies the
+    # exact id-less marker it observed; after taking the same sidecar lock used
+    # by every marker writer, we re-read and upgrade only if that exact marker
+    # is still current. A concurrent agent/operator write therefore wins
+    # instead of being overwritten by a stale migration read.
+    def upgrade_recovery_marker_id(state_file_path, observed:)
+      with_markers_lock(state_file_path) do
+        current_marker = current(state_file_path)
+        return false unless current_marker.raw == observed&.raw
+        return false unless Hive::Recovery.recoverable_marker?(current_marker.name)
+        return false unless current_marker.attrs["marker_id"].to_s.empty?
+
+        marker_name = current_marker.name.to_s.upcase
+        attrs = attrs_with_recovery_marker_id(marker_name, current_marker.attrs)
+        new_marker = build_marker(marker_name, attrs)
+        body = File.read(state_file_path, encoding: "UTF-8")
+        replaced, count = replace_last_marker(body, new_marker)
+        return false unless count == 1
+
+        write_atomic(state_file_path, replaced)
+        true
+      end
     end
 
     def clear_current(state_file_path, expected_name:, match_attrs: {}, purge_history: false)
@@ -171,7 +186,9 @@ module Hive
 
     def attrs_with_recovery_marker_id(marker_name, attrs)
       attrs = attrs ? attrs.to_h : {}
-      return attrs unless %w[ERROR REVIEW_ERROR REVIEW_WORKING].include?(marker_name)
+      needs_id = marker_name == "REVIEW_WORKING" ||
+                 Hive::Recovery.recoverable_marker?(marker_name)
+      return attrs unless needs_id
       return attrs unless attrs["marker_id"].to_s.empty? && attrs[:marker_id].to_s.empty?
 
       attrs.merge("marker_id" => SecureRandom.hex(8))
@@ -198,7 +215,7 @@ module Hive
       attrs.empty? ? marker_name : "#{marker_name} #{attrs}"
     end
 
-    def error_recovery_match_attr(attrs)
+    def recovery_match_attr(attrs)
       attrs = attrs ? attrs.to_h.transform_keys(&:to_s) : {}
       marker_id = attrs["marker_id"].to_s
       reason = attrs["reason"].to_s
@@ -207,35 +224,10 @@ module Hive
       # marker by accident. Keep `reason` as a secondary assertion and audit
       # breadcrumb. `AlertStore.parse_match_attr` continues to use the leading
       # marker_id token as its canonical alert-generation guard.
-      if !marker_id.empty?
-        return "marker_id=#{marker_id}" if reason.empty?
+      return nil if marker_id.empty?
+      return "marker_id=#{marker_id}" if reason.empty?
 
-        return "marker_id=#{marker_id},reason=#{reason}"
-      end
-
-      parts = []
-      %w[reason exit_code].each do |key|
-        value = attrs[key].to_s
-        parts << "#{key}=#{value}" unless value.empty?
-      end
-      parts.empty? ? nil : parts.join(",")
-    end
-
-    def review_error_recovery_match_attr(attrs)
-      attrs = attrs ? attrs.to_h.transform_keys(&:to_s) : {}
-      marker_id = attrs["marker_id"].to_s
-      reason = attrs["reason"].to_s
-      unless marker_id.empty?
-        return "marker_id=#{marker_id}" if reason.empty?
-
-        return "marker_id=#{marker_id},reason=#{reason}"
-      end
-
-      parts = %w[pass phase reason].filter_map do |key|
-        value = attrs[key].to_s
-        "#{key}=#{value}" unless value.empty?
-      end
-      parts.empty? ? nil : parts.join(",")
+      "marker_id=#{marker_id},reason=#{reason}"
     end
 
     def build_marker(name, attrs)

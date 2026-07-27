@@ -1,4 +1,5 @@
 require "hive/agent_profile"
+require "hive/skill_check"
 require "hive/agent_profiles/usage_extractors"
 
 module Hive
@@ -29,13 +30,9 @@ module Hive
       api_key = [ ENV["XAI_API_KEY"], ENV["GROK_CODE_XAI_API_KEY"] ].find do |value|
         !value.to_s.strip.empty?
       end
-      explicit_path = [ ENV["GROK_AUTH_PATH"], ENV["GROK_HOME"] ].any? do |value|
-        !value.to_s.strip.empty?
-      end
-
       auth_path =
         begin
-          Hive::AgentProfiles.grok_auth_path if explicit_path || !api_key
+          Hive::AgentProfiles.grok_auth_path unless api_key
         rescue ArgumentError => e
           raise Hive::AgentError,
                 "grok profile preflight failed: cannot resolve auth path (#{e.message}). " \
@@ -82,22 +79,30 @@ module Hive
       budget_flag: nil,
       output_format_flags: [ "--output-format", "streaming-json" ],
       version_flag: "--version",
-      # Grok registers extension commands at the top level (`/<name>`), like
-      # codex. UNVERIFIED against a skill-invoking stage — grok has no
-      # skill_verifier yet, so stage prompts fall back to plain instruction
-      # text when the skill is absent.
+      # Grok exposes enabled plugin skills at the top level (`/<name>`).
       skill_syntax_format: "/%{skill}",
       headless_supported: true,
       min_version: "0.2.90",
       status_detection_mode: :output_file_exists,
       preflight: GROK_PREFLIGHT,
       usage_extractor: Hive::AgentProfiles::UsageExtractors::GROK,
-      skill_verifier: nil,
+      skill_verifier: Hive::SkillCheck::Grok.method(:verify),
       default_model_resolver: ->(**kwargs) {
         Hive::ImplementationIdentity::NativeDefaults.resolve(:grok, **kwargs)
       },
       model_argument_builder: ->(model) { [ "--model", model ] },
-      launcher_identity: "grok-cli/v1"
+      routed_model_argument_builder: ->(model) {
+        %w[default inherit].include?(model) ? [] : [ "--model", model ]
+      },
+      effort_argument_builder: ->(effort) { [ "--reasoning-effort", effort ] },
+      routed_effort_argument_builder: ->(effort) {
+        %w[default inherit].include?(effort) ? [] : [ "--reasoning-effort", effort ]
+      },
+      routed_effort_values: %w[
+        default inherit none minimal low medium high xhigh max
+      ],
+      launcher_identity: "grok-cli/v1",
+      structured_output_protocol: :grok_end
     )
 
     register(:grok, GROK)

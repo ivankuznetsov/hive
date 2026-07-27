@@ -1,13 +1,54 @@
 ---
 title: Dependencies
 type: dependencies
-source: Gemfile, hive.gemspec, Gemfile.lock, web/Gemfile, web/Gemfile.lock, .llm-wiki/post-commit-refresh.sh
+source: Gemfile, hive.gemspec, Gemfile.lock, web/Gemfile, web/Gemfile.lock, .github/workflows, components/agent-cli-runtime/mirror, .llm-wiki/post-commit-refresh.sh
 created: 2026-04-25
-updated: 2026-07-22
+updated: 2026-07-27
 tags: [dependencies, gems, runtime]
 ---
 
-**TLDR**: The `hive-cli` gem delegates merged-PR digests to its direct PRDigest runtime dependency; root development/test tooling is declared in `Gemfile`; the Rails hivebox app under `web/` carries its own bundle. Sinatra, rack-protection, and puma left the gem runtime with the Rails web rewrite, while the web bundle owns Rails/Turbo/solid-stack dependencies plus Redcarpet for sanitized markdown artifact rendering. Managed llm-wiki refreshes also require GNU `timeout` (or `gtimeout`) for their timeout-governed Git-ref, QMD, and provider operations.
+**TLDR**: Root development/test tooling is declared in `Gemfile`; the Rails
+hivebox app under `web/` carries its own bundle. Sinatra, rack-protection, puma,
+and PRDigest are not `hive-cli` runtime dependencies. The web bundle owns
+Rails/Turbo/solid-stack dependencies plus Redcarpet for sanitized markdown
+artifact rendering. Managed llm-wiki refreshes also require GNU `timeout` (or
+`gtimeout`) for timeout-governed Git-ref, QMD, and provider operations.
+
+## GitHub Actions
+
+Every canonical and generated-mirror workflow pins `actions/checkout` v7.0.1
+to immutable commit `3d3c42e5aac5ba805825da76410c181273ba90b1`.
+The v7 line adds safer defaults for fork refs under `pull_request_target` and
+`workflow_run`; Hive does not use either trigger, so the upgrade preserves its
+current pull-request behavior. Checkout already ran on Node 24 in v5, leaving
+the runner floor unchanged. Exact-SHA pins prevent a mutable tag from changing
+the executable workflow dependency between review and execution, while the
+trailing version comments keep Dependabot updates legible.
+
+All seven `actions/upload-artifact` calls likewise pin v7.0.1 to
+`043fb46d1a93c77aae656e7c1c64a875d1fc6a0a`. They retain archive mode and
+their existing missing-file, hidden-file, and retention policies; Hive does
+not enable v7's single-file direct-upload mode. Upload jobs run only on
+GitHub-hosted runners, satisfying the Node 24 runner floor introduced in v6.
+
+The live-agent validation workflow pins `actions/setup-node` v7.0.0 to
+`820762786026740c76f36085b0efc47a31fe5020`. It continues to install Node.js
+22 without enabling dependency caching or consuming cache-key outputs, so the
+v7 ESM migration does not change Hive's workflow contract. The job runs on a
+GitHub-hosted runner.
+
+All nine paired `actions/download-artifact` calls pin v8.0.1 to
+`3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c`. Existing artifact names,
+patterns, merge behavior, and destinations remain unchanged. Hive keeps
+archive-mode uploads, while v8's default strict digest verification causes a
+corrupted or substituted artifact to fail the job instead of merely warning.
+The downloads run on GitHub-hosted runners, satisfying the Node 24 floor.
+
+The same workflow pins `actions/github-script` v9.0.0 to
+`3a2844b7e9c422d3c10d287c895573f7108da1b3` for its trusted Check Run
+publication step. Hive uses only the action-injected `github` and `context`
+objects: it neither imports the ESM-only `@actions/github` package nor defines
+a local `getOctokit`, so the v9 module-loading changes do not alter this script.
 
 `hive.gemspec` owns runtime gem constraints; `Gemfile` uses `gemspec`
 to pull those constraints into Bundler, then adds development/test-only
@@ -26,13 +67,13 @@ as of this refresh.
 |-----|---------|---------|
 | `thor` | `~> 1.3` (locked 1.5.0) | CLI framework — used in `Hive::CLI` (`lib/hive/cli.rb`). Subcommand routing, option parsing, help generation. |
 | `base64` | `>= 0.2` | Explicit runtime dependency for framed durable-attempt output and other binary-safe payloads; Ruby is unbundling it from the default gems. |
-| `telegram-bot-ruby` | `~> 2.7` (locked 2.7.0) | Telegram Bot API client for `hive bot`. Chosen because RubyGems shows an April 3, 2026 release, MFA on publish, Ruby >= 2.7 support, and four direct runtime dependencies (`dry-struct`, `faraday`, `faraday-multipart`, `zeitwerk`). The lockfile review keeps the larger dry/faraday transitive set explicit. |
+| `bundler` | `= 2.7.2` | Exact installer for the authenticated managed web lock. Hive package managers vendor it into Hive's isolated `GEM_HOME`, and `AppBundle` invokes its absolute executable through the current Ruby without consulting `PATH`. |
+| `telegram-bot-ruby` | `~> 2.7` (locked 2.8.0) | Telegram Bot API client for `hive bot`. The July 23, 2026 release adds Bot API 10.0 through 10.2 support, retains MFA on publish and Ruby >= 2.7 support, and keeps four direct runtime dependencies (`dry-struct`, `faraday`, `faraday-multipart`, `zeitwerk`). Root and packaged-web lockfiles pin the reviewed version while the gemspec preserves 2.x compatibility for downstream resolvers. |
 | `faraday` | `>= 2.14.2, < 3.0` (locked 2.14.2) | HTTP transport used directly by `Hive::Bot::Transcriber` and indirectly through `telegram-bot-ruby`. The lower bound is the bundler-audit floor for CVE-2026-33637 / GHSA-5rv5-xj5j-3484. |
 | `faraday-multipart` | `~> 1.0` (locked 1.2.0) | Multipart upload support for `Hive::Bot::Transcriber` voice-note POSTs and Telegram Bot API file transport. |
 | `bubbletea` | `~> 0.1.4` | MVU runtime for `hive tui`. FFI binding to the Charm Go library. Owns alt-screen lifecycle, raw-mode toggling, resize handling, and the keystroke event stream. `Hive::Tui::App.run_charm` boots a `Bubbletea::Runner` against the `Hive::Tui::BubbleModel` adapter. |
-| `erb` | `>= 4.0` | Template rendering used by stages, task creation, workflows, and display names. Declared because Ruby is unbundling it and packaged installs cannot assume it is present. |
+| `erb` | `>= 4.0` (locked 6.0.6 in root and web) | Template rendering used by stages, task creation, workflows, and display names. Declared because Ruby is unbundling it and packaged installs cannot assume it is present. The 6.0.6 patch fixes ERB's standalone `-h` CLI path; Hive's rendering API is unchanged. |
 | `lipgloss` | `~> 0.2.2` | Lipgloss-ruby — declarative terminal styles consumed by every `Hive::Tui::Views::*` module (`Style#foreground/.bold/.reverse/.border/.padding/.render`). FFI binding to the Charm Go library. ANSI is stripped when stdout isn't a tty (the v0.2.2 limitation tracked in `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`). |
-| `prdigest` | `~> 0.1.0` | Sole merged-PR digest engine. Hive invokes its CLI with registered repositories; PRDigest owns GitHub fetch, Telegram HTML rendering/chunking, durable delivery resume, and result/exit contracts. |
 | `json_schemer` | `~> 2.5` (locked 2.5.0) | Runtime JSON Schema validation for architecture-patrol manifests in daemon and hivebox supervisor processes; also reused by the e2e schema validator. |
 | `rexml` | `~> 3.2` | Launchd plist parsing for daemon install/status drift checks; explicit because Ruby 3.4 no longer guarantees it as a default gem. |
 | `sqlite3` | `~> 2.0` | Runtime token-usage store for `Hive::UsageDb`; loaded lazily when agent usage rows are written or queried. |
@@ -135,7 +176,7 @@ These are not gems but the CLI tools the runtime invokes:
 | `asciinema` | 2.4+ (3.x accepted with v2 output flag) | optional TUI capture support; `test/e2e/lib/asciinema_driver.rb` records TUI failure casts when installed. Records a `.cast` only — rendering it to a terminal-demo GIF needs `agg` (or `vhs`), which the hivebox image does NOT ship |
 | `ffmpeg` | any recent | media conversion for manual `web/script/record_box_demo.rb` output (webm/mp4). NOT a terminal-GIF encoder: it cannot read an asciinema `.cast`, so it does not turn TUI recordings into GIFs on its own |
 | `agg` / `vhs` | not shipped in the hivebox image | the terminal-GIF encoders for artifacts-stage TUI/CLI demos (`agg` renders an asciinema `.cast`; `vhs` records straight to GIF). Absent in-box, so a TUI/CLI demo degrades to a `failed` capture unless the agent installs one |
-| agent-browser or Playwright | project/environment specific | optional UI visual capture support for the artifacts prompt; absence records a failed media manifest rather than failing the stage |
+| Playwright | exact npm metadata 1.60.0 in `web/package-lock.json` | supervised Hive web demo recorder; the expected local CLI and Chromium executable are preflighted before required capture |
 
 `HIVE_CLAUDE_BIN` env var overrides the `claude` binary, used by tests with `test/fixtures/fake-claude` and `fake-gh`.
 
@@ -144,6 +185,27 @@ nor `gtimeout` is executable, the llm-wiki runner fails the bounded operation
 closed (status 125) and retains its queued source for recovery. It deliberately
 has no unbounded fallback: limiting provider and Git execution is part of the
 subscription-safety contract.
+
+Source-worktree web capture also requires `bundle`, Node/npm for installing the
+pinned lock when browser dependencies are absent, Chromium for Playwright, and
+both `ffmpeg` and `ffprobe`. Ruby gems are installed into a private cache keyed
+by both root/web lockfile contents plus Ruby engine/version/platform; neither
+linked-worktree lockfile nor its mode may change. Missing browser/media tooling
+is a truthful required-capture error, never a silent `not_applicable` result.
+
+Managed web installation does not require a `bundle` wrapper on `PATH`.
+`Hive::Web::AppBundle` reads the authenticated web `Gemfile.lock`, resolves
+that exact Bundler through RubyGems, and invokes its absolute executable
+through the current `RbConfig.ruby`. `hive-cli` declares that exact Bundler as
+a runtime dependency so isolated gem, Homebrew, and AUR installations carry it
+inside Hive's managed `GEM_HOME`; a system default gem is not assumed.
+Production asset compilation runs as locked `bundle exec` over that same Ruby,
+so Rails cannot activate a newer host Bundler while reading the managed lock.
+The managed service uses the identical launcher for `db:prepare` and the
+long-running Rails server; provisioning and runtime therefore cannot diverge
+when another Bundler version is the host default.
+A missing locked Bundler is therefore an explicit bootstrap error rather than
+an ambiguous command-not-found failure.
 
 ## Ruby version
 

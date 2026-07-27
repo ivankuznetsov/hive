@@ -1,5 +1,6 @@
 require "fileutils"
 require "securerandom"
+require "time"
 require "yaml"
 require "hive/dependencies"
 
@@ -11,7 +12,7 @@ module Hive
     WRITABLE_FIELDS = %i[
       id slug display_name depends_on workflow workflow_commit
       workflow_manifest_digest workflow_configuration_digest base_branch
-      idempotency_key input_fingerprint
+      idempotency_key input_fingerprint completed_at
     ].freeze
 
     class InvalidMetadata < StandardError; end
@@ -59,6 +60,11 @@ module Hive
       if raw.key?("input_fingerprint") || raw.key?(:input_fingerprint)
         data[:input_fingerprint] = normalize_string(raw["input_fingerprint"] || raw[:input_fingerprint])
       end
+      if key?(raw, "completed_at")
+        data[:completed_at] = normalize_completed_at(
+          fetch(raw, "completed_at"), label: path(task_folder), warn_on_invalid: true
+        )
+      end
       data
     rescue Errno::ENOENT
       # No meta.yml (pre-`hive new` / legacy folders) — a normal, expected
@@ -73,7 +79,8 @@ module Hive
       # are observable instead of failing the gate open in silence.
       warn "hive: task_meta: failed to read #{path(task_folder)} " \
            "(#{e.class}: #{e.message}); treating meta as empty " \
-           "(depends_on, workflow, base_branch dropped; idempotency dropped; managed provenance dropped)"
+           "(depends_on, workflow, base_branch dropped; idempotency dropped; " \
+           "managed provenance dropped; completed_at dropped)"
       empty
     end
 
@@ -135,7 +142,7 @@ module Hive
 
     def write(task_folder, id:, slug:, display_name:, depends_on: nil, workflow: nil, base_branch: nil,
               workflow_commit: nil, workflow_manifest_digest: nil, workflow_configuration_digest: nil,
-              idempotency_key: nil, input_fingerprint: nil)
+              idempotency_key: nil, input_fingerprint: nil, completed_at: nil)
       FileUtils.mkdir_p(task_folder)
       normalized_depends_on = normalize_string(depends_on)
       normalized_workflow = normalize_string(workflow)
@@ -145,6 +152,7 @@ module Hive
       normalized_configuration_digest = normalize_string(workflow_configuration_digest)
       normalized_idempotency_key = normalize_string(idempotency_key)
       normalized_input_fingerprint = normalize_string(input_fingerprint)
+      normalized_completed_at = normalize_completed_at(completed_at, label: "completed_at", strict: true)
       if normalized_commit.nil? != normalized_digest.nil?
         raise ArgumentError, "workflow_commit and workflow_manifest_digest must be written together"
       end
@@ -167,9 +175,11 @@ module Hive
       data["workflow_configuration_digest"] = normalized_configuration_digest if normalized_configuration_digest
       data["idempotency_key"] = normalized_idempotency_key if normalized_idempotency_key
       data["input_fingerprint"] = normalized_input_fingerprint if normalized_input_fingerprint
+      data["completed_at"] = normalized_completed_at if normalized_completed_at
       tmp = File.join(task_folder, ".#{FILENAME}.tmp.#{Process.pid}.#{SecureRandom.hex(4)}")
       File.write(tmp, data.to_yaml)
       File.rename(tmp, path(task_folder))
+      notify_stage_directory(task_folder)
       result = data.transform_keys(&:to_sym).merge(
         depends_on: normalized_depends_on, workflow: normalized_workflow
       )
@@ -183,6 +193,7 @@ module Hive
         result[:idempotency_key] = normalized_idempotency_key
         result[:input_fingerprint] = normalized_input_fingerprint
       end
+      result[:completed_at] = normalized_completed_at if normalized_completed_at
       result
     ensure
       File.delete(tmp) if tmp && File.exist?(tmp)
@@ -199,11 +210,51 @@ module Hive
       rewrite(task_folder, id: id)
     end
 
+    # First-writer-wins completion clock. The stable guard serializes metadata
+    # rewrites without using the task's process lock, so callers that already
+    # hold that lock (run/approve/backfill) can safely call this helper.
+    def write_completed_at_once(task_folder, value = Time.now.utc)
+      with_rewrite_lock(task_folder) do
+        current = read_for_update!(task_folder)
+        return current[:completed_at] if current[:completed_at]
+
+        completed_at = normalize_completed_at(value, label: "completed_at", strict: true)
+        updated = current.merge(completed_at: completed_at)
+        updated[:slug] ||= File.basename(task_folder)
+        write(task_folder, **updated.slice(*WRITABLE_FIELDS))
+        completed_at
+      end
+    end
+
     def rewrite(task_folder, changes)
-      current = read_for_update!(task_folder)
-      updated = current.merge(changes)
-      updated[:slug] ||= File.basename(task_folder)
-      write(task_folder, **updated.slice(*WRITABLE_FIELDS))
+      with_rewrite_lock(task_folder) do
+        current = read_for_update!(task_folder)
+        updated = current.merge(changes)
+        updated[:slug] ||= File.basename(task_folder)
+        write(task_folder, **updated.slice(*WRITABLE_FIELDS))
+      end
+    end
+
+    Snapshot = Data.define(:exists, :bytes)
+
+    def snapshot(task_folder)
+      Snapshot.new(exists: true, bytes: File.binread(path(task_folder)))
+    rescue Errno::ENOENT
+      Snapshot.new(exists: false, bytes: nil)
+    end
+
+    def restore(task_folder, snapshot)
+      if snapshot.exists
+        FileUtils.mkdir_p(task_folder)
+        write_raw_atomic(task_folder, snapshot.bytes)
+        notify_stage_directory(task_folder)
+      else
+        metadata_path = path(task_folder)
+        if File.exist?(metadata_path)
+          File.delete(metadata_path)
+          notify_stage_directory(task_folder)
+        end
+      end
     end
 
     def empty
@@ -211,6 +262,7 @@ module Hive
     end
 
     def read_for_update!(task_folder)
+      validate_stored_completed_at!(task_folder)
       result = read_for_admission(task_folder)
       return result.data if result.ok?
 
@@ -218,7 +270,7 @@ module Hive
     end
 
     def normalized_data(raw)
-      {
+      data = {
         id: normalize_id(fetch(raw, "id")),
         slug: normalize_string(fetch(raw, "slug")),
         display_name: normalize_string(fetch(raw, "display_name")),
@@ -231,6 +283,10 @@ module Hive
         idempotency_key: normalize_string(fetch(raw, "idempotency_key")),
         input_fingerprint: normalize_string(fetch(raw, "input_fingerprint"))
       }
+      if key?(raw, "completed_at")
+        data[:completed_at] = normalize_completed_at(fetch(raw, "completed_at"), label: "completed_at")
+      end
+      data
     end
 
     def key?(hash, key)
@@ -253,6 +309,78 @@ module Hive
     def normalize_string(value)
       string = value.to_s.strip
       string.empty? ? nil : string
+    end
+
+    def normalize_completed_at(value, label:, strict: false, warn_on_invalid: false)
+      return nil if value.nil?
+
+      parsed =
+        if value.is_a?(Time)
+          value
+        elsif value.is_a?(String) && value.match?(/(?:Z|[+-]\d{2}:\d{2})\z/)
+          Time.iso8601(value)
+        end
+      return parsed.utc.iso8601 if parsed
+
+      raise ArgumentError, "#{label} must be a UTC ISO 8601 timestamp" if strict
+      warn "hive: task_meta: invalid completed_at in #{label}; keeping task visible" if warn_on_invalid
+      nil
+    rescue ArgumentError
+      raise ArgumentError, "#{label} must be a UTC ISO 8601 timestamp" if strict
+
+      warn "hive: task_meta: invalid completed_at in #{label}; keeping task visible" if warn_on_invalid
+      nil
+    end
+
+    def validate_stored_completed_at!(task_folder)
+      raw = YAML.safe_load(File.read(path(task_folder))) || {}
+      return unless raw.is_a?(Hash) && key?(raw, "completed_at")
+
+      normalize_completed_at(
+        fetch(raw, "completed_at"), label: path(task_folder), strict: true
+      )
+    rescue Errno::ENOENT
+      nil
+    rescue Psych::Exception, SystemCallError, IOError
+      # read_for_admission below owns the existing typed error normalization
+      # for malformed/unreadable metadata; this preflight only adds the
+      # completed_at-specific validation arm.
+      nil
+    rescue ArgumentError => e
+      raise InvalidMetadata, "refusing to rewrite invalid task metadata: #{e.message}"
+    end
+
+    def with_rewrite_lock(task_folder)
+      FileUtils.mkdir_p(task_folder)
+      # Reuse the task-lock tempfile namespace already ignored by every
+      # hive/state worktree. A persistent stable inode is required for flock
+      # correctness, but it must never enter task-wide state commits.
+      guard_path = File.join(task_folder, ".lock.tmp.meta-guard")
+      File.open(guard_path, File::RDWR | File::CREAT, 0o644) do |guard|
+        guard.flock(File::LOCK_EX)
+        yield
+      end
+    end
+
+    def write_raw_atomic(task_folder, bytes)
+      tmp = File.join(task_folder, ".#{FILENAME}.tmp.#{Process.pid}.#{SecureRandom.hex(4)}")
+      File.binwrite(tmp, bytes)
+      File.rename(tmp, path(task_folder))
+    ensure
+      File.delete(tmp) if tmp && File.exist?(tmp)
+    end
+
+    # StateSource deliberately excludes archived task metadata from its 1 Hz
+    # content fingerprint. Signal Hive-owned metadata mutations through the
+    # containing stage directory instead, which is already the bounded
+    # terminal-stage invalidation surface. Restrict the touch to the canonical
+    # `<state>/stages/<stage>/<task>` layout so standalone TaskMeta consumers
+    # do not mutate an arbitrary parent directory.
+    def notify_stage_directory(task_folder)
+      stage_directory = File.dirname(File.expand_path(task_folder.to_s))
+      return unless File.basename(File.dirname(stage_directory)) == "stages"
+
+      FileUtils.touch(stage_directory)
     end
   end
 end

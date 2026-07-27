@@ -14,7 +14,6 @@ module Hive
     class Record
       SCHEMA = "hive-attempt"
       SCHEMA_VERSION = 2
-      SUPPORTED_SCHEMA_VERSIONS = [ 1, SCHEMA_VERSION ].freeze
       STATES = %w[launching running terminal lost].freeze
       TERMINAL_OUTCOMES = %w[succeeded failed cancelled].freeze
       FINAL_STATES = %w[terminal lost].freeze
@@ -23,7 +22,7 @@ module Hive
         task_id project task_slug intended_stage task_generation progress_token
         ownership_generation task_input_epoch
         provider worker_argv claim_capability_digest starting_revision retry_charge
-        compatibility created_at accepted_at
+        created_at accepted_at
       ].freeze
       REQUIRED_KEYS = (IMMUTABLE_KEYS + %w[
         state outcome lease_version claim_deadline first_heartbeat_deadline
@@ -38,7 +37,7 @@ module Hive
                          task_slug:, intended_stage:, task_generation:, progress_token:, provider:,
                          worker_argv:, claim_capability_digest:, starting_revision:, retry_charge:,
                          inherited_outputs:, now:,
-                         launch_timeout_sec:, compatibility: false, ownership_generation: nil,
+                         launch_timeout_sec:, ownership_generation: nil,
                          task_input_epoch: 0)
         timestamp = iso8601(now)
         new(
@@ -60,7 +59,6 @@ module Hive
           "claim_capability_digest" => claim_capability_digest,
           "starting_revision" => starting_revision,
           "retry_charge" => retry_charge,
-          "compatibility" => compatibility,
           "created_at" => timestamp,
           "accepted_at" => timestamp,
           "state" => "launching",
@@ -83,43 +81,6 @@ module Hive
           "loss" => nil,
           "diagnostics" => {}
         )
-      end
-
-      def self.compatibility_running(attempt_id:, task_id:, project:, task_slug:,
-                                     intended_stage:, task_generation:, progress_token:,
-                                     owner:, provider:, starting_revision:, now:,
-                                     ownership_generation: nil, task_input_epoch: 0)
-        record = launching(
-          attempt_id: attempt_id,
-          request_id: "legacy-backfill:#{attempt_id}",
-          predecessor_attempt_id: nil,
-          task_id: task_id,
-          project: project,
-          task_slug: task_slug,
-          intended_stage: intended_stage,
-          task_generation: task_generation,
-          ownership_generation: ownership_generation,
-          task_input_epoch: task_input_epoch,
-          progress_token: progress_token,
-          provider: provider,
-          worker_argv: [],
-          claim_capability_digest: nil,
-          starting_revision: starting_revision,
-          retry_charge: 0,
-          inherited_outputs: [],
-          now: now,
-          launch_timeout_sec: 1,
-          compatibility: true
-        ).to_h
-        timestamp = iso8601(now)
-        new(record.merge(
-          "state" => "running",
-          "lease_version" => 1,
-          "claim_deadline" => nil,
-          "wrapper" => Hive::StringifyKeys.call(owner),
-          "started_at" => timestamp,
-          "diagnostics" => { "legacy_backfilled_at" => timestamp }
-        ))
       end
 
       def self.validate_receipt!(receipt, attempt_id:, task_generation:, task_input_epoch: nil,
@@ -172,7 +133,6 @@ module Hive
       def initialize(data)
         @data = Hive::StringifyKeys.call(data)
         validate_source_schema!
-        normalize_generation_bridge!
         validate!
         @data.freeze
       end
@@ -196,7 +156,6 @@ module Hive
       def wrapper = Hive::StringifyKeys.call(@data["wrapper"])
       def worker = Hive::StringifyKeys.call(@data["worker"])
       def checkpoint = Hive::StringifyKeys.call(@data["checkpoint"])
-      def compatibility? = @data.fetch("compatibility")
       def live? = %w[launching running].include?(state)
       def final? = FINAL_STATES.include?(state)
       def claimed? = state == "launching" && !@data["wrapper"].nil?
@@ -229,6 +188,10 @@ module Hive
       def validate!
         missing = REQUIRED_KEYS - @data.keys
         raise InvalidRecord, "attempt record missing #{missing.join(', ')}" unless missing.empty?
+        unexpected = @data.keys - REQUIRED_KEYS
+        unless unexpected.empty?
+          raise InvalidRecord, "attempt record has unexpected fields #{unexpected.join(', ')}"
+        end
         raise InvalidRecord, "attempt record has invalid schema" unless @data["schema"] == SCHEMA
         raise InvalidRecord, "attempt record has invalid state" unless STATES.include?(state)
         unless @data["lease_version"].is_a?(Integer) && @data["lease_version"] >= 0
@@ -251,11 +214,7 @@ module Hive
         unless worker_argv.is_a?(Array) && worker_argv.all? { |value| value.is_a?(String) && !value.empty? }
           raise InvalidRecord, "attempt record worker_argv must contain only non-empty strings"
         end
-        if compatibility?
-          unless worker_argv.empty? && @data["claim_capability_digest"].nil?
-            raise InvalidRecord, "compatibility attempt cannot carry launch authority"
-          end
-        elsif worker_argv.empty? || !Capability.valid_digest?(@data["claim_capability_digest"])
+        if worker_argv.empty? || !Capability.valid_digest?(@data["claim_capability_digest"])
           raise InvalidRecord, "durable attempt requires worker argv and a capability digest"
         end
         unless @data["inherited_outputs"].is_a?(Array) && @data["current_outputs"].is_a?(Array)
@@ -276,7 +235,7 @@ module Hive
 
       def validate_source_schema!
         raise InvalidRecord, "attempt record has invalid schema" unless @data["schema"] == SCHEMA
-        return if SUPPORTED_SCHEMA_VERSIONS.include?(@data["schema_version"])
+        return if @data["schema_version"] == SCHEMA_VERSION
 
         raise InvalidRecord,
               "attempt record has unsupported schema_version #{@data['schema_version'].inspect}"
@@ -309,23 +268,8 @@ module Hive
         end
         if state == "running"
           raise InvalidRecord, "running attempt requires wrapper identity" unless @data["wrapper"].is_a?(Hash)
-          if @data["heartbeat_deadline"].nil? && !compatibility?
-            raise InvalidRecord, "running attempt requires heartbeat deadline"
-          end
+          raise InvalidRecord, "running attempt requires heartbeat deadline" if @data["heartbeat_deadline"].nil?
         end
-      end
-
-      def normalize_generation_bridge!
-        return unless @data["schema_version"] == 1
-
-        @data["ownership_generation"] ||= @data["task_generation"]
-        @data["task_input_epoch"] = 0 unless @data.key?("task_input_epoch")
-        receipt = @data["receipt"]
-        if receipt.is_a?(Hash)
-          receipt["ownership_generation"] ||= @data["ownership_generation"]
-          receipt["task_input_epoch"] = @data["task_input_epoch"] unless receipt.key?("task_input_epoch")
-        end
-        @data["schema_version"] = SCHEMA_VERSION
       end
 
       class << self

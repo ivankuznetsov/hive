@@ -202,26 +202,12 @@ The normal Hive loop is simple: the daemon advances ready tasks, and the TUI is 
 
 That is enough to understand what Hive does: it turns a rough idea into durable stage files, then keeps advancing the same task toward code, a pull request, review, and archive. Manual TUI keys still exist for power users who want to steer a specific stage themselves; the happy path is daemon-first. See [wiki/commands/tui.md](wiki/commands/tui.md) for the full dashboard reference.
 
-## Digest Reports
+## PR Digests
 
-`hive digest` delegates the complete merged-PR digest to the standalone
-[PRDigest](https://github.com/ivankuznetsov/prdigest) CLI. Hive supplies its
-registered `github.com` repositories, existing GitHub authentication, and the
-first allowlisted Telegram chat. PRDigest alone fetches, renders safe Telegram
-HTML, chunks, checkpoints, retries, and sends. Hive task and stage state never
-affects inclusion.
-
-```bash
-hive digest --dry-run
-hive digest --date 2026-06-13 --repo owner/name --json
-```
-
-`--repo` is a repeatable, case-insensitive filter over registered repositories,
-not an arbitrary repository selector. Dry-run needs GitHub authentication but
-not Telegram credentials. `--json` is PRDigest's versioned
-`prdigest-result` document without a Hive wrapper, and its exit status is
-preserved. See [wiki/commands/digest.md](wiki/commands/digest.md) for the
-adapter, delivery, and migration contracts.
+[PRDigest](https://github.com/ivankuznetsov/prdigest) is a separate tool. Use
+`prdigest facts` when an agent will write the final message, or schedule
+`prdigest prose --deliver` for a standalone daily Telegram digest. Hive does
+not configure, schedule, or deliver PR digests.
 
 ## Manage Hive From Telegram in 2 Minutes
 
@@ -288,7 +274,7 @@ Useful prompt shapes once Hive is installed:
 - *Watch a long-running task:* `Run hive watch <project>:<slug> --json-lines and stop on its final event.`
 - *Take a safe next step:* `Read a fresh operational action descriptor, then run hive act <action_id> <target> --observation <token> --json.`
 
-For commands that emit JSON, the schema is versioned under [schemas/](schemas/), so agent prompts can rely on field shapes without scraping. `hive status --json` deliberately remains the complete compatibility graph for daemon/bot/TUI consumers; agents should prefer the additive operational view. `hive watch` is a stream and therefore uses `--json-lines`, not the global `--json` document mode. `hive tui` remains human-only. For installation via an agent, point it at [install.md](install.md).
+For commands that emit JSON, the schema is versioned under [schemas/](schemas/), so agent prompts can rely on field shapes without scraping. `hive status --json` is the ordinary visibility projection used by daemon, bot, TUI, and web consumers; each project also reports `hidden_archived_task_count`. Use `hive archive --json` for the complete, retention-unfiltered terminal record. Agents should prefer the additive operational view for day-to-day control. `hive watch` is a stream and therefore uses `--json-lines`, not the global `--json` document mode. `hive tui` remains human-only. For installation via an agent, point it at [install.md](install.md).
 
 ## Custom Workflows
 
@@ -325,6 +311,7 @@ A descriptor is short enough to read top to bottom — an entry gate, agent stag
 
 ```yaml
 id: "writing"
+archive_visibility_retention_days: 3
 stages:
   - { name: inbox,    kind: terminal, state_file: idea.md }
   - { name: research, kind: agent,    state_file: research.md, instruction: ./writing/research.md }
@@ -332,6 +319,12 @@ stages:
   - { name: edit,     kind: agent,    state_file: edit.md,     instruction: ./writing/edit.md }
   - { name: done,     kind: terminal, state_file: done.md }
 ```
+
+`archive_visibility_retention_days` controls how long completed tasks remain in
+ordinary status, TUI, and web views. It accepts a positive integer number of
+full 24-hour periods or the exact lowercase value `never`; omission remains
+compatible and means `3`. This changes visibility only—`hive archive` remains
+the complete record, and no task folders are deleted or moved by retention.
 
 Ask the canonical `/hive` skill to create a workflow in natural language when
 you do not want to author YAML. It uses the same three CLI primitives:

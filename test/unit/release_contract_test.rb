@@ -12,6 +12,7 @@ class ReleaseContractTest < Minitest::Test
   RELEASE_WORKFLOW = File.join(ROOT, ".github/workflows/release.yml")
   LIVE_AGENT_WORKFLOW = File.join(ROOT, ".github/workflows/live-agent-skills.yml")
   RELEASE_SELECTOR = File.join(ROOT, "packaging/live_agent_skills/select_release_proof.rb")
+  SETUP_NODE_ACTION = "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
   CANDIDATE_SHA = "a" * 40
   WORKFLOW_SHA = "b" * 40
   ATTESTATION_SHA256 = "c" * 64
@@ -83,11 +84,15 @@ class ReleaseContractTest < Minitest::Test
     workflow = YAML.safe_load_file(LIVE_AGENT_WORKFLOW, aliases: true)
     jobs = workflow.fetch("jobs")
     matrix = jobs.fetch("live-agent").dig("strategy", "matrix", "include")
+    setup_node = jobs.fetch("live-agent").fetch("steps").find do |step|
+      step["uses"] == SETUP_NODE_ACTION
+    end
 
     assert_includes body, "workflow_dispatch:"
     assert_includes body, "candidate_sha:"
     assert_includes body, '[[ "$GITHUB_REF" == "refs/heads/main" ]]'
     assert_includes body, "git merge-base --is-ancestor"
+    assert_equal({ "node-version" => "22" }, setup_node.fetch("with"))
     assert_includes body, "branches/main"
     assert_equal %w[claude codex openclaw pi], matrix.map { |row| row.fetch("platform") }.sort
     assert_equal "live-agent-skills-${{ matrix.platform }}", jobs.fetch("live-agent").fetch("environment")

@@ -31,6 +31,12 @@ their existing missing-file, hidden-file, and retention policies; Hive does
 not enable v7's single-file direct-upload mode. Upload jobs run only on
 GitHub-hosted runners, satisfying the Node 24 runner floor introduced in v6.
 
+The live-agent validation workflow pins `actions/setup-node` v7.0.0 to
+`820762786026740c76f36085b0efc47a31fe5020`. It continues to install Node.js
+22 without enabling dependency caching or consuming cache-key outputs, so the
+v7 ESM migration does not change Hive's workflow contract. The job runs on a
+GitHub-hosted runner.
+
 `hive.gemspec` owns runtime gem constraints; `Gemfile` uses `gemspec`
 to pull those constraints into Bundler, then adds development/test-only
 tools. The v0.6.9 release-prep checkout is `0.6.9`: `lib/hive.rb`, root

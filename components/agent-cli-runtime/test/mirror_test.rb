@@ -9,7 +9,7 @@ class AgentCliRuntimeMirrorTest < Minitest::Test
   WORKFLOW = File.join(MIRROR, "sync-from-hive.yml")
   RELEASE_WORKFLOW = File.join(MIRROR, "mirror-release.yml")
   SOURCE_SHA = "a" * 40
-  CHECKOUT_ACTION = "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09"
+  CHECKOUT_ACTION = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
   RUBY_ACTION = "ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b"
 
   def test_sync_materializes_package_at_root_and_installs_mirror_admin

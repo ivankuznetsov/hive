@@ -134,7 +134,7 @@ jobs:
             display: Pi
             npm_package: "@mariozechner/pi-coding-agent"
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@v8.0.1
         with:
           name: live-agent-candidate-artifacts-${{ github.run_attempt }}
           path: candidate-artifacts
@@ -205,11 +205,11 @@ jobs:
     outputs:
       attestation_sha256: ${{ steps.attest.outputs.attestation_sha256 }}
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@v8.0.1
         with:
           name: live-agent-candidate-artifacts-${{ github.run_attempt }}
           path: candidate-artifacts
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@v8.0.1
         with:
           pattern: live-agent-evidence-*-${{ github.run_attempt }}
           path: evidence

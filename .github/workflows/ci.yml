@@ -123,7 +123,7 @@ jobs:
         with:
           ruby-version: "3.4"
       - name: Download e2e report
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@v8.0.1
         with:
           name: hive-e2e-report
           path: ${{ runner.temp }}/hive-e2e-runs

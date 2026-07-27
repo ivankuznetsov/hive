@@ -86,6 +86,13 @@ class WorkflowNewTest < Minitest::Test
         "git", "-C", state, "status", "--porcelain", "--",
         "workflows/my-flow.yml", "workflows/my-flow"
       )
+
+      retry_stdout = StringIO.new
+      retry_payload = Hive::Commands::Workflow.new(
+        "commit", "my-flow", project_root: project_root, stdout: retry_stdout
+      ).call!
+      assert_equal false, retry_payload.fetch("committed")
+      assert_includes retry_stdout.string, "populated workflow my-flow is already committed"
     end
   end
 
@@ -260,6 +267,26 @@ class WorkflowNewTest < Minitest::Test
         assert File.symlink?(collision)
         refute File.exist?(outside)
       end
+    end
+  end
+
+  def test_refuses_a_symlinked_workflow_scaffold_root
+    with_initialized_project do |project_root|
+      workflows = File.join(project_root, ".hive-state", "workflows")
+      outside = File.join(project_root, "outside-workflows")
+      FileUtils.rm_rf(workflows)
+      FileUtils.mkdir_p(outside)
+      File.symlink(outside, workflows)
+
+      error = assert_raises(Hive::ConfigError) do
+        Hive::Commands::Workflow.new!(
+          "my-flow", project_root: project_root, stdout: StringIO.new
+        )
+      end
+
+      assert_includes error.message, "scaffold root"
+      assert File.symlink?(workflows)
+      assert_empty Dir.children(outside)
     end
   end
 
@@ -724,6 +751,23 @@ class WorkflowNewTest < Minitest::Test
 
       FileUtils.rm_f(paths.fetch(:descriptor))
       FileUtils.rm_rf(paths.fetch(:instruction_dir))
+    end
+  end
+
+  def test_rollback_scaffold_supports_legacy_path_sets_without_ownership_metadata
+    with_tmp_dir do |root|
+      instruction_dir = File.join(root, "legacy-flow")
+      descriptor = File.join(root, "legacy-flow.yml")
+      FileUtils.mkdir_p(instruction_dir)
+      File.write(File.join(instruction_dir, "work.md"), "work\n")
+      File.write(descriptor, "id: legacy-flow\n")
+
+      Hive::Commands::Workflow.rollback_scaffold(
+        instruction_dir: instruction_dir, descriptor: descriptor
+      )
+
+      refute File.exist?(instruction_dir)
+      refute File.exist?(descriptor)
     end
   end
 

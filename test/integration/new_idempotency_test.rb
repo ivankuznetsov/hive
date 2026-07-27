@@ -148,6 +148,58 @@ class NewIdempotencyTest < Minitest::Test
     end
   end
 
+  def test_idempotent_attachment_copy_rejects_a_corrupted_snapshot_destination
+    with_initialized_project do |project_root, project|
+      with_tmp_dir do |dir|
+        source = File.join(dir, "source.png")
+        File.binwrite(source, "trusted-bytes")
+        original_cp = FileUtils.method(:cp)
+        corrupting_cp = lambda do |from, to, *args, **kwargs|
+          original_cp.call(from, to, *args, **kwargs)
+          File.binwrite(to, "corrupted-after-copy") if to.include?("/assets/")
+        end
+
+        with_replaced_singleton_method(FileUtils, :cp, corrupting_cp) do
+          error = assert_raises(Hive::Commands::New::InvalidAttachmentError) do
+            Hive::Commands::New.new(
+              project, "task with corrupted image",
+              slug_override: "corrupted-attachment-task",
+              idempotency_key: "creator:corrupted-attachment", json: true,
+              attachments: [ [ source, "source.png" ] ]
+            ).call!
+          end
+          assert_includes error.message, "attachment snapshot changed"
+          assert_equal "source.png", error.value
+        end
+
+        refute Dir.exist?(
+          File.join(
+            project_root, ".hive-state", "stages", "1-inbox",
+            "corrupted-attachment-task"
+          )
+        )
+      end
+    end
+  end
+
+  def test_idempotent_attachment_cleanup_tolerates_an_already_missing_snapshot
+    with_tmp_dir do |dir|
+      source = File.join(dir, "source.png")
+      File.binwrite(source, "trusted-bytes")
+      command = Hive::Commands::New.new(
+        "project", "task", idempotency_key: "creator:cleanup",
+        attachments: [ [ source, "source.png" ] ]
+      )
+      command.send(:prepare_idempotent_attachments!)
+      snapshot_dir = command.instance_variable_get(:@attachment_snapshot_dir)
+      FileUtils.remove_entry_secure(snapshot_dir)
+
+      assert_nil command.send(:cleanup_prepared_attachments!)
+      assert_nil command.instance_variable_get(:@attachment_snapshot_dir)
+      assert_nil command.instance_variable_get(:@prepared_attachments)
+    end
+  end
+
   def test_commit_failure_removes_the_uncommitted_task
     with_initialized_project do |project_root, project|
       fake_ops = Object.new

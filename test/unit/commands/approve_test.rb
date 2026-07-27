@@ -92,6 +92,38 @@ class HiveCommandsApproveTest < Minitest::Test
     end
   end
 
+  def test_human_state_snapshot_rejects_file_swaps_and_nofollow_errors
+    with_tmp_dir do |root|
+      path = File.join(root, "approval.md")
+      File.write(path, "owner approval\n")
+      observed = File.lstat(path)
+      swapped_stat = Struct.new(:dev, :ino) do
+        def file? = true
+      end.new(observed.dev, observed.ino + 1)
+      swapped_file = Object.new
+      swapped_file.define_singleton_method(:stat) { swapped_stat }
+      swapped_file.define_singleton_method(:read) { "replacement\n" }
+
+      with_replaced_singleton_method(
+        File, :open, ->(_path, *_args, &block) { block.call(swapped_file) }
+      ) do
+        error = assert_raises(Hive::InvalidTaskPath) do
+          command.send(:read_human_state_snapshot!, path, "approval.md")
+        end
+        assert_includes error.message, "changed while entering the stage"
+      end
+
+      with_replaced_singleton_method(
+        File, :open, ->(*_args) { raise Errno::ELOOP, path }
+      ) do
+        error = assert_raises(Hive::InvalidTaskPath) do
+          command.send(:read_human_state_snapshot!, path, "approval.md")
+        end
+        assert_includes error.message, "must be a regular file, not a symlink"
+      end
+    end
+  end
+
   def test_interrupted_human_stage_commit_restores_move_and_destination_state
     with_tmp_dir do |root|
       state = File.join(root, ".hive-state")

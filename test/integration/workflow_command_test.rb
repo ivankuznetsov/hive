@@ -86,6 +86,71 @@ class WorkflowCommandTest < Minitest::Test
     end
   end
 
+  def test_validate_defaults_missing_hive_state_configuration_without_writing
+    with_tmp_dir do |project_root|
+      validator = Hive::Commands::Workflow::Validate.new(
+        "coding", project_root: project_root, stdout: StringIO.new
+      )
+      config_path = File.join(project_root, "config.yml")
+      read = ->(_root) { [ config_path, {} ] }
+      normalize = ->(data, _source, **_options) { data }
+
+      workflows = with_replaced_singleton_method(
+        Hive::Config, :read_project_config, read
+      ) do
+        with_replaced_singleton_method(
+          Hive::Config, :normalize_legacy_project_config, normalize
+        ) { validator.send(:workflows_dir) }
+      end
+
+      assert_equal File.join(project_root, ".hive-state", "workflows"), workflows
+      refute File.exist?(File.join(project_root, ".hive-state"))
+    end
+  end
+
+  def test_validate_rejects_an_authored_descriptor_claiming_a_built_in_id
+    with_initialized_project do |project_root|
+      editorial = write_editorial_workflow(project_root)
+      shadow = File.join(File.dirname(editorial), "coding.yml")
+      File.write(
+        shadow,
+        File.read(editorial).sub(/^id: editorial$/, "id: coding")
+      )
+
+      error = assert_raises(Hive::ConfigError) do
+        Hive::Commands::Workflow::Validate.new(
+          "coding", project_root: project_root, stdout: StringIO.new
+        ).call!
+      end
+
+      assert_includes error.message, "collides with registered workflow"
+      assert_includes error.message, "coding"
+    end
+  end
+
+  def test_validate_unknown_workflow_lists_authored_managed_and_built_in_ids
+    with_initialized_project do |project_root|
+      descriptor = write_editorial_workflow(project_root)
+      workflows = File.dirname(descriptor)
+      managed = File.join(workflows, "managed-flow")
+      FileUtils.mkdir_p(managed)
+      File.write(
+        File.join(managed, Hive::WorkflowPackage::ManagedStore::LOCK_FILE),
+        "{}\n"
+      )
+
+      error = assert_raises(Hive::Workflows::UnknownWorkflow) do
+        Hive::Commands::Workflow::Validate.new(
+          "missing-flow", project_root: project_root, stdout: StringIO.new
+        ).call!
+      end
+
+      assert_includes error.message, "editorial"
+      assert_includes error.message, "managed-flow"
+      assert_includes error.message, "coding"
+    end
+  end
+
   def test_validate_never_calls_the_production_project_config_loader
     with_initialized_project do |project_root|
       write_editorial_workflow(project_root)
@@ -182,6 +247,31 @@ class WorkflowCommandTest < Minitest::Test
 
     assert_equal Hive::Schemas::WorkflowNewErrorKind::USAGE,
                  command.send(:error_kind_for, error)
+  end
+
+  def test_commit_refuses_a_managed_workflow
+    with_tmp_dir do |project_root|
+      validation = Object.new
+      validation.define_singleton_method(:call!) do
+        {
+          "origin" => "managed",
+          "descriptor_path" => File.join(project_root, "managed-flow.yml")
+        }
+      end
+
+      with_replaced_singleton_method(
+        Hive::Commands::Workflow::Validate, :new, ->(*_args, **_kwargs) { validation }
+      ) do
+        error = assert_raises(Hive::Commands::Workflow::UsageError) do
+          Hive::Commands::Workflow.new(
+            "commit", "managed-flow", project_root: project_root,
+            stdout: StringIO.new
+          ).call!
+        end
+        assert_includes error.message, "requires an owner-authored workflow"
+        assert_includes error.message, "managed"
+      end
+    end
   end
 
   def test_new_collision_proposes_deterministic_available_id

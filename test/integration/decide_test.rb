@@ -28,6 +28,44 @@ class DecideTest < Minitest::Test
     end
   end
 
+  def test_state_reader_rejects_file_swaps_invalid_utf8_and_nofollow_errors
+    with_tmp_dir do |dir|
+      path = File.join(dir, "approval.md")
+      File.binwrite(path, "\xFF".b)
+      error = assert_raises(Hive::InvalidTaskPath) do
+        Hive::Commands::Decide.read_state_file(path)
+      end
+      assert_includes error.message, "valid UTF-8"
+
+      File.write(path, "owner approval\n")
+      observed = File.lstat(path)
+      swapped_stat = Struct.new(:dev, :ino) do
+        def file? = true
+      end.new(observed.dev, observed.ino + 1)
+      swapped_file = Object.new
+      swapped_file.define_singleton_method(:stat) { swapped_stat }
+      swapped_file.define_singleton_method(:read) { "replacement\n" }
+
+      with_replaced_singleton_method(
+        File, :open, ->(_path, *_args, &block) { block.call(swapped_file) }
+      ) do
+        error = assert_raises(Hive::InvalidTaskPath) do
+          Hive::Commands::Decide.read_state_file(path)
+        end
+        assert_includes error.message, "changed while opening it"
+      end
+
+      with_replaced_singleton_method(
+        File, :open, ->(*_args) { raise Errno::ELOOP, path }
+      ) do
+        error = assert_raises(Hive::InvalidTaskPath) do
+          Hive::Commands::Decide.read_state_file(path)
+        end
+        assert_includes error.message, "must be a regular file, not a symlink"
+      end
+    end
+  end
+
   def test_restore_files_removes_a_path_created_after_snapshot
     with_tmp_dir do |dir|
       path = File.join(dir, "created.md")
@@ -214,6 +252,36 @@ class DecideTest < Minitest::Test
     end
   end
 
+  def test_approve_refuses_an_artifact_swapped_while_opening
+    with_editorial_task do |_dir, approval, slug|
+      draft = File.join(approval, "draft.md")
+      task = Hive::Task.new(approval)
+      stage = task.workflow.stage_named("approval")
+      outcome = stage.outcomes.fetch("approve")
+      observed = File.lstat(draft)
+      swapped_stat = Struct.new(:dev, :ino) do
+        def file? = true
+      end.new(observed.dev, observed.ino + 1)
+      swapped_file = Object.new
+      swapped_file.define_singleton_method(:stat) { swapped_stat }
+      swapped_file.define_singleton_method(:read) { "# raced bytes\n" }
+      command = Hive::Commands::Decide.new(
+        slug, "approve", from: "approval", decision_id: decision_id_for(approval)
+      )
+
+      with_replaced_singleton_method(
+        File, :open, ->(_path, *_args, &block) { block.call(swapped_file) }
+      ) do
+        error = assert_raises(Hive::WrongStage) do
+          command.send(
+            :validate_publishable_artifact!, draft, approval, stage, outcome
+          )
+        end
+        assert_includes error.message, "requires non-empty artifact"
+      end
+    end
+  end
+
   def test_decide_refuses_a_symlinked_human_state_file
     with_editorial_task do |dir, approval, slug|
       with_tmp_dir do |outside|
@@ -378,6 +446,20 @@ class DecideTest < Minitest::Test
     end
   end
 
+  def test_decision_requires_the_human_stage_to_still_be_waiting
+    with_editorial_task do |_dir, approval, slug|
+      Hive::Markers.set(File.join(approval, "approval.md"), :complete)
+
+      error = assert_raises(Hive::WrongStage) do
+        Hive::Commands::Decide.new(
+          slug, "approve", from: "approval", decision_id: "a" * 16
+        ).send(:do_call)
+      end
+
+      assert_includes error.message, "is not awaiting a decision"
+    end
+  end
+
   def test_decision_from_a_moved_task_without_a_record_is_stale
     with_editorial_task do |dir, approval, slug|
       draft = File.join(dir, ".hive-state", "stages", "2-draft", slug)
@@ -500,6 +582,77 @@ class DecideTest < Minitest::Test
       assert_equal approval_before, File.binread(File.join(destination, "approval.md"))
       assert_equal draft_before, File.binread(File.join(destination, "draft.md"))
       assert_nil Hive::Commands::Decide.latest_record(File.join(destination, "approval.md"))
+    end
+  end
+
+  def test_reject_wrong_stage_after_local_mutation_restores_and_reraises
+    with_editorial_task do |_dir, approval, slug|
+      state = File.join(approval, "approval.md")
+      draft = File.join(approval, "draft.md")
+      state_before = File.binread(state)
+      draft_before = File.binread(draft)
+
+      replacement = lambda do |_target, **kwargs|
+        fake = Object.new
+        fake.define_singleton_method(:call) do
+          kwargs.fetch(:observation_guard).call(Hive::Task.new(approval))
+          raise Hive::WrongStage, "another transition won"
+        end
+        fake
+      end
+
+      with_replaced_singleton_method(Hive::Commands::Approve, :new, replacement) do
+        error = assert_raises(Hive::WrongStage) do
+          Hive::Commands::Decide.new(
+            slug, "reject", from: "approval", decision_id: decision_id_for(approval)
+          ).send(:do_call)
+        end
+        assert_includes error.message, "another transition won"
+      end
+
+      assert_equal state_before, File.binread(state)
+      assert_equal draft_before, File.binread(draft)
+      assert_nil Hive::Commands::Decide.latest_record(state)
+    end
+  end
+
+  def test_reject_wrong_stage_after_identical_concurrent_move_returns_noop
+    with_editorial_task do |dir, approval, slug|
+      command = Hive::Commands::Decide.new(
+        slug, "reject", from: "approval", decision_id: decision_id_for(approval)
+      )
+      task = Hive::Task.new(approval)
+      stage = task.workflow.stage_named("approval")
+      outcome = stage.outcomes.fetch("reject")
+      record = command.send(
+        :decision_record, task, stage, outcome, decision_id_for(approval)
+      )
+      destination = File.join(dir, ".hive-state", "stages", "2-draft", slug)
+
+      replacement = lambda do |_target, **_kwargs|
+        fake = Object.new
+        fake.define_singleton_method(:call) do
+          FileUtils.mkdir_p(File.dirname(destination))
+          File.rename(approval, destination)
+          command.send(
+            :write_decision_record, File.join(destination, "approval.md"), record
+          )
+          Hive::Markers.set(File.join(destination, "draft.md"), :waiting)
+          raise Hive::WrongStage, "another transition won"
+        end
+        fake
+      end
+
+      payload = with_replaced_singleton_method(
+        Hive::Commands::Approve, :new, replacement
+      ) { command.send(:do_call) }
+
+      assert_equal true, payload.fetch("noop")
+      assert_equal false, payload.fetch("applied")
+      assert_equal "2-draft", payload.fetch("current_stage")
+      assert_equal "reject", Hive::Commands::Decide.latest_record(
+        File.join(destination, "approval.md")
+      ).fetch("outcome")
     end
   end
 
@@ -640,6 +793,21 @@ class DecideTest < Minitest::Test
       refute payload.key?("allowed_outcomes")
       refute payload.dig("next_action").key?("allowed_outcomes")
       refute payload.dig("next_action").key?("decide_with")
+    end
+  end
+
+  def test_completed_human_stage_plain_run_reports_recorded_outcome
+    with_editorial_task do |_dir, approval, slug|
+      capture_io do
+        Hive::Commands::Decide.new(
+          slug, "approve", from: "approval", decision_id: decision_id_for(approval)
+        ).call
+      end
+
+      out, = capture_io { Hive::Commands::Run.new(slug).call }
+
+      assert_includes out, "complete: human workflow outcome recorded"
+      refute_includes out, "outcomes:"
     end
   end
 

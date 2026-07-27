@@ -340,6 +340,58 @@ class InitMinimalTest < Minitest::Test
     end
   end
 
+  def test_minimal_error_envelope_classifies_shared_failures_and_suggestions
+    command = Hive::Commands::Init.new(
+      ".", minimal: true, new_workflow: "editorial", json: true
+    )
+    {
+      Hive::ConcurrentRunError.new("busy") => "concurrent_run",
+      Hive::ConfigError.new("config") => "config",
+      Hive::GitError.new("git") => "git",
+      Hive::InternalError.new("internal") => "internal",
+      RuntimeError.new("other") => "error"
+    }.each do |error, kind|
+      assert_equal kind, command.send(:envelope_error_kind, error)
+    end
+
+    usage = Hive::Commands::Workflow::UsageError.new(
+      "workflow exists", value: "editorial", suggested_id: "editorial-2"
+    )
+    extras = command.send(:envelope_extras_for, usage)
+    assert_equal "editorial", extras.fetch("value")
+    assert_equal "editorial-2", extras.fetch("suggested_id")
+  end
+
+  def test_minimal_git_preconditions_remain_typed_for_automation
+    with_tmp_dir do |project_root|
+      command = Hive::Commands::Init.new(
+        project_root, minimal: true, new_workflow: "editorial", json: true
+      )
+      failure = Object.new
+      failure.define_singleton_method(:success?) { false }
+
+      with_replaced_singleton_method(
+        Open3, :capture3, ->(*_args) { [ "", "not a repository", failure ] }
+      ) do
+        error = assert_raises(Hive::Commands::Init::PreconditionError) do
+          command.send(:validate_git_repo!)
+        end
+        assert_equal "not_git_repository", error.error_kind
+      end
+
+      success = Object.new
+      success.define_singleton_method(:success?) { true }
+      with_replaced_singleton_method(
+        Open3, :capture3, ->(*_args) { [ "../shared.git\n", "", success ] }
+      ) do
+        error = assert_raises(Hive::Commands::Init::PreconditionError) do
+          command.send(:validate_git_repo!)
+        end
+        assert_equal "main_checkout_required", error.error_kind
+      end
+    end
+  end
+
   def test_plain_preview_reports_plan_and_broken_pipe_is_harmless
     with_tmp_global_config do
       with_tmp_git_repo do |project_root|

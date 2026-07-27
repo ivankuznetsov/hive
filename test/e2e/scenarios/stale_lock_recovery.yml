@@ -1,6 +1,9 @@
 name: stale_lock_recovery
 description: Concurrent lock failure produces TEMPFAIL, then marker clear and rerun recover.
 tags: [cli-only, recovery]
+coverage:
+  primary: recovery.stale_lock
+  supporting: []
 steps:
   - kind: seed_state
     stage: 4-execute

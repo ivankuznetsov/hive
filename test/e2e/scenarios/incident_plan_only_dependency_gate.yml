@@ -1,6 +1,9 @@
 name: incident_plan_only_dependency_gate
 description: Proves a plan-only prerequisite blocks dependent dispatch until the sibling-defined threshold.
 tags: [incident-regression]
+coverage:
+  primary: dependency.plan_only_gate
+  supporting: []
 incident_id: plan-only-dependency-gate
 sibling_task_id: "#9771"
 pending: false

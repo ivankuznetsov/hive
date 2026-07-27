@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-e2e-coverage.v1.json",
+  "title": "hive-e2e semantic coverage discovery (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "catalog_digest", "query", "profile", "matches"],
+  "properties": {
+    "schema": { "const": "hive-e2e-coverage" },
+    "schema_version": { "const": 1 },
+    "catalog_digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "query": { "type": "string", "minLength": 1 },
+    "profile": { "type": ["string", "null"] },
+    "matches": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/match" }
+    }
+  },
+  "$defs": {
+    "scenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "pending", "tags", "incident_id", "sibling_task_id"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "pending": { "type": "boolean" },
+        "tags": { "type": "array", "items": { "type": "string" } },
+        "incident_id": { "type": ["string", "null"] },
+        "sibling_task_id": { "type": ["string", "null"] }
+      }
+    },
+    "match": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "title", "description", "maturity", "profiles", "constraints",
+        "docs", "code", "primary_scenario", "supporting_scenarios", "runnable_command"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$"
+        },
+        "title": { "type": "string", "minLength": 1 },
+        "description": { "type": "string", "minLength": 1 },
+        "maturity": { "enum": ["required", "advisory", "planned"] },
+        "profiles": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
+        "constraints": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["platforms", "providers"],
+          "properties": {
+            "platforms": {
+              "type": "array",
+              "items": { "type": "string" },
+              "uniqueItems": true
+            },
+            "providers": {
+              "type": "array",
+              "items": { "type": "string" },
+              "uniqueItems": true
+            }
+          }
+        },
+        "docs": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
+        "code": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
+        "primary_scenario": {
+          "oneOf": [
+            { "$ref": "#/$defs/scenario" },
+            { "type": "null" }
+          ]
+        },
+        "supporting_scenarios": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/scenario" }
+        },
+        "runnable_command": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

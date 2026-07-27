@@ -56,7 +56,7 @@ jobs:
       - name: Synchronize the package tree
         shell: bash
         run: |
-          ruby mirror/.github/mirror/sync.rb \
+          ruby hive/components/agent-cli-runtime/mirror/sync.rb \
             hive/components/agent-cli-runtime \
             mirror \
             "${{ steps.source.outputs.commit }}"

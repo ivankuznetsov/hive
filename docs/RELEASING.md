@@ -91,22 +91,32 @@ The mirror's `main` branch is synchronized one way from
 schedule or manual dispatch. Each snapshot records its exact canonical
 component commit in `.mirror-source.json`. The sync excludes the component's
 `mirror/` administration directory from the public package tree and preserves
-the mirror-only workflow, contribution, and security files.
+the mirror-only workflow, contribution, and security files. The workflow
+executes the projector from the canonical Hive checkout, so projector and
+administration changes take effect atomically.
 New mirror-only administration must first be added to the canonical
-`mirror/` allowlist in Hive; unsourced target-only files are removed. A fully
-absent admin set is preserved only for initial bootstrap compatibility, while a
-partial canonical admin set fails before mutating the mirror.
+`mirror/` allowlist in Hive; unsourced target-only files are removed. Any
+missing canonical admin file fails before mutating the mirror.
 
 After an approved component version has been published from Hive, manually run
 **Mirror a component release** in the mirror with `vX.Y.Z`. The workflow checks
-out the exact protected `components/agent-cli-runtime/vX.Y.Z` tag, requires its
-commit on canonical `main`, verifies its gemspec version is already available
-from RubyGems, and constructs an orphan source snapshot locally. The complete
-snapshot tree must match the canonical projection before the workflow builds
-and installs it and exercises `agent-runtime --version`. Only then does it push
-the mirror tag and create the GitHub release. Existing mirror tags are accepted
-only when their complete tree matches the newly reconstructed canonical
-snapshot.
+out the fully qualified protected
+`refs/tags/components/agent-cli-runtime/vX.Y.Z` ref and runs the component's
+release preflight against canonical `main`. It then verifies the exact version
+is already available from RubyGems and constructs an orphan source snapshot
+locally. An independent Git archive of the canonical tag, excluding only
+`mirror/` and adding the source manifest, defines the expected tree. The
+projected tree must match it before the workflow builds and installs the gem and
+exercises `agent-runtime --version`. Only then does it push the mirror tag and
+create the GitHub release. Existing mirror tags are accepted only when their
+complete tree matches the independently reconstructed canonical snapshot.
+
+The mirror repository must have an active tag ruleset targeting
+`refs/tags/v*` that restricts updates and deletion and blocks non-fast-forward
+movement. Leave initial creation available to the verified workflow; never add
+a bypass that can replace an existing release tag. The workflow checks the live
+ruleset through the GitHub API and refuses to create a local release tag when
+the immutable-tag policy is absent.
 
 The mirror workflow never pushes to Hive or RubyGems and cannot choose or
 publish a version. Do not accept issues, pull requests, independent commits, or

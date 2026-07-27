@@ -12,7 +12,7 @@ class AgentCliRuntimeMirrorTest < Minitest::Test
   CHECKOUT_ACTION = "actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09"
   RUBY_ACTION = "ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b"
 
-  def test_sync_materializes_package_at_root_and_preserves_mirror_admin
+  def test_sync_materializes_package_at_root_and_installs_mirror_admin
     Dir.mktmpdir("agent-cli-runtime-mirror") do |dir|
       source = File.join(dir, "source")
       destination = File.join(dir, "destination")
@@ -44,10 +44,7 @@ class AgentCliRuntimeMirrorTest < Minitest::Test
                        "mirror-release.yml"
                      )
                    )
-      assert_equal "sync\n",
-                   File.read(
-                     File.join(destination, ".github", "mirror", "sync.rb")
-                   )
+      refute_path_exists File.join(destination, ".github", "mirror")
       refute_path_exists(
         File.join(destination, ".github", "workflows", "old.yml")
       )
@@ -88,7 +85,7 @@ class AgentCliRuntimeMirrorTest < Minitest::Test
     end
   end
 
-  def test_sync_preserves_bootstrap_admin_when_source_has_no_admin_files
+  def test_sync_rejects_missing_admin_before_mutating_destination
     Dir.mktmpdir("agent-cli-runtime-mirror") do |dir|
       source = File.join(dir, "source")
       destination = File.join(dir, "destination")
@@ -98,12 +95,14 @@ class AgentCliRuntimeMirrorTest < Minitest::Test
       File.write(File.join(destination, "CONTRIBUTING.md"), "existing\n")
       File.write(File.join(destination, "SECURITY.md"), "existing\n")
 
-      out, err, status = Open3.capture3(
+      _out, err, status = Open3.capture3(
         RbConfig.ruby, SYNC, source, destination, SOURCE_SHA
       )
 
-      assert status.success?, "#{out}\n#{err}"
-      assert_equal "package\n", File.read(File.join(destination, "README.md"))
+      refute status.success?
+      assert_match(/source mirror administration is incomplete/, err)
+      assert_match(/sync-from-hive\.yml/, err)
+      assert_path_exists File.join(destination, "stale.txt")
       assert_equal(
         "old\n",
         File.read(
@@ -187,7 +186,11 @@ class AgentCliRuntimeMirrorTest < Minitest::Test
     assert_actions_are_pinned(workflow)
     assert_equal 2, workflow.scan("uses: #{CHECKOUT_ACTION}").length
     assert_equal 1, workflow.scan("uses: #{RUBY_ACTION}").length
-    assert_includes workflow, "mirror/.github/mirror/sync.rb"
+    assert_includes(
+      workflow,
+      "ruby hive/components/agent-cli-runtime/mirror/sync.rb"
+    )
+    refute_includes workflow, "mirror/.github/mirror/sync.rb"
     assert_includes workflow, "cd mirror"
     assert_includes workflow, "fetch-depth: 1"
     assert_includes workflow, "fetch-depth: 0"
@@ -200,9 +203,19 @@ class AgentCliRuntimeMirrorTest < Minitest::Test
     assert_equal 1, release_workflow.scan("uses: #{RUBY_ACTION}").length
     assert_includes(
       release_workflow,
-      "ref: components/agent-cli-runtime/${{ inputs.version }}"
+      'echo "tag_ref=refs/tags/components/agent-cli-runtime/$VERSION"'
     )
+    assert_includes release_workflow, "ref: ${{ steps.request.outputs.tag_ref }}"
+    assert_before(
+      release_workflow,
+      "- name: Validate the release request",
+      "- name: Check out the canonical component tag"
+    )
+    assert_includes release_workflow, "bin/release-preflight"
     assert_includes release_workflow, "--release"
+    assert_equal 1, release_workflow.scan('ruby "$sync"').length
+    assert_includes release_workflow, "git -C hive archive"
+    assert_includes release_workflow, "--exclude=mirror"
     assert_includes release_workflow, 'cd "$snapshot"'
     assert_includes release_workflow, "rm -rf --ignore-unmatch ."
     assert_includes(
@@ -226,7 +239,8 @@ class AgentCliRuntimeMirrorTest < Minitest::Test
       release_workflow,
       "+refs/heads/main:refs/remotes/origin/main"
     )
-    assert_includes release_workflow, "merge-base --is-ancestor"
+    assert_includes release_workflow, 'includes.include?("refs/tags/v*")'
+    assert_includes release_workflow, "%w[update deletion non_fast_forward]"
     assert_includes release_workflow, 'expected_tree="$(git -C "$expected" write-tree)"'
     assert_includes release_workflow, '"refs/tags/$VERSION^{tree}"'
     assert_includes release_workflow, 'test "$actual_tree" = "$expected_tree"'
@@ -239,13 +253,19 @@ class AgentCliRuntimeMirrorTest < Minitest::Test
       "https://rubygems.org/api/v1/versions/agent-cli-runtime.json",
       tag_push
     )
-    assert_before release_workflow, "merge-base --is-ancestor", tag_push
+    assert_before release_workflow, "bin/release-preflight", tag_push
+    assert_before release_workflow, "Require immutable mirror release tags", tag_push
     assert_before(
       release_workflow,
       "https://rubygems.org/api/v1/versions/agent-cli-runtime.json",
       local_tag
     )
-    assert_before release_workflow, "merge-base --is-ancestor", local_tag
+    assert_before release_workflow, "bin/release-preflight", local_tag
+    assert_before(
+      release_workflow,
+      "git -C hive archive",
+      'expected_tree="$(git -C "$expected" write-tree)"'
+    )
     assert_last_before(
       release_workflow,
       'test "$actual_tree" = "$expected_tree"',

@@ -93,13 +93,16 @@ The public
 repository is a read-only distribution projection, not a second development
 home. Its scheduled or manually dispatched sync copies this component to the
 mirror root and writes `.mirror-source.json` with the exact canonical component
-commit. A separate manual mirror workflow projects an already approved
-component tag to an orphan `vX.Y.Z` source-snapshot tag, verifies the snapshot
-commit is on canonical main and its exact version is already on RubyGems,
-reconstructs and compares the complete canonical tree, verifies that local tag
-as an installable gem, and only then pushes it and creates the focused GitHub
-release. Neither mirror workflow can modify Hive, publish RubyGems bytes, or
-choose a version; issues, pull requests, and release authority stay here.
+commit. The mirror invokes the projector from the canonical checkout and
+requires the complete canonical admin set before mutation. A separate manual
+mirror workflow projects an already approved, fully qualified component tag to
+an orphan `vX.Y.Z` source-snapshot tag. It reuses the component release
+preflight, verifies the exact version is already on RubyGems, compares the
+projected tree with an independently archived canonical tree, requires a live
+immutable `refs/tags/v*` ruleset, verifies the local tag as an installable gem,
+and only then pushes it and creates the focused GitHub release. Neither mirror
+workflow can modify Hive, publish RubyGems bytes, or choose a version; issues,
+pull requests, and release authority stay here.
 
 ## Compatibility
 

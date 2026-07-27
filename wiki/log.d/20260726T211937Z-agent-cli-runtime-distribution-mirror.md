@@ -10,13 +10,14 @@ authority.
 workflow projects the component onto the mirror's `main` branch and records the
 exact canonical component commit in `.mirror-source.json`. A separate manual
 workflow projects an already approved component tag to an orphan mirror tag,
-requires it on canonical main and present on RubyGems, reconstructs and compares
-the complete canonical tree, builds and installs the local snapshot, proves the
-executable version, and only then pushes the tag and creates the mirror GitHub
+requires the exact protected tag on canonical main and present on RubyGems,
+independently reconstructs and compares the complete canonical tree, builds and
+installs the local snapshot, proves the executable version, requires immutable
+mirror release tags, and only then pushes the tag and creates the mirror GitHub
 release. Third-party Actions are commit-pinned. Tests cover stale-file removal,
-symlink rejection before mutation, absent-versus-partial administration-file
-handling, package exclusion, workflow YAML parsing, repository scoping,
-provenance, and verification-before-publication ordering.
+symlink rejection before mutation, strict administration completeness, package
+exclusion, workflow YAML parsing, repository scoping, provenance, and
+verification-before-publication ordering.
 
 **Boundary:** `ivankuznetsov/agent-cli-runtime` is a read-only distribution
 surface. It cannot push to Hive or RubyGems, choose a version, or become an

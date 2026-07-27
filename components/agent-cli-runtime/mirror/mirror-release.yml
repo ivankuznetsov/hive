@@ -28,11 +28,26 @@ jobs:
           path: mirror
           fetch-depth: 0
 
+      - name: Validate the release request
+        id: request
+        env:
+          VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "invalid version: $VERSION" >&2
+            exit 1
+          fi
+          echo "version=${VERSION#v}" >> "$GITHUB_OUTPUT"
+          echo "tag_name=components/agent-cli-runtime/$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag_ref=refs/tags/components/agent-cli-runtime/$VERSION" >> "$GITHUB_OUTPUT"
+
       - name: Check out the canonical component tag
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.0.0
         with:
           repository: ivankuznetsov/hive
-          ref: components/agent-cli-runtime/${{ inputs.version }}
+          ref: ${{ steps.request.outputs.tag_ref }}
           path: hive
           fetch-depth: 0
           persist-credentials: false
@@ -43,42 +58,23 @@ jobs:
         with:
           ruby-version: "3.4"
 
-      - name: Validate release identity
+      - name: Require the exact component tag on canonical main
         id: release
         env:
-          VERSION: ${{ inputs.version }}
-        shell: bash
-        run: |
-          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
-            echo "invalid version: $VERSION" >&2
-            exit 1
-          fi
-          actual="$(
-            ruby -Ihive/components/agent-cli-runtime/lib \
-              -ragent_cli_runtime/version \
-              -e 'print AgentCliRuntime::VERSION'
-          )"
-          if test "v$actual" != "$VERSION"; then
-            echo "tag/source version mismatch: $VERSION != v$actual" >&2
-            exit 1
-          fi
-          source_commit="$(git -C hive rev-parse HEAD)"
-          echo "version=$actual" >> "$GITHUB_OUTPUT"
-          echo "source_commit=$source_commit" >> "$GITHUB_OUTPUT"
-
-      - name: Require the component tag on canonical main
-        env:
-          SOURCE_COMMIT: ${{ steps.release.outputs.source_commit }}
+          EXPECTED_VERSION: ${{ steps.request.outputs.version }}
+          TAG_NAME: ${{ steps.request.outputs.tag_name }}
         shell: bash
         run: |
           set -euo pipefail
+          source_commit="$(git -C hive rev-parse HEAD)"
           git -C hive fetch --no-tags --force origin \
             +refs/heads/main:refs/remotes/origin/main
-          if ! git -C hive merge-base --is-ancestor \
-            "$SOURCE_COMMIT" refs/remotes/origin/main; then
-            echo "component tag is not reachable from canonical main" >&2
-            exit 1
-          fi
+          hive/components/agent-cli-runtime/bin/release-preflight \
+            "$TAG_NAME" \
+            "$source_commit" \
+            refs/remotes/origin/main
+          echo "version=$EXPECTED_VERSION" >> "$GITHUB_OUTPUT"
+          echo "source_commit=$source_commit" >> "$GITHUB_OUTPUT"
 
       - name: Require the exact version on RubyGems
         env:
@@ -101,6 +97,39 @@ jobs:
                 versions.any? { |version| version.fetch("number") == expected }
             ' "$EXPECTED_VERSION"
 
+      - name: Require immutable mirror release tags
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ruleset_ids="$(
+            gh api "repos/$GITHUB_REPOSITORY/rulesets" \
+              --jq '.[] | select(.target == "tag" and .enforcement == "active") | .id'
+          )"
+          immutable=false
+          while IFS= read -r ruleset_id; do
+            test -n "$ruleset_id" || continue
+            if gh api "repos/$GITHUB_REPOSITORY/rulesets/$ruleset_id" |
+              ruby -rjson -e '
+                ruleset = JSON.parse(STDIN.read)
+                includes = ruleset.dig("conditions", "ref_name", "include") || []
+                types = ruleset.fetch("rules", []).map { |rule| rule.fetch("type") }
+                required = %w[update deletion non_fast_forward]
+                immutable = includes.include?("refs/tags/v*") &&
+                  (required - types).empty?
+                exit(immutable ? 0 : 1)
+              '
+            then
+              immutable=true
+              break
+            fi
+          done <<< "$ruleset_ids"
+          if test "$immutable" != true; then
+            echo "active immutable refs/tags/v* ruleset is required" >&2
+            exit 1
+          fi
+
       - name: Create and compare the exact release snapshot tag locally
         env:
           VERSION: ${{ inputs.version }}
@@ -110,13 +139,23 @@ jobs:
           set -euo pipefail
           sync="$RUNNER_TEMP/agent-cli-runtime-mirror-sync.rb"
           expected="$RUNNER_TEMP/expected-release-snapshot"
-          cp mirror/.github/mirror/sync.rb "$sync"
+          git -C hive show \
+            refs/remotes/origin/main:components/agent-cli-runtime/mirror/sync.rb \
+            > "$sync"
+          mkdir -p "$expected"
+          git -C hive archive \
+            "$SOURCE_COMMIT:components/agent-cli-runtime" |
+            tar -x -C "$expected" --exclude=mirror --exclude='mirror/*'
+          ruby -rjson -e '
+            source_commit, destination = ARGV
+            payload = {
+              repository: "ivankuznetsov/hive",
+              component_path: "components/agent-cli-runtime",
+              source_commit: source_commit
+            }
+            File.write(destination, "#{JSON.pretty_generate(payload)}\n")
+          ' "$SOURCE_COMMIT" "$expected/.mirror-source.json"
           git init -q "$expected"
-          ruby "$sync" \
-            hive/components/agent-cli-runtime \
-            "$expected" \
-            "$SOURCE_COMMIT" \
-            --release
           git -C "$expected" add --all
           expected_tree="$(git -C "$expected" write-tree)"
 

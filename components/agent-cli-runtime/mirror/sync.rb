@@ -10,7 +10,6 @@ module AgentCliRuntimeMirror
   COMPONENT_PATH = "components/agent-cli-runtime"
   SOURCE_SHA = /\A[0-9a-f]{40}\z/
   ADMIN_FILES = {
-    "sync.rb" => ".github/mirror/sync.rb",
     "sync-from-hive.yml" => ".github/workflows/sync-from-hive.yml",
     "mirror-release.yml" => ".github/workflows/mirror-release.yml",
     "CONTRIBUTING.md" => "CONTRIBUTING.md",
@@ -32,16 +31,10 @@ module AgentCliRuntimeMirror
     reject_source_symlinks!(source)
 
     release = mode == "--release"
-    admin_presence = ADMIN_FILES.keys.to_h do |path|
-      [ path, File.file?(File.join(source, "mirror", path)) ]
-    end
-    reject_partial_admin!(admin_presence) unless release
-    admin_available = admin_presence.values.all?
-    preserve = [ ".git" ]
-    preserve.concat([ ".github", "CONTRIBUTING.md", "SECURITY.md" ]) unless release || admin_available
+    require_complete_admin!(source) unless release
 
-    replace_payload(source, destination, preserve:)
-    install_admin_files(source, destination) if !release && admin_available
+    replace_payload(source, destination, preserve: [ ".git" ])
+    install_admin_files(source, destination) unless release
     write_manifest(destination, source_commit)
   end
 
@@ -72,10 +65,12 @@ module AgentCliRuntimeMirror
     abort "destination is not a Git checkout: #{destination}"
   end
 
-  def reject_partial_admin!(admin_presence)
-    return if admin_presence.values.none? || admin_presence.values.all?
+  def require_complete_admin!(source)
+    missing = ADMIN_FILES.keys.reject do |path|
+      File.file?(File.join(source, "mirror", path))
+    end.sort
+    return if missing.empty?
 
-    missing = admin_presence.reject { |_path, present| present }.keys.sort
     abort "source mirror administration is incomplete: missing #{missing.join(", ")}"
   end
 

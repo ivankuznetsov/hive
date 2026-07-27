@@ -56,10 +56,12 @@ Landing the package does not change Hive's gem dependency graph. See
 
 Its public standalone repository is deliberately a one-way distribution
 projection. Scheduled main snapshots and manually requested release snapshots
-record the exact Hive component commit, while development, issues, pull
-requests, version selection, and RubyGems publication remain owned by this
-monorepo. The mirror improves focused discovery without creating a second
-source of truth.
+record the exact Hive component commit. The canonical checkout owns projection
+logic and the release workflow independently reconstructs the expected tag tree
+before publication; immutable mirror tag rules protect that verified result.
+Development, issues, pull requests, version selection, and RubyGems publication
+remain owned by this monorepo. The mirror improves focused discovery without
+creating a second source of truth.
 
 ## Catalog contract
 

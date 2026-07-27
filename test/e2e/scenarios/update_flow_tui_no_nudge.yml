@@ -5,6 +5,9 @@ description: >
   project E2E rules: assert presence AND absence).
   (tui-tagged: runs where a tmux/TTY is available.)
 tags: [update, tui]
+coverage:
+  primary: update.tui_no_nudge
+  supporting: []
 steps:
   - kind: tui_expect
     anchor: "Tasks ·"

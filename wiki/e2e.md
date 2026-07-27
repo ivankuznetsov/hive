@@ -1,9 +1,9 @@
 ---
 title: Agentic E2E Suite
 type: reference
-source: test/e2e/, bin/hive-e2e, Rakefile
+source: test/e2e/, bin/hive-e2e, schemas/hive-e2e-{coverage,selection}.v1.json, Rakefile
 created: 2026-04-29
-updated: 2026-07-24
+updated: 2026-07-27
 tags: [test, e2e, tui, incidents, artifacts]
 ---
 
@@ -17,11 +17,47 @@ bin/hive-e2e list               # scenario inventory
 bin/hive-e2e run                # all scenarios
 bin/hive-e2e run --filter tui   # tag filter
 bin/hive-e2e run --filter incident-regression --json
+bin/hive-e2e coverage --match "provider retry"
+bin/hive-e2e run --coverage workflow.full_pipeline
+bin/hive-e2e run --profile release
 test/e2e/check_incident_budget.rb test/e2e/runs
 bin/hive-e2e clean              # old run cleanup
 ```
 
 `rake e2e` delegates to `bin/hive-e2e run`. The default `rake test` suite does not run e2e scenarios.
+
+## Semantic coverage
+
+`test/e2e/coverage.yml` is the canonical stable-ID taxonomy for the 20 scenario
+files. Each scenario retains its steps, pending state, incident metadata, and
+filename as execution authority while declaring one `coverage.primary` and an
+initially empty `coverage.supporting` list. The catalog owns titles,
+descriptions, `required` / `advisory` / `planned` maturity, release-profile
+membership, constraints, and root-confined documentation/code references.
+
+`bin/hive-e2e coverage --match QUERY [--profile release] [--json]` searches the
+joined catalog and scenario metadata. Exact IDs win; substring results use
+stable lexical ID order. Only an active, non-planned primary receives an exact
+`run --coverage ID` command. Supporting scenarios are supplemental discovery
+results and pending/planned matches remain visible without a runnable command.
+
+`bin/hive-e2e run --profile release` selects the active primary for each
+required release ID before constructing a runner. Unknown mappings, duplicate
+primary owners, invalid catalog vocabulary/references/profiles, and a required
+profile gap fail preflight before run or sandbox creation. Semantic runs write
+`selection.json` (`hive-e2e-selection.v1`) beside the unchanged
+`report.json` (`hive-e2e-report.v1`); discovery uses
+`hive-e2e-coverage.v1`. Plain run, pattern/filter selection, list output, and
+the ordinary CI invocation retain their prior contracts.
+
+The published `schemas/hive-e2e-coverage.v1.json` contract binds discovery to
+the catalog digest, query/profile, maturity and constraints, primary/supporting
+scenario metadata, root-confined references, and optional runnable command.
+`schemas/hive-e2e-selection.v1.json` binds a semantic run to its catalog
+digest, profile, required coverage IDs, concrete scenarios,
+pending/advisory/planned IDs, and replay command. `coverage` is read-only
+discovery; `run --coverage` and `run --profile` create the normal run directory
+and are the only modes that add `selection.json`.
 
 ## Binary contract
 
@@ -95,6 +131,7 @@ variable from silently overriding the harness-specific cleanup policy.
 | Path | Purpose |
 |------|---------|
 | `test/e2e/lib/` | Harness library: sandbox bootstrap, CLI driver, tmux driver, parser, executor, artifact capture, report writer. |
+| `test/e2e/coverage.yml` | Stable semantic coverage taxonomy and release-profile membership. |
 | `test/e2e/scenarios/*.yml` | Agent-authorable scenarios using the locked YAML vocabulary. |
 | `test/e2e/scenarios/README.md` | Incident metadata, activation lifecycle, sibling index, GitHub scripting, and process-isolation contract. |
 | `test/e2e/fixtures/gh` | Run-global, default-deny GitHub CLI shim with no host-binary fallback. |

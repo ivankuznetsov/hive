@@ -1,6 +1,9 @@
 name: durable_attempt_1849_replay
 description: A CLI-originated three-commit agent survives attachment termination and completes from its wrapper receipt.
 tags: [durable-attempt, cli-only, acceptance]
+coverage:
+  primary: attempt.terminal_replay
+  supporting: []
 steps:
   - kind: cli
     args: [new, "{project}", "durable attempt replay"]

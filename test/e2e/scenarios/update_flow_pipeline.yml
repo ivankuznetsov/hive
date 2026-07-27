@@ -4,6 +4,9 @@ description: >
   release via the local stub, detects it is behind, writes update_check.json,
   and the nudge surfaces in `hive daemon status --json` and the TUI footer.
 tags: [update, daemon]
+coverage:
+  primary: update.pipeline_available
+  supporting: []
 steps:
   # Force the brew install channel so the nudge command is the real brew string.
   - kind: write_file

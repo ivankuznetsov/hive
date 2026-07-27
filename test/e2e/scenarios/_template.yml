@@ -1,6 +1,9 @@
 name: template
 description: Reference scenario showing every v1 step kind.
 tags: [template]
+coverage:
+  primary: capability.stable_id
+  supporting: []
 
 # Incident regressions additionally require all of the following metadata.
 # Leave `pending: true` until the sibling task defines the exact persisted

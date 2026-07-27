@@ -43,6 +43,7 @@ module Hive
     # loops can branch deterministically.
     class Approve
       include Hive::Schemas::EnvelopeEmitter
+      DEFAULT_CLOCK = -> { Time.now.utc }.freeze
 
       VALID_TERMINAL_MARKERS = %i[complete execute_complete review_complete].freeze
 
@@ -61,7 +62,7 @@ module Hive
       end
 
       def initialize(target, to: nil, from: nil, project: nil, force: false, json: false, quiet: false,
-                     observation_guard: nil, clock: -> { Time.now.utc })
+                     observation_guard: nil, clock: DEFAULT_CLOCK)
         @target = target
         @to = to
         @from = from

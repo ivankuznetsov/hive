@@ -273,8 +273,11 @@ module Hive
             )
           rescue Hive::Error, Hive::TaskMeta::InvalidMetadata,
                  SystemCallError, IOError, ArgumentError, Interrupt => e
-            rollback_terminal_state!(task, terminal_snapshot, ops, e) if archived && terminal_snapshot
-            raise
+            if archived && terminal_snapshot
+              rollback_terminal_state!(task, terminal_snapshot, ops, e)
+            else
+              raise
+            end
           end
         end
       ensure

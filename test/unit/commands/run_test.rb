@@ -269,6 +269,44 @@ class CommandsRunTest < Minitest::Test
     end
   end
 
+  def test_nonterminal_commit_failure_propagates_without_terminal_rollback
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "2-brainstorm", "some-slug")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "brainstorm.md")
+      File.write(state_file, "<!-- COMPLETE -->\n")
+      t = task(
+        folder: folder, state_file: state_file,
+        hive_state_path: File.join(dir, ".hive-state")
+      )
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:hive_commit) do |**|
+        raise Hive::GitError, "commit failed"
+      end
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(*) { fake_ops }) do
+        assert_raises(Hive::GitError) do
+          command.send(:commit_after, t, { commit: "complete" }, config: {})
+        end
+      end
+    end
+  end
+
+  def test_terminal_rollback_failure_reports_both_errors
+    snapshot = Object.new
+    snapshot.define_singleton_method(:restore) { raise IOError, "restore failed" }
+    original = Hive::GitError.new("commit failed")
+
+    error = assert_raises(Hive::RollbackFailed) do
+      command.send(
+        :rollback_terminal_state!, task, snapshot, Object.new, original
+      )
+    end
+
+    assert_includes error.message, "commit error: Hive::GitError: commit failed"
+    assert_includes error.message, "rollback error: IOError: restore failed"
+  end
+
   def test_terminal_runner_failure_restores_all_runner_mutations
     with_tmp_dir do |dir|
       folder = File.join(dir, ".hive-state", "stages", "1-publish", "some-slug")

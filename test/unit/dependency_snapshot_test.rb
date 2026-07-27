@@ -425,6 +425,23 @@ class DependencySnapshotTest < Minitest::Test
     assert_match(/enrollment is missing or ambiguous/, error.message)
   end
 
+  def test_workflow_generation_and_archive_classification_fail_closed
+    generation_error = Hive::ConfigError.new("captured generation failed")
+    snapshot = Hive::DependencySnapshot.admission_project(
+      { "name" => "demo", "path" => "/project" },
+      workflow_generation: generation_error
+    )
+
+    assert_includes snapshot.validation_error, "captured generation failed"
+    refute Hive::DependencySnapshot.send(
+      :archived_folder?, "/missing-task",
+      config: {}, project_name: "demo"
+    )
+    assert_nil Hive::DependencySnapshot.send(
+      :workflow_generation_for, {}, { "/project" => Object.new }
+    )
+  end
+
   private
 
   def write_task_meta(root, stage, slug, id:)

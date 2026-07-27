@@ -541,4 +541,23 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       assert_equal :unavailable, gone
     end
   end
+
+  def test_complete_rejects_invalid_hidden_archive_counts
+    with_tmp_dir do |dir|
+      _store, assembler, _reader = build(File.join(dir, "snapshot.json"))
+      assembler.begin_tick(now: T0)
+
+      error = assert_raises(ArgumentError) do
+        assembler.complete(
+          initial_rows: [], final_rows: [],
+          initial_hidden_archived_task_count: -1,
+          final_hidden_archived_task_count: 0,
+          controller: {}, queue: {}, recoveries: {}, now: T0 + 1
+        )
+      end
+
+      assert_includes error.message, "initial_hidden_archived_task_count"
+      assert_includes error.message, "non-negative integer"
+    end
+  end
 end

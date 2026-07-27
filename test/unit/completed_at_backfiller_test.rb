@@ -128,6 +128,127 @@ class CompletedAtBackfillerTest < Minitest::Test
     end
   end
 
+  def test_cursor_store_reads_writes_and_fails_open
+    with_tmp_dir do |root|
+      store = Hive::CompletedAtBackfiller::CursorStore.new(root: root)
+
+      assert_nil store.read("/state")
+      assert store.write("/state", "/task")
+      assert_equal "/task", store.read("/state")
+
+      with_replaced_singleton_method(
+        Hive::AtomicFile, :write, ->(*) { raise IOError, "cursor unavailable" }
+      ) do
+        _out, err = capture_io do
+          assert_nil store.write("/other-state", "/other-task")
+        end
+        assert_includes err, "completed_at cursor update failed"
+        assert_includes err, "cursor unavailable"
+      end
+    end
+  end
+
+  def test_cursor_rotation_returns_a_bounded_batch_when_persistence_fails
+    with_tmp_dir do |root|
+      tasks = 3.times.map { |index| BackfillTask.new("/task-#{index}", "/state") }
+      store = Hive::CompletedAtBackfiller::CursorStore.new(root: root)
+
+      selected = nil
+      with_replaced_singleton_method(
+        Hive::AtomicFile, :write, ->(*) { raise IOError, "cursor unavailable" }
+      ) do
+        _out, err = capture_io { selected = store.rotating_batch(tasks, 2) }
+        assert_includes err, "completed_at cursor rotation failed"
+      end
+
+      assert_equal %w[/task-0 /task-1], selected.map(&:folder)
+    end
+  end
+
+  def test_completed_at_for_re_raises_interrupt_and_degrades_other_failures
+    with_tmp_dir do |folder|
+      task = Struct.new(:folder, :hive_state_path, :completed_at)
+                   .new(folder, "/state", nil)
+      backfiller = Hive::CompletedAtBackfiller.new
+
+      with_replaced_singleton_method(
+        Hive::Lock, :with_commit_lock, ->(*) { raise Interrupt }
+      ) do
+        assert_raises(Interrupt) { backfiller.completed_at_for(task) }
+      end
+
+      with_replaced_singleton_method(
+        Hive::Lock, :with_commit_lock, ->(*) { raise RuntimeError, "lock unavailable" }
+      ) do
+        _out, err = capture_io do
+          assert_nil backfiller.completed_at_for(task)
+        end
+        assert_includes err, "completed_at backfill failed"
+        assert_includes err, "lock unavailable"
+      end
+    end
+  end
+
+  def test_archived_classification_failure_keeps_the_task_visible
+    task = Struct.new(:folder, :state_file).new("/task", "/task/done.md")
+    backfiller = Hive::CompletedAtBackfiller.new
+
+    with_replaced_singleton_method(
+      Hive::Markers, :current, ->(*) { raise Hive::ConfigError, "bad marker policy" }
+    ) do
+      _out, err = capture_io do
+        refute backfiller.send(:archived?, task, config: {})
+      end
+      assert_includes err, "could not classify"
+      assert_includes err, "bad marker policy"
+    end
+  end
+
+  def test_missing_completion_source_and_expired_deadline_fail_open
+    task = Struct.new(:folder).new("/task")
+    backfiller = Hive::CompletedAtBackfiller.new(
+      monotonic_clock: -> { 2.0 }
+    )
+
+    with_replaced_singleton_method(Hive::CompletionTime, :discover, ->(*) { nil }) do
+      _out, err = capture_io do
+        assert_nil backfiller.send(:persist_discovered_time, task, deadline: 3.0)
+      end
+      assert_includes err, "has no credible source"
+    end
+
+    assert_raises(Hive::CompletionTime::DeadlineExceeded) do
+      backfiller.send(:ensure_before_deadline!, 1.0)
+    end
+  end
+
+  def test_interrupt_while_persisting_restores_the_metadata_snapshot
+    task = Struct.new(:folder).new("/task")
+    backfiller = Hive::CompletedAtBackfiller.new(
+      monotonic_clock: -> { 0.0 }
+    )
+    restored = []
+    backfiller.define_singleton_method(:restore) do |observed_task, snapshot, deadline:|
+      restored << [ observed_task, snapshot, deadline ]
+    end
+
+    with_replaced_singleton_method(
+      Hive::CompletionTime, :discover, ->(*) { Time.utc(2026, 7, 1) }
+    ) do
+      with_replaced_singleton_method(Hive::TaskMeta, :snapshot, ->(*) { :before }) do
+        with_replaced_singleton_method(
+          Hive::TaskMeta, :write_completed_at_once, ->(*) { raise Interrupt }
+        ) do
+          assert_raises(Interrupt) do
+            backfiller.send(:persist_discovered_time, task, deadline: 1.0)
+          end
+        end
+      end
+    end
+
+    assert_equal [ [ task, :before, 1.0 ] ], restored
+  end
+
   def test_backfill_commit_preserves_unrelated_staged_changes
     with_archived_task do |task, state|
       unrelated = File.join(state, "operator.txt")

@@ -9,6 +9,7 @@ module Hive
   # back to the task state-file and folder mtimes.
   module CompletionTime
     TERMINAL_MARKER = /<!--\s*(?:COMPLETE|EXECUTE_COMPLETE|REVIEW_COMPLETE)\b/.freeze
+    MONOTONIC_CLOCK = -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) }.freeze
     class DeadlineExceeded < StandardError; end
 
     CommandResult = Data.define(:out, :err, :status)
@@ -64,7 +65,7 @@ module Hive
     end
 
     class History
-      def initialize(command_runner: CommandRunner.new, monotonic_clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) })
+      def initialize(command_runner: CommandRunner.new, monotonic_clock: MONOTONIC_CLOCK)
         @command_runner = command_runner
         @monotonic_clock = monotonic_clock
       end
@@ -125,7 +126,7 @@ module Hive
       nil
     end
 
-    def discover(task, history: History.new, deadline: nil, monotonic_clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) })
+    def discover(task, history: History.new, deadline: nil, monotonic_clock: MONOTONIC_CLOCK)
       ensure_before_deadline!(deadline, monotonic_clock)
       from_history(task, history: history, deadline: deadline, monotonic_clock: monotonic_clock) ||
         discover_from_mtimes(task, deadline: deadline, monotonic_clock: monotonic_clock)
@@ -134,13 +135,13 @@ module Hive
       discover_from_mtimes(task, deadline: deadline, monotonic_clock: monotonic_clock)
     end
 
-    def discover_from_mtimes(task, deadline: nil, monotonic_clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) })
+    def discover_from_mtimes(task, deadline: nil, monotonic_clock: MONOTONIC_CLOCK)
       ensure_before_deadline!(deadline, monotonic_clock)
       readable_mtime(task.state_file) || readable_mtime(task.folder)
     end
 
     def from_history(task, history: History.new, deadline: nil,
-                     monotonic_clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) })
+                     monotonic_clock: MONOTONIC_CLOCK)
       ensure_before_deadline!(deadline, monotonic_clock)
       membership_workflow = task.action_workflow if task.respond_to?(:action_workflow)
       terminal = (membership_workflow || task.workflow).stages.last

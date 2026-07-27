@@ -79,6 +79,22 @@ class TaskMetaTest < Minitest::Test
     end
   end
 
+  def test_timestamp_shaped_invalid_completed_at_warns_and_stays_visible
+    with_tmp_dir do |dir|
+      File.write(
+        File.join(dir, "meta.yml"),
+        "id: 7\nslug: finished\ncompleted_at: '2026-99-99T00:00:00Z'\n"
+      )
+
+      metadata = nil
+      _out, err = capture_io { metadata = Hive::TaskMeta.read(dir) }
+
+      assert_nil metadata[:completed_at]
+      assert_includes err, "invalid completed_at"
+      assert_includes err, "keeping task visible"
+    end
+  end
+
   def test_concurrent_completed_at_writers_converge_on_one_value
     with_tmp_dir do |dir|
       Hive::TaskMeta.write(dir, id: 7, slug: "finished", display_name: nil)

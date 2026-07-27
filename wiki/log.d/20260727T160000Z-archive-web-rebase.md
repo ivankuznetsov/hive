@@ -20,3 +20,7 @@
 - Refreshed the existing task-media Brakeman false-positive fingerprint after
   the controller dataflow moved to targeted archive resolution; the realpath,
   basename, extension, and symlink guards are unchanged.
+- Closed the exact coverage-gate gaps with failure-path tests for cursor I/O,
+  history deadlines, terminal rollback, invalid hidden counts, workflow
+  generation faults, and both complete and visible archive caches. The
+  resulting merged gate covers 61,074 of 61,074 executable lines.

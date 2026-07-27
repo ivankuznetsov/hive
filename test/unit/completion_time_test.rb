@@ -15,6 +15,18 @@ class CompletionTimeTest < Minitest::Test
     assert_nil Hive::CompletionTime.parse("yesterday")
   end
 
+  def test_parse_warns_and_fails_open_for_timestamp_shaped_invalid_values
+    value = :not_set
+    _out, err = capture_io do
+      value = Hive::CompletionTime.parse(
+        "2026-99-99T00:00:00Z", warn_context: "/task/meta.yml"
+      )
+    end
+
+    assert_nil value
+    assert_includes err, "invalid completed_at for /task/meta.yml"
+  end
+
   def test_discover_falls_back_from_state_file_mtime_to_folder_mtime
     with_tmp_dir do |folder|
       state_file = File.join(folder, "done.md")
@@ -98,5 +110,78 @@ class CompletionTimeTest < Minitest::Test
     end
 
     assert_operator clock.call - started, :<, 0.5
+  end
+
+  def test_history_command_runner_times_out_blocked_readers_and_closes_streams
+    runner = Hive::CompletionTime::CommandRunner.new
+    runner.define_singleton_method(:terminate) { |_waiter| nil }
+    stdin = StringIO.new
+    streams = 2.times.map do
+      queue = Queue.new
+      stream = Object.new
+      stream.define_singleton_method(:read) { queue.pop; "" }
+      stream.define_singleton_method(:closed?) { false }
+      stream.define_singleton_method(:close) do
+        queue << :closed
+        raise IOError, "already closed"
+      end
+      stream
+    end
+    waiter = Object.new
+    waiter.define_singleton_method(:join) { |_timeout| true }
+    clock_values = [ 0.0, 2.0 ]
+    clock = -> { clock_values.shift || 2.0 }
+
+    with_replaced_singleton_method(
+      Open3, :popen3, ->(*) { [ stdin, *streams, waiter ] }
+    ) do
+      assert_raises(Hive::CompletionTime::DeadlineExceeded) do
+        runner.capture([ "fake" ], deadline: 1.0, monotonic_clock: clock)
+      end
+    end
+  end
+
+  def test_command_runner_terminate_tolerates_an_already_dead_process_group
+    waiter = Object.new
+    waiter.define_singleton_method(:pid) { 12_345 }
+    waiter.define_singleton_method(:join) { |_timeout| true }
+
+    with_replaced_singleton_method(
+      Process, :kill, ->(*) { raise Errno::ESRCH }
+    ) do
+      Hive::CompletionTime::CommandRunner.new.send(:terminate, waiter)
+    end
+
+    assert true
+  end
+
+  def test_history_file_at_returns_content_only_for_a_successful_git_show
+    success = Object.new
+    success.define_singleton_method(:success?) { true }
+    failure = Object.new
+    failure.define_singleton_method(:success?) { false }
+    calls = 0
+    replacement = lambda do |*|
+      calls += 1
+      calls == 1 ? [ "contents", "", success ] : [ "", "missing", failure ]
+    end
+    history = Hive::CompletionTime::History.new
+
+    with_replaced_singleton_method(Open3, :capture3, replacement) do
+      assert_equal "contents", history.file_at(
+        hive_state_path: "/state", sha: "abc", relative_path: "meta.yml"
+      )
+      assert_nil history.file_at(
+        hive_state_path: "/state", sha: "def", relative_path: "meta.yml"
+      )
+    end
+  end
+
+  def test_discovery_rejects_an_expired_shared_deadline_before_history_work
+    assert_raises(Hive::CompletionTime::DeadlineExceeded) do
+      Hive::CompletionTime.discover(
+        Object.new, deadline: 1.0, monotonic_clock: -> { 1.0 }
+      )
+    end
   end
 end

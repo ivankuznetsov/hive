@@ -1824,4 +1824,164 @@ class TuiStateSourceTest < Minitest::Test
       source&.stop
     end
   end
+
+  def test_archive_cache_configuration_rejects_invalid_modes_and_intervals
+    mode_error = assert_raises(ArgumentError) do
+      Hive::Tui::StateSource.new(archive_cache_mode: :unknown)
+    end
+    assert_includes mode_error.message, "archive_cache_mode"
+
+    interval_error = assert_raises(ArgumentError) do
+      Hive::Tui::StateSource.new(archive_refresh_fallback_seconds: 0)
+    end
+    assert_includes interval_error.message, "must be positive"
+  end
+
+  def test_policy_and_content_signatures_fail_open_with_observable_sentinels
+    source = Hive::Tui::StateSource.new
+    project = Struct.new(:path, :hive_state_path).new("/project", "/state")
+    breadcrumbs = []
+
+    with_replaced_singleton_method(Dir, :glob, ->(*) { raise Errno::EACCES, "blocked" }) do
+      with_replaced_singleton_method(
+        Hive::Tui::Debug, :log, ->(*args) { breadcrumbs << args }
+      ) do
+        assert_equal [ "/state/workflows" ],
+                     source.send(:project_policy_paths, project)
+      end
+    end
+    assert breadcrumbs.any? { |args| args.join(" ").include?("policy paths failed") }
+
+    with_tmp_dir do |dir|
+      path = File.join(dir, "meta.yml")
+      File.write(path, "slug: task\n")
+      original_stat = File.method(:stat)
+      with_replaced_singleton_method(File, :stat, lambda { |candidate|
+        raise Errno::EACCES, candidate if candidate == path
+
+        original_stat.call(candidate)
+      }) do
+        assert_equal [ :stat_error, "Errno::EACCES" ],
+                     source.send(:safe_content_signature, path)
+      end
+    end
+  ensure
+    source&.stop
+  end
+
+  def test_errored_projects_do_not_merge_stale_visible_archive_rows
+    source = Hive::Tui::StateSource.new
+    active = {
+      "projects" => [
+        {
+          "path" => "/project", "error" => "project_load_failed",
+          "tasks" => [ { "folder" => "/active", "slug" => "active" } ]
+        }
+      ]
+    }
+    cache = {
+      visible_rows_by_path: {
+        "/project" => [ { "folder" => "/archive", "slug" => "archive" } ]
+      },
+      hidden_counts_by_path: { "/project" => 3 }
+    }
+
+    merged = source.send(:merge_visible_archived_payload, active, cache)
+      .fetch("projects").fetch(0)
+
+    assert_equal [ "active" ], merged.fetch("tasks").map { |row| row["slug"] }
+    assert_equal 0, merged.fetch("hidden_archived_task_count")
+  ensure
+    source&.stop
+  end
+
+  def test_invalid_hidden_counts_degrade_to_zero_in_both_archive_cache_modes
+    source = Hive::Tui::StateSource.new
+    context = Hive::DependencyAdmission::Context.new(projects: [])
+    ordinary = {
+      "projects" => [
+        {
+          "path" => "/project", "tasks" => [],
+          "hidden_archived_task_count" => "invalid",
+          "__archive_folders" => []
+        }
+      ]
+    }
+
+    visible = source.send(
+      :visible_archived_cache_from_payload,
+      ordinary,
+      next_retention_boundary: nil,
+      admission_context: context
+    )
+    assert_equal 0, visible.fetch(:hidden_counts_by_path).fetch("/project")
+
+    complete = {
+      rows_by_path: { "/project" => [].freeze }.freeze,
+      archive_folder_index: {}.freeze,
+      visible_rows_by_path: {}.freeze,
+      hidden_counts_by_path: {}.freeze,
+      next_retention_boundary: nil,
+      admission_context: context
+    }.freeze
+    refreshed = source.send(
+      :cache_with_ordinary_visibility,
+      complete,
+      {
+        "projects" => [
+          {
+            "path" => "/project", "tasks" => [],
+            "hidden_archived_task_count" => "invalid"
+          }
+        ]
+      },
+      next_retention_boundary: nil
+    )
+    assert_equal 0, refreshed.fetch(:hidden_counts_by_path).fetch("/project")
+  ensure
+    source&.stop
+  end
+
+  def test_archive_signal_discovery_degrades_to_a_stat_error_marker
+    source = Hive::Tui::StateSource.new
+    project = Struct.new(:path, :hive_state_path).new("/project", "/state")
+    breadcrumbs = []
+
+    with_replaced_singleton_method(
+      Hive::Workflows::Project, :synchronize, ->(&) { raise Hive::ConfigError, "bad workflow" }
+    ) do
+      with_replaced_singleton_method(
+        Hive::Tui::Debug, :log, ->(*args) { breadcrumbs << args }
+      ) do
+        mtimes = source.send(:archive_dir_mtimes_for, [ project ])
+        marker = mtimes.fetch("/state/stages")
+        assert_instance_of Hive::Tui::StateSource::StatError, marker
+      end
+    end
+
+    assert breadcrumbs.any? { |args| args.join(" ").include?("archive signal paths failed") }
+  ensure
+    source&.stop
+  end
+
+  def test_visible_archive_background_refresh_uses_the_bounded_cache_builder
+    with_direct_project do |_project, hive_state|
+      folder = write_state_task(
+        hive_state, "9-done", "background-visible-260727-abcd",
+        marker: "COMPLETE", id: 1
+      )
+      source = Hive::Tui::StateSource.new(archive_cache_mode: :visible)
+
+      source.send(
+        :refresh_archived_cache, Hive::Config.registered_projects
+      )
+
+      rows = source.instance_variable_get(:@archived_cache)
+        .fetch(:rows_by_path).values.flatten
+      assert_includes rows.map { |row| row["folder"] }, folder
+      assert_nil source.instance_variable_get(:@archive_last_error)
+    ensure
+      source&.stop
+    end
+  end
 end

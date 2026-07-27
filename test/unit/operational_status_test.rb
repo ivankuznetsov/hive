@@ -793,6 +793,18 @@ class OperationalStatusTest < Minitest::Test
     assert schema.valid?(result), schema.validate(result).map { |error| error.fetch("error") }.inspect
   end
 
+  def test_invalid_hidden_archive_count_is_rejected_at_the_projection_boundary
+    payload = status_payload(
+      task(action: "ready_to_plan", slug: "invalid-hidden"),
+      hidden_count: "not-an-integer"
+    )
+
+    error = assert_raises(ArgumentError) { project(payload) }
+
+    assert_includes error.message, "invalid hidden_archived_task_count"
+    assert_includes error.message, "not-an-integer"
+  end
+
   private
 
   def project(payload, project_context: {}, scheduler_snapshot: nil)

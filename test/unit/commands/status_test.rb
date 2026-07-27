@@ -2580,6 +2580,96 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_status_archive_and_workflow_helpers_cover_defensive_paths
+    cmd = Hive::Commands::Status.new
+    rows = [
+      { action_key: "archived" },
+      { action_key: "ready_to_run" }
+    ]
+    assert_equal [ rows.first ], cmd.send(:archive_rows, rows)
+
+    with_replaced_singleton_method(
+      Dir, :children, ->(*) { raise Errno::EACCES, "blocked" }
+    ) do
+      expected = Hive::Workflows.all_stage_dirs
+      assert_equal expected,
+                   cmd.send(:default_stage_dirs, "/state", false)
+      refute cmd.send(:orphan_stage_has_workflow_reference?, "/state/stages/2-missing")
+    end
+
+    assert_nil cmd.send(:workflow_generation_for, {}, {})
+    expected_active = Hive::Workflows::Registry.all
+      .flat_map { |workflow| workflow.stages[0...-1].map(&:dir) }
+      .uniq
+    assert_equal expected_active, cmd.send(:workflow_active_stage_dirs, nil)
+  end
+
+  def test_status_generation_capture_records_unexpected_project_failures
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      FileUtils.mkdir_p(hive_state)
+      project = status_project(project_root, hive_state)
+
+      generations = with_replaced_singleton_method(
+        Hive::Workflows::Project, :synchronize, ->(&) { raise RuntimeError, "generation failed" }
+      ) do
+        Hive::Commands::Status.new.send(:capture_workflow_generations, [ project ])
+      end
+
+      error = generations.fetch(File.expand_path(project_root))
+      assert_instance_of RuntimeError, error
+      assert_equal "generation failed", error.message
+    end
+  end
+
+  def test_status_re_raises_unsupported_config_at_each_project_boundary
+    project = {
+      "name" => "bad", "path" => "/project", "hive_state_path" => "/state"
+    }
+    error = Hive::UnsupportedProjectConfigError.new("unsupported root key")
+
+    payload_status = Hive::Commands::Status.new
+    payload_status.define_singleton_method(:project_payload) { |*| raise error }
+    raised = assert_raises(Hive::UnsupportedProjectConfigError) do
+      payload_status.send(:project_payload_or_degraded, project, project_count: 1)
+    end
+    assert_same error, raised
+
+    text_status = Hive::Commands::Status.new(full: true)
+    text_status.define_singleton_method(:capture_workflow_generations) { |_| {} }
+    text_status.define_singleton_method(:build_admission_context) { |*, **| Object.new }
+    text_status.define_singleton_method(:render_project) { |*, **| raise error }
+    raised = with_replaced_singleton_method(
+      Hive::Config, :registered_projects, -> { [ project ] }
+    ) do
+      assert_raises(Hive::UnsupportedProjectConfigError) { text_status.send(:do_call) }
+    end
+    assert_same error, raised
+  end
+
+  def test_collect_rows_re_raises_unsupported_config_from_task_construction
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      folder = File.join(
+        hive_state, "stages", "4-execute", "unsupported-task-260727-abcd"
+      )
+      FileUtils.mkdir_p(folder)
+      error = Hive::UnsupportedProjectConfigError.new("unsupported root key")
+
+      raised = with_replaced_singleton_method(
+        Hive::Task, :new, ->(*) { raise error }
+      ) do
+        assert_raises(Hive::UnsupportedProjectConfigError) do
+          Hive::Commands::Status.new.send(
+            :collect_rows, hive_state, stages: [ "4-execute" ]
+          )
+        end
+      end
+
+      assert_same error, raised
+    end
+  end
+
   def test_full_status_legacy_warning_names_counts_and_recovery
     legacy = [
       { "stage_dir" => "5-review", "task_count" => 2 },

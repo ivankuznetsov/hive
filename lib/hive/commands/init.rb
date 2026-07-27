@@ -798,7 +798,7 @@ module Hive
       # `SystemExit` propagate (Ctrl-C honored as user intent).
       def run_init_preflight!
         cfg = Hive::Config.load(@project_path)
-        inspector = @preflight_inspector || Hive::AgentSkills::Inspector.new(
+        inspector = @preflight_inspector || Hive::AgentSkills.hive_inspector(
           config: cfg,
           project_root: @project_path
         )

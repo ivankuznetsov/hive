@@ -2,7 +2,7 @@ require "json"
 require "shellwords"
 
 require "hive"
-require "hive/agent_skills/provisioner"
+require "hive/agent_skills"
 
 module Hive
   module Commands
@@ -21,14 +21,14 @@ module Hive
         @output = output
         @error = error
         @consent_provenance = consent_provenance
-        @provisioner = provisioner || Hive::AgentSkills::Provisioner.new(
+        @provisioner = provisioner || Hive::AgentSkills.hive_provisioner(
           config: config, project_root: project_root
         )
       end
 
       def call
         emit(run)
-      rescue Hive::ConfigError, Hive::AgentSkills::Manifest::ValidationError, KeyError, ArgumentError => e
+      rescue Hive::ConfigError, Hive::AgentSkills::Error, KeyError, ArgumentError => e
         emit_config_error(e)
       end
 

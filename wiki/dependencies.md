@@ -1,9 +1,9 @@
 ---
 title: Dependencies
 type: dependencies
-source: Gemfile, hive.gemspec, Gemfile.lock, web/Gemfile, web/Gemfile.lock, .llm-wiki/post-commit-refresh.sh
+source: Gemfile, hive.gemspec, Gemfile.lock, web/Gemfile, web/Gemfile.lock, .github/workflows, components/agent-cli-runtime/mirror, .llm-wiki/post-commit-refresh.sh
 created: 2026-04-25
-updated: 2026-07-26
+updated: 2026-07-27
 tags: [dependencies, gems, runtime]
 ---
 
@@ -13,6 +13,17 @@ and PRDigest are not `hive-cli` runtime dependencies. The web bundle owns
 Rails/Turbo/solid-stack dependencies plus Redcarpet for sanitized markdown
 artifact rendering. Managed llm-wiki refreshes also require GNU `timeout` (or
 `gtimeout`) for timeout-governed Git-ref, QMD, and provider operations.
+
+## GitHub Actions
+
+Every canonical and generated-mirror workflow pins `actions/checkout` v7.0.1
+to immutable commit `3d3c42e5aac5ba805825da76410c181273ba90b1`.
+The v7 line adds safer defaults for fork refs under `pull_request_target` and
+`workflow_run`; Hive does not use either trigger, so the upgrade preserves its
+current pull-request behavior. Checkout already ran on Node 24 in v5, leaving
+the runner floor unchanged. Exact-SHA pins prevent a mutable tag from changing
+the executable workflow dependency between review and execution, while the
+trailing version comments keep Dependabot updates legible.
 
 `hive.gemspec` owns runtime gem constraints; `Gemfile` uses `gemspec`
 to pull those constraints into Bundler, then adds development/test-only

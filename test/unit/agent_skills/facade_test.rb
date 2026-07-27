@@ -158,6 +158,32 @@ class AgentSkillsFacadeTest < Minitest::Test
     end
   end
 
+  def test_projection_rejects_invalid_public_shapes
+    canonical = Hive::AgentSkills.render("claude")
+    attributes = {
+      platform: canonical.platform,
+      invocation: canonical.invocation,
+      destination_relative: canonical.destination_relative,
+      skill_version: canonical.skill_version,
+      canonical_digest: canonical.canonical_digest,
+      files: canonical.files
+    }
+
+    error = assert_raises(ArgumentError) do
+      Hive::AgentSkills::Projection.new(**attributes.merge(files: []))
+    end
+    assert_includes error.message, "String-to-String mapping"
+
+    %i[
+      platform invocation destination_relative skill_version canonical_digest
+    ].each do |field|
+      error = assert_raises(ArgumentError) do
+        Hive::AgentSkills::Projection.new(**attributes.merge(field => ""))
+      end
+      assert_includes error.message, field.to_s
+    end
+  end
+
   def test_foreign_destination_produces_a_refusal_plan
     with_tmp_dir do |trusted_root|
       root = File.join(trusted_root, "agent-home")

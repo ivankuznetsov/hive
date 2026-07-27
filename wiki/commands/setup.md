@@ -3,7 +3,7 @@ title: hive setup
 type: command
 source: lib/hive/commands/setup.rb, lib/hive/commands/setup_agents.rb, lib/hive/setup/diagnostics.rb, lib/hive/web/app_bundle.rb, lib/hive/commands/{daemon,web}/service_installer.rb
 created: 2026-06-30
-updated: 2026-07-21
+updated: 2026-07-26
 tags: [command, setup, install, agents, skills, consent, web, daemon]
 ---
 
@@ -48,11 +48,13 @@ Without `--no-bootstrap`, setup provisions in this order:
    `Hive::Web::AppBundle.ensure!`.
 4. Run `hive daemon install` semantics through
    `Hive::Commands::Daemon::ServiceInstaller` with autostart, forced template
-   refresh, and the same `Hive::InvokedBinary.path` used to invoke setup.
+   refresh, and the same `Hive::InvokedBinary.path` used to invoke setup. The
+   adapter delegates platform-neutral service planning/application to
+   `Hive::UserService`.
 5. Initialize or enroll the current project unless `--no-init` is passed. If
    the project is already initialized, setup enables it for daemon dispatch.
 6. Unless `--no-service` is passed, install the separate `hive-web` service
-   through the same invoked binary and observe installed, enabled/loaded,
+   through the same boundary and invoked binary, then observe installed, enabled/loaded,
    running/active, and bounded readiness state. A failed web-bundle phase
    blocks mutation but still reports the read-only lifecycle state. If a
    refreshed bundle replaces an app already held by a running service, setup

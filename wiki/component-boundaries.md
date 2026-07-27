@@ -18,7 +18,7 @@ the first and primary consumer.
 | Component | State | Current entry point | Narrative context |
 |-----------|-------|---------------------|-------------------|
 | Attempts admission / future RunReceipt | `candidate` (guarded reference) | `require "hive/attempts/api"` → `Hive::Attempts::API` | [[modules/attempts]] |
-| UserService | `candidate` | `require "hive/commands/service_installer/base"` → `Hive::Commands::ServiceInstaller::Base` | [[commands/daemon]] |
+| UserService | `boundary-ready` | `require "hive/user_service"` → `Hive::UserService` | [[modules/user_service]] |
 | Agent ABI | `boundary-ready`; standalone package candidate | `require "hive/agent_runtime"` → `Hive::AgentRuntime` | [[modules/agent_cli_runtime]], [[modules/agent_profile]] |
 | Agent Artifact Firewall | `candidate` | `require "hive/protected_files"` → `Hive::ProtectedFiles` | [[modules/protected_files]] |
 | Skillpack | `candidate` | `require "hive/agent_skills"` → `Hive::AgentSkills` | [[commands/setup-agents]] |
@@ -68,6 +68,13 @@ access; immutable mirror tag rules protect the verified result. Development,
 issues, pull requests, version selection, and RubyGems publication remain owned
 by this monorepo. The mirror improves focused discovery without creating a
 second source of truth.
+
+`Hive::UserService` is also a promoted `boundary-ready` component. Its
+Definition, Plan, Status, and Result values keep file drift, stale observation,
+atomic replacement, backups, manager operations, and removal below one clean
+entry point. The daemon, bot, web, setup, init, status, and uninstall surfaces
+remain Hive-owned adapters for templates, policy, messages, JSON, prompts, and
+global sequencing.
 
 ## Catalog contract
 

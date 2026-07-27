@@ -144,6 +144,26 @@ class WorkflowPackagePublishStoreTest < Minitest::Test
     end
   end
 
+  def test_retained_bundle_rechecks_the_validated_manifest_version
+    with_package do |package|
+      with_tmp_dir do |state|
+        store = Hive::WorkflowPackage::PublishStore.new(root: File.join(state, "publish"))
+        receipt = store.create_or_load(package, registry: "owner/registry")
+        result = Struct.new(:manifest).new(
+          Struct.new(:data).new({ "version" => "9.9.9" })
+        )
+
+        with_replaced_singleton_method(
+          Hive::WorkflowPackage::Validator, :validate!, ->(*_args, **_options) { result }
+        ) do
+          assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+            store.verify_bundle(receipt)
+          end
+        end
+      end
+    end
+  end
+
   def test_retention_rechecks_manifest_and_reuses_only_verified_bundle
     with_package do |package|
       with_tmp_dir do |state|
@@ -160,6 +180,59 @@ class WorkflowPackagePublishStoreTest < Minitest::Test
         missing = package.with(root: File.join(state, "missing"))
         assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
           store.send(:persist_bundle, missing)
+        end
+      end
+    end
+  end
+
+  def test_retention_maps_validation_io_and_copy_identity_failures
+    with_package do |package|
+      with_tmp_dir do |state|
+        store = Hive::WorkflowPackage::PublishStore.new(root: File.join(state, "publish"))
+        with_replaced_singleton_method(
+          Hive::WorkflowPackage::Validator, :validate!,
+          ->(*_args, **_options) { raise Errno::EACCES, "denied" }
+        ) do
+          assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+            store.send(:persist_bundle, package)
+          end
+        end
+
+        destination = File.join(state, "copy")
+        FileUtils.mkdir_p(destination)
+        target = File.join(package.root, "README.md")
+        original = Hive::WorkflowPackage::SafeFile.method(:read)
+        replacement = lambda do |path, **options|
+          bytes, stat = original.call(path, **options)
+          next [ bytes, stat ] unless path == target
+
+          changed = Struct.new(:dev, :ino).new(stat.dev + 1, stat.ino)
+          [ bytes, changed ]
+        end
+        with_replaced_singleton_method(
+          Hive::WorkflowPackage::SafeFile, :read, replacement
+        ) do
+          assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+            store.send(:copy_tree, package.root, destination)
+          end
+        end
+      end
+    end
+  end
+
+  def test_gc_marker_wraps_filesystem_failures
+    with_package do |package|
+      with_tmp_dir do |state|
+        store = Hive::WorkflowPackage::PublishStore.new(root: File.join(state, "publish"))
+        receipt = store.create_or_load(package, registry: "owner/registry")
+
+        with_replaced_singleton_method(
+          Hive::AtomicFile, :write,
+          ->(*_args, **_options) { raise Errno::EACCES, "denied" }
+        ) do
+          assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+            store.mark_bundle_gc_eligible(receipt)
+          end
         end
       end
     end

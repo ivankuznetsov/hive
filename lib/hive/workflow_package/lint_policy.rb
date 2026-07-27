@@ -62,7 +62,7 @@ module Hive
           known_rules: data.fetch("known_rules").freeze,
           baseline_network_hosts: data.fetch("baseline_network_hosts").freeze
         ).freeze
-      rescue Psych::Exception, Errno::ENOENT, Errno::EACCES, IOError
+      rescue Psych::Exception
         raise Hive::ConfigError, "Honeycomb lint policy is missing, unreadable, or malformed"
       end
 
@@ -116,8 +116,6 @@ module Hive
                secure_equal?(expected_digest, data.fetch("expected_output_sha256"))
           raise Hive::ConfigError, "Honeycomb lint fixture contract integrity check failed"
         end
-      rescue Errno::ENOENT, Errno::EACCES, IOError
-        raise Hive::ConfigError, "Honeycomb lint fixture contract is missing or unreadable"
       end
       private_class_method :verify_fixture_contract!
 

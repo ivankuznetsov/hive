@@ -44,8 +44,6 @@ module Hive
             description: description, author: author.freeze, license: license,
             hive_min_version: hive_min_version, source: source.freeze, assets: assets.freeze
           ).freeze
-        rescue Errno::ENOENT, Errno::EACCES, IOError
-          raise Hive::ConfigError, "workflow publish requires a readable #{FILE_NAME}"
         end
 
         def validate_readme!(bytes, path: "README.md")

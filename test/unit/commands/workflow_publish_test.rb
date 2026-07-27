@@ -4,6 +4,8 @@ require "hive/commands/workflow/publish"
 require "hive/workflow_package/publisher"
 
 class WorkflowPublishCommandTest < Minitest::Test
+  include HiveTestHelper
+
   Package = Hive::WorkflowPackage::Publisher::Package
   Result = Data.define(:state, :freshness, :observed_at, :pr_url, :warnings)
   Receipt = Data.define(:last_completed_step, :observation, :data)
@@ -116,6 +118,24 @@ class WorkflowPublishCommandTest < Minitest::Test
     assert_equal "pending_review", payload.fetch("state")
     assert_equal "publish.cleanup_failed", payload.fetch("warnings").first.fetch("rule_id")
     assert publish_schemer.valid?(payload)
+  end
+
+  def test_temporary_cleanup_failure_is_converted_to_a_redacted_warning
+    publisher, = publisher_double
+    instance = command(publisher)
+    root = Dir.mktmpdir("workflow-publish-cleanup-test-")
+
+    warning = with_replaced_singleton_method(
+      FileUtils, :remove_entry, ->(_path) { raise Errno::EACCES, "private detail" }
+    ) do
+      instance.send(:cleanup_tempdir, root)
+    end
+
+    assert_equal "publish.cleanup_failed", warning.fetch("rule_id")
+    assert_equal "EACCES", warning.fetch("detail")
+    refute_includes warning.values.join, "private detail"
+  ensure
+    FileUtils.remove_entry(root) if root && File.exist?(root)
   end
 
   def test_lifecycle_schema_rejects_arbitrary_and_contradictory_pr_urls

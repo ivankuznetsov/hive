@@ -222,14 +222,19 @@ class WorkflowPackageRegistryManifestTest < Minitest::Test
         ),
         "tools/check.sh" => Hive::WorkflowPackage::SourceSnapshot::FileRecord.new(
           path: "tools/check.sh", bytes: "#!/bin/sh\n", mode: 0o755, source: "/check.sh"
+        ),
+        "prompts/context.md" => Hive::WorkflowPackage::SourceSnapshot::FileRecord.new(
+          path: "prompts/context.md", bytes: "Context\n", mode: 0o644, source: "/context.md"
         )
-      }, tools: [ "tools/check.sh" ])
+      }, tools: [ "tools/check.sh" ], prompt_assets: [ "prompts/context.md" ])
 
       build = build_registry_manifest(destination, snapshot)
 
       assert File.directory?(destination)
       assert_equal [ { "path" => "tools/check.sh" } ],
                    build.manifest.data.dig("x-hive", "tools")
+      assert_equal [ { "path" => "prompts/context.md" } ],
+                   build.manifest.data.dig("x-hive", "prompt_assets")
     end
   end
 
@@ -373,7 +378,7 @@ class WorkflowPackageRegistryManifestTest < Minitest::Test
     }
   end
 
-  def builder_snapshot(files: nil, tools: [])
+  def builder_snapshot(files: nil, tools: [], prompt_assets: [])
     files ||= {
       "README.md" => Hive::WorkflowPackage::SourceSnapshot::FileRecord.new(
         path: "README.md", bytes: "# Demo\n", mode: 0o644, source: "/README.md"
@@ -384,7 +389,7 @@ class WorkflowPackageRegistryManifestTest < Minitest::Test
     }
     Hive::WorkflowPackage::SourceSnapshot::Snapshot.new(
       name: "demo", descriptor: builder_descriptor, files: files, tools: tools,
-      external_skills: []
+      prompt_assets: prompt_assets, external_skills: []
     )
   end
 end

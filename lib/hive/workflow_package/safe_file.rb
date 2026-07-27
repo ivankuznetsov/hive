@@ -13,7 +13,7 @@ module Hive
         valid &&= before.uid == owner_uid if owner_uid
         raise error_class, message unless valid
 
-        bytes = file.read(max_bytes + 1)
+        bytes = file.read(max_bytes + 1) || "".b
         after = file.stat
         unchanged = %i[dev ino size mtime ctime].all? do |field|
           before.public_send(field) == after.public_send(field)

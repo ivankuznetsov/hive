@@ -62,6 +62,79 @@ class WorkflowPackageSourceSnapshotTest < Minitest::Test
     end
   end
 
+  def test_x_hive_behavior_assets_must_be_declared_and_tools_executable
+    with_source_tree do |workflows, authored, descriptor, metadata|
+      tool = File.join(authored, "assets", "tool.sh")
+      File.write(tool, "#!/bin/sh\n")
+      File.chmod(0o755, tool)
+      File.write(
+        descriptor,
+        File.read(descriptor).sub(
+          "id: demo\n",
+          "id: demo\nx-hive:\n  tools:\n    - assets/tool.sh\n"
+        )
+      )
+
+      error = assert_raises(Hive::ConfigError) do
+        Snapshot.capture(
+          name: "demo", workflows_dir: workflows, descriptor_path: descriptor,
+          authored_dir: authored, metadata: metadata
+        )
+      end
+      assert_match(/must also be declared assets/, error.message)
+    end
+
+    with_source_tree do |workflows, authored, descriptor, metadata|
+      tool = File.join(authored, "assets", "tool.sh")
+      File.write(tool, "#!/bin/sh\n")
+      File.chmod(0o644, tool)
+      metadata = metadata.with(assets: [ "assets/context.txt", "assets/tool.sh" ])
+      File.write(
+        descriptor,
+        File.read(descriptor).sub(
+          "id: demo\n",
+          "id: demo\nx-hive:\n  tools:\n    - assets/tool.sh\n"
+        )
+      )
+
+      error = assert_raises(Hive::ConfigError) do
+        Snapshot.capture(
+          name: "demo", workflows_dir: workflows, descriptor_path: descriptor,
+          authored_dir: authored, metadata: metadata
+        )
+      end
+      assert_match(/must be executable/, error.message)
+    end
+  end
+
+  def test_x_hive_extension_shape_is_strict_and_canonical
+    with_source_tree do |workflows, authored, descriptor, metadata|
+      snapshot = Snapshot.new(
+        name: "demo", workflows_dir: workflows, descriptor_path: descriptor,
+        authored_dir: authored, metadata: metadata
+      )
+      malformed = [
+        { "future" => [] },
+        { "tools" => "not-an-array" },
+        { "tools" => [ "z", "a" ] },
+        { "optional_inputs" => "not-an-array" },
+        { "optional_inputs" => [ { "name" => "API_TOKEN" } ] },
+        {
+          "optional_inputs" => [
+            { "name" => "API_TOKEN", "authorized_slots" => [ "stages.work" ] },
+            { "name" => "API_TOKEN", "authorized_slots" => [ "stages.work" ] }
+          ]
+        }
+      ]
+
+      malformed.each do |extension|
+        assert_raises(Hive::ConfigError, extension.inspect) do
+          snapshot.send(:validate_extension!, extension)
+        end
+      end
+    end
+  end
+
   def test_rejects_reserved_authoring_metadata_as_an_asset
     with_source_tree do |workflows, authored, descriptor, metadata|
       File.write(File.join(authored, "honeycomb.yml"), "authoring only\n")

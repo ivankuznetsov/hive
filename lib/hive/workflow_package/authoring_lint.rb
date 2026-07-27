@@ -357,7 +357,8 @@ module Hive
 
       def safe_yaml_stream!(entry)
         stream = Psych.parse_stream(entry.text, filename: entry.path)
-        unless stream.children.length == 1 && stream.children.first&.root
+        unless stream.is_a?(Psych::Nodes::Stream) &&
+               stream.children.length == 1 && stream.children.first&.root
           raise UnsafeYAML, "YAML must contain one non-empty document"
         end
         inspect_yaml_node!(stream.children.first.root)
@@ -367,8 +368,6 @@ module Hive
         )
         inspect_json_value!(value)
         stream
-      rescue Psych::DisallowedClass
-        raise UnsafeYAML, "YAML contains a non-JSON value"
       end
 
       def inspect_yaml_node!(node)

@@ -172,7 +172,9 @@ manifest byte hash is `package_digest`. The current consumer validator and
 pinned Honeycomb lint contract run before remote access. The installed gem
 ships the pinned Markdown corpus and upstream SafeYAML parity cases as runtime
 contract data, so packaged Hive does not depend on the source checkout's test
-tree. The lint receipt
+tree. Bounded safe-file reads treat a zero-byte regular file as empty bytes;
+an empty YAML behavior asset is therefore reported as malformed YAML instead
+of escaping into the generic scanner-error boundary. The lint receipt
 identity binds the upstream policy, fixture corpus, expected output, and local
 contract checksums. Dry-run returns
 `state: validated`, both digests, and `freshness: not_checked` without durable

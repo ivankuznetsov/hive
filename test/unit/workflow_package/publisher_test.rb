@@ -206,6 +206,22 @@ class WorkflowPackagePublisherTest < Minitest::Test
     end
   end
 
+  def test_authored_input_probe_distinguishes_io_from_fixable_configuration
+    with_authored_workflow do |project, _authored_dir|
+      unavailable = publisher(project)
+      unavailable.define_singleton_method(:load_metadata) do
+        raise Errno::EACCES, "denied"
+      end
+      refute unavailable.send(:authored_inputs_available?)
+
+      invalid = publisher(project)
+      invalid.define_singleton_method(:load_metadata) do
+        raise Hive::ConfigError, "invalid metadata"
+      end
+      assert invalid.send(:authored_inputs_available?)
+    end
+  end
+
   def test_prepare_revalidates_a_retained_bundle_and_asserts_authored_bytes
     with_authored_workflow do |project, authored_dir|
       with_retained_package(project) do |retained, receipt|

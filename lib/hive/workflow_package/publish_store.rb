@@ -207,8 +207,7 @@ module Hive
         ensure
           FileUtils.rm_rf(stage) if stage && File.exist?(stage)
         end
-      rescue PackageError, Errno::ENOENT, Errno::EACCES, IOError => e
-        raise e if e.is_a?(PublishRecoveryError)
+      rescue PackageError, Errno::ENOENT, Errno::EACCES, IOError
         raise PublishRecoveryError, "validated package could not be retained safely"
       end
 

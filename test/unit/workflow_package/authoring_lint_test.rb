@@ -156,6 +156,19 @@ class WorkflowPackageAuthoringLintTest < Minitest::Test
       assert_raises(Hive::ConfigError) { policy_class.send(:validate!, candidate) }
     end
 
+    with_tmp_dir do |dir|
+      malformed = File.join(dir, "malformed.yml")
+      bytes = "schema: [\n"
+      File.write(malformed, bytes)
+      error = assert_raises(Hive::ConfigError) do
+        policy_class.load(
+          path: malformed,
+          expected_sha256: Digest::SHA256.hexdigest(bytes)
+        )
+      end
+      assert_match(/missing, unreadable, or malformed/, error.message)
+    end
+
     with_tmp_dir do |fixtures|
       policy_class::FIXTURE_FILES.each do |name|
         FileUtils.cp(runtime_fixture(name), File.join(fixtures, name))
@@ -249,6 +262,44 @@ class WorkflowPackageAuthoringLintTest < Minitest::Test
     missing = File.join(Dir.tmpdir, "missing-hive-lint-root-#{Process.pid}")
     result = Lint.verify(missing, manifest: lint_manifest)
     assert_includes result.findings.map(&:rule_id), "policy.invalid-file"
+  end
+
+  def test_file_collection_rechecks_the_safe_read_identity
+    with_lint_package("safe\n") do |root, manifest|
+      target = File.join(root, "README.md")
+      original = Hive::WorkflowPackage::SafeFile.method(:read)
+      replacement = lambda do |path, **options|
+        bytes, stat = original.call(path, **options)
+        next [ bytes, stat ] unless path == target
+
+        changed = Struct.new(:dev, :ino, :size).new(stat.dev + 1, stat.ino, stat.size)
+        [ bytes, changed ]
+      end
+
+      result = with_replaced_singleton_method(
+        Hive::WorkflowPackage::SafeFile, :read, replacement
+      ) do
+        Lint.verify(root, manifest: manifest)
+      end
+
+      assert_includes result.findings.map(&:rule_id), "policy.invalid-file"
+    end
+  end
+
+  def test_safe_yaml_rejects_empty_documents_and_unknown_runtime_values
+    with_lint_package(
+      "safe\n", files: { "instructions/empty.yml" => "" }
+    ) do |root, manifest|
+      assert_includes Lint.verify(root, manifest: manifest).findings.map(&:rule_id),
+                      "instruction.malformed-yaml"
+
+      lint = Lint.new(
+        root, manifest: manifest, policy: Hive::WorkflowPackage::LintPolicy.load
+      )
+      assert_raises(Lint::UnsafeYAML) do
+        lint.send(:inspect_json_value!, Object.new)
+      end
+    end
   end
 
   def test_extracts_commands_from_all_supported_authored_surfaces

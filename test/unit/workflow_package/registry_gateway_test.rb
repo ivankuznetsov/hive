@@ -486,6 +486,80 @@ class WorkflowPackageRegistryGatewayTest < Minitest::Test
     end
   end
 
+  def test_retained_commit_cleanup_is_exact_private_and_failure_mapped
+    with_package do |package|
+      with_tmp_dir do |objects_root|
+        gateway = Hive::WorkflowPackage::RegistryGateway.new(
+          objects_root: objects_root
+        )
+        assert_equal false, gateway.cleanup_commit(package, repository: "owner/registry")
+
+        checkout = File.join(objects_root, commit_key(package))
+        FileUtils.mkdir_p(checkout)
+        assert gateway.cleanup_commit(package, repository: "owner/registry")
+        refute File.exist?(checkout)
+
+        outside = File.join(objects_root, "outside")
+        FileUtils.mkdir_p(outside)
+        File.symlink(outside, checkout)
+        assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+          gateway.cleanup_commit(package, repository: "owner/registry")
+        end
+        FileUtils.rm_f(checkout)
+
+        FileUtils.mkdir_p(checkout)
+        original = File.method(:lstat)
+        replacement = lambda do |path|
+          raise Errno::EACCES, "denied" if path == objects_root
+
+          original.call(path)
+        end
+        with_replaced_singleton_method(File, :lstat, replacement) do
+          assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+            gateway.cleanup_commit(package, repository: "owner/registry")
+          end
+        end
+      end
+    end
+  end
+
+  def test_retained_commit_tree_and_checkout_fail_closed_on_boundary_drift
+    with_package do |package|
+      expected_paths = Hive::WorkflowPackage::Manifest.inventory(
+        package.root, exclude: [], require_utf8: false
+      ).map { |entry| "#{package.registry_path}/#{entry.fetch('path')}" }.sort
+
+      changed_gateway = Hive::WorkflowPackage::RegistryGateway.new
+      changed_gateway.define_singleton_method(:git!) do |_checkout, *args|
+        args.first == "diff-tree" ? "outside\n" : raise("unexpected git call")
+      end
+      assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+        changed_gateway.send(:verify_commit_tree!, "/checkout", "a" * 40, package)
+      end
+
+      malformed_gateway = Hive::WorkflowPackage::RegistryGateway.new
+      malformed_gateway.define_singleton_method(:git!) do |_checkout, *args|
+        args.first == "diff-tree" ? "#{expected_paths.join("\n")}\n" : "malformed\n"
+      end
+      assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+        malformed_gateway.send(:verify_commit_tree!, "/checkout", "a" * 40, package)
+      end
+
+      linked = File.join(package.root, "linked")
+      File.symlink("README.md", linked)
+      assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+        malformed_gateway.send(:expected_git_tree, package)
+      end
+      FileUtils.rm_f(linked)
+
+      with_tmp_dir do |checkout|
+        assert_raises(Hive::WorkflowPackage::PublishRecoveryError) do
+          malformed_gateway.send(:ensure_safe_checkout!, checkout)
+        end
+      end
+    end
+  end
+
   def test_push_and_pull_request_mutations_are_bounded_and_non_draft
     with_package do |package|
       calls = []

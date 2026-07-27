@@ -86,4 +86,30 @@ class WorkflowPackagePermissionProjectionTest < Minitest::Test
     assert_equal [ "repository/docs" ], permissions.fetch("filesystem_read")
     assert_empty permissions.fetch("filesystem_write")
   end
+
+  def test_scope_paths_are_normalized_or_rejected_at_the_consent_boundary
+    permissions = Projection.derive!({
+      "stages" => [ {
+        "kind" => "agent",
+        "permissions" => {
+          "preset" => "scoped", "tools" => [ "Read", "Read(./notes)" ],
+          "dirs" => [ "./context" ]
+        }
+      } ]
+    })
+    assert_equal %w[task task/context task/notes], permissions.fetch("filesystem_read")
+
+    [ "/absolute", "../outside", "nested//path" ].each do |path|
+      assert_raises(Hive::ConfigError, path) do
+        Projection.derive!({
+          "stages" => [ {
+            "kind" => "agent",
+            "permissions" => {
+              "preset" => "scoped", "tools" => [ "Read" ], "dirs" => [ path ]
+            }
+          } ]
+        })
+      end
+    end
+  end
 end

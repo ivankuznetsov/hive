@@ -7,6 +7,7 @@ class WorkflowPackagePublishResolverTest < Minitest::Test
 
   class Store
     attr_reader :saved, :gc_receipt
+    attr_writer :gc_error
 
     def verify_bundle(_receipt) = "/retained/package"
 
@@ -19,6 +20,8 @@ class WorkflowPackagePublishResolverTest < Minitest::Test
     end
 
     def mark_bundle_gc_eligible(receipt)
+      raise @gc_error if @gc_error
+
       @gc_receipt = receipt
     end
   end
@@ -95,6 +98,22 @@ class WorkflowPackagePublishResolverTest < Minitest::Test
     assert_equal "listed", result.state
     assert_equal "current", result.freshness
     assert_equal "publish.object_cleanup_failed", result.warnings.first.fetch("rule_id")
+  end
+
+  def test_gc_marker_failures_are_warning_only_after_listing
+    receipt = receipt_for("MERGED")
+    store = Store.new
+    store.receipt = receipt
+    store.gc_error = Errno::EACCES.new("denied")
+    result = Hive::WorkflowPackage::PublishResolver.new(
+      registry: "owner/registry", gateway: Gateway.new(pr: pr("MERGED")),
+      catalogue: Catalogue.new(listed: true), store: store,
+      clock: -> { Time.iso8601("2026-07-21T12:00:00Z") }
+    ).resolve(receipt)
+
+    assert_equal "listed", result.state
+    assert_equal "publish.bundle_gc_marker_failed",
+                 result.warnings.first.fetch("rule_id")
   end
 
   def test_exact_catalogue_advances_even_a_prior_closed_observation

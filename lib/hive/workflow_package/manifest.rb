@@ -65,8 +65,6 @@ module Hive
         new(data)
       rescue JSON::ParserError, EncodingError
         fail!("manifest.invalid_json", FILE_NAME, "manifest is not valid UTF-8 JSON")
-      rescue Errno::ENOENT, Errno::EACCES, IOError
-        fail!("manifest.unreadable", FILE_NAME, "manifest is missing or unreadable")
       end
 
       def self.inventory(root, exclude: [ FILE_NAME ], require_utf8: true)

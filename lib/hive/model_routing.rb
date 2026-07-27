@@ -6,9 +6,6 @@ module Hive
   # parsing, field-wise precedence, provenance, and reachability filtering.
   # Provider selection and provider-native argument rendering live elsewhere.
   module ModelRouting
-    PROJECT_OWNER = :project
-    GLOBAL_DIGEST_OWNER = :global_digest
-    OWNERS = [ PROJECT_OWNER, GLOBAL_DIGEST_OWNER ].freeze
     FIELDS = %i[model effort].freeze
     CONFIG_FIELDS = FIELDS.map { |field| field.to_s.freeze }.freeze
     EFFORT_VALUES = %w[
@@ -23,12 +20,11 @@ module Hive
       max
     ].map(&:freeze).freeze
 
-    RegistryEntry = Data.define(:key, :parent, :owner) do
-      def initialize(key:, parent: nil, owner:)
+    RegistryEntry = Data.define(:key, :parent) do
+      def initialize(key:, parent: nil)
         super(
           key: key.to_s.dup.freeze,
-          parent: parent&.to_s&.dup&.freeze,
-          owner: owner.to_sym
+          parent: parent&.to_s&.dup&.freeze
         )
         freeze
       end
@@ -81,41 +77,37 @@ module Hive
     end
 
     REGISTRY = [
-      RegistryEntry.new(key: "brainstorm", owner: PROJECT_OWNER),
-      RegistryEntry.new(key: "plan", owner: PROJECT_OWNER),
-      RegistryEntry.new(key: "execute", owner: PROJECT_OWNER),
-      RegistryEntry.new(key: "execute_implementation", parent: "execute", owner: PROJECT_OWNER),
-      RegistryEntry.new(key: "rebase", parent: "execute", owner: PROJECT_OWNER),
-      RegistryEntry.new(key: "diagnose", parent: "execute", owner: PROJECT_OWNER),
-      RegistryEntry.new(key: "babysitter", parent: "execute", owner: PROJECT_OWNER),
-      RegistryEntry.new(key: "review", owner: PROJECT_OWNER),
-      RegistryEntry.new(key: "review_ci", parent: "review", owner: PROJECT_OWNER),
-      RegistryEntry.new(key: "review_reviewers", parent: "review", owner: PROJECT_OWNER),
-      RegistryEntry.new(key: "review_triage", parent: "review", owner: PROJECT_OWNER),
-      RegistryEntry.new(key: "review_fix", parent: "review", owner: PROJECT_OWNER),
-      RegistryEntry.new(key: "review_browser", parent: "review", owner: PROJECT_OWNER),
-      RegistryEntry.new(key: "patrol", owner: PROJECT_OWNER),
-      RegistryEntry.new(key: "patrol_review", parent: "patrol", owner: PROJECT_OWNER),
-      RegistryEntry.new(key: "patrol_fix", parent: "patrol", owner: PROJECT_OWNER),
-      RegistryEntry.new(key: "open_pr", owner: PROJECT_OWNER),
-      RegistryEntry.new(key: "artifacts", owner: PROJECT_OWNER),
-      RegistryEntry.new(key: "finalize", owner: PROJECT_OWNER),
-      RegistryEntry.new(key: "digest", owner: GLOBAL_DIGEST_OWNER)
+      RegistryEntry.new(key: "brainstorm"),
+      RegistryEntry.new(key: "plan"),
+      RegistryEntry.new(key: "execute"),
+      RegistryEntry.new(key: "execute_implementation", parent: "execute"),
+      RegistryEntry.new(key: "rebase", parent: "execute"),
+      RegistryEntry.new(key: "diagnose", parent: "execute"),
+      RegistryEntry.new(key: "babysitter", parent: "execute"),
+      RegistryEntry.new(key: "review"),
+      RegistryEntry.new(key: "review_ci", parent: "review"),
+      RegistryEntry.new(key: "review_reviewers", parent: "review"),
+      RegistryEntry.new(key: "review_triage", parent: "review"),
+      RegistryEntry.new(key: "review_fix", parent: "review"),
+      RegistryEntry.new(key: "review_browser", parent: "review"),
+      RegistryEntry.new(key: "patrol"),
+      RegistryEntry.new(key: "patrol_review", parent: "patrol"),
+      RegistryEntry.new(key: "patrol_fix", parent: "patrol"),
+      RegistryEntry.new(key: "open_pr"),
+      RegistryEntry.new(key: "artifacts"),
+      RegistryEntry.new(key: "finalize")
     ].freeze
     REGISTRY_BY_KEY = REGISTRY.to_h { |entry| [ entry.key, entry ] }.freeze
     EMPTY_MODELS = {}.freeze
 
     module_function
 
-    def entries(owner = nil)
-      return REGISTRY if owner.nil?
-
-      validate_owner!(owner)
-      REGISTRY.select { |entry| entry.owner == owner.to_sym }.freeze
+    def entries
+      REGISTRY
     end
 
-    def keys(owner = nil)
-      entries(owner).map(&:key).freeze
+    def keys
+      entries.map(&:key).freeze
     end
 
     def fetch(stage)
@@ -133,8 +125,7 @@ module Hive
     # Structurally validate and normalize a raw `models:` mapping. Capability
     # validation is intentionally separate because it needs the selected,
     # reachable AgentProfile after exact/coarse shadowing has been resolved.
-    def parse(raw, owner:, source:)
-      validate_owner!(owner)
+    def parse(raw, source:)
       unless raw.is_a?(Hash)
         raise Hive::ConfigError,
               "models in #{source} must be a Hash mapping; got #{raw.inspect} (#{raw.class})"
@@ -147,9 +138,6 @@ module Hive
         unless entry
           raise Hive::ConfigError,
                 "models.#{stage} in #{source} is unknown; known stages: #{keys.inspect}"
-        end
-        unless entry.owner == owner.to_sym
-          raise Hive::ConfigError, ownership_error(stage, entry.owner, source)
         end
         if normalized.key?(stage)
           raise Hive::ConfigError,
@@ -263,24 +251,6 @@ module Hive
       end
       controls.freeze
     end
-
-    def validate_owner!(owner)
-      return if OWNERS.include?(owner.to_sym)
-
-      raise ArgumentError, "unknown model-routing config owner #{owner.inspect}; known: #{OWNERS.inspect}"
-    rescue NoMethodError
-      raise ArgumentError, "unknown model-routing config owner #{owner.inspect}; known: #{OWNERS.inspect}"
-    end
-    private_class_method :validate_owner!
-
-    def ownership_error(stage, actual_owner, source)
-      if actual_owner == GLOBAL_DIGEST_OWNER
-        "models.#{stage} in #{source} belongs to the global digest config, not project config"
-      else
-        "models.#{stage} in #{source} belongs to project config, not the global digest config"
-      end
-    end
-    private_class_method :ownership_error
 
     def normalize_model(value, stage:, source:)
       unless value.is_a?(String) || value.is_a?(Symbol)

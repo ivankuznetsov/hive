@@ -120,6 +120,50 @@ class ClaudeModeDispatchTest < Minitest::Test
     end
   end
 
+  def test_independent_core_stages_forward_their_exact_routes
+    with_tmp_dir do |dir|
+      cfg = {
+        "brainstorm" => { "agent" => "codex" },
+        "plan" => { "agent" => "codex" },
+        "artifacts" => { "agent" => "codex" },
+        "finalize" => { "agent" => "codex" },
+        "models" => %w[brainstorm plan artifacts finalize].to_h do |stage|
+          [
+            stage,
+            { "model" => "model-#{stage}", "effort" => "xhigh" }
+          ]
+        end
+      }
+      profile = codex_profile(cfg)
+      task = make_task(dir)
+      File.write(File.join(task.folder, "idea.md"), "test idea")
+      worktree_path = File.join(dir, "worktree")
+      FileUtils.mkdir_p(worktree_path)
+      task.define_singleton_method(:worktree_path) { worktree_path }
+
+      with_spawn_capture do |captured|
+        Hive::Stages::Brainstorm.run_headless!(task, cfg, profile: profile)
+        Hive::Stages::Plan.spawn_plan_agent(task, cfg, "prompt", profile)
+        Hive::Stages::Artifacts.spawn_artifacts_agent(
+          task, cfg, "prompt", profile, screenote: { connected: false }
+        )
+        Hive::Stages::Finalize.spawn_finalize_agent(
+          task, cfg, "prompt", profile, worktree_path
+        )
+
+        assert_equal %w[brainstorm plan artifacts finalize],
+                     captured.map { |call| call[:kwargs].fetch(:routing_arguments).stage }
+        captured.each do |call|
+          routing = call[:kwargs].fetch(:routing_arguments)
+          assert_equal [
+            "--model", "model-#{routing.stage}",
+            "-c", "model_reasoning_effort=xhigh"
+          ], routing.global_arguments
+        end
+      end
+    end
+  end
+
   def test_execute_uses_claude_launcher_for_claude_implementer
     with_tmp_dir do |dir|
       cfg = {
@@ -404,11 +448,13 @@ class ClaudeModeDispatchTest < Minitest::Test
 
   def routed_identity_config(provider:, stage:)
     fields = { "agent" => provider }.freeze
+    models = {
+      "execute_implementation" => { "model" => "routed-execute-model" }
+    }
+    models[stage] = { "model" => "routed-model", "effort" => "xhigh" }
     {
       "execute" => fields.dup,
-      "models" => {
-        stage => { "model" => "routed-model", "effort" => "xhigh" }
-      },
+      "models" => models,
       Hive::Config::IMPLEMENTATION_IDENTITY_PROVENANCE_KEY => {
         "execute" => fields, "open_pr" => {}, "review.fix" => {}, "review.ci" => {}
       }.freeze

@@ -3,13 +3,13 @@ title: Hive::ModelRouting
 type: module
 source: lib/hive/model_routing.rb
 created: 2026-07-25
-updated: 2026-07-25
+updated: 2026-07-27
 tags: [config, models, routing, validation]
 ---
 
 **TLDR**: `Hive::ModelRouting` is the pure, provider-neutral domain for the
 closed built-in model/effort vocabulary. It owns registry enumeration,
-project/global-digest ownership, structural parsing, independent field
+project ownership, structural parsing, independent field
 precedence, provenance, and reachability filtering. It never selects a
 provider or renders provider CLI arguments.
 
@@ -20,13 +20,14 @@ The public keys are:
 `brainstorm`, `plan`, `execute`, `execute_implementation`, `rebase`,
 `diagnose`, `babysitter`, `review`, `review_ci`, `review_reviewers`,
 `review_triage`, `review_fix`, `review_browser`, `patrol`, `patrol_review`,
-`patrol_fix`, `open_pr`, `artifacts`, `finalize`, and `digest`.
+`patrol_fix`, `open_pr`, `artifacts`, and `finalize`.
 
 `execute_implementation`, `rebase`, `diagnose`, and `babysitter` inherit from
 `execute`; every `review_*` key inherits from `review`; and every `patrol_*`
-key inherits from `patrol`. Other keys are roots. `digest` is owned by the
-global digest config; all other keys are project-owned. `entries` and `keys`
-are registry-derived frozen enumerations.
+key inherits from `patrol`. Other keys are roots. Every key is project-owned;
+Hive's former in-process PR digest was removed in favour of standalone
+PRDigest, so `digest` is intentionally not a route. `entries` and `keys` are
+registry-derived frozen enumerations.
 
 ## Structural parsing
 
@@ -70,3 +71,19 @@ its reviews directory, worktree, pointer, or task marker. Review Phase 4
 resolves before its working marker, phase event, Git preparation, or residue
 auto-commit. Unsupported effective controls therefore leave those stage
 surfaces unchanged.
+
+Non-durable built-in calls resolve immediately before their trusted launch
+seam through `Stages::Base.model_routing_arguments`. This covers brainstorm
+(headless and tmux), plan, reviewers (including direct Codex and shared Claude
+sessions), triage, browser testing, rebase, diagnosis, babysitter, ordinary
+patrol, artifacts, and finalize. Architecture Patrol overlays
+`patrol_review`/`patrol_fix` while building its immutable review/fix identities,
+so policy snapshots and resumed actions observe the same route. Shared Claude
+reviewers group by both resolved permission scope and routing arguments.
+
+`Config.validate_model_routing_capabilities!` constructs the enabled,
+reachable call/profile matrix after structural validation and before warnings.
+It validates only routed effective fields after exact/coarse shadowing.
+Runtime helpers repeat validation at the launch boundary as defense in depth
+for callers that construct config hashes without `Config.load`; both layers
+use the same immutable resolution and profile-native renderer.

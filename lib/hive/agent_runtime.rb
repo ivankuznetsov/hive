@@ -386,6 +386,10 @@ module Hive
 
     def routing_arguments(profile, request, evidence)
       return { global: [], subcommand: [] } unless request.routing_arguments
+      if !request.identity_arguments.empty? || request.model || request.effort
+        raise ArgumentError,
+              "routing_arguments cannot be combined with legacy identity model/effort arguments"
+      end
       unless profile.respond_to?(:validate_routing_arguments!)
         unsupported!(
           profile, :model_routing,

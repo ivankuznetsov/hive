@@ -57,6 +57,10 @@ module Hive
           profile: profile,
           model: stage.model,
           effort: stage.effort,
+          routing_arguments: Hive::Stages::Base.recognized_model_routing_arguments(
+            cfg, stage.name, profile,
+            current: { model: stage.model, effort: stage.effort }.compact
+          ),
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           # Honor the descriptor's declared status_mode; fall back to the
           # marker-file convention only when the stage leaves it unset.

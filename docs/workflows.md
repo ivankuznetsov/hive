@@ -328,7 +328,11 @@ stages:
 
 Here `investigate.model` and `investigate.effort` remain descriptor-owned.
 Adding `models.investigate` to project config is an error, and built-in family
-inheritance does not cross into this descriptor.
+inheritance does not cross into this descriptor. A descriptor deliberately
+named for one of the closed built-in identities is the exception: the generic
+agent/council runner recognizes that identity and applies its `models:` overlay
+at the normal profile launch seam. This keeps arbitrary names open for custom
+workflows without making the routing vocabulary open-ended.
 
 Hive rejects arbitrary top-level names, including stage-name lookalikes. The
 stage must be present in a registered descriptor before its override is valid.
@@ -338,7 +342,13 @@ above is nested descriptor data, not a project-config root key.
 
 ## Migration Notes
 
-The automatic implementation-owner policy applies only to the built-in coding workflow's `execute`, `open_pr`, `review.fix`, and `review.ci` boundaries. Descriptor-backed agent and council stages continue to resolve their own optional `agent`, `model`, and `effort` fields, and council reviewers are never inherited from the coding execute owner.
+The automatic implementation-owner policy applies only to the built-in coding
+workflow's `execute`, `open_pr`, `review.fix`, and `review.ci` boundaries.
+Descriptor-backed agent and council stages continue to resolve their own
+optional `agent`, `model`, and `effort` fields, and council reviewers are never
+inherited from the coding execute owner. If such a descriptor uses a recognized
+built-in routing name, its model/effort fields become that call's current
+fallback beneath the exact/coarse `models:` overlay.
 
 Existing workflow descriptors continue to load: an omitted
 `archive_visibility_retention_days` resolves to `3`. Hive-owned `coding`,

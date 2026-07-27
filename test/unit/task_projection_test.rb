@@ -171,7 +171,7 @@ class TaskProjectionTest < Minitest::Test
     refute projection.send(:attempt_descends_from?, "attempt-a", "attempt-c")
   end
 
-  def test_implementation_identity_projection_retains_generations_and_latest_stage_launches
+  def test_implementation_identity_projection_retains_generations_and_first_stage_selection
     execute_one = event(
       event_type: "implementation_identity_captured", event_id: "identity-1",
       task_generation: 1, commit_generation: 0,

@@ -101,6 +101,27 @@ class AgentRuntimeTest < Minitest::Test
     assert_equal :unknown, error.evidence.provider
   end
 
+  def test_typed_routing_rejects_legacy_identity_channels
+    profile = Hive::AgentProfiles.lookup(:codex)
+    routing = profile.routing_arguments(
+      Hive::ModelRouting.resolve(
+        models: { "plan" => { "model" => "gpt-5.6-sol" } },
+        stage: "plan",
+        provider: :codex
+      )
+    )
+
+    error = assert_raises(Hive::AgentRuntime::CompilationError) do
+      compile(
+        profile,
+        routing_arguments: routing,
+        identity_arguments: [ "--model", "legacy-model" ]
+      )
+    end
+
+    assert_includes error.message, "cannot be combined"
+  end
+
   def test_builtin_prompt_transports_preserve_argv_and_stdin
     claude = Hive::AgentProfiles.lookup(:claude)
     codex = Hive::AgentProfiles.lookup(:codex)

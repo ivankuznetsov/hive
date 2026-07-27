@@ -98,6 +98,9 @@ module Hive
       routed_effort_argument_builder: ->(effort) {
         %w[default inherit].include?(effort) ? [] : [ "--reasoning-effort", effort ]
       },
+      routed_effort_values: %w[
+        default inherit none minimal low medium high xhigh max
+      ],
       launcher_identity: "grok-cli/v1",
       structured_output_protocol: :grok_end
     )

@@ -206,6 +206,22 @@ class AgentTest < Minitest::Test
         )
       end
       assert_includes error.message, "different native argv"
+
+      routing = profile.routing_arguments(
+        Hive::ModelRouting.resolve(
+          models: { "plan" => { "model" => "opus" } },
+          stage: "plan",
+          provider: :claude
+        )
+      )
+      error = assert_raises(ArgumentError) do
+        Hive::Agent.new(
+          task: task, prompt: "test", max_budget_usd: 1, timeout_sec: 5,
+          profile: profile, routing_arguments: routing,
+          identity_arguments: launch_arguments.native_arguments
+        )
+      end
+      assert_includes error.message, "cannot be combined"
     end
   end
 

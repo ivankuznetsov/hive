@@ -24,7 +24,6 @@ class ModelRoutingTest < Minitest::Test
     open_pr
     artifacts
     finalize
-    digest
   ].freeze
 
   FAMILY_PARENTS = {
@@ -49,9 +48,6 @@ class ModelRoutingTest < Minitest::Test
                    [ entry.key, entry.parent ] if entry.parent
                  }.to_h
 
-    owners = Hive::ModelRouting.entries.to_h { |entry| [ entry.key, entry.owner ] }
-    assert_equal :global_digest, owners.delete("digest")
-    assert owners.values.all? { |owner| owner == :project }
     assert Hive::ModelRouting.entries.frozen?
     assert Hive::ModelRouting.entries.all?(&:frozen?)
   end
@@ -60,7 +56,6 @@ class ModelRoutingTest < Minitest::Test
     Hive::ModelRouting.entries.each do |entry|
       parsed = Hive::ModelRouting.parse(
         { entry.key => { "model" => " model-#{entry.key} " } },
-        owner: entry.owner,
         source: "/tmp/config.yml"
       )
 
@@ -73,7 +68,6 @@ class ModelRoutingTest < Minitest::Test
         "plan" => { "effort" => "xhigh" },
         "review" => { "model" => "opus", "effort" => "max" }
       },
-      owner: :project,
       source: "/tmp/config.yml"
     )
 
@@ -84,7 +78,7 @@ class ModelRoutingTest < Minitest::Test
   def test_structural_parser_rejects_malformed_roots_entries_fields_and_values
     [ nil, [], "plan", 7 ].each do |root|
       error = assert_raises(Hive::ConfigError) do
-        Hive::ModelRouting.parse(root, owner: :project, source: "/tmp/project.yml")
+        Hive::ModelRouting.parse(root, source: "/tmp/project.yml")
       end
       assert_match(/models.*mapping/i, error.message)
       assert_includes error.message, "/tmp/project.yml"
@@ -98,7 +92,7 @@ class ModelRoutingTest < Minitest::Test
     }
     invalid_entries.each do |key, value|
       error = assert_raises(Hive::ConfigError) do
-        Hive::ModelRouting.parse({ key => value }, owner: :project, source: "/tmp/project.yml")
+        Hive::ModelRouting.parse({ key => value }, source: "/tmp/project.yml")
       end
       assert_match(/models\.#{Regexp.escape(key)}.*non-empty mapping/i, error.message)
     end
@@ -114,35 +108,24 @@ class ModelRoutingTest < Minitest::Test
       { "plan" => { "effort" => " " } } => /models\.plan\.effort.*one of/i
     }.each do |raw, pattern|
       error = assert_raises(Hive::ConfigError) do
-        Hive::ModelRouting.parse(raw, owner: :project, source: "/tmp/project.yml")
+        Hive::ModelRouting.parse(raw, source: "/tmp/project.yml")
       end
       assert_match pattern, error.message
     end
   end
 
-  def test_structural_parser_enforces_config_ownership
-    project_error = assert_raises(Hive::ConfigError) do
+  def test_structural_parser_rejects_removed_and_unknown_stages
+    removed_error = assert_raises(Hive::ConfigError) do
       Hive::ModelRouting.parse(
         { "digest" => { "model" => "gpt-5.6-sol" } },
-        owner: :project,
         source: "/tmp/project.yml"
       )
     end
-    assert_match(/models\.digest.*global digest/i, project_error.message)
-
-    global_error = assert_raises(Hive::ConfigError) do
-      Hive::ModelRouting.parse(
-        { "plan" => { "model" => "gpt-5.6-sol" } },
-        owner: :global_digest,
-        source: "/tmp/global.yml"
-      )
-    end
-    assert_match(/models\.plan.*project config/i, global_error.message)
+    assert_match(/models\.digest.*unknown/i, removed_error.message)
 
     unknown_error = assert_raises(Hive::ConfigError) do
       Hive::ModelRouting.parse(
         { "surprise" => { "model" => "gpt-5.6-sol" } },
-        owner: :project,
         source: "/tmp/project.yml"
       )
     end

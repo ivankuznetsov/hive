@@ -8,6 +8,7 @@ require "hive/agent_profiles"
 require "hive/config"
 require "hive/events"
 require "hive/markers"
+require "hive/model_routing"
 require "hive/permission_scope"
 require "hive/stages/clean_exit"
 require "hive/usage_db"
@@ -145,6 +146,69 @@ module Hive
           routing_arguments: identity.routing_arguments(profile)
         }
       end
+
+      # Resolve one non-durable built-in launch through the same closed,
+      # provider-neutral routing domain as implementation identities. The
+      # caller has already selected the profile; this helper can change only
+      # model and effort, never provider. A nil return preserves the exact
+      # legacy launch path when no route is active.
+      def model_routing_arguments(cfg, stage, profile, current: {})
+        cfg ||= {}
+        models = cfg.fetch("models", Hive::ModelRouting::EMPTY_MODELS)
+        return nil if models.empty?
+
+        resolution = Hive::ModelRouting.resolve(
+          models: models,
+          stage: stage,
+          current: current || Hive::ModelRouting::EMPTY_MODELS,
+          legacy: legacy_model_routing_values(cfg, profile),
+          provider: profile.name
+        )
+        return nil unless resolution.active?
+
+        profile.routing_arguments(
+          resolution,
+          source: model_routing_source(cfg)
+        )
+      end
+
+      def model_routing_current(block)
+        return Hive::ModelRouting::EMPTY_MODELS unless block.is_a?(Hash)
+
+        {
+          model: block["model"] || block[:model],
+          effort: block["effort"] || block[:effort]
+        }.compact
+      end
+
+      # Generic workflow/council stages keep descriptor-level controls unless
+      # their descriptor name is one of Hive's closed built-in identities.
+      # This preserves arbitrary custom stage names while letting the generic
+      # execution seam honor a built-in identity without inventing an open
+      # `models:` namespace.
+      def recognized_model_routing_arguments(cfg, stage, profile, current: {})
+        return nil unless Hive::ModelRouting.known?(stage)
+
+        model_routing_arguments(cfg, stage, profile, current: current)
+      end
+
+      def legacy_model_routing_values(cfg, profile)
+        return Hive::ModelRouting::EMPTY_MODELS unless profile.name == :claude
+
+        {
+          model: cfg.dig("claude", "model"),
+          effort: cfg.dig("claude", "effort")
+        }.compact
+      end
+      private_class_method :legacy_model_routing_values
+
+      def model_routing_source(cfg)
+        root = cfg["project_root"].to_s
+        return "project config" if root.empty?
+
+        File.join(root, ".hive-state", "config.yml")
+      end
+      private_class_method :model_routing_source
 
       def stage_permission_scope(cfg, stage_name, task, profile,
                                  base_add_dirs: [ task.folder ],

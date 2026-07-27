@@ -7,6 +7,38 @@ class ModelRoutingSurfaceTest < Minitest::Test
   include HiveTestHelper
 
   Task = Struct.new(:folder, :state_file, :log_dir, :stage_name, keyword_init: true)
+  INHERITANCE_ONLY_KEYS = %w[execute review patrol].freeze
+  ROUTE_LAUNCH_SOURCES = {
+    "brainstorm" => %w[
+      lib/hive/stages/brainstorm.rb
+      lib/hive/stages/brainstorm_tmux.rb
+    ],
+    "plan" => %w[lib/hive/stages/plan.rb],
+    "execute_implementation" => %w[lib/hive/implementation_identity/resolver.rb],
+    "rebase" => %w[lib/hive/rebase.rb],
+    "diagnose" => %w[lib/hive/diagnosis_agent.rb],
+    "babysitter" => %w[lib/hive/babysitter/pr_fixer.rb],
+    "review_ci" => %w[lib/hive/implementation_identity/resolver.rb],
+    "review_reviewers" => %w[
+      lib/hive/reviewers/agent.rb
+      lib/hive/reviewers/codex_review.rb
+      lib/hive/stages/review.rb
+    ],
+    "review_triage" => %w[lib/hive/stages/review/triage.rb],
+    "review_fix" => %w[lib/hive/implementation_identity/resolver.rb],
+    "review_browser" => %w[lib/hive/stages/review/browser_test.rb],
+    "patrol_review" => %w[
+      lib/hive/patrol/reviewer.rb
+      lib/hive/refactor_patrol/agent_identity.rb
+    ],
+    "patrol_fix" => %w[
+      lib/hive/patrol/fixer.rb
+      lib/hive/refactor_patrol/agent_identity.rb
+    ],
+    "open_pr" => %w[lib/hive/implementation_identity/resolver.rb],
+    "artifacts" => %w[lib/hive/stages/artifacts.rb],
+    "finalize" => %w[lib/hive/stages/finalize.rb]
+  }.freeze
 
   def test_every_registered_identity_reaches_the_profile_argv_seam
     with_tmp_dir do |dir|
@@ -84,21 +116,32 @@ class ModelRoutingSurfaceTest < Minitest::Test
     end
   end
 
+  def test_every_leaf_route_has_an_explicit_launch_surface
+    parent_keys = Hive::ModelRouting.entries.filter_map(&:parent).uniq
+    assert_equal INHERITANCE_ONLY_KEYS.sort, parent_keys.sort
+
+    leaf_keys = Hive::ModelRouting.keys - parent_keys
+    assert_equal leaf_keys.sort, ROUTE_LAUNCH_SOURCES.keys.sort
+
+    root = File.expand_path("../..", __dir__)
+    ROUTE_LAUNCH_SOURCES.each do |key, relative_paths|
+      relative_paths.each do |relative_path|
+        source = File.read(File.join(root, relative_path))
+        assert_includes source, %("#{key}"), "#{relative_path} does not declare #{key}"
+      end
+    end
+  end
+
   def test_registry_vocabulary_is_published_in_operator_docs_and_templates
     project_template = File.read(
       File.expand_path("../../templates/project_config.yml.erb", __dir__)
-    )
-    global_template = File.read(
-      File.expand_path("../../templates/hive_config.yml.erb", __dir__)
     )
     architecture = File.read(
       File.expand_path("../../docs/architecture.md", __dir__)
     )
 
     Hive::ModelRouting.entries.each do |entry|
-      template = entry.owner == Hive::ModelRouting::GLOBAL_DIGEST_OWNER ?
-        global_template : project_template
-      assert_includes template, entry.key, "template omits #{entry.key}"
+      assert_includes project_template, entry.key, "template omits #{entry.key}"
       assert_includes architecture, entry.key, "architecture docs omit #{entry.key}"
     end
   end

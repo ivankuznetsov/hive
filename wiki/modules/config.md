@@ -3,15 +3,14 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-07-25
+updated: 2026-07-27
 tags: [config, yaml, validation]
 ---
 
-**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, digest, digest-owned `models.digest`, update, web, and Screenote base-url settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, default workflow, worktree root, budgets, timeouts, **stage agents**, project-owned `models`, project/top-level and per-stage `permissions`, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, review-stage roles, daemon enrollment, experimental babysitter enrollment, ordinary patrol, and scheduled architecture patrol). Project config root keys are strict: `Config.load(project_root)` rejects unsupported keys before merging defaults, while registered workflow stage names remain the sanctioned dynamic extension for stage overrides. Architecture-patrol discovery, issue review output, and automatic mutation remain separate settings. Fresh init enables issue output with discovery as the default review surface; legacy or hand-written config that omits `issue_filing.enabled` remains effect-free. `Config.load(project_root)` captures frozen raw field provenance for implementation-owning `agent`/`model`/`effort` keys before it **recursively** deep-merges project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays are replaced wholesale, never per-element merged. Screenote OAuth tokens live outside YAML in `screenote.json`, created by `hive connect screenote`.
+**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, update, web, and Screenote base-url settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, default workflow, worktree root, budgets, timeouts, **stage agents**, project-owned `models`, project/top-level and per-stage `permissions`, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, review-stage roles, daemon enrollment, experimental babysitter enrollment, ordinary patrol, and scheduled architecture patrol). Project config root keys are strict: `Config.load(project_root)` rejects unsupported keys before merging defaults, while registered workflow stage names remain the sanctioned dynamic extension for stage overrides. Architecture-patrol discovery, issue review output, and automatic mutation remain separate settings. Fresh init enables issue output with discovery as the default review surface; legacy or hand-written config that omits `issue_filing.enabled` remains effect-free. `Config.load(project_root)` captures frozen raw field provenance for implementation-owning `agent`/`model`/`effort` keys before it **recursively** deep-merges project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays are replaced wholesale, never per-element merged. Screenote OAuth tokens live outside YAML in `screenote.json`, created by `hive connect screenote`.
 
 The live project template includes a commented, copyable `models:` example.
-The global template documents the sole global route, `models.digest`. Exact
-and coarse entries inherit model and effort independently, never select an
+Exact and coarse entries inherit model and effort independently, never select an
 agent, and are absent by default so generated projects keep legacy behavior.
 Arbitrary descriptor stage names remain descriptor-owned and are rejected from
 the closed `models:` vocabulary.
@@ -75,10 +74,9 @@ workflow-path resolution.
 
 `models:` is a strict, no-default section backed by
 [[modules/model_routing]]. Leaving it out therefore leaves the loaded project
-config shape unchanged. Project config may contain every registered public key
-except `digest`; `models.digest` belongs to the global config and is loaded
-with the global digest snapshot. The existing `load_global_digest_block`
-continues to return scheduler settings only.
+config shape unchanged. Project config may contain every registered public
+key. The removed in-process PR digest is not a route; standalone PRDigest owns
+that integration.
 
 Structural validation rejects non-mapping roots, unknown or wrong-owner stage
 keys, empty/non-mapping entries, fields other than `model` and `effort`,
@@ -132,14 +130,14 @@ The built-in downstream policy is `open_pr=medium`, `review.fix=high`, and `revi
     "execute_implementation" => 500, "open_pr" => 50, "artifacts" => 100,
     "finalize" => 50,
     "review_ci" => 100, "review_triage" => 75,
-    "review_fix" => 500, "review_browser" => 100, "patrol" => 100, "digest" => 50
+    "review_fix" => 500, "review_browser" => 100, "patrol" => 100
   },
   "timeout_sec" => {
     "brainstorm" => 1800, "plan" => 3600,
     "execute_implementation" => 14400, "open_pr" => 1800,
     "artifacts" => 3600, "finalize" => 1800,
     "review_ci" => 3600, "review_triage" => 1800,
-    "review_fix" => 14400, "review_browser" => 3600, "patrol" => 3600, "digest" => 1800
+    "review_fix" => 14400, "review_browser" => 3600, "patrol" => 3600
   },
   # Stage-level agent defaults remain for independently owned stages.
   # Implementation-owned downstream stages intentionally omit active
@@ -226,7 +224,6 @@ The built-in downstream policy is `open_pr=medium`, `review.fix=high`, and `revi
     "auto_retry" => { "enabled" => true },
     ...
   },
-  "digest" => { "enabled" => false, "agent" => nil, "max_catchup_days" => 7 },
   "screenote" => { "base_url" => "https://screenote.ai" },
   "bot" => {
     "enabled" => false,
@@ -380,7 +377,7 @@ trigger a failure — only user input does. Both boundaries raise
 `Hive::ConfigError` (the single class for all "config is bad" cases). Key checks
 include:
 
-1. **`validate_hash_shaped_keys!`** — every hash-shaped top-level key (`brainstorm`, `claude`, `plan`, `execute`, `open_pr`, `artifacts`, `finalize`, `budget_usd`, `timeout_sec`, `review`, `agents`, `daemon`, `bot`, `web`, `babysitter`, `patrol`, `digest`, `rebase`) must be a Hash when present. Catches scalar/nil/integer overrides (e.g. YAML `brainstorm: claude`, `budget_usd: ~`, `timeout_sec: 600`) that would otherwise survive `deep_merge` and crash later as `TypeError`/`NoMethodError`.
+1. **`validate_hash_shaped_keys!`** — every hash-shaped top-level key (`brainstorm`, `claude`, `models`, `plan`, `execute`, `conditions`, `open_pr`, `artifacts`, `finalize`, `budget_usd`, `timeout_sec`, `review`, `agents`, `daemon`, `web`, `screenote`, `babysitter`, `patrol`, `refactor_patrol`, `answer_digest`, `bot`, `rebase`) must be a Hash when present. Catches scalar/nil/integer overrides (e.g. YAML `brainstorm: claude`, `budget_usd: ~`, `timeout_sec: 600`) that would otherwise survive `deep_merge` and crash later as `TypeError`/`NoMethodError`.
 2. **`validate_reviewers!` / `validate_review_adhoc!`** — `review.reviewers` must be an Array (nil fails with a hint to remove the key vs. set `[]`). Each entry must be a Hash. `name` and `output_basename` must be unique across the list (basename uniqueness prevents concurrent file-write collisions on `reviews/<basename>-NN.md`). Empty/whitespace `output_basename` is rejected (would yield `reviews/-01.md`). Each entry's `agent` is checked via `validate_agent_name!`. `review.adhoc.reviewers` is either nil or the same reviewer-entry Array shape, and `review.adhoc.fix` is boolean.
 3. **`validate_review_fix_auto_commit!`** — `review.fix` and `review.fix.auto_commit` must stay Hash-shaped. `review.fix.auto_commit.sign_policy` is optional and must be one of `inherit`, `bypass`, or `fail`; `scope_check.enabled` must be boolean; `scope_check.allowed_paths` / `denied_paths` must be relative path-glob arrays without traversal, absolute paths, or null bytes.
 4. **`validate_role_agent_names!`** — every stage/review role agent path is checked via `validate_agent_name!`.
@@ -392,6 +389,11 @@ include:
 10. **`validate_refactor_patrol!`** — validates discovery/auto-fix/issue booleans and nested shapes, agent names, confidence/run counts, the whole-run review deadline, include/exclude paths, all six commands including `docs` and `public_contract`, semantic scope and contract/dependency policy booleans, leverage weights, the proposal-wide leverage floor, and the issue threshold. File count and diff size are publication evidence, not config or mutation gates; runtime mutation remains protected by root/path confinement, `.hive-state` and protected-path checks, secret scanning, dependency and public-contract guards, and applicable validation commands. Invalid side-effect policy fails at config load, not in a background action.
 11. **`validate_daemon!`** — daemon numeric bounds, booleans, and nested hashes are checked before the daemon starts. The nested `daemon.auto_retry` block must be a hash, and `daemon.auto_retry.enabled` must be boolean when present.
 12. **`validate_dependency_gate_stage!`** — `dependency_gate_stage` must be exactly `8-finalize` or `9-done`. Runtime admission then checks reachability against the prerequisite task's selected workflow rather than assuming the coding descriptor.
+13. **`validate_model_routing_capabilities!`** — after structural role and
+patrol validation, resolves exact/coarse routes for enabled, reachable built-in
+calls and asks each already-selected profile to validate only its effective
+model/effort controls. Fully shadowed coarse fields and disabled optional calls
+do not fail. This pure barrier runs before legacy warnings or runtime effects.
 
 Bot attachment capture settings are validated with the other bot numeric
 keys: `bot.idea_attachment_max_bytes` defaults to 20 MiB and may not
@@ -478,10 +480,7 @@ cfg.dig("babysitter", "enabled")
 cfg.dig("babysitter", "max_concurrent_prs")
 cfg.dig("patrol", "review_prs")
 cfg.dig("patrol", "review", "reviewers")
-cfg.dig("digest", "agent")
 cfg.dig("daemon", "auto_retry", "enabled")
-cfg.dig("budget_usd", "digest")
-cfg.dig("timeout_sec", "digest")
 cfg.dig("bot", "chat_id_allowlist")
 cfg["worktree_root"]
 ```

@@ -172,7 +172,7 @@ class AgentProfileTest < Minitest::Test
   end
 
   def test_routed_effort_rejects_profiles_without_native_effort_support
-    %i[grok pi].each do |name|
+    %i[pi].each do |name|
       profile = Hive::AgentProfiles.lookup(name)
       resolution = Hive::ModelRouting.resolve(
         models: { "plan" => { "effort" => "high" } },
@@ -207,9 +207,12 @@ class AgentProfileTest < Minitest::Test
       },
       grok: {
         model: "grok-code-fast-1",
-        effort: nil,
+        effort: "high",
         global: [],
-        subcommand: [ "--model", "grok-code-fast-1" ]
+        subcommand: [
+          "--model", "grok-code-fast-1",
+          "--reasoning-effort", "high"
+        ]
       },
       pi: {
         model: "openai/gpt-5.6-sol",
@@ -239,6 +242,11 @@ class AgentProfileTest < Minitest::Test
       assert_equal name, arguments.profile_name
       assert_equal "plan", arguments.stage
     end
+
+    assert_equal(
+      %w[default inherit none minimal low medium high xhigh max],
+      Hive::AgentProfiles.lookup(:grok).routed_effort_values
+    )
   end
 
   def test_codex_routed_model_and_effort_can_be_rendered_independently

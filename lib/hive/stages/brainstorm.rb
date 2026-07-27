@@ -76,6 +76,10 @@ module Hive
           timeout_sec: cfg.dig("timeout_sec", "brainstorm"),
           log_label: "brainstorm",
           profile: profile,
+          routing_arguments: Hive::Stages::Base.model_routing_arguments(
+            cfg, "brainstorm", profile,
+            current: Hive::Stages::Base.model_routing_current(cfg["brainstorm"])
+          ),
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           # Pin the status-detection mode regardless of which profile the
           # user picked: brainstorm's lifecycle contract is "agent writes
@@ -105,6 +109,10 @@ module Hive
           timeout_sec: cfg.dig("timeout_sec", "brainstorm"),
           log_label: "brainstorm",
           profile: profile,
+          routing_arguments: Hive::Stages::Base.model_routing_arguments(
+            cfg, "brainstorm", profile,
+            current: Hive::Stages::Base.model_routing_current(cfg["brainstorm"])
+          ),
           session_name: Hive::ClaudeLauncher.tmux_session_name("2-brainstorm", task), # coding-scoped: coding brainstorm stage tmux session
           status_mode: :state_file_marker,
           **Hive::Stages::Base.tool_scope_kwargs(scope)

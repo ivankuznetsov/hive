@@ -1079,6 +1079,49 @@ class StagesAgentTest < Minitest::Test
     end
   end
 
+  def test_recognized_descriptor_stage_receives_builtin_route
+    with_tmp_dir do |project|
+      task = task_for(project, "plan")
+      cfg = {
+        "plan" => { "agent" => "codex" },
+        "models" => {
+          "plan" => { "model" => "gpt-5.6-sol", "effort" => "xhigh" }
+        }
+      }
+
+      with_stubbed_spawn do |captured|
+        Hive::Stages::Agent.run!(task, cfg)
+
+        routing = captured.first.fetch(:kwargs).fetch(:routing_arguments)
+        assert_equal "plan", routing.stage
+        assert_equal [
+          "--model", "gpt-5.6-sol", "-c", "model_reasoning_effort=xhigh"
+        ], routing.global_arguments
+      end
+    end
+  end
+
+  def test_custom_descriptor_stage_keeps_descriptor_identity_outside_builtin_routes
+    with_tmp_dir do |project|
+      descriptor = instruction_workflow_with_agent(model: "opus", effort: "high")
+      task = task_for(project, "work", descriptor: descriptor)
+      cfg = {
+        "models" => {
+          "plan" => { "model" => "gpt-5.6-sol", "effort" => "xhigh" }
+        }
+      }
+
+      with_stubbed_spawn do |captured|
+        Hive::Stages::Agent.run!(task, cfg)
+
+        kwargs = captured.first.fetch(:kwargs)
+        assert_nil kwargs.fetch(:routing_arguments)
+        assert_equal "opus", kwargs.fetch(:model)
+        assert_equal "high", kwargs.fetch(:effort)
+      end
+    end
+  end
+
   def test_spawn_honors_cfg_budget_and_timeout_overrides
     with_tmp_dir do |project|
       task = task_for(project, "brainstorm")

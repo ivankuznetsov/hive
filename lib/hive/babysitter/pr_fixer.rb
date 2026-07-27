@@ -227,6 +227,11 @@ module Hive
             cwd: worktree_path,
             log_label: "babysitter-pr-#{number}",
             profile: profile,
+            cfg: @cfg,
+            routing_arguments: Hive::Stages::Base.model_routing_arguments(
+              @cfg, "babysitter", profile,
+              current: Hive::Stages::Base.model_routing_current(@cfg["babysitter"])
+            ),
             status_mode: :exit_code_only
           )
         end

@@ -386,6 +386,10 @@ module Hive
         log_label: "rebase_conflict",
         profile: profile,
         status_mode: :exit_code_only,
+        routing_arguments: Hive::Stages::Base.model_routing_arguments(
+          cfg, "rebase", profile,
+          current: Hive::Stages::Base.model_routing_current(cfg["rebase"])
+        ),
         cfg: cfg
       )
     end

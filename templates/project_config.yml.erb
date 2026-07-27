@@ -54,7 +54,8 @@ claude:
 # brainstorm, plan, execute, execute_implementation, rebase, diagnose,
 # babysitter, review, review_ci, review_reviewers, review_triage, review_fix,
 # review_browser, patrol, patrol_review, patrol_fix, open_pr, artifacts,
-# finalize. The globally owned `digest` key belongs in the global config.
+# finalize. Hive's former in-process PR digest was removed; PRDigest is now a
+# standalone integration and is not a model-routing stage.
 # Arbitrary custom-workflow stage names are intentionally not valid here;
 # put `model:` / `effort:` on their workflow descriptor instead.
 

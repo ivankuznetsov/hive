@@ -15,7 +15,7 @@ route. `models:` never selects the profile.
 | --- | --- | --- | --- |
 | Claude | yes; `inherit` omits the flag | `default`, `inherit`, `low`, `medium`, `high`, `xhigh`, `max` | `--model` / `--effort` in Claude argv; shared by headless and tmux |
 | Codex | yes; `default`/`inherit` omit the flag | `default`, `inherit`, `none`, `minimal`, `low`, `medium`, `high`, `xhigh` | global `--model` / `-c model_reasoning_effort=…` before `exec` or `review` |
-| Grok | yes; `default`/`inherit` omit the flag | unsupported | profile-native model flag only |
+| Grok | yes; `default`/`inherit` omit the flag | `default`, `inherit`, `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` | profile-native `--model` / `--reasoning-effort` flags |
 | Pi | yes; `default`/`inherit` omit the flag | unsupported | profile-native model flag only |
 
 An unsupported effective effort fails before launch; Hive does not translate
@@ -254,9 +254,15 @@ Implementation-owning stages pass normalized model and effort values through the
 | Claude | `--model <model>` | `--effort <value>` | `sonnet`, `medium` |
 | Codex | `--model <model>` | `-c model_reasoning_effort=<value>` | literal `gpt-5.6-terra`, `medium` |
 | Pi | `--model <model>` when pinned | unsupported | normal provider default, no model pin |
-| Grok | `--model <model>` when pinned | unsupported | normal provider default, no model pin |
+| Grok | `--model <model>` when pinned | `--reasoning-effort <value>` | normal provider default, no model pin |
 
-Review-fix and CI-fix retain the exact concrete execute model and request `high`. Pi and Grok honestly report the request as unsupported and omit an effort argument. Their open-PR utility route deliberately omits a model pin so provider-native configuration remains authoritative, while the resolved concrete default is retained for audit/status. Every value is a discrete argv element; model and effort never ride shell interpolation or credential-bearing environment snapshots.
+Review-fix and CI-fix retain the exact concrete execute model and request
+`high`. Pi honestly reports that request as unsupported and omits an effort
+argument; Grok renders it natively. Pi and Grok's open-PR utility route
+deliberately omits a model pin so provider-native configuration remains
+authoritative, while the resolved concrete default is retained for
+audit/status. Every value is a discrete argv element; model and effort never
+ride shell interpolation or credential-bearing environment snapshots.
 
 ## Brainstorm Interactive Tmux Addendum
 

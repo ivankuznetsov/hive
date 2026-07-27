@@ -237,21 +237,36 @@ class ImplementationIdentityResolverTest < Minitest::Test
   end
 
   def test_routed_effort_is_validated_by_selected_provider
-    %w[pi grok].each do |provider|
-      cfg = config(
-        execute: { "agent" => provider, "model" => "provider/model-v1" },
-        models: {
-          "execute_implementation" => { "effort" => "high" }
-        }
-      )
+    cfg = config(
+      execute: { "agent" => "pi", "model" => "provider/model-v1" },
+      models: {
+        "execute_implementation" => { "effort" => "high" }
+      }
+    )
 
-      error = assert_raises(Hive::ConfigError) do
-        resolver(cfg).resolve_execute(generation: 1, attempt_id: "#{provider}-exec")
-      end
-
-      assert_match(/models\.execute_implementation\.effort/, error.message)
-      assert_match(/profile :#{provider}/, error.message)
+    error = assert_raises(Hive::ConfigError) do
+      resolver(cfg).resolve_execute(generation: 1, attempt_id: "pi-exec")
     end
+
+    assert_match(/models\.execute_implementation\.effort/, error.message)
+    assert_match(/profile :pi/, error.message)
+  end
+
+  def test_grok_routed_effort_is_persisted_and_rendered_natively
+    cfg = config(
+      execute: { "agent" => "grok", "model" => "grok-code-fast-1" },
+      models: {
+        "execute_implementation" => { "effort" => "high" }
+      }
+    )
+
+    selection = resolver(cfg).resolve_execute(generation: 1, attempt_id: "grok-exec")
+    arguments = selection.routing_arguments(Hive::AgentProfiles.lookup(:grok))
+
+    assert_equal "high", selection.requested_effort
+    assert_equal "high", selection.routing.fetch("effort")
+    assert_equal [ "--model", "grok-code-fast-1", "--reasoning-effort", "high" ],
+                 arguments.subcommand_arguments
   end
 
   def test_exact_downstream_model_does_not_resolve_a_shadowed_provider_default

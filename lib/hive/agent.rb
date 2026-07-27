@@ -194,6 +194,10 @@ module Hive
         end
         supplied_identity_arguments = @launch_arguments.native_arguments
       end
+      if routing_arguments && (@launch_arguments || !supplied_identity_arguments.empty?)
+        raise ArgumentError,
+              "routing_arguments cannot be combined with legacy identity or launch arguments"
+      end
       @identity_arguments = supplied_identity_arguments.freeze
       @routing_arguments =
         routing_arguments && @profile.validate_routing_arguments!(routing_arguments)

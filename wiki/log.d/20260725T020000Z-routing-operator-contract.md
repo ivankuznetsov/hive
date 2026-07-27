@@ -10,6 +10,7 @@ type: implementation
 - Added deterministic mixed-provider fake-binary and registry-wide argv
   acceptance suites, including Codex ordering, non-leakage, fallback, and
   unscoped legacy behavior.
-- Documented project/global templates, built-in vocabulary, independent
+- Documented the project template, built-in vocabulary, independent
   inheritance, durable retries, profile capabilities, custom workflow
-  boundaries, validation timing, and migration-free fallback.
+  boundaries, validation timing, and migration-free fallback. Standalone
+  PRDigest remains outside Hive's routing vocabulary.

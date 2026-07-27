@@ -1527,12 +1527,14 @@ module Hive
 
           shared_reviewer_groups(cfg, claude_specs).each_with_index do |group, group_idx|
             scope = shared_reviewer_permission_scope(cfg, ctx, task, group.first)
+            routing_arguments = shared_reviewer_routing_arguments(cfg, group.first)
             Hive::ClaudeLauncher.with_shared_session(
               task: task,
               cfg: cfg,
               session_name: shared_reviewer_session_name(task, ctx.pass, group_idx),
               cwd: ctx.worktree_path,
               add_dirs: scope.fetch(:add_dirs),
+              cli_flags: routing_arguments&.native_arguments,
               **Hive::Stages::Base.tool_scope_kwargs(scope)
             ) do |handle|
               group.each do |spec|
@@ -1640,17 +1642,32 @@ module Hive
         :source_unknown
       end
 
-      # Group reviewers that share an effective permission scope so they can
-      # share one tmux session. The group key is the RESOLVED spec — an
+      # Group reviewers that share an effective permission scope and routed
+      # launch identity so they can share one tmux session. The permission
+      # part of the key is the RESOLVED spec — an
       # explicit `permissions:` value, or the project/stage default when the
       # key is omitted — so a reviewer spelling out `permissions: yolo` and
       # one inheriting the default yolo land in the SAME group (identical
       # effective scope → one session) instead of two sessions keyed on
-      # present-vs-absent. Each group's scope is built from group.first, which
-      # is sound because every member resolves to the same effective spec.
+      # present-vs-absent. RoutingArguments are immutable value objects, so
+      # equal effective model/effort controls coalesce while different ones
+      # cannot leak through a previously established Claude process. Each
+      # group's scope and route are built from group.first, which is sound
+      # because every member resolves to the same effective key.
       def shared_reviewer_groups(cfg, specs)
         default = Hive::Config.permission_spec(cfg || {}, "review.reviewers")
-        specs.group_by { |spec| spec.key?("permissions") ? spec["permissions"] : default }.values
+        specs.group_by do |spec|
+          permission = spec.key?("permissions") ? spec["permissions"] : default
+          [ permission, shared_reviewer_routing_arguments(cfg, spec) ]
+        end.values
+      end
+
+      def shared_reviewer_routing_arguments(cfg, spec)
+        profile = Hive::AgentProfiles.lookup(:claude, cfg: cfg)
+        Hive::Stages::Base.model_routing_arguments(
+          cfg || {}, "review_reviewers", profile,
+          current: Hive::Stages::Base.model_routing_current(spec)
+        )
       end
 
       def shared_reviewer_session_name(task, pass, group_idx)

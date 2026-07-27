@@ -811,7 +811,11 @@ module Hive
             profile: profile,
             expected_output: output_path,
             status_mode: :output_file_exists,
-            cli_flags: launch.fetch(:cli_flags)
+            cli_flags: launch.fetch(:cli_flags),
+            routing_arguments: Hive::Stages::Base.model_routing_arguments(
+              @cfg, "patrol_fix", profile,
+              current: Hive::Stages::Base.model_routing_current(@cfg["patrol"])
+            )
           ).run!
         ensure
           @token_budget.record!(

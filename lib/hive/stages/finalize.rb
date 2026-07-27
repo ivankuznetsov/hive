@@ -154,6 +154,10 @@ module Hive
           timeout_sec: finalize_timeout(cfg),
           log_label: "finalize",
           profile: profile,
+          routing_arguments: Hive::Stages::Base.model_routing_arguments(
+            cfg, "finalize", profile,
+            current: Hive::Stages::Base.model_routing_current(cfg["finalize"])
+          ),
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :state_file_marker
         }

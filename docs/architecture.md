@@ -316,17 +316,28 @@ models:
 `execute_implementation`, `rebase`, `diagnose`, `babysitter`, `review`,
 `review_ci`, `review_reviewers`, `review_triage`, `review_fix`,
 `review_browser`, `patrol`, `patrol_review`, `patrol_fix`, `open_pr`,
-`artifacts`, and `finalize`. `digest` uses the same entry syntax but is owned
-by the global config.
+`artifacts`, and `finalize`. Hive's removed in-process PR digest is not a
+routing stage; standalone PRDigest selects its own provider configuration.
 
 Execute, open-PR, review-fix, and review-CI selections are frozen in the
 generation-scoped implementation identity. Retrying that generation does not
 re-read edited routing config; a new generation may capture new values. Hive
-validates an effective routed control against the already-selected profile
-before a marker, journal identity, subprocess, or remote mutation. Codex
-receives routed global controls before `exec` or `review`; other providers
-receive only their native flags. Removing or omitting `models:` requires no
-migration and preserves the legacy argv path.
+also routes the direct and shared-session reviewer adapters, triage,
+browser-test, rebase, diagnosis, babysitter, ordinary patrol, Architecture
+Patrol, brainstorm, plan, artifacts, and finalize at their trusted launch
+seams. Shared Claude sessions are grouped by both effective permission scope
+and routed model/effort so one process cannot leak its identity into another
+reviewer.
+
+Config loading first resolves exact/coarse shadowing over only enabled,
+reachable calls, then validates each effective control against the
+already-selected profile. This happens before legacy warnings, markers,
+journal identities, subprocesses, or remote mutations. Disabled patrol,
+browser, CI, and reviewer paths therefore do not reject an otherwise dormant
+provider-incompatible route, while any reachable incompatible route fails the
+load. Codex receives routed global controls before `exec` or `review`; other
+providers receive only their native flags. Removing or omitting `models:`
+requires no migration and preserves the legacy argv path.
 
 Generation-scoped condition authority is intentionally staged. Existing
 projects stay on `markers`; operators may set only `stages.4-execute` to

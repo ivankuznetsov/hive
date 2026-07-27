@@ -144,8 +144,9 @@ capability.
 Active stage routing is stricter than that legacy identity path. Claude accepts
 `default`, `inherit`, `low`, `medium`, `high`, `xhigh`, and `max`; Codex
 accepts `default`, `inherit`, `none`, `minimal`, `low`, `medium`, `high`, and
-`xhigh`; Grok supports its native `--reasoning-effort` control and Pi rejects
-routed effort. Claude routing omits model
+`xhigh`; Grok accepts `default`, `inherit`, `none`, `minimal`, `low`, `medium`,
+`high`, `xhigh`, and `max` through its native `--reasoning-effort` control,
+while Pi rejects routed effort. Claude routing omits model
 `inherit` and effort `default`/`inherit`. Codex routing emits model and
 reasoning controls as global arguments before its subcommand. The typed
 argument envelope retains profile, stage, values, and provenance and is

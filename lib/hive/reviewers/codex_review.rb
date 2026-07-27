@@ -152,6 +152,10 @@ module Hive
         # the same Hive::ConfigError the agent adapter triggers instead of
         # silently running `codex review` with the declared scope discarded.
         enforce_permission_scope_gate!(profile)
+        routing_arguments = Hive::Stages::Base.model_routing_arguments(
+          @cfg || {}, "review_reviewers", profile,
+          current: Hive::Stages::Base.model_routing_current(spec)
+        )
         begin
           Hive::AgentRuntime.prepare!(profile)
         rescue Hive::AgentError => e
@@ -175,7 +179,9 @@ module Hive
             return error_result("deadline reached before attempt #{attempts}", attempts, max_attempts)
           end
 
-          run = run_codex_review(profile.bin, prompt, spawn_timeout || configured_timeout)
+          run = run_codex_review(
+            profile.bin, prompt, spawn_timeout || configured_timeout, routing_arguments
+          )
           break if usable_review?(run)
           break if attempts >= max_attempts
 
@@ -463,8 +469,18 @@ module Hive
       # The codex binary's existence is already proven by `check_version!`
       # (the caller's preflight), so a spawn-time ENOENT is unreachable here
       # — we deliberately do not re-rescue it.
-      def run_codex_review(bin, prompt, timeout_sec)
-        argv = [ bin, "review", "--title", review_title, prompt ]
+      def run_codex_review(bin, prompt, timeout_sec, routing_arguments = nil)
+        global_arguments = routing_arguments&.global_arguments || []
+        subcommand_arguments = routing_arguments&.subcommand_arguments || []
+        argv = [
+          bin,
+          *global_arguments,
+          "review",
+          *subcommand_arguments,
+          "--title",
+          review_title,
+          prompt
+        ]
 
         pipe_r, pipe_w = IO.pipe
         pid = Process.spawn(*argv, chdir: ctx.worktree_path, pgroup: true, out: pipe_w, err: pipe_w)

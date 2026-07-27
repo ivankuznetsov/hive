@@ -59,6 +59,35 @@ class RefactorPatrolAgentIdentityTest < Minitest::Test
                     provider: "codex", model: "gpt-5.6-sol", effort: "xhigh"
   end
 
+  def test_patrol_routes_are_frozen_into_review_and_fix_identities
+    cfg = {
+      "project_root" => "/tmp/project",
+      "execute" => {
+        "agent" => "codex", "model" => "gpt-5.6-terra", "effort" => "medium"
+      },
+      "models" => {
+        "patrol" => { "effort" => "high" },
+        "patrol_review" => { "model" => "gpt-5.6-review" },
+        "patrol_fix" => { "model" => "gpt-5.6-fix", "effort" => "xhigh" }
+      },
+      "refactor_patrol" => { "auto_fix" => {} }
+    }
+
+    identity = Hive::RefactorPatrol::AgentIdentity.new(cfg: cfg)
+
+    assert_identity identity.review,
+                    provider: "codex", model: "gpt-5.6-review", effort: "high"
+    assert_identity identity.fix,
+                    provider: "codex", model: "gpt-5.6-fix", effort: "xhigh"
+    assert_empty identity.review.native_arguments
+    assert_equal "patrol_review", identity.review.routing.fetch("stage")
+    assert_equal [
+      "--model", "gpt-5.6-review", "-c", "model_reasoning_effort=high"
+    ], identity.review.routing_arguments(
+      Hive::AgentProfiles.lookup(:codex)
+    ).global_arguments
+  end
+
   def test_blank_provider_override_fails_closed
     cfg = {
       "execute" => { "agent" => "codex", "model" => "gpt-5.6-sol", "effort" => "high" },

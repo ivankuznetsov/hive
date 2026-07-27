@@ -631,7 +631,15 @@ class HiveRebaseTest < Minitest::Test
 
     begin
       stub_gitops!(git) do
-        result = Hive::Rebase.perform(task, base_cfg("execute" => { "agent" => "codex" }))
+        result = Hive::Rebase.perform(
+          task,
+          base_cfg(
+            "execute" => { "agent" => "codex" },
+            "models" => {
+              "rebase" => { "model" => "gpt-5.6-sol", "effort" => "xhigh" }
+            }
+          )
+        )
         assert result.succeeded
       end
     ensure
@@ -643,6 +651,9 @@ class HiveRebaseTest < Minitest::Test
                  "rebase helper must use the configured development agent"
     assert_equal :exit_code_only, dispatched_with[:status_mode],
                  "rebase helper must judge development-agent success by exit code"
+    assert_equal [
+      "--model", "gpt-5.6-sol", "-c", "model_reasoning_effort=xhigh"
+    ], dispatched_with.fetch(:routing_arguments).global_arguments
   ensure
     teardown_dirs(worktree, folder)
   end

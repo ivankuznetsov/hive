@@ -36,7 +36,7 @@ printf -v quoted_inner_hive '%q' "$rubygems_bin/hive"
   printf '%s\n' \
     'unset RUBYOPT RUBYLIB BUNDLER_SETUP BUNDLE_GEMFILE BUNDLE_BIN_PATH RUBYGEMS_GEMDEPS'
   printf 'export GEM_HOME=%s\n' "$quoted_install_root"
-  printf '%s\n' 'export GEM_PATH="$GEM_HOME"'
+  printf 'export GEM_PATH="$%s"\n' GEM_HOME
   printf 'exec %s %s "$@"\n' "$quoted_ruby" "$quoted_inner_hive"
 } > "$public_bin/hive"
 chmod 0755 "$public_bin/hive"

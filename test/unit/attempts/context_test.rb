@@ -231,6 +231,21 @@ class AttemptsContextTest < Minitest::Test
         :validate_task_binding!, record, argv.take(6) + [ "other-event" ]
       )
     end
+
+    incomplete = Struct.new(:subject) do
+      def [](key)
+        {
+          "project" => "demo", "task_id" => nil,
+          "intended_stage" => "module-hook"
+        }[key]
+      end
+    end.new(subject.except("event_id"))
+    error = assert_raises(Hive::Attempts::StoreError) do
+      Hive::Attempts::Context.send(
+        :validate_module_hook_binding!, incomplete, argv
+      )
+    end
+    assert_includes error.message, "binding is incomplete"
   end
 
   def test_legacy_opaque_generation_is_bridged_without_becoming_an_epoch

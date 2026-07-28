@@ -50,4 +50,33 @@ class ModulePackagePermissionAtomsTest < Minitest::Test
       )
     end
   end
+
+  def test_canonicalizes_only_exact_individual_permission_atoms
+    repository = Hive::ModulePackage::PermissionAtoms.canonicalize(
+      "category" => "repository_write", "value" => true
+    )
+    assert_equal({ "category" => "repository_write", "value" => true }, repository)
+    assert_predicate repository, :frozen?
+
+    command = {
+      "category" => "external_commands", "value" => "git"
+    }
+    assert_equal command, Hive::ModulePackage::PermissionAtoms.canonicalize(command)
+    assert_equal(
+      Hive::WorkflowPackage::CanonicalJSON.generate(command),
+      Hive::ModulePackage::PermissionAtoms.canonical_key(command)
+    )
+
+    [
+      { category: "external_commands", value: "git" },
+      { "category" => "repository_write", "value" => false },
+      { "category" => "future", "value" => "value" },
+      { "category" => "external_commands", "value" => "" },
+      { "category" => "external_commands", "value" => "git", "extra" => true }
+    ].each do |atom|
+      assert_raises(Hive::ConfigError) do
+        Hive::ModulePackage::PermissionAtoms.canonicalize(atom)
+      end
+    end
+  end
 end

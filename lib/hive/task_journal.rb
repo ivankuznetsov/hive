@@ -154,8 +154,7 @@ module Hive
                  predecessor["task_id"].to_s == expected.fetch("task_id") &&
                  predecessor["intended_stage"] == expected.fetch("intended_stage") &&
                  predecessor.task_input_epoch == expected.fetch("task_input_epoch")
-            raise AttemptMismatch,
-                  "durable attempt lineage predecessor #{predecessor_id} has incompatible identity"
+            raise AttemptMismatch, "durable attempt lineage predecessor #{predecessor_id} has incompatible identity"
           end
           current = predecessor
         end

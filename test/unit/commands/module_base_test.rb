@@ -77,7 +77,12 @@ class ModuleBaseCommandTest < Minitest::Test
       }
       captured = nil
 
-      with_replaced_singleton_method(Hive::Config, :registered_projects, -> { [ entry ] }) do
+      stale = entry.merge(
+        "name" => "stale", "path" => File.join(project, "missing")
+      )
+      with_replaced_singleton_method(
+        Hive::Config, :registered_projects, -> { [ stale, entry ] }
+      ) do
         with_replaced_singleton_method(
           Hive::Modules::Inspector, :new,
           ->(**options) { captured = options; :inspector }
@@ -102,25 +107,35 @@ class ModuleBaseCommandTest < Minitest::Test
       state = File.join(project, ".hive-state")
       FileUtils.mkdir_p(state)
       File.write(File.join(state, "config.yml"), { "hive_state_path" => ".hive-state" }.to_yaml)
-      commit = nil
+      commits = []
       lock_path = nil
       operations = Object.new
-      operations.define_singleton_method(:hive_commit) { |**attributes| commit = attributes }
+      operations.define_singleton_method(:hive_commit) do |**attributes|
+        commits << attributes
+      end
 
       with_replaced_singleton_method(Hive::GitOps, :new, ->(_root) { operations }) do
         with_replaced_singleton_method(
           Hive::Lock, :with_commit_lock,
           ->(path, &block) { lock_path = path; block.call }
         ) do
-          Harness.new(project_root: project, json: true, stdout: StringIO.new)
-                 .send(:commit_state, "demo", "installed")
+          command = Harness.new(
+            project_root: project, json: true, stdout: StringIO.new
+          )
+          command.send(:commit_state, "demo", "installed")
+          command.send(:commit_workflow_state, "demo", "updated")
         end
       end
 
       assert_equal state, lock_path
+      commit = commits.fetch(0)
       assert_equal "modules", commit.fetch(:stage_name)
       assert_equal "demo", commit.fetch(:slug)
       assert_equal [ File.join("modules", "demo") ], commit.fetch(:pathspecs)
+      workflow_commit = commits.fetch(1)
+      assert_equal "workflows", workflow_commit.fetch(:stage_name)
+      assert_equal [ File.join("workflows", "demo") ],
+                   workflow_commit.fetch(:pathspecs)
     end
   end
 

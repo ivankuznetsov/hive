@@ -204,6 +204,48 @@ class ModulesAdaptersPatrolTest < Minitest::Test
     end
   end
 
+  def test_malformed_legacy_shadow_capture_is_rejected
+    adapter = Hive::Modules::Adapters::Patrol.new
+    malformed_decision = event(
+      "schedule",
+      "payload" => {
+        "legacy_mutator_capture" => {
+          "decision" => "not-a-decision", "effects" => {}
+        }
+      }
+    )
+
+    assert_raises(Hive::ConfigError) do
+      adapter.send(:legacy_capture, malformed_decision)
+    end
+    malformed_effects = event(
+      "schedule",
+      "payload" => {
+        "legacy_mutator_capture" => {
+          "decision" => {}, "effects" => {}
+        }
+      }
+    )
+    error = assert_raises(Hive::ConfigError) do
+      adapter.send(:legacy_capture, malformed_effects)
+    end
+    assert_match(/legacy shadow capture is malformed/, error.message)
+
+    valid = {
+      "decision" => { "rationale" => "due" }, "effects" => []
+    }
+    assert_equal(
+      valid,
+      adapter.send(
+        :legacy_capture,
+        event(
+          "schedule",
+          "payload" => { "legacy_mutator_capture" => valid }
+        )
+      )
+    )
+  end
+
   private
 
   def with_project(owner: "legacy")

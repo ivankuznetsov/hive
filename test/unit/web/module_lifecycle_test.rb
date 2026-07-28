@@ -89,6 +89,11 @@ class WebModuleLifecycleTest < Minitest::Test
 
   def test_defaults_are_constructible_and_unknown_operations_fail_closed
     lifecycle = Hive::Web::ModuleLifecycle.new
+    assert_instance_of(
+      Hive::ModulePackage::CatalogClient,
+      lifecycle.instance_variable_get(:@catalog_client_factory).call
+    )
+    assert_instance_of Time, lifecycle.instance_variable_get(:@clock).call
     assert_raises(Hive::ConfigError) do
       lifecycle.preview(
         {

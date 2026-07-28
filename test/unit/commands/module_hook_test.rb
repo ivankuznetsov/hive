@@ -106,6 +106,16 @@ class CommandsModuleHookTest < Minitest::Test
         )
       )
       assert_raises(Hive::ConfigError) { missing.send(:load_run, store) }
+      File.binwrite(
+        File.join(runs, "#{'a' * 64}.json"),
+        Hive::WorkflowPackage::CanonicalJSON.generate(
+          "run_id" => "different", "event_id" => "event-1",
+          "source_commit" => "b" * 40,
+          "configuration_digest" => "c" * 64
+        )
+      )
+      error = assert_raises(Hive::ConfigError) { missing.send(:load_run, store) }
+      assert_match(/identity does not match/, error.message)
       File.write(File.join(runs, "#{'a' * 64}.json"), "{bad")
       assert_raises(Hive::ConfigError) { missing.send(:load_run, store) }
     end
@@ -214,6 +224,36 @@ class CommandsModuleHookTest < Minitest::Test
 
         assert_equal 13, command.call
         assert_equal 1, calls.length
+
+        project_error = assert_raises(Hive::ConfigError) do
+          command.send(
+            :validate_execution_identity!,
+            entry: entry.merge("name" => "other"), run: run,
+            snapshot: attempt.execution_snapshot,
+            configuration: configuration, hook: hooks.first, event: event
+          )
+        end
+        assert_match(/project or event identity/, project_error.message)
+
+        incomplete_run = deep_copy(run)
+        incomplete_run.delete("schema_version")
+        identity_error = assert_raises(Hive::ConfigError) do
+          command.send(
+            :validate_execution_identity!,
+            entry: entry, run: incomplete_run,
+            snapshot: attempt.execution_snapshot,
+            configuration: configuration, hook: hooks.first, event: event
+          )
+        end
+        assert_match(/snapshot identity does not match/, identity_error.message)
+
+        snapshot_error = assert_raises(Hive::ConfigError) do
+          command.send(
+            :validate_snapshot_contract!,
+            attempt.execution_snapshot, configuration, {}
+          )
+        end
+        assert_match(/snapshot identity does not match/, snapshot_error.message)
 
         tampered_runs = [
           deep_copy(run).tap { |row| row["subject"]["project_id"] = "other-project" },

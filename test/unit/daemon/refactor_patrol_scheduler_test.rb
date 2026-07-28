@@ -40,6 +40,21 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_reservation_rechecks_migration_ownership_after_candidate_discovery
+    with_project do |_dir, entry, store|
+      enqueue(store)
+      scheduler = scheduler(entry, store)
+      candidate = scheduler.candidates(now: T0).first
+      scheduler.instance_variable_set(:@migration_ownership, ->(*) { false })
+
+      error = assert_raises(Hive::Daemon::RefactorPatrolScheduler::ReservationBlocked) do
+        scheduler.reserve(candidate, now: T0)
+      end
+
+      assert_equal "migration_ownership_changed", error.reason
+    end
+  end
+
   def test_candidate_pass_snapshots_registration_identity_and_continuation_ledger_once
     with_project do |_dir, entry, store|
       enqueue(store, job_id: "first", number: 7, merged_at: T0)

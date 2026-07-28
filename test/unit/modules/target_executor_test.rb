@@ -309,11 +309,282 @@ class ModulesTargetExecutorTest < Minitest::Test
 
   def test_exact_network_allowlist_fails_activation_until_enforceable
     runner = Hive::Modules::TargetExecutor::CommandRunner.new
+    runner.define_singleton_method(:executable_path) { |_name| "/usr/bin/bwrap" }
     grants = permissions("network_hosts" => [ "api.example.test" ])
 
     error = assert_raises(Hive::ConfigError) { runner.preflight!(grants: grants) }
     assert_match(/host allowlists/, error.message)
     assert runner.preflight!(grants: grants.merge("network_hosts" => [ "*" ]))
+  end
+
+  def test_command_preflight_and_sandbox_modes_are_host_independent
+    runner = Hive::Modules::TargetExecutor::CommandRunner.new
+    runner.define_singleton_method(:executable_path) { |_name| "/usr/bin/bwrap" }
+
+    original_host_os = RbConfig::CONFIG.fetch("host_os")
+    begin
+      RbConfig::CONFIG["host_os"] = "darwin"
+      error = assert_raises(Hive::ConfigError) do
+        runner.preflight!(grants: permissions)
+      end
+      assert_match(/require Linux bubblewrap/, error.message)
+    ensure
+      RbConfig::CONFIG["host_os"] = original_host_os
+    end
+
+    with_tmp_dir do |root|
+      writable = runner.send(
+        :sandbox_argv, argv: %w[git status], chdir: root,
+        grants: permissions("filesystem_write" => [ "*" ])
+      )
+      assert_includes writable.each_cons(3).to_a, [ "--bind", "/", "/" ]
+
+      readable = runner.send(
+        :sandbox_argv, argv: %w[git status], chdir: root,
+        grants: permissions("filesystem_read" => [ "*" ])
+      )
+      assert_includes readable.each_cons(3).to_a, [ "--ro-bind", "/", "/" ]
+
+      repository_write = runner.send(
+        :sandbox_argv, argv: %w[git status], chdir: root,
+        grants: permissions("repository_write" => true)
+      )
+      assert_includes repository_write.each_cons(3).to_a,
+                      [ "--bind", root, root ]
+
+      repository_read = runner.send(
+        :sandbox_argv, argv: %w[git status], chdir: root,
+        grants: permissions("filesystem_read" => [ "repository" ])
+      )
+      assert_includes repository_read.each_cons(3).to_a,
+                      [ "--ro-bind", root, root ]
+    end
+  end
+
+  def test_target_contract_errors_fail_closed_before_dispatch
+    executor = Hive::Modules::TargetExecutor.new(first_party_loader: -> { true })
+    malformed = Struct.new(:contract, :grants).new(
+      { "hooks" => [ { "target" => { "kind" => "future", "id" => "x" } } ] },
+      permissions
+    )
+    error = assert_raises(Hive::ConfigError) do
+      executor.validate_generation!(Dir.pwd, malformed)
+    end
+    assert_match(/target kind is unsupported/, error.message)
+
+    malformed.contract = { "hooks" => [ {} ] }
+    error = assert_raises(Hive::ConfigError) do
+      executor.validate_generation!(Dir.pwd, malformed)
+    end
+    assert_match(/target contract is malformed/, error.message)
+
+    with_tmp_dir do |root|
+      configuration = configuration_for(
+        root, hooks: [ hook("command", "git status") ],
+        permissions: permissions("external_commands" => [ "git" ])
+      )
+      assert_equal(
+        %w[git status],
+        executor.capture_snapshot(
+          target: { "kind" => "command", "id" => "git status" },
+          configuration: configuration
+        ).fetch("argv")
+      )
+      assert_raises(Hive::ConfigError) do
+        executor.capture_snapshot(
+          target: { "kind" => "future", "id" => "x" },
+          configuration: configuration
+        )
+      end
+      assert_raises(Hive::ConfigError) do
+        executor.capture_snapshot(target: {}, configuration: configuration)
+      end
+
+      target = { "kind" => "entrypoint", "id" => "demo.run" }
+      assert_raises(Hive::ConfigError) do
+        executor.call(
+          target: target, target_snapshot: { "kind" => "entrypoint", "id" => "other" },
+          project: { "path" => root }, module_name: "demo", hook_id: "task",
+          event: {}, configuration: configuration
+        )
+      end
+      assert_raises(Hive::ConfigError) do
+        executor.call(
+          target: { "kind" => "future", "id" => "x" },
+          target_snapshot: { "kind" => "future", "id" => "x" },
+          project: { "path" => root }, module_name: "demo", hook_id: "task",
+          event: {}, configuration: configuration
+        )
+      end
+      Hive::Modules::Entrypoints.register("demo.bad-result") { Object.new }
+      assert_raises(Hive::ConfigError) do
+        executor.call(
+          target: { "kind" => "entrypoint", "id" => "demo.bad-result" },
+          target_snapshot: { "kind" => "entrypoint", "id" => "demo.bad-result" },
+          project: { "path" => root }, module_name: "demo", hook_id: "task",
+          event: {}, configuration: configuration
+        )
+      end
+    end
+  end
+
+  def test_command_snapshots_and_secret_bindings_are_revalidated
+    with_tmp_dir do |root|
+      command_calls = []
+      command_runner = lambda do |**values|
+        command_calls << values
+        0
+      end
+      executor = Hive::Modules::TargetExecutor.new(
+        first_party_loader: -> { true }, command_runner: command_runner
+      )
+      package = File.join(root, "secret-command-package")
+      requested = permissions(
+        "external_commands" => [ "git" ], "secrets" => [ "DEMO_TOKEN" ]
+      )
+      resolution, descriptor = write_module_package(
+        package, hooks: [ hook("command", "git status") ],
+        settings: [
+          {
+            "name" => "api_token", "type" => "secret",
+            "required" => true, "secret" => true
+          }
+        ],
+        permissions: requested
+      )
+      configured = Hive::ModulePackage::Configuration.build(
+        descriptor, generation: resolution,
+        settings: { "api_token" => "DEMO_TOKEN" },
+        hooks: { "task" => true }, grants: exact_grants(descriptor)
+      )
+      target = { "kind" => "command", "id" => "git status" }
+
+      with_env("DEMO_TOKEN" => "secret-value") do
+        executor.call(
+          target: target,
+          target_snapshot: executor.capture_snapshot(
+            target: target, configuration: configured
+          ),
+          project: { "path" => root }, module_name: "demo", hook_id: "task",
+          event: {}, configuration: configured
+        )
+      end
+      assert_equal({ "DEMO_TOKEN" => "secret-value" },
+                   command_calls.fetch(0).fetch(:environment))
+
+      assert_raises(Hive::ConfigError) do
+        executor.call(
+          target: target,
+          target_snapshot: {
+            "kind" => "command", "id" => "git status", "argv" => %w[git diff]
+          },
+          project: { "path" => root }, module_name: "demo", hook_id: "task",
+          event: {}, configuration: configured
+        )
+      end
+      with_env("DEMO_TOKEN" => nil) do
+        assert_raises(Hive::Modules::CapabilityDenied) do
+          executor.call(
+            target: target,
+            target_snapshot: executor.capture_snapshot(
+              target: target, configuration: configured
+            ),
+            project: { "path" => root }, module_name: "demo", hook_id: "task",
+            event: {}, configuration: configured
+          )
+        end
+      end
+    end
+  end
+
+  def test_workflow_snapshot_rejects_unavailable_undeclared_and_tampered_files
+    with_workflow_package do |root, resolution, descriptor|
+      configuration = Hive::ModulePackage::Configuration.build(
+        descriptor, generation: resolution, settings: {}, hooks: { "review" => true },
+        grants: exact_grants(descriptor)
+      )
+      executor = Hive::Modules::TargetExecutor.new(first_party_loader: -> { true })
+      target = descriptor.hooks.first.fetch("target")
+      snapshot = executor.capture_snapshot(
+        target: target, configuration: configuration, package_root: root
+      )
+
+      assert_raises(Hive::ConfigError) do
+        executor.send(
+          :snapshot_file, root, File.join(File.dirname(root), "outside.yml"),
+          configuration
+        )
+      end
+      undeclared = File.join(root, "undeclared.yml")
+      File.write(undeclared, "id: undeclared\n")
+      assert_raises(Hive::ConfigError) do
+        executor.send(:snapshot_file, root, undeclared, configuration)
+      end
+      File.write(File.join(root, "review.yml"), "tampered\n")
+      assert_raises(Hive::ConfigError) do
+        executor.send(
+          :snapshot_file, root, File.join(root, "review.yml"), configuration
+        )
+      end
+
+      assert_raises(Hive::ConfigError) do
+        executor.send(
+          :validate_workflow_snapshot_shape!,
+          snapshot.merge("files" => []), descriptor.workflows.first
+        )
+      end
+      Dir.mktmpdir("hive-module-materialize-") do |destination|
+        assert_raises(Hive::ConfigError) do
+          executor.send(
+            :materialize_snapshot!, destination,
+            [ { "path" => "review.yml" } ], configuration
+          )
+        end
+        assert_raises(Hive::ConfigError) do
+          executor.send(
+            :materialize_snapshot!, destination,
+            [ {
+              "path" => "undeclared.yml", "sha256" => "a" * 64,
+              "content" => "x"
+            } ], configuration
+          )
+        end
+        file = snapshot.fetch("files").first.merge("content" => "tampered")
+        assert_raises(Hive::ConfigError) do
+          executor.send(
+            :materialize_snapshot!, destination, [ file ], configuration
+          )
+        end
+      end
+
+      assert_raises(Hive::ConfigError) do
+        executor.capture_snapshot(
+          target: { "kind" => "workflow", "id" => "missing" },
+          configuration: configuration, package_root: root
+        )
+      end
+      descriptor_file = snapshot.fetch("files").find do |file|
+        file.fetch("path") == "review.yml"
+      end
+      File.binwrite(
+        File.join(root, "review.yml"), descriptor_file.fetch("content")
+      )
+      unreadable = Hive::Modules::TargetExecutor.new(
+        first_party_loader: -> { true }
+      )
+      unreadable.define_singleton_method(:snapshot_file) { |*| raise Errno::EIO }
+      assert_raises(Hive::ConfigError) do
+        unreadable.capture_snapshot(
+          target: target, configuration: configuration, package_root: root
+        )
+      end
+      FileUtils.rm_f(File.join(root, "review.yml"))
+      assert_raises(Hive::ConfigError) do
+        executor.capture_snapshot(
+          target: target, configuration: configuration, package_root: root
+        )
+      end
+    end
   end
 
   private

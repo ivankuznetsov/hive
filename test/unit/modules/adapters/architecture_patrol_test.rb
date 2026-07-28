@@ -304,6 +304,23 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
     end
   end
 
+  def test_malformed_legacy_shadow_capture_is_rejected
+    adapter = Hive::Modules::Adapters::ArchitecturePatrol.new
+    malformed = event(
+      "schedule",
+      "payload" => {
+        "legacy_mutator_capture" => {
+          "decision" => {}, "effects" => {}
+        }
+      }
+    )
+
+    error = assert_raises(Hive::ConfigError) do
+      adapter.send(:legacy_capture, malformed)
+    end
+    assert_match(/legacy shadow capture is malformed/, error.message)
+  end
+
   private
 
   def adapter_for(scheduler, commands: [], shadow: [])

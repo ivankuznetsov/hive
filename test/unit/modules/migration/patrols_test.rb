@@ -188,6 +188,92 @@ class ModulesMigrationPatrolsTest < Minitest::Test
     end
   end
 
+  def test_diagnostic_reviewed_configuration_and_admission_lock_reflect_durable_state
+    with_project do |project|
+      root = project.fetch("path")
+      state_path = project.fetch("hive_state_path")
+      assert_equal(
+        {
+          "status" => "unadopted", "owner" => "legacy", "admission" => false
+        },
+        Hive::Modules::Migration::Patrols.diagnostic(
+          root, "patrol", hive_state_path: state_path
+        )
+      )
+
+      migration = Hive::Modules::Migration::Patrols.new(
+        project_root: root, project: "demo", hive_state_path: state_path,
+        module_store: FakeStore.new, quiescence_probe: ->(*) { :quiescent }
+      )
+      migration.adopt!(now: NOW)
+      diagnostic = Hive::Modules::Migration::Patrols.diagnostic(
+        root, "patrol", hive_state_path: state_path
+      )
+      assert_equal "shadowing", diagnostic.fetch("status")
+      assert_equal "legacy", diagnostic.fetch("owner")
+      assert diagnostic.fetch("admission")
+      reviewed = Hive::Modules::Migration::Patrols.reviewed_config(
+        root, "patrol", hive_state_path: state_path
+      )
+      assert_equal ".hive-state", reviewed.fetch("hive_state_path")
+      assert_equal root, reviewed.fetch("project_root")
+      allowed = Hive::Modules::Migration::Patrols.with_admission(
+        root, "patrol", authority: :legacy, hive_state_path: state_path
+      ) { |admission| admission }
+      assert allowed
+
+      path = Hive::Modules::Migration::Patrols.state_file(
+        root, hive_state_path: state_path
+      )
+      state = JSON.parse(File.binread(path))
+      state["bindings"]["patrol"]["reviewed_config_digest"] = "0" * 64
+      File.write(path, Hive::Modules::Migration::Patrols.canonical(state))
+      assert_raises(Hive::ConfigError) do
+        Hive::Modules::Migration::Patrols.reviewed_config(
+          root, "patrol", hive_state_path: state_path
+        )
+      end
+
+      File.write(path, "{bad")
+      corrupt = Hive::Modules::Migration::Patrols.diagnostic(
+        root, "patrol", hive_state_path: state_path
+      )
+      assert_equal "corrupt", corrupt.fetch("status")
+      assert_equal "none", corrupt.fetch("owner")
+      refute corrupt.fetch("admission")
+      refute_empty corrupt.fetch("blocker")
+    end
+  end
+
+  def test_rollback_rejects_an_unrecognized_active_generation
+    with_project do |project|
+      store = FakeStore.new
+      migration = Hive::Modules::Migration::Patrols.new(
+        project_root: project.fetch("path"), project: "demo",
+        hive_state_path: project.fetch("hive_state_path"), module_store: store,
+        quiescence_probe: ->(*) { :quiescent }
+      )
+      report = Report.new(
+        eligible?: true, blockers: [],
+        configuration_digests: {
+          "patrol" => "a" * 64, "architecture-patrol" => "b" * 64
+        }
+      )
+      migration.adopt!(now: NOW)
+      migration.cutover!(report: report, now: NOW + 1)
+      store.instance_variable_get(:@selections).fetch("patrol")["active"] = {
+        "version" => "9.9.9", "catalog_commit" => "z" * 40,
+        "source_commit" => "z" * 40, "manifest_digest" => "9" * 64,
+        "configuration_digest" => "9" * 64
+      }
+
+      error = assert_raises(Hive::ConfigError) do
+        migration.rollback!(now: NOW + 2)
+      end
+      assert_match(/active generation changed/, error.message)
+    end
+  end
+
   def test_reservation_rechecks_ownership_after_candidate_enumeration
     entry = { "name" => "demo", "path" => "/project", "hive_state_path" => "/state" }
     checks = 0

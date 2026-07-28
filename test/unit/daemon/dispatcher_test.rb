@@ -827,6 +827,52 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal "hive patrol p1", supervisor.spawned.fetch(0).fetch(:command)
   end
 
+  def test_patrol_dispatch_rechecks_migration_ownership_at_spawn_boundary
+    dispatcher, _supervisor, _controller, logger = make_dispatcher
+    candidate = {
+      project: "p1", patrol_kind: :architecture,
+      slug: "refactor-patrol-job-7", stage: "refactor-patrol",
+      migration_entry: {
+        "path" => "/tmp/project", "hive_state_path" => "/tmp/project/.hive-state"
+      }
+    }
+    observed = []
+    blocked = lambda do |project_root, module_name, authority:, hive_state_path:, &block|
+      observed << [ project_root, module_name, authority, hive_state_path ]
+      block.call(false)
+    end
+    with_replaced_singleton_method(
+      Hive::Modules::Migration::Patrols, :with_admission, blocked
+    ) do
+      dispatcher.send(:dispatch_patrol_with_gates, candidate, now: T0)
+    end
+    assert_equal(
+      [
+        "/tmp/project", "architecture-patrol", :legacy,
+        "/tmp/project/.hive-state"
+      ],
+      observed.fetch(0)
+    )
+    assert logger.events.any? do |name, attributes|
+      name == :skipped &&
+        attributes[:reason] == "migration_ownership_changed"
+    end
+
+    admitted = []
+    dispatcher.define_singleton_method(:dispatch_patrol_with_admission) do |value, now:|
+      admitted << [ value, now ]
+    end
+    allowed = lambda do |*_args, **_kwargs, &block|
+      block.call(true)
+    end
+    with_replaced_singleton_method(
+      Hive::Modules::Migration::Patrols, :with_admission, allowed
+    ) do
+      dispatcher.send(:dispatch_patrol_with_gates, candidate, now: T0)
+    end
+    assert_equal [ [ candidate, T0 ] ], admitted
+  end
+
   def test_patrol_config_exit_backs_off_without_dropping_project
     dispatcher, supervisor, controller, logger, _watcher, patrol = make_dispatcher(
       rows: [], with_patrol_scheduler: true

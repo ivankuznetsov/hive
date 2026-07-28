@@ -241,6 +241,47 @@ class ModulesDaemonRuntimeTest < Minitest::Test
     end
   end
 
+  def test_setup_identity_cursor_and_retry_timestamp_validation_fail_closed
+    daemon = Hive::Modules::DaemonRuntime.new(
+      attempt_store: Object.new, attempt_dispatcher: Object.new, registry: -> { [] }
+    )
+    selection = { "name" => "demo" }
+    store = Object.new
+    store.define_singleton_method(:promote_setup_outbox) do |_name, &block|
+      block.call(
+        "project_id" => "foreign", "project" => "demo"
+      )
+    end
+    error = assert_raises(Hive::ConfigError) do
+      daemon.send(
+        :promote_setup_outboxes, store, [ selection ],
+        ledger: Object.new,
+        entry: { "project_id" => "project-1", "name" => "demo" },
+        now: NOW
+      )
+    end
+    assert_match(/another project/, error.message)
+
+    with_tmp_dir do |root|
+      path = File.join(root, "cursor.json")
+      File.write(
+        path,
+        Hive::WorkflowPackage::CanonicalJSON.generate(
+          "schema_version" => 1, "cursor" => -1
+        )
+      )
+      assert_raises(Hive::ConfigError) { daemon.send(:read_event_cursor, path) }
+    end
+
+    assert_raises(Hive::ConfigError) do
+      daemon.send(
+        :retry_deferred?,
+        { "status" => "retrying", "updated_at" => "not-a-timestamp" },
+        NOW
+      )
+    end
+  end
+
   def test_tick_promotes_install_setup_outbox_once_and_targets_only_enabled_setup_hooks
     with_tmp_dir do |root|
       hooks = [

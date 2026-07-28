@@ -109,6 +109,42 @@ class ModulesEventLedgerTest < Minitest::Test
     end
   end
 
+  def test_cursor_and_schedule_index_rebuilds_are_strict_and_deterministic
+    with_tmp_dir do |root|
+      ledger = Hive::Modules::EventLedger.new(root: root)
+      assert_raises(Hive::Modules::EventLedgerError) { ledger.events_after(-1) }
+      assert_raises(Hive::Modules::EventLedgerError) { ledger.events_after("bad") }
+
+      two_hours_ago = NOW - 7200
+      one_hour_ago = NOW - 3600
+      [ two_hours_ago, one_hour_ago ].each_with_index do |occurred_at, index|
+        ledger.record(
+          **attributes.merge(
+            event_name: "schedule",
+            occurred_at: occurred_at,
+            idempotency_key: "schedule-#{index}",
+            payload: { "schedule" => "0 * * * *" }
+          ),
+          recorded_at: NOW
+        )
+      end
+
+      index_path = File.join(ledger.events_root, "index.json")
+      File.write(index_path, "{")
+      assert_equal 2, ledger.all.size
+      assert_equal one_hour_ago, ledger.latest_schedule("0 * * * *")
+
+      index = JSON.parse(File.binread(index_path))
+      index["latest_schedules"]["0 * * * *"] = "not-a-time"
+      File.binwrite(
+        index_path, Hive::WorkflowPackage::CanonicalJSON.generate(index)
+      )
+      assert_raises(Hive::Modules::EventLedgerError) do
+        ledger.latest_schedule("0 * * * *")
+      end
+    end
+  end
+
   private
 
   def attributes

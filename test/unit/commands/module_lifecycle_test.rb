@@ -64,6 +64,20 @@ class ModuleLifecycleCommandTest < Minitest::Test
     end
   end
 
+  def test_native_install_rejects_a_managed_workflow_with_the_same_name
+    with_fixture do |project, store, package, resolution|
+      command = install_command(
+        project, store, package, resolution, dry_run: true
+      )
+      compatibility = Object.new
+      compatibility.define_singleton_method(:selected) { |_name| { "name" => "demo" } }
+      command.instance_variable_set(:@workflow_compatibility, compatibility)
+
+      error = assert_raises(Hive::Commands::Module::OwnershipError) { command.call! }
+      assert_match(/managed workflow/, error.message)
+    end
+  end
+
   def test_uninstalled_tombstone_can_be_reinstalled_without_replaying_old_events
     with_fixture do |project, store, package, resolution|
       install_preview = install_command(project, store, package, resolution, dry_run: true).call!
@@ -411,6 +425,14 @@ class ModuleLifecycleCommandTest < Minitest::Test
       assert_nil module_store.inspect_selection("demo", include_tombstone: true)
       refute File.exist?(File.join(state, "modules", "demo"))
 
+      replay = command.call(
+        yes: true, dry_run: false, receipt: preview.fetch("preview_receipt")
+      ).call!
+      assert_equal "already_current", replay.fetch("status")
+      assert_raises(Hive::Commands::Module::OwnershipError) do
+        command.call(yes: false, dry_run: true, receipt: nil).call!
+      end
+
       disable = Hive::Commands::Module::StateChange.new(
         "disable", "demo", project_root: project, json: true,
         stdout: StringIO.new, yes: false, dry_run: true, receipt: nil,
@@ -428,6 +450,281 @@ class ModuleLifecycleCommandTest < Minitest::Test
       status = inspector.inspect("demo")
       assert_equal "active", status["lifecycle_state"]
       assert_equal "legacy_workflow", status.dig("active", "origin")
+
+      uninstall_preview = Hive::Commands::Module::StateChange.new(
+        "uninstall", "demo", project_root: project, json: true,
+        stdout: StringIO.new, yes: false, dry_run: true, receipt: nil,
+        store: module_store, committer: ->(*) { }
+      ).call!
+      uninstalled = Hive::Commands::Module::StateChange.new(
+        "uninstall", "demo", project_root: project, json: true,
+        stdout: StringIO.new, yes: true, dry_run: false,
+        receipt: uninstall_preview.fetch("preview_receipt"),
+        store: module_store, committer: ->(*) { }
+      ).call!
+      assert_equal "uninstalled", uninstalled.fetch("status")
+      assert_equal false, uninstalled.dig("selection", "installed")
+      assert_nil workflow_store.selected("demo")
+      assert_nil inspector.inspect("demo")
+    end
+  end
+
+  def test_legacy_lifecycle_ownership_edges_fail_before_mutation
+    with_tmp_dir do |project|
+      resolution = Struct.new(:name, :descriptor).new("demo", Object.new)
+      candidate_resolution = Struct.new(:source_commit).new("b" * 40)
+      candidate = Struct.new(:resolution).new(candidate_resolution)
+      compatibility = Object.new
+      compatibility.define_singleton_method(:adopt) { |**| candidate }
+      current = { "name" => "demo", "source_commit" => "a" * 40 }
+      compatibility.define_singleton_method(:selected) { |_name| current }
+
+      native_store = Object.new
+      native_store.define_singleton_method(:inspect_selection) { |*, **| { "name" => "demo" } }
+      conflict = bare_lifecycle_command(
+        Hive::Commands::Module::Install, project, store: native_store
+      )
+      conflict.instance_variable_set(:@workflow_compatibility, compatibility)
+      assert_raises(Hive::Commands::Module::OwnershipError) do
+        conflict.send(:call_legacy!, candidate_root: project, resolution: resolution)
+      end
+
+      empty_store = Object.new
+      empty_store.define_singleton_method(:inspect_selection) { |*, **| nil }
+      stale_install = bare_lifecycle_command(
+        Hive::Commands::Module::Install, project, store: empty_store
+      )
+      stale_install.instance_variable_set(:@workflow_compatibility, compatibility)
+      assert_raises(Hive::Commands::Module::OwnershipError) do
+        stale_install.send(:call_legacy!, candidate_root: project, resolution: resolution)
+      end
+
+      compatibility.define_singleton_method(:selected) { |_name| nil }
+      missing_update = bare_lifecycle_command(
+        Hive::Commands::Module::Update, project, store: empty_store
+      )
+      missing_update.instance_variable_set(:@workflow_compatibility, compatibility)
+      assert_raises(Hive::Commands::Module::OwnershipError) do
+        missing_update.send(:call_legacy!, candidate_root: project, resolution: resolution)
+      end
+    end
+  end
+
+  def test_legacy_preview_diff_receipt_replay_and_escalation_guards
+    with_tmp_dir do |project|
+      command = bare_lifecycle_command(
+        Hive::Commands::Module::Install, project,
+        store: Hive::ModulePackage::ManagedStore.new(File.join(project, ".hive-state"))
+      )
+      configuration = Struct.new(:contract, :hooks).new(
+        {
+          "hooks" => [
+            { "id" => "setup", "events" => [ "project.registered" ] }
+          ]
+        },
+        { "setup" => true }
+      )
+      command.define_singleton_method(:registered_project_identity) do
+        { "project_id" => "project-1", "name" => "demo" }
+      end
+      assert_equal(
+        { "project_id" => "project-1", "project" => "demo" },
+        command.send(:setup_context_for, configuration)
+      )
+
+      old_manifest = {
+        "name" => "demo", "version" => "1.0.0",
+        "permissions" => {}, "files" => []
+      }
+      new_manifest = old_manifest.merge(
+        "version" => "1.1.0",
+        "permissions" => { "commands" => [ "git" ] }
+      )
+      workflow_store = Object.new
+      workflow_store.define_singleton_method(:manifest) { |*| old_manifest }
+      command.instance_variable_set(:@workflow_store, workflow_store)
+      candidate = Struct.new(:validated).new(
+        Struct.new(:manifest).new(new_manifest)
+      )
+      resolver = Object.new
+      resolver.define_singleton_method(:actor_policy_changed?) { true }
+      resolver.define_singleton_method(:input_bindings_changed?) { true }
+      diff = command.send(
+        :legacy_diff, candidate,
+        {
+          "name" => "demo", "source_commit" => "a" * 40,
+          "manifest_digest" => "b" * 64
+        },
+        resolver
+      )
+      assert diff.fetch("actor_policy_changed")
+      assert diff.fetch("input_bindings_changed")
+      assert diff.fetch("escalation")
+      assert_includes diff.fetch("escalation_reasons"), "actor_policy_redistribution"
+
+      digest = "d" * 64
+      preview = {
+        digest: digest,
+        data: { "expires_at" => Time.utc(2026, 7, 22, 12).iso8601 }
+      }
+      assert_raises(Hive::ConfigError) do
+        command.send(:verify_legacy_preview!, preview, nil)
+      end
+      assert_raises(Hive::ConfigError) do
+        command.send(
+          :verify_legacy_preview!, preview, digest,
+          now: Time.utc(2026, 7, 22, 12, 0, 1)
+        )
+      end
+
+      candidate_resolution = Struct.new(
+        :source_commit, :manifest_digest
+      ).new("a" * 40, "b" * 64)
+      replay_candidate = Struct.new(:resolution).new(candidate_resolution)
+      replay_configuration = Struct.new(:digest).new("c" * 64)
+      replay_resolver = Struct.new(:configuration).new(replay_configuration)
+      current = {
+        "source_commit" => "a" * 40, "manifest_digest" => "b" * 64,
+        "configuration_digest" => "c" * 64
+      }
+      command.define_singleton_method(:legacy_preview) do |current:, **|
+        { digest: current ? "e" * 64 : "f" * 64 }
+      end
+      assert command.send(
+        :legacy_replay?, candidate: replay_candidate, resolver: replay_resolver,
+        current: current, supplied_digest: "e" * 64, grants: {},
+        issued_at: Time.utc(2026, 7, 22)
+      )
+
+      high_risk = Object.new
+      high_risk.define_singleton_method(:unbounded?) { true }
+      risky_resolution = Struct.new(:permissions).new({ "risk" => "low" })
+      assert_raises(Hive::Commands::Module::ConsentRequired) do
+        command.send(:confirm_legacy_escalation!, high_risk, risky_resolution)
+      end
+
+      interactive = bare_lifecycle_command(
+        Hive::Commands::Module::Install, project,
+        store: command.instance_variable_get(:@store), json: false,
+        stdin: TTYInput.new("no\n")
+      )
+      assert_raises(Hive::Commands::Module::ConsentRequired) do
+        interactive.send(:confirm_legacy_escalation!, high_risk, risky_resolution)
+      end
+      consenting = bare_lifecycle_command(
+        Hive::Commands::Module::Install, project,
+        store: command.instance_variable_get(:@store), json: false,
+        stdin: TTYInput.new("yes\n")
+      )
+      assert consenting.send(:confirm_legacy_escalation!, high_risk, risky_resolution)
+    end
+  end
+
+  def test_legacy_grant_cleanup_and_interactive_hook_edges
+    with_tmp_dir do |project|
+      store = Hive::ModulePackage::ManagedStore.new(File.join(project, ".hive-state"))
+      command = bare_lifecycle_command(
+        Hive::Commands::Module::Install, project, store: store
+      )
+      descriptor = Struct.new(:permissions).new(
+        { "filesystem_read" => [ "repository" ] }
+      )
+      assert_raises(Hive::Commands::Module::ConsentRequired) do
+        command.send(:require_explicit_legacy_grants!, descriptor, {})
+      end
+
+      update = bare_lifecycle_command(
+        Hive::Commands::Module::Update, project, store: store
+      )
+      compatibility = Object.new
+      cleanups = []
+      compatibility.define_singleton_method(:cleanup_unreferenced) { |name| cleanups << name }
+      compatibility.define_singleton_method(:reset_cache!) { cleanups << :reset }
+      update.instance_variable_set(:@workflow_compatibility, compatibility)
+      update.send(:legacy_post_commit, "demo")
+      assert_equal [ "demo", :reset ], cleanups
+
+      failing = Object.new
+      failing.define_singleton_method(:cleanup_unreferenced) { |_name| raise "cleanup failed" }
+      update.instance_variable_set(:@workflow_compatibility, failing)
+      _stdout, stderr = capture_io { update.send(:legacy_post_commit, "demo") }
+      assert_match(/selection change already succeeded/, stderr)
+
+      hooks_descriptor = Struct.new(:settings, :hooks).new(
+        [],
+        [ { "id" => "setup", "default_enabled" => true } ]
+      )
+      defaulted = bare_lifecycle_command(
+        Hive::Commands::Module::Install, project, store: store,
+        json: false, stdin: TTYInput.new("\n")
+      )
+      defaulted.send(:collect_interactive_install_choices!, hooks_descriptor)
+      assert_equal(
+        { "setup" => true },
+        defaulted.instance_variable_get(:@interactive_hook_choices)
+      )
+
+      invalid = bare_lifecycle_command(
+        Hive::Commands::Module::Install, project, store: store,
+        json: false, stdin: TTYInput.new("maybe\n")
+      )
+      assert_raises(Hive::ConfigError) do
+        invalid.send(:collect_interactive_install_choices!, hooks_descriptor)
+      end
+    end
+  end
+
+  def test_state_change_rejects_invalid_missing_and_conflicting_ownership
+    with_tmp_dir do |project|
+      state = File.join(project, ".hive-state")
+      FileUtils.mkdir_p(state)
+      File.write(File.join(state, "config.yml"), { "hive_state_path" => ".hive-state" }.to_yaml)
+      store = Hive::ModulePackage::ManagedStore.new(state)
+      common = {
+        project_root: project, json: true, stdout: StringIO.new,
+        yes: false, dry_run: true, receipt: nil, store: store, committer: ->(*) { }
+      }
+
+      assert_raises(Hive::ConfigError) do
+        Hive::Commands::Module::StateChange.new("future", "demo", **common).call!
+      end
+      assert_raises(Hive::ConfigError) do
+        Hive::Commands::Module::StateChange.new("disable", "", **common).call!
+      end
+      assert_raises(Hive::Commands::Module::OwnershipError) do
+        Hive::Commands::Module::StateChange.new("disable", "demo", **common).call!
+      end
+
+      command = Hive::Commands::Module::StateChange.new("disable", "demo", **common)
+      compatibility = Object.new
+      compatibility.define_singleton_method(:selected) { |_name| { "name" => "demo" } }
+      command.instance_variable_set(:@workflow_compatibility, compatibility)
+      store.define_singleton_method(:inspect_selection) { |*, **| { "name" => "demo" } }
+      assert_raises(Hive::Commands::Module::OwnershipError) { command.call! }
+    end
+  end
+
+  def test_legacy_cleanup_failure_is_post_commit_and_returns_no_retained_commits
+    with_tmp_dir do |project|
+      state = File.join(project, ".hive-state")
+      FileUtils.mkdir_p(state)
+      File.write(File.join(state, "config.yml"), { "hive_state_path" => ".hive-state" }.to_yaml)
+      output = StringIO.new
+      command = Hive::Commands::Module::StateChange.new(
+        "uninstall", "demo", project_root: project, json: true, stdout: output,
+        yes: true, dry_run: false, receipt: "unused",
+        store: Hive::ModulePackage::ManagedStore.new(state), committer: ->(*) { }
+      )
+      compatibility = Object.new
+      compatibility.define_singleton_method(:cleanup_unreferenced) { |_name| raise "cleanup failed" }
+      command.instance_variable_set(:@workflow_compatibility, compatibility)
+
+      result = nil
+      _stdout, stderr = capture_io do
+        result = command.send(:post_commit_legacy_cleanup)
+      end
+      assert_equal [], result
+      assert_match(/selection change already succeeded/, stderr)
     end
   end
 
@@ -452,6 +749,14 @@ class ModuleLifecycleCommandTest < Minitest::Test
       yes: yes, dry_run: dry_run, receipt: receipt, settings: settings,
       hooks: [ "schedule=true" ], grants: [ "filesystem_read=repository" ],
       catalog_client: FakeCatalog.new(package, resolution), store: store, committer: ->(*) { }
+    )
+  end
+
+  def bare_lifecycle_command(type, project, store:, json: true, stdin: StringIO.new)
+    type.new(
+      "demo", project_root: project, json: json, stdout: StringIO.new,
+      stdin: stdin, yes: false, dry_run: true, receipt: nil,
+      settings: [], hooks: [], grants: [], store: store, committer: ->(*) { }
     )
   end
 

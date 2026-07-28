@@ -39,6 +39,8 @@ class WorkflowCompatibilityTest < Minitest::Test
 
       assert_equal resolution.source_commit,
                    compatibility.selected("demo").fetch("source_commit")
+      assert_equal configuration.digest,
+                   compatibility.configuration("demo", configuration.digest).digest
       assert File.directory?(
         store.generation_path("demo", resolution.source_commit)
       )
@@ -74,14 +76,43 @@ class WorkflowCompatibilityTest < Minitest::Test
         project_config: Hive::Config::DEFAULTS.merge("hive_state_path" => ".hive-state")
       )
 
-      candidate = compatibility.adopt(
-        package_root: package, module_resolution: module_resolution
+      candidate = compatibility.candidate(
+        package_root: package, resolution: module_resolution
       )
 
       assert candidate.descriptor.legacy_honeycomb
       assert_equal workflow_resolution.permissions, candidate.resolution.permissions
       assert_equal descriptor.hive_min_version,
                    candidate.resolution.hive_min_version
+
+      mismatched = module_resolution.with(
+        descriptor: descriptor.with(version: "1.0.1")
+      )
+      assert_raises(Hive::ConfigError) do
+        compatibility.adopt(
+          package_root: package, module_resolution: mismatched
+        )
+      end
+      assert_raises(Hive::ConfigError) do
+        compatibility.send(
+          :validate_normalized!, descriptor.with(legacy_honeycomb: false),
+          workflow_resolution,
+          Hive::WorkflowPackage::Validator.validate!(
+            package,
+            expected_name: workflow_resolution.name,
+            expected_manifest_digest: workflow_resolution.manifest_digest
+          )
+        )
+      end
+
+      incomplete = Object.new
+      incomplete.define_singleton_method(:hive_min_version) { raise KeyError }
+      assert_raises(Hive::ConfigError) do
+        compatibility.adopt(
+          package_root: package,
+          module_resolution: module_resolution.with(descriptor: incomplete)
+        )
+      end
     end
   end
 

@@ -640,6 +640,20 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
     end
   end
 
+  def test_wait_for_child_polls_until_its_bounded_deadline
+    sup = make
+    polls = 0
+    with_replaced_singleton_method(
+      Process, :wait2, lambda { |*_args|
+        polls += 1
+        [ nil, nil ]
+      }
+    ) do
+      assert_nil sup.send(:wait_for_child, 999_999, 0.025)
+    end
+    assert_operator polls, :>=, 2
+  end
+
   def test_completion_envelope_reads_and_removes_job_bound_result_file
     with_tmp_dir do |dir|
       path = File.join(dir, "result.json")

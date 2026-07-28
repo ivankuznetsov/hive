@@ -333,6 +333,26 @@ class ModulesDispatcherTest < Minitest::Test
       assert_equal "capacity_blocked", run.dig("retry", "reason")
       assert_equal 3, run.dig("retry", "charge")
       assert_equal 3, result_dispatcher.calls.fetch(0).fetch(:retry_charge)
+      assert_equal(
+        "launch_handoff_failed",
+        runtime.fetch(:dispatcher).send(
+          :deferred_reason, "launch_handoff_failed"
+        )
+      )
+
+      failed = Hive::Attempts::DispatchResult.new(
+        status: :deferred, attempt: nil, receipt: nil,
+        attach_descriptor: nil, reason: "provider"
+      )
+      runtime.fetch(:dispatcher).send(
+        :update_run, "demo", hook_attempt, failed, nil, retry_charge: 3
+      )
+      run = JSON.parse(File.binread(File.join(
+        runtime.fetch(:store).runtime_path("demo"),
+        "runs", "#{hook_attempt.run_id}.json"
+      )))
+      assert_equal "failed", run.fetch("status")
+      refute run.key?("retry")
     end
   end
 
@@ -361,6 +381,21 @@ class ModulesDispatcherTest < Minitest::Test
           runtime.fetch(:dispatcher).dispatch(
             module_name: "demo", hook_id: "task", event: runtime.fetch(:event)
           )
+        end
+        assert_match(/admission lock is unavailable/, error.message)
+      ensure
+        File.define_singleton_method(:open, original_open)
+      end
+    end
+
+    with_runtime do |runtime|
+      original_open = File.method(:open)
+      File.define_singleton_method(:open) { |*| raise Errno::EACCES, "denied" }
+      begin
+        error = assert_raises(Hive::ConfigError) do
+          runtime.fetch(:dispatcher).send(
+            :with_hook_lock, "demo", "task"
+          ) { flunk "lock failure must not yield" }
         end
         assert_match(/admission lock is unavailable/, error.message)
       ensure

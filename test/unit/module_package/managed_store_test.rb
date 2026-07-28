@@ -495,6 +495,56 @@ class ModulePackageManagedStoreTest < Minitest::Test
     end
   end
 
+  def test_setup_outbox_rejects_missing_identity_and_malformed_evidence
+    with_tmp_dir do |root|
+      hooks = [
+        {
+          "id" => "setup",
+          "target" => { "kind" => "entrypoint", "id" => "demo.setup" },
+          "default_enabled" => true, "schedules" => [],
+          "events" => [ "project.registered" ], "concurrency" => "drop"
+        }
+      ]
+      package = File.join(root, "package")
+      resolution, descriptor = write_module_package(package, hooks: hooks)
+      preview = Hive::ModulePackage::Preview.build(
+        operation: "install", descriptor: descriptor, generation: resolution,
+        current: nil, current_configuration: nil,
+        settings: { "mode" => "safe", "api_token" => nil },
+        hooks: { "setup" => true }, grants: exact_grants(descriptor)
+      )
+
+      invalid_store = Hive::ModulePackage::ManagedStore.new(
+        File.join(root, "invalid", ".hive-state")
+      )
+      assert_raises(Hive::ConfigError) do
+        invalid_store.apply(
+          preview, package_root: package, resolution: resolution,
+          setup_context: { project_id: "", project: "demo" }
+        )
+      end
+
+      store = Hive::ModulePackage::ManagedStore.new(
+        File.join(root, "valid", ".hive-state")
+      )
+      store.apply(
+        preview, package_root: package, resolution: resolution,
+        setup_context: { project_id: "project-1", project: "demo" }
+      )
+      path = store.send(:setup_outbox_path, "demo")
+      File.binwrite(
+        path,
+        Hive::WorkflowPackage::CanonicalJSON.generate(
+          "schema_version" => 1, "module" => "demo"
+        )
+      )
+      assert_raises(Hive::ConfigError) { store.inspect_setup_outbox("demo") }
+
+      File.write(path, "{")
+      assert_raises(Hive::ConfigError) { store.inspect_setup_outbox("demo") }
+    end
+  end
+
   def test_disable_discards_pending_setup_and_failed_update_restores_it
     with_tmp_dir do |root|
       hooks = [

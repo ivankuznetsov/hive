@@ -175,6 +175,20 @@ class AttemptsRecordTest < Minitest::Test
     assert_includes error.message, "unsupported schema_version 2"
   end
 
+  def test_task_subject_must_match_the_legacy_identity_fields
+    data = Hive::Attempts::Record.launching(
+      **identity, now: NOW, launch_timeout_sec: 30
+    ).to_h
+    data["subject"] = data.fetch("subject").merge(
+      "task_slug" => "another-task"
+    )
+
+    error = assert_raises(Hive::Attempts::InvalidRecord) do
+      Hive::Attempts::Record.new(data)
+    end
+    assert_match(/subject has incompatible identity/, error.message)
+  end
+
   def test_module_hook_subject_is_first_class_and_strict
     subject = {
       "kind" => "module_hook", "project_id" => "project-1", "module" => "patrol",

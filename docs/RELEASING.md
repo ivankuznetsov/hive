@@ -366,7 +366,10 @@ plus absolute, redirected, and chained exec attempts. The receipt records the
 pinned beta's outside-read skill-root caveat instead of claiming a global read
 denial. A deterministic fake may drive CLI orchestration, but workflow
 authoring still uses this exact native tool surface and explicitly records that
-it did not exercise a model loop. The gateway allows exactly nine semantic Hive
+it did not exercise a model loop. The live creator prompt fixes the four
+creation commands and requires removal of unused neutral-scaffold files before
+validation, so a passing model run retains only the accepted descriptor plus
+research and draft instructions. The gateway allows exactly nine semantic Hive
 commands, holds one serialized audit
 transaction through candidate completion, and runs from a committed six-file
 runtime whose exact copied bytes plus immutable config are SHA-256-bound by the

@@ -95,6 +95,34 @@ class OpenClawCreatorProcessArchitectureTest < Minitest::Test
     end
   end
 
+  def test_framed_json_normalizes_binary_text_before_encoding
+    reader, writer = IO.pipe
+    codec = HiveLiveAgentProof::OpenClawCreatorProof::FramedJson.new(
+      max_bytes: 1_024
+    )
+
+    _stdout, stderr = capture_io do
+      codec.write(
+        writer,
+        {
+          "frame" => "failure",
+          "detail" => "invalid-\xFF-text".b
+        }
+      )
+    end
+    writer.close
+    payload = codec.read(
+      reader,
+      deadline: Process.clock_gettime(Process::CLOCK_MONOTONIC) + 1
+    )
+
+    assert_empty stderr
+    assert_equal "invalid-\uFFFD-text", payload.fetch("detail")
+  ensure
+    reader&.close unless reader&.closed?
+    writer&.close unless writer&.closed?
+  end
+
   def test_network_capture_thread_that_cannot_stop_fails_closed
     capture_class = HiveLiveAgentProof::OpenClawCreatorProof::NetworkCapture
     original_start = capture_class.instance_method(:start)

@@ -37,7 +37,21 @@ module HiveLiveAgentProof
     Use the installed Hive workflow-creator capability in this initialized project.
     The proof harness already verified the candidate with `hive version`; begin with
     `hive workflow list --json` and do not repeat `hive version`.
-    This is creation-only: validate the result, report the defaults, and do not create or run a task.
+    For this creation-only phase, execute exactly these Hive commands once each and
+    in this order, with no other Hive command:
+    1. `hive workflow list --json`
+    2. `hive workflow new editorial --json`
+    3. `hive workflow validate editorial --json`
+    4. `hive workflow commit editorial`
+    Replace the neutral scaffold with the smallest complete accepted graph. Retain
+    exactly these authored paths and no other file under the editorial instruction
+    directory:
+    - `.hive-state/workflows/editorial.yml`
+    - `.hive-state/workflows/editorial/research.md`
+    - `.hive-state/workflows/editorial/draft.md`
+    Delete the blank scaffold's unused `README.md`, `honeycomb.yml`, and `work.md`;
+    do not create substitutes or extra reference files. Validate the result, report
+    the defaults, and do not create or run a task.
   PROMPT
   WORKFLOW_CREATOR_TASK_REQUEST = "Research and draft the launch announcement for approval.".freeze
   WORKFLOW_CREATOR_WORKFLOW = "editorial".freeze

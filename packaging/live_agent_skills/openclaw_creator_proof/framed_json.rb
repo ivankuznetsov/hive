@@ -11,7 +11,7 @@ module HiveLiveAgentProof
       def write(io, payload)
         fail_frame!("frame payload must be an object") unless payload.is_a?(Hash)
 
-        encoded = JSON.generate(payload).b
+        encoded = JSON.generate(normalize_text(payload)).b
         fail_frame!("frame exceeds #{@max_bytes} bytes") if encoded.bytesize > @max_bytes
 
         write_all(io, [ encoded.bytesize ].pack("N"))
@@ -51,6 +51,27 @@ module HiveLiveAgentProof
       end
 
       private
+
+      def normalize_text(value)
+        case value
+        when Hash
+          value.each_with_object({}) do |(key, nested), normalized|
+            normalized[normalize_string(key)] = normalize_text(nested)
+          end
+        when Array
+          value.map { |nested| normalize_text(nested) }
+        when String
+          normalize_string(value)
+        else
+          value
+        end
+      end
+
+      def normalize_string(value)
+        return value unless value.is_a?(String)
+
+        value.dup.force_encoding(Encoding::UTF_8).scrub
+      end
 
       def read_exact(io, length, deadline:)
         retained = +"".b

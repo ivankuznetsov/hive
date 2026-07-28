@@ -62,7 +62,10 @@ prompt digests, native `/hive` discovery, candidate/gateway executable
 identities, ordered actual argv, created-file digests, the exact normalized
 graph, zero tasks after creation-only, one first-stage dispatch, operational
 status, and a deny-by-default effect-policy receipt before reporting no external
-actions. A committed SHA-bound driver uses only OpenClaw's public
+actions. The live creation prompt fences the four creation commands and requires
+the agent to remove the neutral blank scaffold's unused README, Honeycomb
+metadata, and `work.md`, leaving only the accepted descriptor plus research and
+draft instructions. A committed SHA-bound driver uses only OpenClaw's public
 `plugin-sdk/config-schema` and `plugin-sdk/agent-harness` exports to parse the
 configuration and materialize the exact
 `apply_patch/edit/exec/read/write` callable set. It executes inside-workspace
@@ -103,7 +106,9 @@ containment session, child-subreaper cleanup and the sole final teardown record
 to an independently live owner, target capture to an expendable worker, and
 schema validation to strict length-framed JSON/Base64 IPC. Sampler, stdin
 writer, and stdout/stderr reader failures are observed after bounded joins and
-fail closed. Focused stress coverage proves bounded teardown after ordinary,
+fail closed. The frame codec normalizes diagnostic text to valid UTF-8 before
+JSON encoding while binary streams remain explicit Base64. Focused stress
+coverage proves bounded teardown after ordinary,
 `setsid`, double-fork, timeout, worker-SIGSTOP, worker-SIGKILL,
 supervisor/parent TERM, and interrupt paths.
 Actual workflow/task trees reject extra authored files, malformed task directories,

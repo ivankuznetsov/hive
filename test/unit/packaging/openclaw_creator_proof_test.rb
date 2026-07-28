@@ -15,6 +15,27 @@ class OpenClawCreatorProofTest < Minitest::Test
   SHA = "a" * 40
   CREDENTIAL = "proof-credential-with-enough-entropy".freeze
 
+  def test_live_creator_prompt_fences_exact_commands_and_scaffold_cleanup
+    prompt = HiveLiveAgentProof::WORKFLOW_CREATOR_PROMPT
+    commands = [
+      "hive workflow list --json",
+      "hive workflow new editorial --json",
+      "hive workflow validate editorial --json",
+      "hive workflow commit editorial"
+    ]
+    paths = HiveLiveAgentProof::WORKFLOW_CREATOR_FILES
+
+    commands.each_cons(2) do |first, second|
+      assert_operator prompt.index(first), :<, prompt.index(second)
+    end
+    paths.each { |path| assert_includes prompt, path }
+    %w[README.md honeycomb.yml work.md].each do |unused|
+      assert_match(/Delete .*#{Regexp.escape(unused)}/m, prompt)
+    end
+    assert_includes prompt, "with no other Hive command"
+    assert_includes prompt, "do not create substitutes or extra reference files"
+  end
+
   def test_preflight_failure_still_writes_typed_schema_v1_evidence
     with_tmp_dir do |dir|
       evidence_path = File.join(dir, "evidence.json")

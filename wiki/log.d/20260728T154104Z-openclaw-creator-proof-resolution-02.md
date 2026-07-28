@@ -8,7 +8,10 @@ policy controls plus independently observed
 filesystem/network receipts; made every gateway attempt durable and terminally
 poisoning after denial/failure; bound complete read-only installed trees,
 launchers, and interpreters; and initialized typed evidence before every
-ordinary hosted preparation partition.
+ordinary hosted preparation partition. The live creator prompt now names the
+exact creation commands and requires deletion of unused blank-scaffold files,
+and the JSON frame codec normalizes diagnostic strings to valid UTF-8 while
+keeping captured binary streams Base64-encoded.
 
 **Evidence:** Focused tests cover malformed/truncated/oversized/trailing frames,
 worker SIGSTOP/SIGKILL with escaped descendants, wrong-order/digest/budget/

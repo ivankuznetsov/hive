@@ -18,6 +18,7 @@ module Hive
     # hook dispatcher.
     class DaemonRuntime
       MAX_RETRIES = 2
+      RETRY_DELAY_SEC = 3600
 
       def initialize(attempt_store:, attempt_dispatcher:, registry: -> { Hive::Config.registered_projects },
                      planner: SchedulePlanner.new, clock: -> { Time.now.utc })
@@ -180,6 +181,7 @@ module Hive
           Dir.glob(File.join(store.runtime_path(module_name), "runs", "*.json")).sort.each do |path|
             run = JSON.parse(File.binread(path))
             next unless %w[admitting running retrying].include?(run["status"])
+            next if retry_deferred?(run, now)
             attempt_id = run["attempt_id"]
             next unless attempt_id
             attempt = @attempt_store.fetch(attempt_id)
@@ -199,6 +201,15 @@ module Hive
             end
           end
         end
+      end
+
+      def retry_deferred?(run, now)
+        return false unless run["status"] == "retrying"
+
+        updated_at = Time.iso8601(run.fetch("updated_at"))
+        now < updated_at + RETRY_DELAY_SEC
+      rescue ArgumentError, TypeError, KeyError
+        raise Hive::ConfigError, "module retry timestamp is malformed"
       end
 
       def hook_attempt_from(run, selection)

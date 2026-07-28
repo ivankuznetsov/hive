@@ -201,7 +201,9 @@ module Hive
             "status" => %w[closed complete exhausted pending retrying].include?(status) ? status : "unknown",
             "charge" => nonnegative_integer(retry_state["charge"]),
             "max" => nonnegative_integer(retry_state["max"]),
-            "reason" => retry_state["reason"] == "retry_closed" ? "retry_closed" : nil
+            "reason" => %w[
+              capacity_blocked launch_handoff_failed retry_closed
+            ].include?(retry_state["reason"]) ? retry_state["reason"] : nil
           }
         end
         return nil unless attempt && attempt["retry_charge"].positive?

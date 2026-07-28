@@ -97,12 +97,13 @@ restore the workflow, then rerun migrate.
 
 ## Durable recovery schema cutover
 
-Runtime recovery supports only the current shapes: attempt v2, dispatch request
+Runtime recovery supports only the current shapes: attempt v3, dispatch request
 v4, and dispatch result v2. `Hive::Recovery::Migration` moves
-`$HIVE_HOME/attempts/v1` to `attempts/v2`, rewrites v1 attempt generations,
-strips the obsolete compatibility flag, and migrates pending request v1-v3 and
-result v1 documents. It writes `recovery-migration-v2.json` only after every
-active document is current.
+`$HIVE_HOME/attempts/v1` to `attempts/v2`, rewrites v1 generation fields, adds
+the explicit task subject required by attempt v3 to v1/v2 records, strips the
+obsolete compatibility flag, and migrates pending request v1-v3 and result v1
+documents. It writes `recovery-migration-v3.json` only after every active
+document is current, then removes the superseded v2 migration receipt.
 
 Final compatibility leases are moved to
 `$HIVE_HOME/attempts/legacy-v1-records/` as audit history. A live compatibility
@@ -113,8 +114,8 @@ is authoritative; migrate removes that inert tree with empty-directory-only
 `rmdir` operations. Any file, symlink, or concurrent writer preserves the
 fail-closed dual-root error. An old detached supervisor retains the explicit v1
 path until it terminalizes, so Hive never moves storage underneath live work or
-guesses which process owns it. The migration is idempotent, and runtime readers
-contain no legacy-schema branches.
+guesses which process owns it. The migration is idempotent; attempt v1/v2
+schemas and in-memory compatibility readers are removed after the cutover.
 
 ## Registered repository identity backfill
 

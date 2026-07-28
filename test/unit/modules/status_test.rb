@@ -131,6 +131,23 @@ class ModulesStatusTest < Minitest::Test
         { "status" => "unknown", "charge" => nil, "max" => nil, "reason" => nil },
         retry_state
       )
+      capacity_retry = inspector.send(
+        :retry_summary,
+        {
+          "retry" => {
+            "status" => "pending", "charge" => 1,
+            "max" => nil, "reason" => "capacity_blocked"
+          }
+        },
+        pending
+      )
+      assert_equal(
+        {
+          "status" => "pending", "charge" => 1,
+          "max" => nil, "reason" => "capacity_blocked"
+        },
+        capacity_retry
+      )
       assert_equal "attempt_lost",
                    inspector.send(:failure_reason, { "failure" => nil }, FakeAttempt.new(state: "lost", outcome: nil, final: true))
       assert_equal "hook_failed", inspector.send(:failure_reason, { "failure" => nil }, finished)

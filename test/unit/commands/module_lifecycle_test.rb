@@ -29,6 +29,11 @@ class ModuleLifecycleCommandTest < Minitest::Test
     Hive::Modules::Entrypoints.register("demo.new") { 0 }
   end
 
+  def teardown
+    Hive::Modules::Entrypoints.reset!
+    super
+  end
+
   def test_noninteractive_install_requires_complete_choices_and_exact_receipt
     with_fixture do |project, store, package, resolution|
       incomplete = install_command(project, store, package, resolution, dry_run: true, settings: [])

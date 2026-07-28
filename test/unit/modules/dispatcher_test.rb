@@ -45,6 +45,9 @@ class ModulesDispatcherTest < Minitest::Test
   PreviousAttempt = Struct.new(:attempt_id, :retry_charge) do
     def [](key) = key == "retry_charge" ? retry_charge : nil
   end
+  ReplayedAttempt = Struct.new(:attempt_id, :retry_charge) do
+    def [](key) = key == "retry_charge" ? retry_charge : nil
+  end
 
   def test_replay_creates_one_attempt_and_two_explainable_decisions
     with_runtime do |runtime|
@@ -98,6 +101,52 @@ class ModulesDispatcherTest < Minitest::Test
       assert_equal 1, runtime.fetch(:attempt_store).scan.records.size
       assert_equal 1, runtime.fetch(:launcher).launches.size
       assert_equal 1, runtime.fetch(:journal).all.size
+    end
+  end
+
+  def test_terminal_attempt_recovery_stays_eligible_for_finalization
+    with_runtime do |runtime|
+      dispatcher = runtime.fetch(:dispatcher)
+      context = dispatcher.send(:load_context, "demo", "task")
+      hook_attempt = Hive::Modules::HookAttempt.build(
+        project: "demo", project_id: "project-1", module_name: "demo",
+        hook: context.fetch(:hook), selection: context.fetch(:selection),
+        configuration: context.fetch(:configuration), event: runtime.fetch(:event),
+        package_root: runtime.fetch(:store).generation_path(
+          "demo", context.dig(:selection, "active", "source_commit")
+        )
+      )
+      dispatcher.send(:persist_run, "demo", hook_attempt, runtime.fetch(:event))
+      admitted = runtime.fetch(:attempt_dispatcher).dispatch_module_hook(
+        generation: hook_attempt, subject: hook_attempt.subject, argv: hook_attempt.argv,
+        request_id: "module:#{runtime.dig(:event, 'event_id')}:task",
+        provider: "module", interactive: false, now: NOW, project_root: runtime.fetch(:root)
+      )
+      claimed = runtime.fetch(:attempt_store).claim(
+        admitted.attempt, owner: { "pid" => 1 }, claim_capability: "c" * 64,
+        first_heartbeat_timeout_sec: 30, now: NOW + 1
+      )
+      running = runtime.fetch(:attempt_store).first_heartbeat(
+        claimed, stale_sec: 30, now: NOW + 1
+      )
+      runtime.fetch(:attempt_store).terminalize(
+        running, outcome: "succeeded", exit_status: 0,
+        final_checkpoint: running.checkpoint, output_references: [],
+        log_reference: { "path" => "logs/a", "size" => 0, "sha256" => "0" * 64 },
+        now: NOW + 2
+      )
+
+      recovered = dispatcher.dispatch(
+        module_name: "demo", hook_id: "task", event: runtime.fetch(:event)
+      )
+      run = JSON.parse(File.binread(File.join(
+        runtime.fetch(:store).runtime_path("demo"), "runs", "#{hook_attempt.run_id}.json"
+      )))
+
+      assert recovered.launched?
+      assert_equal :terminal_replay, recovered.attempt_result.status
+      assert_equal "running", run.fetch("status")
+      assert_equal admitted.attempt.attempt_id, run.fetch("attempt_id")
     end
   end
 
@@ -202,6 +251,27 @@ class ModulesDispatcherTest < Minitest::Test
     end
   end
 
+  def test_terminal_replay_with_a_durable_attempt_remains_reconcilable
+    replayed = ReplayedAttempt.new("attempt-replayed", 1)
+    result = Hive::Attempts::DispatchResult.new(
+      status: :terminal_replay, attempt: replayed, receipt: {},
+      attach_descriptor: nil, reason: nil
+    )
+    with_runtime(attempt_dispatcher: ResultDispatcher.new(result)) do |runtime|
+      dispatch = runtime.fetch(:dispatcher).dispatch(
+        module_name: "demo", hook_id: "task", event: runtime.fetch(:event)
+      )
+      run = JSON.parse(Dir[
+        File.join(runtime.fetch(:store).runtime_path("demo"), "runs", "*.json")
+      ].then { |paths| File.binread(paths.fetch(0)) })
+
+      assert_equal "terminal_replay", dispatch.decision.fetch("reason")
+      assert_equal "running", run.fetch("status")
+      assert_equal "attempt-replayed", run.fetch("attempt_id")
+      assert_equal 1, run.fetch("retry_charge")
+    end
+  end
+
   def test_required_secret_uses_default_environment_availability_without_exposing_value
     with_env("MODULE_TEST_TOKEN" => "available") do
       with_runtime(secret_required: true) do |runtime|
@@ -259,6 +329,9 @@ class ModulesDispatcherTest < Minitest::Test
       )))
       assert_equal capacity, result
       assert_equal "retrying", run.fetch("status")
+      assert_equal "pending", run.dig("retry", "status")
+      assert_equal "capacity_blocked", run.dig("retry", "reason")
+      assert_equal 3, run.dig("retry", "charge")
       assert_equal 3, result_dispatcher.calls.fetch(0).fetch(:retry_charge)
     end
   end

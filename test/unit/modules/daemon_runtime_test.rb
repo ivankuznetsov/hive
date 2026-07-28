@@ -69,6 +69,41 @@ class ModulesDaemonRuntimeTest < Minitest::Test
     end
   end
 
+  def test_capacity_deferred_retry_waits_one_hour_before_another_admission
+    with_runtime do |runtime|
+      runtime.fetch(:module_dispatcher).dispatch(
+        module_name: "demo", hook_id: "task", event: runtime.fetch(:event)
+      )
+      first = runtime.fetch(:attempt_store).scan.records.first
+      terminalize(runtime.fetch(:attempt_store), first, outcome: "failed")
+      capacity = Hive::Attempts::DispatchResult.new(
+        status: :deferred, attempt: nil, receipt: nil,
+        attach_descriptor: nil, reason: "capacity"
+      )
+      calls = 0
+      capacity_dispatcher = Object.new
+      capacity_dispatcher.define_singleton_method(:dispatch_module_hook) do |**_attributes|
+        calls += 1
+        capacity
+      end
+      daemon = Hive::Modules::DaemonRuntime.new(
+        attempt_store: runtime.fetch(:attempt_store),
+        attempt_dispatcher: capacity_dispatcher,
+        registry: -> { [ runtime.fetch(:entry) ] }
+      )
+
+      daemon.tick(now: NOW + 3)
+      assert_equal 1, calls
+      assert_equal "retrying", current_run(runtime).fetch("status")
+
+      daemon.tick(now: NOW + 3 + Hive::Modules::DaemonRuntime::RETRY_DELAY_SEC - 1)
+      assert_equal 1, calls
+
+      daemon.tick(now: NOW + 3 + Hive::Modules::DaemonRuntime::RETRY_DELAY_SEC)
+      assert_equal 2, calls
+    end
+  end
+
   def test_uninstall_closes_pending_retry_before_idle_and_reinstall_does_not_replay
     with_runtime do |runtime|
       runtime.fetch(:module_dispatcher).dispatch(

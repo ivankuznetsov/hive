@@ -3,7 +3,7 @@ title: Durable task attempts
 type: module
 source: lib/hive/attempts/
 created: 2026-07-16
-updated: 2026-07-26
+updated: 2026-07-27
 tags: [attempts, ownership, leases, daemon, recovery]
 ---
 
@@ -19,7 +19,7 @@ reconciles and applies policy; it does not own or reap task agents.
 |--------|----------------|
 | `API` | Provide Hive commands, bot delivery, and daemon recovery with the stable admission operations `dispatch`, `dispatch_request`, and `dispatch_successor`, while keeping one injected store shared by its foreground and daemon adapters. |
 | `Contracts` | Define the public `ClientResult`, `DispatchResult`, and `UnsupportedDetachment` values independently of the internal client, dispatcher, and launcher implementations. |
-| `Record`, `Store` | Read and write only v2 records, perform locked guarded transitions with atomic write/fsync/rename persistence, and copy nested record/checkpoint/receipt values through `Hive::StringifyKeys`. The default store fails closed while an old v1 root remains; daemon/bot startup or explicit `hive migrate` owns the one-off mutation. |
+| `Record`, `Store` | Read and write only v3 records, perform locked guarded transitions with atomic write/fsync/rename persistence, and copy nested record/checkpoint/receipt values through `Hive::StringifyKeys`. The default store fails closed while an old v1 root remains; daemon/bot startup or explicit `hive migrate` owns the one-off mutation. |
 | `Capability`, `Context` | Generate one-time launch authority, authenticate the exact worker process/task/stage, revalidate generation at the mutation boundary, and expose process-local compatibility projections after transport variables are scrubbed. |
 | `Generation` | Bind stable task identity, intended stage, and a workflow progress token into the semantic ownership key. |
 | `Dispatcher` | Resolve receipt replay, live duplicate attachment, loss deferral, capacity, fresh admission, and explicit successors. |
@@ -67,28 +67,34 @@ other candidate entry points.
 
 Hive still has narrow, cataloged internal construction sites: the daemon
 composition root wires reconciliation and loss processing, the private
-supervisor argv adapter starts the owner wrapper, and read-only compatibility
-adapters plus `TaskClosure`'s active-attempt verification open the canonical
-store. These sites are not alternate admission producers. The
-component-boundary test pins each file/constant pair and rejects the same
-construction from any newly listed file even while Attempts remains a
-candidate. Authorization is file-granular, so it does not distinguish a second
-call site inside an already authorized composition root.
+supervisor argv adapter starts the owner wrapper, module inspection and
+dry-run preview open the canonical store read-only, and compatibility adapters
+plus `TaskClosure`'s active-attempt verification do the same. These sites are
+not alternate admission producers. The component-boundary test pins each
+file/constant pair and rejects the same construction from any newly listed
+file even while Attempts remains a candidate. Authorization is file-granular,
+so it does not distinguish a second call site inside an already authorized
+composition root.
 
 ## Storage and identity
 
-Attempt schema v3 generalizes the execution subject. Existing task attempts
-remain readable through their v1/v2 projections (including v1 compatibility
-records without modern launch fields), while module hook attempts use
-a first-class `module_hook` subject containing the project, module, hook,
-event/decision identity, generation, configuration, and grant digests. Module
-hooks do not fabricate task folders merely to reuse the supervisor.
+Attempt schema v3 generalizes the execution subject. Task attempts use an
+explicit `task_stage` subject, while module hook attempts use a first-class
+`module_hook` subject containing the project, module, hook, event/decision
+identity, generation, configuration, and grant digests. Module hooks do not
+fabricate task folders merely to reuse the supervisor. Runtime readers accept
+v3 only; the one-off recovery migration rewrites retained v1/v2 task attempts
+before the attempt store opens.
 
 Both subjects share the same CAS record store, leases, capabilities,
 heartbeats, detached ownership, bounded retry accounting, receipts, output
 references, reconciliation, and capacity accounting. A module hook retry stays
 attached to its admitted occurrence; disabling or uninstalling the module
-closes pending retry authority instead of replaying it on re-enable.
+closes pending retry authority instead of replaying it on re-enable. A retry
+deferred by capacity or handoff recovery waits one hour before another
+admission attempt, preventing daemon-tick spin while preserving the occurrence.
+The run ledger retains the pending reason and intended charge for redacted
+status projection.
 The private `hive __module-hook` worker also requires an installed,
 authenticated attempt context; transport environment is deliberately scrubbed
 before routing. Its subject is validated directly against module/hook,
@@ -139,20 +145,21 @@ it.
 
 Condition projection adds an explicit numeric `task_input_epoch` to attempt
 records/context while retaining the prerequisite's opaque ownership generation
-as `ownership_generation`. `hive-attempt` v2 is now the sole runtime shape.
+as `ownership_generation`. `hive-attempt` v3 is the sole runtime shape.
 `Hive::Recovery::Migration` moves the old `attempts/v1` tree once, rewrites v1
-records with `ownership_generation` and epoch 0, removes the obsolete
-compatibility flag, and leaves a receipt in the state home. Final compatibility
-leases are archived outside the active store. Any live attempt in the old tree
-blocks the rename because its detached old-binary supervisor still owns the v1
-path; a live compatibility lease is likewise never guessed into the new
-ownership model. If an old reader recreates only empty directories beside the
-current v2 tree, migration prunes them with empty-only `rmdir`; a file, symlink,
-or concurrent writer remains an ambiguous dual root and fails closed. Old
-schema files and in-memory normalization paths are removed. Every condition
-event must name a durable attempt whose task/stage ownership matches the
-record. Retry and adoption reuse the numeric epoch when accepted inputs are
-unchanged.
+records with `ownership_generation` and epoch 0, projects retained v1/v2 task
+records into the explicit `task_stage` subject, removes the obsolete
+compatibility flag, and leaves a v3 receipt in the state home. Final
+compatibility leases are archived outside the active store. Any live attempt
+in the old tree blocks the rename because its detached old-binary supervisor
+still owns the v1 path; a live compatibility lease is likewise never guessed
+into the new ownership model. If an old reader recreates only empty directories
+beside the current v2 tree, migration prunes them with empty-only `rmdir`; a
+file, symlink, or concurrent writer remains an ambiguous dual root and fails
+closed. Old schema files and in-memory normalization paths are removed. Every
+condition event must name a durable attempt whose task/stage ownership matches
+the record. Retry and adoption reuse the numeric epoch when accepted inputs
+are unchanged.
 
 ## State protocol
 

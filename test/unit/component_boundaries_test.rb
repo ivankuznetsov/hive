@@ -60,8 +60,10 @@ class ComponentBoundariesTest < Minitest::Test
         "Hive::Attempts::Store" => [
           "lib/hive/commands/attempt_supervise.rb",
           "lib/hive/commands/daemon.rb",
+          "lib/hive/commands/module/dry_run.rb",
           "lib/hive/conditions/execute_boundary.rb",
           "lib/hive/implementation_identity/store.rb",
+          "lib/hive/modules/inspector.rb",
           "lib/hive/task_closure.rb",
           "lib/hive/task_projection/store.rb"
         ],

@@ -164,37 +164,15 @@ class AttemptsRecordTest < Minitest::Test
     end
   end
 
-  def test_legacy_v2_record_gains_a_task_subject_in_memory
+  def test_legacy_v2_record_is_rejected_until_migrated
     legacy = Hive::Attempts::Record.launching(**identity, now: NOW, launch_timeout_sec: 30).to_h
     legacy["schema_version"] = 2
     legacy.delete("subject")
 
-    record = Hive::Attempts::Record.new(legacy)
-
-    assert_equal "task_stage", record.subject_kind
-    assert_equal "durable-task", record.subject.fetch("task_slug")
-    assert_equal Hive::Attempts::Record::SCHEMA_VERSION, record["schema_version"]
-    refute legacy.key?("subject")
-  end
-
-  def test_legacy_v1_compatibility_record_is_normalized_in_memory
-    legacy = Hive::Attempts::Record.launching(**identity, now: NOW, launch_timeout_sec: 30).to_h
-    legacy["schema_version"] = 1
-    legacy["compatibility"] = true
-    legacy["worker_argv"] = []
-    legacy["claim_capability_digest"] = nil
-    legacy.delete("subject")
-    legacy.delete("ownership_generation")
-    legacy.delete("task_input_epoch")
-
-    record = Hive::Attempts::Record.new(legacy)
-
-    assert_equal Hive::Attempts::Record::SCHEMA_VERSION, record["schema_version"]
-    assert_equal "generation-1", record.ownership_generation
-    assert_equal 0, record.task_input_epoch
-    assert_equal "task_stage", record.subject_kind
-    assert_equal true, record["diagnostics"].fetch("legacy_compatibility")
-    refute record.to_h.key?("compatibility")
+    error = assert_raises(Hive::Attempts::InvalidRecord) do
+      Hive::Attempts::Record.new(legacy)
+    end
+    assert_includes error.message, "unsupported schema_version 2"
   end
 
   def test_module_hook_subject_is_first_class_and_strict
@@ -220,7 +198,7 @@ class AttemptsRecordTest < Minitest::Test
   end
 
   def test_unsupported_schema_versions_are_rejected
-    [ 0, 99 ].each do |schema_version|
+    [ 0, 1, 2, 99 ].each do |schema_version|
       invalid = Hive::Attempts::Record.launching(
         **identity, now: NOW, launch_timeout_sec: 30
       ).to_h.merge("schema_version" => schema_version)

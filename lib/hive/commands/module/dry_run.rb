@@ -1,4 +1,5 @@
 require "hive/commands/module/base"
+require "hive/attempts/store"
 require "hive/modules/dry_run"
 
 module Hive
@@ -20,7 +21,10 @@ module Hive
         def call!
           identity = @project_identity || registered_identity
           evaluator = @evaluator || Hive::Modules::DryRun.new(
-            store: store, project_id: identity.fetch("project_id"), project: identity.fetch("name")
+            store: store,
+            attempt_store: Hive::Attempts::Store.new(create_directories: false),
+            project_id: identity.fetch("project_id"),
+            project: identity.fetch("name")
           )
           result = evaluator.evaluate(
             module_name: @name, hook_id: @hook_id, event_name: @event_name,

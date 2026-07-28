@@ -69,7 +69,7 @@ class RecoveryMigrationTest < Minitest::Test
       assert_nil notice.attempt_id
       assert_nil notice.receipt
 
-      receipt_path = File.join(state_home, "recovery-migration-v2.json")
+      receipt_path = File.join(state_home, "recovery-migration-v3.json")
       assert_path_exists receipt_path
       assert_equal result, Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW + 60)
     end
@@ -89,7 +89,44 @@ class RecoveryMigrationTest < Minitest::Test
         assert_equal File.join(state_home, "attempts", "v2"), store.root
       end
       refute_path_exists File.join(state_home, "attempts", "v1")
-      assert_path_exists File.join(state_home, "recovery-migration-v2.json")
+      assert_path_exists File.join(state_home, "recovery-migration-v3.json")
+    end
+  end
+
+  def test_replaces_the_prior_receipt_and_migrates_v2_attempts_to_v3
+    with_tmp_dir do |state_home|
+      records = File.join(state_home, "attempts", "v2", "records")
+      FileUtils.mkdir_p(records)
+      write_json(File.join(records, "prior.json"), legacy_v2_attempt("prior"))
+      write_json(
+        File.join(state_home, "recovery-migration-v2.json"),
+        {
+          "schema" => "hive-recovery-migration",
+          "schema_version" => 2,
+          "completed_at" => NOW.iso8601(6),
+          "attempts" => {},
+          "dispatch_requests" => {},
+          "dispatch_results" => {}
+        }
+      )
+
+      result = Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW + 60)
+
+      assert_equal 1, result.dig("attempts", "migrated")
+      migrated = JSON.parse(File.binread(File.join(records, "prior.json")))
+      assert_equal 3, migrated.fetch("schema_version")
+      assert_equal(
+        {
+          "kind" => "task_stage",
+          "task_id" => "42",
+          "task_slug" => "durable-task",
+          "intended_stage" => "4-execute"
+        },
+        migrated.fetch("subject")
+      )
+      assert Hive::Attempts::Record.new(migrated)
+      assert_path_exists File.join(state_home, "recovery-migration-v3.json")
+      refute_path_exists File.join(state_home, "recovery-migration-v2.json")
     end
   end
 
@@ -128,8 +165,8 @@ class RecoveryMigrationTest < Minitest::Test
         Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW)
       end
 
-      assert_includes error.message, "must finish before the v2 cutover"
-      refute_path_exists File.join(state_home, "recovery-migration-v2.json")
+      assert_includes error.message, "must finish before the recovery cutover"
+      refute_path_exists File.join(state_home, "recovery-migration-v3.json")
     end
   end
 
@@ -234,13 +271,13 @@ class RecoveryMigrationTest < Minitest::Test
     end
   end
 
-  def test_rejects_an_incomplete_completion_receipt
+  def test_rejects_an_incomplete_current_completion_receipt
     with_tmp_dir do |state_home|
       write_json(
-        File.join(state_home, "recovery-migration-v2.json"),
+        File.join(state_home, "recovery-migration-v3.json"),
         {
           "schema" => "hive-recovery-migration",
-          "schema_version" => 2
+          "schema_version" => 3
         }
       )
 
@@ -347,7 +384,7 @@ class RecoveryMigrationTest < Minitest::Test
       end
 
       assert_equal 0, result.dig("dispatch_requests", "migrated")
-      assert_path_exists File.join(state_home, "recovery-migration-v2.json")
+      assert_path_exists File.join(state_home, "recovery-migration-v3.json")
     end
   end
 
@@ -397,10 +434,17 @@ class RecoveryMigrationTest < Minitest::Test
       "schema_version" => 1,
       "compatibility" => false
     ).tap do |data|
+      data.delete("subject")
       data.delete("ownership_generation")
       data.delete("task_input_epoch")
       data.fetch("receipt").delete("ownership_generation")
       data.fetch("receipt").delete("task_input_epoch")
+    end
+  end
+
+  def legacy_v2_attempt(attempt_id)
+    current_attempt(attempt_id: attempt_id).merge("schema_version" => 2).tap do |data|
+      data.delete("subject")
     end
   end
 

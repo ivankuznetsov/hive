@@ -74,7 +74,11 @@ class ModulesDryRunTest < Minitest::Test
   def test_hook_specific_and_schedule_events_use_strict_pure_envelopes
     with_tmp_dir do |root|
       store = Struct.new(:hive_state_path).new(root)
-      dry_run = Hive::Modules::DryRun.new(store: store, project_id: "project-1", project: "demo")
+      attempts = Struct.new(:scan).new(Struct.new(:records).new([]))
+      dry_run = Hive::Modules::DryRun.new(
+        store: store, attempt_store: attempts,
+        project_id: "project-1", project: "demo"
+      )
       dispatch = Struct.new(:decision).new({ "outcome" => "skip", "reason" => "disabled" })
       dispatcher = Object.new
       dispatcher.define_singleton_method(:dispatch) { |**_attributes| dispatch }

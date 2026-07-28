@@ -97,6 +97,18 @@ class ModulePackageCatalogClientTest < Minitest::Test
       assert_equal "present", File.read(File.join(destination, "keep"))
     end
 
+    with_tmp_dir do |root|
+      target = File.join(root, "target")
+      destination = File.join(root, "destination")
+      FileUtils.mkdir_p(target)
+      File.symlink(target, destination)
+      assert_raises(Hive::ModulePackage::CatalogError) do
+        @client.fetch("honeycomb/demo", destination: destination)
+      end
+      assert File.symlink?(destination)
+      assert_empty Dir.children(target)
+    end
+
     legacy = Object.new
     client = Hive::ModulePackage::CatalogClient.new(repository: "unused")
     client.define_singleton_method(:git!) do |*args, binary: false|
@@ -237,12 +249,51 @@ class ModulePackageCatalogClientTest < Minitest::Test
       end
     end
 
+    missing_manifest = Hive::ModulePackage::CatalogClient.new
+    missing_manifest.define_singleton_method(:git!) do |*_args, **_options|
+      "100644 blob #{'d' * 40}\tmodules/demo/1.0.0/README.md\0".b
+    end
+    with_tmp_dir do |root|
+      destination = File.join(root, "destination")
+      assert_raises(Hive::ModulePackage::CatalogError) do
+        missing_manifest.send(:materialize, "checkout", resolution, destination)
+      end
+      refute_path_exists destination
+    end
+
+    invalid_manifest = Hive::ModulePackage::CatalogClient.new
+    invalid_manifest.define_singleton_method(:git!) do |*args, **_options|
+      if args.include?("ls-tree")
+        "100644 blob #{'d' * 40}\tmodules/demo/1.0.0/module.yml\0".b
+      else
+        "not: [canonical".b
+      end
+    end
+    with_tmp_dir do |root|
+      destination = File.join(root, "destination")
+      assert_raises(Hive::ModulePackage::CatalogError) do
+        invalid_manifest.send(:materialize, "checkout", resolution, destination)
+      end
+      refute_path_exists destination
+    end
+
     valid_tree = "100644 blob #{'d' * 40}\tmodules/demo/1.0.0/README.md\0"
     assert_equal [ { "path" => "README.md", "mode" => "100644" } ],
                  @client.send(:parse_tree, valid_tree, "modules/demo/1.0.0/")
-    invalid_tree = "120000 blob #{'d' * 40}\tmodules/demo/1.0.0/link\0"
+    [
+      "120000 blob #{'d' * 40}\tmodules/demo/1.0.0/link\0",
+      "100644 blob #{'d' * 40}\tmodules/demo/1.0.0/../../escape\0"
+    ].each do |invalid_tree|
+      assert_raises(Hive::ModulePackage::CatalogError) do
+        @client.send(:parse_tree, invalid_tree, "modules/demo/1.0.0/")
+      end
+    end
+    colliding_tree = [
+      "100644 blob #{'d' * 40}\tmodules/demo/1.0.0/README.md",
+      "100644 blob #{'e' * 40}\tmodules/demo/1.0.0/readme.md"
+    ].join("\0") + "\0"
     assert_raises(Hive::ModulePackage::CatalogError) do
-      @client.send(:parse_tree, invalid_tree, "modules/demo/1.0.0/")
+      @client.send(:parse_tree, colliding_tree, "modules/demo/1.0.0/")
     end
 
     manifest = Struct.new(:name, :version, :type, :summary, :data, :digest).new(
@@ -266,6 +317,33 @@ class ModulePackageCatalogClientTest < Minitest::Test
     with_replaced_singleton_method(Open3, :capture3, ->(*_args) { [ "", "fatal: denied", failure ] }) do
       error = assert_raises(Hive::ModulePackage::CatalogError) { @client.send(:git!, "status") }
       assert_match(/fatal: denied/, error.message)
+    end
+  end
+
+  def test_materialization_rejects_unlisted_blobs_before_creating_destination
+    with_module_catalog do |repository, source_revision|
+      File.write(File.join(repository, "modules", "demo", "1.0.0", "UNLISTED"), "surprise")
+      run!("git", "-C", repository, "add", ".")
+      run!("git", "-C", repository, "commit", "-qm", "add unlisted module blob")
+      catalog_commit = run!("git", "-C", repository, "rev-parse", "HEAD").strip
+      manifest_digest = JSON.parse(File.read(File.join(repository, "catalog.json")))
+        .fetch("entries").first.fetch("manifest_sha256")
+      resolution = Hive::ModulePackage::CatalogClient::Resolution.new(
+        name: "demo", version: "1.0.0", type: "workflow",
+        source_commit: catalog_commit, catalog_commit: catalog_commit,
+        source_revision: source_revision, manifest_digest: manifest_digest,
+        summary: "demo module", package_path: "modules/demo/1.0.0", descriptor: nil
+      )
+
+      with_tmp_dir do |root|
+        destination = File.join(root, "destination")
+        assert_raises(Hive::ModulePackage::CatalogError) do
+          Hive::ModulePackage::CatalogClient.new(repository: repository).send(
+            :materialize, repository, resolution, destination
+          )
+        end
+        refute_path_exists destination
+      end
     end
   end
 

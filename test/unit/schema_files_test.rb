@@ -2431,17 +2431,9 @@ class SchemaFilesTest < Minitest::Test
     end
   end
 
-  def test_internal_attempt_v2_schema_remains_for_back_compat
-    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-attempt", version: 2)))
-
-    assert_equal 2, doc.fetch("properties").dig("schema_version", "const")
-    refute_includes doc.fetch("properties").keys, "subject"
-  end
-
-
   def test_legacy_recovery_schema_files_are_removed_after_one_off_cutover
     obsolete = {
-      "hive-attempt" => [ 1 ],
+      "hive-attempt" => [ 1, 2 ],
       "hive-dispatch-request" => [ 1, 2, 3 ],
       "hive-dispatch-result" => [ 1 ]
     }

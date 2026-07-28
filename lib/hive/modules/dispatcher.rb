@@ -101,7 +101,10 @@ module Hive
               project_root: File.dirname(@store.hive_state_path)
             )
             final_evaluation = evaluation_for_attempt(evaluation, attempt_result)
-            update_run(module_name, hook_attempt, attempt_result, final_evaluation)
+            update_run(
+              module_name, hook_attempt, attempt_result, final_evaluation,
+              retry_charge: 0
+            )
             decision = persist_decision(
               context, event, final_evaluation,
               attempt_id: attempt_result.attempt&.attempt_id
@@ -163,7 +166,10 @@ module Hive
               retry_charge: charge, now: @clock.call,
               project_root: File.dirname(@store.hive_state_path)
             )
-            update_run(module_name, retry_attempt, result, nil)
+            update_run(
+              module_name, retry_attempt, result, nil,
+              retry_charge: charge
+            )
             result
           end
         end
@@ -269,7 +275,10 @@ module Hive
         return unless File.file?(path)
 
         data = JSON.parse(File.binread(path))
-        data["status"] = attempt.live? ? "running" : "failed"
+        # A terminal or lost attempt still needs the daemon's normal
+        # finalization/retry pass. Keep the recovered run in that pass instead
+        # of misclassifying a successfully completed attempt as failed.
+        data["status"] = "running"
         data["attempt_id"] = attempt.attempt_id
         data["attempt_ids"] = (Array(data["attempt_ids"]) + [ attempt.attempt_id ]).uniq
         data["decision_reason"] = "admitted"
@@ -367,10 +376,11 @@ module Hive
         Hive::AtomicFile.write(path, canonical(data), mode: 0o600)
       end
 
-      def update_run(module_name, hook_attempt, attempt_result, evaluation)
+      def update_run(module_name, hook_attempt, attempt_result, evaluation, retry_charge:)
         path = run_path(module_name, hook_attempt.run_id)
         data = JSON.parse(File.binread(path))
-        data["status"] = if attempt_result.live?
+        status = if attempt_result.live? ||
+                    (attempt_result.status == :terminal_replay && attempt_result.attempt)
           "running"
         elsif (evaluation.nil? && attempt_result.reason == "capacity") ||
               attempt_result.reason == "launch_handoff_failed"
@@ -378,12 +388,30 @@ module Hive
         else
           "failed"
         end
+        data["status"] = status
         data["attempt_id"] = attempt_result.attempt&.attempt_id || data["attempt_id"]
         data["attempt_ids"] = (Array(data["attempt_ids"]) + [ attempt_result.attempt&.attempt_id ]).compact.uniq
-        data["decision_reason"] = evaluation&.reason || data["decision_reason"]
-        data["retry_charge"] = attempt_result.attempt&.[]("retry_charge")
+        reason = evaluation&.reason || deferred_reason(attempt_result.reason)
+        data["decision_reason"] = reason || data["decision_reason"]
+        charge = attempt_result.attempt&.[]("retry_charge") || retry_charge
+        data["retry_charge"] = charge
+        if status == "retrying"
+          data["retry"] = {
+            "status" => "pending", "charge" => charge,
+            "max" => nil, "reason" => reason
+          }
+        elsif data.dig("retry", "status") == "pending"
+          data.delete("retry")
+        end
         data["updated_at"] = @clock.call.utc.iso8601(6)
         Hive::AtomicFile.write(path, canonical(data), mode: 0o600)
+      end
+
+      def deferred_reason(reason)
+        case reason
+        when "capacity" then "capacity_blocked"
+        when "launch_handoff_failed" then "launch_handoff_failed"
+        end
       end
 
       def close_run(module_name, run_id, reason)

@@ -62,6 +62,9 @@ class ModulePackageManifestTest < Minitest::Test
     assert_mutation("manifest.invalid_schedule") do |document|
       document["hooks"].first["schedules"] = [ "0 * * * *", "0 * * * *" ]
     end
+    assert_mutation("manifest.invalid_schedule") do |document|
+      document["hooks"].first["schedules"] = [ "61 * * * *" ]
+    end
     assert_mutation("manifest.invalid_target") { |document| document["hooks"].first["target"] = [] }
     assert_mutation("manifest.invalid_target") do |document|
       document["hooks"].first["target"] = { "kind" => "entrypoint", "id" => "INVALID" }

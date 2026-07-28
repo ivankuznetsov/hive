@@ -2,6 +2,7 @@ require "digest"
 require "pathname"
 require "psych"
 require "uri"
+require "hive/cron_schedule"
 require "hive/module_package/command_target"
 require "hive/workflow_package/canonical_yaml"
 require "hive/workflow_package/diagnostic"
@@ -269,7 +270,8 @@ module Hive
       end
 
       def self.valid_schedule?(value)
-        value.is_a?(String) && value.bytesize <= 128 && value.split(/\s+/).length == 5 && !value.include?("\0")
+        value.is_a?(String) && value.bytesize <= 128 && !value.include?("\0") &&
+          Hive::CronSchedule.valid?(value)
       end
 
       def self.required_string!(value, label, file_name)

@@ -261,6 +261,24 @@ class ModulesTargetExecutorTest < Minitest::Test
     assert_match(/could not start/, error.message)
   end
 
+  def test_command_runner_never_resolves_the_sandbox_binary_from_a_relative_path
+    runner = Hive::Modules::TargetExecutor::CommandRunner.new
+    with_tmp_dir do |root|
+      File.write(File.join(root, "bwrap"), "#!/bin/sh\n")
+      File.chmod(0o755, File.join(root, "bwrap"))
+
+      with_env("PATH" => ".") do
+        Dir.chdir(root) do
+          assert_nil runner.send(:executable_path, "bwrap")
+          error = assert_raises(Hive::ConfigError) do
+            runner.preflight!(grants: permissions)
+          end
+          assert_match(/require bubblewrap/, error.message)
+        end
+      end
+    end
+  end
+
   def test_command_filesystem_grants_reject_symlinks_outside_the_project
     runner = Hive::Modules::TargetExecutor::CommandRunner.new
     with_tmp_dir do |root|

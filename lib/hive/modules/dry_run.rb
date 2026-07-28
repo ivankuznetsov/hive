@@ -15,7 +15,7 @@ module Hive
     class DryRun
       EVENT_NAMES = [ "schedule", *Hive::ModulePackage::Manifest::EVENT_NAMES ].freeze
 
-      def initialize(store:, project_id:, project:, attempt_store: nil,
+      def initialize(store:, project_id:, project:, attempt_store:,
                      secret_availability: ->(name) { ENV.key?(name.to_s) },
                      capacity_probe: nil,
                      clock: -> { Time.now.utc })
@@ -23,13 +23,12 @@ module Hive
         @project_id = project_id.to_s
         @project = project.to_s
         @clock = clock
-        attempts = attempt_store || Hive::Attempts::Store.new(create_directories: false)
-        capacity_probe ||= capacity_probe_for(attempts)
+        capacity_probe ||= capacity_probe_for(attempt_store)
         journal = DecisionJournal.new(
           root: File.join(store.hive_state_path, "module-runtime"), create_directories: false
         )
         @dispatcher = Dispatcher.new(
-          store: store, attempt_store: attempts, attempt_dispatcher: nil,
+          store: store, attempt_store: attempt_store, attempt_dispatcher: nil,
           project_id: @project_id, project: @project, decision_journal: journal,
           secret_availability: secret_availability, capacity_probe: capacity_probe,
           clock: clock

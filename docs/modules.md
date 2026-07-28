@@ -21,6 +21,9 @@ five-field schedules, bindings for exactly `task.completed`,
 templates, and documentation. Package Ruby is never loaded. Current
 `honeycomb-manifest/v1` workflow packages normalize losslessly into one
 hook-free module, so they do not need republishing or manual migration.
+Schedule syntax is validated with the same bounded five-field UTC cron parser
+used by the daemon, so malformed ranges, steps, comma branches, and field
+domains fail at package validation rather than after installation.
 
 Native module workflow targets are validated and snapshotted at activation, but
 execution currently fails closed. They will remain unavailable until task
@@ -80,7 +83,9 @@ Every evaluated occurrence writes a launch or skip receipt. Module hooks are a
 first-class `hive-attempt` v3 subject and reuse the existing detached owner,
 lease, heartbeat, bounded retry, receipt, and recovery machinery. A hook
 failure records an attempt and retry; it does not roll back a structurally valid
-installation.
+installation. Capacity- or handoff-deferred retries wait one hour before
+another admission attempt rather than spinning on every daemon tick, and the
+pending reason and retry charge remain visible in module status.
 
 ## Read-only operations
 

@@ -18,6 +18,11 @@ class WebModuleLifecycleTest < Minitest::Test
     Hive::Modules::Entrypoints.register("demo.run") { 0 }
   end
 
+  def teardown
+    Hive::Modules::Entrypoints.reset!
+    super
+  end
+
   def test_preview_apply_status_and_state_changes_share_the_domain_engine
     with_tmp_dir do |root|
       project = project_fixture(root)

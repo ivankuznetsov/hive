@@ -38,6 +38,9 @@ module Hive
         materialized = false
         name, requested_ref = parse_source(source)
         destination = File.expand_path(destination)
+        if File.symlink?(destination) || (File.exist?(destination) && !File.directory?(destination))
+          raise CatalogError, "module catalog destination must be a real directory"
+        end
         if File.exist?(destination) && !Dir.empty?(destination)
           raise CatalogError, "module catalog destination must be empty"
         end
@@ -185,9 +188,27 @@ module Hive
         tree = git!("-C", checkout, "ls-tree", "-r", "-z", resolution.catalog_commit, "--", prefix, binary: true)
         entries = parse_tree(tree, prefix)
         raise CatalogError, "reviewed module package is empty" if entries.empty?
+        manifest_entries = entries.select do |entry|
+          [ Manifest::FILE_NAME, Manifest::ALTERNATE_FILE_NAME ].include?(entry.fetch("path"))
+        end
+        unless manifest_entries.one?
+          raise CatalogError, "reviewed module package must contain exactly one manifest"
+        end
+
+        manifest_entry = manifest_entries.first
+        manifest_bytes = read_blob(checkout, resolution, prefix, manifest_entry.fetch("path"))
+        manifest = parse_manifest_bytes(manifest_bytes, manifest_entry.fetch("path"))
+        expected_paths = [ manifest_entry.fetch("path") ] +
+          manifest.file_entries.map { |entry| entry.fetch("path") }
+        unless entries.map { |entry| entry.fetch("path") }.sort == expected_paths.sort
+          raise CatalogError, "reviewed module package tree does not match its complete manifest inventory"
+        end
+
         FileUtils.mkdir_p(destination, mode: 0o700)
         entries.each do |entry|
-          bytes = git!("-C", checkout, "show", "#{resolution.catalog_commit}:#{prefix}#{entry.fetch('path')}", binary: true)
+          relative = entry.fetch("path")
+          bytes = relative == manifest_entry.fetch("path") ? manifest_bytes :
+            read_blob(checkout, resolution, prefix, relative)
           target = File.join(destination, entry.fetch("path"))
           FileUtils.mkdir_p(File.dirname(target), mode: 0o700)
           File.binwrite(target, bytes)
@@ -196,14 +217,43 @@ module Hive
       end
 
       def parse_tree(bytes, prefix)
-        bytes.split("\0").reject(&:empty?).map do |record|
+        entries = bytes.split("\0").reject(&:empty?).map do |record|
           metadata, path = record.split("\t", 2)
           mode, type, = metadata.split(" ")
           unless type == "blob" && mode == "100644" && path&.start_with?(prefix)
             raise CatalogError, "reviewed module package contains a link or executable file"
           end
-          { "path" => path.delete_prefix(prefix), "mode" => mode }
+          relative = path.delete_prefix(prefix)
+          begin
+            Manifest.validate_relative_path!(relative, Manifest::FILE_NAME)
+          rescue Hive::WorkflowPackage::PackageError
+            raise CatalogError, "reviewed module package contains an unsafe path"
+          end
+          { "path" => relative, "mode" => mode }
         end
+        paths = entries.map { |entry| entry.fetch("path") }
+        if paths.uniq.length != paths.length || paths.map(&:downcase).uniq.length != paths.length
+          raise CatalogError, "reviewed module package contains colliding paths"
+        end
+        entries
+      end
+
+      def parse_manifest_bytes(bytes, file_name)
+        Dir.mktmpdir("hive-module-manifest-") do |dir|
+          path = File.join(dir, file_name)
+          File.binwrite(path, bytes)
+          return Manifest.load(path)
+        end
+      rescue Hive::WorkflowPackage::PackageError => e
+        raise CatalogError, "reviewed module package manifest is invalid: #{e.message}"
+      end
+
+      def read_blob(checkout, resolution, prefix, relative)
+        git!(
+          "-C", checkout, "show",
+          "#{resolution.catalog_commit}:#{prefix}#{relative}",
+          binary: true
+        )
       end
 
       def bind_catalog_metadata!(resolution, manifest)

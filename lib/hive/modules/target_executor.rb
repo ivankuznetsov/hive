@@ -194,6 +194,7 @@ module Hive
 
         def executable_path(name)
           ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).filter_map do |dir|
+            next unless Pathname.new(dir).absolute?
             path = File.join(dir, name)
             path if File.file?(path) && File.executable?(path)
           end.first

@@ -2,8 +2,9 @@
 
 - Authenticated detached module hooks now survive transport-environment
   scrubbing, bind directly to their module subject, and recover an admitted
-  launch receipt after a crash before decision persistence. Attempt v1/v2
-  records remain readable through the v3 projection.
+  launch receipt after a crash before decision persistence. The one-off
+  recovery migration projects retained v1/v2 task records into v3 before
+  runtime readers open them.
 - Migration transitions and module admission share one ownership lock,
   quiescence uses a transition-current attempt scan, and rollback requires a
   fresh shadow window before another cutover.

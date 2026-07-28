@@ -3,7 +3,7 @@ title: Dependencies
 type: dependencies
 source: Gemfile, hive.gemspec, Gemfile.lock, web/Gemfile, web/Gemfile.lock, .github/workflows, components/agent-cli-runtime/mirror, .llm-wiki/post-commit-refresh.sh
 created: 2026-04-25
-updated: 2026-07-27
+updated: 2026-07-28
 tags: [dependencies, gems, runtime]
 ---
 
@@ -32,10 +32,11 @@ not enable v7's single-file direct-upload mode. Upload jobs run only on
 GitHub-hosted runners, satisfying the Node 24 runner floor introduced in v6.
 
 The live-agent validation workflow pins `actions/setup-node` v7.0.0 to
-`820762786026740c76f36085b0efc47a31fe5020`. It continues to install Node.js
-22 without enabling dependency caching or consuming cache-key outputs, so the
-v7 ESM migration does not change Hive's workflow contract. The job runs on a
-GitHub-hosted runner.
+`820762786026740c76f36085b0efc47a31fe5020`. The four-platform diagnostic keeps
+the Node.js 22 line, while the OpenClaw creator job pins Node.js 22.23.1 and
+installs its committed npm lock into a private prefix without dependency
+caching. The v7 ESM migration does not change Hive's workflow contract. Both
+jobs run on GitHub-hosted runners.
 
 All nine paired `actions/download-artifact` calls pin v8.0.1 to
 `3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c`. Existing artifact names,
@@ -122,6 +123,7 @@ Why Bubble Tea + Lipgloss (over the original curses choice): MVU keeps every sta
 
 | Gem | Version | Purpose |
 |-----|---------|---------|
+| `fiddle` | `>= 1.1` (locked 1.1.8) | Development/test-only FFI used by the Linux OpenClaw creator proof to call `prctl(PR_SET_CHILD_SUBREAPER)` and verify it with `PR_GET_CHILD_SUBREAPER`. Declared because Fiddle stops being a default gem in Ruby 4; it is not part of the shipped `hive-cli` runtime. |
 | `minitest` | `~> 6.0` (locked 6.0.6) | Test framework — all tests under `test/` extend `Minitest::Test`. Chosen over RSpec for lower ceremony. Bumped 5.x → 6.0 in commit `429ff4c`. |
 | `rake` | `~> 13.0` (locked 13.4.2) | Task runner — `Rakefile` defines `rake test` (default) using `Rake::TestTask`. |
 | `rubocop` | `~> 1.88` (locked 1.88.0 in the root bundle) | Linter — config in `.rubocop.yml`. `bin/rubocop` is the canonical lint command. |

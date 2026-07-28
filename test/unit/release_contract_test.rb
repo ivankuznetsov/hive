@@ -5,6 +5,7 @@ require "open3"
 require "rbconfig"
 require "hive/agent_skills/canonical_skill"
 require_relative "../../packaging/release_candidate/aggregate"
+require_relative "../../packaging/live_agent_skills/proof"
 
 class ReleaseContractTest < Minitest::Test
   include HiveTestHelper
@@ -13,6 +14,9 @@ class ReleaseContractTest < Minitest::Test
   RELEASE_WORKFLOW = File.join(ROOT, ".github/workflows/release.yml")
   CANDIDATE_WORKFLOW = File.join(ROOT, ".github/workflows/release-candidate.yml")
   LIVE_AGENT_WORKFLOW = File.join(ROOT, ".github/workflows/live-agent-skills.yml")
+  OPENCLAW_LOCK = File.join(
+    ROOT, "packaging/live_agent_skills/openclaw/package-lock.json"
+  )
   RELEASE_SELECTOR = File.join(ROOT, "packaging/live_agent_skills/select_release_proof.rb")
   SETUP_NODE_ACTION = "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
   GITHUB_SCRIPT_ACTION = "actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3"
@@ -155,25 +159,25 @@ class ReleaseContractTest < Minitest::Test
     creator = jobs.fetch("live-workflow-creator")
     assert_equal [ "validate", "build" ], creator.fetch("needs")
     assert_equal "live-agent-skills-openclaw", creator.fetch("environment")
-    creator_steps = creator.fetch("steps").select do |step|
-      step["name"].to_s.start_with?("Run authenticated workflow-creator proof with")
+    creator_setup_node = creator.fetch("steps").find do |step|
+      step["uses"] == SETUP_NODE_ACTION
     end
-    assert_equal 2, creator_steps.length
-    assert_equal(
-      [
-        "${{ secrets.OPENAI_API_KEY }}",
-        "${{ secrets.OPENROUTER_API_KEY }}"
-      ],
-      creator_steps.map { |step| step.dig("env", "HIVE_LIVE_PROVIDER_CREDENTIAL") }
-    )
-    assert creator_steps.all? { |step|
-      step.fetch("if").include?("startsWith(vars.HIVE_LIVE_MODEL")
-    }
-    assert creator_steps.all? { |step|
-      (step.fetch("env").keys & %w[OPENAI_API_KEY OPENROUTER_API_KEY]).empty?
-    }
-    assert creator_steps.all? { |step|
-      step.fetch("run").include?("live_hive_workflow_creator_smoke_test.rb")
+    assert_equal({ "node-version" => "22.23.1" }, creator_setup_node.fetch("with"))
+    creator_steps = creator.fetch("steps").select do |step|
+      step["name"] == "Run authenticated workflow-creator proof"
+    end
+    assert_equal 1, creator_steps.length
+    creator_step = creator_steps.fetch(0)
+    refute creator_step.key?("if")
+    credential_expression = creator_step.dig("env", "HIVE_LIVE_PROVIDER_CREDENTIAL")
+    assert_includes credential_expression, "startsWith(vars.HIVE_LIVE_MODEL, 'openai/')"
+    assert_includes credential_expression, "secrets.OPENAI_API_KEY"
+    assert_includes credential_expression, "startsWith(vars.HIVE_LIVE_MODEL, 'openrouter/')"
+    assert_includes credential_expression, "secrets.OPENROUTER_API_KEY"
+    assert_empty creator_step.fetch("env").keys & %w[OPENAI_API_KEY OPENROUTER_API_KEY]
+    assert_includes creator_step.fetch("run"), "live_hive_workflow_creator_smoke_test.rb"
+    refute creator.fetch("steps").any? { |step|
+      step["name"] == "Validate the configured live provider"
     }
     creator_actions = creator.fetch("steps").filter_map { |step| step["uses"] }
     assert creator_actions.all? { |action| action.match?(/@[0-9a-f]{40}\z/) }
@@ -185,46 +189,81 @@ class ReleaseContractTest < Minitest::Test
                  openclaw_install.fetch("env").keys.sort
     refute_match(/\$\{\{\s*secrets\./, JSON.generate(openclaw_install))
     install_body = openclaw_install.fetch("run")
+    assert_includes install_body, "packaging/live_agent_skills/openclaw/package-lock.json"
     assert_includes(
       install_body,
-      'npm pack "openclaw@${OPENCLAW_VERSION}" --json --pack-destination "$pack_dir"'
+      'npm ci --prefix "$openclaw_root" --ignore-scripts --audit=false --fund=false'
     )
     assert_includes install_body, "JSON.parse"
-    %w[entry.version entry.integrity entry.filename].each do |metadata_field|
-      assert_includes install_body, metadata_field
-    end
-    assert_includes install_body, 'createHash("sha512")'
-    assert_includes install_body, "readFileSync(process.argv[1])"
-    assert_includes install_body, '"sha512-"'
-    assert_includes install_body, '[[ "$packed_version" == "$OPENCLAW_VERSION" ]]'
-    assert_includes install_body, '[[ "$reported_integrity" == "$OPENCLAW_INTEGRITY" ]]'
-    assert_includes install_body, '[[ "$computed_integrity" == "$OPENCLAW_INTEGRITY" ]]'
-    assert_includes install_body, '[[ "$computed_integrity" == "$reported_integrity" ]]'
-    assert_includes install_body, 'npm install --global "$tarball"'
+    assert_includes install_body, "entry.resolved.startsWith(\"https://registry.npmjs.org/\")"
+    assert_includes install_body, "entry.integrity"
+    assert_includes install_body, "openclaw.integrity !== integrity"
+    assert_includes install_body, 'openclaw_bin="$openclaw_root/node_modules/.bin/openclaw"'
+    assert_includes install_body, '"$openclaw_realpath" == "$openclaw_root/"*'
+    assert_includes install_body, "write_installation_receipt.rb"
+    assert_includes install_body, "--kind openclaw_npm"
+    assert_includes install_body, "HIVE_OPENCLAW_INSTALL_RECEIPT="
     refute_includes install_body, "npm view"
-    refute_match(/npm install\s+--global\s+["']?openclaw@/, install_body)
-    assert_operator(
-      install_body.index('[[ "$computed_integrity" == "$OPENCLAW_INTEGRITY" ]]'),
-      :<,
-      install_body.index('npm install --global "$tarball"')
-    )
+    refute_includes install_body, "npm pack"
+    refute_match(/npm install\s+--global/, install_body)
     creator_body = creator.fetch("steps").filter_map { |step| step["run"] }.join("\n")
     assert_includes body,
                     "sha512-KYPBQnAfEb/9qrxlw/96a90mMQeKdAZdUABMROOue9Ph2oFbnDGezZjd5Bmw4WhRyzgyvHOHqHje/swGipC4xA=="
-    assert_includes creator_body, 'package_json="$(npm root --global)/openclaw/package.json"'
+    assert_includes creator_body,
+                    'package_json="$openclaw_root/node_modules/openclaw/package.json"'
     assert_includes creator_body,
                     'node -p "require(process.argv[1]).version" "$package_json"'
     assert_includes creator_body,
                     'openclaw_version_regex="${OPENCLAW_VERSION//./\\\\.}"'
     assert_includes creator_body,
                     '^OpenClaw[[:space:]]${openclaw_version_regex}[[:space:]]\\\\(.+\\\\)$'
-    assert_includes creator_body,
-                    "HIVE_OPENCLAW_PACKAGE_VERSION=$OPENCLAW_VERSION"
-    assert_includes creator_body,
-                    "HIVE_OPENCLAW_PACKAGE_INTEGRITY=$computed_integrity"
-    assert_includes creator_body, "HIVE_PROVEN_HIVE_BIN=$RUNNER_TEMP/proven-gems/bin/hive"
+    assert_includes creator_body, "--kind candidate_gem"
+    assert_includes creator_body, "HIVE_CANDIDATE_INSTALL_RECEIPT="
+    refute_includes creator_body, "HIVE_OPENCLAW_PACKAGE_VERSION="
+    refute_includes creator_body, "HIVE_OPENCLAW_PACKAGE_INTEGRITY="
+    refute_includes creator_body, "HIVE_PROVEN_HIVE_BIN="
+    refute_includes creator_body, "HIVE_OPENCLAW_BIN="
     assert_includes body, "workflow-creator-evidence-openclaw"
     assert_includes body, "creator-evidence"
+  end
+
+  def test_openclaw_creator_lock_is_a_closed_exact_integrity_inventory
+    lock = JSON.parse(File.read(OPENCLAW_LOCK))
+    packages = lock.fetch("packages")
+    openclaw = packages.fetch("node_modules/openclaw")
+
+    assert_equal 3, lock.fetch("lockfileVersion")
+    assert_equal(
+      { "openclaw" => HiveLiveAgentProof::WORKFLOW_CREATOR_OPENCLAW_VERSION },
+      packages.fetch("").fetch("dependencies")
+    )
+    assert_equal 306, packages.length - 1
+    assert_equal HiveLiveAgentProof::WORKFLOW_CREATOR_OPENCLAW_LOCK_SHA256,
+                 Digest::SHA256.file(OPENCLAW_LOCK).hexdigest
+    assert_equal HiveLiveAgentProof::WORKFLOW_CREATOR_OPENCLAW_VERSION,
+                 openclaw.fetch("version")
+    assert_equal HiveLiveAgentProof::WORKFLOW_CREATOR_OPENCLAW_INTEGRITY,
+                 openclaw.fetch("integrity")
+    packages.reject { |relative, _entry| relative.empty? }.each do |relative, entry|
+      assert_equal false, entry.fetch("link", false), relative
+      assert_match(/\A[^[:space:]]+\z/, entry.fetch("version"), relative)
+      assert_match(%r{\Ahttps://registry\.npmjs\.org/}, entry.fetch("resolved"), relative)
+      assert_match(/\Asha512-[A-Za-z0-9+\/]+={0,2}\z/, entry.fetch("integrity"), relative)
+    end
+  end
+
+  def test_openclaw_creator_sources_do_not_commit_developer_home_paths
+    files = [
+      LIVE_AGENT_WORKFLOW,
+      *Dir.glob(File.join(ROOT, "packaging/live_agent_skills/openclaw_creator_proof{.rb,/**/*.rb}")),
+      File.join(ROOT, "packaging/live_agent_skills/write_installation_receipt.rb"),
+      File.join(ROOT, "test/unit/packaging/openclaw_creator_proof_test.rb")
+    ]
+
+    files.each do |path|
+      body = File.read(path)
+      refute_match(%r{/(?:home|Users)/(?!runner(?:/|$))[^/[:space:]]+/}, body, path)
+    end
   end
 
   def test_tag_release_selects_and_reverifies_exact_pre_tag_candidate

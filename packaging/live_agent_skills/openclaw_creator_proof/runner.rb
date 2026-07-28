@@ -14,17 +14,15 @@ module HiveLiveAgentProof
           evidence_path: environment["HIVE_CREATOR_EVIDENCE_PATH"],
           model: environment["HIVE_LIVE_MODEL"],
           provider_credential: environment["HIVE_LIVE_PROVIDER_CREDENTIAL"],
-          proven_hive_bin: environment["HIVE_PROVEN_HIVE_BIN"],
-          openclaw_bin: environment["HIVE_OPENCLAW_BIN"],
-          openclaw_package_version: environment["HIVE_OPENCLAW_PACKAGE_VERSION"],
-          openclaw_package_integrity: environment["HIVE_OPENCLAW_PACKAGE_INTEGRITY"],
+          candidate_install_receipt: environment["HIVE_CANDIDATE_INSTALL_RECEIPT"],
+          openclaw_install_receipt: environment["HIVE_OPENCLAW_INSTALL_RECEIPT"],
           base_environment: environment
         )
       end
 
       def initialize(candidate_sha:, artifact_dir:, evidence_path:, model:,
-                     provider_credential:, proven_hive_bin:, openclaw_bin: nil,
-                     openclaw_package_version: nil, openclaw_package_integrity: nil,
+                     provider_credential:, candidate_install_receipt:,
+                     openclaw_install_receipt:,
                      base_environment: ENV,
                      root_factory: -> { Dir.mktmpdir("hive-openclaw-creator-proof") },
                      cleanup: ->(root) { FileUtils.rm_rf(root) },
@@ -34,10 +32,8 @@ module HiveLiveAgentProof
         @evidence_path = evidence_path.to_s
         @model = model.to_s
         @provider_credential = provider_credential.to_s
-        @proven_hive_bin = proven_hive_bin.to_s
-        @openclaw_bin = openclaw_bin.to_s
-        @openclaw_package_version = openclaw_package_version.to_s
-        @openclaw_package_integrity = openclaw_package_integrity.to_s
+        @candidate_install_receipt = candidate_install_receipt.to_s
+        @openclaw_install_receipt = openclaw_install_receipt.to_s
         @base_environment = base_environment.to_h.transform_keys(&:to_s)
         @root_factory = root_factory
         @cleanup = cleanup
@@ -51,14 +47,13 @@ module HiveLiveAgentProof
         @document = EvidenceDocument.new(
           candidate_sha: @candidate_sha,
           model: @model,
-          candidate_path: @proven_hive_bin,
-          openclaw_path: @openclaw_bin,
           credential: @provider_credential
         )
         @evidence = @document.data
       end
 
       def call
+        @document.write(@evidence_path)
         execute
       rescue Failure => e
         record_failure(e)
@@ -87,16 +82,28 @@ module HiveLiveAgentProof
         @document.phase = "preflight"
         @document.provider = provider
         validate_preflight!
-        candidate = resolve_executable!(
-          @proven_hive_bin, kind: "candidate", search_path: false
+        candidate = resolve_installation_receipt!(
+          @candidate_install_receipt,
+          kind: "candidate",
+          expected_kind: "candidate_gem",
+          expected_package_name: "hive-cli",
+          expected_package_version: Hive::VERSION
         )
-        openclaw = resolve_executable!(
-          @openclaw_bin, kind: "openclaw", search_path: true
+        openclaw = resolve_installation_receipt!(
+          @openclaw_install_receipt,
+          kind: "openclaw",
+          expected_kind: "openclaw_npm",
+          expected_package_name: "openclaw",
+          expected_package_version: OPENCLAW_VERSION,
+          expected_package_integrity: OPENCLAW_INTEGRITY,
+          expected_lock_sha256: OPENCLAW_LOCK_SHA256,
+          expected_package_count: OPENCLAW_LOCK_PACKAGE_COUNT
         )
         @document.set_executable("candidate", candidate)
         @document.set_executable("openclaw", openclaw)
+        @document.openclaw_package_verified!(openclaw)
         validate_artifact_directory!
-        git = resolve_executable!("", kind: "git", search_path: true)
+        git = resolve_path_executable!("git")
 
         @root = File.expand_path(@root_factory.call.to_s)
         unless File.directory?(@root) && !File.symlink?(@root) && Dir.empty?(@root)
@@ -150,42 +157,12 @@ module HiveLiveAgentProof
             "HIVE_LIVE_PROVIDER_CREDENTIAL exceeds #{CREDENTIAL_LIMIT} bytes"
           )
         end
-        validate_openclaw_package!
         if @evidence_path.empty?
           fail_with!(
             "preflight", "missing_evidence_path",
             "HIVE_CREATOR_EVIDENCE_PATH is required"
           )
         end
-      end
-
-      def validate_openclaw_package!
-        if @openclaw_package_version.empty?
-          fail_with!(
-            "preflight", "missing_openclaw_package_version",
-            "HIVE_OPENCLAW_PACKAGE_VERSION is required"
-          )
-        end
-        unless @openclaw_package_version == OPENCLAW_VERSION
-          fail_with!(
-            "preflight", "openclaw_package_version_mismatch",
-            "OpenClaw package version does not match the pinned proof version"
-          )
-        end
-        if @openclaw_package_integrity.empty?
-          fail_with!(
-            "preflight", "missing_openclaw_package_integrity",
-            "HIVE_OPENCLAW_PACKAGE_INTEGRITY is required"
-          )
-        end
-        unless @openclaw_package_integrity == OPENCLAW_INTEGRITY
-          fail_with!(
-            "preflight", "openclaw_package_integrity_mismatch",
-            "OpenClaw package integrity does not match the pinned proof integrity"
-          )
-        end
-
-        @document.openclaw_package_verified!
       end
 
       def validate_artifact_directory!
@@ -197,34 +174,30 @@ module HiveLiveAgentProof
         end
       end
 
-      def resolve_executable!(configured, kind:, search_path:)
-        path = configured.to_s
-        path = find_on_path(kind) if path.empty? && search_path
-        reason = "#{kind}_not_executable"
-        unless !path.to_s.empty? && Pathname.new(path).absolute? &&
-               File.file?(path) && File.executable?(path)
-          fail_with!(
-            "preflight", reason,
-            "#{kind} executable is unavailable: #{path.to_s.empty? ? '(unset)' : path}"
-          )
-        end
+      def resolve_installation_receipt!(path, kind:, **expectations)
+        InstallationReceipt.new(path: path, **expectations).call
+      rescue HiveLiveAgentProof::Error => e
+        fail_with!(
+          "preflight", "#{kind}_installation_receipt_invalid", e.message
+        )
+      end
 
+      def resolve_path_executable!(name)
+        path = @base_environment.fetch("PATH", "").split(File::PATH_SEPARATOR).filter_map do |dir|
+          candidate = File.expand_path(File.join(dir, name))
+          candidate if File.file?(candidate) && File.executable?(candidate)
+        end.first
+        unless path && Pathname.new(path).absolute?
+          fail_with!("preflight", "#{name}_not_executable", "#{name} is unavailable on PATH")
+        end
         realpath = File.realpath(path)
         {
-          "configured_path" => File.expand_path(path),
+          "configured_path" => path,
           "realpath" => realpath,
           "sha256" => Digest::SHA256.file(realpath).hexdigest
         }
       rescue Errno::EACCES, Errno::ENOENT, Errno::ELOOP, Errno::ENOTDIR => e
-        fail_with!("preflight", reason, e.message)
-      end
-
-      def find_on_path(name)
-        @base_environment.fetch("PATH", "").split(File::PATH_SEPARATOR).each do |directory|
-          candidate = File.expand_path(File.join(directory, name))
-          return candidate if File.file?(candidate) && File.executable?(candidate)
-        end
-        nil
+        fail_with!("preflight", "#{name}_not_executable", e.message)
       end
 
       def record_failure(failure)

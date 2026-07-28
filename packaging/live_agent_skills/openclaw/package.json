@@ -1,0 +1,11 @@
+{
+  "name": "hive-openclaw-creator-proof",
+  "version": "1.0.0",
+  "private": true,
+  "engines": {
+    "node": "22.23.1"
+  },
+  "dependencies": {
+    "openclaw": "2026.7.1-beta.2"
+  }
+}

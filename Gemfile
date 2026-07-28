@@ -16,6 +16,9 @@ ruby "~> 3.4"
 gemspec
 
 group :development, :test do
+  # The Linux-only live proof uses prctl(PR_SET_CHILD_SUBREAPER) through
+  # Fiddle. Declare it here because Fiddle stops being a default gem in Ruby 4.
+  gem "fiddle", ">= 1.1"
   gem "minitest", "~> 6.0"
   gem "rake", "~> 13.0"
   gem "rubocop", "~> 1.88", require: false

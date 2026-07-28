@@ -39,7 +39,11 @@ fake OpenClaw through the real candidate CLI; the smoke file contains no fake
 Hive or proof mechanics. The runner verifies the exact candidate artifacts,
 materializes the OpenClaw projection with a no-link/no-special-file Ruby tar
 reader, initializes a disposable real Hive project, and installs a distinct
-digest-bound audit gateway through native `tools.exec.pathPrepend`.
+digest-bound audit gateway through native `tools.exec.pathPrepend`. Typed
+installation receipts bind the verified candidate gem and committed OpenClaw
+npm lock to their private install roots and exact executable realpaths/digests.
+The lock pins a 306-package transitive inventory; the hosted job uses Node
+22.23.1 and `npm ci --ignore-scripts`.
 
 The gateway admits exactly nine semantic command positions. Its seventh
 position is `run <created_slug>`: the slug comes from the first idempotent
@@ -48,9 +52,18 @@ and must match the retry result with `created=false`. Attestation verifies both
 prompt digests, native `/hive` discovery, candidate/gateway executable
 identities, ordered actual argv, created-file digests, the exact normalized
 graph, zero tasks after creation-only, one first-stage dispatch, operational
-status, no external actions, all-byte secret scanning, process-group teardown,
-and cleanup. Missing provider credentials make this optional live diagnostic
-explicitly unavailable; they never turn a skipped test into release evidence.
+status, and a deny-by-default effect-policy receipt before reporting no external
+actions. The transaction lock stays held through candidate completion and each
+audit row carries exit/signal/success. Candidate children receive no selected,
+opposite, or generic provider credential. All-byte secret scanning recursively
+sanitizes persisted evidence, while a verified Linux child-subreaper plus its
+top-level emergency drain proves teardown of ordinary, `setsid`, double-fork,
+timeout, supervisor/parent TERM, and interrupt paths. Actual
+workflow/task trees reject extra authored files, malformed task directories,
+symlinks, and special files; archive verification/materialization share byte,
+entry, directory, depth, and inode budgets. Missing provider credentials make
+this optional live diagnostic explicitly unavailable; they never turn a
+skipped test into release evidence.
 
 ## Local feedback loop
 
@@ -620,12 +633,16 @@ The protected `live-agent-skills.yml` workflow can additionally:
    private proof, and create a `live-agent-skills` Check Run on the exact SHA.
 
 Its separate OpenClaw workflow-creator job pins every third-party Action and
-OpenClaw's npm version/integrity. It fetches one tarball with `npm pack`,
-validates the pack metadata, independently computes the tarball SHA-512 SRI,
-and installs only those verified local bytes. It accepts `openai/*` and
-`openrouter/*` models through mutually exclusive credential steps, passes one
-generic secret to the runner boundary, and uploads typed schema-v1 evidence
-even when preflight or an ordinary proof phase fails.
+Node 22.23.1 plus OpenClaw's npm version/integrity. It installs into a private
+prefix with `npm ci --ignore-scripts` from a committed lock whose every package
+entry has an exact registry URL and SHA-512 integrity. Typed receipts bind the
+lock/candidate artifacts, install roots, executable realpaths, and executable
+digests consumed by the runner. One unconditional proof step derives
+`openai/*` or `openrouter/*` routing, maps only the selected secret into one
+generic runner input, and enters the evidence-initializing runner even for
+unsupported/missing provider inputs. The `always()` upload therefore receives
+scanner-clean typed schema-v1 evidence for preflight and ordinary proof
+failures.
 
 The repository-owned selector and attestation verifier remain covered by
 executable fixtures for optional diagnostic runs. They validate workflow/run

@@ -2,6 +2,7 @@ require "test_helper"
 require "json"
 require "rbconfig"
 require "rubygems/package"
+require "timeout"
 require "zlib"
 require_relative "../../../packaging/live_agent_skills/openclaw_creator_proof"
 
@@ -112,8 +113,8 @@ class OpenClawCreatorProofTest < Minitest::Test
         evidence_path: File.join(dir, "evidence.json"),
         model: "openrouter/openai/gpt-5.6",
         provider_credential: "",
-        proven_hive_bin: "/proof/hive",
-        openclaw_bin: "/proof/openclaw",
+        candidate_install_receipt: "/proof/candidate-installation-receipt.json",
+        openclaw_install_receipt: "/proof/openclaw-installation-receipt.json",
         base_environment: {}
       )
 
@@ -124,41 +125,119 @@ class OpenClawCreatorProofTest < Minitest::Test
     end
   end
 
-  def test_openclaw_package_metadata_must_match_the_pinned_identity
-    variants = [
-      [ "missing-version", "", HiveLiveAgentProof::OpenClawCreatorProof::OPENCLAW_INTEGRITY,
-        "missing_openclaw_package_version" ],
-      [ "wrong-version", "2026.7.2", HiveLiveAgentProof::OpenClawCreatorProof::OPENCLAW_INTEGRITY,
-        "openclaw_package_version_mismatch" ],
-      [ "missing-integrity", HiveLiveAgentProof::OpenClawCreatorProof::OPENCLAW_VERSION, "",
-        "missing_openclaw_package_integrity" ],
-      [ "wrong-integrity", HiveLiveAgentProof::OpenClawCreatorProof::OPENCLAW_VERSION,
-        "sha512-not-the-pinned-package", "openclaw_package_integrity_mismatch" ]
-    ]
-
+  def test_installation_receipts_reject_executable_lock_and_root_tampering
     with_tmp_dir do |dir|
-      variants.each do |name, version, integrity, reason|
-        evidence = build_runner(
-          evidence_path: File.join(dir, "#{name}.json"),
-          openclaw_package_version: version,
-          openclaw_package_integrity: integrity
-        ).call
+      candidate_root = File.join(dir, "candidate-install")
+      openclaw_root = File.join(dir, "openclaw-install")
+      FileUtils.mkdir_p([ candidate_root, openclaw_root ])
+      candidate = File.join(candidate_root, "hive")
+      openclaw = File.join(openclaw_root, "openclaw")
+      artifact = File.join(dir, "hive.gem")
+      write_executable(candidate, "#!#{RbConfig.ruby}\n")
+      write_executable(openclaw, "#!#{RbConfig.ruby}\n")
+      File.write(artifact, "candidate artifact")
+      receipts = write_installation_receipts(
+        dir,
+        candidate_path: candidate,
+        candidate_artifact: artifact,
+        openclaw_path: openclaw
+      )
 
-        assert_equal "preflight", evidence.fetch("phase")
-        assert_equal reason, evidence.fetch("reason")
-        assert_equal(
-          {
-            "version" => HiveLiveAgentProof::OpenClawCreatorProof::OPENCLAW_VERSION,
-            "integrity" => HiveLiveAgentProof::OpenClawCreatorProof::OPENCLAW_INTEGRITY,
-            "verified" => false
-          },
-          evidence.fetch("openclaw_package")
-        )
-      end
+      File.open(candidate, "a") { |file| file.write("# changed\n") }
+      executable_evidence = build_runner(
+        evidence_path: File.join(dir, "executable-evidence.json"),
+        candidate_install_receipt: receipts.fetch("candidate"),
+        openclaw_install_receipt: receipts.fetch("openclaw")
+      ).call
+      assert_equal "candidate_installation_receipt_invalid",
+                   executable_evidence.fetch("reason")
+
+      write_executable(candidate, "#!#{RbConfig.ruby}\n")
+      receipts = write_installation_receipts(
+        dir,
+        candidate_path: candidate,
+        candidate_artifact: artifact,
+        openclaw_path: openclaw
+      )
+      openclaw_receipt = JSON.parse(File.read(receipts.fetch("openclaw")))
+      File.open(openclaw_receipt.dig("lock", "path"), "a") { |file| file.write("\n") }
+      lock_evidence = build_runner(
+        evidence_path: File.join(dir, "lock-evidence.json"),
+        candidate_install_receipt: receipts.fetch("candidate"),
+        openclaw_install_receipt: receipts.fetch("openclaw")
+      ).call
+      assert_equal "openclaw_installation_receipt_invalid", lock_evidence.fetch("reason")
+
+      outside = File.join(dir, "outside-openclaw")
+      write_executable(outside, "#!#{RbConfig.ruby}\n")
+      lock_path = File.join(openclaw_root, "package-lock.json")
+      FileUtils.cp(
+        HiveLiveAgentProof::OpenClawCreatorProof::OPENCLAW_LOCK_PATH,
+        lock_path
+      )
+      HiveLiveAgentProof::OpenClawCreatorProof::InstallationReceipt.write(
+        path: receipts.fetch("openclaw"),
+        kind: "openclaw_npm",
+        artifact_path: lock_path,
+        install_root: openclaw_root,
+        executable_path: outside,
+        package_name: "openclaw",
+        package_version: HiveLiveAgentProof::OpenClawCreatorProof::OPENCLAW_VERSION,
+        package_integrity: HiveLiveAgentProof::OpenClawCreatorProof::OPENCLAW_INTEGRITY,
+        lock_path: lock_path,
+        package_count:
+          HiveLiveAgentProof::OpenClawCreatorProof::OPENCLAW_LOCK_PACKAGE_COUNT
+      )
+      root_evidence = build_runner(
+        evidence_path: File.join(dir, "root-evidence.json"),
+        candidate_install_receipt: receipts.fetch("candidate"),
+        openclaw_install_receipt: receipts.fetch("openclaw")
+      ).call
+      assert_equal "openclaw_installation_receipt_invalid", root_evidence.fetch("reason")
     end
   end
 
-  def test_from_env_consumes_only_verified_openclaw_package_metadata
+  def test_installation_receipt_writer_cli_emits_a_valid_candidate_receipt
+    with_tmp_dir do |dir|
+      install_root = File.join(dir, "install")
+      FileUtils.mkdir_p(install_root)
+      executable = File.join(install_root, "hive")
+      artifact = File.join(dir, "hive.gem")
+      receipt = File.join(dir, "candidate.json")
+      write_executable(executable, "#!#{RbConfig.ruby}\n")
+      File.write(artifact, "candidate artifact")
+      script = File.expand_path(
+        "../../../packaging/live_agent_skills/write_installation_receipt.rb",
+        __dir__
+      )
+
+      _stdout, stderr, status = Open3.capture3(
+        RbConfig.ruby,
+        script,
+        "--output", receipt,
+        "--kind", "candidate_gem",
+        "--artifact", artifact,
+        "--install-root", install_root,
+        "--executable", executable,
+        "--package-name", "hive-cli",
+        "--package-version", Hive::VERSION
+      )
+
+      assert status.success?, stderr
+      resolved = HiveLiveAgentProof::OpenClawCreatorProof::InstallationReceipt.new(
+        path: receipt,
+        expected_kind: "candidate_gem",
+        expected_package_name: "hive-cli",
+        expected_package_version: Hive::VERSION
+      ).call
+      assert_equal "candidate_gem", resolved.fetch("kind")
+      assert_equal File.realpath(executable), resolved.fetch("realpath")
+      assert_equal Digest::SHA256.file(artifact).hexdigest,
+                   resolved.fetch("artifact_sha256")
+    end
+  end
+
+  def test_from_env_consumes_only_typed_installation_receipts
     with_tmp_dir do |dir|
       evidence = HiveLiveAgentProof::OpenClawCreatorProof::Runner.from_env(
         "HIVE_CANDIDATE_SHA" => SHA,
@@ -166,6 +245,8 @@ class OpenClawCreatorProofTest < Minitest::Test
         "HIVE_CREATOR_EVIDENCE_PATH" => File.join(dir, "evidence.json"),
         "HIVE_LIVE_MODEL" => "openai/gpt-5.6",
         "HIVE_LIVE_PROVIDER_CREDENTIAL" => CREDENTIAL,
+        "HIVE_CANDIDATE_INSTALL_RECEIPT" => File.join(dir, "missing-candidate.json"),
+        "HIVE_OPENCLAW_INSTALL_RECEIPT" => File.join(dir, "missing-openclaw.json"),
         "HIVE_PROVEN_HIVE_BIN" => File.join(dir, "missing-hive"),
         "HIVE_OPENCLAW_BIN" => File.join(dir, "missing-openclaw"),
         "HIVE_OPENCLAW_PACKAGE_VERSION" =>
@@ -174,42 +255,100 @@ class OpenClawCreatorProofTest < Minitest::Test
           HiveLiveAgentProof::OpenClawCreatorProof::OPENCLAW_INTEGRITY
       ).call
 
-      assert_equal "candidate_not_executable", evidence.fetch("reason")
-      assert_equal true, evidence.dig("openclaw_package", "verified")
+      assert_equal "candidate_installation_receipt_invalid", evidence.fetch("reason")
+      assert_equal false, evidence.dig("openclaw_package", "verified")
     end
   end
 
   def test_missing_candidate_binary_is_reported_before_artifact_work
     with_tmp_dir do |dir|
-      openclaw = File.join(dir, "openclaw")
+      candidate_root = File.join(dir, "candidate-install")
+      openclaw_root = File.join(dir, "openclaw-install")
+      FileUtils.mkdir_p([ candidate_root, openclaw_root ])
+      candidate = File.join(candidate_root, "hive")
+      openclaw = File.join(openclaw_root, "openclaw")
+      artifact = File.join(dir, "hive.gem")
+      write_executable(candidate, "#!#{RbConfig.ruby}\n")
       write_executable(openclaw, "#!#{RbConfig.ruby}\n")
+      File.write(artifact, "candidate artifact")
+      receipts = write_installation_receipts(
+        dir,
+        candidate_path: candidate,
+        candidate_artifact: artifact,
+        openclaw_path: openclaw
+      )
+      FileUtils.rm_f(candidate)
       evidence = build_runner(
         evidence_path: File.join(dir, "evidence.json"),
-        proven_hive_bin: File.join(dir, "missing-hive"),
-        openclaw_bin: openclaw
+        candidate_install_receipt: receipts.fetch("candidate"),
+        openclaw_install_receipt: receipts.fetch("openclaw")
       ).call
 
-      assert_equal "candidate_not_executable", evidence.fetch("reason")
+      assert_equal "candidate_installation_receipt_invalid", evidence.fetch("reason")
       assert_nil evidence.dig("executables", "candidate", "sha256")
     end
   end
 
   def test_missing_artifact_directory_is_typed_after_executable_identity
     with_tmp_dir do |dir|
-      candidate = File.join(dir, "hive")
-      openclaw = File.join(dir, "openclaw")
+      candidate_root = File.join(dir, "candidate-install")
+      openclaw_root = File.join(dir, "openclaw-install")
+      FileUtils.mkdir_p([ candidate_root, openclaw_root ])
+      candidate = File.join(candidate_root, "hive")
+      openclaw = File.join(openclaw_root, "openclaw")
+      artifact = File.join(dir, "hive.gem")
       write_executable(candidate, "#!#{RbConfig.ruby}\n")
       write_executable(openclaw, "#!#{RbConfig.ruby}\n")
+      File.write(artifact, "candidate artifact")
+      receipts = write_installation_receipts(
+        dir,
+        candidate_path: candidate,
+        candidate_artifact: artifact,
+        openclaw_path: openclaw
+      )
       evidence = build_runner(
         artifact_dir: File.join(dir, "missing-artifacts"),
         evidence_path: File.join(dir, "evidence.json"),
-        proven_hive_bin: candidate,
-        openclaw_bin: openclaw
+        candidate_install_receipt: receipts.fetch("candidate"),
+        openclaw_install_receipt: receipts.fetch("openclaw")
       ).call
 
       assert_equal "artifact_directory_missing", evidence.fetch("reason")
       assert_match(/\A[0-9a-f]{64}\z/, evidence.dig("executables", "candidate", "sha256"))
       assert_match(/\A[0-9a-f]{64}\z/, evidence.dig("executables", "openclaw", "sha256"))
+    end
+  end
+
+  def test_candidate_receipt_must_bind_the_manifested_gem
+    with_tmp_dir do |dir|
+      artifacts = prepare_candidate_artifacts(dir)
+      candidate_root = File.join(dir, "candidate-install")
+      openclaw_root = File.join(dir, "openclaw-install")
+      FileUtils.mkdir_p([ candidate_root, openclaw_root ])
+      candidate = File.join(candidate_root, "hive")
+      openclaw = File.join(openclaw_root, "openclaw")
+      substituted_artifact = File.join(dir, "substituted.gem")
+      write_executable(candidate, "#!#{RbConfig.ruby}\n")
+      write_executable(openclaw, "#!#{RbConfig.ruby}\n")
+      File.write(substituted_artifact, "substituted artifact")
+      receipts = write_installation_receipts(
+        dir,
+        candidate_path: candidate,
+        candidate_artifact: substituted_artifact,
+        openclaw_path: openclaw
+      )
+
+      evidence = build_runner(
+        artifact_dir: artifacts,
+        evidence_path: File.join(dir, "evidence.json"),
+        candidate_install_receipt: receipts.fetch("candidate"),
+        openclaw_install_receipt: receipts.fetch("openclaw"),
+        base_environment: { "PATH" => ENV.fetch("PATH") }
+      ).call
+
+      assert_equal "artifact_verification", evidence.fetch("phase")
+      assert_equal "candidate_installation_receipt_mismatch", evidence.fetch("reason")
+      assert_equal "passed", evidence.dig("cleanup", "status")
     end
   end
 
@@ -289,6 +428,45 @@ class OpenClawCreatorProofTest < Minitest::Test
     end
   end
 
+  def test_materializer_rejects_entry_directory_depth_and_inode_budgets_and_cleans_up
+    cases = {
+      "entries" => Array.new(HiveLiveAgentProof::SKILL_ARCHIVE_ENTRY_LIMIT + 1) do |index|
+        [ :file, "openclaw/hive/files/#{index}", "" ]
+      end,
+      "directories" => Array.new(HiveLiveAgentProof::SKILL_ARCHIVE_DIRECTORY_LIMIT + 1) do |index|
+        [ :directory, "openclaw/hive/directories/#{index}/" ]
+      end,
+      "depth" => [
+        [
+          :file,
+          (Array.new(HiveLiveAgentProof::SKILL_ARCHIVE_DEPTH_LIMIT + 1, "nested") + [ "file" ]).join("/"),
+          ""
+        ]
+      ],
+      "inodes" => Array.new(HiveLiveAgentProof::SKILL_ARCHIVE_INODE_LIMIT + 1) do |index|
+        [ :file, "openclaw/hive/inodes/#{index}", "" ]
+      end
+    }
+
+    cases.each do |name, entries|
+      with_tmp_dir do |dir|
+        archive = File.join(dir, "#{name}.tar.gz")
+        destination = File.join(dir, "materialized")
+        write_archive(archive, *entries)
+
+        error = assert_raises(HiveLiveAgentProof::OpenClawCreatorProof::Failure) do
+          HiveLiveAgentProof::OpenClawCreatorProof::SafeTarMaterializer.new(
+            archive: archive,
+            destination: destination
+          ).call
+        end
+
+        assert_equal "unsafe_archive", error.reason
+        refute File.exist?(destination), "#{name} failure must remove its partial tree"
+      end
+    end
+  end
+
   def test_materializer_rejects_absolute_hardlink_device_and_fifo_entries
     cases = {
       "absolute" => [ "/absolute", "0", "" ],
@@ -327,6 +505,7 @@ class OpenClawCreatorProofTest < Minitest::Test
       workspace = File.join(dir, "workspace")
       gateway_bin = File.join(dir, "gateway", "bin")
       FileUtils.mkdir_p([ workspace, gateway_bin ])
+      write_executable(File.join(gateway_bin, "hive"), "#!#{RbConfig.ruby}\n")
       configuration =
         HiveLiveAgentProof::OpenClawCreatorProof::OpenClawConfiguration.new(
           root: dir,
@@ -338,11 +517,22 @@ class OpenClawCreatorProofTest < Minitest::Test
       payload = configuration.write
 
       assert_equal [ gateway_bin ], payload.dig("tools", "exec", "pathPrepend")
-      assert_equal "coding", payload.dig("tools", "profile")
+      assert_equal [ "exec" ], payload.dig("tools", "allow")
+      assert_equal "allowlist", payload.dig("tools", "exec", "mode")
+      assert_equal "gateway", payload.dig("tools", "exec", "host")
+      assert_equal true, payload.dig("tools", "exec", "strictInlineEval")
       assert_equal workspace, payload.dig("agents", "defaults", "workspace")
       assert_equal "openrouter/openai/gpt-5.6",
                    payload.dig("agents", "defaults", "model", "primary")
       assert_equal payload, JSON.parse(File.read(configuration.config_path))
+      approvals = JSON.parse(File.read(configuration.approvals_path))
+      assert_equal "deny", approvals.dig("defaults", "security")
+      assert_equal "allowlist", approvals.dig("agents", "main", "security")
+      assert_equal false, approvals.dig("agents", "main", "autoAllowSkills")
+      allowlist = approvals.dig("agents", "main", "allowlist")
+      assert_equal [ File.join(gateway_bin, "hive") ],
+                   allowlist.map { |row| row.fetch("pattern") }
+      refute allowlist.first.key?("source")
     end
   end
 
@@ -353,6 +543,10 @@ class OpenClawCreatorProofTest < Minitest::Test
       write_executable(candidate, <<~RUBY)
         #!#{RbConfig.ruby}
         require "json"
+        forbidden = %w[
+          OPENAI_API_KEY OPENROUTER_API_KEY HIVE_LIVE_PROVIDER_CREDENTIAL
+        ].select { |name| ENV.key?(name) }
+        abort "credential reached candidate: \#{forbidden.join(",")}" unless forbidden.empty?
         File.open(#{calls.dump}, "a", 0o600) { |file| file.puts(JSON.generate(ARGV)) }
         puts "candidate:\#{ARGV.join(" ")}"
       RUBY
@@ -364,9 +558,16 @@ class OpenClawCreatorProofTest < Minitest::Test
         commands: HiveLiveAgentProof::WORKFLOW_CREATOR_COMMANDS.first(2)
       ).install
 
-      first_out, first_err, first_status = Open3.capture3(gateway, "version")
+      credential_environment = {
+        "OPENAI_API_KEY" => "selected",
+        "OPENROUTER_API_KEY" => "opposite",
+        "HIVE_LIVE_PROVIDER_CREDENTIAL" => "generic"
+      }
+      first_out, first_err, first_status = Open3.capture3(
+        credential_environment, gateway, "version"
+      )
       second_out, second_err, second_status = Open3.capture3(
-        gateway, "workflow", "list", "--json"
+        credential_environment, gateway, "workflow", "list", "--json"
       )
 
       assert first_status.success?, first_err
@@ -381,7 +582,52 @@ class OpenClawCreatorProofTest < Minitest::Test
         HiveLiveAgentProof::WORKFLOW_CREATOR_COMMANDS.first(2),
         File.readlines(calls, chomp: true).map { |line| JSON.parse(line) }
       )
+      receipts = File.readlines(audit, chomp: true).map { |line| JSON.parse(line) }
+      assert receipts.all? { |row|
+        row["success"] == true && row["exit_status"] == 0 && row["signal"].nil?
+      }
       refute_equal File.realpath(candidate), File.realpath(gateway)
+    end
+  end
+
+  def test_audit_gateway_holds_serialization_until_candidate_completion
+    with_tmp_dir do |dir|
+      candidate = File.join(dir, "candidate-hive")
+      first_started = File.join(dir, "first-started")
+      first_release = File.join(dir, "first-release")
+      write_executable(candidate, <<~RUBY)
+        #!#{RbConfig.ruby}
+        if ARGV == ["version"]
+          File.write(#{first_started.dump}, "ready")
+          sleep 0.01 until File.file?(#{first_release.dump})
+        end
+        puts ARGV.join(" ")
+      RUBY
+      audit = File.join(dir, "audit.jsonl")
+      gateway = HiveLiveAgentProof::OpenClawCreatorProof::AuditGateway.new(
+        candidate_path: candidate,
+        directory: File.join(dir, "gateway"),
+        audit_path: audit,
+        commands: HiveLiveAgentProof::WORKFLOW_CREATOR_COMMANDS.first(2)
+      ).install
+
+      first = Thread.new { Open3.capture3(gateway, "version") }
+      sleep 0.01 until File.file?(first_started)
+      second = Thread.new { Open3.capture3(gateway, "workflow", "list", "--json") }
+      sleep 0.05
+
+      refute File.exist?(audit), "admission must not be recorded before command completion"
+      assert second.alive?, "the next command must wait for the active audit transaction"
+
+      File.write(first_release, "go")
+      first_out, first_err, first_status = first.value
+      second_out, second_err, second_status = second.value
+
+      assert first_status.success?, "#{first_out}\n#{first_err}"
+      assert second_status.success?, "#{second_out}\n#{second_err}"
+      rows = File.readlines(audit, chomp: true).map { |line| JSON.parse(line) }
+      assert_equal [ 1, 2 ], rows.map { |row| row.fetch("ordinal") }
+      assert rows.all? { |row| row.fetch("success") }
     end
   end
 
@@ -487,6 +733,79 @@ class OpenClawCreatorProofTest < Minitest::Test
     end
   end
 
+  def test_proof_inspector_rejects_extra_authored_files_and_malformed_task_entries
+    with_tmp_dir do |dir|
+      workspace = File.join(dir, "workspace")
+      HiveLiveAgentProof::WORKFLOW_CREATOR_FILES.each do |relative|
+        path = File.join(workspace, relative)
+        FileUtils.mkdir_p(File.dirname(path))
+        File.write(path, "expected\n")
+      end
+      File.write(
+        File.join(workspace, ".hive-state", "workflows", "editorial", "extra.md"),
+        "unexpected\n"
+      )
+      inspector = HiveLiveAgentProof::OpenClawCreatorProof::ProofInspector.new(
+        workspace: workspace,
+        audit_path: File.join(dir, "audit.jsonl"),
+        result_path: File.join(dir, "results.jsonl"),
+        candidate_record: { "realpath" => "/proof/hive", "sha256" => "a" * 64 }
+      )
+
+      extra_error = assert_raises(HiveLiveAgentProof::OpenClawCreatorProof::Failure) do
+        inspector.send(:created_file_records)
+      end
+      assert_includes extra_error.message, "missing or extra"
+
+      FileUtils.rm_f(
+        File.join(workspace, ".hive-state", "workflows", "editorial", "extra.md")
+      )
+      malformed = File.join(workspace, ".hive-state", "stages", "1-research", "malformed")
+      FileUtils.mkdir_p(malformed)
+      task_error = assert_raises(HiveLiveAgentProof::OpenClawCreatorProof::Failure) do
+        inspector.send(:task_folders)
+      end
+      assert_includes task_error.message, "meta.yml"
+    end
+  end
+
+  def test_proof_inspector_rejects_symlinks_and_special_entries_in_actual_trees
+    with_tmp_dir do |dir|
+      workspace = File.join(dir, "workspace")
+      HiveLiveAgentProof::WORKFLOW_CREATOR_FILES.each do |relative|
+        path = File.join(workspace, relative)
+        FileUtils.mkdir_p(File.dirname(path))
+        File.write(path, "expected\n")
+      end
+      workflow_link = File.join(
+        workspace, ".hive-state", "workflows", "editorial", "linked.md"
+      )
+      File.symlink("/etc/passwd", workflow_link)
+      inspector = HiveLiveAgentProof::OpenClawCreatorProof::ProofInspector.new(
+        workspace: workspace,
+        audit_path: File.join(dir, "audit.jsonl"),
+        result_path: File.join(dir, "results.jsonl"),
+        candidate_record: { "realpath" => "/proof/hive", "sha256" => "a" * 64 }
+      )
+
+      link_error = assert_raises(HiveLiveAgentProof::OpenClawCreatorProof::Failure) do
+        inspector.send(:created_file_records)
+      end
+      assert_includes link_error.message, "symlink"
+
+      FileUtils.rm_f(workflow_link)
+      task = File.join(workspace, ".hive-state", "stages", "1-research", "task")
+      FileUtils.mkdir_p(task)
+      File.write(File.join(task, "meta.yml"), YAML.dump("slug" => "task"))
+      special = File.join(task, "special")
+      File.mkfifo(special, 0o600)
+      special_error = assert_raises(HiveLiveAgentProof::OpenClawCreatorProof::Failure) do
+        inspector.send(:task_folders)
+      end
+      assert_includes special_error.message, "special entry"
+    end
+  end
+
   def test_process_runner_scans_all_unredacted_bytes_beyond_retention_limit
     with_tmp_dir do |dir|
       script = File.join(dir, "emit")
@@ -516,6 +835,28 @@ class OpenClawCreatorProofTest < Minitest::Test
     end
   end
 
+  def test_stream_capture_detects_literal_and_pattern_secrets_split_across_short_chunks
+    literal = "proof-secret-split-across-writes"
+    capture = HiveLiveAgentProof::OpenClawCreatorProof::StreamCapture.new(
+      limit: 256,
+      exact_secrets: [ literal ]
+    )
+    [ "prefix-", "proof-secret-", "split-", "across-", "writes-suffix" ].each do |chunk|
+      capture.update(chunk)
+    end
+
+    pattern = HiveLiveAgentProof::OpenClawCreatorProof::StreamCapture.new(
+      limit: 256,
+      exact_secrets: []
+    )
+    [ "prefix sk-proj-", "abcdefghijkl", "mnopqrstuvwx suffix" ].each do |chunk|
+      pattern.update(chunk)
+    end
+
+    assert_includes capture.findings, "exact-secret:0"
+    assert pattern.findings.any? { |finding| finding.start_with?("pattern:") }
+  end
+
   def test_process_runner_times_out_with_term_and_reaps_the_group
     with_tmp_dir do |dir|
       marker = File.join(dir, "term-seen")
@@ -543,37 +884,12 @@ class OpenClawCreatorProofTest < Minitest::Test
     end
   end
 
-  def test_process_runner_escalates_to_kill_when_term_is_ignored
-    with_tmp_dir do |dir|
-      script = File.join(dir, "ignore-term")
-      write_executable(script, <<~RUBY)
-        #!#{RbConfig.ruby}
-        trap("TERM", "IGNORE")
-        loop { sleep 1 }
-      RUBY
-      runner = HiveLiveAgentProof::OpenClawCreatorProof::ProcessRunner.new(
-        timeout: 0.05,
-        term_grace: 0.05,
-        output_limit: 64,
-        exact_secrets: []
-      )
-
-      result = runner.call(environment: {}, argv: [ script ], chdir: dir)
-
-      assert_equal true, result.dig("record", "timed_out")
-      assert_equal true, result.dig("record", "teardown", "term_sent")
-      assert_equal true, result.dig("record", "teardown", "kill_sent")
-      assert_equal true, result.dig("record", "teardown", "reaped")
-      assert_equal "none", result.dig("record", "teardown", "descendants")
-    end
-  end
-
-  def test_process_runner_cleans_a_descendant_left_by_a_successful_parent
+  def test_process_runner_cleans_a_setsid_descendant_left_by_a_successful_parent
     with_tmp_dir do |dir|
       script = File.join(dir, "descendant")
       ready = File.join(dir, "descendant-ready")
       descendant_source =
-        "trap('TERM', 'IGNORE'); File.write(#{ready.dump}, 'ready'); loop { sleep 1 }"
+        "Process.setsid; trap('TERM', 'IGNORE'); File.write(#{ready.dump}, 'ready'); loop { sleep 1 }"
       write_executable(script, <<~RUBY)
         #!#{RbConfig.ruby}
         child = spawn(
@@ -603,20 +919,248 @@ class OpenClawCreatorProofTest < Minitest::Test
     end
   end
 
+  def test_process_runner_cleans_a_double_forked_descendant
+    with_tmp_dir do |dir|
+      script = File.join(dir, "double-fork")
+      ready = File.join(dir, "double-fork-ready")
+      pid_path = File.join(dir, "double-fork-pid")
+      write_executable(script, <<~RUBY)
+        #!#{RbConfig.ruby}
+        first = fork do
+          Process.setsid
+          second = fork do
+            trap("TERM", "IGNORE")
+            File.write(#{pid_path.dump}, Process.pid.to_s)
+            File.write(#{ready.dump}, "ready")
+            loop { sleep 1 }
+          end
+          Process.detach(second)
+          exit! 0
+        end
+        Process.wait(first)
+        sleep 0.01 until File.file?(#{ready.dump})
+      RUBY
+      runner = HiveLiveAgentProof::OpenClawCreatorProof::ProcessRunner.new(
+        timeout: 2,
+        term_grace: 0.1,
+        output_limit: 64,
+        exact_secrets: []
+      )
+
+      result = runner.call(environment: {}, argv: [ script ], chdir: dir)
+
+      assert result.fetch("status").success?, result.fetch("stderr")
+      descendant_pid = Integer(File.read(pid_path), 10)
+      assert_equal true, result.dig("record", "teardown", "kill_sent")
+      assert_equal "none", result.dig("record", "teardown", "descendants")
+      assert_raises(Errno::ESRCH) { Process.kill(0, descendant_pid) }
+    end
+  end
+
+  def test_process_runner_interrupts_through_the_subreaper_and_records_teardown
+    with_tmp_dir do |dir|
+      script = File.join(dir, "interrupt")
+      ready = File.join(dir, "interrupt-ready")
+      target_pid = File.join(dir, "interrupt-pid")
+      write_executable(script, <<~RUBY)
+        #!#{RbConfig.ruby}
+        File.write(#{target_pid.dump}, Process.pid.to_s)
+        trap("TERM") { exit 0 }
+        File.write(#{ready.dump}, "ready")
+        loop { sleep 1 }
+      RUBY
+      runner = HiveLiveAgentProof::OpenClawCreatorProof::ProcessRunner.new(
+        timeout: 5,
+        term_grace: 0.5,
+        output_limit: 64,
+        exact_secrets: []
+      )
+
+      execution = Thread.new do
+        runner.call(environment: {}, argv: [ script ], chdir: dir)
+      end
+      Timeout.timeout(2) do
+        sleep 0.01 until File.file?(ready) && runner.supervisor_pid
+      end
+      Process.kill("TERM", runner.supervisor_pid)
+      result = execution.value
+
+      assert_equal true, result.dig("record", "interrupted")
+      assert_equal false, result.dig("record", "timed_out")
+      assert_equal true, result.dig("record", "teardown", "term_sent")
+      assert_equal "linux_child_subreaper",
+                   result.dig("record", "teardown", "containment")
+      assert_equal "passed", result.dig("record", "teardown", "status")
+      assert_raises(Errno::ESRCH) do
+        Process.kill(0, Integer(File.read(target_pid), 10))
+      end
+    ensure
+      if execution&.alive?
+        execution.kill
+        execution.join(5)
+      end
+    end
+  end
+
+  def test_process_runner_parent_interruption_drains_all_supervisor_descendants
+    with_tmp_dir do |dir|
+      script = File.join(dir, "parent-interrupt")
+      ready = File.join(dir, "parent-interrupt-ready")
+      target_pid_path = File.join(dir, "parent-interrupt-target-pid")
+      child_pid_path = File.join(dir, "parent-interrupt-child-pid")
+      child_source = <<~RUBY
+        Process.setsid
+        trap("TERM", "IGNORE")
+        File.write(#{child_pid_path.dump}, Process.pid.to_s)
+        loop { sleep 1 }
+      RUBY
+      write_executable(script, <<~RUBY)
+        #!#{RbConfig.ruby}
+        trap("TERM", "IGNORE")
+        File.write(#{target_pid_path.dump}, Process.pid.to_s)
+        child = spawn(
+          #{RbConfig.ruby.dump}, "-e", #{child_source.dump},
+          out: File::NULL, err: File::NULL
+        )
+        sleep 0.01 until File.file?(#{child_pid_path.dump})
+        File.write(#{ready.dump}, child.to_s)
+        loop { sleep 1 }
+      RUBY
+      runner = HiveLiveAgentProof::OpenClawCreatorProof::ProcessRunner.new(
+        timeout: 5,
+        term_grace: 0.05,
+        output_limit: 64,
+        exact_secrets: []
+      )
+      execution = Thread.new do
+        runner.call(environment: {}, argv: [ script ], chdir: dir)
+      end
+      execution.report_on_exception = false
+
+      Timeout.timeout(2) do
+        sleep 0.01 until File.file?(ready) && runner.supervisor_pid
+      end
+      supervisor_pid = runner.supervisor_pid
+      target_pid = Integer(File.read(target_pid_path), 10)
+      child_pid = Integer(File.read(child_pid_path), 10)
+      execution.raise(Interrupt)
+
+      assert_raises(Interrupt) { execution.value }
+      [ supervisor_pid, target_pid, child_pid ].each do |pid|
+        assert_raises(Errno::ESRCH) { Process.kill(0, pid) }
+      end
+    ensure
+      if execution&.alive?
+        execution.kill
+        execution.join(5)
+      end
+    end
+  end
+
+  def test_process_runner_top_level_interrupt_drains_adopted_descendant
+    with_tmp_dir do |dir|
+      ready = File.join(dir, "top-level-interrupt-ready")
+      child_pid_path = File.join(dir, "top-level-interrupt-child-pid")
+      child_source = <<~RUBY
+        Process.setsid
+        trap("TERM", "IGNORE")
+        File.write(#{child_pid_path.dump}, Process.pid.to_s)
+        loop { sleep 1 }
+      RUBY
+      runner = HiveLiveAgentProof::OpenClawCreatorProof::ProcessRunner.new(
+        timeout: 5,
+        term_grace: 0.05,
+        output_limit: 64,
+        exact_secrets: []
+      )
+      runner.define_singleton_method(:run_supervised) do |**_options|
+        child = spawn(
+          RbConfig.ruby, "-e", child_source,
+          out: File::NULL, err: File::NULL
+        )
+        File.write(ready, child.to_s)
+        loop { sleep 1 }
+      end
+      execution = Thread.new do
+        runner.call(environment: {}, argv: [ "/unused" ], chdir: dir)
+      end
+      execution.report_on_exception = false
+
+      Timeout.timeout(2) do
+        sleep 0.01 until File.file?(ready) && File.file?(child_pid_path) &&
+                               runner.supervisor_pid
+      end
+      supervisor_pid = runner.supervisor_pid
+      child_pid = Integer(File.read(child_pid_path), 10)
+      Process.kill("TERM", supervisor_pid)
+
+      error = assert_raises(
+        HiveLiveAgentProof::OpenClawCreatorProof::Failure
+      ) { execution.value }
+      assert_equal "interrupted", error.reason
+      [ supervisor_pid, child_pid ].each do |pid|
+        assert_raises(Errno::ESRCH) { Process.kill(0, pid) }
+      end
+    ensure
+      if execution&.alive?
+        execution.kill
+        execution.join(5)
+      end
+    end
+  end
+
+  def test_evidence_document_recursively_redacts_before_persistence
+    with_tmp_dir do |dir|
+      path = File.join(dir, "evidence.json")
+      document = HiveLiveAgentProof::OpenClawCreatorProof::EvidenceDocument.new(
+        candidate_sha: SHA,
+        model: "openai/gpt-5.6",
+        credential: CREDENTIAL
+      )
+      document.merge!(
+        "nested" => {
+          "array" => [ "before #{CREDENTIAL} after", "sk-proj-abcdefghijklmnopqrstuvwxyz" ]
+        }
+      )
+
+      document.finalize_secret_scan
+      document.write(path)
+      persisted = File.read(path)
+      payload = JSON.parse(persisted)
+
+      refute_includes persisted, CREDENTIAL
+      refute_includes persisted, "sk-proj-abcdefghijklmnopqrstuvwxyz"
+      assert_equal "failed", payload.fetch("result")
+      assert_equal "secret_material_detected", payload.fetch("reason")
+      assert_equal "failed", payload.dig("secret_scan", "status")
+    end
+  end
+
   def test_cleanup_failure_overrides_an_ordinary_failure_and_remains_typed
     with_tmp_dir do |dir|
-      candidate = File.join(dir, "hive")
-      openclaw = File.join(dir, "openclaw")
+      candidate_root = File.join(dir, "candidate-install")
+      openclaw_root = File.join(dir, "openclaw-install")
+      FileUtils.mkdir_p([ candidate_root, openclaw_root ])
+      candidate = File.join(candidate_root, "hive")
+      openclaw = File.join(openclaw_root, "openclaw")
+      artifact = File.join(dir, "hive.gem")
       artifacts = File.join(dir, "artifacts")
       root = File.join(dir, "proof-root")
       FileUtils.mkdir_p([ artifacts, root ])
       write_executable(candidate, "#!#{RbConfig.ruby}\n")
       write_executable(openclaw, "#!#{RbConfig.ruby}\n")
+      File.write(artifact, "candidate artifact")
+      receipts = write_installation_receipts(
+        dir,
+        candidate_path: candidate,
+        candidate_artifact: artifact,
+        openclaw_path: openclaw
+      )
       runner = build_runner(
         artifact_dir: artifacts,
         evidence_path: File.join(dir, "evidence.json"),
-        proven_hive_bin: candidate,
-        openclaw_bin: openclaw,
+        candidate_install_receipt: receipts.fetch("candidate"),
+        openclaw_install_receipt: receipts.fetch("openclaw"),
         base_environment: { "PATH" => ENV.fetch("PATH") },
         root_factory: -> { root },
         cleanup: ->(_path) { raise Errno::EACCES, "cleanup denied" }
@@ -636,25 +1180,40 @@ class OpenClawCreatorProofTest < Minitest::Test
   def test_runner_drives_fake_openclaw_through_the_real_candidate_and_dynamic_slug
     with_tmp_dir do |dir|
       artifacts = prepare_candidate_artifacts(dir)
-      openclaw = File.join(dir, "openclaw")
-      candidate = File.join(dir, "candidate-hive")
+      candidate_root = File.join(dir, "candidate-install")
+      openclaw_root = File.join(dir, "openclaw-install")
+      FileUtils.mkdir_p([ candidate_root, openclaw_root ])
+      openclaw = File.join(openclaw_root, "openclaw")
+      candidate = File.join(candidate_root, "candidate-hive")
+      bundle_executable = Gem.bin_path("bundler", "bundle")
       write_fake_openclaw(openclaw)
       write_executable(candidate, <<~RUBY)
         #!#{RbConfig.ruby}
+        forbidden = %w[
+          OPENAI_API_KEY OPENROUTER_API_KEY HIVE_LIVE_PROVIDER_CREDENTIAL
+        ].select { |name| ENV.key?(name) }
+        abort "provider credential reached candidate: \#{forbidden.join(",")}" unless forbidden.empty?
         ENV["GEM_HOME"] = #{Gem.dir.dump}
         ENV["GEM_PATH"] = #{Gem.path.join(File::PATH_SEPARATOR).dump}
         ENV["BUNDLE_GEMFILE"] = #{File.expand_path("../../../Gemfile", __dir__).dump}
         exec(
-          "/home/asterio/.local/share/gem/ruby/3.4.0/bin/bundle",
+          #{RbConfig.ruby.dump}, #{bundle_executable.dump},
           "exec", #{File.expand_path("../../../bin/hive", __dir__).dump}, *ARGV
         )
       RUBY
+      candidate_artifact = Dir.glob(File.join(artifacts, "hive-cli-*.gem")).fetch(0)
+      receipts = write_installation_receipts(
+        dir,
+        candidate_path: candidate,
+        candidate_artifact: candidate_artifact,
+        openclaw_path: openclaw
+      )
       evidence_path = File.join(dir, "evidence.json")
       runner = build_runner(
         artifact_dir: artifacts,
         evidence_path: evidence_path,
-        proven_hive_bin: candidate,
-        openclaw_bin: openclaw,
+        candidate_install_receipt: receipts.fetch("candidate"),
+        openclaw_install_receipt: receipts.fetch("openclaw"),
         base_environment: { "PATH" => ENV.fetch("PATH"), "LANG" => "C.UTF-8" }
       )
 
@@ -676,6 +1235,10 @@ class OpenClawCreatorProofTest < Minitest::Test
         {
           "version" => HiveLiveAgentProof::OpenClawCreatorProof::OPENCLAW_VERSION,
           "integrity" => HiveLiveAgentProof::OpenClawCreatorProof::OPENCLAW_INTEGRITY,
+          "lock_sha256" => HiveLiveAgentProof::OpenClawCreatorProof::OPENCLAW_LOCK_SHA256,
+          "package_count" =>
+            HiveLiveAgentProof::OpenClawCreatorProof::OPENCLAW_LOCK_PACKAGE_COUNT,
+          "receipt_sha256" => Digest::SHA256.file(receipts.fetch("openclaw")).hexdigest,
           "verified" => true
         },
         evidence.fetch("openclaw_package")
@@ -685,6 +1248,8 @@ class OpenClawCreatorProofTest < Minitest::Test
       assert_equal "passed", evidence.dig("teardown", "status")
       assert_equal "passed", evidence.dig("cleanup", "status")
       assert_equal "passed", evidence.dig("secret_scan", "status")
+      assert_equal "enforced", evidence.dig("effect_policy", "status")
+      assert_equal [], evidence.fetch("external_actions")
       refute_includes File.read(evidence_path), CREDENTIAL
     end
   end
@@ -694,11 +1259,8 @@ class OpenClawCreatorProofTest < Minitest::Test
   def build_runner(candidate_sha: SHA, artifact_dir: "/proof/artifacts",
                    evidence_path: File.join(Dir.tmpdir, "unused-openclaw-proof-evidence.json"),
                    model: "openai/gpt-5.6", base_environment: {},
-                   proven_hive_bin: "/proof/hive", openclaw_bin: "/proof/openclaw",
-                   openclaw_package_version:
-                     HiveLiveAgentProof::OpenClawCreatorProof::OPENCLAW_VERSION,
-                   openclaw_package_integrity:
-                     HiveLiveAgentProof::OpenClawCreatorProof::OPENCLAW_INTEGRITY,
+                   candidate_install_receipt: "/proof/candidate-installation-receipt.json",
+                   openclaw_install_receipt: "/proof/openclaw-installation-receipt.json",
                    **options)
     HiveLiveAgentProof::OpenClawCreatorProof::Runner.new(
       candidate_sha: candidate_sha,
@@ -706,13 +1268,47 @@ class OpenClawCreatorProofTest < Minitest::Test
       evidence_path: evidence_path,
       model: model,
       provider_credential: CREDENTIAL,
-      proven_hive_bin: proven_hive_bin,
-      openclaw_bin: openclaw_bin,
-      openclaw_package_version: openclaw_package_version,
-      openclaw_package_integrity: openclaw_package_integrity,
+      candidate_install_receipt: candidate_install_receipt,
+      openclaw_install_receipt: openclaw_install_receipt,
       base_environment: base_environment,
       **options
     )
+  end
+
+  def write_installation_receipts(dir, candidate_path:, candidate_artifact:,
+                                  openclaw_path:)
+    candidate_root = File.dirname(candidate_path)
+    openclaw_root = File.dirname(openclaw_path)
+    lock_path = File.join(openclaw_root, "package-lock.json")
+    FileUtils.cp(
+      HiveLiveAgentProof::OpenClawCreatorProof::OPENCLAW_LOCK_PATH,
+      lock_path
+    )
+    candidate_receipt = File.join(dir, "candidate-installation-receipt.json")
+    openclaw_receipt = File.join(dir, "openclaw-installation-receipt.json")
+    HiveLiveAgentProof::OpenClawCreatorProof::InstallationReceipt.write(
+      path: candidate_receipt,
+      kind: "candidate_gem",
+      artifact_path: candidate_artifact,
+      install_root: candidate_root,
+      executable_path: candidate_path,
+      package_name: "hive-cli",
+      package_version: Hive::VERSION
+    )
+    HiveLiveAgentProof::OpenClawCreatorProof::InstallationReceipt.write(
+      path: openclaw_receipt,
+      kind: "openclaw_npm",
+      artifact_path: lock_path,
+      install_root: openclaw_root,
+      executable_path: openclaw_path,
+      package_name: "openclaw",
+      package_version: HiveLiveAgentProof::OpenClawCreatorProof::OPENCLAW_VERSION,
+      package_integrity: HiveLiveAgentProof::OpenClawCreatorProof::OPENCLAW_INTEGRITY,
+      lock_path: lock_path,
+      package_count:
+        HiveLiveAgentProof::OpenClawCreatorProof::OPENCLAW_LOCK_PACKAGE_COUNT
+    )
+    { "candidate" => candidate_receipt, "openclaw" => openclaw_receipt }
   end
 
   def prepare_candidate_artifacts(dir)
@@ -753,6 +1349,17 @@ class OpenClawCreatorProofTest < Minitest::Test
       abort "selected provider credential missing" if ENV.fetch(credential_name, "").empty?
       abort "opposite credential reached OpenClaw" if ENV.key?(opposite_name)
       abort "generic credential reached OpenClaw" if ENV.key?("HIVE_LIVE_PROVIDER_CREDENTIAL")
+      abort "candidate receipt reached OpenClaw" if ENV.key?("HIVE_CANDIDATE_INSTALL_RECEIPT")
+      abort "OpenClaw receipt reached OpenClaw" if ENV.key?("HIVE_OPENCLAW_INSTALL_RECEIPT")
+      approvals = JSON.parse(
+        File.read(File.join(ENV.fetch("OPENCLAW_STATE_DIR"), "exec-approvals.json"))
+      )
+      gateway = File.join(prepended.fetch(0), "hive")
+      abort "OpenClaw tool policy is not deny-by-default" unless
+        config.dig("tools", "allow") == ["exec"] &&
+        config.dig("tools", "exec", "mode") == "allowlist" &&
+        approvals.dig("defaults", "security") == "deny" &&
+        approvals.dig("agents", "main", "allowlist").map { |row| row["pattern"] } == [gateway]
 
       if ARGV == ["skills", "info", "hive", "--json"]
         puts JSON.generate(

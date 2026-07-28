@@ -15,14 +15,26 @@ module HiveLiveAgentProof
         seen = {}
         records = {}
         total_size = 0
+        @entry_count = 0
+        @directory_count = 0
+        @inode_count = 0
 
         Zlib::GzipReader.open(@archive) do |gzip|
           Gem::Package::TarReader.new(gzip) do |tar|
             tar.each do |entry|
+              @entry_count += 1
+              if @entry_count > SKILL_ARCHIVE_ENTRY_LIMIT
+                fail_archive!("archive contains more than #{SKILL_ARCHIVE_ENTRY_LIMIT} entries")
+              end
               name = normalized_name(entry.full_name)
               next if name.empty? && entry.directory?
               fail_archive!("unsafe archive entry #{entry.full_name.inspect}") if name.empty?
               fail_archive!("duplicate archive entry #{name.inspect}") if seen.key?(name)
+              if Pathname.new(name).each_filename.count > SKILL_ARCHIVE_DEPTH_LIMIT
+                fail_archive!(
+                  "archive entry exceeds depth #{SKILL_ARCHIVE_DEPTH_LIMIT}: #{name.inspect}"
+                )
+              end
 
               seen[name] = true
               destination = File.join(@destination, name)
@@ -98,11 +110,13 @@ module HiveLiveAgentProof
           fail_archive!("archive path conflicts with an existing entry: #{path}")
         end
 
+        reserve_inode!(directory: true)
         Dir.mkdir(path, 0o700)
       end
 
       def create_regular_file(entry, path, expected_size)
         ensure_controlled_parent!(File.dirname(path))
+        reserve_inode!(directory: false)
         flags = File::WRONLY | File::CREAT | File::EXCL
         flags |= File::NOFOLLOW if defined?(File::NOFOLLOW)
         bytes_written = 0
@@ -129,8 +143,24 @@ module HiveLiveAgentProof
             fail_archive!("archive parent is not a directory: #{current}") unless
               File.directory?(current) && !File.symlink?(current)
           else
+            reserve_inode!(directory: true)
             Dir.mkdir(current, 0o700)
           end
+        end
+      end
+
+      def reserve_inode!(directory:)
+        if directory
+          @directory_count += 1
+          if @directory_count > SKILL_ARCHIVE_DIRECTORY_LIMIT
+            fail_archive!(
+              "archive materializes more than #{SKILL_ARCHIVE_DIRECTORY_LIMIT} directories"
+            )
+          end
+        end
+        @inode_count += 1
+        if @inode_count > SKILL_ARCHIVE_INODE_LIMIT
+          fail_archive!("archive materializes more than #{SKILL_ARCHIVE_INODE_LIMIT} inodes")
         end
       end
 

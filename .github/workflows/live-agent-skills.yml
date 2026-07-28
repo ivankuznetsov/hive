@@ -220,129 +220,105 @@ jobs:
           ruby-version: "3.4"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "22"
+          node-version: "22.23.1"
       - name: Install OpenClaw in the ephemeral runner
         env:
           OPENCLAW_VERSION: 2026.7.1-beta.2
           OPENCLAW_INTEGRITY: sha512-KYPBQnAfEb/9qrxlw/96a90mMQeKdAZdUABMROOue9Ph2oFbnDGezZjd5Bmw4WhRyzgyvHOHqHje/swGipC4xA==
         run: |
           set -euo pipefail
-          pack_dir="$RUNNER_TEMP/openclaw-package"
-          pack_json="$pack_dir/npm-pack.json"
-          mkdir -p "$pack_dir"
-          npm pack "openclaw@${OPENCLAW_VERSION}" --json --pack-destination "$pack_dir" \
-            > "$pack_json"
-          mapfile -t package_metadata < <(
-            node -e '
-              const fs = require("fs");
-              const path = require("path");
-              const payload = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-              if (!Array.isArray(payload) || payload.length !== 1) {
-                throw new Error("npm pack must return exactly one package");
-              }
-              const entry = payload[0];
-              for (const field of ["version", "integrity", "filename"]) {
-                if (!entry || typeof entry[field] !== "string" || entry[field].length === 0) {
-                  throw new Error(`npm pack metadata is missing ${field}`);
-                }
-              }
-              if (path.basename(entry.filename) !== entry.filename) {
-                throw new Error("npm pack returned an unsafe filename");
-              }
-              process.stdout.write(`${entry.version}\n${entry.integrity}\n${entry.filename}\n`);
-            ' "$pack_json"
-          )
-          [[ "${#package_metadata[@]}" -eq 3 ]] || {
-            echo "OpenClaw package metadata is malformed" >&2
-            exit 1
+          openclaw_root="$RUNNER_TEMP/openclaw-install"
+          receipt_dir="$RUNNER_TEMP/install-receipts"
+          mkdir -p "$openclaw_root" "$receipt_dir"
+          cp candidate-source/packaging/live_agent_skills/openclaw/package.json \
+            "$openclaw_root/package.json"
+          cp candidate-source/packaging/live_agent_skills/openclaw/package-lock.json \
+            "$openclaw_root/package-lock.json"
+          node - "$openclaw_root/package-lock.json" \
+            "$OPENCLAW_VERSION" "$OPENCLAW_INTEGRITY" <<'NODE'
+          const fs = require("fs");
+          const [lockPath, version, integrity] = process.argv.slice(2);
+          const lock = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+          const packages = lock.packages;
+          if (lock.lockfileVersion !== 3 || !packages || typeof packages !== "object") {
+            throw new Error("OpenClaw npm lock must be lockfileVersion 3");
           }
-          packed_version="${package_metadata[0]}"
-          reported_integrity="${package_metadata[1]}"
-          packed_filename="${package_metadata[2]}"
-          tarball="$pack_dir/$packed_filename"
-          [[ -f "$tarball" && ! -L "$tarball" && -s "$tarball" ]] || {
-            echo "OpenClaw package tarball is missing or unsafe" >&2
-            exit 1
+          const root = packages[""];
+          if (!root || JSON.stringify(root.dependencies) !== JSON.stringify({openclaw: version})) {
+            throw new Error("OpenClaw npm lock root identity changed");
           }
-          computed_integrity="$(
-            node -e '
-              const crypto = require("crypto");
-              const fs = require("fs");
-              const digest = crypto.createHash("sha512")
-                .update(fs.readFileSync(process.argv[1]))
-                .digest("base64");
-              process.stdout.write("sha512-" + digest);
-            ' "$tarball"
-          )"
-          [[ "$packed_version" == "$OPENCLAW_VERSION" ]] || {
-            echo "OpenClaw package version changed" >&2
-            exit 1
+          for (const [relative, entry] of Object.entries(packages)) {
+            if (relative === "") continue;
+            if (!entry || entry.link === true || typeof entry.version !== "string" ||
+                typeof entry.resolved !== "string" ||
+                !entry.resolved.startsWith("https://registry.npmjs.org/") ||
+                typeof entry.integrity !== "string" ||
+                !/^sha512-[A-Za-z0-9+/]+={0,2}$/.test(entry.integrity)) {
+              throw new Error(`mutable npm lock entry: ${relative}`);
+            }
           }
-          [[ "$reported_integrity" == "$OPENCLAW_INTEGRITY" ]] || {
-            echo "OpenClaw reported package integrity changed" >&2
-            exit 1
+          const openclaw = packages["node_modules/openclaw"];
+          if (!openclaw || openclaw.version !== version || openclaw.integrity !== integrity) {
+            throw new Error("OpenClaw npm lock package identity changed");
           }
-          [[ "$computed_integrity" == "$OPENCLAW_INTEGRITY" ]] || {
-            echo "OpenClaw package bytes do not match the pinned integrity" >&2
-            exit 1
-          }
-          [[ "$computed_integrity" == "$reported_integrity" ]] || {
-            echo "OpenClaw package metadata does not match its bytes" >&2
-            exit 1
-          }
-          npm install --global "$tarball"
-          package_json="$(npm root --global)/openclaw/package.json"
+          NODE
+          npm ci --prefix "$openclaw_root" --ignore-scripts --audit=false --fund=false
+          cmp --silent \
+            candidate-source/packaging/live_agent_skills/openclaw/package-lock.json \
+            "$openclaw_root/package-lock.json"
+          openclaw_bin="$openclaw_root/node_modules/.bin/openclaw"
+          openclaw_realpath="$(realpath "$openclaw_bin")"
+          [[ -x "$openclaw_bin" && "$openclaw_realpath" == "$openclaw_root/"* ]]
+          package_json="$openclaw_root/node_modules/openclaw/package.json"
           [[ "$(node -p "require(process.argv[1]).version" "$package_json")" == "$OPENCLAW_VERSION" ]]
-          cli_version="$(openclaw --version | head -n 1)"
+          cli_version="$("$openclaw_bin" --version | head -n 1)"
           openclaw_version_regex="${OPENCLAW_VERSION//./\\.}"
           [[ "$cli_version" =~ ^OpenClaw[[:space:]]${openclaw_version_regex}[[:space:]]\\(.+\\)$ ]]
-          {
-            echo "HIVE_OPENCLAW_BIN=$(command -v openclaw)"
-            echo "HIVE_OPENCLAW_PACKAGE_VERSION=$OPENCLAW_VERSION"
-            echo "HIVE_OPENCLAW_PACKAGE_INTEGRITY=$computed_integrity"
-          } >> "$GITHUB_ENV"
+          package_count="$(
+            node -p 'Object.keys(require(process.argv[1]).packages).length - 1' \
+              "$openclaw_root/package-lock.json"
+          )"
+          openclaw_receipt="$receipt_dir/openclaw.json"
+          ruby candidate-source/packaging/live_agent_skills/write_installation_receipt.rb \
+            --output "$openclaw_receipt" \
+            --kind openclaw_npm \
+            --artifact "$openclaw_root/package-lock.json" \
+            --install-root "$openclaw_root" \
+            --executable "$openclaw_bin" \
+            --package-name openclaw \
+            --package-version "$OPENCLAW_VERSION" \
+            --package-integrity "$OPENCLAW_INTEGRITY" \
+            --lock "$openclaw_root/package-lock.json" \
+            --package-count "$package_count"
+          echo "HIVE_OPENCLAW_INSTALL_RECEIPT=$openclaw_receipt" >> "$GITHUB_ENV"
       - name: Install the exact candidate gem and test dependencies
         run: |
           set -euo pipefail
           gem_file="$(find candidate-artifacts -maxdepth 1 -type f -name 'hive-cli-*.gem' -print -quit)"
           [[ -n "$gem_file" && -s "$gem_file" ]]
+          receipt_dir="$RUNNER_TEMP/install-receipts"
+          mkdir -p "$receipt_dir"
           bash candidate-source/packaging/live_agent_skills/install_candidate_gem.sh \
             "$gem_file" "$RUNNER_TEMP/proven-gems"
           "$RUNNER_TEMP/proven-gems/bin/hive" --version
-          echo "HIVE_PROVEN_HIVE_BIN=$RUNNER_TEMP/proven-gems/bin/hive" >> "$GITHUB_ENV"
+          candidate_version="$(
+            ruby -Icandidate-source/lib -rhive/version -e 'print Hive::VERSION'
+          )"
+          candidate_receipt="$receipt_dir/candidate.json"
+          ruby candidate-source/packaging/live_agent_skills/write_installation_receipt.rb \
+            --output "$candidate_receipt" \
+            --kind candidate_gem \
+            --artifact "$gem_file" \
+            --install-root "$RUNNER_TEMP/proven-gems" \
+            --executable "$RUNNER_TEMP/proven-gems/bin/hive" \
+            --package-name hive-cli \
+            --package-version "$candidate_version"
+          echo "HIVE_CANDIDATE_INSTALL_RECEIPT=$candidate_receipt" >> "$GITHUB_ENV"
           cd candidate-source
           bundle install --jobs 4 --retry 2
-      - name: Validate the configured live provider
+      - name: Run authenticated workflow-creator proof
         env:
-          HIVE_LIVE_MODEL: ${{ vars.HIVE_LIVE_MODEL }}
-        run: |
-          set -euo pipefail
-          case "$HIVE_LIVE_MODEL" in
-            openai/*|openrouter/*) ;;
-            *)
-              echo "HIVE_LIVE_MODEL must begin with openai/ or openrouter/" >&2
-              exit 64
-              ;;
-          esac
-      - name: Run authenticated workflow-creator proof with OpenAI
-        if: ${{ startsWith(vars.HIVE_LIVE_MODEL, 'openai/') }}
-        env:
-          HIVE_LIVE_PROVIDER_CREDENTIAL: ${{ secrets.OPENAI_API_KEY }}
-          HIVE_LIVE_MODEL: ${{ vars.HIVE_LIVE_MODEL }}
-          HIVE_LIVE_AGENT_SKILLS: "1"
-          HIVE_RELEASE_GATE: "1"
-          HIVE_CANDIDATE_SHA: ${{ needs.validate.outputs.candidate_sha }}
-          HIVE_PROOF_ARTIFACTS: ${{ github.workspace }}/candidate-artifacts
-          HIVE_CREATOR_EVIDENCE_PATH: ${{ runner.temp }}/workflow-creator-evidence/openclaw-workflow-creator.json
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/workflow-creator-evidence"
-          cd candidate-source
-          bundle exec ruby -Itest test/smoke/live_hive_workflow_creator_smoke_test.rb
-      - name: Run authenticated workflow-creator proof with OpenRouter
-        if: ${{ startsWith(vars.HIVE_LIVE_MODEL, 'openrouter/') }}
-        env:
-          HIVE_LIVE_PROVIDER_CREDENTIAL: ${{ secrets.OPENROUTER_API_KEY }}
+          HIVE_LIVE_PROVIDER_CREDENTIAL: ${{ startsWith(vars.HIVE_LIVE_MODEL, 'openai/') && secrets.OPENAI_API_KEY || startsWith(vars.HIVE_LIVE_MODEL, 'openrouter/') && secrets.OPENROUTER_API_KEY || '' }}
           HIVE_LIVE_MODEL: ${{ vars.HIVE_LIVE_MODEL }}
           HIVE_LIVE_AGENT_SKILLS: "1"
           HIVE_RELEASE_GATE: "1"

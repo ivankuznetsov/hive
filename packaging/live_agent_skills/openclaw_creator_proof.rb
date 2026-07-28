@@ -1,4 +1,5 @@
 require "digest"
+require "fiddle"
 require "fileutils"
 require "json"
 require "open3"
@@ -17,6 +18,10 @@ module HiveLiveAgentProof
     EVIDENCE_SCHEMA = "hive-live-workflow-creator-evidence".freeze
     OPENCLAW_VERSION = WORKFLOW_CREATOR_OPENCLAW_VERSION
     OPENCLAW_INTEGRITY = WORKFLOW_CREATOR_OPENCLAW_INTEGRITY
+    OPENCLAW_LOCK_PATH =
+      File.expand_path("openclaw/package-lock.json", __dir__).freeze
+    OPENCLAW_LOCK_SHA256 = WORKFLOW_CREATOR_OPENCLAW_LOCK_SHA256
+    OPENCLAW_LOCK_PACKAGE_COUNT = WORKFLOW_CREATOR_OPENCLAW_PACKAGE_COUNT
     DETAIL_LIMIT = 1_000
     CREDENTIAL_LIMIT = 4_096
     PROVIDER_CREDENTIAL_ENV = WORKFLOW_CREATOR_PROVIDER_ENV
@@ -34,6 +39,7 @@ module HiveLiveAgentProof
         super(detail)
       end
     end
+    require_relative "openclaw_creator_proof/installation_receipt"
     require_relative "openclaw_creator_proof/safe_tar_materializer"
     require_relative "openclaw_creator_proof/audit_gateway"
     require_relative "openclaw_creator_proof/process_runner"

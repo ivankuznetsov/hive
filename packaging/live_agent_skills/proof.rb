@@ -45,8 +45,15 @@ module HiveLiveAgentProof
   WORKFLOW_CREATOR_OPENCLAW_VERSION = "2026.7.1-beta.2".freeze
   WORKFLOW_CREATOR_OPENCLAW_INTEGRITY =
     "sha512-KYPBQnAfEb/9qrxlw/96a90mMQeKdAZdUABMROOue9Ph2oFbnDGezZjd5Bmw4WhRyzgyvHOHqHje/swGipC4xA==".freeze
+  WORKFLOW_CREATOR_OPENCLAW_LOCK_SHA256 =
+    "31994a60856f7a3d4db9a35b1d49951b17e9bb3642fa5e877774390a93410c15".freeze
+  WORKFLOW_CREATOR_OPENCLAW_PACKAGE_COUNT = 306
   SKILL_ARCHIVE_FILE_LIMIT = 16 * 1024 * 1024
   SKILL_ARCHIVE_TOTAL_LIMIT = 64 * 1024 * 1024
+  SKILL_ARCHIVE_ENTRY_LIMIT = 512
+  SKILL_ARCHIVE_DIRECTORY_LIMIT = 64
+  SKILL_ARCHIVE_DEPTH_LIMIT = 8
+  SKILL_ARCHIVE_INODE_LIMIT = 256
   WORKFLOW_CREATOR_PROVIDER_ENV = {
     "openai" => "OPENAI_API_KEY",
     "openrouter" => "OPENROUTER_API_KEY"
@@ -210,26 +217,50 @@ module HiveLiveAgentProof
       candidate["realpath"] != gateway["realpath"] &&
       path_prepend == [ File.dirname(gateway["realpath"]) ] &&
       row.dig("openclaw_configuration", "sha256").to_s.match?(/\A[0-9a-f]{64}\z/) &&
+      row.dig("openclaw_configuration", "approvals_sha256").to_s.match?(
+        /\A[0-9a-f]{64}\z/
+      ) &&
+      valid_creator_effect_policy?(row["effect_policy"], gateway: gateway) &&
       processes.is_a?(Array) && !processes.empty? &&
       processes.all? { |process|
         process["timed_out"] == false &&
+          process["interrupted"] == false &&
           process.dig("teardown", "status") == "passed" &&
           process.dig("teardown", "reaped") == true &&
           process.dig("teardown", "readers") == "complete" &&
           process.dig("teardown", "writer") == "complete" &&
-          process.dig("teardown", "descendants") == "none"
+          process.dig("teardown", "descendants") == "none" &&
+          process.dig("teardown", "containment") == "linux_child_subreaper"
       } &&
       teardown.is_a?(Hash) && teardown["status"] == "passed" &&
-      teardown["reaped"] == true && teardown["descendants"] == "none"
+      teardown["reaped"] == true && teardown["descendants"] == "none" &&
+      teardown["containment"] == "linux_child_subreaper"
   rescue TypeError
     false
   end
 
+  def valid_creator_effect_policy?(record, gateway:)
+    record.is_a?(Hash) &&
+      record.keys.sort == %w[
+        allowed_executables allowed_tools approvals_sha256 configuration_sha256 status
+      ] &&
+      record["status"] == "enforced" &&
+      record["allowed_tools"] == [ "exec" ] &&
+      record["allowed_executables"] == [ gateway["realpath"] ] &&
+      record["configuration_sha256"].to_s.match?(/\A[0-9a-f]{64}\z/) &&
+      record["approvals_sha256"].to_s.match?(/\A[0-9a-f]{64}\z/)
+  end
+
   def valid_openclaw_package_evidence?(record)
     record.is_a?(Hash) &&
-      record.keys.sort == %w[integrity verified version] &&
+      record.keys.sort == %w[
+        integrity lock_sha256 package_count receipt_sha256 verified version
+      ] &&
       record["version"] == WORKFLOW_CREATOR_OPENCLAW_VERSION &&
       record["integrity"] == WORKFLOW_CREATOR_OPENCLAW_INTEGRITY &&
+      record["lock_sha256"] == WORKFLOW_CREATOR_OPENCLAW_LOCK_SHA256 &&
+      record["receipt_sha256"].to_s.match?(/\A[0-9a-f]{64}\z/) &&
+      record["package_count"] == WORKFLOW_CREATOR_OPENCLAW_PACKAGE_COUNT &&
       record["verified"] == true
   end
 
@@ -325,15 +356,26 @@ module HiveLiveAgentProof
 
     def initialize(candidate_dir:, candidate_sha:, expected_hive_version:, canonical:,
                    archive_file_limit: SKILL_ARCHIVE_FILE_LIMIT,
-                   archive_total_limit: SKILL_ARCHIVE_TOTAL_LIMIT)
+                   archive_total_limit: SKILL_ARCHIVE_TOTAL_LIMIT,
+                   archive_entry_limit: SKILL_ARCHIVE_ENTRY_LIMIT,
+                   archive_directory_limit: SKILL_ARCHIVE_DIRECTORY_LIMIT,
+                   archive_depth_limit: SKILL_ARCHIVE_DEPTH_LIMIT,
+                   archive_inode_limit: SKILL_ARCHIVE_INODE_LIMIT)
       @candidate_dir = File.expand_path(candidate_dir)
       @candidate_sha = HiveLiveAgentProof.validate_sha!(candidate_sha, "candidate_sha")
       @expected_hive_version = expected_hive_version.to_s
       @canonical = canonical
       @archive_file_limit = Integer(archive_file_limit)
       @archive_total_limit = Integer(archive_total_limit)
+      @archive_entry_limit = Integer(archive_entry_limit)
+      @archive_directory_limit = Integer(archive_directory_limit)
+      @archive_depth_limit = Integer(archive_depth_limit)
+      @archive_inode_limit = Integer(archive_inode_limit)
       raise Error, "expected Hive version must not be empty" if @expected_hive_version.empty?
-      unless @archive_file_limit.positive? && @archive_total_limit.positive?
+      unless [
+        @archive_file_limit, @archive_total_limit, @archive_entry_limit,
+        @archive_directory_limit, @archive_depth_limit, @archive_inode_limit
+      ].all?(&:positive?)
         raise Error, "skill archive limits must be positive"
       end
     rescue ArgumentError, TypeError
@@ -419,19 +461,62 @@ module HiveLiveAgentProof
 
     def read_skill_archive(path)
       files = {}
+      seen = {}
+      materialized_directories = {}
       total_size = 0
+      entry_count = 0
+      file_count = 0
       Zlib::GzipReader.open(path) do |gzip|
         Gem::Package::TarReader.new(gzip) do |tar|
           tar.each do |entry|
+            entry_count += 1
+            if entry_count > @archive_entry_limit
+              raise Error, "skill archive contains more than #{@archive_entry_limit} entries"
+            end
             name = entry.full_name.sub(%r{\A\./}, "")
-            next if name.empty? || entry.directory?
+            next if name.empty? && entry.directory?
 
             clean = Pathname.new(name).cleanpath
-            if clean.absolute? || clean.each_filename.include?("..") || !entry.file?
+            if name.empty? || clean.absolute? || clean.each_filename.include?("..")
               raise Error, "skill archive contains an unsafe entry: #{name}"
             end
             clean_name = clean.to_s
-            raise Error, "skill archive contains duplicate entry: #{clean_name}" if files.key?(clean_name)
+            if seen.key?(clean_name) ||
+               (entry.directory? && materialized_directories.key?(clean_name))
+              raise Error, "skill archive contains duplicate entry: #{clean_name}"
+            end
+            seen[clean_name] = entry.directory? ? "directory" : "file"
+            depth = clean.each_filename.count
+            if depth > @archive_depth_limit
+              raise Error, "skill archive entry exceeds depth #{@archive_depth_limit}: #{clean_name}"
+            end
+            parts = clean.each_filename.to_a
+            parent_limit = entry.directory? ? parts.length : parts.length - 1
+            parent_limit.times do |index|
+              directory = parts.first(index + 1).join("/")
+              if seen[directory] == "file"
+                raise Error, "skill archive path conflicts with a file: #{directory}"
+              end
+              materialized_directories[directory] = true
+            end
+            directory_count = materialized_directories.length
+            if directory_count > @archive_directory_limit
+              raise Error,
+                    "skill archive materializes more than #{@archive_directory_limit} directories"
+            end
+            if entry.directory?
+              next
+            end
+            unless entry.file?
+              raise Error, "skill archive contains an unsafe entry: #{clean_name}"
+            end
+            if materialized_directories.key?(clean_name)
+              raise Error, "skill archive file conflicts with a directory: #{clean_name}"
+            end
+            file_count += 1
+            if directory_count + file_count > @archive_inode_limit
+              raise Error, "skill archive materializes more than #{@archive_inode_limit} inodes"
+            end
 
             size = Integer(entry.header.size)
             if size > @archive_file_limit

@@ -128,6 +128,46 @@ class LiveAgentProofTest < Minitest::Test
     end
   end
 
+  def test_candidate_verifier_applies_entry_directory_depth_and_inode_budgets
+    cases = {
+      "entries" => {
+        files: { "one" => "", "two" => "" },
+        options: { archive_entry_limit: 1 },
+        message: "more than 1 entries"
+      },
+      "directories" => {
+        files: { "one/two/file" => "" },
+        options: { archive_directory_limit: 1 },
+        message: "more than 1 directories"
+      },
+      "depth" => {
+        files: { "one/two/file" => "" },
+        options: { archive_depth_limit: 2 },
+        message: "exceeds depth 2"
+      },
+      "inodes" => {
+        files: { "one/file" => "" },
+        options: { archive_inode_limit: 1 },
+        message: "more than 1 inodes"
+      }
+    }
+
+    with_tmp_dir do |dir|
+      canonical = Hive::AgentSkills::CanonicalSkill.new
+      cases.each do |name, definition|
+        artifacts = prepare_release_artifacts(File.join(dir, name), canonical)
+        skill_path = File.join(artifacts, "hive-agent-skills-#{SHA}.tar.gz")
+        write_test_archive(skill_path, definition.fetch(:files))
+        refresh_artifact_record(artifacts, skill_path)
+
+        error = assert_raises(HiveLiveAgentProof::Error) do
+          verify_candidate(artifacts, canonical, **definition.fetch(:options))
+        end
+        assert_includes error.message, definition.fetch(:message)
+      end
+    end
+  end
+
   def test_attestor_and_verifier_accept_only_exact_proven_artifacts
     with_tmp_dir do |dir|
       artifacts = prepare_artifacts(dir)
@@ -325,8 +365,17 @@ class LiveAgentProofTest < Minitest::Test
         "package_integrity" => lambda do |row|
           row.fetch("openclaw_package")["integrity"] = "sha512-substituted"
         end,
+        "package_lock" => lambda do |row|
+          row.fetch("openclaw_package")["lock_sha256"] = "0" * 64
+        end,
         "package_unverified" => lambda do |row|
           row.fetch("openclaw_package")["verified"] = false
+        end,
+        "effect_policy" => lambda do |row|
+          row.fetch("effect_policy")["allowed_executables"] = [ "/proof/candidate-hive" ]
+        end,
+        "interrupted" => lambda do |row|
+          row.fetch("processes").fetch(0)["interrupted"] = true
         end,
         "teardown" => lambda do |row|
           row["teardown"]["status"] = "failed"
@@ -488,6 +537,9 @@ class LiveAgentProofTest < Minitest::Test
       "openclaw_package" => {
         "version" => HiveLiveAgentProof::WORKFLOW_CREATOR_OPENCLAW_VERSION,
         "integrity" => HiveLiveAgentProof::WORKFLOW_CREATOR_OPENCLAW_INTEGRITY,
+        "lock_sha256" => HiveLiveAgentProof::WORKFLOW_CREATOR_OPENCLAW_LOCK_SHA256,
+        "package_count" => HiveLiveAgentProof::WORKFLOW_CREATOR_OPENCLAW_PACKAGE_COUNT,
+        "receipt_sha256" => "6" * 64,
         "verified" => true
       },
       "executables" => {
@@ -510,25 +562,36 @@ class LiveAgentProofTest < Minitest::Test
       },
       "openclaw_configuration" => {
         "sha256" => "4" * 64,
+        "approvals_sha256" => "7" * 64,
         "path_prepend" => [ "/proof/gateway/bin" ]
+      },
+      "effect_policy" => {
+        "status" => "enforced",
+        "allowed_tools" => [ "exec" ],
+        "allowed_executables" => [ "/proof/gateway/bin/hive" ],
+        "configuration_sha256" => "4" * 64,
+        "approvals_sha256" => "7" * 64
       },
       "processes" => [
         {
           "label" => "workflow_creation",
           "timed_out" => false,
+          "interrupted" => false,
           "teardown" => {
             "status" => "passed",
             "reaped" => true,
             "readers" => "complete",
             "writer" => "complete",
-            "descendants" => "none"
+            "descendants" => "none",
+            "containment" => "linux_child_subreaper"
           }
         }
       ],
       "teardown" => {
         "status" => "passed",
         "reaped" => true,
-        "descendants" => "none"
+        "descendants" => "none",
+        "containment" => "linux_child_subreaper"
       },
       "prompt_sha256" => Digest::SHA256.hexdigest(HiveLiveAgentProof::WORKFLOW_CREATOR_PROMPT),
       "task_prompt_sha256" =>

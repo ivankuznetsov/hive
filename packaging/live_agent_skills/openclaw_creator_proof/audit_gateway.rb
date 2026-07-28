@@ -44,14 +44,14 @@ module HiveLiveAgentProof
           raise Failure.new(
             phase: "preflight",
             reason: "candidate_path_not_absolute",
-            detail: "HIVE_PROVEN_HIVE_BIN must be absolute"
+            detail: "candidate receipt executable must be absolute"
           )
         end
         unless File.file?(@configured_candidate) && File.executable?(@configured_candidate)
           raise Failure.new(
             phase: "preflight",
             reason: "candidate_not_executable",
-            detail: "HIVE_PROVEN_HIVE_BIN is not executable: #{@configured_candidate}"
+            detail: "candidate receipt executable is unavailable: #{@configured_candidate}"
           )
         end
 
@@ -89,6 +89,9 @@ module HiveLiveAgentProof
         candidate_digest = @candidate_record.fetch("sha256")
         lock_path = File.join(@directory, "audit.lock")
         workspace = @workspace
+        credential_names = (PROVIDER_CREDENTIAL_ENV.values + [
+          "HIVE_LIVE_PROVIDER_CREDENTIAL"
+        ]).uniq
         script = <<~RUBY
           #!#{RbConfig.ruby}
           require "digest"
@@ -107,6 +110,7 @@ module HiveLiveAgentProof
           run_placeholder = #{WORKFLOW_CREATOR_RUN_PLACEHOLDER.dump}
           task_key = #{WORKFLOW_CREATOR_TASK_KEY.dump}
           safe_slug = #{WORKFLOW_CREATOR_SAFE_SLUG.inspect}
+          credential_names = #{credential_names.inspect}
 
           def created_slug(workspace, task_key, safe_slug)
             paths = Dir.glob(
@@ -130,18 +134,25 @@ module HiveLiveAgentProof
             matches.fetch(0)
           end
 
-          unless File.file?(candidate) && File.executable?(candidate) &&
-                 Digest::SHA256.file(candidate).hexdigest == expected_digest
-            warn "workflow-creator proof candidate digest changed"
-            exit 65
-          end
-
-          ordinal = nil
           FileUtils.mkdir_p(File.dirname(lock_path), mode: 0o700)
           File.open(lock_path, File::RDWR | File::CREAT, 0o600) do |lock|
             lock.flock(File::LOCK_EX)
-            ordinal = File.file?(audit_path) ? File.foreach(audit_path).count : 0
+            rows =
+              if File.file?(audit_path)
+                File.readlines(audit_path, chomp: true).map { |line| JSON.parse(line) }
+              else
+                []
+              end
+            unless rows.all? { |row| row.is_a?(Hash) && row["success"] == true }
+              warn "workflow-creator proof audit contains a prior failed command"
+              exit 68
+            end
+            ordinal = rows.length
             expected = commands[ordinal]
+            unless expected
+              warn "workflow-creator proof command budget is exhausted"
+              exit 64
+            end
             dynamic_slug = nil
             if expected == ["run", run_placeholder]
               dynamic_slug = created_slug(workspace, task_key, safe_slug)
@@ -151,6 +162,100 @@ module HiveLiveAgentProof
               warn "workflow-creator proof expected \#{expected.inspect}, got \#{ARGV.inspect}"
               exit 64
             end
+            unless File.file?(candidate) && File.executable?(candidate) &&
+                   Digest::SHA256.file(candidate).hexdigest == expected_digest
+              warn "workflow-creator proof candidate digest changed"
+              exit 65
+            end
+
+            retained = +""
+            status = nil
+            candidate_environment = ENV.to_h.reject do |name, _value|
+              credential_names.include?(name)
+            end
+            candidate_environment.delete("HIVE_PROVEN_HIVE_BIN")
+            candidate_environment.delete("HIVE_OPENCLAW_BIN")
+            candidate_environment.delete("HIVE_CANDIDATE_INSTALL_RECEIPT")
+            candidate_environment.delete("HIVE_OPENCLAW_INSTALL_RECEIPT")
+            Open3.popen3(
+              candidate_environment, candidate, *ARGV, unsetenv_others: true
+            ) do |input, output, error, waiter|
+              input.close
+              stdout_reader = Thread.new do
+                loop do
+                  chunk = output.readpartial(16 * 1024)
+                  STDOUT.write(chunk)
+                  if retained.bytesize < 64 * 1024
+                    retained << chunk.byteslice(0, 64 * 1024 - retained.bytesize)
+                  end
+                end
+              rescue EOFError
+                nil
+              end
+              stderr_reader = Thread.new do
+                loop { STDERR.write(error.readpartial(16 * 1024)) }
+              rescue EOFError
+                nil
+              end
+              status = waiter.value
+              stdout_reader.join
+              stderr_reader.join
+            end
+
+            proof_success = status.success?
+            proof_exit = status.exitstatus || 1
+            result_record = nil
+            if proof_success && [3, 5, 7].include?(ordinal)
+              payload = retained.lines.reverse_each.filter_map do |line|
+                JSON.parse(line)
+              rescue JSON::ParserError
+                nil
+              end.find { |row| row.is_a?(Hash) }
+              result_record =
+                if ordinal == 3
+                  unless payload && payload["schema"] == "hive-workflow-validate" &&
+                         payload["valid"] == true
+                    warn "workflow-creator proof could not parse validation output"
+                    proof_success = false
+                    proof_exit = 67
+                    nil
+                  else
+                    {
+                      "ordinal" => ordinal + 1,
+                      "kind" => "validation",
+                      "valid" => true,
+                      "stages" => Array(payload["stages"]).map { |stage| stage["name"] },
+                      "automatic_edges" => Array(payload["automatic_edges"]).map {
+                        |edge| [edge["from"], edge["to"]]
+                      },
+                      "human_outcomes" => payload["human_outcomes"]
+                    }
+                  end
+                else
+                  unless payload && payload["schema"] == "hive-new" &&
+                         [true, false].include?(payload["created"]) &&
+                         safe_slug.match?(payload["slug"].to_s)
+                    warn "workflow-creator proof could not parse task creation output"
+                    proof_success = false
+                    proof_exit = 67
+                    nil
+                  else
+                    {
+                      "ordinal" => ordinal + 1,
+                      "kind" => "task_creation",
+                      "slug" => payload.fetch("slug"),
+                      "created" => payload.fetch("created")
+                    }
+                  end
+                end
+            end
+            if result_record
+              File.open(result_path, File::WRONLY | File::CREAT | File::APPEND, 0o600) do |result|
+                result.puts(JSON.generate(result_record))
+                result.flush
+                result.fsync
+              end
+            end
             FileUtils.mkdir_p(File.dirname(audit_path), mode: 0o700)
             File.open(audit_path, File::WRONLY | File::CREAT | File::APPEND, 0o600) do |audit|
               audit.puts(JSON.generate(
@@ -158,84 +263,19 @@ module HiveLiveAgentProof
                 "argv" => ARGV,
                 "dynamic_slug" => dynamic_slug,
                 "candidate_realpath" => candidate,
-                "candidate_sha256" => expected_digest
+                "candidate_sha256" => expected_digest,
+                "exit_status" => status.exitstatus,
+                "signal" => status.termsig,
+                "success" => proof_success
               ))
               audit.flush
               audit.fsync
             end
+            exit(proof_exit) unless proof_success
+          rescue JSON::ParserError
+            warn "workflow-creator proof audit is malformed"
+            exit 68
           end
-
-          unless [3, 5, 7].include?(ordinal)
-            exec(candidate, *ARGV)
-          end
-
-          retained = +""
-          status = nil
-          Open3.popen3(candidate, *ARGV) do |input, output, error, waiter|
-            input.close
-            stdout_reader = Thread.new do
-              loop do
-                chunk = output.readpartial(16 * 1024)
-                STDOUT.write(chunk)
-                retained << chunk.byteslice(0, 64 * 1024 - retained.bytesize) if retained.bytesize < 64 * 1024
-              end
-            rescue EOFError
-              nil
-            end
-            stderr_reader = Thread.new do
-              loop { STDERR.write(error.readpartial(16 * 1024)) }
-            rescue EOFError
-              nil
-            end
-            status = waiter.value
-            stdout_reader.join
-            stderr_reader.join
-          end
-
-          if status.success?
-            payload = retained.lines.reverse_each.filter_map do |line|
-              JSON.parse(line)
-            rescue JSON::ParserError
-              nil
-            end.find { |row| row.is_a?(Hash) }
-            record =
-              if ordinal == 3
-                unless payload && payload["schema"] == "hive-workflow-validate" &&
-                       payload["valid"] == true
-                  warn "workflow-creator proof could not parse validation output"
-                  exit 67
-                end
-                {
-                  "ordinal" => ordinal + 1,
-                  "kind" => "validation",
-                  "valid" => true,
-                  "stages" => Array(payload["stages"]).map { |stage| stage["name"] },
-                  "automatic_edges" => Array(payload["automatic_edges"]).map {
-                    |edge| [edge["from"], edge["to"]]
-                  },
-                  "human_outcomes" => payload["human_outcomes"]
-                }
-              else
-                unless payload && payload["schema"] == "hive-new" &&
-                       [true, false].include?(payload["created"]) &&
-                       safe_slug.match?(payload["slug"].to_s)
-                  warn "workflow-creator proof could not parse task creation output"
-                  exit 67
-                end
-                {
-                  "ordinal" => ordinal + 1,
-                  "kind" => "task_creation",
-                  "slug" => payload.fetch("slug"),
-                  "created" => payload.fetch("created")
-                }
-              end
-            File.open(result_path, File::WRONLY | File::CREAT | File::APPEND, 0o600) do |result|
-              result.puts(JSON.generate(record))
-              result.flush
-              result.fsync
-            end
-          end
-          exit(status.exitstatus || 1)
         RUBY
         File.open(path, File::WRONLY | File::CREAT | File::EXCL, 0o700) do |file|
           file.write(script)

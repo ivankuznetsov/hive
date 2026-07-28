@@ -330,20 +330,33 @@ input; neither the opposite named secret nor the generic input reaches the
 OpenClaw child. Provider credentials are exposed only to the authenticated
 proof step, not checkout, npm, Bundler, artifact, or attestation steps. The
 harness never copies host auth state, retains no model prose, scans every raw
-process-output byte before redaction, terminates and reaps the whole process
-group, and removes the private home before success.
+process-output byte before redaction, strips selected/opposite/generic provider
+credentials before every candidate invocation, and uses a Linux child-subreaper
+to terminate and reap process-group escapes, `setsid` descendants, and
+double-forks before removing the private home.
 
-The creator proof fetches exact OpenClaw `2026.7.1-beta.2` once with `npm pack`,
-validates the returned version and integrity metadata, independently computes
-the tarball's SHA-512 SRI, and installs only that verified local tarball after
-both identities match the workflow pin. It materializes the candidate skill
-archive with the Ruby safe-tar reader, creates a disposable project with the
-installed candidate, and exposes a distinct digest-bound audit gateway through
-OpenClaw's native `tools.exec.pathPrepend`. The gateway allows exactly nine
-semantic Hive commands. It binds `run` to the slug returned by the first
-idempotent `hive new`, requires the retry to return the same slug with
-`created=false`, and records only structural evidence. The smoke test is a thin
-adapter over this packaging-owned runner; it contains no substitute Hive.
+The creator proof installs exact OpenClaw `2026.7.1-beta.2` under Node
+`22.23.1` with `npm ci` from the committed lockfile. The lock is a closed
+306-package inventory: every non-root entry has an exact registry URL and
+SHA-512 integrity, the OpenClaw entry matches the reviewed SRI, and install
+scripts are disabled. A typed installation receipt binds that lock digest,
+private install root, exact OpenClaw realpath, and executable digest. A second
+receipt binds the candidate gem from the verified artifact manifest to its
+private install root and executable.
+
+The runner materializes the candidate skill archive with shared byte, entry,
+directory, depth, and inode budgets, creates a disposable project, and exposes
+a distinct digest-bound audit gateway through OpenClaw's native
+`tools.exec.pathPrepend`. OpenClaw is configured with only the `exec` tool and a
+deny-by-default approval file containing only the gateway executable. The
+gateway allows exactly nine semantic Hive commands, holds one serialized audit
+transaction through candidate completion, and records exit/signal/success
+receipts. It binds `run` to the slug returned by the first idempotent `hive
+new`, requires the retry to return the same slug with `created=false`, and
+records only structural evidence. The inspector rereads the retained policy,
+audit, actual authored tree, and every stage-task entry before attesting zero
+external actions. The smoke test remains a thin adapter over this
+packaging-owned runner; it contains no substitute Hive.
 
 The optional workflow refuses a non-main dispatch, a workflow revision not
 loaded from `refs/heads/main`, a

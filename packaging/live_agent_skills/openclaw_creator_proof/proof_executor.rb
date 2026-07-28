@@ -28,7 +28,8 @@ module HiveLiveAgentProof
           workspace: sandbox.workspace,
           audit_path: audit_path,
           result_path: gateway.result_path,
-          candidate_record: @candidate
+          candidate_record: @candidate,
+          configuration: configuration
         )
 
         verify_openclaw_version(environment, sandbox)
@@ -53,6 +54,7 @@ module HiveLiveAgentProof
           expected_hive_version: Hive::VERSION,
           canonical: canonical
         ).call
+        verify_candidate_installation!(verified.fetch("gem"))
         materialized_root = File.join(@root, "materialized-skills")
         records = SafeTarMaterializer.new(
           archive: verified.fetch("skills"),
@@ -66,6 +68,19 @@ module HiveLiveAgentProof
         [ verified, materialized_root ]
       rescue HiveLiveAgentProof::Error, Hive::AgentSkills::ValidationError => e
         fail_with!("artifact_verification", "candidate_artifacts_invalid", e.message)
+      end
+
+      def verify_candidate_installation!(verified_gem)
+        artifact_path = File.realpath(verified_gem)
+        artifact_digest = Digest::SHA256.file(artifact_path).hexdigest
+        return if @candidate.fetch("artifact_path") == artifact_path &&
+                  @candidate.fetch("artifact_sha256") == artifact_digest
+
+        fail_with!(
+          "artifact_verification",
+          "candidate_installation_receipt_mismatch",
+          "candidate installation receipt is not bound to the verified candidate gem"
+        )
       end
 
       def prepare_project
@@ -99,7 +114,10 @@ module HiveLiveAgentProof
           workspace: sandbox.workspace
         )
         gateway_path = gateway.install
-        unless gateway.candidate_record == @candidate &&
+        bound = %w[configured_path realpath sha256].all? do |key|
+          gateway.candidate_record.fetch(key) == @candidate.fetch(key)
+        end
+        unless bound &&
                gateway.gateway_record.fetch("realpath") != @candidate.fetch("realpath")
           fail_with!(
             "gateway", "gateway_identity_invalid",
@@ -120,6 +138,8 @@ module HiveLiveAgentProof
         config = configuration.write
         @document.merge!("openclaw_configuration" => {
           "sha256" => Digest::SHA256.file(configuration.config_path).hexdigest,
+          "approvals_sha256" =>
+            Digest::SHA256.file(configuration.approvals_path).hexdigest,
           "path_prepend" => config.dig("tools", "exec", "pathPrepend")
         })
         configuration
@@ -132,7 +152,6 @@ module HiveLiveAgentProof
           "OPENCLAW_STATE_DIR" => configuration.state_dir,
           "OPENCLAW_CONFIG_PATH" => configuration.config_path,
           "HIVE_CODEX_BIN" => codex_path,
-          "HIVE_PROVEN_HIVE_BIN" => @candidate.fetch("realpath"),
           "HIVE_LIVE_PROOF" => "1",
           "HIVE_SKIP_LLM_WIKI_SCHEDULER" => "1",
           "HIVE_SKIP_LLM_WIKI_SYSTEMCTL" => "1",
@@ -204,6 +223,8 @@ module HiveLiveAgentProof
           )
         end
         return result if result.fetch("status")&.success? &&
+                         result.dig("record", "timed_out") == false &&
+                         result.dig("record", "interrupted") == false &&
                          result.dig("record", "teardown", "status") == "passed"
 
         detail = result.fetch("stderr").to_s.scrub.lines.first(12).join
@@ -237,7 +258,8 @@ module HiveLiveAgentProof
           "creation_only_task_count" => creation.fetch("creation_only_task_count"),
           "task_count" => task.fetch("task_count"),
           "task" => task.fetch("task"),
-          "external_actions" => []
+          "effect_policy" => task.fetch("effect_policy"),
+          "external_actions" => task.fetch("external_actions")
         )
         @document.data
       end

@@ -427,7 +427,7 @@ module Hive
             admission_lock: ->(shared: true, &block) { block.call }
           )
           current = Hive::Modules::Migration::Report.build(
-            records: comparator.records,
+            record_source: comparator.each_record,
             reviewer: payload.fetch("reviewer"),
             reviewed_at: payload.fetch("reviewed_at"),
             generated_at: now

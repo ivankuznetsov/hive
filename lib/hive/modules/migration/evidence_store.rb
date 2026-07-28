@@ -1,6 +1,6 @@
-require "fileutils"
 require "json"
-require "hive/atomic_file"
+require "hive/managed_directory"
+require "hive/modules/migration/bounded_file_inventory"
 require "hive/modules/migration/patrol_evidence"
 
 module Hive
@@ -20,7 +20,6 @@ module Hive
         MAX_PAGE_SIZE = 256
         MAX_HISTORY_RECORDS = 4_096
         INDEX_SCHEMA = "hive-patrol-evidence-index".freeze
-        REPAIR_CURSOR = /\Arepair-v1-([0-9a-f]+)-([0-9a-f]+)-([0-9a-f]+)\z/
         ID_PATTERNS = {
           capture: /\Acap-[0-9a-f]{64}\z/,
           receipt: /\Areceipt-[0-9a-f]{64}\z/,
@@ -32,12 +31,15 @@ module Hive
 
         def initialize(root:)
           @root = File.expand_path(root)
-          prepare_directory(captures_root)
-          prepare_directory(receipts_root)
-          prepare_directory(indexes_root)
-          prepare_directory(occurrence_indexes_root)
-          prepare_directory(intent_indexes_root)
-        rescue SystemCallError => e
+          @managed_directory = Hive::ManagedDirectory.new(
+            root: @root,
+            label: "patrol evidence"
+          )
+          @managed_directory.prepare!
+          %w[
+            captures receipts indexes indexes/occurrences indexes/intents
+          ].each { |relative| @managed_directory.ensure_directory(relative) }
+        rescue Hive::ConfigError, SystemCallError => e
           raise Hive::ConfigError, "patrol evidence store is unavailable: #{e.message}"
         end
 
@@ -127,21 +129,16 @@ module Hive
         def intent_indexes_root = File.join(indexes_root, "intents")
         def lock_path = File.join(root, "evidence.lock")
 
-        def prepare_directory(path)
-          FileUtils.mkdir_p(path, mode: 0o700)
-          File.chmod(0o700, path)
-        end
-
         def append(directory, identity, record)
           bytes = canonical(record.to_h)
           path = File.join(directory, "#{identity}.json")
           with_lock do
-            if File.file?(path)
-              existing = read_record(
-                path,
-                expected_id: identity,
-                type: record.class
-              )
+            existing = read_record(
+              path,
+              expected_id: identity,
+              type: record.class
+            )
+            if existing
               unless canonical(existing.to_h) == bytes
                 raise Hive::ConfigError,
                       "patrol evidence identity conflicts with existing bytes"
@@ -150,8 +147,9 @@ module Hive
               return EvidenceAppend.new(status: :duplicate, record: existing)
             end
 
-            Hive::AtomicFile.write(path, bytes, mode: 0o600)
-            Hive::AtomicFile.fsync_directory(directory)
+            @managed_directory.atomic_write(
+              @managed_directory.relative_path(path), bytes, mode: 0o600
+            )
             update_receipt_indexes_unlocked(record) if record.is_a?(EffectReceipt)
           end
           EvidenceAppend.new(status: :created, record: record)
@@ -163,13 +161,7 @@ module Hive
 
         def records(directory, type:)
           with_lock(shared: true) do
-            paths = bounded_paths(
-              directory, limit: MAX_HISTORY_RECORDS + 1, cursor: nil
-            )
-            if paths.size > MAX_HISTORY_RECORDS
-              raise Hive::ConfigError,
-                    "patrol evidence history exceeds the bounded read limit"
-            end
+            paths = bounded_paths(directory)
             paths.map do |path|
               identity = File.basename(path, ".json")
               read_record(path, expected_id: identity, type: type)
@@ -188,7 +180,9 @@ module Hive
           max_bytes = type == PatrolCapture ?
             PatrolEvidence::MAX_CAPTURE_BYTES :
             PatrolEvidence::MAX_RECEIPT_BYTES
-          bytes = bounded_regular_read(path, max_bytes: max_bytes)
+          bytes = bounded_regular_read(path, max_bytes: max_bytes, missing: true)
+          return nil unless bytes
+
           data = JSON.parse(bytes)
           raise Hive::ConfigError, "patrol evidence is malformed" unless bytes == canonical(data)
 
@@ -197,8 +191,6 @@ module Hive
           raise Hive::ConfigError, "patrol evidence is malformed" unless identity == expected_id.to_s
 
           record
-        rescue Errno::ENOENT
-          nil
         rescue JSON::ParserError, EncodingError, TypeError, ArgumentError
           raise Hive::ConfigError, "patrol evidence is malformed"
         rescue Hive::ConfigError => e
@@ -247,16 +239,23 @@ module Hive
             end
             index = index.merge("receipt_ids" => ids)
             path = index_path(kind, identity)
-            Hive::AtomicFile.write(path, canonical(index), mode: 0o600)
-            Hive::AtomicFile.fsync_directory(File.dirname(path))
+            @managed_directory.atomic_write(
+              @managed_directory.relative_path(path),
+              canonical(index),
+              mode: 0o600
+            )
           end
         end
 
         def read_index(kind, identity)
           path = index_path(kind, identity)
           bytes = bounded_regular_read(
-            path, max_bytes: PatrolEvidence::MAX_RECEIPT_BYTES
+            path,
+            max_bytes: PatrolEvidence::MAX_RECEIPT_BYTES,
+            missing: true
           )
+          return nil unless bytes
+
           data = JSON.parse(bytes)
           valid = bytes == canonical(data) &&
                   data.is_a?(Hash) &&
@@ -276,8 +275,6 @@ module Hive
           raise Hive::ConfigError, "patrol evidence index is malformed" unless valid
 
           data
-        rescue Errno::ENOENT
-          nil
         rescue JSON::ParserError, EncodingError, TypeError
           raise Hive::ConfigError, "patrol evidence index is malformed"
         end
@@ -313,138 +310,71 @@ module Hive
           raise Hive::ConfigError, "patrol evidence page limit is malformed"
         end
 
-        # Directory positions are opaque filesystem cookies, so the cursor is
-        # bound to the exact receipt directory device/inode that issued it.
-        # Receipt files are append-only: additions between pages are already
-        # indexed by #append_receipt and cannot invalidate repair of the older
-        # files. Each call reads at most +limit + 1+ directory entries and at
-        # most +limit+ receipt documents; no history-wide name allocation or
-        # rescan hides behind the paged API.
+        # The inventory cursor binds a restart to one lexicographic high-water
+        # mark instead of a filesystem-specific directory offset. Appends above
+        # that mark are indexed by #append_receipt; mutations inside the frozen
+        # inventory invalidate the cursor rather than silently skipping work.
         def receipt_repair_page(limit:, cursor:)
-          directory = File.lstat(receipts_root)
-          unless directory.directory? && !directory.symlink?
-            raise Hive::ConfigError, "patrol evidence is malformed"
-          end
-          offset = repair_offset(
-            cursor, device: directory.dev, inode: directory.ino
+          page = inventory_for(
+            receipts_root,
+            type: :receipt,
+            cursor_prefix: "repair-v2",
+            malformed_message: "patrol evidence repair cursor is malformed"
+          ).page(limit: limit, cursor: cursor)
+          paths = page.names.map do |name|
+            File.join(receipts_root, name)
+          end.freeze
+          [ paths, page.next_cursor ]
+        end
+
+        def bounded_paths(directory)
+          kind = directory == captures_root ? :capture : :receipt
+          inventory = inventory_for(
+            directory,
+            type: kind,
+            cursor_prefix: "evidence-#{kind}-v1",
+            malformed_message: "patrol evidence is malformed"
           )
-          paths = []
-          next_cursor = nil
-          Dir.open(receipts_root) do |entries|
-            entries.seek(offset) if offset
-            skip_directory_pseudo_entries(entries) unless offset
-            limit.times do
-              name = entries.read
-              break unless name
-
-              paths << receipt_repair_path(name)
-            end
-            position = entries.tell
-            if entries.read
-              next_cursor = repair_cursor(
-                device: directory.dev, inode: directory.ino,
-                offset: position
-              )
-            end
+          snapshot = inventory.snapshot
+          inventory.each_name(
+            page_size: MAX_PAGE_SIZE,
+            snapshot: snapshot
+          ).map do |name|
+            File.join(directory, name)
           end
-          [ paths.freeze, next_cursor ]
+        end
+
+        def inventory_for(directory, type:, cursor_prefix:, malformed_message:)
+          identity_pattern = ID_PATTERNS.fetch(type)
+          Hive::Modules::Migration::BoundedFileInventory.new(
+            directory: @managed_directory,
+            relative: @managed_directory.relative_path(directory),
+            filename_pattern: /\A#{identity_pattern.source.delete_prefix('\A').delete_suffix('\z')}\.json\z/,
+            max_entries: MAX_HISTORY_RECORDS,
+            cursor_prefix: cursor_prefix,
+            malformed_message: malformed_message,
+            overflow_message:
+              "patrol evidence history exceeds the bounded read limit"
+          )
+        end
+
+        def bounded_regular_read(path, max_bytes:, missing: false)
+          @managed_directory.read(
+            @managed_directory.relative_path(path),
+            max_bytes: max_bytes,
+            missing: missing
+          )
         rescue Hive::ConfigError
-          raise
-        rescue SystemCallError, IOError, ArgumentError
-          raise Hive::ConfigError, "patrol evidence repair cursor is malformed"
-        end
-
-        def skip_directory_pseudo_entries(entries)
-          %w[. ..].each do |expected|
-            observed = entries.read
-            unless observed == expected
-              raise Hive::ConfigError, "patrol evidence is malformed"
-            end
-          end
-        end
-
-        def receipt_repair_path(name)
-          identity = name.to_s.delete_suffix(".json")
-          unless name == "#{identity}.json" &&
-                 ID_PATTERNS.fetch(:receipt).match?(identity)
-            raise Hive::ConfigError, "patrol evidence is malformed"
-          end
-          File.join(receipts_root, name)
-        end
-
-        def repair_cursor(device:, inode:, offset:)
-          "repair-v1-#{Integer(device).to_s(16)}-" \
-            "#{Integer(inode).to_s(16)}-#{Integer(offset).to_s(16)}"
-        end
-
-        def repair_offset(cursor, device:, inode:)
-          return nil if cursor.nil?
-
-          match = REPAIR_CURSOR.match(cursor.to_s)
-          unless match &&
-                 Integer(match[1], 16) == device &&
-                 Integer(match[2], 16) == inode
-            raise Hive::ConfigError,
-                  "patrol evidence repair cursor is malformed"
-          end
-          offset = Integer(match[3], 16)
-          unless offset.positive? && offset <= (2**63 - 1)
-            raise Hive::ConfigError,
-                  "patrol evidence repair cursor is malformed"
-          end
-          offset
-        rescue ArgumentError, TypeError
-          raise Hive::ConfigError,
-                "patrol evidence repair cursor is malformed"
-        end
-
-        def bounded_paths(directory, limit:, cursor:)
-          names = []
-          Dir.each_child(directory) do |name|
-            next unless name.end_with?(".json")
-            identity = name.delete_suffix(".json")
-            next if cursor && identity <= cursor
-
-            names << name
-            if names.size > MAX_HISTORY_RECORDS + 1
-              raise Hive::ConfigError,
-                    "patrol evidence history exceeds the bounded read limit"
-            end
-          end
-          names.sort.first(limit).map { |name| File.join(directory, name) }
-        rescue SystemCallError
           raise Hive::ConfigError, "patrol evidence is malformed"
         end
 
-        def bounded_regular_read(path, max_bytes:)
-          before = File.lstat(path)
-          unless before.file? && !before.symlink? && before.size <= max_bytes
-            raise Hive::ConfigError, "patrol evidence is malformed"
-          end
-          flags = File::RDONLY
-          flags |= File::NOFOLLOW if defined?(File::NOFOLLOW)
-          File.open(path, flags) do |io|
-            current = io.stat
-            unless current.file? && current.dev == before.dev &&
-                   current.ino == before.ino
-              raise Hive::ConfigError, "patrol evidence is malformed"
-            end
-            bytes = io.read(max_bytes + 1)
-            if bytes.nil? || bytes.bytesize > max_bytes
-              raise Hive::ConfigError, "patrol evidence is malformed"
-            end
-            bytes
-          end
-        end
-
         def with_lock(shared: false)
-          File.open(lock_path, File::RDWR | File::CREAT, 0o600) do |lock|
-            lock.flock(shared ? File::LOCK_SH : File::LOCK_EX)
-            yield
-          ensure
-            lock&.flock(File::LOCK_UN)
-          end
-        rescue SystemCallError, IOError => e
+          @managed_directory.with_lock(
+            @managed_directory.relative_path(lock_path),
+            shared: shared
+          ) { yield }
+        rescue Hive::ManagedDirectory::UnsafeError,
+               SystemCallError, IOError => e
           raise Hive::ConfigError, "patrol evidence store lock is unavailable: #{e.message}"
         end
 

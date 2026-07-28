@@ -138,7 +138,7 @@ class ModulesMigrationEvidenceStoreTest < Minitest::Test
         cursor = page.next_cursor
         break if page.complete
 
-        assert_match(/\Arepair-v1-/, cursor)
+        assert_match(/\Arepair-v2\./, cursor)
       end
 
       assert_nil cursor
@@ -195,7 +195,7 @@ class ModulesMigrationEvidenceStoreTest < Minitest::Test
       error = assert_raises(Hive::ConfigError) do
         store.append_capture(capture_for(recorded_at: NOW))
       end
-      assert_match(/store lock is unavailable/, error.message)
+      assert_equal "patrol evidence is malformed", error.message
 
       unserializable = Object.new
       unserializable.define_singleton_method(:to_h) do
@@ -257,12 +257,7 @@ class ModulesMigrationEvidenceStoreTest < Minitest::Test
       end
       assert_equal "patrol evidence is malformed", error.message
 
-      store.define_singleton_method(:bounded_paths) do |*|
-        Array.new(
-          Hive::Modules::Migration::EvidenceStore::MAX_HISTORY_RECORDS + 1,
-          "/unused"
-        )
-      end
+      File.write(File.join(root, "captures", "unexpected.json"), "{}")
       error = assert_raises(Hive::ConfigError) do
         store.send(
           :records,
@@ -270,7 +265,7 @@ class ModulesMigrationEvidenceStoreTest < Minitest::Test
           type: Hive::Modules::Migration::PatrolCapture
         )
       end
-      assert_match(/history exceeds/, error.message)
+      assert_equal "patrol evidence is malformed", error.message
     end
   end
 
@@ -327,7 +322,7 @@ class ModulesMigrationEvidenceStoreTest < Minitest::Test
     end
   end
 
-  def test_repair_rejects_non_directories_names_and_invalid_offsets
+  def test_repair_rejects_non_directories_names_and_invalid_cursors
     with_tmp_dir do |root|
       store = Hive::Modules::Migration::EvidenceStore.new(root: root)
       receipts_root = File.join(root, "receipts")
@@ -341,53 +336,23 @@ class ModulesMigrationEvidenceStoreTest < Minitest::Test
         store.repair_receipt_indexes
       end
       FileUtils.mkdir_p(receipts_root)
+      File.write(File.join(receipts_root, "unexpected"), "{}")
+      assert_raises(Hive::ConfigError) do
+        store.repair_receipt_indexes
+      end
+      File.unlink(File.join(receipts_root, "unexpected"))
 
-      reader = Object.new
-      reader.define_singleton_method(:read) { "unexpected" }
       assert_raises(Hive::ConfigError) do
-        store.send(:skip_directory_pseudo_entries, reader)
-      end
-      assert_raises(Hive::ConfigError) do
-        store.send(:receipt_repair_path, "../receipt.json")
+        store.repair_receipt_indexes(cursor: "repair-v2.bad")
       end
 
-      stat = File.lstat(receipts_root)
-      zero_cursor = store.send(
-        :repair_cursor,
-        device: stat.dev,
-        inode: stat.ino,
-        offset: 0
-      )
-      assert_raises(Hive::ConfigError) do
-        store.send(
-          :repair_offset,
-          zero_cursor,
-          device: stat.dev,
-          inode: stat.ino
-        )
-      end
       hostile_cursor = Object.new
       hostile_cursor.define_singleton_method(:to_s) do
         raise ArgumentError, "not text"
       end
       assert_raises(Hive::ConfigError) do
-        store.send(
-          :repair_offset,
-          hostile_cursor,
-          device: stat.dev,
-          inode: stat.ino
-        )
+        store.repair_receipt_indexes(cursor: hostile_cursor)
       end
-
-      huge_cursor = store.send(
-        :repair_cursor,
-        device: stat.dev,
-        inode: stat.ino,
-        offset: 2**62
-      )
-      page = store.repair_receipt_indexes(limit: 1, cursor: huge_cursor)
-      assert page.complete
-      assert_equal 0, page.processed
     end
   end
 
@@ -397,21 +362,8 @@ class ModulesMigrationEvidenceStoreTest < Minitest::Test
       assert_raises(Hive::ConfigError) do
         store.send(
           :bounded_paths,
-          File.join(root, "missing"),
-          limit: 1,
-          cursor: nil
+          File.join(root, "missing")
         )
-      end
-
-      crowded = File.join(root, "crowded")
-      FileUtils.mkdir_p(crowded)
-      (
-        Hive::Modules::Migration::EvidenceStore::MAX_HISTORY_RECORDS + 2
-      ).times do |index|
-        FileUtils.touch(File.join(crowded, "#{index}.json"))
-      end
-      assert_raises(Hive::ConfigError) do
-        store.send(:bounded_paths, crowded, limit: 1, cursor: nil)
       end
 
       assert_raises(Hive::ConfigError) do
@@ -424,10 +376,7 @@ class ModulesMigrationEvidenceStoreTest < Minitest::Test
 
       path = File.join(root, "race.json")
       File.write(path, "{}")
-      before = File.lstat(path)
-      fake_stat = Data.define(:dev, :ino) do
-        def file? = true
-      end.new(dev: before.dev, ino: before.ino + 1)
+      fake_stat = File.stat(__FILE__)
       fake_io = Object.new
       fake_io.define_singleton_method(:stat) { fake_stat }
       with_file_open_override(path, fake_io) do

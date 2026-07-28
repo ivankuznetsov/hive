@@ -384,6 +384,11 @@ the test harness, feed it from these finalized occurrences without consulting
 EvidenceStore for recovery, and produce the elapsed production qualification
 set. Until that proof exists, Patrol Effect Evidence remains a catalog
 `candidate`; neither module mutator cutover nor boundary promotion is complete.
+The local storage contract now covers portable bounded repair/history cursors,
+streamed report aggregation, managed-component and lock symlink refusal, and
+bounded no-follow v1 archives. It is a same-user integrity/custody guard, not a
+hostile-process sandbox; the U3 live qualification still has to prove the
+operational evidence stream under the supported deployment filesystems.
 
 Native module workflow targets also remain execution-disabled. Activation
 validates and snapshots their package files, but safe admission still needs

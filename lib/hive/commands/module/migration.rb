@@ -42,11 +42,13 @@ module Hive
           reviewer = @reviewer.to_s.strip
           raise Hive::ConfigError, "module migration report requires --reviewer" if reviewer.empty?
 
-          records = comparator.records.select do |record|
+          record_source = comparator.each_record.lazy.select do |record|
             Time.iso8601(record.fetch("recorded_at")) >= Time.iso8601(state.fetch("shadow_started_at"))
           end
           report = Hive::Modules::Migration::Report.build(
-            records: records, reviewer: reviewer, reviewed_at: Time.now.utc
+            record_source: record_source,
+            reviewer: reviewer,
+            reviewed_at: Time.now.utc
           )
           report.write(report_path)
           emit(report.payload, "Shadow report: #{report.eligible? ? 'eligible' : 'blocked'}")

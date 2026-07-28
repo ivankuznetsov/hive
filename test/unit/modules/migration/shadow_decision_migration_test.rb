@@ -24,7 +24,8 @@ class ModulesMigrationShadowDecisionMigrationTest < Minitest::Test
       archive = File.join(root, "archive", "v1", "patrol", File.basename(path))
       assert_equal bytes, File.binread(archive)
 
-      migrated = Hive::Modules::Migration::ShadowComparator.new(root: root).records.fetch(0)
+      migrated = Hive::Modules::Migration::ShadowComparator.new(root: root)
+        .each_record.to_a.fetch(0)
       assert_equal 2, migrated.fetch("schema_version")
       refute migrated.fetch("comparable")
       assert_nil migrated.fetch("legacy_capture")
@@ -52,7 +53,8 @@ class ModulesMigrationShadowDecisionMigrationTest < Minitest::Test
       File.write(path, Hive::WorkflowPackage::CanonicalJSON.generate(v1_record))
 
       error = assert_raises(Hive::ConfigError) do
-        Hive::Modules::Migration::ShadowComparator.new(root: root).records
+        Hive::Modules::Migration::ShadowComparator.new(root: root)
+          .each_record.to_a
       end
       assert_equal "module shadow evidence is malformed", error.message
     end
@@ -71,6 +73,37 @@ class ModulesMigrationShadowDecisionMigrationTest < Minitest::Test
         migrate(root)
       end
       assert_equal "module shadow v1 archive conflicts with existing bytes", error.message
+    end
+  end
+
+  def test_migration_rejects_symlinked_archive_files_and_directories
+    with_tmp_dir do |root|
+      path = File.join(root, "patrol", "#{'a' * 64}.json")
+      archive = File.join(root, "archive", "v1", "patrol", File.basename(path))
+      outside = File.join(root, "outside")
+      FileUtils.mkdir_p(File.dirname(path))
+      FileUtils.mkdir_p(File.dirname(archive))
+      bytes = Hive::WorkflowPackage::CanonicalJSON.generate(v1_record)
+      File.write(path, bytes)
+      File.write(outside, bytes)
+      File.symlink(outside, archive)
+
+      assert_raises(Hive::ConfigError) { migrate(root) }
+      assert_equal bytes, File.binread(outside)
+    end
+
+    with_tmp_dir do |root|
+      path = File.join(root, "patrol", "#{'a' * 64}.json")
+      archive_parent = File.join(root, "archive", "v1")
+      outside = File.join(root, "outside")
+      FileUtils.mkdir_p(File.dirname(path))
+      FileUtils.mkdir_p(File.dirname(archive_parent))
+      FileUtils.mkdir_p(File.join(outside, "patrol"))
+      File.write(path, Hive::WorkflowPackage::CanonicalJSON.generate(v1_record))
+      File.symlink(outside, archive_parent)
+
+      assert_raises(Hive::ConfigError) { migrate(root) }
+      assert_empty Dir.children(File.join(outside, "patrol"))
     end
   end
 
@@ -115,7 +148,7 @@ class ModulesMigrationShadowDecisionMigrationTest < Minitest::Test
       assert_equal 1, result.already_current
       assert_equal [ 2, 2 ],
                    Hive::Modules::Migration::ShadowComparator.new(root: root)
-                     .records.map { |record| record.fetch("schema_version") }
+                     .each_record.map { |record| record.fetch("schema_version") }
       assert File.file?(
         File.join(root, "migrations", "shadow-decision-v2.json")
       )
@@ -150,6 +183,17 @@ class ModulesMigrationShadowDecisionMigrationTest < Minitest::Test
 
   def test_migration_wraps_missing_stamp_malformed_json_and_invalid_v1
     with_tmp_dir do |root|
+      assert_raises(Hive::ConfigError) do
+        Hive::Modules::Migration::ShadowDecisionMigration.ensure_complete!(
+          root: root
+        )
+      end
+    end
+
+    with_tmp_dir do |root|
+      stamp = File.join(root, "migrations", "shadow-decision-v2.json")
+      FileUtils.mkdir_p(File.dirname(stamp))
+      File.write(stamp, "{bad")
       assert_raises(Hive::ConfigError) do
         Hive::Modules::Migration::ShadowDecisionMigration.ensure_complete!(
           root: root
@@ -306,6 +350,7 @@ class ModulesMigrationShadowDecisionMigrationTest < Minitest::Test
         Hive::Modules::Migration::ShadowComparator::MAX_RECORD_BYTES + 1
       )
       proxy = Object.new
+      proxy.define_singleton_method(:stat) { File.lstat(path) }
       proxy.define_singleton_method(:read) { |_limit| oversized }
       original = File.method(:open)
       replacement = lambda do |candidate, *args, **kwargs, &block|
@@ -327,7 +372,44 @@ class ModulesMigrationShadowDecisionMigrationTest < Minitest::Test
     end
   end
 
+  def test_migration_inventory_rejects_combined_excess_before_body_reads
+    with_tmp_dir do |root|
+      %w[patrol architecture-patrol].each_with_index do |module_name, index|
+        directory = File.join(root, module_name)
+        FileUtils.mkdir_p(directory)
+        File.write(
+          File.join(directory, "#{index.to_s(16).rjust(64, '0')}.json"),
+          "unread"
+        )
+      end
+      migrator = Hive::Modules::Migration::ShadowDecisionMigration.new(
+        root: root,
+        quiescence_probe: -> { :quiescent }
+      )
+
+      with_constant(
+        Hive::Modules::Migration::ShadowComparator,
+        :MAX_RECORDS,
+        1
+      ) do
+        assert_raises(Hive::ConfigError) do
+          migrator.send(:evidence_paths).to_a
+        end
+      end
+    end
+  end
+
   private
+
+  def with_constant(owner, name, replacement)
+    original = owner.const_get(name, false)
+    owner.send(:remove_const, name)
+    owner.const_set(name, replacement)
+    yield
+  ensure
+    owner.send(:remove_const, name) if owner.const_defined?(name, false)
+    owner.const_set(name, original)
+  end
 
   def migrate(root)
     Hive::Modules::Migration::ShadowDecisionMigration.migrate!(

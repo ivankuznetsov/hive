@@ -78,7 +78,10 @@ class ModuleMigrationIntegrationTest < Minitest::Test
       refute report.fetch("eligible")
       assert_includes report.fetch("blockers"), "patrol:decision_count_below_10"
       assert_includes report.fetch("blockers"), "architecture-patrol:decision_count_below_10"
-      assert_schema("hive-module-shadow-decision", comparator.records.first)
+      assert_schema(
+        "hive-module-shadow-decision",
+        comparator.each_record.first
+      )
       assert_schema("hive-module-migration-report", report)
 
       assert_raises(Hive::ConfigError) do

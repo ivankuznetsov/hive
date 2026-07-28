@@ -1,10 +1,10 @@
 require "digest"
 require "json"
 require "time"
-require "hive/atomic_file"
+require "hive/managed_directory"
+require "hive/modules/migration/bounded_file_inventory"
 require "hive/modules/migration/patrol_evidence"
 require "hive/workflow_package/canonical_json"
-require "hive/workflow_package/mutation_lock"
 
 module Hive
   module Modules
@@ -12,9 +12,13 @@ module Hive
       # Writes only namespaced comparison evidence. Recovery never consults
       # these records; they are immutable observational inputs to qualification.
       class ShadowComparator
+        class IdentityConflict < Hive::ConfigError; end
+
+        ShadowPage = Data.define(:records, :next_cursor)
         MODULES = PatrolEvidence::MODULES
         MAX_RECORD_BYTES = 512 * 1024
         MAX_RECORDS = 4_096
+        MAX_PAGE_SIZE = 256
         EVIDENCE_SOURCES = %w[legacy_mutator_capture archived_v1].freeze
         IGNORED_KEYS = %w[duration_ms engine owner recorded_at representation].freeze
         EXPECTED_KEYS = %w[
@@ -31,11 +35,11 @@ module Hive
                        admission_lock: nil)
           @root = File.expand_path(root)
           @clock = clock
-          @admission_lock = admission_lock || lambda do |shared: true, &block|
-            Hive::WorkflowPackage::MutationLock.with_lock(
-              File.dirname(@root), shared: shared, &block
-            )
-          end
+          @managed_directory = Hive::ManagedDirectory.new(
+            root: @root,
+            label: "module shadow evidence"
+          )
+          @admission_lock = admission_lock || default_admission_lock
         end
 
         def record!(module_name:, trigger:, module_decision:, configuration_digest:,
@@ -94,19 +98,49 @@ module Hive
           end
         end
 
-        def records(module_name = nil)
+        def records_page(module_name:, limit: MAX_PAGE_SIZE, cursor: nil)
+          module_name = validated_module_name(module_name)
+          limit = validated_page_size(limit)
           @admission_lock.call(shared: true) do
-            paths = if module_name
-              Dir.glob(File.join(root, module_name.to_s, "*.json"))
-            else
-              MODULES.flat_map { |name| Dir.glob(File.join(root, name, "*.json")) }
-            end
-            if paths.size > MAX_RECORDS
-              raise Hive::ConfigError,
-                    "module shadow evidence exceeds the bounded read limit"
-            end
-            paths.sort.map { |path| read(path) }.freeze
+            page = inventory_for(module_name).page(
+              limit: limit,
+              cursor: cursor
+            )
+            ShadowPage.new(
+              records: page.names.map do |name|
+                read(File.join(root, module_name, name))
+              end.freeze,
+              next_cursor: page.next_cursor
+            ).freeze
           end
+        end
+
+        def each_record(module_name = nil, page_size: MAX_PAGE_SIZE)
+          return enum_for(
+            __method__, module_name, page_size: page_size
+          ) unless block_given?
+
+          page_size = validated_page_size(page_size)
+          modules = module_name ?
+            [ validated_module_name(module_name) ] :
+            MODULES.sort
+          @admission_lock.call(shared: true) do
+            inventories = modules.to_h do |name|
+              inventory = inventory_for(name)
+              [ name, [ inventory, inventory.snapshot ] ]
+            end
+            total = inventories.values.sum { |_inventory, snapshot| snapshot.count }
+            history_overflow! if total > MAX_RECORDS
+            inventories.each do |name, (inventory, snapshot)|
+              inventory.each_name(
+                page_size: page_size,
+                snapshot: snapshot
+              ) do |filename|
+                yield read(File.join(root, name, filename))
+              end
+            end
+          end
+          nil
         end
 
         def validate_record!(value, expected_module: nil,
@@ -124,6 +158,57 @@ module Hive
         end
 
         private
+
+        def default_admission_lock
+          lock_directory = Hive::ManagedDirectory.new(
+            root: File.dirname(root),
+            label: "module migration lock"
+          )
+          lambda do |shared: true, &block|
+            lock_directory.with_lock(
+              ".mutation.lock",
+              shared: shared,
+              &block
+            )
+          end
+        end
+
+        def validated_module_name(value)
+          name = value.to_s
+          return name if MODULES.include?(name)
+
+          raise Hive::ConfigError, "module shadow identity is malformed"
+        end
+
+        def validated_page_size(value)
+          size = Integer(value)
+          return size if size.positive? && size <= MAX_PAGE_SIZE
+
+          raise Hive::ConfigError,
+                "module shadow evidence page limit is malformed"
+        rescue ArgumentError, TypeError
+          raise Hive::ConfigError,
+                "module shadow evidence page limit is malformed"
+        end
+
+        def inventory_for(module_name)
+          Hive::Modules::Migration::BoundedFileInventory.new(
+            directory: @managed_directory,
+            relative: module_name,
+            filename_pattern: /\A[0-9a-f]{64}\.json\z/,
+            max_entries: MAX_RECORDS,
+            cursor_prefix: "shadow-v1",
+            malformed_message: "module shadow evidence is malformed",
+            overflow_message:
+              "module shadow evidence exceeds the bounded read limit",
+            missing: true
+          )
+        end
+
+        def history_overflow!
+          raise Hive::ConfigError,
+                "module shadow evidence exceeds the bounded read limit"
+        end
 
         def validate_identity!(module_name, configuration_digest)
           unless MODULES.include?(module_name.to_s) &&
@@ -206,44 +291,38 @@ module Hive
         def persist(record)
           path = File.join(root, record.fetch("module"), "#{record.fetch('decision_id')}.json")
           bytes = canonical(record)
-          if File.file?(path)
-            existing = read(path)
+          relative = @managed_directory.relative_path(path)
+          existing_bytes = @managed_directory.read(
+            relative,
+            max_bytes: MAX_RECORD_BYTES,
+            missing: true
+          )
+          if existing_bytes
+            existing = read(path, bytes: existing_bytes)
             return existing if canonical(existing) == bytes ||
                                existing.merge("recorded_at" => record.fetch("recorded_at")) == record
-            raise Hive::ConfigError,
+            raise IdentityConflict,
                   "module shadow decision identity conflicts with existing evidence"
           end
-          Hive::AtomicFile.write(path, bytes, mode: 0o600)
-          Hive::AtomicFile.fsync_directory(File.dirname(path))
+          @managed_directory.atomic_write(relative, bytes, mode: 0o600)
           record
+        rescue IdentityConflict
+          raise
+        rescue Hive::ConfigError
+          raise Hive::ConfigError, "module shadow evidence is malformed"
         end
 
-        def read(path)
+        def read(path, bytes: nil)
           module_name = File.basename(File.dirname(path))
           decision_id = File.basename(path, ".json")
           unless MODULES.include?(module_name) &&
                  decision_id.match?(/\A[0-9a-f]{64}\z/)
             raise Hive::ConfigError, "module shadow evidence is malformed"
           end
-          before = File.lstat(path)
-          unless before.file? && !before.symlink? &&
-                 before.size <= MAX_RECORD_BYTES
-            raise Hive::ConfigError, "module shadow evidence is malformed"
-          end
-          flags = File::RDONLY
-          flags |= File::NOFOLLOW if defined?(File::NOFOLLOW)
-          bytes = File.open(path, flags) do |io|
-            current = io.stat
-            unless current.file? && current.dev == before.dev &&
-                   current.ino == before.ino
-              raise Hive::ConfigError, "module shadow evidence is malformed"
-            end
-            value = io.read(MAX_RECORD_BYTES + 1)
-            if value.nil? || value.bytesize > MAX_RECORD_BYTES
-              raise Hive::ConfigError, "module shadow evidence is malformed"
-            end
-            value
-          end
+          bytes ||= @managed_directory.read(
+            @managed_directory.relative_path(path),
+            max_bytes: MAX_RECORD_BYTES
+          )
           data = JSON.parse(bytes)
           unless bytes == canonical(data)
             raise Hive::ConfigError, "module shadow evidence is malformed"
@@ -253,7 +332,8 @@ module Hive
             expected_module: module_name,
             expected_decision_id: decision_id
           )
-        rescue JSON::ParserError, EncodingError, SystemCallError
+        rescue JSON::ParserError, EncodingError, SystemCallError,
+               Hive::ConfigError
           raise Hive::ConfigError, "module shadow evidence is malformed"
         end
 

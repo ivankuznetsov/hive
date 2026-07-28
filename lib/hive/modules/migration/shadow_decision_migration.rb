@@ -1,11 +1,10 @@
 require "digest"
-require "fileutils"
 require "json"
 require "time"
-require "hive/atomic_file"
+require "hive/managed_directory"
+require "hive/modules/migration/bounded_file_inventory"
 require "hive/modules/migration/shadow_comparator"
 require "hive/workflow_package/canonical_json"
-require "hive/workflow_package/mutation_lock"
 
 module Hive
   module Modules
@@ -37,6 +36,14 @@ module Hive
         def initialize(root:, quiescence_probe:)
           @root = File.expand_path(root)
           @quiescence_probe = quiescence_probe
+          @managed_directory = Hive::ManagedDirectory.new(
+            root: @root,
+            label: "module shadow migration"
+          )
+          @lock_directory = Hive::ManagedDirectory.new(
+            root: File.dirname(@root),
+            label: "module migration lock"
+          )
         end
 
         def migrate!
@@ -47,7 +54,8 @@ module Hive
               raise Hive::ConfigError,
                     "module shadow v1 evidence migration requires quiescence"
             end
-            return completed_result if File.file?(stamp_path)
+            stamp = bounded_read(stamp_path, missing: true)
+            return completed_result(bytes: stamp) if stamp
 
             evidence_paths.each do |path|
               bytes = bounded_read(path)
@@ -62,8 +70,11 @@ module Hive
               validate_v1!(data, bytes)
               checkpoint!(path, bytes, "pending")
               archive_v1!(data.fetch("module"), path, bytes)
-              Hive::AtomicFile.write(path, canonical(v2_record(data, bytes)), mode: 0o600)
-              Hive::AtomicFile.fsync_directory(File.dirname(path))
+              @managed_directory.atomic_write(
+                @managed_directory.relative_path(path),
+                canonical(v2_record(data, bytes)),
+                mode: 0o600
+              )
               checkpoint!(path, bytes, "migrated")
               migrated += 1
             end
@@ -79,8 +90,8 @@ module Hive
         end
 
         def ensure_complete!
-          Hive::WorkflowPackage::MutationLock.with_lock(
-            File.dirname(root), shared: true
+          @lock_directory.with_lock(
+            ".mutation.lock", shared: true
           ) { completed_result }
         end
 
@@ -89,9 +100,26 @@ module Hive
         attr_reader :root
 
         def evidence_paths
-          ShadowComparator::MODULES.flat_map do |module_name|
-            Dir.glob(File.join(root, module_name, "*.json"))
-          end.sort
+          return enum_for(__method__) unless block_given?
+
+          inventories = ShadowComparator::MODULES.sort.to_h do |module_name|
+            inventory = evidence_inventory(module_name)
+            [ module_name, [ inventory, inventory.snapshot ] ]
+          end
+          total = inventories.values.sum { |_inventory, snapshot| snapshot.count }
+          if total > ShadowComparator::MAX_RECORDS
+            raise Hive::ConfigError,
+                  "module shadow evidence exceeds the bounded read limit"
+          end
+          inventories.each do |module_name, (inventory, snapshot)|
+            inventory.each_name(
+              page_size: ShadowComparator::MAX_PAGE_SIZE,
+              snapshot: snapshot
+            ) do |filename|
+              yield File.join(root, module_name, filename)
+            end
+          end
+          nil
         end
 
         def stamp_path
@@ -102,8 +130,8 @@ module Hive
           File.join(root, "migrations", "shadow-decision-v2-checkpoint.json")
         end
 
-        def completed_result
-          bytes = bounded_read(stamp_path)
+        def completed_result(bytes: nil)
+          bytes ||= bounded_read(stamp_path)
           data = JSON.parse(bytes)
           expected = %w[already_current migrated schema schema_version status]
           valid = bytes == canonical(data) && data.keys.sort == expected &&
@@ -124,10 +152,8 @@ module Hive
         end
 
         def write_stamp(migrated:, already_current:)
-          directory = File.dirname(stamp_path)
-          FileUtils.mkdir_p(directory, mode: 0o700)
-          Hive::AtomicFile.write(
-            stamp_path,
+          @managed_directory.atomic_write(
+            @managed_directory.relative_path(stamp_path),
             canonical(
               "schema" => "hive-module-shadow-decision-migration",
               "schema_version" => 1,
@@ -137,7 +163,6 @@ module Hive
             ),
             mode: 0o600
           )
-          Hive::AtomicFile.fsync_directory(directory)
         end
 
         def validate_v1!(data, bytes)
@@ -181,18 +206,21 @@ module Hive
 
         def archive_v1!(module_name, path, bytes)
           directory = File.join(root, "archive", "v1", module_name)
-          FileUtils.mkdir_p(directory, mode: 0o700)
           archive = File.join(directory, File.basename(path))
-          if File.file?(archive)
-            unless File.binread(archive) == bytes
+          existing = bounded_read(archive, missing: true)
+          if existing
+            unless existing == bytes
               raise Hive::ConfigError,
                     "module shadow v1 archive conflicts with existing bytes"
             end
             return
           end
 
-          Hive::AtomicFile.write(archive, bytes, mode: 0o600)
-          Hive::AtomicFile.fsync_directory(directory)
+          @managed_directory.atomic_write(
+            @managed_directory.relative_path(archive),
+            bytes,
+            mode: 0o600
+          )
         end
 
         def v2_record(data, bytes)
@@ -231,8 +259,8 @@ module Hive
         end
 
         def with_lock
-          Hive::WorkflowPackage::MutationLock.with_lock(
-            File.dirname(root), shared: false
+          @lock_directory.with_lock(
+            ".mutation.lock", shared: false
           ) { yield }
         end
 
@@ -251,8 +279,6 @@ module Hive
         end
 
         def checkpoint!(path, source_bytes, status)
-          directory = File.dirname(checkpoint_path)
-          FileUtils.mkdir_p(directory, mode: 0o700)
           checkpoint = read_checkpoint
           relative = path.delete_prefix("#{root}/")
           entry = {
@@ -266,21 +292,22 @@ module Hive
                   "module shadow v1 migration inventory changed"
           end
           checkpoint.fetch("files")[relative] = entry
-          Hive::AtomicFile.write(
-            checkpoint_path, canonical(checkpoint), mode: 0o600
+          @managed_directory.atomic_write(
+            @managed_directory.relative_path(checkpoint_path),
+            canonical(checkpoint),
+            mode: 0o600
           )
-          Hive::AtomicFile.fsync_directory(directory)
         end
 
         def read_checkpoint
+          bytes = bounded_read(checkpoint_path, missing: true)
           return {
             "schema" => "hive-module-shadow-decision-migration-checkpoint",
             "schema_version" => 1,
             "status" => "in_progress",
             "files" => {}
-          } unless File.file?(checkpoint_path)
+          } unless bytes
 
-          bytes = bounded_read(checkpoint_path)
           data = JSON.parse(bytes)
           valid = bytes == canonical(data) &&
                   data.is_a?(Hash) &&
@@ -302,32 +329,37 @@ module Hive
 
         def complete_checkpoint!
           checkpoint = read_checkpoint.merge("status" => "complete")
-          Hive::AtomicFile.write(
-            checkpoint_path, canonical(checkpoint), mode: 0o600
+          @managed_directory.atomic_write(
+            @managed_directory.relative_path(checkpoint_path),
+            canonical(checkpoint),
+            mode: 0o600
           )
-          Hive::AtomicFile.fsync_directory(File.dirname(checkpoint_path))
         end
 
-        def bounded_read(path)
-          stat = File.lstat(path)
-          unless stat.file? && !stat.symlink? &&
-                 stat.size <= ShadowComparator::MAX_RECORD_BYTES
-            raise Hive::ConfigError,
-                  "module shadow v1 evidence migration failed"
-          end
-          File.open(
-            path,
-            File::RDONLY |
-              (defined?(File::NOFOLLOW) ? File::NOFOLLOW : 0)
-          ) do |io|
-            bytes = io.read(ShadowComparator::MAX_RECORD_BYTES + 1)
-            if bytes.nil? ||
-               bytes.bytesize > ShadowComparator::MAX_RECORD_BYTES
-              raise Hive::ConfigError,
-                    "module shadow v1 evidence migration failed"
-            end
-            bytes
-          end
+        def evidence_inventory(module_name)
+          Hive::Modules::Migration::BoundedFileInventory.new(
+            directory: @managed_directory,
+            relative: module_name,
+            filename_pattern: /\A[0-9a-f]{64}\.json\z/,
+            max_entries: ShadowComparator::MAX_RECORDS,
+            cursor_prefix: "shadow-migration-v1",
+            malformed_message:
+              "module shadow v1 evidence migration failed",
+            overflow_message:
+              "module shadow evidence exceeds the bounded read limit",
+            missing: true
+          )
+        end
+
+        def bounded_read(path, missing: false)
+          @managed_directory.read(
+            @managed_directory.relative_path(path),
+            max_bytes: ShadowComparator::MAX_RECORD_BYTES,
+            missing: missing
+          )
+        rescue Hive::ConfigError
+          raise Hive::ConfigError,
+                "module shadow v1 evidence migration failed"
         end
 
         def canonical(value)

@@ -41,7 +41,7 @@ tags: [module, patrol, review, worktree, pr, codex]
 | `Hive::RefactorPatrol::ArchitectureIntakeTransitions` | `lib/hive/refactor_patrol/architecture_intake_transitions.rb` | Shared command/daemon coordinator for manifest occurrence reservation, exact enqueue reconciliation, and transition identity. Callers retain policy and cadence; this collaborator adds no persistence of its own. |
 | `Hive::RefactorPatrol::ActionTransitions` | `lib/hive/refactor_patrol/action_transitions.rb` | Facade used by `ActionRunner`: claim-scoped CAS/reconcile/receipt operations and job-level plan/link/block transitions live in separate coordinators over one immutable transition context. `ActionRunner` retains thesis, policy, fixer, publication, and issue decisions. |
 | `Hive::RefactorPatrol::DiscoveryTransitions` | `lib/hive/refactor_patrol/discovery_transitions.rb` | Facade used by `RefactorPatrolScheduler`: discovery claim/checkpoint/release and diagnostic block transitions live in separate coordinators. `ArchitectureOccurrenceLifecycle` alone reserves/finalizes occurrences and recovers capture/event/receipt projections; the scheduler retains cadence, candidate selection, spawn, and envelope handling. |
-| `Hive::Modules::Migration::PatrolEvidence` | `lib/hive/modules/migration/patrol_evidence.rb` | Strict immutable ordinary/architecture capture, intent, and receipt values shared only as an observation protocol. `EvidenceStore` appends canonical records, maintains bounded occurrence/intent indices, offers restart-safe bounded repair pages, and has no mutation or recovery authority. |
+| `Hive::Modules::Migration::PatrolEvidence` | `lib/hive/modules/migration/patrol_evidence.rb` | Strict immutable ordinary/architecture capture, intent, and receipt values shared only as an observation protocol. `EvidenceStore` appends canonical records, maintains bounded occurrence/intent indices, and repairs them through portable lexicographic pages whose cursors freeze one high-water inventory plus an order-independent filename fingerprint. `ManagedDirectory` rejects linked managed components and descriptor-binds its bounded reads, locks, and atomic writes; evidence remains observation-only and has no mutation or recovery authority. |
 
 ## State
 
@@ -186,6 +186,15 @@ second scheduler occurrence. Missing, malformed, foreign, provisional, or
 provenance-only captures remain non-comparable. Module-native cron targets are
 suppressed while legacy or shadow owns either product, preventing a second
 schedule producer.
+
+Shadow-history qualification no longer materializes the full directory or
+record set. `BoundedFileInventory` rejects excess and unexpected children
+before record bodies are read, emits restart-portable lexicographic pages, and
+freezes each scan at a cursor-bound high-water mark. `Report` consumes that
+source incrementally into constant-sized per-module aggregates. The one-off v1
+migration uses the same no-follow bounded reader for live evidence, checkpoints,
+and archive collision checks; linked, special, or oversized archives fail
+closed.
 
 `Hive::Modules::CapabilityContext` still preflights installed grants, and each
 mutation reloads the live owner epoch, enabled configuration, installed module

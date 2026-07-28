@@ -268,6 +268,14 @@ class ComponentBoundariesTest < Minitest::Test
     )
     assert_equal [ "lib/hive/workflow_package/publisher.rb" ],
                  authoring_lint.fetch("hive_consumers")
+    assert_equal(
+      [
+        "Read-only incumbent phase-boundary manifest reads without " \
+          "cross-phase memoization, bounded package snapshot, immutable " \
+          "commands and observations, and exact ordered findings"
+      ],
+      authoring_lint.fetch("state_contracts")
+    )
     assert_empty authoring_lint.fetch("component_dependencies")
     assert_empty authoring_lint.fetch("migration_exceptions")
 

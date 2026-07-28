@@ -770,7 +770,7 @@ components:
       - lib/hive/workflow_package/lint_policy.rb
       - config/honeycomb-security-lint
     state_contracts:
-      - "Read-only insertion-order-preserving manifest snapshot, bounded package snapshot, immutable commands and observations, and exact ordered findings"
+      - "Read-only incumbent phase-boundary manifest reads without cross-phase memoization, bounded package snapshot, immutable commands and observations, and exact ordered findings"
     schema_contracts:
       - "Pinned Honeycomb lint policy v1 plus unchanged Finding, Result, LintError, and publisher finding-envelope bytes"
     lock_contracts:

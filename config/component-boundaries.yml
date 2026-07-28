@@ -748,3 +748,56 @@ components:
       - test/unit/task_projection_test.rb
       - test/unit/workflow_test.rb
     migration_exceptions: []
+
+  - id: workflow-authoring-lint
+    name: Workflow Authoring Lint
+    state: boundary-ready
+    entrypoint:
+      file: lib/hive/workflow_package/authoring_lint.rb
+      require: hive/workflow_package/authoring_lint
+      constant: Hive::WorkflowPackage::AuthoringLint
+    public_contract:
+      values:
+        - Hive::WorkflowPackage::AuthoringLint::Finding
+        - Hive::WorkflowPackage::AuthoringLint::Result
+        - Hive::WorkflowPackage::LintPolicy::Policy
+      errors:
+        - Hive::WorkflowPackage::AuthoringLint::LintError
+        - Hive::ConfigError
+    owned_paths:
+      - lib/hive/workflow_package/authoring_lint.rb
+      - lib/hive/workflow_package/authoring_lint
+      - lib/hive/workflow_package/lint_policy.rb
+      - config/honeycomb-security-lint
+    state_contracts:
+      - "Read-only insertion-order-preserving manifest snapshot, bounded package snapshot, immutable commands and observations, and exact ordered findings"
+    schema_contracts:
+      - "Pinned Honeycomb lint policy v1 plus unchanged Finding, Result, LintError, and publisher finding-envelope bytes"
+    lock_contracts:
+      - "No durable state or locks; PackageReader uses incumbent lstat plus no-follow SafeFile identity checks"
+    component_dependencies: []
+    allowed_hive_dependencies:
+      - hive/errors
+      - hive/workflow_package/safe_file
+    internal_collaborators:
+      - Hive::WorkflowPackage::AuthoringLint::PackageReader
+      - Hive::WorkflowPackage::AuthoringLint::CommandExtractor
+      - Hive::WorkflowPackage::AuthoringLint::ObservationExtractor
+      - Hive::WorkflowPackage::AuthoringLint::FindingEvaluator
+    forbidden_constructions:
+      - Hive::WorkflowPackage::AuthoringLint::PackageReader
+      - Hive::WorkflowPackage::AuthoringLint::CommandExtractor
+      - Hive::WorkflowPackage::AuthoringLint::ObservationExtractor
+      - Hive::WorkflowPackage::AuthoringLint::FindingEvaluator
+    authorized_internal_constructions: []
+    hive_consumers:
+      - lib/hive/workflow_package/publisher.rb
+    mutation_authority: "None; Publisher supplies the package root, validated manifest, and pinned policy while the facade only returns immutable findings."
+    recovery_surface: "Unexpected scanner failures collapse at the facade to the exact redacted policy.scanner-error result; no recovery state or retry path is introduced."
+    wiki_page: wiki/modules/workflows.md
+    focused_tests:
+      - test/unit/workflow_package/authoring_lint_collaborators_test.rb
+      - test/unit/workflow_package/authoring_lint_characterization_test.rb
+      - test/unit/workflow_package/authoring_lint_test.rb
+      - test/unit/workflow_package/publisher_test.rb
+    migration_exceptions: []

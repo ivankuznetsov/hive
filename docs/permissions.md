@@ -82,6 +82,12 @@ consumer validation, and the pinned local Honeycomb lint before any remote
 interaction. It deliberately does not apply the current runtime admission
 limit to author submission, so a correctly disclosed high-risk package remains
 reviewable even when this Hive version cannot yet install it.
+The lint runs through the stable `AuthoringLint` facade: bounded package reads,
+format-specific command extraction, immutable network observations, and rule
+evaluation are private collaborators, while Publisher remains the sole
+production consumer. This boundary changes no permission rule, finding byte,
+suppression, limit, or publication behavior, and it does not substitute the
+separate package `SecurityScanner` diagnostic engine.
 Codex, Pi, Grok,
 custom profiles without the full `policy_capabilities` set, and explicit
 managed actors selecting them fail closed. These controls reduce agent/tool

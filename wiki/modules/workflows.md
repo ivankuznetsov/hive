@@ -3,7 +3,7 @@ title: Hive::Workflows
 type: module
 source: lib/hive/workflows.rb, lib/hive/workflow.rb, lib/hive/workflows/registry.rb, lib/hive/workflows/coding.rb, lib/hive/workflows/content.rb, lib/hive/workflows/bench.rb, lib/hive/workflows/descriptor_parser.rb, lib/hive/workflows/loader.rb, lib/hive/workflows/project.rb, lib/hive/workflow_package/
 created: 2026-04-26
-updated: 2026-07-26
+updated: 2026-07-28
 tags: [module, workflow, verbs, selection, human-stage, outcomes, honeycomb, registry, archive, retention]
 ---
 
@@ -149,6 +149,16 @@ packaged-workflow runner remains unavailable with the typed
 `Hive::WorkflowPackage` defines a second, stricter trust boundary without
 weakening owner-authored descriptor compatibility:
 
+- `AuthoringLint` is the boundary-ready facade used only by `Publisher`. It
+  snapshots manifest data without sorting permission hashes, coordinates
+  private bounded package-reading, format-specific command extraction,
+  immutable network observations, and finding evaluation, and preserves exact
+  `Finding`, `Result`, `LintError`, policy, fingerprint, suppression, limit,
+  order, and outer scanner-error bytes. YAML remains structural; Ruby,
+  Markdown, JSON, shell, and extensionless inputs retain their characterized
+  lexical behavior. Its private finding buffer owns the unusual global
+  pop-newest limit sentinel before first-fingerprint deduplication and final
+  sorting. It adds no state, migration, lock, or recovery path.
 - `Manifest`, `RegistryManifest`, `CanonicalJSON`, `CanonicalYAML`, `Validator`, and `SecurityScanner` enforce
   canonical metadata, full path/hash coverage, safe package filesystem shapes,
   package-name descriptor binding, redacted diagnostics, and objective
@@ -157,6 +167,10 @@ weakening owner-authored descriptor compatibility:
   the matched behavior suppresses a finding. Exhortations and double negatives
   such as `do not forget`, `never fail`, `not only`, or `without exception`,
   plus affirmative behavior after a comma or semicolon, remain reportable.
+  `SecurityScanner` remains a separate diagnostic engine rather than an
+  `AuthoringLint` collaborator: its catalogs, diagnostics, overlap policy,
+  permission semantics, identifiers, locations, and deduplication are not
+  shared.
 - `RegistryClient` consumes canonical `honeycomb-catalog/v2` flat entries,
   applies listed/latest plus exact soft-hidden/yanked and revoked-blocked
   lifecycle semantics, materializes `packages/NAME/VERSION/` only from the

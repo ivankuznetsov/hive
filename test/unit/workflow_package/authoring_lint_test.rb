@@ -293,11 +293,12 @@ class WorkflowPackageAuthoringLintTest < Minitest::Test
       assert_includes Lint.verify(root, manifest: manifest).findings.map(&:rule_id),
                       "instruction.malformed-yaml"
 
-      lint = Lint.new(
-        root, manifest: manifest, policy: Hive::WorkflowPackage::LintPolicy.load
+      policy = Hive::WorkflowPackage::LintPolicy.load
+      extractor = Lint.const_get(:CommandExtractor, false).new(
+        manifest: manifest, limits: policy.limits
       )
       assert_raises(Lint::UnsafeYAML) do
-        lint.send(:inspect_json_value!, Object.new)
+        extractor.inspect_json_value!(Object.new)
       end
     end
   end
@@ -396,9 +397,14 @@ class WorkflowPackageAuthoringLintTest < Minitest::Test
       "network_hosts" => [ "127.0.0.1" ]
     )
     with_lint_package(instruction, permissions: permissions) do |root, manifest|
-      lint = Lint.new(root, manifest: manifest, policy: Hive::WorkflowPackage::LintPolicy.load)
-      refute lint.send(:value_option?, "unknown", "--value")
-      rules = lint.verify.findings.map(&:rule_id)
+      policy = Hive::WorkflowPackage::LintPolicy.load
+      extractor = Lint.const_get(:ObservationExtractor, false).new(
+        limits: policy.limits
+      )
+      refute extractor.value_option?("unknown", "--value")
+      rules = Lint.new(
+        root, manifest: manifest, policy: policy
+      ).verify.findings.map(&:rule_id)
       assert_includes rules, "network.dynamic-destination"
       assert_includes rules, "network.ip-literal"
     end

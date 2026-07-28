@@ -25,6 +25,7 @@ the first and primary consumer.
 | Skillpack | `boundary-ready` | `require "hive/agent_skills"` → `Hive::AgentSkills` | [[commands/setup-agents]] |
 | Safe Agent Git Gate | `boundary-ready` | `require "hive/agent_git_gate"` → `Hive::AgentGitGate` | [[modules/agent_git_gate]] |
 | WorkLedger | `boundary-ready` | `require "hive/work_ledger"` → `Hive::WorkLedger` | [[state-model]] |
+| Workflow Authoring Lint | `boundary-ready` | `require "hive/workflow_package/authoring_lint"` → `Hive::WorkflowPackage::AuthoringLint` | [[modules/workflows]] |
 
 `candidate` means the current code is mapped, but callers, dependencies, or
 policy still need refactoring before the seam is supported. `boundary-ready`
@@ -34,7 +35,7 @@ has earned a gem, version, repository, or release.
 
 ## Final graph audit
 
-The final U2 resolution on 2026-07-29 retains eight components: six are
+The final U2/U4 integration on 2026-07-30 retains nine components: seven are
 `boundary-ready`; Attempts and Patrol Effect Evidence remain `candidate`.
 Patrol retains one bounded U3 exception for compressed evidence qualification
 and cutover proof. Every retained entry point has a focused clean-process load
@@ -53,6 +54,7 @@ flowchart LR
   artifact_firewall[Agent Artifact Firewall]
   git_gate[Safe Agent Git Gate]
   work_ledger[WorkLedger]
+  authoring_lint[Workflow Authoring Lint]
 ```
 
 All other cataloged components depend only on explicitly allowed lower-level
@@ -63,7 +65,7 @@ candidates rather than being promoted ahead of their remaining lifecycle or
 qualification proof.
 
 This is an internal architecture verdict, not a packaging verdict. None of the
-six ready components currently has the named non-Hive adopter and independent
+seven ready components currently has the named non-Hive adopter and independent
 package proof required by the standalone-gem plan.
 
 `Patrol Effect Evidence` owns the immutable cross-product capture, selection,
@@ -248,6 +250,27 @@ cycle. Task directories, condition vocabulary, transition and migration
 policy, overlays, snapshots, Git behavior, and operational status all remain
 Hive-owned. Boundary readiness is an internal API verdict, not a public format,
 gem, version, or release commitment.
+
+`Workflow Authoring Lint` is boundary-ready as a read-only package-analysis
+component. `AuthoringLint` retains its initializer and class/instance
+`verify`/`verify!` compatibility surface plus the exact `Finding`, `Result`,
+`LintError`, `LintPolicy`, and policy-value contracts. The facade snapshots
+manifest data without sorting permission hashes, then coordinates private
+package-reading, command-extraction, observation-extraction, and
+finding-evaluation collaborators. Package traversal and no-follow reads remain
+in `PackageReader`; YAML extraction remains structural while Ruby, Markdown,
+JSON, shell, and extensionless inputs retain their characterized lexical
+behavior.
+
+`FindingEvaluator` and its private buffer alone own phase order, rules,
+permission/network checks, NUL-joined fingerprints, the global pop-newest
+finding-limit sentinel, suppression, known-rule collapse, first-fingerprint
+deduplication, and final sorting. Unexpected implementation errors still
+collapse at the facade into the exact redacted scanner-error result. Publisher
+is the sole production consumer. `SecurityScanner` remains a separate
+diagnostic engine with its own rules, overlap policy, identifiers, messages,
+and deduplication; no diagnostic or policy semantics are shared. The component
+owns no durable state, lock, recovery format, or publication behavior.
 
 ## Catalog contract
 

@@ -22,6 +22,7 @@ class ComponentBoundariesTest < Minitest::Test
       skillpack
       user-service
       work-ledger
+      workflow-authoring-lint
     ], contract.components.map { |component| component.fetch("id") }.sort
 
     attempts = contract.component("attempts")
@@ -242,8 +243,37 @@ class ComponentBoundariesTest < Minitest::Test
     )
     assert_empty work_ledger.fetch("migration_exceptions")
 
+    authoring_lint = contract.component("workflow-authoring-lint")
+    assert_equal "boundary-ready", authoring_lint.fetch("state")
+    assert_equal "hive/workflow_package/authoring_lint",
+                 authoring_lint.dig("entrypoint", "require")
+    assert_equal "Hive::WorkflowPackage::AuthoringLint",
+                 authoring_lint.dig("entrypoint", "constant")
+    assert_equal(
+      %w[
+        Hive::WorkflowPackage::AuthoringLint::Finding
+        Hive::WorkflowPackage::AuthoringLint::Result
+        Hive::WorkflowPackage::LintPolicy::Policy
+      ],
+      authoring_lint.dig("public_contract", "values").sort
+    )
+    assert_equal(
+      %w[
+        Hive::WorkflowPackage::AuthoringLint::CommandExtractor
+        Hive::WorkflowPackage::AuthoringLint::FindingEvaluator
+        Hive::WorkflowPackage::AuthoringLint::ObservationExtractor
+        Hive::WorkflowPackage::AuthoringLint::PackageReader
+      ],
+      authoring_lint.fetch("forbidden_constructions").sort
+    )
+    assert_equal [ "lib/hive/workflow_package/publisher.rb" ],
+                 authoring_lint.fetch("hive_consumers")
+    assert_empty authoring_lint.fetch("component_dependencies")
+    assert_empty authoring_lint.fetch("migration_exceptions")
+
     ready_components.push(
-      agent_abi, artifact_firewall, skillpack, git_gate, work_ledger
+      agent_abi, artifact_firewall, skillpack, git_gate, work_ledger,
+      authoring_lint
     )
     remaining_candidates = contract.components.reject do |component|
       ready_components.include?(component)
@@ -260,6 +290,7 @@ class ComponentBoundariesTest < Minitest::Test
       skillpack
       user-service
       work-ledger
+      workflow-authoring-lint
     ], ready_loads.keys.sort
     agent_abi_load = ready_loads.fetch("agent-abi")
     assert_equal "Hive::AgentRuntime", agent_abi_load.fetch("constant")
@@ -290,6 +321,11 @@ class ComponentBoundariesTest < Minitest::Test
                  patrol_effects_load.fetch("constant")
     assert_empty patrol_effects_load.fetch("forbidden_loaded_features")
     assert_empty patrol_effects_load.fetch("forbidden_constants")
+    authoring_lint_load = ready_loads.fetch("workflow-authoring-lint")
+    assert_equal "Hive::WorkflowPackage::AuthoringLint",
+                 authoring_lint_load.fetch("constant")
+    assert_empty authoring_lint_load.fetch("forbidden_loaded_features")
+    assert_empty authoring_lint_load.fetch("forbidden_constants")
   end
 
   def test_final_graph_and_wiki_inventory_agree_with_the_catalog
@@ -531,6 +567,28 @@ class ComponentBoundariesTest < Minitest::Test
       source = ruby_sources.fetch(path)
       refute_includes source, "TransitionGateway.new"
       refute_match(/AtomicFile|File\.(?:write|rename)/, source)
+    end
+  end
+
+  def test_publisher_is_the_only_production_consumer_of_workflow_authoring_lint
+    owned = contract_component_owned_files("workflow-authoring-lint")
+    consumers = Dir.glob(File.join(ROOT, "lib", "hive", "**", "*.rb")).filter_map do |path|
+      relative = path.delete_prefix("#{ROOT}/")
+      next if owned.include?(relative)
+
+      source = File.read(path)
+      relative if source.match?(/\bAuthoringLint(?:\.|::)/) ||
+                  source.match?(
+                    /require ["']hive\/workflow_package\/authoring_lint["']/
+                  )
+    end
+
+    assert_equal [ "lib/hive/workflow_package/publisher.rb" ], consumers
+    assert_raises(NameError) do
+      Hive::WorkflowPackage::AuthoringLint::PackageReader
+    end
+    assert_raises(NameError) do
+      Hive::WorkflowPackage::AuthoringLint::FindingEvaluator
     end
   end
 

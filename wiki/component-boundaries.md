@@ -252,25 +252,27 @@ Hive-owned. Boundary readiness is an internal API verdict, not a public format,
 gem, version, or release commitment.
 
 `Workflow Authoring Lint` is boundary-ready as a read-only package-analysis
-component. `AuthoringLint` retains its initializer and class/instance
-`verify`/`verify!` compatibility surface plus the exact `Finding`, `Result`,
-`LintError`, `LintPolicy`, and policy-value contracts. The facade snapshots
-manifest data without sorting permission hashes, then coordinates private
-package-reading, command-extraction, observation-extraction, and
-finding-evaluation collaborators. Package traversal and no-follow reads remain
-in `PackageReader`; YAML extraction remains structural while Ruby, Markdown,
-JSON, shell, and extensionless inputs retain their characterized lexical
-behavior.
+component. `AuthoringLint` retains its initializer and instance `verify`, plus
+class `verify`/`verify!`, and the exact `Finding`, `Result`, `LintError`,
+`LintPolicy`, and policy-value contracts. The facade lazily snapshots manifest
+data and permissions at their incumbent phase boundaries without sorting
+permission hashes, then coordinates private package-reading,
+command-extraction, observation-extraction, and finding-evaluation
+collaborators. Package traversal and no-follow reads remain in `PackageReader`;
+YAML extraction remains structural while Ruby, Markdown, JSON, shell, and
+extensionless inputs retain their characterized lexical behavior.
 
-`FindingEvaluator` and its private buffer alone own phase order, rules,
-permission/network checks, NUL-joined fingerprints, the global pop-newest
-finding-limit sentinel, suppression, known-rule collapse, first-fingerprint
-deduplication, and final sorting. Unexpected implementation errors still
-collapse at the facade into the exact redacted scanner-error result. Publisher
-is the sole production consumer. `SecurityScanner` remains a separate
-diagnostic engine with its own rules, overlap policy, identifiers, messages,
-and deduplication; no diagnostic or policy semantics are shared. The component
-owns no durable state, lock, recovery format, or publication behavior.
+`FindingEvaluator`, its typed phase sink, and its private buffer alone own phase
+order, rules, permission/network checks, NUL-joined fingerprints, the global
+pop-newest finding-limit sentinel, suppression, known-rule collapse,
+first-fingerprint deduplication, and final sorting. Reader and extractor
+rejections stream through that sink rather than accumulating unbounded
+intermediate event arrays. Unexpected implementation errors still collapse at
+the facade into the exact redacted scanner-error result. Publisher is the sole
+production consumer. `SecurityScanner` remains a separate diagnostic engine
+with its own rules, overlap policy, identifiers, messages, and deduplication;
+no diagnostic or policy semantics are shared. The component owns no durable
+state, lock, recovery format, or publication behavior.
 
 ## Catalog contract
 

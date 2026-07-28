@@ -298,8 +298,16 @@ class WorkflowPackageAuthoringLintTest < Minitest::Test
         manifest: manifest, limits: policy.limits
       )
       assert_raises(Lint::UnsafeYAML) do
-        extractor.inspect_json_value!(Object.new)
+        extractor.send(:inspect_json_value!, Object.new)
       end
+    end
+
+    with_lint_package(
+      "safe\n",
+      files: { "instructions/complex-key.yml" => "? [nested, key]\n: value\n" }
+    ) do |root, manifest|
+      assert_includes Lint.verify(root, manifest: manifest).findings.map(&:rule_id),
+                      "instruction.malformed-yaml"
     end
   end
 
@@ -401,7 +409,7 @@ class WorkflowPackageAuthoringLintTest < Minitest::Test
       extractor = Lint.const_get(:ObservationExtractor, false).new(
         limits: policy.limits
       )
-      refute extractor.value_option?("unknown", "--value")
+      refute extractor.send(:value_option?, "unknown", "--value")
       rules = Lint.new(
         root, manifest: manifest, policy: policy
       ).verify.findings.map(&:rule_id)
@@ -478,6 +486,62 @@ class WorkflowPackageAuthoringLintTest < Minitest::Test
         assert_includes Lint.verify(root, manifest: manifest).findings.map(&:rule_id),
                         "manifest.invalid-security-extension"
       end
+    end
+  end
+
+  def test_same_instance_retains_package_findings_across_transient_manifest_failure
+    with_tmp_dir do |root|
+      linked = File.join(root, "linked.md")
+      File.symlink("missing.md", linked)
+      permissions = empty_permissions
+      calls = 0
+      manifest = Object.new
+      manifest.define_singleton_method(:data) do
+        calls += 1
+        raise RuntimeError, "transient manifest read" if calls == 1
+
+        { "scalar-version" => 1 }
+      end
+      manifest.define_singleton_method(:permissions) { permissions }
+      lint = Lint.new(
+        root, manifest: manifest, policy: Hive::WorkflowPackage::LintPolicy.load
+      )
+
+      assert_raises(RuntimeError) { lint.verify }
+      File.unlink(linked)
+
+      result = lint.verify
+      assert_equal [ "policy.invalid-file" ], result.findings.map(&:rule_id)
+    end
+  end
+
+  def test_same_instance_retains_observation_findings_across_transient_permission_failure
+    with_lint_package(
+      "curl https://one.example\ncurl https://two.example\n",
+      permissions: empty_permissions
+    ) do |root, original_manifest|
+      calls = 0
+      manifest = Object.new
+      manifest.define_singleton_method(:data) { original_manifest.data }
+      manifest.define_singleton_method(:permissions) do
+        calls += 1
+        raise RuntimeError, "transient permission read" if calls == 1
+
+        original_manifest.permissions
+      end
+      lint = Lint.new(
+        root, manifest: manifest,
+        policy: policy_with("max_observations" => 1)
+      )
+
+      assert_raises(RuntimeError) { lint.verify }
+      File.write(File.join(root, "instructions", "work.md"), "safe\n")
+
+      result = lint.verify
+      assert_equal(
+        [ "policy.observation-limit", "policy.observation-limit" ],
+        result.findings.map(&:rule_id)
+      )
     end
   end
 

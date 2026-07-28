@@ -9,7 +9,7 @@ module Hive
         ObservationEvent = Data.define(
           :rule_id, :severity, :path, :line, :column, :message, :review, :evidence
         )
-        ObservationBatch = Data.define(:observations, :events)
+        ObservationBatch = Data.define(:observations)
 
         NETWORK_COMMAND = /\b(?:curl|wget|iwr|invoke-webrequest|Net::H[T]TP|URI[.]open|OpenURI)\b/i
         URL_PATTERN = %r{https?://[^\s"'<>|`]+}i
@@ -34,8 +34,8 @@ module Hive
           @limits = limits
         end
 
-        def extract(commands)
-          events = []
+        def extract(commands, event_sink:)
+          @event_sink = event_sink
           observations = []
           commands.each do |command|
             before = observations.length
@@ -43,8 +43,7 @@ module Hive
               match = Regexp.last_match
               raw = match[0].sub(/[),.;]+\z/, "")
               append_observation(
-                observations, events,
-                observation(command, raw, match.begin(0) + 1)
+                observations, observation(command, raw, match.begin(0) + 1)
               )
             end
             unresolved_fallback = observations.length == before
@@ -52,8 +51,7 @@ module Hive
             next unless self.class.network_command?(command.raw) && destination
 
             append_observation(
-              observations, events,
-              immutable_observation(
+              observations, immutable_observation(
                 host: destination, dynamic: true, path: command.path,
                 line: command.line, column: command.column, raw: destination
               )
@@ -62,10 +60,10 @@ module Hive
           normalized = observations
                        .uniq { |entry| [ entry.host, entry.path, entry.line, entry.column ] }
                        .sort_by { |entry| [ entry.path, entry.line, entry.column, entry.host ] }
-          ObservationBatch.new(
-            observations: normalized.freeze, events: events.freeze
-          ).freeze
+          ObservationBatch.new(observations: normalized.freeze).freeze
         end
+
+        private
 
         def value_option?(client, token)
           case client
@@ -77,15 +75,13 @@ module Hive
           end
         end
 
-        private
-
-        def append_observation(observations, events, observation)
+        def append_observation(observations, observation)
           if observations.length >= @limits.fetch("max_observations")
-            events << event(
+            @event_sink.call(event(
               "policy.observation-limit", :error, observation.path,
               observation.line, observation.column,
               "network observation count exceeds lint policy"
-            )
+            ))
             return
           end
           observations << observation

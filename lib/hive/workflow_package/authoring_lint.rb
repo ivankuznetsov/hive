@@ -43,7 +43,31 @@ module Hive
         def valid? = errors.empty?
       end
 
-      ManifestSnapshot = Data.define(:data, :permissions)
+      class ManifestSnapshot
+        def initialize(manifest, snapshot:)
+          @manifest = manifest
+          @snapshot = snapshot
+        end
+
+        def data
+          snapshot(:data)
+        end
+
+        def permissions
+          snapshot(:permissions)
+        end
+
+        private
+
+        def snapshot(name)
+          variable = :"@#{name}"
+          return instance_variable_get(variable) if instance_variable_defined?(variable)
+
+          instance_variable_set(
+            variable, @snapshot.call(@manifest.public_send(name))
+          )
+        end
+      end
       class UnsafeYAML < StandardError; end
 
       private_constant(
@@ -81,33 +105,26 @@ module Hive
       end
 
       def verify
-        manifest = snapshot_manifest
-        package_snapshot = PackageReader.new(
-          @root, limits: @policy.limits
-        ).read
-        command_batch = CommandExtractor.new(
-          manifest: manifest, limits: @policy.limits
-        ).extract(package_snapshot.files)
-        observation_batch = ObservationExtractor.new(
-          limits: @policy.limits
-        ).extract(command_batch.commands)
+        manifest = ManifestSnapshot.new(@manifest, snapshot: method(:deep_snapshot))
         findings = @finding_evaluator.evaluate(
           manifest: manifest,
-          package_snapshot: package_snapshot,
-          command_batch: command_batch,
-          observation_batch: observation_batch
+          package_stage: lambda do |event_sink|
+            PackageReader.new(@root, limits: @policy.limits)
+                         .read(event_sink: event_sink)
+          end,
+          command_stage: lambda do |files, event_sink|
+            CommandExtractor.new(manifest: manifest, limits: @policy.limits)
+                            .extract(files, event_sink: event_sink)
+          end,
+          observation_stage: lambda do |commands, event_sink|
+            ObservationExtractor.new(limits: @policy.limits)
+                                .extract(commands, event_sink: event_sink)
+          end
         )
         Result.new(contract: @policy.identity, findings: findings).freeze
       end
 
       private
-
-      def snapshot_manifest
-        ManifestSnapshot.new(
-          data: deep_snapshot(@manifest.data),
-          permissions: deep_snapshot(@manifest.permissions)
-        ).freeze
-      end
 
       def deep_snapshot(value)
         case value

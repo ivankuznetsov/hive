@@ -107,13 +107,11 @@ module Hive
             @findings = []
           end
 
-          def replay(events)
-            events.each do |event|
-              add(
-                event.rule_id, event.severity, event.path, event.line, event.column,
-                event.message, review: event.review, evidence: event.evidence
-              )
-            end
+          def replay(event)
+            add(
+              event.rule_id, event.severity, event.path, event.line, event.column,
+              event.message, review: event.review, evidence: event.evidence
+            )
           end
 
           def add(rule, severity, path, line, column, message,
@@ -196,24 +194,39 @@ module Hive
           end
         end
 
-        private_constant :FindingBuffer
+        class PhaseSink
+          def initialize(buffer)
+            @buffer = buffer
+            freeze
+          end
+
+          def call(event)
+            @buffer.replay(event)
+          end
+        end
+
+        private_constant :FindingBuffer, :PhaseSink
 
         def initialize(policy:)
           @policy = policy
           @buffer = FindingBuffer.new(policy)
+          @phase_sink = PhaseSink.new(@buffer)
         end
 
-        def evaluate(manifest:, package_snapshot:, command_batch:,
-                     observation_batch:)
+        def evaluate(manifest:, package_stage:, command_stage:, observation_stage:)
           @manifest = manifest
-          @buffer.replay(package_snapshot.events)
+          package_snapshot = package_stage.call(@phase_sink)
           extension = security_extension
           package_snapshot.files.each do |entry|
             scan_patterns(entry) if entry.text
           end
-          @buffer.replay(command_batch.events)
+          command_batch = command_stage.call(
+            package_snapshot.files, @phase_sink
+          )
           scan_deny_rules(command_batch.commands)
-          @buffer.replay(observation_batch.events)
+          observation_batch = observation_stage.call(
+            command_batch.commands, @phase_sink
+          )
           scan_permissions(
             command_batch.commands, observation_batch.observations, extension
           )
@@ -254,11 +267,6 @@ module Hive
             end
             PII_PATTERNS.each do |rule, regex, severity, message|
               each_match(line, regex) do |match|
-                if rule == "pii.phone" &&
-                   !match[0].scan(/\d/).length.between?(10, 15)
-                  next
-                end
-
                 add(
                   rule, severity, entry.path, line_number, match.begin(0) + 1,
                   message, review: severity == :warning, evidence: match[0]

@@ -8,7 +8,7 @@ module Hive
         ExtractionEvent = Data.define(
           :rule_id, :severity, :path, :line, :column, :message, :review, :evidence
         )
-        CommandBatch = Data.define(:commands, :events)
+        CommandBatch = Data.define(:commands)
 
         COMMAND_START = /\A\s*(?:\$\s*)?(?:(?:bash|sh|zsh|pwsh|powershell|curl|wget|iwr|invoke-webrequest|git|gh|ruby|python\d*|node|npm|npx|bundle|rake|cat|grep|rg|find|ls|head|tail|sed|awk|tar|zip|gzip|base64|openssl|env|printenv|export|set|cp|mv|rm|mkdir|chmod|chown|tee|echo|printf|source)\b|\.\/[^\s]+)(?:\s|[|;&<>()]|\z)/i
         SHELL_FENCE = /\A\s*```\s*(bash|sh|shell|zsh|powershell|pwsh)?\s*\z/i
@@ -177,12 +177,7 @@ module Hive
             when Psych::Nodes::Mapping
               node.children.each_slice(2) do |key, value|
                 walk_yaml(key, path, commands, mapping_key: true, yaml_path: yaml_path)
-                child_path =
-                  if key.is_a?(Psych::Nodes::Scalar)
-                    yaml_path + [ key.value ]
-                  else
-                    yaml_path
-                  end
+                child_path = yaml_path + [ key.value ]
                 walk_yaml(
                   value, path, commands, mapping_key: false, yaml_path: child_path
                 )
@@ -241,8 +236,8 @@ module Hive
           @limits = limits
         end
 
-        def extract(files)
-          @events = []
+        def extract(files, event_sink:)
+          @event_sink = event_sink
           @command_count = 0
           behavior_paths = declared_behavior_paths
           scoped = files.select do |entry|
@@ -252,25 +247,23 @@ module Hive
           end
           commands = scoped.flat_map do |entry|
             unless entry.text
-              @events << event(
+              emit(event(
                 "policy.invalid-file", :error, entry.path, nil, nil,
                 "declared behavior must be scannable UTF-8 text"
-              )
+              ))
               next []
             end
 
             extract_entry(entry)
           end.sort_by { |command| [ command.path, command.line, command.column, command.raw ] }
-          CommandBatch.new(
-            commands: commands.freeze, events: @events.freeze
-          ).freeze
+          CommandBatch.new(commands: commands.freeze).freeze
         end
+
+        private
 
         def inspect_json_value!(value)
           yaml_extractor.send(:inspect_json_value!, value)
         end
-
-        private
 
         def extract_entry(entry)
           return extract_yaml(entry) if entry.path.match?(/\.ya?ml\z/i)
@@ -287,20 +280,20 @@ module Hive
           end
           return extensionless_extractor.extract(entry) if File.extname(entry.path).empty?
 
-          @events << event(
+          emit(event(
             "policy.invalid-file", :error, entry.path, nil, nil,
             "declared executable type is unsupported by the lint contract"
-          )
+          ))
           []
         end
 
         def extract_yaml(entry)
           yaml_extractor.extract(entry)
         rescue Psych::Exception, UnsafeYAML
-          @events << event(
+          emit(event(
             "instruction.malformed-yaml", :error, entry.path, nil, nil,
             "instruction YAML could not be parsed safely"
-          )
+          ))
           []
         end
 
@@ -328,10 +321,10 @@ module Hive
             raw: raw.to_s.dup.freeze
           ).freeze
           if @command_count >= @limits.fetch("max_commands")
-            @events << event(
+            emit(event(
               "policy.command-limit", :error, command.path, command.line,
               command.column, "extracted command count exceeds lint policy"
-            )
+            ))
             return nil
           end
           @command_count += 1
@@ -405,6 +398,10 @@ module Hive
             line: line, column: column, message: message.freeze,
             review: review, evidence: evidence&.freeze
           ).freeze
+        end
+
+        def emit(event)
+          @event_sink.call(event)
         end
       end
     end

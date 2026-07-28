@@ -1,0 +1,759 @@
+{
+  "contract": {
+    "version": "v1",
+    "upstream_commit": "ada805d0d8c94dc236a0673a22232a0440843cf0",
+    "upstream_policy_sha256": "abb0d43bf30e683413e38060f5416e9ece370b98eba9c836a7c56ebbcdd765fa",
+    "fixture_corpus_sha256": "bfc864815663dd61f75043da7c24e954364220c9d7eeb85ba73b298d824c268d",
+    "expected_output_sha256": "549ca5ec602fbc7ee7618a0c44f2ef48b10b3bb57f91aee3b7c73b21f1d63fb6",
+    "contract_sha256": "c132a3d494d83f3376a53bdaff8841a86e63078824d72b8386f0736718defcc7"
+  },
+  "authoring": {
+    "benign": {
+      "valid": true,
+      "findings": []
+    },
+    "malicious": {
+      "valid": false,
+      "findings": [
+        {
+          "rule_id": "secret.anthropic-key",
+          "severity": "error",
+          "path": "instructions/work.md",
+          "line": 1,
+          "column": 5,
+          "message": "Anthropic credential detected",
+          "review_required": false,
+          "suppression_allowed": false,
+          "fingerprint": "af7832cd18bdbeab0d53cde1b754f4d8c1e15e121d02995f4b4932185c614207",
+          "suppression_requested": false
+        },
+        {
+          "rule_id": "secret.openai-key",
+          "severity": "error",
+          "path": "instructions/work.md",
+          "line": 1,
+          "column": 5,
+          "message": "OpenAI credential detected",
+          "review_required": false,
+          "suppression_allowed": false,
+          "fingerprint": "f9eac8dcccbd755a94895627db24db77700422a5f34359e113ae9586e2585e5a",
+          "suppression_requested": false
+        },
+        {
+          "rule_id": "deny.pipe-to-shell",
+          "severity": "error",
+          "path": "instructions/work.md",
+          "line": 4,
+          "column": 1,
+          "message": "Network response is piped to a shell",
+          "review_required": false,
+          "suppression_allowed": true,
+          "fingerprint": "542e1ab7da81b61f88049b612b26b07dcec4fca5dca072fb3524f1a015d40b56",
+          "suppression_requested": false
+        },
+        {
+          "rule_id": "network.undeclared-host",
+          "severity": "error",
+          "path": "instructions/work.md",
+          "line": 4,
+          "column": 6,
+          "message": "Observed network host is not declared exactly",
+          "review_required": false,
+          "suppression_allowed": true,
+          "fingerprint": "5ed9924db595e1ca0b9f374bb0e2274073bcfab19032fff70cda3218d0719578",
+          "suppression_requested": false
+        },
+        {
+          "rule_id": "permission.broad-declaration",
+          "severity": "warning",
+          "path": "manifest.yml",
+          "line": 1,
+          "column": 1,
+          "message": "Broad declared permissions require human review",
+          "review_required": true,
+          "suppression_allowed": true,
+          "fingerprint": "0ba18ca68ad65313e1f94b098d5cabf3b0f3448f2bf3ec6dece97b62c7498815",
+          "suppression_requested": false
+        }
+      ]
+    },
+    "malformed_yaml": {
+      "valid": false,
+      "findings": [
+        {
+          "rule_id": "instruction.malformed-yaml",
+          "severity": "error",
+          "path": "instructions/broken.yml",
+          "message": "instruction YAML could not be parsed safely",
+          "review_required": false,
+          "suppression_allowed": true,
+          "fingerprint": "82413acd1d6309686c66fdd1471e5cadfed9e3a16d2f4b68a033214a0ed2c90f",
+          "suppression_requested": false
+        }
+      ]
+    },
+    "tolerated_malformed_lexical_formats": {
+      "valid": true,
+      "findings": []
+    },
+    "file_order_determinism": {
+      "valid": false,
+      "findings": [
+        {
+          "rule_id": "permission.absolute-path",
+          "severity": "error",
+          "path": "instructions/a.md",
+          "line": 1,
+          "column": 1,
+          "message": "Absolute filesystem path is outside declared scopes",
+          "review_required": false,
+          "suppression_allowed": true,
+          "fingerprint": "79a7f83384ff3e410afe836a4245045631d26797d463f4f8ae95dc2a9cb68b05",
+          "suppression_requested": false
+        },
+        {
+          "rule_id": "permission.filesystem-read",
+          "severity": "error",
+          "path": "instructions/a.md",
+          "line": 1,
+          "column": 1,
+          "message": "Observed read is not declared",
+          "review_required": false,
+          "suppression_allowed": true,
+          "fingerprint": "bd10af0669af5521e510019a73f00b8afc4cddb7940b17bc485341a3c8261a15",
+          "suppression_requested": false
+        },
+        {
+          "rule_id": "permission.shell",
+          "severity": "error",
+          "path": "instructions/a.md",
+          "line": 1,
+          "column": 1,
+          "message": "Observed shell command is not declared",
+          "review_required": false,
+          "suppression_allowed": true,
+          "fingerprint": "21faf4accfd1be1c34d4d949f78c86a5fe82cdaf2bd6b2abc4ad66deeec89e60",
+          "suppression_requested": false
+        },
+        {
+          "rule_id": "permission.network",
+          "severity": "error",
+          "path": "instructions/z.yml",
+          "line": 1,
+          "column": 9,
+          "message": "Observed network use is not declared",
+          "review_required": false,
+          "suppression_allowed": true,
+          "fingerprint": "b3851eff0fb2e5b47db1de220a9d815c39fc0d02222778a150c11fa156ddf589",
+          "suppression_requested": false
+        },
+        {
+          "rule_id": "permission.shell",
+          "severity": "error",
+          "path": "instructions/z.yml",
+          "line": 1,
+          "column": 9,
+          "message": "Observed shell command is not declared",
+          "review_required": false,
+          "suppression_allowed": true,
+          "fingerprint": "3181ac06ab744276344328bf5f98c5d829762373bd4163b90712e6a380857427",
+          "suppression_requested": false
+        },
+        {
+          "rule_id": "network.undeclared-host",
+          "severity": "error",
+          "path": "instructions/z.yml",
+          "line": 1,
+          "column": 14,
+          "message": "Observed network host is not declared exactly",
+          "review_required": false,
+          "suppression_allowed": true,
+          "fingerprint": "75bdfbe0a24c5fb88ba6f824f953919a721f51c2474cd1e1a164aec41e0a8da8",
+          "suppression_requested": false
+        }
+      ]
+    },
+    "suppression_reason_independence": {
+      "valid": true,
+      "findings": [
+        {
+          "rule_id": "permission.broad-declaration",
+          "severity": "warning",
+          "path": "manifest.yml",
+          "line": 1,
+          "column": 1,
+          "message": "Broad declared permissions require human review",
+          "review_required": true,
+          "suppression_allowed": true,
+          "fingerprint": "0ba18ca68ad65313e1f94b098d5cabf3b0f3448f2bf3ec6dece97b62c7498815",
+          "suppression_requested": true
+        }
+      ]
+    },
+    "suppression_orphan": {
+      "valid": false,
+      "findings": [
+        {
+          "rule_id": "suppression.orphaned-request",
+          "severity": "error",
+          "path": "manifest.yml",
+          "line": 1,
+          "column": 1,
+          "message": "A suppression request does not match current evidence",
+          "review_required": false,
+          "suppression_allowed": true,
+          "fingerprint": "00b84052493f3a180f74313cc613925c15d42ca34c178fb3afe48b281410b557",
+          "suppression_requested": false
+        }
+      ]
+    },
+    "suppression_forbidden": {
+      "valid": false,
+      "findings": [
+        {
+          "rule_id": "secret.anthropic-key",
+          "severity": "error",
+          "path": "instructions/work.md",
+          "line": 1,
+          "column": 1,
+          "message": "Anthropic credential detected",
+          "review_required": false,
+          "suppression_allowed": false,
+          "fingerprint": "610d25028c42a14c12637771717251a653a321a5f3271841354002a0f06735e1",
+          "suppression_requested": false
+        },
+        {
+          "rule_id": "secret.openai-key",
+          "severity": "error",
+          "path": "instructions/work.md",
+          "line": 1,
+          "column": 1,
+          "message": "OpenAI credential detected",
+          "review_required": false,
+          "suppression_allowed": false,
+          "fingerprint": "084c0ffd0f0b7d742582cb24b2477f8de7adc0c70593f375d9067323863783ac",
+          "suppression_requested": false
+        },
+        {
+          "rule_id": "manifest.invalid-security-extension",
+          "severity": "error",
+          "path": "manifest.yml",
+          "line": 1,
+          "column": 1,
+          "message": "Secret and policy findings cannot be suppressed",
+          "review_required": false,
+          "suppression_allowed": true,
+          "fingerprint": "a4a3ed03151125b844a85f35602edb7cbbf44071029a9bcc0f09c03898103ac1",
+          "suppression_requested": false
+        }
+      ]
+    },
+    "suppressible_error_remains_invalid": {
+      "valid": false,
+      "findings": [
+        {
+          "rule_id": "deny.pipe-to-shell",
+          "severity": "error",
+          "path": "instructions/work.md",
+          "line": 1,
+          "column": 1,
+          "message": "Network response is piped to a shell",
+          "review_required": true,
+          "suppression_allowed": true,
+          "fingerprint": "dc4896719ee7ccf85f35ebae9d94b7b28e60e3e380066442cf195193dfc11358",
+          "suppression_requested": true
+        },
+        {
+          "rule_id": "permission.broad-declaration",
+          "severity": "warning",
+          "path": "manifest.yml",
+          "line": 1,
+          "column": 1,
+          "message": "Broad declared permissions require human review",
+          "review_required": true,
+          "suppression_allowed": true,
+          "fingerprint": "0ba18ca68ad65313e1f94b098d5cabf3b0f3448f2bf3ec6dece97b62c7498815",
+          "suppression_requested": false
+        }
+      ]
+    },
+    "invalid_utf8": {
+      "valid": false,
+      "findings": [
+        {
+          "rule_id": "policy.invalid-encoding",
+          "severity": "error",
+          "path": "invalid.txt",
+          "message": "text input is not valid UTF-8",
+          "review_required": false,
+          "suppression_allowed": false,
+          "fingerprint": "79025ba6ee39f28bac288baed5146798b34473ae9561544b8795a80b17c51a7e",
+          "suppression_requested": false
+        }
+      ]
+    },
+    "symlink": {
+      "valid": false,
+      "findings": [
+        {
+          "rule_id": "policy.invalid-file",
+          "severity": "error",
+          "path": "linked.md",
+          "message": "package contains a linked or special file",
+          "review_required": false,
+          "suppression_allowed": false,
+          "fingerprint": "353841d790017eb72f5ae7c85a84d01689ae0c352947aaad7cf9efd2b6dccf58",
+          "suppression_requested": false
+        }
+      ]
+    },
+    "scanner_error": {
+      "contract": {},
+      "valid": false,
+      "findings": [
+        {
+          "rule_id": "policy.scanner-error",
+          "severity": "error",
+          "path": "manifest.yml",
+          "message": "local Honeycomb scanner failed closed",
+          "review_required": false,
+          "suppression_allowed": false,
+          "fingerprint": "cd5fa13da091711cf1c5ec4ba10d0b2ee5b499fc619d84850f0e9fc6d266d267",
+          "suppression_requested": false
+        }
+      ]
+    },
+    "unknown_rule": {
+      "valid": false,
+      "findings": [
+        {
+          "rule_id": "policy.unknown-rule",
+          "severity": "error",
+          "path": "manifest.yml",
+          "message": "lint emitted an unknown rule and failed closed",
+          "review_required": false,
+          "suppression_allowed": false,
+          "fingerprint": "791376e8f80714e222f32d9bcb60f94a21869be017e0d2672175487791a0e3a2",
+          "suppression_requested": false
+        }
+      ]
+    },
+    "lint_error": {
+      "class": "Hive::WorkflowPackage::AuthoringLint::LintError",
+      "message": "Honeycomb authoring lint failed: Anthropic credential detected",
+      "result": {
+        "valid": false,
+        "findings": [
+          {
+            "rule_id": "secret.anthropic-key",
+            "severity": "error",
+            "path": "instructions/work.md",
+            "line": 1,
+            "column": 1,
+            "message": "Anthropic credential detected",
+            "review_required": false,
+            "suppression_allowed": false,
+            "fingerprint": "610d25028c42a14c12637771717251a653a321a5f3271841354002a0f06735e1",
+            "suppression_requested": false
+          },
+          {
+            "rule_id": "secret.openai-key",
+            "severity": "error",
+            "path": "instructions/work.md",
+            "line": 1,
+            "column": 1,
+            "message": "OpenAI credential detected",
+            "review_required": false,
+            "suppression_allowed": false,
+            "fingerprint": "084c0ffd0f0b7d742582cb24b2477f8de7adc0c70593f375d9067323863783ac",
+            "suppression_requested": false
+          }
+        ]
+      }
+    },
+    "limit_files": {
+      "valid": false,
+      "findings": [
+        {
+          "rule_id": "policy.file-limit",
+          "severity": "error",
+          "path": "instructions/work.md",
+          "message": "package file count exceeds lint policy",
+          "review_required": false,
+          "suppression_allowed": false,
+          "fingerprint": "4d967f36a2f69f9ff26f1057859da11a18391e3f4ce4b5d328edd02f7425b4fc",
+          "suppression_requested": false
+        }
+      ]
+    },
+    "limit_file_bytes": {
+      "valid": false,
+      "findings": [
+        {
+          "rule_id": "policy.file-limit",
+          "severity": "error",
+          "path": "README.md",
+          "message": "package file exceeds lint byte limit",
+          "review_required": false,
+          "suppression_allowed": false,
+          "fingerprint": "ccdc4e46d7d7c1b1fd96a2198ab4e135668e6f280d90d1590c3f804ff878cef5",
+          "suppression_requested": false
+        },
+        {
+          "rule_id": "policy.file-limit",
+          "severity": "error",
+          "path": "instructions/work.md",
+          "message": "package file exceeds lint byte limit",
+          "review_required": false,
+          "suppression_allowed": false,
+          "fingerprint": "1cfc7f1df5ad5c0cddb5688141c84c26d1e186cdf4d0c8c52eb5161449ca6892",
+          "suppression_requested": false
+        },
+        {
+          "rule_id": "policy.file-limit",
+          "severity": "error",
+          "path": "workflow.yml",
+          "message": "package file exceeds lint byte limit",
+          "review_required": false,
+          "suppression_allowed": false,
+          "fingerprint": "9b8cf4605b2817d75054594a384525e9ae12bad9bf6ee23e06e4d95bfa21aa30",
+          "suppression_requested": false
+        }
+      ]
+    },
+    "limit_total_bytes": {
+      "valid": false,
+      "findings": [
+        {
+          "rule_id": "policy.total-limit",
+          "severity": "error",
+          "path": "README.md",
+          "message": "package total bytes exceed lint policy",
+          "review_required": false,
+          "suppression_allowed": false,
+          "fingerprint": "23f7e3bada6588981ad5fffaa50b6c7208741e593b8d85ee5dd90d157f7d69c8",
+          "suppression_requested": false
+        }
+      ]
+    },
+    "limit_commands": {
+      "valid": false,
+      "findings": [
+        {
+          "rule_id": "permission.absolute-path",
+          "severity": "error",
+          "path": "instructions/work.md",
+          "line": 1,
+          "column": 1,
+          "message": "Absolute filesystem path is outside declared scopes",
+          "review_required": false,
+          "suppression_allowed": true,
+          "fingerprint": "6709fc6f9dff449e19af525727f98afe7425f8d3fcf495478d17b2a9bfd32fe9",
+          "suppression_requested": false
+        },
+        {
+          "rule_id": "permission.filesystem-read",
+          "severity": "error",
+          "path": "instructions/work.md",
+          "line": 1,
+          "column": 1,
+          "message": "Observed read is not declared",
+          "review_required": false,
+          "suppression_allowed": true,
+          "fingerprint": "e62ec12150e0928b67e25bf7d55990007be2224192001b7efbf56c9288cd337c",
+          "suppression_requested": false
+        },
+        {
+          "rule_id": "permission.shell",
+          "severity": "error",
+          "path": "instructions/work.md",
+          "line": 1,
+          "column": 1,
+          "message": "Observed shell command is not declared",
+          "review_required": false,
+          "suppression_allowed": true,
+          "fingerprint": "0535d1c2e34e47cf6130554c9d5774f584ee26d994d5a93b8547276afedaf678",
+          "suppression_requested": false
+        },
+        {
+          "rule_id": "policy.command-limit",
+          "severity": "error",
+          "path": "instructions/work.md",
+          "line": 2,
+          "column": 1,
+          "message": "extracted command count exceeds lint policy",
+          "review_required": false,
+          "suppression_allowed": false,
+          "fingerprint": "a70e61c15bb40e64abff82a4692b75e342b97c38600a78479d624312dc9335fa",
+          "suppression_requested": false
+        }
+      ]
+    },
+    "limit_observations": {
+      "valid": false,
+      "findings": [
+        {
+          "rule_id": "permission.network",
+          "severity": "error",
+          "path": "instructions/work.md",
+          "line": 1,
+          "column": 1,
+          "message": "Observed network use is not declared",
+          "review_required": false,
+          "suppression_allowed": true,
+          "fingerprint": "78dc08b1ca821dc667982b6b6171f0245a567da0a4c3fe1b40342be7e0b16a07",
+          "suppression_requested": false
+        },
+        {
+          "rule_id": "permission.shell",
+          "severity": "error",
+          "path": "instructions/work.md",
+          "line": 1,
+          "column": 1,
+          "message": "Observed shell command is not declared",
+          "review_required": false,
+          "suppression_allowed": true,
+          "fingerprint": "22cd148bc23bc8c1965749f607a6581a4ca8821d140fb59016a20e03f29a2d9f",
+          "suppression_requested": false
+        },
+        {
+          "rule_id": "network.undeclared-host",
+          "severity": "error",
+          "path": "instructions/work.md",
+          "line": 1,
+          "column": 6,
+          "message": "Observed network host is not declared exactly",
+          "review_required": false,
+          "suppression_allowed": true,
+          "fingerprint": "693e06393aeb1e97d6788cecd31922bc4b2753e9274bef0a8a95941fe0fb73e9",
+          "suppression_requested": false
+        },
+        {
+          "rule_id": "permission.network",
+          "severity": "error",
+          "path": "instructions/work.md",
+          "line": 2,
+          "column": 1,
+          "message": "Observed network use is not declared",
+          "review_required": false,
+          "suppression_allowed": true,
+          "fingerprint": "5da0795900d5e42d3daf3193e0b4a296f751ecce7bd074c8fddc727086251edb",
+          "suppression_requested": false
+        },
+        {
+          "rule_id": "permission.shell",
+          "severity": "error",
+          "path": "instructions/work.md",
+          "line": 2,
+          "column": 1,
+          "message": "Observed shell command is not declared",
+          "review_required": false,
+          "suppression_allowed": true,
+          "fingerprint": "7f30cce5971cbfbc9314c1adb5dc868a6cb9acd5802a003f2cb70755eaafb38b",
+          "suppression_requested": false
+        },
+        {
+          "rule_id": "policy.observation-limit",
+          "severity": "error",
+          "path": "instructions/work.md",
+          "line": 2,
+          "column": 1,
+          "message": "network observation count exceeds lint policy",
+          "review_required": false,
+          "suppression_allowed": false,
+          "fingerprint": "67f68f660546dfff85abd83f883dc3778de1056d3cdf99f3c37e3be55db03245",
+          "suppression_requested": false
+        },
+        {
+          "rule_id": "policy.observation-limit",
+          "severity": "error",
+          "path": "instructions/work.md",
+          "line": 2,
+          "column": 6,
+          "message": "network observation count exceeds lint policy",
+          "review_required": false,
+          "suppression_allowed": false,
+          "fingerprint": "837571bc2a4587a8ef2db80452c98f7b48119472976bf87e38035c6a3a7f60ef",
+          "suppression_requested": false
+        }
+      ]
+    },
+    "limit_findings": {
+      "valid": false,
+      "findings": [
+        {
+          "rule_id": "policy.command-limit",
+          "severity": "error",
+          "path": "instructions/work.md",
+          "line": 2,
+          "column": 1,
+          "message": "extracted command count exceeds lint policy",
+          "review_required": false,
+          "suppression_allowed": false,
+          "fingerprint": "a70e61c15bb40e64abff82a4692b75e342b97c38600a78479d624312dc9335fa",
+          "suppression_requested": false
+        },
+        {
+          "rule_id": "policy.finding-limit",
+          "severity": "error",
+          "path": "manifest.yml",
+          "message": "lint finding count exceeds policy",
+          "review_required": false,
+          "suppression_allowed": false,
+          "fingerprint": "3950a1c27d0754609c5f283666e6caca3a1851079b4fb4e5e8f3983bd4a266cd",
+          "suppression_requested": false
+        }
+      ]
+    }
+  },
+  "security_scanner": {
+    "anthropic": [
+      {
+        "rule": "security.anthropic_api_key",
+        "severity": "error",
+        "path": "instructions/work.md",
+        "line": 1,
+        "column": 1,
+        "message": "possible secret material is not permitted in workflow packages"
+      }
+    ]
+  },
+  "publisher": {
+    "fresh_order": {
+      "warnings": [
+        {
+          "rule_id": "security.declared_network",
+          "severity": "warning",
+          "path": "instructions/work.md",
+          "line": 1,
+          "column": 1,
+          "message": "declared network behavior requires human review"
+        },
+        {
+          "rule_id": "permission.broad-declaration",
+          "severity": "warning",
+          "path": "manifest.yml",
+          "line": 1,
+          "column": 1,
+          "message": "Broad declared permissions require human review",
+          "review_required": true,
+          "suppression_allowed": true,
+          "fingerprint": "0ba18ca68ad65313e1f94b098d5cabf3b0f3448f2bf3ec6dece97b62c7498815",
+          "suppression_requested": false
+        }
+      ],
+      "findings": [
+        {
+          "rule_id": "security.declared_network",
+          "severity": "warning",
+          "path": "instructions/work.md",
+          "line": 1,
+          "column": 1,
+          "message": "declared network behavior requires human review"
+        },
+        {
+          "rule_id": "permission.broad-declaration",
+          "severity": "warning",
+          "path": "manifest.yml",
+          "line": 1,
+          "column": 1,
+          "message": "Broad declared permissions require human review",
+          "review_required": true,
+          "suppression_allowed": true,
+          "fingerprint": "0ba18ca68ad65313e1f94b098d5cabf3b0f3448f2bf3ec6dece97b62c7498815",
+          "suppression_requested": false
+        }
+      ],
+      "mutation_blocked": false
+    },
+    "cli_validated_envelope": {
+      "schema": "hive-workflow-publish",
+      "schema_version": 2,
+      "ok": true,
+      "name": "demo",
+      "version": "1.2.3",
+      "package_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "release_digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "warnings": [
+        {
+          "rule_id": "security.declared_network",
+          "severity": "warning",
+          "path": "instructions/work.md",
+          "line": 1,
+          "column": 1,
+          "message": "declared network behavior requires human review"
+        },
+        {
+          "rule_id": "permission.broad-declaration",
+          "severity": "warning",
+          "path": "manifest.yml",
+          "line": 1,
+          "column": 1,
+          "message": "Broad declared permissions require human review",
+          "review_required": true,
+          "suppression_allowed": true,
+          "fingerprint": "0ba18ca68ad65313e1f94b098d5cabf3b0f3448f2bf3ec6dece97b62c7498815",
+          "suppression_requested": false
+        }
+      ],
+      "state": "validated",
+      "freshness": "not_checked",
+      "validated_at": "2026-07-28T12:00:00Z"
+    },
+    "recovery_order": {
+      "warnings": [
+        {
+          "rule_id": "deny.pipe-to-shell",
+          "severity": "error",
+          "path": "instructions/work.md",
+          "line": 4,
+          "column": 1,
+          "message": "Network response is piped to a shell",
+          "review_required": false,
+          "suppression_allowed": true,
+          "fingerprint": "1111111111111111111111111111111111111111111111111111111111111111",
+          "suppression_requested": false
+        },
+        {
+          "rule_id": "permission.broad-declaration",
+          "severity": "warning",
+          "path": "manifest.yml",
+          "line": 1,
+          "column": 1,
+          "message": "Broad declared permissions require human review",
+          "review_required": true,
+          "suppression_allowed": true,
+          "fingerprint": "2222222222222222222222222222222222222222222222222222222222222222",
+          "suppression_requested": false
+        }
+      ],
+      "findings": [
+        {
+          "rule_id": "deny.pipe-to-shell",
+          "severity": "error",
+          "path": "instructions/work.md",
+          "line": 4,
+          "column": 1,
+          "message": "Network response is piped to a shell",
+          "review_required": false,
+          "suppression_allowed": true,
+          "fingerprint": "1111111111111111111111111111111111111111111111111111111111111111",
+          "suppression_requested": false
+        },
+        {
+          "rule_id": "permission.broad-declaration",
+          "severity": "warning",
+          "path": "manifest.yml",
+          "line": 1,
+          "column": 1,
+          "message": "Broad declared permissions require human review",
+          "review_required": true,
+          "suppression_allowed": true,
+          "fingerprint": "2222222222222222222222222222222222222222222222222222222222222222",
+          "suppression_requested": false
+        }
+      ],
+      "mutation_blocked": true
+    }
+  }
+}

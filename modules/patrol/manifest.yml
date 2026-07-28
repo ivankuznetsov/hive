@@ -91,12 +91,13 @@ permissions:
     - "repository"
   filesystem_write:
     - ".hive-state/patrol/**"
+    - ".hive-state/stages/**"
   secrets: []
 templates:
   - "templates/patrol.yml"
 docs:
   - "README.md"
 files:
-  "README.md": "e8239b549afc97bd326cf681133e57c4a685fbaafbf208ef97116afb36ccabe0"
+  "README.md": "5c7122c19be2b8cba0c195905d56d79368d2f5a06f7646dc10f1370004574f92"
   "templates/patrol.yml": "821cbe6870fb874ab84b80d4cc9f9875cdfe8fdfd23af79117df0809a56b1474"
-release_sha256: "76b6f95dbdb63a30b50008df5ecedd9de966cd5acfa64bea69aff7b79264cb51"
+release_sha256: "75f27e92ddb5fcd6aa1c6f6d51fc54f74f65d77a7bbc6dc2871785f869c9415c"

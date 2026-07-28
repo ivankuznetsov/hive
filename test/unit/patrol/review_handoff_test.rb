@@ -107,6 +107,35 @@ class HivePatrolReviewHandoffTest < Minitest::Test
     end
   end
 
+  def test_reconcile_reports_exact_absence_then_the_published_task_without_writing
+    with_tmp_dir do |dir|
+      subject = handoff(dir)
+      arguments = {
+        finding: finding,
+        patch: patch(dir),
+        pr_url: "https://example.com/pull/7"
+      }
+
+      assert_equal(
+        { "status" => "absent", "outcome" => {} },
+        subject.reconcile(**arguments)
+      )
+      folder = nil
+      with_task_counter { folder = subject.enqueue(**arguments) }
+      before = Dir.glob(File.join(dir, ".hive-state", "**", "*"), File::FNM_DOTMATCH).sort
+
+      assert_equal(
+        {
+          "status" => "matched",
+          "outcome" => { "task_path" => folder }
+        },
+        subject.reconcile(**arguments)
+      )
+      assert_equal before,
+                   Dir.glob(File.join(dir, ".hive-state", "**", "*"), File::FNM_DOTMATCH).sort
+    end
+  end
+
   def test_enqueue_writes_task_id_and_falls_back_to_null_when_counter_is_busy
     with_tmp_dir do |dir|
       folder = nil

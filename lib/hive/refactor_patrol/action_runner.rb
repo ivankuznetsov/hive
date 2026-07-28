@@ -5,10 +5,13 @@ require "time"
 require "uri"
 require "hive/gh"
 require "hive/lock"
+require "hive/modules/migration/evidence_store"
+require "hive/modules/migration/patrols"
 require "hive/refactor_patrol/canonical_action_catalog"
 require "hive/refactor_patrol/caps"
 require "hive/refactor_patrol/family_store"
 require "hive/refactor_patrol/fixer"
+require "hive/refactor_patrol/effect_gateway"
 require "hive/refactor_patrol/issue_filer"
 require "hive/refactor_patrol/job_store"
 require "hive/refactor_patrol/policy"
@@ -57,6 +60,7 @@ module Hive
                      repository_ownership: nil,
                      canonical_action_catalog: nil,
                      registration: nil, token_budget: nil,
+                     effect_gateway_factory: nil, evidence_store: nil,
                      lease_sec: 3600, backoff_sec: 60,
                      authority_backoff_sec: AUTHORITY_RECHECK_SEC)
         @project_root = File.expand_path(project_root)
@@ -106,10 +110,21 @@ module Hive
         @lease_sec = lease_sec
         @backoff_sec = backoff_sec
         @authority_backoff_sec = authority_backoff_sec
+        @effect_gateway_factory = effect_gateway_factory
+        @effect_evidence_store = evidence_store ||
+                                 Hive::Modules::Migration::EvidenceStore.new(
+                                   root: File.join(
+                                     @project_root, ".hive-state",
+                                     "module-runtime", "migration",
+                                     "patrol-evidence"
+                                   )
+                                 )
       end
 
       def run(job_id:, dry_run: false)
         @events = []
+        @authorized_effects = {}
+        @effect_captures = {}
         aggregate = @job_store.read_job(job_id)
         @source = aggregate.fetch("source")
         return result(aggregate, dry_run: dry_run) if aggregate.fetch("complete")
@@ -627,6 +642,12 @@ module Hive
           authorize_push: external_effect_fence(token, "fix"),
           authorize_create: external_effect_fence(token, "fix"),
           authorize_handoff: continuation_fence(token, aggregate),
+          execute_effect: publication_effect_executor(
+            token, "fix", aggregate, action, patch, attempt_id: attempt_id
+          ),
+          execute_handoff: handoff_effect_executor(
+            token, "fix", aggregate, action, patch
+          ),
           creation_attempted: publication.any?,
           publication_state: publication,
           superseded_patch_commits: superseded_patch_commits(fresh_action)
@@ -663,6 +684,9 @@ module Hive
           reasons: reasons,
           record_intent: publication_intent_callback(token, "issue", aggregate, action),
           authorize_create: external_effect_fence(token, "issue"),
+          execute_effect: publication_effect_executor(
+            token, "issue", aggregate, action
+          ),
           creation_attempted: publication.any? || remote_continuation ||
             remote_continuation_evidence?(fresh_action),
           publication_state: publication
@@ -732,7 +756,7 @@ module Hive
                                         {}
                                       end
         result_receipts = json_copy(result_receipts || {})
-        if adapter_result.terminal == true
+        aggregate = if adapter_result.terminal == true
           @job_store.finish_action!(
             token,
             outcome: adapter_result.outcome,
@@ -748,6 +772,8 @@ module Hive
             backoff_sec: backoff_sec_for(adapter_result.outcome)
           )
         end
+        finalize_effect_receipts(token, aggregate) if @authorized_effects&.any?
+        aggregate
       end
 
       def valid_adapter_result?(adapter, result)
@@ -841,13 +867,341 @@ module Hive
           unless payload == expected
             raise JobStore::InconsistentRecord, "publication intent payload is invalid"
           end
-          unless phase == PrOpener::PUSH_COMPLETE
-            next false unless effect_authorized?(kind)
-          end
-
-          persist_publication_phase(token, kind, phase, payload, attempt_id: attempt_id)
+          persist_publication_phase(
+            token, kind, phase, payload, attempt_id: attempt_id
+          )
           true
         end
+      end
+
+      def publication_effect_executor(token, kind, aggregate, action, patch = nil,
+                                      attempt_id: nil)
+        lambda do |phase:, payload:, &effect|
+          expected = expected_publication_payload(
+            kind, phase, aggregate, action, patch,
+            expected_remote_oid: payload.is_a?(Hash) ?
+              payload["expected_remote_oid"] : nil
+          )
+          unless payload == expected
+            raise JobStore::InconsistentRecord,
+                  "publication effect payload is invalid"
+          end
+
+          capture = effect_capture(token, aggregate, action)
+          descriptor = effect_descriptor(
+            token, kind, phase, payload, aggregate, action,
+            attempt_id: attempt_id
+          )
+          gateway = build_effect_gateway(
+            token,
+            kind,
+            phase,
+            payload,
+            capture,
+            attempt_id: attempt_id
+          )
+          gateway.apply!(
+            sink: descriptor.fetch(:sink),
+            target: descriptor.fetch(:target),
+            idempotency_key: descriptor.fetch(:idempotency_key),
+            capability: descriptor.fetch(:capability),
+            claim_generation: token.fetch(:generation)
+          ) do |intent|
+            @authorized_effects[intent.intent_id] = {
+              gateway: gateway,
+              intent: intent
+            }
+            effect.call
+          end
+        end
+      end
+
+      def handoff_effect_executor(token, kind, aggregate, action, patch)
+        lambda do |phase:, payload:, &effect|
+          expected = {
+            "pr_url" => payload.is_a?(Hash) ? payload["pr_url"] : nil,
+            "job_id" => aggregate.fetch("job_id"),
+            "canonical_action_id" => action.fetch("canonical_action_id"),
+            "commit_sha" => patch.commit_sha
+          }
+          unless phase == "review_handoff" &&
+                 expected["pr_url"].to_s.match?(%r{\Ahttps://}) &&
+                 payload == expected
+            raise JobStore::InconsistentRecord,
+                  "review handoff effect payload is invalid"
+          end
+
+          capture = effect_capture(token, aggregate, action)
+          gateway = build_effect_gateway(
+            token,
+            kind,
+            phase,
+            payload,
+            capture,
+            attempt_id: nil,
+            persist_publication: false
+          )
+          gateway.apply!(
+            sink: "review_handoff",
+            target: payload.fetch("pr_url"),
+            idempotency_key: [
+              token.fetch(:job_id),
+              token.fetch(:canonical_action_id),
+              token.fetch(:generation),
+              "review_handoff",
+              payload.fetch("pr_url")
+            ].join(":"),
+            capability: "review_handoff",
+            claim_generation: token.fetch(:generation)
+          ) do |intent|
+            @authorized_effects[intent.intent_id] = {
+              gateway: gateway,
+              intent: intent
+            }
+            effect.call
+          end
+        end
+      end
+
+      def build_effect_gateway(token, kind, phase, payload, capture, attempt_id:,
+                               persist_publication: true)
+        options = {
+          project_root: @project_root,
+          hive_state_path: File.join(@project_root, ".hive-state"),
+          capture: capture,
+          authority: capture.owner,
+          evidence_store: @effect_evidence_store,
+          intent_writer: lambda do |intent|
+            if persist_publication
+              persist_publication_phase(
+                token, kind, phase, payload, attempt_id: attempt_id
+              )
+            end
+            key = "effect_intent_#{intent.intent_id}"
+            current = current_action(token).fetch("receipts")[key]
+            if current
+              unless current == intent.to_h
+                raise JobStore::InconsistentRecord,
+                      "architecture patrol effect intent conflicts with JobStore"
+              end
+              :duplicate
+            else
+              @job_store.record_action_receipt!(
+                token, key: key, value: intent.to_h, now: now
+              )
+              :created
+            end
+          end,
+          recovery_reader: lambda do |intent|
+            effect_recovery_state(token, intent)
+          end,
+          outcome_writer: lambda do |intent, status:, outcome:|
+            @job_store.record_action_receipt!(
+              token,
+              key: "effect_outcome_#{intent.intent_id}",
+              value: { "status" => status, "outcome" => outcome },
+              now: now
+            )
+          end,
+          claim_validator: lambda do |claim_generation:, **|
+            next false unless claim_generation == token.fetch(:generation)
+
+            @job_store.assert_action_claim!(token, now: now)
+          rescue JobStore::StaleClaim
+            false
+          end,
+          config_loader: @config_loader,
+          capability_checker: lambda do |**|
+            claim_effect_authorized?(token, kind)
+          end,
+          clock: @clock
+        }
+        return @effect_gateway_factory.call(**options) if @effect_gateway_factory
+
+        Hive::RefactorPatrol::EffectGateway.new(**options)
+      end
+
+      def effect_capture(token, aggregate, action)
+        key = [
+          token.fetch(:job_id),
+          token.fetch(:canonical_action_id),
+          token.fetch(:generation)
+        ]
+        @effect_captures[key] ||= begin
+          snapshot = Hive::Modules::Migration::Patrols.ownership_snapshot(
+            @project_root,
+            "architecture-patrol",
+            hive_state_path: File.join(@project_root, ".hive-state")
+          )
+          unless %w[legacy module].include?(snapshot["owner"]) &&
+                 snapshot["admission"] == true &&
+                 snapshot["epoch"].to_i.positive?
+            raise JobStore::InconsistentRecord,
+                  "architecture patrol migration ownership is unavailable"
+          end
+          identity = key.join(":")
+          capture = Hive::Modules::Migration::PatrolCapture.build(
+            module_name: "architecture-patrol",
+            project: {
+              "project_id" => effect_project_id,
+              "name" => effect_project_name,
+              "repository" => aggregate.dig("source", "repository")
+            },
+            trigger: {
+              "kind" => "action_claim",
+              "id" => identity,
+              "job_id" => token.fetch(:job_id),
+              "canonical_action_id" => token.fetch(:canonical_action_id),
+              "claim_generation" => token.fetch(:generation)
+            },
+            reservation: {
+              "kind" => "architecture",
+              "id" => identity,
+              "job_id" => token.fetch(:job_id),
+              "action_id" => token.fetch(:canonical_action_id),
+              "claim_generation" => token.fetch(:generation)
+            },
+            owner: snapshot.fetch("owner"),
+            owner_epoch: snapshot.fetch("epoch"),
+            decision_class: "action",
+            decision: {
+              "rationale" => "claimed",
+              "kind" => action.fetch("kind"),
+              "action_id" => action.fetch("canonical_action_id")
+            },
+            occurred_at: now,
+            recorded_at: now
+          )
+          @effect_evidence_store.append_capture(capture)
+          capture
+        end
+      end
+
+      def effect_descriptor(token, kind, phase, payload, aggregate, action,
+                            attempt_id:)
+        repository = aggregate.dig("source", "repository")
+        base = [
+          token.fetch(:job_id),
+          action.fetch("canonical_action_id"),
+          token.fetch(:generation),
+          phase,
+          attempt_id
+        ].compact.join(":")
+        case phase
+        when PrOpener::PUSH_INTENT
+          {
+            sink: "branch",
+            target: "#{repository}:#{payload.fetch('branch')}",
+            idempotency_key: base,
+            capability: "repository_write"
+          }
+        when PrOpener::PR_CREATE_INTENT
+          {
+            sink: "pull_request",
+            target: "#{repository}:#{payload.fetch('branch')}",
+            idempotency_key: base,
+            capability: "github_pull_requests"
+          }
+        when "issue_create_intent"
+          {
+            sink: "issue",
+            target: "#{repository}:#{action.fetch('family_id')}",
+            idempotency_key: base,
+            capability: "github_issues"
+          }
+        else
+          raise JobStore::InconsistentRecord,
+                "architecture patrol effect phase is unsupported"
+        end
+      end
+
+      def effect_recovery_state(token, intent)
+        receipts = current_action(token).fetch("receipts")
+        outcome = receipts["effect_outcome_#{intent.intent_id}"]
+        return outcome if outcome.is_a?(Hash)
+        return nil unless receipts["effect_intent_#{intent.intent_id}"]
+
+        { "status" => "intent", "outcome" => {} }
+      end
+
+      def finalize_effect_receipts(token, aggregate)
+        action = aggregate.fetch("actions").find do |candidate|
+          candidate.fetch("canonical_action_id") ==
+            token.fetch(:canonical_action_id)
+        end
+        return unless action
+
+        @authorized_effects.each_value do |entry|
+          intent = entry.fetch(:intent)
+          next unless intent.claim_generation == token.fetch(:generation)
+
+          status, outcome = finalized_effect_outcome(action, intent)
+          entry.fetch(:gateway).finalize!(
+            intent: intent,
+            status: status,
+            outcome: outcome
+          )
+        rescue StandardError => e
+          @events << event(
+            "effect_evidence_append_failed",
+            intent_id: intent&.intent_id,
+            error: "#{e.class}: #{e.message}"
+          )
+        end
+      end
+
+      def finalized_effect_outcome(action, intent)
+        receipts = action.fetch("receipts")
+        status = case intent.sink
+        when "branch"
+          publication_receipt_present?(receipts, PrOpener::PUSH_COMPLETE) ?
+            "committed" : uncertain_effect_status(action)
+        when "pull_request"
+          receipts["pr_url"] || receipts["pr"] ? "committed" :
+            uncertain_effect_status(action)
+        when "issue"
+          receipts["issue_url"] || receipts["issue"] ? "committed" :
+            uncertain_effect_status(action)
+        when "review_handoff"
+          receipts["review_task_path"] ? "committed" :
+            uncertain_effect_status(action)
+        else
+          uncertain_effect_status(action)
+        end
+        [
+          status,
+          {
+            "action_outcome" => action.fetch("outcome"),
+            "terminal" => action.fetch("terminal")
+          }
+        ]
+      end
+
+      def uncertain_effect_status(action)
+        action.fetch("outcome") == REMOTE_UNCERTAIN_OUTCOME ? "unknown" : "failed"
+      end
+
+      def publication_receipt_present?(receipts, phase)
+        return true if receipts.key?(phase)
+
+        attempts = receipts[PublicationAttempt::ATTEMPTS_KEY]
+        attempts.is_a?(Hash) &&
+          attempts.values.any? { |attempt| attempt.is_a?(Hash) && attempt.key?(phase) }
+      end
+
+      def effect_project_id
+        registered = Hive::Config.registered_projects.find do |entry|
+          entry["name"].to_s == effect_project_name &&
+            File.expand_path(entry.fetch("path")) == @project_root
+        end
+        registered&.fetch("project_id", nil) ||
+          "local-#{::Digest::SHA256.hexdigest(@project_root)}"
+      rescue Hive::ConfigError, KeyError, SystemCallError
+        "local-#{::Digest::SHA256.hexdigest(@project_root)}"
+      end
+
+      def effect_project_name
+        @registration.empty? ? File.basename(@project_root) : @registration
       end
 
       def external_effect_fence(token, kind)

@@ -2,6 +2,7 @@ require "hive/config"
 require "hive/module_package/managed_store"
 require "hive/modules/migration/patrols"
 require "hive/modules/migration/report"
+require "hive/modules/migration/shadow_decision_migration"
 
 module Hive
   module Modules
@@ -42,6 +43,11 @@ module Hive
           selections = store.inspect_selections.to_h { |selection| [ selection.fetch("name"), selection ] }
           return unless Patrols::MODULES.all? { |name| selections.dig(name, "installed") == true }
 
+          ShadowDecisionMigration.migrate!(
+            root: File.join(
+              entry.fetch("hive_state_path"), "module-runtime", "migration", "shadow"
+            )
+          ) unless @dry_run
           state = Patrols.read_state(entry.fetch("path"), hive_state_path: entry.fetch("hive_state_path"))
           return unless state.nil? || %w[pending cutover_pending rollback_pending].include?(state.fetch("status"))
           return { project: entry.fetch("name"), status: :dry_run } if @dry_run

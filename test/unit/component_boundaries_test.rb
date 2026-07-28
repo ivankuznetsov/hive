@@ -17,6 +17,7 @@ class ComponentBoundariesTest < Minitest::Test
       agent-abi
       agent-artifact-firewall
       attempts
+      patrol-effects
       safe-agent-git-gate
       skillpack
       user-service
@@ -90,7 +91,23 @@ class ComponentBoundariesTest < Minitest::Test
                  user_service.fetch("forbidden_constructions")
     assert_empty user_service.fetch("migration_exceptions")
 
-    ready_components = [ user_service ]
+    patrol_effects = contract.component("patrol-effects")
+    assert_equal "boundary-ready", patrol_effects.fetch("state")
+    assert_equal "hive/modules/migration/patrol_evidence",
+                 patrol_effects.dig("entrypoint", "require")
+    assert_equal "Hive::Modules::Migration::PatrolEvidence",
+                 patrol_effects.dig("entrypoint", "constant")
+    assert_equal(
+      %w[
+        Hive::Modules::Migration::EffectIntent
+        Hive::Modules::Migration::EffectReceipt
+        Hive::Modules::Migration::PatrolCapture
+      ],
+      patrol_effects.dig("public_contract", "values").sort
+    )
+    assert_empty patrol_effects.fetch("migration_exceptions")
+
+    ready_components = [ user_service, patrol_effects ]
 
     clean_load = contract.validate_clean_load!("attempts")
     assert_equal "Hive::Attempts::API", clean_load.fetch("constant")
@@ -200,6 +217,7 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal %w[
       agent-abi
       agent-artifact-firewall
+      patrol-effects
       safe-agent-git-gate
       skillpack
       user-service
@@ -229,6 +247,11 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal "Hive::WorkLedger", work_ledger_load.fetch("constant")
     assert_empty work_ledger_load.fetch("forbidden_loaded_features")
     assert_empty work_ledger_load.fetch("forbidden_constants")
+    patrol_effects_load = ready_loads.fetch("patrol-effects")
+    assert_equal "Hive::Modules::Migration::PatrolEvidence",
+                 patrol_effects_load.fetch("constant")
+    assert_empty patrol_effects_load.fetch("forbidden_loaded_features")
+    assert_empty patrol_effects_load.fetch("forbidden_constants")
   end
 
   def test_final_graph_and_wiki_inventory_agree_with_the_catalog

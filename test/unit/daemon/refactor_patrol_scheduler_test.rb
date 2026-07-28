@@ -403,6 +403,27 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       )
       assert_equal :closed, completed.fetch(:status)
       assert store.read_job("job-7").fetch("complete")
+      evidence = Hive::Modules::Migration::EvidenceStore.new(
+        root: File.join(
+          entry.fetch("hive_state_path"), "module-runtime", "migration",
+          "patrol-evidence"
+        )
+      )
+      finalized = evidence.captures.find do |capture|
+        capture.reservation.dig("outcome", "status") == "closed"
+      end
+      refute_nil finalized
+      assert_equal "not_due", finalized.decision.fetch("rationale")
+      event = Hive::Modules::EventLedger.new(
+        root: File.join(entry.fetch("hive_state_path"), "module-runtime")
+      ).all.find do |candidate_event|
+        candidate_event.dig(
+          "payload", "legacy_mutator_capture", "capture_id"
+        ) == finalized.capture_id
+      end
+      refute_nil event
+      assert_equal "legacy_architecture_patrol_completion",
+                   event.dig("source", "type")
       assert_empty scheduler.candidates(now: T0 + 3600), "completed zero must be terminal exactly once"
     end
   end
@@ -1089,7 +1110,12 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
   end
 
   def entry(dir, name)
-    { "name" => name, "path" => dir, "hive_state_path" => File.join(dir, ".hive-state") }
+    {
+      "name" => name,
+      "project_id" => "#{name}-id",
+      "path" => dir,
+      "hive_state_path" => File.join(dir, ".hive-state")
+    }
   end
 
   def enabled_cfg

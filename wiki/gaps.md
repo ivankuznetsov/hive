@@ -3,13 +3,21 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-07-27
+updated: 2026-07-28
 tags: [gap, todo, release-proof, agent-skills]
 ---
 
 **TLDR**: The wiki has broad domain coverage for the current `lib/`, command, stage, TUI, daemon, bot, native Hive web, Hivebox container, testing/static-analysis, template/prompt, and release surfaces, but the source-file map below is representative rather than an automatically verified one-file-per-source audit. Remaining gaps are mainly live behavioral verification and a few deeper reference pages.
 
 ## Current release gap
+
+- Patrol capture/effect boundaries are source- and focused-test-pinned, but
+  they are not yet compressed-campaign or live-cutover evidence. The permanent
+  U3 harness must still exercise real scheduler/event/adapter/store paths,
+  restarts around intent and outcome boundaries, shadow attempted-effect
+  denial, exact reconciliation, and run-level duplicate detection before any
+  migration qualification claim. Longer elapsed telemetry remains useful but
+  is not a substitute for that protocol.
 
 - `agent-cli-runtime` 0.1.0 has a self-contained package, exact-artifact
   verifier, Linux/macOS install matrix, and component-scoped trusted-publishing

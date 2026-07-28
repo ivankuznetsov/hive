@@ -89,9 +89,11 @@ module Hive
         raise EventLedgerError, "module event cursor is malformed"
       end
 
-      def latest_schedule(schedule)
+      def latest_schedule(schedule, target_module: nil)
         value = with_lock do
-          index_unlocked.fetch("latest_schedules")[schedule.to_s]
+          index_unlocked.fetch("latest_schedules")[
+            schedule_index_key(schedule, target_module)
+          ]
         end
         value && Time.iso8601(value)
       rescue ArgumentError
@@ -104,9 +106,12 @@ module Hive
         index["event_ids"] << event.fetch("event_id")
         if event.fetch("event_name") == "schedule"
           schedule = event.dig("payload", "schedule")
-          current = index.fetch("latest_schedules")[schedule]
+          key = schedule_index_key(
+            schedule, event.dig("payload", "target_module")
+          )
+          current = index.fetch("latest_schedules")[key]
           occurred_at = event.fetch("occurred_at")
-          index["latest_schedules"][schedule] = occurred_at if current.nil? || occurred_at > current
+          index["latest_schedules"][key] = occurred_at if current.nil? || occurred_at > current
         end
         Hive::AtomicFile.write(index_path, canonical(index), mode: 0o600)
       end
@@ -138,8 +143,11 @@ module Hive
           next unless event.fetch("event_name") == "schedule"
 
           schedule = event.dig("payload", "schedule")
+          key = schedule_index_key(
+            schedule, event.dig("payload", "target_module")
+          )
           occurred_at = event.fetch("occurred_at")
-          latest[schedule] = occurred_at if latest[schedule].nil? || occurred_at > latest[schedule]
+          latest[key] = occurred_at if latest[key].nil? || occurred_at > latest[key]
         end
         index = {
           "schema_version" => 1,
@@ -222,6 +230,12 @@ module Hive
           raise EventLedgerError, "module event id is malformed"
         end
         File.join(events_root, "#{event_id}.json")
+      end
+
+      def schedule_index_key(schedule, target_module)
+        return schedule.to_s if target_module.nil?
+
+        "#{target_module}\u0000#{schedule}"
       end
 
       def with_lock(shared: false)

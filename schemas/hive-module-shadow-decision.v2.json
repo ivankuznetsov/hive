@@ -1,0 +1,143 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hivecli.sh/schemas/hive-module-shadow-decision.v2.json",
+  "title": "Hive module shadow decision v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "module",
+    "decision_id",
+    "trigger",
+    "trigger_digest",
+    "occurred_at",
+    "recorded_at",
+    "evidence_source",
+    "configuration_digest",
+    "comparable",
+    "legacy_capture",
+    "module_decision",
+    "explained_differences",
+    "unexplained_differences",
+    "legacy_effects",
+    "module_effects",
+    "duplicate_effects",
+    "migration"
+  ],
+  "properties": {
+    "schema": {"const": "hive-module-shadow-decision"},
+    "schema_version": {"const": 2},
+    "module": {"enum": ["patrol", "architecture-patrol"]},
+    "decision_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "trigger": {"type": "object"},
+    "trigger_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "occurred_at": {"type": "string", "format": "date-time"},
+    "recorded_at": {"type": "string", "format": "date-time"},
+    "evidence_source": {
+      "enum": ["legacy_mutator_capture", "archived_v1", null]
+    },
+    "configuration_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "comparable": {"type": "boolean"},
+    "legacy_capture": {
+      "anyOf": [
+        {
+          "type": "object",
+          "required": [
+            "schema",
+            "schema_version",
+            "capture_id",
+            "occurrence_id",
+            "decision"
+          ],
+          "properties": {
+            "schema": {"const": "hive-patrol-capture"},
+            "schema_version": {"const": 1},
+            "capture_id": {"type": "string", "pattern": "^cap-[0-9a-f]{64}$"},
+            "occurrence_id": {"type": "string", "pattern": "^occ-[0-9a-f]{64}$"},
+            "decision": {"type": "object"}
+          }
+        },
+        {"type": "null"}
+      ]
+    },
+    "module_decision": {},
+    "explained_differences": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/difference"}
+    },
+    "unexplained_differences": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/difference"}
+    },
+    "legacy_effects": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/effect_receipt"}
+    },
+    "module_effects": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/effect_receipt"}
+    },
+    "duplicate_effects": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^intent-[0-9a-f]{64}$"}
+    },
+    "migration": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source_digest", "source_schema_version", "status"],
+          "properties": {
+            "source_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "source_schema_version": {"const": 1},
+            "status": {"const": "archived_non_comparable"}
+          }
+        },
+        {"type": "null"}
+      ]
+    }
+  },
+  "$defs": {
+    "difference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "legacy", "module"],
+      "properties": {
+        "path": {"type": "string"},
+        "legacy": {},
+        "module": {}
+      }
+    },
+    "effect_receipt": {
+      "type": "object",
+      "required": [
+        "schema",
+        "schema_version",
+        "receipt_id",
+        "intent",
+        "status",
+        "outcome",
+        "recorded_at"
+      ],
+      "properties": {
+        "schema": {"const": "hive-patrol-effect-receipt"},
+        "schema_version": {"const": 1},
+        "receipt_id": {"type": "string", "pattern": "^receipt-[0-9a-f]{64}$"},
+        "intent": {
+          "type": "object",
+          "required": ["intent_id", "occurrence_id", "sink"],
+          "properties": {
+            "intent_id": {"type": "string", "pattern": "^intent-[0-9a-f]{64}$"},
+            "occurrence_id": {"type": "string", "pattern": "^occ-[0-9a-f]{64}$"},
+            "sink": {"type": "string", "minLength": 1}
+          }
+        },
+        "status": {"type": "string", "minLength": 1},
+        "outcome": {"type": "object"},
+        "recorded_at": {"type": "string", "format": "date-time"}
+      }
+    }
+  }
+}

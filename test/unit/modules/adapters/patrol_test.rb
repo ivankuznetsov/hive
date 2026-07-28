@@ -167,7 +167,8 @@ class ModulesAdaptersPatrolTest < Minitest::Test
       record = JSON.parse(File.binread(shadow_files.fetch(0)))
       refute record.fetch("comparable")
       assert_nil record.fetch("evidence_source")
-      assert_empty record.fetch("legacy")
+      assert_nil record.fetch("legacy_capture")
+      assert_empty record.fetch("legacy_effects")
 
       assert_raises(Hive::ConfigError) do
         adapter.call(
@@ -234,16 +235,14 @@ class ModulesAdaptersPatrolTest < Minitest::Test
     end
     assert_match(/legacy shadow capture is malformed/, error.message)
 
-    valid = {
-      "decision" => { "rationale" => "due" }, "effects" => []
-    }
+    valid = capture
     assert_equal(
       valid,
       adapter.send(
         :legacy_capture,
         event(
           "schedule",
-          "payload" => { "legacy_mutator_capture" => valid }
+          "payload" => { "legacy_mutator_capture" => valid.to_h }
         )
       )
     )
@@ -286,7 +285,10 @@ class ModulesAdaptersPatrolTest < Minitest::Test
           "refactor_patrol" => { "enabled" => true }
         }.to_yaml
       )
-      project = { "name" => "demo", "path" => root, "hive_state_path" => state }
+      project = {
+        "name" => "demo", "project_id" => "project-1",
+        "path" => root, "hive_state_path" => state
+      }
       write_migration_state(project, owner)
       yield(project)
     end
@@ -329,7 +331,8 @@ class ModulesAdaptersPatrolTest < Minitest::Test
       grants: {
         "repository_write" => true, "github_mutations" => [ "pull_requests" ],
         "external_commands" => %w[gh git], "network_hosts" => [ "api.github.com" ],
-        "filesystem_read" => [ "repository" ], "filesystem_write" => [ ".hive-state/patrol/**" ],
+        "filesystem_read" => [ "repository" ],
+        "filesystem_write" => [ ".hive-state/patrol/**", ".hive-state/stages/**" ],
         "secrets" => []
       }, digest: "d" * 64
     )
@@ -346,7 +349,35 @@ class ModulesAdaptersPatrolTest < Minitest::Test
   def event(name, overrides = {})
     {
       "event_id" => "evt-#{'a' * 64}", "event_name" => name,
+      "project_id" => "project-1", "project" => "demo",
       "occurred_at" => NOW.iso8601(6), "payload" => {}
     }.merge(overrides)
+  end
+
+  def capture
+    Hive::Modules::Migration::PatrolCapture.build(
+      module_name: "patrol",
+      project: {
+        "project_id" => "project-1",
+        "name" => "demo",
+        "repository" => nil
+      },
+      trigger: {
+        "kind" => "schedule",
+        "id" => "ordinary:project-1:#{NOW.iso8601(6)}",
+        "schedule" => "*/10 * * * *",
+        "occurred_at" => NOW.iso8601(6)
+      },
+      reservation: {
+        "kind" => "ordinary",
+        "id" => "ordinary:project-1:#{NOW.iso8601(6)}"
+      },
+      owner: "legacy",
+      owner_epoch: 1,
+      decision_class: "due",
+      decision: { "rationale" => "due" },
+      occurred_at: NOW,
+      recorded_at: NOW
+    )
   end
 end

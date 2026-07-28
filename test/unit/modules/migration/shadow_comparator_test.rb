@@ -10,22 +10,25 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
   def test_normalizes_representation_fields_and_is_idempotent
     with_tmp_dir do |root|
       comparator = Hive::Modules::Migration::ShadowComparator.new(root: root)
+      trigger = { "id" => "tick-1" }
+      capture = capture_for(
+        "patrol", trigger,
+        { "status" => "due", "owner" => "legacy", "duration_ms" => 10 }
+      )
       record = comparator.record!(
-        module_name: "patrol", trigger: { "id" => "tick-1" },
-        legacy_decision: { status: :due, owner: "legacy", duration_ms: 10 },
+        module_name: "patrol", trigger: trigger, legacy_capture: capture,
         module_decision: { "status" => "due", "engine" => "module" },
-        configuration_digest: "a" * 64, occurred_at: START
+        configuration_digest: "a" * 64, occurred_at: START, comparable: false
       )
       repeated = comparator.record!(
-        module_name: "patrol", trigger: { "id" => "tick-1" },
-        legacy_decision: { status: :due, owner: "legacy", duration_ms: 99 },
+        module_name: "patrol", trigger: trigger, legacy_capture: capture,
         module_decision: { "status" => "due", "engine" => "module" },
-        configuration_digest: "a" * 64, occurred_at: START
+        configuration_digest: "a" * 64, occurred_at: START, comparable: false
       )
 
       assert_empty record.fetch("unexplained_differences")
-      refute record.fetch("comparable"), "unproven self-comparison must not count toward cutover"
-      assert_nil record.fetch("evidence_source")
+      refute record.fetch("comparable"), "explicitly noncomparable evidence must not count toward cutover"
+      assert_equal "legacy_mutator_capture", record.fetch("evidence_source")
       assert_equal record, repeated
       assert_equal 1, comparator.records("patrol").length
     end
@@ -40,15 +43,19 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
       10.times do |index|
         captured_at = START + (index * 24 * 60 * 60)
         %w[patrol architecture-patrol].each do |module_name|
+          trigger = { "id" => "#{module_name}-#{index}", "snapshot" => index }
+          decision = { "status" => "due", "reason" => "matched" }
+          capture = capture_for(module_name, trigger, decision)
           comparator.record!(
             module_name: module_name,
-            trigger: { "id" => "#{module_name}-#{index}", "snapshot" => index },
-            legacy_decision: { "status" => "due", "reason" => "matched" },
-            module_decision: { "status" => "due", "reason" => "matched" },
+            trigger: trigger,
+            legacy_capture: capture,
+            module_decision: decision,
             configuration_digest: "#{module_name == 'patrol' ? 'a' : 'b'}" * 64,
             occurred_at: START + (index * 24 * 60 * 60),
-            legacy_effects: [ "effect-#{index}" ],
-            evidence_source: "legacy_mutator_capture"
+            legacy_effects: [
+              receipt_for(capture, "effect-#{index}", authority: "legacy")
+            ]
           )
         end
       end
@@ -64,12 +71,15 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
                       7 * 24 * 60 * 60
 
       captured_at = reviewed_at
+      trigger = { "id" => "mismatch" }
+      capture = capture_for("patrol", trigger, { "status" => "due" })
       comparator.record!(
-        module_name: "patrol", trigger: { "id" => "mismatch" },
-        legacy_decision: { "status" => "due" }, module_decision: { "status" => "skip" },
+        module_name: "patrol", trigger: trigger,
+        legacy_capture: capture, module_decision: { "status" => "skip" },
         configuration_digest: "a" * 64, occurred_at: reviewed_at,
-        module_effects: [ "unexpected-pr" ],
-        evidence_source: "legacy_mutator_capture"
+        module_effects: [
+          receipt_for(capture, "unexpected-pr", authority: "shadow", status: "denied")
+        ]
       )
       blocked = Hive::Modules::Migration::Report.build(
         records: comparator.records, reviewer: "operator@example.com",
@@ -84,13 +94,22 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
   def test_shadow_identity_time_and_conflicting_replay_fail_closed
     with_tmp_dir do |root|
       comparator = Hive::Modules::Migration::ShadowComparator.new(root: root)
+      trigger = { "id" => "same" }
+      capture = capture_for(
+        "patrol", trigger,
+        { "rows" => [ "due", { "value" => 1 } ] }
+      )
+      legacy_receipt = receipt_for(capture, "legacy", authority: "legacy")
+      module_receipt = receipt_for(
+        capture, "module", authority: "shadow", status: "denied"
+      )
       attributes = {
-        module_name: "patrol", trigger: { "id" => "same" },
-        legacy_decision: { "rows" => [ :due, { "value" => 1 } ] },
+        module_name: "patrol", trigger: trigger, legacy_capture: capture,
         module_decision: { "rows" => [ :skip, { "value" => 2 } ] },
         configuration_digest: "a" * 64, occurred_at: START,
-        explained_paths: [ "$.rows[0]" ], legacy_effects: [ { "id" => 1 }, { "id" => 1 } ],
-        module_effects: [ { "id" => 2 } ]
+        explained_paths: [ "$.rows[0]" ],
+        legacy_effects: [ legacy_receipt, legacy_receipt ],
+        module_effects: [ module_receipt ]
       }
       record = comparator.record!(**attributes)
       assert_equal [ "$.rows[0]" ], record.fetch("explained_differences").map { |row| row.fetch("path") }
@@ -110,7 +129,7 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
         comparator.record!(**attributes.merge(module_decision: { "rows" => [] }))
       end
       assert_raises(Hive::ConfigError) do
-        comparator.record!(**attributes.merge(evidence_source: "fixture"))
+        comparator.record!(**attributes.merge(legacy_capture: {}))
       end
     end
   end
@@ -173,5 +192,49 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
     }
 
     refute Hive::Modules::Migration::Report.valid_payload?(payload)
+  end
+
+  private
+
+  def capture_for(module_name, trigger, decision)
+    Hive::Modules::Migration::PatrolCapture.build(
+      module_name: module_name,
+      project: {
+        "project_id" => "project-1",
+        "name" => "demo",
+        "repository" => "owner/demo"
+      },
+      trigger: trigger,
+      reservation: {
+        "kind" => module_name == "patrol" ? "ordinary" : "architecture",
+        "id" => trigger.fetch("id")
+      },
+      owner: "legacy",
+      owner_epoch: 1,
+      decision_class: decision.fetch("status", "due"),
+      decision: decision,
+      occurred_at: START,
+      recorded_at: START
+    )
+  end
+
+  def receipt_for(capture, id, authority:, status: "committed")
+    intent = Hive::Modules::Migration::EffectIntent.build(
+      module_name: capture.module_name,
+      occurrence_id: capture.occurrence_id,
+      authority: authority,
+      owner_epoch: capture.owner_epoch,
+      sink: "state",
+      target: id,
+      idempotency_key: id,
+      capability: "filesystem_write",
+      created_at: START
+    )
+    Hive::Modules::Migration::EffectReceipt.build(
+      intent: intent,
+      status: status,
+      outcome: { "attempted" => true },
+      recorded_at: START
+    )
   end
 end

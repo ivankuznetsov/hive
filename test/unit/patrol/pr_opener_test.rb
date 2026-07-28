@@ -226,10 +226,24 @@ class HivePatrolPrOpenerTest < Minitest::Test
 
       state = Hive::Patrol::StateStore.new(dir)
       state.ensure!
-      original_write = state.method(:write_fingerprints)
-      state.define_singleton_method(:write_fingerprints) do |fingerprints|
-        operations << "mapping:#{fingerprints.dig('fp1', 'state')}"
-        original_write.call(fingerprints)
+      original_reserve = state.method(:reserve_effect_intent)
+      state.define_singleton_method(:reserve_effect_intent) do |fingerprint, intent, **options|
+        operations << "effect:#{intent.sink}:intent"
+        original_reserve.call(fingerprint, intent, **options)
+      end
+      original_outcome = state.method(:record_effect_outcome)
+      state.define_singleton_method(:record_effect_outcome) do |fingerprint, intent, **options|
+        operations << "effect:#{intent.sink}:#{options.fetch(:status)}"
+        original_outcome.call(fingerprint, intent, **options)
+      end
+      original_mutate = state.method(:mutate_fingerprints)
+      state.define_singleton_method(:mutate_fingerprints) do |&mutation|
+        original_mutate.call do |fingerprints|
+          previous = fingerprints.dig("fp1", "state")
+          mutation.call(fingerprints)
+          current = fingerprints.dig("fp1", "state")
+          operations << "mapping:#{current}" if current && current != previous
+        end
       end
 
       handoff = RecordingReviewHandoff.new
@@ -246,10 +260,19 @@ class HivePatrolPrOpenerTest < Minitest::Test
       assert result.opened?
       assert_equal(
         [
+          "effect:branch:intent",
+          "effect:branch:known_not_sent",
           :push,
+          "effect:branch:committed",
+          "effect:pull_request:intent",
+          "effect:pull_request:known_not_sent",
           :create_pr,
+          "effect:pull_request:committed",
           "mapping:reconciliation_pending",
+          "effect:review_handoff:intent",
+          "effect:review_handoff:known_not_sent",
           :review_handoff,
+          "effect:review_handoff:committed",
           "mapping:open"
         ],
         operations

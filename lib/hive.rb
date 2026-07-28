@@ -79,7 +79,7 @@ module Hive
       "hive-module-doctor" => 1,
       "hive-module-dry-run" => 1,
       "hive-module-migration" => 1,
-      "hive-module-shadow-decision" => 1,
+      "hive-module-shadow-decision" => 2,
       "hive-module-migration-report" => 1,
       # Daily digest of tasks waiting on human input (`hive answer-digest
       # --json`). The success envelope reports the send outcome plus the full

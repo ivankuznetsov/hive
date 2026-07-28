@@ -4,6 +4,8 @@ require "shellwords"
 require "time"
 require "hive/config"
 require "hive/git_ops"
+require "hive/modules/event_publisher"
+require "hive/modules/migration/evidence_store"
 require "hive/modules/migration/patrols"
 
 module Hive
@@ -15,6 +17,7 @@ module Hive
     class PatrolScheduler
       PATROL_STAGE = "patrol".freeze
       PATROL_SLUG = "patrol".freeze
+      MODULE_SCHEDULE = "*/10 * * * *".freeze
       FAILURE_BACKOFF_SCHEDULE = [ 60, 300, 900 ].freeze
 
       class GitHelper
@@ -33,7 +36,8 @@ module Hive
       def initialize(registry: -> { Hive::Config.registered_projects },
                      config_loader: ->(path) { Hive::Config.load(path) },
                      git: GitHelper.new, migration_authority: :legacy,
-                     migration_ownership: nil)
+                     migration_ownership: nil, migration_snapshot: nil,
+                     evidence_store_factory: nil, event_publisher: nil)
         @registry = registry
         @config_loader = config_loader
         @git = git
@@ -44,6 +48,21 @@ module Hive
             hive_state_path: entry["hive_state_path"]
           )
         end
+        @migration_snapshot = migration_snapshot || lambda do |entry, module_name|
+          Hive::Modules::Migration::Patrols.ownership_snapshot(
+            entry.fetch("path"), module_name,
+            hive_state_path: entry["hive_state_path"]
+          )
+        end
+        @evidence_store_factory = evidence_store_factory || lambda do |entry|
+          Hive::Modules::Migration::EvidenceStore.new(
+            root: File.join(
+              entry.fetch("hive_state_path"), "module-runtime", "migration",
+              "patrol-evidence"
+            )
+          )
+        end
+        @event_publisher = event_publisher || Hive::Modules::EventPublisher.new
         @pending = {}
         @failures = {}
         @next_check_at = {}
@@ -109,8 +128,21 @@ module Hive
         return nil unless @migration_ownership.call(entry, "patrol", @migration_authority)
         return nil if pending?(project)
 
+        snapshot = @migration_snapshot.call(entry, "patrol")
+        return nil unless reservation_owner?(snapshot)
+
         @pending[project] = { started_at: now }
-        public_dispatch(candidate)
+        capture = capture_reservation(entry, snapshot, now)
+        @evidence_store_factory.call(entry).append_capture(capture)
+        event = @event_publisher.patrol_reserved(
+          entry, capture, schedule: MODULE_SCHEDULE
+        )
+        @pending[project]["capture_id"] = capture.capture_id
+        @pending[project]["event_id"] = event.event.fetch("event_id")
+        public_dispatch(candidate, capture: capture)
+      rescue StandardError
+        @pending.delete(project)
+        raise
       end
 
       def complete(project:, exit_code:, now: Time.now)
@@ -214,8 +246,51 @@ module Hive
         }
       end
 
-      def public_dispatch(candidate)
-        candidate.reject { |key, _value| key == :patrol_kind }
+      def public_dispatch(candidate, capture:)
+        dispatch = candidate.reject { |key, _value| key == :patrol_kind }
+        dispatch.merge(
+          command: "#{dispatch.fetch(:command)} --occurrence-id #{capture.capture_id}"
+        )
+      end
+
+      def reservation_owner?(snapshot)
+        snapshot.is_a?(Hash) &&
+          snapshot["owner"] == @migration_authority.to_s &&
+          snapshot["admission"] == true &&
+          snapshot["epoch"].is_a?(Integer) &&
+          snapshot["epoch"].positive?
+      end
+
+      def capture_reservation(entry, snapshot, now)
+        occurred_at = now.utc.iso8601(6)
+        reservation_id = [
+          "ordinary", entry.fetch("project_id"), occurred_at
+        ].join(":")
+        trigger = {
+          "kind" => "schedule",
+          "id" => reservation_id,
+          "schedule" => MODULE_SCHEDULE,
+          "occurred_at" => occurred_at
+        }
+        Hive::Modules::Migration::PatrolCapture.build(
+          module_name: "patrol",
+          project: {
+            "project_id" => entry.fetch("project_id"),
+            "name" => entry.fetch("name"),
+            "repository" => entry["repository"]
+          },
+          trigger: trigger,
+          reservation: { "kind" => "ordinary", "id" => reservation_id },
+          owner: snapshot.fetch("owner"),
+          owner_epoch: snapshot.fetch("epoch"),
+          decision_class: "due",
+          decision: {
+            "rationale" => "due",
+            "reservation_id" => reservation_id
+          },
+          occurred_at: now,
+          recorded_at: now
+        )
       end
     end
   end

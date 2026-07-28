@@ -1,6 +1,7 @@
 require "hive/attempts/generation"
 require "hive/config"
 require "hive/modules/event_ledger"
+require "hive/modules/migration/patrol_evidence"
 require "hive/refactor_patrol/pr_manifest"
 
 module Hive
@@ -43,6 +44,62 @@ module Hive
         )
       end
 
+      def patrol_reserved(entry, capture, schedule:)
+        unless capture.is_a?(Hive::Modules::Migration::PatrolCapture) &&
+               capture.module_name == "patrol" &&
+               capture.project.fetch("project_id") == entry.fetch("project_id").to_s &&
+               capture.project.fetch("name") == entry.fetch("name").to_s
+          raise Hive::ConfigError, "patrol reservation capture does not match its project"
+        end
+
+        ledger(entry).record(
+          project_id: entry.fetch("project_id"), project: entry.fetch("name"),
+          event_name: "schedule", occurred_at: capture.occurred_at,
+          source: {
+            "type" => "legacy_patrol_reservation",
+            "id" => capture.occurrence_id
+          },
+          idempotency_key: "patrol-reservation:#{capture.occurrence_id}",
+          payload: {
+            "schedule" => schedule.to_s,
+            "due_at" => capture.occurred_at,
+            "missed_windows" => 0,
+            "target_module" => "patrol",
+            "legacy_mutator_capture" => capture.to_h
+          },
+          recorded_at: @clock.call
+        )
+      end
+
+      def architecture_patrol_finalized(entry, capture, schedule:, target_hook:)
+        unless capture.is_a?(Hive::Modules::Migration::PatrolCapture) &&
+               capture.module_name == "architecture-patrol" &&
+               capture.project.fetch("project_id") == entry.fetch("project_id").to_s &&
+               capture.project.fetch("name") == entry.fetch("name").to_s
+          raise Hive::ConfigError,
+                "architecture patrol finalized capture does not match its project"
+        end
+
+        ledger(entry).record(
+          project_id: entry.fetch("project_id"), project: entry.fetch("name"),
+          event_name: "schedule", occurred_at: capture.occurred_at,
+          source: {
+            "type" => "legacy_architecture_patrol_completion",
+            "id" => capture.occurrence_id
+          },
+          idempotency_key: "architecture-patrol-finalized:#{capture.occurrence_id}",
+          payload: {
+            "schedule" => schedule.to_s,
+            "due_at" => capture.occurred_at,
+            "missed_windows" => 0,
+            "target_module" => "architecture-patrol",
+            "target_hook" => target_hook.to_s,
+            "legacy_mutator_capture" => capture.to_h
+          },
+          recorded_at: @clock.call
+        )
+      end
+
       def pull_request_merged(entry, manifest)
         manifest = Hive::RefactorPatrol::PrManifest.validate!(manifest)
         source = manifest.fetch("source")
@@ -59,7 +116,7 @@ module Hive
             "merge_commit" => source.fetch("merge_sha"),
             "manifest_digest" => manifest.fetch("manifest_checksum"),
             "job_id" => manifest.fetch("job_id"),
-            "legacy_mutator_capture" => {
+            "legacy_enqueue_provenance" => {
               "decision" => {
                 "rationale" => "due", "job_id" => manifest.fetch("job_id"),
                 "phase" => "discovery"

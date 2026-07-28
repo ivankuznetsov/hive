@@ -251,24 +251,23 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
       record = JSON.parse(File.binread(files.fetch(0)))
       refute record.fetch("comparable")
       assert_nil record.fetch("evidence_source")
-      assert_empty record.fetch("legacy")
+      assert_nil record.fetch("legacy_capture")
+      assert_empty record.fetch("legacy_effects")
     end
   end
 
-  def test_default_shadow_comparator_accepts_independent_merged_pr_capture
+  def test_default_shadow_comparator_accepts_finalized_scheduler_capture
     with_project do |project|
       scheduler = FakeScheduler.new([ candidate ])
       adapter = Hive::Modules::Adapters::ArchitecturePatrol.new(
         scheduler_factory: ->(**) { scheduler }
       )
-      event = merged_event
-      event["payload"]["legacy_mutator_capture"] = {
-        "decision" => { "rationale" => "due", "job_id" => "job-7", "phase" => "discovery" },
-        "effects" => [ { "kind" => "job", "id" => "job-7" } ]
-      }
+      capture = finalized_capture
+      event = schedule_event
+      event["payload"]["legacy_mutator_capture"] = capture.to_h
 
       assert_equal 0, adapter.call(
-        project: project, hook_id: "merged-pr-discovery", event: event,
+        project: project, hook_id: "scheduled-discovery", event: event,
         configuration: configuration(shadow: true)
       )
       file = Dir.glob(File.join(
@@ -277,7 +276,7 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
       record = JSON.parse(File.binread(file))
       assert record.fetch("comparable")
       assert_equal "legacy_mutator_capture", record.fetch("evidence_source")
-      assert_equal "job-7", record.dig("legacy", "job_id")
+      assert_equal "job-7", record.dig("legacy_capture", "decision", "job_id")
     end
   end
 
@@ -383,7 +382,10 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
           "refactor_patrol" => { "enabled" => true }
         }.to_yaml
       )
-      project = { "name" => "demo", "path" => root, "hive_state_path" => state }
+      project = {
+        "name" => "demo", "project_id" => "project-1",
+        "path" => root, "hive_state_path" => state
+      }
       write_migration_state(project, owner)
       yield(project)
     end
@@ -432,7 +434,9 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
         "repository_write" => true, "github_mutations" => %w[issues pull_requests],
         "external_commands" => %w[gh git], "network_hosts" => [ "api.github.com" ],
         "filesystem_read" => [ "repository" ],
-        "filesystem_write" => [ ".hive-state/refactor_patrol/**" ], "secrets" => []
+        "filesystem_write" => [
+          ".hive-state/refactor_patrol/**", ".hive-state/stages/**"
+        ], "secrets" => []
       }, digest: "d" * 64
     )
   end
@@ -449,7 +453,42 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
   def event(name, overrides = {})
     {
       "event_id" => "evt-#{'a' * 64}", "event_name" => name,
+      "project_id" => "project-1", "project" => "demo",
       "occurred_at" => NOW.iso8601(6), "payload" => {}
     }.merge(overrides)
+  end
+
+  def finalized_capture
+    Hive::Modules::Migration::PatrolCapture.build(
+      module_name: "architecture-patrol",
+      project: {
+        "project_id" => "project-1",
+        "name" => "demo",
+        "repository" => "acme/demo"
+      },
+      trigger: {
+        "kind" => "finalized_scheduler",
+        "id" => "reservation-1",
+        "schedule" => "*/10 * * * *",
+        "phase" => "discovery"
+      },
+      reservation: {
+        "kind" => "architecture",
+        "id" => "reservation-1",
+        "job_id" => "job-7",
+        "phase" => "discovery",
+        "outcome" => { "status" => "classified" }
+      },
+      owner: "legacy",
+      owner_epoch: 1,
+      decision_class: "scheduler_outcome",
+      decision: {
+        "rationale" => "due",
+        "job_id" => "job-7",
+        "phase" => "discovery"
+      },
+      occurred_at: NOW,
+      recorded_at: NOW
+    )
   end
 end

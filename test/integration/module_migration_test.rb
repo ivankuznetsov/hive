@@ -64,7 +64,6 @@ class ModuleMigrationIntegrationTest < Minitest::Test
           comparator.record!(
             module_name: module_name,
             trigger: { "fixture" => true, "module" => module_name, "index" => index },
-            legacy_decision: { "status" => "skip", "reason" => "not_due" },
             module_decision: { "status" => "skip", "reason" => "not_due" },
             configuration_digest: digests.fetch(module_name),
             occurred_at: START + (index * 24 * 60 * 60)

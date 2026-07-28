@@ -96,7 +96,7 @@ class ModulesEventRoutingTest < Minitest::Test
           { "kind" => "job", "id" => manifest.fetch("job_id") }
         ]
       },
-      record.dig(:payload, "legacy_mutator_capture"),
+      record.dig(:payload, "legacy_enqueue_provenance"),
       "the merge event records immutable enqueue provenance, not a later scheduler outcome"
     )
     assert_equal(
@@ -115,6 +115,47 @@ class ModulesEventRoutingTest < Minitest::Test
         publisher.send(:project_entry, "demo", "/project")
       end
     end
+  end
+
+  def test_publisher_links_exact_patrol_captures_to_targeted_schedule_events
+    ledger = RecordingLedger.new
+    publisher = Hive::Modules::EventPublisher.new(
+      ledger_factory: ->(_entry) { ledger }, clock: -> { NOW }
+    )
+    entry = {
+      "name" => "demo",
+      "project_id" => "project-1",
+      "hive_state_path" => "/state"
+    }
+    ordinary = capture("patrol", decision: { "rationale" => "due" })
+    architecture = capture(
+      "architecture-patrol",
+      decision: {
+        "rationale" => "not_due",
+        "job_id" => nil,
+        "phase" => nil
+      }
+    )
+
+    publisher.patrol_reserved(entry, ordinary, schedule: "*/10 * * * *")
+    publisher.architecture_patrol_finalized(
+      entry,
+      architecture,
+      schedule: "*/10 * * * *",
+      target_hook: "scheduled-discovery"
+    )
+
+    patrol = ledger.records.fetch(0)
+    assert_equal ordinary.to_h,
+                 patrol.dig(:payload, "legacy_mutator_capture")
+    assert_equal "patrol", patrol.dig(:payload, "target_module")
+    architecture_record = ledger.records.fetch(1)
+    assert_equal architecture.to_h,
+                 architecture_record.dig(:payload, "legacy_mutator_capture")
+    assert_equal "architecture-patrol",
+                 architecture_record.dig(:payload, "target_module")
+    assert_equal "scheduled-discovery",
+                 architecture_record.dig(:payload, "target_hook")
   end
 
   def test_publisher_persists_registration_with_default_ledger_factory
@@ -166,5 +207,30 @@ class ModulesEventRoutingTest < Minitest::Test
       assert_equal "coding", record.dig(:payload, "workflow")
       assert_equal "8-finalize", record.dig(:payload, "terminal_stage")
     end
+  end
+
+  private
+
+  def capture(module_name, decision:)
+    identity = "#{module_name}-reservation"
+    Hive::Modules::Migration::PatrolCapture.build(
+      module_name: module_name,
+      project: {
+        "project_id" => "project-1",
+        "name" => "demo",
+        "repository" => "owner/demo"
+      },
+      trigger: { "kind" => "schedule", "id" => identity },
+      reservation: {
+        "kind" => module_name == "patrol" ? "ordinary" : "architecture",
+        "id" => identity
+      },
+      owner: "legacy",
+      owner_epoch: 1,
+      decision_class: "scheduler_outcome",
+      decision: decision,
+      occurred_at: NOW,
+      recorded_at: NOW
+    )
   end
 end

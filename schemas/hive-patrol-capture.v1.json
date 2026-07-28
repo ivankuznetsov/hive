@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hive.local/schemas/hive-patrol-capture.v1.json",
+  "title": "Hive Patrol Capture v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "capture_id",
+    "module",
+    "occurrence_id",
+    "project",
+    "trigger",
+    "reservation",
+    "owner",
+    "owner_epoch",
+    "decision_class",
+    "decision",
+    "effect_ids",
+    "occurred_at",
+    "recorded_at"
+  ],
+  "properties": {
+    "schema": {"const": "hive-patrol-capture"},
+    "schema_version": {"const": 1},
+    "capture_id": {"type": "string", "pattern": "^cap-[0-9a-f]{64}$"},
+    "module": {"enum": ["patrol", "architecture-patrol"]},
+    "occurrence_id": {"type": "string", "pattern": "^occ-[0-9a-f]{64}$"},
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project_id", "name", "repository"],
+      "properties": {
+        "project_id": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1},
+        "repository": {
+          "anyOf": [
+            {"type": "string", "minLength": 1},
+            {"type": "null"}
+          ]
+        }
+      }
+    },
+    "trigger": {"type": "object"},
+    "reservation": {"type": "object"},
+    "owner": {"enum": ["legacy", "module"]},
+    "owner_epoch": {"type": "integer", "minimum": 1},
+    "decision_class": {"type": "string", "minLength": 1},
+    "decision": {"type": "object"},
+    "effect_ids": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "occurred_at": {"type": "string", "format": "date-time"},
+    "recorded_at": {"type": "string", "format": "date-time"}
+  }
+}

@@ -32,6 +32,22 @@ module Hive
             "none"
           end
 
+          # Return the complete ownership fence in one read so effect gateways
+          # never compose an owner, epoch, and admission decision from
+          # different migration-state snapshots.
+          def ownership_snapshot(project_root, module_name, hive_state_path: nil)
+            state = read_state(project_root, hive_state_path: hive_state_path)
+            return { "owner" => "legacy", "epoch" => 1, "admission" => true } unless state
+
+            {
+              "owner" => state.fetch("owners").fetch(module_name.to_s),
+              "epoch" => state.fetch("epoch"),
+              "admission" => state.fetch("admissions").fetch(module_name.to_s)
+            }
+          rescue Hive::ConfigError, KeyError
+            { "owner" => "none", "epoch" => 0, "admission" => false }
+          end
+
           def admission_allowed?(project_root, module_name, authority:, hive_state_path: nil)
             state = read_state(project_root, hive_state_path: hive_state_path)
             return authority.to_sym != :module unless state

@@ -3,7 +3,7 @@ title: Hive::Patrol
 type: module
 source: lib/hive/patrol/
 created: 2026-05-28
-updated: 2026-07-26
+updated: 2026-07-28
 tags: [module, patrol, review, worktree, pr, codex]
 ---
 
@@ -32,6 +32,9 @@ tags: [module, patrol, review, worktree, pr, codex]
 | `Hive::Patrol::Dismissals` | `lib/hive/patrol/dismissals.rb` | Reconciles closed-unmerged patrol PRs into `dismissed.json` so the same finding is not immediately re-filed. Retryable publication entries match only their exact receipted PR URL and remain retryable while that PR is open. |
 | `Hive::Patrol::BaseStateStore` | `lib/hive/patrol/base_state_store.rb` | Shared JSON lifecycle for ordinary patrol and architecture patrol's legacy reporting state: directory creation, state/fingerprint/dismissal files, run artifacts, and tolerant reads. It delegates atomic replacement to `Hive::AtomicFile` while preserving the stores' prior no-fsync behavior. |
 | `Hive::Patrol::StateStore` | `lib/hive/patrol/state_store.rb` | Defines the ordinary-patrol collections and records written under `.hive-state/patrol/`; architecture patrol retains its own subclass, namespace, and thesis records. |
+| `Hive::Patrol::EffectGateway` | `lib/hive/patrol/effect_gateway.rb` | Holds the migration admission lock across live owner/config/capability checks and each ordinary state, finding, attempt, branch, PR, or review-handoff sink. Its durable recovery cells extend StateStore state/fingerprint records; it never reads observational evidence to choose a retry. |
+| `Hive::RefactorPatrol::EffectGateway` | `lib/hive/refactor_patrol/effect_gateway.rb` | Separate Architecture Patrol boundary around GitHub and review-handoff sinks. JobStore publication phases and action claims remain authoritative, and evidence is appended only after the incumbent action outcome settles. |
+| `Hive::Modules::Migration::PatrolEvidence` | `lib/hive/modules/migration/patrol_evidence.rb` | Strict immutable ordinary/architecture capture, intent, and receipt values shared only as an observation protocol. `EvidenceStore` appends canonical records and has no mutation or recovery authority. |
 
 ## State
 
@@ -44,9 +47,12 @@ Patrol state is deliberately inspectable and removable:
   patches/*.json
   runs/*/                         # agent transcripts/output
   runs/selection-*.json           # immutable score/decision audit
-  state.json
-  fingerprints.json
+  state.json                      # cycle state + occurrence effect cells
+  fingerprints.json               # publication mappings + PR effect cells
   dismissed.json
+.hive-state/module-runtime/migration/patrol-evidence/
+  captures/*.json
+  receipts/*.json
 ```
 
 The managed repository worktree is not edited by fixes. `Fixer` uses [[modules/worktree]] to create a branch named `hive-patrol/<feature-id>-<fingerprint8>` under the project's worktree root. When `patrol.review_prs` is enabled (default), that worktree is kept after PR creation and referenced by a synthetic `6-review` task with display name `Patrol: <finding title>`. When disabled, the successful local worktree is removed after the branch is pushed and the PR opens.
@@ -147,8 +153,9 @@ The adapters deliberately do not relocate durable product state.
 action proofs, budgets, fingerprints, dismissals, claims, artifacts, and
 recovery receipts remain authoritative. A durable migration ownership epoch
 keeps legacy scheduling as the sole mutator during shadow comparison. Cutover
-is fail-closed until both modules have seven elapsed days, ten comparable
-decisions, reviewer sign-off, and no unexplained or duplicate effects; rollback
+remains fail-closed until the migration report's current qualification
+requirements, reviewer sign-off, and no unexplained or duplicate effects are
+satisfied; rollback
 restores legacy ownership without moving checkpoints or replaying events.
 Missing or corrupt migration state cannot authorize a module mutator. The
 reviewed legacy configuration is copied into the migration binding with its
@@ -158,19 +165,22 @@ spawn, and Architecture Patrol claim attachment; cutover and rollback take the
 same lock exclusively. Status and doctor surface unadopted, fenced, and corrupt
 migration state rather than reporting an apparently healthy active module.
 
-Shadow comparison no longer compares a module decision with itself. A
-comparable record requires an independently produced
-`legacy_mutator_capture` in the immutable occurrence, and cutover rebuilds the
-report from the current shadow directory instead of trusting a saved
-`eligible` bit. The existing merged-PR reconciler produces an independent
-Architecture Patrol capture without adding a second GitHub poller. Ordinary
-Patrol schedule evaluation does not yet produce one and remains a cutover
-blocker.
+Shadow comparison consumes exact independently persisted `PatrolCapture`
+records. Ordinary scheduler reservation publishes the same captured occurrence
+later consumed by the module event; Architecture Patrol retains merge-manifest
+enqueue provenance and publishes a separately linked finalized scheduler
+outcome only after JobStore checkpoint/release. Missing, malformed, foreign,
+or provenance-only captures remain non-comparable. Module-native cron targets
+are suppressed while legacy or shadow owns either product, preventing a second
+schedule producer.
 
-`Hive::Modules::CapabilityContext` preflights the project-local installed grants
-before either adapter invokes its legacy engine. The engines do not yet accept
-capability-bound gateways at every side-effect sink, so the permission gate
-remains a cutover blocker. First-party modules receive no consent bypass.
+`Hive::Modules::CapabilityContext` still preflights installed grants, and each
+mutation is rechecked at its separate ordinary/architecture gateway while the
+migration admission lock is held across the sink. Shadow authority can emit an
+`attempted` evidence receipt but cannot alter StateStore, JobStore, GitHub, or
+ReviewHandoff. Ordinary recovery remains fingerprint/ReviewHandoff-owned;
+Architecture recovery remains JobStore-owned; the append-only evidence tree is
+never a retry input. First-party modules receive no consent bypass.
 
 ## Safety invariants
 

@@ -698,6 +698,111 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     end
   end
 
+  def test_effect_gateway_wraps_remote_sinks_and_records_evidence_after_job_settlement
+    with_tmp_dir do |dir|
+      item = thesis(id: "effect-order", fingerprint: "fp-effect-order")
+      store = write_classified_job(
+        dir,
+        policy: snapshot_policy("auto_fix" => true),
+        dispositions: dispositions(accepted: [ disposition(item) ])
+      )
+      operations = []
+      recording = Module.new
+      recording.define_method(:record_action_receipt!) do |token, key:, value:, now:|
+        operations << :effect_intent if key.start_with?("effect_intent_")
+        super(token, key: key, value: value, now: now)
+      end
+      recording.define_method(:finish_action!) do |token, **arguments|
+        result = super(token, **arguments)
+        operations << :job_settled
+        result
+      end
+      store.singleton_class.prepend(recording)
+
+      durable_evidence = Hive::Modules::Migration::EvidenceStore.new(
+        root: File.join(dir, "effect-evidence")
+      )
+      evidence = Object.new
+      evidence.define_singleton_method(:append_capture) do |capture|
+        operations << :capture
+        durable_evidence.append_capture(capture)
+      end
+      evidence.define_singleton_method(:append_receipt) do |receipt|
+        operations << :effect_evidence
+        durable_evidence.append_receipt(receipt)
+      end
+
+      patch = validated_patch(fingerprint: item.fingerprint)
+      success = pr_result
+      opener = Object.new
+      opener.define_singleton_method(:open) do |record_intent:, execute_effect:,
+                                                execute_handoff:,
+                                                canonical_action_id:, source:, patch:, **|
+        push_intent = Hive::RefactorPatrol::PrOpener.push_intent_payload(
+          canonical_action_id: canonical_action_id,
+          repository: source.fetch("repository"), branch: patch.branch,
+          commit_sha: patch.commit_sha, expected_remote_oid: nil
+        )
+        push_complete = Hive::RefactorPatrol::PrOpener.push_complete_payload(
+          canonical_action_id: canonical_action_id,
+          repository: source.fetch("repository"), branch: patch.branch,
+          commit_sha: patch.commit_sha
+        )
+        pr_intent = Hive::RefactorPatrol::PrOpener.pr_create_intent_payload(
+          canonical_action_id: canonical_action_id,
+          repository: source.fetch("repository"), branch: patch.branch,
+          commit_sha: patch.commit_sha
+        )
+        raise "push intent failed" unless record_intent.call(
+          phase: "push_intent", payload: push_intent
+        )
+        execute_effect.call(phase: "push_intent", payload: push_intent) do
+          operations << :push_sink
+        end
+        raise "push completion failed" unless record_intent.call(
+          phase: "push_complete", payload: push_complete
+        )
+        raise "PR intent failed" unless record_intent.call(
+          phase: "pr_create_intent", payload: pr_intent
+        )
+        execute_effect.call(phase: "pr_create_intent", payload: pr_intent) do
+          operations << :pr_sink
+          success.pr_url
+        end
+        execute_handoff.call(
+          phase: "review_handoff",
+          payload: {
+            "pr_url" => success.pr_url,
+            "job_id" => "job-1",
+            "canonical_action_id" => canonical_action_id,
+            "commit_sha" => patch.commit_sha
+          }
+        ) do
+          operations << :handoff_sink
+          success.review_task_path
+        end
+        success
+      end
+
+      result = build_runner(
+        dir,
+        store: store,
+        fixer: FakeFixer.new(patch),
+        pr_opener: opener,
+        evidence_store: evidence
+      ).run(job_id: "job-1")
+
+      assert result.complete?
+      assert_equal 3, operations.count(:effect_intent)
+      assert_operator operations.index(:effect_intent), :<, operations.index(:push_sink)
+      assert_operator operations.rindex(:effect_intent), :<, operations.index(:handoff_sink)
+      assert_operator operations.index(:job_settled), :<, operations.index(:effect_evidence)
+      assert_equal %w[branch pull_request review_handoff],
+                   durable_evidence.receipts.map { |receipt| receipt.intent.sink }.sort
+      assert durable_evidence.receipts.all? { |receipt| receipt.status == "committed" }
+    end
+  end
+
   def test_review_handoff_retry_reuses_the_persisted_patch_and_remote_intent
     with_tmp_dir do |dir|
       store = write_classified_job(
@@ -2816,6 +2921,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
                    gate_reader: nil,
                    repository_ownership: nil,
                    canonical_action_catalog: nil,
+                   evidence_store: nil,
                    clock: -> { T0 },
                    repository_resolver: ->(*) {
                      { "repository" => "acme/polyglot", "host" => "github.com" }
@@ -2833,6 +2939,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       repository_resolver: repository_resolver,
       repository_ownership: repository_ownership,
       canonical_action_catalog: canonical_action_catalog,
+      evidence_store: evidence_store,
       config_loader: config_loader,
       gate_reader: gate_reader,
       lease_sec: 60,

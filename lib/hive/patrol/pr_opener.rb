@@ -1,7 +1,11 @@
 require "tempfile"
 require "time"
+require "digest"
 require "hive/gh"
 require "hive/git_ops"
+require "hive/modules/migration/evidence_store"
+require "hive/modules/migration/patrols"
+require "hive/patrol/effect_gateway"
 require "hive/patrol/fingerprint"
 require "hive/patrol/review_handoff"
 require "hive/patrol/state_store"
@@ -37,12 +41,25 @@ module Hive
         end
       end
 
-      def initialize(project_root, cfg:, state: StateStore.new(project_root), gh: Hive::Gh, review_handoff: nil)
+      def initialize(project_root, cfg:, state: StateStore.new(project_root), gh: Hive::Gh,
+                     review_handoff: nil, capture: nil, effect_gateway_factory: nil,
+                     evidence_store: nil, config_loader: nil,
+                     capability_checker: nil)
         @project_root = File.expand_path(project_root)
         @cfg = cfg
         @state = state
         @gh = gh
         @review_handoff = review_handoff || ReviewHandoff.new(@project_root, cfg: cfg, state: state)
+        @capture = capture
+        @effect_gateway_factory = effect_gateway_factory
+        @evidence_store = evidence_store || Hive::Modules::Migration::EvidenceStore.new(
+          root: File.join(
+            @project_root, ".hive-state", "module-runtime", "migration",
+            "patrol-evidence"
+          )
+        )
+        @config_loader = config_loader || default_config_loader
+        @capability_checker = capability_checker || ->(**) { true }
       end
 
       def open(finding, patch, now: Time.now)
@@ -50,6 +67,8 @@ module Hive
         return Result.new(status: :skipped, reason: "validation_failed") unless patch.passed
 
         assert_local_patch_identity!(patch)
+        capture = effect_capture(finding, patch)
+        gateway = effect_gateway(finding, patch, capture)
         pending = reconciliation_pending_entry(finding, patch)
         preserve_worktree = !pending.nil?
 
@@ -76,10 +95,15 @@ module Hive
             patch,
             require_base_oid: !pending.nil? || handoff_open_pr
           )
+          reconcile_pull_request_effect!(
+            gateway, finding, patch, observed_prs: branch_prs
+          )
           if review_prs_enabled? && existing["state"] == "OPEN"
             assert_local_patch_identity!(patch)
             assert_remote_patch_identity!(patch)
-            review_task_path = enqueue_review_task(finding, patch, existing["url"], now)
+            review_task_path = enqueue_review_task(
+              gateway, finding, patch, existing["url"], now
+            )
             unless review_task_path
               # Preserve the exact validated worktree. Fixer reuses its
               # durable patch receipt on the next cycle, allowing handoff
@@ -110,9 +134,6 @@ module Hive
         end
 
         assert_remote_base_identity!(patch)
-        expected_remote_oid = @gh.remote_branch_oid(
-          patch.worktree_path, patch.branch, cfg: @cfg
-        )
         title = title_for(finding)
         body = body_for(finding, patch)
         secret_hits = Hive::SecretPatterns.scan(title) +
@@ -126,17 +147,13 @@ module Hive
         end
 
         assert_local_patch_identity!(patch)
-        @gh.push_branch!(
-          patch.worktree_path,
-          patch.branch,
-          cfg: @cfg,
-          expected_remote_oid: expected_remote_oid,
-          expected_remote_absent: expected_remote_oid.nil?
-        )
+        perform_branch_effect!(gateway, finding, patch)
         assert_local_patch_identity!(patch)
         assert_remote_patch_identity!(patch)
         assert_remote_base_identity!(patch)
-        pr_url = create_pr(patch, body)
+        pr_url = perform_pull_request_effect!(
+          gateway, finding, patch, body, observed_prs: branch_prs
+        )
         # The PR now exists on the remote, but it is not active until exact
         # identity reconciliation and mandatory review handoff settle. Keep
         # the validated patch receipt retryable across read-after-write lag.
@@ -150,7 +167,9 @@ module Hive
         raise Hive::GhError, "created patrol PR #{pr_url} could not be reconciled" unless created_pr
 
         assert_existing_pr_identity!(created_pr, patch, require_base_oid: true)
-        review_task_path = enqueue_review_task(finding, patch, pr_url, now)
+        review_task_path = if review_prs_enabled?
+          enqueue_review_task(gateway, finding, patch, pr_url, now)
+        end
         if !review_task_path && review_prs_enabled?
           # Preserve the exact validated worktree and patch receipt so the
           # next cycle can retry only the failed review handoff. Rebuilding
@@ -190,7 +209,7 @@ module Hive
         nil
       end
 
-      def enqueue_review_task(finding, patch, pr_url, now)
+      def enqueue_review_task(gateway, finding, patch, pr_url, now)
         # This is the last guard before the task folder is published. Hosted
         # PR reconciliation alone is not enough: the default branch may move
         # after that lookup, and a handoff retry must never enqueue an old-base
@@ -198,7 +217,31 @@ module Hive
         assert_local_patch_identity!(patch)
         assert_remote_patch_identity!(patch)
         assert_remote_base_identity!(patch)
-        @review_handoff.enqueue(finding: finding, patch: patch, pr_url: pr_url, now: now)
+        result = perform_effect do
+          gateway.perform!(
+            sink: "review_handoff",
+            target: pr_url,
+            idempotency_key: "#{finding.fingerprint}:#{patch.id}:review_handoff",
+            capability: "review_handoff",
+            reconcile: lambda do |_intent|
+              if @review_handoff.respond_to?(:reconcile)
+                @review_handoff.reconcile(
+                  finding: finding, patch: patch, pr_url: pr_url
+                )
+              else
+                { "status" => "absent", "outcome" => {} }
+              end
+            end
+          ) do
+            task_path = @review_handoff.enqueue(
+              finding: finding, patch: patch, pr_url: pr_url, now: now
+            )
+            raise Hive::ConfigError, "patrol review handoff was not published" unless task_path
+
+            { "task_path" => task_path }
+          end
+        end
+        result.outcome.fetch("task_path")
       rescue Hive::GhError
         raise
       rescue StandardError => e
@@ -406,23 +449,221 @@ module Hive
       end
 
       def record_mapping(finding, patch, pr_url, state, now)
-        fingerprints = @state.fingerprints
-        Fingerprint.record_seen(
-          fingerprints,
-          finding.fingerprint,
-          branch: patch.branch,
-          pr_url: pr_url,
-          state: state,
-          finding: finding,
-          now: now
-        )
-        entry = fingerprints.fetch(finding.fingerprint)
-        if state == "reconciliation_pending"
-          entry["publication_receipt"] = publication_receipt_for(patch)
-        else
-          entry.delete("publication_receipt")
+        @state.mutate_fingerprints do |fingerprints|
+          Fingerprint.record_seen(
+            fingerprints,
+            finding.fingerprint,
+            branch: patch.branch,
+            pr_url: pr_url,
+            state: state,
+            finding: finding,
+            now: now
+          )
+          entry = fingerprints.fetch(finding.fingerprint)
+          if state == "reconciliation_pending"
+            entry["publication_receipt"] = publication_receipt_for(patch)
+          else
+            entry.delete("publication_receipt")
+          end
         end
-        @state.write_fingerprints(fingerprints)
+      end
+
+      def default_config_loader
+        return ->(root) { Hive::Config.load(root) } if @capture
+
+        # Direct library callers historically invoke PrOpener only after
+        # Patrol admission. Preserve that narrow test/embedding surface;
+        # production commands always pass a reservation capture and reload
+        # the project configuration from disk.
+        admitted = Hive::Config.deep_merge(
+          Hive::Config.deep_dup(@cfg),
+          "patrol" => { "enabled" => true }
+        )
+        ->(_root) { admitted }
+      end
+
+      def effect_capture(finding, patch)
+        return @capture if @capture
+
+        snapshot = Hive::Modules::Migration::Patrols.ownership_snapshot(
+          @project_root, "patrol",
+          hive_state_path: File.join(@project_root, ".hive-state")
+        )
+        owner = snapshot["owner"] == "none" ? "legacy" : snapshot.fetch("owner")
+        epoch = snapshot["epoch"].to_i.positive? ? snapshot.fetch("epoch") : 1
+        identity = [
+          finding.fingerprint, patch.id, patch.branch,
+          validated_oid!(patch.head_sha, "validated patch head")
+        ].join(":")
+        capture = Hive::Modules::Migration::PatrolCapture.build(
+          module_name: "patrol",
+          project: {
+            "project_id" => "local-#{::Digest::SHA256.hexdigest(@project_root)}",
+            "name" => File.basename(@project_root),
+            "repository" => nil
+          },
+          trigger: { "kind" => "direct", "id" => identity },
+          reservation: { "kind" => "ordinary", "id" => identity },
+          owner: owner,
+          owner_epoch: epoch,
+          decision_class: "publication",
+          decision: {
+            "rationale" => "validated_patch",
+            "fingerprint" => finding.fingerprint
+          },
+          occurred_at: Time.at(0).utc,
+          recorded_at: Time.at(0).utc
+        )
+        @evidence_store.append_capture(capture)
+        capture
+      end
+
+      def effect_gateway(finding, patch, capture)
+        context = publication_receipt_for(patch).merge(
+          "fingerprint" => finding.fingerprint,
+          "branch" => patch.branch
+        )
+        options = {
+          project_root: @project_root,
+          hive_state_path: File.join(@project_root, ".hive-state"),
+          capture: capture,
+          authority: capture.owner,
+          evidence_store: @evidence_store,
+          intent_writer: lambda do |intent|
+            @state.reserve_effect_intent(
+              finding.fingerprint, intent, context: context
+            )
+          end,
+          recovery_reader: lambda do |intent|
+            @state.effect_intent_state(finding.fingerprint, intent)
+          end,
+          outcome_writer: lambda do |intent, status:, outcome:|
+            @state.record_effect_outcome(
+              finding.fingerprint, intent, status: status, outcome: outcome
+            )
+          end,
+          config_loader: @config_loader,
+          capability_checker: @capability_checker
+        }
+        return @effect_gateway_factory.call(**options) if @effect_gateway_factory
+
+        Hive::Patrol::EffectGateway.new(**options)
+      end
+
+      def perform_branch_effect!(gateway, finding, patch)
+        desired_oid = validated_oid!(patch.head_sha, "validated patch head")
+        target = "#{effect_repository(gateway)}:#{patch.branch}"
+        perform_effect do
+          gateway.perform!(
+            sink: "branch",
+            target: target,
+            idempotency_key: "#{finding.fingerprint}:#{patch.id}:branch",
+            capability: "repository_write",
+            reconcile: lambda do |_intent|
+              observed = @gh.remote_branch_oid(
+                patch.worktree_path, patch.branch, cfg: @cfg
+              )
+              if observed == desired_oid
+                {
+                  "status" => "matched",
+                  "outcome" => { "remote_oid" => observed }
+                }
+              else
+                {
+                  "status" => "absent",
+                  "outcome" => { "observed_oid" => observed }
+                }
+              end
+            end
+          ) do
+            expected_remote_oid = @gh.remote_branch_oid(
+              patch.worktree_path, patch.branch, cfg: @cfg
+            )
+            @gh.push_branch!(
+              patch.worktree_path,
+              patch.branch,
+              cfg: @cfg,
+              expected_remote_oid: expected_remote_oid,
+              expected_remote_absent: expected_remote_oid.nil?
+            )
+            { "remote_oid" => desired_oid }
+          end
+        end
+      end
+
+      def perform_pull_request_effect!(gateway, finding, patch, body, observed_prs:)
+        result = perform_effect do
+          gateway.perform!(
+            sink: "pull_request",
+            target: "#{effect_repository(gateway)}:#{patch.branch}",
+            idempotency_key: "#{finding.fingerprint}:#{patch.id}:pull_request",
+            capability: "github_pull_requests",
+            reconcile: lambda do |_intent|
+              pull_request_reconciliation(patch, observed_prs: observed_prs)
+            end
+          ) do
+            { "pr_url" => create_pr(patch, body) }
+          end
+        end
+        result.outcome.fetch("pr_url")
+      end
+
+      def reconcile_pull_request_effect!(gateway, finding, patch, observed_prs:)
+        perform_effect do
+          gateway.perform!(
+            sink: "pull_request",
+            target: "#{effect_repository(gateway)}:#{patch.branch}",
+            idempotency_key: "#{finding.fingerprint}:#{patch.id}:pull_request",
+            capability: "github_pull_requests",
+            reconcile: lambda do |_intent|
+              pull_request_reconciliation(patch, observed_prs: observed_prs)
+            end
+          ) do
+            raise Hive::GhError,
+                  "exact pull request reconciliation unexpectedly reached creation"
+          end
+        end
+      end
+
+      def pull_request_reconciliation(patch, observed_prs: nil)
+        candidates = observed_prs || @gh.lookup_prs_for_branch(
+          patch.worktree_path, patch.branch
+        )
+        matches = candidates.select do |pr|
+          %w[OPEN MERGED].include?(pr["state"]) &&
+            exact_pr_identity?(pr, patch)
+        end
+        return { "status" => "absent", "outcome" => {} } if matches.empty?
+        return { "status" => "ambiguous", "outcome" => {} } unless matches.one?
+
+        pr = matches.fetch(0)
+        {
+          "status" => "matched",
+          "outcome" => {
+            "pr_url" => pr.fetch("url"),
+            "state" => pr.fetch("state"),
+            "head_oid" => pr.fetch("headRefOid"),
+            "base_oid" => pr.fetch("baseRefOid")
+          }
+        }
+      end
+
+      def exact_pr_identity?(pr, patch)
+        pr["headRefOid"] == validated_oid!(patch.head_sha, "validated patch head") &&
+          pr["baseRefOid"] == validated_oid!(patch.base_sha, "validated patch base") &&
+          pr["baseRefName"] == default_branch
+      end
+
+      def effect_repository(_gateway)
+        @capture&.project&.fetch("repository", nil) ||
+          File.basename(@project_root)
+      end
+
+      def perform_effect
+        yield
+      rescue Hive::Patrol::EffectGateway::Denied,
+             Hive::Patrol::EffectGateway::ReconciliationRequired => e
+        raise Hive::GhError, e.message
       end
 
       def reconciliation_pending_entry(finding, patch)

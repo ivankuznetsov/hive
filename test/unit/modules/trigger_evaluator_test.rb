@@ -27,6 +27,37 @@ class ModulesTriggerEvaluatorTest < Minitest::Test
     end
   end
 
+  def test_targeted_schedule_only_matches_its_selected_module
+    with_fixture do |selection, configuration, hook|
+      evaluator = Hive::Modules::TriggerEvaluator.new
+      foreign = evaluator.evaluate(
+        selection: selection, configuration: configuration, hook: hook,
+        hook_state: hook_state,
+        event: event(
+          "schedule",
+          "payload" => {
+            "schedule" => "0 * * * *",
+            "target_module" => "another-module"
+          }
+        )
+      )
+      local = evaluator.evaluate(
+        selection: selection, configuration: configuration, hook: hook,
+        hook_state: hook_state,
+        event: event(
+          "schedule",
+          "payload" => {
+            "schedule" => "0 * * * *",
+            "target_module" => selection.fetch("name")
+          }
+        )
+      )
+
+      assert_equal "no_match", foreign.reason
+      assert local.launch?
+    end
+  end
+
   def test_state_dedupe_concurrency_high_water_and_secret_gates_are_explainable
     with_fixture(secret_required: true) do |selection, configuration, hook|
       evaluator = Hive::Modules::TriggerEvaluator.new
@@ -100,6 +131,7 @@ class ModulesTriggerEvaluatorTest < Minitest::Test
         hooks: { "task" => true }, grants: exact_grants(descriptor)
       )
       selection = {
+        "name" => "demo",
         "installed" => true, "enabled" => true, "epoch" => 1,
         "high_water_at" => (NOW - 30).iso8601(6),
         "active" => {

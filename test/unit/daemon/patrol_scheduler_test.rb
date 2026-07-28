@@ -38,7 +38,12 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
   end
 
   def project_entry(dir, name: "p1")
-    { "name" => name, "path" => dir, "hive_state_path" => File.join(dir, ".hive-state") }
+    {
+      "name" => name,
+      "path" => dir,
+      "project_id" => "#{name}-id",
+      "hive_state_path" => File.join(dir, ".hive-state")
+    }
   end
 
   def scheduler(entry, cfg, git: FakeGit.new)
@@ -77,8 +82,24 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       assert_equal "p1", dispatches.first[:project]
       assert_equal "patrol", dispatches.first[:slug]
       assert_equal "patrol", dispatches.first[:stage]
-      assert_equal "hive patrol p1 --json", dispatches.first[:command]
+      assert_match(
+        /\Ahive patrol p1 --json --occurrence-id cap-[0-9a-f]{64}\z/,
+        dispatches.first[:command]
+      )
       assert scheduler.pending?("p1")
+      evidence = Hive::Modules::Migration::EvidenceStore.new(
+        root: File.join(
+          entry.fetch("hive_state_path"), "module-runtime", "migration",
+          "patrol-evidence"
+        )
+      )
+      capture = evidence.captures.fetch(0)
+      event = Hive::Modules::EventLedger.new(
+        root: File.join(entry.fetch("hive_state_path"), "module-runtime")
+      ).all.fetch(0)
+      assert_equal capture.to_h, event.dig("payload", "legacy_mutator_capture")
+      assert_equal capture.occurrence_id, event.dig("source", "id")
+      assert_equal "patrol", event.dig("payload", "target_module")
       assert_empty scheduler.tick(now: T0 + 1),
                    "pending patrol child must not be re-dispatched"
     end
@@ -124,7 +145,11 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
 
       ownership_allowed = true
       dispatch = sched.reserve(candidate, now: T0)
-      assert_equal candidate.reject { |key, _value| key == :patrol_kind }, dispatch
+      assert_equal(
+        candidate.reject { |key, _value| %i[patrol_kind command].include?(key) },
+        dispatch.reject { |key, _value| key == :command }
+      )
+      assert_match(/ --occurrence-id cap-[0-9a-f]{64}\z/, dispatch.fetch(:command))
       refute_includes dispatch.keys, :patrol_kind
       assert sched.pending?("p1")
       assert_equal(

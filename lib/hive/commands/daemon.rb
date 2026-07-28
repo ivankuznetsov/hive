@@ -231,8 +231,13 @@ module Hive
           store: Hive::Daemon::PrMergeReconciliationStore.new(dry_run: @dry_run),
           dry_run: @dry_run
         )
-        patrol_scheduler = Hive::Daemon::PatrolScheduler.new
-        refactor_patrol_scheduler = Hive::Daemon::RefactorPatrolScheduler.new(dry_run: @dry_run)
+        patrol_scheduler = Hive::Daemon::PatrolScheduler.new(
+          event_publisher: module_event_publisher
+        )
+        refactor_patrol_scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
+          dry_run: @dry_run,
+          event_publisher: module_event_publisher
+        )
         patrol_arbiter = Hive::Daemon::PatrolArbiter.new(
           ordinary_scheduler: patrol_scheduler,
           architecture_scheduler: refactor_patrol_scheduler,

@@ -3,7 +3,7 @@ title: Component boundaries
 type: reference
 source: config/component-boundaries.yml, test/support/component_boundary_contract.rb
 created: 2026-07-25
-updated: 2026-07-26
+updated: 2026-07-28
 tags: [architecture, components, boundaries, monorepo]
 ---
 
@@ -17,6 +17,7 @@ the first and primary consumer.
 
 | Component | State | Current entry point | Narrative context |
 |-----------|-------|---------------------|-------------------|
+| Patrol Effect Evidence | `boundary-ready` | `require "hive/modules/migration/patrol_evidence"` → `Hive::Modules::Migration::PatrolEvidence` | [[modules/patrol]] |
 | Attempts admission / future RunReceipt | `candidate` (guarded reference) | `require "hive/attempts/api"` → `Hive::Attempts::API` | [[modules/attempts]] |
 | UserService | `boundary-ready` | `require "hive/user_service"` → `Hive::UserService` | [[modules/user_service]] |
 | Agent ABI | `boundary-ready`; standalone package candidate | `require "hive/agent_runtime"` → `Hive::AgentRuntime` | [[modules/agent_cli_runtime]], [[modules/agent_profile]] |
@@ -33,7 +34,7 @@ has earned a gem, version, repository, or release.
 
 ## Final graph audit
 
-The U9 audit on 2026-07-26 retained seven components: six are
+The U2 update on 2026-07-28 retains eight components: seven are
 `boundary-ready`, Attempts remains the sole `candidate`, and no migration
 exceptions remain. Every retained entry point has a focused clean-process load
 proof, every catalog-owned path and focused test resolves inside this
@@ -45,6 +46,7 @@ The component dependency graph has one edge:
 ```mermaid
 flowchart LR
   skillpack[Skillpack] --> agent_abi[Agent ABI]
+  patrol_effects[Patrol Effect Evidence]
   attempts[Attempts admission - candidate]
   user_service[UserService]
   artifact_firewall[Agent Artifact Firewall]
@@ -59,8 +61,14 @@ while Attempts is deliberately retained as a guarded candidate rather than
 misrepresented as a complete lifecycle API.
 
 This is an internal architecture verdict, not a packaging verdict. None of the
-six ready components currently has the named non-Hive adopter and independent
+seven ready components currently has the named non-Hive adopter and independent
 package proof required by the standalone-gem plan.
+
+`Patrol Effect Evidence` owns only the immutable cross-product capture, intent,
+receipt, and append-only observation contract plus the two deliberately
+separate authorization gateways. Ordinary Patrol keeps fingerprint and
+ReviewHandoff recovery; Architecture Patrol keeps JobStore recovery. The
+evidence store is never consulted to decide a retry or mutation.
 
 `Hive::Attempts::API` is the guarded reference admission slice. Its public
 result contracts, focused clean-load proof, and exact internal construction

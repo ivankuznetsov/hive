@@ -80,12 +80,13 @@ permissions:
     - "repository"
   filesystem_write:
     - ".hive-state/refactor_patrol/**"
+    - ".hive-state/stages/**"
   secrets: []
 templates:
   - "templates/refactor-patrol.yml"
 docs:
   - "README.md"
 files:
-  "README.md": "dab977170d99fa04b7e9a6b26cbb523d1ed8ef3fff44696eb3fdca06981ac464"
+  "README.md": "fb5361c458d7fb24f1fc9e89877608e56a44c2437b5e7d551ab18a000149958e"
   "templates/refactor-patrol.yml": "5d8d1ede3cfe2854281b285d46191bc96a228e50ad745b667610e20d9cab653a"
-release_sha256: "ed47ad7d0cc2d9f577970aedaf1390442d0955ae96c3b082b6591cfa31215ef0"
+release_sha256: "3e0a266ed9f19eac7ed09b5a9916eb4952a7118d9a463c8b66cf4b243b07645a"

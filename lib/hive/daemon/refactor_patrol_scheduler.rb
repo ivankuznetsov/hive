@@ -14,6 +14,8 @@ require "hive/refactor_patrol/job_store"
 require "hive/refactor_patrol/pr_manifest"
 require "hive/refactor_patrol/process_group_resolver"
 require "hive/refactor_patrol/repository_ownership"
+require "hive/modules/event_publisher"
+require "hive/modules/migration/evidence_store"
 require "hive/modules/migration/patrols"
 
 module Hive
@@ -23,6 +25,7 @@ module Hive
     class RefactorPatrolScheduler
       PATROL_STAGE = "refactor-patrol".freeze
       PATROL_SLUG_PREFIX = "refactor-patrol".freeze
+      MODULE_SCHEDULE = "*/10 * * * *".freeze
       RETRY_BACKOFF_SEC = 60
       SUPPORTED_REPORT_SCHEMA_VERSIONS = [ 2, Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol") ].uniq.freeze
 
@@ -45,7 +48,9 @@ module Hive
                      repository_ownership: nil,
                      owner: nil, claim_resolver: ProcessGroupResolver.new,
                      lease_sec: 7200, dry_run: false,
-                     migration_authority: :legacy, migration_ownership: nil)
+                     migration_authority: :legacy, migration_ownership: nil,
+                     migration_snapshot: nil, evidence_store_factory: nil,
+                     event_publisher: nil)
         @registry = registry
         @config_loader = config_loader
         @job_store_factory = job_store_factory
@@ -72,6 +77,21 @@ module Hive
             hive_state_path: entry["hive_state_path"]
           )
         end
+        @migration_snapshot = migration_snapshot || lambda do |entry, module_name|
+          Hive::Modules::Migration::Patrols.ownership_snapshot(
+            entry.fetch("path"), module_name,
+            hive_state_path: entry["hive_state_path"]
+          )
+        end
+        @evidence_store_factory = evidence_store_factory || lambda do |entry|
+          Hive::Modules::Migration::EvidenceStore.new(
+            root: File.join(
+              entry.fetch("hive_state_path"), "module-runtime", "migration",
+              "patrol-evidence"
+            )
+          )
+        end
+        @event_publisher = event_publisher || Hive::Modules::EventPublisher.new
         @events = []
         @schemers = SUPPORTED_REPORT_SCHEMA_VERSIONS.to_h do |version|
           [ version, JSONSchemer.schema(Pathname.new(Hive::Schemas.schema_path("hive-refactor-patrol", version: version))) ]
@@ -139,6 +159,14 @@ module Hive
         )
           raise ReservationBlocked.new("migration_ownership_changed")
         end
+        migration = @migration_snapshot.call(entry, "architecture-patrol")
+        unless migration.is_a?(Hash) &&
+               migration["owner"] == @migration_authority.to_s &&
+               migration["admission"] == true &&
+               migration["epoch"].to_i.positive?
+          raise ReservationBlocked.new("migration_ownership_changed")
+        end
+        reservation_id = "architecture-#{SecureRandom.hex(16)}"
         phase = candidate.fetch(:action_phase, :discovery).to_sym
         store = store_for(entry)
         aggregate = store.read_job(candidate.fetch(:job_id))
@@ -185,7 +213,10 @@ module Hive
             phase: :action,
             job_id: aggregate.fetch("job_id"),
             registration: entry.fetch("name"),
-            result_path: result_path
+            result_path: result_path,
+            reservation_id: reservation_id,
+            migration_owner: migration.fetch("owner"),
+            migration_epoch: migration.fetch("epoch")
           }
           return candidate.merge(
             slug: "#{PATROL_SLUG_PREFIX}-#{aggregate.fetch('job_id')}-actions",
@@ -239,7 +270,10 @@ module Hive
           dispatch_token: token.merge(
             kind: :architecture_patrol, phase: :discovery,
             registration: entry.fetch("name"), result_path: result_path,
-            analysis_sha: analysis_sha
+            analysis_sha: analysis_sha,
+            reservation_id: reservation_id,
+            migration_owner: migration.fetch("owner"),
+            migration_epoch: migration.fetch("epoch")
           )
         )
       rescue ReservationBlocked
@@ -290,7 +324,11 @@ module Hive
             dispatch_token, reason: completion_failure_reason(exit_code, envelope),
             now: now, backoff_sec: RETRY_BACKOFF_SEC
           )
-          return completion_result(:retry, dispatch_token, envelope, aggregate: aggregate)
+          result = completion_result(
+            :retry, dispatch_token, envelope, aggregate: aggregate
+          )
+          publish_finalized(entry, dispatch_token, result, aggregate, now)
+          return result
         end
 
         aggregate = store.checkpoint_discovery!(
@@ -299,7 +337,7 @@ module Hive
           now: now,
           backoff_sec: discovery_backoff_sec(envelope, now)
         )
-        completion_result(
+        result = completion_result(
           if envelope.fetch("complete")
             aggregate.fetch("complete") ? :closed : :classified
           else
@@ -307,6 +345,8 @@ module Hive
           end,
           dispatch_token, envelope, aggregate: aggregate
         )
+        publish_finalized(entry, dispatch_token, result, aggregate, now)
+        result
       rescue Hive::RefactorPatrol::JobStore::StaleClaim
         completion_result(:stale, dispatch_token, envelope, aggregate: aggregate)
       rescue Hive::RefactorPatrol::JobStore::Error, KeyError
@@ -530,7 +570,9 @@ module Hive
           )
           :retry
         end
-        completion_result(status, token, envelope, aggregate: aggregate)
+        result = completion_result(status, token, envelope, aggregate: aggregate)
+        publish_finalized(entry, token, result, aggregate, now)
+        result
       rescue Hive::RefactorPatrol::JobStore::Error, Hive::ConfigError, KeyError
         completion_result(:retry, token, envelope, aggregate: aggregate)
       end
@@ -565,6 +607,63 @@ module Hive
             [ action["canonical_action_id"], action["outcome"] ]
           end.compact
         }
+      end
+
+      def publish_finalized(entry, token, result, aggregate, now)
+        return unless @migration_authority.to_sym == :legacy
+        return unless token[:reservation_id] && token[:migration_epoch]
+
+        pending = Array(aggregate && aggregate["actions"]).find do |action|
+          action["terminal"] != true
+        end
+        decision = if pending
+          {
+            "rationale" => "due",
+            "job_id" => aggregate.fetch("job_id"),
+            "phase" => "action"
+          }
+        else
+          {
+            "rationale" => "not_due",
+            "job_id" => nil,
+            "phase" => nil
+          }
+        end
+        phase = pending ? "action" : token.fetch(:phase).to_s
+        capture = Hive::Modules::Migration::PatrolCapture.build(
+          module_name: "architecture-patrol",
+          project: {
+            "project_id" => entry.fetch("project_id"),
+            "name" => entry.fetch("name"),
+            "repository" => aggregate.dig("source", "repository")
+          },
+          trigger: {
+            "kind" => "finalized_scheduler",
+            "id" => token.fetch(:reservation_id),
+            "schedule" => MODULE_SCHEDULE,
+            "phase" => phase
+          },
+          reservation: {
+            "kind" => "architecture",
+            "id" => token.fetch(:reservation_id),
+            "job_id" => token.fetch(:job_id),
+            "phase" => token.fetch(:phase).to_s,
+            "outcome" => JSON.parse(JSON.generate(result))
+          },
+          owner: token.fetch(:migration_owner),
+          owner_epoch: token.fetch(:migration_epoch),
+          decision_class: "scheduler_outcome",
+          decision: decision,
+          occurred_at: now,
+          recorded_at: now
+        )
+        @evidence_store_factory.call(entry).append_capture(capture)
+        @event_publisher.architecture_patrol_finalized(
+          entry,
+          capture,
+          schedule: MODULE_SCHEDULE,
+          target_hook: phase == "action" ? "actions" : "scheduled-discovery"
+        )
       end
 
       def parse_time(value)

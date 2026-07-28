@@ -254,6 +254,7 @@ module Hive
 
         @capability_context.require_repository_write!
         @capability_context.require_filesystem_write!(".hive-state/refactor_patrol/**")
+        @capability_context.require_filesystem_write!(".hive-state/stages/**")
         @capability_context.require_github_mutation!("issues")
         @capability_context.require_github_mutation!("pull_requests")
         @capability_context.require_external_command!("gh")

@@ -4,6 +4,7 @@ require "hive/config"
 require "hive/modules/migration/patrols"
 require "hive/modules/migration/report"
 require "hive/modules/migration/shadow_comparator"
+require "hive/modules/migration/shadow_decision_migration"
 
 module Hive
   module Commands
@@ -76,9 +77,16 @@ module Hive
         end
 
         def comparator
-          Hive::Modules::Migration::ShadowComparator.new(
-            root: File.join(hive_state_path, "module-runtime", "migration", "shadow")
+          Hive::Modules::Migration::ShadowDecisionMigration.migrate!(
+            root: shadow_root
           )
+          Hive::Modules::Migration::ShadowComparator.new(
+            root: shadow_root
+          )
+        end
+
+        def shadow_root
+          File.join(hive_state_path, "module-runtime", "migration", "shadow")
         end
 
         def read_state

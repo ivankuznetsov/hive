@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hive.local/schemas/hive-patrol-effect-receipt.v1.json",
+  "title": "Hive Patrol Effect Receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "receipt_id",
+    "intent",
+    "status",
+    "outcome",
+    "recorded_at"
+  ],
+  "properties": {
+    "schema": {"const": "hive-patrol-effect-receipt"},
+    "schema_version": {"const": 1},
+    "receipt_id": {"type": "string", "pattern": "^receipt-[0-9a-f]{64}$"},
+    "intent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "intent_id",
+        "module",
+        "occurrence_id",
+        "authority",
+        "owner_epoch",
+        "sink",
+        "target",
+        "idempotency_key",
+        "capability",
+        "claim_generation",
+        "created_at"
+      ],
+      "properties": {
+        "intent_id": {"type": "string", "pattern": "^intent-[0-9a-f]{64}$"},
+        "module": {"enum": ["patrol", "architecture-patrol"]},
+        "occurrence_id": {"type": "string", "pattern": "^occ-[0-9a-f]{64}$"},
+        "authority": {"enum": ["legacy", "module", "shadow"]},
+        "owner_epoch": {"type": "integer", "minimum": 1},
+        "sink": {
+          "enum": [
+            "attempt",
+            "state",
+            "finding",
+            "branch",
+            "pull_request",
+            "review_handoff",
+            "job",
+            "discovery",
+            "action",
+            "issue"
+          ]
+        },
+        "target": {"type": "string", "minLength": 1},
+        "idempotency_key": {"type": "string", "minLength": 1},
+        "capability": {"type": "string", "minLength": 1},
+        "claim_generation": {
+          "anyOf": [
+            {"type": "integer", "minimum": 0},
+            {"type": "null"}
+          ]
+        },
+        "created_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "status": {
+      "enum": [
+        "attempted",
+        "denied",
+        "known_not_sent",
+        "unknown",
+        "committed",
+        "reconciled",
+        "failed"
+      ]
+    },
+    "outcome": {"type": "object"},
+    "recorded_at": {"type": "string", "format": "date-time"}
+  }
+}

@@ -2,6 +2,7 @@ require "hive/commands/patrol"
 require "hive/config"
 require "hive/daemon/patrol_scheduler"
 require "hive/modules/capability_context"
+require "hive/modules/migration/evidence_store"
 require "hive/modules/migration/patrols"
 require "hive/modules/migration/shadow_comparator"
 require "hive/patrol/state_store"
@@ -67,7 +68,7 @@ module Hive
           end
           return 0 unless candidate
 
-          run_cycle(project, context, cfg, configuration)
+          run_cycle(project, context, cfg, configuration, event)
         end
 
         def task_completed(project, context, cfg, configuration, event)
@@ -80,10 +81,10 @@ module Hive
 
           context.require_filesystem_read!("repository")
           context.require_external_command!("git")
-          run_cycle(project, context, cfg, configuration)
+          run_cycle(project, context, cfg, configuration, event)
         end
 
-        def run_cycle(project, context, cfg, configuration)
+        def run_cycle(project, context, cfg, configuration, event)
           dry_run = configuration.settings.fetch("dry_run")
           unless dry_run
             context.require_repository_write!
@@ -96,7 +97,9 @@ module Hive
             project.fetch("name"),
             {
               json: true, dry_run: dry_run, project_entry: project,
-              config_loader: ->(_path) { cfg }, capability_context: context
+              config_loader: ->(_path) { cfg }, capability_context: context,
+              capture: module_capture(project, event),
+              migration_authority: :module
             }
           ).call
           result.is_a?(Hash) && result["ok"] == false ? 1 : 0
@@ -138,15 +141,21 @@ module Hive
             @shadow_sink.call(record)
           else
             capture = legacy_capture(event)
+            receipts = capture ? occurrence_receipts(project, capture) : []
             shadow_comparator(project).record!(
-              module_name: "patrol", trigger: event,
-              legacy_decision: capture ? capture.fetch("decision") : {},
+              module_name: "patrol",
+              trigger: capture ? capture.trigger : event,
+              legacy_capture: capture,
               module_decision: { "rationale" => rationale },
-              legacy_effects: capture ? Array(capture["effects"]) : [],
+              legacy_effects: receipts.reject do |receipt|
+                receipt.intent.authority == "shadow"
+              end,
+              module_effects: receipts.select do |receipt|
+                receipt.intent.authority == "shadow"
+              end,
               configuration_digest: configuration.digest,
               occurred_at: event.fetch("occurred_at"),
-              comparable: comparable && !capture.nil?,
-              evidence_source: capture && "legacy_mutator_capture"
+              comparable: comparable && !capture.nil?
             )
           end
           0
@@ -162,12 +171,75 @@ module Hive
         def legacy_capture(event)
           capture = event.dig("payload", "legacy_mutator_capture")
           return nil if capture.nil?
-          unless capture.is_a?(Hash) && capture["decision"].is_a?(Hash) &&
-                 (capture["effects"].nil? || capture["effects"].is_a?(Array))
+
+          value = Hive::Modules::Migration::PatrolCapture.from_h(capture)
+          unless value.module_name == "patrol" &&
+                 value.project.fetch("project_id") == event.fetch("project_id") &&
+                 value.project.fetch("name") == event.fetch("project")
             raise Hive::ConfigError, "Patrol legacy shadow capture is malformed"
           end
+          value
+        rescue Hive::ConfigError, KeyError
+          raise Hive::ConfigError, "Patrol legacy shadow capture is malformed"
+        end
 
-          capture
+        def occurrence_receipts(project, capture)
+          evidence_store(project).receipts.select do |receipt|
+            receipt.intent.module_name == "patrol" &&
+              receipt.intent.occurrence_id == capture.occurrence_id
+          end
+        end
+
+        def module_capture(project, event)
+          snapshot = Hive::Modules::Migration::Patrols.ownership_snapshot(
+            project.fetch("path"), "patrol",
+            hive_state_path: project["hive_state_path"]
+          )
+          unless snapshot["owner"] == "module" &&
+                 snapshot["admission"] == true &&
+                 snapshot["epoch"].to_i.positive?
+            raise Hive::ConfigError,
+                  "Patrol module occurrence lost mutation ownership"
+          end
+
+          Hive::Modules::Migration::PatrolCapture.build(
+            module_name: "patrol",
+            project: {
+              "project_id" => project.fetch("project_id"),
+              "name" => project.fetch("name"),
+              "repository" => project["repository_identity"]
+            },
+            trigger: {
+              "kind" => "module_event",
+              "id" => event.fetch("event_id"),
+              "event_name" => event.fetch("event_name"),
+              "occurred_at" => event.fetch("occurred_at"),
+              "payload" => event.fetch("payload")
+            },
+            reservation: {
+              "kind" => "module_hook",
+              "id" => event.fetch("event_id")
+            },
+            owner: "module",
+            owner_epoch: snapshot.fetch("epoch"),
+            decision_class: "due",
+            decision: {
+              "rationale" => "due",
+              "event_id" => event.fetch("event_id")
+            },
+            occurred_at: event.fetch("occurred_at"),
+            recorded_at: event.fetch("recorded_at", event.fetch("occurred_at"))
+          )
+        end
+
+        def evidence_store(project)
+          state = project["hive_state_path"] ||
+                  File.join(project.fetch("path"), ".hive-state")
+          Hive::Modules::Migration::EvidenceStore.new(
+            root: File.join(
+              state, "module-runtime", "migration", "patrol-evidence"
+            )
+          )
         end
 
         def validate_hook!(hook_id, event)

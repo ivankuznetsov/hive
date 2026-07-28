@@ -895,12 +895,14 @@ module Hive
     DESC
     option :dry_run, type: :boolean, default: false,
                      desc: "map and review, but do not fix, push, or open PRs"
+    option :occurrence_id, type: :string, hide: true
     def patrol(project)
       require "hive/commands/patrol"
       Hive::Commands::Patrol.new(
         project,
         json: options[:json],
-        dry_run: options[:dry_run]
+        dry_run: options[:dry_run],
+        occurrence_id: options[:occurrence_id]
       ).call
     end
 

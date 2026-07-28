@@ -5,6 +5,8 @@ require "tmpdir"
 require "time"
 require "hive/config"
 require "hive/git_ops"
+require "hive/modules/migration/evidence_store"
+require "hive/modules/migration/patrols"
 require "hive/patrol/candidate_selector"
 require "hive/patrol/dismissals"
 require "hive/patrol/fingerprint"
@@ -31,6 +33,10 @@ module Hive
                      fixer_factory: nil, pr_opener_factory: nil,
                      dismissals_factory: nil, project_entry: nil,
                      capability_context: nil,
+                     occurrence_id: nil, capture: nil,
+                     migration_authority: :legacy,
+                     evidence_store_factory: nil,
+                     clock: -> { Time.now.utc },
                      config_loader: ->(path) { Hive::Config.load(path) })
         @project = project
         @json = json
@@ -40,10 +46,22 @@ module Hive
         end
         @reviewer_factory = reviewer_factory
         @fixer_factory = fixer_factory
-        @pr_opener_factory = pr_opener_factory || ->(root, cfg, state) { Hive::Patrol::PrOpener.new(root, cfg: cfg, state: state) }
+        @pr_opener_factory = pr_opener_factory
         @dismissals_factory = dismissals_factory || ->(root, state) { Hive::Patrol::Dismissals.new(root, state: state) }
         @project_entry = project_entry
         @capability_context = capability_context
+        @occurrence_id = occurrence_id
+        @capture = capture
+        @migration_authority = migration_authority.to_s
+        @evidence_store_factory = evidence_store_factory || lambda do |entry|
+          Hive::Modules::Migration::EvidenceStore.new(
+            root: File.join(
+              entry.fetch("hive_state_path"), "module-runtime", "migration",
+              "patrol-evidence"
+            )
+          )
+        end
+        @clock = clock
         @config_loader = config_loader
       end
 
@@ -67,11 +85,20 @@ module Hive
 
         project_root = entry.fetch("path")
         cfg = @config_loader.call(project_root)
+        capture = patrol_capture(entry)
         require_module_observation_capabilities!
         require_module_mutation_capabilities! unless @dry_run
         ensure_validation_configured!(cfg) unless @dry_run
         state = Hive::Patrol::StateStore.new(project_root)
         state.ensure!
+        unless @dry_run
+          state.configure_effect_gateway!(
+            capture: capture,
+            evidence_store: @evidence_store_factory.call(entry),
+            config_loader: @config_loader,
+            capability_checker: method(:effect_capability_allowed?)
+          )
+        end
         token_budget = Hive::Patrol::TokenBudget.new(project_root, cfg: cfg)
         dismissed = @dismissals_factory.call(project_root, state).reconcile
         target_sha = sweep_target_sha(project_root, cfg, state)
@@ -118,12 +145,26 @@ module Hive
         fix_results = []
         unless @dry_run
           fixer = build_fixer(project_root, cfg, state, token_budget)
-          pr_opener = @pr_opener_factory.call(project_root, cfg, state)
+          pr_opener = if @pr_opener_factory
+            @pr_opener_factory.call(project_root, cfg, state)
+          else
+            Hive::Patrol::PrOpener.new(
+              project_root,
+              cfg: cfg,
+              state: state,
+              capture: capture,
+              evidence_store: @evidence_store_factory.call(entry),
+              config_loader: @config_loader,
+              capability_checker: method(:effect_capability_allowed?)
+            )
+          end
           prs_opened = 0
           candidates.each do |finding|
             break if prs_opened >= max_prs || fixes.size >= max_attempts
 
-            patch = fixer.attempt(finding)
+            patch = perform_fix_attempt(
+              state, fixer, finding, capture
+            )
             fixes << patch
             outcome = fix_outcome(finding, patch)
             fix_results << outcome
@@ -193,9 +234,101 @@ module Hive
         return unless @capability_context
 
         @capability_context.require_repository_write!
+        @capability_context.require_filesystem_write!(".hive-state/stages/**")
         @capability_context.require_github_mutation!("pull_requests")
         @capability_context.require_external_command!("gh")
         @capability_context.require_network_host!("api.github.com")
+      end
+
+      def patrol_capture(entry)
+        store = @evidence_store_factory.call(entry)
+        capture = @capture
+        capture ||= store.fetch_capture(@occurrence_id) if @occurrence_id
+        if @occurrence_id && capture.nil?
+          raise Hive::ConfigError,
+                "patrol reservation capture #{@occurrence_id.inspect} is unavailable"
+        end
+        capture ||= build_manual_capture(entry)
+        validate_capture!(capture, entry)
+        store.append_capture(capture)
+        capture
+      end
+
+      def build_manual_capture(entry)
+        Hive::Modules::Migration::Patrols.with_migration_lock(
+          entry.fetch("path"),
+          hive_state_path: entry.fetch("hive_state_path"),
+          shared: true
+        ) do
+          snapshot = Hive::Modules::Migration::Patrols.ownership_snapshot(
+            entry.fetch("path"), "patrol",
+            hive_state_path: entry.fetch("hive_state_path")
+          )
+          unless snapshot["owner"] == @migration_authority &&
+                 snapshot["admission"] == true &&
+                 snapshot["epoch"].to_i.positive?
+            raise Hive::ConfigError,
+                  "patrol mutation authority is not admitted"
+          end
+
+          now = @clock.call
+          identity = [
+            "manual", entry.fetch("project_id"), now.utc.iso8601(6)
+          ].join(":")
+          Hive::Modules::Migration::PatrolCapture.build(
+            module_name: "patrol",
+            project: {
+              "project_id" => entry.fetch("project_id"),
+              "name" => entry.fetch("name"),
+              "repository" => entry["repository_identity"]
+            },
+            trigger: { "kind" => "manual", "id" => identity },
+            reservation: { "kind" => "ordinary", "id" => identity },
+            owner: snapshot.fetch("owner"),
+            owner_epoch: snapshot.fetch("epoch"),
+            decision_class: "due",
+            decision: { "rationale" => "manual" },
+            occurred_at: now,
+            recorded_at: now
+          )
+        end
+      end
+
+      def validate_capture!(capture, entry)
+        valid = capture.is_a?(Hive::Modules::Migration::PatrolCapture) &&
+                capture.module_name == "patrol" &&
+                capture.project.fetch("project_id") == entry.fetch("project_id").to_s &&
+                capture.project.fetch("name") == entry.fetch("name").to_s &&
+                capture.owner == @migration_authority
+        return true if valid
+
+        raise Hive::ConfigError,
+              "patrol reservation capture does not match the command project or authority"
+      rescue KeyError
+        raise Hive::ConfigError,
+              "patrol reservation capture does not match the command project or authority"
+      end
+
+      def effect_capability_allowed?(capability:, **)
+        return true unless @capability_context
+
+        case capability.to_s
+        when "repository_write"
+          @capability_context.require_repository_write!
+        when "github_pull_requests"
+          @capability_context.require_github_mutation!("pull_requests")
+          @capability_context.require_external_command!("gh")
+          @capability_context.require_network_host!("api.github.com")
+        when "filesystem_write"
+          @capability_context.require_filesystem_write!(".hive-state/patrol/**")
+        when "review_handoff"
+          @capability_context.require_filesystem_write!(".hive-state/stages/**")
+        else
+          return false
+        end
+        true
+      rescue Hive::Modules::CapabilityDenied
+        false
       end
 
       def review_outcome(feature_batch, reviewer)
@@ -299,6 +432,41 @@ module Hive
         when "stale_target_sha"
           registry.transition_current!(finding, state: "superseded", reason: reason)
         end
+      end
+
+      def perform_fix_attempt(state, fixer, finding, capture)
+        patch = nil
+        result = state.perform_cycle_effect!(
+          sink: "attempt",
+          target: "attempts/#{finding.fingerprint}",
+          idempotency_key: [
+            capture.occurrence_id, "attempt", finding.fingerprint
+          ].join(":"),
+          capability: "repository_write",
+          reconcile: ->(_intent) { state.reconcile_attempt(finding.fingerprint) }
+        ) do
+          patch = fixer.attempt(finding)
+          { "patch" => JSON.parse(JSON.generate(patch.to_h)) }
+        end
+        patch || patch_from_effect_outcome(finding, result.outcome)
+      end
+
+      def patch_from_effect_outcome(finding, outcome)
+        data = outcome.fetch("patch")
+        Hive::Patrol::Fixer::PatchAttempt.new(
+          id: data.fetch("id"),
+          finding: finding,
+          branch: data.fetch("branch"),
+          worktree_path: data.fetch("worktree_path"),
+          validation: data.fetch("validation"),
+          passed: data.fetch("passed"),
+          diffstat: data.fetch("diffstat"),
+          base_sha: data.fetch("base_sha"),
+          head_sha: data.fetch("head_sha")
+        )
+      rescue KeyError, TypeError
+        raise Hive::ConfigError,
+              "patrol attempt reconciliation returned a malformed patch"
       end
 
       def current_default_sha(project_root, cfg)

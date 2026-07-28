@@ -4,6 +4,65 @@ schema_version: 1
 # its test-only contract enforce declared source boundaries; they are not a
 # runtime security sandbox and cannot prevent reflection or monkeypatching.
 components:
+  - id: patrol-effects
+    name: Patrol Effect Evidence
+    state: boundary-ready
+    entrypoint:
+      file: lib/hive/modules/migration/patrol_evidence.rb
+      require: hive/modules/migration/patrol_evidence
+      constant: Hive::Modules::Migration::PatrolEvidence
+    public_contract:
+      values:
+        - Hive::Modules::Migration::PatrolCapture
+        - Hive::Modules::Migration::EffectIntent
+        - Hive::Modules::Migration::EffectReceipt
+      errors:
+        - Hive::ConfigError
+    owned_paths:
+      - lib/hive/modules/migration/patrol_evidence.rb
+      - lib/hive/modules/migration/evidence_store.rb
+      - lib/hive/patrol/effect_gateway.rb
+      - lib/hive/refactor_patrol/effect_errors.rb
+      - lib/hive/refactor_patrol/effect_gateway.rb
+    state_contracts:
+      - "Immutable occurrence captures and append-only effect receipts under module-runtime/migration/patrol-evidence"
+      - "Ordinary StateStore and Architecture JobStore remain the only recovery authorities"
+    schema_contracts:
+      - "hive-patrol-capture v1 and hive-patrol-effect-receipt v1 are strict canonical observation records"
+    lock_contracts:
+      - "Incumbent durable intent before the shared migration admission lock; live owner, epoch, config, capability, and claim checks surround each sink"
+    component_dependencies: []
+    allowed_hive_dependencies:
+      - hive/atomic_file
+      - hive/config
+      - hive/errors
+      - hive/modules/migration/patrols
+      - hive/workflow_package/canonical_json
+    internal_collaborators:
+      - Hive::Modules::Migration::EvidenceStore
+      - Hive::Patrol::EffectGateway
+      - Hive::RefactorPatrol::EffectGateway
+    forbidden_constructions: []
+    authorized_internal_constructions: []
+    hive_consumers:
+      - lib/hive/commands/patrol.rb
+      - lib/hive/daemon/patrol_scheduler.rb
+      - lib/hive/daemon/refactor_patrol_scheduler.rb
+      - lib/hive/modules/adapters/architecture_patrol.rb
+      - lib/hive/modules/adapters/patrol.rb
+      - lib/hive/patrol/pr_opener.rb
+      - lib/hive/patrol/state_store.rb
+      - lib/hive/refactor_patrol/action_runner.rb
+    mutation_authority: "The separate ordinary and architecture gateways authorize their own product sinks; shared values and EvidenceStore have no mutation authority."
+    recovery_surface: "Evidence is observation-only; fingerprint publication state, ReviewHandoff, JobStore, and Safe Agent Git Gate retain reconciliation and recovery."
+    wiki_page: wiki/modules/patrol.md
+    focused_tests:
+      - test/unit/modules/migration/evidence_store_test.rb
+      - test/unit/modules/migration/patrol_evidence_test.rb
+      - test/unit/patrol/effect_gateway_test.rb
+      - test/unit/refactor_patrol/effect_gateway_test.rb
+    migration_exceptions: []
+
   - id: attempts
     name: Attempts admission / future RunReceipt
     state: candidate

@@ -3,6 +3,7 @@ require "hive/commands/refactor_patrol"
 require "hive/config"
 require "hive/daemon/refactor_patrol_scheduler"
 require "hive/modules/capability_context"
+require "hive/modules/migration/evidence_store"
 require "hive/modules/migration/patrols"
 require "hive/modules/migration/shadow_comparator"
 require "hive/refactor_patrol/state_store"
@@ -157,18 +158,24 @@ module Hive
             @shadow_sink.call(record)
           else
             capture = legacy_capture(event)
+            receipts = capture ? occurrence_receipts(project, capture) : []
             decision = {
               "rationale" => rationale, "job_id" => record["job_id"], "phase" => record["phase"]
             }
             shadow_comparator(project).record!(
-              module_name: "architecture-patrol", trigger: event,
-              legacy_decision: capture ? capture.fetch("decision") : {},
+              module_name: "architecture-patrol",
+              trigger: capture ? capture.trigger : event,
+              legacy_capture: capture,
               module_decision: decision,
-              legacy_effects: capture ? Array(capture["effects"]) : [],
+              legacy_effects: receipts.reject do |receipt|
+                receipt.intent.authority == "shadow"
+              end,
+              module_effects: receipts.select do |receipt|
+                receipt.intent.authority == "shadow"
+              end,
               configuration_digest: configuration.digest,
               occurred_at: event.fetch("occurred_at"),
-              comparable: comparable && !capture.nil?,
-              evidence_source: capture && "legacy_mutator_capture"
+              comparable: comparable && !capture.nil?
             )
           end
           0
@@ -184,12 +191,35 @@ module Hive
         def legacy_capture(event)
           capture = event.dig("payload", "legacy_mutator_capture")
           return nil if capture.nil?
-          unless capture.is_a?(Hash) && capture["decision"].is_a?(Hash) &&
-                 (capture["effects"].nil? || capture["effects"].is_a?(Array))
-            raise Hive::ConfigError, "Architecture Patrol legacy shadow capture is malformed"
-          end
 
-          capture
+          value = Hive::Modules::Migration::PatrolCapture.from_h(capture)
+          unless value.module_name == "architecture-patrol" &&
+                 value.project.fetch("project_id") == event.fetch("project_id") &&
+                 value.project.fetch("name") == event.fetch("project")
+            raise Hive::ConfigError,
+                  "Architecture Patrol legacy shadow capture is malformed"
+          end
+          value
+        rescue Hive::ConfigError, KeyError
+          raise Hive::ConfigError,
+                "Architecture Patrol legacy shadow capture is malformed"
+        end
+
+        def occurrence_receipts(project, capture)
+          evidence_store(project).receipts.select do |receipt|
+            receipt.intent.module_name == "architecture-patrol" &&
+              receipt.intent.occurrence_id == capture.occurrence_id
+          end
+        end
+
+        def evidence_store(project)
+          state = project["hive_state_path"] ||
+                  File.join(project.fetch("path"), ".hive-state")
+          Hive::Modules::Migration::EvidenceStore.new(
+            root: File.join(
+              state, "module-runtime", "migration", "patrol-evidence"
+            )
+          )
         end
 
         def validate_hook!(hook_id, event)

@@ -115,6 +115,21 @@ class RefactorPatrolPrOpenerTest < Minitest::Test
         record_intent: lambda do |phase:, payload:|
           operations << phase
           !payload.empty?
+        end,
+        execute_effect: lambda do |phase:, payload:, &effect|
+          refute_empty payload
+          operations << "gateway_begin:#{phase}"
+          value = effect.call
+          operations << "gateway_end:#{phase}"
+          value
+        end,
+        execute_handoff: lambda do |phase:, payload:, &effect|
+          assert_equal "review_handoff", phase
+          assert_equal "https://github.com/acme/demo/pull/9", payload.fetch("pr_url")
+          operations << "gateway_begin:#{phase}"
+          value = effect.call
+          operations << "gateway_end:#{phase}"
+          value
         end
       )
 
@@ -122,7 +137,10 @@ class RefactorPatrolPrOpenerTest < Minitest::Test
       assert result.terminal
       assert_equal(
         %w[
-          push_intent push push_complete pr_create_intent create_pr review_handoff
+          push_intent gateway_begin:push_intent push gateway_end:push_intent
+          push_complete pr_create_intent gateway_begin:pr_create_intent
+          create_pr gateway_end:pr_create_intent
+          gateway_begin:review_handoff review_handoff gateway_end:review_handoff
         ],
         operations,
         "each remote effect is bracketed by its incumbent durable callbacks"

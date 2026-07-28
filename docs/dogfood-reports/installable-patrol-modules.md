@@ -22,13 +22,16 @@ legacy cursors or budgets, spawn agents, or invoke side-effect gateways.
 Comparison is admitted only when the trigger carries a separately persisted
 `legacy_mutator_capture`; missing captures remain non-comparable.
 
-The ordinary Patrol scheduler does not yet publish an immutable
-`legacy_mutator_capture`. The merged-PR reconciler supplies one for
-Architecture Patrol, but this report contains no live occurrences, so both
-documented counters remain zero. Capability checks around the adapters are
-also preflight-only until the legacy engines accept capability-bound gateways.
-Those blockers, the elapsed-time gate, the drills, and the hosted delivery
-gates mean this report must not be used to request cutover. Machine eligibility
+Current source gives ordinary scheduler reservations an immutable typed capture
+and gives Architecture Patrol a linked finalized scheduler capture in addition
+to merge enqueue provenance. Separate ordinary/architecture effect gateways
+wrap state, finding, attempt, branch, issue, PR, and review-handoff sinks with
+live owner/config/capability checks. Their append-only receipts are observation,
+while StateStore, JobStore, ReviewHandoff, and the Safe Agent Git Gate retain
+recovery authority. This document still contains no qualifying live
+occurrences, compressed fault campaign, cutover drill, or hosted delivery
+proof. Those remaining gates mean this report must not be used to request
+cutover. Machine eligibility
 remains false until current evidence is rebuilt and re-reviewed; cutover
 re-evaluates the live shadow directory rather than trusting this document or a
 saved `eligible` bit.

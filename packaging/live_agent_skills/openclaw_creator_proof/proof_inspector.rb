@@ -4,12 +4,17 @@ module HiveLiveAgentProof
       WORKFLOW_CONTROL_FILES = [ ".hive-state/workflows/.mutation.lock" ].freeze
 
       def initialize(workspace:, audit_path:, result_path:, candidate_record:,
-                     configuration: nil)
+                     configuration: nil, policy_path: nil, authoring_path: nil,
+                     effects_path: nil, process_records: [])
         @workspace = File.expand_path(workspace)
         @audit_path = File.expand_path(audit_path)
         @result_path = File.expand_path(result_path)
         @candidate_record = candidate_record
         @configuration = configuration
+        @policy_path = policy_path && File.expand_path(policy_path)
+        @authoring_path = authoring_path && File.expand_path(authoring_path)
+        @effects_path = effects_path && File.expand_path(effects_path)
+        @process_records = process_records
       end
 
       def creation_result
@@ -59,6 +64,7 @@ module HiveLiveAgentProof
                meta["idempotency_key"] == WORKFLOW_CREATOR_TASK_KEY
           fail_proof!("task metadata does not bind the audited task identity")
         end
+        unauthorized_effects = observed_unauthorized_effects
         {
           "hive_commands" => expected_commands,
           "task_count" => task_folders.length,
@@ -73,7 +79,10 @@ module HiveLiveAgentProof
             "current_stage" => File.basename(File.dirname(folder))
           },
           "effect_policy" => effect_policy_receipt,
-          "external_actions" => observed_external_actions
+          "effect_observations" => effect_observation_summary,
+          "unauthorized_effects_observed" => unauthorized_effects,
+          "external_actions" => unauthorized_effects,
+          "external_actions_scope" => external_actions_scope
         }.tap do |result|
           fail_proof!("workflow-creator proof did not retain exactly one task") unless
             result.fetch("task_count") == 1
@@ -85,21 +94,32 @@ module HiveLiveAgentProof
       private
 
       def audit_rows
-        rows = read_json_lines(@audit_path)
-        rows.each_with_index do |row, index|
-          valid = row.is_a?(Hash) && row["ordinal"] == index + 1 &&
-                  row["argv"].is_a?(Array) &&
-                  row["candidate_realpath"] == @candidate_record.fetch("realpath") &&
-                  row["candidate_sha256"] == @candidate_record.fetch("sha256") &&
-                  row["success"] == true && row["exit_status"] == 0 &&
-                  row["signal"].nil?
-          fail_proof!("audit gateway identity or ordinal is invalid") unless valid
-        end
-        rows
+        state = audit_state
+        fail_proof!("audit gateway retained a pending attempt") if state.pending
+        fail_proof!("audit gateway retained a denied or failed attempt") if
+          state.poisoned_terminal
+        state.pairs.map { |pair| pair.fetch(:terminal) }.freeze
+      end
+
+      def audit_state
+        ledger = HiveLiveAgentProof::OpenClawCreatorGatewayRuntime::AttemptLedger.new(
+          path: @audit_path,
+          candidate_realpath: @candidate_record.fetch("realpath"),
+          candidate_sha256: @candidate_record.fetch("sha256")
+        )
+        ledger.read
+      rescue HiveLiveAgentProof::OpenClawCreatorGatewayRuntime::InvalidLedger => e
+        fail_proof!("audit gateway ledger is invalid: #{e.message}")
       end
 
       def result_rows
-        read_json_lines(@result_path)
+        state = audit_state
+        HiveLiveAgentProof::OpenClawCreatorGatewayRuntime::ResultLedger.new(
+          path: @result_path,
+          safe_slug: WORKFLOW_CREATOR_SAFE_SLUG
+        ).read(attempt_pairs: state.pairs)
+      rescue HiveLiveAgentProof::OpenClawCreatorGatewayRuntime::InvalidLedger => e
+        fail_proof!("gateway result ledger is invalid: #{e.message}")
       end
 
       def validation_result
@@ -209,25 +229,30 @@ module HiveLiveAgentProof
         matches.fetch(0)
       end
 
-      def read_json_lines(path)
-        return [] unless File.file?(path) && !File.symlink?(path)
-
-        File.readlines(path, chomp: true).map { |line| JSON.parse(line) }
-      rescue JSON::ParserError, Errno::EACCES => e
-        fail_proof!("cannot read proof audit: #{e.message}")
-      end
-
       def effect_policy_receipt
-        fail_proof!("OpenClaw effect policy was not retained") unless @configuration
+        fail_proof!("OpenClaw effect policy was not retained") unless
+          @configuration && @policy_path
 
         config = JSON.parse(File.read(@configuration.config_path))
         approvals = JSON.parse(File.read(@configuration.approvals_path))
+        policy = JSON.parse(File.read(@policy_path))
         gateway = File.join(
           config.dig("tools", "exec", "pathPrepend").to_a.fetch(0),
           "hive"
         )
         allowed = approvals.dig("agents", "main", "allowlist").to_a
-        valid = config.dig("tools", "allow") == [ "exec" ] &&
+        receipts = policy["tool_receipts"].to_a
+        receipts_by_id = receipts.to_h { |row| [ row["id"], row ] }
+        driver_sha256 = Digest::SHA256.file(OpenClawPolicyProbe::DRIVER_SOURCE_PATH).hexdigest
+        successful = %w[
+          inside_write inside_read inside_edit inside_apply_patch exec_hive_version
+        ]
+        denied = OpenClawPolicyProbe::DENIED_CONTROL_IDS
+        valid = config.dig("tools", "allow") == %w[read write edit apply_patch exec] &&
+                config.dig("tools", "fs", "workspaceOnly") == true &&
+                config.dig("tools", "elevated", "enabled") == false &&
+                config.dig("tools", "exec", "applyPatch", "enabled") == true &&
+                config.dig("tools", "exec", "applyPatch", "workspaceOnly") == true &&
                 config.dig("tools", "exec", "mode") == "allowlist" &&
                 config.dig("tools", "exec", "host") == "gateway" &&
                 config.dig("tools", "exec", "strictInlineEval") == true &&
@@ -238,13 +263,45 @@ module HiveLiveAgentProof
                 approvals.dig("agents", "main", "ask") == "off" &&
                 approvals.dig("agents", "main", "askFallback") == "deny" &&
                 approvals.dig("agents", "main", "autoAllowSkills") == false &&
-                allowed.length == 1 && allowed.fetch(0)["pattern"] == gateway
+                allowed.length == 1 && allowed.fetch(0)["pattern"] == gateway &&
+                policy["schema"] == "hive-openclaw-effective-policy" &&
+                policy["schema_version"] == 2 &&
+                %w[openclaw-exact-runtime public-export-contract-fixture].include?(
+                  policy["source"]
+                ) &&
+                policy["proof_mode"] == "direct_native_tool_surface" &&
+                policy["public_exports"] == OpenClawPolicyProbe::PUBLIC_EXPORTS &&
+                policy["driver_sha256"] == driver_sha256 &&
+                policy.dig("runtime_package", "name") == "openclaw" &&
+                policy.dig("runtime_package", "version") == OPENCLAW_VERSION &&
+                policy["effective_tools"] == %w[apply_patch edit exec read write] &&
+                policy["workspace_only"] == true &&
+                policy["apply_patch_workspace_only"] == true &&
+                policy["elevated_enabled"] == false &&
+                policy["exec_allowlist"] == [ gateway ] &&
+                policy["unauthorized_effects_observed"] == [] &&
+                policy["monitored_surfaces"].is_a?(Array) &&
+                policy.dig("outside_read_caveat", "global_denial_claimed") == false &&
+                receipts.map { |row| row["id"] }.uniq.length == receipts.length &&
+                successful.all? {
+                  |id| receipts_by_id.dig(id, "decision") == "succeeded"
+                } &&
+                denied.all? { |id| receipts_by_id.dig(id, "decision") == "denied" } &&
+                denied.all? {
+                  |id| receipts_by_id.dig(id, "mutation_observed") == false
+                }
         fail_proof!("OpenClaw effect policy is not deny-by-default") unless valid
 
         {
           "status" => "enforced",
-          "allowed_tools" => [ "exec" ],
+          "allowed_tools" => %w[read write edit apply_patch exec],
           "allowed_executables" => [ gateway ],
+          "runtime_source" => policy.fetch("source"),
+          "proof_mode" => policy.fetch("proof_mode"),
+          "driver_sha256" => driver_sha256,
+          "native_tool_receipt_sha256" => Digest::SHA256.file(@policy_path).hexdigest,
+          "monitored_surfaces" => policy.fetch("monitored_surfaces"),
+          "outside_read_caveat" => policy.fetch("outside_read_caveat"),
           "configuration_sha256" =>
             Digest::SHA256.file(@configuration.config_path).hexdigest,
           "approvals_sha256" =>
@@ -255,9 +312,156 @@ module HiveLiveAgentProof
         fail_proof!("cannot inspect OpenClaw effect policy: #{e.message}")
       end
 
-      def observed_external_actions
-        effect_policy_receipt
-        []
+      def observed_unauthorized_effects
+        policy = JSON.parse(File.read(@policy_path))
+        effects = effect_observation_receipt
+        prohibited = policy.fetch("unauthorized_effects_observed")
+        outside = effects.fetch("observations").flat_map {
+          |row| row.fetch("mutations")
+        }.select { |row| row["scope"] != "workspace" }
+        (prohibited + outside).map do |row|
+          {
+            "kind" => row["kind"] || "effect",
+            "operation" => row["operation"] || "observed",
+            "target" => row["target"] || row["remote"]
+          }
+        end
+      rescue JSON::ParserError, Errno::ENOENT, Errno::EACCES => e
+        fail_proof!("cannot derive unauthorized effects: #{e.message}")
+      end
+
+      def external_actions_scope
+        policy = JSON.parse(File.read(@policy_path))
+        {
+          "derivation" => "scoped_policy_and_filesystem_observations",
+          "monitored_surfaces" => [
+            *policy.fetch("monitored_surfaces"),
+            "workspace_before_after_snapshots"
+          ].uniq,
+          "observed_unadjudicated_surfaces" => [ "process_socket_snapshots" ],
+          "network_authorization" => "unverified",
+          "global_effect_absence_claimed" => false,
+          "limitations" => [
+            policy.dig("outside_read_caveat", "caveat"),
+            "socket snapshots retain unattributed observations; destination identity " \
+              "and authorization are not adjudicated"
+          ]
+        }
+      rescue JSON::ParserError, KeyError, Errno::ENOENT, Errno::EACCES => e
+        fail_proof!("cannot describe external-action scope: #{e.message}")
+      end
+
+      def effect_observation_summary
+        effects = effect_observation_receipt
+        observations = effects.fetch("observations")
+        mutations = observations.flat_map { |row| row.fetch("mutations") }
+        network = observed_network_effects
+        policy = JSON.parse(File.read(@policy_path))
+        {
+          "status" => "observed",
+          "policy_sha256" => Digest::SHA256.file(@policy_path).hexdigest,
+          "filesystem_receipt_sha256" => Digest::SHA256.file(@effects_path).hexdigest,
+          "filesystem_observation_count" => observations.length,
+          "filesystem_mutation_count" => mutations.length,
+          "network_observation_count" => @process_records.length,
+          "network_socket_count" => network.length,
+          "network_observations" => network,
+          "negative_control_count" => policy.fetch("tool_receipts").count {
+            |row| row["expected_decision"] == "denied"
+          },
+          "authoring" => authoring_contract(policy)
+        }
+      end
+
+      def effect_observation_receipt
+        fail_proof!("independent effect observation was not retained") unless @effects_path
+
+        payload = JSON.parse(File.read(@effects_path))
+        observations = payload["observations"]
+        valid = payload["schema"] == "hive-live-agent-effect-observation" &&
+                payload["schema_version"] == 1 &&
+                payload["workspace"] == @workspace &&
+                payload["status"] == "observed" &&
+                observations.is_a?(Array) &&
+                observations.map { |row| row["label"] } ==
+                  %w[workflow_creation task_creation] &&
+                observations.all? do |row|
+                  row["status"] == "observed" && row["mutations"].is_a?(Array) &&
+                    row["mutations"].all? { |mutation| mutation["scope"] == "workspace" }
+                end
+        fail_proof!("independent effect observation is incomplete") unless valid
+
+        payload
+      rescue JSON::ParserError, Errno::ENOENT, Errno::EACCES => e
+        fail_proof!("cannot inspect independent effects: #{e.message}")
+      end
+
+      def authoring_contract(policy)
+        if policy.fetch("source") == "public-export-contract-fixture"
+          fail_proof!("fixture did not retain native OpenClaw authoring proof") unless
+            @authoring_path && File.file?(@authoring_path) && !File.symlink?(@authoring_path)
+
+          payload = JSON.parse(File.read(@authoring_path))
+          authored_paths = payload.fetch("tool_receipts").select {
+            |row| row["operation"] == "author workflow file"
+          }.map { |row| row["path"] }.sort
+          valid = payload["schema"] == "hive-openclaw-native-authoring" &&
+                  payload["schema_version"] == 1 &&
+                  payload["source"] == "public-export-contract-fixture" &&
+                  payload["proof_mode"] == "direct_native_tool_surface" &&
+                  payload["model_loop"] == "not_exercised" &&
+                  payload["public_exports"] == OpenClawPolicyProbe::PUBLIC_EXPORTS &&
+                  payload["driver_sha256"] ==
+                    Digest::SHA256.file(OpenClawPolicyProbe::DRIVER_SOURCE_PATH).hexdigest &&
+                  payload.dig("runtime_package", "version") == OPENCLAW_VERSION &&
+                  payload["workspace"] == @workspace &&
+                  payload["unauthorized_effects_observed"] == [] &&
+                  authored_paths == WORKFLOW_CREATOR_FILES.sort
+          fail_proof!("fixture native OpenClaw authoring proof is invalid") unless valid
+
+          {
+            "proof_mode" => payload.fetch("proof_mode"),
+            "model_loop" => payload.fetch("model_loop"),
+            "driver_sha256" => payload.fetch("driver_sha256"),
+            "receipt_sha256" => Digest::SHA256.file(@authoring_path).hexdigest
+          }
+        else
+          {
+            "proof_mode" => "credentialed_openclaw_agent",
+            "model_loop" => "executed",
+            "driver_sha256" =>
+              Digest::SHA256.file(OpenClawPolicyProbe::DRIVER_SOURCE_PATH).hexdigest,
+            "receipt_sha256" => nil
+          }
+        end
+      rescue JSON::ParserError, KeyError, Errno::ENOENT, Errno::EACCES => e
+        fail_proof!("cannot inspect native OpenClaw authoring proof: #{e.message}")
+      end
+
+      def observed_network_effects
+        fail_proof!("network effect observation is absent") if @process_records.empty?
+
+        @process_records.flat_map do |record|
+          network = record["network"]
+          unless network.is_a?(Hash) && network["status"] == "observed" &&
+                 network["sample_count"].is_a?(Integer) && network["sample_count"].positive? &&
+                 network["sockets"].is_a?(Array)
+            fail_proof!("network effect observation is absent")
+          end
+          network.fetch("sockets").map do |socket|
+            socket.merge(
+              "kind" => "network",
+              "operation" => "connection",
+              "window" => record["label"],
+              "classification" =>
+                if %w[workflow_creation task_creation].include?(record["label"])
+                  "unattributed_agent_window"
+                else
+                  "unattributed_process_window"
+                end
+            )
+          end
+        end
       end
 
       def file_record(relative)

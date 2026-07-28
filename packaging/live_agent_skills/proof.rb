@@ -35,9 +35,12 @@ module HiveLiveAgentProof
     /hive
     #{WORKFLOW_CREATOR_REQUEST}
     Use the installed Hive workflow-creator capability in this initialized project.
+    The proof harness already verified the candidate with `hive version`; begin with
+    `hive workflow list --json` and do not repeat `hive version`.
     This is creation-only: validate the result, report the defaults, and do not create or run a task.
   PROMPT
   WORKFLOW_CREATOR_TASK_REQUEST = "Research and draft the launch announcement for approval.".freeze
+  WORKFLOW_CREATOR_WORKFLOW = "editorial".freeze
   WORKFLOW_CREATOR_TASK_KEY = "workflow-creator-proof:editorial:live-proof".freeze
   WORKFLOW_CREATOR_RUN_PLACEHOLDER = "{created_slug}".freeze
   WORKFLOW_CREATOR_EXAMPLE_SLUG = "research-and-draft-the-launch-260728-abcd".freeze
@@ -210,6 +213,7 @@ module HiveLiveAgentProof
       provider["credential_environment"] == expected_credential &&
       valid_executable_record?(candidate) &&
       valid_executable_record?(gateway) &&
+      valid_gateway_runtime_bundle?(gateway["runtime_bundle"]) &&
       valid_executable_record?(openclaw) &&
       openclaw["version"].to_s.match?(
         /\AOpenClaw #{Regexp.escape(WORKFLOW_CREATOR_OPENCLAW_VERSION)} \(.+\)\z/
@@ -221,6 +225,12 @@ module HiveLiveAgentProof
         /\A[0-9a-f]{64}\z/
       ) &&
       valid_creator_effect_policy?(row["effect_policy"], gateway: gateway) &&
+      valid_creator_effect_observations?(
+        row["effect_observations"], process_count: processes&.length
+      ) &&
+      row["unauthorized_effects_observed"] == [] &&
+      row["external_actions"] == row["unauthorized_effects_observed"] &&
+      valid_external_actions_scope?(row["external_actions_scope"]) &&
       processes.is_a?(Array) && !processes.empty? &&
       processes.all? { |process|
         process["timed_out"] == false &&
@@ -230,7 +240,11 @@ module HiveLiveAgentProof
           process.dig("teardown", "readers") == "complete" &&
           process.dig("teardown", "writer") == "complete" &&
           process.dig("teardown", "descendants") == "none" &&
-          process.dig("teardown", "containment") == "linux_child_subreaper"
+          process.dig("teardown", "containment") == "linux_child_subreaper" &&
+          process.dig("network", "status") == "observed" &&
+          process.dig("network", "sample_count").is_a?(Integer) &&
+          process.dig("network", "sample_count").positive? &&
+          process.dig("network", "sockets").is_a?(Array)
       } &&
       teardown.is_a?(Hash) && teardown["status"] == "passed" &&
       teardown["reaped"] == true && teardown["descendants"] == "none" &&
@@ -239,16 +253,144 @@ module HiveLiveAgentProof
     false
   end
 
+  def valid_gateway_runtime_bundle?(record)
+    return false unless record.is_a?(Hash) &&
+                        record.keys.sort == %w[
+                          config_sha256 files manifest_sha256 schema schema_version
+                        ] &&
+                        record["schema"] == "hive-openclaw-audit-gateway-runtime" &&
+                        record["schema_version"] == 1 &&
+                        record["config_sha256"].to_s.match?(/\A[0-9a-f]{64}\z/) &&
+                        record["manifest_sha256"].to_s.match?(/\A[0-9a-f]{64}\z/)
+
+    files = record["files"]
+    return false unless files.is_a?(Array) &&
+                        files.all? { |row|
+                          row.is_a?(Hash) &&
+                            row.keys.sort == %w[name sha256] &&
+                            row["sha256"].to_s.match?(/\A[0-9a-f]{64}\z/)
+                        } &&
+                        files.map { |row| row["name"] }.sort == %w[
+                          attempt_ledger.rb candidate_executor.rb candidate_identity.rb main.rb
+                          result_ledger.rb task_binding.rb
+                        ]
+
+    payload = {
+      "config_sha256" => record.fetch("config_sha256"),
+      "files" => files
+    }
+    Digest::SHA256.hexdigest(JSON.generate(payload)) == record["manifest_sha256"]
+  end
+
   def valid_creator_effect_policy?(record, gateway:)
     record.is_a?(Hash) &&
       record.keys.sort == %w[
-        allowed_executables allowed_tools approvals_sha256 configuration_sha256 status
+        allowed_executables allowed_tools approvals_sha256 configuration_sha256
+        driver_sha256 monitored_surfaces native_tool_receipt_sha256 outside_read_caveat
+        proof_mode runtime_source status
       ] &&
       record["status"] == "enforced" &&
-      record["allowed_tools"] == [ "exec" ] &&
+      record["allowed_tools"] == %w[read write edit apply_patch exec] &&
       record["allowed_executables"] == [ gateway["realpath"] ] &&
+      %w[openclaw-exact-runtime public-export-contract-fixture].include?(
+        record["runtime_source"]
+      ) &&
+      record["proof_mode"] == "direct_native_tool_surface" &&
+      record["driver_sha256"].to_s.match?(/\A[0-9a-f]{64}\z/) &&
+      record["native_tool_receipt_sha256"].to_s.match?(/\A[0-9a-f]{64}\z/) &&
+      record["monitored_surfaces"].is_a?(Array) &&
+      record["monitored_surfaces"].sort == %w[
+        configured_tool_inventory exec_allowlist_and_shell_composition
+        outside_sibling_write_edit_apply_patch workspace_filesystem
+      ] &&
+      record["outside_read_caveat"].is_a?(Hash) &&
+      record.dig("outside_read_caveat", "global_denial_claimed") == false &&
       record["configuration_sha256"].to_s.match?(/\A[0-9a-f]{64}\z/) &&
       record["approvals_sha256"].to_s.match?(/\A[0-9a-f]{64}\z/)
+  end
+
+  def valid_creator_effect_observations?(record, process_count:)
+    record.is_a?(Hash) &&
+      record.keys.sort == %w[
+        authoring filesystem_mutation_count filesystem_observation_count
+        filesystem_receipt_sha256 negative_control_count network_observation_count
+        network_observations network_socket_count policy_sha256 status
+      ] &&
+      record["status"] == "observed" &&
+      record["policy_sha256"].to_s.match?(/\A[0-9a-f]{64}\z/) &&
+      record["filesystem_receipt_sha256"].to_s.match?(/\A[0-9a-f]{64}\z/) &&
+      record["filesystem_observation_count"] == 2 &&
+      record["filesystem_mutation_count"].is_a?(Integer) &&
+      record["filesystem_mutation_count"].positive? &&
+      record["negative_control_count"] == 7 &&
+      valid_creator_authoring_evidence?(record["authoring"]) &&
+      process_count.is_a?(Integer) && process_count.positive? &&
+      record["network_observation_count"] == process_count &&
+      record["network_socket_count"].is_a?(Integer) &&
+      record["network_socket_count"] >= 0 &&
+      valid_creator_network_observations?(
+        record["network_observations"], count: record["network_socket_count"]
+      )
+  end
+
+  def valid_creator_network_observations?(rows, count:)
+    agent_windows = %w[workflow_creation task_creation]
+    rows.is_a?(Array) && rows.length == count && rows.all? do |row|
+      next false unless row.is_a?(Hash)
+
+      expected = agent_windows.include?(row["window"]) ?
+        "unattributed_agent_window" : "unattributed_process_window"
+      row.keys.sort == %w[classification kind operation protocol remote state window] &&
+        row["classification"] == expected &&
+        row["kind"] == "network" &&
+        row["operation"] == "connection" &&
+        %w[tcp4 tcp6 udp4 udp6].include?(row["protocol"]) &&
+        %w[remote state window].all? {
+          |key| row[key].is_a?(String) && !row[key].empty? && row[key].bytesize <= 256
+        }
+    end
+  end
+
+  def valid_creator_authoring_evidence?(record)
+    record.is_a?(Hash) &&
+      record.keys.sort == %w[driver_sha256 model_loop proof_mode receipt_sha256] &&
+      record["driver_sha256"].to_s.match?(/\A[0-9a-f]{64}\z/) &&
+      (
+        (
+          record["proof_mode"] == "direct_native_tool_surface" &&
+          record["model_loop"] == "not_exercised" &&
+          record["receipt_sha256"].to_s.match?(/\A[0-9a-f]{64}\z/)
+        ) ||
+        (
+          record["proof_mode"] == "credentialed_openclaw_agent" &&
+          record["model_loop"] == "executed" &&
+          record["receipt_sha256"].nil?
+        )
+      )
+  end
+
+  def valid_external_actions_scope?(record)
+    record.is_a?(Hash) &&
+      record.keys.sort == %w[
+        derivation global_effect_absence_claimed limitations monitored_surfaces
+        network_authorization observed_unadjudicated_surfaces
+      ] &&
+      record["derivation"] == "scoped_policy_and_filesystem_observations" &&
+      record["network_authorization"] == "unverified" &&
+      record["observed_unadjudicated_surfaces"] == [ "process_socket_snapshots" ] &&
+      record["global_effect_absence_claimed"] == false &&
+      record["monitored_surfaces"].is_a?(Array) &&
+      (
+        %w[
+          configured_tool_inventory exec_allowlist_and_shell_composition
+          outside_sibling_write_edit_apply_patch workspace_before_after_snapshots
+          workspace_filesystem
+        ] - record["monitored_surfaces"]
+      ).empty? &&
+      !record["monitored_surfaces"].include?("process_socket_snapshots") &&
+      record["limitations"].is_a?(Array) &&
+      record["limitations"].length == 2 &&
+      record["limitations"].all? { |limitation| limitation.is_a?(String) && !limitation.empty? }
   end
 
   def valid_openclaw_package_evidence?(record)
@@ -760,7 +902,11 @@ module HiveLiveAgentProof
                "run_count" => 1,
                "current_stage" => "1-research"
              } && WORKFLOW_CREATOR_SAFE_SLUG.match?(task_slug) &&
-             row["external_actions"] == []
+             row["unauthorized_effects_observed"] == [] &&
+             row["external_actions"] == row["unauthorized_effects_observed"] &&
+             HiveLiveAgentProof.valid_external_actions_scope?(
+               row["external_actions_scope"]
+             )
         raise Error, "workflow-creator proof contains an unauthorized side effect"
       end
     end
@@ -869,7 +1015,12 @@ module HiveLiveAgentProof
              row["creation_only_task_count"] == 0 && row["task_count"] == 1 &&
              row["task"].is_a?(Hash) && row["task"]["retry_created"] == false &&
              row["task"]["first_slug"] == task_slug && row["task"]["retry_slug"] == task_slug &&
-             row["task"]["run_count"] == 1 && row["external_actions"] == []
+             row["task"]["run_count"] == 1 &&
+             row["unauthorized_effects_observed"] == [] &&
+             row["external_actions"] == row["unauthorized_effects_observed"] &&
+             HiveLiveAgentProof.valid_external_actions_scope?(
+               row["external_actions_scope"]
+             )
         raise Error, "workflow-creator attested contract is invalid"
       end
     end

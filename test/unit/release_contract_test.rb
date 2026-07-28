@@ -181,36 +181,74 @@ class ReleaseContractTest < Minitest::Test
     }
     creator_actions = creator.fetch("steps").filter_map { |step| step["uses"] }
     assert creator_actions.all? { |action| action.match?(/@[0-9a-f]{40}\z/) }
-    openclaw_install = creator.fetch("steps").find do |step|
-      step["name"] == "Install OpenClaw in the ephemeral runner"
+    creator_job_steps = creator.fetch("steps")
+    initializer_index = creator_job_steps.index do |step|
+      step["name"] == "Initialize redacted workflow-creator evidence"
+    end
+    download_index = creator_job_steps.index do |step|
+      step["name"] == "Download the exact candidate artifacts"
+    end
+    refute_nil initializer_index
+    refute_nil download_index
+    assert_operator initializer_index, :<, download_index
+    evidence_initializer = creator_job_steps.fetch(initializer_index).fetch("run")
+    assert_includes evidence_initializer, "workflow_creator_evidence_driver.rb"
+    assert_includes evidence_initializer, " initialize "
+    creator_body = creator_job_steps.filter_map { |step| step["run"] }.join("\n")
+    %w[
+      artifact_download_failed artifact_missing artifact_extraction_failed
+      openclaw_lock_invalid openclaw_npm_install_failed openclaw_binary_invalid
+      openclaw_version_invalid candidate_gem_install_failed candidate_binary_invalid
+      candidate_version_invalid bundle_install_failed
+      openclaw_receipt_failed candidate_receipt_failed
+    ].each { |reason| assert_includes creator_body, reason }
+    openclaw_install = creator_job_steps.find do |step|
+      step["name"] == "Install the exact OpenClaw dependency closure"
     end
     refute_nil openclaw_install
-    assert_equal %w[OPENCLAW_INTEGRITY OPENCLAW_VERSION],
-                 openclaw_install.fetch("env").keys.sort
-    refute_match(/\$\{\{\s*secrets\./, JSON.generate(openclaw_install))
     install_body = openclaw_install.fetch("run")
-    assert_includes install_body, "packaging/live_agent_skills/openclaw/package-lock.json"
     assert_includes(
       install_body,
-      'npm ci --prefix "$openclaw_root" --ignore-scripts --audit=false --fund=false'
+      'npm ci --prefix "$HIVE_OPENCLAW_ROOT"'
     )
-    assert_includes install_body, "JSON.parse"
-    assert_includes install_body, "entry.resolved.startsWith(\"https://registry.npmjs.org/\")"
-    assert_includes install_body, "entry.integrity"
-    assert_includes install_body, "openclaw.integrity !== integrity"
-    assert_includes install_body, 'openclaw_bin="$openclaw_root/node_modules/.bin/openclaw"'
-    assert_includes install_body, '"$openclaw_realpath" == "$openclaw_root/"*'
-    assert_includes install_body, "write_installation_receipt.rb"
-    assert_includes install_body, "--kind openclaw_npm"
-    assert_includes install_body, "HIVE_OPENCLAW_INSTALL_RECEIPT="
-    refute_includes install_body, "npm view"
-    refute_includes install_body, "npm pack"
-    refute_match(/npm install\s+--global/, install_body)
-    creator_body = creator.fetch("steps").filter_map { |step| step["run"] }.join("\n")
+    lock_validation = creator_job_steps.find do |step|
+      step["name"] == "Validate the pinned OpenClaw lock"
+    end.fetch("run")
+    assert_includes lock_validation, "validate_openclaw_lock.js"
+    openclaw_identity = creator_job_steps.find do |step|
+      step["name"] == "Verify the exact OpenClaw binary"
+    end.fetch("run")
+    assert_includes openclaw_identity,
+                    'openclaw_bin="$HIVE_OPENCLAW_ROOT/node_modules/.bin/openclaw"'
+    assert_includes openclaw_identity, '"$openclaw_realpath" == "$HIVE_OPENCLAW_ROOT/"*'
+    openclaw_receipt_index = creator_job_steps.index do |step|
+      step["name"] == "Retain the complete OpenClaw installation identity"
+    end
+    candidate_receipt_index = creator_job_steps.index do |step|
+      step["name"] == "Retain the complete candidate installation identity"
+    end
+    bundle_index = creator_job_steps.index do |step|
+      step["name"] == "Install unrelated proof dependencies before identity receipts"
+    end
+    assert_operator bundle_index, :<, openclaw_receipt_index
+    assert_operator bundle_index, :<, candidate_receipt_index
+    receipt_body = [
+      creator_job_steps.fetch(openclaw_receipt_index).fetch("run"),
+      creator_job_steps.fetch(candidate_receipt_index).fetch("run")
+    ].join("\n")
+    assert_includes receipt_body, "write_installation_receipt.rb"
+    assert_includes receipt_body, "--kind openclaw_npm"
+    assert_includes receipt_body, "--kind candidate_gem"
+    assert_includes receipt_body, "--interpreter"
+    assert_includes receipt_body, "HIVE_OPENCLAW_INSTALL_RECEIPT="
+    assert_includes receipt_body, "HIVE_CANDIDATE_INSTALL_RECEIPT="
+    refute_includes creator_body, "npm view"
+    refute_includes creator_body, "npm pack"
+    refute_match(/npm install\s+--global/, creator_body)
     assert_includes body,
                     "sha512-KYPBQnAfEb/9qrxlw/96a90mMQeKdAZdUABMROOue9Ph2oFbnDGezZjd5Bmw4WhRyzgyvHOHqHje/swGipC4xA=="
     assert_includes creator_body,
-                    'package_json="$openclaw_root/node_modules/openclaw/package.json"'
+                    'package_json="$HIVE_OPENCLAW_ROOT/node_modules/openclaw/package.json"'
     assert_includes creator_body,
                     'node -p "require(process.argv[1]).version" "$package_json"'
     assert_includes creator_body,

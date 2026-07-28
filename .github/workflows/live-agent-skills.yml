@@ -204,118 +204,257 @@ jobs:
       actions: read
       contents: read
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - name: Check out the packaging-owned evidence driver
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.validate.outputs.candidate_sha }}
+          path: evidence-source
+          persist-credentials: false
+      - name: Initialize redacted workflow-creator evidence
+        env:
+          CANDIDATE_SHA: ${{ needs.validate.outputs.candidate_sha }}
+          HIVE_LIVE_MODEL: ${{ vars.HIVE_LIVE_MODEL }}
+        run: |
+          set -euo pipefail
+          evidence_path="$RUNNER_TEMP/workflow-creator-evidence/openclaw-workflow-creator.json"
+          evidence_driver="$GITHUB_WORKSPACE/evidence-source/packaging/live_agent_skills/workflow_creator_evidence_driver.rb"
+          mkdir -p "$(dirname "$evidence_path")"
+          ruby "$evidence_driver" initialize \
+            --path "$evidence_path" \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --model "$HIVE_LIVE_MODEL"
+          {
+            echo "HIVE_CREATOR_EVIDENCE_PATH=$evidence_path"
+            echo "HIVE_CREATOR_EVIDENCE_DRIVER=$evidence_driver"
+            echo "HIVE_OPENCLAW_ROOT=$RUNNER_TEMP/openclaw-install"
+            echo "HIVE_CANDIDATE_ROOT=$RUNNER_TEMP/proven-gems"
+            echo "HIVE_INSTALL_RECEIPTS=$RUNNER_TEMP/install-receipts"
+          } >> "$GITHUB_ENV"
+      - id: download-candidate
+        name: Download the exact candidate artifacts
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: live-agent-candidate-artifacts-${{ github.run_attempt }}
           path: candidate-artifacts
+      - name: Retain artifact download failure
+        if: ${{ steps.download-candidate.outcome != 'success' }}
+        run: |
+          ruby "$HIVE_CREATOR_EVIDENCE_DRIVER" fail \
+            --path "$HIVE_CREATOR_EVIDENCE_PATH" \
+            --phase artifact_download \
+            --reason artifact_download_failed \
+            --detail "candidate artifact download action failed"
+      - name: Verify candidate artifacts are present
+        env:
+          CANDIDATE_SHA: ${{ needs.validate.outputs.candidate_sha }}
+        run: |
+          ruby "$HIVE_CREATOR_EVIDENCE_DRIVER" run \
+            --path "$HIVE_CREATOR_EVIDENCE_PATH" \
+            --phase artifact_extraction \
+            --reason artifact_missing \
+            -- bash -euo pipefail -c '
+              source_archive="candidate-artifacts/hive-source-${CANDIDATE_SHA}.tar.gz"
+              test -s "$source_archive"
+              gem_count="$(find candidate-artifacts -maxdepth 1 -type f -name "hive-cli-*.gem" -size +0c | wc -l)"
+              test "$gem_count" -eq 1
+            '
       - name: Extract the exact candidate source
         env:
           CANDIDATE_SHA: ${{ needs.validate.outputs.candidate_sha }}
         run: |
-          set -euo pipefail
-          mkdir -p candidate-source
-          tar -xzf "candidate-artifacts/hive-source-${CANDIDATE_SHA}.tar.gz" -C candidate-source
-      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # pinned 2026-07-26
+          ruby "$HIVE_CREATOR_EVIDENCE_DRIVER" run \
+            --path "$HIVE_CREATOR_EVIDENCE_PATH" \
+            --phase artifact_extraction \
+            --reason artifact_extraction_failed \
+            -- bash -euo pipefail -c '
+              mkdir -p candidate-source
+              tar -xzf "candidate-artifacts/hive-source-${CANDIDATE_SHA}.tar.gz" \
+                -C candidate-source
+              test -s candidate-source/packaging/live_agent_skills/proof.rb
+            '
+      - id: ruby-setup
+        name: Set up the pinned Ruby runtime
+        continue-on-error: true
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # pinned 2026-07-26
         with:
           ruby-version: "3.4"
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - name: Retain Ruby setup infrastructure failure
+        if: ${{ steps.ruby-setup.outcome != 'success' }}
+        run: |
+          ruby "$HIVE_CREATOR_EVIDENCE_DRIVER" fail \
+            --path "$HIVE_CREATOR_EVIDENCE_PATH" \
+            --phase ruby_setup \
+            --reason infrastructure_action_failed \
+            --detail "ruby/setup-ruby failed"
+      - id: node-setup
+        name: Set up the pinned Node runtime
+        continue-on-error: true
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22.23.1"
-      - name: Install OpenClaw in the ephemeral runner
+      - name: Retain Node setup infrastructure failure
+        if: ${{ steps.node-setup.outcome != 'success' }}
+        run: |
+          ruby "$HIVE_CREATOR_EVIDENCE_DRIVER" fail \
+            --path "$HIVE_CREATOR_EVIDENCE_PATH" \
+            --phase node_setup \
+            --reason infrastructure_action_failed \
+            --detail "actions/setup-node failed"
+      - name: Validate the pinned OpenClaw lock
         env:
           OPENCLAW_VERSION: 2026.7.1-beta.2
           OPENCLAW_INTEGRITY: sha512-KYPBQnAfEb/9qrxlw/96a90mMQeKdAZdUABMROOue9Ph2oFbnDGezZjd5Bmw4WhRyzgyvHOHqHje/swGipC4xA==
         run: |
-          set -euo pipefail
-          openclaw_root="$RUNNER_TEMP/openclaw-install"
-          receipt_dir="$RUNNER_TEMP/install-receipts"
-          mkdir -p "$openclaw_root" "$receipt_dir"
-          cp candidate-source/packaging/live_agent_skills/openclaw/package.json \
-            "$openclaw_root/package.json"
-          cp candidate-source/packaging/live_agent_skills/openclaw/package-lock.json \
-            "$openclaw_root/package-lock.json"
-          node - "$openclaw_root/package-lock.json" \
-            "$OPENCLAW_VERSION" "$OPENCLAW_INTEGRITY" <<'NODE'
-          const fs = require("fs");
-          const [lockPath, version, integrity] = process.argv.slice(2);
-          const lock = JSON.parse(fs.readFileSync(lockPath, "utf8"));
-          const packages = lock.packages;
-          if (lock.lockfileVersion !== 3 || !packages || typeof packages !== "object") {
-            throw new Error("OpenClaw npm lock must be lockfileVersion 3");
-          }
-          const root = packages[""];
-          if (!root || JSON.stringify(root.dependencies) !== JSON.stringify({openclaw: version})) {
-            throw new Error("OpenClaw npm lock root identity changed");
-          }
-          for (const [relative, entry] of Object.entries(packages)) {
-            if (relative === "") continue;
-            if (!entry || entry.link === true || typeof entry.version !== "string" ||
-                typeof entry.resolved !== "string" ||
-                !entry.resolved.startsWith("https://registry.npmjs.org/") ||
-                typeof entry.integrity !== "string" ||
-                !/^sha512-[A-Za-z0-9+/]+={0,2}$/.test(entry.integrity)) {
-              throw new Error(`mutable npm lock entry: ${relative}`);
-            }
-          }
-          const openclaw = packages["node_modules/openclaw"];
-          if (!openclaw || openclaw.version !== version || openclaw.integrity !== integrity) {
-            throw new Error("OpenClaw npm lock package identity changed");
-          }
-          NODE
-          npm ci --prefix "$openclaw_root" --ignore-scripts --audit=false --fund=false
-          cmp --silent \
-            candidate-source/packaging/live_agent_skills/openclaw/package-lock.json \
-            "$openclaw_root/package-lock.json"
-          openclaw_bin="$openclaw_root/node_modules/.bin/openclaw"
-          openclaw_realpath="$(realpath "$openclaw_bin")"
-          [[ -x "$openclaw_bin" && "$openclaw_realpath" == "$openclaw_root/"* ]]
-          package_json="$openclaw_root/node_modules/openclaw/package.json"
-          [[ "$(node -p "require(process.argv[1]).version" "$package_json")" == "$OPENCLAW_VERSION" ]]
-          cli_version="$("$openclaw_bin" --version | head -n 1)"
-          openclaw_version_regex="${OPENCLAW_VERSION//./\\.}"
-          [[ "$cli_version" =~ ^OpenClaw[[:space:]]${openclaw_version_regex}[[:space:]]\\(.+\\)$ ]]
-          package_count="$(
-            node -p 'Object.keys(require(process.argv[1]).packages).length - 1' \
-              "$openclaw_root/package-lock.json"
-          )"
-          openclaw_receipt="$receipt_dir/openclaw.json"
-          ruby candidate-source/packaging/live_agent_skills/write_installation_receipt.rb \
-            --output "$openclaw_receipt" \
-            --kind openclaw_npm \
-            --artifact "$openclaw_root/package-lock.json" \
-            --install-root "$openclaw_root" \
-            --executable "$openclaw_bin" \
-            --package-name openclaw \
-            --package-version "$OPENCLAW_VERSION" \
-            --package-integrity "$OPENCLAW_INTEGRITY" \
-            --lock "$openclaw_root/package-lock.json" \
-            --package-count "$package_count"
-          echo "HIVE_OPENCLAW_INSTALL_RECEIPT=$openclaw_receipt" >> "$GITHUB_ENV"
-      - name: Install the exact candidate gem and test dependencies
+          ruby "$HIVE_CREATOR_EVIDENCE_DRIVER" run \
+            --path "$HIVE_CREATOR_EVIDENCE_PATH" \
+            --phase lock_validation \
+            --reason openclaw_lock_invalid \
+            -- bash -euo pipefail -c '
+              mkdir -p "$HIVE_OPENCLAW_ROOT" "$HIVE_INSTALL_RECEIPTS"
+              cp candidate-source/packaging/live_agent_skills/openclaw/package.json \
+                "$HIVE_OPENCLAW_ROOT/package.json"
+              cp candidate-source/packaging/live_agent_skills/openclaw/package-lock.json \
+                "$HIVE_OPENCLAW_ROOT/package-lock.json"
+              node candidate-source/packaging/live_agent_skills/validate_openclaw_lock.js \
+                "$HIVE_OPENCLAW_ROOT/package-lock.json" \
+                "$OPENCLAW_VERSION" "$OPENCLAW_INTEGRITY"
+            '
+      - name: Install the exact OpenClaw dependency closure
         run: |
-          set -euo pipefail
-          gem_file="$(find candidate-artifacts -maxdepth 1 -type f -name 'hive-cli-*.gem' -print -quit)"
-          [[ -n "$gem_file" && -s "$gem_file" ]]
-          receipt_dir="$RUNNER_TEMP/install-receipts"
-          mkdir -p "$receipt_dir"
-          bash candidate-source/packaging/live_agent_skills/install_candidate_gem.sh \
-            "$gem_file" "$RUNNER_TEMP/proven-gems"
-          "$RUNNER_TEMP/proven-gems/bin/hive" --version
-          candidate_version="$(
-            ruby -Icandidate-source/lib -rhive/version -e 'print Hive::VERSION'
-          )"
-          candidate_receipt="$receipt_dir/candidate.json"
-          ruby candidate-source/packaging/live_agent_skills/write_installation_receipt.rb \
-            --output "$candidate_receipt" \
-            --kind candidate_gem \
-            --artifact "$gem_file" \
-            --install-root "$RUNNER_TEMP/proven-gems" \
-            --executable "$RUNNER_TEMP/proven-gems/bin/hive" \
-            --package-name hive-cli \
-            --package-version "$candidate_version"
-          echo "HIVE_CANDIDATE_INSTALL_RECEIPT=$candidate_receipt" >> "$GITHUB_ENV"
-          cd candidate-source
-          bundle install --jobs 4 --retry 2
+          ruby "$HIVE_CREATOR_EVIDENCE_DRIVER" run \
+            --path "$HIVE_CREATOR_EVIDENCE_PATH" \
+            --phase openclaw_install \
+            --reason openclaw_npm_install_failed \
+            -- bash -euo pipefail -c '
+              npm ci --prefix "$HIVE_OPENCLAW_ROOT" \
+                --ignore-scripts --audit=false --fund=false
+              cmp --silent \
+                candidate-source/packaging/live_agent_skills/openclaw/package-lock.json \
+                "$HIVE_OPENCLAW_ROOT/package-lock.json"
+            '
+      - name: Verify the exact OpenClaw binary
+        env:
+          OPENCLAW_VERSION: 2026.7.1-beta.2
+        run: |
+          ruby "$HIVE_CREATOR_EVIDENCE_DRIVER" run \
+            --path "$HIVE_CREATOR_EVIDENCE_PATH" \
+            --phase openclaw_identity \
+            --reason openclaw_binary_invalid \
+            -- bash -euo pipefail -c '
+              openclaw_bin="$HIVE_OPENCLAW_ROOT/node_modules/.bin/openclaw"
+              openclaw_realpath="$(realpath "$openclaw_bin")"
+              test -x "$openclaw_bin"
+              [[ "$openclaw_realpath" == "$HIVE_OPENCLAW_ROOT/"* ]]
+              package_json="$HIVE_OPENCLAW_ROOT/node_modules/openclaw/package.json"
+              test "$(node -p "require(process.argv[1]).version" "$package_json")" = \
+                "$OPENCLAW_VERSION"
+            '
+      - name: Verify the exact OpenClaw version
+        env:
+          OPENCLAW_VERSION: 2026.7.1-beta.2
+        run: |
+          ruby "$HIVE_CREATOR_EVIDENCE_DRIVER" run \
+            --path "$HIVE_CREATOR_EVIDENCE_PATH" \
+            --phase openclaw_identity \
+            --reason openclaw_version_invalid \
+            -- bash -euo pipefail -c '
+              openclaw_realpath="$(realpath "$HIVE_OPENCLAW_ROOT/node_modules/.bin/openclaw")"
+              cli_version="$(node "$openclaw_realpath" --version | head -n 1)"
+              openclaw_version_regex="${OPENCLAW_VERSION//./\\.}"
+              [[ "$cli_version" =~ ^OpenClaw[[:space:]]${openclaw_version_regex}[[:space:]]\\(.+\\)$ ]]
+            '
+      - name: Install the exact candidate gem
+        run: |
+          ruby "$HIVE_CREATOR_EVIDENCE_DRIVER" run \
+            --path "$HIVE_CREATOR_EVIDENCE_PATH" \
+            --phase candidate_install \
+            --reason candidate_gem_install_failed \
+            -- bash -euo pipefail -c '
+              gem_file="$(find candidate-artifacts -maxdepth 1 -type f -name "hive-cli-*.gem" -print)"
+              test "$(printf "%s\n" "$gem_file" | sed "/^$/d" | wc -l)" -eq 1
+              bash candidate-source/packaging/live_agent_skills/install_candidate_gem.sh \
+                "$gem_file" "$HIVE_CANDIDATE_ROOT"
+            '
+      - name: Verify the exact candidate binary
+        run: |
+          ruby "$HIVE_CREATOR_EVIDENCE_DRIVER" run \
+            --path "$HIVE_CREATOR_EVIDENCE_PATH" \
+            --phase candidate_identity \
+            --reason candidate_binary_invalid \
+            -- bash -euo pipefail -c '
+              test -x "$HIVE_CANDIDATE_ROOT/bin/hive"
+              [[ "$(realpath "$HIVE_CANDIDATE_ROOT/bin/hive")" == \
+                "$HIVE_CANDIDATE_ROOT/"* ]]
+            '
+      - name: Verify the exact candidate version
+        run: |
+          ruby "$HIVE_CREATOR_EVIDENCE_DRIVER" run \
+            --path "$HIVE_CREATOR_EVIDENCE_PATH" \
+            --phase candidate_identity \
+            --reason candidate_version_invalid \
+            -- bash -euo pipefail -c '
+              candidate_version="$(ruby -Icandidate-source/lib -rhive/version -e "print Hive::VERSION")"
+              test "$("$HIVE_CANDIDATE_ROOT/bin/hive" --version)" = "$candidate_version"
+            '
+      - name: Install unrelated proof dependencies before identity receipts
+        run: |
+          ruby "$HIVE_CREATOR_EVIDENCE_DRIVER" run \
+            --path "$HIVE_CREATOR_EVIDENCE_PATH" \
+            --phase bundle_install \
+            --reason bundle_install_failed \
+            -- bash -euo pipefail -c '
+              cd candidate-source
+              bundle install --jobs 4 --retry 2
+            '
+      - name: Retain the complete OpenClaw installation identity
+        env:
+          OPENCLAW_VERSION: 2026.7.1-beta.2
+          OPENCLAW_INTEGRITY: sha512-KYPBQnAfEb/9qrxlw/96a90mMQeKdAZdUABMROOue9Ph2oFbnDGezZjd5Bmw4WhRyzgyvHOHqHje/swGipC4xA==
+        run: |
+          ruby "$HIVE_CREATOR_EVIDENCE_DRIVER" run \
+            --path "$HIVE_CREATOR_EVIDENCE_PATH" \
+            --phase openclaw_receipt \
+            --reason openclaw_receipt_failed \
+            -- bash -euo pipefail -c '
+              package_count="$(node -p "Object.keys(require(process.argv[1]).packages).length - 1" \
+                "$HIVE_OPENCLAW_ROOT/package-lock.json")"
+              openclaw_receipt="$HIVE_INSTALL_RECEIPTS/openclaw.json"
+              ruby candidate-source/packaging/live_agent_skills/write_installation_receipt.rb \
+                --output "$openclaw_receipt" \
+                --kind openclaw_npm \
+                --artifact "$HIVE_OPENCLAW_ROOT/package-lock.json" \
+                --install-root "$HIVE_OPENCLAW_ROOT" \
+                --executable "$HIVE_OPENCLAW_ROOT/node_modules/.bin/openclaw" \
+                --interpreter "$(realpath "$(command -v node)")" \
+                --package-name openclaw \
+                --package-version "$OPENCLAW_VERSION" \
+                --package-integrity "$OPENCLAW_INTEGRITY" \
+                --lock "$HIVE_OPENCLAW_ROOT/package-lock.json" \
+                --package-count "$package_count"
+              echo "HIVE_OPENCLAW_INSTALL_RECEIPT=$openclaw_receipt" >> "$GITHUB_ENV"
+            '
+      - name: Retain the complete candidate installation identity
+        run: |
+          ruby "$HIVE_CREATOR_EVIDENCE_DRIVER" run \
+            --path "$HIVE_CREATOR_EVIDENCE_PATH" \
+            --phase candidate_receipt \
+            --reason candidate_receipt_failed \
+            -- bash -euo pipefail -c '
+              gem_file="$(find candidate-artifacts -maxdepth 1 -type f -name "hive-cli-*.gem" -print)"
+              candidate_version="$(ruby -Icandidate-source/lib -rhive/version -e "print Hive::VERSION")"
+              candidate_receipt="$HIVE_INSTALL_RECEIPTS/candidate.json"
+              ruby candidate-source/packaging/live_agent_skills/write_installation_receipt.rb \
+                --output "$candidate_receipt" \
+                --kind candidate_gem \
+                --artifact "$gem_file" \
+                --install-root "$HIVE_CANDIDATE_ROOT" \
+                --executable "$HIVE_CANDIDATE_ROOT/bin/hive" \
+                --interpreter "$(ruby -rrbconfig -e "print File.realpath(RbConfig.ruby)")" \
+                --package-name hive-cli \
+                --package-version "$candidate_version"
+              echo "HIVE_CANDIDATE_INSTALL_RECEIPT=$candidate_receipt" >> "$GITHUB_ENV"
+            '
       - name: Run authenticated workflow-creator proof
         env:
           HIVE_LIVE_PROVIDER_CREDENTIAL: ${{ startsWith(vars.HIVE_LIVE_MODEL, 'openai/') && secrets.OPENAI_API_KEY || startsWith(vars.HIVE_LIVE_MODEL, 'openrouter/') && secrets.OPENROUTER_API_KEY || '' }}
@@ -324,12 +463,15 @@ jobs:
           HIVE_RELEASE_GATE: "1"
           HIVE_CANDIDATE_SHA: ${{ needs.validate.outputs.candidate_sha }}
           HIVE_PROOF_ARTIFACTS: ${{ github.workspace }}/candidate-artifacts
-          HIVE_CREATOR_EVIDENCE_PATH: ${{ runner.temp }}/workflow-creator-evidence/openclaw-workflow-creator.json
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/workflow-creator-evidence"
           cd candidate-source
           bundle exec ruby -Itest test/smoke/live_hive_workflow_creator_smoke_test.rb
+      - name: Finalize workflow-creator evidence
+        if: ${{ always() }}
+        run: |
+          ruby "$HIVE_CREATOR_EVIDENCE_DRIVER" finalize \
+            --path "$HIVE_CREATOR_EVIDENCE_PATH"
       - name: Upload redacted workflow-creator evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

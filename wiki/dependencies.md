@@ -123,7 +123,7 @@ Why Bubble Tea + Lipgloss (over the original curses choice): MVU keeps every sta
 
 | Gem | Version | Purpose |
 |-----|---------|---------|
-| `fiddle` | `>= 1.1` (locked 1.1.8) | Development/test-only FFI used by the Linux OpenClaw creator proof to call `prctl(PR_SET_CHILD_SUBREAPER)` and verify it with `PR_GET_CHILD_SUBREAPER`. Declared because Fiddle stops being a default gem in Ruby 4; it is not part of the shipped `hive-cli` runtime. |
+| `fiddle` | `>= 1.1` (locked 1.1.8) | Development/test-only FFI used by the independently live Linux OpenClaw creator containment owner to call `prctl(PR_SET_CHILD_SUBREAPER)` and verify it with `PR_GET_CHILD_SUBREAPER` before it launches the fault-injected worker. Declared because Fiddle stops being a default gem in Ruby 4; it is not part of the shipped `hive-cli` runtime. |
 | `minitest` | `~> 6.0` (locked 6.0.6) | Test framework — all tests under `test/` extend `Minitest::Test`. Chosen over RSpec for lower ceremony. Bumped 5.x → 6.0 in commit `429ff4c`. |
 | `rake` | `~> 13.0` (locked 13.4.2) | Task runner — `Rakefile` defines `rake test` (default) using `Rake::TestTask`. |
 | `rubocop` | `~> 1.88` (locked 1.88.0 in the root bundle) | Linter — config in `.rubocop.yml`. `bin/rubocop` is the canonical lint command. |

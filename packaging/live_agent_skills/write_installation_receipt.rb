@@ -29,6 +29,7 @@ OptionParser.new do |parser|
   parser.on("--artifact PATH") { |value| options[:artifact_path] = value }
   parser.on("--install-root PATH") { |value| options[:install_root] = value }
   parser.on("--executable PATH") { |value| options[:executable_path] = value }
+  parser.on("--interpreter PATH") { |value| options[:interpreter_path] = value }
   parser.on("--package-name NAME") { |value| options[:package_name] = value }
   parser.on("--package-version VERSION") { |value| options[:package_version] = value }
   parser.on("--package-integrity SRI") { |value| options[:package_integrity] = value }

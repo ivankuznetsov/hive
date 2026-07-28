@@ -5,10 +5,10 @@ module HiveLiveAgentProof
 
       attr_reader :workspace, :home, :hive_home
 
-      def initialize(root:, candidate_path:, git_path:, process_runner:, environment:,
+      def initialize(root:, candidate_argv:, git_path:, process_runner:, environment:,
                      document:)
         @root = File.expand_path(root)
-        @candidate_path = File.expand_path(candidate_path)
+        @candidate_argv = candidate_argv.map(&:to_s).freeze
         @git_path = File.expand_path(git_path)
         @process_runner = process_runner
         @environment = environment
@@ -28,7 +28,7 @@ module HiveLiveAgentProof
         run!([ @git_path, "commit", "-m", "Seed proof project" ], chdir: @workspace)
         run!(
           [
-            @candidate_path, "init", "--new-workflow", BOOTSTRAP_WORKFLOW,
+            *@candidate_argv, "init", "--new-workflow", BOOTSTRAP_WORKFLOW,
             "--minimal", "--json", @workspace
           ],
           chdir: @workspace,

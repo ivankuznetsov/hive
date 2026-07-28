@@ -332,31 +332,74 @@ proof step, not checkout, npm, Bundler, artifact, or attestation steps. The
 harness never copies host auth state, retains no model prose, scans every raw
 process-output byte before redaction, strips selected/opposite/generic provider
 credentials before every candidate invocation, and uses a Linux child-subreaper
-to terminate and reap process-group escapes, `setsid` descendants, and
-double-forks before removing the private home.
+in an independently live containment owner to terminate and reap process-group
+escapes, `setsid` descendants, and double-forks even when the fault-injected
+worker is stopped or killed. Parent/owner/worker IPC is length-bounded JSON
+framing with strict typed keys and Base64 binary streams; malformed, truncated,
+oversized, or trailing frames fail closed.
 
 The creator proof installs exact OpenClaw `2026.7.1-beta.2` under Node
 `22.23.1` with `npm ci` from the committed lockfile. The lock is a closed
 306-package inventory: every non-root entry has an exact registry URL and
 SHA-512 integrity, the OpenClaw entry matches the reviewed SRI, and install
-scripts are disabled. A typed installation receipt binds that lock digest,
-private install root, exact OpenClaw realpath, and executable digest. A second
-receipt binds the candidate gem from the verified artifact manifest to its
-private install root and executable.
+scripts are disabled. Typed receipts bind each complete entry-bounded,
+read-only installed tree, the executable and artifact, and the realpath,
+digest, and version of every invoked interpreter. This covers OpenClaw's
+imported dependency bytes and the candidate's outer launcher, RubyGems inner
+launcher, and installed gem bytes. The runner revalidates those identities
+immediately before and after relevant executions. OpenClaw is always invoked
+as the receipt-bound Node interpreter realpath followed by the executable
+realpath, including the pinned package's `#!/usr/bin/env node` launcher form.
 
 The runner materializes the candidate skill archive with shared byte, entry,
 directory, depth, and inode budgets, creates a disposable project, and exposes
 a distinct digest-bound audit gateway through OpenClaw's native
-`tools.exec.pathPrepend`. OpenClaw is configured with only the `exec` tool and a
-deny-by-default approval file containing only the gateway executable. The
-gateway allows exactly nine semantic Hive commands, holds one serialized audit
-transaction through candidate completion, and records exit/signal/success
-receipts. It binds `run` to the slug returned by the first idempotent `hive
-new`, requires the retry to return the same slug with `created=false`, and
-records only structural evidence. The inspector rereads the retained policy,
-audit, actual authored tree, and every stage-task entry before attesting zero
-external actions. The smoke test remains a thin adapter over this
-packaging-owned runner; it contains no substitute Hive.
+`tools.exec.pathPrepend`. OpenClaw's exact runtime must resolve only
+`apply_patch`, `edit`, `exec`, `read`, and `write`; filesystem and apply-patch
+writes are workspace-only, while the exec approval file allows only the
+gateway executable. A digest-bound committed driver parses configuration with
+the public `openclaw/plugin-sdk/config-schema` export and constructs tools with
+the public `openclaw/plugin-sdk/agent-harness` export. It executes native
+inside-workspace read/write/edit/apply-patch controls, the allowed `hive
+version` exec, and unchanged-sentinel denials for outside write/edit/apply-patch
+plus absolute, redirected, and chained exec attempts. The receipt records the
+pinned beta's outside-read skill-root caveat instead of claiming a global read
+denial. A deterministic fake may drive CLI orchestration, but workflow
+authoring still uses this exact native tool surface and explicitly records that
+it did not exercise a model loop. The gateway allows exactly nine semantic Hive
+commands, holds one serialized audit
+transaction through candidate completion, and runs from a committed six-file
+runtime whose exact copied bytes plus immutable config are SHA-256-bound by the
+small launcher and retained in evidence. Before admission checks or candidate
+launch it appends and fsyncs an immutable `attempted` row; success, denial, or
+failure appends a matching `terminal` row with the same deterministic attempt
+ID. Any
+malformed pair, pending attempt, or denied/failed terminal poisons the session
+before another candidate launch. Success therefore means nine successful
+pairs (18 rows), no extras or pending attempts, and attempt-bound result rows.
+Those deterministic IDs detect corruption, truncation, and broken pairing;
+they are not authenticity evidence against a coherent same-UID rewrite. The
+separate result reader rejects links, malformed or extra rows, type drift,
+wrong order, and mismatched attempt IDs under bounded reads. Before ordinal 7
+can launch, ordinal 6 must have succeeded with `created=true`, and one
+symlink-free, bounded task metadata record must bind its exact safe slug,
+`editorial` workflow, and proof idempotency key.
+
+The inspector derives `unauthorized_effects_observed` from independently
+retained filesystem mutation receipts, effective policy decisions, and
+prohibited-action controls over enumerated authorization surfaces. Raw socket
+snapshots remain in process/effect evidence as `unattributed_agent_window` or
+`unattributed_process_window`; destination identity and authorization are
+unverified, so network is explicitly an observed-but-unadjudicated surface and
+is not folded into that authorization verdict. The compatibility
+`external_actions` field is the same scoped derived value and never claims
+global effect absence. Missing observation fails closed. Before any artifact
+download, extraction, lock/npm install, binary or
+version check, receipt, or Bundler preflight, a packaging-owned workflow driver
+creates the schema-v1 evidence file. Each ordinary preparation partition
+updates that same redacted artifact, the proof runner inherits its preparation
+receipts, an `always()` finalizer closes non-terminal evidence, and the smoke
+test remains a thin adapter with no substitute Hive.
 
 The optional workflow refuses a non-main dispatch, a workflow revision not
 loaded from `refs/heads/main`, a

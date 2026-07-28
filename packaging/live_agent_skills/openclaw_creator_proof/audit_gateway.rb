@@ -1,35 +1,57 @@
 module HiveLiveAgentProof
   module OpenClawCreatorProof
     class AuditGateway
+      RUNTIME_DIRECTORY = File.expand_path("gateway_runtime", __dir__).freeze
+      RUNTIME_FILES = %w[
+        attempt_ledger.rb
+        candidate_identity.rb
+        candidate_executor.rb
+        result_ledger.rb
+        task_binding.rb
+        main.rb
+      ].freeze
+      RUNTIME_SCHEMA = "hive-openclaw-audit-gateway-runtime".freeze
+      RUNTIME_SCHEMA_VERSION = 1
+
       attr_reader :candidate_record, :gateway_record, :audit_path, :result_path
 
       def initialize(candidate_path:, directory:, audit_path:, commands: WORKFLOW_CREATOR_COMMANDS,
-                     workspace: nil, result_path: nil)
+                     workspace: nil, result_path: nil, candidate_identity: nil)
         @configured_candidate = candidate_path.to_s
         @directory = File.expand_path(directory)
         @audit_path = File.expand_path(audit_path)
         @result_path = File.expand_path(result_path || "#{@audit_path}.results")
         @commands = commands.map { |argv| argv.map(&:to_s).freeze }.freeze
         @workspace = workspace && File.expand_path(workspace)
+        @candidate_identity = candidate_identity
       end
 
       def install
         validate_candidate!
         validate_dynamic_binding!
-        raise Failure.new(
-          phase: "gateway",
-          reason: "gateway_destination_exists",
-          detail: "audit gateway destination already exists: #{@directory}"
-        ) if File.exist?(@directory)
+        runtime_sources = load_runtime_sources!
+        reject_existing_destination!
 
         bin_dir = File.join(@directory, "bin")
-        FileUtils.mkdir_p(bin_dir, mode: 0o700)
-        path = File.join(bin_dir, "hive")
-        write_gateway(path)
-        FileUtils.chmod(0o700, path)
-        @gateway_record = executable_record(path)
-        path
-      rescue Errno::EACCES, Errno::ENOENT, Errno::ENOTDIR => e
+        runtime_dir = File.join(@directory, "runtime")
+        FileUtils.mkdir_p([ bin_dir, runtime_dir ], mode: 0o700)
+        runtime_records = materialize_runtime(runtime_dir, runtime_sources)
+        config_path, config_digest = write_config(runtime_dir)
+        launcher_path = File.join(bin_dir, "hive")
+        write_launcher(
+          launcher_path,
+          runtime_dir: runtime_dir,
+          runtime_records: runtime_records,
+          config_path: config_path,
+          config_digest: config_digest
+        )
+        @gateway_record = executable_record(launcher_path).merge(
+          "runtime_bundle" => runtime_bundle_record(
+            runtime_records, config_digest: config_digest
+          )
+        )
+        launcher_path
+      rescue Errno::EACCES, Errno::EEXIST, Errno::ENOENT, Errno::ENOTDIR => e
         raise Failure.new(
           phase: "gateway",
           reason: "gateway_install_failed",
@@ -47,7 +69,7 @@ module HiveLiveAgentProof
             detail: "candidate receipt executable must be absolute"
           )
         end
-        unless File.file?(@configured_candidate) && File.executable?(@configured_candidate)
+        unless regular_executable?(@configured_candidate)
           raise Failure.new(
             phase: "preflight",
             reason: "candidate_not_executable",
@@ -56,21 +78,22 @@ module HiveLiveAgentProof
         end
 
         @candidate_record = executable_record(@configured_candidate)
+        return unless @candidate_identity
+        return if %w[configured_path realpath sha256].all? {
+          |key| @candidate_identity[key] == @candidate_record[key]
+        } && @candidate_identity["receipt_path"].to_s.start_with?("/")
+
+        raise Failure.new(
+          phase: "preflight",
+          reason: "candidate_installation_identity_invalid",
+          detail: "candidate gateway identity is not bound to its installation receipt"
+        )
       rescue Errno::ELOOP, Errno::ENOENT, Errno::EACCES => e
         raise Failure.new(
           phase: "preflight",
           reason: "candidate_not_executable",
           detail: e.message
         )
-      end
-
-      def executable_record(path)
-        realpath = File.realpath(path)
-        {
-          "configured_path" => File.expand_path(path),
-          "realpath" => realpath,
-          "sha256" => Digest::SHA256.file(realpath).hexdigest
-        }
       end
 
       def validate_dynamic_binding!
@@ -84,202 +107,172 @@ module HiveLiveAgentProof
         )
       end
 
-      def write_gateway(path)
-        candidate_realpath = @candidate_record.fetch("realpath")
-        candidate_digest = @candidate_record.fetch("sha256")
-        lock_path = File.join(@directory, "audit.lock")
-        workspace = @workspace
-        credential_names = (PROVIDER_CREDENTIAL_ENV.values + [
-          "HIVE_LIVE_PROVIDER_CREDENTIAL"
-        ]).uniq
+      def reject_existing_destination!
+        return unless File.exist?(@directory) || File.symlink?(@directory)
+
+        raise Failure.new(
+          phase: "gateway",
+          reason: "gateway_destination_exists",
+          detail: "audit gateway destination already exists: #{@directory}"
+        )
+      end
+
+      def load_runtime_sources!
+        RUNTIME_FILES.to_h do |name|
+          path = File.join(RUNTIME_DIRECTORY, name)
+          stat = File.lstat(path)
+          unless stat.file? && !stat.symlink? &&
+                 File.realpath(path).start_with?("#{File.realpath(RUNTIME_DIRECTORY)}/")
+            raise Failure.new(
+              phase: "gateway",
+              reason: "gateway_runtime_source_invalid",
+              detail: "gateway runtime source is not a committed regular file: #{name}"
+            )
+          end
+          [ name, File.binread(path) ]
+        end
+      rescue SystemCallError => e
+        raise Failure.new(
+          phase: "gateway",
+          reason: "gateway_runtime_source_invalid",
+          detail: e.message
+        )
+      end
+
+      def materialize_runtime(runtime_dir, sources)
+        sources.map do |name, bytes|
+          path = File.join(runtime_dir, name)
+          write_exclusive(path, bytes, mode: 0o400)
+          {
+            "name" => name,
+            "sha256" => Digest::SHA256.hexdigest(bytes)
+          }
+        end.freeze
+      end
+
+      def write_config(runtime_dir)
+        path = File.join(runtime_dir, "config.json")
+        bytes = "#{JSON.generate(runtime_config)}\n"
+        write_exclusive(path, bytes, mode: 0o400)
+        [ path, Digest::SHA256.hexdigest(bytes) ]
+      end
+
+      def runtime_config
+        {
+          "schema" => "hive-openclaw-audit-gateway-config",
+          "schema_version" => 1,
+          "candidate" => @candidate_record.fetch("realpath"),
+          "expected_digest" => @candidate_record.fetch("sha256"),
+          "commands" => @commands,
+          "audit_path" => @audit_path,
+          "result_path" => @result_path,
+          "lock_path" => File.join(@directory, "audit.lock"),
+          "workspace" => @workspace,
+          "run_placeholder" => WORKFLOW_CREATOR_RUN_PLACEHOLDER,
+          "task_key" => WORKFLOW_CREATOR_TASK_KEY,
+          "task_workflow" => WORKFLOW_CREATOR_WORKFLOW,
+          "safe_slug_pattern" => WORKFLOW_CREATOR_SAFE_SLUG.source,
+          "credential_names" => (
+            PROVIDER_CREDENTIAL_ENV.values + [ "HIVE_LIVE_PROVIDER_CREDENTIAL" ]
+          ).uniq,
+          "candidate_identity" => @candidate_identity
+        }
+      end
+
+      def write_launcher(path, runtime_dir:, runtime_records:, config_path:, config_digest:)
+        file_digests = runtime_records.to_h {
+          |record| [ record.fetch("name"), record.fetch("sha256") ]
+        }
         script = <<~RUBY
           #!#{RbConfig.ruby}
           require "digest"
           require "fileutils"
           require "json"
           require "open3"
+          require "pathname"
           require "yaml"
 
-          candidate = #{candidate_realpath.dump}
-          expected_digest = #{candidate_digest.dump}
-          commands = #{@commands.inspect}
-          audit_path = #{@audit_path.dump}
-          result_path = #{@result_path.dump}
-          lock_path = #{lock_path.dump}
-          workspace = #{workspace&.dump || "nil"}
-          run_placeholder = #{WORKFLOW_CREATOR_RUN_PLACEHOLDER.dump}
-          task_key = #{WORKFLOW_CREATOR_TASK_KEY.dump}
-          safe_slug = #{WORKFLOW_CREATOR_SAFE_SLUG.inspect}
-          credential_names = #{credential_names.inspect}
+          runtime_dir = #{runtime_dir.dump}
+          config_path = #{config_path.dump}
+          expected_config_digest = #{config_digest.dump}
+          expected_runtime_digests = #{file_digests.inspect}
 
-          def created_slug(workspace, task_key, safe_slug)
-            paths = Dir.glob(
-              File.join(workspace, ".hive-state", "stages", "*", "*", "meta.yml")
-            ).sort
-            matches = paths.filter_map do |meta_path|
-              data = YAML.safe_load(File.read(meta_path), aliases: false)
-              next unless data.is_a?(Hash) && data["idempotency_key"] == task_key
-
-              slug = data["slug"].to_s
-              next unless safe_slug.match?(slug) && File.basename(File.dirname(meta_path)) == slug
-
-              slug
-            rescue Psych::Exception, SystemCallError
-              nil
-            end.uniq
-            unless matches.length == 1
-              warn "workflow-creator proof could not bind one created slug"
-              exit 66
-            end
-            matches.fetch(0)
+          def verified_regular_bytes(path, expected_digest)
+            stat = File.lstat(path)
+            raise "identity target is not a regular file: \#{path}" unless
+              stat.file? && !stat.symlink?
+            bytes = File.binread(path)
+            raise "identity digest changed: \#{path}" unless
+              Digest::SHA256.hexdigest(bytes) == expected_digest
+            bytes
           end
 
-          FileUtils.mkdir_p(File.dirname(lock_path), mode: 0o700)
-          File.open(lock_path, File::RDWR | File::CREAT, 0o600) do |lock|
-            lock.flock(File::LOCK_EX)
-            rows =
-              if File.file?(audit_path)
-                File.readlines(audit_path, chomp: true).map { |line| JSON.parse(line) }
-              else
-                []
-              end
-            unless rows.all? { |row| row.is_a?(Hash) && row["success"] == true }
-              warn "workflow-creator proof audit contains a prior failed command"
-              exit 68
+          begin
+            runtime_stat = File.lstat(runtime_dir)
+            raise "runtime directory identity changed" unless
+              runtime_stat.directory? && !runtime_stat.symlink?
+            config = JSON.parse(
+              verified_regular_bytes(config_path, expected_config_digest)
+            )
+            expected_runtime_digests.each do |name, digest|
+              verified_regular_bytes(File.join(runtime_dir, name), digest)
             end
-            ordinal = rows.length
-            expected = commands[ordinal]
-            unless expected
-              warn "workflow-creator proof command budget is exhausted"
-              exit 64
+            expected_runtime_digests.each_key do |name|
+              require File.join(runtime_dir, name.delete_suffix(".rb"))
             end
-            dynamic_slug = nil
-            if expected == ["run", run_placeholder]
-              dynamic_slug = created_slug(workspace, task_key, safe_slug)
-              expected = ["run", dynamic_slug]
-            end
-            unless ARGV == expected
-              warn "workflow-creator proof expected \#{expected.inspect}, got \#{ARGV.inspect}"
-              exit 64
-            end
-            unless File.file?(candidate) && File.executable?(candidate) &&
-                   Digest::SHA256.file(candidate).hexdigest == expected_digest
-              warn "workflow-creator proof candidate digest changed"
-              exit 65
-            end
-
-            retained = +""
-            status = nil
-            candidate_environment = ENV.to_h.reject do |name, _value|
-              credential_names.include?(name)
-            end
-            candidate_environment.delete("HIVE_PROVEN_HIVE_BIN")
-            candidate_environment.delete("HIVE_OPENCLAW_BIN")
-            candidate_environment.delete("HIVE_CANDIDATE_INSTALL_RECEIPT")
-            candidate_environment.delete("HIVE_OPENCLAW_INSTALL_RECEIPT")
-            Open3.popen3(
-              candidate_environment, candidate, *ARGV, unsetenv_others: true
-            ) do |input, output, error, waiter|
-              input.close
-              stdout_reader = Thread.new do
-                loop do
-                  chunk = output.readpartial(16 * 1024)
-                  STDOUT.write(chunk)
-                  if retained.bytesize < 64 * 1024
-                    retained << chunk.byteslice(0, 64 * 1024 - retained.bytesize)
-                  end
-                end
-              rescue EOFError
-                nil
-              end
-              stderr_reader = Thread.new do
-                loop { STDERR.write(error.readpartial(16 * 1024)) }
-              rescue EOFError
-                nil
-              end
-              status = waiter.value
-              stdout_reader.join
-              stderr_reader.join
-            end
-
-            proof_success = status.success?
-            proof_exit = status.exitstatus || 1
-            result_record = nil
-            if proof_success && [3, 5, 7].include?(ordinal)
-              payload = retained.lines.reverse_each.filter_map do |line|
-                JSON.parse(line)
-              rescue JSON::ParserError
-                nil
-              end.find { |row| row.is_a?(Hash) }
-              result_record =
-                if ordinal == 3
-                  unless payload && payload["schema"] == "hive-workflow-validate" &&
-                         payload["valid"] == true
-                    warn "workflow-creator proof could not parse validation output"
-                    proof_success = false
-                    proof_exit = 67
-                    nil
-                  else
-                    {
-                      "ordinal" => ordinal + 1,
-                      "kind" => "validation",
-                      "valid" => true,
-                      "stages" => Array(payload["stages"]).map { |stage| stage["name"] },
-                      "automatic_edges" => Array(payload["automatic_edges"]).map {
-                        |edge| [edge["from"], edge["to"]]
-                      },
-                      "human_outcomes" => payload["human_outcomes"]
-                    }
-                  end
-                else
-                  unless payload && payload["schema"] == "hive-new" &&
-                         [true, false].include?(payload["created"]) &&
-                         safe_slug.match?(payload["slug"].to_s)
-                    warn "workflow-creator proof could not parse task creation output"
-                    proof_success = false
-                    proof_exit = 67
-                    nil
-                  else
-                    {
-                      "ordinal" => ordinal + 1,
-                      "kind" => "task_creation",
-                      "slug" => payload.fetch("slug"),
-                      "created" => payload.fetch("created")
-                    }
-                  end
-                end
-            end
-            if result_record
-              File.open(result_path, File::WRONLY | File::CREAT | File::APPEND, 0o600) do |result|
-                result.puts(JSON.generate(result_record))
-                result.flush
-                result.fsync
-              end
-            end
-            FileUtils.mkdir_p(File.dirname(audit_path), mode: 0o700)
-            File.open(audit_path, File::WRONLY | File::CREAT | File::APPEND, 0o600) do |audit|
-              audit.puts(JSON.generate(
-                "ordinal" => ordinal + 1,
-                "argv" => ARGV,
-                "dynamic_slug" => dynamic_slug,
-                "candidate_realpath" => candidate,
-                "candidate_sha256" => expected_digest,
-                "exit_status" => status.exitstatus,
-                "signal" => status.termsig,
-                "success" => proof_success
-              ))
-              audit.flush
-              audit.fsync
-            end
-            exit(proof_exit) unless proof_success
-          rescue JSON::ParserError
-            warn "workflow-creator proof audit is malformed"
-            exit 68
+            exit HiveLiveAgentProof::OpenClawCreatorGatewayRuntime::Main.call(
+              config, ARGV
+            )
+          rescue StandardError => e
+            warn "workflow-creator proof gateway runtime identity failed: " \
+                 "\#{e.class}: \#{e.message}"
+            exit 69
           end
         RUBY
-        File.open(path, File::WRONLY | File::CREAT | File::EXCL, 0o700) do |file|
-          file.write(script)
+        write_exclusive(path, script, mode: 0o500)
+      end
+
+      def write_exclusive(path, bytes, mode:)
+        File.open(path, File::WRONLY | File::CREAT | File::EXCL, mode) do |file|
+          written = file.write(bytes)
+          raise Errno::EIO, "incomplete gateway write: #{path}" unless
+            written == bytes.bytesize
+
+          file.flush
+          file.fsync
         end
+        FileUtils.chmod(mode, path)
+      end
+
+      def runtime_bundle_record(runtime_records, config_digest:)
+        manifest_payload = {
+          "config_sha256" => config_digest,
+          "files" => runtime_records
+        }
+        {
+          "schema" => RUNTIME_SCHEMA,
+          "schema_version" => RUNTIME_SCHEMA_VERSION,
+          "config_sha256" => config_digest,
+          "manifest_sha256" =>
+            Digest::SHA256.hexdigest(JSON.generate(manifest_payload)),
+          "files" => runtime_records
+        }
+      end
+
+      def regular_executable?(path)
+        stat = File.lstat(path)
+        stat.file? && !stat.symlink? && File.executable?(path)
+      rescue SystemCallError
+        false
+      end
+
+      def executable_record(path)
+        realpath = File.realpath(path)
+        {
+          "configured_path" => File.expand_path(path),
+          "realpath" => realpath,
+          "sha256" => Digest::SHA256.file(realpath).hexdigest
+        }
       end
     end
   end

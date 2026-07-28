@@ -53,6 +53,7 @@ module HiveLiveAgentProof
       end
 
       def call
+        inherit_preparation_evidence!
         @document.write(@evidence_path)
         execute
       rescue Failure => e
@@ -77,6 +78,41 @@ module HiveLiveAgentProof
       def child_environment(additions = {}) = @environment_policy.child_environment(additions)
 
       private
+
+      def inherit_preparation_evidence!
+        unless File.file?(@evidence_path) && !File.symlink?(@evidence_path)
+          return unless @base_environment["HIVE_RELEASE_GATE"] == "1"
+
+          fail_with!(
+            "preparation", "preparation_evidence_missing",
+            "packaging-owned preparation evidence must exist before live proof"
+          )
+        end
+        raw = File.read(@evidence_path)
+        payload = JSON.parse(raw)
+        valid = payload["schema"] == EVIDENCE_SCHEMA &&
+                payload["schema_version"] == SCHEMA_VERSION &&
+                payload["platform"] == "openclaw" &&
+                payload["candidate_sha"] == @candidate_sha &&
+                payload["result"] == "failed" &&
+                payload["phase"] == "preparation" &&
+                %w[not_started in_progress].include?(payload["reason"]) &&
+                payload.dig("secret_scan", "status") == "passed" &&
+                payload["preparation"].is_a?(Array) &&
+                payload["preparation"].length <= 32
+        unless valid
+          fail_with!(
+            "preparation", "preparation_evidence_invalid",
+            "packaging-owned preparation evidence is malformed or non-current"
+          )
+        end
+        @document.merge!(
+          "preparation" => payload.fetch("preparation"),
+          "preparation_receipt_sha256" => Digest::SHA256.hexdigest(raw)
+        )
+      rescue JSON::ParserError, Errno::ENOENT, Errno::EACCES => e
+        fail_with!("preparation", "preparation_evidence_invalid", e.message)
+      end
 
       def execute
         @document.phase = "preflight"

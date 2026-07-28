@@ -771,14 +771,32 @@ including real descriptor loading, human approve/reject decisions, minimal-init
 preview, collision refusal, and state-wide task idempotency. The
 packaging-owned OpenClaw runner now also drives a deterministic fake OpenClaw
 through the real candidate CLI, safe-materialized candidate skill, native
-`pathPrepend`, a deny-by-default gateway-only exec policy, dynamic
-created-slug run, bounded Codex fixture, typed candidate/OpenClaw installation
-receipts, committed transitive npm lock, all-byte recursive secret sanitation,
-and Linux child-subreaper teardown for `setsid`/double-fork/interrupt paths.
-The gateway retains serialization through candidate completion and the
-inspector enumerates the authored/task trees and rejects authored extras,
-malformed task entries, links, and special files before emitting its
-effect-policy receipt. The
+`pathPrepend`, workspace-confined native filesystem tools, a deny-by-default
+gateway-only exec policy, dynamic created-slug run, bounded Codex fixture,
+complete read-only installed-tree/interpreter receipts, committed transitive
+npm lock, all-byte recursive secret sanitation, independently observed
+filesystem/network effects, and an outer Linux child-subreaper owner that
+survives worker stop/kill. A committed digest-bound driver now uses only the
+pinned package's public config-schema and agent-harness exports. It exercises
+the exact five-tool inventory, successful workspace read/write/edit/apply-patch
+and Hive exec calls, and unchanged-sentinel denials for sibling filesystem
+mutations plus absolute, redirected, and chained exec attempts. The
+deterministic fake's authoring receipt is direct native-tool-surface evidence,
+not model-loop evidence, and the beta's outside-read skill-root caveat remains
+explicit. No provider credential was used. The gateway retains serialization
+through candidate completion, fsyncs a deterministic-ID attempted row before
+candidate launch, closes it with a terminal row, and rejects malformed, failed,
+or pending history before any retry. Its six-file runtime/config manifest is
+digest-bound in the launcher and proof evidence. These IDs detect corruption,
+truncation, and broken pairing but do not authenticate a coherent same-UID
+rewrite. A separate strict result ledger plus symlink-free bounded task binding
+now require ordinal 6 `created=true` and exact slug/workflow/idempotency metadata
+before ordinal 7 launches. Raw socket rows remain unattributed observations
+outside the authorization verdict; no provider identity is inferred from
+timing. The inspector rejects incomplete observations, unbound results,
+authored extras, malformed task entries, links, and special files before
+deriving external actions. Preparation evidence now exists before ordinary
+artifact/install/version/receipt/Bundler preflight. The
 protected job and fail-closed attestor are source/unit tested, but this branch
 still has no successful credentialed hosted run and therefore no trusted live
 attestation. Keep this gap open until `live-workflow-creator` succeeds for an
@@ -786,8 +804,11 @@ exact protected-main candidate and its Check Run binds the OpenClaw
 version/integrity/lock digest, provider route, prompts, installation receipts,
 candidate/gateway identities, all nine completed command receipts, first/retry
 slug equality, exact editorial graph, zero creation-only tasks, one first-stage
-run, matching operational status, deny-by-default effect policy, secret scan,
-subreaper teardown, and cleanup.
+run, matching operational status, credentialed exact-runtime model-loop
+authoring, the public-export native control matrix, independently observed
+scoped effects, complete runtime-closure identities,
+nine successful/zero denied-or-failed gateway rows, proof-first failure
+partitions, secret scan, outer-owner teardown, and cleanup.
 
 ## WorkLedger is an internal boundary, not a published format (2026-07-26)
 

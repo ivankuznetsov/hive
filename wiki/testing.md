@@ -41,9 +41,18 @@ materializes the OpenClaw projection with a no-link/no-special-file Ruby tar
 reader, initializes a disposable real Hive project, and installs a distinct
 digest-bound audit gateway through native `tools.exec.pathPrepend`. Typed
 installation receipts bind the verified candidate gem and committed OpenClaw
-npm lock to their private install roots and exact executable realpaths/digests.
-The lock pins a 306-package transitive inventory; the hosted job uses Node
-22.23.1 and `npm ci --ignore-scripts`.
+npm lock to deterministic entry-bounded manifests of their complete read-only
+installed trees. Receipts also bind executable/launcher bytes and the invoked
+interpreter realpath, digest, and version, covering OpenClaw imports plus the
+candidate RubyGems inner launcher. The runner revalidates each identity
+immediately around relevant execution. The lock pins a 306-package transitive
+inventory; the hosted job uses Node 22.23.1 and `npm ci --ignore-scripts`.
+The gateway installer copies a committed six-file runtime byte-for-byte; its
+small launcher binds the immutable config and every runtime file by SHA-256,
+rejecting links or digest drift before loading any gateway code. The same
+config/runtime manifest identity is retained in proof evidence and required by
+attestation. The pinned `#!/usr/bin/env node` launcher is invoked through the
+receipt-bound Node interpreter realpath plus the executable realpath.
 
 The gateway admits exactly nine semantic command positions. Its seventh
 position is `run <created_slug>`: the slug comes from the first idempotent
@@ -53,17 +62,62 @@ prompt digests, native `/hive` discovery, candidate/gateway executable
 identities, ordered actual argv, created-file digests, the exact normalized
 graph, zero tasks after creation-only, one first-stage dispatch, operational
 status, and a deny-by-default effect-policy receipt before reporting no external
-actions. The transaction lock stays held through candidate completion and each
-audit row carries exit/signal/success. Candidate children receive no selected,
-opposite, or generic provider credential. All-byte secret scanning recursively
-sanitizes persisted evidence, while a verified Linux child-subreaper plus its
-top-level emergency drain proves teardown of ordinary, `setsid`, double-fork,
-timeout, supervisor/parent TERM, and interrupt paths. Actual
-workflow/task trees reject extra authored files, malformed task directories,
+actions. A committed SHA-bound driver uses only OpenClaw's public
+`plugin-sdk/config-schema` and `plugin-sdk/agent-harness` exports to parse the
+configuration and materialize the exact
+`apply_patch/edit/exec/read/write` callable set. It executes inside-workspace
+read/write/edit/apply-patch, the allowed `hive version`, and unchanged-sentinel
+denials for sibling write/edit/apply-patch plus absolute, redirected, and
+chained exec attempts. The pinned beta's outside-read skill-root caveat is
+retained without a global denial claim. The deterministic fake uses the same
+public-export native authoring seam but records `model_loop=not_exercised`.
+Filesystem mutations and `/proc` network sockets are independently observed;
+missing observation fails closed. Socket rows remain raw, unattributed
+agent/process-window observations. Because destination identity and
+authorization are unverified, sockets are recorded as an unadjudicated surface
+and are not used to derive authorization failures.
+`unauthorized_effects_observed` is derived only over the enumerated policy and
+filesystem authorization surfaces, while compatibility `external_actions`
+mirrors that value with an explicit non-global scope.
+
+The transaction lock stays held through candidate completion. Before budget,
+order, dynamic-binding, identity checks, or candidate launch, the gateway
+durably appends and fsyncs an immutable `attempted` row. It then appends one
+`terminal` row with the same stable attempt ID for success, denial, or failure.
+Wrong order, digest drift, budget exhaustion, candidate failure, an extra
+attempt, malformed/duplicate/mismatched rows, or an unresolved attempted row
+terminally poisons the session before another candidate launch. Success
+requires exactly nine successful pairs (18 rows), no extras or pending
+attempts, and result rows bound to their successful attempt IDs. The IDs are a
+deterministic corruption/truncation/pairing check, not authenticity protection
+against coherent same-UID rewriting. A separate bounded `O_NOFOLLOW` result
+reader enforces exact row fields, types, order, and successful attempt IDs.
+Ordinal 7 additionally requires ordinal 6 `created=true` plus exactly one
+bounded, symlink-free task metadata record matching its safe slug, `editorial`
+workflow, and idempotency key; every traversed ancestor is lstat-checked and
+the canonical metadata path must remain under the workspace. Candidate
+children receive no selected, opposite, or generic provider credential.
+All-byte secret scanning recursively sanitizes persisted evidence. The thin
+process-runner facade delegates parent lifecycle and absolute deadlines to a
+containment session, child-subreaper cleanup and the sole final teardown record
+to an independently live owner, target capture to an expendable worker, and
+schema validation to strict length-framed JSON/Base64 IPC. Sampler, stdin
+writer, and stdout/stderr reader failures are observed after bounded joins and
+fail closed. Focused stress coverage proves bounded teardown after ordinary,
+`setsid`, double-fork, timeout, worker-SIGSTOP, worker-SIGKILL,
+supervisor/parent TERM, and interrupt paths.
+Actual workflow/task trees reject extra authored files, malformed task directories,
 symlinks, and special files; archive verification/materialization share byte,
 entry, directory, depth, and inode budgets. Missing provider credentials make
 this optional live diagnostic explicitly unavailable; they never turn a
 skipped test into release evidence.
+
+The hosted creator job checks out the packaging-owned evidence driver and
+initializes one redacted schema-v1 artifact before artifact download. Typed
+failure partitions cover download/missing/extraction, setup actions, lock/npm,
+OpenClaw binary/version, candidate install/binary/version, Bundler, and both
+installation receipts. The proof runner inherits successful preparation
+receipts and an unconditional finalizer closes any non-terminal artifact.
 
 ## Local feedback loop
 

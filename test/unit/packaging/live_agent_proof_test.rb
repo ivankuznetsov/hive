@@ -356,6 +356,10 @@ class LiveAgentProofTest < Minitest::Test
           row.dig("executables", "audit_gateway")["realpath"] =
             row.dig("executables", "candidate", "realpath")
         end,
+        "gateway_runtime_manifest" => lambda do |row|
+          row.dig("executables", "audit_gateway", "runtime_bundle")["manifest_sha256"] =
+            "0" * 64
+        end,
         "openclaw_version" => lambda do |row|
           row.dig("executables", "openclaw")["version"] = "OpenClaw 2026.7.2 (wrong)"
         end,
@@ -373,6 +377,12 @@ class LiveAgentProofTest < Minitest::Test
         end,
         "effect_policy" => lambda do |row|
           row.fetch("effect_policy")["allowed_executables"] = [ "/proof/candidate-hive" ]
+        end,
+        "effect_observation_absent" => lambda do |row|
+          row.delete("effect_observations")
+        end,
+        "network_observation_absent" => lambda do |row|
+          row.fetch("processes").fetch(0).delete("network")
         end,
         "interrupted" => lambda do |row|
           row.fetch("processes").fetch(0)["interrupted"] = true
@@ -523,6 +533,19 @@ class LiveAgentProofTest < Minitest::Test
     FileUtils.rm_rf(evidence)
     FileUtils.mkdir_p(evidence)
     manifest = JSON.parse(File.read(File.join(artifacts, "artifact-manifest.json")))
+    gateway_runtime_files = %w[
+      attempt_ledger.rb candidate_identity.rb candidate_executor.rb result_ledger.rb
+      task_binding.rb main.rb
+    ].each_with_index.map do |name, index|
+      { "name" => name, "sha256" => (index + 8).to_s(16) * 64 }
+    end
+    gateway_runtime_config_sha = "c" * 64
+    gateway_runtime_manifest_sha = Digest::SHA256.hexdigest(
+      JSON.generate(
+        "config_sha256" => gateway_runtime_config_sha,
+        "files" => gateway_runtime_files
+      )
+    )
     row = {
       "schema" => "hive-live-workflow-creator-evidence",
       "schema_version" => 1,
@@ -551,7 +574,14 @@ class LiveAgentProofTest < Minitest::Test
         "audit_gateway" => {
           "configured_path" => "/proof/gateway/bin/hive",
           "realpath" => "/proof/gateway/bin/hive",
-          "sha256" => "2" * 64
+          "sha256" => "2" * 64,
+          "runtime_bundle" => {
+            "schema" => "hive-openclaw-audit-gateway-runtime",
+            "schema_version" => 1,
+            "config_sha256" => gateway_runtime_config_sha,
+            "manifest_sha256" => gateway_runtime_manifest_sha,
+            "files" => gateway_runtime_files
+          }
         },
         "openclaw" => {
           "configured_path" => "/proof/openclaw",
@@ -567,16 +597,63 @@ class LiveAgentProofTest < Minitest::Test
       },
       "effect_policy" => {
         "status" => "enforced",
-        "allowed_tools" => [ "exec" ],
+        "allowed_tools" => %w[read write edit apply_patch exec],
         "allowed_executables" => [ "/proof/gateway/bin/hive" ],
+        "runtime_source" => "openclaw-exact-runtime",
+        "proof_mode" => "direct_native_tool_surface",
+        "driver_sha256" => "a" * 64,
+        "native_tool_receipt_sha256" => "b" * 64,
+        "monitored_surfaces" => %w[
+          workspace_filesystem outside_sibling_write_edit_apply_patch
+          exec_allowlist_and_shell_composition configured_tool_inventory
+        ],
+        "outside_read_caveat" => {
+          "global_denial_claimed" => false,
+          "caveat" => "Pinned beta permits configured skill-root reads."
+        },
         "configuration_sha256" => "4" * 64,
         "approvals_sha256" => "7" * 64
+      },
+      "effect_observations" => {
+        "status" => "observed",
+        "policy_sha256" => "8" * 64,
+        "filesystem_receipt_sha256" => "9" * 64,
+        "filesystem_observation_count" => 2,
+        "filesystem_mutation_count" => 3,
+        "network_observation_count" => 1,
+        "network_socket_count" => 1,
+        "network_observations" => [
+          {
+            "protocol" => "tcp4",
+            "remote" => "0100007F:01BB",
+            "state" => "01",
+            "kind" => "network",
+            "operation" => "connection",
+            "window" => "workflow_creation",
+            "classification" => "unattributed_agent_window"
+          }
+        ],
+        "negative_control_count" => 7,
+        "authoring" => {
+          "proof_mode" => "credentialed_openclaw_agent",
+          "model_loop" => "executed",
+          "driver_sha256" => "a" * 64,
+          "receipt_sha256" => nil
+        }
       },
       "processes" => [
         {
           "label" => "workflow_creation",
           "timed_out" => false,
           "interrupted" => false,
+          "network" => {
+            "status" => "observed",
+            "sample_count" => 1,
+            "socket_count" => 1,
+            "sockets" => [
+              { "protocol" => "tcp4", "remote" => "0100007F:01BB", "state" => "01" }
+            ]
+          },
           "teardown" => {
             "status" => "passed",
             "reaped" => true,
@@ -633,7 +710,24 @@ class LiveAgentProofTest < Minitest::Test
         "run_count" => 1,
         "current_stage" => "1-research"
       },
+      "unauthorized_effects_observed" => [],
       "external_actions" => [],
+      "external_actions_scope" => {
+        "derivation" => "scoped_policy_and_filesystem_observations",
+        "monitored_surfaces" => %w[
+          workspace_filesystem outside_sibling_write_edit_apply_patch
+          exec_allowlist_and_shell_composition configured_tool_inventory
+          workspace_before_after_snapshots
+        ],
+        "observed_unadjudicated_surfaces" => [ "process_socket_snapshots" ],
+        "network_authorization" => "unverified",
+        "global_effect_absence_claimed" => false,
+        "limitations" => [
+          "Pinned beta permits configured skill-root reads.",
+          "socket snapshots retain unattributed observations; destination identity " \
+            "and authorization are not adjudicated"
+        ]
+      },
       "secret_scan" => { "status" => "passed" },
       "cleanup" => { "status" => "passed" }
     }

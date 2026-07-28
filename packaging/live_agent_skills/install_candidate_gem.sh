@@ -27,13 +27,16 @@ gem install "$gem_file" \
   --bindir "$rubygems_bin" \
   --no-document
 
+ruby_realpath="$(ruby -rrbconfig -e 'print File.realpath(RbConfig.ruby)')"
 printf -v quoted_install_root '%q' "$install_root"
-printf -v quoted_rubygems_hive '%q' "$rubygems_bin/hive"
+printf -v quoted_ruby '%q' "$ruby_realpath"
+printf -v quoted_inner_hive '%q' "$rubygems_bin/hive"
 {
-  printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail'
-  printf '%s\n' 'unset RUBYOPT RUBYLIB BUNDLER_SETUP BUNDLE_GEMFILE BUNDLE_BIN_PATH RUBYGEMS_GEMDEPS'
+  printf '%s\n' '#!/usr/bin/bash' 'set -euo pipefail'
+  printf '%s\n' \
+    'unset RUBYOPT RUBYLIB BUNDLER_SETUP BUNDLE_GEMFILE BUNDLE_BIN_PATH RUBYGEMS_GEMDEPS'
   printf 'export GEM_HOME=%s\n' "$quoted_install_root"
-  printf '%s\n' "export GEM_PATH=\"\$GEM_HOME\""
-  printf 'exec %s "$@"\n' "$quoted_rubygems_hive"
+  printf '%s\n' 'export GEM_PATH="$GEM_HOME"'
+  printf 'exec %s %s "$@"\n' "$quoted_ruby" "$quoted_inner_hive"
 } > "$public_bin/hive"
 chmod 0755 "$public_bin/hive"

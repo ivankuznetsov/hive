@@ -1,7 +1,7 @@
 module HiveLiveAgentProof
   module OpenClawCreatorProof
     class OpenClawConfiguration
-      attr_reader :approvals_path, :config_path, :state_dir
+      attr_reader :approvals_path, :config_path, :gateway_bin_dir, :state_dir
 
       def initialize(root:, workspace:, model:, gateway_bin_dir:)
         @root = File.expand_path(root)
@@ -38,11 +38,21 @@ module HiveLiveAgentProof
             }
           },
           "tools" => {
-            "allow" => [ "exec" ],
+            "allow" => %w[read write edit apply_patch exec],
+            "fs" => {
+              "workspaceOnly" => true
+            },
+            "elevated" => {
+              "enabled" => false
+            },
             "exec" => {
               "mode" => "allowlist",
               "host" => "gateway",
               "strictInlineEval" => true,
+              "applyPatch" => {
+                "enabled" => true,
+                "workspaceOnly" => true
+              },
               "pathPrepend" => [ @gateway_bin_dir ]
             }
           }

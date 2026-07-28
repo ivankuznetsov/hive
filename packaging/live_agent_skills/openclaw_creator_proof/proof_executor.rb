@@ -24,19 +24,33 @@ module HiveLiveAgentProof
         gateway, gateway_path, audit_path = install_gateway(sandbox)
         configuration = configure_openclaw(sandbox, gateway_path)
         environment = proof_environment(sandbox, configuration, installer.codex_path)
+        policy_probe = verify_effective_policy(environment, sandbox, configuration)
+        environment.merge!(policy_probe.driver_environment(workspace: sandbox.workspace))
+        effects = NativeAuthoringSurface.new(
+          workspace: sandbox.workspace,
+          receipt_path: File.join(@root, "effects", "authoring-effects.json")
+        )
         inspector = ProofInspector.new(
           workspace: sandbox.workspace,
           audit_path: audit_path,
           result_path: gateway.result_path,
           candidate_record: @candidate,
-          configuration: configuration
+          configuration: configuration,
+          policy_path: policy_probe.receipt_path,
+          authoring_path: policy_probe.authoring_receipt_path,
+          effects_path: effects.receipt_path,
+          process_records: @document.process_records
         )
 
         verify_openclaw_version(environment, sandbox)
         discovery = verify_skill_discovery(environment, sandbox, installer)
-        run_agent(sandbox, environment, WORKFLOW_CREATOR_PROMPT, "workflow_creation")
+        effects.observe("workflow_creation") do
+          run_agent(sandbox, environment, WORKFLOW_CREATOR_PROMPT, "workflow_creation")
+        end
         creation = inspector.creation_result
-        run_agent(sandbox, environment, WORKFLOW_CREATOR_TASK_PROMPT, "task_creation")
+        effects.observe("task_creation") do
+          run_agent(sandbox, environment, WORKFLOW_CREATOR_TASK_PROMPT, "task_creation")
+        end
         task = inspector.final_result
         record_success(installer, discovery, creation, task)
       rescue JSON::ParserError, KeyError, Errno::ENOENT, Errno::EACCES => e
@@ -85,14 +99,17 @@ module HiveLiveAgentProof
 
       def prepare_project
         @document.phase = "project_setup"
-        ProjectSandbox.new(
+        revalidate_installation!(@candidate, "candidate")
+        sandbox = ProjectSandbox.new(
           root: @root,
-          candidate_path: @candidate.fetch("realpath"),
+          candidate_argv: [ @candidate.fetch("realpath") ],
           git_path: @git.fetch("realpath"),
           process_runner: @process_runner,
           environment: @environment_policy.sanitized_environment,
           document: @document
         ).prepare
+        revalidate_installation!(@candidate, "candidate")
+        sandbox
       end
 
       def install_workspace(sandbox, verified, materialized_root)
@@ -109,6 +126,7 @@ module HiveLiveAgentProof
         audit_path = File.join(@root, "audit", "hive-argv.jsonl")
         gateway = AuditGateway.new(
           candidate_path: @candidate.fetch("realpath"),
+          candidate_identity: @candidate,
           directory: File.join(@root, "audit-gateway"),
           audit_path: audit_path,
           workspace: sandbox.workspace
@@ -145,6 +163,19 @@ module HiveLiveAgentProof
         configuration
       end
 
+      def verify_effective_policy(environment, sandbox, configuration)
+        probe = OpenClawPolicyProbe.new(
+          root: @root,
+          openclaw: @openclaw,
+          configuration: configuration,
+          process_runner: @process_runner,
+          document: @document,
+          revalidate: -> { revalidate_installation!(@openclaw, "openclaw") }
+        )
+        probe.call(environment: environment, workspace: sandbox.workspace)
+        probe
+      end
+
       def proof_environment(sandbox, configuration, codex_path)
         @environment_policy.child_environment(
           "HOME" => sandbox.home,
@@ -162,7 +193,7 @@ module HiveLiveAgentProof
       def verify_openclaw_version(environment, sandbox)
         result = run_proof(
           "openclaw_version", environment,
-          [ @openclaw.fetch("realpath"), "--version" ],
+          openclaw_argv("--version"),
           chdir: sandbox.workspace, timeout: 30
         )
         version = result.fetch("stdout").to_s.scrub.lines.first.to_s.strip
@@ -179,7 +210,7 @@ module HiveLiveAgentProof
       def verify_skill_discovery(environment, sandbox, installer)
         result = run_proof(
           "skill_discovery", environment,
-          [ @openclaw.fetch("realpath"), "skills", "info", "hive", "--json" ],
+          openclaw_argv("skills", "info", "hive", "--json"),
           chdir: sandbox.workspace, timeout: 60
         )
         payload = JSON.parse(result.fetch("stdout"))
@@ -199,7 +230,7 @@ module HiveLiveAgentProof
         run_proof(
           label, environment,
           [
-            @openclaw.fetch("realpath"), "agent", "--local", "--agent", "main",
+            *openclaw_argv, "agent", "--local", "--agent", "main",
             "--message", prompt, "--timeout", "180", "--json"
           ],
           chdir: sandbox.workspace,
@@ -209,12 +240,14 @@ module HiveLiveAgentProof
 
       def run_proof(label, environment, argv, chdir:, timeout:)
         @document.phase = label
+        revalidate_installation!(@openclaw, "openclaw")
         result = @process_runner.call(
           environment: environment,
           argv: argv,
           chdir: chdir,
           timeout: timeout
         )
+        revalidate_installation!(@openclaw, "openclaw")
         @document.record_process(result, label: label)
         unless result.fetch("secret_findings").empty?
           fail_with!(
@@ -259,9 +292,54 @@ module HiveLiveAgentProof
           "task_count" => task.fetch("task_count"),
           "task" => task.fetch("task"),
           "effect_policy" => task.fetch("effect_policy"),
-          "external_actions" => task.fetch("external_actions")
+          "effect_observations" => task.fetch("effect_observations"),
+          "unauthorized_effects_observed" =>
+            task.fetch("unauthorized_effects_observed"),
+          "external_actions" => task.fetch("external_actions"),
+          "external_actions_scope" => task.fetch("external_actions_scope")
         )
         @document.data
+      end
+
+      def openclaw_argv(*arguments)
+        [
+          @openclaw.fetch("interpreter").fetch("realpath"),
+          @openclaw.fetch("realpath"),
+          *arguments
+        ]
+      end
+
+      def revalidate_installation!(record, label)
+        expectations = {
+          expected_kind: record.fetch("kind"),
+          expected_package_name: record.fetch("package").fetch("name"),
+          expected_package_version: record.fetch("package").fetch("version")
+        }
+        if record.fetch("kind") == "openclaw_npm"
+          expectations.merge!(
+            expected_package_integrity: OPENCLAW_INTEGRITY,
+            expected_lock_sha256: OPENCLAW_LOCK_SHA256,
+            expected_package_count: OPENCLAW_LOCK_PACKAGE_COUNT
+          )
+        end
+        current = InstallationReceipt.new(
+          path: record.fetch("receipt_path"),
+          **expectations
+        ).call
+        keys = %w[
+          configured_path realpath sha256 receipt_sha256 install_root tree_manifest
+          interpreter launcher_interpreter package lock
+        ]
+        return if keys.all? { |key| current[key] == record[key] }
+
+        fail_with!(
+          "runtime_identity", "#{label}_installation_identity_changed",
+          "#{label} installed closure changed during proof execution"
+        )
+      rescue HiveLiveAgentProof::Error => e
+        fail_with!(
+          "runtime_identity", "#{label}_installation_identity_changed", e.message
+        )
       end
 
       def fail_with!(phase, reason, detail)

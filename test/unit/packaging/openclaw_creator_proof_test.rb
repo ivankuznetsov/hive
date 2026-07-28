@@ -1703,6 +1703,107 @@ class OpenClawCreatorProofTest < Minitest::Test
     assert_worker_loss_is_bounded("KILL")
   end
 
+  def test_process_runner_owner_stop_is_bounded_and_drains_escaped_descendants
+    assert_owner_loss_is_bounded("STOP")
+  end
+
+  def test_process_runner_owner_kill_is_bounded_and_drains_escaped_descendants
+    assert_owner_loss_is_bounded("KILL")
+  end
+
+  def test_caller_process_exit_closes_cancel_channel_and_drains_owner_domain
+    with_tmp_dir do |dir|
+      ready = File.join(dir, "caller-exit-ready")
+      target_pid_path = File.join(dir, "caller-exit-target-pid")
+      descendant_pid_path = File.join(dir, "caller-exit-descendant-pid")
+      descendant_source = <<~RUBY
+        Process.setsid
+        second = fork do
+          trap("TERM", "IGNORE")
+          File.write(#{descendant_pid_path.dump}, Process.pid.to_s)
+          loop { sleep 1 }
+        end
+        Process.detach(second)
+        exit! 0
+      RUBY
+      script = File.join(dir, "caller-exit")
+      write_executable(script, <<~RUBY)
+        #!#{RbConfig.ruby}
+        File.write(#{target_pid_path.dump}, Process.pid.to_s)
+        first = spawn(
+          #{RbConfig.ruby.dump}, "-e", #{descendant_source.dump},
+          out: File::NULL, err: File::NULL
+        )
+        Process.wait(first)
+        sleep 0.01 until File.file?(#{descendant_pid_path.dump})
+        File.write(#{ready.dump}, "ready")
+        loop { sleep 1 }
+      RUBY
+      identity_reader, identity_writer = IO.pipe
+      caller = Process.fork do
+        identity_reader.close
+        runner = HiveLiveAgentProof::OpenClawCreatorProof::ProcessRunner.new(
+          timeout: 5,
+          term_grace: 0.05,
+          output_limit: 64,
+          exact_secrets: []
+        )
+        Thread.new do
+          runner.call(environment: {}, argv: [ script ], chdir: dir)
+        end
+        Timeout.timeout(2) do
+          sleep 0.01 until File.file?(ready) && runner.containment_root_pid &&
+                                 runner.owner_pid && runner.worker_pid
+        end
+        pids = [
+          runner.containment_root_pid,
+          runner.owner_pid,
+          runner.worker_pid,
+          Integer(File.read(target_pid_path), 10),
+          Integer(File.read(descendant_pid_path), 10)
+        ]
+        identity_writer.write(
+          JSON.generate(
+            pids.to_h { |pid| [ pid.to_s, process_start_ticks(pid) ] }
+          )
+        )
+        identity_writer.close
+        exit! 0
+      end
+      identity_writer.close
+      identities = JSON.parse(identity_reader.read).to_h {
+        |pid, start_ticks| [ Integer(pid, 10), start_ticks ]
+      }
+      Process.wait(caller)
+
+      Timeout.timeout(6) do
+        sleep 0.01 while identities.any? {
+          |pid, start_ticks| process_identity_alive?(pid, start_ticks)
+        }
+      end
+      identities.each do |pid, start_ticks|
+        refute process_identity_alive?(pid, start_ticks),
+               "caller EOF left process identity #{pid}/#{start_ticks}"
+      end
+    ensure
+      begin
+        Process.kill("KILL", caller) if caller
+      rescue Errno::ESRCH
+        nil
+      end
+      identity_reader&.close unless identity_reader&.closed?
+      identity_writer&.close unless identity_writer&.closed?
+      (identities || {}).each do |pid, start_ticks|
+        next unless process_identity_alive?(pid, start_ticks)
+
+        Process.kill("CONT", pid)
+        Process.kill("KILL", pid)
+      rescue Errno::ESRCH
+        nil
+      end
+    end
+  end
+
   def test_stream_capture_detects_literal_and_pattern_secrets_split_across_short_chunks
     literal = "proof-secret-split-across-writes"
     capture = HiveLiveAgentProof::OpenClawCreatorProof::StreamCapture.new(
@@ -1908,19 +2009,33 @@ class OpenClawCreatorProofTest < Minitest::Test
       Timeout.timeout(2) do
         sleep 0.01 until File.file?(ready) && runner.supervisor_pid
       end
+      root_pid = runner.containment_root_pid
+      owner_pid = runner.owner_pid
       supervisor_pid = runner.supervisor_pid
       target_pid = Integer(File.read(target_pid_path), 10)
       child_pid = Integer(File.read(child_pid_path), 10)
+      identities = [
+        root_pid, owner_pid, supervisor_pid, target_pid, child_pid
+      ].to_h { |pid| [ pid, process_start_ticks(pid) ] }
       execution.raise(Interrupt)
 
       assert_raises(Interrupt) { execution.value }
-      [ supervisor_pid, target_pid, child_pid ].each do |pid|
-        assert_raises(Errno::ESRCH) { Process.kill(0, pid) }
+      identities.each do |pid, start_ticks|
+        refute process_identity_alive?(pid, start_ticks),
+               "caller cancellation left process identity #{pid}/#{start_ticks}"
       end
     ensure
       if execution&.alive?
         execution.kill
         execution.join(5)
+      end
+      (identities || {}).each do |pid, start_ticks|
+        next unless process_identity_alive?(pid, start_ticks)
+
+        Process.kill("CONT", pid)
+        Process.kill("KILL", pid)
+      rescue Errno::ESRCH
+        nil
       end
     end
   end
@@ -2699,6 +2814,125 @@ class OpenClawCreatorProofTest < Minitest::Test
         execution.join(5)
       end
     end
+  end
+
+  def assert_owner_loss_is_bounded(signal)
+    with_tmp_dir do |dir|
+      ready = File.join(dir, "owner-loss-ready")
+      target_pid_path = File.join(dir, "owner-loss-target-pid")
+      descendant_pid_path = File.join(dir, "owner-loss-descendant-pid")
+      descendant_source = <<~RUBY
+        Process.setsid
+        second = fork do
+          trap("TERM", "IGNORE")
+          File.write(#{descendant_pid_path.dump}, Process.pid.to_s)
+          loop { sleep 1 }
+        end
+        Process.detach(second)
+        exit! 0
+      RUBY
+      script = File.join(dir, "owner-loss")
+      write_executable(script, <<~RUBY)
+        #!#{RbConfig.ruby}
+        File.write(#{target_pid_path.dump}, Process.pid.to_s)
+        first = spawn(
+          #{RbConfig.ruby.dump}, "-e", #{descendant_source.dump},
+          out: File::NULL, err: File::NULL
+        )
+        Process.wait(first)
+        sleep 0.01 until File.file?(#{descendant_pid_path.dump})
+        File.write(#{ready.dump}, "ready")
+        loop { sleep 1 }
+      RUBY
+      runner = HiveLiveAgentProof::OpenClawCreatorProof::ProcessRunner.new(
+        timeout: 0.3,
+        term_grace: 0.05,
+        output_limit: 64,
+        exact_secrets: []
+      )
+      execution = Thread.new do
+        runner.call(environment: {}, argv: [ script ], chdir: dir)
+      end
+      execution.report_on_exception = false
+
+      Timeout.timeout(2) do
+        sleep 0.01 until File.file?(ready) && runner.owner_pid &&
+                               runner.worker_pid
+      end
+      owner_pid = runner.owner_pid
+      worker_pid = runner.worker_pid
+      target_pid = Integer(File.read(target_pid_path), 10)
+      descendant_pid = Integer(File.read(descendant_pid_path), 10)
+      identities = [ owner_pid, worker_pid, target_pid, descendant_pid ].to_h do |pid|
+        [ pid, process_start_ticks(pid) ]
+      end
+      root_pid = runner.containment_root_pid
+      identities[root_pid] = process_start_ticks(root_pid)
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      Process.kill(signal, owner_pid)
+
+      error = Timeout.timeout(6) do
+        assert_raises(HiveLiveAgentProof::OpenClawCreatorProof::Failure) do
+          execution.value
+        end
+      end
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
+      assert_equal "containment_failed", error.reason
+      assert_operator elapsed, :<, 6
+      refute_equal owner_pid, root_pid
+      identities.except(root_pid).each do |pid, start_ticks|
+        refute process_identity_alive?(pid, start_ticks),
+               "original process identity #{pid}/#{start_ticks} survived owner #{signal}"
+      end
+      refute process_identity_alive?(root_pid, identities.fetch(root_pid)),
+             "containment root #{root_pid} survived owner #{signal}"
+    ensure
+      if execution&.alive?
+        execution.kill
+        execution.join(5)
+      end
+      cleanup_identities = identities || {}
+      [ descendant_pid_path, target_pid_path ].compact.each do |path|
+        pid = Integer(File.binread(path), 10)
+        cleanup_identities[pid] ||= process_start_ticks(pid)
+      rescue Errno::ENOENT, Errno::ESRCH, ArgumentError, IndexError
+        nil
+      end
+      [
+        descendant_pid, target_pid, worker_pid, owner_pid, root_pid,
+        runner&.worker_pid, runner&.owner_pid, runner&.containment_root_pid
+      ].compact.uniq.each do |pid|
+        cleanup_identities[pid] ||= process_start_ticks(pid)
+      rescue Errno::ENOENT, Errno::ESRCH, ArgumentError, IndexError
+        nil
+      end
+      cleanup_identities.each do |pid, start_ticks|
+        next unless process_identity_alive?(pid, start_ticks)
+
+        Process.kill("CONT", pid)
+        Process.kill("KILL", pid)
+      rescue Errno::ESRCH
+        nil
+      end
+      Timeout.timeout(3) do
+        sleep 0.01 while cleanup_identities.any? {
+          |pid, start_ticks| process_identity_alive?(pid, start_ticks)
+        }
+      end
+    end
+  end
+
+  def process_start_ticks(pid)
+    stat = File.binread("/proc/#{Integer(pid)}/stat")
+    fields = stat[(stat.rindex(")") + 2)..].split
+    fields.fetch(19)
+  end
+
+  def process_identity_alive?(pid, start_ticks)
+    process_start_ticks(pid) == start_ticks
+  rescue Errno::ENOENT, Errno::ESRCH, ArgumentError, IndexError
+    false
   end
 
   def build_runner(candidate_sha: SHA, artifact_dir: "/proof/artifacts",

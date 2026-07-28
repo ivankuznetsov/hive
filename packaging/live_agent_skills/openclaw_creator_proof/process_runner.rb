@@ -1,7 +1,7 @@
 module HiveLiveAgentProof
   module OpenClawCreatorProof
     class ProcessRunner
-      attr_reader :owner_pid, :worker_pid
+      attr_reader :containment_root_pid, :owner_pid, :worker_pid
 
       # Compatibility seam: callers which previously observed the supervisor
       # now observe the expendable worker, never the containment owner.
@@ -41,8 +41,11 @@ module HiveLiveAgentProof
           },
           worker_factory: @worker_factory
         )
-        @owner_pid = session.pid
-        session.result { |pid| @worker_pid = pid }
+        @containment_root_pid = session.pid
+        session.result do |ready|
+          @owner_pid = ready.owner_pid
+          @worker_pid = ready.worker_pid
+        end
       rescue EOFError, IOError, SystemCallError, TypeError, ArgumentError,
              RangeError => e
         fail_containment!(
@@ -53,6 +56,7 @@ module HiveLiveAgentProof
         begin
           cleanup_error = cleanup_session(session)
         ensure
+          @containment_root_pid = nil
           @owner_pid = nil
           @worker_pid = nil
         end

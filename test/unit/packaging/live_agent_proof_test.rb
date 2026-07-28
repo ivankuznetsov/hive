@@ -491,6 +491,18 @@ class LiveAgentProofTest < Minitest::Test
       end,
       "limitations" => lambda do |row|
         row.fetch("external_actions_scope")["limitations"] = [ "not exact", "still two" ]
+      end,
+      "process_teardown_authority" => lambda do |row|
+        row.dig("processes", 0, "teardown")["teardown_authority"] = "containment_owner"
+      end,
+      "process_root_loss_guarantee" => lambda do |row|
+        row.dig("processes", 0, "teardown")["root_loss_guarantee"] = "guaranteed"
+      end,
+      "aggregate_teardown_authority" => lambda do |row|
+        row.fetch("teardown")["teardown_authority"] = "containment_owner"
+      end,
+      "aggregate_root_loss_guarantee" => lambda do |row|
+        row.fetch("teardown")["root_loss_guarantee"] = "guaranteed"
       end
     }
 
@@ -913,7 +925,9 @@ class LiveAgentProofTest < Minitest::Test
             "readers" => "complete",
             "writer" => "complete",
             "descendants" => "none",
-            "containment" => "linux_child_subreaper"
+            "containment" => "linux_child_subreaper",
+            "teardown_authority" => "independent_root",
+            "root_loss_guarantee" => "not_claimed"
           }
         }
       ],
@@ -921,7 +935,9 @@ class LiveAgentProofTest < Minitest::Test
         "status" => "passed",
         "reaped" => true,
         "descendants" => "none",
-        "containment" => "linux_child_subreaper"
+        "containment" => "linux_child_subreaper",
+        "teardown_authority" => "independent_root",
+        "root_loss_guarantee" => "not_claimed"
       },
       "prompt_sha256" => Digest::SHA256.hexdigest(HiveLiveAgentProof::WORKFLOW_CREATOR_PROMPT),
       "task_prompt_sha256" =>

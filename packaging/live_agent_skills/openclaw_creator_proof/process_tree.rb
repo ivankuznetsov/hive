@@ -21,6 +21,13 @@ module HiveLiveAgentProof
         include_root ? [ @root_pid, *descendants ] : descendants
       end
 
+      def direct_pids(include_zombies: true)
+        parent_map, states = snapshot
+        Array(parent_map[@root_pid]).select {
+          |pid| include_zombies || states[pid] != "Z"
+        }.sort
+      end
+
       private
 
       def snapshot

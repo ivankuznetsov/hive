@@ -16,6 +16,7 @@ class ReleaseCandidateArtifactsTest < Minitest::Test
         packaging/live_agent_skills/proof.rb
         packaging/live_agent_skills/build.rb
         packaging/live_agent_skills/workflow_creator_contract.rb
+        packaging/live_agent_skills/openclaw_creator_proof/containment_root.rb
         packaging/live_agent_skills/openclaw_creator_proof/installation_identity.rb
         packaging/live_agent_skills/openclaw_creator_proof/gateway_runtime/bounded_regular_reader.rb
       ],

@@ -3,9 +3,80 @@ module HiveLiveAgentProof
     class FramedJson
       HEADER_BYTES = 4
 
+      class StreamReader
+        READ_CHUNK = 16 * 1024
+
+        def initialize(max_bytes:)
+          @max_bytes = max_bytes
+          @buffer = +"".b
+          @eof = false
+        end
+
+        def read_available(io)
+          frames = []
+          loop do
+            chunk = io.read_nonblock(READ_CHUNK, exception: false)
+            case chunk
+            when :wait_readable
+              break
+            when nil
+              @eof = true
+              break
+            else
+              @buffer << chunk
+              frames.concat(extract_frames)
+            end
+          end
+          frames
+        rescue JSON::ParserError => e
+          fail_frame!("frame JSON is malformed: #{e.message}")
+        end
+
+        def eof? = @eof
+
+        def finish!
+          fail_frame!("frame is truncated") unless @buffer.empty?
+
+          true
+        end
+
+        private
+
+        def extract_frames
+          frames = []
+          loop do
+            break if @buffer.bytesize < HEADER_BYTES
+
+            length = @buffer.unpack1("N")
+            fail_frame!("frame length must be positive") unless length.positive?
+            fail_frame!("frame exceeds #{@max_bytes} bytes") if length > @max_bytes
+            break if @buffer.bytesize < HEADER_BYTES + length
+
+            encoded = @buffer.byteslice(HEADER_BYTES, length)
+            @buffer = @buffer.byteslice(HEADER_BYTES + length..) || +"".b
+            payload = JSON.parse(encoded)
+            fail_frame!("frame payload must be an object") unless payload.is_a?(Hash)
+            frames << payload
+          end
+          frames
+        end
+
+        def fail_frame!(detail)
+          raise Failure.new(
+            phase: "process",
+            reason: "containment_failed",
+            detail: detail
+          )
+        end
+      end
+
       def initialize(max_bytes:)
         @max_bytes = Integer(max_bytes)
         raise ArgumentError, "frame limit must be positive" unless @max_bytes.positive?
+      end
+
+      def stream_reader
+        StreamReader.new(max_bytes: @max_bytes)
       end
 
       def write(io, payload)

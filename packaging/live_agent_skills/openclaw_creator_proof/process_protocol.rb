@@ -2,6 +2,7 @@ module HiveLiveAgentProof
   module OpenClawCreatorProof
     class ProcessProtocol
       FRAME_OVERHEAD_LIMIT = 64 * 1024
+      Ready = Data.define(:owner_pid, :worker_pid)
       Outcome = Data.define(:failure, :result) do
         def success? = failure.nil?
       end
@@ -29,16 +30,42 @@ module HiveLiveAgentProof
         Outcome.new(failure: nil, result: result)
       end
 
-      def write_ready(io, worker_pid)
-        @codec.write(io, { "frame" => "ready", "worker_pid" => worker_pid })
+      def write_ready(io, owner_pid:, worker_pid:)
+        @codec.write(
+          io,
+          {
+            "frame" => "ready",
+            "owner_pid" => owner_pid,
+            "worker_pid" => worker_pid
+          }
+        )
       end
 
-      def read_ready(io, deadline:)
-        frame = @codec.read(io, deadline: deadline)
-        exact_keys!(frame, %w[frame worker_pid], "ready frame")
-        unless frame["frame"] == "ready" && frame["worker_pid"].is_a?(Integer) &&
-               frame["worker_pid"].positive?
+      def decode_ready_frame(frame)
+        exact_keys!(frame, %w[frame owner_pid worker_pid], "ready frame")
+        unless frame["frame"] == "ready" &&
+               positive_integer?(frame["owner_pid"]) &&
+               positive_integer?(frame["worker_pid"])
           fail_containment!("ready frame has invalid types")
+        end
+        Ready.new(
+          owner_pid: frame.fetch("owner_pid"),
+          worker_pid: frame.fetch("worker_pid")
+        )
+      end
+
+      def write_owner_ready(io, worker_pid)
+        @codec.write(
+          io,
+          { "frame" => "owner_ready", "worker_pid" => worker_pid }
+        )
+      end
+
+      def decode_owner_ready_frame(frame)
+        exact_keys!(frame, %w[frame worker_pid], "owner ready frame")
+        unless frame["frame"] == "owner_ready" &&
+               positive_integer?(frame["worker_pid"])
+          fail_containment!("owner ready frame has invalid types")
         end
         frame.fetch("worker_pid")
       end
@@ -56,12 +83,38 @@ module HiveLiveAgentProof
         )
       end
 
+      def write_owner_outcome(io, outcome)
+        @codec.write(
+          io,
+          encode_outcome(outcome, frame_name: "owner_result", worker: true)
+        )
+      end
+
+      def decode_owner_outcome_frame(frame)
+        decode_outcome(
+          frame,
+          frame_name: "owner_result",
+          worker: true,
+          raise_failure: false
+        )
+      end
+
       def write_parent_outcome(io, outcome)
         @codec.write(io, encode_outcome(outcome, frame_name: "result", worker: false))
       end
 
       def read_parent_frame(io, deadline:)
         @codec.read(io, deadline: deadline)
+      end
+
+      def stream_reader = @codec.stream_reader
+
+      def read_available(stream, io)
+        stream.read_available(io)
+      end
+
+      def finish_stream!(stream)
+        stream.finish!
       end
 
       def decode_parent_frame(frame)
@@ -217,7 +270,10 @@ module HiveLiveAgentProof
       def validate_teardown_record!(record)
         exact_keys!(
           record,
-          %w[containment descendants kill_sent readers reaped status term_sent writer],
+          %w[
+            containment descendants kill_sent readers reaped root_loss_guarantee
+            status teardown_authority term_sent writer
+          ],
           "teardown record"
         )
         valid = %w[not_started passed failed].include?(record["status"]) &&
@@ -227,7 +283,11 @@ module HiveLiveAgentProof
                 %w[not_started complete incomplete].include?(record["readers"]) &&
                 %w[not_started complete incomplete].include?(record["writer"]) &&
                 %w[not_checked none remaining].include?(record["descendants"]) &&
-                record["containment"] == "linux_child_subreaper"
+                record["containment"] == WORKFLOW_CREATOR_PROCESS_CONTAINMENT &&
+                record["teardown_authority"] ==
+                  WORKFLOW_CREATOR_TEARDOWN_AUTHORITY &&
+                record["root_loss_guarantee"] ==
+                  WORKFLOW_CREATOR_ROOT_LOSS_GUARANTEE
         fail_containment!("teardown record types are invalid") unless valid
       end
 
@@ -305,6 +365,10 @@ module HiveLiveAgentProof
 
       def nullable_nonnegative_integer?(value)
         value.nil? || (value.is_a?(Integer) && value >= 0)
+      end
+
+      def positive_integer?(value)
+        value.is_a?(Integer) && value.positive?
       end
 
       def boolean?(value)

@@ -778,8 +778,9 @@ project-level agent/model inheritance and writes a bound completed research
 artifact,
 complete read-only installed-tree/interpreter receipts, committed transitive
 npm lock, all-byte recursive secret sanitation, independently observed
-filesystem/network effects, and an outer Linux child-subreaper owner that
-survives worker stop/kill. A committed digest-bound driver now uses only the
+filesystem/network effects, and an independent outer Linux child-subreaper
+root that survives owner or worker stop/kill. A committed digest-bound driver
+now uses only the
 pinned package's public config-schema and agent-harness exports. It exercises
 the exact five-tool inventory, successful workspace read/write/edit/apply-patch
 and Hive exec calls, and unchanged-sentinel denials for sibling filesystem
@@ -818,17 +819,20 @@ matching operational status, credentialed exact-runtime model-loop
 authoring, the public-export native control matrix, independently observed
 scoped effects, complete runtime-closure identities,
 nine successful/zero denied-or-failed gateway rows, proof-first failure
-partitions, secret scan, outer-owner teardown, and cleanup.
+partitions, secret scan, independent-root teardown, and cleanup.
 
 The producer, attestor, verifier, and audit gateway now share one complete
 installation-identity record, and attestation and verification share one
 workflow-creator contract. Retained validation intentionally avoids
 dereferencing cleaned-up paths; live validation recomputes filesystem identity.
-These changes close contract drift, not containment loss: proof-root teardown
-and owner death remain governed by the existing containment owner, a Linux task
-stuck in uninterruptible `D` state can still outlive a bounded teardown window,
-and raw socket observations remain unattributed. Those limitations must not be
-promoted into cgroup, global-filesystem, or network-authorization claims.
+These changes close contract drift. Owner loss is now covered by a separate
+outer child-subreaper root that owns final teardown, detects a stopped or dead
+owner, and drains newly adopted direct-child generations. Root loss itself is
+still not covered: the retained schema says
+`root_loss_guarantee=not_claimed`, and a Linux task stuck in uninterruptible
+`D` state can still outlive a bounded teardown window. Raw socket observations
+also remain unattributed. Those limitations must not be promoted into cgroup,
+global-filesystem, or network-authorization claims.
 
 ## WorkLedger is an internal boundary, not a published format (2026-07-26)
 

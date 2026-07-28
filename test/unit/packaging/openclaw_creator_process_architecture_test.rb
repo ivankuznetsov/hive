@@ -13,6 +13,7 @@ class OpenClawCreatorProcessArchitectureTest < Minitest::Test
   PROCESS_FILES = %w[
     capture_worker.rb
     containment_owner.rb
+    containment_root.rb
     containment_session.rb
     containment_warden.rb
     framed_json.rb
@@ -53,10 +54,23 @@ class OpenClawCreatorProcessArchitectureTest < Minitest::Test
     refute_includes sources.fetch("containment_owner.rb"), "Open3.popen3"
     refute_includes sources.fetch("containment_owner.rb"), "StreamCapture"
     refute_includes sources.fetch("containment_owner.rb"), "NetworkCapture"
+    refute_includes sources.fetch("containment_owner.rb"), "enable_child_subreaper!"
+    refute_includes sources.fetch("containment_root.rb"), "Open3.popen3"
+    refute_includes sources.fetch("containment_root.rb"), "StreamCapture"
+    refute_includes sources.fetch("containment_root.rb"), "NetworkCapture"
+    assert_includes sources.fetch("containment_root.rb"), "warden.enable_child_subreaper!"
+    assert_includes sources.fetch("containment_root.rb"), "Process::WUNTRACED"
+    assert_includes sources.fetch("containment_root.rb"), "drain_child_domain"
     refute_includes sources.fetch("containment_session.rb"), "Open3.popen3"
     refute_includes sources.fetch("containment_session.rb"), "Thread.new"
+    refute_match(
+      /Process\.kill\(\s*["']KILL["']/,
+      sources.fetch("containment_session.rb"),
+      "ContainmentSession must not destroy its teardown authority"
+    )
     refute_includes sources.fetch("containment_warden.rb"), "JSON."
     refute_includes sources.fetch("containment_warden.rb"), "Base64."
+    assert_includes sources.fetch("containment_warden.rb"), "direct_pids"
     refute_includes sources.fetch("process_protocol.rb"), "Process.kill"
     refute_includes sources.fetch("process_protocol.rb"), "Process.fork"
     refute_includes sources.fetch("framed_json.rb"), '"teardown"'
@@ -64,7 +78,7 @@ class OpenClawCreatorProcessArchitectureTest < Minitest::Test
     teardown_writers = sources.filter_map do |relative, source|
       relative if source.match?(/\["teardown"\]\s*=/)
     end
-    assert_equal [ "containment_owner.rb" ], teardown_writers
+    assert_equal [ "containment_root.rb" ], teardown_writers
   end
 
   def test_nonzero_target_remains_a_returned_process_result
@@ -92,6 +106,10 @@ class OpenClawCreatorProcessArchitectureTest < Minitest::Test
       assert_equal false, result.dig("record", "interrupted")
       assert_equal "passed", result.dig("record", "teardown", "status")
       assert_equal "none", result.dig("record", "teardown", "descendants")
+      assert_equal "independent_root",
+                   result.dig("record", "teardown", "teardown_authority")
+      assert_equal "not_claimed",
+                   result.dig("record", "teardown", "root_loss_guarantee")
     end
   end
 
@@ -121,6 +139,133 @@ class OpenClawCreatorProcessArchitectureTest < Minitest::Test
   ensure
     reader&.close unless reader&.closed?
     writer&.close unless writer&.closed?
+  end
+
+  def test_framed_json_stream_reader_is_incremental_and_rejects_partial_eof
+    codec = HiveLiveAgentProof::OpenClawCreatorProof::FramedJson.new(
+      max_bytes: 1_024
+    )
+    encoded = JSON.generate("frame" => "owner_ready", "worker_pid" => 123).b
+    bytes = [ encoded.bytesize ].pack("N") + encoded
+    reader, writer = IO.pipe
+    stream = codec.stream_reader
+
+    writer.write(bytes.byteslice(0, 3))
+    assert_empty stream.read_available(reader)
+    writer.write(bytes.byteslice(3..))
+    assert_equal(
+      [ { "frame" => "owner_ready", "worker_pid" => 123 } ],
+      stream.read_available(reader)
+    )
+    writer.close
+    assert_empty stream.read_available(reader)
+    assert stream.eof?
+    assert stream.finish!
+
+    partial_reader, partial_writer = IO.pipe
+    partial_stream = codec.stream_reader
+    partial_writer.write([ 10 ].pack("N") + "{")
+    partial_writer.close
+    assert_empty partial_stream.read_available(partial_reader)
+    assert partial_stream.eof?
+    assert_raises(HiveLiveAgentProof::OpenClawCreatorProof::Failure) do
+      partial_stream.finish!
+    end
+  ensure
+    reader&.close
+    writer&.close unless writer&.closed?
+    partial_reader&.close
+    partial_writer&.close unless partial_writer&.closed?
+  end
+
+  def test_owner_death_before_ready_reaps_its_adopted_child
+    with_tmp_dir do |dir|
+      identity_path = File.join(dir, "pre-ready-child.json")
+      owner = owner_that_dies(
+        identity_path: identity_path,
+        before_death: ->(_writer, _child) { }
+      )
+
+      error = run_faulted_owner(owner)
+
+      assert_equal "containment_failed", error.reason
+      assert_includes error.message, "before ready"
+      assert_recorded_identity_gone(identity_path)
+    end
+  end
+
+  def test_partial_owner_frame_reaps_its_adopted_child
+    with_tmp_dir do |dir|
+      identity_path = File.join(dir, "partial-frame-child.json")
+      owner = owner_that_dies(
+        identity_path: identity_path,
+        before_death: lambda { |writer, _child|
+          writer.write([ 128 ].pack("N"))
+          writer.write("{")
+          writer.flush
+        }
+      )
+
+      error = run_faulted_owner(owner)
+
+      assert_equal "containment_failed", error.reason
+      assert_includes error.message, "truncated"
+      assert_recorded_identity_gone(identity_path)
+    end
+  end
+
+  def test_provisional_success_followed_by_owner_kill_is_rejected
+    with_tmp_dir do |dir|
+      identity_path = File.join(dir, "provisional-child.json")
+      protocol = process_protocol
+      payload = valid_worker_payload
+      owner = owner_that_dies(
+        identity_path: identity_path,
+        before_death: lambda { |writer, child|
+          protocol.write_owner_ready(writer, child)
+          protocol.write_owner_outcome(
+            writer,
+            protocol.success_outcome(payload)
+          )
+        }
+      )
+
+      error = run_faulted_owner(owner, protocol: protocol)
+
+      assert_equal "containment_failed", error.reason
+      assert_includes error.message, "exited unsuccessfully"
+      assert_recorded_identity_gone(identity_path)
+    end
+  end
+
+  def test_subreaper_setup_failure_prevents_owner_creation
+    with_tmp_dir do |dir|
+      owner_started = File.join(dir, "owner-started")
+      unavailable = HiveLiveAgentProof::OpenClawCreatorProof::Failure.new(
+        phase: "process",
+        reason: "containment_unavailable",
+        detail: "synthetic subreaper refusal"
+      )
+      warden = Object.new
+      warden.define_singleton_method(:enable_child_subreaper!) { raise unavailable }
+      warden.define_singleton_method(:drain_child_domain) { [] }
+      warden.define_singleton_method(:term_sent) { false }
+      warden.define_singleton_method(:kill_sent) { false }
+      owner_factory = lambda do |**_arguments|
+        File.write(owner_started, "started")
+        raise "owner must not be built"
+      end
+
+      error = run_faulted_owner(
+        nil,
+        owner_factory: owner_factory,
+        warden_factory: ->(_pid) { warden }
+      )
+
+      assert_equal "containment_unavailable", error.reason
+      assert_includes error.message, "synthetic subreaper refusal"
+      refute_path_exists owner_started
+    end
   end
 
   def test_network_capture_thread_that_cannot_stop_fails_closed
@@ -243,6 +388,7 @@ class OpenClawCreatorProcessArchitectureTest < Minitest::Test
 
     assert_same original, error
     assert closed
+    assert_nil @last_runner.containment_root_pid
     assert_nil @last_runner.owner_pid
     assert_nil @last_runner.worker_pid
   end
@@ -268,6 +414,7 @@ class OpenClawCreatorProcessArchitectureTest < Minitest::Test
     assert_equal "containment_failed", error.reason
     assert_includes error.message, "shutdown exploded"
     assert closed
+    assert_nil @last_runner.containment_root_pid
     assert_nil @last_runner.owner_pid
     assert_nil @last_runner.worker_pid
   end
@@ -293,6 +440,7 @@ class OpenClawCreatorProcessArchitectureTest < Minitest::Test
     assert_equal "containment_failed", error.reason
     assert_includes error.message, "wait exploded"
     assert closed
+    assert_nil @last_runner.containment_root_pid
     assert_nil @last_runner.owner_pid
     assert_nil @last_runner.worker_pid
   end
@@ -315,6 +463,7 @@ class OpenClawCreatorProcessArchitectureTest < Minitest::Test
 
     assert_equal "containment_failed", error.reason
     assert_includes error.message, "fork resources exhausted"
+    assert_nil @last_runner.containment_root_pid
     assert_nil @last_runner.owner_pid
     assert_nil @last_runner.worker_pid
   ensure
@@ -322,6 +471,125 @@ class OpenClawCreatorProcessArchitectureTest < Minitest::Test
   end
 
   private
+
+  def run_faulted_owner(owner, protocol: process_protocol,
+                        owner_factory: nil, warden_factory: nil)
+    budget = HiveLiveAgentProof::OpenClawCreatorProof::ProcessBudget.new(
+      timeout: 0.2,
+      term_grace: 0.05
+    )
+    owner_factory ||= ->(**_arguments) { owner }
+    root_factory = lambda do |**arguments|
+      HiveLiveAgentProof::OpenClawCreatorProof::ContainmentRoot.new(
+        **arguments,
+        owner_factory: owner_factory,
+        warden_factory: warden_factory
+      )
+    end
+    session =
+      HiveLiveAgentProof::OpenClawCreatorProof::ContainmentSession.start(
+        protocol: protocol,
+        budget: budget,
+        output_limit: 256,
+        exact_secrets: [],
+        secret_patterns: [],
+        request: {},
+        root_factory: root_factory
+      )
+    assert_raises(HiveLiveAgentProof::OpenClawCreatorProof::Failure) do
+      session.result { |_ready| }
+    end
+  ensure
+    session&.shutdown
+    session&.close
+  end
+
+  def owner_that_dies(identity_path:, before_death:)
+    Object.new.tap do |owner|
+      owner.define_singleton_method(:run) do |writer, _request|
+        child = Process.fork do
+          writer.close
+          Signal.trap("TERM", "IGNORE")
+          loop { sleep 1 }
+        end
+        stat = File.binread("/proc/#{child}/stat")
+        fields = stat[(stat.rindex(")") + 2)..].split
+        File.write(
+          identity_path,
+          JSON.generate("pid" => child, "start_ticks" => fields.fetch(19))
+        )
+        before_death.call(writer, child)
+        Process.kill("KILL", Process.pid)
+      end
+    end
+  end
+
+  def assert_recorded_identity_gone(path)
+    identity = JSON.parse(File.binread(path))
+    pid = identity.fetch("pid")
+    expected = identity.fetch("start_ticks")
+    refute process_identity_alive?(pid, expected),
+           "original process identity #{pid}/#{expected} survived"
+  ensure
+    if identity && process_identity_alive?(identity["pid"], identity["start_ticks"])
+      Process.kill("KILL", identity.fetch("pid"))
+    end
+  end
+
+  def process_identity_alive?(pid, expected)
+    stat = File.binread("/proc/#{Integer(pid)}/stat")
+    fields = stat[(stat.rindex(")") + 2)..].split
+    fields.fetch(19) == expected
+  rescue Errno::ENOENT, Errno::ESRCH, ArgumentError, IndexError
+    false
+  end
+
+  def process_protocol
+    HiveLiveAgentProof::OpenClawCreatorProof::ProcessProtocol.new(
+      output_limit: 256,
+      detail_limit: HiveLiveAgentProof::OpenClawCreatorProof::DETAIL_LIMIT
+    )
+  end
+
+  def valid_worker_payload
+    empty_stream = {
+      "sha256" => Digest::SHA256.hexdigest(""),
+      "bytes" => 0,
+      "retained_bytes" => 0,
+      "truncated" => false
+    }
+    {
+      "status_record" => { "exitstatus" => 0, "termsig" => nil },
+      "stdout" => "",
+      "stderr" => "",
+      "secret_findings" => [],
+      "record" => {
+        "executable" => "ruby",
+        "argv_sha256" => Digest::SHA256.hexdigest("[]"),
+        "exit_status" => 0,
+        "signal" => nil,
+        "timed_out" => false,
+        "interrupted" => false,
+        "duration_ms" => 1,
+        "stdout" => empty_stream,
+        "stderr" => empty_stream,
+        "network" => {
+          "status" => "observed",
+          "sample_count" => 0,
+          "socket_count" => 0,
+          "sockets" => []
+        }
+      },
+      "worker_teardown" => {
+        "term_sent" => false,
+        "kill_sent" => false,
+        "target_reaped" => true,
+        "readers" => "complete",
+        "writer" => "complete",
+        "descendants" => "none"
+      }
+    }
+  end
 
   def process_runner(timeout:, worker_factory: nil)
     @last_runner = HiveLiveAgentProof::OpenClawCreatorProof::ProcessRunner.new(
@@ -356,9 +624,16 @@ class OpenClawCreatorProcessArchitectureTest < Minitest::Test
   end
 
   def fake_session(result:, shutdown:, close:)
+    ready =
+      HiveLiveAgentProof::OpenClawCreatorProof::ProcessProtocol::Ready.new(
+        owner_pid: 654_322,
+        worker_pid: 654_323
+      )
     Object.new.tap do |session|
       session.define_singleton_method(:pid) { 654_321 }
-      session.define_singleton_method(:result, &result)
+      session.define_singleton_method(:result) do |&callback|
+        result.call { |_ignored| callback.call(ready) }
+      end
       session.define_singleton_method(:shutdown, &shutdown)
       session.define_singleton_method(:close, &close)
     end

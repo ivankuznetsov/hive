@@ -58,6 +58,7 @@ module HiveLiveAgentProof
     require_relative "openclaw_creator_proof/containment_warden"
     require_relative "openclaw_creator_proof/capture_worker"
     require_relative "openclaw_creator_proof/containment_owner"
+    require_relative "openclaw_creator_proof/containment_root"
     require_relative "openclaw_creator_proof/containment_session"
     require_relative "openclaw_creator_proof/process_runner"
     require_relative "openclaw_creator_proof/openclaw_configuration"

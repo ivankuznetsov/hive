@@ -40,7 +40,9 @@ module HiveLiveAgentProof
             "kill_sent" => false,
             "reaped" => true,
             "descendants" => "not_checked",
-            "containment" => "not_started"
+            "containment" => "not_started",
+            "teardown_authority" => "not_started",
+            "root_loss_guarantee" => WORKFLOW_CREATOR_ROOT_LOSS_GUARANTEE
           },
           "cleanup" => {
             "status" => "not_started",
@@ -109,8 +111,14 @@ module HiveLiveAgentProof
           "descendants" =>
             teardowns.all? { |row| row["descendants"] == "none" } ? "none" : "not_checked",
           "containment" =>
-            teardowns.all? { |row| row["containment"] == "linux_child_subreaper" } ?
-              "linux_child_subreaper" : "not_started"
+            teardowns.all? {
+              |row| row["containment"] == WORKFLOW_CREATOR_PROCESS_CONTAINMENT
+            } ? WORKFLOW_CREATOR_PROCESS_CONTAINMENT : "not_started",
+          "teardown_authority" =>
+            teardowns.all? {
+              |row| row["teardown_authority"] == WORKFLOW_CREATOR_TEARDOWN_AUTHORITY
+            } ? WORKFLOW_CREATOR_TEARDOWN_AUTHORITY : "not_started",
+          "root_loss_guarantee" => WORKFLOW_CREATOR_ROOT_LOSS_GUARANTEE
         }
         @data["teardown"]["status"] = "not_started" if teardowns.empty?
       end
@@ -228,7 +236,9 @@ module HiveLiveAgentProof
             "kill_sent" => false,
             "reaped" => true,
             "descendants" => "not_checked",
-            "containment" => "not_started"
+            "containment" => "not_started",
+            "teardown_authority" => "not_started",
+            "root_loss_guarantee" => WORKFLOW_CREATOR_ROOT_LOSS_GUARANTEE
           },
           "cleanup" => {
             "status" => "not_started",

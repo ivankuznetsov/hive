@@ -4,24 +4,47 @@ module HiveLiveAgentProof
       attr_reader :pid
 
       def self.start(protocol:, budget:, output_limit:, exact_secrets:,
-                     secret_patterns:, request:, worker_factory: nil)
+                     secret_patterns:, request:, worker_factory: nil,
+                     root_factory: nil)
         reader, writer = IO.pipe
+        cancel_reader, cancel_writer = IO.pipe
         pid = Process.fork do
           reader.close
-          ContainmentOwner.new(
+          cancel_writer.close
+          root_arguments = {
             protocol: protocol,
             budget: budget,
             output_limit: output_limit,
             exact_secrets: exact_secrets,
             secret_patterns: secret_patterns,
             worker_factory: worker_factory
-          ).run(writer, request)
+          }
+          root =
+            if root_factory
+              root_factory.call(**root_arguments)
+            else
+              ContainmentRoot.new(**root_arguments)
+            end
+          root.run(
+            parent_writer: writer,
+            cancel_reader: cancel_reader,
+            request: request
+          )
         end
         writer.close
-        new(pid: pid, reader: reader, protocol: protocol, budget: budget)
+        cancel_reader.close
+        new(
+          pid: pid,
+          reader: reader,
+          cancel_writer: cancel_writer,
+          protocol: protocol,
+          budget: budget
+        )
       rescue StandardError
         close_quietly(reader)
         close_quietly(writer)
+        close_quietly(cancel_reader)
+        close_quietly(cancel_writer)
         raise
       end
 
@@ -32,9 +55,10 @@ module HiveLiveAgentProof
       end
       private_class_method :close_quietly
 
-      def initialize(pid:, reader:, protocol:, budget:)
+      def initialize(pid:, reader:, cancel_writer:, protocol:, budget:)
         @pid = pid
         @reader = reader
+        @cancel_writer = cancel_writer
         @protocol = protocol
         @budget = budget
         @reaped = false
@@ -42,13 +66,18 @@ module HiveLiveAgentProof
 
       def result
         deadline = monotonic_now + @budget.parent_seconds
-        worker_pid = @protocol.read_ready(@reader, deadline: deadline)
-        yield worker_pid
-        frame = @protocol.read_parent_frame(@reader, deadline: deadline)
+        first = @protocol.read_parent_frame(@reader, deadline: deadline)
+        frame =
+          if first["frame"] == "ready"
+            yield @protocol.decode_ready_frame(first)
+            @protocol.read_parent_frame(@reader, deadline: deadline)
+          else
+            first
+          end
         @protocol.expect_eof!(@reader, deadline: deadline)
-        status = wait_for_owner(deadline)
+        status = wait_for_root(deadline)
         @reaped = true
-        fail_containment!("process containment owner exited unsuccessfully") unless
+        fail_containment!("process containment root exited unsuccessfully") unless
           status.success?
 
         @protocol.decode_parent_frame(frame)
@@ -57,57 +86,57 @@ module HiveLiveAgentProof
       def shutdown
         return if @reaped
 
-        signal_owner_shutdown
+        signal_root_continue
+        request_cancel
         deadline = monotonic_now + @budget.owner_shutdown_seconds
-        loop do
-          waited = Process.waitpid(@pid, Process::WNOHANG)
-          if waited
-            @reaped = true
-            return
-          end
-          break if monotonic_now >= deadline
+        status = wait_for_root(deadline)
+        @reaped = true
+        return if status.success?
 
-          sleep 0.01
-        rescue Errno::ECHILD
-          @reaped = true
-          return
-        end
-        kill_owner
-        Process.waitpid(@pid)
-        @reaped = true
-      rescue Errno::ECHILD
-        @reaped = true
+        fail_authority!("process containment root exited unsuccessfully")
       end
 
       def close
-        @reader.close unless @reader.closed?
+        self.class.send(:close_quietly, @cancel_writer)
+        self.class.send(:close_quietly, @reader)
       end
 
       private
 
-      def signal_owner_shutdown
+      def signal_root_continue
         Process.kill("CONT", @pid)
-        Process.kill("TERM", @pid)
       rescue Errno::ESRCH
         nil
       end
 
-      def kill_owner
-        Process.kill("KILL", @pid)
-      rescue Errno::ESRCH
+      def request_cancel
+        return if @cancel_writer.closed?
+
+        @cancel_writer.write_nonblock("C", exception: false)
+        @cancel_writer.close
+      rescue Errno::EPIPE, IOError
         nil
       end
 
-      def wait_for_owner(deadline)
+      def wait_for_root(deadline)
         loop do
           waited, status = Process.wait2(@pid, Process::WNOHANG)
           return status if waited
-          fail_containment!("process containment owner exceeded result deadline") if
+          fail_authority!("process containment root exceeded shutdown deadline") if
             monotonic_now >= deadline
+
           sleep 0.01
         end
       rescue Errno::ECHILD
-        fail_containment!("process containment owner was not waitable")
+        fail_authority!("process containment root was not waitable")
+      end
+
+      def fail_authority!(detail)
+        raise Failure.new(
+          phase: "process",
+          reason: "containment_authority_lost",
+          detail: detail
+        )
       end
 
       def fail_containment!(detail)

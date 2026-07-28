@@ -129,15 +129,21 @@ the canonical metadata path must remain under the workspace. Candidate
 children receive no selected, opposite, or generic provider credential.
 All-byte secret scanning recursively sanitizes persisted evidence. The thin
 process-runner facade delegates parent lifecycle and absolute deadlines to a
-containment session, child-subreaper cleanup and the sole final teardown record
-to an independently live owner, target capture to an expendable worker, and
-schema validation to strict length-framed JSON/Base64 IPC. Sampler, stdin
+containment session, while an independent outer Linux child-subreaper root
+owns final teardown and an expendable inner owner manages target capture
+through the worker. The root observes owner stop/exit directly, drains newly
+adopted direct-child generations without retaining PIDs across reap, and is
+the sole writer of final teardown evidence. Strict length-framed JSON/Base64
+IPC separates parent/root, root/owner, and owner/worker traffic. Sampler, stdin
 writer, and stdout/stderr reader failures are observed after bounded joins and
 fail closed. The frame codec normalizes diagnostic text to valid UTF-8 before
 JSON encoding while binary streams remain explicit Base64. Focused stress
-coverage proves bounded teardown after ordinary,
-`setsid`, double-fork, timeout, worker-SIGSTOP, worker-SIGKILL,
-supervisor/parent TERM, and interrupt paths.
+coverage proves bounded teardown after ordinary, `setsid`, double-fork,
+timeout, worker-SIGSTOP, worker-SIGKILL, owner-SIGSTOP, owner-SIGKILL,
+caller EOF, supervisor/parent TERM, and interrupt paths. The retained schema
+identifies `teardown_authority=independent_root` and
+`root_loss_guarantee=not_claimed`; it does not promise cleanup after root loss
+or for tasks stuck in uninterruptible `D` state.
 Actual workflow/task trees reject extra authored files, malformed task directories,
 symlinks, and special files; archive verification/materialization share byte,
 entry, directory, depth, and inode budgets. Missing provider credentials make

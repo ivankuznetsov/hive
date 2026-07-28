@@ -90,6 +90,23 @@ module HiveLiveAgentProof
         descendants
       end
 
+      # The outer subreaper uses only its current direct, unreaped children as
+      # signal authority. Once one exits, Linux reparents its surviving child
+      # generation to this root and the next pass discovers that generation.
+      # A PID cannot be reused until we reap it, and no PID is retained across
+      # a reap.
+      def drain_child_domain
+        term_deadline = monotonic_now + @budget.term_grace
+        return [] if drain_direct_children("TERM", deadline: term_deadline)
+
+        kill_deadline = monotonic_now + @budget.post_kill_grace
+        drain_direct_children("KILL", deadline: kill_deadline)
+        reap_adopted_children
+        return [] if child_domain_empty?
+
+        @process_tree.pids(include_zombies: true)
+      end
+
       def wait_until_descendants_gone(seconds)
         deadline = monotonic_now + seconds
         loop do
@@ -130,6 +147,35 @@ module HiveLiveAgentProof
       end
 
       private
+
+      def drain_direct_children(signal, deadline:)
+        loop do
+          reap_adopted_children
+          return true if child_domain_empty?
+
+          children = @process_tree.direct_pids
+          children.each { |pid| signal_process(pid, "CONT") }
+          sent = false
+          children.each { |pid| sent = signal_process(pid, signal) || sent }
+          record_signal(signal, sent)
+          reap_adopted_children
+          return true if child_domain_empty?
+          return false if monotonic_now >= deadline
+
+          sleep 0.01
+        end
+      end
+
+      def child_domain_empty?
+        loop do
+          return false unless @process_tree.direct_pids.empty?
+
+          waited = Process.waitpid(-1, Process::WNOHANG)
+          return false unless waited
+        end
+      rescue Errno::ECHILD
+        true
+      end
 
       def signal_descendants(signal)
         signalled = false

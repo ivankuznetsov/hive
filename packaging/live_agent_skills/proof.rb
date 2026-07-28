@@ -66,6 +66,9 @@ module HiveLiveAgentProof
   WORKFLOW_CREATOR_OPENCLAW_LOCK_SHA256 =
     "31994a60856f7a3d4db9a35b1d49951b17e9bb3642fa5e877774390a93410c15".freeze
   WORKFLOW_CREATOR_OPENCLAW_PACKAGE_COUNT = 306
+  WORKFLOW_CREATOR_PROCESS_CONTAINMENT = "linux_child_subreaper".freeze
+  WORKFLOW_CREATOR_TEARDOWN_AUTHORITY = "independent_root".freeze
+  WORKFLOW_CREATOR_ROOT_LOSS_GUARANTEE = "not_claimed".freeze
   SKILL_ARCHIVE_FILE_LIMIT = 16 * 1024 * 1024
   SKILL_ARCHIVE_TOTAL_LIMIT = 64 * 1024 * 1024
   SKILL_ARCHIVE_ENTRY_LIMIT = 512
@@ -328,7 +331,12 @@ module HiveLiveAgentProof
           process.dig("teardown", "readers") == "complete" &&
           process.dig("teardown", "writer") == "complete" &&
           process.dig("teardown", "descendants") == "none" &&
-          process.dig("teardown", "containment") == "linux_child_subreaper" &&
+          process.dig("teardown", "containment") ==
+            WORKFLOW_CREATOR_PROCESS_CONTAINMENT &&
+          process.dig("teardown", "teardown_authority") ==
+            WORKFLOW_CREATOR_TEARDOWN_AUTHORITY &&
+          process.dig("teardown", "root_loss_guarantee") ==
+            WORKFLOW_CREATOR_ROOT_LOSS_GUARANTEE &&
           process.dig("network", "status") == "observed" &&
           process.dig("network", "sample_count").is_a?(Integer) &&
           process.dig("network", "sample_count").positive? &&
@@ -336,7 +344,9 @@ module HiveLiveAgentProof
       } &&
       teardown.is_a?(Hash) && teardown["status"] == "passed" &&
       teardown["reaped"] == true && teardown["descendants"] == "none" &&
-      teardown["containment"] == "linux_child_subreaper"
+      teardown["containment"] == WORKFLOW_CREATOR_PROCESS_CONTAINMENT &&
+      teardown["teardown_authority"] == WORKFLOW_CREATOR_TEARDOWN_AUTHORITY &&
+      teardown["root_loss_guarantee"] == WORKFLOW_CREATOR_ROOT_LOSS_GUARANTEE
   rescue TypeError
     false
   end

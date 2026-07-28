@@ -16,7 +16,6 @@ module HiveLiveAgentProof
         Signal.trap("TERM") { interrupted = true }
         Signal.trap("INT") { interrupted = true }
         warden = ContainmentWarden.new(root_pid: Process.pid, budget: @budget)
-        warden.enable_child_subreaper!
         worker_reader, worker_writer = IO.pipe
         worker = Process.fork do
           worker_reader.close
@@ -24,7 +23,7 @@ module HiveLiveAgentProof
           write_worker_result(worker_writer, request)
         end
         worker_writer.close
-        @protocol.write_ready(writer, worker)
+        @protocol.write_owner_ready(writer, worker)
         deadline = monotonic_now + @budget.owner_seconds
         outcome, worker_status = await_worker_outcome(
           worker_reader,
@@ -33,8 +32,8 @@ module HiveLiveAgentProof
           deadline: deadline,
           interrupted: -> { interrupted }
         )
-        outcome = finalize_outcome(outcome, worker_status, warden)
-        @protocol.write_parent_outcome(writer, outcome)
+        outcome = prepare_outcome(outcome, worker_status, warden)
+        @protocol.write_owner_outcome(writer, outcome)
       rescue Failure => e
         safe_write_failure(writer, e)
       rescue StandardError => e
@@ -161,17 +160,17 @@ module HiveLiveAgentProof
         CaptureWorker.new(**arguments)
       end
 
-      def finalize_outcome(outcome, worker_status, warden)
+      def prepare_outcome(outcome, worker_status, warden)
         warden.drain_remaining_descendants
         warden.reap_adopted_children
         remaining = warden.descendants
         unless remaining.empty?
           return @protocol.failure_outcome(
             reason: "containment_failed",
-            detail: "outer watchdog retained #{remaining.length} descendant(s)"
+            detail: "process owner retained #{remaining.length} descendant(s)"
           )
         end
-        if worker_status && !worker_status.success? && outcome.failure.nil?
+        if outcome.success? && !worker_status&.success?
           return @protocol.failure_outcome(
             reason: "containment_failed",
             detail: "process worker exited unsuccessfully"
@@ -180,36 +179,10 @@ module HiveLiveAgentProof
         return outcome unless outcome.success?
 
         payload = outcome.result
-        worker = payload.delete("worker_teardown")
-        payload.fetch("record")["teardown"] = final_teardown(
-          worker,
-          warden,
-          remaining
-        )
+        worker = payload.fetch("worker_teardown")
+        worker["term_sent"] ||= warden.term_sent
+        worker["kill_sent"] ||= warden.kill_sent
         @protocol.success_outcome(payload)
-      end
-
-      def final_teardown(worker, warden, remaining)
-        reaped = worker.fetch("target_reaped") &&
-                 worker.fetch("descendants") == "none" &&
-                 remaining.empty?
-        status =
-          if reaped && worker.fetch("readers") == "complete" &&
-             worker.fetch("writer") == "complete"
-            "passed"
-          else
-            "failed"
-          end
-        {
-          "status" => status,
-          "term_sent" => worker.fetch("term_sent") || warden.term_sent,
-          "kill_sent" => worker.fetch("kill_sent") || warden.kill_sent,
-          "reaped" => reaped,
-          "readers" => worker.fetch("readers"),
-          "writer" => worker.fetch("writer"),
-          "descendants" => remaining.empty? ? "none" : "remaining",
-          "containment" => "linux_child_subreaper"
-        }
       end
 
       def emergency_cleanup(worker, warden)
@@ -225,7 +198,7 @@ module HiveLiveAgentProof
       def safe_write_failure(writer, failure)
         return if writer.nil? || writer.closed?
 
-        @protocol.write_parent_outcome(writer, failure_outcome(failure))
+        @protocol.write_owner_outcome(writer, failure_outcome(failure))
       rescue Failure, Errno::EPIPE, IOError
         nil
       end

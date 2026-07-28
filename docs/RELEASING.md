@@ -331,12 +331,18 @@ OpenClaw child. Provider credentials are exposed only to the authenticated
 proof step, not checkout, npm, Bundler, artifact, or attestation steps. The
 harness never copies host auth state, retains no model prose, scans every raw
 process-output byte before redaction, strips selected/opposite/generic provider
-credentials before every candidate invocation, and uses a Linux child-subreaper
-in an independently live containment owner to terminate and reap process-group
-escapes, `setsid` descendants, and double-forks even when the fault-injected
-worker is stopped or killed. Parent/owner/worker IPC is length-bounded JSON
-framing with strict typed keys and Base64 binary streams; malformed, truncated,
-oversized, or trailing frames fail closed.
+credentials before every candidate invocation, and uses an independent outer
+Linux child-subreaper containment root to terminate and reap process-group
+escapes, `setsid` descendants, and double-forks even when the expendable
+containment owner or fault-injected worker is stopped or killed. The root is
+the sole final-teardown authority: it observes owner stop/exit directly and
+drains each newly adopted direct-child generation without retaining a PID
+after reap. Parent/root/owner/worker IPC is length-bounded JSON framing with
+strict typed keys and Base64 binary streams; malformed, truncated, oversized,
+or trailing frames fail closed. Evidence names this authority
+`independent_root` and explicitly sets its root-loss guarantee to
+`not_claimed`: a killed containment root or a Linux task stuck in
+uninterruptible `D` state is outside the bounded guarantee.
 
 The creator proof installs exact OpenClaw `2026.7.1-beta.2` under Node
 `22.23.1` with `npm ci` from the committed lockfile. The lock is a closed

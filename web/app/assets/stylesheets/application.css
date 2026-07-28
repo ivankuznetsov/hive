@@ -863,8 +863,8 @@ pre {
     scrollbar-width: none;
   }
   .topbar .nav-link {
-    padding: 5px clamp(3px, 1vw, 5px);
-    font-size: clamp(0.74rem, 3.35vw, 0.86rem);
+    padding: 5px 3px;
+    font-size: clamp(0.72rem, 3.2vw, 0.84rem);
   }
   .topbar nav::-webkit-scrollbar { display: none; }
   .session-login { display: none; }

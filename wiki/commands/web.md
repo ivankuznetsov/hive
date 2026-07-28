@@ -175,7 +175,10 @@ sharing the URL.
 A locally authenticated operator sees the
 complete primary navigation under the `hive` product identity and is labelled
 `Local`; GitHub-dependent repository browsing stays behind an explicit
-**Connect GitHub** action. Navigation state is grouped by the first segment of
+**Connect GitHub** action. At the 390px mobile breakpoint, all six primary
+capabilities fit beside the account action without starting inside a horizontal
+scroll overflow; spacing uses fixed small insets so Linux and local Chromium
+font metrics preserve the same visible set. Navigation state is grouped by the first segment of
 Rails `controller_path`, so namespaced task, workflow, and Telegram resource
 controllers retain their parent section's active link when they render a
 complete page. Completing the optional GitHub connection from verified

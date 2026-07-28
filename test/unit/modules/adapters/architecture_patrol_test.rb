@@ -231,13 +231,19 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
   def test_default_shadow_comparator_keeps_missing_legacy_capture_noncomparable
     with_project do |project|
       scheduler = FakeScheduler.new([ candidate.merge(job_id: "other") ])
+      commands = []
       adapter = Hive::Modules::Adapters::ArchitecturePatrol.new(
+        command_factory: lambda do |name, options|
+          commands << [ name, options ]
+          FakeCommand.new
+        end,
         scheduler_factory: ->(**) { scheduler }
       )
       assert_equal 0, adapter.call(
         project: project, hook_id: "merged-pr-discovery", event: merged_event,
         configuration: configuration(shadow: true)
       )
+      assert_empty commands
       files = Dir.glob(File.join(
         project.fetch("hive_state_path"), "module-runtime", "migration", "shadow", "**", "*.json"
       ))
@@ -319,6 +325,34 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
       adapter.send(:legacy_capture, malformed)
     end
     assert_match(/legacy shadow capture is malformed/, error.message)
+
+    with_project do |project|
+      commands = []
+      malformed_event = merged_event
+      malformed_event["payload"]["legacy_mutator_capture"] = {
+        "decision" => {}, "effects" => {}
+      }
+      scheduler = FakeScheduler.new([ candidate ])
+      adapter = Hive::Modules::Adapters::ArchitecturePatrol.new(
+        command_factory: lambda do |name, options|
+          commands << [ name, options ]
+          FakeCommand.new
+        end,
+        scheduler_factory: ->(**) { scheduler }
+      )
+
+      assert_raises(Hive::ConfigError) do
+        adapter.call(
+          project: project, hook_id: "merged-pr-discovery", event: malformed_event,
+          configuration: configuration(shadow: true)
+        )
+      end
+      assert_nil scheduler.reserved
+      assert_empty commands
+      assert_empty Dir.glob(File.join(
+        project.fetch("hive_state_path"), "module-runtime", "migration", "shadow", "**", "*.json"
+      ))
+    end
   end
 
   private

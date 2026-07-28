@@ -84,6 +84,73 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_candidate_boundary_preserves_identity_and_reservation_rechecks_ownership
+    with_tmp_dir do |dir|
+      write_state(dir, "last_scanned_sha" => "old")
+      entry = project_entry(dir)
+      ownership_allowed = true
+      ownership_checks = []
+      sched = Hive::Daemon::PatrolScheduler.new(
+        registry: -> { [ entry ] },
+        config_loader: ->(_path) { enabled_cfg },
+        git: FakeGit.new,
+        migration_ownership: lambda do |candidate_entry, module_name, authority|
+          ownership_checks << [ candidate_entry, module_name, authority ]
+          ownership_allowed
+        end
+      )
+
+      candidate = sched.candidates(now: T0).fetch(0)
+
+      assert_equal(
+        {
+          project: "p1",
+          slug: "patrol",
+          stage: "patrol",
+          command: "hive patrol p1 --json",
+          patrol_kind: :ordinary,
+          state_file_mtime: nil,
+          state_file_path: nil,
+          hive_state_path: entry.fetch("hive_state_path"),
+          migration_entry: entry
+        },
+        candidate
+      )
+      refute sched.pending?("p1"), "candidate discovery must not consume the patrol turn"
+
+      ownership_allowed = false
+      assert_nil sched.reserve(candidate, now: T0)
+      refute sched.pending?("p1"), "a reservation-time ownership fence must not mark pending"
+
+      ownership_allowed = true
+      dispatch = sched.reserve(candidate, now: T0)
+      assert_equal candidate.reject { |key, _value| key == :patrol_kind }, dispatch
+      refute_includes dispatch.keys, :patrol_kind
+      assert sched.pending?("p1")
+      assert_equal(
+        [
+          [ entry, "patrol", :legacy ],
+          [ entry, "patrol", :legacy ],
+          [ entry, "patrol", :legacy ]
+        ],
+        ownership_checks
+      )
+
+      config_loads = 0
+      fenced = Hive::Daemon::PatrolScheduler.new(
+        registry: -> { [ entry ] },
+        config_loader: lambda do |_path|
+          config_loads += 1
+          enabled_cfg
+        end,
+        git: FakeGit.new,
+        migration_ownership: ->(*) { false }
+      )
+      assert_empty fenced.candidates(now: T0)
+      assert_equal 0, config_loads, "a fenced project must stop before config and due checks"
+    end
+  end
+
   def test_unchanged_sha_is_not_due
     with_tmp_dir do |dir|
       cfg = enabled_cfg("patrol" => { "enabled" => true, "trigger" => "new_commits" })

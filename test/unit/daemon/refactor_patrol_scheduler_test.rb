@@ -978,9 +978,33 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       :completion_result, :retry, { job_id: "job-7" }, nil, aggregate: aggregate
     )
 
+    assert_equal :retry, projection.fetch(:status)
+    assert_equal "job-7", projection.fetch(:job_id)
+    assert_equal 7, projection.fetch(:pr_number)
+    assert_equal "url", projection.fetch(:pr_url)
+    assert_equal 1, projection.fetch(:accepted_count)
+    assert_equal 0, projection.fetch(:flagged_count)
+    assert_equal 0, projection.fetch(:suppressed_count)
+    assert_equal 2, projection.fetch(:action_count)
     assert_equal 1, projection.fetch(:terminal_action_count)
     assert_equal [ "pending" ], projection.fetch(:pending_action_ids)
     assert_equal({ "done" => "pr_opened", "pending" => "claimed" }, projection.fetch(:action_outcomes))
+
+    classified = scheduler.send(
+      :completion_result,
+      :classified,
+      { job_id: "job-7" },
+      {
+        "accepted" => [ {}, {} ],
+        "flagged" => [ {} ],
+        "suppressed" => []
+      },
+      aggregate: aggregate
+    )
+    assert_equal :classified, classified.fetch(:status)
+    assert_equal 2, classified.fetch(:accepted_count)
+    assert_equal 1, classified.fetch(:flagged_count)
+    assert_equal({ "done" => "pr_opened", "pending" => "claimed" }, classified.fetch(:action_outcomes))
     assert_equal Time.at(0).utc, scheduler.send(:parse_time, "not-a-time")
   end
 

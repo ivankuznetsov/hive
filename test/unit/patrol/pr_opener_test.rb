@@ -208,6 +208,55 @@ class HivePatrolPrOpenerTest < Minitest::Test
     end
   end
 
+  def test_publication_orders_remote_effects_mapping_receipts_and_review_handoff
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      operations = []
+      gh = FakeGh.new
+      original_push = gh.method(:push_branch!)
+      gh.define_singleton_method(:push_branch!) do |*args, **options|
+        operations << :push
+        original_push.call(*args, **options)
+      end
+      original_capture = gh.method(:capture3)
+      gh.define_singleton_method(:capture3) do |*command, chdir: nil, cfg: nil|
+        operations << :create_pr unless command.first == "git"
+        original_capture.call(*command, chdir: chdir, cfg: cfg)
+      end
+
+      state = Hive::Patrol::StateStore.new(dir)
+      state.ensure!
+      original_write = state.method(:write_fingerprints)
+      state.define_singleton_method(:write_fingerprints) do |fingerprints|
+        operations << "mapping:#{fingerprints.dig('fp1', 'state')}"
+        original_write.call(fingerprints)
+      end
+
+      handoff = RecordingReviewHandoff.new
+      original_enqueue = handoff.method(:enqueue)
+      handoff.define_singleton_method(:enqueue) do |**attributes|
+        operations << :review_handoff
+        original_enqueue.call(**attributes)
+      end
+
+      result = Hive::Patrol::PrOpener.new(
+        dir, cfg: cfg, state: state, gh: gh, review_handoff: handoff
+      ).open(finding, patch(worktree_path: dir))
+
+      assert result.opened?
+      assert_equal(
+        [
+          :push,
+          :create_pr,
+          "mapping:reconciliation_pending",
+          :review_handoff,
+          "mapping:open"
+        ],
+        operations
+      )
+    end
+  end
+
   def test_pr_body_preserves_alpha_and_root_cause_evidence
     opener = Hive::Patrol::PrOpener.new(Dir.pwd, cfg: cfg, gh: FakeGh.new)
 

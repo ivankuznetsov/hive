@@ -93,16 +93,40 @@ class RefactorPatrolPrOpenerTest < Minitest::Test
     with_tmp_git_repo do |repo|
       gh = FakeGh.new
       handoff = Handoff.new
-      intents = 0
+      operations = []
+      original_push = gh.method(:push_branch!)
+      gh.define_singleton_method(:push_branch!) do |*args, **options|
+        operations << "push"
+        original_push.call(*args, **options)
+      end
+      original_capture = gh.method(:capture3)
+      gh.define_singleton_method(:capture3) do |*args, **options|
+        operations << "create_pr"
+        original_capture.call(*args, **options)
+      end
+      original_enqueue = handoff.method(:enqueue)
+      handoff.define_singleton_method(:enqueue) do |**arguments|
+        operations << "review_handoff"
+        original_enqueue.call(**arguments)
+      end
       result = opener(repo, gh, handoff).open(
         thesis: thesis, patch: patch(repo), job_id: "job-7",
         canonical_action_id: "fix-fp", source: source,
-        record_intent: -> { intents += 1; true }
+        record_intent: lambda do |phase:, payload:|
+          operations << phase
+          !payload.empty?
+        end
       )
 
       assert_equal "pr_opened", result.outcome
       assert result.terminal
-      assert_equal 2, intents, "push and PR create require distinct durable intents"
+      assert_equal(
+        %w[
+          push_intent push push_complete pr_create_intent create_pr review_handoff
+        ],
+        operations,
+        "each remote effect is bracketed by its incumbent durable callbacks"
+      )
       assert_equal(
         [ [ repo, "master", nil, true, "git@github.com:acme/demo.git", false ] ],
         gh.pushed

@@ -610,9 +610,14 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
       gh = FakeGh.new
       gh.details = { 2 => details(2, at: T0) }
       calls = []
+      store = job_store(dir)
       publisher = Object.new
       publisher.define_singleton_method(:pull_request_merged) do |entry, manifest|
-        calls << [ entry, manifest ]
+        calls << {
+          entry: entry,
+          manifest: manifest,
+          durable_jobs_at_publish: store.jobs.map { |job| job.fetch("job_id") }
+        }
       end
 
       aggregate = reconciler(dir, gh, module_event_publisher: publisher).ingest(
@@ -620,7 +625,13 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
       )
 
       assert_equal 1, calls.size
-      assert_equal aggregate.fetch("job_id"), calls.first.last.fetch("job_id")
+      published = calls.fetch(0)
+      assert_equal aggregate.fetch("job_id"), published.fetch(:manifest).fetch("job_id")
+      assert_equal(
+        [ aggregate.fetch("job_id") ],
+        published.fetch(:durable_jobs_at_publish),
+        "module publication must observe the already-enqueued authoritative job"
+      )
       manifests = Dir.glob(File.join(dir, ".hive-state", "refactor_patrol", "v2", "manifests", "*.json"))
       assert_equal 1, manifests.size
     end

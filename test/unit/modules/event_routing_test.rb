@@ -86,8 +86,22 @@ class ModulesEventRoutingTest < Minitest::Test
     assert_equal "owner/repo#7", record.dig(:source, "id")
     assert_equal manifest.fetch("manifest_checksum"), record.dig(:payload, "manifest_digest")
     assert_equal(
-      manifest.fetch("job_id"),
-      record.dig(:payload, "legacy_mutator_capture", "decision", "job_id")
+      {
+        "decision" => {
+          "rationale" => "due",
+          "job_id" => manifest.fetch("job_id"),
+          "phase" => "discovery"
+        },
+        "effects" => [
+          { "kind" => "job", "id" => manifest.fetch("job_id") }
+        ]
+      },
+      record.dig(:payload, "legacy_mutator_capture"),
+      "the merge event records immutable enqueue provenance, not a later scheduler outcome"
+    )
+    assert_equal(
+      "pull-request:owner/repo:7:#{'b' * 40}",
+      record.fetch(:idempotency_key)
     )
 
     without_identity = { "name" => "demo", "path" => File.expand_path("/project") }

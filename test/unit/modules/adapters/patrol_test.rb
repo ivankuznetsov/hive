@@ -150,13 +150,16 @@ class ModulesAdaptersPatrolTest < Minitest::Test
 
   def test_default_shadow_journal_and_hook_event_validation_fail_closed
     with_project do |project|
+      commands = []
       adapter = Hive::Modules::Adapters::Patrol.new(
+        command_factory: ->(*args) { commands << args; FakeCommand.new },
         scheduler_factory: ->(**) { FakeScheduler.new(nil) }
       )
       assert_equal 0, adapter.call(
         project: project, hook_id: "scheduled-scan", event: schedule_event,
         configuration: configuration(shadow: true)
       )
+      assert_empty commands
       shadow_files = Dir.glob(File.join(
         project.fetch("hive_state_path"), "module-runtime", "migration", "shadow", "**", "*.json"
       ))
@@ -244,6 +247,29 @@ class ModulesAdaptersPatrolTest < Minitest::Test
         )
       )
     )
+
+    with_project do |project|
+      commands = []
+      malformed_event = schedule_event
+      malformed_event["payload"]["legacy_mutator_capture"] = {
+        "decision" => {}, "effects" => {}
+      }
+      adapter = Hive::Modules::Adapters::Patrol.new(
+        command_factory: ->(*args) { commands << args; FakeCommand.new },
+        scheduler_factory: ->(**) { FakeScheduler.new(nil) }
+      )
+
+      assert_raises(Hive::ConfigError) do
+        adapter.call(
+          project: project, hook_id: "scheduled-scan", event: malformed_event,
+          configuration: configuration(shadow: true)
+        )
+      end
+      assert_empty commands
+      assert_empty Dir.glob(File.join(
+        project.fetch("hive_state_path"), "module-runtime", "migration", "shadow", "**", "*.json"
+      ))
+    end
   end
 
   private

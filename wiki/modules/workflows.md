@@ -150,10 +150,11 @@ packaged-workflow runner remains unavailable with the typed
 weakening owner-authored descriptor compatibility:
 
 - `AuthoringLint` is the boundary-ready facade used only by `Publisher`. It
-  lazily snapshots manifest data and permissions at their incumbent phase
-  boundaries without sorting permission hashes, coordinates private bounded
-  package-reading, format-specific command extraction, immutable network
-  observations, and finding evaluation, and preserves exact `Finding`,
+  reads manifest data and permissions at their incumbent phase boundaries
+  without cross-phase memoization or traversal of irrelevant fields, then
+  coordinates private bounded package-reading, format-specific command
+  extraction, immutable network observations, and finding evaluation, and
+  preserves exact `Finding`,
   `Result`, `LintError`, policy, fingerprint, suppression, limit, order, and
   outer scanner-error bytes. YAML remains structural; Ruby, Markdown, JSON,
   shell, and extensionless inputs retain their characterized lexical behavior.

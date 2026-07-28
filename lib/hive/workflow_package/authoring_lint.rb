@@ -43,36 +43,11 @@ module Hive
         def valid? = errors.empty?
       end
 
-      class ManifestSnapshot
-        def initialize(manifest, snapshot:)
-          @manifest = manifest
-          @snapshot = snapshot
-        end
-
-        def data
-          snapshot(:data)
-        end
-
-        def permissions
-          snapshot(:permissions)
-        end
-
-        private
-
-        def snapshot(name)
-          variable = :"@#{name}"
-          return instance_variable_get(variable) if instance_variable_defined?(variable)
-
-          instance_variable_set(
-            variable, @snapshot.call(@manifest.public_send(name))
-          )
-        end
-      end
       class UnsafeYAML < StandardError; end
 
       private_constant(
         :PackageReader, :CommandExtractor, :ObservationExtractor,
-        :FindingEvaluator, :ManifestSnapshot
+        :FindingEvaluator
       )
 
       def self.verify(root, manifest:, policy: nil)
@@ -105,15 +80,14 @@ module Hive
       end
 
       def verify
-        manifest = ManifestSnapshot.new(@manifest, snapshot: method(:deep_snapshot))
         findings = @finding_evaluator.evaluate(
-          manifest: manifest,
+          manifest: @manifest,
           package_stage: lambda do |event_sink|
             PackageReader.new(@root, limits: @policy.limits)
                          .read(event_sink: event_sink)
           end,
           command_stage: lambda do |files, event_sink|
-            CommandExtractor.new(manifest: manifest, limits: @policy.limits)
+            CommandExtractor.new(manifest: @manifest, limits: @policy.limits)
                             .extract(files, event_sink: event_sink)
           end,
           observation_stage: lambda do |commands, event_sink|
@@ -122,23 +96,6 @@ module Hive
           end
         )
         Result.new(contract: @policy.identity, findings: findings).freeze
-      end
-
-      private
-
-      def deep_snapshot(value)
-        case value
-        when Hash
-          value.each_with_object({}) do |(key, child), snapshot|
-            snapshot[deep_snapshot(key)] = deep_snapshot(child)
-          end.freeze
-        when Array
-          value.map { |child| deep_snapshot(child) }.freeze
-        when String
-          value.dup.freeze
-        else
-          value
-        end
       end
     end
   end

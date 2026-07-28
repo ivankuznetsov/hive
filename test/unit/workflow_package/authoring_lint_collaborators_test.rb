@@ -215,7 +215,7 @@ class WorkflowPackageAuthoringLintCollaboratorsTest < Minitest::Test
                     :value_option?
   end
 
-  def test_finding_buffer_pops_newest_once_and_manifest_snapshot_keeps_hash_order
+  def test_finding_buffer_pops_newest_once_and_permissions_keep_hash_order
     policy = Policy.load
     limited = policy.with(
       limits: policy.limits.merge("max_findings" => 2).freeze

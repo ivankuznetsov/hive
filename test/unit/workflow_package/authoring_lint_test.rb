@@ -545,6 +545,80 @@ class WorkflowPackageAuthoringLintTest < Minitest::Test
     end
   end
 
+  def test_same_instance_preserves_second_manifest_data_read_failure_timing
+    with_tmp_dir do |root|
+      linked = File.join(root, "linked.md")
+      File.symlink("missing.md", linked)
+      calls = 0
+      permissions = empty_permissions
+      manifest = Object.new
+      manifest.define_singleton_method(:data) do
+        calls += 1
+        raise RuntimeError, "second manifest data read" if calls == 2
+
+        {}
+      end
+      manifest.define_singleton_method(:permissions) { permissions }
+      lint = Lint.new(
+        root, manifest: manifest, policy: Hive::WorkflowPackage::LintPolicy.load
+      )
+
+      assert_raises(RuntimeError) { lint.verify }
+      File.unlink(linked)
+
+      result = lint.verify
+      assert_equal [ "policy.invalid-file" ], result.findings.map(&:rule_id)
+      assert_equal 4, calls
+    end
+  end
+
+  def test_same_instance_preserves_second_permissions_read_failure_timing
+    with_tmp_dir do |root|
+      linked = File.join(root, "linked.md")
+      File.symlink("missing.md", linked)
+      calls = 0
+      permissions = empty_permissions
+      manifest = Object.new
+      manifest.define_singleton_method(:data) do
+        {
+          "x-security" => {
+            "network_host_reasons" => {}, "suppressions" => []
+          }
+        }
+      end
+      manifest.define_singleton_method(:permissions) do
+        calls += 1
+        raise RuntimeError, "second permissions read" if calls == 2
+
+        permissions
+      end
+      lint = Lint.new(
+        root, manifest: manifest, policy: Hive::WorkflowPackage::LintPolicy.load
+      )
+
+      assert_raises(RuntimeError) { lint.verify }
+      File.unlink(linked)
+
+      result = lint.verify
+      assert_equal [ "policy.invalid-file" ], result.findings.map(&:rule_id)
+      assert_equal 4, calls
+    end
+  end
+
+  def test_ignored_cyclic_manifest_data_is_not_traversed
+    with_tmp_dir do |root|
+      cycle = []
+      cycle << cycle
+      manifest = lint_manifest(data: { "ignored" => cycle })
+
+      result = Lint.new(
+        root, manifest: manifest, policy: Hive::WorkflowPackage::LintPolicy.load
+      ).verify
+
+      assert_empty result.findings
+    end
+  end
+
   def test_unknown_rule_emission_fails_closed
     with_lint_package("person@example.test\n") do |root, manifest|
       policy = Hive::WorkflowPackage::LintPolicy.load

@@ -254,9 +254,9 @@ gem, version, or release commitment.
 `Workflow Authoring Lint` is boundary-ready as a read-only package-analysis
 component. `AuthoringLint` retains its initializer and instance `verify`, plus
 class `verify`/`verify!`, and the exact `Finding`, `Result`, `LintError`,
-`LintPolicy`, and policy-value contracts. The facade lazily snapshots manifest
-data and permissions at their incumbent phase boundaries without sorting
-permission hashes, then coordinates private package-reading,
+`LintPolicy`, and policy-value contracts. The facade reads manifest data and
+permissions at the incumbent phase boundaries without memoizing across phases
+or traversing irrelevant fields, then coordinates private package-reading,
 command-extraction, observation-extraction, and finding-evaluation
 collaborators. Package traversal and no-follow reads remain in `PackageReader`;
 YAML extraction remains structural while Ruby, Markdown, JSON, shell, and

@@ -44,7 +44,7 @@ module Hive
         )
       end
 
-      def patrol_reserved(entry, capture, schedule:)
+      def prepare_patrol_finalized(entry, capture, schedule:)
         unless capture.is_a?(Hive::Modules::Migration::PatrolCapture) &&
                capture.module_name == "patrol" &&
                capture.project.fetch("project_id") == entry.fetch("project_id").to_s &&
@@ -52,14 +52,14 @@ module Hive
           raise Hive::ConfigError, "patrol reservation capture does not match its project"
         end
 
-        ledger(entry).record(
+        ledger(entry).prepare(
           project_id: entry.fetch("project_id"), project: entry.fetch("name"),
           event_name: "schedule", occurred_at: capture.occurred_at,
           source: {
-            "type" => "legacy_patrol_reservation",
+            "type" => "legacy_patrol_completion",
             "id" => capture.occurrence_id
           },
-          idempotency_key: "patrol-reservation:#{capture.occurrence_id}",
+          idempotency_key: "patrol-finalized:#{capture.occurrence_id}",
           payload: {
             "schedule" => schedule.to_s,
             "due_at" => capture.occurred_at,
@@ -71,7 +71,17 @@ module Hive
         )
       end
 
-      def architecture_patrol_finalized(entry, capture, schedule:, target_hook:)
+      def patrol_finalized(entry, capture, schedule:)
+        event = prepare_patrol_finalized(entry, capture, schedule: schedule)
+        publish_prepared(entry, event)
+      end
+
+      # Kept as a source-compatible façade for callers outside the scheduler;
+      # it now publishes finalized semantics and must not be called at reserve.
+      alias patrol_reserved patrol_finalized
+
+      def prepare_architecture_patrol_finalized(entry, capture, schedule:,
+                                                target_hook:)
         unless capture.is_a?(Hive::Modules::Migration::PatrolCapture) &&
                capture.module_name == "architecture-patrol" &&
                capture.project.fetch("project_id") == entry.fetch("project_id").to_s &&
@@ -80,7 +90,7 @@ module Hive
                 "architecture patrol finalized capture does not match its project"
         end
 
-        ledger(entry).record(
+        ledger(entry).prepare(
           project_id: entry.fetch("project_id"), project: entry.fetch("name"),
           event_name: "schedule", occurred_at: capture.occurred_at,
           source: {
@@ -98,6 +108,17 @@ module Hive
           },
           recorded_at: @clock.call
         )
+      end
+
+      def architecture_patrol_finalized(entry, capture, schedule:, target_hook:)
+        event = prepare_architecture_patrol_finalized(
+          entry, capture, schedule: schedule, target_hook: target_hook
+        )
+        publish_prepared(entry, event)
+      end
+
+      def publish_prepared(entry, event)
+        ledger(entry).append(event)
       end
 
       def pull_request_merged(entry, manifest)

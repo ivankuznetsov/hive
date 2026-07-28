@@ -5,6 +5,7 @@ require "time"
 require "hive/atomic_file"
 require "hive/modules/migration/shadow_comparator"
 require "hive/workflow_package/canonical_json"
+require "hive/workflow_package/mutation_lock"
 
 module Hive
   module Modules
@@ -21,45 +22,66 @@ module Hive
         ].freeze
 
         class << self
-          def migrate!(root:)
-            new(root: root).migrate!
+          def migrate!(root:, quiescence_probe: -> { :ambiguous })
+            new(root: root, quiescence_probe: quiescence_probe).migrate!
+          end
+
+          def ensure_complete!(root:)
+            new(
+              root: root,
+              quiescence_probe: nil
+            ).ensure_complete!
           end
         end
 
-        def initialize(root:)
+        def initialize(root:, quiescence_probe:)
           @root = File.expand_path(root)
+          @quiescence_probe = quiescence_probe
         end
 
         def migrate!
-          return completed_result if File.file?(stamp_path)
-
           migrated = 0
           current = 0
           with_lock do
+            unless @quiescence_probe.call.to_sym == :quiescent
+              raise Hive::ConfigError,
+                    "module shadow v1 evidence migration requires quiescence"
+            end
             return completed_result if File.file?(stamp_path)
 
             evidence_paths.each do |path|
-              bytes = File.binread(path)
+              bytes = bounded_read(path)
               data = JSON.parse(bytes)
               if data["schema_version"] == 2
                 validate_v2!(path)
+                checkpoint!(path, bytes, "current")
                 current += 1
                 next
               end
 
               validate_v1!(data, bytes)
+              checkpoint!(path, bytes, "pending")
               archive_v1!(data.fetch("module"), path, bytes)
               Hive::AtomicFile.write(path, canonical(v2_record(data, bytes)), mode: 0o600)
               Hive::AtomicFile.fsync_directory(File.dirname(path))
+              checkpoint!(path, bytes, "migrated")
               migrated += 1
             end
+            validate_zero_v1!
             write_stamp(migrated: migrated, already_current: current)
+            complete_checkpoint!
           end
           Result.new(migrated: migrated, already_current: current)
         rescue Hive::ConfigError
           raise
         rescue JSON::ParserError, EncodingError, SystemCallError, IOError
           raise Hive::ConfigError, "module shadow v1 evidence migration failed"
+        end
+
+        def ensure_complete!
+          Hive::WorkflowPackage::MutationLock.with_lock(
+            File.dirname(root), shared: true
+          ) { completed_result }
         end
 
         private
@@ -76,8 +98,12 @@ module Hive
           File.join(root, "migrations", "shadow-decision-v2.json")
         end
 
+        def checkpoint_path
+          File.join(root, "migrations", "shadow-decision-v2-checkpoint.json")
+        end
+
         def completed_result
-          bytes = File.binread(stamp_path)
+          bytes = bounded_read(stamp_path)
           data = JSON.parse(bytes)
           expected = %w[already_current migrated schema schema_version status]
           valid = bytes == canonical(data) && data.keys.sort == expected &&
@@ -87,6 +113,7 @@ module Hive
                   data["already_current"].is_a?(Integer) &&
                   data["already_current"] >= 0
           raise Hive::ConfigError, "module shadow v1 migration stamp is malformed" unless valid
+          validate_zero_v1!
 
           Result.new(
             migrated: 0,
@@ -140,10 +167,16 @@ module Hive
         def validate_v2!(path)
           module_name = File.basename(File.dirname(path))
           decision_id = File.basename(path, ".json")
-          record = ShadowComparator.new(root: root).records(module_name).find do |row|
-            row["decision_id"] == decision_id
+          bytes = bounded_read(path)
+          data = JSON.parse(bytes)
+          unless bytes == canonical(data)
+            raise Hive::ConfigError, "module shadow evidence is malformed"
           end
-          raise Hive::ConfigError, "module shadow evidence is malformed" unless record
+          ShadowComparator.new(root: root).validate_record!(
+            data,
+            expected_module: module_name,
+            expected_decision_id: decision_id
+          )
         end
 
         def archive_v1!(module_name, path, bytes)
@@ -166,7 +199,7 @@ module Hive
           trigger = {
             "archived_v1_trigger_digest" => data.fetch("trigger_digest")
           }
-          {
+          record = {
             "schema" => "hive-module-shadow-decision",
             "schema_version" => 2,
             "module" => data.fetch("module"),
@@ -191,16 +224,109 @@ module Hive
               "status" => "archived_non_comparable"
             }
           }
+          record["semantic_digest"] = digest(
+            record.reject { |key, _value| key == "recorded_at" }
+          )
+          record
         end
 
         def with_lock
-          FileUtils.mkdir_p(root, mode: 0o700)
-          File.open(File.join(root, "shadow-decision-migration.lock"),
-                    File::RDWR | File::CREAT, 0o600) do |lock|
-            lock.flock(File::LOCK_EX)
-            yield
-          ensure
-            lock&.flock(File::LOCK_UN)
+          Hive::WorkflowPackage::MutationLock.with_lock(
+            File.dirname(root), shared: false
+          ) { yield }
+        end
+
+        def validate_zero_v1!
+          evidence_paths.each do |path|
+            bytes = bounded_read(path)
+            data = JSON.parse(bytes)
+            unless data["schema_version"] == 2
+              raise Hive::ConfigError,
+                    "module shadow v1 evidence remains after migration"
+            end
+            validate_v2!(path)
+          end
+        rescue JSON::ParserError, EncodingError
+          raise Hive::ConfigError, "module shadow v1 evidence migration failed"
+        end
+
+        def checkpoint!(path, source_bytes, status)
+          directory = File.dirname(checkpoint_path)
+          FileUtils.mkdir_p(directory, mode: 0o700)
+          checkpoint = read_checkpoint
+          relative = path.delete_prefix("#{root}/")
+          entry = {
+            "source_digest" => ::Digest::SHA256.hexdigest(source_bytes),
+            "status" => status
+          }
+          existing = checkpoint.fetch("files")[relative]
+          if existing && existing["source_digest"] != entry.fetch("source_digest") &&
+             existing["status"] != "migrated"
+            raise Hive::ConfigError,
+                  "module shadow v1 migration inventory changed"
+          end
+          checkpoint.fetch("files")[relative] = entry
+          Hive::AtomicFile.write(
+            checkpoint_path, canonical(checkpoint), mode: 0o600
+          )
+          Hive::AtomicFile.fsync_directory(directory)
+        end
+
+        def read_checkpoint
+          return {
+            "schema" => "hive-module-shadow-decision-migration-checkpoint",
+            "schema_version" => 1,
+            "status" => "in_progress",
+            "files" => {}
+          } unless File.file?(checkpoint_path)
+
+          bytes = bounded_read(checkpoint_path)
+          data = JSON.parse(bytes)
+          valid = bytes == canonical(data) &&
+                  data.is_a?(Hash) &&
+                  data.keys.sort == %w[files schema schema_version status] &&
+                  data["schema"] ==
+                    "hive-module-shadow-decision-migration-checkpoint" &&
+                  data["schema_version"] == 1 &&
+                  %w[in_progress complete].include?(data["status"]) &&
+                  data["files"].is_a?(Hash)
+          unless valid
+            raise Hive::ConfigError,
+                  "module shadow v1 migration checkpoint is malformed"
+          end
+          data
+        rescue JSON::ParserError, EncodingError
+          raise Hive::ConfigError,
+                "module shadow v1 migration checkpoint is malformed"
+        end
+
+        def complete_checkpoint!
+          checkpoint = read_checkpoint.merge("status" => "complete")
+          Hive::AtomicFile.write(
+            checkpoint_path, canonical(checkpoint), mode: 0o600
+          )
+          Hive::AtomicFile.fsync_directory(File.dirname(checkpoint_path))
+        end
+
+        def bounded_read(path)
+          stat = File.lstat(path)
+          unless stat.file? && !stat.symlink? &&
+                 stat.size <= ShadowComparator::MAX_RECORD_BYTES
+            raise Hive::ConfigError,
+                  "module shadow v1 evidence migration failed"
+          end
+          File.open(
+            path,
+            File::RDONLY |
+              (defined?(File::NOFOLLOW) ? File::NOFOLLOW : 0)
+          ) do |io|
+            bytes = io.read(ShadowComparator::MAX_RECORD_BYTES + 1)
+            if bytes.nil? ||
+               bytes.bytesize > ShadowComparator::MAX_RECORD_BYTES
+              raise Hive::ConfigError,
+                    "module shadow v1 evidence migration failed"
+            end
+            bytes
           end
         end
 

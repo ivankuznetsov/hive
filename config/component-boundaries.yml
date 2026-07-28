@@ -6,7 +6,7 @@ schema_version: 1
 components:
   - id: patrol-effects
     name: Patrol Effect Evidence
-    state: boundary-ready
+    state: candidate
     entrypoint:
       file: lib/hive/modules/migration/patrol_evidence.rb
       require: hive/modules/migration/patrol_evidence
@@ -21,47 +21,116 @@ components:
     owned_paths:
       - lib/hive/modules/migration/patrol_evidence.rb
       - lib/hive/modules/migration/evidence_store.rb
+      - lib/hive/modules/migration/effect_admission.rb
+      - lib/hive/modules/migration/effect_delivery.rb
+      - lib/hive/modules/migration/effect_receipt_ledger.rb
+      - lib/hive/modules/migration/effect_sender.rb
+      - lib/hive/modules/migration/occurrence_effects.rb
+      - lib/hive/modules/migration/occurrence_journal.rb
+      - lib/hive/modules/migration/occurrence_outbox.rb
+      - lib/hive/modules/migration/occurrence_record_store.rb
+      - lib/hive/modules/migration/occurrence_record_validator.rb
       - lib/hive/patrol/effect_gateway.rb
+      - lib/hive/refactor_patrol/action_claim_transitions.rb
+      - lib/hive/refactor_patrol/action_plan_transitions.rb
+      - lib/hive/refactor_patrol/action_transition_context.rb
+      - lib/hive/refactor_patrol/action_transitions.rb
+      - lib/hive/refactor_patrol/architecture_intake_transitions.rb
+      - lib/hive/refactor_patrol/architecture_occurrence_binding.rb
+      - lib/hive/refactor_patrol/architecture_occurrence_lifecycle.rb
+      - lib/hive/refactor_patrol/architecture_occurrence_store.rb
+      - lib/hive/refactor_patrol/discovery_block_transitions.rb
+      - lib/hive/refactor_patrol/discovery_claim_transitions.rb
+      - lib/hive/refactor_patrol/discovery_transition_context.rb
+      - lib/hive/refactor_patrol/discovery_transitions.rb
       - lib/hive/refactor_patrol/effect_errors.rb
       - lib/hive/refactor_patrol/effect_gateway.rb
+      - lib/hive/refactor_patrol/transition_gateway.rb
     state_contracts:
-      - "Immutable occurrence captures and append-only effect receipts under module-runtime/migration/patrol-evidence"
-      - "Ordinary StateStore and Architecture JobStore remain the only recovery authorities"
+      - "StateStore and JobStore expose the only product recovery APIs over one OccurrenceJournal facade; OccurrenceRecordStore is the sole occurrence-cell lock/read/write owner"
+      - "ArchitectureOccurrenceBinding is the sole writer of the immutable job-to-occurrence identity edge; it contains no effect or retry state"
+      - "Canonical occurrence records atomically bind sender leases, delivery uncertainty, terminal outcomes, and ordered projection outbox bytes"
+      - "EvidenceStore is an append-only bounded observational projection under module-runtime/migration/patrol-evidence and is never consulted for retry"
+      - "ActionRunner and RefactorPatrolScheduler decide product work; composed action/discovery transition coordinators own durable transition identities, claim fences, and replay"
     schema_contracts:
       - "hive-patrol-capture v1 and hive-patrol-effect-receipt v1 are strict canonical observation records"
     lock_contracts:
-      - "Incumbent durable intent before the shared migration admission lock; live owner, epoch, config, capability, and claim checks surround each sink"
+      - "Persist intent before shared migration admission; under live owner, epoch, config, module-generation, capability, and claim checks, per-occurrence CAS grants at most one sender lease"
+      - "Expired dispatch uncertainty is reconciliation-only; exact absence must settle before a fresh CAS can grant another sender"
+      - "Architecture manifest reservation and job binding serialize before the enqueue transition; command and daemon intake share the same coordinator"
     component_dependencies: []
     allowed_hive_dependencies:
       - hive/atomic_file
       - hive/config
       - hive/errors
+      - hive/module_package/managed_store
+      - hive/modules/capability_context
       - hive/modules/migration/patrols
+      - hive/refactor_patrol/job_store
+      - hive/refactor_patrol/pr_manifest
+      - hive/refactor_patrol/publication_attempt
       - hive/workflow_package/canonical_json
     internal_collaborators:
+      - Hive::Modules::Migration::EffectAdmission
+      - Hive::Modules::Migration::EffectDelivery
+      - Hive::Modules::Migration::EffectReceiptLedger
+      - Hive::Modules::Migration::EffectSender
       - Hive::Modules::Migration::EvidenceStore
+      - Hive::Modules::Migration::OccurrenceEffects
+      - Hive::Modules::Migration::OccurrenceJournal
+      - Hive::Modules::Migration::OccurrenceOutbox
+      - Hive::Modules::Migration::OccurrenceRecordStore
+      - Hive::Modules::Migration::OccurrenceRecordValidator
       - Hive::Patrol::EffectGateway
+      - Hive::RefactorPatrol::ActionClaimTransitions
+      - Hive::RefactorPatrol::ActionPlanTransitions
+      - Hive::RefactorPatrol::ActionTransitionContext
+      - Hive::RefactorPatrol::ActionTransitions
+      - Hive::RefactorPatrol::ArchitectureIntakeTransitions
+      - Hive::RefactorPatrol::ArchitectureOccurrenceBinding
+      - Hive::RefactorPatrol::ArchitectureOccurrenceLifecycle
+      - Hive::RefactorPatrol::ArchitectureOccurrenceStore
+      - Hive::RefactorPatrol::DiscoveryBlockTransitions
+      - Hive::RefactorPatrol::DiscoveryClaimTransitions
+      - Hive::RefactorPatrol::DiscoveryTransitionContext
+      - Hive::RefactorPatrol::DiscoveryTransitions
       - Hive::RefactorPatrol::EffectGateway
+      - Hive::RefactorPatrol::TransitionGateway
     forbidden_constructions: []
     authorized_internal_constructions: []
     hive_consumers:
       - lib/hive/commands/patrol.rb
+      - lib/hive/commands/refactor_patrol.rb
       - lib/hive/daemon/patrol_scheduler.rb
+      - lib/hive/daemon/refactor_patrol_merge_reconciler.rb
       - lib/hive/daemon/refactor_patrol_scheduler.rb
       - lib/hive/modules/adapters/architecture_patrol.rb
       - lib/hive/modules/adapters/patrol.rb
       - lib/hive/patrol/pr_opener.rb
       - lib/hive/patrol/state_store.rb
       - lib/hive/refactor_patrol/action_runner.rb
-    mutation_authority: "The separate ordinary and architecture gateways authorize their own product sinks; shared values and EvidenceStore have no mutation authority."
-    recovery_surface: "Evidence is observation-only; fingerprint publication state, ReviewHandoff, JobStore, and Safe Agent Git Gate retain reconciliation and recovery."
+      - lib/hive/refactor_patrol/job_store.rb
+    mutation_authority: "The separate ordinary and architecture gateways authorize product sinks; TransitionGateway is the architecture JobStore port, while shared values, OccurrenceJournal, and EvidenceStore contain no product policy."
+    recovery_surface: "StateStore and JobStore are the only product recovery authorities over the single OccurrenceJournal mechanic; EvidenceStore is observation-only and Safe Agent Git Gate retains Git reconciliation."
     wiki_page: wiki/modules/patrol.md
     focused_tests:
       - test/unit/modules/migration/evidence_store_test.rb
+      - test/unit/modules/migration/effect_delivery_collaborators_test.rb
+      - test/unit/modules/migration/occurrence_journal_test.rb
       - test/unit/modules/migration/patrol_evidence_test.rb
+      - test/unit/daemon/refactor_patrol_scheduler_test.rb
       - test/unit/patrol/effect_gateway_test.rb
+      - test/unit/patrol/state_store_effect_intents_test.rb
+      - test/unit/refactor_patrol/action_runner_test.rb
+      - test/unit/refactor_patrol/action_transitions_test.rb
+      - test/unit/refactor_patrol/architecture_intake_transitions_test.rb
+      - test/unit/refactor_patrol/architecture_occurrence_store_test.rb
+      - test/unit/refactor_patrol/discovery_transitions_test.rb
       - test/unit/refactor_patrol/effect_gateway_test.rb
-    migration_exceptions: []
+      - test/unit/refactor_patrol/transition_gateway_test.rb
+    migration_exceptions:
+      - reason: "U3 must prove candidate-bound compressed evidence and production qualification before this internal transition boundary can be promoted."
+        removal_unit: U3
 
   - id: attempts
     name: Attempts admission / future RunReceipt

@@ -40,11 +40,31 @@ module Hive
 
       def record(project_id:, project:, event_name:, occurred_at:, source:, idempotency_key:,
                  payload: {}, recorded_at: Time.now.utc)
-        event = build_event(
+        append(
+          prepare(
+            project_id: project_id, project: project, event_name: event_name,
+            occurred_at: occurred_at, source: source,
+            idempotency_key: idempotency_key, payload: payload,
+            recorded_at: recorded_at
+          )
+        )
+      end
+
+      # Canonical event construction is deliberately separate from append so
+      # an authoritative producer can atomically persist these exact bytes in
+      # its own outbox before this observational ledger is touched.
+      def prepare(project_id:, project:, event_name:, occurred_at:, source:,
+                  idempotency_key:, payload: {}, recorded_at: Time.now.utc)
+        build_event(
           project_id: project_id, project: project, event_name: event_name,
           occurred_at: occurred_at, source: source, idempotency_key: idempotency_key,
           payload: payload, recorded_at: recorded_at
-        )
+        ).freeze
+      end
+
+      def append(event)
+        bytes = canonical(event)
+        event = parse(bytes, expected_id: event["event_id"])
         with_lock do
           existing = fetch_unlocked(event.fetch("event_id"))
           if existing

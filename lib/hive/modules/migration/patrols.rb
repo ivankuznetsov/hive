@@ -5,6 +5,7 @@ require "hive/atomic_file"
 require "hive/config"
 require "hive/module_package/managed_store"
 require "hive/modules/migration/report"
+require "hive/modules/migration/shadow_decision_migration"
 require "hive/workflow_package/canonical_json"
 require "hive/workflow_package/mutation_lock"
 
@@ -182,10 +183,13 @@ module Hive
         def read = self.class.read_state(project_root, hive_state_path: hive_state_path)
 
         def adopt!(now: Time.now.utc)
+          immediate = nil
+          migration_ready = false
           mutate do
             state = read || initial_state(now)
             if %w[shadowing module].include?(state.fetch("status"))
-              next outcome("already_current", state)
+              immediate = outcome("already_current", state)
+              next
             end
             bindings = module_bindings
             pending = state.merge(
@@ -198,19 +202,57 @@ module Hive
             write(pending)
             blockers = quiescence_blockers
             if blockers.empty?
-              active = pending.merge(
-                "status" => "shadowing",
-                "admissions" => MODULES.to_h { |name| [ name, true ] },
-                "blockers" => {}, "shadow_started_at" => pending["shadow_started_at"] || timestamp(now),
-                "updated_at" => timestamp(now)
-              )
-              write(active)
-              outcome("shadowing", active)
+              migration_ready = true
             else
               fenced = pending.merge("blockers" => blockers, "updated_at" => timestamp(now))
               write(fenced)
-              outcome("pending", fenced, blockers)
+              immediate = outcome("pending", fenced, blockers)
             end
+          end
+          return immediate if immediate
+          unless migration_ready
+            raise Hive::ConfigError,
+                  "patrol module migration admission is unavailable"
+          end
+
+          # Admission is durably closed before the one-off v1 inventory starts.
+          # The migrator takes the same exclusive migration lock, independently
+          # proves old workers quiescent, converts/checkpoints every file, and
+          # stamps only after a zero-v1 rescan. Runtime readers remain v2-only.
+          migrate_shadow_decisions!
+
+          mutate do
+            state = read || raise(
+              Hive::ConfigError,
+              "patrol module migration state disappeared during adoption"
+            )
+            if %w[shadowing module].include?(state.fetch("status"))
+              next outcome("already_current", state)
+            end
+            unless state.fetch("status") == "pending"
+              raise Hive::ConfigError,
+                    "patrol module migration changed during adoption"
+            end
+            blockers = quiescence_blockers
+            unless blockers.empty?
+              fenced = state.merge(
+                "blockers" => blockers, "updated_at" => timestamp(now)
+              )
+              write(fenced)
+              next outcome("pending", fenced, blockers)
+            end
+
+            active = state.merge(
+              "status" => "shadowing",
+              "bindings" => module_bindings,
+              "admissions" => MODULES.to_h { |name| [ name, true ] },
+              "blockers" => {},
+              "shadow_started_at" =>
+                state["shadow_started_at"] || timestamp(now),
+              "updated_at" => timestamp(now)
+            )
+            write(active)
+            outcome("shadowing", active)
           end
         end
 
@@ -357,6 +399,17 @@ module Hive
           end.to_h
         end
 
+        def migrate_shadow_decisions!
+          ShadowDecisionMigration.migrate!(
+            root: File.join(@migration_dir, "shadow"),
+            quiescence_probe: lambda do
+              blockers = quiescence_blockers
+              blockers.empty? ? :quiescent :
+                blockers.value?("live") ? :live : :ambiguous
+            end
+          )
+        end
+
         def assert_report_bindings!(state, report)
           report.configuration_digests.each do |name, digest_value|
             unless state.dig("bindings", name, "configuration_digest") == digest_value
@@ -370,7 +423,8 @@ module Hive
 
           payload = report.payload
           comparator = Hive::Modules::Migration::ShadowComparator.new(
-            root: File.join(@migration_dir, "shadow")
+            root: File.join(@migration_dir, "shadow"),
+            admission_lock: ->(shared: true, &block) { block.call }
           )
           current = Hive::Modules::Migration::Report.build(
             records: comparator.records,

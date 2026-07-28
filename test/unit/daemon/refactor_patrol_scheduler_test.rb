@@ -55,6 +55,25 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_reservation_rejects_a_malformed_live_migration_snapshot
+    with_project do |_dir, entry, store|
+      enqueue(store)
+      scheduler = scheduler(entry, store)
+      candidate = scheduler.candidates(now: T0).first
+      scheduler.instance_variable_set(
+        :@migration_snapshot,
+        ->(*) { { "owner" => "legacy", "admission" => true, "epoch" => 0 } }
+      )
+
+      error = assert_raises(Hive::Daemon::RefactorPatrolScheduler::ReservationBlocked) do
+        scheduler.reserve(candidate, now: T0)
+      end
+
+      assert_equal "migration_ownership_changed", error.reason
+      assert_equal "queued", store.read_job("job-7").fetch("state")
+    end
+  end
+
   def test_candidate_pass_snapshots_registration_identity_and_continuation_ledger_once
     with_project do |_dir, entry, store|
       enqueue(store, job_id: "first", number: 7, merged_at: T0)
@@ -410,10 +429,10 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
         )
       )
       finalized = evidence.captures.find do |capture|
-        capture.reservation.dig("outcome", "status") == "closed"
+        capture.decision["completion_status"] == "closed"
       end
       refute_nil finalized
-      assert_equal "not_due", finalized.decision.fetch("rationale")
+      assert_equal "complete", finalized.decision.fetch("rationale")
       event = Hive::Modules::EventLedger.new(
         root: File.join(entry.fetch("hive_state_path"), "module-runtime")
       ).all.find do |candidate_event|
@@ -446,6 +465,28 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
         dispatch_token: dispatch.fetch(:dispatch_token), exit_code: 0,
         envelope: complete_zero_envelope(entry), now: T0 + 3
       ).fetch(:status)
+    end
+  end
+
+  def test_completion_reports_stale_when_the_claim_settles_during_checkpoint
+    with_project do |_dir, entry, store|
+      enqueue(store)
+      scheduler = scheduler(entry, store)
+      dispatch = scheduler.reserve(scheduler.candidates(now: T0).first, now: T0)
+      scheduler.define_singleton_method(:checkpoint_discovery_through_gateway!) do |*, **|
+        raise Hive::RefactorPatrol::JobStore::StaleClaim, "claim already settled"
+      end
+
+      result = scheduler.complete(
+        dispatch_token: dispatch.fetch(:dispatch_token),
+        exit_code: 0,
+        envelope: complete_zero_envelope(entry),
+        now: T0 + 1
+      )
+
+      assert_equal :stale, result.fetch(:status)
+      assert_equal "job-7", result.fetch(:job_id)
+      assert_equal "analyzing", store.read_job("job-7").fetch("state")
     end
   end
 

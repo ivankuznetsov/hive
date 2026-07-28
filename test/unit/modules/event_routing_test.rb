@@ -18,10 +18,19 @@ class ModulesEventRoutingTest < Minitest::Test
     end
 
     def record(**attributes)
-      @records << attributes
-      event = attributes.transform_keys(&:to_s).merge(
+      append(prepare(**attributes))
+    end
+
+    def prepare(**attributes)
+      attributes.transform_keys(&:to_s).merge(
         "event_id" => "evt-#{'a' * 64}", "payload" => attributes.fetch(:payload)
       )
+    end
+
+    def append(event)
+      @records << event.each_with_object({}) do |(key, value), record|
+        record[key.to_sym] = value unless key == "event_id"
+      end
       Hive::Modules::EventResult.new(status: :created, event: event)
     end
   end
@@ -156,6 +165,20 @@ class ModulesEventRoutingTest < Minitest::Test
                  architecture_record.dig(:payload, "target_module")
     assert_equal "scheduled-discovery",
                  architecture_record.dig(:payload, "target_hook")
+
+    assert_raises(Hive::ConfigError) do
+      publisher.prepare_patrol_finalized(
+        entry, architecture, schedule: "*/10 * * * *"
+      )
+    end
+    assert_raises(Hive::ConfigError) do
+      publisher.prepare_architecture_patrol_finalized(
+        entry.merge("name" => "other"),
+        architecture,
+        schedule: "*/10 * * * *",
+        target_hook: "scheduled-discovery"
+      )
+    end
   end
 
   def test_publisher_persists_registration_with_default_ledger_factory

@@ -390,6 +390,28 @@ class ModulesDaemonRuntimeTest < Minitest::Test
     end
   end
 
+  def test_default_migration_owner_reads_the_durable_owner
+    with_tmp_dir do |root|
+      runtime = Hive::Modules::DaemonRuntime.new(
+        attempt_store: Object.new,
+        attempt_dispatcher: Object.new,
+        registry: -> { [] }
+      )
+      owner = runtime.instance_variable_get(:@migration_owner)
+
+      assert_equal(
+        "legacy",
+        owner.call(
+          {
+            "path" => root,
+            "hive_state_path" => File.join(root, ".hive-state")
+          },
+          "patrol"
+        )
+      )
+    end
+  end
+
   private
 
   def with_runtime(schedules: [], publish_event: true, module_name: "demo",

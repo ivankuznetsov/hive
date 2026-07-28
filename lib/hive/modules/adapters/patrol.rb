@@ -98,6 +98,7 @@ module Hive
             {
               json: true, dry_run: dry_run, project_entry: project,
               config_loader: ->(_path) { cfg }, capability_context: context,
+              module_execution: module_execution(configuration),
               capture: module_capture(project, event),
               migration_authority: :module
             }
@@ -115,6 +116,15 @@ module Hive
             "poll_interval_sec" => settings.fetch("poll_interval_sec")
           }
           Hive::Config.deep_merge(current, "patrol" => overrides)
+        end
+
+        def module_execution(configuration)
+          {
+            "module" => "patrol",
+            "generation" =>
+              configuration.generation.fetch("source_commit"),
+            "configuration_digest" => configuration.digest
+          }
         end
 
         def task_matches?(configuration, event)
@@ -184,9 +194,18 @@ module Hive
         end
 
         def occurrence_receipts(project, capture)
-          evidence_store(project).receipts.select do |receipt|
-            receipt.intent.module_name == "patrol" &&
-              receipt.intent.occurrence_id == capture.occurrence_id
+          page = evidence_store(project).receipts_for_occurrence(
+            capture.occurrence_id,
+            limit:
+              Hive::Modules::Migration::PatrolEvidence::
+                MAX_EFFECTS_PER_OCCURRENCE
+          )
+          if page.next_cursor
+            raise Hive::ConfigError,
+                  "Patrol occurrence receipt index exceeds its bound"
+          end
+          page.records.select do |receipt|
+            receipt.intent.module_name == "patrol"
           end
         end
 

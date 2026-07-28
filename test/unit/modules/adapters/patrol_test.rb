@@ -6,7 +6,7 @@ class ModulesAdaptersPatrolTest < Minitest::Test
   include HiveTestHelper
 
   NOW = Time.utc(2026, 7, 22, 15, 0, 0)
-  Configuration = Data.define(:settings, :grants, :digest)
+  Configuration = Data.define(:settings, :grants, :digest, :generation)
 
   class FakeCommand
     def initialize(result = { "ok" => true }) = @result = result
@@ -271,6 +271,106 @@ class ModulesAdaptersPatrolTest < Minitest::Test
     end
   end
 
+  def test_shadow_partitions_receipts_and_rejects_cross_project_capture
+    adapter = Hive::Modules::Adapters::Patrol.new
+    wrong_project = event(
+      "schedule",
+      "project" => "other",
+      "payload" => { "legacy_mutator_capture" => capture.to_h }
+    )
+    assert_raises(Hive::ConfigError) do
+      adapter.send(:legacy_capture, wrong_project)
+    end
+
+    receipt_type = Data.define(:intent)
+    intent_type = Data.define(:module_name, :authority)
+    legacy = receipt_type.new(
+      intent: intent_type.new(
+        module_name: "patrol", authority: "legacy"
+      )
+    )
+    shadow = receipt_type.new(
+      intent: intent_type.new(
+        module_name: "patrol", authority: "shadow"
+      )
+    )
+    recorded = []
+    comparator = Object.new
+    comparator.define_singleton_method(:record!) do |**attributes|
+      recorded << attributes
+    end
+    adapter.define_singleton_method(:occurrence_receipts) do |*, **|
+      [ legacy, shadow ]
+    end
+    adapter.define_singleton_method(:shadow_comparator) do |_project|
+      comparator
+    end
+    shadow_event = schedule_event
+    shadow_event["payload"]["legacy_mutator_capture"] = capture.to_h
+    assert_equal 0, adapter.send(
+      :shadow,
+      { "path" => "/tmp/project" },
+      configuration(shadow: true),
+      shadow_event,
+      "due"
+    )
+    assert_equal [ legacy ], recorded.fetch(0).fetch(:legacy_effects)
+    assert_equal [ shadow ], recorded.fetch(0).fetch(:module_effects)
+  end
+
+  def test_occurrence_receipt_index_is_bounded_and_module_filtered
+    adapter = Hive::Modules::Adapters::Patrol.new
+    page_type = Data.define(:records, :next_cursor)
+    receipt_type = Data.define(:intent)
+    intent_type = Data.define(:module_name)
+    patrol_receipt = receipt_type.new(
+      intent: intent_type.new(module_name: "patrol")
+    )
+    foreign_receipt = receipt_type.new(
+      intent: intent_type.new(module_name: "architecture-patrol")
+    )
+    store = Object.new
+    store.define_singleton_method(:receipts_for_occurrence) do |*, **|
+      page_type.new(
+        records: [ patrol_receipt, foreign_receipt ],
+        next_cursor: nil
+      )
+    end
+    adapter.define_singleton_method(:evidence_store) { |_project| store }
+    assert_equal(
+      [ patrol_receipt ],
+      adapter.send(
+        :occurrence_receipts,
+        { "path" => "/tmp/project" },
+        capture
+      )
+    )
+
+    store.define_singleton_method(:receipts_for_occurrence) do |*, **|
+      page_type.new(records: [], next_cursor: "receipt-next")
+    end
+    assert_raises(Hive::ConfigError) do
+      adapter.send(
+        :occurrence_receipts,
+        { "path" => "/tmp/project" },
+        capture
+      )
+    end
+  end
+
+  def test_module_capture_and_default_evidence_store_obey_ownership
+    with_project(owner: "legacy") do |project|
+      adapter = Hive::Modules::Adapters::Patrol.new
+      assert_raises(Hive::ConfigError) do
+        adapter.send(:module_capture, project, schedule_event)
+      end
+      assert_instance_of(
+        Hive::Modules::Migration::EvidenceStore,
+        adapter.send(:evidence_store, project)
+      )
+    end
+  end
+
   private
 
   def with_project(owner: "legacy")
@@ -334,7 +434,9 @@ class ModulesAdaptersPatrolTest < Minitest::Test
         "filesystem_read" => [ "repository" ],
         "filesystem_write" => [ ".hive-state/patrol/**", ".hive-state/stages/**" ],
         "secrets" => []
-      }, digest: "d" * 64
+      },
+      digest: "d" * 64,
+      generation: { "source_commit" => "a" * 40 }
     )
   end
 

@@ -11,6 +11,8 @@ require "hive/lock"
 require "hive/process_kill"
 require "hive/refactor_patrol/checkout_guard"
 require "hive/refactor_patrol/job_store"
+require "hive/refactor_patrol/architecture_occurrence_lifecycle"
+require "hive/refactor_patrol/discovery_transitions"
 require "hive/refactor_patrol/pr_manifest"
 require "hive/refactor_patrol/process_group_resolver"
 require "hive/refactor_patrol/repository_ownership"
@@ -50,7 +52,7 @@ module Hive
                      lease_sec: 7200, dry_run: false,
                      migration_authority: :legacy, migration_ownership: nil,
                      migration_snapshot: nil, evidence_store_factory: nil,
-                     event_publisher: nil)
+                     event_publisher: nil, module_execution: nil)
         @registry = registry
         @config_loader = config_loader
         @job_store_factory = job_store_factory
@@ -92,6 +94,30 @@ module Hive
           )
         end
         @event_publisher = event_publisher || Hive::Modules::EventPublisher.new
+        @module_execution = module_execution
+        @occurrence_lifecycle =
+          Hive::RefactorPatrol::ArchitectureOccurrenceLifecycle.new(
+            migration_authority: @migration_authority,
+            dry_run: @dry_run,
+            evidence_store_factory: @evidence_store_factory,
+            event_publisher: @event_publisher,
+            module_schedule: MODULE_SCHEDULE,
+            reservation_error: ReservationBlocked
+          )
+        @discovery_transitions =
+          Hive::RefactorPatrol::DiscoveryTransitions.new(
+            config_loader: @config_loader,
+            migration_snapshot: @migration_snapshot,
+            evidence_store_factory: @evidence_store_factory,
+            module_execution: @module_execution,
+            owner: @owner,
+            owner_pid: @owner_pid,
+            owner_process_start_time: @owner_process_start_time,
+            lease_sec: @lease_sec,
+            claim_resolver: @claim_resolver,
+            reservation_error: ReservationBlocked,
+            occurrence_lifecycle: @occurrence_lifecycle
+          )
         @events = []
         @schemers = SUPPORTED_REPORT_SCHEMA_VERSIONS.to_h do |version|
           [ version, JSONSchemer.schema(Pathname.new(Hive::Schemas.schema_path("hive-refactor-patrol", version: version))) ]
@@ -104,6 +130,7 @@ module Hive
         block_configuration_errors(now)
         due_by_project = managed.to_h do |entry|
           store = store_for(entry)
+          recover_projections(store, entry)
           discovery = if entry.dig("_refactor_patrol_cfg", "refactor_patrol", "enabled") == true
             store.claimable_jobs(now: now)
           else
@@ -166,7 +193,6 @@ module Hive
                migration["epoch"].to_i.positive?
           raise ReservationBlocked.new("migration_ownership_changed")
         end
-        reservation_id = "architecture-#{SecureRandom.hex(16)}"
         phase = candidate.fetch(:action_phase, :discovery).to_sym
         store = store_for(entry)
         aggregate = store.read_job(candidate.fetch(:job_id))
@@ -206,6 +232,9 @@ module Hive
         end
         manifest_path = candidate.fetch(:manifest_path)
         assert_manifest_matches!(manifest_path, aggregate)
+        capture = reserve_occurrence(
+          store, entry, aggregate, migration, now
+        )
         result_path = result_path_for(entry, aggregate.fetch("job_id"), phase)
         if phase == :action
           token = {
@@ -214,7 +243,8 @@ module Hive
             job_id: aggregate.fetch("job_id"),
             registration: entry.fetch("name"),
             result_path: result_path,
-            reservation_id: reservation_id,
+            reservation_id: capture.occurrence_id,
+            occurrence_id: capture.occurrence_id,
             migration_owner: migration.fetch("owner"),
             migration_epoch: migration.fetch("epoch")
           }
@@ -223,7 +253,9 @@ module Hive
             stage: PATROL_STAGE,
             command: "hive refactor-patrol #{Shellwords.escape(entry.fetch('name'))} " \
                      "--job-manifest #{Shellwords.escape(manifest_path)} " \
-                     "--result-file #{Shellwords.escape(result_path)} --actions --json",
+                     "--result-file #{Shellwords.escape(result_path)} " \
+                     "--occurrence-id #{Shellwords.escape(capture.occurrence_id)} " \
+                     "--actions --json",
             state_file_mtime: nil,
             state_file_path: nil,
             hive_state_path: entry["hive_state_path"],
@@ -250,10 +282,9 @@ module Hive
         token = if @dry_run
           { job_id: aggregate.fetch("job_id"), owner: @owner, generation: 0, dry_run: true }
         else
-          store.claim_discovery!(
-            aggregate.fetch("job_id"), owner: @owner, analysis_sha: analysis_sha,
-            now: now, lease_sec: @lease_sec, claim_resolver: @claim_resolver,
-            owner_pid: @owner_pid, owner_process_start_time: @owner_process_start_time
+          claim_discovery_through_gateway!(
+            entry, store, capture, aggregate,
+            analysis_sha: analysis_sha, now: now
           )
         end
         raise ReservationBlocked.new("claim_unavailable") unless token
@@ -263,7 +294,8 @@ module Hive
           stage: PATROL_STAGE,
           command: "hive refactor-patrol #{Shellwords.escape(entry.fetch('name'))} " \
                    "--job-manifest #{Shellwords.escape(manifest_path)} " \
-                   "--result-file #{Shellwords.escape(result_path)} --json",
+                   "--result-file #{Shellwords.escape(result_path)} " \
+                   "--occurrence-id #{Shellwords.escape(capture.occurrence_id)} --json",
           state_file_mtime: nil,
           state_file_path: nil,
           hive_state_path: entry["hive_state_path"],
@@ -271,7 +303,8 @@ module Hive
             kind: :architecture_patrol, phase: :discovery,
             registration: entry.fetch("name"), result_path: result_path,
             analysis_sha: analysis_sha,
-            reservation_id: reservation_id,
+            reservation_id: capture.occurrence_id,
+            occurrence_id: capture.occurrence_id,
             migration_owner: migration.fetch("owner"),
             migration_epoch: migration.fetch("epoch")
           )
@@ -305,8 +338,11 @@ module Hive
         return dispatch if @dry_run || token[:dry_run]
         return dispatch if token[:phase] == :action
 
-        store_for(dispatch.fetch(:entry)).release_discovery!(
-          token, reason: reason, now: now, backoff_sec: RETRY_BACKOFF_SEC
+        entry = dispatch.fetch(:entry)
+        store = store_for(entry)
+        release_discovery_through_gateway!(
+          entry, store, token, reason: reason, now: now,
+          backoff_sec: RETRY_BACKOFF_SEC
         )
       rescue Hive::RefactorPatrol::JobStore::StaleClaim
         nil
@@ -320,8 +356,9 @@ module Hive
         store = store_for(entry)
         aggregate = store.read_job(dispatch_token.fetch(:job_id))
         unless exit_code == 0 && envelope.is_a?(Hash) && valid_report_envelope?(envelope)
-          aggregate = store.release_discovery!(
-            dispatch_token, reason: completion_failure_reason(exit_code, envelope),
+          aggregate = release_discovery_through_gateway!(
+            entry, store, dispatch_token,
+            reason: completion_failure_reason(exit_code, envelope),
             now: now, backoff_sec: RETRY_BACKOFF_SEC
           )
           result = completion_result(
@@ -331,10 +368,9 @@ module Hive
           return result
         end
 
-        aggregate = store.checkpoint_discovery!(
-          dispatch_token,
-          envelope: envelope,
-          now: now,
+        aggregate = checkpoint_discovery_through_gateway!(
+          entry, store, dispatch_token,
+          envelope: envelope, now: now,
           backoff_sec: discovery_backoff_sec(envelope, now)
         )
         result = completion_result(
@@ -349,12 +385,22 @@ module Hive
         result
       rescue Hive::RefactorPatrol::JobStore::StaleClaim
         completion_result(:stale, dispatch_token, envelope, aggregate: aggregate)
+      rescue Hive::RefactorPatrol::EffectGateway::Denied => e
+        raise unless e.reason == "stale_claim"
+
+        aggregate = store&.read_job(dispatch_token.fetch(:job_id))
+        completion_result(
+          :stale, dispatch_token, envelope, aggregate: aggregate
+        )
       rescue Hive::RefactorPatrol::JobStore::Error, KeyError
         begin
-          store&.release_discovery!(
-            dispatch_token, reason: "mismatched_completion", now: now,
-            backoff_sec: RETRY_BACKOFF_SEC
-          )
+          if entry && store
+            release_discovery_through_gateway!(
+              entry, store, dispatch_token,
+              reason: "mismatched_completion", now: now,
+              backoff_sec: RETRY_BACKOFF_SEC
+            )
+          end
         rescue Hive::RefactorPatrol::JobStore::Error
           nil
         end
@@ -362,6 +408,66 @@ module Hive
       end
 
       private
+
+      def claim_discovery_through_gateway!(entry, store, capture, aggregate,
+                                           analysis_sha:, now:)
+        @discovery_transitions.claim(
+          entry: entry,
+          store: store,
+          capture: capture,
+          aggregate: aggregate,
+          analysis_sha: analysis_sha,
+          now: now
+        )
+      end
+
+      def release_discovery_through_gateway!(entry, store, token, reason:,
+                                             now:, backoff_sec:)
+        @discovery_transitions.release(
+          entry: entry,
+          store: store,
+          token: token,
+          reason: reason,
+          now: now,
+          backoff_sec: backoff_sec
+        )
+      end
+
+      def checkpoint_discovery_through_gateway!(entry, store, token,
+                                                envelope:, now:, backoff_sec:)
+        @discovery_transitions.checkpoint(
+          entry: entry,
+          store: store,
+          token: token,
+          envelope: envelope,
+          now: now,
+          backoff_sec: backoff_sec
+        )
+      end
+
+      def block_through_gateway!(entry, store, aggregate, phase:, reason:,
+                                 evidence:, now:, backoff_sec:)
+        @discovery_transitions.block(
+          entry: entry,
+          store: store,
+          aggregate: aggregate,
+          phase: phase,
+          reason: reason,
+          evidence: evidence,
+          now: now,
+          backoff_sec: backoff_sec
+        )
+      end
+
+      def reserve_occurrence(store, entry, aggregate, migration, now)
+        @occurrence_lifecycle.reserve(
+          store: store,
+          entry: entry,
+          aggregate: aggregate,
+          migration: migration,
+          now: now
+        )
+      end
 
       def managed_entries
         @configuration_errors = []
@@ -474,17 +580,11 @@ module Hive
       def block(entry, aggregate, reason:, evidence:, now:, phase: :discovery)
         unless @dry_run
           store = store_for(entry)
-          if phase.to_sym == :action
-            store.block_actions!(
-              aggregate.fetch("job_id"), reason: reason, evidence: evidence,
-              now: now, backoff_sec: RETRY_BACKOFF_SEC
-            )
-          else
-            store.block_discovery!(
-              aggregate.fetch("job_id"), reason: reason, evidence: evidence,
-              now: now, backoff_sec: RETRY_BACKOFF_SEC
-            )
-          end
+          block_through_gateway!(
+            entry, store, aggregate, phase: phase,
+            reason: reason, evidence: evidence, now: now,
+            backoff_sec: RETRY_BACKOFF_SEC
+          )
         end
         @events << {
           status: :blocked, project: entry.fetch("name"), job_id: aggregate.fetch("job_id"),
@@ -562,9 +662,10 @@ module Hive
         status = if valid
           aggregate.fetch("complete") ? :closed : :action_pending
         else
-          aggregate = store.block_actions!(
-            token.fetch(:job_id),
+          aggregate = block_through_gateway!(
+            entry, store, aggregate, phase: :action,
             reason: action_completion_failure_reason(exit_code, envelope),
+            evidence: {},
             now: now,
             backoff_sec: RETRY_BACKOFF_SEC
           )
@@ -610,60 +711,19 @@ module Hive
       end
 
       def publish_finalized(entry, token, result, aggregate, now)
-        return unless @migration_authority.to_sym == :legacy
-        return unless token[:reservation_id] && token[:migration_epoch]
+        store = store_for(entry)
+        @occurrence_lifecycle.publish_finalized(
+          store: store,
+          entry: entry,
+          token: token,
+          result: result,
+          aggregate: aggregate,
+          now: now
+        )
+      end
 
-        pending = Array(aggregate && aggregate["actions"]).find do |action|
-          action["terminal"] != true
-        end
-        decision = if pending
-          {
-            "rationale" => "due",
-            "job_id" => aggregate.fetch("job_id"),
-            "phase" => "action"
-          }
-        else
-          {
-            "rationale" => "not_due",
-            "job_id" => nil,
-            "phase" => nil
-          }
-        end
-        phase = pending ? "action" : token.fetch(:phase).to_s
-        capture = Hive::Modules::Migration::PatrolCapture.build(
-          module_name: "architecture-patrol",
-          project: {
-            "project_id" => entry.fetch("project_id"),
-            "name" => entry.fetch("name"),
-            "repository" => aggregate.dig("source", "repository")
-          },
-          trigger: {
-            "kind" => "finalized_scheduler",
-            "id" => token.fetch(:reservation_id),
-            "schedule" => MODULE_SCHEDULE,
-            "phase" => phase
-          },
-          reservation: {
-            "kind" => "architecture",
-            "id" => token.fetch(:reservation_id),
-            "job_id" => token.fetch(:job_id),
-            "phase" => token.fetch(:phase).to_s,
-            "outcome" => JSON.parse(JSON.generate(result))
-          },
-          owner: token.fetch(:migration_owner),
-          owner_epoch: token.fetch(:migration_epoch),
-          decision_class: "scheduler_outcome",
-          decision: decision,
-          occurred_at: now,
-          recorded_at: now
-        )
-        @evidence_store_factory.call(entry).append_capture(capture)
-        @event_publisher.architecture_patrol_finalized(
-          entry,
-          capture,
-          schedule: MODULE_SCHEDULE,
-          target_hook: phase == "action" ? "actions" : "scheduled-discovery"
-        )
+      def recover_projections(store, entry)
+        @occurrence_lifecycle.recover(store: store, entry: entry)
       end
 
       def parse_time(value)

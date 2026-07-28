@@ -18,16 +18,21 @@ tags: [decisions, adr]
 **Decision:** Hive remains the canonical monorepo and the first and primary consumer of every reusable component. Establish and enforce internal Ruby boundaries first: one supported entry point or facade, structured public values and errors, an acyclic dependency direction, explicit state/schema/lock ownership, clean-process loading, and all Hive production consumers routed through the boundary. Existing module wiki pages plus one component catalog are the canonical agent context; do not add a parallel `.context.md` hierarchy.
 
 Implementation readiness and standalone product value are different rankings.
-The final audit retains six `boundary-ready` components: UserService, Agent ABI,
-Agent Artifact Firewall, Skillpack, Safe Agent Git Gate, and WorkLedger.
-`Hive::Attempts::API` remains the sole guarded `candidate`: its focused
-clean-load behavior, result contracts, and exact internal composition and
-compatibility sites are enforced without adding generic lifecycle,
-cancellation, export, or raw-store APIs. U8 removed the former reciprocal
-Attempts/WorkLedger catalog edge by keeping `TaskProjection::Store` as a
-Hive-owned adapter rather than WorkLedger-owned source, so the final catalog has
-no migration exceptions. RunReceipt remains the strongest standalone
-opportunity without forcing the largest refactor first. Operational
+The current audit retains six `boundary-ready` components: UserService, Agent
+ABI, Agent Artifact Firewall, Skillpack, Safe Agent Git Gate, and WorkLedger.
+`Hive::Attempts::API` and Patrol Effect Evidence remain guarded `candidate`
+rows. Attempts has focused clean-load behavior, result contracts, and exact
+internal composition sites without adding generic lifecycle, cancellation,
+export, or raw-store APIs. Patrol has one bounded U3 exception: its single
+occurrence store sits behind a validator/outbox/effect facade; separate product
+gateways compose admission, sender, and receipt collaborators; and oversized
+runner/scheduler transition mechanics are delegated to claim/plan/discovery/
+occurrence coordinators. Compressed candidate-bound evidence and production
+qualification are not complete. U8
+removed the former reciprocal Attempts/WorkLedger catalog edge by keeping
+`TaskProjection::Store` as a Hive-owned adapter rather than WorkLedger-owned
+source. RunReceipt remains the strongest standalone opportunity without
+forcing the largest refactor first. Operational
 status/Statewatch, layout migration, standalone capability probes, separate
 lease/capsule products, generic status rendering, and a new local-agent
 framework remain rejected or folded ideas rather than package commitments.

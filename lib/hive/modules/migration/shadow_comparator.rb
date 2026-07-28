@@ -4,6 +4,7 @@ require "time"
 require "hive/atomic_file"
 require "hive/modules/migration/patrol_evidence"
 require "hive/workflow_package/canonical_json"
+require "hive/workflow_package/mutation_lock"
 
 module Hive
   module Modules
@@ -12,78 +13,114 @@ module Hive
       # these records; they are immutable observational inputs to qualification.
       class ShadowComparator
         MODULES = PatrolEvidence::MODULES
+        MAX_RECORD_BYTES = 512 * 1024
+        MAX_RECORDS = 4_096
         EVIDENCE_SOURCES = %w[legacy_mutator_capture archived_v1].freeze
         IGNORED_KEYS = %w[duration_ms engine owner recorded_at representation].freeze
         EXPECTED_KEYS = %w[
           comparable configuration_digest decision_id duplicate_effects
           evidence_source explained_differences legacy_capture legacy_effects
           migration module module_decision module_effects occurred_at recorded_at
-          schema schema_version trigger trigger_digest unexplained_differences
+          schema schema_version semantic_digest trigger trigger_digest
+          unexplained_differences
         ].freeze
 
         attr_reader :root
 
-        def initialize(root:, clock: -> { Time.now.utc })
+        def initialize(root:, clock: -> { Time.now.utc },
+                       admission_lock: nil)
           @root = File.expand_path(root)
           @clock = clock
+          @admission_lock = admission_lock || lambda do |shared: true, &block|
+            Hive::WorkflowPackage::MutationLock.with_lock(
+              File.dirname(@root), shared: shared, &block
+            )
+          end
         end
 
         def record!(module_name:, trigger:, module_decision:, configuration_digest:,
                     occurred_at:, legacy_capture: nil, legacy_effects: [],
                     module_effects: [], explained_paths: [], comparable: true)
-          validate_identity!(module_name, configuration_digest)
-          timestamp = time(occurred_at)
-          recorded_at = time(@clock.call)
-          trigger = normalize(trigger)
-          capture = capture_value(legacy_capture, module_name, trigger)
-          legacy_effects = effect_values(
-            legacy_effects, module_name: module_name,
-            occurrence_id: capture&.occurrence_id
-          )
-          module_effects = effect_values(
-            module_effects, module_name: module_name,
-            occurrence_id: capture&.occurrence_id,
-            shadow_only: true
-          )
-          normalized_legacy = normalize(capture ? capture.decision : {})
-          normalized_module = normalize(module_decision)
-          all_differences = differences(normalized_legacy, normalized_module)
-          explained = all_differences.select { |row| explained_paths.include?(row.fetch("path")) }
-          unexplained = all_differences - explained
-          trigger_digest = digest(trigger)
-          decision_id = digest("module" => module_name, "trigger_digest" => trigger_digest)
-          source = capture && "legacy_mutator_capture"
-          record = {
-            "schema" => "hive-module-shadow-decision",
-            "schema_version" => 2,
-            "module" => module_name.to_s,
-            "decision_id" => decision_id,
-            "trigger" => trigger,
-            "trigger_digest" => trigger_digest,
-            "occurred_at" => timestamp.iso8601(6),
-            "recorded_at" => recorded_at.iso8601(6),
-            "evidence_source" => source,
-            "configuration_digest" => configuration_digest.to_s,
-            "comparable" => comparable == true && !capture.nil?,
-            "legacy_capture" => capture&.to_h,
-            "module_decision" => normalized_module,
-            "explained_differences" => explained,
-            "unexplained_differences" => unexplained,
-            "legacy_effects" => legacy_effects.map(&:to_h),
-            "module_effects" => module_effects.map(&:to_h),
-            "duplicate_effects" => duplicate_effects(legacy_effects, module_effects),
-            "migration" => nil
-          }
-          persist(record)
+          @admission_lock.call(shared: true) do
+            validate_identity!(module_name, configuration_digest)
+            timestamp = time(occurred_at)
+            recorded_at = time(@clock.call)
+            trigger = normalize(trigger)
+            capture = capture_value(legacy_capture, module_name, trigger)
+            legacy_effects = effect_values(
+              legacy_effects, module_name: module_name,
+              occurrence_id: capture&.occurrence_id
+            )
+            module_effects = effect_values(
+              module_effects, module_name: module_name,
+              occurrence_id: capture&.occurrence_id,
+              shadow_only: true
+            )
+            normalized_legacy = normalize(capture ? capture.decision : {})
+            normalized_module = normalize(module_decision)
+            all_differences = differences(normalized_legacy, normalized_module)
+            explained = all_differences.select { |row| explained_paths.include?(row.fetch("path")) }
+            unexplained = all_differences - explained
+            trigger_digest = digest(trigger)
+            source = capture && "legacy_mutator_capture"
+            comparable = comparable == true && !capture.nil?
+            decision_id = digest(
+              "module" => module_name,
+              "trigger_digest" => trigger_digest
+            )
+            record = {
+              "schema" => "hive-module-shadow-decision",
+              "schema_version" => 2,
+              "module" => module_name.to_s,
+              "decision_id" => decision_id,
+              "trigger" => trigger,
+              "trigger_digest" => trigger_digest,
+              "occurred_at" => timestamp.iso8601(6),
+              "recorded_at" => recorded_at.iso8601(6),
+              "evidence_source" => source,
+              "configuration_digest" => configuration_digest.to_s,
+              "comparable" => comparable,
+              "legacy_capture" => capture&.to_h,
+              "module_decision" => normalized_module,
+              "explained_differences" => explained,
+              "unexplained_differences" => unexplained,
+              "legacy_effects" => legacy_effects.map(&:to_h),
+              "module_effects" => module_effects.map(&:to_h),
+              "duplicate_effects" => duplicate_effects(legacy_effects, module_effects),
+              "migration" => nil
+            }
+            record["semantic_digest"] = semantic_digest(record)
+            persist(record)
+          end
         end
 
         def records(module_name = nil)
-          paths = if module_name
-            Dir.glob(File.join(root, module_name.to_s, "*.json"))
-          else
-            MODULES.flat_map { |name| Dir.glob(File.join(root, name, "*.json")) }
+          @admission_lock.call(shared: true) do
+            paths = if module_name
+              Dir.glob(File.join(root, module_name.to_s, "*.json"))
+            else
+              MODULES.flat_map { |name| Dir.glob(File.join(root, name, "*.json")) }
+            end
+            if paths.size > MAX_RECORDS
+              raise Hive::ConfigError,
+                    "module shadow evidence exceeds the bounded read limit"
+            end
+            paths.sort.map { |path| read(path) }.freeze
           end
-          paths.sort.map { |path| read(path) }.freeze
+        end
+
+        def validate_record!(value, expected_module: nil,
+                             expected_decision_id: nil)
+          data = JSON.parse(canonical(value))
+          valid = valid_record?(data) &&
+                  (!expected_module || data["module"] == expected_module.to_s) &&
+                  (!expected_decision_id ||
+                   data["decision_id"] == expected_decision_id.to_s)
+          raise Hive::ConfigError, "module shadow evidence is malformed" unless valid
+
+          data.freeze
+        rescue JSON::GeneratorError, TypeError
+          raise Hive::ConfigError, "module shadow evidence is malformed"
         end
 
         private
@@ -182,12 +219,40 @@ module Hive
         end
 
         def read(path)
-          bytes = File.binread(path)
-          data = JSON.parse(bytes)
-          unless bytes == canonical(data) && valid_record?(data)
+          module_name = File.basename(File.dirname(path))
+          decision_id = File.basename(path, ".json")
+          unless MODULES.include?(module_name) &&
+                 decision_id.match?(/\A[0-9a-f]{64}\z/)
             raise Hive::ConfigError, "module shadow evidence is malformed"
           end
-          data.freeze
+          before = File.lstat(path)
+          unless before.file? && !before.symlink? &&
+                 before.size <= MAX_RECORD_BYTES
+            raise Hive::ConfigError, "module shadow evidence is malformed"
+          end
+          flags = File::RDONLY
+          flags |= File::NOFOLLOW if defined?(File::NOFOLLOW)
+          bytes = File.open(path, flags) do |io|
+            current = io.stat
+            unless current.file? && current.dev == before.dev &&
+                   current.ino == before.ino
+              raise Hive::ConfigError, "module shadow evidence is malformed"
+            end
+            value = io.read(MAX_RECORD_BYTES + 1)
+            if value.nil? || value.bytesize > MAX_RECORD_BYTES
+              raise Hive::ConfigError, "module shadow evidence is malformed"
+            end
+            value
+          end
+          data = JSON.parse(bytes)
+          unless bytes == canonical(data)
+            raise Hive::ConfigError, "module shadow evidence is malformed"
+          end
+          validate_record!(
+            data,
+            expected_module: module_name,
+            expected_decision_id: decision_id
+          )
         rescue JSON::ParserError, EncodingError, SystemCallError
           raise Hive::ConfigError, "module shadow evidence is malformed"
         end
@@ -225,19 +290,50 @@ module Hive
           return false unless data["evidence_source"] == (capture && "legacy_mutator_capture")
           return false if capture && capture.module_name != data["module"]
           return false unless digest(data["trigger"]) == data["trigger_digest"]
+          return false if capture && digest(capture.trigger) != data["trigger_digest"]
 
-          effect_values(
+          legacy_effects = effect_values(
             data["legacy_effects"],
             module_name: data["module"],
             occurrence_id: capture&.occurrence_id
           )
-          effect_values(
+          module_effects = effect_values(
             data["module_effects"],
             module_name: data["module"],
             occurrence_id: capture&.occurrence_id,
             shadow_only: true
           )
+          normalized_legacy = normalize(capture ? capture.decision : {})
+          normalized_module = normalize(data["module_decision"])
+          all_differences = differences(normalized_legacy, normalized_module)
+          explained_paths = difference_paths(data["explained_differences"])
+          expected_explained = all_differences.select do |row|
+            explained_paths.include?(row.fetch("path"))
+          end
+          return false unless data["explained_differences"] == expected_explained
+          return false unless data["unexplained_differences"] ==
+                              all_differences - expected_explained
+          return false unless data["duplicate_effects"] ==
+                              duplicate_effects(legacy_effects, module_effects)
+          return false unless data["decision_id"] == digest(
+            "module" => data["module"],
+            "trigger_digest" => data["trigger_digest"]
+          )
+          return false unless data["semantic_digest"] == semantic_digest(data)
           true
+        end
+
+        def difference_paths(rows)
+          paths = rows.map do |row|
+            return [] unless row.is_a?(Hash) &&
+                             row.keys.sort == %w[legacy module path] &&
+                             row["path"].is_a?(String)
+
+            row.fetch("path")
+          end
+          return [] unless paths.uniq == paths
+
+          paths
         end
 
         def valid_migrated_record?(data)
@@ -253,7 +349,16 @@ module Hive
             data["legacy_effects"].empty? &&
             data["module_effects"].empty? &&
             data["duplicate_effects"].empty? &&
-            digest(data["trigger"]) == data["trigger_digest"]
+            digest(data["trigger"]) == data["trigger_digest"] &&
+            data["semantic_digest"] == semantic_digest(data)
+        end
+
+        def semantic_digest(record)
+          digest(
+            record.reject do |key, _value|
+              %w[semantic_digest recorded_at].include?(key)
+            end
+          )
         end
 
         def digest(value) = ::Digest::SHA256.hexdigest(canonical(normalize(value)))

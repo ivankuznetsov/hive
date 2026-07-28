@@ -164,8 +164,14 @@ class HiveDaemonDispatcherTest < Minitest::Test
       out
     end
 
-    def complete(project:, exit_code:, now:)
-      @completed << { project: project, exit_code: exit_code, now: now }
+    def complete(project:, exit_code:, envelope: nil, now:)
+      completion = {
+        project: project,
+        exit_code: exit_code,
+        now: now
+      }
+      completion[:envelope] = envelope if envelope
+      @completed << completion
     end
 
     def cancel(project:)
@@ -897,7 +903,17 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
     refute controller.project_dropped?("p1")
     refute logger.events.any? { |name, attrs| name == :project_dropped && attrs[:project] == "p1" }
-    assert_equal [ { project: "p1", exit_code: Hive::ExitCodes::CONFIG, now: T0 } ], patrol.completed
+    assert_equal(
+      [
+        {
+          project: "p1",
+          exit_code: Hive::ExitCodes::CONFIG,
+          envelope: { "ok" => false, "error_kind" => "config" },
+          now: T0
+        }
+      ],
+      patrol.completed
+    )
   end
 
   def test_unverified_architecture_child_claim_is_preserved_if_termination_cannot_be_proved

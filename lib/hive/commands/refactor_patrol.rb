@@ -12,6 +12,7 @@ require "hive/lock"
 require "hive/process_kill"
 require "hive/patrol/mapper"
 require "hive/patrol/token_budget"
+require "hive/refactor_patrol/architecture_intake_transitions"
 require "hive/refactor_patrol/caps"
 require "hive/refactor_patrol/action_runner"
 require "hive/refactor_patrol/collisions"
@@ -27,6 +28,7 @@ require "hive/refactor_patrol/pr_manifest_resolver"
 require "hive/refactor_patrol/reporter"
 require "hive/refactor_patrol/repository_ownership"
 require "hive/refactor_patrol/reviewer"
+require "hive/refactor_patrol/discovery_transitions"
 require "hive/refactor_patrol/state_store"
 require "hive/refactor_patrol/thesis"
 require "hive/worktree"
@@ -70,6 +72,7 @@ module Hive
                      heartbeat_lease_sec: CLAIM_HEARTBEAT_LEASE_SEC,
                      heartbeat_clock: -> { Time.now }, heartbeat_resolver: ClaimLivenessResolver.new,
                      project_entry: nil, capability_context: nil,
+                     occurrence_id: nil, module_execution: nil,
                      config_loader: ->(path) { Hive::Config.load(path) })
         @project = project
         @json = json
@@ -119,7 +122,15 @@ module Hive
         @heartbeat_resolver = heartbeat_resolver
         @project_entry = project_entry
         @capability_context = capability_context
+        @occurrence_id = occurrence_id
+        @module_execution = module_execution
         @config_loader = config_loader
+        @architecture_intake_transitions =
+          Hive::RefactorPatrol::ArchitectureIntakeTransitions.new(
+            config_loader: @config_loader,
+            module_execution: @module_execution,
+            claimant: "architecture-command-#{Process.pid}"
+          )
       end
 
       def call
@@ -401,7 +412,9 @@ module Hive
         Hive::RefactorPatrol::ActionRunner.new(
           root, cfg: cfg, registration: @project,
           repository_ownership: @repository_ownership,
-          token_budget: token_budget
+          token_budget: token_budget,
+          occurrence_id: @occurrence_id,
+          module_execution: @module_execution
         )
       end
 
@@ -573,11 +586,16 @@ module Hive
 
       def prepare_durable_discovery!(entry, project_root, cfg)
         @job_store = @job_store_factory.call(project_root)
+        @transition_entry = entry.merge("path" => project_root)
         aggregate = if @pr
-          @job_store.enqueue_manifest!(
-            @manifest,
+          @architecture_intake_transitions.enqueue(
+            entry: @transition_entry,
+            store: @job_store,
+            manifest: @manifest,
             policy: Hive::RefactorPatrol::Policy.capture(cfg),
-            now: Time.now
+            now: Time.now,
+            dry_run: @dry_run,
+            required_occurrence_id: @occurrence_id
           )
         else
           @job_store.read_job(@manifest.fetch("job_id"))
@@ -585,10 +603,14 @@ module Hive
         if @pr && aggregate.fetch("complete")
           @manifest = publish_manual_replay_manifest!(project_root, @manifest)
           @explicit_replay = true
-          aggregate = @job_store.enqueue_manifest!(
-            @manifest,
+          aggregate = @architecture_intake_transitions.enqueue(
+            entry: @transition_entry,
+            store: @job_store,
+            manifest: @manifest,
             policy: Hive::RefactorPatrol::Policy.capture(cfg),
-            now: Time.now
+            now: Time.now,
+            dry_run: @dry_run,
+            required_occurrence_id: @occurrence_id
           )
         end
         unless aggregate.fetch("source") == source_pr_context
@@ -612,19 +634,93 @@ module Hive
         if process_start_time.to_s.empty?
           raise Hive::ConfigError, "refactor patrol cannot verify the current process identity"
         end
-        @manual_claim_token = @job_store.claim_discovery!(
-          aggregate.fetch("job_id"),
+        @manual_discovery_transitions = build_manual_discovery_transitions(
           owner: "manual-#{Process.pid}-#{process_start_time}",
-          analysis_sha: @checkout_snapshot.fetch("analysis_sha"),
-          now: Time.now,
-          claim_resolver: Hive::RefactorPatrol::ProcessGroupResolver.new,
           owner_pid: Process.pid,
-          owner_process_start_time: process_start_time
+          owner_process_start_time: process_start_time,
+          claim_resolver: Hive::RefactorPatrol::ProcessGroupResolver.new
+        )
+        capture = if @job_store.respond_to?(:occurrence_capture)
+          @job_store.occurrence_capture(aggregate.fetch("job_id"))
+        end
+        @manual_claim_token = @manual_discovery_transitions.claim(
+          entry: @transition_entry,
+          store: @job_store,
+          capture: capture,
+          aggregate: aggregate,
+          analysis_sha: @checkout_snapshot.fetch("analysis_sha"),
+          now: Time.now
         )
         unless @manual_claim_token
           raise Hive::ConfigError, "refactor patrol job is already claimed by another worker"
         end
         @durable_aggregate = @job_store.read_job(aggregate.fetch("job_id"))
+      end
+
+      def checkpoint_manual_discovery_transition!(token, envelope:, now:)
+        return @job_store.checkpoint_discovery!(
+          token, envelope: envelope, now: now
+        ) unless @manual_discovery_transitions
+
+        @manual_discovery_transitions.checkpoint(
+          entry: @transition_entry,
+          store: @job_store,
+          token: token,
+          envelope: envelope,
+          now: now,
+          backoff_sec: 0
+        )
+      end
+
+      def checkpoint_manual_progress_transition!(token, envelope:, now:,
+                                                 lease_sec:)
+        return @job_store.checkpoint_discovery_progress!(
+          token, envelope: envelope, now: now, lease_sec: lease_sec
+        ) unless @manual_discovery_transitions
+
+        @manual_discovery_transitions.checkpoint_progress(
+          entry: @transition_entry,
+          store: @job_store,
+          token: token,
+          envelope: envelope,
+          now: now,
+          lease_sec: lease_sec
+        )
+      end
+
+      def release_manual_discovery_transition!(token, reason:, now:,
+                                               backoff_sec:)
+        return @job_store.release_discovery!(
+          token, reason: reason, now: now, backoff_sec: backoff_sec
+        ) unless @manual_discovery_transitions
+
+        @manual_discovery_transitions.release(
+          entry: @transition_entry,
+          store: @job_store,
+          token: token,
+          reason: reason,
+          now: now,
+          backoff_sec: backoff_sec
+        )
+      end
+
+      def build_manual_discovery_transitions(owner:, owner_pid:,
+                                             owner_process_start_time:,
+                                             claim_resolver:)
+        Hive::RefactorPatrol::DiscoveryTransitions.new(
+          config_loader: @config_loader,
+          module_execution: @module_execution,
+          owner: owner,
+          owner_pid: owner_pid,
+          owner_process_start_time: owner_process_start_time,
+          lease_sec: @heartbeat_lease_sec,
+          claim_resolver: claim_resolver,
+          reservation_error: Hive::ConfigError,
+          occurrence_lifecycle: nil,
+          claimant: "architecture-command-#{Process.pid}",
+          claim_operation: "manual-discovery-claim",
+          operation_prefix: ""
+        )
       end
 
       def publish_manual_replay_manifest!(project_root, original)
@@ -661,7 +757,7 @@ module Hive
       end
 
       def checkpoint_manual_discovery!(payload)
-        @durable_aggregate = @job_store.checkpoint_discovery!(
+        @durable_aggregate = checkpoint_manual_discovery_transition!(
           @manual_claim_token, envelope: payload, now: Time.now
         )
         @manual_claim_token = nil
@@ -686,10 +782,8 @@ module Hive
           reviewer,
           feature_results: results
         ).merge("complete" => false, "zero_reason" => nil)
-        @durable_aggregate = @job_store.checkpoint_discovery_progress!(
-          token,
-          envelope: payload,
-          now: @heartbeat_clock.call,
+        @durable_aggregate = checkpoint_manual_progress_transition!(
+          token, envelope: payload, now: @heartbeat_clock.call,
           lease_sec: @heartbeat_lease_sec
         )
       end
@@ -781,8 +875,9 @@ module Hive
       def release_manual_claim(reason)
         return unless @manual_claim_token && @job_store
 
-        @job_store.release_discovery!(
-          @manual_claim_token, reason: reason, now: Time.now, backoff_sec: 60
+        release_manual_discovery_transition!(
+          @manual_claim_token, reason: reason, now: Time.now,
+          backoff_sec: 60
         )
       rescue Hive::RefactorPatrol::JobStore::Error
         nil

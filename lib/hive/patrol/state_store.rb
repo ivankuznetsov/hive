@@ -3,6 +3,7 @@ require "hive/patrol/feature"
 require "hive/patrol/finding"
 require "hive/patrol/base_state_store"
 require "hive/patrol/effect_gateway"
+require "hive/modules/migration/occurrence_journal"
 require "hive/modules/migration/patrol_evidence"
 
 module Hive
@@ -10,28 +11,171 @@ module Hive
     class StateStore < BaseStateStore
       def initialize(project_root)
         super(project_root, state_directory: "patrol", collections: %w[features findings patches reports runs])
+        @occurrence_store = Hive::Modules::Migration::OccurrenceJournal.new(
+          File.join(root, "occurrences"), module_name: "patrol"
+        )
       end
 
-      # Attach the per-occurrence authorization boundary without changing the
-      # incumbent state layout or introducing a recovery store. Cycle effect
-      # intent cells live in state.json; PR effect cells continue to live in
-      # the fingerprint mapping that already owns publication recovery.
       def configure_effect_gateway!(capture:, evidence_store:, config_loader:,
-                                    capability_checker:)
+                                    capability_checker:, module_execution: nil)
         @effect_capture = capture
+        reserve_occurrence!(capture)
+        @effect_evidence_store = evidence_store
         @state_effect_gateway = Hive::Patrol::EffectGateway.new(
           project_root: project_root,
           hive_state_path: File.join(project_root, ".hive-state"),
           capture: capture,
           authority: capture.owner,
           evidence_store: evidence_store,
-          intent_writer: method(:reserve_cycle_effect_intent),
-          recovery_reader: method(:cycle_effect_intent_state),
-          outcome_writer: method(:record_cycle_effect_outcome),
+          delivery_store: self,
           config_loader: config_loader,
-          capability_checker: capability_checker
+          capability_checker: capability_checker,
+          module_execution: module_execution
         )
         self
+      end
+
+      def reserve_occurrence!(capture, now: Time.now.utc)
+        @occurrence_store.reserve!(capture, now: now)
+      end
+
+      def occurrence(occurrence_id)
+        @occurrence_store.fetch(occurrence_id)
+      end
+
+      def occurrence_capture(occurrence_id)
+        record = occurrence(occurrence_id)
+        return nil unless record
+
+        Hive::Modules::Migration::PatrolCapture.from_h(
+          record.fetch("provisional_capture")
+        )
+      end
+
+      def pending_occurrences
+        @occurrence_store.pending
+      end
+
+      def projection_pending_occurrences
+        @occurrence_store.projection_pending
+      end
+
+      def finalize_occurrence!(capture:, event: nil, evidence_store:,
+                               event_publisher: nil, project_entry: nil,
+                               now: Time.now.utc)
+        event_bytes = event && Hive::Modules::Migration::PatrolEvidence
+                               .canonical(event)
+        @occurrence_store.finalize!(
+          capture, event_bytes: event_bytes, now: now
+        )
+        drain_occurrence_outbox!(
+          capture.occurrence_id,
+          evidence_store: evidence_store,
+          event_publisher: event_publisher,
+          project_entry: project_entry
+        )
+        @occurrence_store.fetch(capture.occurrence_id)
+      end
+
+      # Projection acknowledgement happens only after the observational sink
+      # confirms its idempotent append. A failed append leaves the exact
+      # canonical bytes pending for the next duplicate/restart.
+      def drain_occurrence_outbox!(occurrence_id, evidence_store:,
+                                   event_publisher: nil,
+                                   project_entry: nil, kinds: nil)
+        selected_kinds = kinds && Array(kinds).map(&:to_s)
+        @occurrence_store.pending_outbox(occurrence_id).each do |entry|
+          next if selected_kinds &&
+                  !selected_kinds.include?(entry.fetch("kind"))
+
+          value = JSON.parse(entry.fetch("bytes"))
+          case entry.fetch("kind")
+          when "receipt"
+            evidence_store.append_receipt(
+              Hive::Modules::Migration::EffectReceipt.from_h(value)
+            )
+          when "capture"
+            evidence_store.append_capture(
+              Hive::Modules::Migration::PatrolCapture.from_h(value)
+            )
+          when "event"
+            unless event_publisher && project_entry
+              raise Hive::ConfigError,
+                    "patrol finalized event publisher is unavailable"
+            end
+            event_publisher.publish_prepared(project_entry, value)
+          else
+            raise Hive::ConfigError, "patrol outbox kind is malformed"
+          end
+          @occurrence_store.acknowledge_outbox!(
+            occurrence_id,
+            entry_id: entry.fetch("id"),
+            digest: entry.fetch("digest")
+          )
+        end
+        true
+      rescue JSON::ParserError
+        raise Hive::ConfigError, "patrol outbox bytes are malformed"
+      end
+
+      def prepare_effect!(intent, now: Time.now.utc)
+        @occurrence_store.prepare_effect!(intent, now: now)
+      end
+
+      def effect_state(intent)
+        @occurrence_store.effect_state(intent)
+      end
+
+      def acquire_effect!(intent, claimant:, now: Time.now.utc, lease_sec: 300)
+        @occurrence_store.acquire_effect!(
+          intent, claimant: claimant, now: now, lease_sec: lease_sec
+        )
+      end
+
+      def mark_dispatch_uncertain!(intent, token:, now: Time.now.utc)
+        @occurrence_store.mark_dispatch_uncertain!(
+          intent, token: token, now: now
+        )
+      end
+
+      def resolve_effect_absent!(intent, expected_generation:, outcome:,
+                                 receipt:, now: Time.now.utc)
+        @occurrence_store.resolve_absent!(
+          intent, expected_generation: expected_generation,
+          outcome: outcome, receipt: receipt, now: now
+        )
+      end
+
+      def settle_effect_reconciled!(intent, expected_generation:, outcome:,
+                                    receipt:, now: Time.now.utc)
+        @occurrence_store.settle_reconciled!(
+          intent, expected_generation: expected_generation,
+          outcome: outcome, receipt: receipt, now: now
+        )
+      end
+
+      def settle_effect_claimed!(intent, token:, status:, outcome:, receipt:,
+                                 now: Time.now.utc)
+        @occurrence_store.settle_claimed!(
+          intent, token: token, status: status, outcome: outcome,
+          receipt: receipt, now: now
+        )
+      end
+
+      def deny_effect!(intent, outcome:, receipt:, now: Time.now.utc)
+        @occurrence_store.deny_prepared!(
+          intent, outcome: outcome, receipt: receipt, now: now
+        )
+      end
+
+      def effect_receipt(receipt_id, occurrence_id:)
+        @occurrence_store.receipt(
+          receipt_id, occurrence_id: occurrence_id
+        )
+      end
+
+      def terminal_effect_receipt_ids(occurrence_id)
+        @occurrence_store.effect_receipt_ids(occurrence_id)
       end
 
       def write_feature(feature)
@@ -94,7 +238,7 @@ module Hive
       end
 
       def update_state(data)
-        desired = state.reject { |key, _value| key == "effect_intents" }.merge(data)
+        desired = state.merge(data)
         effect_write(
           sink: "state", target: "state", value: desired
         ) { raw_update_state(data) }
@@ -151,76 +295,12 @@ module Hive
         { "status" => "matched", "outcome" => { "patch" => matches.first } }
       end
 
-      # Effect intent/outcome state extends the existing fingerprint mapping;
-      # it is not a second recovery ledger. The typed intent is immutable, and
-      # every transition rewrites the same keyed cell under one file lock.
-      def reserve_effect_intent(fingerprint, intent, context:, now: Time.now.utc)
-        intent = effect_intent_value(intent)
-        context = effect_object(context)
-        disposition = nil
-        mutate_fingerprints do |data|
-          entry = data[fingerprint.to_s] ||= {
-            "first_seen" => now.utc.iso8601
-          }
-          effects = entry["effect_intents"] ||= {}
-          existing = effects[intent.intent_id]
-          if existing
-            validate_effect_cell!(existing, intent)
-            unless existing.fetch("context") == context
-              raise Hive::ConfigError,
-                    "patrol effect intent context conflicts with existing recovery state"
-            end
-            disposition = :duplicate
-          else
-            effects[intent.intent_id] = {
-              "intent" => intent.to_h,
-              "status" => "intent",
-              "outcome" => {},
-              "context" => context
-            }
-            disposition = :created
-          end
-        end
-        disposition
-      end
-
-      def effect_intent_state(fingerprint, intent)
-        intent = effect_intent_value(intent)
-        with_fingerprint_lock(shared: true) do
-          data = fingerprints
-          cell = data.dig(fingerprint.to_s, "effect_intents", intent.intent_id)
-          next nil unless cell
-
-          validate_effect_cell!(cell, intent)
-          JSON.parse(JSON.generate(cell))
-        end
-      end
-
-      def record_effect_outcome(fingerprint, intent, status:, outcome:)
-        intent = effect_intent_value(intent)
-        status = status.to_s
-        allowed = Hive::Modules::Migration::PatrolEvidence::RECEIPT_STATUSES
-        unless allowed.include?(status)
-          raise Hive::ConfigError, "patrol effect outcome status is malformed"
-        end
-        outcome = effect_object(outcome)
-        mutate_fingerprints do |data|
-          cell = data.dig(fingerprint.to_s, "effect_intents", intent.intent_id)
-          raise Hive::ConfigError, "patrol effect intent is missing" unless cell
-
-          validate_effect_cell!(cell, intent)
-          cell["status"] = status
-          cell["outcome"] = outcome
-        end
-      end
-
+      # Fingerprint publication remains ordinary Patrol's product recovery
+      # state. Effect delivery metadata lives only in the occurrence journal.
       def mutate_fingerprints
         with_fingerprint_lock do
           data = fingerprints
           yield data
-          # Effect cells are the incumbent PR recovery bookkeeping. Writing
-          # them must not recursively authorize another state effect while a
-          # branch/PR gateway already holds the migration lock.
           raw_write_fingerprints(data)
         end
       end
@@ -270,7 +350,7 @@ module Hive
       def effect_target_value(target)
         case target
         when "state"
-          state.reject { |key, _value| key == "effect_intents" }
+          state
         when "fingerprints"
           fingerprints
         when "dismissed"
@@ -285,86 +365,12 @@ module Hive
         end
       end
 
-      def reserve_cycle_effect_intent(intent)
-        disposition = nil
-        mutate_cycle_effects do |effects|
-          existing = effects[intent.intent_id]
-          if existing
-            validate_cycle_effect_cell!(existing, intent)
-            disposition = :duplicate
-          else
-            effects[intent.intent_id] = {
-              "intent" => intent.to_h,
-              "status" => "intent",
-              "outcome" => {}
-            }
-            disposition = :created
-          end
-        end
-        disposition
-      end
-
-      def cycle_effect_intent_state(intent)
-        with_cycle_effect_lock(shared: true) do
-          cell = state.dig("effect_intents", intent.intent_id)
-          next nil unless cell
-
-          validate_cycle_effect_cell!(cell, intent)
-          JSON.parse(JSON.generate(cell))
-        end
-      end
-
-      def record_cycle_effect_outcome(intent, status:, outcome:)
-        status = status.to_s
-        allowed = Hive::Modules::Migration::PatrolEvidence::RECEIPT_STATUSES
-        unless allowed.include?(status)
-          raise Hive::ConfigError, "patrol cycle effect status is malformed"
-        end
-        outcome = effect_object(outcome)
-        mutate_cycle_effects do |effects|
-          cell = effects[intent.intent_id]
-          raise Hive::ConfigError, "patrol cycle effect intent is missing" unless cell
-
-          validate_cycle_effect_cell!(cell, intent)
-          cell["status"] = status
-          cell["outcome"] = outcome
-        end
-      end
-
-      def mutate_cycle_effects
-        with_cycle_effect_lock do
-          data = state
-          effects = data["effect_intents"] ||= {}
-          yield effects
-          write_json(File.join(root, "state.json"), data)
-        end
-      end
-
-      def validate_cycle_effect_cell!(cell, intent)
-        keys = %w[intent outcome status]
-        valid = cell.is_a?(Hash) && cell.keys.sort == keys &&
-                cell["intent"] == intent.to_h &&
-                ([ "intent" ] +
-                 Hive::Modules::Migration::PatrolEvidence::RECEIPT_STATUSES)
-                  .include?(cell["status"]) &&
-                cell["outcome"].is_a?(Hash)
-        raise Hive::ConfigError, "patrol cycle effect recovery state is malformed" unless valid
-
-        true
-      end
-
       def raw_update_state(data)
         write_json(File.join(root, "state.json"), state.merge(data))
       end
 
       def raw_write_fingerprints(data)
         write_json(File.join(root, "fingerprints.json"), data)
-      end
-
-      def effect_intent_value(value)
-        return value if value.is_a?(Hive::Modules::Migration::EffectIntent)
-
-        Hive::Modules::Migration::EffectIntent.from_h(value)
       end
 
       def effect_object(value)
@@ -380,20 +386,6 @@ module Hive
         raise Hive::ConfigError, "patrol effect recovery state is malformed"
       end
 
-      def validate_effect_cell!(cell, intent)
-        keys = %w[context intent outcome status]
-        valid = cell.is_a?(Hash) && cell.keys.sort == keys &&
-                cell["intent"] == intent.to_h &&
-                ([ "intent" ] +
-                 Hive::Modules::Migration::PatrolEvidence::RECEIPT_STATUSES)
-                  .include?(cell["status"]) &&
-                cell["outcome"].is_a?(Hash) &&
-                cell["context"].is_a?(Hash)
-        raise Hive::ConfigError, "patrol effect recovery state is malformed" unless valid
-
-        true
-      end
-
       def with_fingerprint_lock(shared: false)
         FileUtils.mkdir_p(root)
         File.open(
@@ -407,23 +399,8 @@ module Hive
           lock&.flock(File::LOCK_UN)
         end
       rescue SystemCallError, IOError => e
-        raise Hive::ConfigError, "patrol fingerprint lock is unavailable: #{e.message}"
-      end
-
-      def with_cycle_effect_lock(shared: false)
-        FileUtils.mkdir_p(root)
-        File.open(
-          File.join(root, "state.lock"),
-          File::RDWR | File::CREAT,
-          0o600
-        ) do |lock|
-          lock.flock(shared ? File::LOCK_SH : File::LOCK_EX)
-          yield
-        ensure
-          lock&.flock(File::LOCK_UN)
-        end
-      rescue SystemCallError, IOError => e
-        raise Hive::ConfigError, "patrol state lock is unavailable: #{e.message}"
+        raise Hive::ConfigError,
+              "patrol fingerprint lock is unavailable: #{e.message}"
       end
     end
   end

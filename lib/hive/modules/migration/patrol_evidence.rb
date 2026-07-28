@@ -10,6 +10,13 @@ module Hive
         MODULES = %w[patrol architecture-patrol].freeze
         OWNERS = %w[legacy module].freeze
         AUTHORITIES = %w[legacy module shadow].freeze
+        MAX_CAPTURE_BYTES = 48 * 1024
+        MAX_RECEIPT_BYTES = 128 * 1024
+        MAX_INTENT_BYTES = 32 * 1024
+        MAX_EFFECTS_PER_OCCURRENCE = 128
+        MAX_JSON_DEPTH = 32
+        MAX_JSON_NODES = 8_192
+        MAX_STRING_BYTES = 32 * 1024
         SINKS = %w[
           attempt state finding branch pull_request review_handoff
           job discovery action issue
@@ -20,16 +27,28 @@ module Hive
 
         module_function
 
-        def immutable_json(value, label:)
+        def immutable_json(value, label:, depth: 0, budget: nil)
+          budget ||= { nodes: 0 }
+          budget[:nodes] += 1
+          malformed!(label) if depth > MAX_JSON_DEPTH ||
+                               budget.fetch(:nodes) > MAX_JSON_NODES
           case value
           when Hash
             value.each_with_object({}) do |(key, child), copy|
-              malformed!(label) unless key.is_a?(String)
-              copy[key.dup.freeze] = immutable_json(child, label: label)
+              malformed!(label) unless key.is_a?(String) &&
+                                       key.bytesize <= MAX_STRING_BYTES
+              copy[key.dup.freeze] = immutable_json(
+                child, label: label, depth: depth + 1, budget: budget
+              )
             end.freeze
           when Array
-            value.map { |child| immutable_json(child, label: label) }.freeze
+            value.map do |child|
+              immutable_json(
+                child, label: label, depth: depth + 1, budget: budget
+              )
+            end.freeze
           when String
+            malformed!(label) if value.bytesize > MAX_STRING_BYTES
             value.dup.freeze
           when Integer, TrueClass, FalseClass, NilClass
             value
@@ -54,6 +73,11 @@ module Hive
 
         def digest(prefix, value)
           "#{prefix}-#{::Digest::SHA256.hexdigest(canonical(value))}".freeze
+        end
+
+        def bounded!(value, max_bytes:, label:)
+          malformed!(label) if canonical(value).bytesize > max_bytes
+          value
         end
 
         def nonempty(value, label:)
@@ -125,7 +149,9 @@ module Hive
             effect_ids = Array(effect_ids).map do |effect_id|
               PatrolEvidence.nonempty(effect_id, label: label)
             end
-            PatrolEvidence.malformed!(label) unless effect_ids.uniq == effect_ids
+            PatrolEvidence.malformed!(label) unless effect_ids.uniq == effect_ids &&
+                                                    effect_ids.size <=
+                                                      PatrolEvidence::MAX_EFFECTS_PER_OCCURRENCE
             effect_ids = effect_ids.freeze
             occurred_at = PatrolEvidence.timestamp(occurred_at, label: label)
             recorded_at = PatrolEvidence.timestamp(recorded_at, label: label)
@@ -146,7 +172,7 @@ module Hive
                 "effect_ids" => effect_ids
               )
             )
-            {
+            attributes = {
               capture_id: capture_id,
               module_name: module_name,
               occurrence_id: occurrence_id,
@@ -161,6 +187,16 @@ module Hive
               occurred_at: occurred_at,
               recorded_at: recorded_at
             }
+            PatrolEvidence.bounded!(
+              {
+                "schema" => "hive-patrol-capture",
+                "schema_version" => 1,
+                **attributes.transform_keys(&:to_s)
+              },
+              max_bytes: PatrolEvidence::MAX_CAPTURE_BYTES,
+              label: label
+            )
+            attributes
           end
 
           def parse(value)
@@ -247,13 +283,15 @@ module Hive
 
       class EffectIntentValidator
         KEYS = %w[
-          authority capability claim_generation created_at idempotency_key
-          intent_id module occurrence_id owner_epoch sink target
+          authority authorization_digest capability claim_generation created_at
+          idempotency_key intent_id module occurrence_id owner_epoch scope sink
+          target
         ].freeze
 
         class << self
           def build(module_name:, occurrence_id:, authority:, owner_epoch:, sink:, target:,
-                    idempotency_key:, capability:, created_at:, claim_generation: nil)
+                    idempotency_key:, capability:, created_at:, claim_generation: nil,
+                    scope: {})
             label = "patrol effect intent"
             module_name = PatrolEvidence.enum(module_name, PatrolEvidence::MODULES, label: label)
             occurrence_id = PatrolEvidence.hex_id(occurrence_id, "occ", label: label)
@@ -265,27 +303,50 @@ module Hive
             capability = PatrolEvidence.nonempty(capability, label: label)
             claim_generation = PatrolEvidence.optional_generation(claim_generation, label: label)
             created_at = PatrolEvidence.timestamp(created_at, label: label)
+            scope = PatrolEvidence.immutable_json(scope, label: label)
+            PatrolEvidence.malformed!(label) unless scope.is_a?(Hash)
             identity = {
               "module" => module_name,
               "occurrence_id" => occurrence_id,
               "sink" => sink,
               "target" => target,
               "idempotency_key" => idempotency_key,
-              "owner_epoch" => owner_epoch
+              "owner_epoch" => owner_epoch,
+              "scope" => scope
             }
-            {
-              intent_id: PatrolEvidence.digest("intent", identity),
+            intent_id = PatrolEvidence.digest("intent", identity)
+            authorization_digest = PatrolEvidence.digest(
+              "auth",
+              {
+                "intent_id" => intent_id,
+                "authority" => authority,
+                "owner_epoch" => owner_epoch,
+                "capability" => capability,
+                "claim_generation" => claim_generation,
+                "created_at" => created_at
+              }
+            )
+            attributes = {
+              intent_id: intent_id,
               module_name: module_name,
               occurrence_id: occurrence_id,
               authority: authority,
+              authorization_digest: authorization_digest,
               owner_epoch: owner_epoch,
               sink: sink,
               target: target,
               idempotency_key: idempotency_key,
               capability: capability,
               claim_generation: claim_generation,
+              scope: scope,
               created_at: created_at
             }
+            PatrolEvidence.bounded!(
+              attributes.transform_keys(&:to_s),
+              max_bytes: PatrolEvidence::MAX_INTENT_BYTES,
+              label: label
+            )
+            attributes
           end
 
           def parse(value)
@@ -301,11 +362,17 @@ module Hive
               idempotency_key: value["idempotency_key"],
               capability: value["capability"],
               claim_generation: value["claim_generation"],
+              scope: value["scope"],
               created_at: value["created_at"]
             )
             unless attributes[:intent_id] == value["intent_id"]
               raise Hive::ConfigError,
                     "patrol effect intent identity does not match its contents"
+            end
+            unless attributes[:authorization_digest] ==
+                   value["authorization_digest"]
+              raise Hive::ConfigError,
+                    "patrol effect intent authorization does not match its contents"
             end
             attributes
           end
@@ -313,9 +380,9 @@ module Hive
       end
 
       EffectIntent = Data.define(
-        :intent_id, :module_name, :occurrence_id, :authority, :owner_epoch,
-        :sink, :target, :idempotency_key, :capability, :claim_generation,
-        :created_at
+        :intent_id, :module_name, :occurrence_id, :authority,
+        :authorization_digest, :owner_epoch, :sink, :target, :idempotency_key,
+        :capability, :claim_generation, :scope, :created_at
       ) do
         class << self
           def build(**attributes)
@@ -333,12 +400,14 @@ module Hive
             "module" => module_name,
             "occurrence_id" => occurrence_id,
             "authority" => authority,
+            "authorization_digest" => authorization_digest,
             "owner_epoch" => owner_epoch,
             "sink" => sink,
             "target" => target,
             "idempotency_key" => idempotency_key,
             "capability" => capability,
             "claim_generation" => claim_generation,
+            "scope" => scope,
             "created_at" => created_at
           }.freeze
         end
@@ -370,6 +439,21 @@ module Hive
               outcome: outcome,
               recorded_at: recorded_at
             }
+              .tap do |attributes|
+                PatrolEvidence.bounded!(
+                  {
+                    "schema" => "hive-patrol-effect-receipt",
+                    "schema_version" => 1,
+                    "receipt_id" => attributes.fetch(:receipt_id),
+                    "intent" => attributes.fetch(:intent).to_h,
+                    "status" => attributes.fetch(:status),
+                    "outcome" => attributes.fetch(:outcome),
+                    "recorded_at" => attributes.fetch(:recorded_at)
+                  },
+                  max_bytes: PatrolEvidence::MAX_RECEIPT_BYTES,
+                  label: label
+                )
+              end
           end
 
           def parse(value)

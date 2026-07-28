@@ -1344,6 +1344,75 @@ class RefactorPatrolPrOpenerTest < Minitest::Test
     end
   end
 
+  def test_publication_effect_gateway_failures_keep_the_action_retryable
+    cases = [
+      [
+        Hive::RefactorPatrol::EffectDenied.new("authority revoked", nil),
+        "authority_revoked"
+      ],
+      [
+        Hive::RefactorPatrol::EffectReconciliationRequired.new(
+          "remote outcome unknown", nil
+        ),
+        "remote_outcome_unknown"
+      ]
+    ]
+
+    cases.each do |gateway_error, expected_outcome|
+      with_tmp_git_repo do |repo|
+        result = opener(repo, FakeGh.new, Handoff.new).open(
+          thesis: thesis,
+          patch: patch(repo),
+          job_id: "job-7",
+          canonical_action_id: "fix-fp",
+          source: source,
+          record_intent: ->(**) { true },
+          execute_effect: ->(**) { raise gateway_error }
+        )
+
+        assert_equal expected_outcome, result.outcome
+        refute result.terminal
+        if gateway_error.is_a?(Hive::RefactorPatrol::EffectReconciliationRequired)
+          assert_includes result.receipts.fetch("error"), "remote outcome unknown"
+        end
+      end
+    end
+  end
+
+  def test_handoff_effect_gateway_failures_return_visible_pending_receipts
+    errors = [
+      Hive::RefactorPatrol::EffectDenied.new("authority revoked", nil),
+      Hive::RefactorPatrol::EffectReconciliationRequired.new(
+        "remote outcome unknown", nil
+      )
+    ]
+
+    with_tmp_git_repo do |repo|
+      subject = opener(repo, FakeGh.new, Handoff.new)
+      errors.each do |gateway_error|
+        result = subject.send(
+          :handoff,
+          thesis,
+          patch(repo),
+          "https://github.com/acme/demo/pull/9",
+          "job-7",
+          "fix-fp",
+          source,
+          authorize_handoff: -> { true },
+          execute_handoff: ->(**) { raise gateway_error }
+        )
+
+        assert_equal "review_handoff_pending", result.outcome
+        refute result.terminal
+        assert_equal(
+          "https://github.com/acme/demo/pull/9",
+          result.receipts.fetch("pr_url")
+        )
+        assert_equal gateway_error.message, result.receipts.fetch("handoff_error")
+      end
+    end
+  end
+
   private
 
   def opener(repo, gh, handoff)

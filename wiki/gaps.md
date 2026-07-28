@@ -111,13 +111,14 @@ tags: [gap, todo, release-proof, agent-skills]
 
 ## Internal component boundary gap
 
-- The final internal graph audit retains seven catalog rows: UserService, Agent
+- The final internal graph audit retains eight catalog rows: UserService, Agent
   ABI, Agent Artifact Firewall, Skillpack, Safe Agent Git Gate, and WorkLedger
-  are `boundary-ready`; Attempts admission remains the sole `candidate`.
-  Skillpack to Agent ABI is the only component dependency, and no migration
-  exceptions remain. Attempts is not ready because Hive has no demonstrated
-  need for a supported reconciliation, supervision, capacity, loss-processing,
-  cancellation, export, or raw-store lifecycle API.
+  are `boundary-ready`; Attempts admission and Patrol Effect Evidence remain
+  `candidate`. Skillpack to Agent ABI is the only component dependency. Patrol
+  retains one bounded U3 exception for compressed candidate evidence and
+  production qualification; Attempts remains unready because Hive has no
+  demonstrated need for a supported reconciliation, supervision, capacity,
+  loss-processing, cancellation, export, or raw-store lifecycle API.
 - No ready component has yet earned standalone packaging. There is no named
   non-Hive adopter, independently installed component artifact, separate
   compatibility promise, or explicit release decision. Those proofs belong to
@@ -370,15 +371,19 @@ Dependency lock uncertainty is unchanged: the root bundle has
 ## Installable patrol modules require live shadow evidence (2026-07-22)
 
 The package, lifecycle, event, attempt, adapter, migration, comparison, and
-rollback contracts have deterministic fixture coverage. Those fixtures prove
-the gate logic but intentionally do not satisfy the operational rollout gate.
-The adapters now refuse self-comparison and admit comparable evidence only
-from an independently supplied immutable `legacy_mutator_capture`, but the
-legacy Patrol producers do not yet publish that snapshot. Adapter permission
-checks are still preflight-only until the existing Patrol engines accept
-capability-bound side-effect gateways. Reservation-to-child registration now
-shares the migration lock with cutover, removing that ownership race without
-claiming the remaining evidence and capability gates are complete.
+rollback contracts have deterministic fixture coverage. U2 now supplies
+finalized ordinary positive and negative captures, one occurrence spanning the
+Architecture Patrol job, discovery, action, and final decision, live
+effect-time generation/grant checks, sender leases with reconciliation-only
+uncertainty, canonical outboxes, v2-only one-off migration, and bounded
+occurrence/intent evidence indices. Those fixtures prove the repaired boundary
+but intentionally do not satisfy the operational rollout gate.
+
+U3 still needs to make the candidate-bound compressed evidence protocol part of
+the test harness, feed it from these finalized occurrences without consulting
+EvidenceStore for recovery, and produce the elapsed production qualification
+set. Until that proof exists, Patrol Effect Evidence remains a catalog
+`candidate`; neither module mutator cutover nor boundary promotion is complete.
 
 Native module workflow targets also remain execution-disabled. Activation
 validates and snapshots their package files, but safe admission still needs

@@ -684,6 +684,125 @@ class ModulesMigrationPatrolsTest < Minitest::Test
     end
   end
 
+  def test_ownership_snapshot_and_adoption_lock_fail_closed
+    with_project do |project|
+      state_path = Hive::Modules::Migration::Patrols.state_file(
+        project.fetch("path"),
+        hive_state_path: project.fetch("hive_state_path")
+      )
+      FileUtils.mkdir_p(File.dirname(state_path))
+      File.write(state_path, "{bad")
+      assert_equal(
+        {
+          "owner" => "none",
+          "epoch" => 0,
+          "admission" => false
+        },
+        Hive::Modules::Migration::Patrols.ownership_snapshot(
+          project.fetch("path"),
+          "patrol",
+          hive_state_path: project.fetch("hive_state_path")
+        )
+      )
+    end
+
+    with_project do |project|
+      migration = Hive::Modules::Migration::Patrols.new(
+        project_root: project.fetch("path"),
+        project: "demo",
+        hive_state_path: project.fetch("hive_state_path"),
+        module_store: FakeStore.new,
+        quiescence_probe: ->(_name, _root) { :quiescent }
+      )
+      migration.define_singleton_method(:mutate) do |&_block|
+        nil
+      end
+      error = assert_raises(Hive::ConfigError) do
+        migration.adopt!(now: NOW)
+      end
+      assert_match(/admission is unavailable/, error.message)
+    end
+  end
+
+  def test_adoption_rechecks_concurrent_state_after_inventory
+    with_project do |project|
+      migration = Hive::Modules::Migration::Patrols.new(
+        project_root: project.fetch("path"),
+        project: "demo",
+        hive_state_path: project.fetch("hive_state_path"),
+        module_store: FakeStore.new,
+        quiescence_probe: ->(_name, _root) { :quiescent }
+      )
+      migration.define_singleton_method(
+        :migrate_shadow_decisions!
+      ) do
+        send(:write, read.merge("status" => "shadowing"))
+      end
+      assert_equal "already_current", migration.adopt!(now: NOW).status
+    end
+
+    with_project do |project|
+      migration = Hive::Modules::Migration::Patrols.new(
+        project_root: project.fetch("path"),
+        project: "demo",
+        hive_state_path: project.fetch("hive_state_path"),
+        module_store: FakeStore.new,
+        quiescence_probe: ->(_name, _root) { :quiescent }
+      )
+      migration.define_singleton_method(
+        :migrate_shadow_decisions!
+      ) do
+        send(:write, read.merge("status" => "rolled_back"))
+      end
+      error = assert_raises(Hive::ConfigError) do
+        migration.adopt!(now: NOW)
+      end
+      assert_match(/changed during adoption/, error.message)
+    end
+
+    with_project do |project|
+      probes = 0
+      migration = Hive::Modules::Migration::Patrols.new(
+        project_root: project.fetch("path"),
+        project: "demo",
+        hive_state_path: project.fetch("hive_state_path"),
+        module_store: FakeStore.new,
+        quiescence_probe: lambda do |_name, _root|
+          probes += 1
+          probes <= 2 ? :quiescent : :live
+        end
+      )
+      migration.define_singleton_method(
+        :migrate_shadow_decisions!
+      ) { nil }
+      outcome = migration.adopt!(now: NOW)
+      assert_equal "pending", outcome.status
+      assert_equal(
+        {
+          "patrol" => "live",
+          "architecture-patrol" => "live"
+        },
+        outcome.blockers
+      )
+    end
+  end
+
+  def test_shadow_inventory_distinguishes_live_quiescence_failure
+    with_project do |project|
+      migration = Hive::Modules::Migration::Patrols.new(
+        project_root: project.fetch("path"),
+        project: "demo",
+        hive_state_path: project.fetch("hive_state_path"),
+        module_store: FakeStore.new,
+        quiescence_probe: ->(_name, _root) { :live }
+      )
+      error = assert_raises(Hive::ConfigError) do
+        migration.send(:migrate_shadow_decisions!)
+      end
+      assert_match(/requires quiescence/, error.message)
+    end
+  end
+
   private
 
   def with_project

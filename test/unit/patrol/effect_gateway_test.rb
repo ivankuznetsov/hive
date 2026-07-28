@@ -1,161 +1,183 @@
 require "test_helper"
 require "hive/patrol/effect_gateway"
+require "hive/patrol/state_store"
 
 class PatrolEffectGatewayTest < Minitest::Test
   include HiveTestHelper
 
   NOW = Time.utc(2026, 7, 28, 12)
 
-  def test_orders_intent_lock_live_authorization_sink_outcome_and_evidence
+  def test_persists_intent_before_live_authorization_and_sink
     with_tmp_dir do |root|
       operations = []
-      domain = FakeDomain.new(operations)
-      evidence = FakeEvidence.new(operations)
+      store, evidence = delivery(root, operations)
       gateway = gateway(
-        root,
-        domain: domain,
-        evidence: evidence,
-        operations: operations
+        root, store: store, evidence: evidence, operations: operations
       )
 
-      result = gateway.perform!(
-        sink: "finding",
-        target: "finding-1",
-        idempotency_key: "finding-1",
-        capability: "filesystem_write"
-      ) do
+      result = perform(gateway, sink: "finding") do
         operations << :sink
         { "finding_id" => "finding-1" }
       end
 
       assert_equal :committed, result.status
-      assert_equal(
-        [ :intent, :lock, :migration_reload, :config_reload, :capability_check,
-         :sink, :outcome, :evidence ],
-        operations
-      )
-      assert_equal "committed", domain.state.fetch("status")
+      assert_operator operations.index(:intent), :<, operations.index(:lock)
+      assert_operator operations.index(:capability_check), :<,
+                      operations.index(:sink)
+      assert_operator operations.index(:uncertain), :<,
+                      operations.index(:sink)
+      assert_operator operations.index(:sink), :<,
+                      operations.index(:outcome)
+      assert_operator operations.index(:outcome), :<,
+                      operations.index(:evidence)
+      assert_equal "committed", effect_state(store, sink: "finding")
+        .fetch("state")
     end
   end
 
-  def test_capability_revoked_after_preflight_denies_without_sink
+  def test_capability_revocation_denies_without_sink
     with_tmp_dir do |root|
-      operations = [ :preflight_allowed ]
-      domain = FakeDomain.new(operations)
-      evidence = FakeEvidence.new(operations)
+      operations = []
+      store, evidence = delivery(root, operations)
       gateway = gateway(
-        root,
-        domain: domain,
-        evidence: evidence,
-        operations: operations,
+        root, store: store, evidence: evidence, operations: operations,
         capability_allowed: false
       )
       calls = 0
 
       error = assert_raises(Hive::Patrol::EffectGateway::Denied) do
-        gateway.perform!(
-          sink: "pull_request",
-          target: "owner/demo:branch",
-          idempotency_key: "finding-1:pr",
-          capability: "github_pull_requests"
-        ) { calls += 1 }
+        perform(gateway) { calls += 1 }
       end
 
       assert_equal "capability_revoked", error.reason
       assert_equal 0, calls
-      assert_equal "denied", domain.state.fetch("status")
+      assert_equal "denied", effect_state(store).fetch("state")
       assert_equal "denied", evidence.receipts.last.status
     end
   end
 
-  def test_duplicate_unknown_remote_effect_is_reconciliation_only
+  def test_expired_uncertainty_is_reconciliation_only
     with_tmp_dir do |root|
       operations = []
-      domain = FakeDomain.new(operations, duplicate: true, status: "unknown")
-      evidence = FakeEvidence.new(operations)
-      reconciliations = 0
-      sink_calls = 0
-      gateway = gateway(
-        root,
-        domain: domain,
-        evidence: evidence,
-        operations: operations
+      store, evidence = delivery(root, operations)
+      first = gateway(
+        root, store: store, evidence: evidence, operations: operations,
+        lease_sec: 1, claimant: "sender-one"
+      )
+      assert_raises(RuntimeError) do
+        perform(first) { raise "crash at send boundary" }
+      end
+      calls = 0
+      second = gateway(
+        root, store: store, evidence: evidence, operations: operations,
+        now: NOW + 2, lease_sec: 1, claimant: "sender-two"
       )
 
-      result = gateway.perform!(
-        sink: "pull_request",
-        target: "owner/demo:branch",
-        idempotency_key: "finding-1:pr",
-        capability: "github_pull_requests",
-        reconcile: lambda do |intent|
-          reconciliations += 1
-          assert_equal "owner/demo:branch", intent.target
-          {
-            "status" => "matched",
-            "outcome" => { "pr_url" => "https://github.com/owner/demo/pull/7" }
+      error = assert_raises(
+        Hive::Patrol::EffectGateway::ReconciliationRequired
+      ) do
+        perform(
+          second,
+          reconcile: ->(_intent) {
+            { "status" => "ambiguous", "outcome" => {} }
           }
-        end
-      ) { sink_calls += 1 }
+        ) { calls += 1 }
+      end
 
-      assert_equal :reconciled, result.status
-      assert_equal 1, reconciliations
-      assert_equal 0, sink_calls
-      assert_equal "reconciled", domain.state.fetch("status")
+      assert_equal "remote_identity_ambiguous", error.reason
+      assert_equal 0, calls
+      assert_equal "dispatch_uncertain", effect_state(store).fetch("state")
+      assert_empty evidence.receipts
     end
   end
 
-  def test_shadow_attempt_records_denial_without_domain_or_sink_mutation
+  def test_terminal_duplicate_reuses_canonical_receipt_without_redelivery
     with_tmp_dir do |root|
       operations = []
-      domain = FakeDomain.new(operations)
-      evidence = FakeEvidence.new(operations)
+      store, evidence = delivery(root, operations)
       gateway = gateway(
-        root,
-        authority: "shadow",
-        domain: domain,
-        evidence: evidence,
-        operations: operations
+        root, store: store, evidence: evidence, operations: operations
       )
-      sink_calls = 0
+      calls = 0
+
+      first = perform(gateway) do
+        calls += 1
+        { "pr_url" => "https://github.com/owner/demo/pull/7" }
+      end
+      duplicate = perform(gateway) do
+        calls += 1
+        { "pr_url" => "https://github.com/owner/demo/pull/8" }
+      end
+
+      assert_equal 1, calls
+      assert_equal first.receipt.to_h, duplicate.receipt.to_h
+      assert_equal 1, evidence.receipts.size
+    end
+  end
+
+  def test_reconcile_only_adopts_an_exact_existing_remote_effect
+    with_tmp_dir do |root|
+      operations = []
+      store, evidence = delivery(root, operations)
+      gateway = gateway(
+        root, store: store, evidence: evidence, operations: operations
+      )
+
+      result = gateway.reconcile!(
+        sink: "pull_request",
+        target: "owner/demo:branch",
+        idempotency_key: "finding-1:pull_request",
+        capability: "github_pull_requests",
+        scope: { "fingerprint" => "fingerprint-1" }
+      ) do
+        {
+          "status" => "matched",
+          "outcome" => {
+            "pr_url" => "https://github.com/owner/demo/pull/7"
+          }
+        }
+      end
+
+      assert_equal :reconciled, result.status
+      assert_equal result.receipt.to_h, evidence.receipts.first.to_h
+      assert_equal "reconciled", effect_state(store).fetch("state")
+      refute_includes operations, :sink
+    end
+  end
+
+  def test_shadow_attempt_is_observational_only
+    with_tmp_dir do |root|
+      operations = []
+      store = Hive::Patrol::StateStore.new(root)
+      evidence = Evidence.new(operations)
+      gateway = gateway(
+        root, store: store, evidence: evidence, operations: operations,
+        authority: "shadow"
+      )
 
       error = assert_raises(Hive::Patrol::EffectGateway::Denied) do
-        gateway.perform!(
-          sink: "issue",
-          target: "owner/demo:family-1",
-          idempotency_key: "family-1",
-          capability: "github_issues"
-        ) { sink_calls += 1 }
+        perform(gateway) { flunk "shadow must not reach the sink" }
       end
 
       assert_equal "shadow_mutation_forbidden", error.reason
-      assert_equal 0, sink_calls
-      assert_empty domain.intents
-      assert_nil domain.state
-      assert_equal [ :lock, :migration_reload, :config_reload, :evidence ], operations
-      assert_equal true, evidence.receipts.last.outcome.fetch("attempted")
+      assert_nil store.occurrence(capture.occurrence_id)
+      assert_equal [ "attempted" ], evidence.receipts.map(&:status)
     end
   end
 
   def test_stale_owner_epoch_is_denied
     with_tmp_dir do |root|
       operations = []
-      domain = FakeDomain.new(operations)
-      evidence = FakeEvidence.new(operations)
+      store, evidence = delivery(root, operations)
       gateway = gateway(
-        root,
-        domain: domain,
-        evidence: evidence,
-        operations: operations,
+        root, store: store, evidence: evidence, operations: operations,
         owner_epoch: 2
       )
 
       error = assert_raises(Hive::Patrol::EffectGateway::Denied) do
-        gateway.perform!(
-          sink: "state",
-          target: "patrol/state.json",
-          idempotency_key: "occurrence-state",
-          capability: "filesystem_write"
-        ) { flunk "stale epoch must not reach the sink" }
+        perform(gateway, sink: "state") do
+          flunk "stale epoch must not reach the sink"
+        end
       end
 
       assert_equal "stale_owner_epoch", error.reason
@@ -164,34 +186,7 @@ class PatrolEffectGatewayTest < Minitest::Test
 
   private
 
-  class FakeDomain
-    attr_reader :intents, :state
-
-    def initialize(operations, duplicate: false, status: "intent")
-      @operations = operations
-      @duplicate = duplicate
-      @state = duplicate ? { "status" => status, "outcome" => {} } : nil
-      @intents = []
-    end
-
-    def write_intent(intent)
-      @operations << :intent
-      @intents << intent
-      return :duplicate if @duplicate
-
-      @state = { "status" => "intent", "outcome" => {} }
-      :created
-    end
-
-    def read(_intent) = @state
-
-    def write_outcome(_intent, status:, outcome:)
-      @operations << :outcome
-      @state = { "status" => status, "outcome" => outcome }
-    end
-  end
-
-  class FakeEvidence
+  class Evidence
     attr_reader :receipts
 
     def initialize(operations)
@@ -201,21 +196,46 @@ class PatrolEffectGatewayTest < Minitest::Test
 
     def append_receipt(receipt)
       @operations << :evidence
-      @receipts << receipt
+      existing = @receipts.find do |candidate|
+        candidate.receipt_id == receipt.receipt_id
+      end
+      raise "receipt bytes conflict" if existing && existing.to_h != receipt.to_h
+
+      @receipts << receipt unless existing
+      receipt
     end
   end
 
-  def gateway(root, domain:, evidence:, operations:, authority: "legacy",
-              capability_allowed: true, owner_epoch: 1)
+  def delivery(root, operations)
+    store = Hive::Patrol::StateStore.new(root)
+    store.reserve_occurrence!(capture, now: NOW)
+    instrumentation = Module.new
+    instrumentation.define_method(:prepare_effect!) do |intent, **options|
+      operations << :intent
+      super(intent, **options)
+    end
+    instrumentation.define_method(:mark_dispatch_uncertain!) do |intent, **options|
+      operations << :uncertain
+      super(intent, **options)
+    end
+    instrumentation.define_method(:settle_effect_claimed!) do |intent, **options|
+      operations << :outcome
+      super(intent, **options)
+    end
+    store.singleton_class.prepend(instrumentation)
+    [ store, Evidence.new(operations) ]
+  end
+
+  def gateway(root, store:, evidence:, operations:, authority: "legacy",
+              capability_allowed: true, owner_epoch: 1, now: NOW,
+              lease_sec: 300, claimant: "sender")
     Hive::Patrol::EffectGateway.new(
       project_root: root,
       hive_state_path: File.join(root, ".hive-state"),
-      capture: capture(authority),
+      capture: capture,
       authority: authority,
       evidence_store: evidence,
-      intent_writer: domain.method(:write_intent),
-      recovery_reader: domain.method(:read),
-      outcome_writer: domain.method(:write_outcome),
+      delivery_store: store,
       migration_lock: lambda do |&block|
         operations << :lock
         block.call
@@ -236,11 +256,43 @@ class PatrolEffectGatewayTest < Minitest::Test
         operations << :capability_check
         capability_allowed
       end,
-      clock: -> { NOW }
+      clock: -> { now },
+      lease_sec: lease_sec,
+      claimant: claimant
     )
   end
 
-  def capture(authority)
+  def perform(gateway, sink: "pull_request", reconcile: nil, &effect)
+    gateway.perform!(
+      sink: sink,
+      target: sink == "state" ? "state" : "owner/demo:branch",
+      idempotency_key: "finding-1:#{sink}",
+      capability: sink == "state" ? "filesystem_write" :
+        "github_pull_requests",
+      scope: { "fingerprint" => "fingerprint-1" },
+      reconcile: reconcile,
+      &effect
+    )
+  end
+
+  def effect_state(store, sink: "pull_request")
+    intent = Hive::Modules::Migration::EffectIntent.build(
+      module_name: "patrol",
+      occurrence_id: capture.occurrence_id,
+      authority: "legacy",
+      owner_epoch: 1,
+      sink: sink,
+      target: sink == "state" ? "state" : "owner/demo:branch",
+      idempotency_key: "finding-1:#{sink}",
+      capability: sink == "state" ? "filesystem_write" :
+        "github_pull_requests",
+      scope: { "fingerprint" => "fingerprint-1" },
+      created_at: NOW
+    )
+    store.effect_state(intent)
+  end
+
+  def capture
     Hive::Modules::Migration::PatrolCapture.build(
       module_name: "patrol",
       project: {
@@ -250,7 +302,7 @@ class PatrolEffectGatewayTest < Minitest::Test
       },
       trigger: { "kind" => "schedule", "id" => "schedule-1" },
       reservation: { "kind" => "ordinary", "id" => "reservation-1" },
-      owner: authority == "shadow" ? "legacy" : authority,
+      owner: "legacy",
       owner_epoch: 1,
       decision_class: "due",
       decision: { "rationale" => "due" },

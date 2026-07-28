@@ -17,7 +17,7 @@ the first and primary consumer.
 
 | Component | State | Current entry point | Narrative context |
 |-----------|-------|---------------------|-------------------|
-| Patrol Effect Evidence | `boundary-ready` | `require "hive/modules/migration/patrol_evidence"` → `Hive::Modules::Migration::PatrolEvidence` | [[modules/patrol]] |
+| Patrol Effect Evidence | `candidate` (U3 qualification pending) | `require "hive/modules/migration/patrol_evidence"` → `Hive::Modules::Migration::PatrolEvidence` | [[modules/patrol]] |
 | Attempts admission / future RunReceipt | `candidate` (guarded reference) | `require "hive/attempts/api"` → `Hive::Attempts::API` | [[modules/attempts]] |
 | UserService | `boundary-ready` | `require "hive/user_service"` → `Hive::UserService` | [[modules/user_service]] |
 | Agent ABI | `boundary-ready`; standalone package candidate | `require "hive/agent_runtime"` → `Hive::AgentRuntime` | [[modules/agent_cli_runtime]], [[modules/agent_profile]] |
@@ -34,9 +34,10 @@ has earned a gem, version, repository, or release.
 
 ## Final graph audit
 
-The U2 update on 2026-07-28 retains eight components: seven are
-`boundary-ready`, Attempts remains the sole `candidate`, and no migration
-exceptions remain. Every retained entry point has a focused clean-process load
+The U2 resolution on 2026-07-28 retains eight components: six are
+`boundary-ready`; Attempts and Patrol Effect Evidence remain `candidate`.
+Patrol retains one bounded U3 exception for compressed evidence qualification
+and cutover proof. Every retained entry point has a focused clean-process load
 proof, every catalog-owned path and focused test resolves inside this
 repository, and the direct-construction guards pass against all production
 Ruby sources.
@@ -46,7 +47,7 @@ The component dependency graph has one edge:
 ```mermaid
 flowchart LR
   skillpack[Skillpack] --> agent_abi[Agent ABI]
-  patrol_effects[Patrol Effect Evidence]
+  patrol_effects[Patrol Effect Evidence - candidate]
   attempts[Attempts admission - candidate]
   user_service[UserService]
   artifact_firewall[Agent Artifact Firewall]
@@ -57,18 +58,38 @@ flowchart LR
 All other cataloged components depend only on explicitly allowed lower-level
 Hive primitives. The source audit found no retained experimental facade outside
 the catalog: each promoted facade is owned by a catalog row and used by Hive,
-while Attempts is deliberately retained as a guarded candidate rather than
-misrepresented as a complete lifecycle API.
+while Attempts and Patrol Effect Evidence are deliberately retained as guarded
+candidates rather than being promoted ahead of their remaining lifecycle or
+qualification proof.
 
 This is an internal architecture verdict, not a packaging verdict. None of the
-seven ready components currently has the named non-Hive adopter and independent
+six ready components currently has the named non-Hive adopter and independent
 package proof required by the standalone-gem plan.
 
-`Patrol Effect Evidence` owns only the immutable cross-product capture, intent,
-receipt, and append-only observation contract plus the two deliberately
-separate authorization gateways. Ordinary Patrol keeps fingerprint and
-ReviewHandoff recovery; Architecture Patrol keeps JobStore recovery. The
-evidence store is never consulted to decide a retry or mutation.
+`Patrol Effect Evidence` owns the immutable cross-product capture, intent, and
+receipt values, the single lower-level occurrence facade, bounded observational
+indices, and the two deliberately separate product gateways. The facade
+composes one pure validator, one store that alone locks and writes, one outbox,
+and one effect state machine. Both product gateways compose the same admission,
+sender, and receipt-projection collaborators without inheriting from a shared
+product superclass. `TransitionGateway` is a persistence-free Architecture
+Patrol port: it routes `job`, `discovery`, and `action` mutations into the
+architecture gateway but can only mutate by invoking JobStore. ActionRunner and
+the scheduler delegate transition identities, claim fencing, reconciliation,
+and occurrence finalization to bounded coordinators while retaining product
+decisions and cadence. Command and daemon manifest intake share
+`ArchitectureIntakeTransitions`; `ArchitectureOccurrenceStore` validates the
+job scope over the shared journal, while its immutable
+`ArchitectureOccurrenceBinding` contains only the job-to-occurrence identity
+edge. StateStore and JobStore expose the separate product recovery APIs over
+the one occurrence store. Terminal outcomes and canonical projection bytes
+commit together; EvidenceStore is never consulted to decide a retry or
+mutation.
+
+The row remains `candidate` because U3 still has to prove the compressed
+candidate-bound evidence protocol against the repaired production stream and
+complete qualification. That exception is not permission for another recovery
+store, compatibility effect map, or cutover claim.
 
 `Hive::Attempts::API` is the guarded reference admission slice. Its public
 result contracts, focused clean-load proof, and exact internal construction

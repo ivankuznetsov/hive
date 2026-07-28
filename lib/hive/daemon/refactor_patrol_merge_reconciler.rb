@@ -7,6 +7,9 @@ require "hive/atomic_file"
 require "hive/config"
 require "hive/gh"
 require "hive/daemon/refactor_patrol_merge_progress_store"
+require "hive/modules/migration/evidence_store"
+require "hive/modules/migration/patrols"
+require "hive/refactor_patrol/architecture_intake_transitions"
 require "hive/refactor_patrol/job_store"
 require "hive/refactor_patrol/github_gateway"
 require "hive/refactor_patrol/policy"
@@ -61,7 +64,8 @@ module Hive
                      backoff_base_sec: DEFAULT_BACKOFF_BASE_SEC,
                      backoff_max_sec: DEFAULT_BACKOFF_MAX_SEC,
                      monotonic_clock: nil, jitter: nil, progress_store: nil,
-                     module_event_publisher: nil)
+                     module_event_publisher: nil, migration_snapshot: nil,
+                     evidence_store_factory: nil)
         @registry = registry
         @config_loader = config_loader
         @gh = gh
@@ -85,6 +89,29 @@ module Hive
         @job_store_factory = job_store_factory || ->(root) { Hive::RefactorPatrol::JobStore.new(root) }
         @dry_run = dry_run
         @module_event_publisher = module_event_publisher
+        @migration_snapshot = migration_snapshot || lambda do |entry|
+          Hive::Modules::Migration::Patrols.ownership_snapshot(
+            entry.fetch("path"), "architecture-patrol",
+            hive_state_path: entry["hive_state_path"]
+          )
+        end
+        @evidence_store_factory = evidence_store_factory || lambda do |entry|
+          state = entry["hive_state_path"] ||
+                  File.join(entry.fetch("path"), ".hive-state")
+          Hive::Modules::Migration::EvidenceStore.new(
+            root: File.join(
+              state, "module-runtime", "migration", "patrol-evidence"
+            )
+          )
+        end
+        @architecture_intake_transitions =
+          Hive::RefactorPatrol::ArchitectureIntakeTransitions.new(
+            config_loader: @config_loader,
+            migration_snapshot: @migration_snapshot,
+            evidence_store_factory: @evidence_store_factory,
+            claimant: "architecture-intake-#{Process.pid}",
+            admission_error: Blocked
+          )
         @next_poll_at = nil
         @rotation_offset = 0
       end
@@ -301,8 +328,11 @@ module Hive
         resolver = @resolver_factory.call(entry, cfg, @github_gateway, @dry_run)
         manifest = resolver.resolve(pr, timeout_sec: timeout_sec)
         assert_manifest_matches!(manifest, expected) if expected
-        result = @job_store_factory.call(entry.fetch("path")).enqueue_manifest!(
-          manifest,
+        store = @job_store_factory.call(entry.fetch("path"))
+        result = @architecture_intake_transitions.enqueue(
+          entry: entry,
+          store: store,
+          manifest: manifest,
           policy: policy_snapshot(cfg, now),
           now: now,
           dry_run: @dry_run

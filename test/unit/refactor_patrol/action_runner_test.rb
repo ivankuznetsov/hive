@@ -708,9 +708,9 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       )
       operations = []
       recording = Module.new
-      recording.define_method(:record_action_receipt!) do |token, key:, value:, now:|
-        operations << :effect_intent if key.start_with?("effect_intent_")
-        super(token, key: key, value: value, now: now)
+      recording.define_method(:prepare_effect!) do |intent, **options|
+        operations << [ :effect_intent, intent.sink ]
+        super(intent, **options)
       end
       recording.define_method(:finish_action!) do |token, **arguments|
         result = super(token, **arguments)
@@ -728,7 +728,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
         durable_evidence.append_capture(capture)
       end
       evidence.define_singleton_method(:append_receipt) do |receipt|
-        operations << :effect_evidence
+        operations << [ :effect_evidence, receipt.intent.sink ]
         durable_evidence.append_receipt(receipt)
       end
 
@@ -793,12 +793,36 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       ).run(job_id: "job-1")
 
       assert result.complete?
-      assert_equal 3, operations.count(:effect_intent)
-      assert_operator operations.index(:effect_intent), :<, operations.index(:push_sink)
-      assert_operator operations.rindex(:effect_intent), :<, operations.index(:handoff_sink)
-      assert_operator operations.index(:job_settled), :<, operations.index(:effect_evidence)
-      assert_equal %w[branch pull_request review_handoff],
-                   durable_evidence.receipts.map { |receipt| receipt.intent.sink }.sort
+      intents = operations.filter_map do |operation|
+        operation.last if operation.is_a?(Array) &&
+                          operation.first == :effect_intent
+      end
+      assert_equal 1, intents.count("branch")
+      assert_equal 1, intents.count("pull_request")
+      assert_equal 1, intents.count("review_handoff")
+      assert_operator intents.count("action"), :>=, 4
+      assert_operator(
+        operations.index([ :effect_intent, "branch" ]),
+        :<,
+        operations.index(:push_sink)
+      )
+      assert_operator(
+        operations.index([ :effect_intent, "review_handoff" ]),
+        :<,
+        operations.index(:handoff_sink)
+      )
+      assert_operator(
+        operations.index(:job_settled),
+        :<,
+        operations.rindex([ :effect_evidence, "action" ])
+      )
+      receipt_sinks = durable_evidence.receipts.map do |receipt|
+        receipt.intent.sink
+      end
+      assert_equal 1, receipt_sinks.count("branch")
+      assert_equal 1, receipt_sinks.count("pull_request")
+      assert_equal 1, receipt_sinks.count("review_handoff")
+      assert_operator receipt_sinks.count("action"), :>=, 4
       assert durable_evidence.receipts.all? { |receipt| receipt.status == "committed" }
     end
   end
@@ -2911,6 +2935,291 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     end
   end
 
+  def test_run_rejects_an_effect_occurrence_from_another_dispatch
+    with_tmp_dir do |dir|
+      item = thesis(id: "accepted")
+      store = write_classified_job(
+        dir,
+        policy: snapshot_policy,
+        dispositions: dispositions(accepted: [ disposition(item) ])
+      )
+      runner = build_runner(dir, store: store)
+      runner.instance_variable_set(
+        :@expected_occurrence_id,
+        "occ-#{'f' * 64}"
+      )
+
+      error = assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        runner.run(job_id: "job-1")
+      end
+
+      assert_equal(
+        "architecture patrol action occurrence does not match dispatch",
+        error.message
+      )
+      refute_nil store.occurrence_capture("job-1")
+    end
+  end
+
+  def test_effect_executors_reject_mutated_publication_and_handoff_payloads
+    with_tmp_dir do |dir|
+      runner = build_runner(dir, store: Object.new)
+      token = {
+        job_id: "job-1",
+        canonical_action_id: "action-1",
+        generation: 1,
+        continuation_only: false
+      }
+      aggregate = { "job_id" => "job-1", "source" => source(7) }
+      action = {
+        "canonical_action_id" => "action-1",
+        "family_id" => "family-1",
+        "thesis_fingerprint" => "fingerprint-1"
+      }
+      patch = validated_patch(fingerprint: "fingerprint-1")
+      publication = runner.send(
+        :publication_effect_executor,
+        token, "issue", aggregate, action
+      )
+      handoff = runner.send(
+        :handoff_effect_executor,
+        token, "fix", aggregate, action, patch
+      )
+
+      publication_error = assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        publication.call(
+          phase: "issue_create_intent",
+          payload: { "operation" => "create_issue", "mutated" => true }
+        ) { {} }
+      end
+      handoff_error = assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        handoff.call(
+          phase: "review_handoff",
+          payload: {
+            "pr_url" => "http://github.com/acme/polyglot/pull/99",
+            "job_id" => "job-1",
+            "canonical_action_id" => "action-1",
+            "commit_sha" => patch.commit_sha
+          }
+        ) { {} }
+      end
+
+      assert_equal "publication effect payload is invalid", publication_error.message
+      assert_equal "review handoff effect payload is invalid", handoff_error.message
+    end
+  end
+
+  def test_effect_gateway_claim_validator_fails_closed_on_a_stale_claim
+    with_tmp_dir do |dir|
+      store = Object.new
+      store.define_singleton_method(:assert_action_claim!) do |_token, **|
+        raise Hive::RefactorPatrol::JobStore::StaleClaim, "claim replaced"
+      end
+      runner = build_runner(dir, store: store)
+      options = nil
+      runner.instance_variable_set(
+        :@effect_gateway_factory,
+        lambda do |**gateway_options|
+          options = gateway_options
+          Object.new
+        end
+      )
+      token = {
+        job_id: "job-1",
+        canonical_action_id: "action-1",
+        generation: 7,
+        continuation_only: false
+      }
+
+      runner.send(
+        :build_effect_gateway,
+        token,
+        "fix",
+        Hive::RefactorPatrol::PrOpener::PUSH_INTENT,
+        {},
+        architecture_capture,
+        attempt_id: "attempt-1"
+      )
+
+      refute options.fetch(:claim_validator).call(claim_generation: 7)
+      refute options.fetch(:claim_validator).call(claim_generation: 8)
+    end
+  end
+
+  def test_effect_capture_and_descriptor_guards_are_explicit
+    with_tmp_dir do |dir|
+      runner = build_runner(dir, store: Object.new)
+      token = {
+        job_id: "job-1",
+        canonical_action_id: "action-1",
+        generation: 1,
+        continuation_only: false
+      }
+      aggregate = { "source" => source(7) }
+      issue_action = {
+        "canonical_action_id" => "action-1",
+        "family_id" => "family-1"
+      }
+
+      capture_error = assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        runner.send(:effect_capture, token, aggregate, issue_action)
+      end
+      issue = runner.send(
+        :effect_descriptor,
+        token, "issue", "issue_create_intent", {},
+        aggregate, issue_action, attempt_id: nil
+      )
+      phase_error = assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        runner.send(
+          :effect_descriptor,
+          token, "fix", "unknown", {},
+          aggregate, issue_action, attempt_id: nil
+        )
+      end
+
+      assert_equal "architecture patrol effect occurrence is unavailable",
+                   capture_error.message
+      assert_equal "issue", issue.fetch(:sink)
+      assert_equal "acme/polyglot:family-1", issue.fetch(:target)
+      assert_equal "github_issues", issue.fetch(:capability)
+      assert_equal "architecture patrol effect phase is unsupported",
+                   phase_error.message
+    end
+  end
+
+  def test_effect_project_identity_falls_back_when_registry_is_corrupt
+    with_tmp_global_config do |hive_home|
+      with_tmp_dir do |dir|
+        File.write(File.join(hive_home, "config.yml"), "[")
+        runner = build_runner(dir, store: Object.new)
+
+        assert_equal(
+          "local-#{::Digest::SHA256.hexdigest(File.expand_path(dir))}",
+          runner.send(:effect_project_id)
+        )
+      end
+    end
+  end
+
+  def test_publication_attempt_matcher_handles_exact_and_malformed_receipts
+    with_tmp_dir do |dir|
+      runner = build_runner(dir, store: Object.new)
+      captured_matcher = nil
+      runner.define_singleton_method(:action_claim_transition!) do |*,
+                                                                     matcher:,
+                                                                     **|
+        captured_matcher = matcher
+      end
+      token = { job_id: "job-1", canonical_action_id: "action-1" }
+      attempt_id = "a" * 64
+      phase = Hive::RefactorPatrol::PrOpener::PUSH_INTENT
+      payload = { "operation" => "push_branch" }
+
+      runner.send(
+        :persist_publication_phase,
+        token, "fix", phase, payload, attempt_id: attempt_id
+      )
+
+      exact = {
+        "receipts" => {
+          Hive::RefactorPatrol::PublicationAttempt::ATTEMPTS_KEY => {
+            attempt_id => { phase => payload }
+          }
+        }
+      }
+      assert captured_matcher.call(exact)
+      refute captured_matcher.call("receipts" => nil)
+    end
+  end
+
+  def test_claim_effect_capability_checks_cover_every_external_sink
+    with_tmp_dir do |dir|
+      runner = build_runner(dir, store: Object.new)
+      runner.define_singleton_method(:effect_authorized?) { |_kind| true }
+      token = {
+        job_id: "job-1",
+        canonical_action_id: "action-1",
+        generation: 1,
+        continuation_only: false
+      }
+      calls = []
+      context = Object.new
+      {
+        require_repository_write!: [],
+        require_github_mutation!: nil,
+        require_external_command!: nil,
+        require_network_host!: nil,
+        require_filesystem_write!: nil
+      }.each do |method_name, fixed_arguments|
+        context.define_singleton_method(method_name) do |*arguments|
+          calls << [ method_name, *(fixed_arguments || arguments) ]
+          true
+        end
+      end
+
+      refute runner.send(
+        :claim_effect_authorized?,
+        token, "fix", capability_context: context, capability: nil
+      )
+      assert runner.send(
+        :claim_effect_authorized?,
+        token, "fix", capability_context: context,
+        capability: "repository_write"
+      )
+      assert runner.send(
+        :claim_effect_authorized?,
+        token, "fix", capability_context: context,
+        capability: "github_pull_requests"
+      )
+      assert runner.send(
+        :claim_effect_authorized?,
+        token, "issue", capability_context: context,
+        capability: "github_issues"
+      )
+      assert runner.send(
+        :claim_effect_authorized?,
+        token, "fix", capability_context: context,
+        capability: "review_handoff"
+      )
+      refute runner.send(
+        :claim_effect_authorized?,
+        token, "fix", capability_context: context,
+        capability: "unknown"
+      )
+      assert_equal(
+        [
+          [ :require_repository_write! ],
+          [ :require_github_mutation!, "pull_requests" ],
+          [ :require_external_command!, "gh" ],
+          [ :require_network_host!, "api.github.com" ],
+          [ :require_github_mutation!, "issues" ],
+          [ :require_external_command!, "gh" ],
+          [ :require_network_host!, "api.github.com" ],
+          [ :require_filesystem_write!, ".hive-state/stages/**" ]
+        ],
+        calls
+      )
+
+      denied = Object.new
+      denied.define_singleton_method(:require_repository_write!) do
+        raise Hive::Modules::CapabilityDenied, "denied"
+      end
+      refute runner.send(
+        :claim_effect_authorized?,
+        token, "fix", capability_context: denied,
+        capability: "repository_write"
+      )
+    end
+  end
+
   private
 
   def build_runner(dir, store:, cfg: config, family_store: FakeFamilyStore.new,
@@ -2997,6 +3306,32 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       "base_sha" => "a" * 40,
       "merge_sha" => number == 7 ? "b" * 40 : "d" * 40
     }
+  end
+
+  def architecture_capture
+    Hive::Modules::Migration::PatrolCapture.build(
+      module_name: "architecture-patrol",
+      project: {
+        "project_id" => "project-1",
+        "name" => "polyglot",
+        "repository" => "acme/polyglot"
+      },
+      trigger: {
+        "kind" => "pull_request.merged",
+        "id" => "acme/polyglot:7:#{'b' * 40}"
+      },
+      reservation: {
+        "kind" => "architecture",
+        "id" => "job-1",
+        "job_id" => "job-1"
+      },
+      owner: "legacy",
+      owner_epoch: 1,
+      decision_class: "provenance",
+      decision: { "rationale" => "due", "job_id" => "job-1" },
+      occurred_at: T0,
+      recorded_at: T0
+    )
   end
 
   def snapshot_policy(overrides = {})

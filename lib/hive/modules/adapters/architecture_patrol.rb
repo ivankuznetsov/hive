@@ -64,7 +64,13 @@ module Hive
           scheduler = @scheduler_factory.call(
             registry: -> { [ project ] }, config_loader: ->(_path) { cfg },
             dry_run: mode == :shadow || configuration.settings.fetch("dry_run"),
-            migration_authority: mode == :mutator ? :module : :shadow
+            migration_authority: mode == :mutator ? :module : :shadow,
+            module_execution: {
+              "module" => "architecture-patrol",
+              "generation" =>
+                configuration.generation.fetch("source_commit"),
+              "configuration_digest" => configuration.digest
+            }
           )
           candidate = select_candidate(scheduler.candidates(now: event_time(event)), hook_id, event)
           rationale = candidate ? "due" : "not_due"
@@ -82,7 +88,15 @@ module Hive
           options = {
             json: true, dry_run: configuration.settings.fetch("dry_run"),
             job_manifest: reserved.fetch(:manifest_path), project_entry: project,
-            config_loader: ->(_path) { cfg }, capability_context: context
+            config_loader: ->(_path) { cfg }, capability_context: context,
+            occurrence_id:
+              reserved.dig(:dispatch_token, :occurrence_id),
+            module_execution: {
+              "module" => "architecture-patrol",
+              "generation" =>
+                configuration.generation.fetch("source_commit"),
+              "configuration_digest" => configuration.digest
+            }
           }
           options[:actions] = true if reserved.fetch(:action_phase, :discovery).to_sym == :action
           envelope = @command_factory.call(project.fetch("name"), options).call
@@ -206,9 +220,18 @@ module Hive
         end
 
         def occurrence_receipts(project, capture)
-          evidence_store(project).receipts.select do |receipt|
-            receipt.intent.module_name == "architecture-patrol" &&
-              receipt.intent.occurrence_id == capture.occurrence_id
+          page = evidence_store(project).receipts_for_occurrence(
+            capture.occurrence_id,
+            limit:
+              Hive::Modules::Migration::PatrolEvidence::
+                MAX_EFFECTS_PER_OCCURRENCE
+          )
+          if page.next_cursor
+            raise Hive::ConfigError,
+                  "Architecture Patrol occurrence receipt index exceeds its bound"
+          end
+          page.records.select do |receipt|
+            receipt.intent.module_name == "architecture-patrol"
           end
         end
 

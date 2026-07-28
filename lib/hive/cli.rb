@@ -898,12 +898,13 @@ module Hive
     option :occurrence_id, type: :string, hide: true
     def patrol(project)
       require "hive/commands/patrol"
-      Hive::Commands::Patrol.new(
-        project,
+      command_options = {
         json: options[:json],
-        dry_run: options[:dry_run],
-        occurrence_id: options[:occurrence_id]
-      ).call
+        dry_run: options[:dry_run]
+      }
+      occurrence_id = options[:occurrence_id]
+      command_options[:occurrence_id] = occurrence_id unless occurrence_id.nil?
+      Hive::Commands::Patrol.new(project, **command_options).call
     end
 
     desc "refactor-patrol PROJECT", "Discover ranked refactor theses for a registered project"
@@ -946,6 +947,8 @@ module Hive
                      desc: "resume actions for --job-manifest (daemon/internal)"
     option :result_file, type: :string,
                          desc: "write daemon completion envelope to a fenced result file (internal)"
+    option :occurrence_id, type: :string,
+                           desc: "reuse a durable patrol occurrence (daemon/internal)"
     option :list, type: :boolean, default: false,
                   desc: "list durable architecture-patrol jobs without changing state"
     option :show, type: :string,
@@ -970,6 +973,7 @@ module Hive
         job_manifest: options[:job_manifest],
         actions: options[:actions],
         result_file: options[:result_file],
+        occurrence_id: options[:occurrence_id],
         list: options[:list],
         show: options[:show],
         limit: options[:limit],

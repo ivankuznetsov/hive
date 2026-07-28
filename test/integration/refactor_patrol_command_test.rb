@@ -712,12 +712,12 @@ class RefactorPatrolCommandTest < Minitest::Test
       end
       assert_equal Hive::ExitCodes::SUCCESS, first_status, "#{first_out}\n#{first_err}"
 
-      recursive_manifest = pr_manifest(merge_sha: head).merge(
+      recursive_manifest = with_manifest_checksum(pr_manifest(merge_sha: head).merge(
         "job_id" => "pr-8-recursive",
         "source" => first_manifest.fetch("source").merge(
           "url" => "https://github.com/acme/demo/pull/8", "number" => 8
         )
-      )
+      ))
       duplicate = thesis("recursive", fingerprint: "recursive-fp")
       second_out, second_err, second_status = with_captured_exit do
         command_for(
@@ -1914,7 +1914,7 @@ class RefactorPatrolCommandTest < Minitest::Test
   end
 
   def pr_manifest(merge_sha: "7" * 40, changed_paths: [ "lib/checkout.rb" ])
-    {
+    with_manifest_checksum(
       "schema" => "hive-refactor-patrol-pr-manifest",
       "schema_version" => 2,
       "job_id" => "pr-7-deadbeef",
@@ -1931,7 +1931,7 @@ class RefactorPatrolCommandTest < Minitest::Test
       "files" => changed_paths.map { |path| { "path" => path, "status" => "modified" } },
       "changed_paths" => changed_paths,
       "manifest_checksum" => "checksum"
-    }
+    )
   end
 
   def source_context(manifest)

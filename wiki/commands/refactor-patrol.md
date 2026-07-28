@@ -263,6 +263,11 @@ but delegates deterministic responsibilities to three collaborators:
 `ClaimTransitions` constructs, renews, and finishes in-memory discovery/action
 claims, and `JobIndexes` projects rebuildable fingerprint/action indexes from
 terminal aggregates. None of those collaborators persists independently.
+Every production `job`, `discovery`, and `action` mutation enters JobStore
+through the persistence-free `TransitionGateway`, which applies the separate
+Architecture Patrol authorization gateway and the job-bound occurrence sender
+CAS before invoking the transition. JobStore still owns the aggregate and
+replay decision; the gateway adds no state file or recovery path.
 `PatrolArbiter` gives
 ordinary and architecture scans the same per-project patrol-scan budget and
 alternates kinds across ticks; architecture occurrences are oldest-first.
@@ -558,6 +563,8 @@ and thesis schema. V2 uses a separate namespace:
   reconciler-progress.json      # identity-bound page/intake cursor, schema v1
   manifests/<job-id>.json       # write-once source occurrence
   jobs/<job-id>.json            # authoritative aggregate + claims/receipts
+  occurrences/records/occ-*.json # job-bound effect leases/outbox journal
+  occurrences/jobs/*.json       # immutable job -> occurrence binding
   families/<family-id>.json     # rebuildable semantic-family projection
   indexes/                      # rebuildable fingerprint/action indexes
   results/<dispatch-id>.json    # daemon completion channel; removed on reap

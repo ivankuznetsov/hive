@@ -698,6 +698,32 @@ class HivePatrolReviewHandoffTest < Minitest::Test
     end
   end
 
+  def test_reconcile_fails_closed_for_duplicate_tasks_and_invalid_identity
+    with_tmp_dir do |dir|
+      arguments = {
+        finding: finding,
+        patch: patch(dir),
+        pr_url: "https://example.com/pull/7",
+        mandatory: true
+      }
+      first = handoff(dir).enqueue(**arguments)
+      duplicate = File.join(dir, ".hive-state", "stages", "9-done", File.basename(first))
+      FileUtils.mkdir_p(File.dirname(duplicate))
+      FileUtils.cp_r(first, duplicate)
+
+      assert_equal(
+        { "status" => "ambiguous", "outcome" => {} },
+        handoff(dir).reconcile(**arguments)
+      )
+      assert_equal(
+        { "status" => "ambiguous", "outcome" => {} },
+        handoff(dir).reconcile(
+          finding: finding, patch: patch(dir), pr_url: "", mandatory: true
+        )
+      )
+    end
+  end
+
   private
 
   def review_root(dir)

@@ -7,62 +7,101 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
 
   NOW = Time.utc(2026, 7, 28, 12)
 
-  def test_effect_intent_and_outcome_share_the_fingerprint_mapping
+  def test_occurrence_journal_is_the_only_effect_recovery_authority
     with_tmp_dir do |root|
       store = Hive::Patrol::StateStore.new(root)
       store.ensure!
       intent = effect_intent
-      context = {
-        "patch_id" => "patch-1",
-        "head_sha" => "a" * 40
+      store.reserve_occurrence!(capture, now: NOW)
+      store.prepare_effect!(intent, now: NOW)
+      claim = store.acquire_effect!(
+        intent, claimant: "sender-one", now: NOW, lease_sec: 60
+      )
+      store.mark_dispatch_uncertain!(
+        intent, token: claim.token, now: NOW
+      )
+      outcome = {
+        "pr_url" => "https://github.com/owner/demo/pull/7"
       }
-
-      assert_equal :created, store.reserve_effect_intent(
-        "fingerprint-1", intent, context: context, now: NOW
+      receipt = Hive::Modules::Migration::EffectReceipt.build(
+        intent: intent, status: "committed", outcome: outcome,
+        recorded_at: NOW
       )
-      assert_equal :duplicate, store.reserve_effect_intent(
-        "fingerprint-1", intent, context: context, now: NOW + 1
-      )
-      assert_equal "intent",
-                   store.effect_intent_state("fingerprint-1", intent).fetch("status")
-
-      store.record_effect_outcome(
-        "fingerprint-1", intent,
-        status: "committed",
-        outcome: { "pr_url" => "https://github.com/owner/demo/pull/7" }
+      store.settle_effect_claimed!(
+        intent, token: claim.token, status: "committed",
+        outcome: outcome, receipt: receipt, now: NOW
       )
 
       reloaded = Hive::Patrol::StateStore.new(root)
-      state = reloaded.effect_intent_state("fingerprint-1", intent)
-      assert_equal "committed", state.fetch("status")
-      assert_equal(
-        "https://github.com/owner/demo/pull/7",
-        state.dig("outcome", "pr_url")
-      )
-      assert_equal(
-        intent.to_h,
-        reloaded.fingerprints
-                .dig("fingerprint-1", "effect_intents", intent.intent_id, "intent")
-      )
+      assert_equal "committed", reloaded.effect_state(intent).fetch("state")
+      assert_equal receipt.to_h, reloaded.effect_receipt(
+        receipt.receipt_id, occurrence_id: intent.occurrence_id
+      ).to_h
+      refute reloaded.state.key?("effect_intents")
+      assert reloaded.fingerprints.values.none? do |entry|
+        entry.is_a?(Hash) && entry.key?("effect_intents")
+      end
     end
   end
 
-  def test_intent_identity_or_context_collision_fails_closed
+  def test_legacy_parallel_effect_maps_and_methods_are_absent
+    source = File.read(
+      File.expand_path(
+        "../../../lib/hive/patrol/state_store.rb", __dir__
+      )
+    )
+
+    %w[
+      reserve_effect_intent effect_intent_state record_effect_outcome
+      reserve_cycle_effect_intent cycle_effect_intent_state
+      record_cycle_effect_outcome
+    ].each do |legacy_method|
+      refute_includes source, "def #{legacy_method}"
+      refute Hive::Patrol::StateStore.public_instance_methods(false)
+        .include?(legacy_method.to_sym)
+      refute Hive::Patrol::StateStore.private_instance_methods(false)
+        .include?(legacy_method.to_sym)
+    end
+  end
+
+  def test_terminal_effect_requires_its_exact_canonical_outbox_receipt
     with_tmp_dir do |root|
       store = Hive::Patrol::StateStore.new(root)
-      store.ensure!
       intent = effect_intent
-      store.reserve_effect_intent(
-        "fingerprint-1", intent, context: { "patch_id" => "patch-1" }, now: NOW
+      store.reserve_occurrence!(capture, now: NOW)
+      store.prepare_effect!(intent, now: NOW)
+      claim = store.acquire_effect!(
+        intent, claimant: "sender-one", now: NOW, lease_sec: 60
+      )
+      store.mark_dispatch_uncertain!(
+        intent, token: claim.token, now: NOW
+      )
+      outcome = {
+        "pr_url" => "https://github.com/owner/demo/pull/7"
+      }
+      receipt = Hive::Modules::Migration::EffectReceipt.build(
+        intent: intent, status: "committed", outcome: outcome,
+        recorded_at: NOW
+      )
+      store.settle_effect_claimed!(
+        intent, token: claim.token, status: "committed",
+        outcome: outcome, receipt: receipt, now: NOW
+      )
+      path = File.join(
+        store.root, "occurrences", "#{capture.occurrence_id}.json"
+      )
+      record = JSON.parse(File.read(path))
+      record.dig("effects", intent.intent_id)["terminal_receipt_id"] = nil
+      File.write(
+        path,
+        Hive::WorkflowPackage::CanonicalJSON.generate(record)
       )
 
-      assert_raises(Hive::ConfigError) do
-        store.reserve_effect_intent(
-          "fingerprint-1", intent,
-          context: { "patch_id" => "different" },
-          now: NOW + 1
-        )
+      error = assert_raises(Hive::ConfigError) do
+        Hive::Patrol::StateStore.new(root).occurrence(capture.occurrence_id)
       end
+      assert_equal "patrol effect terminal receipt is malformed",
+                   error.message
     end
   end
 
@@ -100,10 +139,7 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
       assert_equal receipt_count, evidence.receipts.size
       assert_equal %w[attempt finding state],
                    evidence.receipts.map { |receipt| receipt.intent.sink }.uniq.sort
-      assert_equal(
-        %w[committed known_not_sent],
-        evidence.receipts.map(&:status).uniq.sort
-      )
+      assert_equal %w[committed], evidence.receipts.map(&:status).uniq.sort
       assert_equal NOW.iso8601, store.state.fetch("last_run_at")
       assert_equal patch, store.read_json(
         File.join(store.root, "patches", "patch-1.json")
@@ -111,7 +147,233 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
     end
   end
 
+  def test_outbox_rejects_unpublishable_events_unknown_kinds_and_invalid_json
+    with_tmp_dir do |root|
+      store = Hive::Patrol::StateStore.new(root)
+      evidence = Object.new
+      occurrence_store = Object.new
+      pending = []
+      occurrence_store.define_singleton_method(:pending_outbox) { |_occurrence_id| pending }
+      occurrence_store.define_singleton_method(:acknowledge_outbox!) do |*|
+        raise "invalid outbox entries must never be acknowledged"
+      end
+      store.instance_variable_set(:@occurrence_store, occurrence_store)
+
+      pending.replace([ outbox_entry("event", "{}") ])
+      unavailable = assert_raises(Hive::ConfigError) do
+        store.drain_occurrence_outbox!("occurrence-1", evidence_store: evidence)
+      end
+      pending.replace([ outbox_entry("unknown", "{}") ])
+      unknown = assert_raises(Hive::ConfigError) do
+        store.drain_occurrence_outbox!("occurrence-1", evidence_store: evidence)
+      end
+      pending.replace([ outbox_entry("capture", "{") ])
+      malformed = assert_raises(Hive::ConfigError) do
+        store.drain_occurrence_outbox!("occurrence-1", evidence_store: evidence)
+      end
+
+      assert_equal "patrol finalized event publisher is unavailable", unavailable.message
+      assert_equal "patrol outbox kind is malformed", unknown.message
+      assert_equal "patrol outbox bytes are malformed", malformed.message
+    end
+  end
+
+  def test_known_absent_effect_releases_the_sender_generation_for_retry
+    with_tmp_dir do |root|
+      store = Hive::Patrol::StateStore.new(root)
+      intent = effect_intent
+      store.reserve_occurrence!(capture, now: NOW)
+      store.prepare_effect!(intent, now: NOW)
+      claim = store.acquire_effect!(
+        intent, claimant: "sender-one", now: NOW, lease_sec: 60
+      )
+      store.mark_dispatch_uncertain!(intent, token: claim.token, now: NOW)
+      outcome = { "remote" => "absent" }
+      receipt = Hive::Modules::Migration::EffectReceipt.build(
+        intent: intent, status: "known_not_sent", outcome: outcome,
+        recorded_at: NOW
+      )
+
+      store.resolve_effect_absent!(
+        intent,
+        expected_generation: claim.generation,
+        outcome: outcome,
+        receipt: receipt,
+        now: NOW + 1
+      )
+
+      retry_claim = store.acquire_effect!(
+        intent, claimant: "sender-two", now: NOW + 2, lease_sec: 60
+      )
+      assert_equal :acquired, retry_claim.status
+      assert_operator retry_claim.generation, :>, claim.generation
+    end
+  end
+
+  def test_gateway_denials_are_normalized_at_both_public_effect_seams
+    with_tmp_dir do |root|
+      store = Hive::Patrol::StateStore.new(root)
+      denied_gateway = Object.new
+      denied_gateway.define_singleton_method(:perform!) do |**|
+        raise Hive::Patrol::EffectGateway::Denied.new("owner changed", nil)
+      end
+      store.instance_variable_set(:@state_effect_gateway, denied_gateway)
+      store.instance_variable_set(:@effect_capture, capture)
+
+      cycle_error = assert_raises(Hive::ConfigError) do
+        store.perform_cycle_effect!(
+          sink: "attempt", target: "attempts/fingerprint-1",
+          idempotency_key: "attempt-1", capability: "repository_write"
+        ) { {} }
+      end
+
+      uncertain_gateway = Object.new
+      uncertain_gateway.define_singleton_method(:perform!) do |**|
+        raise Hive::Patrol::EffectGateway::ReconciliationRequired.new(
+          "delivery uncertain"
+        )
+      end
+      store.instance_variable_set(:@state_effect_gateway, uncertain_gateway)
+      write_error = assert_raises(Hive::ConfigError) do
+        store.update_state("last_run_at" => NOW.iso8601)
+      end
+
+      assert_match(/owner changed/, cycle_error.message)
+      assert_match(/delivery uncertain/, write_error.message)
+    end
+  end
+
+  def test_attempt_reconciliation_distinguishes_absent_ambiguous_and_exact_match
+    with_tmp_dir do |root|
+      store = Hive::Patrol::StateStore.new(root)
+      assert_equal(
+        { "status" => "absent", "outcome" => {} },
+        store.reconcile_attempt("fingerprint-1")
+      )
+
+      store.instance_variable_set(:@effect_capture, capture)
+      FileUtils.mkdir_p(File.join(store.root, "patches"))
+      write_patch_record(
+        store, "foreign",
+        "patrol_occurrence_id" => "occ-#{'f' * 64}",
+        "fingerprint" => "fingerprint-1"
+      )
+      assert_equal(
+        { "status" => "absent", "outcome" => {} },
+        store.reconcile_attempt("fingerprint-1")
+      )
+    end
+
+    with_tmp_dir do |root|
+      store = Hive::Patrol::StateStore.new(root)
+      store.instance_variable_set(:@effect_capture, capture)
+      FileUtils.mkdir_p(File.join(store.root, "patches"))
+      %w[first second].each do |id|
+        write_patch_record(
+          store, id,
+          "patrol_occurrence_id" => capture.occurrence_id,
+          "fingerprint" => "fingerprint-1",
+          "id" => id
+        )
+      end
+
+      assert_equal(
+        { "status" => "ambiguous", "outcome" => {} },
+        store.reconcile_attempt("fingerprint-1")
+      )
+    end
+
+    with_tmp_dir do |root|
+      store = Hive::Patrol::StateStore.new(root)
+      store.instance_variable_set(:@effect_capture, capture)
+      FileUtils.mkdir_p(File.join(store.root, "patches"))
+      record = {
+        "patrol_occurrence_id" => capture.occurrence_id,
+        "fingerprint" => "fingerprint-1",
+        "id" => "only"
+      }
+      write_patch_record(store, "only", record)
+
+      assert_equal(
+        { "status" => "matched", "outcome" => { "patch" => record } },
+        store.reconcile_attempt("fingerprint-1")
+      )
+    end
+  end
+
+  def test_effect_reconciliation_compares_every_supported_product_target
+    with_tmp_dir do |root|
+      store = Hive::Patrol::StateStore.new(root)
+      store.ensure!
+      store.instance_variable_set(:@effect_capture, capture)
+      reconciliations = []
+      gateway = Object.new
+      gateway.define_singleton_method(:perform!) do |reconcile:, **, &_effect|
+        reconciliations << reconcile.call(nil)
+        Object.new
+      end
+      store.instance_variable_set(:@state_effect_gateway, gateway)
+
+      store.send(:raw_update_state, "last_run_at" => NOW.iso8601)
+      store.update_state("last_run_at" => NOW.iso8601)
+      store.update_state("last_run_at" => (NOW + 1).iso8601)
+
+      assert_equal "matched", reconciliations.fetch(0).fetch("status")
+      assert_equal "absent", reconciliations.fetch(1).fetch("status")
+      assert_equal "different", reconciliations.fetch(1).dig("outcome", "observed")
+
+      store.write_json(File.join(store.root, "fingerprints.json"), { "fp" => "active" })
+      store.write_json(File.join(store.root, "dismissed.json"), { "fp" => "closed" })
+      store.write_json(File.join(store.root, "features", "feature-1.json"), { "id" => "feature-1" })
+
+      assert_equal({ "last_run_at" => NOW.iso8601 }, store.send(:effect_target_value, "state"))
+      assert_equal({ "fp" => "active" }, store.send(:effect_target_value, "fingerprints"))
+      assert_equal({ "fp" => "closed" }, store.send(:effect_target_value, "dismissed"))
+      assert_equal({ "id" => "feature-1" }, store.send(:effect_target_value, "features/feature-1"))
+      assert_nil store.send(:effect_target_value, "features/missing")
+      assert_nil store.send(:effect_target_value, "unsupported/value")
+      assert_nil store.send(:effect_target_value, "features")
+    end
+  end
+
+  def test_effect_recovery_values_and_fingerprint_lock_fail_closed
+    with_tmp_dir do |root|
+      store = Hive::Patrol::StateStore.new(root)
+
+      non_object = assert_raises(Hive::ConfigError) do
+        store.send(:effect_object, [])
+      end
+      non_json = assert_raises(Hive::ConfigError) do
+        store.send(:effect_object, { "value" => Float::NAN })
+      end
+      FileUtils.mkdir_p(File.join(store.root, "fingerprints.lock"))
+      lock_error = assert_raises(Hive::ConfigError) do
+        store.mutate_fingerprints { |_data| }
+      end
+
+      assert_equal "patrol effect recovery state is malformed", non_object.message
+      assert_equal "patrol effect recovery state is malformed", non_json.message
+      assert_match(/patrol fingerprint lock is unavailable/, lock_error.message)
+    end
+  end
+
   private
+
+  def outbox_entry(kind, bytes)
+    {
+      "id" => "outbox-1",
+      "kind" => kind,
+      "bytes" => bytes,
+      "digest" => "digest-1"
+    }
+  end
+
+  def write_patch_record(store, id, record)
+    store.write_json(
+      File.join(store.root, "patches", "#{id}.json"),
+      record
+    )
+  end
 
   def perform_attempt(store, patch)
     store.perform_cycle_effect!(

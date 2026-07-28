@@ -739,7 +739,12 @@ module Hive
             @logger.event(:project_dropped, project: entry.project)
           end
           if entry.stage == Hive::Daemon::PatrolScheduler::PATROL_STAGE
-            @patrol_scheduler&.complete(project: entry.project, exit_code: entry.exit_code, now: now)
+            @patrol_scheduler&.complete(
+              project: entry.project,
+              exit_code: entry.exit_code,
+              envelope: entry.json_envelope,
+              now: now
+            )
           end
           if entry.dispatch_token && entry.dispatch_token[:kind] == :architecture_patrol
             result = @refactor_patrol_scheduler&.complete(

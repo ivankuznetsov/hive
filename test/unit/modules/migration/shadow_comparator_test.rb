@@ -149,6 +149,233 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
     end
   end
 
+  def test_shadow_binding_and_bounded_history_guards_fail_closed
+    with_tmp_dir do |root|
+      comparator = Hive::Modules::Migration::ShadowComparator.new(root: root)
+      trigger = { "id" => "tick-1" }
+      patrol_capture = capture_for(
+        "patrol", trigger, { "status" => "due" }
+      )
+      foreign_capture = capture_for(
+        "architecture-patrol", trigger, { "status" => "due" }
+      )
+      assert_raises(Hive::ConfigError) do
+        comparator.record!(
+          module_name: "patrol",
+          trigger: trigger,
+          legacy_capture: foreign_capture,
+          module_decision: { "status" => "due" },
+          configuration_digest: "a" * 64,
+          occurred_at: START
+        )
+      end
+
+      foreign_effect = receipt_for(
+        foreign_capture, "foreign", authority: "shadow"
+      )
+      assert_raises(Hive::ConfigError) do
+        comparator.record!(
+          module_name: "patrol",
+          trigger: trigger,
+          legacy_capture: patrol_capture,
+          module_decision: { "status" => "due" },
+          configuration_digest: "a" * 64,
+          occurred_at: START,
+          module_effects: [ foreign_effect ]
+        )
+      end
+
+      comparator.record!(
+        module_name: "patrol",
+        trigger: trigger,
+        legacy_capture: patrol_capture,
+        module_decision: { "status" => "due" },
+        configuration_digest: "a" * 64,
+        occurred_at: START
+      )
+      with_constant(
+        Hive::Modules::Migration::ShadowComparator,
+        :MAX_RECORDS,
+        0
+      ) do
+        assert_raises(Hive::ConfigError) do
+          comparator.records("patrol")
+        end
+      end
+
+      hostile_key = Object.new
+      hostile_key.define_singleton_method(:to_s) do
+        raise TypeError, "not a string key"
+      end
+      assert_raises(Hive::ConfigError) do
+        comparator.validate_record!({ hostile_key => true })
+      end
+      hostile = Object.new
+      hostile.define_singleton_method(:[]) do |_key|
+        raise NoMethodError, "corrupt mapping"
+      end
+      refute comparator.send(:valid_record?, hostile)
+    end
+  end
+
+  def test_shadow_reader_detects_link_inode_size_and_byte_races
+    with_tmp_dir do |root|
+      comparator = Hive::Modules::Migration::ShadowComparator.new(root: root)
+      path = File.join(root, "patrol", "#{'a' * 64}.json")
+      FileUtils.mkdir_p(File.dirname(path))
+      target = File.join(root, "target")
+      File.write(target, "{}")
+      File.symlink(target, path)
+      assert_raises(Hive::ConfigError) do
+        comparator.send(:read, path)
+      end
+    end
+
+    with_tmp_dir do |root|
+      comparator = Hive::Modules::Migration::ShadowComparator.new(root: root)
+      trigger = { "id" => "tick-1" }
+      capture = capture_for("patrol", trigger, { "status" => "due" })
+      record = comparator.record!(
+        module_name: "patrol",
+        trigger: trigger,
+        legacy_capture: capture,
+        module_decision: { "status" => "due" },
+        configuration_digest: "a" * 64,
+        occurred_at: START
+      )
+      path = File.join(
+        root, "patrol", "#{record.fetch('decision_id')}.json"
+      )
+      File.write(path, JSON.pretty_generate(record))
+      assert_raises(Hive::ConfigError) do
+        comparator.send(:read, path)
+      end
+
+      missing = File.join(root, "patrol", "#{'f' * 64}.json")
+      assert_raises(Hive::ConfigError) do
+        comparator.send(:read, missing)
+      end
+    end
+
+    with_tmp_dir do |root|
+      comparator = Hive::Modules::Migration::ShadowComparator.new(root: root)
+      path = File.join(root, "patrol", "#{'a' * 64}.json")
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "{}")
+      before = File.lstat(path)
+      wrong_stat = File.stat(__FILE__)
+      oversized = "x" * (
+        Hive::Modules::Migration::ShadowComparator::MAX_RECORD_BYTES + 1
+      )
+      reads = [ [ wrong_stat, "{}" ], [ before, oversized ] ]
+      original = File.method(:open)
+      replacement = lambda do |candidate, *args, **kwargs, &block|
+        unless candidate == path
+          next original.call(
+            candidate, *args, **kwargs, &block
+          )
+        end
+
+        stat, bytes = reads.shift
+        proxy = Object.new
+        proxy.define_singleton_method(:stat) { stat }
+        proxy.define_singleton_method(:read) { |_limit| bytes }
+        block.call(proxy)
+      end
+      with_replaced_singleton_method(
+        File, :open, replacement
+      ) do
+        2.times do
+          assert_raises(Hive::ConfigError) do
+            comparator.send(:read, path)
+          end
+        end
+      end
+    end
+  end
+
+  def test_reader_recomputes_semantics_and_binds_filename
+    %w[
+      decision_id trigger_digest comparable explained_differences
+      unexplained_differences duplicate_effects
+    ].each do |field|
+      with_tmp_dir do |root|
+        comparator = Hive::Modules::Migration::ShadowComparator.new(root: root)
+        trigger = { "id" => "tick-1" }
+        decision = { "status" => "due" }
+        capture = capture_for("patrol", trigger, decision)
+        record = comparator.record!(
+          module_name: "patrol",
+          trigger: trigger,
+          legacy_capture: capture,
+          module_decision: decision,
+          configuration_digest: "a" * 64,
+          occurred_at: START
+        )
+        path = File.join(root, "patrol", "#{record.fetch('decision_id')}.json")
+        changed = JSON.parse(File.binread(path))
+        changed[field] = case field
+        when "decision_id", "trigger_digest" then "f" * 64
+        when "comparable" then false
+        else [ { "forged" => true } ]
+        end
+        File.write(
+          path,
+          Hive::WorkflowPackage::CanonicalJSON.generate(changed)
+        )
+
+        assert_raises(Hive::ConfigError, field) do
+          comparator.records("patrol")
+        end
+      end
+    end
+
+    with_tmp_dir do |root|
+      comparator = Hive::Modules::Migration::ShadowComparator.new(root: root)
+      trigger = { "id" => "tick-1" }
+      decision = { "status" => "due" }
+      capture = capture_for("patrol", trigger, decision)
+      record = comparator.record!(
+        module_name: "patrol",
+        trigger: trigger,
+        legacy_capture: capture,
+        module_decision: decision,
+        configuration_digest: "a" * 64,
+        occurred_at: START
+      )
+      original = File.join(root, "patrol", "#{record.fetch('decision_id')}.json")
+      File.rename(original, File.join(root, "patrol", "#{'f' * 64}.json"))
+
+      assert_raises(Hive::ConfigError) { comparator.records("patrol") }
+    end
+  end
+
+  def test_report_revalidates_raw_comparison_records
+    with_tmp_dir do |root|
+      comparator = Hive::Modules::Migration::ShadowComparator.new(root: root)
+      trigger = { "id" => "tick-1" }
+      decision = { "status" => "due" }
+      capture = capture_for("patrol", trigger, decision)
+      record = comparator.record!(
+        module_name: "patrol",
+        trigger: trigger,
+        legacy_capture: capture,
+        module_decision: decision,
+        configuration_digest: "a" * 64,
+        occurred_at: START
+      )
+      forged = record.merge("duplicate_effects" => [ "intent-forged" ])
+
+      assert_raises(Hive::ConfigError) do
+        Hive::Modules::Migration::Report.build(
+          records: [ forged ],
+          reviewer: "operator@example.com",
+          reviewed_at: START
+        )
+      end
+    end
+  end
+
   def test_report_loading_and_time_validation_are_strict
     with_tmp_dir do |root|
       missing = File.join(root, "missing.json")
@@ -195,6 +422,16 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
   end
 
   private
+
+  def with_constant(owner, name, replacement)
+    original = owner.const_get(name, false)
+    owner.send(:remove_const, name)
+    owner.const_set(name, replacement)
+    yield
+  ensure
+    owner.send(:remove_const, name) if owner.const_defined?(name, false)
+    owner.const_set(name, original)
+  end
 
   def capture_for(module_name, trigger, decision)
     Hive::Modules::Migration::PatrolCapture.build(

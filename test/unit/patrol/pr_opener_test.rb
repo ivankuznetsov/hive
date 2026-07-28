@@ -14,6 +14,28 @@ class HivePatrolPrOpenerTest < Minitest::Test
 
   FakePatch = Struct.new(:id, :finding, :branch, :worktree_path, :validation,
                          :passed, :diffstat, :base_sha, :head_sha, keyword_init: true)
+  GatewayResult = Struct.new(:outcome, keyword_init: true)
+
+  class ReconcilingGateway
+    attr_reader :reconciliations, :effect_calls
+
+    def initialize
+      @reconciliations = []
+      @effect_calls = 0
+    end
+
+    def perform!(reconcile:, **)
+      reconciliation = reconcile.call({})
+      @reconciliations << reconciliation
+      outcome = if reconciliation.fetch("status") == "matched"
+        reconciliation.fetch("outcome")
+      else
+        @effect_calls += 1
+        yield
+      end
+      GatewayResult.new(outcome: outcome)
+    end
+  end
 
   class FakeGh
     attr_reader :pushed, :push_options, :created_args, :git_commands
@@ -226,15 +248,20 @@ class HivePatrolPrOpenerTest < Minitest::Test
 
       state = Hive::Patrol::StateStore.new(dir)
       state.ensure!
-      original_reserve = state.method(:reserve_effect_intent)
-      state.define_singleton_method(:reserve_effect_intent) do |fingerprint, intent, **options|
+      original_prepare = state.method(:prepare_effect!)
+      state.define_singleton_method(:prepare_effect!) do |intent, **options|
         operations << "effect:#{intent.sink}:intent"
-        original_reserve.call(fingerprint, intent, **options)
+        original_prepare.call(intent, **options)
       end
-      original_outcome = state.method(:record_effect_outcome)
-      state.define_singleton_method(:record_effect_outcome) do |fingerprint, intent, **options|
+      original_absent = state.method(:resolve_effect_absent!)
+      state.define_singleton_method(:resolve_effect_absent!) do |intent, **options|
+        operations << "effect:#{intent.sink}:known_not_sent"
+        original_absent.call(intent, **options)
+      end
+      original_settle = state.method(:settle_effect_claimed!)
+      state.define_singleton_method(:settle_effect_claimed!) do |intent, **options|
         operations << "effect:#{intent.sink}:#{options.fetch(:status)}"
-        original_outcome.call(fingerprint, intent, **options)
+        original_settle.call(intent, **options)
       end
       original_mutate = state.method(:mutate_fingerprints)
       state.define_singleton_method(:mutate_fingerprints) do |&mutation|
@@ -261,16 +288,13 @@ class HivePatrolPrOpenerTest < Minitest::Test
       assert_equal(
         [
           "effect:branch:intent",
-          "effect:branch:known_not_sent",
           :push,
           "effect:branch:committed",
           "effect:pull_request:intent",
-          "effect:pull_request:known_not_sent",
           :create_pr,
           "effect:pull_request:committed",
           "mapping:reconciliation_pending",
           "effect:review_handoff:intent",
-          "effect:review_handoff:known_not_sent",
           :review_handoff,
           "effect:review_handoff:committed",
           "mapping:open"
@@ -947,6 +971,115 @@ class HivePatrolPrOpenerTest < Minitest::Test
     end
     assert_raises(ArgumentError) do
       Hive::Patrol::PrOpener::Result.new(status: :error, reason: "free-form error")
+    end
+  end
+
+  def test_review_handoff_effect_reconciles_existing_task_and_supports_legacy_absence
+    validated_patch = patch
+    gh = FakeGh.new
+    gh.remote_oid = HEAD_SHA
+    reconciled_handoff = RecordingReviewHandoff.new
+    reconciled_handoff.define_singleton_method(:reconcile) do |**|
+      {
+        "status" => "matched",
+        "outcome" => { "task_path" => "/tmp/reconciled-review-task" }
+      }
+    end
+    opener = Hive::Patrol::PrOpener.new(
+      Dir.pwd, cfg: cfg, gh: gh, review_handoff: reconciled_handoff
+    )
+    gateway = ReconcilingGateway.new
+
+    task_path = opener.send(
+      :enqueue_review_task, gateway, finding, validated_patch,
+      "https://example.com/pr/7", Time.at(0)
+    )
+
+    assert_equal "/tmp/reconciled-review-task", task_path
+    assert_equal 0, gateway.effect_calls
+    assert_empty reconciled_handoff.calls
+
+    legacy_handoff = RecordingReviewHandoff.new
+    legacy_opener = Hive::Patrol::PrOpener.new(
+      Dir.pwd, cfg: cfg, gh: gh, review_handoff: legacy_handoff
+    )
+    legacy_gateway = ReconcilingGateway.new
+
+    task_path = legacy_opener.send(
+      :enqueue_review_task, legacy_gateway, finding, validated_patch,
+      "https://example.com/pr/8", Time.at(0)
+    )
+
+    assert_equal "/tmp/review-task", task_path
+    assert_equal(
+      [ { "status" => "absent", "outcome" => {} } ],
+      legacy_gateway.reconciliations
+    )
+    assert_equal 1, legacy_gateway.effect_calls
+    assert_equal 1, legacy_handoff.calls.size
+  end
+
+  def test_branch_effect_reconciles_matching_remote_and_retries_confirmed_absence
+    validated_patch = patch
+    gh = FakeGh.new
+    opener = Hive::Patrol::PrOpener.new(Dir.pwd, cfg: cfg, gh: gh)
+
+    gh.remote_oid = HEAD_SHA
+    matched_gateway = ReconcilingGateway.new
+    result = opener.send(
+      :perform_branch_effect!, matched_gateway, finding, validated_patch
+    )
+
+    assert_equal HEAD_SHA, result.outcome.fetch("remote_oid")
+    assert_equal "matched", matched_gateway.reconciliations.first.fetch("status")
+    assert_equal 0, matched_gateway.effect_calls
+    assert_empty gh.pushed
+
+    gh.remote_oid = nil
+    absent_gateway = ReconcilingGateway.new
+    result = opener.send(
+      :perform_branch_effect!, absent_gateway, finding, validated_patch
+    )
+
+    assert_equal HEAD_SHA, result.outcome.fetch("remote_oid")
+    assert_equal(
+      {
+        "status" => "absent",
+        "outcome" => { "observed_oid" => nil }
+      },
+      absent_gateway.reconciliations.first
+    )
+    assert_equal 1, absent_gateway.effect_calls
+    assert_equal [ [ Dir.pwd, validated_patch.branch ] ], gh.pushed
+  end
+
+  def test_pull_request_effect_reconciles_the_exact_existing_pr
+    opener = Hive::Patrol::PrOpener.new(Dir.pwd, cfg: cfg, gh: FakeGh.new)
+    gateway = ReconcilingGateway.new
+
+    url = opener.send(
+      :perform_pull_request_effect!, gateway, finding, patch, "unused body",
+      observed_prs: [ matching_pr ]
+    )
+
+    assert_equal "https://example.com/pr/1", url
+    assert_equal "matched", gateway.reconciliations.first.fetch("status")
+    assert_equal 0, gateway.effect_calls
+  end
+
+  def test_effect_gateway_failures_are_normalized_as_github_errors
+    errors = [
+      Hive::Patrol::EffectGateway::Denied.new("authority revoked", nil),
+      Hive::Patrol::EffectGateway::ReconciliationRequired.new("outcome unknown")
+    ]
+    opener = Hive::Patrol::PrOpener.new(Dir.pwd, cfg: cfg, gh: FakeGh.new)
+
+    errors.each do |gateway_error|
+      error = assert_raises(Hive::GhError) do
+        opener.send(:perform_effect) { raise gateway_error }
+      end
+
+      assert_equal gateway_error.message, error.message
     end
   end
 end

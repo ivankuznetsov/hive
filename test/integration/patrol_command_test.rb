@@ -1250,6 +1250,127 @@ class PatrolCommandTest < Minitest::Test
     refute outcome.fetch("review_complete")
   end
 
+  def test_shipping_cycle_composes_the_default_pr_opener
+    with_patrol_project do
+      command = Hive::Commands::Patrol.new(
+        "demo",
+        json: true,
+        mapper_factory: ->(_root, _cfg, _state) { FakeMapper.new([]) },
+        reviewer_factory: ->(_root, _cfg, _state) { FakeReviewer.new([]) },
+        fixer_factory: ->(_root, _cfg, _state) { FakeFixer.new(nil) },
+        dismissals_factory: ->(_root, _state) { FakeDismissals.new }
+      )
+
+      out, err, status = with_captured_exit { command.call }
+
+      assert_equal "", err
+      assert_equal Hive::ExitCodes::SUCCESS, status
+      assert_equal 0, JSON.parse(out).fetch("fix_candidates")
+    end
+  end
+
+  def test_requested_occurrence_must_have_a_durable_capture
+    state = Object.new
+    state.define_singleton_method(:occurrence_capture) { |_occurrence_id| nil }
+    command = Hive::Commands::Patrol.new(
+      "demo", occurrence_id: "occ-#{'a' * 64}"
+    )
+
+    error = assert_raises(Hive::ConfigError) do
+      command.send(:patrol_capture, {}, state)
+    end
+
+    assert_match(/reservation capture .* is unavailable/, error.message)
+  end
+
+  def test_manual_capture_requires_the_selected_migration_authority
+    with_patrol_project do
+      entry = Hive::Config.find_project("demo")
+      command = Hive::Commands::Patrol.new(
+        "demo", migration_authority: :module
+      )
+
+      error = assert_raises(Hive::ConfigError) do
+        command.send(:build_manual_capture, entry)
+      end
+
+      assert_equal "patrol mutation authority is not admitted", error.message
+    end
+  end
+
+  def test_capture_validation_rejects_wrong_types_and_missing_identity_keys
+    entry = {
+      "project_id" => "project-1",
+      "name" => "demo",
+      "path" => "/tmp/demo",
+      "hive_state_path" => "/tmp/demo/.hive-state"
+    }
+    command = Hive::Commands::Patrol.new("demo")
+
+    wrong_type = assert_raises(Hive::ConfigError) do
+      command.send(:validate_capture!, Object.new, entry)
+    end
+    missing_key = assert_raises(Hive::ConfigError) do
+      command.send(
+        :validate_capture!,
+        patrol_capture_for(entry).with(project: {}),
+        entry
+      )
+    end
+
+    assert_match(/does not match the command project or authority/, wrong_type.message)
+    assert_match(/does not match the command project or authority/, missing_key.message)
+  end
+
+  def test_fix_attempt_reconstructs_a_durable_reconciled_patch
+    finding = sample_finding
+    finding.fingerprint = "fingerprint-1"
+    serialized_patch = JSON.parse(JSON.generate(sample_patch("/tmp/worktree", finding).to_h))
+    reconciliations = []
+    state = Object.new
+    state.define_singleton_method(:reconcile_attempt) do |fingerprint|
+      reconciliations << fingerprint
+      { "status" => "matched", "outcome" => { "patch" => serialized_patch } }
+    end
+    state.define_singleton_method(:perform_cycle_effect!) do |reconcile:, **_attributes, &_effect|
+      reconciliation = reconcile.call(nil)
+      Hive::Patrol::EffectGateway::Result.new(
+        status: :reconciled,
+        outcome: reconciliation.fetch("outcome"),
+        receipt: nil
+      )
+    end
+    fixer = FakeFixer.new(nil)
+
+    patch = command_for.send(
+      :perform_fix_attempt,
+      state,
+      fixer,
+      finding,
+      patrol_capture_for(
+        "project_id" => "project-1",
+        "name" => "demo"
+      )
+    )
+
+    assert_equal [ "fingerprint-1" ], reconciliations
+    assert_empty fixer.attempted
+    assert_equal "patch-finding-1", patch.id
+    assert_equal finding, patch.finding
+    assert_equal "hive-patrol/route-home-abcdef12", patch.branch
+    assert_equal "/tmp/worktree", patch.worktree_path
+    assert patch.passed
+    assert_equal "abc123", patch.head_sha
+  end
+
+  def test_malformed_reconciled_patch_fails_closed
+    error = assert_raises(Hive::ConfigError) do
+      command_for.send(:patch_from_effect_outcome, sample_finding, {})
+    end
+
+    assert_equal "patrol attempt reconciliation returned a malformed patch", error.message
+  end
+
   private
 
   def set_patrol_commands(repo, commands)
@@ -1365,6 +1486,26 @@ class PatrolCommandTest < Minitest::Test
       passed: true,
       diffstat: " app.rb | 1 +",
       head_sha: "abc123"
+    )
+  end
+
+  def patrol_capture_for(entry)
+    now = Time.utc(2026, 7, 28, 12, 0, 0)
+    Hive::Modules::Migration::PatrolCapture.build(
+      module_name: "patrol",
+      project: {
+        "project_id" => entry.fetch("project_id"),
+        "name" => entry.fetch("name"),
+        "repository" => entry["repository_identity"]
+      },
+      trigger: { "kind" => "manual", "id" => "manual-1" },
+      reservation: { "kind" => "ordinary", "id" => "reservation-1" },
+      owner: "legacy",
+      owner_epoch: 1,
+      decision_class: "due",
+      decision: { "rationale" => "manual" },
+      occurred_at: now,
+      recorded_at: now
     )
   end
 

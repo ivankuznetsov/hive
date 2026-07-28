@@ -4,6 +4,7 @@ require "digest"
 require "time"
 require "uri"
 require "hive/atomic_file"
+require "hive/refactor_patrol/architecture_occurrence_store"
 require "hive/refactor_patrol/claim_transitions"
 require "hive/refactor_patrol/caps"
 require "hive/refactor_patrol/job_indexes"
@@ -116,6 +117,122 @@ module Hive
           id_pattern: ID_PATTERN,
           corrupt_record: CorruptRecord,
           inconsistent_record: InconsistentRecord
+        )
+        @architecture_occurrences = ArchitectureOccurrenceStore.new(
+          root: @root,
+          job_reader: method(:read_job),
+          id_validator: method(:validate_id!),
+          corrupt_record: CorruptRecord,
+          inconsistent_record: InconsistentRecord
+        )
+      end
+
+      # Architecture Patrol owns one durable occurrence per immutable job.
+      # Discovery claims and every later action generation reuse this identity;
+      # action claim generations remain authorization fences, not effect IDs.
+      def reserve_manifest_occurrence!(manifest, capture:, now: Time.now.utc)
+        @architecture_occurrences.reserve_manifest!(
+          manifest, capture: capture, now: now
+        )
+      end
+
+      def reserve_occurrence!(job_id, capture:, now: Time.now.utc)
+        @architecture_occurrences.reserve!(
+          job_id, capture: capture, now: now
+        )
+      end
+
+      def occurrence_for_job(job_id)
+        @architecture_occurrences.fetch_for_job(job_id)
+      end
+
+      def occurrence_capture(job_id)
+        @architecture_occurrences.capture_for_job(job_id)
+      end
+
+      def projection_pending_occurrences
+        @architecture_occurrences.projection_pending
+      end
+
+      def prepare_effect!(intent, now: Time.now.utc)
+        @architecture_occurrences.prepare_effect!(intent, now: now)
+      end
+
+      def effect_state(intent)
+        @architecture_occurrences.effect_state(intent)
+      end
+
+      def acquire_effect!(intent, claimant:, now: Time.now.utc, lease_sec: 300)
+        @architecture_occurrences.acquire_effect!(
+          intent, claimant: claimant,
+          now: now, lease_sec: lease_sec
+        )
+      end
+
+      def mark_dispatch_uncertain!(intent, token:, now: Time.now.utc)
+        @architecture_occurrences.mark_dispatch_uncertain!(
+          intent, token: token, now: now
+        )
+      end
+
+      def resolve_effect_absent!(intent, expected_generation:, outcome:,
+                                 receipt:, now: Time.now.utc)
+        @architecture_occurrences.resolve_effect_absent!(
+          intent,
+          expected_generation: expected_generation,
+          outcome: outcome, receipt: receipt, now: now
+        )
+      end
+
+      def settle_effect_reconciled!(intent, expected_generation:, outcome:,
+                                    receipt:, now: Time.now.utc)
+        @architecture_occurrences.settle_effect_reconciled!(
+          intent,
+          expected_generation: expected_generation,
+          outcome: outcome, receipt: receipt, now: now
+        )
+      end
+
+      def settle_effect_claimed!(intent, token:, status:, outcome:, receipt:,
+                                 now: Time.now.utc)
+        @architecture_occurrences.settle_effect_claimed!(
+          intent, token: token, status: status,
+          outcome: outcome, receipt: receipt, now: now
+        )
+      end
+
+      def deny_effect!(intent, outcome:, receipt:, now: Time.now.utc)
+        @architecture_occurrences.deny_effect!(
+          intent,
+          outcome: outcome, receipt: receipt, now: now
+        )
+      end
+
+      def effect_receipt(receipt_id, occurrence_id:)
+        @architecture_occurrences.effect_receipt(
+          receipt_id, occurrence_id: occurrence_id
+        )
+      end
+
+      def terminal_effect_receipt_ids(occurrence_id)
+        @architecture_occurrences.terminal_effect_receipt_ids(occurrence_id)
+      end
+
+      def finalize_occurrence!(capture:, event:, now: Time.now.utc)
+        @architecture_occurrences.finalize!(
+          capture: capture, event: event, now: now
+        )
+      end
+
+      def drain_occurrence_outbox!(occurrence_id, evidence_store:,
+                                   event_publisher: nil,
+                                   project_entry: nil, kinds: nil)
+        @architecture_occurrences.drain_outbox!(
+          occurrence_id,
+          evidence_store: evidence_store,
+          event_publisher: event_publisher,
+          project_entry: project_entry,
+          kinds: kinds
         )
       end
 
@@ -328,6 +445,15 @@ module Hive
           aggregate["updated_at"] = now.utc.iso8601
           aggregate
         end
+      end
+
+      # Read-fence equivalent for discovery transitions. The claim lock and
+      # generation/lease checks are shared with all discovery mutations.
+      def assert_discovery_claim!(token, now: Time.now)
+        mutate_claim(token, now: now) do |aggregate, _attempt|
+          aggregate
+        end
+        true
       end
 
       # Heartbeats are generation-fenced and refuse expired claims. The

@@ -44,7 +44,7 @@ module Hive
       def initialize(project_root, cfg:, state: StateStore.new(project_root), gh: Hive::Gh,
                      review_handoff: nil, capture: nil, effect_gateway_factory: nil,
                      evidence_store: nil, config_loader: nil,
-                     capability_checker: nil)
+                     capability_checker: nil, module_execution: nil)
         @project_root = File.expand_path(project_root)
         @cfg = cfg
         @state = state
@@ -60,6 +60,7 @@ module Hive
         )
         @config_loader = config_loader || default_config_loader
         @capability_checker = capability_checker || ->(**) { true }
+        @module_execution = module_execution
       end
 
       def open(finding, patch, now: Time.now)
@@ -223,6 +224,7 @@ module Hive
             target: pr_url,
             idempotency_key: "#{finding.fingerprint}:#{patch.id}:review_handoff",
             capability: "review_handoff",
+            scope: effect_scope(finding, patch),
             reconcile: lambda do |_intent|
               if @review_handoff.respond_to?(:reconcile)
                 @review_handoff.reconcile(
@@ -514,36 +516,22 @@ module Hive
           occurred_at: Time.at(0).utc,
           recorded_at: Time.at(0).utc
         )
-        @evidence_store.append_capture(capture)
+        @state.reserve_occurrence!(capture)
         capture
       end
 
       def effect_gateway(finding, patch, capture)
-        context = publication_receipt_for(patch).merge(
-          "fingerprint" => finding.fingerprint,
-          "branch" => patch.branch
-        )
+        @state.reserve_occurrence!(capture)
         options = {
           project_root: @project_root,
           hive_state_path: File.join(@project_root, ".hive-state"),
           capture: capture,
           authority: capture.owner,
           evidence_store: @evidence_store,
-          intent_writer: lambda do |intent|
-            @state.reserve_effect_intent(
-              finding.fingerprint, intent, context: context
-            )
-          end,
-          recovery_reader: lambda do |intent|
-            @state.effect_intent_state(finding.fingerprint, intent)
-          end,
-          outcome_writer: lambda do |intent, status:, outcome:|
-            @state.record_effect_outcome(
-              finding.fingerprint, intent, status: status, outcome: outcome
-            )
-          end,
+          delivery_store: @state,
           config_loader: @config_loader,
-          capability_checker: @capability_checker
+          capability_checker: @capability_checker,
+          module_execution: @module_execution
         }
         return @effect_gateway_factory.call(**options) if @effect_gateway_factory
 
@@ -559,6 +547,7 @@ module Hive
             target: target,
             idempotency_key: "#{finding.fingerprint}:#{patch.id}:branch",
             capability: "repository_write",
+            scope: effect_scope(finding, patch),
             reconcile: lambda do |_intent|
               observed = @gh.remote_branch_oid(
                 patch.worktree_path, patch.branch, cfg: @cfg
@@ -598,6 +587,7 @@ module Hive
             target: "#{effect_repository(gateway)}:#{patch.branch}",
             idempotency_key: "#{finding.fingerprint}:#{patch.id}:pull_request",
             capability: "github_pull_requests",
+            scope: effect_scope(finding, patch),
             reconcile: lambda do |_intent|
               pull_request_reconciliation(patch, observed_prs: observed_prs)
             end
@@ -610,17 +600,14 @@ module Hive
 
       def reconcile_pull_request_effect!(gateway, finding, patch, observed_prs:)
         perform_effect do
-          gateway.perform!(
+          gateway.reconcile!(
             sink: "pull_request",
             target: "#{effect_repository(gateway)}:#{patch.branch}",
             idempotency_key: "#{finding.fingerprint}:#{patch.id}:pull_request",
             capability: "github_pull_requests",
-            reconcile: lambda do |_intent|
+            scope: effect_scope(finding, patch)
+          ) do |_intent|
               pull_request_reconciliation(patch, observed_prs: observed_prs)
-            end
-          ) do
-            raise Hive::GhError,
-                  "exact pull request reconciliation unexpectedly reached creation"
           end
         end
       end
@@ -657,6 +644,13 @@ module Hive
       def effect_repository(_gateway)
         @capture&.project&.fetch("repository", nil) ||
           File.basename(@project_root)
+      end
+
+      def effect_scope(finding, patch)
+        publication_receipt_for(patch).merge(
+          "fingerprint" => finding.fingerprint,
+          "branch" => patch.branch
+        )
       end
 
       def perform_effect

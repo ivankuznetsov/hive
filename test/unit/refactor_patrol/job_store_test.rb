@@ -19,6 +19,43 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     end
   end
 
+  def test_reconciled_effect_settlement_delegates_the_complete_receipt_contract
+    with_tmp_dir do |dir|
+      calls = []
+      occurrences = Object.new
+      occurrences.define_singleton_method(:settle_effect_reconciled!) do |intent, **options|
+        calls << [ intent, options ]
+        :settled
+      end
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      store.instance_variable_set(:@architecture_occurrences, occurrences)
+      intent = { "effect_id" => "effect-1" }
+      receipt = { "receipt_id" => "receipt-1" }
+
+      result = store.settle_effect_reconciled!(
+        intent,
+        expected_generation: 3,
+        outcome: { "state" => "complete" },
+        receipt: receipt,
+        now: T0
+      )
+
+      assert_equal :settled, result
+      assert_equal(
+        [
+          intent,
+          {
+            expected_generation: 3,
+            outcome: { "state" => "complete" },
+            receipt: receipt,
+            now: T0
+          }
+        ],
+        calls.fetch(0)
+      )
+    end
+  end
+
   def test_dry_run_validates_but_persists_nothing
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)

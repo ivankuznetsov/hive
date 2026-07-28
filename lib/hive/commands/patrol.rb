@@ -32,7 +32,7 @@ module Hive
                      mapper_factory: nil, reviewer_factory: nil,
                      fixer_factory: nil, pr_opener_factory: nil,
                      dismissals_factory: nil, project_entry: nil,
-                     capability_context: nil,
+                     capability_context: nil, module_execution: nil,
                      occurrence_id: nil, capture: nil,
                      migration_authority: :legacy,
                      evidence_store_factory: nil,
@@ -50,6 +50,7 @@ module Hive
         @dismissals_factory = dismissals_factory || ->(root, state) { Hive::Patrol::Dismissals.new(root, state: state) }
         @project_entry = project_entry
         @capability_context = capability_context
+        @module_execution = module_execution
         @occurrence_id = occurrence_id
         @capture = capture
         @migration_authority = migration_authority.to_s
@@ -85,18 +86,19 @@ module Hive
 
         project_root = entry.fetch("path")
         cfg = @config_loader.call(project_root)
-        capture = patrol_capture(entry)
         require_module_observation_capabilities!
         require_module_mutation_capabilities! unless @dry_run
         ensure_validation_configured!(cfg) unless @dry_run
         state = Hive::Patrol::StateStore.new(project_root)
         state.ensure!
+        capture = patrol_capture(entry, state)
         unless @dry_run
           state.configure_effect_gateway!(
             capture: capture,
             evidence_store: @evidence_store_factory.call(entry),
             config_loader: @config_loader,
-            capability_checker: method(:effect_capability_allowed?)
+            capability_checker: method(:effect_capability_allowed?),
+            module_execution: @module_execution
           )
         end
         token_budget = Hive::Patrol::TokenBudget.new(project_root, cfg: cfg)
@@ -155,7 +157,8 @@ module Hive
               capture: capture,
               evidence_store: @evidence_store_factory.call(entry),
               config_loader: @config_loader,
-              capability_checker: method(:effect_capability_allowed?)
+              capability_checker: method(:effect_capability_allowed?),
+              module_execution: @module_execution
             )
           end
           prs_opened = 0
@@ -216,10 +219,14 @@ module Hive
             "feature_review_cursor" => feature_batch.next_cursor
           )
         end
-        success_payload(
+        payload = success_payload(
           entry, project_root, scanned_sha, features, review,
           findings, candidates, fixes, fix_results, pr_results, skipped
         )
+        finalize_manual_occurrence!(
+          entry, state, capture, payload
+        ) if @occurrence_id.nil? && !@dry_run
+        payload
       end
 
       def require_module_observation_capabilities!
@@ -240,17 +247,16 @@ module Hive
         @capability_context.require_network_host!("api.github.com")
       end
 
-      def patrol_capture(entry)
-        store = @evidence_store_factory.call(entry)
+      def patrol_capture(entry, state)
         capture = @capture
-        capture ||= store.fetch_capture(@occurrence_id) if @occurrence_id
+        capture ||= state.occurrence_capture(@occurrence_id) if @occurrence_id
         if @occurrence_id && capture.nil?
           raise Hive::ConfigError,
                 "patrol reservation capture #{@occurrence_id.inspect} is unavailable"
         end
         capture ||= build_manual_capture(entry)
         validate_capture!(capture, entry)
-        store.append_capture(capture)
+        state.reserve_occurrence!(capture)
         capture
       end
 
@@ -309,26 +315,56 @@ module Hive
               "patrol reservation capture does not match the command project or authority"
       end
 
-      def effect_capability_allowed?(capability:, **)
-        return true unless @capability_context
+      def effect_capability_allowed?(capability:, capability_context: nil, **)
+        context = capability_context || @capability_context
+        return true unless context
 
         case capability.to_s
         when "repository_write"
-          @capability_context.require_repository_write!
+          context.require_repository_write!
         when "github_pull_requests"
-          @capability_context.require_github_mutation!("pull_requests")
-          @capability_context.require_external_command!("gh")
-          @capability_context.require_network_host!("api.github.com")
+          context.require_github_mutation!("pull_requests")
+          context.require_external_command!("gh")
+          context.require_network_host!("api.github.com")
         when "filesystem_write"
-          @capability_context.require_filesystem_write!(".hive-state/patrol/**")
+          context.require_filesystem_write!(".hive-state/patrol/**")
         when "review_handoff"
-          @capability_context.require_filesystem_write!(".hive-state/stages/**")
+          context.require_filesystem_write!(".hive-state/stages/**")
         else
           return false
         end
         true
       rescue Hive::Modules::CapabilityDenied
         false
+      end
+
+      def finalize_manual_occurrence!(entry, state, provisional, payload)
+        capture = Hive::Modules::Migration::PatrolCapture.build(
+          module_name: "patrol",
+          project: provisional.project,
+          trigger: provisional.trigger,
+          reservation: provisional.reservation,
+          owner: provisional.owner,
+          owner_epoch: provisional.owner_epoch,
+          decision_class: "completed",
+          decision: {
+            "rationale" => "manual_completed",
+            "ok" => payload.fetch("ok"),
+            "findings" => payload.fetch("findings"),
+            "fixes_attempted" => payload.fetch("fixes_attempted"),
+            "prs_opened" => payload.fetch("prs_opened"),
+            "review_complete" => payload.fetch("review_complete")
+          },
+          effect_ids: state.terminal_effect_receipt_ids(
+            provisional.occurrence_id
+          ),
+          occurred_at: provisional.occurred_at,
+          recorded_at: @clock.call
+        )
+        state.finalize_occurrence!(
+          capture: capture,
+          evidence_store: @evidence_store_factory.call(entry)
+        )
       end
 
       def review_outcome(feature_batch, reviewer)

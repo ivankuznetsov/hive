@@ -25,12 +25,14 @@
         "module",
         "occurrence_id",
         "authority",
+        "authorization_digest",
         "owner_epoch",
         "sink",
         "target",
         "idempotency_key",
         "capability",
         "claim_generation",
+        "scope",
         "created_at"
       ],
       "properties": {
@@ -38,6 +40,7 @@
         "module": {"enum": ["patrol", "architecture-patrol"]},
         "occurrence_id": {"type": "string", "pattern": "^occ-[0-9a-f]{64}$"},
         "authority": {"enum": ["legacy", "module", "shadow"]},
+        "authorization_digest": {"type": "string", "pattern": "^auth-[0-9a-f]{64}$"},
         "owner_epoch": {"type": "integer", "minimum": 1},
         "sink": {
           "enum": [
@@ -62,6 +65,7 @@
             {"type": "null"}
           ]
         },
+        "scope": {"type": "object"},
         "created_at": {"type": "string", "format": "date-time"}
       }
     },

@@ -7,6 +7,7 @@ require "hive/git_ops"
 require "hive/modules/event_publisher"
 require "hive/modules/migration/evidence_store"
 require "hive/modules/migration/patrols"
+require "hive/patrol/state_store"
 
 module Hive
   module Daemon
@@ -37,7 +38,8 @@ module Hive
                      config_loader: ->(path) { Hive::Config.load(path) },
                      git: GitHelper.new, migration_authority: :legacy,
                      migration_ownership: nil, migration_snapshot: nil,
-                     evidence_store_factory: nil, event_publisher: nil)
+                     evidence_store_factory: nil, event_publisher: nil,
+                     state_store_factory: nil)
         @registry = registry
         @config_loader = config_loader
         @git = git
@@ -63,6 +65,9 @@ module Hive
           )
         end
         @event_publisher = event_publisher || Hive::Modules::EventPublisher.new
+        @state_store_factory = state_store_factory || lambda do |entry|
+          Hive::Patrol::StateStore.new(entry.fetch("path"))
+        end
         @pending = {}
         @failures = {}
         @next_check_at = {}
@@ -85,8 +90,15 @@ module Hive
         dispatches = []
         @registry.call.each do |entry|
           project = entry.fetch("name")
+          recover_projections(entry)
           next unless @migration_ownership.call(entry, "patrol", @migration_authority)
           next if pending?(project)
+          if (record = pending_occurrence(entry))
+            dispatches << dispatch_for(entry).merge(
+              recovery_occurrence_id: record.fetch("occurrence_id")
+            )
+            next
+          end
           next if backed_off?(project, now)
           # Slow patrol cadence (U2): once a project has been evaluated,
           # don't re-run its per-project git/config checks until
@@ -106,10 +118,16 @@ module Hive
           # patrol.enabled: false. A project that flips to enabled
           # mid-interval is picked up on its next poll window.
           unless patrol["enabled"] == true
+            finalize_negative(
+              entry, patrol: patrol, rationale: "disabled", now: now
+            )
             @next_check_at[project] = now + patrol.fetch("poll_interval_sec", 600).to_i
             next
           end
           unless due?(entry, cfg, patrol, now)
+            finalize_negative(
+              entry, patrol: patrol, rationale: "not_due", now: now
+            )
             @next_check_at[project] = now + patrol.fetch("poll_interval_sec", 600).to_i
             next
           end
@@ -131,21 +149,36 @@ module Hive
         snapshot = @migration_snapshot.call(entry, "patrol")
         return nil unless reservation_owner?(snapshot)
 
-        @pending[project] = { started_at: now }
-        capture = capture_reservation(entry, snapshot, now)
-        @evidence_store_factory.call(entry).append_capture(capture)
-        event = @event_publisher.patrol_reserved(
-          entry, capture, schedule: MODULE_SCHEDULE
-        )
-        @pending[project]["capture_id"] = capture.capture_id
-        @pending[project]["event_id"] = event.event.fetch("event_id")
+        state = state_store(entry)
+        capture = if candidate[:recovery_occurrence_id]
+          state.occurrence_capture(candidate.fetch(:recovery_occurrence_id))
+        else
+          capture_reservation(
+            entry, snapshot, now,
+            poll_interval_sec:
+              @config_loader.call(entry.fetch("path"))
+                            .dig("patrol", "poll_interval_sec") || 600
+          )
+        end
+        return nil unless capture &&
+                          capture.owner == snapshot.fetch("owner") &&
+                          capture.owner_epoch == snapshot.fetch("epoch")
+
+        state.reserve_occurrence!(capture, now: now)
+        @pending[project] = {
+          started_at: now,
+          entry: entry,
+          occurrence_id: capture.occurrence_id
+        }
         public_dispatch(candidate, capture: capture)
       rescue StandardError
         @pending.delete(project)
         raise
       end
 
-      def complete(project:, exit_code:, now: Time.now)
+      def complete(project:, exit_code:, envelope: nil, now: Time.now)
+        pending = @pending.fetch(project, nil)
+        finalize_pending(pending, exit_code: exit_code, envelope: envelope, now: now) if pending
         @pending.delete(project)
         if exit_code == Hive::ExitCodes::SUCCESS
           @failures.delete(project)
@@ -249,7 +282,7 @@ module Hive
       def public_dispatch(candidate, capture:)
         dispatch = candidate.reject { |key, _value| key == :patrol_kind }
         dispatch.merge(
-          command: "#{dispatch.fetch(:command)} --occurrence-id #{capture.capture_id}"
+          command: "#{dispatch.fetch(:command)} --occurrence-id #{capture.occurrence_id}"
         )
       end
 
@@ -261,8 +294,10 @@ module Hive
           snapshot["epoch"].positive?
       end
 
-      def capture_reservation(entry, snapshot, now)
-        occurred_at = now.utc.iso8601(6)
+      def capture_reservation(entry, snapshot, now, poll_interval_sec:,
+                              rationale: "due")
+        occurred = schedule_window(now, poll_interval_sec)
+        occurred_at = occurred.iso8601(6)
         reservation_id = [
           "ordinary", entry.fetch("project_id"), occurred_at
         ].join(":")
@@ -283,14 +318,145 @@ module Hive
           reservation: { "kind" => "ordinary", "id" => reservation_id },
           owner: snapshot.fetch("owner"),
           owner_epoch: snapshot.fetch("epoch"),
-          decision_class: "due",
+          decision_class: rationale,
           decision: {
-            "rationale" => "due",
+            "rationale" => rationale,
             "reservation_id" => reservation_id
           },
-          occurred_at: now,
+          occurred_at: occurred,
+          recorded_at: occurred
+        )
+      end
+
+      def state_store(entry)
+        @state_store_factory.call(entry)
+      end
+
+      def pending_occurrence(entry)
+        state_store(entry).pending_occurrences.min_by do |record|
+          record.fetch("created_at")
+        end
+      end
+
+      def recover_projections(entry)
+        store = state_store(entry)
+        pending = store.projection_pending_occurrences
+        return if pending.empty?
+
+        evidence = @evidence_store_factory.call(entry)
+        pending.each do |record|
+          store.drain_occurrence_outbox!(
+            record.fetch("occurrence_id"),
+            evidence_store: evidence,
+            event_publisher: @event_publisher,
+            project_entry: entry
+          )
+        end
+      end
+
+      def finalize_negative(entry, patrol:, rationale:, now:)
+        snapshot = @migration_snapshot.call(entry, "patrol")
+        return unless reservation_owner?(snapshot)
+
+        store = state_store(entry)
+        capture = capture_reservation(
+          entry, snapshot, now,
+          poll_interval_sec: patrol.fetch("poll_interval_sec", 600).to_i,
+          rationale: rationale
+        )
+        store.reserve_occurrence!(capture, now: now)
+        existing = store.occurrence(capture.occurrence_id)
+        if existing.fetch("phase") == "finalized"
+          store.drain_occurrence_outbox!(
+            capture.occurrence_id,
+            evidence_store: @evidence_store_factory.call(entry),
+            event_publisher: @event_publisher,
+            project_entry: entry
+          )
+          return
+        end
+        event = @event_publisher.prepare_patrol_finalized(
+          entry, capture, schedule: MODULE_SCHEDULE
+        )
+        store.finalize_occurrence!(
+          capture: capture,
+          event: event,
+          evidence_store: @evidence_store_factory.call(entry),
+          event_publisher: @event_publisher,
+          project_entry: entry,
+          now: now
+        )
+      end
+
+      def finalize_pending(pending, exit_code:, envelope:, now:)
+        entry = pending.fetch(:entry)
+        store = state_store(entry)
+        provisional = store.occurrence_capture(
+          pending.fetch(:occurrence_id)
+        )
+        raise Hive::ConfigError, "patrol pending occurrence is unavailable" unless provisional
+        existing = store.occurrence(provisional.occurrence_id)
+        if existing.fetch("phase") == "finalized"
+          store.drain_occurrence_outbox!(
+            provisional.occurrence_id,
+            evidence_store: @evidence_store_factory.call(entry),
+            event_publisher: @event_publisher,
+            project_entry: entry
+          )
+          return
+        end
+
+        success = exit_code == Hive::ExitCodes::SUCCESS &&
+                  envelope.is_a?(Hash) && envelope["ok"] == true
+        decision = {
+          "rationale" => success ? "completed" : "failed",
+          "exit_code" => exit_code.nil? ? nil : Integer(exit_code),
+          "ok" => success
+        }
+        if envelope.is_a?(Hash)
+          %w[
+            features_mapped features_reviewed review_complete findings
+            fixes_attempted prs_opened last_scanned_sha
+          ].each do |key|
+            decision[key] = envelope[key] if envelope.key?(key)
+          end
+        end
+        capture = Hive::Modules::Migration::PatrolCapture.build(
+          module_name: "patrol",
+          project: provisional.project,
+          trigger: provisional.trigger,
+          reservation: provisional.reservation,
+          owner: provisional.owner,
+          owner_epoch: provisional.owner_epoch,
+          decision_class: success ? "completed" : "failed",
+          decision: decision,
+          effect_ids: store.terminal_effect_receipt_ids(
+            provisional.occurrence_id
+          ),
+          occurred_at: provisional.occurred_at,
           recorded_at: now
         )
+        event = @event_publisher.prepare_patrol_finalized(
+          entry, capture, schedule: MODULE_SCHEDULE
+        )
+        store.finalize_occurrence!(
+          capture: capture,
+          event: event,
+          evidence_store: @evidence_store_factory.call(entry),
+          event_publisher: @event_publisher,
+          project_entry: entry,
+          now: now
+        )
+      rescue ArgumentError, TypeError
+        raise Hive::ConfigError,
+              "patrol completion outcome is malformed"
+      end
+
+      def schedule_window(now, interval)
+        seconds = [ Integer(interval), 1 ].max
+        Time.at(now.to_i - (now.to_i % seconds)).utc
+      rescue ArgumentError, TypeError
+        raise Hive::ConfigError, "patrol poll interval is malformed"
       end
     end
   end

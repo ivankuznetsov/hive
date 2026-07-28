@@ -48,7 +48,8 @@ module Hive
         end
 
         def initialize(records:, reviewer:, reviewed_at:, generated_at:)
-          @records = Array(records)
+          validator = ShadowComparator.new(root: Dir.pwd)
+          @records = Array(records).map { |record| validator.validate_record!(record) }
           @reviewer = reviewer.to_s.strip
           @reviewed_at = parse_time(reviewed_at)
           @generated_at = parse_time(generated_at)

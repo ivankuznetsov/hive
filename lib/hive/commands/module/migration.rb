@@ -77,7 +77,7 @@ module Hive
         end
 
         def comparator
-          Hive::Modules::Migration::ShadowDecisionMigration.migrate!(
+          Hive::Modules::Migration::ShadowDecisionMigration.ensure_complete!(
             root: shadow_root
           )
           Hive::Modules::Migration::ShadowComparator.new(

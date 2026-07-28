@@ -203,6 +203,51 @@ class AttemptsContextTest < Minitest::Test
     end
   end
 
+  def test_module_hook_binding_uses_its_authenticated_subject_without_task_resolution
+    subject = {
+      "kind" => "module_hook", "project_id" => "project-1", "module" => "patrol",
+      "hook" => "scheduled-scan", "event_id" => "event-1", "occurrence_id" => "event-1",
+      "event_name" => "schedule.tick", "module_generation" => "a" * 40,
+      "configuration_digest" => "b" * 64, "grant_digest" => "c" * 64
+    }
+    argv = [
+      "hive", "__module-hook", "patrol", "scheduled-scan",
+      "--project", "demo", "--event-id", "event-1"
+    ]
+    record = Hive::Attempts::Record.launching(
+      attempt_id: "attempt-module", request_id: "request-module",
+      predecessor_attempt_id: nil, task_id: nil, project: "demo",
+      task_slug: "module-patrol-scheduled-scan", intended_stage: "module-hook",
+      task_generation: "generation-module", progress_token: "event-1",
+      provider: "native", worker_argv: argv,
+      claim_capability_digest: Hive::Attempts::Capability.digest(CLAIM_CAPABILITY),
+      starting_revision: nil, retry_charge: 0, inherited_outputs: [],
+      subject: subject, launch_timeout_sec: 30, now: Time.now.utc
+    )
+
+    assert_nil Hive::Attempts::Context.send(:validate_task_binding!, record, argv)
+    assert_raises(Hive::Attempts::StoreError) do
+      Hive::Attempts::Context.send(
+        :validate_task_binding!, record, argv.take(6) + [ "other-event" ]
+      )
+    end
+
+    incomplete = Struct.new(:subject) do
+      def [](key)
+        {
+          "project" => "demo", "task_id" => nil,
+          "intended_stage" => "module-hook"
+        }[key]
+      end
+    end.new(subject.except("event_id"))
+    error = assert_raises(Hive::Attempts::StoreError) do
+      Hive::Attempts::Context.send(
+        :validate_module_hook_binding!, incomplete, argv
+      )
+    end
+    assert_includes error.message, "binding is incomplete"
+  end
+
   def test_legacy_opaque_generation_is_bridged_without_becoming_an_epoch
     context = Hive::Attempts::Context.send(
       :new, attempt_id: "attempt", task_generation: "opaque"

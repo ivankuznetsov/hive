@@ -326,6 +326,9 @@ class CommandsStageActionTest < Minitest::Test
         "archive", task.folder, closure_receipt_digest: "a" * 64
       )
       runs = []
+      archive.define_singleton_method(:publish_task_completed) do |completed|
+        runs << [ :published, completed ]
+      end
       archive.define_singleton_method(:run_at) do |folder, observation_guard:|
         runs << [ folder, observation_guard ]
       end
@@ -341,7 +344,7 @@ class CommandsStageActionTest < Minitest::Test
           )
         end
       end
-      assert_equal [ [ task.folder, nil ] ], runs
+      assert_equal [ [ task.folder, nil ], [ :published, task ] ], runs
     end
   end
 end

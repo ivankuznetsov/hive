@@ -97,7 +97,11 @@ class TaskJournalTest < Minitest::Test
         "predecessor_attempt_id" => "attempt-1"
       )
       File.write(store.record_path("attempt-2"), JSON.generate(second) + "\n")
-      File.write(first_path, JSON.generate(first.merge("task_slug" => "other-task")) + "\n")
+      incompatible = first.merge(
+        "task_slug" => "other-task",
+        "subject" => first.fetch("subject").merge("task_slug" => "other-task")
+      )
+      File.write(first_path, JSON.generate(incompatible) + "\n")
 
       fresh_writer = Hive::TaskJournal::Writer.new(
         task_folder: writer.task_folder, attempt_store: store, clock: -> { NOW }

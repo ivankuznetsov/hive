@@ -149,6 +149,22 @@ module Hive
         result
       end
 
+      # Read-only inspection mirrors the module store's diagnostic boundary:
+      # atomically published lock/configuration bytes may be inspected without
+      # reconciling an interrupted mutation or creating lock files.
+      def inspect_selected(name, cfg: {})
+        selected_unlocked(name, cfg: cfg)
+      end
+
+      def inspect_selections(cfg: {})
+        return [] unless File.directory?(workflows_dir)
+
+        Dir.glob(File.join(workflows_dir, "*", LOCK_FILE)).sort.filter_map do |path|
+          name = File.basename(File.dirname(path))
+          selected_unlocked(name, cfg: cfg)
+        end
+      end
+
       def generation_path(name, commit)
         validate_name_and_commit!(name, commit)
         File.join(workflows_dir, name, "versions", commit)
@@ -210,6 +226,10 @@ module Hive
 
       def task_references(name = nil)
         MutationLock.with_lock(workflows_dir, shared: true) { task_references_unlocked(name) }
+      end
+
+      def inspect_task_references(name = nil)
+        task_references_unlocked(name)
       end
 
       # Task creation uses this boundary to make a legacy v1 lock's derived

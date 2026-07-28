@@ -520,6 +520,67 @@ module Hive
       ).call
     end
 
+    desc "module SUBCOMMAND [SOURCE_OR_NAME]", "Manage reviewed project-local modules"
+    long_desc <<~DESC
+      Subcommands:
+        install honeycomb/NAME[@VERSION]  Preview or activate a reviewed module.
+        update NAME                       Preview or activate its reviewed update.
+        enable NAME                       Resume future trigger admission.
+        disable NAME                      Fence new trigger admission.
+        uninstall NAME                    Stop dispatch while retaining history.
+        list                              List installed modules for this project.
+        inspect NAME                      Inspect installed or retained history.
+        status [NAME]                     Show the shared redacted status model.
+        doctor NAME                       Diagnose without repairing state.
+        dry-run NAME                      Evaluate a supplied event without writes.
+        migration status|report|cutover|rollback
+                                          Inspect or advance the durable patrol ownership epoch.
+
+      Lifecycle mutations are preview-bound. Run with --dry-run first, review
+      every hook, setting, binding, and grant, then repeat with --yes and the
+      exact --receipt value. Non-interactive callers must explicitly provide
+      every install setting and hook choice. Grants are repeated CATEGORY=VALUE
+      values; repository_write is the only boolean grant.
+    DESC
+    option :yes, type: :boolean, default: false,
+                 desc: "apply a reviewed module preview"
+    option :dry_run, type: :boolean, default: false,
+                     desc: "build a read-only preview receipt"
+    option :receipt, type: :string,
+                     desc: "exact receipt emitted by the matching --dry-run"
+    option :setting, type: :array, default: [],
+                     desc: "module setting choice NAME=VALUE (repeatable)"
+    option :hook, type: :array, default: [],
+                  desc: "module hook choice ID=enabled|disabled (repeatable)"
+    option :grant, type: :array, default: [],
+                   desc: "module permission grant CATEGORY=VALUE (repeatable)"
+    option :mapping, type: :array, default: [],
+                     desc: "legacy Honeycomb actor mapping SLOT=AGENT[,model=...][,effort=...]"
+    option :input_binding, type: :array, default: [],
+                           desc: "legacy Honeycomb optional input binding NAME=ENV_VAR"
+    option :allow_escalation, type: :boolean, default: false,
+                              desc: "separately approve a legacy Honeycomb security escalation"
+    option :event, type: :string,
+                   desc: "for `dry-run`: schedule or a supported named event"
+    option :schedule, type: :string,
+                      desc: "for schedule dry-run: exact five-field cron binding"
+    option :occurred_at, type: :string,
+                         desc: "for `dry-run`: ISO 8601 occurrence time"
+    option :reviewer, type: :string,
+                      desc: "for `migration report`: reviewer identity recorded in the gate"
+    define_method(:module) do |subcommand = nil, subject = nil|
+      require "hive/commands/module"
+      Hive::Commands::Module.new(
+        subcommand, subject, project_root: Dir.pwd, json: options[:json],
+        yes: options[:yes], dry_run: options[:dry_run], receipt: options[:receipt],
+        settings: options[:setting], hooks: options[:hook], grants: options[:grant],
+        mappings: options[:mapping], input_bindings: options[:input_binding],
+        allow_escalation: options[:allow_escalation],
+        event_name: options[:event], schedule: options[:schedule], occurred_at: options[:occurred_at],
+        reviewer: options[:reviewer]
+      ).call
+    end
+
     desc "bench SUBCOMMAND [SLUG]", "Contribute to hive-bench: `bench submit SLUG` extracts a 9-done task and opens a PR"
     long_desc <<~DESC
       Subcommands:

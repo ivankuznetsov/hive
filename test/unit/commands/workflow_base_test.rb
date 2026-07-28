@@ -18,6 +18,8 @@ class WorkflowBaseTest < Minitest::Test
     def kind(error) = error_kind(error)
     def config = project_config
     def state_path = hive_state_path
+    def admit(*args, **kwargs) = admit_runtime!(*args, **kwargs)
+    def cleanup(name, error) = cleanup_after_failed_activation(name, error)
     def envelope_schema = "hive-workflow-install"
   end
 
@@ -106,5 +108,36 @@ class WorkflowBaseTest < Minitest::Test
     }
 
     cases.each { |error, expected| assert_equal expected, command.kind(error) }
+  end
+
+  def test_runtime_admission_and_failed_activation_cleanup_use_shared_boundaries
+    command = Probe.new(
+      project_root: Dir.pwd, json: false, stdout: StringIO.new
+    )
+    admissions = []
+    compatibility = Object.new
+    compatibility.define_singleton_method(:admit_runtime!) do |*args, **kwargs|
+      admissions << [ args, kwargs ]
+      :admitted
+    end
+    command.instance_variable_set(:@workflow_compatibility, compatibility)
+    assert_equal :admitted,
+                 command.admit(:workflow, "/package", configuration: :config)
+    assert_equal [ [ [ :workflow, "/package" ], { configuration: :config } ] ],
+                 admissions
+
+    failing_store = Object.new
+    failing_store.define_singleton_method(:cleanup_unreferenced) do |_name|
+      raise Errno::EIO, "cleanup blocked"
+    end
+    command.instance_variable_set(:@store, failing_store)
+    original = Hive::ConfigError.new("activation blocked")
+    _out, err = capture_io do
+      raised = assert_raises(Hive::ConfigError) do
+        command.cleanup("demo", original)
+      end
+      assert_same original, raised
+    end
+    assert_includes err, "candidate cleanup also failed"
   end
 end

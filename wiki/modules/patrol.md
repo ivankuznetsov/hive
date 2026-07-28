@@ -3,7 +3,7 @@ title: Hive::Patrol
 type: module
 source: lib/hive/patrol/
 created: 2026-05-28
-updated: 2026-07-22
+updated: 2026-07-26
 tags: [module, patrol, review, worktree, pr, codex]
 ---
 
@@ -132,6 +132,45 @@ advances past only the proven-clean prefix; the failed feature and remaining
 suffix stay pinned for retry.
 
 `Hive::Daemon::PatrolScheduler` still consumes the lower-level `patrol.trigger` modes. `continuous` dispatches when either the default branch SHA changed or `poll_interval_sec` has elapsed, allowing patrol to keep reviewing existing feature slices between infrequent merges. Each cycle persists a SHA-bound feature cursor; `last_scanned_sha` advances only after the full mapped sweep succeeds. `new_commits` therefore keeps dispatching successive batches until that sweep completes. `timer` dispatches solely from `last_run_at` age.
+
+## First-party module adapters and ownership
+
+`modules/patrol` and `modules/architecture-patrol` package the existing engines
+as reviewed first-party modules. Their registered adapters translate immutable
+module trigger snapshots into the existing command/engine seams; package code
+is never loaded. Ordinary Patrol accepts schedule and `task.completed`, while
+Architecture Patrol accepts schedule and `pull_request.merged`. The existing
+merge reconciler remains the only GitHub intake producer.
+
+The adapters deliberately do not relocate durable product state.
+`.hive-state/patrol/`, `.hive-state/refactor_patrol/`, global architecture
+action proofs, budgets, fingerprints, dismissals, claims, artifacts, and
+recovery receipts remain authoritative. A durable migration ownership epoch
+keeps legacy scheduling as the sole mutator during shadow comparison. Cutover
+is fail-closed until both modules have seven elapsed days, ten comparable
+decisions, reviewer sign-off, and no unexplained or duplicate effects; rollback
+restores legacy ownership without moving checkpoints or replaying events.
+Missing or corrupt migration state cannot authorize a module mutator. The
+reviewed legacy configuration is copied into the migration binding with its
+digest and is the only configuration the adapters execute. A shared migration
+lock spans the final legacy ownership check, scheduler reservation, process
+spawn, and Architecture Patrol claim attachment; cutover and rollback take the
+same lock exclusively. Status and doctor surface unadopted, fenced, and corrupt
+migration state rather than reporting an apparently healthy active module.
+
+Shadow comparison no longer compares a module decision with itself. A
+comparable record requires an independently produced
+`legacy_mutator_capture` in the immutable occurrence, and cutover rebuilds the
+report from the current shadow directory instead of trusting a saved
+`eligible` bit. The existing merged-PR reconciler produces an independent
+Architecture Patrol capture without adding a second GitHub poller. Ordinary
+Patrol schedule evaluation does not yet produce one and remains a cutover
+blocker.
+
+`Hive::Modules::CapabilityContext` preflights the project-local installed grants
+before either adapter invokes its legacy engine. The engines do not yet accept
+capability-bound gateways at every side-effect sink, so the permission gate
+remains a cutover blocker. First-party modules receive no consent bypass.
 
 ## Safety invariants
 

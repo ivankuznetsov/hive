@@ -60,7 +60,8 @@ module Hive
                      max_call_timeout_sec: DEFAULT_MAX_CALL_TIMEOUT_SEC,
                      backoff_base_sec: DEFAULT_BACKOFF_BASE_SEC,
                      backoff_max_sec: DEFAULT_BACKOFF_MAX_SEC,
-                     monotonic_clock: nil, jitter: nil, progress_store: nil)
+                     monotonic_clock: nil, jitter: nil, progress_store: nil,
+                     module_event_publisher: nil)
         @registry = registry
         @config_loader = config_loader
         @gh = gh
@@ -83,6 +84,7 @@ module Hive
         @resolver_factory = resolver_factory || method(:build_resolver)
         @job_store_factory = job_store_factory || ->(root) { Hive::RefactorPatrol::JobStore.new(root) }
         @dry_run = dry_run
+        @module_event_publisher = module_event_publisher
         @next_poll_at = nil
         @rotation_offset = 0
       end
@@ -299,12 +301,14 @@ module Hive
         resolver = @resolver_factory.call(entry, cfg, @github_gateway, @dry_run)
         manifest = resolver.resolve(pr, timeout_sec: timeout_sec)
         assert_manifest_matches!(manifest, expected) if expected
-        @job_store_factory.call(entry.fetch("path")).enqueue_manifest!(
+        result = @job_store_factory.call(entry.fetch("path")).enqueue_manifest!(
           manifest,
           policy: policy_snapshot(cfg, now),
           now: now,
           dry_run: @dry_run
         )
+        @module_event_publisher&.pull_request_merged(entry, manifest) unless @dry_run
+        result
       end
 
       def build_resolver(entry, cfg, github_gateway, dry_run)

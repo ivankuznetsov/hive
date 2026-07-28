@@ -1,0 +1,102 @@
+schema: "hive-module/v1"
+name: "patrol"
+version: "0.1.0"
+description: "First-party ordinary repository Patrol adapter"
+type: "patrol"
+author:
+  name: "Hive"
+  url: "https://hivecli.sh"
+license: "MIT"
+hive_min_version: "0.6.7"
+source:
+  url: "https://github.com/ivankuznetsov/hive"
+  revision: "122d3b3a8b1178fe34e027895a41ad750ebe0e20"
+workflows: []
+hooks:
+  -
+    id: "setup"
+    target:
+      kind: "entrypoint"
+      id: "patrol.setup"
+    default_enabled: true
+    schedules: []
+    events:
+      - "project.registered"
+    concurrency: "drop"
+  -
+    id: "scheduled-scan"
+    target:
+      kind: "entrypoint"
+      id: "patrol.scheduled-scan"
+    default_enabled: false
+    schedules:
+      - "*/10 * * * *"
+    events: []
+    concurrency: "drop"
+  -
+    id: "task-completed"
+    target:
+      kind: "entrypoint"
+      id: "patrol.task-completed"
+    default_enabled: false
+    schedules: []
+    events:
+      - "task.completed"
+    concurrency: "drop"
+settings:
+  -
+    name: "shadow_mode"
+    type: "boolean"
+    required: true
+    default: true
+    description: "Evaluate without invoking the mutating Patrol engine"
+  -
+    name: "trigger"
+    type: "enum"
+    required: true
+    default: "timer"
+    values:
+      - "continuous"
+      - "new_commits"
+      - "timer"
+    description: "Legacy-compatible Patrol due policy"
+  -
+    name: "poll_interval_sec"
+    type: "integer"
+    required: true
+    default: 14400
+    description: "Legacy-compatible Patrol interval"
+  -
+    name: "task_completed_workflows"
+    type: "string"
+    required: true
+    default: "*"
+    description: "Comma-separated workflow ids admitted by task.completed"
+  -
+    name: "dry_run"
+    type: "boolean"
+    required: true
+    default: false
+    description: "Retain the legacy Patrol dry-run execution mode"
+permissions:
+  repository_write: true
+  github_mutations:
+    - "pull_requests"
+  external_commands:
+    - "gh"
+    - "git"
+  network_hosts:
+    - "api.github.com"
+  filesystem_read:
+    - "repository"
+  filesystem_write:
+    - ".hive-state/patrol/**"
+  secrets: []
+templates:
+  - "templates/patrol.yml"
+docs:
+  - "README.md"
+files:
+  "README.md": "e8239b549afc97bd326cf681133e57c4a685fbaafbf208ef97116afb36ccabe0"
+  "templates/patrol.yml": "821cbe6870fb874ab84b80d4cc9f9875cdfe8fdfd23af79117df0809a56b1474"
+release_sha256: "76b6f95dbdb63a30b50008df5ecedd9de966cd5acfa64bea69aff7b79264cb51"

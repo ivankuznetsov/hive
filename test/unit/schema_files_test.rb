@@ -2423,6 +2423,7 @@ class SchemaFilesTest < Minitest::Test
     refute_includes doc.fetch("properties").keys, "compatibility"
     assert_equal 1, doc.fetch("properties").dig("worker_argv", "minItems")
     assert_equal "string", doc.fetch("properties").dig("claim_capability_digest", "type")
+    assert_includes doc.fetch("required"), "subject"
     assert_equal "^[0-9a-f]{64}$", doc.fetch("properties").dig("claim_capability_digest", "pattern")
     receipt_required = doc.dig("$defs", "Receipt", "required")
     %w[attempt_id task_generation ownership_generation task_input_epoch outcome exit_status started_at ended_at final_checkpoint output_references log_reference].each do |key|
@@ -2430,10 +2431,9 @@ class SchemaFilesTest < Minitest::Test
     end
   end
 
-
   def test_legacy_recovery_schema_files_are_removed_after_one_off_cutover
     obsolete = {
-      "hive-attempt" => [ 1 ],
+      "hive-attempt" => [ 1, 2 ],
       "hive-dispatch-request" => [ 1, 2, 3 ],
       "hive-dispatch-result" => [ 1 ]
     }

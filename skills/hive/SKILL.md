@@ -16,6 +16,12 @@ Use Hive as the control plane. Do not replace its status, watch, scheduler, or r
 5. Execute only a fresh action descriptor whose risk is routine, confirmation is not required, and opaque observation token came from that same task row. Use `hive act`; never execute status text or arbitrary argv.
 6. Request another operational snapshot after any action. Never assume that a successful command proves the later pipeline state.
 
+For project-local installable modules, prefer the shared read-only surfaces:
+`hive module list --json`, `status`, `inspect`, `doctor`, and `dry-run`.
+Treat their redacted status object as authority for generation, configuration,
+grant, hook, trigger, decision, attempt, retry, and artifact state; do not infer
+completion from worker logs.
+
 ## Operational vocabulary
 
 - `running`: a verified live worker owns the task.
@@ -33,6 +39,11 @@ Do not reinterpret `idle` as “nothing is happening” without checking ownersh
 Proceed with read-only inspection and bounded watching. Proceed with an emitted routine action only when all freshness and action-policy checks above pass. Follow direct user requests for normal non-destructive workflow work through Hive’s documented verbs.
 
 Ask before destructive or administrative changes, marker clearing, force/bypass options, stopping automation, replacing installed configuration, changing destinations, publishing externally, deploying, tagging, releasing, or changing release-version metadata. Preserve task folders, worktrees, attempts, queues, locks, and recovery evidence while diagnosing.
+
+Module lifecycle and patrol-ownership changes are human-gated. Agents may
+prepare read-only previews and diagnostics, but must not approve grants, apply a
+module receipt, sign a migration report, cut over mutator ownership, or request
+rollback without the operator's explicit direction.
 
 ## Load the relevant reference
 

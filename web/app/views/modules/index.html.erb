@@ -1,0 +1,64 @@
+<% content_for(:title, "#{web_product_name} — modules") %>
+<h1>Modules</h1>
+<p class="muted">Install and operate reviewed, project-local automation. Every change is previewed against one immutable candidate and exact settings, hooks, and grants.</p>
+
+<% if @projects.empty? %>
+  <div class="empty-state">
+    <p>Add a repository before managing modules.</p>
+    <p><%= link_to "Add a repository", repos_path %></p>
+  </div>
+<% else %>
+  <%= form_with url: modules_path, method: :get, class: "repo-form module-project-form" do |f| %>
+    <%= select_tag :project,
+          options_for_select(@projects.map { |project| [project.name, project.name] }, @selected_project&.name),
+          include_blank: @projects.many? ? "Choose a project…" : false,
+          required: true, aria: { label: "Project modules" } %>
+    <label class="check">
+      <%= check_box_tag :history, "1", @show_history %> Include uninstalled history
+    </label>
+    <%= f.submit "View modules", data: { turbo_submits_with: "Loading…" } %>
+  <% end %>
+<% end %>
+
+<% if @selected_project %>
+  <% if @module_change %>
+    <%= render "modules/preview", change: @module_change, project: @selected_project %>
+  <% end %>
+
+  <section aria-labelledby="project-modules-heading">
+    <h2 id="project-modules-heading"><%= @selected_project.name %> modules</h2>
+    <% if @modules.empty? %>
+      <p class="empty-state">No <%= @show_history ? "module history" : "installed modules" %> for this project.</p>
+    <% else %>
+      <div class="module-list">
+        <%= render partial: "modules/module", collection: @modules, as: :hive_module,
+              locals: { project: @selected_project } %>
+      </div>
+    <% end %>
+  </section>
+
+  <section class="card module-install-card" aria-labelledby="install-module-heading">
+    <h2 id="install-module-heading">Install reviewed module</h2>
+    <p class="muted">Supply every required setting and hook choice. Secret settings take an environment binding name, never the secret value.</p>
+    <%= form_with url: preview_module_install_path, class: "form-grid", data: { turbo: false } do |f| %>
+      <%= hidden_field_tag :project, @selected_project.name %>
+      <div class="form-row">
+        <%= f.label :source, "Reviewed package" %>
+        <%= f.text_field :source, required: true, placeholder: "honeycomb/patrol@1.0.0" %>
+      </div>
+      <div class="form-row">
+        <%= f.label :settings, "Setting choices" %>
+        <%= f.text_area :settings, rows: 3, placeholder: "mode=safe\napi_token=HIVE_PATROL_TOKEN" %>
+      </div>
+      <div class="form-row">
+        <%= f.label :hooks, "Hook choices" %>
+        <%= f.text_area :hooks, rows: 3, placeholder: "scheduled-scan=enabled\ntask-completed=disabled" %>
+      </div>
+      <div class="form-row">
+        <%= f.label :grants, "Permission grants" %>
+        <%= f.text_area :grants, rows: 3, placeholder: "repository_write=true\nfilesystem_read=repository" %>
+      </div>
+      <p><%= f.submit "Preview install", data: { turbo_submits_with: "Verifying…" } %></p>
+    <% end %>
+  </section>
+<% end %>

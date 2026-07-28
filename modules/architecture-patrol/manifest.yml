@@ -1,0 +1,91 @@
+schema: "hive-module/v1"
+name: "architecture-patrol"
+version: "0.1.0"
+description: "First-party merged-PR Architecture Patrol adapter"
+type: "architecture-patrol"
+author:
+  name: "Hive"
+  url: "https://hivecli.sh"
+license: "MIT"
+hive_min_version: "0.6.7"
+source:
+  url: "https://github.com/ivankuznetsov/hive"
+  revision: "913c11a83e892792354f612ea47b27d868ad0e6b"
+workflows: []
+hooks:
+  -
+    id: "setup"
+    target:
+      kind: "entrypoint"
+      id: "architecture-patrol.setup"
+    default_enabled: true
+    schedules: []
+    events:
+      - "project.registered"
+    concurrency: "drop"
+  -
+    id: "scheduled-discovery"
+    target:
+      kind: "entrypoint"
+      id: "architecture-patrol.scheduled-discovery"
+    default_enabled: false
+    schedules:
+      - "*/10 * * * *"
+    events: []
+    concurrency: "drop"
+  -
+    id: "merged-pr-discovery"
+    target:
+      kind: "entrypoint"
+      id: "architecture-patrol.merged-pr-discovery"
+    default_enabled: false
+    schedules: []
+    events:
+      - "pull_request.merged"
+    concurrency: "drop"
+  -
+    id: "actions"
+    target:
+      kind: "entrypoint"
+      id: "architecture-patrol.actions"
+    default_enabled: false
+    schedules:
+      - "*/10 * * * *"
+    events: []
+    concurrency: "drop"
+settings:
+  -
+    name: "shadow_mode"
+    type: "boolean"
+    required: true
+    default: true
+    description: "Evaluate without claiming or invoking Architecture Patrol work"
+  -
+    name: "dry_run"
+    type: "boolean"
+    required: true
+    default: false
+    description: "Retain the legacy Architecture Patrol dry-run execution mode"
+permissions:
+  repository_write: true
+  github_mutations:
+    - "issues"
+    - "pull_requests"
+  external_commands:
+    - "gh"
+    - "git"
+  network_hosts:
+    - "api.github.com"
+  filesystem_read:
+    - "repository"
+  filesystem_write:
+    - ".hive-state/refactor_patrol/**"
+  secrets: []
+templates:
+  - "templates/refactor-patrol.yml"
+docs:
+  - "README.md"
+files:
+  "README.md": "dab977170d99fa04b7e9a6b26cbb523d1ed8ef3fff44696eb3fdca06981ac464"
+  "templates/refactor-patrol.yml": "5d8d1ede3cfe2854281b285d46191bc96a228e50ad745b667610e20d9cab653a"
+release_sha256: "ed47ad7d0cc2d9f577970aedaf1390442d0955ae96c3b082b6591cfa31215ef0"

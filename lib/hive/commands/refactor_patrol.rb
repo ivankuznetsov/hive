@@ -68,7 +68,9 @@ module Hive
                      analysis_worktree_factory: nil,
                      heartbeat_interval_sec: CLAIM_HEARTBEAT_INTERVAL_SEC,
                      heartbeat_lease_sec: CLAIM_HEARTBEAT_LEASE_SEC,
-                     heartbeat_clock: -> { Time.now }, heartbeat_resolver: ClaimLivenessResolver.new)
+                     heartbeat_clock: -> { Time.now }, heartbeat_resolver: ClaimLivenessResolver.new,
+                     project_entry: nil, capability_context: nil,
+                     config_loader: ->(path) { Hive::Config.load(path) })
         @project = project
         @json = json
         @dry_run = dry_run
@@ -115,6 +117,9 @@ module Hive
         @heartbeat_lease_sec = heartbeat_lease_sec.to_i
         @heartbeat_clock = heartbeat_clock
         @heartbeat_resolver = heartbeat_resolver
+        @project_entry = project_entry
+        @capability_context = capability_context
+        @config_loader = config_loader
       end
 
       def call
@@ -139,6 +144,8 @@ module Hive
 
       def run_action_cycle
         entry, project_root, cfg = resolve_project!
+        require_module_observation_capabilities!
+        require_module_mutation_capabilities! unless @dry_run
         @manifest = resolve_manifest(entry, project_root, cfg)
         validate_result_file!(project_root) if @result_file
         @job_store = @job_store_factory.call(project_root)
@@ -155,6 +162,8 @@ module Hive
 
       def run_cycle
         entry, project_root, cfg = resolve_project!
+        require_module_observation_capabilities!
+        require_module_mutation_capabilities! if pr_mode? && !@dry_run
         assert_repository_ownership!(entry, cfg) if pr_mode?
         @manifest = resolve_manifest(entry, project_root, cfg) if pr_mode?
         validate_result_file!(project_root) if @result_file
@@ -164,6 +173,7 @@ module Hive
         end
         analysis_root = pr_mode? ? materialize_analysis_worktree!(project_root, cfg) : project_root
         state = Hive::RefactorPatrol::StateStore.new(project_root)
+        @capability_context&.require_filesystem_write!(".hive-state/refactor_patrol/**") unless ephemeral_discovery?
         # A dry run must not create durable artifacts under
         # .hive-state/refactor_patrol/; all reads tolerate a missing dir.
         state.ensure! unless ephemeral_discovery?
@@ -232,12 +242,30 @@ module Hive
         cleanup_analysis_worktree!(raise_on_drift: $!.nil?)
       end
 
+      def require_module_observation_capabilities!
+        return unless @capability_context
+
+        @capability_context.require_filesystem_read!("repository")
+        @capability_context.require_external_command!("git")
+      end
+
+      def require_module_mutation_capabilities!
+        return unless @capability_context
+
+        @capability_context.require_repository_write!
+        @capability_context.require_filesystem_write!(".hive-state/refactor_patrol/**")
+        @capability_context.require_github_mutation!("issues")
+        @capability_context.require_github_mutation!("pull_requests")
+        @capability_context.require_external_command!("gh")
+        @capability_context.require_network_host!("api.github.com")
+      end
+
       def resolve_project!
-        entry = Hive::Config.find_project(@project)
+        entry = @project_entry || Hive::Config.find_project(@project)
         raise Hive::ConfigError, "hive refactor-patrol: unknown project #{@project.inspect}" unless entry
 
         project_root = entry.fetch("path")
-        cfg = Hive::Config.load(project_root)
+        cfg = @config_loader.call(project_root)
         unless query_mode? || @actions || (cfg["refactor_patrol"] || {})["enabled"]
           raise Hive::ConfigError, "hive refactor-patrol: project #{entry.fetch('name').inspect} must opt in with refactor_patrol.enabled: true"
         end

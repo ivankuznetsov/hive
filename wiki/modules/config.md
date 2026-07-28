@@ -325,6 +325,18 @@ expiry, client id, issuer, MCP resource URL, base URL, and default
 
 ## Module functions
 
+Installable-module selections are project-local runtime configuration, stored
+under `<hive_state_path>/modules/` rather than as shared user configuration.
+Each active pointer references an immutable normalized generation and a
+digest-addressed configuration snapshot containing effective settings, hook
+states, bindings, and redacted grants. Runtime events, decisions, attempts,
+artifacts, watermarks, and patrol stores live outside those generations.
+
+During the 0.x compatibility period, `patrol.*` and `refactor_patrol.*` remain
+accepted projections into the canonical first-party module settings. The
+adapters retain one authoritative state store and warn with exact replacements;
+they do not create a second writable copy of patrol checkpoints or ledgers.
+
 | Function | Returns / does |
 |----------|----------------|
 | `hive_home` | `ENV["HIVE_HOME"] || Hive::Paths.config_home` (XDG default `~/.config/hive`; legacy `~/Dev/hive/config.yml` is migrated) |

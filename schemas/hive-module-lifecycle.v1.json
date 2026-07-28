@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hivecli.sh/schemas/hive-module-lifecycle.v1.json",
+  "title": "Hive module lifecycle v1",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "operation", "status", "name", "preview_receipt", "candidate", "configuration_digest", "diff", "proposed", "selection"],
+      "properties": {
+        "schema": {"const": "hive-module-lifecycle"},
+        "schema_version": {"const": 1},
+        "ok": {"const": true},
+        "operation": {"enum": ["install", "update", "enable", "disable", "uninstall"]},
+        "status": {"enum": ["preview", "installed", "updated", "enabled", "disabled", "uninstalled", "already_current"]},
+        "name": {"type": "string"},
+        "preview_receipt": {"type": ["string", "null"]},
+        "candidate": {"type": ["object", "null"]},
+        "configuration_digest": {"type": ["string", "null"]},
+        "diff": {"type": ["object", "null"]},
+        "proposed": {"type": ["object", "null"]},
+        "selection": {"type": ["object", "null"]}
+      }
+    },
+    {
+      "type": "object",
+      "required": ["schema", "schema_version", "ok", "error_kind", "exit_code", "message"],
+      "properties": {
+        "schema": {"const": "hive-module-lifecycle"},
+        "schema_version": {"const": 1},
+        "ok": {"const": false},
+        "error_kind": {"type": "string"},
+        "exit_code": {"type": "integer"},
+        "message": {"type": "string"}
+      }
+    }
+  ]
+}

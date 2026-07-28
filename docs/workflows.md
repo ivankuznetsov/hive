@@ -170,6 +170,14 @@ hive new <project> --workflow my-flow "<your idea>"
 
 ## Reviewed Honeycomb Packages
 
+Managed Honeycomb workflows now use the generalized project-local module
+lifecycle described in [modules.md](modules.md). Existing `hive workflow
+install|list|update|remove` flags, output schemas, locks, and task-pinned
+generations remain compatibility projections of one-workflow, hook-free
+modules; existing catalog entries and installed locks require no republish or
+manual migration. Use `hive module` for packages that also expose hooks,
+schedules, events, typed settings, and grants.
+
 Honeycomb packages are a separate, untrusted-by-default workflow origin. Hive
 consumes the official flat `honeycomb-catalog/v2` snapshot and accepts only
 `honeycomb/<name>[@<listed-version-or-full-source-revision>]`. Bare names select

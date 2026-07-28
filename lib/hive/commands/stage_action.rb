@@ -9,6 +9,7 @@ require "hive/task_action"
 require "hive/attempts/context"
 require "hive/attempts/command_dispatch"
 require "hive/conditions/transition_guard"
+require "hive/modules/event_publisher"
 
 module Hive
   module Commands
@@ -45,7 +46,8 @@ module Hive
 
       def initialize(verb, target, project: nil, from: nil, json: false,
                      durable: false, attempt_entrypoint: nil, quiet: false,
-                     observation_guard: nil, closure_receipt_digest: nil)
+                     observation_guard: nil, closure_receipt_digest: nil,
+                     module_event_publisher: nil)
         @verb = verb
         @target = target
         @project_filter = project
@@ -56,6 +58,7 @@ module Hive
         @quiet = quiet
         @observation_guard = observation_guard
         @closure_receipt_digest = closure_receipt_digest
+        @module_event_publisher = module_event_publisher || Hive::Modules::EventPublisher.new
       end
 
       def call
@@ -99,10 +102,14 @@ module Hive
         source_stage = config.fetch(:source)
 
         return close_with_receipt(task, current_stage, target_stage) if @closure_receipt_digest
-        return emit_archive_noop(task) if archive_noop?(task, current_stage)
+        if archive_noop?(task, current_stage)
+          publish_task_completed(task)
+          return emit_archive_noop(task)
+        end
 
         if current_stage == target_stage
           run_at(task.folder, observation_guard: @observation_guard)
+          publish_task_completed(task)
           return emit_phase(task, "ran")
         end
 
@@ -119,7 +126,9 @@ module Hive
         new_folder = File.join(task.hive_state_path, "stages", target_stage, task.slug)
         promote(task, target_stage, current_stage, config)
         run_at(new_folder, observation_guard: nil)
-        emit_phase(Hive::Task.new(new_folder), "promoted_and_ran")
+        promoted = Hive::Task.new(new_folder)
+        publish_task_completed(promoted)
+        emit_phase(promoted, "promoted_and_ran")
       end
 
       def resolve_task
@@ -195,10 +204,15 @@ module Hive
         )
         if current_stage == target_stage
           marker = Hive::Markers.current(task.state_file)
-          return emit_archive_noop(task) if marker.name == :complete
+          if marker.name == :complete
+            publish_task_completed(task)
+            return emit_archive_noop(task)
+          end
 
           run_at(task.folder, observation_guard: nil)
-          return emit_phase(Hive::Task.new(task.folder), "closure_resumed")
+          resumed = Hive::Task.new(task.folder)
+          publish_task_completed(resumed)
+          return emit_phase(resumed, "closure_resumed")
         end
 
         new_folder = File.join(task.hive_state_path, "stages", target_stage, task.slug)
@@ -221,7 +235,9 @@ module Hive
           observation_guard: closure_guard
         ).call
         run_at(new_folder, observation_guard: nil)
-        emit_phase(Hive::Task.new(new_folder), "closed_with_evidence")
+        closed = Hive::Task.new(new_folder)
+        publish_task_completed(closed)
+        emit_phase(closed, "closed_with_evidence")
       end
 
       # Inner Approve and Run are silent when the verb is in --json mode;
@@ -248,6 +264,13 @@ module Hive
           quiet: @json || @quiet,
           observation_guard: observation_guard
         ).call
+      end
+
+      def publish_task_completed(task)
+        return unless task.workflow.stages.last.dir == stage_dir(task)
+        return unless Hive::Markers.current(task.state_file).name == :complete
+
+        @module_event_publisher.task_completed(task)
       end
 
       # ── Reporting ───────────────────────────────────────────────────────

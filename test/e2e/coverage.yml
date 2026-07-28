@@ -19,6 +19,38 @@ coverage:
     constraints: { platforms: [], providers: [] }
     docs: [wiki/e2e.md]
     code: [test/e2e/scenarios/full_pipeline_happy_path.yml]
+  - id: module.lifecycle_install
+    title: Module installation lifecycle
+    description: Reviewed first-party modules activate project-locally and expose one shared redacted CLI and web status.
+    maturity: required
+    profiles: [release]
+    constraints: { platforms: [], providers: [] }
+    docs: [docs/modules.md, wiki/e2e.md]
+    code: [test/e2e/scenarios/module_fresh_install.yml]
+  - id: module.lifecycle_disable_uninstall
+    title: Module disable and uninstall lifecycle
+    description: Disable, re-enable, and uninstall preserve tombstones and no-replay watermarks.
+    maturity: required
+    profiles: [release]
+    constraints: { platforms: [], providers: [] }
+    docs: [docs/modules.md, wiki/e2e.md]
+    code: [test/e2e/scenarios/module_disable_uninstall.yml]
+  - id: module.event_replay
+    title: Module event replay
+    description: Replaying one named event yields one hook attempt and an explainable duplicate decision.
+    maturity: required
+    profiles: [release]
+    constraints: { platforms: [], providers: [] }
+    docs: [docs/modules.md, wiki/e2e.md]
+    code: [test/e2e/scenarios/module_trigger_replay.yml]
+  - id: module.lifecycle_update_rollback
+    title: Module update rollback
+    description: Failed and explicitly reversed updates preserve the prior executable generation and durable state.
+    maturity: required
+    profiles: [release]
+    constraints: { platforms: [], providers: [] }
+    docs: [docs/modules.md, wiki/e2e.md]
+    code: [test/e2e/scenarios/module_update_rollback.yml]
   - id: attempt.caller_loss_adoption
     title: Caller-loss attempt adoption
     description: Durable attempt ownership adopts accepted work exactly once after its caller disappears.

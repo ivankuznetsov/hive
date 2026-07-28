@@ -22,7 +22,7 @@ components:
     state_contracts:
       - "$HIVE_HOME/attempts/v2 records, framed logs, outputs, generation locks, leases, receipts, and lost-outcome evidence"
     schema_contracts:
-      - "hive-attempt v2 is the only runtime reader/writer; Hive::Recovery::Migration owns the one-off cutover"
+      - "hive-attempt v3 is the only runtime reader/writer; Hive::Recovery::Migration owns the one-off cutover"
     lock_contracts:
       - "admission lock before generation lock; record transitions use guarded CAS"
     component_dependencies: []
@@ -69,11 +69,13 @@ components:
         files:
           - lib/hive/commands/attempt_supervise.rb
           - lib/hive/commands/daemon.rb
+          - lib/hive/commands/module/dry_run.rb
           - lib/hive/conditions/execute_boundary.rb
           - lib/hive/implementation_identity/store.rb
+          - lib/hive/modules/inspector.rb
           - lib/hive/task_closure.rb
           - lib/hive/task_projection/store.rb
-        reason: "Existing Hive composition, read-only consumers, execution-boundary checks, and closure verification share the canonical durable store; they are not alternate admission producers."
+        reason: "Existing Hive composition, read-only consumers and previews, execution-boundary checks, and closure verification share the canonical durable store; they are not alternate admission producers."
       - constant: Hive::Attempts::Supervisor
         files:
           - lib/hive/commands/attempt_supervise.rb

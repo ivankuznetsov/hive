@@ -91,6 +91,17 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
     assert_equal [], sup.reap_all
   end
 
+  def test_in_flight_filters_by_exact_project_and_stage
+    supervisor = make(dry_run: true)
+    supervisor.spawn(
+      command_string: "hive patrol demo --json", project: "demo", slug: "patrol", stage: "patrol"
+    )
+
+    assert supervisor.in_flight?(project: "demo", stage: "patrol")
+    refute supervisor.in_flight?(project: "other", stage: "patrol")
+    refute supervisor.in_flight?(project: "demo", stage: "refactor-patrol")
+  end
+
   def test_spawn_with_invalid_json_stdout_returns_nil_envelope
     with_tmp_dir do |dir|
       sup = make(log_dir: dir)
@@ -627,6 +638,20 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
     with_replaced_singleton_method(Process, :wait2, ->(*_args) { raise Errno::ECHILD }) do
       assert_nil sup.send(:wait_for_child, 999_999, 0)
     end
+  end
+
+  def test_wait_for_child_polls_until_its_bounded_deadline
+    sup = make
+    polls = 0
+    with_replaced_singleton_method(
+      Process, :wait2, lambda { |*_args|
+        polls += 1
+        [ nil, nil ]
+      }
+    ) do
+      assert_nil sup.send(:wait_for_child, 999_999, 0.025)
+    end
+    assert_operator polls, :>=, 2
   end
 
   def test_completion_envelope_reads_and_removes_job_bound_result_file

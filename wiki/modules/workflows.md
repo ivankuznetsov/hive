@@ -117,6 +117,35 @@ still visible and the unrelated dirty-state fingerprint unchanged.
 
 ## Managed Honeycomb overlay
 
+Managed Honeycombs also normalize through `Hive::ModulePackage`. An unchanged
+`honeycomb-manifest/v1` package becomes a one-workflow, hook-free module with
+the same identity, source commit, manifest digest, mappings, inputs, and
+permission disclosure. `hive workflow install|list|update|remove` remains the
+0.x compatibility projection; the generalized project-local lifecycle is
+available through `hive module` and uses the same reviewed-catalog trust
+boundary. No package republish or state migration is required.
+
+Native `hive-module/v1` descriptors can add registered entrypoint hooks,
+schedules, the three named module events, typed settings, grants, templates,
+and docs. They remain declarative: packages cannot load Ruby code, and all
+side effects require a registered entrypoint or an explicitly granted external
+command. Declared workflow targets are activation-validated and snapshotted but
+execution remains fail-closed until task provenance, idempotent admission,
+module-pinned recovery, and permission intersection are durable.
+
+Native module activation retains its activation journal through the external
+source-state callback, then commits and removes recovery evidence. Generation
+cleanup follows the durable pointer commit,
+configuration-only updates retain the immediate previous configuration, and
+reinstall or changed hook bindings start at a fresh high-water mark. Command
+targets receive only explicitly granted secret bindings, redact those values
+from bounded stdout/stderr, discard the ambient environment, and run in a
+bubblewrap boundary exposing only runtime files plus reviewed filesystem
+grants. No-network and wildcard-network grants are enforced; unsupported exact
+host filtering fails activation rather than silently widening authority. The
+packaged-workflow runner remains unavailable with the typed
+`workflow_admission_unavailable` reason.
+
 `Hive::WorkflowPackage` defines a second, stricter trust boundary without
 weakening owner-authored descriptor compatibility:
 

@@ -1,0 +1,19 @@
+name: module_trigger_replay
+description: Replaying one named event yields one module-hook attempt and an explainable duplicate decision.
+tags: [modules, acceptance, events]
+coverage:
+  primary: module.event_replay
+  supporting: []
+steps:
+  - kind: seed_state
+    stage: 1-inbox
+    slug: module-trigger-replay-task
+    state_file: idea.md
+    content: "# Module acceptance fixture\n"
+  - kind: ruby_block
+    block: |
+      require "module_scenario_support"
+      Hive::E2E::ModuleScenarioSupport.trigger_replay!(sandbox: sandbox, run_home: run_home)
+  - kind: state_assert
+    path: "{run_home}/module-trigger-replay.json"
+    contains: '"attempts": 1'

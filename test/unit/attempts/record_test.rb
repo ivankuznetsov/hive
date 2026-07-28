@@ -164,8 +164,55 @@ class AttemptsRecordTest < Minitest::Test
     end
   end
 
-  def test_only_current_schema_version_is_accepted
-    [ 1, 99 ].each do |schema_version|
+  def test_legacy_v2_record_is_rejected_until_migrated
+    legacy = Hive::Attempts::Record.launching(**identity, now: NOW, launch_timeout_sec: 30).to_h
+    legacy["schema_version"] = 2
+    legacy.delete("subject")
+
+    error = assert_raises(Hive::Attempts::InvalidRecord) do
+      Hive::Attempts::Record.new(legacy)
+    end
+    assert_includes error.message, "unsupported schema_version 2"
+  end
+
+  def test_task_subject_must_match_the_legacy_identity_fields
+    data = Hive::Attempts::Record.launching(
+      **identity, now: NOW, launch_timeout_sec: 30
+    ).to_h
+    data["subject"] = data.fetch("subject").merge(
+      "task_slug" => "another-task"
+    )
+
+    error = assert_raises(Hive::Attempts::InvalidRecord) do
+      Hive::Attempts::Record.new(data)
+    end
+    assert_match(/subject has incompatible identity/, error.message)
+  end
+
+  def test_module_hook_subject_is_first_class_and_strict
+    subject = {
+      "kind" => "module_hook", "project_id" => "project-1", "module" => "patrol",
+      "hook" => "task-completed", "event_id" => "evt-1", "occurrence_id" => "evt-1",
+      "event_name" => "task.completed", "module_generation" => "a" * 40,
+      "configuration_digest" => "b" * 64, "grant_digest" => "c" * 64
+    }
+    record = Hive::Attempts::Record.launching(
+      **identity.merge(task_id: nil, task_slug: "module-patrol-task", intended_stage: "module-hook"),
+      subject: subject, now: NOW, launch_timeout_sec: 30
+    )
+
+    assert record.module_hook?
+    assert_equal subject, record.subject
+    assert_raises(Hive::Attempts::InvalidRecord) do
+      Hive::Attempts::Record.new(record.to_h.merge("subject" => subject.merge("grant_digest" => "secret")))
+    end
+    assert_raises(Hive::Attempts::InvalidRecord) do
+      Hive::Attempts::Record.new(record.to_h.merge("subject" => { "kind" => "future" }))
+    end
+  end
+
+  def test_unsupported_schema_versions_are_rejected
+    [ 0, 1, 2, 99 ].each do |schema_version|
       invalid = Hive::Attempts::Record.launching(
         **identity, now: NOW, launch_timeout_sec: 30
       ).to_h.merge("schema_version" => schema_version)

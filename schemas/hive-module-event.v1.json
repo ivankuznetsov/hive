@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-module-event.v1.json",
+  "title": "hive module event (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schema_version", "event_id", "event_name", "project_id", "project",
+    "occurred_at", "recorded_at", "source", "idempotency_key", "payload"
+  ],
+  "properties": {
+    "schema": { "const": "hive-module-event" },
+    "schema_version": { "const": 1 },
+    "event_id": { "type": "string", "pattern": "^evt-[0-9a-f]{64}$" },
+    "event_name": {
+      "enum": ["schedule", "task.completed", "pull_request.merged", "project.registered"]
+    },
+    "project_id": { "type": "string", "minLength": 1 },
+    "project": { "type": "string", "minLength": 1 },
+    "occurred_at": { "type": "string", "format": "date-time" },
+    "recorded_at": { "type": "string", "format": "date-time" },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "id"],
+      "properties": {
+        "type": { "type": "string", "minLength": 1 },
+        "id": { "type": "string", "minLength": 1 }
+      }
+    },
+    "idempotency_key": { "type": "string", "minLength": 1, "maxLength": 512 },
+    "payload": { "type": "object" }
+  }
+}

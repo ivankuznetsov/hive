@@ -1,5 +1,4 @@
 require "hive/commands/workflow/base"
-require "hive/workflows/project"
 require "hive/workflows/registry"
 
 module Hive
@@ -40,19 +39,19 @@ module Hive
             return emit(cancelled, human_lines: [ "hive: remove cancelled; no project state changed" ])
           end
 
-          store.remove_selection(
-            @name, expected_current: lock,
+          workflow_compatibility.remove_selection!(
+            name: @name, expected_current: lock,
             commit: -> { commit_state(@name, "removed") }
           )
           warnings = []
           cleaned = post_commit_step(warnings, "unreferenced generation cleanup") do
-            store.cleanup_unreferenced(@name)
+            workflow_compatibility.cleanup_unreferenced(@name)
           end
           retained = cleaned if cleaned
           if cleaned && deletable.any?
             post_commit_step(warnings, "cleanup state commit") { commit_state(@name, "cleaned") }
           end
-          post_commit_step(warnings, "workflow cache refresh") { Hive::Workflows::Project.reset! }
+          post_commit_step(warnings, "workflow cache refresh") { workflow_compatibility.reset_cache! }
           report = payload("removed", lock, retained, deletable)
           report["warnings"] = warnings unless warnings.empty?
           emit(report, human_lines: [

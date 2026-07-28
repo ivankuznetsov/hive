@@ -1,0 +1,19 @@
+name: module_disable_uninstall
+description: Disable, re-enable, and uninstall enforce no-replay watermarks while retaining tombstone history.
+tags: [modules, acceptance, lifecycle]
+coverage:
+  primary: module.lifecycle_disable_uninstall
+  supporting: []
+steps:
+  - kind: seed_state
+    stage: 1-inbox
+    slug: module-disable-uninstall-task
+    state_file: idea.md
+    content: "# Module acceptance fixture\n"
+  - kind: ruby_block
+    block: |
+      require "module_scenario_support"
+      Hive::E2E::ModuleScenarioSupport.disable_uninstall!(sandbox: sandbox, run_home: run_home)
+  - kind: state_assert
+    path: "{run_home}/module-disable-uninstall.json"
+    contains: '"history_available": true'

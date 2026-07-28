@@ -359,6 +359,32 @@ Dependency lock uncertainty is unchanged: the root bundle has
 
 ## Open enhancements
 
+## Installable patrol modules require live shadow evidence (2026-07-22)
+
+The package, lifecycle, event, attempt, adapter, migration, comparison, and
+rollback contracts have deterministic fixture coverage. Those fixtures prove
+the gate logic but intentionally do not satisfy the operational rollout gate.
+The adapters now refuse self-comparison and admit comparable evidence only
+from an independently supplied immutable `legacy_mutator_capture`, but the
+legacy Patrol producers do not yet publish that snapshot. Adapter permission
+checks are still preflight-only until the existing Patrol engines accept
+capability-bound side-effect gateways. Reservation-to-child registration now
+shares the migration lock with cutover, removing that ownership race without
+claiming the remaining evidence and capability gates are complete.
+
+Native module workflow targets also remain execution-disabled. Activation
+validates and snapshots their package files, but safe admission still needs
+module provenance in task metadata, an idempotent hook-run-to-task CAS,
+module-pinned task/status/daemon resolution across update and uninstall, and
+permission intersection between the module grant snapshot and workflow stage.
+
+Before mutator cutover, each installed first-party patrol module still needs at
+least seven elapsed UTC days and ten comparable production decisions with
+legacy as the sole mutator, reviewer sign-off, zero unexplained differences,
+and zero duplicate findings/jobs/issues/PRs. Hosted exact-head CI and PR
+mergeability are likewise delivery-stage evidence, not facts synthesized by
+local execute tests.
+
 - **Ordinary-patrol alpha weights are Hive-corpus calibrated, not yet cross-project calibrated.** The 0–100 scorer, semantic clustering, component cooldown, and proof gates are language-neutral, but the empirical audit behind the default threshold used 218 generated PRs from this repository. No checked-in evidence yet compares acceptance, duplicate rate, surface diversity, or delivered weighted alpha across unrelated Python, TypeScript, Go, Rust, JVM, infrastructure, or mixed-language projects. Persisted immutable finding/selection/outcome metadata now makes that calibration possible; a future evaluation should tune weights from several repositories without using raw patrol count as a positive signal for already-overpatrolled surfaces.
 
 - **Ordinary-patrol exact publication recovery is locally pinned, not live-smoked.** Unit/integration coverage now fetches the explicit remote branch under a bounded transport deadline, replaces unmaterializable scan pins, binds proof/branch push/PR identity/review handoff to exact Git SHAs, uses expected-OID leases, and rechecks the live remote head/base immediately before first and retried task handoff. No disposable hosted-repository run has yet advanced the default branch during ordinary-patrol publication or failed/retried the real GitHub `6-review` handoff, so remote-provider race behavior remains proven by fake-`gh` contracts rather than a live trace.

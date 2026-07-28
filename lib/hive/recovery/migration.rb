@@ -14,10 +14,12 @@ module Hive
       class Error < Hive::Error; end
 
       RECEIPT_SCHEMA = "hive-recovery-migration"
-      RECEIPT_VERSION = 2
-      RECEIPT_BASENAME = "recovery-migration-v2.json"
+      RECEIPT_VERSION = 3
+      RECEIPT_BASENAME = "recovery-migration-v3.json"
+      LEGACY_RECEIPT_BASENAME = "recovery-migration-v2.json"
+      # Keep the shared lock name so an older binary cannot run the v2 cutover
+      # concurrently with the final v3 cutover.
       LOCK_BASENAME = ".recovery-migration-v2.lock"
-      LEGACY_ATTEMPT_VERSION = 1
       CURRENT_ATTEMPT_VERSION = Hive::Attempts::Record::SCHEMA_VERSION
       CURRENT_REQUEST_VERSION = 4
       CURRENT_RESULT_VERSION = 2
@@ -55,6 +57,7 @@ module Hive
           }
           Hive::AtomicFile.write(receipt_path, JSON.generate(result) + "\n", mode: 0o600)
           Hive::AtomicFile.fsync_directory(state_home)
+          remove_legacy_receipt!
           result
         end
       rescue JSON::ParserError, SystemCallError, IOError, Hive::Attempts::InvalidRecord => e
@@ -67,12 +70,13 @@ module Hive
         [
           legacy_attempt_root, current_attempt_root,
           dispatch_requests_root, dispatch_results_root,
-          receipt_path
+          receipt_path, legacy_receipt_path
         ].any? { |path| File.exist?(path) }
       end
 
       def complete?
-        File.file?(receipt_path) && !File.exist?(legacy_attempt_root)
+        File.file?(receipt_path) && !File.exist?(legacy_attempt_root) &&
+          !File.exist?(legacy_receipt_path)
       end
 
       def read_receipt
@@ -118,16 +122,15 @@ module Hive
             unless %w[terminal lost].include?(data["state"])
               raise Error,
                     "live legacy compatibility attempt #{data['attempt_id']} must finish " \
-                    "before the v2 cutover"
+                    "before the recovery cutover"
             end
             archive_compatibility_record!(path)
             archived += 1
             next
           end
 
-          source_version = data["schema_version"]
-          case source_version
-          when LEGACY_ATTEMPT_VERSION
+          case data["schema_version"]
+          when 1
             data["ownership_generation"] ||= data["task_generation"]
             data["task_input_epoch"] = 0 unless data.key?("task_input_epoch")
             receipt = data["receipt"]
@@ -135,12 +138,17 @@ module Hive
               receipt["ownership_generation"] ||= data["ownership_generation"]
               receipt["task_input_epoch"] = data["task_input_epoch"] unless receipt.key?("task_input_epoch")
             end
+            add_task_subject!(data)
+            data["schema_version"] = CURRENT_ATTEMPT_VERSION
+            migrated += 1
+          when 2
+            add_task_subject!(data)
             data["schema_version"] = CURRENT_ATTEMPT_VERSION
             migrated += 1
           when CURRENT_ATTEMPT_VERSION
             normalized += 1 if data.key?("compatibility")
           else
-            raise Error, "#{path} has unsupported attempt schema #{source_version.inspect}"
+            raise Error, "#{path} has unsupported attempt schema #{data['schema_version'].inspect}"
           end
 
           data.delete("compatibility")
@@ -196,7 +204,7 @@ module Hive
           label = data["compatibility"] == true ? "live legacy compatibility attempt" :
             "live attempt in the legacy root"
           raise Error,
-                "#{label} #{data['attempt_id']} must finish before the v2 cutover"
+                "#{label} #{data['attempt_id']} must finish before the recovery cutover"
         end
       rescue Errno::ENOENT
         nil
@@ -272,6 +280,22 @@ module Hive
         Hive::AtomicFile.fsync_directory(current_attempt_records_root)
       end
 
+      def add_task_subject!(data)
+        data["subject"] ||= {
+          "kind" => "task_stage",
+          "task_id" => data["task_id"],
+          "task_slug" => data["task_slug"],
+          "intended_stage" => data["intended_stage"]
+        }
+      end
+
+      def remove_legacy_receipt!
+        return unless File.exist?(legacy_receipt_path)
+
+        File.delete(legacy_receipt_path)
+        Hive::AtomicFile.fsync_directory(state_home)
+      end
+
       def parse_object!(path)
         data = JSON.parse(File.binread(path))
         raise Error, "#{path} must contain a JSON object" unless data.is_a?(Hash)
@@ -319,6 +343,7 @@ module Hive
       def dispatch_requests_root = File.join(state_home, "dispatch_requests")
       def dispatch_results_root = File.join(state_home, "dispatch_results")
       def receipt_path = File.join(state_home, RECEIPT_BASENAME)
+      def legacy_receipt_path = File.join(state_home, LEGACY_RECEIPT_BASENAME)
       def lock_path = File.join(state_home, LOCK_BASENAME)
     end
   end

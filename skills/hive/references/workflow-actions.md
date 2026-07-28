@@ -19,6 +19,29 @@ hive archive SLUG --project PROJECT --json
 
 Hive can also run project-authored workflows. Inspect them with `hive workflow list --json`; do not assume every task uses the coding stage names.
 
+Reviewed project-local modules use one shared status and lifecycle contract:
+
+```bash
+hive module list --json
+hive module status --json
+hive module inspect NAME --json
+hive module doctor NAME --json
+hive module dry-run NAME --event schedule --schedule '*/10 * * * *' --json
+```
+
+These commands are read-only. Module dry-run evaluates the production trigger
+logic without persisting an event, decision, attempt, cursor, claim, artifact,
+or worker. That is intentionally different from the legacy Patrol commands
+described below.
+
+Installation and change are preview-bound. First run the exact lifecycle
+command with `--dry-run --json`, review every setting, hook, binding, and
+individual grant, then apply only with the matching receipt and explicit human
+approval. Never infer a missing non-interactive choice or grant.
+`hive module migration status --json` is the exact read-only migration
+diagnostic; `migration report`, `cutover`, and `rollback`
+are administrative, human-only transitions and are not `hive act` actions.
+
 For reviewed Honeycomb workflows, preview the exact no-write operation first:
 
 ```bash

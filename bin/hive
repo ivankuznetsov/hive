@@ -64,6 +64,22 @@ if ARGV.first == "__attempt-supervise"
   end
 end
 
+# Private module-hook worker route. Only the durable attempt supervisor emits
+# this argv after admission; keeping it ahead of Thor prevents a public bypass
+# around previewed installation and hook state.
+if ARGV.first == "__module-hook"
+  require "hive/commands/module_hook"
+  begin
+    unless Hive::Attempts::Context.active?
+      raise Hive::ConfigError, "module hook requires authenticated durable attempt context"
+    end
+    exit Hive::Commands::ModuleHook.from_argv(ARGV.drop(1)).call
+  rescue Hive::Error => e
+    warn "hive: #{e.message}"
+    exit e.exit_code
+  end
+end
+
 if ARGV == [ "--version" ] || ARGV == [ "-v" ]
   puts Hive::VERSION
   exit 0
@@ -108,6 +124,7 @@ JSON_USAGE_ERROR_CONTRACTS = {
   # (for example too many positionals) must ride the same JSON envelope as the
   # command's own UsageError. Bare `hive workflow` is handled in-command.
   "workflow" => { schema: "hive-workflow-new", error_kind: "usage" },
+  "module" => { schema: "hive-module-lifecycle", error_kind: "usage" },
   "pr" => {
     schema: "hive-stage-action",
     error_kind: "invalid_task_path",
@@ -401,6 +418,28 @@ def json_usage_error_contract(argv)
       end
       return { schema: schema, error_kind: "usage", extras: extras }
     end
+  when "module"
+    subcommand = json_usage_subcommand(
+      argv, command_index,
+      value_options: %w[
+        --receipt --setting --hook --grant --mapping --input-binding
+        --event --schedule --occurred-at
+      ]
+    )
+    schema = case subcommand
+    when "list" then "hive-module-list"
+    when "inspect", "status" then "hive-module-status"
+    when "doctor" then "hive-module-doctor"
+    when "dry-run" then "hive-module-dry-run"
+    when "migration"
+      migration_action = json_usage_subcommand(
+        argv, argv.index("migration") || command_index,
+        value_options: %w[--reviewer]
+      )
+      migration_action == "report" ? "hive-module-migration-report" : "hive-module-migration"
+    else "hive-module-lifecycle"
+    end
+    return { schema: schema, error_kind: "usage" }
   end
 
   JSON_USAGE_ERROR_CONTRACTS[command]

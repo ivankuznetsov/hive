@@ -531,6 +531,20 @@ partial discovery pins its analysis SHA, the job preserves completed slices,
 reuses the original SHA, and rematerializes the same detached exact worktree
 for only the incomplete slices. Hive never mixes snapshots or resets trunk.
 
+## Module compatibility
+
+`hive refactor-patrol` remains the frozen 0.x serializer and recovery protocol
+for the first-party `architecture-patrol` module adapter. All public and
+daemon-internal modes continue to use the existing v2 jobs, immutable merge
+manifests, claims, progress, quarantine, result transport, publication
+attempts, and global terminal proofs. Module scheduling and
+`pull_request.merged` admission do not add a second GitHub poller; the current
+merge reconciler is the sole event producer.
+
+Architecture Patrol shares the durable shadow/cutover ownership epoch with
+ordinary Patrol. A rollback changes ownership and module pointers only; it
+does not copy state or replay merged-PR history.
+
 ## State and JSON
 
 Legacy state remains under `.hive-state/refactor_patrol/`. It shares directory,

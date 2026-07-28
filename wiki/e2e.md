@@ -4,7 +4,7 @@ type: reference
 source: test/e2e/, bin/hive-e2e, schemas/hive-e2e-{coverage,selection}.v1.json, Rakefile
 created: 2026-04-29
 updated: 2026-07-27
-tags: [test, e2e, tui, incidents, artifacts]
+tags: [test, e2e, tui, incidents, modules, artifacts]
 ---
 
 **TLDR**: `test/e2e/` is the outer test layer. It drives the real `bin/hive` binary in a copied Ruby sample project, uses tmux for TUI scenarios, validates JSON output against published schemas, and writes versioned run artifacts for later debugging. The `bin/hive-e2e` Thor executable is also a small public harness surface with pinned exit codes and JSON error envelopes for wrapper/CI callers.
@@ -28,12 +28,14 @@ bin/hive-e2e clean              # old run cleanup
 
 ## Semantic coverage
 
-`test/e2e/coverage.yml` is the canonical stable-ID taxonomy for the 20 scenario
+`test/e2e/coverage.yml` is the canonical stable-ID taxonomy for the 24 scenario
 files. Each scenario retains its steps, pending state, incident metadata, and
 filename as execution authority while declaring one `coverage.primary` and an
 initially empty `coverage.supporting` list. The catalog owns titles,
 descriptions, `required` / `advisory` / `planned` maturity, release-profile
 membership, constraints, and root-confined documentation/code references.
+The release profile includes four module proofs for install, event replay,
+disable/uninstall watermarks, and update rollback.
 
 `bin/hive-e2e coverage --match QUERY [--profile release] [--json]` searches the
 joined catalog and scenario metadata. Exact IDs win; substring results use

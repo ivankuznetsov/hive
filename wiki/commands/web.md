@@ -175,7 +175,10 @@ sharing the URL.
 A locally authenticated operator sees the
 complete primary navigation under the `hive` product identity and is labelled
 `Local`; GitHub-dependent repository browsing stays behind an explicit
-**Connect GitHub** action. Navigation state is grouped by the first segment of
+**Connect GitHub** action. At the 390px mobile breakpoint, all six primary
+capabilities fit beside the account action without starting inside a horizontal
+scroll overflow; spacing uses fixed small insets so Linux and local Chromium
+font metrics preserve the same visible set. Navigation state is grouped by the first segment of
 Rails `controller_path`, so namespaced task, workflow, and Telegram resource
 controllers retain their parent section's active link when they render a
 complete page. Completing the optional GitHub connection from verified
@@ -194,6 +197,16 @@ Production accepts arbitrary Host values in both modes so the controller-level
 login gate can run; Host never grants the no-auth bypass unless it is loopback.
 
 ## Surfaces
+
+The project-filtered **Modules** surface presents installed and historical
+module rows using the same redacted `Hive::Modules::Status` object as CLI
+list/status/inspect. Rails does not parse generation locks or patrol stores.
+Install, update, enable, disable, settings changes, and uninstall use the same
+preview-bound lifecycle service as CLI: signed receipts bind candidate/current
+identity, settings, hooks, bindings, cursors, and individual grants, and any
+drift returns a no-write preview-again response. `/workflows` remains the
+workflow authoring/selection surface and preserves its existing managed
+Honeycomb projections.
 
 - **Status board and grid (`/board`, `/grid`, `/`)** — Board is the first-visit
   default. The view-switch forms store a signed browser preference that `/`

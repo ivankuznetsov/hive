@@ -1,0 +1,181 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hivecli.sh/schemas/hive-module-status.v1.json",
+  "title": "Hive module status v1",
+  "oneOf": [
+    {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "modules"],
+      "properties": {
+        "schema": {"const": "hive-module-status"}, "schema_version": {"const": 1},
+        "ok": {"const": true}, "modules": {"type": "array", "items": {"$ref": "#/$defs/ModuleStatus"}}
+      }
+    },
+    {"$ref": "#/$defs/Error"}
+  ],
+  "$defs": {
+    "ModuleStatus": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "lifecycle_state", "installed", "enabled", "epoch", "high_water_at", "generated_at", "active", "previous", "integrity", "settings", "grants", "grant_digest", "hooks", "latest_decision", "latest_attempt", "retry", "artifacts", "failure_reason", "history_available"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "lifecycle_state": {"enum": ["active", "activating", "corrupt", "disabled", "failed_activation", "uninstalled_history"]},
+        "installed": {"type": ["boolean", "null"]}, "enabled": {"type": ["boolean", "null"]},
+        "epoch": {"type": ["integer", "null"]}, "high_water_at": {"type": ["string", "null"]},
+        "generated_at": {"type": "string", "format": "date-time"},
+        "active": {"oneOf": [{"$ref": "#/$defs/Generation"}, {"type": "null"}]},
+        "previous": {"oneOf": [{"$ref": "#/$defs/Generation"}, {"type": "null"}]},
+        "integrity": {"$ref": "#/$defs/Integrity"},
+        "settings": {"type": "array", "maxItems": 100, "items": {"$ref": "#/$defs/Setting"}},
+        "grants": {"oneOf": [{"$ref": "#/$defs/Grants"}, {"type": "null"}]},
+        "grant_digest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+        "hooks": {"type": "array", "maxItems": 100, "items": {"$ref": "#/$defs/Hook"}},
+        "latest_decision": {"oneOf": [{"$ref": "#/$defs/Decision"}, {"type": "null"}]},
+        "latest_attempt": {"oneOf": [{"$ref": "#/$defs/Attempt"}, {"type": "null"}]},
+        "retry": {"oneOf": [{"$ref": "#/$defs/Retry"}, {"type": "null"}]},
+        "artifacts": {"type": "array", "maxItems": 50, "items": {"$ref": "#/$defs/Artifact"}},
+        "failure_reason": {"type": ["string", "null"], "maxLength": 4096},
+        "history_available": {"type": "boolean"}
+      }
+    },
+    "Generation": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["version", "catalog_commit", "source_commit", "manifest_digest", "configuration_digest"],
+          "properties": {
+            "version": {"type": "string"}, "catalog_commit": {"type": "string"},
+            "source_commit": {"type": "string"}, "manifest_digest": {"type": "string"},
+            "configuration_digest": {"type": "string"}
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["version", "catalog_commit", "source_commit", "manifest_digest", "configuration_digest", "summary", "origin"],
+          "properties": {
+            "version": {"type": "string"}, "catalog_commit": {"type": "string"},
+            "source_commit": {"type": "string"}, "manifest_digest": {"type": "string"},
+            "configuration_digest": {"type": "string"}, "summary": {"type": "string"},
+            "origin": {"const": "legacy_workflow"}
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["source_commit", "manifest_digest", "configuration_digest", "origin"],
+          "properties": {
+            "source_commit": {"type": "string"}, "manifest_digest": {"type": "string"},
+            "configuration_digest": {"type": ["string", "null"]},
+            "origin": {"const": "legacy_workflow"}
+          }
+        }
+      ]
+    },
+    "Integrity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["configuration_valid", "generation_present", "activation_fenced", "journal_present"],
+      "properties": {
+        "configuration_valid": {"type": "boolean"}, "generation_present": {"type": "boolean"},
+        "activation_fenced": {"type": "boolean"}, "journal_present": {"type": "boolean"}
+      }
+    },
+    "Setting": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "type", "required", "secret", "value", "binding", "available"],
+      "properties": {
+        "name": {"type": "string", "maxLength": 4096},
+        "type": {"type": "string", "maxLength": 4096},
+        "required": {"type": "boolean"}, "secret": {"type": "boolean"},
+        "value": {"type": ["string", "number", "integer", "boolean", "null"]},
+        "binding": {"type": ["string", "null"], "maxLength": 4096},
+        "available": {"type": ["boolean", "null"]}
+      }
+    },
+    "Grants": {
+      "type": "object", "additionalProperties": false,
+      "required": ["repository_write", "github_mutations", "external_commands", "network_hosts", "filesystem_read", "filesystem_write", "secrets"],
+      "properties": {
+        "repository_write": {"type": "boolean"},
+        "github_mutations": {"$ref": "#/$defs/StringSet"},
+        "external_commands": {"$ref": "#/$defs/StringSet"},
+        "network_hosts": {"$ref": "#/$defs/StringSet"},
+        "filesystem_read": {"$ref": "#/$defs/StringSet"},
+        "filesystem_write": {"$ref": "#/$defs/StringSet"},
+        "secrets": {"$ref": "#/$defs/StringSet"}
+      }
+    },
+    "StringSet": {
+      "type": "array", "maxItems": 100, "uniqueItems": true,
+      "items": {"type": "string", "maxLength": 4096}
+    },
+    "Hook": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "enabled", "cursor", "binding_digest", "target", "concurrency", "schedules", "event_bindings", "next_trigger_at"],
+      "properties": {
+        "id": {"type": "string"}, "enabled": {"type": "boolean"},
+        "cursor": {"type": ["string", "null"]},
+        "binding_digest": {"type": ["string", "null"]},
+        "target": {
+          "type": "object", "additionalProperties": false, "required": ["kind", "id"],
+          "properties": {"kind": {"type": "string"}, "id": {"type": "string"}}
+        },
+        "concurrency": {"type": "string"},
+        "schedules": {"$ref": "#/$defs/StringSet"},
+        "event_bindings": {"$ref": "#/$defs/StringSet"},
+        "next_trigger_at": {"type": ["string", "null"]}
+      }
+    },
+    "Decision": {
+      "type": "object", "additionalProperties": false,
+      "required": ["decision_id", "hook", "event_id", "event_name", "evaluated_at", "outcome", "reason", "binding_digest", "cursor_before", "cursor_after", "attempt_id"],
+      "properties": {
+        "decision_id": {"type": "string"}, "hook": {"type": "string"},
+        "event_id": {"type": "string"}, "event_name": {"type": "string"},
+        "evaluated_at": {"type": "string"}, "outcome": {"type": "string"},
+        "reason": {"type": "string"}, "binding_digest": {"type": ["string", "null"]},
+        "cursor_before": {"type": ["string", "null"]},
+        "cursor_after": {"type": ["string", "null"]},
+        "attempt_id": {"type": ["string", "null"]}
+      }
+    },
+    "Attempt": {
+      "type": "object", "additionalProperties": false,
+      "required": ["attempt_id", "hook", "event_id", "state", "outcome", "retry_charge", "created_at", "started_at", "ended_at"],
+      "properties": {
+        "attempt_id": {"type": "string"}, "hook": {"type": "string"},
+        "event_id": {"type": "string"}, "state": {"type": "string"},
+        "outcome": {"type": ["string", "null"]},
+        "retry_charge": {"type": "integer", "minimum": 0},
+        "created_at": {"type": "string"}, "started_at": {"type": ["string", "null"]},
+        "ended_at": {"type": ["string", "null"]}
+      }
+    },
+    "Retry": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "charge", "max", "reason"],
+      "properties": {
+        "status": {"enum": ["closed", "complete", "exhausted", "finished", "pending", "retrying", "unknown"]},
+        "charge": {"type": ["integer", "null"], "minimum": 0},
+        "max": {"type": ["integer", "null"], "minimum": 0},
+        "reason": {"enum": ["retry_closed", null]}
+      }
+    },
+    "Artifact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "size", "sha256"],
+      "properties": {
+        "path": {"type": "string", "maxLength": 4096},
+        "size": {"type": "integer", "minimum": 0},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "Error": {
+      "type": "object",
+      "required": ["schema", "schema_version", "ok", "error_kind", "exit_code", "message"],
+      "properties": {
+        "schema": {"const": "hive-module-status"}, "schema_version": {"const": 1},
+        "ok": {"const": false}, "error_kind": {"type": "string"},
+        "exit_code": {"type": "integer"}, "message": {"type": "string"}
+      }
+    }
+  }
+}

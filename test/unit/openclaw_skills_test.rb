@@ -46,6 +46,8 @@ class OpenClawSkillsTest < Minitest::Test
     assert_includes text, "hive watch PROJECT:SLUG"
     assert_includes text, "--json-lines"
     assert_includes text, "hive act ACTION_ID"
+    assert_includes text, "hive module status --json"
+    assert_includes text, "hive module dry-run NAME"
     assert_includes text, "hive setup-agents --yes --json"
     assert_includes text, "OpenClaw: `/hive`"
     assert_includes text, "Pi: `/skill:hive`"

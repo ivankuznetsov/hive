@@ -1,16 +1,15 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-attempt.v2.json",
-  "title": "hive durable attempt (v2)",
-  "description": "Owner-private mutable lease and terminal receipt for one accepted task-stage attempt. ownership_generation retains the opaque admission token; task_input_epoch is the numeric condition-generation bridge.",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-attempt.v3.json",
+  "title": "hive durable attempt (v3)",
+  "description": "Owner-private lease and terminal receipt for task-stage or module-hook execution.",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "schema", "schema_version", "attempt_id", "request_id", "predecessor_attempt_id",
     "task_id", "project", "task_slug", "intended_stage", "task_generation",
-    "ownership_generation", "task_input_epoch",
-    "progress_token", "provider", "worker_argv", "claim_capability_digest",
-    "starting_revision", "retry_charge",
+    "ownership_generation", "task_input_epoch", "progress_token", "provider", "worker_argv",
+    "claim_capability_digest", "starting_revision", "retry_charge", "subject",
     "created_at", "accepted_at", "state", "outcome", "lease_version", "claim_deadline",
     "first_heartbeat_deadline", "heartbeat_deadline", "wrapper", "worker", "heartbeat_at",
     "started_at", "ended_at", "latest_revision", "checkpoint", "log_reference",
@@ -18,7 +17,7 @@
   ],
   "properties": {
     "schema": { "const": "hive-attempt" },
-    "schema_version": { "const": 2 },
+    "schema_version": { "const": 3 },
     "attempt_id": { "type": "string", "minLength": 1 },
     "request_id": { "type": ["string", "null"] },
     "predecessor_attempt_id": { "type": ["string", "null"] },
@@ -32,16 +31,13 @@
     "progress_token": { "type": "string", "minLength": 1 },
     "provider": { "type": "string", "minLength": 1 },
     "worker_argv": {
-      "type": "array",
-      "minItems": 1,
+      "type": "array", "minItems": 1,
       "items": { "type": "string", "minLength": 1 }
     },
-    "claim_capability_digest": {
-      "type": "string",
-      "pattern": "^[0-9a-f]{64}$"
-    },
+    "claim_capability_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "starting_revision": { "type": ["string", "null"] },
     "retry_charge": { "type": "integer", "minimum": 0 },
+    "subject": { "$ref": "#/$defs/Subject" },
     "created_at": { "type": "string", "format": "date-time" },
     "accepted_at": { "type": "string", "format": "date-time" },
     "state": { "enum": ["launching", "running", "terminal", "lost"] },
@@ -65,10 +61,7 @@
     "diagnostics": { "type": "object" }
   },
   "$defs": {
-    "NullableTimestamp": {
-      "type": ["string", "null"],
-      "format": "date-time"
-    },
+    "NullableTimestamp": { "type": ["string", "null"], "format": "date-time" },
     "ProcessIdentity": {
       "type": "object",
       "required": ["pid", "start_fingerprint", "session_id", "process_group_id"],
@@ -80,8 +73,7 @@
       }
     },
     "OutputReference": {
-      "type": "object",
-      "additionalProperties": false,
+      "type": "object", "additionalProperties": false,
       "required": ["path", "size", "sha256"],
       "properties": {
         "path": { "type": "string", "minLength": 1 },
@@ -89,13 +81,44 @@
         "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
       }
     },
+    "Subject": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "task_id", "task_slug", "intended_stage"],
+          "properties": {
+            "kind": { "const": "task_stage" },
+            "task_id": { "type": ["string", "integer", "null"] },
+            "task_slug": { "type": "string", "minLength": 1 },
+            "intended_stage": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": [
+            "kind", "project_id", "module", "hook", "event_id", "occurrence_id",
+            "event_name", "module_generation", "configuration_digest", "grant_digest"
+          ],
+          "properties": {
+            "kind": { "const": "module_hook" },
+            "project_id": { "type": "string", "minLength": 1 },
+            "module": { "type": "string", "minLength": 1 },
+            "hook": { "type": "string", "minLength": 1 },
+            "event_id": { "type": "string", "minLength": 1 },
+            "occurrence_id": { "type": "string", "minLength": 1 },
+            "event_name": { "type": "string", "minLength": 1 },
+            "module_generation": { "type": "string", "minLength": 1 },
+            "configuration_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "grant_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+          }
+        }
+      ]
+    },
     "Receipt": {
-      "type": "object",
-      "additionalProperties": false,
+      "type": "object", "additionalProperties": false,
       "required": [
-        "attempt_id", "task_generation", "ownership_generation", "task_input_epoch",
-        "outcome", "exit_status", "started_at", "ended_at",
-        "final_checkpoint", "output_references", "log_reference"
+        "attempt_id", "task_generation", "ownership_generation", "task_input_epoch", "outcome",
+        "exit_status", "started_at", "ended_at", "final_checkpoint", "output_references", "log_reference"
       ],
       "properties": {
         "attempt_id": { "type": "string", "minLength": 1 },

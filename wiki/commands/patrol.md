@@ -135,6 +135,19 @@ Config errors emit `ok: false`, `error_kind: "config"`, and exit 78. A missing `
 
 The always-on behavior comes from [[modules/daemon]]: `Hive::Daemon::PatrolScheduler` checks opt-in projects on a slow cadence and returns `hive patrol <project> --json` dispatches. The dispatcher still applies `daemon.enabled`, legacy-layout, dry-run, and concurrency gates before spawning the child.
 
+## Module compatibility
+
+`hive patrol` is the frozen 0.x argument/output serializer for the first-party
+`patrol` module adapter. The adapter continues to call the existing Patrol
+engine and preserve `.hive-state/patrol/`, budgets, artifacts, review handoff,
+human output, exit codes, and JSON v1/v2. Schedules and `task.completed`
+occurrences can enter through the module dispatcher, but legacy scheduling
+remains the only mutator until the shadow gate advances the ownership epoch.
+
+Do not confuse dry-run modes: `hive module dry-run patrol ...` is a pure trigger
+evaluation that persists nothing, while legacy `hive patrol --dry-run` retains
+its established agent-launching and state-writing behavior.
+
 ## Backlinks
 
 - [[modules/patrol]]

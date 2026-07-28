@@ -20,6 +20,8 @@ class WorkflowPackageManagedStoreTest < Minitest::Test
 
       assert_equal generation, store.generation_path("demo", resolution.source_commit)
       assert_equal resolution.source_commit, store.selected("demo").fetch("source_commit")
+      assert_equal [ "demo" ],
+                   store.inspect_selections.map { |selection| selection.fetch("name") }
       assert_equal :demo, store.workflow("demo", resolution.source_commit, resolution.manifest_digest).id
       assert store.verify_generation("demo", resolution.source_commit, resolution.manifest_digest).valid?
       assert_equal 0o444, File.stat(File.join(generation, "README.md")).mode & 0o777

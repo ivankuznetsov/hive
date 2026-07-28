@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release-candidate,release}.yml, packaging/{live_agent_skills,release_candidate}/, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-07-27
+updated: 2026-07-28
 tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, release-proof]
 ---
 
@@ -33,17 +33,24 @@ JSON failures, serialized idempotent creation with index rollback and authored
 content fingerprints, concurrent/self-target decision behavior, and the
 distinct completed-human action.
 
-`test/smoke/live_hive_workflow_creator_smoke_test.rb` is a separate,
-OpenClaw-only protected proof. The exact candidate projection receives the
-editorial prompt in a disposable initialized project. Its controlled Hive
-surface permits only version, workflow inventory, scaffold, validation, and
-the populated-graph commit before task creation.
-Attestation verifies the prompt digest, native `/hive` discovery, ordered argv,
-created-file digests, exact normalized graph, zero tasks after creation-only,
-then one created-and-run slug plus a no-op retry with the same idempotency key,
-operational status, no external actions, secret scanning, and cleanup. Missing
-provider credentials make this live gate explicitly unavailable; they never
-turn a skipped test into release evidence.
+`test/smoke/live_hive_workflow_creator_smoke_test.rb` is a thin adapter over the
+packaging-owned OpenClaw creator runner. Deterministic unit coverage drives a
+fake OpenClaw through the real candidate CLI; the smoke file contains no fake
+Hive or proof mechanics. The runner verifies the exact candidate artifacts,
+materializes the OpenClaw projection with a no-link/no-special-file Ruby tar
+reader, initializes a disposable real Hive project, and installs a distinct
+digest-bound audit gateway through native `tools.exec.pathPrepend`.
+
+The gateway admits exactly nine semantic command positions. Its seventh
+position is `run <created_slug>`: the slug comes from the first idempotent
+creation result, must identify the single task with the expected workflow/key,
+and must match the retry result with `created=false`. Attestation verifies both
+prompt digests, native `/hive` discovery, candidate/gateway executable
+identities, ordered actual argv, created-file digests, the exact normalized
+graph, zero tasks after creation-only, one first-stage dispatch, operational
+status, no external actions, all-byte secret scanning, process-group teardown,
+and cleanup. Missing provider credentials make this optional live diagnostic
+explicitly unavailable; they never turn a skipped test into release evidence.
 
 ## Local feedback loop
 
@@ -611,6 +618,14 @@ The protected `live-agent-skills.yml` workflow can additionally:
    seven-day structural evidence;
 7. validate all four evidence rows, assemble the candidate/provenance-bound
    private proof, and create a `live-agent-skills` Check Run on the exact SHA.
+
+Its separate OpenClaw workflow-creator job pins every third-party Action and
+OpenClaw's npm version/integrity. It fetches one tarball with `npm pack`,
+validates the pack metadata, independently computes the tarball SHA-512 SRI,
+and installs only those verified local bytes. It accepts `openai/*` and
+`openrouter/*` models through mutually exclusive credential steps, passes one
+generic secret to the runner boundary, and uploads typed schema-v1 evidence
+even when preflight or an ordinary proof phase fails.
 
 The repository-owned selector and attestation verifier remain covered by
 executable fixtures for optional diagnostic runs. They validate workflow/run

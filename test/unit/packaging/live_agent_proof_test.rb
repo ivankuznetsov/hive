@@ -86,6 +86,48 @@ class LiveAgentProofTest < Minitest::Test
     end
   end
 
+  def test_candidate_verifier_rejects_per_file_and_total_archive_limits_before_materialization
+    with_tmp_dir do |dir|
+      canonical = Hive::AgentSkills::CanonicalSkill.new
+      oversized_artifacts = prepare_release_artifacts(
+        File.join(dir, "oversized"), canonical
+      )
+      oversized_path =
+        File.join(oversized_artifacts, "hive-agent-skills-#{SHA}.tar.gz")
+      write_declared_size_archive(
+        oversized_path,
+        name: "openclaw/hive/SKILL.md",
+        size: HiveLiveAgentProof::SKILL_ARCHIVE_FILE_LIMIT + 1
+      )
+      refresh_artifact_record(oversized_artifacts, oversized_path)
+
+      error = assert_raises(HiveLiveAgentProof::Error) do
+        verify_candidate(oversized_artifacts, canonical)
+      end
+      assert_includes error.message, "entry exceeds"
+
+      cumulative_artifacts = prepare_release_artifacts(
+        File.join(dir, "cumulative"), canonical
+      )
+      cumulative_path =
+        File.join(cumulative_artifacts, "hive-agent-skills-#{SHA}.tar.gz")
+      write_test_archive(
+        cumulative_path,
+        "openclaw/hive/SKILL.md" => "a" * 16,
+        "claude/hive/SKILL.md" => "b" * 16
+      )
+      refresh_artifact_record(cumulative_artifacts, cumulative_path)
+
+      error = assert_raises(HiveLiveAgentProof::Error) do
+        verify_candidate(
+          cumulative_artifacts, canonical,
+          archive_file_limit: 20, archive_total_limit: 24
+        )
+      end
+      assert_includes error.message, "expands beyond"
+    end
+  end
+
   def test_attestor_and_verifier_accept_only_exact_proven_artifacts
     with_tmp_dir do |dir|
       artifacts = prepare_artifacts(dir)
@@ -120,7 +162,12 @@ class LiveAgentProofTest < Minitest::Test
         [ "hive-live-workflow-creator-evidence", 1, "openclaw", SHA, "passed" ],
         creator.values_at("schema", "schema_version", "platform", "candidate_sha", "result")
       )
-      assert_equal HiveLiveAgentProof::WORKFLOW_CREATOR_COMMANDS, creator.fetch("hive_commands")
+      assert_equal(
+        HiveLiveAgentProof.workflow_creator_commands(
+          HiveLiveAgentProof::WORKFLOW_CREATOR_EXAMPLE_SLUG
+        ),
+        creator.fetch("hive_commands")
+      )
       assert_equal HiveLiveAgentProof::WORKFLOW_CREATOR_FILES,
                    creator.fetch("created_files").map { |record| record.fetch("path") }.sort
       assert_equal(
@@ -211,7 +258,9 @@ class LiveAgentProofTest < Minitest::Test
     with_tmp_dir do |dir|
       artifacts = prepare_artifacts(dir)
       evidence = prepare_evidence(dir, artifacts)
-      expected = HiveLiveAgentProof::WORKFLOW_CREATOR_COMMANDS.map(&:dup)
+      expected = HiveLiveAgentProof.workflow_creator_commands(
+        HiveLiveAgentProof::WORKFLOW_CREATOR_EXAMPLE_SLUG
+      )
       command_variants = {
         "missing" => expected.first(expected.length - 1),
         "reordered" => expected.map(&:dup).tap { |commands| commands[0], commands[1] = commands[1], commands[0] },
@@ -231,6 +280,92 @@ class LiveAgentProofTest < Minitest::Test
         end
         assert_equal "workflow-creator prompt or command sequence is invalid", error.message
       end
+    end
+  end
+
+  def test_attestor_rejects_task_slug_or_retry_binding_drift
+    with_tmp_dir do |dir|
+      artifacts = prepare_artifacts(dir)
+      evidence = prepare_evidence(dir, artifacts)
+      variants = {
+        "first_slug" => "different-first-260728-abcd",
+        "retry_slug" => "different-retry-260728-abcd"
+      }
+
+      variants.each do |field, value|
+        creator_evidence = prepare_creator_evidence(File.join(dir, field), artifacts)
+        row_path = File.join(creator_evidence, "openclaw-workflow-creator.json")
+        row = JSON.parse(File.read(row_path))
+        row.fetch("task")[field] = value
+        HiveLiveAgentProof.write_json(row_path, row)
+
+        error = assert_raises(HiveLiveAgentProof::Error) do
+          attest(artifacts, evidence, creator_evidence, File.join(dir, "proof-#{field}"))
+        end
+        assert_includes error.message, "unauthorized side effect"
+      end
+    end
+  end
+
+  def test_attestor_rejects_runtime_package_identity_version_or_teardown_drift
+    with_tmp_dir do |dir|
+      artifacts = prepare_artifacts(dir)
+      evidence = prepare_evidence(dir, artifacts)
+      mutations = {
+        "gateway_alias" => lambda do |row|
+          row.dig("executables", "audit_gateway")["realpath"] =
+            row.dig("executables", "candidate", "realpath")
+        end,
+        "openclaw_version" => lambda do |row|
+          row.dig("executables", "openclaw")["version"] = "OpenClaw 2026.7.2 (wrong)"
+        end,
+        "package_version" => lambda do |row|
+          row.fetch("openclaw_package")["version"] = "2026.7.2"
+        end,
+        "package_integrity" => lambda do |row|
+          row.fetch("openclaw_package")["integrity"] = "sha512-substituted"
+        end,
+        "package_unverified" => lambda do |row|
+          row.fetch("openclaw_package")["verified"] = false
+        end,
+        "teardown" => lambda do |row|
+          row["teardown"]["status"] = "failed"
+        end
+      }
+
+      mutations.each do |name, mutation|
+        creator_evidence = prepare_creator_evidence(File.join(dir, name), artifacts)
+        row_path = File.join(creator_evidence, "openclaw-workflow-creator.json")
+        row = JSON.parse(File.read(row_path))
+        mutation.call(row)
+        HiveLiveAgentProof.write_json(row_path, row)
+
+        error = assert_raises(HiveLiveAgentProof::Error) do
+          attest(artifacts, evidence, creator_evidence, File.join(dir, "proof-#{name}"))
+        end
+        assert_includes error.message, "runtime identity or teardown"
+      end
+    end
+  end
+
+  def test_verifier_rejects_openclaw_package_identity_with_a_matching_digest
+    with_tmp_dir do |dir|
+      artifacts = prepare_artifacts(dir)
+      evidence = prepare_evidence(dir, artifacts)
+      creator_evidence = prepare_creator_evidence(dir, artifacts)
+      proof = File.join(dir, "proof")
+      attest(artifacts, evidence, creator_evidence, proof)
+      attestation_path = File.join(proof, "attestation.json")
+      attestation = JSON.parse(File.read(attestation_path))
+      attestation.dig("workflow_creator", "openclaw_package")["integrity"] =
+        "sha512-substituted"
+      HiveLiveAgentProof.write_json(attestation_path, attestation)
+      digest = HiveLiveAgentProof.sha256(attestation_path)
+
+      error = assert_raises(HiveLiveAgentProof::Error) do
+        verifier(proof, digest).call
+      end
+      assert_includes error.message, "attested runtime evidence"
     end
   end
 
@@ -292,12 +427,13 @@ class LiveAgentProofTest < Minitest::Test
     artifacts
   end
 
-  def verify_candidate(artifacts, canonical)
+  def verify_candidate(artifacts, canonical, **options)
     HiveLiveAgentProof::CandidateVerifier.new(
       candidate_dir: artifacts,
       candidate_sha: SHA,
       expected_hive_version: Hive::VERSION,
-      canonical: canonical
+      canonical: canonical,
+      **options
     ).call
   end
 
@@ -344,6 +480,56 @@ class LiveAgentProofTest < Minitest::Test
       "platform" => "openclaw",
       "candidate_sha" => SHA,
       "result" => "passed",
+      "provider" => {
+        "name" => "openai",
+        "model" => "openai/gpt-5.6",
+        "credential_environment" => "OPENAI_API_KEY"
+      },
+      "openclaw_package" => {
+        "version" => HiveLiveAgentProof::WORKFLOW_CREATOR_OPENCLAW_VERSION,
+        "integrity" => HiveLiveAgentProof::WORKFLOW_CREATOR_OPENCLAW_INTEGRITY,
+        "verified" => true
+      },
+      "executables" => {
+        "candidate" => {
+          "configured_path" => "/proof/candidate-hive",
+          "realpath" => "/proof/candidate-hive",
+          "sha256" => "1" * 64
+        },
+        "audit_gateway" => {
+          "configured_path" => "/proof/gateway/bin/hive",
+          "realpath" => "/proof/gateway/bin/hive",
+          "sha256" => "2" * 64
+        },
+        "openclaw" => {
+          "configured_path" => "/proof/openclaw",
+          "realpath" => "/proof/openclaw",
+          "sha256" => "3" * 64,
+          "version" => "OpenClaw 2026.7.1-beta.2 (fixture)"
+        }
+      },
+      "openclaw_configuration" => {
+        "sha256" => "4" * 64,
+        "path_prepend" => [ "/proof/gateway/bin" ]
+      },
+      "processes" => [
+        {
+          "label" => "workflow_creation",
+          "timed_out" => false,
+          "teardown" => {
+            "status" => "passed",
+            "reaped" => true,
+            "readers" => "complete",
+            "writer" => "complete",
+            "descendants" => "none"
+          }
+        }
+      ],
+      "teardown" => {
+        "status" => "passed",
+        "reaped" => true,
+        "descendants" => "none"
+      },
       "prompt_sha256" => Digest::SHA256.hexdigest(HiveLiveAgentProof::WORKFLOW_CREATOR_PROMPT),
       "task_prompt_sha256" =>
         Digest::SHA256.hexdigest(HiveLiveAgentProof::WORKFLOW_CREATOR_TASK_PROMPT),
@@ -355,7 +541,9 @@ class LiveAgentProofTest < Minitest::Test
         "kind" => HiveLiveAgentProof::NATIVE_ACTIVATION_KINDS.fetch("openclaw"),
         "invocation" => HiveLiveAgentProof::INVOCATIONS.fetch("openclaw")
       },
-      "hive_commands" => HiveLiveAgentProof::WORKFLOW_CREATOR_COMMANDS,
+      "hive_commands" => HiveLiveAgentProof.workflow_creator_commands(
+        HiveLiveAgentProof::WORKFLOW_CREATOR_EXAMPLE_SLUG
+      ),
       "created_files" => HiveLiveAgentProof::WORKFLOW_CREATOR_FILES.map do |path|
         { "path" => path, "sha256" => "c" * 64, "size" => 10 }
       end,
@@ -373,7 +561,9 @@ class LiveAgentProofTest < Minitest::Test
       "creation_only_task_count" => 0,
       "task_count" => 1,
       "task" => {
-        "slug" => HiveLiveAgentProof::WORKFLOW_CREATOR_TASK_SLUG,
+        "slug" => HiveLiveAgentProof::WORKFLOW_CREATOR_EXAMPLE_SLUG,
+        "first_slug" => HiveLiveAgentProof::WORKFLOW_CREATOR_EXAMPLE_SLUG,
+        "retry_slug" => HiveLiveAgentProof::WORKFLOW_CREATOR_EXAMPLE_SLUG,
         "workflow" => "editorial",
         "first_created" => true,
         "retry_created" => false,
@@ -406,5 +596,41 @@ class LiveAgentProofTest < Minitest::Test
   def write_file(path, content)
     File.write(path, content)
     path
+  end
+
+  def refresh_artifact_record(artifacts, path)
+    manifest_path = File.join(artifacts, "artifact-manifest.json")
+    manifest = JSON.parse(File.read(manifest_path))
+    record = manifest.fetch("files").fetch(File.basename(path))
+    record["sha256"] = HiveLiveAgentProof.sha256(path)
+    record["size"] = File.size(path)
+    HiveLiveAgentProof.write_json(manifest_path, manifest)
+  end
+
+  def write_declared_size_archive(path, name:, size:)
+    header = Gem::Package::TarHeader.new(
+      name: name,
+      size: size,
+      prefix: "",
+      mode: 0o600,
+      typeflag: "0",
+      linkname: ""
+    )
+    Zlib::GzipWriter.open(path) do |gzip|
+      gzip.write(header.to_s)
+      gzip.write("\0" * 1_024)
+    end
+  end
+
+  def write_test_archive(path, files)
+    Zlib::GzipWriter.open(path) do |gzip|
+      Gem::Package::TarWriter.new(gzip) do |tar|
+        files.each do |name, content|
+          tar.add_file_simple(name, 0o600, content.bytesize) do |entry|
+            entry.write(content)
+          end
+        end
+      end
+    end
   end
 end

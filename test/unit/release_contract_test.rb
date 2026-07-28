@@ -96,6 +96,9 @@ class ReleaseContractTest < Minitest::Test
     workflow = YAML.safe_load_file(LIVE_AGENT_WORKFLOW, aliases: true)
     jobs = workflow.fetch("jobs")
     matrix = jobs.fetch("live-agent").dig("strategy", "matrix", "include")
+    action_uses = jobs.values.flat_map do |job|
+      [ job["uses"], *job.fetch("steps", []).filter_map { |step| step["uses"] } ]
+    end.compact
     setup_node = jobs.fetch("live-agent").fetch("steps").find do |step|
       step["uses"] == SETUP_NODE_ACTION
     end
@@ -116,6 +119,10 @@ class ReleaseContractTest < Minitest::Test
     assert_includes body, "checks: write"
     assert_includes body, "attestation_sha256"
     assert_includes body, "HIVE_RELEASE_GATE: \"1\""
+    refute_empty action_uses
+    action_uses.each do |action|
+      assert_match(/\A[^@]+@[0-9a-f]{40}\z/, action)
+    end
 
     github_script_steps = jobs.values.flat_map { |job| job.fetch("steps", []) }.select do |step|
       step.fetch("uses", "").start_with?("actions/github-script@")
@@ -148,12 +155,74 @@ class ReleaseContractTest < Minitest::Test
     creator = jobs.fetch("live-workflow-creator")
     assert_equal [ "validate", "build" ], creator.fetch("needs")
     assert_equal "live-agent-skills-openclaw", creator.fetch("environment")
-    creator_step = creator.fetch("steps").find do |step|
-      step["name"] == "Run authenticated workflow-creator proof"
+    creator_steps = creator.fetch("steps").select do |step|
+      step["name"].to_s.start_with?("Run authenticated workflow-creator proof with")
     end
-    refute_nil creator_step
-    assert_equal "${{ secrets.OPENAI_API_KEY }}", creator_step.dig("env", "OPENAI_API_KEY")
-    assert_includes creator_step.fetch("run"), "live_hive_workflow_creator_smoke_test.rb"
+    assert_equal 2, creator_steps.length
+    assert_equal(
+      [
+        "${{ secrets.OPENAI_API_KEY }}",
+        "${{ secrets.OPENROUTER_API_KEY }}"
+      ],
+      creator_steps.map { |step| step.dig("env", "HIVE_LIVE_PROVIDER_CREDENTIAL") }
+    )
+    assert creator_steps.all? { |step|
+      step.fetch("if").include?("startsWith(vars.HIVE_LIVE_MODEL")
+    }
+    assert creator_steps.all? { |step|
+      (step.fetch("env").keys & %w[OPENAI_API_KEY OPENROUTER_API_KEY]).empty?
+    }
+    assert creator_steps.all? { |step|
+      step.fetch("run").include?("live_hive_workflow_creator_smoke_test.rb")
+    }
+    creator_actions = creator.fetch("steps").filter_map { |step| step["uses"] }
+    assert creator_actions.all? { |action| action.match?(/@[0-9a-f]{40}\z/) }
+    openclaw_install = creator.fetch("steps").find do |step|
+      step["name"] == "Install OpenClaw in the ephemeral runner"
+    end
+    refute_nil openclaw_install
+    assert_equal %w[OPENCLAW_INTEGRITY OPENCLAW_VERSION],
+                 openclaw_install.fetch("env").keys.sort
+    refute_match(/\$\{\{\s*secrets\./, JSON.generate(openclaw_install))
+    install_body = openclaw_install.fetch("run")
+    assert_includes(
+      install_body,
+      'npm pack "openclaw@${OPENCLAW_VERSION}" --json --pack-destination "$pack_dir"'
+    )
+    assert_includes install_body, "JSON.parse"
+    %w[entry.version entry.integrity entry.filename].each do |metadata_field|
+      assert_includes install_body, metadata_field
+    end
+    assert_includes install_body, 'createHash("sha512")'
+    assert_includes install_body, "readFileSync(process.argv[1])"
+    assert_includes install_body, '"sha512-"'
+    assert_includes install_body, '[[ "$packed_version" == "$OPENCLAW_VERSION" ]]'
+    assert_includes install_body, '[[ "$reported_integrity" == "$OPENCLAW_INTEGRITY" ]]'
+    assert_includes install_body, '[[ "$computed_integrity" == "$OPENCLAW_INTEGRITY" ]]'
+    assert_includes install_body, '[[ "$computed_integrity" == "$reported_integrity" ]]'
+    assert_includes install_body, 'npm install --global "$tarball"'
+    refute_includes install_body, "npm view"
+    refute_match(/npm install\s+--global\s+["']?openclaw@/, install_body)
+    assert_operator(
+      install_body.index('[[ "$computed_integrity" == "$OPENCLAW_INTEGRITY" ]]'),
+      :<,
+      install_body.index('npm install --global "$tarball"')
+    )
+    creator_body = creator.fetch("steps").filter_map { |step| step["run"] }.join("\n")
+    assert_includes body,
+                    "sha512-KYPBQnAfEb/9qrxlw/96a90mMQeKdAZdUABMROOue9Ph2oFbnDGezZjd5Bmw4WhRyzgyvHOHqHje/swGipC4xA=="
+    assert_includes creator_body, 'package_json="$(npm root --global)/openclaw/package.json"'
+    assert_includes creator_body,
+                    'node -p "require(process.argv[1]).version" "$package_json"'
+    assert_includes creator_body,
+                    'openclaw_version_regex="${OPENCLAW_VERSION//./\\\\.}"'
+    assert_includes creator_body,
+                    '^OpenClaw[[:space:]]${openclaw_version_regex}[[:space:]]\\\\(.+\\\\)$'
+    assert_includes creator_body,
+                    "HIVE_OPENCLAW_PACKAGE_VERSION=$OPENCLAW_VERSION"
+    assert_includes creator_body,
+                    "HIVE_OPENCLAW_PACKAGE_INTEGRITY=$computed_integrity"
+    assert_includes creator_body, "HIVE_PROVEN_HIVE_BIN=$RUNNER_TEMP/proven-gems/bin/hive"
     assert_includes body, "workflow-creator-evidence-openclaw"
     assert_includes body, "creator-evidence"
   end

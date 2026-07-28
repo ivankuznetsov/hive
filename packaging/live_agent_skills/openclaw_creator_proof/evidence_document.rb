@@ -1,0 +1,149 @@
+module HiveLiveAgentProof
+  module OpenClawCreatorProof
+    class EvidenceDocument
+      attr_reader :data, :process_records, :secret_findings
+
+      def initialize(candidate_sha:, model:, candidate_path:, openclaw_path:, credential:)
+        @credential = credential.to_s
+        @process_records = []
+        @secret_findings = Set.new
+        safe_candidate = SAFE_SHA.match?(candidate_sha) ? candidate_sha : "unresolved"
+        @data = {
+          "schema" => EVIDENCE_SCHEMA,
+          "schema_version" => SCHEMA_VERSION,
+          "platform" => "openclaw",
+          "candidate_sha" => safe_candidate,
+          "result" => "failed",
+          "phase" => "initializing",
+          "reason" => "not_started",
+          "provider" => {
+            "name" => "unresolved",
+            "model" => redact(model),
+            "credential_environment" => nil
+          },
+          "openclaw_package" => {
+            "version" => OPENCLAW_VERSION,
+            "integrity" => OPENCLAW_INTEGRITY,
+            "verified" => false
+          },
+          "executables" => {
+            "openclaw" => unresolved_executable(openclaw_path),
+            "candidate" => unresolved_executable(candidate_path),
+            "audit_gateway" => unresolved_executable(nil)
+          },
+          "processes" => [],
+          "teardown" => {
+            "status" => "not_started",
+            "term_sent" => false,
+            "kill_sent" => false,
+            "reaped" => true,
+            "descendants" => "not_checked"
+          },
+          "cleanup" => {
+            "status" => "not_started",
+            "root_removed" => false
+          }
+        }
+      end
+
+      def phase=(value)
+        @data["phase"] = value.to_s
+      end
+
+      def provider=(value)
+        @data["provider"] = value
+      end
+
+      def set_executable(name, record)
+        @data.fetch("executables")[name.to_s] = record
+      end
+
+      def openclaw_package_verified!
+        @data.fetch("openclaw_package")["verified"] = true
+      end
+
+      def merge!(values)
+        @data.merge!(values)
+      end
+
+      def record_process(result, label: nil)
+        record = result.fetch("record")
+        record = record.merge("label" => label) if label
+        @process_records << record
+        @secret_findings.merge(result.fetch("secret_findings"))
+      end
+
+      def failure(failure)
+        @data["result"] = "failed"
+        @data["phase"] = failure.phase
+        @data["reason"] = failure.reason
+        @data["detail"] = redact(failure.message)
+        @data
+      end
+
+      def cleanup=(value)
+        @data["cleanup"] = value
+      end
+
+      def finalize_teardown
+        @data["processes"] = @process_records
+        teardowns = @process_records.filter_map { |record| record["teardown"] }
+        @data["teardown"] = {
+          "status" => teardowns.all? { |row| row["status"] == "passed" } ? "passed" : "failed",
+          "term_sent" => teardowns.any? { |row| row["term_sent"] },
+          "kill_sent" => teardowns.any? { |row| row["kill_sent"] },
+          "reaped" => teardowns.all? { |row| row["reaped"] },
+          "descendants" =>
+            teardowns.all? { |row| row["descendants"] == "none" } ? "none" : "not_checked"
+        }
+        @data["teardown"]["status"] = "not_started" if teardowns.empty?
+      end
+
+      def finalize_secret_scan
+        findings = @secret_findings.to_a
+        findings.concat(
+          HiveLiveAgentProof.secret_findings(
+            JSON.generate(@data),
+            exact_secrets: [ @credential ]
+          )
+        )
+        @data["secret_scan"] = {
+          "status" => findings.empty? ? "passed" : "failed",
+          "scanner" => "hive-live-agent-proof/v1"
+        }
+        return if findings.empty?
+
+        failure(
+          Failure.new(
+            phase: "secret_scan",
+            reason: "secret_material_detected",
+            detail: "proof evidence or raw output contained credential material"
+          )
+        )
+      end
+
+      def write(path)
+        return if path.to_s.empty?
+
+        HiveLiveAgentProof.write_json(path, @data)
+      end
+
+      private
+
+      def unresolved_executable(configured)
+        {
+          "configured_path" => configured.to_s.empty? ? nil : configured.to_s,
+          "realpath" => nil,
+          "sha256" => nil
+        }
+      end
+
+      def redact(value)
+        redacted = value.to_s.dup
+        redacted.gsub!(@credential, "[REDACTED]") unless @credential.empty?
+        SECRET_PATTERNS.each { |pattern| redacted.gsub!(pattern, "[REDACTED]") }
+        redacted.byteslice(0, DETAIL_LIMIT).to_s.scrub
+      end
+    end
+  end
+end

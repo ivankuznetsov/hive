@@ -313,8 +313,9 @@ Releases do not require provider keys or these environments. Maintainers who
 want an additional authenticated native-agent diagnostic may create four
 GitHub environments restricted to protected `main` workflow runs:
 
-- `live-agent-skills-openclaw`: `OPENAI_API_KEY` and environment variable
-  `HIVE_LIVE_MODEL` naming its OpenClaw model.
+- `live-agent-skills-openclaw`: environment variable `HIVE_LIVE_MODEL` beginning
+  with `openai/` or `openrouter/`, plus only the matching `OPENAI_API_KEY` or
+  `OPENROUTER_API_KEY` secret.
 - `live-agent-skills-claude`: `ANTHROPIC_API_KEY` and a Claude-compatible
   `HIVE_LIVE_MODEL`.
 - `live-agent-skills-codex`: `CODEX_API_KEY` and a Codex-compatible
@@ -323,11 +324,26 @@ GitHub environments restricted to protected `main` workflow runs:
   `HIVE_LIVE_MODEL`.
 
 Use dedicated low-privilege test credentials and environment reviewers when
-appropriate. Provider credentials are exposed only to the authenticated proof
-step, not checkout, npm, Bundler, artifact, or attestation steps. The harness
-passes only the selected platform's credential into its disposable child
-environment, never copies host auth state, retains no model prose, scans raw
-process output before redaction, and removes the private home before success.
+appropriate. The OpenClaw creator job derives the provider from the model
+prefix and maps the selected secret into the runner's single generic credential
+input; neither the opposite named secret nor the generic input reaches the
+OpenClaw child. Provider credentials are exposed only to the authenticated
+proof step, not checkout, npm, Bundler, artifact, or attestation steps. The
+harness never copies host auth state, retains no model prose, scans every raw
+process-output byte before redaction, terminates and reaps the whole process
+group, and removes the private home before success.
+
+The creator proof fetches exact OpenClaw `2026.7.1-beta.2` once with `npm pack`,
+validates the returned version and integrity metadata, independently computes
+the tarball's SHA-512 SRI, and installs only that verified local tarball after
+both identities match the workflow pin. It materializes the candidate skill
+archive with the Ruby safe-tar reader, creates a disposable project with the
+installed candidate, and exposes a distinct digest-bound audit gateway through
+OpenClaw's native `tools.exec.pathPrepend`. The gateway allows exactly nine
+semantic Hive commands. It binds `run` to the slug returned by the first
+idempotent `hive new`, requires the retry to return the same slug with
+`created=false`, and records only structural evidence. The smoke test is a thin
+adapter over this packaging-owned runner; it contains no substitute Hive.
 
 The optional workflow refuses a non-main dispatch, a workflow revision not
 loaded from `refs/heads/main`, a

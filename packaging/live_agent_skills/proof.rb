@@ -39,14 +39,26 @@ module HiveLiveAgentProof
   PROMPT
   WORKFLOW_CREATOR_TASK_REQUEST = "Research and draft the launch announcement for approval.".freeze
   WORKFLOW_CREATOR_TASK_KEY = "workflow-creator-proof:editorial:live-proof".freeze
-  WORKFLOW_CREATOR_TASK_SLUG = "editorial-live-proof".freeze
+  WORKFLOW_CREATOR_RUN_PLACEHOLDER = "{created_slug}".freeze
+  WORKFLOW_CREATOR_EXAMPLE_SLUG = "research-and-draft-the-launch-260728-abcd".freeze
+  WORKFLOW_CREATOR_SAFE_SLUG = /\A[a-z][a-z0-9-]{0,63}\z/.freeze
+  WORKFLOW_CREATOR_OPENCLAW_VERSION = "2026.7.1-beta.2".freeze
+  WORKFLOW_CREATOR_OPENCLAW_INTEGRITY =
+    "sha512-KYPBQnAfEb/9qrxlw/96a90mMQeKdAZdUABMROOue9Ph2oFbnDGezZjd5Bmw4WhRyzgyvHOHqHje/swGipC4xA==".freeze
+  SKILL_ARCHIVE_FILE_LIMIT = 16 * 1024 * 1024
+  SKILL_ARCHIVE_TOTAL_LIMIT = 64 * 1024 * 1024
+  WORKFLOW_CREATOR_PROVIDER_ENV = {
+    "openai" => "OPENAI_API_KEY",
+    "openrouter" => "OPENROUTER_API_KEY"
+  }.freeze
   WORKFLOW_CREATOR_TASK_PROMPT = <<~PROMPT.freeze
     /hive
     Use the validated editorial workflow to create and run one task for:
     "#{WORKFLOW_CREATOR_TASK_REQUEST}"
-    Use idempotency key #{WORKFLOW_CREATOR_TASK_KEY}. In this exact order: create the task,
-    run its first stage once, repeat the same creation command once to prove the retry is a no-op,
-    then query operational status. Do not publish or perform any other external action.
+    Use idempotency key #{WORKFLOW_CREATOR_TASK_KEY}. Capture the slug from the first creation
+    command's JSON and use exactly that slug to run its first stage once. Then repeat the same
+    creation command once, require its JSON to return the same slug with created=false, and query
+    operational status. Keep that exact order. Do not publish or perform any other external action.
   PROMPT
   WORKFLOW_CREATOR_TASK_NEW_ARGV = [
     "new", "workflow-creator-proof", "--workflow", "editorial",
@@ -59,7 +71,7 @@ module HiveLiveAgentProof
     [ "workflow", "validate", "editorial", "--json" ],
     [ "workflow", "commit", "editorial" ],
     WORKFLOW_CREATOR_TASK_NEW_ARGV,
-    [ "run", WORKFLOW_CREATOR_TASK_SLUG ],
+    [ "run", WORKFLOW_CREATOR_RUN_PLACEHOLDER ],
     WORKFLOW_CREATOR_TASK_NEW_ARGV,
     [ "status", "--operational", "--json" ]
   ].freeze
@@ -158,6 +170,76 @@ module HiveLiveAgentProof
       value["invocation"] == INVOCATIONS.fetch(platform)
   end
 
+  def workflow_creator_commands(task_slug)
+    slug = task_slug.to_s
+    raise Error, "workflow-creator task slug is invalid" unless WORKFLOW_CREATOR_SAFE_SLUG.match?(slug)
+
+    WORKFLOW_CREATOR_COMMANDS.map do |argv|
+      argv == [ "run", WORKFLOW_CREATOR_RUN_PLACEHOLDER ] ? [ "run", slug ] : argv.dup
+    end
+  end
+
+  def valid_workflow_creator_commands?(commands, task_slug:)
+    commands == workflow_creator_commands(task_slug)
+  rescue Error
+    false
+  end
+
+  def valid_creator_runtime_evidence?(row)
+    provider = row["provider"]
+    provider_name = provider.is_a?(Hash) ? provider["name"] : nil
+    expected_credential = WORKFLOW_CREATOR_PROVIDER_ENV[provider_name]
+    executables = row["executables"]
+    candidate = executables.is_a?(Hash) ? executables["candidate"] : nil
+    gateway = executables.is_a?(Hash) ? executables["audit_gateway"] : nil
+    openclaw = executables.is_a?(Hash) ? executables["openclaw"] : nil
+    processes = row["processes"]
+    teardown = row["teardown"]
+    path_prepend = row.dig("openclaw_configuration", "path_prepend")
+
+    expected_credential &&
+      valid_openclaw_package_evidence?(row["openclaw_package"]) &&
+      provider["model"].to_s.start_with?("#{provider_name}/") &&
+      provider["credential_environment"] == expected_credential &&
+      valid_executable_record?(candidate) &&
+      valid_executable_record?(gateway) &&
+      valid_executable_record?(openclaw) &&
+      openclaw["version"].to_s.match?(
+        /\AOpenClaw #{Regexp.escape(WORKFLOW_CREATOR_OPENCLAW_VERSION)} \(.+\)\z/
+      ) &&
+      candidate["realpath"] != gateway["realpath"] &&
+      path_prepend == [ File.dirname(gateway["realpath"]) ] &&
+      row.dig("openclaw_configuration", "sha256").to_s.match?(/\A[0-9a-f]{64}\z/) &&
+      processes.is_a?(Array) && !processes.empty? &&
+      processes.all? { |process|
+        process["timed_out"] == false &&
+          process.dig("teardown", "status") == "passed" &&
+          process.dig("teardown", "reaped") == true &&
+          process.dig("teardown", "readers") == "complete" &&
+          process.dig("teardown", "writer") == "complete" &&
+          process.dig("teardown", "descendants") == "none"
+      } &&
+      teardown.is_a?(Hash) && teardown["status"] == "passed" &&
+      teardown["reaped"] == true && teardown["descendants"] == "none"
+  rescue TypeError
+    false
+  end
+
+  def valid_openclaw_package_evidence?(record)
+    record.is_a?(Hash) &&
+      record.keys.sort == %w[integrity verified version] &&
+      record["version"] == WORKFLOW_CREATOR_OPENCLAW_VERSION &&
+      record["integrity"] == WORKFLOW_CREATOR_OPENCLAW_INTEGRITY &&
+      record["verified"] == true
+  end
+
+  def valid_executable_record?(record)
+    record.is_a?(Hash) &&
+      record["configured_path"].to_s.start_with?("/") &&
+      record["realpath"].to_s.start_with?("/") &&
+      record["sha256"].to_s.match?(/\A[0-9a-f]{64}\z/)
+  end
+
   class Builder
     def initialize(candidate_sha:, gem_path:, source_archive:, output_dir:, canonical:)
       @candidate_sha = HiveLiveAgentProof.validate_sha!(candidate_sha, "candidate_sha")
@@ -241,12 +323,21 @@ module HiveLiveAgentProof
   class CandidateVerifier
     MANIFEST_NAME = "artifact-manifest.json".freeze
 
-    def initialize(candidate_dir:, candidate_sha:, expected_hive_version:, canonical:)
+    def initialize(candidate_dir:, candidate_sha:, expected_hive_version:, canonical:,
+                   archive_file_limit: SKILL_ARCHIVE_FILE_LIMIT,
+                   archive_total_limit: SKILL_ARCHIVE_TOTAL_LIMIT)
       @candidate_dir = File.expand_path(candidate_dir)
       @candidate_sha = HiveLiveAgentProof.validate_sha!(candidate_sha, "candidate_sha")
       @expected_hive_version = expected_hive_version.to_s
       @canonical = canonical
+      @archive_file_limit = Integer(archive_file_limit)
+      @archive_total_limit = Integer(archive_total_limit)
       raise Error, "expected Hive version must not be empty" if @expected_hive_version.empty?
+      unless @archive_file_limit.positive? && @archive_total_limit.positive?
+        raise Error, "skill archive limits must be positive"
+      end
+    rescue ArgumentError, TypeError
+      raise Error, "skill archive limits must be positive integers"
     end
 
     def call
@@ -318,7 +409,9 @@ module HiveLiveAgentProof
         raise Error, "skill archive projection file set does not match canonical source"
       end
       expected.each do |name, content|
-        unless Digest::SHA256.hexdigest(actual.fetch(name)) == Digest::SHA256.hexdigest(content)
+        record = actual.fetch(name)
+        unless record["size"] == content.bytesize &&
+               record["sha256"] == Digest::SHA256.hexdigest(content)
           raise Error, "skill archive projection differs from canonical source: #{name}"
         end
       end
@@ -326,6 +419,7 @@ module HiveLiveAgentProof
 
     def read_skill_archive(path)
       files = {}
+      total_size = 0
       Zlib::GzipReader.open(path) do |gzip|
         Gem::Package::TarReader.new(gzip) do |tar|
           tar.each do |entry|
@@ -339,13 +433,37 @@ module HiveLiveAgentProof
             clean_name = clean.to_s
             raise Error, "skill archive contains duplicate entry: #{clean_name}" if files.key?(clean_name)
 
-            files[clean_name] = entry.read
+            size = Integer(entry.header.size)
+            if size > @archive_file_limit
+              raise Error, "skill archive entry exceeds #{@archive_file_limit} bytes: #{clean_name}"
+            end
+            total_size += size
+            if total_size > @archive_total_limit
+              raise Error, "skill archive expands beyond #{@archive_total_limit} bytes"
+            end
+            files[clean_name] = digest_archive_entry(entry, size, clean_name)
           end
         end
       end
       files
-    rescue Zlib::GzipFile::Error, Gem::Package::TarInvalidError, EOFError => e
+    rescue Zlib::GzipFile::Error, Gem::Package::TarInvalidError, EOFError,
+           ArgumentError, RangeError, IOError => e
       raise Error, "cannot read skill archive: #{e.message}"
+    end
+
+    def digest_archive_entry(entry, expected_size, name)
+      digest = Digest::SHA256.new
+      bytes_read = 0
+      while bytes_read < expected_size
+        chunk = entry.read([ 16 * 1024, expected_size - bytes_read ].min)
+        if chunk.nil? || chunk.empty?
+          raise Error, "skill archive entry is truncated: #{name}"
+        end
+
+        digest.update(chunk)
+        bytes_read += chunk.bytesize
+      end
+      { "sha256" => digest.hexdigest, "size" => bytes_read }
     end
   end
 
@@ -496,14 +614,21 @@ module HiveLiveAgentProof
       unless HiveLiveAgentProof.valid_native_activation?("openclaw", row["native_activation"])
         raise Error, "workflow-creator native activation evidence is invalid"
       end
+      unless HiveLiveAgentProof.valid_creator_runtime_evidence?(row)
+        raise Error, "workflow-creator runtime identity or teardown evidence is invalid"
+      end
       expected_prompt = Digest::SHA256.hexdigest(WORKFLOW_CREATOR_PROMPT)
       expected_task_prompt = Digest::SHA256.hexdigest(WORKFLOW_CREATOR_TASK_PROMPT)
       unless row["prompt_sha256"] == expected_prompt &&
-             row["task_prompt_sha256"] == expected_task_prompt &&
-             row["hive_commands"] == WORKFLOW_CREATOR_COMMANDS
+             row["task_prompt_sha256"] == expected_task_prompt
         raise Error, "workflow-creator prompt or command sequence is invalid"
       end
       validate_creator_result!(row)
+      unless HiveLiveAgentProof.valid_workflow_creator_commands?(
+        row["hive_commands"], task_slug: row.dig("task", "slug")
+      )
+        raise Error, "workflow-creator prompt or command sequence is invalid"
+      end
       unless row.dig("secret_scan", "status") == "passed" && row.dig("cleanup", "status") == "passed"
         raise Error, "workflow-creator evidence lacks secret-scan or cleanup proof"
       end
@@ -538,15 +663,18 @@ module HiveLiveAgentProof
         raise Error, "workflow-creator normalized graph is invalid"
       end
       task = row["task"]
+      task_slug = task.is_a?(Hash) ? task["slug"].to_s : ""
       unless row["creation_only_task_count"] == 0 && row["task_count"] == 1 &&
              task == {
-               "slug" => WORKFLOW_CREATOR_TASK_SLUG,
+               "slug" => task_slug,
+               "first_slug" => task_slug,
+               "retry_slug" => task_slug,
                "workflow" => "editorial",
                "first_created" => true,
                "retry_created" => false,
                "run_count" => 1,
                "current_stage" => "1-research"
-             } &&
+             } && WORKFLOW_CREATOR_SAFE_SLUG.match?(task_slug) &&
              row["external_actions"] == []
         raise Error, "workflow-creator proof contains an unauthorized side effect"
       end
@@ -644,11 +772,18 @@ module HiveLiveAgentProof
       unless HiveLiveAgentProof.valid_native_activation?("openclaw", row["native_activation"])
         raise Error, "workflow-creator attested native activation evidence is invalid"
       end
+      unless HiveLiveAgentProof.valid_creator_runtime_evidence?(row)
+        raise Error, "workflow-creator attested runtime evidence is invalid"
+      end
+      task_slug = row.dig("task", "slug")
       unless row["prompt_sha256"] == Digest::SHA256.hexdigest(WORKFLOW_CREATOR_PROMPT) &&
              row["task_prompt_sha256"] == Digest::SHA256.hexdigest(WORKFLOW_CREATOR_TASK_PROMPT) &&
-             row["hive_commands"] == WORKFLOW_CREATOR_COMMANDS &&
+             HiveLiveAgentProof.valid_workflow_creator_commands?(
+               row["hive_commands"], task_slug: task_slug
+             ) &&
              row["creation_only_task_count"] == 0 && row["task_count"] == 1 &&
              row["task"].is_a?(Hash) && row["task"]["retry_created"] == false &&
+             row["task"]["first_slug"] == task_slug && row["task"]["retry_slug"] == task_slug &&
              row["task"]["run_count"] == 1 && row["external_actions"] == []
         raise Error, "workflow-creator attested contract is invalid"
       end

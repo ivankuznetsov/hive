@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-07-27
+updated: 2026-07-28
 tags: [gap, todo, release-proof, agent-skills]
 ---
 
@@ -768,16 +768,19 @@ explicit; no version or publication decision is implied by the source change.
 
 The natural-language workflow creator is covered hermetically through AE1–AE5,
 including real descriptor loading, human approve/reject decisions, minimal-init
-preview, collision refusal, and state-wide task idempotency. The protected
-OpenClaw workflow and fail-closed attestor are source/unit tested, but this
-implementation session had no release-gate OpenAI credential and therefore did
-not produce a trusted live attestation. Keep this gap open until the dedicated
-`live-workflow-creator` job succeeds for an exact protected-main candidate and
-the resulting Check Run binds the prompt, candidate skill digest, ordered Hive
-commands, exact editorial graph, zero task count, secret scan, and cleanup.
-The same proof must also attest one explicitly authorized task, one first-stage
-run, a no-op retry with the same idempotency key, and matching operational
-status.
+preview, collision refusal, and state-wide task idempotency. The
+packaging-owned OpenClaw runner now also drives a deterministic fake OpenClaw
+through the real candidate CLI, safe-materialized candidate skill, native
+`pathPrepend`, distinct digest-bound gateway, dynamic created-slug run, bounded
+Codex fixture, all-byte secret scan, process-group teardown, and cleanup. The
+protected job and fail-closed attestor are source/unit tested, but this branch
+still has no successful credentialed hosted run and therefore no trusted live
+attestation. Keep this gap open until `live-workflow-creator` succeeds for an
+exact protected-main candidate and its Check Run binds the OpenClaw
+version/integrity, provider route, prompts, candidate/gateway identities, all
+nine actual commands, first/retry slug equality, exact editorial graph, zero
+creation-only tasks, one first-stage run, matching operational status, secret
+scan, teardown, and cleanup.
 
 ## WorkLedger is an internal boundary, not a published format (2026-07-26)
 

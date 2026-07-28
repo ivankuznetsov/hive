@@ -2037,6 +2037,14 @@ class OpenClawCreatorProofTest < Minitest::Test
       assert_equal "research", evidence.dig("stage_execution", "stage")
       assert_equal slug, evidence.dig("stage_execution", "task_slug")
       assert_equal(
+        HiveLiveAgentProof::WORKFLOW_CREATOR_STAGE_INSTRUCTION,
+        evidence.dig("stage_execution", "instruction", "path")
+      )
+      assert_match(
+        /\A[0-9a-f]{64}\z/,
+        evidence.dig("stage_execution", "instruction", "sha256")
+      )
+      assert_equal(
         HiveLiveAgentProof::WORKFLOW_CREATOR_STAGE_OUTPUT_SHA256,
         evidence.dig("stage_execution", "artifact", "sha256")
       )
@@ -2108,6 +2116,7 @@ class OpenClawCreatorProofTest < Minitest::Test
       slug = "research-and-draft-the-launch-260728-abcd"
       task = File.join(workspace, ".hive-state", "stages", "1-research", slug)
       FileUtils.mkdir_p(task)
+      write_nested_stage_instruction(workspace)
       output = File.join(task, HiveLiveAgentProof::WORKFLOW_CREATOR_STAGE_FILE)
       File.write(output, "<!-- AGENT_WORKING pid=1 -->\n")
       fixture =
@@ -2143,6 +2152,12 @@ class OpenClawCreatorProofTest < Minitest::Test
         )
       )
       assert_equal fixture.record.fetch("sha256"), receipt.fetch("executable_sha256")
+      assert_equal HiveLiveAgentProof::WORKFLOW_CREATOR_STAGE_INSTRUCTION,
+                   receipt.fetch("instruction_path")
+      assert_equal Digest::SHA256.hexdigest("Research the launch.\n"),
+                   receipt.fetch("instruction_sha256")
+      assert_equal "Research the launch.\n".bytesize,
+                   receipt.fetch("instruction_size")
       assert_equal HiveLiveAgentProof::WORKFLOW_CREATOR_STAGE_OUTPUT_SHA256,
                    receipt.fetch("after_sha256")
       assert_equal fixture.record, fixture.revalidate!
@@ -2162,6 +2177,7 @@ class OpenClawCreatorProofTest < Minitest::Test
       slug = "research-and-draft-the-launch-260728-abcd"
       task = File.join(workspace, ".hive-state", "stages", "1-research", slug)
       FileUtils.mkdir_p(task)
+      instruction = write_nested_stage_instruction(workspace)
       output = File.join(task, HiveLiveAgentProof::WORKFLOW_CREATOR_STAGE_FILE)
       File.write(output, "<!-- AGENT_WORKING pid=1 -->\n")
       fixture =
@@ -2180,6 +2196,19 @@ class OpenClawCreatorProofTest < Minitest::Test
       assert_equal 64, credential_status.exitstatus
       assert_includes credential_err, "provider credential reached fixture"
       refute File.exist?(fixture.receipt_path)
+
+      File.write(instruction, "Research a different subject.\n")
+      _out, binding_err, binding_status = Open3.capture3(
+        {},
+        fixture.path,
+        *nested_stage_argv(task, nested_stage_prompt),
+        chdir: task,
+        unsetenv_others: true
+      )
+      assert_equal 64, binding_status.exitstatus
+      assert_includes binding_err, "exact authored instruction"
+      refute File.exist?(fixture.receipt_path)
+      File.write(instruction, "Research the launch.\n")
 
       _out, prompt_err, prompt_status = Open3.capture3(
         {},
@@ -2396,6 +2425,15 @@ class OpenClawCreatorProofTest < Minitest::Test
       `<!-- COMPLETE -->`.
       Do not modify files outside the task folder.
     PROMPT
+  end
+
+  def write_nested_stage_instruction(workspace, content = "Research the launch.\n")
+    path = File.join(
+      workspace, HiveLiveAgentProof::WORKFLOW_CREATOR_STAGE_INSTRUCTION
+    )
+    FileUtils.mkdir_p(File.dirname(path))
+    File.write(path, content)
+    path
   end
 
   def nested_stage_argv(task, prompt)

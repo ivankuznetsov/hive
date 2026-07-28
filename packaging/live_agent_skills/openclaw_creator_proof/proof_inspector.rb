@@ -281,9 +281,10 @@ module HiveLiveAgentProof
         )
         receipt = JSON.parse(bytes)
         expected_keys = %w[
-          after_sha256 argv_sha256 before_sha256 executable_sha256 invocation_count
-          marker output_file prompt_sha256 provider provider_version schema
-          schema_version size stage task_folder task_slug workspace
+          after_sha256 argv_sha256 before_sha256 executable_sha256 instruction_path
+          instruction_sha256 instruction_size invocation_count marker output_file
+          prompt_sha256 provider provider_version schema schema_version size stage
+          task_folder task_slug workspace
         ]
         relative_folder =
           Pathname.new(folder).relative_path_from(Pathname.new(@workspace)).to_s
@@ -297,15 +298,38 @@ module HiveLiveAgentProof
                 receipt["workspace"] == @workspace &&
                 receipt["task_slug"] == slug &&
                 receipt["task_folder"] == relative_folder &&
+                receipt["instruction_path"] ==
+                  NestedStageFixture::INSTRUCTION_RELATIVE_PATH &&
+                receipt["instruction_size"].is_a?(Integer) &&
+                receipt["instruction_size"].positive? &&
+                receipt["instruction_size"] <= NestedStageFixture::INSTRUCTION_MAX_BYTES &&
                 receipt["output_file"] == WORKFLOW_CREATOR_STAGE_FILE &&
                 receipt["marker"] == "complete" &&
                 receipt["invocation_count"] == 1 &&
                 receipt["executable_sha256"] == @stage_fixture_record.fetch("sha256") &&
-                %w[before_sha256 after_sha256 prompt_sha256 argv_sha256].all? {
+                %w[
+                  before_sha256 after_sha256 instruction_sha256 prompt_sha256 argv_sha256
+                ].all? {
                   |key| receipt[key].to_s.match?(/\A[0-9a-f]{64}\z/)
                 } &&
                 receipt["before_sha256"] != receipt["after_sha256"]
         fail_proof!("nested-stage fixture receipt is invalid") unless valid
+
+        # Re-walk the authored workflow tree at final inspection time. The
+        # creation checkpoint ran before task execution, so this second
+        # bounded validation prevents the nested-stage receipt from being
+        # accepted after an instruction-path type or ancestor substitution.
+        created_file_records
+        instruction = bounded_regular_bytes(
+          File.join(@workspace, NestedStageFixture::INSTRUCTION_RELATIVE_PATH),
+          max_bytes: NestedStageFixture::INSTRUCTION_MAX_BYTES,
+          label: "authored research instruction"
+        )
+        instruction_valid =
+          instruction.bytesize == receipt["instruction_size"] &&
+          Digest::SHA256.hexdigest(instruction) == receipt["instruction_sha256"]
+        fail_proof!("nested-stage instruction binding is invalid") unless
+          instruction_valid
 
         artifact_path = File.join(folder, WORKFLOW_CREATOR_STAGE_FILE)
         artifact = bounded_regular_bytes(
@@ -330,6 +354,11 @@ module HiveLiveAgentProof
           "provider_version" => NestedStageFixture::CLAUDE_VERSION,
           "stage" => "research",
           "task_slug" => slug,
+          "instruction" => {
+            "path" => receipt.fetch("instruction_path"),
+            "sha256" => receipt.fetch("instruction_sha256"),
+            "size" => receipt.fetch("instruction_size")
+          },
           "artifact" => {
             "path" => WORKFLOW_CREATOR_STAGE_FILE,
             "sha256" => receipt.fetch("after_sha256"),

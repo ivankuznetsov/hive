@@ -214,6 +214,8 @@ class LiveAgentProofTest < Minitest::Test
                    creator.dig("descriptor", "normalized_sha256")
       assert_equal HiveLiveAgentProof::WORKFLOW_CREATOR_STAGE_OUTPUT_SHA256,
                    creator.dig("stage_execution", "artifact", "sha256")
+      assert_equal HiveLiveAgentProof::WORKFLOW_CREATOR_STAGE_INSTRUCTION,
+                   creator.dig("stage_execution", "instruction", "path")
       assert_equal(
         [ 0, 1, false, 1 ],
         [
@@ -329,6 +331,19 @@ class LiveAgentProofTest < Minitest::Test
       HiveLiveAgentProof.write_json(row_path, row)
       error = assert_raises(HiveLiveAgentProof::Error) do
         attest(artifacts, evidence, creator_evidence, File.join(dir, "proof-stage"))
+      end
+      assert_includes error.message, "nested stage evidence"
+
+      creator_evidence = prepare_creator_evidence(dir, artifacts)
+      row_path = File.join(creator_evidence, "openclaw-workflow-creator.json")
+      row = JSON.parse(File.read(row_path))
+      row.dig("stage_execution", "instruction")["sha256"] = "not-a-digest"
+      HiveLiveAgentProof.write_json(row_path, row)
+      error = assert_raises(HiveLiveAgentProof::Error) do
+        attest(
+          artifacts, evidence, creator_evidence,
+          File.join(dir, "proof-stage-instruction")
+        )
       end
       assert_includes error.message, "nested stage evidence"
     end
@@ -769,6 +784,11 @@ class LiveAgentProofTest < Minitest::Test
         "provider_version" => "2.1.118",
         "stage" => "research",
         "task_slug" => HiveLiveAgentProof::WORKFLOW_CREATOR_EXAMPLE_SLUG,
+        "instruction" => {
+          "path" => HiveLiveAgentProof::WORKFLOW_CREATOR_STAGE_INSTRUCTION,
+          "sha256" => "e" * 64,
+          "size" => 42
+        },
         "artifact" => {
           "path" => HiveLiveAgentProof::WORKFLOW_CREATOR_STAGE_FILE,
           "sha256" => HiveLiveAgentProof::WORKFLOW_CREATOR_STAGE_OUTPUT_SHA256,

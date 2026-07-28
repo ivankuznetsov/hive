@@ -67,14 +67,17 @@ editorial contract; its research and draft stages deliberately omit `agent`
 and `model`, so the first dispatch must inherit the project's Claude route. A
 proof-owned Claude fixture installed outside the workspace accepts exactly one
 credential-free research-stage invocation. It validates the inherited Claude
-argv, bounded stage prompt and prior-artifact envelope, then replaces the
+argv, bounded stage prompt and prior-artifact envelope, and the exact bounded
+research instruction authored by the live creator. It then replaces the
 existing marker file with deterministic nonempty `research.md` bytes ending in
 one trailing `<!-- COMPLETE -->`. Its one-shot receipt binds the fixture,
-prompt, argv, task slug, and before/after artifact digests. The inspector and
-attestor bind that receipt and completed artifact to the descriptor; this proves
-real nested-stage orchestration without representing the fixture as a remote
-Claude model call. Candidate failures retain a bounded structured failure
-receipt rather than raw stderr. The live creation prompt fences the four
+prompt, argv, authored-instruction path/digest/size, task slug, and before/after
+artifact digests. Final inspection revalidates the authored workflow tree and
+instruction bytes before the attestor accepts that receipt. This proves real
+nested-stage orchestration without assuming fixed model-authored instruction
+prose or representing the fixture as a remote Claude model call. Candidate
+failures retain a bounded structured failure receipt rather than raw stderr.
+The live creation prompt fences the four
 creation commands and requires
 the agent to remove the neutral blank scaffold's unused README, Honeycomb
 metadata, and `work.md`, leaving only the accepted descriptor plus research and

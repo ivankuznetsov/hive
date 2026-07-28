@@ -374,12 +374,15 @@ binds its exact normalized editorial semantics, including the intentional
 absence of stage-level `agent` and `model` keys. The first task run therefore
 inherits the disposable project's Claude configuration. A proof-owned,
 credential-free Claude executable outside the workspace accepts only that
-single research-stage argv and bounded prompt, writes a deterministic nonempty
-`research.md` ending in one `<!-- COMPLETE -->`, and emits a one-shot receipt
-binding its executable, prompt, argv, before/after artifact digests, task slug,
-and invocation count. Attestation independently binds the descriptor,
+single research-stage argv and bounded prompt, requires that prompt to carry
+the exact bounded instruction authored by the live creator, writes a
+deterministic nonempty `research.md` ending in one `<!-- COMPLETE -->`, and
+emits a one-shot receipt binding its executable, prompt, argv, authored
+instruction, before/after artifact digests, task slug, and invocation count.
+Attestation independently revalidates and binds the descriptor, instruction,
 fixture, and completed artifact; the fixture proves provider inheritance and
-real stage orchestration without claiming a second remote model call.
+real stage orchestration without assuming fixed model-authored instruction
+prose or claiming a second remote model call.
 Candidate command failures are retained as bounded structured receipts rather
 than raw stderr. The gateway allows exactly nine semantic Hive
 commands, holds one serialized audit

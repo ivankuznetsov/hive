@@ -141,6 +141,9 @@ module HiveLiveAgentProof
   WORKFLOW_CREATOR_DESCRIPTOR_SHA256 =
     Digest::SHA256.hexdigest(JSON.generate(WORKFLOW_CREATOR_DESCRIPTOR)).freeze
   WORKFLOW_CREATOR_STAGE_FILE = "research.md".freeze
+  WORKFLOW_CREATOR_STAGE_INSTRUCTION =
+    ".hive-state/workflows/editorial/research.md".freeze
+  WORKFLOW_CREATOR_STAGE_INSTRUCTION_MAX_BYTES = 64 * 1024
   WORKFLOW_CREATOR_STAGE_MARKER = "<!-- COMPLETE -->".freeze
   WORKFLOW_CREATOR_STAGE_OUTPUT = <<~MARKDOWN.freeze
     # Launch research
@@ -366,7 +369,7 @@ module HiveLiveAgentProof
     return false unless record.is_a?(Hash) &&
                         fixture.is_a?(Hash) &&
                         record.keys.sort == %w[
-                          argv_sha256 artifact fixture prompt_sha256 provider
+                          argv_sha256 artifact fixture instruction prompt_sha256 provider
                           provider_version stage task_slug
                         ] &&
                         record["provider"] == "claude" &&
@@ -379,6 +382,7 @@ module HiveLiveAgentProof
 
     artifact = record["artifact"]
     fixture_receipt = record["fixture"]
+    instruction = record["instruction"]
     artifact.is_a?(Hash) &&
       artifact.keys.sort == %w[changed marker path sha256 size] &&
       artifact["path"] == WORKFLOW_CREATOR_STAGE_FILE &&
@@ -386,6 +390,13 @@ module HiveLiveAgentProof
       artifact["size"] == WORKFLOW_CREATOR_STAGE_OUTPUT.bytesize &&
       artifact["marker"] == "complete" &&
       artifact["changed"] == true &&
+      instruction.is_a?(Hash) &&
+      instruction.keys.sort == %w[path sha256 size] &&
+      instruction["path"] == WORKFLOW_CREATOR_STAGE_INSTRUCTION &&
+      instruction["sha256"].to_s.match?(/\A[0-9a-f]{64}\z/) &&
+      instruction["size"].is_a?(Integer) &&
+      instruction["size"].positive? &&
+      instruction["size"] <= WORKFLOW_CREATOR_STAGE_INSTRUCTION_MAX_BYTES &&
       fixture_receipt.is_a?(Hash) &&
       fixture_receipt.keys.sort == %w[invocation_count receipt_sha256 sha256] &&
       fixture_receipt["sha256"] == fixture["sha256"] &&

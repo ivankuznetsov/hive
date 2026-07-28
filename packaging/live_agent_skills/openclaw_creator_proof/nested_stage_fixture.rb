@@ -5,6 +5,8 @@ module HiveLiveAgentProof
       SCHEMA_VERSION = 1
       CLAUDE_VERSION = "2.1.118".freeze
       RECEIPT_MAX_BYTES = 32 * 1024
+      INSTRUCTION_MAX_BYTES = WORKFLOW_CREATOR_STAGE_INSTRUCTION_MAX_BYTES
+      INSTRUCTION_RELATIVE_PATH = WORKFLOW_CREATOR_STAGE_INSTRUCTION
       OUTPUT_BYTES = WORKFLOW_CREATOR_STAGE_OUTPUT
 
       attr_reader :path, :receipt_path, :record
@@ -63,6 +65,8 @@ module HiveLiveAgentProof
           WORKSPACE = #{@workspace.dump}.freeze
           RECEIPT_PATH = #{@receipt_path.dump}.freeze
           OUTPUT_BYTES = #{OUTPUT_BYTES.dump}.freeze
+          INSTRUCTION_RELATIVE_PATH = #{INSTRUCTION_RELATIVE_PATH.dump}.freeze
+          INSTRUCTION_MAX_BYTES = #{INSTRUCTION_MAX_BYTES}
           SAFE_SLUG = #{WORKFLOW_CREATOR_SAFE_SLUG.inspect}
           CREDENTIAL_NAMES = #{
             (
@@ -74,6 +78,42 @@ module HiveLiveAgentProof
           def reject!(message)
             warn "bounded nested-stage fixture rejected invocation: \#{message}"
             exit 64
+          end
+
+          def bounded_regular_bytes!(path, max_bytes:, label:)
+            before = File.lstat(path)
+            reject!("\#{label} is not a regular file") unless
+              before.file? && !before.symlink?
+            reject!("\#{label} exceeds byte budget") if before.size > max_bytes
+
+            flags = File::RDONLY
+            flags |= File::NOFOLLOW if defined?(File::NOFOLLOW)
+            bytes = File.open(path, flags) do |file|
+              opened = file.stat
+              same_identity =
+                opened.file? &&
+                opened.dev == before.dev &&
+                opened.ino == before.ino &&
+                opened.size <= max_bytes
+              reject!("\#{label} identity changed while opening") unless same_identity
+
+              value = file.read(max_bytes + 1)
+              reject!("\#{label} changed while reading") if
+                value.nil? || value.bytesize > max_bytes ||
+                value.bytesize != opened.size
+              value
+            end
+            after = File.lstat(path)
+            unchanged =
+              after.file? &&
+              !after.symlink? &&
+              after.dev == before.dev &&
+              after.ino == before.ino &&
+              after.size == bytes.bytesize
+            reject!("\#{label} identity changed after reading") unless unchanged
+            bytes
+          rescue SystemCallError
+            reject!("\#{label} is unavailable")
           end
 
           if ARGV == ["--version"]
@@ -97,6 +137,25 @@ module HiveLiveAgentProof
           reject!("task folder is outside the research stage") unless
             File.dirname(cwd) == stage_root
 
+          instruction_path = File.join(WORKSPACE, INSTRUCTION_RELATIVE_PATH)
+          [
+            File.join(WORKSPACE, ".hive-state"),
+            File.join(WORKSPACE, ".hive-state", "workflows"),
+            File.dirname(instruction_path)
+          ].each do |directory|
+            stat = File.lstat(directory)
+            reject!("authored instruction ancestor is unsafe") unless
+              stat.directory? && !stat.symlink?
+          rescue SystemCallError
+            reject!("authored instruction ancestor is unavailable")
+          end
+          instruction = bounded_regular_bytes!(
+            instruction_path,
+            max_bytes: INSTRUCTION_MAX_BYTES,
+            label: "authored instruction"
+          )
+          reject!("authored instruction is empty") if instruction.empty?
+
           prompt = ARGV.last.to_s
           expected_argv = [
             "-p",
@@ -116,7 +175,6 @@ module HiveLiveAgentProof
             "You are running stage research of the hive pipeline.",
             "Working directory: the task folder",
             "State file: research.md",
-            "Instruction:\\nResearch the launch.",
             "Write the stage output to `research.md`.",
             "If the output is final, end `research.md` with a single trailing line",
             "`<!-- COMPLETE -->`.",
@@ -126,6 +184,8 @@ module HiveLiveAgentProof
             required_prompt_fragments.index { |fragment| !prompt.include?(fragment) }
           reject!("stage prompt is missing required fragment \#{missing_prompt_fragment}") if
             missing_prompt_fragment
+          reject!("stage prompt does not carry the exact authored instruction") unless
+            prompt.include?("Instruction:\\n\#{instruction}\\n")
           tag = prompt.match(/<(?<name>user_supplied_[0-9a-f]{16}) content_type="prior_artifacts">/)
           reject!("stage prompt lacks a bounded prior-artifact envelope") unless
             tag && prompt.include?("</\#{tag[:name]}>")
@@ -165,6 +225,9 @@ module HiveLiveAgentProof
               "provider_version" => #{CLAUDE_VERSION.dump},
               "stage" => "research",
               "workspace" => WORKSPACE,
+              "instruction_path" => INSTRUCTION_RELATIVE_PATH,
+              "instruction_sha256" => Digest::SHA256.hexdigest(instruction),
+              "instruction_size" => instruction.bytesize,
               "task_slug" => slug,
               "task_folder" =>
                 Pathname.new(cwd).relative_path_from(Pathname.new(WORKSPACE)).to_s,

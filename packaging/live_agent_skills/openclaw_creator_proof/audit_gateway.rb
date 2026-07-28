@@ -3,6 +3,8 @@ module HiveLiveAgentProof
     class AuditGateway
       RUNTIME_DIRECTORY = File.expand_path("gateway_runtime", __dir__).freeze
       RUNTIME_FILES = %w[
+        installation_identity.rb
+        bounded_regular_reader.rb
         attempt_ledger.rb
         candidate_identity.rb
         candidate_executor.rb
@@ -10,6 +12,15 @@ module HiveLiveAgentProof
         task_binding.rb
         main.rb
       ].freeze
+      RUNTIME_SOURCE_PATHS = RUNTIME_FILES.to_h do |name|
+        path =
+          if name == "installation_identity.rb"
+            File.expand_path("installation_identity.rb", __dir__)
+          else
+            File.join(RUNTIME_DIRECTORY, name)
+          end
+        [ name, path ]
+      end.freeze
       RUNTIME_SCHEMA = "hive-openclaw-audit-gateway-runtime".freeze
       RUNTIME_SCHEMA_VERSION = 1
 
@@ -119,10 +130,10 @@ module HiveLiveAgentProof
 
       def load_runtime_sources!
         RUNTIME_FILES.to_h do |name|
-          path = File.join(RUNTIME_DIRECTORY, name)
+          path = RUNTIME_SOURCE_PATHS.fetch(name)
           stat = File.lstat(path)
           unless stat.file? && !stat.symlink? &&
-                 File.realpath(path).start_with?("#{File.realpath(RUNTIME_DIRECTORY)}/")
+                 File.realpath(path) == File.expand_path(path)
             raise Failure.new(
               phase: "gateway",
               reason: "gateway_runtime_source_invalid",
@@ -190,6 +201,7 @@ module HiveLiveAgentProof
           require "json"
           require "open3"
           require "pathname"
+          require "timeout"
           require "yaml"
 
           runtime_dir = #{runtime_dir.dump}

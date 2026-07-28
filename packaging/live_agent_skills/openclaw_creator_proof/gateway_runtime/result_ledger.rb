@@ -38,23 +38,13 @@ module HiveLiveAgentProof
       private
 
       def read_rows
-        return [] unless File.exist?(@path) || File.symlink?(@path)
+        content = BoundedRegularReader.new(
+          path: @path,
+          max_bytes: MAX_BYTES,
+          label: "result ledger"
+        ).read
+        return [] if content.nil?
 
-        stat = File.lstat(@path)
-        raise InvalidLedger, "result ledger is not a regular file" unless
-          stat.file? && !stat.symlink?
-        raise InvalidLedger, "result ledger exceeds byte budget" if stat.size > MAX_BYTES
-
-        flags = File::RDONLY
-        flags |= File::NOFOLLOW if defined?(File::NOFOLLOW)
-        content = File.open(@path, flags) do |file|
-          raise InvalidLedger, "result ledger is not a regular file" unless file.stat.file?
-
-          bytes = file.read(MAX_BYTES + 1)
-          raise InvalidLedger, "result ledger exceeds byte budget" if bytes.bytesize > MAX_BYTES
-
-          bytes
-        end
         raise InvalidLedger, "result ledger has a truncated row" unless
           content.empty? || content.end_with?("\n")
 

@@ -1,9 +1,5 @@
 module HiveLiveAgentProof
   module OpenClawCreatorGatewayRuntime
-    class LedgerError < StandardError; end
-    class InvalidLedger < LedgerError; end
-    class LedgerWriteFailed < LedgerError; end
-
     class DurableJsonLineAppender
       def initialize(path, open_file: File.method(:open))
         @path = File.expand_path(path)
@@ -145,14 +141,13 @@ module HiveLiveAgentProof
       private
 
       def read_rows
-        return [] unless File.exist?(@path) || File.symlink?(@path)
+        content = BoundedRegularReader.new(
+          path: @path,
+          max_bytes: MAX_BYTES,
+          label: "audit ledger"
+        ).read
+        return [] if content.nil?
 
-        stat = File.lstat(@path)
-        raise InvalidLedger, "audit ledger is not a regular file" unless
-          stat.file? && !stat.symlink?
-        raise InvalidLedger, "audit ledger exceeds byte budget" if stat.size > MAX_BYTES
-
-        content = File.binread(@path)
         raise InvalidLedger, "audit ledger has a truncated row" unless
           content.empty? || content.end_with?("\n")
 

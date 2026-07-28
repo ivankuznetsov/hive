@@ -6,6 +6,7 @@ require "pathname"
 require "rubygems/package"
 require "tmpdir"
 require "zlib"
+require_relative "openclaw_creator_proof/installation_identity"
 
 module HiveLiveAgentProof
   SCHEMA_VERSION = 1
@@ -155,6 +156,21 @@ module HiveLiveAgentProof
   MARKDOWN
   WORKFLOW_CREATOR_STAGE_OUTPUT_SHA256 =
     Digest::SHA256.hexdigest(WORKFLOW_CREATOR_STAGE_OUTPUT).freeze
+  WORKFLOW_CREATOR_FIXTURE_EXECUTION_KIND = "deterministic_fixture".freeze
+  WORKFLOW_CREATOR_FIXTURE_MODEL_LOOP = "not_exercised".freeze
+  WORKFLOW_CREATOR_DRIVER_PATH =
+    File.expand_path("openclaw_native_tools.mjs", __dir__).freeze
+  WORKFLOW_CREATOR_DRIVER_SHA256 =
+    Digest::SHA256.file(WORKFLOW_CREATOR_DRIVER_PATH).hexdigest.freeze
+  WORKFLOW_CREATOR_POLICY_SURFACES = %w[
+    workspace_filesystem outside_sibling_write_edit_apply_patch
+    exec_allowlist_and_shell_composition configured_tool_inventory
+  ].freeze
+  WORKFLOW_CREATOR_OUTSIDE_READ_CAVEAT =
+    "OpenClaw beta.2 may admit configured read-only skill roots outside the workspace".freeze
+  WORKFLOW_CREATOR_SOCKET_LIMITATION =
+    "socket snapshots retain unattributed observations; destination identity " \
+    "and authorization are not adjudicated".freeze
   SAFE_SHA = /\A[0-9a-f]{40}\z/.freeze
   SAFE_REPOSITORY = /\A[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\z/.freeze
   SECRET_PATTERNS = [
@@ -343,8 +359,9 @@ module HiveLiveAgentProof
                             row["sha256"].to_s.match?(/\A[0-9a-f]{64}\z/)
                         } &&
                         files.map { |row| row["name"] }.sort == %w[
-                          attempt_ledger.rb candidate_executor.rb candidate_identity.rb main.rb
-                          result_ledger.rb task_binding.rb
+                          attempt_ledger.rb bounded_regular_reader.rb candidate_executor.rb
+                          candidate_identity.rb installation_identity.rb main.rb result_ledger.rb
+                          task_binding.rb
                         ]
 
     payload = {
@@ -369,11 +386,14 @@ module HiveLiveAgentProof
     return false unless record.is_a?(Hash) &&
                         fixture.is_a?(Hash) &&
                         record.keys.sort == %w[
-                          argv_sha256 artifact fixture instruction prompt_sha256 provider
-                          provider_version stage task_slug
+                          argv_sha256 artifact execution_kind fixture instruction model_loop
+                          prompt_sha256 provider provider_version stage task_slug
                         ] &&
                         record["provider"] == "claude" &&
                         record["provider_version"] == "2.1.118" &&
+                        record["execution_kind"] ==
+                          WORKFLOW_CREATOR_FIXTURE_EXECUTION_KIND &&
+                        record["model_loop"] == WORKFLOW_CREATOR_FIXTURE_MODEL_LOOP &&
                         record["stage"] == "research" &&
                         record["task_slug"] == task_slug &&
                         WORKFLOW_CREATOR_SAFE_SLUG.match?(task_slug.to_s) &&
@@ -418,15 +438,18 @@ module HiveLiveAgentProof
         record["runtime_source"]
       ) &&
       record["proof_mode"] == "direct_native_tool_surface" &&
-      record["driver_sha256"].to_s.match?(/\A[0-9a-f]{64}\z/) &&
+      record["driver_sha256"] == WORKFLOW_CREATOR_DRIVER_SHA256 &&
       record["native_tool_receipt_sha256"].to_s.match?(/\A[0-9a-f]{64}\z/) &&
-      record["monitored_surfaces"].is_a?(Array) &&
-      record["monitored_surfaces"].sort == %w[
-        configured_tool_inventory exec_allowlist_and_shell_composition
-        outside_sibling_write_edit_apply_patch workspace_filesystem
-      ] &&
+      record["monitored_surfaces"] == WORKFLOW_CREATOR_POLICY_SURFACES &&
       record["outside_read_caveat"].is_a?(Hash) &&
+      record["outside_read_caveat"].keys.sort ==
+        %w[caveat global_denial_claimed ordinary_sibling_decision] &&
+      record.dig("outside_read_caveat", "caveat") ==
+        WORKFLOW_CREATOR_OUTSIDE_READ_CAVEAT &&
       record.dig("outside_read_caveat", "global_denial_claimed") == false &&
+      %w[succeeded denied].include?(
+        record.dig("outside_read_caveat", "ordinary_sibling_decision")
+      ) &&
       record["configuration_sha256"].to_s.match?(/\A[0-9a-f]{64}\z/) &&
       record["approvals_sha256"].to_s.match?(/\A[0-9a-f]{64}\z/)
   end
@@ -501,18 +524,13 @@ module HiveLiveAgentProof
       record["network_authorization"] == "unverified" &&
       record["observed_unadjudicated_surfaces"] == [ "process_socket_snapshots" ] &&
       record["global_effect_absence_claimed"] == false &&
-      record["monitored_surfaces"].is_a?(Array) &&
-      (
-        %w[
-          configured_tool_inventory exec_allowlist_and_shell_composition
-          outside_sibling_write_edit_apply_patch workspace_before_after_snapshots
-          workspace_filesystem
-        ] - record["monitored_surfaces"]
-      ).empty? &&
+      record["monitored_surfaces"] ==
+        [ *WORKFLOW_CREATOR_POLICY_SURFACES, "workspace_before_after_snapshots" ] &&
       !record["monitored_surfaces"].include?("process_socket_snapshots") &&
-      record["limitations"].is_a?(Array) &&
-      record["limitations"].length == 2 &&
-      record["limitations"].all? { |limitation| limitation.is_a?(String) && !limitation.empty? }
+      record["limitations"] == [
+        WORKFLOW_CREATOR_OUTSIDE_READ_CAVEAT,
+        WORKFLOW_CREATOR_SOCKET_LIMITATION
+      ]
   end
 
   def valid_openclaw_package_evidence?(record)
@@ -951,101 +969,13 @@ module HiveLiveAgentProof
 
       path = File.join(@creator_evidence_dir, actual_names.fetch(0))
       row = HiveLiveAgentProof.read_json(path)
-      unless row.is_a?(Hash) && row["schema"] == "hive-live-workflow-creator-evidence" &&
-             row["schema_version"] == SCHEMA_VERSION && row["platform"] == "openclaw" &&
-             row["candidate_sha"] == @candidate_sha && row["result"] == "passed"
-        raise Error, "workflow-creator evidence identity or result is invalid"
-      end
-      unless row.dig("skill", "canonical_digest") == manifest["canonical_digest"] &&
-             row.dig("skill", "skill_version") == manifest["skill_version"]
-        raise Error, "workflow-creator evidence canonical provenance mismatch"
-      end
-      unless HiveLiveAgentProof.valid_native_activation?("openclaw", row["native_activation"])
-        raise Error, "workflow-creator native activation evidence is invalid"
-      end
-      unless HiveLiveAgentProof.valid_creator_runtime_evidence?(row)
-        raise Error, "workflow-creator runtime identity or teardown evidence is invalid"
-      end
-      expected_prompt = Digest::SHA256.hexdigest(WORKFLOW_CREATOR_PROMPT)
-      expected_task_prompt = Digest::SHA256.hexdigest(WORKFLOW_CREATOR_TASK_PROMPT)
-      unless row["prompt_sha256"] == expected_prompt &&
-             row["task_prompt_sha256"] == expected_task_prompt
-        raise Error, "workflow-creator prompt or command sequence is invalid"
-      end
-      validate_creator_result!(row)
-      unless HiveLiveAgentProof.valid_workflow_creator_commands?(
-        row["hive_commands"], task_slug: row.dig("task", "slug")
+      WorkflowCreatorContract.validate!(
+        row: row, manifest: manifest, candidate_sha: @candidate_sha
       )
-        raise Error, "workflow-creator prompt or command sequence is invalid"
-      end
-      unless row.dig("secret_scan", "status") == "passed" && row.dig("cleanup", "status") == "passed"
-        raise Error, "workflow-creator evidence lacks secret-scan or cleanup proof"
-      end
       findings = HiveLiveAgentProof.secret_findings(File.read(path))
       raise Error, "workflow-creator evidence secret scan failed: #{findings.join(', ')}" unless findings.empty?
 
       row
-    end
-
-    def validate_creator_result!(row)
-      created = row["created_files"]
-      unless created.is_a?(Array) && created.map { |record| record["path"] }.sort == WORKFLOW_CREATOR_FILES
-        raise Error, "workflow-creator created files are incomplete"
-      end
-      unless created.all? { |record| record.keys.sort == %w[path sha256 size] &&
-        record["sha256"].to_s.match?(/\A[0-9a-f]{64}\z/) && record["size"].to_i.positive? }
-        raise Error, "workflow-creator created-file records are invalid"
-      end
-      descriptor = row["descriptor"]
-      descriptor_file = created.find do |record|
-        record["path"] == ".hive-state/workflows/editorial.yml"
-      end
-      unless HiveLiveAgentProof.valid_creator_descriptor_evidence?(descriptor) &&
-             descriptor_file &&
-             descriptor["sha256"] == descriptor_file["sha256"]
-        raise Error, "workflow-creator descriptor contract is invalid"
-      end
-
-      validation = row["validation"]
-      stages = validation.is_a?(Hash) ? validation["stages"] : nil
-      outcomes = validation.is_a?(Hash) ? validation["human_outcomes"] : nil
-      unless validation&.fetch("valid", false) == true &&
-             stages == %w[research draft approval] &&
-             validation["automatic_edges"] == [ %w[research draft], %w[draft approval] ] &&
-             outcomes == [
-               { "stage" => "approval", "name" => "approve", "complete" => true,
-                 "artifact" => "draft.md", "to" => nil },
-               { "stage" => "approval", "name" => "reject", "complete" => false,
-                 "artifact" => nil, "to" => "draft" }
-             ]
-        raise Error, "workflow-creator normalized graph is invalid"
-      end
-      task = row["task"]
-      task_slug = task.is_a?(Hash) ? task["slug"].to_s : ""
-      fixture = row.dig("executables", "nested_stage_fixture")
-      unless HiveLiveAgentProof.valid_creator_stage_execution?(
-        row["stage_execution"], task_slug: task_slug, fixture: fixture
-      )
-        raise Error, "workflow-creator nested stage evidence is invalid"
-      end
-      unless row["creation_only_task_count"] == 0 && row["task_count"] == 1 &&
-             task == {
-               "slug" => task_slug,
-               "first_slug" => task_slug,
-               "retry_slug" => task_slug,
-               "workflow" => "editorial",
-               "first_created" => true,
-               "retry_created" => false,
-               "run_count" => 1,
-               "current_stage" => "1-research"
-             } && WORKFLOW_CREATOR_SAFE_SLUG.match?(task_slug) &&
-             row["unauthorized_effects_observed"] == [] &&
-             row["external_actions"] == row["unauthorized_effects_observed"] &&
-             HiveLiveAgentProof.valid_external_actions_scope?(
-               row["external_actions_scope"]
-             )
-        raise Error, "workflow-creator proof contains an unauthorized side effect"
-      end
     end
   end
 
@@ -1131,40 +1061,11 @@ module HiveLiveAgentProof
 
     def validate_workflow_creator!(manifest)
       row = @attestation["workflow_creator"]
-      unless row.is_a?(Hash) && row["schema"] == "hive-live-workflow-creator-evidence" &&
-             row["platform"] == "openclaw" && row["candidate_sha"] == @candidate_sha &&
-             row["result"] == "passed" && row.dig("skill", "canonical_digest") == manifest["canonical_digest"] &&
-             row.dig("secret_scan", "status") == "passed" && row.dig("cleanup", "status") == "passed"
-        raise Error, "workflow-creator attested evidence is incomplete"
-      end
-      unless HiveLiveAgentProof.valid_native_activation?("openclaw", row["native_activation"])
-        raise Error, "workflow-creator attested native activation evidence is invalid"
-      end
-      unless HiveLiveAgentProof.valid_creator_runtime_evidence?(row)
-        raise Error, "workflow-creator attested runtime evidence is invalid"
-      end
-      task_slug = row.dig("task", "slug")
-      fixture = row.dig("executables", "nested_stage_fixture")
-      unless row["prompt_sha256"] == Digest::SHA256.hexdigest(WORKFLOW_CREATOR_PROMPT) &&
-             row["task_prompt_sha256"] == Digest::SHA256.hexdigest(WORKFLOW_CREATOR_TASK_PROMPT) &&
-             HiveLiveAgentProof.valid_workflow_creator_commands?(
-               row["hive_commands"], task_slug: task_slug
-             ) &&
-             row["creation_only_task_count"] == 0 && row["task_count"] == 1 &&
-             row["task"].is_a?(Hash) && row["task"]["retry_created"] == false &&
-             row["task"]["first_slug"] == task_slug && row["task"]["retry_slug"] == task_slug &&
-             row["task"]["run_count"] == 1 &&
-             HiveLiveAgentProof.valid_creator_descriptor_evidence?(row["descriptor"]) &&
-             HiveLiveAgentProof.valid_creator_stage_execution?(
-               row["stage_execution"], task_slug: task_slug, fixture: fixture
-             ) &&
-             row["unauthorized_effects_observed"] == [] &&
-             row["external_actions"] == row["unauthorized_effects_observed"] &&
-             HiveLiveAgentProof.valid_external_actions_scope?(
-               row["external_actions_scope"]
-             )
-        raise Error, "workflow-creator attested contract is invalid"
-      end
+      WorkflowCreatorContract.validate!(
+        row: row, manifest: manifest, candidate_sha: @candidate_sha
+      )
     end
   end
 end
+
+require_relative "workflow_creator_contract"

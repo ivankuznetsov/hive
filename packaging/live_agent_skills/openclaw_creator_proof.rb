@@ -41,9 +41,11 @@ module HiveLiveAgentProof
         super(detail)
       end
     end
+    require_relative "openclaw_creator_proof/installation_identity"
     require_relative "openclaw_creator_proof/installation_receipt"
     require_relative "openclaw_creator_proof/safe_tar_materializer"
     require_relative "openclaw_creator_proof/audit_gateway"
+    require_relative "openclaw_creator_proof/gateway_runtime/bounded_regular_reader"
     require_relative "openclaw_creator_proof/gateway_runtime/attempt_ledger"
     require_relative "openclaw_creator_proof/gateway_runtime/result_ledger"
     require_relative "openclaw_creator_proof/process_budget"

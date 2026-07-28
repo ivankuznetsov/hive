@@ -785,14 +785,20 @@ the exact five-tool inventory, successful workspace read/write/edit/apply-patch
 and Hive exec calls, and unchanged-sentinel denials for sibling filesystem
 mutations plus absolute, redirected, and chained exec attempts. The
 deterministic fake's authoring receipt is direct native-tool-surface evidence,
-not model-loop evidence, and the beta's outside-read skill-root caveat remains
-explicit. No provider credential was used. The gateway retains serialization
+not model-loop evidence; it is now explicitly typed as
+`execution_kind=deterministic_fixture` with `model_loop=not_exercised`, and the
+beta's outside-read skill-root caveat remains explicit. Old minimal proof rows
+cannot be relabelled as this evidence. No provider credential was used. The
+gateway retains serialization
 through candidate completion, fsyncs a deterministic-ID attempted row before
 candidate launch, closes it with a terminal row, and rejects malformed, failed,
-or pending history before any retry. Its six-file runtime/config manifest is
+or pending history before any retry. Its eight-file runtime/config manifest is
 digest-bound in the launcher and proof evidence. These IDs detect corruption,
 truncation, and broken pairing but do not authenticate a coherent same-UID
-rewrite. A separate strict result ledger plus symlink-free bounded task binding
+rewrite. Both ledgers now share a bounded no-follow reader that detects
+path/descriptor substitution and path changes around the read, but that does
+not add authentication against a same-UID coherent rewrite. A separate strict
+result ledger plus symlink-free bounded task binding
 now require ordinal 6 `created=true` and exact slug/workflow/idempotency metadata
 before ordinal 7 launches. Raw socket rows remain unattributed observations
 outside the authorization verdict; no provider identity is inferred from
@@ -813,6 +819,16 @@ authoring, the public-export native control matrix, independently observed
 scoped effects, complete runtime-closure identities,
 nine successful/zero denied-or-failed gateway rows, proof-first failure
 partitions, secret scan, outer-owner teardown, and cleanup.
+
+The producer, attestor, verifier, and audit gateway now share one complete
+installation-identity record, and attestation and verification share one
+workflow-creator contract. Retained validation intentionally avoids
+dereferencing cleaned-up paths; live validation recomputes filesystem identity.
+These changes close contract drift, not containment loss: proof-root teardown
+and owner death remain governed by the existing containment owner, a Linux task
+stuck in uninterruptible `D` state can still outlive a bounded teardown window,
+and raw socket observations remain unattributed. Those limitations must not be
+promoted into cgroup, global-filesystem, or network-authorization claims.
 
 ## WorkLedger is an internal boundary, not a published format (2026-07-26)
 

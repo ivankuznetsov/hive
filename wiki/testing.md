@@ -45,9 +45,13 @@ npm lock to deterministic entry-bounded manifests of their complete read-only
 installed trees. Receipts also bind executable/launcher bytes and the invoked
 interpreter realpath, digest, and version, covering OpenClaw imports plus the
 candidate RubyGems inner launcher. The runner revalidates each identity
-immediately around relevant execution. The lock pins a 306-package transitive
+immediately around relevant execution through the same installation-identity
+API that the gateway uses. Retained attestation validates the complete record
+without depending on paths already removed by cleanup, while live validation
+recomputes file, tree, interpreter, artifact, receipt, package, and lock
+bindings and rejects aliasing. The lock pins a 306-package transitive
 inventory; the hosted job uses Node 22.23.1 and `npm ci --ignore-scripts`.
-The gateway installer copies a committed six-file runtime byte-for-byte; its
+The gateway installer copies a committed eight-file runtime byte-for-byte; its
 small launcher binds the immutable config and every runtime file by SHA-256,
 rejecting links or digest drift before loading any gateway code. The same
 config/runtime manifest identity is retained in proof evidence and required by
@@ -89,7 +93,9 @@ read/write/edit/apply-patch, the allowed `hive version`, and unchanged-sentinel
 denials for sibling write/edit/apply-patch plus absolute, redirected, and
 chained exec attempts. The pinned beta's outside-read skill-root caveat is
 retained without a global denial claim. The deterministic fake uses the same
-public-export native authoring seam but records `model_loop=not_exercised`.
+public-export native authoring seam but records the exact pair
+`execution_kind=deterministic_fixture` and `model_loop=not_exercised`; omitting
+or relabelling either field fails closed.
 Filesystem mutations and `/proc` network sockets are independently observed;
 missing observation fails closed. Socket rows remain raw, unattributed
 agent/process-window observations. Because destination identity and
@@ -103,6 +109,11 @@ The transaction lock stays held through candidate completion. Before budget,
 order, dynamic-binding, identity checks, or candidate launch, the gateway
 durably appends and fsyncs an immutable `attempted` row. It then appends one
 `terminal` row with the same stable attempt ID for success, denial, or failure.
+Both ledgers use the same bounded regular-file reader: no-follow open,
+path/descriptor identity comparison, a maximum-plus-one-byte read, and a
+post-read path identity check. Focused tests fault-inject link swaps,
+descriptor substitution, growth, truncation, and oversized input through that
+shared seam.
 Wrong order, digest drift, budget exhaustion, candidate failure, an extra
 attempt, malformed/duplicate/mismatched rows, or an unresolved attempted row
 terminally poisons the session before another candidate launch. Success

@@ -8,6 +8,21 @@ require_relative "../../../packaging/release_candidate/runner"
 class ReleaseCandidateArtifactsTest < Minitest::Test
   include HiveTestHelper
 
+  ROOT = File.expand_path("../../..", __dir__)
+
+  def test_builder_revision_covers_shared_creator_validator_and_runtime_inputs
+    assert_equal(
+      %w[
+        packaging/live_agent_skills/proof.rb
+        packaging/live_agent_skills/build.rb
+        packaging/live_agent_skills/workflow_creator_contract.rb
+        packaging/live_agent_skills/openclaw_creator_proof/installation_identity.rb
+        packaging/live_agent_skills/openclaw_creator_proof/gateway_runtime/bounded_regular_reader.rb
+      ],
+      HiveReleaseCandidate::Artifacts::LIVE_AGENT_BUILDER_INPUTS
+    )
+  end
+
   def test_rejects_a_non_full_candidate_sha_before_building
     error = assert_raises(HiveReleaseCandidate::Error) do
       HiveReleaseCandidate::Artifacts.new(
@@ -149,10 +164,19 @@ class ReleaseCandidateArtifactsTest < Minitest::Test
     source_name = "hive-source-#{'a' * 40}.tar.gz"
     proof_bytes = "proof builder\n"
     build_bytes = "build wrapper\n"
+    builder_sources =
+      HiveReleaseCandidate::Artifacts::LIVE_AGENT_BUILDER_INPUTS.to_h do |relative|
+        bytes =
+          case relative
+          when "packaging/live_agent_skills/proof.rb" then proof_bytes
+          when "packaging/live_agent_skills/build.rb" then build_bytes
+          else File.binread(File.join(ROOT, relative))
+          end
+        [ relative, bytes ]
+      end
     build_source_fixture(
       File.join(candidate, source_name),
-      proof_bytes: proof_bytes,
-      build_bytes: build_bytes,
+      builder_sources: builder_sources,
       root: dir
     )
     files[source_name] = [ "source", nil ]
@@ -168,8 +192,9 @@ class ReleaseCandidateArtifactsTest < Minitest::Test
       ]
     end
     builder_digest = Digest::SHA256.new
-    builder_digest << "proof.rb\0" << proof_bytes << "\0"
-    builder_digest << "build.rb\0" << build_bytes << "\0"
+    builder_sources.each do |relative, bytes|
+      builder_digest << File.basename(relative) << "\0" << bytes << "\0"
+    end
     managed = File.expand_path("../../../packaging/managed_web_archive.rb", __dir__)
     builder_digest << "managed_web_archive.rb\0" << File.binread(managed) << "\0"
     manifest = {
@@ -188,12 +213,13 @@ class ReleaseCandidateArtifactsTest < Minitest::Test
     )
   end
 
-  def build_source_fixture(destination, proof_bytes:, build_bytes:, root:)
+  def build_source_fixture(destination, builder_sources:, root:)
     stage = File.join(root, "source-stage")
-    builders = File.join(stage, "packaging/live_agent_skills")
-    FileUtils.mkdir_p(builders)
-    File.binwrite(File.join(builders, "proof.rb"), proof_bytes)
-    File.binwrite(File.join(builders, "build.rb"), build_bytes)
+    builder_sources.each do |relative, bytes|
+      path = File.join(stage, relative)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.binwrite(path, bytes)
+    end
     _stdout, stderr, status = Open3.capture3("tar", "-czf", destination, "-C", stage, ".")
     raise stderr unless status.success?
   end

@@ -763,8 +763,8 @@ class OpenClawCreatorProofTest < Minitest::Test
       assert_match(/\A[0-9a-f]{64}\z/, bundle.fetch("config_sha256"))
       assert_match(/\A[0-9a-f]{64}\z/, bundle.fetch("manifest_sha256"))
       assert_equal %w[
-        attempt_ledger.rb candidate_executor.rb candidate_identity.rb main.rb result_ledger.rb
-        task_binding.rb
+        attempt_ledger.rb bounded_regular_reader.rb candidate_executor.rb
+        candidate_identity.rb installation_identity.rb main.rb result_ledger.rb task_binding.rb
       ], bundle.fetch("files").map { |row| row.fetch("name") }.sort
       refute_equal File.realpath(candidate), File.realpath(gateway)
     end
@@ -1252,10 +1252,8 @@ class OpenClawCreatorProofTest < Minitest::Test
         gateway.gateway_record.fetch("runtime_bundle").fetch("files").each do |record|
           assert_equal(
             File.binread(
-              File.join(
-                HiveLiveAgentProof::OpenClawCreatorProof::AuditGateway::RUNTIME_DIRECTORY,
-                record.fetch("name")
-              )
+              HiveLiveAgentProof::OpenClawCreatorProof::AuditGateway::
+                RUNTIME_SOURCE_PATHS.fetch(record.fetch("name"))
             ),
             File.binread(File.join(gateway_root, "runtime", record.fetch("name"))),
             label
@@ -1435,6 +1433,106 @@ class OpenClawCreatorProofTest < Minitest::Test
         assert_includes error.message, "write/fsync failed"
         assert_includes error.message, label == "write" ? "space" : "Invalid"
       end
+    end
+  end
+
+  def test_bounded_regular_reader_rejects_open_and_read_races_without_overreading
+    reader_class =
+      HiveLiveAgentProof::OpenClawCreatorGatewayRuntime::BoundedRegularReader
+    stat_class = Struct.new(:dev, :ino, :size) do
+      def file? = true
+      def symlink? = false
+    end
+
+    with_tmp_dir do |dir|
+      path = File.join(dir, "ledger")
+      File.binwrite(path, "safe")
+      assert_equal(
+        "safe",
+        reader_class.new(path: path, max_bytes: 4, label: "test ledger").read
+      )
+
+      File.binwrite(path, "oversized")
+      error = assert_raises(
+        HiveLiveAgentProof::OpenClawCreatorGatewayRuntime::InvalidLedger
+      ) do
+        reader_class.new(path: path, max_bytes: 4, label: "test ledger").read
+      end
+      assert_includes error.message, "exceeds byte budget"
+    end
+
+    before = stat_class.new(1, 10, 4)
+    opened = stat_class.new(1, 11, 4)
+    fake_file = Object.new
+    fake_file.define_singleton_method(:stat) { opened }
+    fake_file.define_singleton_method(:read) { |_limit| flunk("identity mismatch read") }
+    open_file = ->(_path, _flags, &block) { block.call(fake_file) }
+    assert_raises(
+      HiveLiveAgentProof::OpenClawCreatorGatewayRuntime::InvalidLedger
+    ) do
+      reader_class.new(
+        path: "/proof/ledger", max_bytes: 4, label: "test ledger",
+        lstat: ->(_path) { before }, open_file: open_file
+      ).read
+    end
+
+    opened = stat_class.new(1, 10, 4)
+    fake_file = Object.new
+    fake_file.define_singleton_method(:stat) { opened }
+    observed_limit = nil
+    fake_file.define_singleton_method(:read) do |limit|
+      observed_limit = limit
+      "grown"
+    end
+    open_file = ->(_path, _flags, &block) { block.call(fake_file) }
+    assert_raises(
+      HiveLiveAgentProof::OpenClawCreatorGatewayRuntime::InvalidLedger
+    ) do
+      reader_class.new(
+        path: "/proof/ledger", max_bytes: 4, label: "test ledger",
+        lstat: ->(_path) { before }, open_file: open_file
+      ).read
+    end
+    assert_equal 5, observed_limit
+
+    post = stat_class.new(1, 12, 4)
+    stats = [ before, post ]
+    fake_file = Object.new
+    fake_file.define_singleton_method(:stat) { opened }
+    fake_file.define_singleton_method(:read) { |_limit| "safe" }
+    open_file = ->(_path, _flags, &block) { block.call(fake_file) }
+    assert_raises(
+      HiveLiveAgentProof::OpenClawCreatorGatewayRuntime::InvalidLedger
+    ) do
+      reader_class.new(
+        path: "/proof/ledger", max_bytes: 4, label: "test ledger",
+        lstat: ->(_path) { stats.shift }, open_file: open_file
+      ).read
+    end
+  end
+
+  def test_attempt_and_result_ledgers_accept_missing_or_stable_empty_files
+    runtime = HiveLiveAgentProof::OpenClawCreatorGatewayRuntime
+    with_tmp_dir do |dir|
+      audit_path = File.join(dir, "audit.jsonl")
+      result_path = File.join(dir, "results.jsonl")
+      attempt = runtime::AttemptLedger.new(
+        path: audit_path,
+        candidate_realpath: "/proof/hive",
+        candidate_sha256: "a" * 64
+      )
+      result = runtime::ResultLedger.new(
+        path: result_path,
+        safe_slug: HiveLiveAgentProof::WORKFLOW_CREATOR_SAFE_SLUG
+      )
+
+      assert_empty attempt.read.pairs
+      assert_empty result.read(attempt_pairs: [])
+
+      FileUtils.touch([ audit_path, result_path ])
+
+      assert_empty attempt.read.pairs
+      assert_empty result.read(attempt_pairs: [])
     end
   end
 
@@ -2059,8 +2157,8 @@ class OpenClawCreatorProofTest < Minitest::Test
       assert_match(/\A[0-9a-f]{64}\z/, gateway_runtime.fetch("config_sha256"))
       assert_match(/\A[0-9a-f]{64}\z/, gateway_runtime.fetch("manifest_sha256"))
       assert_equal %w[
-        attempt_ledger.rb candidate_executor.rb candidate_identity.rb main.rb result_ledger.rb
-        task_binding.rb
+        attempt_ledger.rb bounded_regular_reader.rb candidate_executor.rb
+        candidate_identity.rb installation_identity.rb main.rb result_ledger.rb task_binding.rb
       ], gateway_runtime.fetch("files").map { |row| row.fetch("name") }.sort
       assert_equal "passed", evidence.dig("teardown", "status")
       assert_equal "passed", evidence.dig("cleanup", "status")
@@ -2386,14 +2484,17 @@ class OpenClawCreatorProofTest < Minitest::Test
     refute_includes installer, "eval("
     refute_includes installer, "def current_tree"
     assert_equal %w[
-      attempt_ledger.rb candidate_identity.rb candidate_executor.rb result_ledger.rb
-      task_binding.rb main.rb
+      installation_identity.rb bounded_regular_reader.rb attempt_ledger.rb
+      candidate_identity.rb candidate_executor.rb result_ledger.rb task_binding.rb main.rb
     ], runtime_files
     runtime_files.each do |name|
-      path = File.join(source_root, "gateway_runtime", name)
+      path =
+        HiveLiveAgentProof::OpenClawCreatorProof::AuditGateway::
+          RUNTIME_SOURCE_PATHS.fetch(name)
       assert File.file?(path), name
       refute File.symlink?(path), name
-      assert_operator File.readlines(path).length, :<, 350, name
+      limit = name == "installation_identity.rb" ? 650 : 350
+      assert_operator File.readlines(path).length, :<, limit, name
     end
     result_reader = File.read(File.join(source_root, "gateway_runtime", "result_ledger.rb"))
     main = File.read(File.join(source_root, "gateway_runtime", "main.rb"))

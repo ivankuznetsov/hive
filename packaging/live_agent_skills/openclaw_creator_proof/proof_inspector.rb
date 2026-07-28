@@ -281,10 +281,10 @@ module HiveLiveAgentProof
         )
         receipt = JSON.parse(bytes)
         expected_keys = %w[
-          after_sha256 argv_sha256 before_sha256 executable_sha256 instruction_path
-          instruction_sha256 instruction_size invocation_count marker output_file
-          prompt_sha256 provider provider_version schema schema_version size stage
-          task_folder task_slug workspace
+          after_sha256 argv_sha256 before_sha256 executable_sha256 execution_kind
+          instruction_path instruction_sha256 instruction_size invocation_count marker
+          model_loop output_file prompt_sha256 provider provider_version schema
+          schema_version size stage task_folder task_slug workspace
         ]
         relative_folder =
           Pathname.new(folder).relative_path_from(Pathname.new(@workspace)).to_s
@@ -294,6 +294,9 @@ module HiveLiveAgentProof
                 receipt["schema_version"] == NestedStageFixture::SCHEMA_VERSION &&
                 receipt["provider"] == "claude" &&
                 receipt["provider_version"] == NestedStageFixture::CLAUDE_VERSION &&
+                receipt["execution_kind"] ==
+                  WORKFLOW_CREATOR_FIXTURE_EXECUTION_KIND &&
+                receipt["model_loop"] == WORKFLOW_CREATOR_FIXTURE_MODEL_LOOP &&
                 receipt["stage"] == "research" &&
                 receipt["workspace"] == @workspace &&
                 receipt["task_slug"] == slug &&
@@ -352,6 +355,8 @@ module HiveLiveAgentProof
         {
           "provider" => "claude",
           "provider_version" => NestedStageFixture::CLAUDE_VERSION,
+          "execution_kind" => WORKFLOW_CREATOR_FIXTURE_EXECUTION_KIND,
+          "model_loop" => WORKFLOW_CREATOR_FIXTURE_MODEL_LOOP,
           "stage" => "research",
           "task_slug" => slug,
           "instruction" => {
@@ -392,7 +397,6 @@ module HiveLiveAgentProof
         allowed = approvals.dig("agents", "main", "allowlist").to_a
         receipts = policy["tool_receipts"].to_a
         receipts_by_id = receipts.to_h { |row| [ row["id"], row ] }
-        driver_sha256 = Digest::SHA256.file(OpenClawPolicyProbe::DRIVER_SOURCE_PATH).hexdigest
         successful = %w[
           inside_write inside_read inside_edit inside_apply_patch exec_hive_version
         ]
@@ -420,7 +424,7 @@ module HiveLiveAgentProof
                 ) &&
                 policy["proof_mode"] == "direct_native_tool_surface" &&
                 policy["public_exports"] == OpenClawPolicyProbe::PUBLIC_EXPORTS &&
-                policy["driver_sha256"] == driver_sha256 &&
+                policy["driver_sha256"] == WORKFLOW_CREATOR_DRIVER_SHA256 &&
                 policy.dig("runtime_package", "name") == "openclaw" &&
                 policy.dig("runtime_package", "version") == OPENCLAW_VERSION &&
                 policy["effective_tools"] == %w[apply_patch edit exec read write] &&
@@ -430,6 +434,11 @@ module HiveLiveAgentProof
                 policy["exec_allowlist"] == [ gateway ] &&
                 policy["unauthorized_effects_observed"] == [] &&
                 policy["monitored_surfaces"].is_a?(Array) &&
+                policy["outside_read_caveat"].is_a?(Hash) &&
+                policy["outside_read_caveat"].keys.sort ==
+                  %w[caveat global_denial_claimed ordinary_sibling_decision] &&
+                policy.dig("outside_read_caveat", "caveat") ==
+                  WORKFLOW_CREATOR_OUTSIDE_READ_CAVEAT &&
                 policy.dig("outside_read_caveat", "global_denial_claimed") == false &&
                 receipts.map { |row| row["id"] }.uniq.length == receipts.length &&
                 successful.all? {
@@ -447,7 +456,7 @@ module HiveLiveAgentProof
           "allowed_executables" => [ gateway ],
           "runtime_source" => policy.fetch("source"),
           "proof_mode" => policy.fetch("proof_mode"),
-          "driver_sha256" => driver_sha256,
+          "driver_sha256" => WORKFLOW_CREATOR_DRIVER_SHA256,
           "native_tool_receipt_sha256" => Digest::SHA256.file(@policy_path).hexdigest,
           "monitored_surfaces" => policy.fetch("monitored_surfaces"),
           "outside_read_caveat" => policy.fetch("outside_read_caveat"),
@@ -491,9 +500,8 @@ module HiveLiveAgentProof
           "network_authorization" => "unverified",
           "global_effect_absence_claimed" => false,
           "limitations" => [
-            policy.dig("outside_read_caveat", "caveat"),
-            "socket snapshots retain unattributed observations; destination identity " \
-              "and authorization are not adjudicated"
+            WORKFLOW_CREATOR_OUTSIDE_READ_CAVEAT,
+            WORKFLOW_CREATOR_SOCKET_LIMITATION
           ]
         }
       rescue JSON::ParserError, KeyError, Errno::ENOENT, Errno::EACCES => e
@@ -560,8 +568,7 @@ module HiveLiveAgentProof
                   payload["proof_mode"] == "direct_native_tool_surface" &&
                   payload["model_loop"] == "not_exercised" &&
                   payload["public_exports"] == OpenClawPolicyProbe::PUBLIC_EXPORTS &&
-                  payload["driver_sha256"] ==
-                    Digest::SHA256.file(OpenClawPolicyProbe::DRIVER_SOURCE_PATH).hexdigest &&
+                  payload["driver_sha256"] == WORKFLOW_CREATOR_DRIVER_SHA256 &&
                   payload.dig("runtime_package", "version") == OPENCLAW_VERSION &&
                   payload["workspace"] == @workspace &&
                   payload["unauthorized_effects_observed"] == [] &&
@@ -578,8 +585,7 @@ module HiveLiveAgentProof
           {
             "proof_mode" => "credentialed_openclaw_agent",
             "model_loop" => "executed",
-            "driver_sha256" =>
-              Digest::SHA256.file(OpenClawPolicyProbe::DRIVER_SOURCE_PATH).hexdigest,
+            "driver_sha256" => WORKFLOW_CREATOR_DRIVER_SHA256,
             "receipt_sha256" => nil
           }
         end

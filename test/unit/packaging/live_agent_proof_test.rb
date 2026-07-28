@@ -465,6 +465,138 @@ class LiveAgentProofTest < Minitest::Test
     end
   end
 
+  def test_attestor_and_verifier_reject_incoherent_creator_contract_digests
+    mutations = {
+      "configuration" => lambda do |row|
+        row.fetch("effect_policy")["configuration_sha256"] = "f" * 64
+      end,
+      "approvals" => lambda do |row|
+        row.fetch("effect_policy")["approvals_sha256"] = "f" * 64
+      end,
+      "observation_policy" => lambda do |row|
+        row.fetch("effect_observations")["policy_sha256"] = "f" * 64
+      end,
+      "authoring_driver" => lambda do |row|
+        row.dig("effect_observations", "authoring")["driver_sha256"] = "f" * 64
+      end,
+      "committed_driver" => lambda do |row|
+        row.fetch("effect_policy")["driver_sha256"] = "f" * 64
+        row.dig("effect_observations", "authoring")["driver_sha256"] = "f" * 64
+      end,
+      "monitored_surfaces" => lambda do |row|
+        row.fetch("external_actions_scope")["monitored_surfaces"].reverse!
+      end,
+      "outside_read_caveat" => lambda do |row|
+        row.dig("effect_policy", "outside_read_caveat")["caveat"] = "broader claim"
+      end,
+      "limitations" => lambda do |row|
+        row.fetch("external_actions_scope")["limitations"] = [ "not exact", "still two" ]
+      end
+    }
+
+    mutations.each do |name, mutation|
+      assert_creator_mutation_rejected_by_attestor_and_verifier(name, &mutation)
+    end
+  end
+
+  def test_attestor_and_verifier_reject_unqualified_deterministic_fixture
+    assert_creator_mutation_rejected_by_attestor_and_verifier(
+      "missing_fixture_semantics"
+    ) do |row|
+      row.fetch("stage_execution").delete("execution_kind")
+      row.fetch("stage_execution").delete("model_loop")
+    end
+
+    assert_creator_mutation_rejected_by_attestor_and_verifier(
+      "misleading_fixture_semantics"
+    ) do |row|
+      row.fetch("stage_execution")["execution_kind"] = "live_model"
+      row.fetch("stage_execution")["model_loop"] = "executed"
+    end
+  end
+
+  def test_shared_creator_contract_rejects_installation_path_aliases
+    {
+      "within_candidate" => lambda do |row|
+        candidate = row.dig("executables", "candidate")
+        candidate["receipt_path"] = candidate.fetch("artifact_path")
+      end,
+      "across_installations" => lambda do |row|
+        row.dig("executables", "openclaw")["receipt_path"] =
+          row.dig("executables", "candidate", "artifact_path")
+      end
+    }.each do |name, mutation|
+      assert_creator_mutation_rejected_by_attestor_and_verifier(name, &mutation)
+    end
+  end
+
+  def test_shared_creator_contract_rejects_every_installation_identity_leaf_removal
+    with_tmp_dir do |dir|
+      artifacts = prepare_artifacts(dir)
+      creator_evidence = prepare_creator_evidence(dir, artifacts)
+      row = JSON.parse(
+        File.read(File.join(creator_evidence, "openclaw-workflow-creator.json"))
+      )
+      manifest = JSON.parse(
+        File.read(File.join(artifacts, "artifact-manifest.json"))
+      )
+      paths = {
+        "candidate" => [
+          %w[configured_path], %w[realpath], %w[sha256], %w[receipt_path],
+          %w[receipt_sha256], %w[kind], %w[artifact_path], %w[artifact_sha256],
+          %w[artifact_size], %w[install_root], %w[tree_manifest],
+          %w[tree_manifest path], %w[tree_manifest sha256],
+          %w[tree_manifest size], %w[tree_manifest entry_count],
+          %w[tree_manifest total_file_bytes], %w[interpreter],
+          %w[interpreter configured_path], %w[interpreter realpath],
+          %w[interpreter sha256], %w[interpreter version],
+          %w[launcher_interpreter], %w[package], %w[package name],
+          %w[package version], %w[lock]
+        ],
+        "openclaw" => [
+          %w[configured_path], %w[realpath], %w[sha256], %w[version],
+          %w[receipt_path], %w[receipt_sha256], %w[kind], %w[artifact_path],
+          %w[artifact_sha256], %w[artifact_size], %w[install_root],
+          %w[tree_manifest], %w[tree_manifest path], %w[tree_manifest sha256],
+          %w[tree_manifest size], %w[tree_manifest entry_count],
+          %w[tree_manifest total_file_bytes], %w[interpreter],
+          %w[interpreter configured_path], %w[interpreter realpath],
+          %w[interpreter sha256], %w[interpreter version],
+          %w[launcher_interpreter], %w[package], %w[package name],
+          %w[package version], %w[package integrity], %w[lock],
+          %w[lock path], %w[lock sha256], %w[lock package_count]
+        ]
+      }
+
+      paths.each do |kind, leaves|
+        leaves.each do |leaf|
+          mutated = Marshal.load(Marshal.dump(row))
+          parent = leaf[0...-1].reduce(
+            mutated.dig("executables", kind)
+          ) { |value, key| value.fetch(key) }
+          parent.delete(leaf.last)
+
+          assert_raises(
+            HiveLiveAgentProof::Error,
+            "#{kind}.#{leaf.join('.')} must be required"
+          ) do
+            HiveLiveAgentProof::WorkflowCreatorContract.validate!(
+              row: mutated, manifest: manifest, candidate_sha: SHA
+            )
+          end
+        end
+      end
+
+      %w[candidate openclaw].each do |kind|
+        assert_creator_mutation_rejected_by_attestor_and_verifier(
+          "missing_#{kind}_artifact_size"
+        ) do |mutated|
+          mutated.dig("executables", kind).delete("artifact_size")
+        end
+      end
+    end
+  end
+
   def test_verifier_rejects_openclaw_package_identity_with_a_matching_digest
     with_tmp_dir do |dir|
       artifacts = prepare_artifacts(dir)
@@ -482,7 +614,7 @@ class LiveAgentProofTest < Minitest::Test
       error = assert_raises(HiveLiveAgentProof::Error) do
         verifier(proof, digest).call
       end
-      assert_includes error.message, "attested runtime evidence"
+      assert_includes error.message, "runtime identity or teardown"
     end
   end
 
@@ -592,8 +724,8 @@ class LiveAgentProofTest < Minitest::Test
     FileUtils.mkdir_p(evidence)
     manifest = JSON.parse(File.read(File.join(artifacts, "artifact-manifest.json")))
     gateway_runtime_files = %w[
-      attempt_ledger.rb candidate_identity.rb candidate_executor.rb result_ledger.rb
-      task_binding.rb main.rb
+      installation_identity.rb bounded_regular_reader.rb attempt_ledger.rb
+      candidate_identity.rb candidate_executor.rb result_ledger.rb task_binding.rb main.rb
     ].each_with_index.map do |name, index|
       { "name" => name, "sha256" => (index + 8).to_s(16) * 64 }
     end
@@ -604,6 +736,73 @@ class LiveAgentProofTest < Minitest::Test
         "files" => gateway_runtime_files
       )
     )
+    gem_name, gem_record = manifest.fetch("files").find do |name, _record|
+      name.match?(/\Ahive-cli-[0-9].*\.gem\z/)
+    end
+    interpreter = {
+      "configured_path" => "/proof/runtime/ruby",
+      "realpath" => "/proof/runtime/ruby",
+      "sha256" => "e" * 64,
+      "version" => "ruby 3.4.10"
+    }
+    candidate_identity = {
+      "configured_path" => "/proof/candidate/bin/hive",
+      "realpath" => "/proof/candidate/bin/hive",
+      "sha256" => "1" * 64,
+      "receipt_path" => "/proof/receipts/candidate.json",
+      "receipt_sha256" => "d" * 64,
+      "kind" => "candidate_gem",
+      "artifact_path" => "/proof/artifacts/#{gem_name}",
+      "artifact_sha256" => gem_record.fetch("sha256"),
+      "artifact_size" => gem_record.fetch("size"),
+      "install_root" => "/proof/candidate",
+      "tree_manifest" => {
+        "path" => "/proof/receipts/candidate.json.tree.json",
+        "sha256" => "f" * 64,
+        "size" => 512,
+        "entry_count" => 8,
+        "total_file_bytes" => 4_096
+      },
+      "interpreter" => interpreter,
+      "launcher_interpreter" => nil,
+      "package" => {
+        "name" => "hive-cli",
+        "version" => manifest.fetch("hive_version")
+      },
+      "lock" => nil
+    }
+    openclaw_identity = {
+      "configured_path" => "/proof/openclaw/bin/openclaw",
+      "realpath" => "/proof/openclaw/bin/openclaw",
+      "sha256" => "3" * 64,
+      "receipt_path" => "/proof/receipts/openclaw.json",
+      "receipt_sha256" => "6" * 64,
+      "kind" => "openclaw_npm",
+      "artifact_path" => "/proof/artifacts/openclaw.tgz",
+      "artifact_sha256" => "0" * 64,
+      "artifact_size" => 1_024,
+      "install_root" => "/proof/openclaw",
+      "tree_manifest" => {
+        "path" => "/proof/receipts/openclaw.json.tree.json",
+        "sha256" => "9" * 64,
+        "size" => 4_096,
+        "entry_count" => 306,
+        "total_file_bytes" => 16_384
+      },
+      "interpreter" => interpreter,
+      "launcher_interpreter" => nil,
+      "package" => {
+        "name" => "openclaw",
+        "version" => HiveLiveAgentProof::WORKFLOW_CREATOR_OPENCLAW_VERSION,
+        "integrity" => HiveLiveAgentProof::WORKFLOW_CREATOR_OPENCLAW_INTEGRITY
+      },
+      "lock" => {
+        "path" => "/proof/openclaw/package-lock.json",
+        "sha256" => HiveLiveAgentProof::WORKFLOW_CREATOR_OPENCLAW_LOCK_SHA256,
+        "package_count" =>
+          HiveLiveAgentProof::WORKFLOW_CREATOR_OPENCLAW_PACKAGE_COUNT
+      }
+    }
     row = {
       "schema" => "hive-live-workflow-creator-evidence",
       "schema_version" => 1,
@@ -624,11 +823,7 @@ class LiveAgentProofTest < Minitest::Test
         "verified" => true
       },
       "executables" => {
-        "candidate" => {
-          "configured_path" => "/proof/candidate-hive",
-          "realpath" => "/proof/candidate-hive",
-          "sha256" => "1" * 64
-        },
+        "candidate" => candidate_identity,
         "audit_gateway" => {
           "configured_path" => "/proof/gateway/bin/hive",
           "realpath" => "/proof/gateway/bin/hive",
@@ -641,12 +836,9 @@ class LiveAgentProofTest < Minitest::Test
             "files" => gateway_runtime_files
           }
         },
-        "openclaw" => {
-          "configured_path" => "/proof/openclaw",
-          "realpath" => "/proof/openclaw",
-          "sha256" => "3" * 64,
+        "openclaw" => openclaw_identity.merge(
           "version" => "OpenClaw 2026.7.1-beta.2 (fixture)"
-        },
+        ),
         "nested_stage_fixture" => {
           "configured_path" => "/proof/fixture-bin/claude",
           "realpath" => "/proof/fixture-bin/claude",
@@ -664,22 +856,20 @@ class LiveAgentProofTest < Minitest::Test
         "allowed_executables" => [ "/proof/gateway/bin/hive" ],
         "runtime_source" => "openclaw-exact-runtime",
         "proof_mode" => "direct_native_tool_surface",
-        "driver_sha256" => "a" * 64,
+        "driver_sha256" => HiveLiveAgentProof::WORKFLOW_CREATOR_DRIVER_SHA256,
         "native_tool_receipt_sha256" => "b" * 64,
-        "monitored_surfaces" => %w[
-          workspace_filesystem outside_sibling_write_edit_apply_patch
-          exec_allowlist_and_shell_composition configured_tool_inventory
-        ],
+        "monitored_surfaces" => HiveLiveAgentProof::WORKFLOW_CREATOR_POLICY_SURFACES,
         "outside_read_caveat" => {
+          "ordinary_sibling_decision" => "succeeded",
           "global_denial_claimed" => false,
-          "caveat" => "Pinned beta permits configured skill-root reads."
+          "caveat" => HiveLiveAgentProof::WORKFLOW_CREATOR_OUTSIDE_READ_CAVEAT
         },
         "configuration_sha256" => "4" * 64,
         "approvals_sha256" => "7" * 64
       },
       "effect_observations" => {
         "status" => "observed",
-        "policy_sha256" => "8" * 64,
+        "policy_sha256" => "b" * 64,
         "filesystem_receipt_sha256" => "9" * 64,
         "filesystem_observation_count" => 2,
         "filesystem_mutation_count" => 3,
@@ -700,7 +890,7 @@ class LiveAgentProofTest < Minitest::Test
         "authoring" => {
           "proof_mode" => "credentialed_openclaw_agent",
           "model_loop" => "executed",
-          "driver_sha256" => "a" * 64,
+          "driver_sha256" => HiveLiveAgentProof::WORKFLOW_CREATOR_DRIVER_SHA256,
           "receipt_sha256" => nil
         }
       },
@@ -782,6 +972,8 @@ class LiveAgentProofTest < Minitest::Test
       "stage_execution" => {
         "provider" => "claude",
         "provider_version" => "2.1.118",
+        "execution_kind" => "deterministic_fixture",
+        "model_loop" => "not_exercised",
         "stage" => "research",
         "task_slug" => HiveLiveAgentProof::WORKFLOW_CREATOR_EXAMPLE_SLUG,
         "instruction" => {
@@ -808,18 +1000,16 @@ class LiveAgentProofTest < Minitest::Test
       "external_actions" => [],
       "external_actions_scope" => {
         "derivation" => "scoped_policy_and_filesystem_observations",
-        "monitored_surfaces" => %w[
-          workspace_filesystem outside_sibling_write_edit_apply_patch
-          exec_allowlist_and_shell_composition configured_tool_inventory
-          workspace_before_after_snapshots
+        "monitored_surfaces" => [
+          *HiveLiveAgentProof::WORKFLOW_CREATOR_POLICY_SURFACES,
+          "workspace_before_after_snapshots"
         ],
         "observed_unadjudicated_surfaces" => [ "process_socket_snapshots" ],
         "network_authorization" => "unverified",
         "global_effect_absence_claimed" => false,
         "limitations" => [
-          "Pinned beta permits configured skill-root reads.",
-          "socket snapshots retain unattributed observations; destination identity " \
-            "and authorization are not adjudicated"
+          HiveLiveAgentProof::WORKFLOW_CREATOR_OUTSIDE_READ_CAVEAT,
+          HiveLiveAgentProof::WORKFLOW_CREATOR_SOCKET_LIMITATION
         ]
       },
       "secret_scan" => { "status" => "passed" },
@@ -842,6 +1032,39 @@ class LiveAgentProofTest < Minitest::Test
       proof_dir: proof, candidate_sha: SHA, workflow_revision: WORKFLOW_SHA,
       repository: REPOSITORY, run_id: "42", run_attempt: "1", attestation_sha256: digest
     )
+  end
+
+  def assert_creator_mutation_rejected_by_attestor_and_verifier(name)
+    with_tmp_dir do |dir|
+      artifacts = prepare_artifacts(dir)
+      evidence = prepare_evidence(dir, artifacts)
+      creator_evidence = prepare_creator_evidence(dir, artifacts)
+      row_path = File.join(creator_evidence, "openclaw-workflow-creator.json")
+      row = JSON.parse(File.read(row_path))
+      yield row
+      HiveLiveAgentProof.write_json(row_path, row)
+
+      assert_raises(HiveLiveAgentProof::Error, "#{name} attestor acceptance") do
+        attest(
+          artifacts, evidence, creator_evidence,
+          File.join(dir, "proof-rejected-#{name}")
+        )
+      end
+
+      pristine_creator = prepare_creator_evidence(
+        File.join(dir, "pristine-#{name}"), artifacts
+      )
+      proof = File.join(dir, "proof-#{name}")
+      attest(artifacts, evidence, pristine_creator, proof)
+      attestation_path = File.join(proof, "attestation.json")
+      attestation = JSON.parse(File.read(attestation_path))
+      yield attestation.fetch("workflow_creator")
+      HiveLiveAgentProof.write_json(attestation_path, attestation)
+
+      assert_raises(HiveLiveAgentProof::Error, "#{name} verifier acceptance") do
+        verifier(proof, HiveLiveAgentProof.sha256(attestation_path)).call
+      end
+    end
   end
 
   def write_file(path, content)

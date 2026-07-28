@@ -223,6 +223,8 @@ module HiveLiveAgentProof
               "schema_version" => #{SCHEMA_VERSION},
               "provider" => "claude",
               "provider_version" => #{CLAUDE_VERSION.dump},
+              "execution_kind" => #{WORKFLOW_CREATOR_FIXTURE_EXECUTION_KIND.dump},
+              "model_loop" => #{WORKFLOW_CREATOR_FIXTURE_MODEL_LOOP.dump},
               "stage" => "research",
               "workspace" => WORKSPACE,
               "instruction_path" => INSTRUCTION_RELATIVE_PATH,

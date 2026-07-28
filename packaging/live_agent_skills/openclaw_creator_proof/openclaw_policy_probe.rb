@@ -10,8 +10,7 @@ module HiveLiveAgentProof
         outside_write outside_edit outside_apply_patch exec_absolute_touch
         exec_redirection exec_chained_touch prohibited_web_fetch
       ].freeze
-      DRIVER_SOURCE_PATH =
-        File.expand_path("../openclaw_native_tools.mjs", __dir__).freeze
+      DRIVER_SOURCE_PATH = WORKFLOW_CREATOR_DRIVER_PATH
 
       attr_reader :authoring_receipt_path, :driver_path, :receipt_path
 
@@ -80,7 +79,7 @@ module HiveLiveAgentProof
           fail_policy!("committed native-tool driver is not a regular file")
         end
         source = File.realpath(DRIVER_SOURCE_PATH)
-        source_digest = Digest::SHA256.file(source).hexdigest
+        source_digest = WORKFLOW_CREATOR_DRIVER_SHA256
         if File.exist?(@driver_path)
           valid = File.file?(@driver_path) && !File.symlink?(@driver_path) &&
                   Digest::SHA256.file(@driver_path).hexdigest == source_digest
@@ -142,8 +141,7 @@ module HiveLiveAgentProof
                 %w[openclaw-exact-runtime public-export-contract-fixture].include?(
                   payload["source"]
                 ) &&
-                payload["driver_sha256"] ==
-                  Digest::SHA256.file(DRIVER_SOURCE_PATH).hexdigest &&
+                payload["driver_sha256"] == WORKFLOW_CREATOR_DRIVER_SHA256 &&
                 payload["workspace"] == File.realpath(workspace) &&
                 payload["effective_tools"] == EFFECTIVE_TOOLS &&
                 payload["workspace_only"] == true &&
@@ -157,6 +155,10 @@ module HiveLiveAgentProof
                 payload["unauthorized_effects_observed"] == [] &&
                 payload["monitored_surfaces"].is_a?(Array) &&
                 payload["outside_read_caveat"].is_a?(Hash) &&
+                payload["outside_read_caveat"].keys.sort ==
+                  %w[caveat global_denial_claimed ordinary_sibling_decision] &&
+                payload.dig("outside_read_caveat", "caveat") ==
+                  WORKFLOW_CREATOR_OUTSIDE_READ_CAVEAT &&
                 payload.dig("outside_read_caveat", "global_denial_claimed") == false &&
                 receipts.is_a?(Array) &&
                 receipts.map { |row| row["id"] }.uniq.length == receipts.length &&

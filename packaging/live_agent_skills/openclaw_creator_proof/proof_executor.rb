@@ -325,33 +325,11 @@ module HiveLiveAgentProof
       end
 
       def revalidate_installation!(record, label)
-        expectations = {
-          expected_kind: record.fetch("kind"),
-          expected_package_name: record.fetch("package").fetch("name"),
-          expected_package_version: record.fetch("package").fetch("version")
-        }
-        if record.fetch("kind") == "openclaw_npm"
-          expectations.merge!(
-            expected_package_integrity: OPENCLAW_INTEGRITY,
-            expected_lock_sha256: OPENCLAW_LOCK_SHA256,
-            expected_package_count: OPENCLAW_LOCK_PACKAGE_COUNT
-          )
-        end
-        current = InstallationReceipt.new(
-          path: record.fetch("receipt_path"),
-          **expectations
-        ).call
-        keys = %w[
-          configured_path realpath sha256 receipt_sha256 install_root tree_manifest
-          interpreter launcher_interpreter package lock
-        ]
-        return if keys.all? { |key| current[key] == record[key] }
-
-        fail_with!(
-          "runtime_identity", "#{label}_installation_identity_changed",
-          "#{label} installed closure changed during proof execution"
+        InstallationIdentity.validate_live!(
+          record: record,
+          expected: InstallationIdentity.expectations_from(record)
         )
-      rescue HiveLiveAgentProof::Error => e
+      rescue InstallationIdentity::Invalid => e
         fail_with!(
           "runtime_identity", "#{label}_installation_identity_changed", e.message
         )

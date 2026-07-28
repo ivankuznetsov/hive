@@ -350,6 +350,12 @@ launcher, and installed gem bytes. The runner revalidates those identities
 immediately before and after relevant executions. OpenClaw is always invoked
 as the receipt-bound Node interpreter realpath followed by the executable
 realpath, including the pinned package's `#!/usr/bin/env node` launcher form.
+One shared installation-identity contract constructs receipts, performs those
+live filesystem revalidations, and validates retained evidence without
+dereferencing paths that cleanup may already have removed. It binds the
+candidate artifact to the release manifest and the OpenClaw tree to the
+committed package and lock records; path aliasing between the install root,
+artifact, and receipt is rejected.
 
 The runner materializes the candidate skill archive with shared byte, entry,
 directory, depth, and inode budgets, creates a disposable project, and exposes
@@ -366,7 +372,9 @@ plus absolute, redirected, and chained exec attempts. The receipt records the
 pinned beta's outside-read skill-root caveat instead of claiming a global read
 denial. A deterministic fake may drive CLI orchestration, but workflow
 authoring still uses this exact native tool surface and explicitly records that
-it did not exercise a model loop. The live creator prompt fixes the four
+it did not exercise a model loop as
+`execution_kind=deterministic_fixture` and `model_loop=not_exercised`. The live
+creator prompt fixes the four
 creation commands and requires removal of unused neutral-scaffold files before
 validation, so a passing model run retains only the accepted descriptor plus
 research and draft instructions. The inspector safe-loads that descriptor and
@@ -386,7 +394,7 @@ prose or claiming a second remote model call.
 Candidate command failures are retained as bounded structured receipts rather
 than raw stderr. The gateway allows exactly nine semantic Hive
 commands, holds one serialized audit
-transaction through candidate completion, and runs from a committed six-file
+transaction through candidate completion, and runs from a committed eight-file
 runtime whose exact copied bytes plus immutable config are SHA-256-bound by the
 small launcher and retained in evidence. Before admission checks or candidate
 launch it appends and fsyncs an immutable `attempted` row; success, denial, or
@@ -398,10 +406,21 @@ pairs (18 rows), no extras or pending attempts, and attempt-bound result rows.
 Those deterministic IDs detect corruption, truncation, and broken pairing;
 they are not authenticity evidence against a coherent same-UID rewrite. The
 separate result reader rejects links, malformed or extra rows, type drift,
-wrong order, and mismatched attempt IDs under bounded reads. Before ordinal 7
+wrong order, and mismatched attempt IDs through one shared bounded regular-file
+reader. That reader uses no-follow opens, compares path and descriptor identity
+before and after reading, and reads at most the configured bound plus one byte.
+Before ordinal 7
 can launch, ordinal 6 must have succeeded with `created=true`, and one
 symlink-free, bounded task metadata record must bind its exact safe slug,
 `editorial` workflow, and proof idempotency key.
+
+The attestor and release verifier delegate to the same strict
+workflow-creator contract, including candidate/config/policy/driver/gateway
+identity, exact monitored surfaces and caveats, installation bindings,
+command/result equations, and authoring-source semantics. The
+release-candidate builder revision includes that contract plus the shared
+installation-identity and bounded-reader sources, so changing any of those
+rules changes candidate provenance.
 
 The inspector derives `unauthorized_effects_observed` from independently
 retained filesystem mutation receipts, effective policy decisions, and

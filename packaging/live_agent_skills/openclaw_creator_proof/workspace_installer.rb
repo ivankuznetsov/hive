@@ -1,11 +1,10 @@
 module HiveLiveAgentProof
   module OpenClawCreatorProof
     class WorkspaceInstaller
-      attr_reader :skill_root, :codex_path, :projection
+      attr_reader :skill_root, :projection
 
-      def initialize(workspace:, root:)
+      def initialize(workspace:)
         @workspace = File.expand_path(workspace)
-        @root = File.expand_path(root)
       end
 
       def install_skill(materialized_root:, manifest:)
@@ -44,38 +43,6 @@ module HiveLiveAgentProof
         raise Failure.new(
           phase: "skill_install",
           reason: "openclaw_projection_invalid",
-          detail: e.message
-        )
-      end
-
-      def install_codex_fixture
-        bin_dir = File.join(@root, "fixture-bin")
-        FileUtils.mkdir_p(bin_dir, mode: 0o700)
-        @codex_path = File.join(bin_dir, "codex")
-        script = <<~RUBY
-          #!#{RbConfig.ruby}
-          require "json"
-
-          if ARGV == ["--version"]
-            puts "codex-cli 0.139.0"
-            exit 0
-          end
-          unless ARGV.include?("exec")
-            warn "bounded proof codex fixture accepts only exec"
-            exit 64
-          end
-          STDIN.read
-          puts({ "type" => "turn.completed", "usage" => {} }.to_json)
-        RUBY
-        File.open(@codex_path, File::WRONLY | File::CREAT | File::EXCL, 0o700) do |file|
-          file.write(script)
-        end
-        FileUtils.chmod(0o700, @codex_path)
-        @codex_path
-      rescue Errno::EACCES, Errno::EEXIST, Errno::ENOENT => e
-        raise Failure.new(
-          phase: "fixture",
-          reason: "codex_fixture_install_failed",
           detail: e.message
         )
       end

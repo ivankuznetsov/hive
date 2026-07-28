@@ -2020,6 +2020,28 @@ class OpenClawCreatorProofTest < Minitest::Test
       )
       refute_equal evidence.dig("executables", "candidate", "realpath"),
                    evidence.dig("executables", "audit_gateway", "realpath")
+      assert_match(
+        /\A[0-9a-f]{64}\z/,
+        evidence.dig("executables", "nested_stage_fixture", "sha256")
+      )
+      assert_equal(
+        {
+          "path" => ".hive-state/workflows/editorial.yml",
+          "sha256" => evidence.dig("descriptor", "sha256"),
+          "normalized_sha256" => HiveLiveAgentProof::WORKFLOW_CREATOR_DESCRIPTOR_SHA256,
+          "agent_model_inheritance" => "project"
+        },
+        evidence.fetch("descriptor")
+      )
+      assert_equal "claude", evidence.dig("stage_execution", "provider")
+      assert_equal "research", evidence.dig("stage_execution", "stage")
+      assert_equal slug, evidence.dig("stage_execution", "task_slug")
+      assert_equal(
+        HiveLiveAgentProof::WORKFLOW_CREATOR_STAGE_OUTPUT_SHA256,
+        evidence.dig("stage_execution", "artifact", "sha256")
+      )
+      assert_equal "complete", evidence.dig("stage_execution", "artifact", "marker")
+      assert_equal 1, evidence.dig("stage_execution", "fixture", "invocation_count")
       gateway_runtime = evidence.dig(
         "executables", "audit_gateway", "runtime_bundle"
       )
@@ -2077,6 +2099,211 @@ class OpenClawCreatorProofTest < Minitest::Test
       assert_equal false,
                    evidence.dig("external_actions_scope", "global_effect_absence_claimed")
       refute_includes File.read(evidence_path), CREDENTIAL
+    end
+  end
+
+  def test_nested_stage_fixture_accepts_only_one_exact_claude_research_invocation
+    with_tmp_dir do |dir|
+      workspace = File.join(dir, "workspace")
+      slug = "research-and-draft-the-launch-260728-abcd"
+      task = File.join(workspace, ".hive-state", "stages", "1-research", slug)
+      FileUtils.mkdir_p(task)
+      output = File.join(task, HiveLiveAgentProof::WORKFLOW_CREATOR_STAGE_FILE)
+      File.write(output, "<!-- AGENT_WORKING pid=1 -->\n")
+      fixture =
+        HiveLiveAgentProof::OpenClawCreatorProof::NestedStageFixture.new(
+          workspace: workspace,
+          root: File.join(dir, "proof")
+        ).install
+      prompt = nested_stage_prompt
+      argv = nested_stage_argv(task, prompt)
+
+      version_out, version_err, version_status = Open3.capture3(
+        {}, fixture.path, "--version", unsetenv_others: true
+      )
+      assert version_status.success?, version_err
+      assert_equal "2.1.118 (Claude Code)\n", version_out
+
+      stdout, stderr, status = Open3.capture3(
+        {}, fixture.path, *argv, chdir: task, unsetenv_others: true
+      )
+
+      assert status.success?, stderr
+      assert_equal "result", JSON.parse(stdout).fetch("type")
+      assert_equal HiveLiveAgentProof::WORKFLOW_CREATOR_STAGE_OUTPUT, File.read(output)
+      receipt = JSON.parse(File.read(fixture.receipt_path))
+      assert_equal(
+        [
+          "hive-openclaw-nested-stage-fixture", 1, "claude", "research",
+          slug, "complete", 1
+        ],
+        receipt.values_at(
+          "schema", "schema_version", "provider", "stage", "task_slug",
+          "marker", "invocation_count"
+        )
+      )
+      assert_equal fixture.record.fetch("sha256"), receipt.fetch("executable_sha256")
+      assert_equal HiveLiveAgentProof::WORKFLOW_CREATOR_STAGE_OUTPUT_SHA256,
+                   receipt.fetch("after_sha256")
+      assert_equal fixture.record, fixture.revalidate!
+
+      _retry_out, retry_err, retry_status = Open3.capture3(
+        {}, fixture.path, *argv, chdir: task, unsetenv_others: true
+      )
+      assert_equal 64, retry_status.exitstatus
+      assert_includes retry_err, "already invoked"
+      assert_equal HiveLiveAgentProof::WORKFLOW_CREATOR_STAGE_OUTPUT, File.read(output)
+    end
+  end
+
+  def test_nested_stage_fixture_rejects_prompt_credentials_and_identity_drift
+    with_tmp_dir do |dir|
+      workspace = File.join(dir, "workspace")
+      slug = "research-and-draft-the-launch-260728-abcd"
+      task = File.join(workspace, ".hive-state", "stages", "1-research", slug)
+      FileUtils.mkdir_p(task)
+      output = File.join(task, HiveLiveAgentProof::WORKFLOW_CREATOR_STAGE_FILE)
+      File.write(output, "<!-- AGENT_WORKING pid=1 -->\n")
+      fixture =
+        HiveLiveAgentProof::OpenClawCreatorProof::NestedStageFixture.new(
+          workspace: workspace,
+          root: File.join(dir, "proof")
+        ).install
+
+      _out, credential_err, credential_status = Open3.capture3(
+        { "OPENAI_API_KEY" => "fixture-secret" },
+        fixture.path,
+        *nested_stage_argv(task, nested_stage_prompt),
+        chdir: task,
+        unsetenv_others: true
+      )
+      assert_equal 64, credential_status.exitstatus
+      assert_includes credential_err, "provider credential reached fixture"
+      refute File.exist?(fixture.receipt_path)
+
+      _out, prompt_err, prompt_status = Open3.capture3(
+        {},
+        fixture.path,
+        *nested_stage_argv(task, "unexpected prompt"),
+        chdir: task,
+        unsetenv_others: true
+      )
+      assert_equal 64, prompt_status.exitstatus
+      assert_includes prompt_err, "stage prompt"
+      refute File.exist?(fixture.receipt_path)
+
+      FileUtils.chmod(0o700, fixture.path)
+      File.open(fixture.path, "a") { |file| file.write("# drift\n") }
+      error = assert_raises(HiveLiveAgentProof::OpenClawCreatorProof::Failure) do
+        fixture.revalidate!
+      end
+      assert_equal "nested_stage_fixture_identity_changed", error.reason
+    end
+
+    with_tmp_dir do |dir|
+      workspace = File.join(dir, "workspace")
+      FileUtils.mkdir_p(workspace)
+      root = File.join(dir, "proof")
+      fixture =
+        HiveLiveAgentProof::OpenClawCreatorProof::NestedStageFixture.new(
+          workspace: workspace,
+          root: root
+        ).install
+      collision = assert_raises(HiveLiveAgentProof::OpenClawCreatorProof::Failure) do
+        HiveLiveAgentProof::OpenClawCreatorProof::NestedStageFixture.new(
+          workspace: workspace,
+          root: root
+        ).install
+      end
+      assert_equal "nested_stage_fixture_install_failed", collision.reason
+
+      FileUtils.rm_f(fixture.path)
+      missing = assert_raises(HiveLiveAgentProof::OpenClawCreatorProof::Failure) do
+        fixture.revalidate!
+      end
+      assert_equal "nested_stage_fixture_identity_changed", missing.reason
+    end
+  end
+
+  def test_proof_inspector_binds_descriptor_semantics_and_audit_failure_receipt
+    with_tmp_dir do |dir|
+      workspace = File.join(dir, "workspace")
+      descriptor = File.join(workspace, ".hive-state", "workflows", "editorial.yml")
+      FileUtils.mkdir_p(File.dirname(descriptor))
+      File.write(descriptor, YAML.dump(HiveLiveAgentProof::WORKFLOW_CREATOR_DESCRIPTOR))
+      inspector = HiveLiveAgentProof::OpenClawCreatorProof::ProofInspector.new(
+        workspace: workspace,
+        audit_path: File.join(dir, "audit.jsonl"),
+        result_path: File.join(dir, "results.jsonl"),
+        candidate_record: { "realpath" => "/proof/hive", "sha256" => "a" * 64 }
+      )
+
+      result = inspector.send(:descriptor_result)
+      assert_equal HiveLiveAgentProof::WORKFLOW_CREATOR_DESCRIPTOR_SHA256,
+                   result.fetch("normalized_sha256")
+      assert_equal "project", result.fetch("agent_model_inheritance")
+
+      drifted = Marshal.load(Marshal.dump(HiveLiveAgentProof::WORKFLOW_CREATOR_DESCRIPTOR))
+      drifted.fetch("stages").first["agent"] = "codex"
+      File.write(descriptor, YAML.dump(drifted))
+      drift = assert_raises(HiveLiveAgentProof::OpenClawCreatorProof::Failure) do
+        inspector.send(:descriptor_result)
+      end
+      assert_includes drift.message, "accepted editorial contract"
+
+      File.write(descriptor, "stages: [\n")
+      malformed = assert_raises(HiveLiveAgentProof::OpenClawCreatorProof::Failure) do
+        inspector.send(:descriptor_result)
+      end
+      assert_includes malformed.message, "cannot inspect authored descriptor"
+
+      FileUtils.rm_f(descriptor)
+      File.symlink(File.join(dir, "outside.yml"), descriptor)
+      File.write(File.join(dir, "outside.yml"), YAML.dump(
+        HiveLiveAgentProof::WORKFLOW_CREATOR_DESCRIPTOR
+      ))
+      linked = assert_raises(HiveLiveAgentProof::OpenClawCreatorProof::Failure) do
+        inspector.send(:descriptor_result)
+      end
+      assert_includes linked.message, "not a regular file"
+    end
+
+    with_tmp_dir do |dir|
+      candidate = File.join(dir, "candidate")
+      audit = File.join(dir, "audit.jsonl")
+      write_executable(candidate, "#!#{RbConfig.ruby}\nexit 7\n")
+      gateway = HiveLiveAgentProof::OpenClawCreatorProof::AuditGateway.new(
+        candidate_path: candidate,
+        directory: File.join(dir, "gateway"),
+        audit_path: audit,
+        commands: [ [ "version" ] ]
+      )
+      gateway_path = gateway.install
+      _out, _err, status = Open3.capture3(gateway_path, "version")
+      assert_equal 7, status.exitstatus
+      inspector = HiveLiveAgentProof::OpenClawCreatorProof::ProofInspector.new(
+        workspace: File.join(dir, "workspace"),
+        audit_path: audit,
+        result_path: gateway.result_path,
+        candidate_record: gateway.candidate_record
+      )
+
+      failure = assert_raises(HiveLiveAgentProof::OpenClawCreatorProof::Failure) do
+        inspector.send(:audit_rows)
+      end
+      assert_equal(
+        {
+          "schema" => "hive-openclaw-command-failure",
+          "schema_version" => 1,
+          "ordinal" => 1,
+          "command_kind" => "version",
+          "dynamic_slug" => nil,
+          "decision" => "failed",
+          "reason" => "candidate_failed",
+          "exit_status" => 7
+        },
+        failure.evidence
+      )
     end
   end
 
@@ -2149,6 +2376,41 @@ class OpenClawCreatorProofTest < Minitest::Test
   end
 
   private
+
+  def nested_stage_prompt
+    <<~PROMPT
+      You are running stage research of the hive pipeline.
+
+      Working directory: the task folder
+      State file: research.md
+
+      Instruction:
+      Research the launch.
+
+      <user_supplied_0123456789abcdef content_type="prior_artifacts">
+      bounded prior context
+      </user_supplied_0123456789abcdef>
+
+      Write the stage output to `research.md`.
+      If the output is final, end `research.md` with a single trailing line
+      `<!-- COMPLETE -->`.
+      Do not modify files outside the task folder.
+    PROMPT
+  end
+
+  def nested_stage_argv(task, prompt)
+    [
+      "-p",
+      "--dangerously-skip-permissions",
+      "--add-dir", task,
+      "--model", "default",
+      "--output-format", "stream-json",
+      "--include-partial-messages",
+      "--verbose",
+      "--no-session-persistence",
+      prompt
+    ]
+  end
 
   def install_result_binding_gateway(dir, created: true, workflow: "editorial",
                                      task_key: HiveLiveAgentProof::WORKFLOW_CREATOR_TASK_KEY,

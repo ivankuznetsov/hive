@@ -500,13 +500,11 @@ if (mode === "probe") {
         "stages:\n" +
         "  - name: research\n" +
         "    kind: agent\n" +
-        "    agent: codex\n" +
         "    state_file: research.md\n" +
         "    instruction: editorial/research.md\n" +
         "    permissions: yolo\n" +
         "  - name: draft\n" +
         "    kind: agent\n" +
-        "    agent: codex\n" +
         "    state_file: draft.md\n" +
         "    instruction: editorial/draft.md\n" +
         "    permissions: yolo\n" +

@@ -210,6 +210,10 @@ class LiveAgentProofTest < Minitest::Test
       )
       assert_equal HiveLiveAgentProof::WORKFLOW_CREATOR_FILES,
                    creator.fetch("created_files").map { |record| record.fetch("path") }.sort
+      assert_equal HiveLiveAgentProof::WORKFLOW_CREATOR_DESCRIPTOR_SHA256,
+                   creator.dig("descriptor", "normalized_sha256")
+      assert_equal HiveLiveAgentProof::WORKFLOW_CREATOR_STAGE_OUTPUT_SHA256,
+                   creator.dig("stage_execution", "artifact", "sha256")
       assert_equal(
         [ 0, 1, false, 1 ],
         [
@@ -291,6 +295,42 @@ class LiveAgentProofTest < Minitest::Test
         attest(artifacts, evidence, creator_evidence, File.join(dir, "proof-publish"))
       end
       assert_includes error.message, "normalized graph"
+
+      creator_evidence = prepare_creator_evidence(dir, artifacts)
+      row_path = File.join(creator_evidence, "openclaw-workflow-creator.json")
+      row = JSON.parse(File.read(row_path))
+      row["descriptor"]["normalized_sha256"] = "0" * 64
+      HiveLiveAgentProof.write_json(row_path, row)
+      error = assert_raises(HiveLiveAgentProof::Error) do
+        attest(artifacts, evidence, creator_evidence, File.join(dir, "proof-descriptor"))
+      end
+      assert_includes error.message, "descriptor contract"
+
+      creator_evidence = prepare_creator_evidence(dir, artifacts)
+      row_path = File.join(creator_evidence, "openclaw-workflow-creator.json")
+      row = JSON.parse(File.read(row_path))
+      descriptor_file = row.fetch("created_files").find do |record|
+        record.fetch("path") == ".hive-state/workflows/editorial.yml"
+      end
+      descriptor_file["sha256"] = "0" * 64
+      HiveLiveAgentProof.write_json(row_path, row)
+      error = assert_raises(HiveLiveAgentProof::Error) do
+        attest(
+          artifacts, evidence, creator_evidence,
+          File.join(dir, "proof-descriptor-file")
+        )
+      end
+      assert_includes error.message, "descriptor contract"
+
+      creator_evidence = prepare_creator_evidence(dir, artifacts)
+      row_path = File.join(creator_evidence, "openclaw-workflow-creator.json")
+      row = JSON.parse(File.read(row_path))
+      row.dig("stage_execution", "artifact")["sha256"] = "0" * 64
+      HiveLiveAgentProof.write_json(row_path, row)
+      error = assert_raises(HiveLiveAgentProof::Error) do
+        attest(artifacts, evidence, creator_evidence, File.join(dir, "proof-stage"))
+      end
+      assert_includes error.message, "nested stage evidence"
     end
   end
 
@@ -362,6 +402,9 @@ class LiveAgentProofTest < Minitest::Test
         end,
         "openclaw_version" => lambda do |row|
           row.dig("executables", "openclaw")["version"] = "OpenClaw 2026.7.2 (wrong)"
+        end,
+        "nested_stage_fixture" => lambda do |row|
+          row.dig("executables", "nested_stage_fixture")["sha256"] = "not-a-digest"
         end,
         "package_version" => lambda do |row|
           row.fetch("openclaw_package")["version"] = "2026.7.2"
@@ -588,6 +631,11 @@ class LiveAgentProofTest < Minitest::Test
           "realpath" => "/proof/openclaw",
           "sha256" => "3" * 64,
           "version" => "OpenClaw 2026.7.1-beta.2 (fixture)"
+        },
+        "nested_stage_fixture" => {
+          "configured_path" => "/proof/fixture-bin/claude",
+          "realpath" => "/proof/fixture-bin/claude",
+          "sha256" => "5" * 64
         }
       },
       "openclaw_configuration" => {
@@ -687,6 +735,12 @@ class LiveAgentProofTest < Minitest::Test
       "created_files" => HiveLiveAgentProof::WORKFLOW_CREATOR_FILES.map do |path|
         { "path" => path, "sha256" => "c" * 64, "size" => 10 }
       end,
+      "descriptor" => {
+        "path" => ".hive-state/workflows/editorial.yml",
+        "sha256" => "c" * 64,
+        "normalized_sha256" => HiveLiveAgentProof::WORKFLOW_CREATOR_DESCRIPTOR_SHA256,
+        "agent_model_inheritance" => "project"
+      },
       "validation" => {
         "valid" => true,
         "stages" => %w[research draft approval],
@@ -709,6 +763,26 @@ class LiveAgentProofTest < Minitest::Test
         "retry_created" => false,
         "run_count" => 1,
         "current_stage" => "1-research"
+      },
+      "stage_execution" => {
+        "provider" => "claude",
+        "provider_version" => "2.1.118",
+        "stage" => "research",
+        "task_slug" => HiveLiveAgentProof::WORKFLOW_CREATOR_EXAMPLE_SLUG,
+        "artifact" => {
+          "path" => HiveLiveAgentProof::WORKFLOW_CREATOR_STAGE_FILE,
+          "sha256" => HiveLiveAgentProof::WORKFLOW_CREATOR_STAGE_OUTPUT_SHA256,
+          "size" => HiveLiveAgentProof::WORKFLOW_CREATOR_STAGE_OUTPUT.bytesize,
+          "marker" => "complete",
+          "changed" => true
+        },
+        "fixture" => {
+          "sha256" => "5" * 64,
+          "receipt_sha256" => "d" * 64,
+          "invocation_count" => 1
+        },
+        "prompt_sha256" => "a" * 64,
+        "argv_sha256" => "b" * 64
       },
       "unauthorized_effects_observed" => [],
       "external_actions" => [],

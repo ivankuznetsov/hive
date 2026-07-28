@@ -772,7 +772,10 @@ preview, collision refusal, and state-wide task idempotency. The
 packaging-owned OpenClaw runner now also drives a deterministic fake OpenClaw
 through the real candidate CLI, safe-materialized candidate skill, native
 `pathPrepend`, workspace-confined native filesystem tools, a deny-by-default
-gateway-only exec policy, dynamic created-slug run, bounded Codex fixture,
+gateway-only exec policy, dynamic created-slug run, exact safe-loaded descriptor
+semantics, and a proof-owned one-shot Claude stage fixture that verifies
+project-level agent/model inheritance and writes a bound completed research
+artifact,
 complete read-only installed-tree/interpreter receipts, committed transitive
 npm lock, all-byte recursive secret sanitation, independently observed
 filesystem/network effects, and an outer Linux child-subreaper owner that
@@ -804,7 +807,8 @@ exact protected-main candidate and its Check Run binds the OpenClaw
 version/integrity/lock digest, provider route, prompts, installation receipts,
 candidate/gateway identities, all nine completed command receipts, first/retry
 slug equality, exact editorial graph, zero creation-only tasks, one first-stage
-run, matching operational status, credentialed exact-runtime model-loop
+run with exact inherited-Claude fixture receipt and completed research artifact,
+matching operational status, credentialed exact-runtime model-loop
 authoring, the public-export native control matrix, independently observed
 scoped effects, complete runtime-closure identities,
 nine successful/zero denied-or-failed gateway rows, proof-first failure

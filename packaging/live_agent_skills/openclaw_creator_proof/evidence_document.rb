@@ -90,6 +90,7 @@ module HiveLiveAgentProof
         @data["phase"] = failure.phase
         @data["reason"] = failure.reason
         @data["detail"] = redact(failure.message)
+        @data["failure_receipt"] = failure.evidence if failure.evidence
         @data
       end
 

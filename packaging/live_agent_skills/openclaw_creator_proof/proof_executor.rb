@@ -21,9 +21,10 @@ module HiveLiveAgentProof
         verified, materialized_root = verify_and_materialize_candidate
         sandbox = prepare_project
         installer = install_workspace(sandbox, verified, materialized_root)
+        stage_fixture = install_nested_stage_fixture(sandbox)
         gateway, gateway_path, audit_path = install_gateway(sandbox)
         configuration = configure_openclaw(sandbox, gateway_path)
-        environment = proof_environment(sandbox, configuration, installer.codex_path)
+        environment = proof_environment(sandbox, configuration, stage_fixture.path)
         policy_probe = verify_effective_policy(environment, sandbox, configuration)
         environment.merge!(policy_probe.driver_environment(workspace: sandbox.workspace))
         effects = NativeAuthoringSurface.new(
@@ -39,6 +40,8 @@ module HiveLiveAgentProof
           policy_path: policy_probe.receipt_path,
           authoring_path: policy_probe.authoring_receipt_path,
           effects_path: effects.receipt_path,
+          stage_fixture_record: stage_fixture.record,
+          stage_fixture_receipt_path: stage_fixture.receipt_path,
           process_records: @document.process_records
         )
 
@@ -48,9 +51,11 @@ module HiveLiveAgentProof
           run_agent(sandbox, environment, WORKFLOW_CREATOR_PROMPT, "workflow_creation")
         end
         creation = inspector.creation_result
+        stage_fixture.revalidate!
         effects.observe("task_creation") do
           run_agent(sandbox, environment, WORKFLOW_CREATOR_TASK_PROMPT, "task_creation")
         end
+        stage_fixture.revalidate!
         task = inspector.final_result
         record_success(installer, discovery, creation, task)
       rescue JSON::ParserError, KeyError, Errno::ENOENT, Errno::EACCES => e
@@ -113,13 +118,21 @@ module HiveLiveAgentProof
       end
 
       def install_workspace(sandbox, verified, materialized_root)
-        installer = WorkspaceInstaller.new(workspace: sandbox.workspace, root: @root)
+        installer = WorkspaceInstaller.new(workspace: sandbox.workspace)
         installer.install_skill(
           materialized_root: materialized_root,
           manifest: verified.fetch("manifest")
         )
-        installer.install_codex_fixture
         installer
+      end
+
+      def install_nested_stage_fixture(sandbox)
+        fixture = NestedStageFixture.new(
+          workspace: sandbox.workspace,
+          root: @root
+        ).install
+        @document.set_executable("nested_stage_fixture", fixture.record)
+        fixture
       end
 
       def install_gateway(sandbox)
@@ -176,13 +189,13 @@ module HiveLiveAgentProof
         probe
       end
 
-      def proof_environment(sandbox, configuration, codex_path)
+      def proof_environment(sandbox, configuration, claude_path)
         @environment_policy.child_environment(
           "HOME" => sandbox.home,
           "HIVE_HOME" => sandbox.hive_home,
           "OPENCLAW_STATE_DIR" => configuration.state_dir,
           "OPENCLAW_CONFIG_PATH" => configuration.config_path,
-          "HIVE_CODEX_BIN" => codex_path,
+          "HIVE_CLAUDE_BIN" => claude_path,
           "HIVE_LIVE_PROOF" => "1",
           "HIVE_SKIP_LLM_WIKI_SCHEDULER" => "1",
           "HIVE_SKIP_LLM_WIKI_SYSTEMCTL" => "1",
@@ -288,9 +301,11 @@ module HiveLiveAgentProof
           "hive_commands" => task.fetch("hive_commands"),
           "created_files" => creation.fetch("created_files"),
           "validation" => creation.fetch("validation"),
+          "descriptor" => creation.fetch("descriptor"),
           "creation_only_task_count" => creation.fetch("creation_only_task_count"),
           "task_count" => task.fetch("task_count"),
           "task" => task.fetch("task"),
+          "stage_execution" => task.fetch("stage_execution"),
           "effect_policy" => task.fetch("effect_policy"),
           "effect_observations" => task.fetch("effect_observations"),
           "unauthorized_effects_observed" =>

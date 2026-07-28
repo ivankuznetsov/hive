@@ -104,6 +104,54 @@ module HiveLiveAgentProof
     ".hive-state/workflows/editorial/draft.md",
     ".hive-state/workflows/editorial/research.md"
   ].freeze
+  WORKFLOW_CREATOR_DESCRIPTOR = {
+    "id" => "editorial",
+    "stages" => [
+      {
+        "name" => "research",
+        "kind" => "agent",
+        "state_file" => "research.md",
+        "instruction" => "editorial/research.md",
+        "permissions" => "yolo"
+      },
+      {
+        "name" => "draft",
+        "kind" => "agent",
+        "state_file" => "draft.md",
+        "instruction" => "editorial/draft.md",
+        "permissions" => "yolo"
+      },
+      {
+        "name" => "approval",
+        "kind" => "human",
+        "state_file" => "approval.md",
+        "input" => "draft.md",
+        "outcomes" => {
+          "approve" => {
+            "complete" => true,
+            "artifact" => "draft.md"
+          },
+          "reject" => {
+            "to" => "draft"
+          }
+        }
+      }
+    ]
+  }.freeze
+  WORKFLOW_CREATOR_DESCRIPTOR_SHA256 =
+    Digest::SHA256.hexdigest(JSON.generate(WORKFLOW_CREATOR_DESCRIPTOR)).freeze
+  WORKFLOW_CREATOR_STAGE_FILE = "research.md".freeze
+  WORKFLOW_CREATOR_STAGE_MARKER = "<!-- COMPLETE -->".freeze
+  WORKFLOW_CREATOR_STAGE_OUTPUT = <<~MARKDOWN.freeze
+    # Launch research
+
+    The launch announcement should state the audience, intended outcome,
+    supporting evidence, and approval boundary before drafting.
+
+    <!-- COMPLETE -->
+  MARKDOWN
+  WORKFLOW_CREATOR_STAGE_OUTPUT_SHA256 =
+    Digest::SHA256.hexdigest(WORKFLOW_CREATOR_STAGE_OUTPUT).freeze
   SAFE_SHA = /\A[0-9a-f]{40}\z/.freeze
   SAFE_REPOSITORY = /\A[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\z/.freeze
   SECRET_PATTERNS = [
@@ -217,6 +265,7 @@ module HiveLiveAgentProof
     candidate = executables.is_a?(Hash) ? executables["candidate"] : nil
     gateway = executables.is_a?(Hash) ? executables["audit_gateway"] : nil
     openclaw = executables.is_a?(Hash) ? executables["openclaw"] : nil
+    stage_fixture = executables.is_a?(Hash) ? executables["nested_stage_fixture"] : nil
     processes = row["processes"]
     teardown = row["teardown"]
     path_prepend = row.dig("openclaw_configuration", "path_prepend")
@@ -229,10 +278,16 @@ module HiveLiveAgentProof
       valid_executable_record?(gateway) &&
       valid_gateway_runtime_bundle?(gateway["runtime_bundle"]) &&
       valid_executable_record?(openclaw) &&
+      valid_executable_record?(stage_fixture) &&
       openclaw["version"].to_s.match?(
         /\AOpenClaw #{Regexp.escape(WORKFLOW_CREATOR_OPENCLAW_VERSION)} \(.+\)\z/
       ) &&
-      candidate["realpath"] != gateway["realpath"] &&
+      executables.keys.sort == %w[
+        audit_gateway candidate nested_stage_fixture openclaw
+      ] &&
+      [ candidate, gateway, openclaw, stage_fixture ].map {
+        |record| record["realpath"]
+      }.uniq.length == 4 &&
       path_prepend == [ File.dirname(gateway["realpath"]) ] &&
       row.dig("openclaw_configuration", "sha256").to_s.match?(/\A[0-9a-f]{64}\z/) &&
       row.dig("openclaw_configuration", "approvals_sha256").to_s.match?(
@@ -294,6 +349,48 @@ module HiveLiveAgentProof
       "files" => files
     }
     Digest::SHA256.hexdigest(JSON.generate(payload)) == record["manifest_sha256"]
+  end
+
+  def valid_creator_descriptor_evidence?(record)
+    record.is_a?(Hash) &&
+      record.keys.sort == %w[
+        agent_model_inheritance normalized_sha256 path sha256
+      ] &&
+      record["path"] == ".hive-state/workflows/editorial.yml" &&
+      record["sha256"].to_s.match?(/\A[0-9a-f]{64}\z/) &&
+      record["normalized_sha256"] == WORKFLOW_CREATOR_DESCRIPTOR_SHA256 &&
+      record["agent_model_inheritance"] == "project"
+  end
+
+  def valid_creator_stage_execution?(record, task_slug:, fixture:)
+    return false unless record.is_a?(Hash) &&
+                        fixture.is_a?(Hash) &&
+                        record.keys.sort == %w[
+                          argv_sha256 artifact fixture prompt_sha256 provider
+                          provider_version stage task_slug
+                        ] &&
+                        record["provider"] == "claude" &&
+                        record["provider_version"] == "2.1.118" &&
+                        record["stage"] == "research" &&
+                        record["task_slug"] == task_slug &&
+                        WORKFLOW_CREATOR_SAFE_SLUG.match?(task_slug.to_s) &&
+                        record["prompt_sha256"].to_s.match?(/\A[0-9a-f]{64}\z/) &&
+                        record["argv_sha256"].to_s.match?(/\A[0-9a-f]{64}\z/)
+
+    artifact = record["artifact"]
+    fixture_receipt = record["fixture"]
+    artifact.is_a?(Hash) &&
+      artifact.keys.sort == %w[changed marker path sha256 size] &&
+      artifact["path"] == WORKFLOW_CREATOR_STAGE_FILE &&
+      artifact["sha256"] == WORKFLOW_CREATOR_STAGE_OUTPUT_SHA256 &&
+      artifact["size"] == WORKFLOW_CREATOR_STAGE_OUTPUT.bytesize &&
+      artifact["marker"] == "complete" &&
+      artifact["changed"] == true &&
+      fixture_receipt.is_a?(Hash) &&
+      fixture_receipt.keys.sort == %w[invocation_count receipt_sha256 sha256] &&
+      fixture_receipt["sha256"] == fixture["sha256"] &&
+      fixture_receipt["receipt_sha256"].to_s.match?(/\A[0-9a-f]{64}\z/) &&
+      fixture_receipt["invocation_count"] == 1
   end
 
   def valid_creator_effect_policy?(record, gateway:)
@@ -888,6 +985,15 @@ module HiveLiveAgentProof
         record["sha256"].to_s.match?(/\A[0-9a-f]{64}\z/) && record["size"].to_i.positive? }
         raise Error, "workflow-creator created-file records are invalid"
       end
+      descriptor = row["descriptor"]
+      descriptor_file = created.find do |record|
+        record["path"] == ".hive-state/workflows/editorial.yml"
+      end
+      unless HiveLiveAgentProof.valid_creator_descriptor_evidence?(descriptor) &&
+             descriptor_file &&
+             descriptor["sha256"] == descriptor_file["sha256"]
+        raise Error, "workflow-creator descriptor contract is invalid"
+      end
 
       validation = row["validation"]
       stages = validation.is_a?(Hash) ? validation["stages"] : nil
@@ -905,6 +1011,12 @@ module HiveLiveAgentProof
       end
       task = row["task"]
       task_slug = task.is_a?(Hash) ? task["slug"].to_s : ""
+      fixture = row.dig("executables", "nested_stage_fixture")
+      unless HiveLiveAgentProof.valid_creator_stage_execution?(
+        row["stage_execution"], task_slug: task_slug, fixture: fixture
+      )
+        raise Error, "workflow-creator nested stage evidence is invalid"
+      end
       unless row["creation_only_task_count"] == 0 && row["task_count"] == 1 &&
              task == {
                "slug" => task_slug,
@@ -1021,6 +1133,7 @@ module HiveLiveAgentProof
         raise Error, "workflow-creator attested runtime evidence is invalid"
       end
       task_slug = row.dig("task", "slug")
+      fixture = row.dig("executables", "nested_stage_fixture")
       unless row["prompt_sha256"] == Digest::SHA256.hexdigest(WORKFLOW_CREATOR_PROMPT) &&
              row["task_prompt_sha256"] == Digest::SHA256.hexdigest(WORKFLOW_CREATOR_TASK_PROMPT) &&
              HiveLiveAgentProof.valid_workflow_creator_commands?(
@@ -1030,6 +1143,10 @@ module HiveLiveAgentProof
              row["task"].is_a?(Hash) && row["task"]["retry_created"] == false &&
              row["task"]["first_slug"] == task_slug && row["task"]["retry_slug"] == task_slug &&
              row["task"]["run_count"] == 1 &&
+             HiveLiveAgentProof.valid_creator_descriptor_evidence?(row["descriptor"]) &&
+             HiveLiveAgentProof.valid_creator_stage_execution?(
+               row["stage_execution"], task_slug: task_slug, fixture: fixture
+             ) &&
              row["unauthorized_effects_observed"] == [] &&
              row["external_actions"] == row["unauthorized_effects_observed"] &&
              HiveLiveAgentProof.valid_external_actions_scope?(

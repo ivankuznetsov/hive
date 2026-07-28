@@ -32,11 +32,12 @@ module HiveLiveAgentProof
     ].freeze
 
     class Failure < StandardError
-      attr_reader :phase, :reason
+      attr_reader :phase, :reason, :evidence
 
-      def initialize(phase:, reason:, detail:)
+      def initialize(phase:, reason:, detail:, evidence: nil)
         @phase = phase
         @reason = reason
+        @evidence = evidence
         super(detail)
       end
     end
@@ -62,6 +63,7 @@ module HiveLiveAgentProof
     require_relative "openclaw_creator_proof/openclaw_policy_probe"
     require_relative "openclaw_creator_proof/project_sandbox"
     require_relative "openclaw_creator_proof/proof_inspector"
+    require_relative "openclaw_creator_proof/nested_stage_fixture"
     require_relative "openclaw_creator_proof/workspace_installer"
     require_relative "openclaw_creator_proof/evidence_document"
     require_relative "openclaw_creator_proof/environment_policy"

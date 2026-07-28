@@ -5,7 +5,8 @@ module HiveLiveAgentProof
 
       def initialize(workspace:, audit_path:, result_path:, candidate_record:,
                      configuration: nil, policy_path: nil, authoring_path: nil,
-                     effects_path: nil, process_records: [])
+                     effects_path: nil, stage_fixture_record: nil,
+                     stage_fixture_receipt_path: nil, process_records: [])
         @workspace = File.expand_path(workspace)
         @audit_path = File.expand_path(audit_path)
         @result_path = File.expand_path(result_path)
@@ -14,6 +15,9 @@ module HiveLiveAgentProof
         @policy_path = policy_path && File.expand_path(policy_path)
         @authoring_path = authoring_path && File.expand_path(authoring_path)
         @effects_path = effects_path && File.expand_path(effects_path)
+        @stage_fixture_record = stage_fixture_record
+        @stage_fixture_receipt_path =
+          stage_fixture_receipt_path && File.expand_path(stage_fixture_receipt_path)
         @process_records = process_records
       end
 
@@ -26,6 +30,7 @@ module HiveLiveAgentProof
         {
           "hive_commands" => rows.map { |row| row.fetch("argv") },
           "created_files" => created_file_records,
+          "descriptor" => descriptor_result,
           "validation" => validation_result,
           "creation_only_task_count" => task_folders.length
         }.tap do |result|
@@ -64,6 +69,7 @@ module HiveLiveAgentProof
                meta["idempotency_key"] == WORKFLOW_CREATOR_TASK_KEY
           fail_proof!("task metadata does not bind the audited task identity")
         end
+        stage_execution = stage_execution_result(folder, slug)
         unauthorized_effects = observed_unauthorized_effects
         {
           "hive_commands" => expected_commands,
@@ -78,6 +84,7 @@ module HiveLiveAgentProof
             "run_count" => rows.count { |row| row.fetch("argv").first == "run" },
             "current_stage" => File.basename(File.dirname(folder))
           },
+          "stage_execution" => stage_execution,
           "effect_policy" => effect_policy_receipt,
           "effect_observations" => effect_observation_summary,
           "unauthorized_effects_observed" => unauthorized_effects,
@@ -96,8 +103,23 @@ module HiveLiveAgentProof
       def audit_rows
         state = audit_state
         fail_proof!("audit gateway retained a pending attempt") if state.pending
-        fail_proof!("audit gateway retained a denied or failed attempt") if
-          state.poisoned_terminal
+        if (terminal = state.poisoned_terminal)
+          receipt = {
+            "schema" => "hive-openclaw-command-failure",
+            "schema_version" => 1,
+            "ordinal" => terminal.fetch("ordinal"),
+            "command_kind" => terminal.fetch("argv").first,
+            "dynamic_slug" => terminal["dynamic_slug"],
+            "decision" => terminal.fetch("decision"),
+            "reason" => terminal.fetch("reason"),
+            "exit_status" => terminal["exit_status"]
+          }
+          fail_proof!(
+            "audit gateway retained a denied or failed attempt: " \
+            "#{JSON.generate(receipt)}",
+            evidence: receipt
+          )
+        end
         state.pairs.map { |pair| pair.fetch(:terminal) }.freeze
       end
 
@@ -151,6 +173,25 @@ module HiveLiveAgentProof
           fail_proof!("candidate validation graph differs from the accepted graph") unless
             validation == expected
         end
+      end
+
+      def descriptor_result
+        relative = ".hive-state/workflows/editorial.yml"
+        path = File.join(@workspace, relative)
+        bytes = bounded_regular_bytes(path, max_bytes: 64 * 1024, label: "descriptor")
+        descriptor = YAML.safe_load(bytes, aliases: false)
+        unless descriptor == WORKFLOW_CREATOR_DESCRIPTOR
+          fail_proof!("authored descriptor differs from the accepted editorial contract")
+        end
+
+        {
+          "path" => relative,
+          "sha256" => Digest::SHA256.hexdigest(bytes),
+          "normalized_sha256" => WORKFLOW_CREATOR_DESCRIPTOR_SHA256,
+          "agent_model_inheritance" => "project"
+        }
+      rescue Psych::Exception => e
+        fail_proof!("cannot inspect authored descriptor: #{e.message}")
       end
 
       def created_file_records
@@ -227,6 +268,85 @@ module HiveLiveAgentProof
         fail_proof!("created task slug does not resolve to one task folder") unless matches.length == 1
 
         matches.fetch(0)
+      end
+
+      def stage_execution_result(folder, slug)
+        fail_proof!("nested-stage fixture evidence is absent") unless
+          @stage_fixture_record && @stage_fixture_receipt_path
+
+        bytes = bounded_regular_bytes(
+          @stage_fixture_receipt_path,
+          max_bytes: NestedStageFixture::RECEIPT_MAX_BYTES,
+          label: "nested-stage fixture receipt"
+        )
+        receipt = JSON.parse(bytes)
+        expected_keys = %w[
+          after_sha256 argv_sha256 before_sha256 executable_sha256 invocation_count
+          marker output_file prompt_sha256 provider provider_version schema
+          schema_version size stage task_folder task_slug workspace
+        ]
+        relative_folder =
+          Pathname.new(folder).relative_path_from(Pathname.new(@workspace)).to_s
+        valid = receipt.is_a?(Hash) &&
+                receipt.keys.sort == expected_keys &&
+                receipt["schema"] == NestedStageFixture::SCHEMA &&
+                receipt["schema_version"] == NestedStageFixture::SCHEMA_VERSION &&
+                receipt["provider"] == "claude" &&
+                receipt["provider_version"] == NestedStageFixture::CLAUDE_VERSION &&
+                receipt["stage"] == "research" &&
+                receipt["workspace"] == @workspace &&
+                receipt["task_slug"] == slug &&
+                receipt["task_folder"] == relative_folder &&
+                receipt["output_file"] == WORKFLOW_CREATOR_STAGE_FILE &&
+                receipt["marker"] == "complete" &&
+                receipt["invocation_count"] == 1 &&
+                receipt["executable_sha256"] == @stage_fixture_record.fetch("sha256") &&
+                %w[before_sha256 after_sha256 prompt_sha256 argv_sha256].all? {
+                  |key| receipt[key].to_s.match?(/\A[0-9a-f]{64}\z/)
+                } &&
+                receipt["before_sha256"] != receipt["after_sha256"]
+        fail_proof!("nested-stage fixture receipt is invalid") unless valid
+
+        artifact_path = File.join(folder, WORKFLOW_CREATOR_STAGE_FILE)
+        artifact = bounded_regular_bytes(
+          artifact_path,
+          max_bytes: 1024 * 1024,
+          label: "completed research artifact"
+        )
+        lines = artifact.lines(chomp: true)
+        forbidden = [ "<!-- WAITING -->", "<!-- ERROR", "<!-- AGENT_WORKING" ]
+        artifact_valid =
+          artifact.bytesize.positive? &&
+          receipt["size"] == artifact.bytesize &&
+          receipt["after_sha256"] == Digest::SHA256.hexdigest(artifact) &&
+          lines.last == WORKFLOW_CREATOR_STAGE_MARKER &&
+          lines.count { |line| line == WORKFLOW_CREATOR_STAGE_MARKER } == 1 &&
+          forbidden.none? { |marker| artifact.include?(marker) }
+        fail_proof!("research stage did not retain one completed artifact") unless
+          artifact_valid
+
+        {
+          "provider" => "claude",
+          "provider_version" => NestedStageFixture::CLAUDE_VERSION,
+          "stage" => "research",
+          "task_slug" => slug,
+          "artifact" => {
+            "path" => WORKFLOW_CREATOR_STAGE_FILE,
+            "sha256" => receipt.fetch("after_sha256"),
+            "size" => receipt.fetch("size"),
+            "marker" => "complete",
+            "changed" => true
+          },
+          "fixture" => {
+            "sha256" => receipt.fetch("executable_sha256"),
+            "receipt_sha256" => Digest::SHA256.hexdigest(bytes),
+            "invocation_count" => receipt.fetch("invocation_count")
+          },
+          "prompt_sha256" => receipt.fetch("prompt_sha256"),
+          "argv_sha256" => receipt.fetch("argv_sha256")
+        }
+      rescue JSON::ParserError, KeyError => e
+        fail_proof!("cannot inspect nested-stage execution: #{e.message}")
       end
 
       def effect_policy_receipt
@@ -475,6 +595,36 @@ module HiveLiveAgentProof
         }
       end
 
+      def bounded_regular_bytes(path, max_bytes:, label:)
+        before = File.lstat(path)
+        fail_proof!("#{label} is not a regular file") unless
+          before.file? && !before.symlink?
+        fail_proof!("#{label} exceeds byte budget") if before.size > max_bytes
+
+        flags = File::RDONLY
+        flags |= File::NOFOLLOW if defined?(File::NOFOLLOW)
+        File.open(path, flags) do |file|
+          current = file.stat
+          valid_identity =
+            current.file? &&
+            current.dev == before.dev &&
+            current.ino == before.ino &&
+            current.size <= max_bytes
+          fail_proof!("#{label} identity changed while opening") unless
+            valid_identity
+
+          bytes = file.read(max_bytes + 1)
+          if bytes.nil? || bytes.bytesize > max_bytes ||
+             bytes.bytesize != current.size
+            fail_proof!("#{label} changed while reading")
+          end
+          bytes
+        end
+      rescue Errno::ENOENT, Errno::EACCES, Errno::ENOTDIR, Errno::ELOOP,
+             IOError => e
+        fail_proof!("cannot read #{label}: #{e.message}")
+      end
+
       def walk_tree(root, &block)
         Dir.children(root).sort.each do |name|
           path = File.join(root, name)
@@ -511,11 +661,12 @@ module HiveLiveAgentProof
         false
       end
 
-      def fail_proof!(detail)
+      def fail_proof!(detail, evidence: nil)
         raise Failure.new(
           phase: "verification",
           reason: "proof_contract_failed",
-          detail: detail
+          detail: detail,
+          evidence: evidence
         )
       end
     end

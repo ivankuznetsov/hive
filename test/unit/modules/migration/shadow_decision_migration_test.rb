@@ -2,6 +2,8 @@ require "test_helper"
 require "digest"
 require "json"
 require "json_schemer"
+require "open3"
+require "rbconfig"
 require "hive/modules/migration/shadow_comparator"
 require "hive/modules/migration/shadow_decision_migration"
 
@@ -55,6 +57,371 @@ class ModulesMigrationShadowDecisionMigrationTest < Minitest::Test
       repeated = migrate(root)
       assert_equal 0, repeated.migrated
       assert_equal 1, repeated.already_current
+    end
+  end
+
+  def test_completed_migration_accepts_later_native_v2_evidence
+    with_tmp_dir do |root|
+      path = File.join(root, "patrol", "#{"a" * 64}.json")
+      write_v1(path)
+      migrate(root)
+      checkpoint = File.binread(checkpoint_path(root))
+
+      comparator =
+        Hive::Modules::Migration::ShadowComparator.new(root: root)
+      record_native_v2(
+        root,
+        module_name: "architecture-patrol",
+        trigger_id: "post-migration",
+        now: START + 60
+      )
+
+      repeated = migrate(root)
+
+      assert_equal 0, repeated.migrated
+      assert_equal 1, repeated.already_current
+      assert_equal checkpoint, File.binread(checkpoint_path(root))
+      assert_equal(
+        [ 2, 2 ],
+        comparator.each_record.map { |record| record.fetch("schema_version") }
+      )
+    end
+  end
+
+  def test_fresh_process_resumes_after_live_v2_replacement
+    with_tmp_dir do |root|
+      relative = File.join("patrol", "#{"a" * 64}.json")
+      path = File.join(root, relative)
+      FileUtils.mkdir_p(File.dirname(path))
+      source = Hive::WorkflowPackage::CanonicalJSON.generate(v1_record)
+      File.binwrite(path, source)
+
+      child = fork do
+        original = Hive::ManagedDirectory.instance_method(:atomic_write)
+        Hive::ManagedDirectory.define_method(:atomic_write) do |candidate, *args,
+                                                                  **options|
+          result = original.bind_call(self, candidate, *args, **options)
+          Process.kill("KILL", Process.pid) if candidate == relative
+          result
+        end
+        migrate(root)
+      end
+      _pid, status = Process.wait2(child)
+
+      assert_predicate status, :signaled?
+      assert_equal Signal.list.fetch("KILL"), status.termsig
+      checkpoint = read_json(checkpoint_path(root))
+      assert_equal "pending",
+                   checkpoint.dig("files", relative, "status")
+      archive = File.join(root, "archive", "v1", relative)
+      assert_equal source, File.binread(archive)
+      assert_equal 2, read_json(path).fetch("schema_version")
+
+      stdout, stderr, restarted = Open3.capture3(
+        RbConfig.ruby,
+        "-I#{File.expand_path("../../../lib", __dir__)}",
+        "-e",
+        <<~'RUBY',
+          require "json"
+          require "hive/modules/migration/shadow_decision_migration"
+          result =
+            Hive::Modules::Migration::ShadowDecisionMigration.migrate!(
+              root: ARGV.fetch(0),
+              quiescence_probe: -> { :quiescent }
+            )
+          STDOUT.write(
+            JSON.generate(
+              "migrated" => result.migrated,
+              "already_current" => result.already_current
+            )
+          )
+        RUBY
+        root
+      )
+
+      assert restarted.success?, stderr
+      assert_equal(
+        { "migrated" => 1, "already_current" => 0 },
+        JSON.parse(stdout)
+      )
+      assert_equal "migrated",
+                   read_json(checkpoint_path(root))
+                     .dig("files", relative, "status")
+      assert_equal(
+        1,
+        Hive::Modules::Migration::ShadowDecisionMigration.ensure_complete!(
+          root: root
+        ).already_current
+      )
+    end
+  end
+
+  def test_legacy_checkpoint_recovers_matching_replacement_states
+    %w[pending current].each do |status|
+      with_tmp_dir do |root|
+        relative = File.join("patrol", "#{"a" * 64}.json")
+        path = File.join(root, relative)
+        source = write_v1(path)
+        migrate(root)
+        File.unlink(
+          File.join(root, "migrations", "shadow-decision-v2.json")
+        )
+        live = File.binread(path)
+        legacy = {
+          "schema" =>
+            "hive-module-shadow-decision-migration-checkpoint",
+          "schema_version" => 1,
+          "status" => "in_progress",
+          "files" => {
+            relative => {
+              "source_digest" => Digest::SHA256.hexdigest(
+                status == "pending" ? source : live
+              ),
+              "status" => status
+            }
+          }
+        }
+        File.binwrite(
+          checkpoint_path(root),
+          Hive::WorkflowPackage::CanonicalJSON.generate(legacy)
+        )
+
+        result = migrate(root)
+
+        assert_equal 1, result.migrated, status
+        checkpoint = read_json(checkpoint_path(root))
+        assert_equal 2, checkpoint.fetch("schema_version"), status
+        assert_equal "complete", checkpoint.fetch("status"), status
+        assert_equal "migrated",
+                     checkpoint.dig("files", relative, "status"),
+                     status
+      end
+    end
+  end
+
+  def test_pending_replacement_corruption_matrix_fails_without_stamp
+    corruptions = {
+      "missing archive" => lambda do |root, relative, _checkpoint|
+        File.unlink(File.join(root, "archive", "v1", relative))
+      end,
+      "changed archive" => lambda do |root, relative, _checkpoint|
+        File.binwrite(
+          File.join(root, "archive", "v1", relative),
+          "changed"
+        )
+      end,
+      "wrong live source binding" => lambda do |root, relative, _checkpoint|
+        path = File.join(root, relative)
+        record = read_json(path)
+        record.fetch("migration")["source_digest"] = "f" * 64
+        File.binwrite(
+          path,
+          Hive::WorkflowPackage::CanonicalJSON.generate(record)
+        )
+      end,
+      "wrong checkpoint destination digest" =>
+        lambda do |root, relative, checkpoint|
+          checkpoint.dig("files", relative)["v2_digest"] = "f" * 64
+          File.binwrite(
+            checkpoint_path(root),
+            Hive::WorkflowPackage::CanonicalJSON.generate(checkpoint)
+          )
+        end,
+      "wrong checkpoint archive binding" =>
+        lambda do |root, relative, checkpoint|
+          checkpoint.dig("files", relative)["archive_digest"] = "f" * 64
+          write_json(checkpoint_path(root), checkpoint)
+        end
+    }
+    corruptions.each do |label, corrupt|
+      with_tmp_dir do |root|
+        relative = File.join("patrol", "#{"a" * 64}.json")
+        write_v1(File.join(root, relative))
+        migrate(root)
+        File.unlink(
+          File.join(root, "migrations", "shadow-decision-v2.json")
+        )
+        checkpoint = read_json(checkpoint_path(root))
+        checkpoint["status"] = "in_progress"
+        checkpoint.dig("files", relative)["status"] = "pending"
+        File.binwrite(
+          checkpoint_path(root),
+          Hive::WorkflowPackage::CanonicalJSON.generate(checkpoint)
+        )
+        corrupt.call(root, relative, checkpoint)
+
+        assert_raises(Hive::ConfigError) { migrate(root) }
+        refute File.exist?(
+          File.join(root, "migrations", "shadow-decision-v2.json")
+        ), label
+      end
+    end
+  end
+
+  def test_migrate_repairs_stamp_before_checkpoint_completion
+    with_tmp_dir do |root|
+      path = File.join(root, "patrol", "#{"a" * 64}.json")
+      write_v1(path)
+      migrate(root)
+      checkpoint = read_json(checkpoint_path(root))
+      checkpoint["status"] = "in_progress"
+      File.binwrite(
+        checkpoint_path(root),
+        Hive::WorkflowPackage::CanonicalJSON.generate(checkpoint)
+      )
+
+      assert_raises(Hive::ConfigError) do
+        Hive::Modules::Migration::ShadowDecisionMigration.ensure_complete!(
+          root: root
+        )
+      end
+      assert_equal 1, migrate(root).already_current
+      assert_equal "complete",
+                   read_json(checkpoint_path(root)).fetch("status")
+    end
+  end
+
+  def test_restart_rejects_checkpoint_state_contradictions
+    with_tmp_dir do |root|
+      relative, path = migrated_v1_fixture(root)
+      File.unlink(stamp_path(root))
+      checkpoint = read_json(checkpoint_path(root))
+      checkpoint["status"] = "in_progress"
+      checkpoint.dig("files", relative)["status"] = "pending"
+      changed = v1_record.merge("configuration_digest" => "f" * 64)
+      write_json(path, changed)
+      write_json(checkpoint_path(root), checkpoint)
+
+      assert_raises(Hive::ConfigError) { migrate(root) }
+    end
+
+    with_tmp_dir do |root|
+      migrated_v1_fixture(root)
+      File.unlink(stamp_path(root))
+
+      assert_raises(Hive::ConfigError) { migrate(root) }
+    end
+
+    with_tmp_dir do |root|
+      migrated_v1_fixture(root)
+      File.unlink(stamp_path(root))
+      File.unlink(checkpoint_path(root))
+
+      assert_raises(Hive::ConfigError) { migrate(root) }
+    end
+
+    with_tmp_dir do |root|
+      relative, = migrated_v1_fixture(root)
+      File.unlink(stamp_path(root))
+      checkpoint = read_json(checkpoint_path(root))
+      checkpoint["status"] = "in_progress"
+      checkpoint.dig("files", relative)["status"] = "unknown"
+      write_json(checkpoint_path(root), checkpoint)
+
+      assert_raises(Hive::ConfigError) { migrate(root) }
+    end
+
+    with_tmp_dir do |root|
+      record = record_native_v2(
+        root, module_name: "patrol", trigger_id: "current-mismatch"
+      )
+      migrate(root)
+      File.unlink(stamp_path(root))
+      relative = File.join(
+        "patrol", "#{record.fetch('decision_id')}.json"
+      )
+      checkpoint = read_json(checkpoint_path(root))
+      checkpoint["status"] = "in_progress"
+      checkpoint.dig("files", relative)["v2_digest"] = "f" * 64
+      write_json(checkpoint_path(root), checkpoint)
+
+      assert_raises(Hive::ConfigError) { migrate(root) }
+    end
+  end
+
+  def test_completion_and_legacy_bindings_fail_closed_on_corruption
+    with_tmp_dir do |root|
+      migrated_v1_fixture(root)
+      stamp = read_json(stamp_path(root))
+      stamp["migrated"] += 1
+      write_json(stamp_path(root), stamp)
+
+      assert_raises(Hive::ConfigError) do
+        Hive::Modules::Migration::ShadowDecisionMigration.ensure_complete!(
+          root: root
+        )
+      end
+    end
+
+    with_tmp_dir do |root|
+      _relative, path = migrated_v1_fixture(root)
+      File.binwrite(path, "{bad")
+
+      assert_raises(Hive::ConfigError) do
+        Hive::Modules::Migration::ShadowDecisionMigration.ensure_complete!(
+          root: root
+        )
+      end
+    end
+
+    with_tmp_dir do |root|
+      relative, = migrated_v1_fixture(root)
+      checkpoint = read_json(checkpoint_path(root))
+      checkpoint["status"] = "in_progress"
+      checkpoint.dig("files", relative)["status"] = "pending"
+      write_json(checkpoint_path(root), checkpoint)
+
+      assert_raises(Hive::ConfigError) do
+        Hive::Modules::Migration::ShadowDecisionMigration.ensure_complete!(
+          root: root
+        )
+      end
+    end
+
+    with_tmp_dir do |root|
+      relative, = migrated_v1_fixture(root)
+      File.unlink(stamp_path(root))
+      checkpoint = read_json(checkpoint_path(root))
+      checkpoint["schema_version"] = 1
+      checkpoint["status"] = "in_progress"
+      checkpoint["files"] = {
+        relative => {
+          "source_digest" => "f" * 64,
+          "status" => "migrated"
+        }
+      }
+      write_json(checkpoint_path(root), checkpoint)
+
+      assert_raises(Hive::ConfigError) { migrate(root) }
+    end
+
+    with_tmp_dir do |root|
+      relative, path = migrated_v1_fixture(root)
+      File.unlink(stamp_path(root))
+      checkpoint = read_json(checkpoint_path(root))
+      source_digest =
+        checkpoint.dig("files", relative, "source_digest")
+      checkpoint["schema_version"] = 1
+      checkpoint["status"] = "in_progress"
+      checkpoint["files"] = {
+        relative => {
+          "source_digest" => source_digest,
+          "status" => "migrated"
+        }
+      }
+      live = read_json(path)
+      live["recorded_at"] = (START + 300).iso8601(6)
+      write_json(path, live)
+      write_json(checkpoint_path(root), checkpoint)
+
+      assert_raises(Hive::ConfigError) { migrate(root) }
+    end
+
+    with_tmp_dir do |root|
+      path = File.join(root, "patrol", "#{"a" * 64}.json")
+      write_json(path, v1_record.merge("schema_version" => 3))
+
+      assert_raises(Hive::ConfigError) { migrate(root) }
     end
   end
 
@@ -121,43 +488,10 @@ class ModulesMigrationShadowDecisionMigrationTest < Minitest::Test
 
   def test_mixed_partial_conversion_resumes_and_stamps_only_after_zero_v1
     with_tmp_dir do |root|
-      current = Hive::Modules::Migration::ShadowComparator.new(root: root)
-      trigger = { "id" => "current" }
-      capture = Hive::Modules::Migration::PatrolCapture.build(
+      record_native_v2(
+        root,
         module_name: "architecture-patrol",
-        project: {
-          "project_id" => "project-1",
-          "name" => "demo",
-          "repository" => "owner/demo"
-        },
-        trigger: trigger,
-        reservation: { "kind" => "architecture", "id" => "job-1" },
-        owner: "legacy",
-        owner_epoch: 1,
-        selection_input: {
-          "kind" => "candidate",
-          "job_id" => "job-1",
-          "phase" => "discovery"
-        },
-        selection:
-          Hive::Modules::Migration::PatrolDecisionProjection.build(
-            module_name: "architecture-patrol",
-            rationale: "due",
-            job_id: "job-1",
-            phase: "discovery"
-          ),
-        outcome_class: "complete",
-        outcome: { "rationale" => "complete" },
-        occurred_at: START,
-        recorded_at: START
-      )
-      current.record!(
-        module_name: "architecture-patrol",
-        trigger: trigger,
-        legacy_capture: capture,
-        module_projection: capture.selection,
-        configuration_digest: "d" * 64,
-        occurred_at: START
+        trigger_id: "current"
       )
       v1_path = File.join(root, "patrol", "#{'a' * 64}.json")
       FileUtils.mkdir_p(File.dirname(v1_path))
@@ -176,6 +510,30 @@ class ModulesMigrationShadowDecisionMigrationTest < Minitest::Test
       assert File.file?(
         File.join(root, "migrations", "shadow-decision-v2.json")
       )
+
+      File.unlink(stamp_path(root))
+      checkpoint = read_json(checkpoint_path(root))
+      checkpoint["schema_version"] = 1
+      checkpoint["status"] = "in_progress"
+      checkpoint["files"] = checkpoint.fetch("files").to_h do |relative, entry|
+        digest = entry.fetch(
+          entry.fetch("status") == "current" ?
+            "v2_digest" : "source_digest"
+        )
+        [
+          relative,
+          {
+            "source_digest" => digest,
+            "status" => entry.fetch("status")
+          }
+        ]
+      end
+      write_json(checkpoint_path(root), checkpoint)
+
+      resumed = migrate(root)
+      assert_equal 1, resumed.migrated
+      assert_equal 1, resumed.already_current
+      assert_equal 2, migrate(root).already_current
     end
   end
 
@@ -246,40 +604,10 @@ class ModulesMigrationShadowDecisionMigrationTest < Minitest::Test
 
   def test_migration_rejects_noncanonical_v2_and_reuses_exact_archive
     with_tmp_dir do |root|
-      comparator = Hive::Modules::Migration::ShadowComparator.new(root: root)
-      trigger = { "id" => "current" }
-      capture = Hive::Modules::Migration::PatrolCapture.build(
+      record = record_native_v2(
+        root,
         module_name: "patrol",
-        project: {
-          "project_id" => "project-1",
-          "name" => "demo",
-          "repository" => "owner/demo"
-        },
-        trigger: trigger,
-        reservation: { "kind" => "ordinary", "id" => "reservation-1" },
-        owner: "legacy",
-        owner_epoch: 1,
-        selection_input: {
-          "kind" => "operation",
-          "operation" => "shadow-migration"
-        },
-        selection:
-          Hive::Modules::Migration::PatrolDecisionProjection.build(
-            module_name: "patrol",
-            rationale: "due"
-          ),
-        outcome_class: "complete",
-        outcome: {},
-        occurred_at: START,
-        recorded_at: START
-      )
-      record = comparator.record!(
-        module_name: "patrol",
-        trigger: trigger,
-        legacy_capture: capture,
-        module_projection: capture.selection,
-        configuration_digest: "c" * 64,
-        occurred_at: START
+        trigger_id: "current"
       )
       path = File.join(
         root, "patrol", "#{record.fetch('decision_id')}.json"
@@ -306,28 +634,23 @@ class ModulesMigrationShadowDecisionMigrationTest < Minitest::Test
 
   def test_checkpoint_inventory_and_shape_corruption_fail_closed
     with_tmp_dir do |root|
-      migrator = Hive::Modules::Migration::ShadowDecisionMigration.new(
-        root: root,
-        quiescence_probe: -> { :quiescent }
-      )
       path = File.join(root, "patrol", "#{'a' * 64}.json")
       FileUtils.mkdir_p(File.dirname(path))
       File.write(path, "{bad")
-      assert_raises(Hive::ConfigError) do
-        migrator.send(:validate_zero_v1!)
-      end
+      assert_raises(Hive::ConfigError) { migrate(root) }
     end
 
     with_tmp_dir do |root|
-      migrator = Hive::Modules::Migration::ShadowDecisionMigration.new(
-        root: root,
-        quiescence_probe: -> { :quiescent }
-      )
       path = File.join(root, "patrol", "#{'a' * 64}.json")
-      checkpoint_path = migrator.send(:checkpoint_path)
-      FileUtils.mkdir_p(File.dirname(checkpoint_path))
+      FileUtils.mkdir_p(File.dirname(path))
+      File.binwrite(
+        path,
+        Hive::WorkflowPackage::CanonicalJSON.generate(v1_record)
+      )
+      checkpoint = checkpoint_path(root)
+      FileUtils.mkdir_p(File.dirname(checkpoint))
       relative = path.delete_prefix("#{root}/")
-      checkpoint = {
+      payload = {
         "schema" =>
           "hive-module-shadow-decision-migration-checkpoint",
         "schema_version" => 1,
@@ -340,68 +663,95 @@ class ModulesMigrationShadowDecisionMigrationTest < Minitest::Test
         }
       }
       File.write(
-        checkpoint_path,
-        Hive::WorkflowPackage::CanonicalJSON.generate(checkpoint)
+        checkpoint,
+        Hive::WorkflowPackage::CanonicalJSON.generate(payload)
       )
-      assert_raises(Hive::ConfigError) do
-        migrator.send(:checkpoint!, path, "changed", "pending")
-      end
+      assert_raises(Hive::ConfigError) { migrate(root) }
 
       File.write(
-        checkpoint_path,
+        checkpoint,
         Hive::WorkflowPackage::CanonicalJSON.generate(
-          checkpoint.merge("status" => "unknown")
+          payload.merge("status" => "unknown")
         )
       )
-      assert_raises(Hive::ConfigError) do
-        migrator.send(:read_checkpoint)
-      end
-      File.write(checkpoint_path, "{bad")
-      assert_raises(Hive::ConfigError) do
-        migrator.send(:read_checkpoint)
+      assert_raises(Hive::ConfigError) { migrate(root) }
+      File.write(checkpoint, "{bad")
+      assert_raises(Hive::ConfigError) { migrate(root) }
+    end
+  end
+
+  def test_bounded_migration_reader_rejects_links_and_oversized_records
+    with_tmp_dir do |root|
+      target = File.join(root, "target")
+      link = File.join(root, "patrol", "#{"a" * 64}.json")
+      FileUtils.mkdir_p(File.dirname(link))
+      File.binwrite(
+        target,
+        Hive::WorkflowPackage::CanonicalJSON.generate(v1_record)
+      )
+      File.symlink(target, link)
+      assert_raises(Hive::ConfigError) { migrate(root) }
+    end
+
+    with_tmp_dir do |root|
+      path = File.join(root, "patrol", "#{"a" * 64}.json")
+      FileUtils.mkdir_p(File.dirname(path))
+      File.binwrite(
+        path,
+        "x" * (
+          Hive::Modules::Migration::ShadowComparator::MAX_RECORD_BYTES + 1
+        )
+      )
+      assert_raises(Hive::ConfigError) { migrate(root) }
+    end
+
+    with_tmp_dir do |root|
+      path = File.join(root, "patrol", "#{"a" * 64}.json")
+      write_v1(path)
+      with_constant(
+        Hive::Modules::Migration::ShadowDecisionMigration,
+        :MAX_CHECKPOINT_BYTES,
+        64
+      ) do
+        assert_raises(Hive::ConfigError) { migrate(root) }
       end
     end
   end
 
-  def test_bounded_migration_reader_detects_links_and_growth_races
+  def test_migration_rejects_checkpoint_inventory_addition
     with_tmp_dir do |root|
-      migrator = Hive::Modules::Migration::ShadowDecisionMigration.new(
-        root: root,
-        quiescence_probe: -> { :quiescent }
+      first = File.join(root, "patrol", "#{"a" * 64}.json")
+      FileUtils.mkdir_p(File.dirname(first))
+      File.binwrite(
+        first,
+        Hive::WorkflowPackage::CanonicalJSON.generate(v1_record)
       )
-      target = File.join(root, "target")
-      link = File.join(root, "link")
-      File.write(target, "{}")
-      File.symlink(target, link)
-      assert_raises(Hive::ConfigError) do
-        migrator.send(:bounded_read, link)
+      child = fork do
+        original = Hive::ManagedDirectory.instance_method(:atomic_write)
+        Hive::ManagedDirectory.define_method(:atomic_write) do |candidate,
+                                                                  *args,
+                                                                  **options|
+          result = original.bind_call(self, candidate, *args, **options)
+          if candidate.end_with?("shadow-decision-v2-checkpoint.json")
+            Process.kill("KILL", Process.pid)
+          end
+          result
+        end
+        migrate(root)
       end
-
-      path = File.join(root, "record")
-      File.write(path, "{}")
-      oversized = "x" * (
-        Hive::Modules::Migration::ShadowComparator::MAX_RECORD_BYTES + 1
+      Process.wait(child)
+      second = File.join(root, "patrol", "#{"e" * 64}.json")
+      File.binwrite(
+        second,
+        Hive::WorkflowPackage::CanonicalJSON.generate(
+          v1_record.merge("decision_id" => "e" * 64)
+        )
       )
-      proxy = Object.new
-      proxy.define_singleton_method(:stat) { File.lstat(path) }
-      proxy.define_singleton_method(:read) { |_limit| oversized }
-      original = File.method(:open)
-      replacement = lambda do |candidate, *args, **kwargs, &block|
-        unless candidate == path
-          next original.call(
-            candidate, *args, **kwargs, &block
-          )
-        end
 
-        block.call(proxy)
-      end
-      with_replaced_singleton_method(
-        File, :open, replacement
-      ) do
-        assert_raises(Hive::ConfigError) do
-          migrator.send(:bounded_read, path)
-        end
-      end
+      assert_raises(Hive::ConfigError) { migrate(root) }
+      refute File.exist?(
+        File.join(root, "migrations", "shadow-decision-v2.json")
+      )
     end
   end
 
@@ -415,19 +765,13 @@ class ModulesMigrationShadowDecisionMigrationTest < Minitest::Test
           "unread"
         )
       end
-      migrator = Hive::Modules::Migration::ShadowDecisionMigration.new(
-        root: root,
-        quiescence_probe: -> { :quiescent }
-      )
 
       with_constant(
         Hive::Modules::Migration::ShadowComparator,
         :MAX_RECORDS,
         1
       ) do
-        assert_raises(Hive::ConfigError) do
-          migrator.send(:evidence_paths).to_a
-        end
+        assert_raises(Hive::ConfigError) { migrate(root) }
       end
     end
   end
@@ -448,6 +792,102 @@ class ModulesMigrationShadowDecisionMigrationTest < Minitest::Test
     Hive::Modules::Migration::ShadowDecisionMigration.migrate!(
       root: root,
       quiescence_probe: -> { :quiescent }
+    )
+  end
+
+  def checkpoint_path(root)
+    File.join(
+      root, "migrations", "shadow-decision-v2-checkpoint.json"
+    )
+  end
+
+  def stamp_path(root)
+    File.join(root, "migrations", "shadow-decision-v2.json")
+  end
+
+  def read_json(path)
+    JSON.parse(File.binread(path))
+  end
+
+  def write_json(path, value)
+    FileUtils.mkdir_p(File.dirname(path))
+    File.binwrite(
+      path,
+      Hive::WorkflowPackage::CanonicalJSON.generate(value)
+    )
+  end
+
+  def write_v1(path)
+    FileUtils.mkdir_p(File.dirname(path))
+    bytes = Hive::WorkflowPackage::CanonicalJSON.generate(v1_record)
+    File.binwrite(path, bytes)
+    bytes
+  end
+
+  def migrated_v1_fixture(root)
+    relative = File.join("patrol", "#{"a" * 64}.json")
+    path = File.join(root, relative)
+    write_v1(path)
+    migrate(root)
+    [ relative, path ]
+  end
+
+  def record_native_v2(root, module_name:, trigger_id:, now: START)
+    trigger = { "id" => trigger_id }
+    architecture = module_name == "architecture-patrol"
+    job_id = "job-#{trigger_id}"
+    selection_input = if architecture
+      {
+        "kind" => "candidate",
+        "job_id" => job_id,
+        "phase" => "discovery"
+      }
+    else
+      {
+        "kind" => "operation",
+        "operation" => "shadow-migration"
+      }
+    end
+    selection =
+      Hive::Modules::Migration::PatrolDecisionProjection.build(
+        module_name: module_name,
+        rationale: "due",
+        job_id: architecture ? job_id : nil,
+        phase: architecture ? "discovery" : nil
+      )
+    capture = Hive::Modules::Migration::PatrolCapture.build(
+      module_name: module_name,
+      project: {
+        "project_id" => "project-1",
+        "name" => "demo",
+        "repository" => "owner/demo"
+      },
+      trigger: trigger,
+      reservation: architecture ?
+        {
+          "kind" => "architecture",
+          "id" => job_id,
+          "job_id" => job_id,
+          "window_started_at" => now.utc.iso8601(6),
+          "attempt_generation" => 1
+        } :
+        { "kind" => "ordinary", "id" => "reservation-#{trigger_id}" },
+      owner: "legacy",
+      owner_epoch: 1,
+      selection_input: selection_input,
+      selection: selection,
+      outcome_class: "complete",
+      outcome: { "rationale" => "complete" },
+      occurred_at: now,
+      recorded_at: now
+    )
+    Hive::Modules::Migration::ShadowComparator.new(root: root).record!(
+      module_name: module_name,
+      trigger: trigger,
+      legacy_capture: capture,
+      module_projection: capture.selection,
+      configuration_digest: "d" * 64,
+      occurred_at: now
     )
   end
 

@@ -438,11 +438,6 @@ module Hive
       def transition_record(cell, generation)
         semantic = cell.fetch("semantic")
         status = cell.dig("outcome", "transition_status")
-        unless %w[applied rejected].include?(status)
-          inconsistent!(
-            "refactor patrol transition outcome is malformed"
-          )
-        end
         rejected = status == "rejected"
         error_code = rejected ?
           cell.dig("outcome", "error_code").to_s : nil

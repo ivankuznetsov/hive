@@ -3,6 +3,10 @@ require "hive/daemon/patrol_scheduler"
 require "hive/daemon/refactor_patrol_scheduler"
 require "hive/modules/migration/patrols"
 require "hive/modules/migration/coordinator"
+require "hive/patrol/state_store"
+require "hive/refactor_patrol/job_store"
+require "hive/refactor_patrol/pr_manifest"
+require "hive/refactor_patrol/transition_gateway"
 
 class ModulesMigrationPatrolsTest < Minitest::Test
   include HiveTestHelper
@@ -558,6 +562,114 @@ class ModulesMigrationPatrolsTest < Minitest::Test
     end
   end
 
+  def test_default_coordinator_probe_observes_real_durable_product_work
+    with_project do |project|
+      state = Hive::Patrol::StateStore.new(project.fetch("path"))
+      state.reserve_occurrence!(patrol_capture, now: NOW)
+
+      result = default_coordinator(project).tick(now: NOW).fetch(0)
+
+      assert_equal :pending, result.fetch(:status)
+      assert_equal({ "patrol" => "live" }, result.fetch(:blockers))
+    end
+
+    with_project do |project|
+      store = Hive::RefactorPatrol::JobStore.new(
+        project.fetch("path")
+      )
+      manifest = architecture_manifest
+      capture = architecture_capture(manifest)
+      store.reserve_manifest_occurrence!(
+        manifest, capture: capture, now: NOW
+      )
+
+      result = default_coordinator(project).tick(now: NOW).fetch(0)
+
+      assert_equal :pending, result.fetch(:status)
+      assert_equal(
+        { "architecture-patrol" => "live" },
+        result.fetch(:blockers)
+      )
+    end
+
+    with_project do |project|
+      store = Hive::RefactorPatrol::JobStore.new(
+        project.fetch("path")
+      )
+      256.times do |index|
+        store.write_job!(architecture_job(index))
+      end
+      store.write_job!(
+        architecture_job(
+          999,
+          "state" => "queued",
+          "complete" => false,
+          "analysis_sha" => nil,
+          "zero_reason" => nil
+        )
+      )
+
+      result = default_coordinator(project).tick(now: NOW).fetch(0)
+
+      assert_equal :pending, result.fetch(:status)
+      assert_equal(
+        { "architecture-patrol" => "live" },
+        result.fetch(:blockers)
+      )
+    end
+  end
+
+  def test_default_coordinator_probe_accepts_completed_state_and_fails_closed
+    with_project do |project|
+      store = Hive::Patrol::StateStore.new(project.fetch("path"))
+      capture = patrol_capture
+      store.reserve_occurrence!(capture, now: NOW)
+      evidence_store = Object.new
+      evidence_store.define_singleton_method(:append_capture) { |_capture| }
+      store.finalize_occurrence!(
+        capture: capture,
+        evidence_store: evidence_store,
+        now: NOW
+      )
+
+      result = default_coordinator(project).tick(now: NOW).fetch(0)
+
+      assert_equal :shadowing, result.fetch(:status)
+      assert_empty result.fetch(:blockers)
+    end
+
+    with_project do |project|
+      Hive::RefactorPatrol::JobStore.new(
+        project.fetch("path")
+      ).write_job!(architecture_job(1))
+
+      result = default_coordinator(project).tick(now: NOW).fetch(0)
+
+      assert_equal :shadowing, result.fetch(:status)
+      assert_empty result.fetch(:blockers)
+    end
+
+    with_project do |project|
+      store = Hive::RefactorPatrol::JobStore.new(
+        project.fetch("path")
+      )
+      aggregate = architecture_job(1)
+      store.write_job!(aggregate)
+      File.write(
+        File.join(store.root, "jobs", "#{aggregate.fetch('job_id')}.json"),
+        "{"
+      )
+
+      result = default_coordinator(project).tick(now: NOW).fetch(0)
+
+      assert_equal :pending, result.fetch(:status)
+      assert_equal(
+        { "architecture-patrol" => "ambiguous" },
+        result.fetch(:blockers)
+      )
+    end
+  end
+
   def test_coordinator_defaults_and_project_errors_are_bounded
     defaulted = Hive::Modules::Migration::Coordinator.new(
       supervisor: FakeSupervisor.new, attempt_store: FakeAttemptStore.new
@@ -914,6 +1026,114 @@ class ModulesMigrationPatrolsTest < Minitest::Test
   end
 
   private
+
+  def default_coordinator(project)
+    supervisor = FakeSupervisor.new
+    supervisor.live = false
+    Hive::Modules::Migration::Coordinator.new(
+      supervisor: supervisor,
+      attempt_store: FakeAttemptStore.new,
+      registry: -> { [ project ] },
+      store_factory: ->(_state) { FakeStore.new }
+    )
+  end
+
+  def patrol_capture
+    Hive::Modules::Migration::PatrolCapture.build(
+      module_name: "patrol",
+      project: {
+        "project_id" => "project-1",
+        "name" => "demo",
+        "repository" => "acme/demo"
+      },
+      trigger: { "kind" => "manual", "id" => "manual-1" },
+      reservation: { "kind" => "ordinary", "id" => "reservation-1" },
+      owner: "legacy",
+      owner_epoch: 1,
+      selection_input: {
+        "kind" => "operation",
+        "operation" => "coordinator-proof"
+      },
+      selection:
+        Hive::Modules::Migration::PatrolDecisionProjection.build(
+          module_name: "patrol",
+          rationale: "due"
+        ),
+      outcome_class: nil,
+      outcome: nil,
+      occurred_at: NOW,
+      recorded_at: NOW
+    )
+  end
+
+  def architecture_manifest
+    Hive::RefactorPatrol::PrManifest.build(
+      source: {
+        "url" => "https://github.com/acme/demo/pull/7",
+        "number" => 7,
+        "repository" => "acme/demo",
+        "registration" => "demo",
+        "base_branch" => "main",
+        "base_sha" => "a" * 40,
+        "merge_sha" => "b" * 40,
+        "merged_at" => NOW.iso8601
+      },
+      files: [
+        { "path" => "lib/demo.rb", "status" => "modified" }
+      ]
+    )
+  end
+
+  def architecture_capture(manifest)
+    Hive::RefactorPatrol::TransitionGateway.capture_for_manifest(
+      manifest: manifest,
+      project_id: "project-1",
+      owner: "legacy",
+      owner_epoch: 1,
+      recorded_at: NOW
+    )
+  end
+
+  def architecture_job(index, overrides = {})
+    digest = Digest::SHA256.hexdigest("coordinator-job-#{index}")
+    {
+      "schema" => Hive::RefactorPatrol::JobStore::SCHEMA,
+      "schema_version" =>
+        Hive::RefactorPatrol::JobStore::SCHEMA_VERSION,
+      "job_id" => format("job-%03d", index),
+      "occurrence_id" => "occ-#{digest}",
+      "intake_transition_id" => "intent-#{digest}",
+      "source" => {
+        "url" => "https://github.com/acme/demo/pull/#{index + 1}",
+        "number" => index + 1,
+        "repository" => "acme/demo",
+        "registration" => "demo",
+        "base_branch" => "main",
+        "base_sha" => "a" * 40,
+        "merge_sha" => "b" * 40
+      },
+      "analysis_sha" => "c" * 40,
+      "policy" => {
+        "discovery" => true,
+        "auto_fix" => false,
+        "issue_filing" => false
+      },
+      "state" => "complete",
+      "complete" => true,
+      "dispositions" => {
+        "accepted" => [],
+        "flagged" => [],
+        "suppressed" => []
+      },
+      "feature_results" => [],
+      "review_errors" => [],
+      "zero_reason" => "no_mapped_slice",
+      "attempts" => [],
+      "actions" => [],
+      "created_at" => NOW.iso8601,
+      "updated_at" => NOW.iso8601
+    }.merge(overrides)
+  end
 
   def with_project
     with_tmp_dir do |root|

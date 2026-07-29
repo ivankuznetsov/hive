@@ -118,8 +118,6 @@ module Hive
             else
               :quiescent
             end
-          else
-            :ambiguous
           end
         end
       end

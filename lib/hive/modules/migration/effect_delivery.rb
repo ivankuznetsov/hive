@@ -1,4 +1,3 @@
-require "securerandom"
 require "hive/modules/migration/effect_admission"
 require "hive/modules/migration/effect_receipt_ledger"
 require "hive/modules/migration/effect_sender"
@@ -21,7 +20,7 @@ module Hive
                        module_execution: nil, lifecycle_store_factory: nil,
                        diagnostic_transition: false, pass_intent: false,
                        not_delivered_error: nil, clock: -> { Time.now.utc },
-                       lease_sec: 300, claimant: nil)
+                       retry_safe_sinks: [])
           @module_name = module_name.to_s.freeze
           @product_label = product_label.to_s.freeze
           @capture = validate_capture(capture)
@@ -52,12 +51,11 @@ module Hive
             denied_error: denied_error,
             clock: clock
           )
-          claimant ||= [
-            "#{@module_name}-effect",
-            Process.pid,
-            Thread.current.object_id,
-            SecureRandom.hex(12)
-          ].join(":")
+          retry_safe_sinks = Array(retry_safe_sinks).map(&:to_s).freeze
+          unless (retry_safe_sinks - PatrolEvidence::SINKS).empty?
+            raise Hive::ConfigError,
+                  "#{@product_label} retry-safe sink contract is malformed"
+          end
           @sender = EffectSender.new(
             product_label: @product_label,
             delivery_store: delivery_store,
@@ -66,8 +64,9 @@ module Hive
             pass_intent: pass_intent,
             not_delivered_error: not_delivered_error,
             clock: clock,
-            lease_sec: lease_sec,
-            claimant: claimant
+            retry_safe: lambda do |intent|
+              retry_safe_sinks.include?(intent.sink)
+            end
           )
         end
 
@@ -86,10 +85,10 @@ module Hive
           )
           return shadow_attempt(intent) if @authority == "shadow"
 
-          @sender.prepare(intent)
           if (result = @sender.replay_if_terminal(intent))
             return result
           end
+          @sender.prepare(intent)
 
           with_live_authorization(intent) do
             @sender.deliver_or_reconcile(
@@ -116,10 +115,27 @@ module Hive
           )
           return shadow_attempt(intent) if @authority == "shadow"
 
-          @sender.prepare(intent)
           if (result = @sender.replay_if_terminal(intent))
             return result
           end
+          @sender.prepare(intent)
+
+          with_live_authorization(intent) do
+            @sender.reconcile_observed(intent, reconcile)
+          end
+        end
+
+        def reconcile_intent!(intent, &reconcile)
+          unless reconcile
+            raise ArgumentError, "a reconciliation block is required"
+          end
+          intent = validate_recovery_intent(intent)
+          return shadow_attempt(intent) if @authority == "shadow"
+
+          if (result = @sender.replay_if_terminal(intent))
+            return result
+          end
+          @sender.prepare(intent)
 
           with_live_authorization(intent) do
             @sender.reconcile_observed(intent, reconcile)
@@ -127,6 +143,20 @@ module Hive
         end
 
         private
+
+        def validate_recovery_intent(value)
+          intent = value.is_a?(EffectIntent) ?
+            value : EffectIntent.from_h(value)
+          valid = intent.module_name == @module_name &&
+                  intent.occurrence_id == @capture.occurrence_id &&
+                  intent.owner_epoch == @capture.owner_epoch
+          unless valid
+            raise Hive::ConfigError,
+                  "#{@product_label} recovery intent is malformed"
+          end
+
+          intent
+        end
 
         def validate_capture(capture)
           unless capture.is_a?(PatrolCapture) &&

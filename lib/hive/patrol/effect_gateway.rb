@@ -8,6 +8,7 @@ module Hive
     # protocol used by both patrol products.
     class EffectGateway
       Result = Hive::Modules::Migration::EffectDelivery::Result
+      RETRY_SAFE_SINKS = %w[state finding review_handoff].freeze
 
       class Denied < StandardError
         attr_reader :reason, :receipt
@@ -64,6 +65,7 @@ module Hive
               hive_state_path: hive_state_path
             )
           end,
+          retry_safe_sinks: RETRY_SAFE_SINKS,
           **options
         )
       end

@@ -267,7 +267,11 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
     with_tmp_dir do |dir|
       write_state(dir, "last_scanned_sha" => "old")
       sched = scheduler(project_entry(dir), enabled_cfg)
-      assert_equal 1, sched.tick(now: T0).size
+      first = sched.tick(now: T0).fetch(0)
+      first_id = first.fetch(:command).split.last
+      state = Hive::Patrol::StateStore.new(dir)
+      assert_equal 1, state.occurrence_capture(first_id)
+                           .reservation.fetch("attempt_generation")
 
       sched.complete(project: "p1", exit_code: 1, now: T0 + 10)
       refute sched.pending?("p1")
@@ -277,8 +281,12 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       # A project with an outstanding failure retries on the backoff
       # cadence (60s), not the slow poll interval — the throttle is
       # exempt while a failure is recorded.
-      assert_equal 1, sched.tick(now: T0 + 71).size,
-                   "failed patrol retries once the backoff interval elapses"
+      retry_dispatch = sched.tick(now: T0 + 71).fetch(0)
+      retry_id = retry_dispatch.fetch(:command).split.last
+      refute_equal first_id, retry_id
+      assert_equal 2, state.occurrence_capture(retry_id)
+                           .reservation.fetch("attempt_generation"),
+                   "failed patrol retries with a new durable attempt identity"
 
       sched.complete(project: "p1", exit_code: 0, now: T0 + 80)
       refute sched.pending?("p1")
@@ -399,19 +407,25 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       entry = project_entry(dir)
       capture = reservation_capture(entry)
       reservations = []
+      enumerations = 0
       store = Object.new
-      store.define_singleton_method(:projection_pending_occurrences) { [] }
-      store.define_singleton_method(:pending_occurrences) do
-        [
+      store.define_singleton_method(:each_occurrence) do |&block|
+        enumerations += 1
+        records = [
           {
             "occurrence_id" => "occ-#{'b' * 64}",
-            "created_at" => (T0 + 1).iso8601(6)
+            "created_at" => (T0 + 1).iso8601(6),
+            "phase" => "reserved",
+            "outbox" => []
           },
           {
             "occurrence_id" => capture.occurrence_id,
-            "created_at" => T0.iso8601(6)
+            "created_at" => T0.iso8601(6),
+            "phase" => "reserved",
+            "outbox" => []
           }
         ]
+        records.each(&block)
       end
       store.define_singleton_method(:occurrence_capture) do |occurrence_id|
         capture if occurrence_id == capture.occurrence_id
@@ -434,6 +448,8 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       assert_includes dispatch.fetch(:command), "--occurrence-id #{capture.occurrence_id}"
       assert_equal [ [ capture, T0 + 2 ] ], reservations
       assert sched.pending?("p1")
+      assert_equal 1, enumerations,
+                   "recovery projection and reservation must share one inventory pass"
     end
   end
 
@@ -444,11 +460,17 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       evidence = Object.new
       publisher = Object.new
       store = Object.new
-      store.define_singleton_method(:projection_pending_occurrences) do
-        [
-          { "occurrence_id" => "occ-#{'a' * 64}" },
-          { "occurrence_id" => "occ-#{'b' * 64}" }
-        ]
+      store.define_singleton_method(:each_occurrence) do |&block|
+        %w[a b].each do |suffix|
+          block.call(
+            "occurrence_id" => "occ-#{suffix * 64}",
+            "created_at" => T0.iso8601(6),
+            "phase" => "finalized",
+            "outbox" => [
+              { "acknowledged" => false }
+            ]
+          )
+        end
       end
       store.define_singleton_method(:drain_occurrence_outbox!) do |occurrence_id, **options|
         drained << [ occurrence_id, options ]
@@ -482,8 +504,7 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       reserved = []
       drained = []
       store = Object.new
-      store.define_singleton_method(:projection_pending_occurrences) { [] }
-      store.define_singleton_method(:pending_occurrences) { [] }
+      store.define_singleton_method(:each_occurrence) { |&| nil }
       store.define_singleton_method(:reserve_occurrence!) do |capture, now:|
         reserved << [ capture, now ]
       end
@@ -515,6 +536,57 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       assert_equal T0, reservation_time
       assert_equal [ capture.occurrence_id ], drained.map(&:first)
       assert_same evidence, drained.first.last.fetch(:evidence_store)
+    end
+  end
+
+  def test_projection_recovery_failure_is_visible_and_retried_with_backoff
+    with_tmp_dir do |dir|
+      entry = project_entry(dir)
+      drain_calls = 0
+      store = Object.new
+      store.define_singleton_method(:each_occurrence) do |&block|
+        block.call(
+          "occurrence_id" => "occ-recovery",
+          "created_at" => T0.iso8601(6),
+          "phase" => "finalized",
+          "outbox" => [
+            { "acknowledged" => false }
+          ]
+        )
+      end
+      store.define_singleton_method(:drain_occurrence_outbox!) do |_occurrence_id, **_options|
+        drain_calls += 1
+        raise IOError, "projection failed: #{"x" * 600}"
+      end
+      sched = Hive::Daemon::PatrolScheduler.new(
+        registry: -> { [ entry ] },
+        migration_ownership: ->(*) { true },
+        evidence_store_factory: ->(_candidate) { Object.new },
+        state_store_factory: ->(_candidate) { store }
+      )
+
+      assert_empty sched.candidates(now: T0)
+      first = sched.drain_events.fetch(0)
+      assert_equal "p1", first.fetch(:project)
+      assert_equal "occ-recovery", first.fetch(:occurrence_id)
+      assert_equal "occurrence_outbox_projection", first.fetch(:recovery)
+      assert_equal "recovery_failed", first.fetch(:blocker)
+      assert_equal "IOError", first.fetch(:error_class)
+      assert_equal 512, first.fetch(:error).bytesize
+      assert_equal 1, first.fetch(:retry_count)
+      assert_equal 60, first.fetch(:retry_in_sec)
+      assert_equal (T0 + 60).utc.iso8601, first.fetch(:retry_at)
+
+      assert_empty sched.candidates(now: T0 + 59)
+      assert_empty sched.drain_events
+      assert_equal 1, drain_calls
+
+      assert_empty sched.candidates(now: T0 + 60)
+      second = sched.drain_events.fetch(0)
+      assert_equal 2, drain_calls
+      assert_equal 2, second.fetch(:retry_count)
+      assert_equal 300, second.fetch(:retry_in_sec)
+      assert_equal (T0 + 360).utc.iso8601, second.fetch(:retry_at)
     end
   end
 
@@ -578,6 +650,53 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_nonterminal_effect_blocks_finalization_but_not_occurrence_recovery
+    with_tmp_dir do |dir|
+      write_state(dir, "last_scanned_sha" => "old")
+      entry = project_entry(dir)
+      sched = scheduler(entry, enabled_cfg)
+      dispatch = sched.tick(now: T0).fetch(0)
+      occurrence_id = dispatch.fetch(:command).split.last
+      state = Hive::Patrol::StateStore.new(dir)
+      capture = state.occurrence_capture(occurrence_id)
+      intent = Hive::Modules::Migration::EffectIntent.build(
+        module_name: "patrol",
+        occurrence_id: occurrence_id,
+        authority: capture.owner,
+        owner_epoch: capture.owner_epoch,
+        sink: "pull_request",
+        target: "owner/demo:branch",
+        idempotency_key: "finding-1:pull-request",
+        capability: "github_pull_requests",
+        created_at: capture.recorded_at
+      )
+      state.prepare_effect!(intent, now: T0)
+      state.mark_dispatch_uncertain!(intent, now: T0)
+
+      assert_raises(Hive::ConfigError) do
+        sched.complete(project: "p1", exit_code: 1, now: T0 + 1)
+      end
+      refute sched.pending?("p1")
+      recovery = sched.candidates(now: T0 + 2).fetch(0)
+      assert_equal occurrence_id,
+                   recovery.fetch(:recovery_occurrence_id)
+    end
+  end
+
+  def test_completion_without_a_process_local_pending_marker_is_a_noop
+    with_tmp_dir do |dir|
+      sched = scheduler(project_entry(dir), enabled_cfg)
+
+      sched.complete(
+        project: "p1",
+        exit_code: Hive::ExitCodes::SUCCESS,
+        now: T0
+      )
+
+      refute sched.pending?("p1")
+    end
+  end
+
   def test_malformed_completion_and_poll_interval_fail_closed
     with_tmp_dir do |dir|
       write_state(dir, "last_scanned_sha" => "old")
@@ -593,7 +712,10 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
 
       assert_equal "patrol completion outcome is malformed", completion_error.message
       assert_equal "patrol poll interval is malformed", interval_error.message
-      assert sched.pending?("p1"), "a malformed completion must not discard recovery state"
+      refute sched.pending?("p1"),
+             "an ended child must not retain process-local dispatch ownership"
+      refute_empty Hive::Patrol::StateStore.new(dir).pending_occurrences,
+                   "the reserved occurrence remains the recovery authority"
     end
   end
 

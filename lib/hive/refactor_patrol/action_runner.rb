@@ -659,7 +659,7 @@ module Hive
           superseded_patch_commits: superseded_patch_commits(fresh_action)
         )
         if result.is_a?(PrOpener::Result) && result.outcome == "trunk_drift_retry"
-          @job_store.supersede_publication_attempt!(
+          action_transitions.supersede_publication(
             token,
             attempt_id: attempt_id,
             observed_head_sha: result.observed_head_sha,
@@ -855,18 +855,6 @@ module Hive
       def record_action_receipt_transition!(token, phase, payload)
         action_transitions.record_action_receipt(
           token, phase, payload, now: now
-        )
-      end
-
-      def action_claim_transition!(token, operation:, payload:, matcher:,
-                                   &transition)
-        action_transitions.claimed_transition(
-          token,
-          operation: operation,
-          payload: payload,
-          matcher: matcher,
-          now: now,
-          &transition
         )
       end
 
@@ -1078,57 +1066,8 @@ module Hive
         )
         return existing if existing
 
-        snapshot = Hive::Modules::Migration::Patrols.ownership_snapshot(
-          @project_root,
-          "architecture-patrol",
-          hive_state_path: File.join(@project_root, ".hive-state")
-        )
-        owner = %w[legacy module].include?(snapshot["owner"]) ?
-          snapshot.fetch("owner") : "legacy"
-        epoch = snapshot["epoch"].to_i.positive? ?
-          snapshot.fetch("epoch") : 1
-        source = aggregate.fetch("source")
-        occurred_at = source["merged_at"] || aggregate.fetch("created_at")
-        capture = Hive::Modules::Migration::PatrolCapture.build(
-          module_name: "architecture-patrol",
-          project: {
-            "project_id" => effect_project_id,
-            "name" => source.fetch("registration"),
-            "repository" => source.fetch("repository")
-          },
-          trigger: {
-            "kind" => "pull_request.merged",
-            "id" => [
-              source.fetch("repository"),
-              source.fetch("number"),
-              source.fetch("merge_sha")
-            ].join(":"),
-            "manifest_digest" => source["manifest_checksum"] ||
-              ::Digest::SHA256.hexdigest(
-                Hive::WorkflowPackage::CanonicalJSON.generate(source)
-              ),
-            "merge_sha" => source.fetch("merge_sha")
-          },
-          reservation: {
-            "kind" => "architecture",
-            "id" => aggregate.fetch("job_id"),
-            "job_id" => aggregate.fetch("job_id")
-          },
-          owner: owner,
-          owner_epoch: epoch,
-          decision_class: "provenance",
-          decision: {
-            "rationale" => "due",
-            "job_id" => aggregate.fetch("job_id"),
-            "phase" => "discovery"
-          },
-          occurred_at: occurred_at,
-          recorded_at: occurred_at
-        )
-        @job_store.reserve_occurrence!(
-          aggregate.fetch("job_id"), capture: capture, now: now
-        )
-        @job_store.occurrence_capture(aggregate.fetch("job_id"))
+        raise JobStore::InconsistentRecord,
+              "architecture patrol job occurrence is unavailable"
       end
 
       def effect_scope(token)
@@ -1217,23 +1156,13 @@ module Hive
 
       def persist_publication_phase(token, kind, phase, payload, attempt_id: nil)
         if kind == "fix"
-          action_claim_transition!(
-            token, operation: "publication-#{phase}",
+          action_transitions.record_publication_phase(
+            token,
+            attempt_id: attempt_id,
+            phase: phase,
             payload: payload,
-            matcher: lambda do |action|
-              Hive::RefactorPatrol::PublicationAttempt.state_for(
-                action.fetch("receipts"), attempt_id
-              )[phase] == payload
-            rescue Hive::RefactorPatrol::PublicationAttempt::Error,
-                   NoMethodError
-              false
-            end
-          ) do
-            @job_store.record_publication_attempt_phase!(
-              token, attempt_id: attempt_id, phase: phase,
-              payload: payload, now: now
-            )
-          end
+            now: now
+          )
           return
         end
 
@@ -1606,8 +1535,8 @@ module Hive
         )[action_id]
         return false unless proof
 
-        @job_store.materialize_terminal_proof!(
-          aggregate.fetch("job_id"), action_id, proof: proof, now: now
+        action_transitions.materialize_terminal_proof(
+          aggregate, action_id, proof: proof, now: now
         )
         @events << event(
           "canonical_action_linked",

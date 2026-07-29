@@ -1,3 +1,4 @@
+require "digest"
 require_relative "../../test_helper"
 require "hive/refactor_patrol/job_store"
 
@@ -153,6 +154,135 @@ class RefactorPatrolJobStoreCollaboratorsTest < Minitest::Test
     end
   end
 
+  def test_record_validator_rejects_every_v3_recovery_identity_and_history_drift
+    path = "/tmp/job.json"
+    occurrence_id = valid_job.fetch("occurrence_id")
+    transition = effect_transition
+    diagnostic = diagnostic_attempt(occurrence_id, transition)
+    job_transition = job_transition_attempt(occurrence_id, transition)
+    discovery = discovery_attempt(occurrence_id, transition)
+
+    assert_invalid_attempt(
+      diagnostic.merge("generation" => 0), occurrence_id, path
+    )
+    assert_invalid_attempt(
+      diagnostic.merge("occurrence_id" => "occ-#{'f' * 64}"),
+      occurrence_id,
+      path
+    )
+    assert_invalid_attempt(
+      diagnostic.merge("state" => "complete"), occurrence_id, path
+    )
+    assert_invalid_attempt(
+      diagnostic.merge("evidence" => []), occurrence_id, path
+    )
+    assert_invalid_attempt(
+      diagnostic.merge("action_claim_generations" => { "action-1" => -1 }),
+      occurrence_id,
+      path
+    )
+    assert_invalid_attempt(
+      job_transition.merge("generation" => 0), occurrence_id, path
+    )
+    assert_invalid_attempt(
+      job_transition.merge("occurrence_id" => "occ-#{'f' * 64}"),
+      occurrence_id,
+      path
+    )
+    assert_invalid_attempt(
+      discovery.merge("occurrence_id" => "occ-#{'f' * 64}"),
+      occurrence_id,
+      path
+    )
+    assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+      validator.send(
+        :validate_discovery_attempts!,
+        [
+          diagnostic,
+          diagnostic.merge("generation" => 3)
+        ],
+        path,
+        occurrence_id: occurrence_id
+      )
+    end
+
+    invalid_transitions = [
+      transition.merge("generation" => 0),
+      transition.merge("semantic_digest" => "bad"),
+      transition.merge("outcome" => "unknown"),
+      transition.merge("error_code" => "unexpected")
+    ]
+    invalid_transitions.each do |invalid|
+      assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        validator.send(
+          :validate_transition_records!, [ invalid ], path, generation: 1
+        )
+      end
+    end
+    assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+      validator.send(
+        :validate_transition_records!, [ transition, transition ], path,
+        generation: 1
+      )
+    end
+    assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+      validator.send(
+        :validate_transition_records!,
+        Array.new(
+          Hive::RefactorPatrol::JobStore::MAX_TRANSITIONS_PER_GENERATION + 1,
+          transition
+        ),
+        path,
+        generation: 1
+      )
+    end
+
+    action = accepted_job.fetch("actions").first
+    action["claims"] = [
+      action_claim(1, "released").merge(
+        "occurrence_id" => "occ-#{'f' * 64}"
+      )
+    ]
+    assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+      validator.send(
+        :validate_action_claims!,
+        action,
+        path,
+        occurrence_id: occurrence_id
+      )
+    end
+
+    assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+      validator.send(
+        :validate_discovery_attempt_transition!, [ discovery ], [], path
+      )
+    end
+    assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+      validator.send(
+        :validate_discovery_attempt_transition!,
+        [ discovery ],
+        [ diagnostic ],
+        path
+      )
+    end
+    assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+      validator.send(
+        :validate_transition_history!, [ transition ], [], path
+      )
+    end
+    assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+      validator.send(:occurrence_id!, "bad", "occurrence", path)
+    end
+    assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+      validator.send(:intent_id!, "bad", "intent", path)
+    end
+    assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+      validator.validate_transition_semantic!(
+        transition, semantic: {}, path: path
+      )
+    end
+  end
+
   def test_claim_transitions_build_and_advance_claims_without_io
     transitions = Hive::RefactorPatrol::ClaimTransitions.new(
       inconsistent_record: Hive::RefactorPatrol::JobStore::InconsistentRecord
@@ -163,6 +293,7 @@ class RefactorPatrolJobStoreCollaboratorsTest < Minitest::Test
       owner: "worker",
       owner_pid: 101,
       owner_process_start_time: "start",
+      occurrence_id: "occ-#{'1' * 64}",
       authority: "full",
       now: T0,
       lease_sec: 60
@@ -232,7 +363,7 @@ class RefactorPatrolJobStoreCollaboratorsTest < Minitest::Test
 
   def test_job_indexes_reject_links_without_a_terminal_owner
     projector = Hive::RefactorPatrol::JobIndexes.new(
-      schema_version: 2,
+      schema_version: Hive::RefactorPatrol::JobStore::SCHEMA_VERSION,
       dispositions: Hive::RefactorPatrol::JobStore::DISPOSITIONS,
       inconsistent_record: Hive::RefactorPatrol::JobStore::InconsistentRecord
     )
@@ -266,7 +397,8 @@ class RefactorPatrolJobStoreCollaboratorsTest < Minitest::Test
     aggregate["actions"] << {
       "canonical_action_id" => "action-1", "thesis_id" => "thesis-1",
       "thesis_fingerprint" => "fp-1", "kind" => "fix", "owner_job_id" => "job-1",
-      "outcome" => "queued", "terminal" => false, "receipts" => {}, "claims" => []
+      "outcome" => "queued", "terminal" => false, "receipts" => {},
+      "claims" => [], "transitions" => []
     }
     aggregate
   end
@@ -290,12 +422,85 @@ class RefactorPatrolJobStoreCollaboratorsTest < Minitest::Test
   def action_claim(generation, state)
     {
       "owner" => "worker", "owner_pid" => nil, "owner_process_start_time" => nil,
+      "occurrence_id" => "occ-#{Digest::SHA256.hexdigest('job-1')}",
       "generation" => generation, "state" => state, "authority" => "full",
       "claimed_at" => T0.iso8601, "heartbeat_at" => T0.iso8601,
       "expires_at" => (T0 + 60).iso8601, "pid" => nil,
       "process_start_time" => nil, "pgid" => nil,
       "finished_at" => nil, "outcome" => nil, "next_eligible_at" => nil
     }
+  end
+
+  def effect_transition
+    {
+      "intent_id" => "intent-#{'1' * 64}",
+      "operation" => "test",
+      "generation" => 1,
+      "semantic_digest" => "a" * 64,
+      "outcome" => "applied",
+      "error_code" => nil,
+      "recorded_at" => T0.iso8601
+    }
+  end
+
+  def diagnostic_attempt(occurrence_id, transition)
+    {
+      "kind" => "action_block",
+      "occurrence_id" => occurrence_id,
+      "generation" => 1,
+      "state" => "blocked",
+      "reason" => "retry",
+      "evidence" => {},
+      "transitions" => [ transition ],
+      "finished_at" => T0.iso8601,
+      "next_eligible_at" => (T0 + 60).iso8601,
+      "action_claim_generations" => { "action-1" => 0 }
+    }
+  end
+
+  def job_transition_attempt(occurrence_id, transition)
+    {
+      "kind" =>
+        Hive::RefactorPatrol::JobStore::JOB_TRANSITION_ATTEMPT_KIND,
+      "operation" => "test",
+      "occurrence_id" => occurrence_id,
+      "generation" => 1,
+      "transitions" => [ transition ],
+      "recorded_at" => T0.iso8601
+    }
+  end
+
+  def discovery_attempt(occurrence_id, transition)
+    {
+      "kind" => Hive::RefactorPatrol::JobStore::DISCOVERY_ATTEMPT_KIND,
+      "owner" => "worker",
+      "owner_pid" => nil,
+      "owner_process_start_time" => nil,
+      "occurrence_id" => occurrence_id,
+      "generation" => 1,
+      "state" => "released",
+      "transitions" => [ transition ],
+      "claimed_at" => T0.iso8601,
+      "heartbeat_at" => T0.iso8601,
+      "expires_at" => (T0 + 60).iso8601,
+      "pid" => nil,
+      "process_start_time" => nil,
+      "pgid" => nil,
+      "finished_at" => T0.iso8601,
+      "outcome" => "retry",
+      "next_eligible_at" => (T0 + 60).iso8601
+    }
+  end
+
+  def assert_invalid_attempt(attempt, occurrence_id, path)
+    assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+      validator.send(
+        :validate_discovery_attempts!,
+        [ attempt ],
+        path,
+        occurrence_id: occurrence_id
+      )
+    end
   end
 
   def publication_job
@@ -336,10 +541,14 @@ class RefactorPatrolJobStoreCollaboratorsTest < Minitest::Test
   end
 
   def valid_job(overrides = {})
+    job_id = overrides.fetch("job_id", "job-1")
     {
       "schema" => Hive::RefactorPatrol::JobStore::SCHEMA,
       "schema_version" => Hive::RefactorPatrol::JobStore::SCHEMA_VERSION,
-      "job_id" => "job-1",
+      "job_id" => job_id,
+      "occurrence_id" => "occ-#{Digest::SHA256.hexdigest(job_id)}",
+      "intake_transition_id" =>
+        "intent-#{Digest::SHA256.hexdigest("intake:#{job_id}")}",
       "source" => {
         "url" => "https://github.com/acme/demo/pull/1",
         "number" => 1,
@@ -388,7 +597,8 @@ class RefactorPatrolJobStoreCollaboratorsTest < Minitest::Test
       "outcome" => "complete",
       "terminal" => true,
       "receipts" => {},
-      "claims" => []
+      "claims" => [],
+      "transitions" => []
     }
     aggregate
   end

@@ -1,4 +1,6 @@
 require "test_helper"
+require "hive/modules/migration/occurrence_journal"
+require "hive/refactor_patrol/transition_gateway"
 require "hive/refactor_patrol/job_store"
 require "hive/refactor_patrol/pr_opener"
 
@@ -6,6 +8,392 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   include HiveTestHelper
 
   T0 = Time.utc(2026, 7, 10, 12, 0, 0)
+
+  def test_one_off_schema_migration_moves_occurrence_authority_into_job_store
+    with_tmp_dir do |dir|
+      fixture = legacy_migration_fixture(dir)
+      root = fixture.fetch(:root)
+      job_id = fixture.fetch(:job_id)
+      capture = fixture.fetch(:capture)
+      intent = fixture.fetch(:intake_intent)
+      binding_path = fixture.fetch(:binding_path)
+
+      migrated = Hive::RefactorPatrol::JobStore.new(dir)
+                                                .read_job(job_id)
+
+      assert_equal 3, migrated.fetch("schema_version")
+      assert_equal capture.occurrence_id,
+                   migrated.fetch("occurrence_id")
+      assert_equal intent.intent_id,
+                   migrated.fetch("intake_transition_id")
+      refute File.exist?(binding_path)
+      refute File.exist?("#{binding_path}.lock")
+      marker = File.join(root, "job-schema-v3-migration.json")
+      assert File.file?(marker), "successful migration must be fenced"
+      marker_inode = File.stat(marker).ino
+      assert_equal migrated,
+                   Hive::RefactorPatrol::JobStore.new(dir)
+                                                    .read_job(job_id)
+      assert_equal marker_inode, File.stat(marker).ino,
+                   "completed migration marker must not be rewritten"
+    end
+  end
+
+  def test_schema_migration_restart_is_idempotent_at_each_cleanup_boundary
+    with_tmp_dir do |dir|
+      fixture = legacy_migration_fixture(dir)
+      root = fixture.fetch(:root)
+      marker = File.join(root, "job-schema-v3-migration.json")
+      binding = fixture.fetch(:binding_path)
+      job = File.join(
+        root, "jobs", "#{fixture.fetch(:job_id)}.json"
+      )
+      Hive::RefactorPatrol::JobStore.new(dir)
+      job_inode = File.stat(job).ino
+
+      File.unlink(marker)
+      write_legacy_binding(
+        binding,
+        fixture.fetch(:job_id),
+        fixture.fetch(:capture).occurrence_id
+      )
+      File.write("#{binding}.lock", "")
+      Hive::RefactorPatrol::JobStore.new(dir)
+      assert_equal job_inode, File.stat(job).ino
+      refute File.exist?(binding)
+      refute File.exist?("#{binding}.lock")
+      assert File.file?(marker)
+
+      File.unlink(marker)
+      Hive::RefactorPatrol::JobStore.new(dir)
+      assert_equal job_inode, File.stat(job).ino
+      assert File.file?(marker)
+    end
+  end
+
+  def test_schema_migration_rejects_orphan_bindings_without_mutation
+    with_tmp_dir do |dir|
+      root = migration_root(dir)
+      binding = File.join(
+        root, "occurrences", "jobs", "orphan.json"
+      )
+      write_legacy_binding(
+        binding, "orphan", "occ-#{'a' * 64}"
+      )
+      File.write("#{binding}.lock", "")
+
+      assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        Hive::RefactorPatrol::JobStore.new(dir)
+      end
+      assert File.file?(binding)
+      assert File.file?("#{binding}.lock")
+      refute File.exist?(
+        File.join(root, "job-schema-v3-migration.json")
+      )
+    end
+  end
+
+  def test_schema_migration_rejects_symlink_and_preflight_replacement_race
+    with_tmp_dir do |dir|
+      fixture = legacy_migration_fixture(dir)
+      binding = fixture.fetch(:binding_path)
+      outside = File.join(dir, "outside-binding.json")
+      File.rename(binding, outside)
+      File.symlink(outside, binding)
+      before = File.binread(outside)
+
+      assert_raises(Hive::RefactorPatrol::JobStore::CorruptRecord) do
+        Hive::RefactorPatrol::JobStore.new(dir)
+      end
+      assert_equal before, File.binread(outside)
+      refute File.exist?(
+        File.join(
+          fixture.fetch(:root),
+          "job-schema-v3-migration.json"
+        )
+      )
+    end
+
+    with_tmp_dir do |dir|
+      fixture = legacy_migration_fixture(dir)
+      migration = schema_migration(fixture.fetch(:root))
+      directory = migration.send(:directory)
+      original = directory.method(:read)
+      relative = File.join(
+        "jobs", "#{fixture.fetch(:job_id)}.json"
+      )
+      reads = 0
+      directory.define_singleton_method(:read) do |path, **options|
+        if path == relative
+          reads += 1
+          if reads == 3
+            target = File.join(root, path)
+            replacement = "#{File.binread(target)} "
+            temporary = "#{target}.race"
+            File.binwrite(temporary, replacement)
+            File.rename(temporary, target)
+          end
+        end
+        original.call(path, **options)
+      end
+
+      assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) { migration.run! }
+      assert File.file?(fixture.fetch(:binding_path))
+      refute File.exist?(
+        File.join(
+          fixture.fetch(:root),
+          "job-schema-v3-migration.json"
+        )
+      )
+    end
+  end
+
+  def test_completed_marker_rejects_reintroduced_legacy_authority
+    with_tmp_dir do |dir|
+      fixture = legacy_migration_fixture(dir)
+      Hive::RefactorPatrol::JobStore.new(dir)
+      migrated_path = File.join(
+        fixture.fetch(:root),
+        "jobs",
+        "#{fixture.fetch(:job_id)}.json"
+      )
+      migrated = JSON.parse(File.binread(migrated_path))
+      legacy = migrated.reject do |key, _value|
+        %w[occurrence_id intake_transition_id].include?(key)
+      end
+      legacy["schema_version"] = 2
+      File.write(migrated_path, "#{JSON.pretty_generate(legacy)}\n")
+
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      assert_raises(
+        Hive::RefactorPatrol::JobStore::UnsupportedVersion
+      ) do
+        store.read_job(fixture.fetch(:job_id))
+      end
+      File.write(migrated_path, "{")
+      fast_path = Hive::RefactorPatrol::JobStore.new(dir)
+      assert_raises(
+        Hive::RefactorPatrol::JobStore::CorruptRecord
+      ) do
+        fast_path.read_job(fixture.fetch(:job_id))
+      end
+    end
+
+    with_tmp_dir do |dir|
+      fixture = legacy_migration_fixture(dir)
+      Hive::RefactorPatrol::JobStore.new(dir)
+      write_legacy_binding(
+        fixture.fetch(:binding_path),
+        fixture.fetch(:job_id),
+        fixture.fetch(:capture).occurrence_id
+      )
+
+      assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        Hive::RefactorPatrol::JobStore.new(dir)
+      end
+    end
+  end
+
+  def test_migrated_and_live_transitions_share_exact_semantic_digest
+    with_tmp_dir do |dir|
+      fixture = legacy_migration_fixture(
+        dir, discovery_transition: true
+      )
+      migrated = Hive::RefactorPatrol::JobStore.new(dir)
+                                                 .read_job(
+        fixture.fetch(:job_id)
+      )
+      transition = migrated.dig("attempts", 0, "transitions", 0)
+      intent = fixture.fetch(:discovery_intent)
+      expected =
+        Hive::RefactorPatrol::TransitionEvidence.semantic_digest(intent)
+
+      assert_equal intent.intent_id, transition.fetch("intent_id")
+      assert_equal expected, transition.fetch("semantic_digest")
+      refute transition.key?("payload_digest")
+
+      validator = Hive::RefactorPatrol::JobRecordValidator.new(
+        contract: Hive::RefactorPatrol::JobStore
+      )
+      mismatch = transition.merge("semantic_digest" => "0" * 64)
+      assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        validator.validate_transition_semantic!(
+          mismatch,
+          semantic:
+            Hive::RefactorPatrol::TransitionEvidence.semantic(intent)
+        )
+      end
+      mislabeled = transition.dup
+      mislabeled["payload_digest"] =
+        mislabeled.delete("semantic_digest")
+      assert_raises(
+        Hive::RefactorPatrol::JobStore::CorruptRecord
+      ) do
+        validator.validate_job!(
+          migrated.merge(
+            "attempts" => [
+              migrated.fetch("attempts").first.merge(
+                "transitions" => [ mislabeled ]
+              )
+            ]
+          )
+        )
+      end
+    end
+  end
+
+  def test_schema_migration_assigns_diagnostic_episodes_and_job_transitions
+    with_tmp_dir do |dir|
+      fixture = legacy_migration_fixture(dir)
+      job_path = File.join(
+        fixture.fetch(:root),
+        "jobs",
+        "#{fixture.fetch(:job_id)}.json"
+      )
+      legacy = JSON.parse(File.binread(job_path))
+      legacy.merge!(
+        "state" => "blocked",
+        "complete" => false,
+        "actions" => [],
+        "attempts" => [
+          legacy_block_attempt("first", T0),
+          legacy_block_attempt("second", T0 + 60)
+        ]
+      )
+      File.write(job_path, "#{JSON.pretty_generate(legacy)}\n")
+
+      journal = Hive::Modules::Migration::OccurrenceJournal.new(
+        File.join(
+          fixture.fetch(:root),
+          "occurrences",
+          "records"
+        ),
+        module_name: "architecture-patrol"
+      )
+      diagnostic = architecture_intent(
+        fixture.fetch(:capture),
+        sink: "discovery",
+        target: "#{fixture.fetch(:job_id)}:block",
+        idempotency_key: "diagnostic-episode-2",
+        job_id: fixture.fetch(:job_id),
+        claim_generation: 2
+      )
+      plan = architecture_intent(
+        fixture.fetch(:capture),
+        sink: "action",
+        target: "#{fixture.fetch(:job_id)}:initialize",
+        idempotency_key: "initialize-actions",
+        job_id: fixture.fetch(:job_id),
+        claim_generation: fixture.fetch(:capture).owner_epoch
+      )
+      commit_transition(journal, diagnostic)
+      commit_transition(journal, plan)
+
+      migrated = Hive::RefactorPatrol::JobStore.new(dir).read_job(
+        fixture.fetch(:job_id)
+      )
+      diagnostics = migrated.fetch("attempts").select do |attempt|
+        attempt["kind"] == "discovery_block"
+      end
+      assert_equal [ 1, 2 ],
+                   diagnostics.map { |attempt| attempt.fetch("generation") }
+      assert_empty diagnostics.first.fetch("transitions")
+      assert_equal(
+        diagnostic.intent_id,
+        diagnostics.last.dig("transitions", 0, "intent_id")
+      )
+      job_transition = migrated.fetch("attempts").find do |attempt|
+        attempt["kind"] ==
+          Hive::RefactorPatrol::JobStore::JOB_TRANSITION_ATTEMPT_KIND
+      end
+      refute_nil job_transition
+      assert_equal fixture.fetch(:capture).owner_epoch,
+                   job_transition.fetch("generation")
+      assert_equal plan.intent_id,
+                   job_transition.dig("transitions", 0, "intent_id")
+    end
+  end
+
+  def test_job_transition_replay_is_exact_and_does_not_rewrite_the_aggregate
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      store.write_job!(classified_job("attempts" => []))
+      transition = {
+        "intent_id" => "intent-#{"a" * 64}",
+        "operation" => "initialize-actions",
+        "semantic_digest" => "b" * 64,
+        "error_code" => "stale_claim"
+      }
+
+      first = store.record_job_transition_rejection!(
+        "job-1",
+        operation: "initialize-actions-rejection",
+        generation: 1,
+        transition: transition,
+        now: T0
+      )
+      replay = store.record_job_transition_rejection!(
+        "job-1",
+        operation: "initialize-actions-rejection",
+        generation: 1,
+        transition: transition,
+        now: T0 + 60
+      )
+
+      assert_equal first, replay
+      assert_equal 1, replay.fetch("attempts").size
+      assert_equal T0.iso8601, replay.fetch("updated_at")
+
+      assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        store.record_job_transition_rejection!(
+          "job-1",
+          operation: "initialize-actions-rejection",
+          generation: 1,
+          transition: transition.merge("semantic_digest" => "c" * 64),
+          now: T0 + 120
+        )
+      end
+      assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        store.record_job_transition_rejection!(
+          "job-1",
+          operation: "different-rejection",
+          generation: 2,
+          transition: transition,
+          now: T0 + 120
+        )
+      end
+    end
+  end
+
+  def test_schema_migration_rejects_missing_or_malformed_transition_outcome
+    with_tmp_dir do |dir|
+      fixture = legacy_migration_fixture(
+        dir,
+        discovery_transition: true,
+        discovery_outcome: {}
+      )
+
+      assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        Hive::RefactorPatrol::JobStore.new(dir)
+      end
+      refute File.exist?(
+        File.join(
+          fixture.fetch(:root),
+          "job-schema-v3-migration.json"
+        )
+      )
+    end
+  end
 
   def test_writes_and_strictly_reads_authoritative_job_aggregate
     with_tmp_dir do |dir|
@@ -19,40 +407,63 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     end
   end
 
-  def test_reconciled_effect_settlement_delegates_the_complete_receipt_contract
+  def test_incomplete_job_probe_uses_the_bounded_query_index
+    with_tmp_dir do |dir|
+      incomplete = Hive::RefactorPatrol::JobStore.new(
+        File.join(dir, "incomplete")
+      )
+      incomplete.write_job!(
+        classified_job("attempts" => [])
+      )
+      assert incomplete.incomplete_jobs?
+
+      complete = Hive::RefactorPatrol::JobStore.new(
+        File.join(dir, "complete")
+      )
+      complete.write_job!(job)
+      refute complete.incomplete_jobs?
+    end
+  end
+
+  def test_effect_recovery_delegates_the_store_minted_receipt_contract
     with_tmp_dir do |dir|
       calls = []
       occurrences = Object.new
-      occurrences.define_singleton_method(:settle_effect_reconciled!) do |intent, **options|
-        calls << [ intent, options ]
+      occurrences.define_singleton_method(:reset_effect_prepared!) do |intent, **options|
+        calls << [ :reset, intent, options ]
+        :reset
+      end
+      occurrences.define_singleton_method(:settle_effect!) do |intent, **options|
+        calls << [ :settle, intent, options ]
         :settled
       end
       store = Hive::RefactorPatrol::JobStore.new(dir)
       store.instance_variable_set(:@architecture_occurrences, occurrences)
       intent = { "effect_id" => "effect-1" }
-      receipt = { "receipt_id" => "receipt-1" }
 
-      result = store.settle_effect_reconciled!(
+      assert_equal :reset,
+                   store.reset_effect_prepared!(intent, now: T0)
+      result = store.settle_effect!(
         intent,
-        expected_generation: 3,
+        status: "reconciled",
         outcome: { "state" => "complete" },
-        receipt: receipt,
         now: T0
       )
 
       assert_equal :settled, result
       assert_equal(
         [
+          :settle,
           intent,
           {
-            expected_generation: 3,
+            status: "reconciled",
             outcome: { "state" => "complete" },
-            receipt: receipt,
             now: T0
           }
         ],
-        calls.fetch(0)
+        calls.fetch(1)
       )
+      assert_equal [ :reset, intent, { now: T0 } ], calls.fetch(0)
     end
   end
 
@@ -324,8 +735,9 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
 
-      created = store.enqueue_manifest!(manifest, policy: intake_policy, now: T0)
-      duplicate = store.enqueue_manifest!(
+      created = enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
+      duplicate = enqueue_manifest(
+        store,
         manifest,
         policy: intake_policy.merge("auto_fix" => true),
         now: T0 + 60
@@ -343,7 +755,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def test_manifest_intake_rejects_divergent_source_without_overwrite
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
-      original = store.enqueue_manifest!(manifest, policy: intake_policy, now: T0)
+      original = enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
       path = File.join(store.root, "jobs", "pr-7-stable.json")
       bytes = File.binread(path)
       divergent = manifest.merge(
@@ -352,7 +764,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       )
 
       assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
-        store.enqueue_manifest!(divergent, policy: intake_policy, now: T0 + 60)
+        enqueue_manifest(store, divergent, policy: intake_policy, now: T0 + 60)
       end
       assert_equal original, store.read_job("pr-7-stable")
       assert_equal bytes, File.binread(path)
@@ -368,7 +780,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       first_manifest = manifest(
         "source" => manifest.fetch("source").merge("merged_at" => "2026-07-10T13:00:00+01:00")
       )
-      first = store.enqueue_manifest!(first_manifest, policy: intake_policy, now: T0)
+      first = enqueue_manifest(store, first_manifest, policy: intake_policy, now: T0)
       second_manifest = manifest(
         "job_id" => "pr-8-stable",
         "source" => manifest.fetch("source").merge(
@@ -379,7 +791,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
         ),
         "manifest_checksum" => "e" * 64
       )
-      second = store.enqueue_manifest!(second_manifest, policy: intake_policy, now: T0 + 60)
+      second = enqueue_manifest(store, second_manifest, policy: intake_policy, now: T0 + 60)
       store.write_job!(
         first.merge(
           "state" => "blocked",
@@ -398,7 +810,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def test_discovery_claim_is_fenced_and_only_exact_owner_generation_can_checkpoint
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
-      store.enqueue_manifest!(manifest, policy: intake_policy, now: T0)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
 
       token = store.claim_discovery!(
         "pr-7-stable", owner: "daemon-a", analysis_sha: "c" * 40,
@@ -427,7 +839,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
       policy = intake_policy.merge("issue_filing" => true)
-      store.enqueue_manifest!(manifest, policy: policy, now: T0)
+      enqueue_manifest(store, manifest, policy: policy, now: T0)
       token = store.claim_discovery!(
         "pr-7-stable", owner: "daemon-a", analysis_sha: "c" * 40,
         now: T0, lease_sec: 60
@@ -459,7 +871,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
       policy = intake_policy.merge("issue_filing" => true)
-      store.enqueue_manifest!(manifest, policy: policy, now: T0)
+      enqueue_manifest(store, manifest, policy: policy, now: T0)
       token = store.claim_discovery!(
         "pr-7-stable", owner: "daemon-a", analysis_sha: "c" * 40,
         now: T0, lease_sec: 60
@@ -489,7 +901,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def test_expired_claim_reclaims_only_after_process_identity_is_resolved
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
-      store.enqueue_manifest!(manifest, policy: intake_policy, now: T0)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
       first = store.claim_discovery!(
         "pr-7-stable", owner: "daemon-a", analysis_sha: "c" * 40,
         now: T0, lease_sec: 10
@@ -579,7 +991,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def test_stale_prior_generation_token_cannot_renew_or_checkpoint_after_supersede_and_release
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
-      store.enqueue_manifest!(manifest, policy: intake_policy, now: T0)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
       stale = store.claim_discovery!(
         "pr-7-stable", owner: "daemon-a", analysis_sha: "c" * 40,
         now: T0, lease_sec: 10
@@ -608,7 +1020,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def test_discovery_heartbeat_renews_only_the_live_exact_generation
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
-      store.enqueue_manifest!(manifest, policy: intake_policy, now: T0)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
       token = store.claim_discovery!(
         "pr-7-stable", owner: "daemon-a", analysis_sha: "c" * 40,
         now: T0, lease_sec: 60, owner_pid: 1234,
@@ -650,7 +1062,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def test_claim_heartbeat_rejects_dead_owner_and_matches_pid_start_time
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
-      store.enqueue_manifest!(manifest, policy: intake_policy, now: T0)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
       token = store.claim_discovery!(
         "pr-7-stable", owner: "daemon-a", analysis_sha: "c" * 40,
         now: T0, lease_sec: 60, owner_pid: 1234,
@@ -677,7 +1089,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def test_release_records_durable_retry_without_disposition_checkpoint
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
-      store.enqueue_manifest!(manifest, policy: intake_policy, now: T0)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
       token = store.claim_discovery!(
         "pr-7-stable", owner: "daemon-a", analysis_sha: "c" * 40,
         now: T0, lease_sec: 60
@@ -696,7 +1108,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def test_partial_checkpoint_preserves_completed_features_and_retries_only_incomplete_work
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
-      store.enqueue_manifest!(manifest, policy: intake_policy, now: T0)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
       token = store.claim_discovery!(
         "pr-7-stable", owner: "daemon-a", analysis_sha: "c" * 40,
         now: T0, lease_sec: 60
@@ -758,7 +1170,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def test_feature_checkpoint_is_durable_without_releasing_the_discovery_claim
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
-      store.enqueue_manifest!(manifest, policy: intake_policy, now: T0)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
       token = store.claim_discovery!(
         "pr-7-stable", owner: "daemon-a", analysis_sha: "c" * 40,
         now: T0, lease_sec: 60
@@ -1617,10 +2029,10 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
       assert_raises(Hive::RefactorPatrol::JobStore::CorruptRecord) do
-        store.enqueue_manifest!(manifest.except("job_id"), policy: intake_policy, now: T0)
+        enqueue_manifest(store, manifest.except("job_id"), policy: intake_policy, now: T0)
       end
 
-      store.enqueue_manifest!(manifest, policy: intake_policy, now: T0)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
       token = store.claim_discovery!(
         "pr-7-stable", owner: "daemon", analysis_sha: "c" * 40,
         now: T0, lease_sec: 10
@@ -1665,7 +2077,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def test_discovery_claim_guards_resolver_checkout_and_child_identity
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
-      store.enqueue_manifest!(manifest, policy: intake_policy, now: T0)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
       first = store.claim_discovery!(
         "pr-7-stable", owner: "one", analysis_sha: "c" * 40,
         now: T0, lease_sec: 10
@@ -1693,7 +2105,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def test_block_discovery_records_retry_evidence_and_is_idempotent_for_complete_jobs
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
-      store.enqueue_manifest!(manifest, policy: intake_policy, now: T0)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
       blocked = store.block_discovery!(
         "pr-7-stable", reason: "checkout_failed", evidence: { "ref" => "main" },
         now: T0, backoff_sec: 30
@@ -1701,6 +2113,23 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       assert_equal "blocked", blocked.fetch("state")
       assert_equal "checkout_failed", blocked.fetch("attempts").last.fetch("reason")
       assert_equal (T0 + 30).iso8601, blocked.fetch("attempts").last.fetch("next_eligible_at")
+      retried = store.block_discovery!(
+        "pr-7-stable",
+        reason: "checkout_failed",
+        evidence: { "ref" => "main" },
+        now: T0 + 10,
+        backoff_sec: 60
+      )
+      episodes = retried.fetch("attempts").select do |attempt|
+        attempt["kind"] == "discovery_block"
+      end
+      assert_equal [ 1, 2 ], episodes.map { |attempt|
+        attempt.fetch("generation")
+      }
+      assert_equal(
+        (T0 + 70).iso8601,
+        episodes.last.fetch("next_eligible_at")
+      )
 
       completed = Hive::RefactorPatrol::JobStore.new(File.join(dir, "complete"))
       completed.write_job!(job)
@@ -1902,7 +2331,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       end
 
       queued = Hive::RefactorPatrol::JobStore.new(File.join(dir, "queued"))
-      queued.enqueue_manifest!(manifest, policy: intake_policy, now: T0)
+      enqueue_manifest(queued, manifest, policy: intake_policy, now: T0)
       assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
         queued.plan_actions("pr-7-stable", specifications: [])
       end
@@ -1981,7 +2410,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def test_discovery_payload_validation_rejects_each_inconsistent_progress_shape
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
-      store.enqueue_manifest!(manifest, policy: intake_policy, now: T0)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
       store.claim_discovery!("pr-7-stable", owner: "runner", analysis_sha: "c" * 40, now: T0)
       aggregate = store.read_job("pr-7-stable")
       valid = complete_zero_envelope(dir)
@@ -2066,7 +2495,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
       assert_raises(Hive::RefactorPatrol::JobStore::CorruptRecord) do
-        store.enqueue_manifest!(manifest("schema_version" => 1), policy: intake_policy, now: T0)
+        enqueue_manifest(store, manifest("schema_version" => 1), policy: intake_policy, now: T0)
       end
       jobs_dir = File.join(store.root, "jobs")
       FileUtils.mkdir_p(jobs_dir)
@@ -2155,7 +2584,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def test_feature_completion_cannot_claim_success_while_retaining_errors
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
-      store.enqueue_manifest!(manifest, policy: intake_policy, now: T0)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
       store.claim_discovery!("pr-7-stable", owner: "runner", analysis_sha: "c" * 40, now: T0)
       aggregate = store.read_job("pr-7-stable")
       retry_error = { "feature_id" => "checkout", "error" => "timeout" }
@@ -2470,8 +2899,10 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def job(overrides = {})
     {
       "schema" => "hive-refactor-patrol-job",
-      "schema_version" => 2,
+      "schema_version" => Hive::RefactorPatrol::JobStore::SCHEMA_VERSION,
       "job_id" => "job-1",
+      "occurrence_id" => "occ-#{'1' * 64}",
+      "intake_transition_id" => "intent-#{'2' * 64}",
       "source" => source,
       "analysis_sha" => "c" * 40,
       "policy" => { "discovery" => true, "auto_fix" => true, "issue_filing" => false },
@@ -2524,8 +2955,10 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       "owner" => owner,
       "owner_pid" => nil,
       "owner_process_start_time" => nil,
+      "occurrence_id" => "occ-#{'1' * 64}",
       "generation" => generation,
       "state" => state,
+      "transitions" => [],
       "claimed_at" => (T0 + generation).iso8601,
       "heartbeat_at" => (T0 + generation).iso8601,
       "expires_at" => (T0 + 3600).iso8601,
@@ -2547,7 +2980,8 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       "owner_job_id" => "job-1",
       "outcome" => "pr_opened",
       "terminal" => true,
-      "receipts" => { "pr_url" => "https://github.com/acme/demo/pull/9" }
+      "receipts" => { "pr_url" => "https://github.com/acme/demo/pull/9" },
+      "transitions" => []
     }
   end
 
@@ -2572,6 +3006,208 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       "issue_filing" => false,
       "captured_at" => T0.iso8601
     }
+  end
+
+  def architecture_capture(manifest_value = manifest)
+    Hive::RefactorPatrol::TransitionGateway.capture_for_manifest(
+      manifest: manifest_value,
+      project_id: "project-7",
+      owner: "module",
+      owner_epoch: 7,
+      recorded_at: T0
+    )
+  end
+
+  def architecture_intent(capture, sink:, target:, idempotency_key:,
+                          claim_generation:, job_id: "pr-7-stable")
+    Hive::Modules::Migration::EffectIntent.build(
+      module_name: "architecture-patrol",
+      occurrence_id: capture.occurrence_id,
+      authority: capture.owner,
+      owner_epoch: capture.owner_epoch,
+      sink: sink,
+      target: target,
+      idempotency_key: idempotency_key,
+      capability: "filesystem_write",
+      claim_generation: claim_generation,
+      scope: { "job_id" => job_id },
+      created_at: capture.recorded_at
+    )
+  end
+
+  def legacy_migration_fixture(dir, discovery_transition: false,
+                               discovery_outcome: nil)
+    root = migration_root(dir)
+    migration_manifest = Hive::RefactorPatrol::PrManifest.build(
+      source: source("merged_at" => "2026-07-10T12:00:00Z"),
+      files: [
+        { "path" => "lib/checkout.rb", "status" => "modified" }
+      ]
+    )
+    job_id = migration_manifest.fetch("job_id")
+    attempts = if discovery_transition
+      [
+        discovery_attempt(
+          generation: 1, state: "complete"
+        ).reject do |key, _value|
+          %w[occurrence_id transitions].include?(key)
+        end
+      ]
+    else
+      []
+    end
+    legacy = job(
+      "schema_version" => 2,
+      "job_id" => job_id,
+      "source" => migration_manifest.fetch("source").merge(
+        "changed_paths" => migration_manifest.fetch("changed_paths"),
+        "manifest_checksum" =>
+          migration_manifest.fetch("manifest_checksum")
+      ),
+      "attempts" => attempts,
+      "actions" => []
+    ).reject do |key, _value|
+      %w[occurrence_id intake_transition_id].include?(key)
+    end
+    FileUtils.mkdir_p(File.join(root, "jobs"))
+    File.write(
+      File.join(root, "jobs", "#{job_id}.json"),
+      "#{JSON.pretty_generate(legacy)}\n"
+    )
+
+    capture = architecture_capture(migration_manifest)
+    journal = Hive::Modules::Migration::OccurrenceJournal.new(
+      File.join(root, "occurrences", "records"),
+      module_name: "architecture-patrol"
+    )
+    journal.reserve!(capture, now: T0)
+    intake_intent = architecture_intent(
+      capture,
+      sink: "job",
+      target: job_id,
+      idempotency_key: [
+        job_id, "enqueue",
+        migration_manifest.fetch("manifest_checksum")
+      ].join(":"),
+      job_id: job_id,
+      claim_generation: capture.owner_epoch
+    )
+    commit_transition(journal, intake_intent)
+
+    discovery_intent = nil
+    if discovery_transition
+      discovery_intent = architecture_intent(
+        capture,
+        sink: "discovery",
+        target: "#{job_id}:checkpoint",
+        idempotency_key: [
+          job_id,
+          "discovery-checkpoint",
+          1,
+          "checkpoint-digest"
+        ].join(":"),
+        job_id: job_id,
+        claim_generation: 1
+      )
+      commit_transition(
+        journal,
+        discovery_intent,
+        outcome: discovery_outcome || {
+          "transition_status" => "applied"
+        }
+      )
+    end
+
+    binding_path = File.join(
+      root, "occurrences", "jobs", "#{job_id}.json"
+    )
+    write_legacy_binding(
+      binding_path, job_id, capture.occurrence_id
+    )
+    File.write("#{binding_path}.lock", "")
+    {
+      root: root,
+      job_id: job_id,
+      capture: capture,
+      intake_intent: intake_intent,
+      discovery_intent: discovery_intent,
+      binding_path: binding_path
+    }
+  end
+
+  def commit_transition(
+    journal,
+    intent,
+    outcome: { "transition_status" => "applied" }
+  )
+    journal.prepare_effect!(intent, now: T0)
+    journal.mark_dispatch_uncertain!(intent, now: T0)
+    journal.settle_effect!(
+      intent,
+      status: "committed",
+      outcome: outcome,
+      now: T0
+    )
+  end
+
+  def write_legacy_binding(path, job_id, occurrence_id)
+    FileUtils.mkdir_p(File.dirname(path))
+    File.write(
+      path,
+      Hive::WorkflowPackage::CanonicalJSON.generate(
+        "schema" => "hive-refactor-patrol-job-occurrence",
+        "schema_version" => 1,
+        "job_id" => job_id,
+        "occurrence_id" => occurrence_id
+      )
+    )
+  end
+
+  def legacy_block_attempt(reason, now)
+    {
+      "kind" => "discovery_block",
+      "state" => "blocked",
+      "reason" => reason,
+      "evidence" => {},
+      "finished_at" => now.utc.iso8601,
+      "next_eligible_at" => (now + 60).utc.iso8601
+    }
+  end
+
+  def migration_root(dir)
+    File.join(
+      dir, ".hive-state", "refactor_patrol", "v2"
+    )
+  end
+
+  def schema_migration(root)
+    Hive::RefactorPatrol::JobStoreSchemaMigration.new(
+      root: root,
+      target_version:
+        Hive::RefactorPatrol::JobStore::SCHEMA_VERSION,
+      validator: Hive::RefactorPatrol::JobRecordValidator.new(
+        contract: Hive::RefactorPatrol::JobStore
+      ),
+      corrupt_record:
+        Hive::RefactorPatrol::JobStore::CorruptRecord,
+      inconsistent_record:
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+    )
+  end
+
+  def enqueue_manifest(store, value, **options)
+    identity = Digest::SHA256.hexdigest(
+      [
+        value["job_id"],
+        value["manifest_checksum"]
+      ].join(":")
+    )
+    store.enqueue_manifest!(
+      value,
+      occurrence_id: "occ-#{identity}",
+      intake_transition_id: "intent-#{identity}",
+      **options
+    )
   end
 
   def complete_zero_envelope(project_root)

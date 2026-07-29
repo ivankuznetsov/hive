@@ -47,8 +47,28 @@ module Hive
         @plan.reconcile_linked(...)
       end
 
+      def materialize_terminal_proof(...)
+        @plan.materialize_terminal_proof(...)
+      end
+
       def record_patch_publication(...)
         @claims.record_patch_publication(...)
+      end
+
+      def record_patch_receipt(...)
+        @claims.record_patch_receipt(...)
+      end
+
+      def record_publication_phase(...)
+        @claims.record_publication_phase(...)
+      end
+
+      def supersede_publication(...)
+        @claims.supersede_publication(...)
+      end
+
+      def record_fix_receipt(...)
+        @claims.record_fix_receipt(...)
       end
 
       def record_creation_intent(...)

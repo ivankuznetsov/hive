@@ -12,14 +12,13 @@ module Hive
     class ArchitectureIntakeTransitions
       def initialize(config_loader:, migration_snapshot: nil,
                      evidence_store_factory: nil, module_execution: nil,
-                     claimant:, admission_error: Hive::ConfigError,
+                     admission_error: Hive::ConfigError,
                      gateway_factory: nil)
         @config_loader = config_loader
         @migration_snapshot = migration_snapshot || method(:migration_snapshot)
         @evidence_store_factory =
           evidence_store_factory || method(:evidence_store)
         @module_execution = module_execution
-        @claimant = claimant
         @admission_error = admission_error
         @gateway_factory = gateway_factory ||
                            ->(**options) { TransitionGateway.new(**options) }
@@ -29,7 +28,12 @@ module Hive
                   required_occurrence_id: nil)
         unless !dry_run && gateway_supported?(store)
           return store.enqueue_manifest!(
-            manifest, policy: policy, now: now, dry_run: dry_run
+            manifest,
+            policy: policy,
+            occurrence_id: dry_identity("occ", manifest),
+            intake_transition_id: dry_identity("intent", manifest),
+            now: now,
+            dry_run: dry_run
           )
         end
 
@@ -58,9 +62,7 @@ module Hive
 
       def capture_for(entry, store, manifest, migration:, now:)
         job_id = manifest.fetch("job_id")
-        capture = if store.respond_to?(:occurrence_capture)
-          store.occurrence_capture(job_id)
-        end
+        capture = existing_capture(store, job_id)
         capture ||= TransitionGateway.capture_for_manifest(
           manifest: manifest,
           project_id: entry["project_id"] ||
@@ -73,6 +75,14 @@ module Hive
           manifest, capture: capture, now: now
         )
         capture
+      end
+
+      def existing_capture(store, job_id)
+        return unless store.respond_to?(:occurrence_capture)
+
+        store.occurrence_capture(job_id)
+      rescue JobStore::RecordNotFound
+        nil
       end
 
       def perform_enqueue!(entry, store, manifest, policy:, capture:,
@@ -92,9 +102,13 @@ module Hive
             reconcile_enqueue(store, job_id, source)
           end,
           replay: ->(_result) { store.read_job(job_id) }
-        ) do
+        ) do |intent|
           store.enqueue_manifest!(
-            manifest, policy: policy, now: now
+            manifest,
+            policy: policy,
+            occurrence_id: capture.occurrence_id,
+            intake_transition_id: intent.intent_id,
+            now: now
           )
         end
       end
@@ -110,8 +124,7 @@ module Hive
           config_loader: @config_loader,
           module_execution: @module_execution,
           ownership_loader: -> { current_migration_snapshot!(entry) },
-          clock: -> { now },
-          claimant: @claimant
+          clock: -> { now }
         )
       end
 
@@ -164,6 +177,17 @@ module Hive
           "changed_paths" => manifest.fetch("changed_paths"),
           "manifest_checksum" => manifest.fetch("manifest_checksum")
         )
+      end
+
+      def dry_identity(prefix, manifest)
+        digest = Digest::SHA256.hexdigest(
+          [
+            prefix,
+            manifest.fetch("job_id"),
+            manifest.fetch("manifest_checksum")
+          ].join(":")
+        )
+        "#{prefix}-#{digest}"
       end
     end
   end

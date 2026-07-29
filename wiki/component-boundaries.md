@@ -79,12 +79,18 @@ the scheduler delegate transition identities, claim fencing, reconciliation,
 and occurrence finalization to bounded coordinators while retaining product
 decisions and cadence. Command and daemon manifest intake share
 `ArchitectureIntakeTransitions`; `ArchitectureOccurrenceStore` validates the
-job scope over the shared journal, while its immutable
-`ArchitectureOccurrenceBinding` contains only the job-to-occurrence identity
-edge. StateStore and JobStore expose the separate product recovery APIs over
-the one occurrence store. Terminal outcomes and canonical projection bytes
-commit together; EvidenceStore is never consulted to decide a retry or
-mutation.
+job scope over the shared journal from the immutable occurrence pointer in the
+v3 JobStore aggregate. There is no binding sidecar or compatibility lookup.
+StateStore and JobStore expose the separate product recovery APIs over the one
+occurrence store. Terminal outcomes and canonical projection bytes commit
+together; EvidenceStore is never consulted to decide a retry or mutation.
+
+The Patrol row has a non-empty construction boundary. Shared stores and
+mechanisms, both product gateways, and intake/discovery/action/claim-maintenance
+coordinators are forbidden outside their exact command, scheduler, state, and
+action-runner composition roots. A separate static source contract allows
+JobStore semantic mutators only inside those transition ports. This enforces
+dependency direction; it is not runtime isolation.
 
 The row remains `candidate` because U3 still has to prove the compressed
 candidate-bound evidence protocol against the repaired production stream and

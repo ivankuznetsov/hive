@@ -4,7 +4,6 @@ require "hive/modules/migration/effect_delivery"
 require "hive/modules/migration/effect_sender"
 
 class ModulesMigrationEffectDeliveryCollaboratorsTest < Minitest::Test
-  Claim = Data.define(:status, :token, :generation, :receipt)
   Intent = Data.define(
     :occurrence_id,
     :claim_generation,
@@ -13,7 +12,7 @@ class ModulesMigrationEffectDeliveryCollaboratorsTest < Minitest::Test
     :target,
     :scope
   )
-  Receipt = Data.define(:receipt_id)
+  Receipt = Data.define(:receipt_id, :status, :outcome)
 
   class DeliveryError < StandardError
     attr_reader :reason, :receipt
@@ -42,38 +41,46 @@ class ModulesMigrationEffectDeliveryCollaboratorsTest < Minitest::Test
   end
 
   class DeliveryStore
-    attr_accessor :claim, :state, :receipt
+    attr_accessor :state, :receipt
     attr_reader :calls
 
     def initialize
       @calls = []
+      @state = { "state" => "prepared" }
     end
 
     def prepare_effect!(intent, **options)
       calls << [ :prepare, intent, options ]
     end
 
-    def acquire_effect!(*, **)
-      claim.is_a?(Array) ? claim.shift : claim
+    def with_effect_sender_lock(intent)
+      calls << [ :sender_lock, intent ]
+      yield
     end
 
     def mark_dispatch_uncertain!(intent, **options)
       calls << [ :fence, intent, options ]
+      @state = { "state" => "dispatch_uncertain" }
     end
 
-    def settle_effect_reconciled!(intent, **options)
-      calls << [ :reconciled, intent, options ]
-      { "state" => "reconciled" }
+    def reset_effect_prepared!(intent, **options)
+      calls << [ :reset, intent, options ]
+      @state = { "state" => "prepared" }
     end
 
-    def resolve_effect_absent!(intent, **options)
-      calls << [ :absent, intent, options ]
-      { "state" => "known_not_sent" }
-    end
-
-    def settle_effect_claimed!(intent, **options)
+    def settle_effect!(intent, **options)
       calls << [ :settled, intent, options ]
-      { "state" => "committed" }
+      @receipt = Receipt.new(
+        receipt_id: "receipt-1",
+        status: options.fetch(:status),
+        outcome: options.fetch(:outcome)
+      )
+      @state = {
+        "state" => @receipt.status,
+        "terminal_receipt_id" => @receipt.receipt_id,
+        "outcome" => @receipt.outcome
+      }
+      @receipt
     end
 
     def effect_state(_intent)
@@ -109,39 +116,22 @@ class ModulesMigrationEffectDeliveryCollaboratorsTest < Minitest::Test
       @calls = []
     end
 
-    def terminal_result(_intent)
+    def terminal_result(intent)
+      calls << [ :terminal_result, intent ]
       terminal
     end
 
-    def replay_terminal(intent)
-      calls << [ :replay, intent ]
+    def replay_terminal(intent, result = nil)
+      calls << [ :replay, intent, result ]
       :terminal
-    end
-
-    def receipt_for_claim(_intent, claim)
-      claim.receipt
-    end
-
-    def build(_intent, status, outcome)
-      Receipt.new(
-        receipt_id: "#{status}:#{outcome.hash}"
-      )
     end
 
     def drain(intent)
       calls << [ :drain, intent ]
     end
 
-    def terminal_result_from_state(_intent, state)
-      state.fetch("state").to_sym
-    end
-
-    def known_not_sent(_intent, outcome, receipt)
-      {
-        status: :known_not_sent,
-        outcome: outcome,
-        receipt: receipt
-      }
+    def result_from_receipt(receipt)
+      receipt.status.to_sym
     end
   end
 
@@ -202,37 +192,24 @@ class ModulesMigrationEffectDeliveryCollaboratorsTest < Minitest::Test
     end
   end
 
-  def test_sender_reconcile_only_protocol_handles_every_claim_disposition
+  def test_sender_reconcile_only_protocol_handles_every_recovery_state
     store = DeliveryStore.new
     ledger = ReceiptLedger.new
-    sender = sender_with(store, ledger)
+    sender = sender_with(store, ledger, retry_safe: true)
 
-    store.claim = Claim.new(
-      status: :terminal,
-      token: nil,
-      generation: 1,
-      receipt: "receipt-1"
-    )
+    ledger.terminal = true
     assert_equal :terminal,
                  sender.reconcile_observed(intent, ->(*) { {} })
-
-    store.claim = Claim.new(
-      status: :busy,
-      token: nil,
-      generation: 1,
-      receipt: "receipt-1"
+    assert_equal(
+      [
+        [ :terminal_result, intent ],
+        [ :replay, intent, true ]
+      ],
+      ledger.calls
     )
-    error = assert_raises(DeliveryError) do
-      sender.reconcile_observed(intent, ->(*) { {} })
-    end
-    assert_equal "active_sender_lease", error.reason
+    ledger.calls.clear
+    ledger.terminal = nil
 
-    store.claim = Claim.new(
-      status: :acquired,
-      token: "token",
-      generation: 2,
-      receipt: nil
-    )
     result = sender.reconcile_observed(
       intent,
       ->(*) do
@@ -242,15 +219,11 @@ class ModulesMigrationEffectDeliveryCollaboratorsTest < Minitest::Test
         }
       end
     )
-    assert_equal :known_not_sent, result.fetch(:status)
+    assert_equal :retry_safe, result.status
     assert_includes store.calls.map(&:first), :fence
+    assert_includes store.calls.map(&:first), :reset
 
-    store.claim = Claim.new(
-      status: :reconcile,
-      token: "token",
-      generation: 3,
-      receipt: nil
-    )
+    store.state = { "state" => "dispatch_uncertain" }
     assert_equal(
       :reconciled,
       sender.reconcile_observed(
@@ -264,12 +237,7 @@ class ModulesMigrationEffectDeliveryCollaboratorsTest < Minitest::Test
       )
     )
 
-    store.claim = Claim.new(
-      status: :unknown,
-      token: nil,
-      generation: 4,
-      receipt: nil
-    )
+    store.state = { "state" => "unknown" }
     error = assert_raises(DeliveryError) do
       sender.reconcile_observed(intent, ->(*) { {} })
     end
@@ -281,43 +249,29 @@ class ModulesMigrationEffectDeliveryCollaboratorsTest < Minitest::Test
     ledger = ReceiptLedger.new
     sender = sender_with(store, ledger)
 
-    store.claim = Claim.new(
-      status: :terminal,
-      token: nil,
-      generation: 1,
-      receipt: "receipt-1"
-    )
+    ledger.terminal = true
     assert_equal :terminal,
                  sender.deliver_or_reconcile(
                    intent, nil, -> { {} }
                  )
+    ledger.terminal = nil
 
-    store.claim = Claim.new(
-      status: :unknown,
-      token: nil,
-      generation: 1,
-      receipt: nil
-    )
+    store.state = { "state" => "unknown" }
     assert_raises(DeliveryError) do
       sender.deliver_or_reconcile(intent, nil, -> { {} })
     end
 
-    store.claim = Claim.new(
-      status: :acquired,
-      token: "token",
-      generation: 2,
-      receipt: nil
-    )
+    store.state = {}
+    assert_raises(DeliveryError) do
+      sender.deliver_or_reconcile(intent, nil, -> { {} })
+    end
+
+    store.state = { "state" => "prepared" }
     assert_raises(Hive::ConfigError) do
       sender.deliver_or_reconcile(intent, nil, -> { [] })
     end
 
-    store.claim = Claim.new(
-      status: :reconcile,
-      token: "token",
-      generation: 3,
-      receipt: nil
-    )
+    store.state = { "state" => "dispatch_uncertain" }
     ambiguous = assert_raises(DeliveryError) do
       sender.deliver_or_reconcile(
         intent, ->(*) { raise "remote unavailable" }, -> { {} }
@@ -325,12 +279,55 @@ class ModulesMigrationEffectDeliveryCollaboratorsTest < Minitest::Test
     end
     assert_equal "remote_identity_ambiguous", ambiguous.reason
 
-    assert_raises(Hive::ConfigError) do
-      sender_with(store, ledger, lease_sec: 0)
+    store.state = { "state" => "dispatch_uncertain" }
+    absent = assert_raises(DeliveryError) do
+      sender.deliver_or_reconcile(
+        intent,
+        ->(*) { { "status" => "absent", "outcome" => {} } },
+        -> { {} }
+      )
     end
-    assert_raises(Hive::ConfigError) do
-      sender_with(store, ledger, lease_sec: "bad")
+    assert_equal "remote_absence_not_retry_safe", absent.reason
+
+    store.state = { "state" => "dispatch_uncertain" }
+    policy_failure = assert_raises(DeliveryError) do
+      sender_with(
+        store,
+        ledger,
+        retry_safe: ->(*) { raise "policy unavailable" }
+      ).deliver_or_reconcile(
+        intent,
+        ->(*) { { "status" => "absent", "outcome" => {} } },
+        -> { {} }
+      )
     end
+    assert_equal "remote_absence_not_retry_safe", policy_failure.reason
+  end
+
+  def test_retry_safe_absence_resets_then_redispatches_once
+    store = DeliveryStore.new
+    store.state = { "state" => "dispatch_uncertain" }
+    calls = 0
+    result = sender_with(
+      store, ReceiptLedger.new, retry_safe: true
+    ).deliver_or_reconcile(
+      intent,
+      ->(*) do
+        {
+          "status" => "absent",
+          "outcome" => { "remote" => "absent" }
+        }
+      end,
+      lambda do
+        calls += 1
+        { "remote" => "created" }
+      end
+    )
+
+    assert_equal :committed, result
+    assert_equal 1, calls
+    assert_equal %i[sender_lock reset fence settled],
+                 store.calls.map(&:first)
   end
 
   def test_default_admission_dependencies_and_delivery_validation_are_explicit
@@ -377,6 +374,14 @@ class ModulesMigrationEffectDeliveryCollaboratorsTest < Minitest::Test
         **common, capture: capture, authority: "invalid"
       )
     end
+    assert_raises(Hive::ConfigError) do
+      Hive::Modules::Migration::EffectDelivery.new(
+        **common,
+        capture: capture,
+        authority: "legacy",
+        retry_safe_sinks: [ "unknown" ]
+      )
+    end
 
     delivery = Hive::Modules::Migration::EffectDelivery.new(
       **common,
@@ -394,14 +399,18 @@ class ModulesMigrationEffectDeliveryCollaboratorsTest < Minitest::Test
     end
   end
 
-  def test_receipt_replay_and_sender_race_preserve_canonical_evidence
+  def test_receipt_replay_and_unsafe_absence_preserve_canonical_evidence
     store = DeliveryStore.new
     store.state = {
       "state" => "denied",
       "terminal_receipt_id" => "receipt-1",
       "outcome" => { "reason" => "revoked" }
     }
-    store.receipt = Receipt.new(receipt_id: "receipt-1")
+    store.receipt = Receipt.new(
+      receipt_id: "receipt-1",
+      status: "denied",
+      outcome: { "reason" => "revoked" }
+    )
     ledger = Hive::Modules::Migration::EffectReceiptLedger.new(
       delivery_store: store,
       evidence_store: Object.new,
@@ -413,38 +422,27 @@ class ModulesMigrationEffectDeliveryCollaboratorsTest < Minitest::Test
     end
     assert_equal "revoked", denied.reason
 
-    claim = Claim.new(
-      status: :busy,
-      token: nil,
-      generation: 2,
-      receipt: "receipt-1"
-    )
-    assert_equal "receipt-1",
-                 ledger.receipt_for_claim(intent, claim).receipt_id
+    store.state = {
+      "state" => "committed",
+      "terminal_receipt_id" => "receipt-1",
+      "outcome" => { "reason" => "revoked" }
+    }
+    assert_raises(Hive::ConfigError) do
+      ledger.terminal_result(intent)
+    end
 
     receipt_ledger = ReceiptLedger.new
-    store.claim = [
-      Claim.new(
-        status: :reconcile,
-        token: "token",
-        generation: 1,
-        receipt: nil
-      ),
-      Claim.new(
-        status: :busy,
-        token: nil,
-        generation: 2,
-        receipt: "receipt-1"
-      )
-    ]
-    race = assert_raises(DeliveryError) do
+    store.state = { "state" => "dispatch_uncertain" }
+    assert_nil ledger.replay_terminal(intent)
+    refute_includes store.calls.map(&:first), :drain
+    absence = assert_raises(DeliveryError) do
       sender_with(store, receipt_ledger).deliver_or_reconcile(
         intent,
         ->(*) { { "status" => "absent", "outcome" => {} } },
         -> { {} }
       )
     end
-    assert_equal "sender_lease_raced_after_reconciliation", race.reason
+    assert_equal "remote_absence_not_retry_safe", absence.reason
 
     sender = sender_with(store, receipt_ledger)
     assert_equal(
@@ -500,7 +498,7 @@ class ModulesMigrationEffectDeliveryCollaboratorsTest < Minitest::Test
     assert_equal :diagnostic_authorized, result
   end
 
-  def test_default_clock_terminal_replay_and_known_not_sent_are_durable
+  def test_default_clock_shadow_and_terminal_replay_are_durable
     capture = patrol_capture
     evidence = EvidenceStore.new
     shadow_store = DeliveryStore.new
@@ -520,8 +518,7 @@ class ModulesMigrationEffectDeliveryCollaboratorsTest < Minitest::Test
       ownership_loader: lambda do
         { "owner" => "legacy", "epoch" => 1, "admission" => true }
       end,
-      config_loader: ->(*) { { "patrol" => {} } },
-      claimant: "shadow"
+      config_loader: ->(*) { { "patrol" => {} } }
     )
     denied = assert_raises(DeliveryError) do
       shadow.perform!(
@@ -540,7 +537,11 @@ class ModulesMigrationEffectDeliveryCollaboratorsTest < Minitest::Test
       "terminal_receipt_id" => "receipt-1",
       "outcome" => { "remote" => "present" }
     }
-    store.receipt = Receipt.new(receipt_id: "receipt-1")
+    store.receipt = Receipt.new(
+      receipt_id: "receipt-1",
+      status: "committed",
+      outcome: { "remote" => "present" }
+    )
     delivery = Hive::Modules::Migration::EffectDelivery.new(
       module_name: "patrol",
       product_label: "patrol",
@@ -557,8 +558,7 @@ class ModulesMigrationEffectDeliveryCollaboratorsTest < Minitest::Test
       ownership_loader: lambda do
         { "owner" => "legacy", "epoch" => 1, "admission" => true }
       end,
-      config_loader: ->(*) { { "patrol" => {} } },
-      claimant: "legacy"
+      config_loader: ->(*) { { "patrol" => {} } }
     )
     result = delivery.reconcile!(
       sink: "state",
@@ -567,49 +567,23 @@ class ModulesMigrationEffectDeliveryCollaboratorsTest < Minitest::Test
       capability: "filesystem_write"
     ) { flunk("terminal replay must not reconcile remotely") }
     assert_equal :committed, result.status
-
-    ledger = Hive::Modules::Migration::EffectReceiptLedger.new(
-      delivery_store: store,
-      evidence_store: evidence,
-      denied_error: DeliveryError,
-      clock: -> { Time.utc(2026, 7, 28, 18) }
-    )
-    built_intent = delivery.send(
-      :build_intent,
-      sink: "state",
-      target: "target",
-      idempotency_key: "known-absent",
-      capability: "filesystem_write",
-      claim_generation: nil,
-      scope: {}
-    )
-    known_absent = ledger.known_not_sent(
-      built_intent, { "remote" => "absent" }
-    )
-    assert_equal :known_not_sent, known_absent.status
-    assert_equal "known_not_sent", known_absent.receipt.status
   end
 
-  def test_sender_maps_known_not_delivered_errors_to_terminal_absence
+  def test_sender_maps_known_not_delivered_errors_to_retry_safe_prepared
     store = DeliveryStore.new
-    store.claim = Claim.new(
-      status: :acquired,
-      token: "token",
-      generation: 2,
-      receipt: nil
-    )
     result = sender_with(store, ReceiptLedger.new).deliver_or_reconcile(
       intent,
       nil,
       -> { raise NotDelivered, "connection refused before send" }
     )
 
-    assert_equal :known_not_sent, result.fetch(:status)
+    assert_equal :retry_safe, result.status
     assert_equal(
       "connection refused before send",
-      result.fetch(:outcome).fetch("reason")
+      result.outcome.fetch("reason")
     )
-    assert_includes store.calls.map(&:first), :absent
+    assert_includes store.calls.map(&:first), :reset
+    assert_equal "prepared", store.state.fetch("state")
   end
 
   private
@@ -639,7 +613,9 @@ class ModulesMigrationEffectDeliveryCollaboratorsTest < Minitest::Test
     )
   end
 
-  def sender_with(store, ledger, lease_sec: 30)
+  def sender_with(store, ledger, retry_safe: false)
+    retry_policy = retry_safe.respond_to?(:call) ?
+      retry_safe : ->(_intent) { retry_safe }
     Hive::Modules::Migration::EffectSender.new(
       product_label: "patrol",
       delivery_store: store,
@@ -648,8 +624,7 @@ class ModulesMigrationEffectDeliveryCollaboratorsTest < Minitest::Test
       pass_intent: false,
       not_delivered_error: NotDelivered,
       clock: -> { Time.utc(2026, 7, 28, 18) },
-      lease_sec: lease_sec,
-      claimant: "sender"
+      retry_safe: retry_policy
     )
   end
 

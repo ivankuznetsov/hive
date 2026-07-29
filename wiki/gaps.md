@@ -372,10 +372,13 @@ Dependency lock uncertainty is unchanged: the root bundle has
 
 The package, lifecycle, event, attempt, adapter, migration, comparison, and
 rollback contracts have deterministic fixture coverage. U2 now supplies
-finalized ordinary positive and negative captures, one occurrence spanning the
-Architecture Patrol job, discovery, action, and final decision, live
-effect-time generation/grant checks, sender leases with reconciliation-only
-uncertainty, canonical outboxes, v2-only one-off migration, and bounded
+finalized ordinary positive and negative captures, durable per-window attempt
+generations, one occurrence spanning the Architecture Patrol job, discovery,
+action, and final decision, live effect-time generation/grant checks, stable
+process/thread sender locks with persisted uncertainty but no lease/PID
+authority, gateway-owned retry-safe local absence, remote-absence refusal,
+store-minted byte-stable receipts, canonical outboxes, a bounded one-off
+JobStore v2-to-v3 migration with v3-only runtime reads, and bounded
 occurrence/intent evidence indices. Those fixtures prove the repaired boundary
 but intentionally do not satisfy the operational rollout gate.
 

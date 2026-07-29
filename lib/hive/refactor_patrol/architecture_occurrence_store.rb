@@ -1,6 +1,5 @@
 require "json"
 require "hive/modules/migration/occurrence_journal"
-require "hive/refactor_patrol/architecture_occurrence_binding"
 require "hive/refactor_patrol/pr_manifest"
 require "hive/workflow_package/canonical_json"
 
@@ -8,23 +7,18 @@ module Hive
   module RefactorPatrol
     # Architecture Patrol's product adapter over the shared occurrence journal.
     #
-    # The journal remains the sole owner of occurrence/effect state. This
-    # adapter owns only the immutable job-to-occurrence binding and validates
-    # that architecture effects belong to the bound JobStore aggregate.
+    # The journal remains the sole owner of occurrence/effect state. JobStore
+    # owns the immutable occurrence pointer; this adapter validates that
+    # architecture effects belong to that aggregate.
     class ArchitectureOccurrenceStore
       MODULE_NAME = "architecture-patrol".freeze
 
       def initialize(root:, job_reader:, id_validator:, corrupt_record:,
-                     inconsistent_record:, binding: nil, journal: nil)
+                     inconsistent_record:, journal: nil)
         @job_reader = job_reader
         @id_validator = id_validator
         @corrupt_record = corrupt_record
         @inconsistent_record = inconsistent_record
-        @binding = binding || ArchitectureOccurrenceBinding.new(
-          root: root,
-          id_validator: id_validator,
-          corrupt_record: corrupt_record
-        )
         @journal = journal || Hive::Modules::Migration::OccurrenceJournal.new(
           File.join(root, "occurrences", "records"),
           module_name: MODULE_NAME
@@ -47,9 +41,7 @@ module Hive
               "architecture patrol occurrence does not match its manifest" unless
           valid
 
-        reserve_bound!(
-          data.fetch("job_id"), capture: capture, now: now
-        )
+        @journal.reserve!(capture, now: now)
       rescue Hive::ConfigError => e
         raise @inconsistent_record, e.message
       end
@@ -67,17 +59,24 @@ module Hive
         raise @inconsistent_record,
               "architecture patrol occurrence does not match its job" unless valid
 
-        reserve_bound!(id, capture: capture, now: now)
+        unless aggregate.fetch("occurrence_id") ==
+               capture.occurrence_id
+          raise @inconsistent_record,
+                "architecture patrol job occurrence identity is immutable"
+        end
+
+        @journal.reserve!(capture, now: now)
       rescue Hive::ConfigError => e
         raise @inconsistent_record, e.message
       end
 
       def fetch_for_job(job_id)
         id = validate_id!(job_id)
-        index = @binding.fetch(id)
-        return nil unless index
+        aggregate = @job_reader.call(id)
+        occurrence_id = aggregate.fetch("occurrence_id")
+        return nil if occurrence_id.to_s.empty?
 
-        @journal.fetch(index.fetch("occurrence_id"))
+        @journal.fetch(occurrence_id)
       rescue Hive::ConfigError => e
         raise @corrupt_record, e.message
       end
@@ -91,8 +90,8 @@ module Hive
         )
       end
 
-      def projection_pending
-        @journal.projection_pending
+      def recovery_active
+        @journal.recovery_active
       end
 
       def prepare_effect!(intent, now: Time.now.utc)
@@ -109,59 +108,58 @@ module Hive
         raise @inconsistent_record, e.message
       end
 
-      def acquire_effect!(intent, claimant:, now: Time.now.utc, lease_sec: 300)
-        @journal.acquire_effect!(
-          architecture_intent!(intent), claimant: claimant,
-          now: now, lease_sec: lease_sec
-        )
+      def effect_intent(occurrence_id, intent_id)
+        @journal.effect_intent(occurrence_id, intent_id)
       rescue Hive::ConfigError => e
+        raise @corrupt_record, e.message
+      end
+
+      def with_effect_sender_lock(intent, &block)
+        normalized = architecture_intent!(intent)
+        block_error = nil
+        @journal.with_effect_sender_lock(normalized) do
+          begin
+            block.call
+          rescue Hive::ConfigError => e
+            block_error = e
+            raise
+          end
+        end
+      rescue Hive::ConfigError => e
+        raise if block_error.equal?(e)
+
         raise @inconsistent_record, e.message
       end
 
-      def mark_dispatch_uncertain!(intent, token:, now: Time.now.utc)
+      def mark_dispatch_uncertain!(intent, now: Time.now.utc)
         @journal.mark_dispatch_uncertain!(
-          architecture_intent!(intent), token: token, now: now
+          architecture_intent!(intent), now: now
         )
       rescue Hive::ConfigError => e
         raise @inconsistent_record, e.message
       end
 
-      def resolve_effect_absent!(intent, expected_generation:, outcome:,
-                                 receipt:, now: Time.now.utc)
-        @journal.resolve_absent!(
+      def reset_effect_prepared!(intent, now: Time.now.utc)
+        @journal.reset_effect_prepared!(
+          architecture_intent!(intent), now: now
+        )
+      rescue Hive::ConfigError => e
+        raise @inconsistent_record, e.message
+      end
+
+      def settle_effect!(intent, status:, outcome:, now: Time.now.utc)
+        @journal.settle_effect!(
           architecture_intent!(intent),
-          expected_generation: expected_generation,
-          outcome: outcome, receipt: receipt, now: now
+          status: status, outcome: outcome, now: now
         )
       rescue Hive::ConfigError => e
         raise @inconsistent_record, e.message
       end
 
-      def settle_effect_reconciled!(intent, expected_generation:, outcome:,
-                                    receipt:, now: Time.now.utc)
-        @journal.settle_reconciled!(
+      def deny_effect!(intent, outcome:, now: Time.now.utc)
+        @journal.deny_effect!(
           architecture_intent!(intent),
-          expected_generation: expected_generation,
-          outcome: outcome, receipt: receipt, now: now
-        )
-      rescue Hive::ConfigError => e
-        raise @inconsistent_record, e.message
-      end
-
-      def settle_effect_claimed!(intent, token:, status:, outcome:, receipt:,
-                                 now: Time.now.utc)
-        @journal.settle_claimed!(
-          architecture_intent!(intent), token: token, status: status,
-          outcome: outcome, receipt: receipt, now: now
-        )
-      rescue Hive::ConfigError => e
-        raise @inconsistent_record, e.message
-      end
-
-      def deny_effect!(intent, outcome:, receipt:, now: Time.now.utc)
-        @journal.deny_prepared!(
-          architecture_intent!(intent),
-          outcome: outcome, receipt: receipt, now: now
+          outcome: outcome, now: now
         )
       rescue Hive::ConfigError => e
         raise @inconsistent_record, e.message
@@ -211,21 +209,6 @@ module Hive
 
       private
 
-      def reserve_bound!(job_id, capture:, now:)
-        id = validate_id!(job_id)
-        @binding.synchronize(id) do
-          existing = @binding.fetch(id)
-          if existing &&
-             existing.fetch("occurrence_id") != capture.occurrence_id
-            raise @inconsistent_record,
-                  "architecture patrol job occurrence identity is immutable"
-          end
-          @journal.reserve!(capture, now: now)
-          @binding.write(id, capture.occurrence_id) unless existing
-        end
-        fetch_for_job(id)
-      end
-
       def architecture_intent!(value)
         intent =
           if value.is_a?(Hive::Modules::Migration::EffectIntent)
@@ -264,9 +247,16 @@ module Hive
           raise @inconsistent_record,
                 "architecture patrol effect scope requires job_id"
         end
-        occurrence = fetch_for_job(job_id)
+        occurrence = if intent.sink == "job"
+          @journal.fetch(intent.occurrence_id)
+        else
+          fetch_for_job(job_id)
+        end
         unless occurrence &&
-               occurrence.fetch("occurrence_id") == intent.occurrence_id
+               occurrence.fetch("occurrence_id") == intent.occurrence_id &&
+               occurrence.dig(
+                 "provisional_capture", "reservation", "job_id"
+               ) == job_id
           raise @inconsistent_record,
                 "architecture patrol effect occurrence does not match its job"
         end

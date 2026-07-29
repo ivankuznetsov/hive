@@ -39,6 +39,13 @@ module Hive
         @occurrence_store.reserve!(capture, now: now)
       end
 
+      def reserve_attempt_occurrence!(reservation_id, now: Time.now.utc,
+                                      &capture_builder)
+        @occurrence_store.reserve_attempt!(
+          reservation_id, now: now, &capture_builder
+        )
+      end
+
       def occurrence(occurrence_id)
         @occurrence_store.fetch(occurrence_id)
       end
@@ -58,6 +65,16 @@ module Hive
 
       def projection_pending_occurrences
         @occurrence_store.projection_pending
+      end
+
+      def recovery_active_occurrences
+        @occurrence_store.recovery_active
+      end
+
+      def each_occurrence(&block)
+        return @occurrence_store.each_record unless block
+
+        @occurrence_store.each_record(&block)
       end
 
       def finalize_occurrence!(capture:, event: nil, evidence_store:,
@@ -126,45 +143,31 @@ module Hive
         @occurrence_store.effect_state(intent)
       end
 
-      def acquire_effect!(intent, claimant:, now: Time.now.utc, lease_sec: 300)
-        @occurrence_store.acquire_effect!(
-          intent, claimant: claimant, now: now, lease_sec: lease_sec
-        )
+      def with_effect_sender_lock(intent, &block)
+        @occurrence_store.with_effect_sender_lock(intent, &block)
       end
 
-      def mark_dispatch_uncertain!(intent, token:, now: Time.now.utc)
+      def mark_dispatch_uncertain!(intent, now: Time.now.utc)
         @occurrence_store.mark_dispatch_uncertain!(
-          intent, token: token, now: now
+          intent, now: now
         )
       end
 
-      def resolve_effect_absent!(intent, expected_generation:, outcome:,
-                                 receipt:, now: Time.now.utc)
-        @occurrence_store.resolve_absent!(
-          intent, expected_generation: expected_generation,
-          outcome: outcome, receipt: receipt, now: now
+      def reset_effect_prepared!(intent, now: Time.now.utc)
+        @occurrence_store.reset_effect_prepared!(
+          intent, now: now
         )
       end
 
-      def settle_effect_reconciled!(intent, expected_generation:, outcome:,
-                                    receipt:, now: Time.now.utc)
-        @occurrence_store.settle_reconciled!(
-          intent, expected_generation: expected_generation,
-          outcome: outcome, receipt: receipt, now: now
+      def settle_effect!(intent, status:, outcome:, now: Time.now.utc)
+        @occurrence_store.settle_effect!(
+          intent, status: status, outcome: outcome, now: now
         )
       end
 
-      def settle_effect_claimed!(intent, token:, status:, outcome:, receipt:,
-                                 now: Time.now.utc)
-        @occurrence_store.settle_claimed!(
-          intent, token: token, status: status, outcome: outcome,
-          receipt: receipt, now: now
-        )
-      end
-
-      def deny_effect!(intent, outcome:, receipt:, now: Time.now.utc)
-        @occurrence_store.deny_prepared!(
-          intent, outcome: outcome, receipt: receipt, now: now
+      def deny_effect!(intent, outcome:, now: Time.now.utc)
+        @occurrence_store.deny_effect!(
+          intent, outcome: outcome, now: now
         )
       end
 

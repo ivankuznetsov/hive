@@ -6,7 +6,7 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
 
   NOW = Time.utc(2026, 7, 28, 12)
 
-  def test_sender_lease_recovery_and_terminal_replay_contract
+  def test_sender_recovery_state_contains_no_liveness_claims
     with_journal do |journal|
       first = effect_intent
       alternate = effect_intent(capability: "github_pull_requests:alternate")
@@ -18,91 +18,192 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
       assert_empty journal.projection_pending
       journal.reserve!(patrol_capture, now: NOW)
 
-      claim = journal.acquire_effect!(
-        first, claimant: "sender-one", now: NOW, lease_sec: 10
-      )
-      assert_equal :acquired, claim.status
-      busy = journal.acquire_effect!(
-        first, claimant: "sender-two", now: NOW + 1, lease_sec: 10
-      )
-      assert_equal :busy, busy.status
-      expired = journal.acquire_effect!(
-        first, claimant: "sender-two", now: NOW + 11, lease_sec: 10
-      )
-      assert_equal :reconcile, expired.status
-      assert_equal "dispatch_uncertain", expired.delivery_state
-
-      assert_raises(Hive::ConfigError) do
-        journal.acquire_effect!(
-          first, claimant: "sender-two", now: nil, lease_sec: 10
-        )
-      end
-      assert_raises(Hive::ConfigError) do
-        journal.mark_dispatch_uncertain!(
-          first, token: claim.token, now: NOW + 12
-        )
-      end
-      assert_raises(Hive::ConfigError) do
-        journal.resolve_absent!(
-          first,
-          expected_generation: "bad",
-          outcome: {},
-          receipt: receipt(first, "known_not_sent", {}),
-          now: NOW + 12
-        )
-      end
-      assert_raises(Hive::ConfigError) do
-        journal.resolve_absent!(
-          first,
-          expected_generation: claim.generation + 1,
-          outcome: {},
-          receipt: receipt(first, "known_not_sent", {}),
-          now: NOW + 12
-        )
-      end
-
-      absent_outcome = { "remote" => "absent" }
-      absent_receipt = receipt(
-        first, "known_not_sent", absent_outcome
-      )
-      journal.resolve_absent!(
-        first,
-        expected_generation: claim.generation,
-        outcome: absent_outcome,
-        receipt: absent_receipt,
-        now: NOW + 12
-      )
-      fresh = journal.acquire_effect!(
-        first, claimant: "sender-two", now: NOW + 13, lease_sec: 10
-      )
-      journal.mark_dispatch_uncertain!(
-        first, token: fresh.token, now: NOW + 13
-      )
+      journal.mark_dispatch_uncertain!(first, now: NOW + 12)
+      uncertain = journal.effect_state(first)
+      assert_equal "dispatch_uncertain", uncertain.fetch("state")
+      refute_includes uncertain, "claim"
+      refute_includes uncertain, "delivery_generation"
+      journal.reset_effect_prepared!(first, now: NOW + 13)
+      journal.mark_dispatch_uncertain!(first, now: NOW + 13)
       outcome = { "url" => "https://example.test/effect/1" }
-      committed = receipt(first, "committed", outcome)
-      journal.settle_claimed!(
+      committed = journal.settle_effect!(
         first,
-        token: fresh.token,
         status: "committed",
         outcome: outcome,
-        receipt: committed,
         now: NOW + 14
       )
 
-      terminal = journal.acquire_effect!(
-        first, claimant: "sender-three", now: NOW + 15
-      )
-      assert_equal :terminal, terminal.status
-      assert_equal committed.receipt_id, terminal.receipt
       assert_equal committed.to_h, journal.receipt(
         committed.receipt_id, occurrence_id: first.occurrence_id
       ).to_h
       assert_equal [ committed.receipt_id ],
                    journal.effect_receipt_ids(first.occurrence_id)
-      assert_equal(
-        [ absent_receipt.receipt_id, committed.receipt_id ].sort,
-        journal.effect_state(first).fetch("receipt_ids").sort
+      assert_equal [ committed.receipt_id ],
+                   journal.effect_state(first).fetch("receipt_ids")
+    end
+  end
+
+  def test_recovery_active_is_one_view_for_reserved_and_pending_projection
+    with_journal do |journal|
+      occurrence_id = patrol_capture.occurrence_id
+      assert_equal [ occurrence_id ],
+                   journal.recovery_active.map { |record|
+                     record.fetch("occurrence_id")
+                   }
+
+      journal.finalize!(patrol_capture, now: NOW + 1)
+      assert_equal [ occurrence_id ],
+                   journal.recovery_active.map { |record|
+                     record.fetch("occurrence_id")
+                   }
+
+      journal.pending_outbox(occurrence_id).each do |entry|
+        journal.acknowledge_outbox!(
+          occurrence_id,
+          entry_id: entry.fetch("id"),
+          digest: entry.fetch("digest")
+        )
+      end
+      assert_empty journal.recovery_active
+    end
+  end
+
+  def test_stable_sender_lock_blocks_other_processes_and_is_never_unlinked
+    skip "fork is unavailable" unless Process.respond_to?(:fork)
+
+    with_journal do |journal|
+      intent = effect_intent
+      reader, writer = IO.pipe
+      child = nil
+      journal.with_effect_sender_lock(intent) do
+        child = fork do
+          reader.close
+          journal.with_effect_sender_lock(intent) do
+            writer.write("acquired")
+            writer.flush
+          end
+          writer.close
+          exit! 0
+        end
+        writer.close
+        assert_nil IO.select([ reader ], nil, nil, 0.1)
+      end
+      assert IO.select([ reader ], nil, nil, 2)
+      assert_equal "acquired", reader.read
+      Process.wait(child)
+      assert_predicate $?, :success?
+      child = nil
+
+      lock = Dir.glob(
+        File.join(journal.root, ".sender-locks", "*.lock")
+      ).fetch(0)
+      assert_equal 0o600, File.stat(lock).mode & 0o777
+      assert_path_exists lock
+    ensure
+      reader&.close unless reader&.closed?
+      writer&.close unless writer&.closed?
+      Process.wait(child) if child
+    end
+  end
+
+  def test_stable_sender_lock_rejects_malformed_names
+    with_tmp_dir do |root|
+      lock = Hive::Modules::Migration::StableProcessLock.new(
+        root: File.join(root, "locks"),
+        label: "test locks"
       )
+      assert_raises(Hive::ConfigError) do
+        lock.synchronize("../escape") { flunk("must not lock") }
+      end
+    end
+  end
+
+  def test_schedule_attempt_generation_is_durable_and_concurrency_safe
+    with_journal do |journal|
+      base = "ordinary:project-1:2026-07-28T12:00:00.000000Z"
+      captures = 2.times.map do
+        Thread.new do
+          journal.reserve_attempt!(base, now: NOW) do |generation|
+            patrol_capture(
+              trigger: {
+                "kind" => "schedule",
+                "id" => "#{base}:attempt:#{generation}"
+              },
+              reservation: {
+                "kind" => "ordinary",
+                "id" => base,
+                "attempt_generation" => generation
+              }
+            )
+          end
+        end
+      end.map(&:value)
+      assert_equal 1, captures.map(&:occurrence_id).uniq.size
+      assert_equal 1,
+                   captures.first.reservation.fetch("attempt_generation")
+
+      journal.finalize!(captures.first, now: NOW + 1)
+      retry_capture = journal.reserve_attempt!(base, now: NOW + 2) do |generation|
+        patrol_capture(
+          trigger: {
+            "kind" => "schedule",
+            "id" => "#{base}:attempt:#{generation}"
+          },
+          reservation: {
+            "kind" => "ordinary",
+            "id" => base,
+            "attempt_generation" => generation
+          }
+        )
+      end
+      assert_equal 2,
+                   retry_capture.reservation.fetch("attempt_generation")
+      refute_equal captures.first.occurrence_id,
+                   retry_capture.occurrence_id
+    end
+  end
+
+  def test_schedule_attempt_allocation_rejects_malformed_or_ambiguous_history
+    with_journal do |journal|
+      base = "ordinary:project-1:2026-07-28T12:00:00.000000Z"
+      assert_raises(Hive::ConfigError) do
+        journal.reserve_attempt!(base, now: NOW) do |generation|
+          patrol_capture(
+            trigger: {
+              "kind" => "schedule",
+              "id" => "wrong:attempt:#{generation}"
+            },
+            reservation: {
+              "kind" => "ordinary",
+              "id" => "wrong",
+              "attempt_generation" => generation
+            }
+          )
+        end
+      end
+
+      2.times do |index|
+        generation = index + 1
+        journal.reserve!(
+          patrol_capture(
+            trigger: {
+              "kind" => "schedule",
+              "id" => "#{base}:attempt:#{generation}"
+            },
+            reservation: {
+              "kind" => "ordinary",
+              "id" => base,
+              "attempt_generation" => generation
+            }
+          ),
+          now: NOW
+        )
+      end
+      assert_raises(Hive::ConfigError) do
+        journal.reserve_attempt!(base, now: NOW) do
+          flunk("ambiguous history must not allocate")
+        end
+      end
     end
   end
 
@@ -112,145 +213,89 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
       journal.prepare_effect!(intent, now: NOW)
 
       assert_raises(Hive::ConfigError) do
-        journal.settle_claimed!(
+        journal.settle_effect!(
           intent,
-          token: "missing",
           status: "unknown",
           outcome: {},
-          receipt: receipt(intent, "failed", {}),
           now: NOW
         )
       end
 
-      claim = journal.acquire_effect!(
-        intent, claimant: "sender", now: NOW, lease_sec: 30
-      )
       assert_raises(Hive::ConfigError) do
-        journal.settle_claimed!(
+        journal.settle_effect!(
           intent,
-          token: claim.token,
           status: "committed",
           outcome: {},
-          receipt: receipt(intent, "committed", {}),
           now: NOW
         )
       end
+
+      denial = journal.deny_effect!(
+        intent,
+        outcome: { "reason" => "revoked" },
+        now: NOW
+      )
+      replay = journal.deny_effect!(
+        intent,
+        outcome: { "reason" => "revoked" },
+        now: NOW + 60
+      )
+      assert_equal denial.to_h, replay.to_h
+      assert_equal "denied",
+                   journal.effect_state(intent).fetch("state")
       assert_raises(Hive::ConfigError) do
-        journal.mark_dispatch_uncertain!(
-          intent, token: "stale", now: NOW
+        journal.deny_effect!(
+          intent, outcome: { "reason" => "changed" }, now: NOW + 61
         )
       end
 
-      journal.mark_dispatch_uncertain!(
-        intent, token: claim.token, now: NOW
-      )
-      denial = receipt(intent, "denied", { "reason" => "revoked" })
-      journal.deny_prepared!(
-        intent,
-        outcome: denial.outcome,
-        receipt: denial,
-        now: NOW
-      )
-      assert_equal "dispatch_uncertain",
-                   journal.effect_state(intent).fetch("state")
-      assert_includes journal.effect_state(intent).fetch("receipt_ids"),
-                      denial.receipt_id
-
+      uncertain = effect_intent(target: "owner/demo:uncertain")
+      journal.prepare_effect!(uncertain, now: NOW)
+      journal.mark_dispatch_uncertain!(uncertain, now: NOW)
       assert_raises(Hive::ConfigError) do
-        journal.settle_claimed!(
-          intent,
-          token: claim.token,
-          status: "committed",
-          outcome: {},
-          receipt: receipt(intent, "denied", {}),
-          now: NOW
+        journal.mark_dispatch_uncertain!(uncertain, now: NOW)
+      end
+      assert_raises(Hive::ConfigError) do
+        journal.deny_effect!(
+          uncertain, outcome: { "reason" => "revoked" }, now: NOW
         )
       end
-      outcome = { "url" => "https://example.test/effect/1" }
-      committed = receipt(intent, "committed", outcome)
-      journal.settle_claimed!(
-        intent,
-        token: claim.token,
-        status: "committed",
-        outcome: outcome,
-        receipt: committed,
-        now: NOW
-      )
-      journal.deny_prepared!(
-        intent,
-        outcome: { "reason" => "late" },
-        receipt: receipt(intent, "denied", { "reason" => "late" }),
-        now: NOW
-      )
-      assert_equal "committed",
-                   journal.effect_state(intent).fetch("state")
     end
   end
 
-  def test_reconciled_settlement_is_idempotent_but_not_rewritable
+  def test_reconciled_settlement_reuses_exact_persisted_receipt_bytes
     with_journal do |journal|
       intent = effect_intent
       journal.prepare_effect!(intent, now: NOW)
-      claim = journal.acquire_effect!(
-        intent, claimant: "sender", now: NOW, lease_sec: 1
-      )
-      journal.mark_dispatch_uncertain!(
-        intent, token: claim.token, now: NOW
-      )
+      journal.mark_dispatch_uncertain!(intent, now: NOW)
       outcome = { "remote" => "matched" }
-      reconciled = receipt(intent, "reconciled", outcome)
-      assert_raises(Hive::ConfigError) do
-        journal.settle_reconciled!(
-          intent,
-          expected_generation: claim.generation + 1,
-          outcome: outcome,
-          receipt: reconciled,
-          now: NOW + 1
-        )
-      end
-      assert_raises(Hive::ConfigError) do
-        journal.settle_reconciled!(
-          intent,
-          expected_generation: "bad",
-          outcome: outcome,
-          receipt: reconciled,
-          now: NOW + 1
-        )
-      end
-      journal.settle_reconciled!(
+      reconciled = journal.settle_effect!(
         intent,
-        expected_generation: claim.generation,
+        status: "reconciled",
         outcome: outcome,
-        receipt: reconciled,
         now: NOW + 2
       )
-      journal.settle_reconciled!(
+      replay = journal.settle_effect!(
         intent,
-        expected_generation: claim.generation,
+        status: "reconciled",
         outcome: outcome,
-        receipt: reconciled,
         now: NOW + 3
       )
+      assert_equal reconciled.to_h, replay.to_h
 
       assert_raises(Hive::ConfigError) do
-        journal.settle_reconciled!(
+        journal.settle_effect!(
           intent,
-          expected_generation: claim.generation,
+          status: "reconciled",
           outcome: { "remote" => "different" },
-          receipt: receipt(
-            intent, "reconciled", { "remote" => "different" }
-          ),
           now: NOW + 4
         )
       end
       assert_raises(Hive::ConfigError) do
-        journal.settle_reconciled!(
+        journal.settle_effect!(
           effect_intent(target: "other"),
-          expected_generation: "bad",
+          status: "reconciled",
           outcome: {},
-          receipt: receipt(
-            effect_intent(target: "other"), "reconciled", {}
-          ),
           now: NOW
         )
       end
@@ -262,20 +307,17 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
       provisional = patrol_capture
       intent = effect_intent
       journal.prepare_effect!(intent, now: NOW)
-      claim = journal.acquire_effect!(
-        intent, claimant: "sender", now: NOW
-      )
-      journal.mark_dispatch_uncertain!(
-        intent, token: claim.token, now: NOW
-      )
+      assert_raises(Hive::ConfigError) do
+        journal.finalize!(provisional, now: NOW)
+      end
+      assert_equal [ provisional.occurrence_id ],
+                   journal.pending.map { |record| record.fetch("occurrence_id") }
+      journal.mark_dispatch_uncertain!(intent, now: NOW)
       outcome = { "url" => "https://example.test/effect/1" }
-      committed = receipt(intent, "committed", outcome)
-      journal.settle_claimed!(
+      committed = journal.settle_effect!(
         intent,
-        token: claim.token,
         status: "committed",
         outcome: outcome,
-        receipt: committed,
         now: NOW
       )
       final = patrol_capture(
@@ -303,6 +345,14 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
         final, event_bytes: event, now: NOW + 2
       )
       assert_equal "finalized", replay.fetch("phase")
+      assert_raises(Hive::ConfigError) do
+        journal.prepare_effect!(
+          effect_intent(target: "owner/demo:new"), now: NOW + 2
+        )
+      end
+      assert_raises(Hive::ConfigError) do
+        journal.mark_dispatch_uncertain!(intent, now: NOW + 2)
+      end
       pending_ids = journal.projection_pending.map do |record|
         record.fetch("occurrence_id")
       end
@@ -336,9 +386,8 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
       intent = effect_intent
       journal.prepare_effect!(intent, now: NOW)
       outcome = { "reason" => "revoked" }
-      denied = receipt(intent, "denied", outcome)
-      journal.deny_prepared!(
-        intent, outcome: outcome, receipt: denied, now: NOW
+      denied = journal.deny_effect!(
+        intent, outcome: outcome, now: NOW
       )
       entry = journal.pending_outbox(intent.occurrence_id).fetch(0)
 
@@ -394,18 +443,17 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
         journal.fetch("bad")
       end
       assert_raises(Hive::ConfigError) do
-        journal.acquire_effect!(
-          intent, claimant: "", now: NOW, lease_sec: 1
+        journal.mark_dispatch_uncertain!(
+          effect_intent(target: "missing"), now: NOW
         )
       end
       assert_raises(Hive::ConfigError) do
-        journal.acquire_effect!(
-          intent, claimant: "sender", now: NOW, lease_sec: 0
+        journal.reset_effect_prepared!(intent, now: NOW
         )
       end
       assert_raises(Hive::ConfigError) do
-        journal.acquire_effect!(
-          intent, claimant: "sender", now: NOW, lease_sec: "bad"
+        journal.settle_effect!(
+          intent, status: "committed", outcome: [], now: NOW
         )
       end
       validator = occurrence_validator
@@ -474,14 +522,11 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
       }
       assert_invalid_record(validator, inactive_claim)
 
-      leased = journal.acquire_effect!(
-        prepared_intent, claimant: "sender", now: NOW, lease_sec: 10
-      )
-      invalid_claim = mutable(journal.fetch(prepared_intent.occurrence_id))
-      invalid_claim.dig(
-        "effects", prepared_intent.intent_id, "claim"
-      )["generation"] = leased.generation + 1
-      assert_invalid_record(validator, invalid_claim)
+      legacy_generation = mutable(prepared)
+      legacy_generation.dig(
+        "effects", prepared_intent.intent_id
+      )["delivery_generation"] = 1
+      assert_invalid_record(validator, legacy_generation)
 
       oversized_effects = prepared.fetch("effects").to_h do |id, value|
         [ id, value ]
@@ -634,6 +679,21 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
       terminal_mismatch["next_outbox_sequence"] = 2
       assert_invalid_record(validator, terminal_mismatch)
 
+      finalized_nonterminal = mutable(prepared)
+      finalized_nonterminal["phase"] = "finalized"
+      finalized_nonterminal["final_capture"] = patrol_capture.to_h
+      capture_bytes = canonical(patrol_capture.to_h)
+      finalized_nonterminal["outbox"] = [
+        outbox_entry(
+          sequence: 1,
+          kind: "capture",
+          id: patrol_capture.capture_id,
+          bytes: capture_bytes
+        )
+      ]
+      finalized_nonterminal["next_outbox_sequence"] = 2
+      assert_invalid_record(validator, finalized_nonterminal)
+
       malformed_module = mutable(prepared)
       malformed_module.delete("module")
       assert_invalid_record(validator, malformed_module)
@@ -746,19 +806,17 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
         File.join(root, "occurrences"),
         module_name: "patrol"
       )
-      FileUtils.mkdir_p(journal.root)
-      original = Dir.method(:each_child)
-      replacement = lambda do |path, &block|
-        if path == journal.root
-          4_097.times do |index|
-            block.call("occ-#{format('%064x', index)}.json")
-          end
-        else
-          original.call(path, &block)
-        end
-      end
-      with_replaced_singleton_method(
-        Dir, :each_child, replacement
+      journal.reserve!(patrol_capture, now: NOW)
+      journal.reserve!(
+        patrol_capture(
+          trigger: { "kind" => "manual", "id" => "second" }
+        ),
+        now: NOW
+      )
+      with_constant(
+        Hive::Modules::Migration::OccurrenceRecordStore,
+        :MAX_HISTORY_RECORDS,
+        1
       ) do
         assert_raises(Hive::ConfigError) { journal.records }
       end
@@ -853,19 +911,23 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
         store.mutate(missing.occurrence_id) { |value| value }
       end
 
-      original = Hive::AtomicFile.method(:write)
-      replacement = lambda do |*args, **kwargs|
-        if args.fetch(0).start_with?(journal.root)
-          raise Errno::ENOSPC, args.fetch(0)
-        end
+      record_store = journal.instance_variable_get(:@store)
+      directory = record_store.instance_variable_get(:@directory)
+      writes = 0
+      original = directory.method(:atomic_write)
+      directory.define_singleton_method(:atomic_write) do |*args, **kwargs|
+        writes += 1
         original.call(*args, **kwargs)
       end
-      with_replaced_singleton_method(
-        Hive::AtomicFile, :write, replacement
-      ) do
-        assert_raises(Hive::ConfigError) do
-          journal.reserve!(missing, now: NOW)
-        end
+      journal.reserve!(patrol_capture, now: NOW)
+      assert_equal 0, writes,
+                   "byte-identical replay must not rewrite and fsync"
+
+      directory.define_singleton_method(:atomic_write) do |*args, **_kwargs|
+        raise Errno::ENOSPC, args.fetch(0)
+      end
+      assert_raises(Hive::ConfigError) do
+        journal.reserve!(missing, now: NOW)
       end
     end
 
@@ -948,7 +1010,7 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
       effects = journal.instance_variable_get(:@effects)
       cell = mutable(journal.effect_state(intent))
       assert_raises(Hive::ConfigError) do
-        effects.send(:existing_claim_disposition, cell, now: NOW)
+        effects.send(:effect_cell!, { "effects" => {} }, intent)
       end
 
       conflicting = mutable(cell)
@@ -1048,7 +1110,8 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
 
   def test_record_store_detects_growth_between_stat_and_read
     with_tmp_dir do |root|
-      path = File.join(root, "occurrence.json")
+      occurrence_id = patrol_capture.occurrence_id
+      path = File.join(root, "#{occurrence_id}.json")
       File.write(path, "{}")
       initial = File.lstat(path)
       oversized = "x" * (
@@ -1076,7 +1139,7 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
         File, :open, replacement
       ) do
         assert_raises(Hive::ConfigError) do
-          store.send(:bounded_regular_read, path)
+          store.fetch(occurrence_id)
         end
       end
     end
@@ -1098,7 +1161,10 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
   def patrol_capture(decision_class: "due",
                      decision: { "rationale" => "due" },
                      effect_ids: [],
-                     trigger: { "kind" => "manual", "id" => "manual-1" })
+                     trigger: { "kind" => "manual", "id" => "manual-1" },
+                     reservation: {
+                       "kind" => "ordinary", "id" => "reservation-1"
+                     })
     Hive::Modules::Migration::PatrolCapture.build(
       module_name: "patrol",
       project: {
@@ -1107,7 +1173,7 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
         "repository" => "owner/demo"
       },
       trigger: trigger,
-      reservation: { "kind" => "ordinary", "id" => "reservation-1" },
+      reservation: reservation,
       owner: "legacy",
       owner_epoch: 1,
       decision_class: decision_class,

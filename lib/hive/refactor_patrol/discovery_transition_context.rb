@@ -14,7 +14,7 @@ module Hive
 
       def initialize(config_loader:, migration_snapshot: nil,
                      evidence_store_factory: nil, module_execution:, owner:,
-                     occurrence_lifecycle:, claimant: nil,
+                     occurrence_lifecycle:,
                      gateway_factory: nil)
         @config_loader = config_loader
         @migration_snapshot = migration_snapshot || method(:migration_snapshot)
@@ -23,7 +23,6 @@ module Hive
         @module_execution = module_execution
         @owner = owner
         @occurrence_lifecycle = occurrence_lifecycle
-        @claimant = claimant || "architecture-scheduler-#{owner}"
         @gateway_factory = gateway_factory ||
                            ->(**options) { TransitionGateway.new(**options) }
       end
@@ -48,7 +47,6 @@ module Hive
             @migration_snapshot.call(entry, "architecture-patrol")
           end,
           clock: -> { now },
-          claimant: @claimant,
           diagnostic_transition: diagnostic_transition
         )
       end
@@ -94,6 +92,27 @@ module Hive
           migration: migration,
           now: now
         )
+      end
+
+      def reconcile_recorded(entry, store, aggregate, now)
+        capture = store.occurrence_capture(
+          aggregate.fetch("job_id")
+        )
+        return aggregate unless capture
+
+        gateway = gateway(
+          entry, store, capture, now,
+          diagnostic_transition: true
+        )
+        store.unsettled_recorded_transitions(aggregate).each do |intent,
+                                                                  transition|
+          unless %w[job discovery action].include?(intent.sink)
+            raise JobStore::InconsistentRecord,
+                  "recorded transition sink is not local"
+          end
+          gateway.reconcile_recorded!(intent, transition)
+        end
+        store.read_job(aggregate.fetch("job_id"))
       end
 
       def digest(value)

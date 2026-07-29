@@ -253,13 +253,8 @@ class HivePatrolPrOpenerTest < Minitest::Test
         operations << "effect:#{intent.sink}:intent"
         original_prepare.call(intent, **options)
       end
-      original_absent = state.method(:resolve_effect_absent!)
-      state.define_singleton_method(:resolve_effect_absent!) do |intent, **options|
-        operations << "effect:#{intent.sink}:known_not_sent"
-        original_absent.call(intent, **options)
-      end
-      original_settle = state.method(:settle_effect_claimed!)
-      state.define_singleton_method(:settle_effect_claimed!) do |intent, **options|
+      original_settle = state.method(:settle_effect!)
+      state.define_singleton_method(:settle_effect!) do |intent, **options|
         operations << "effect:#{intent.sink}:#{options.fetch(:status)}"
         original_settle.call(intent, **options)
       end

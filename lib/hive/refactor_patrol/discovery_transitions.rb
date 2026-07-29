@@ -10,22 +10,21 @@ module Hive
                      evidence_store_factory: nil, module_execution:, owner:,
                      owner_pid:, owner_process_start_time:, lease_sec:,
                      claim_resolver:, reservation_error:,
-                     occurrence_lifecycle:, claimant: nil,
+                     occurrence_lifecycle:,
                      claim_operation: "discovery-claim",
                      operation_prefix: "discovery-",
                      gateway_factory: nil)
-        context = DiscoveryTransitionContext.new(
+        @context = DiscoveryTransitionContext.new(
           config_loader: config_loader,
           migration_snapshot: migration_snapshot,
           evidence_store_factory: evidence_store_factory,
           module_execution: module_execution,
           owner: owner,
           occurrence_lifecycle: occurrence_lifecycle,
-          claimant: claimant,
           gateway_factory: gateway_factory
         )
         @claims = DiscoveryClaimTransitions.new(
-          context: context,
+          context: @context,
           owner_pid: owner_pid,
           owner_process_start_time: owner_process_start_time,
           lease_sec: lease_sec,
@@ -34,7 +33,7 @@ module Hive
           claim_operation: claim_operation,
           operation_prefix: operation_prefix
         )
-        @blocks = DiscoveryBlockTransitions.new(context: context)
+        @blocks = DiscoveryBlockTransitions.new(context: @context)
       end
 
       def claim(...)
@@ -55,6 +54,10 @@ module Hive
 
       def block(...)
         @blocks.block(...)
+      end
+
+      def reconcile_recorded(...)
+        @context.reconcile_recorded(...)
       end
     end
   end

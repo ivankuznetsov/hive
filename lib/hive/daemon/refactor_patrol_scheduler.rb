@@ -12,6 +12,7 @@ require "hive/process_kill"
 require "hive/refactor_patrol/checkout_guard"
 require "hive/refactor_patrol/job_store"
 require "hive/refactor_patrol/architecture_occurrence_lifecycle"
+require "hive/refactor_patrol/claim_maintenance_transitions"
 require "hive/refactor_patrol/discovery_transitions"
 require "hive/refactor_patrol/pr_manifest"
 require "hive/refactor_patrol/process_group_resolver"
@@ -29,6 +30,8 @@ module Hive
       PATROL_SLUG_PREFIX = "refactor-patrol".freeze
       MODULE_SCHEDULE = "*/10 * * * *".freeze
       RETRY_BACKOFF_SEC = 60
+      RECOVERY_BACKOFF_SCHEDULE = [ 60, 300, 900 ].freeze
+      RECOVERY_ERROR_LIMIT = 512
       SUPPORTED_REPORT_SCHEMA_VERSIONS = [ 2, Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol") ].uniq.freeze
 
       class ReservationBlocked < StandardError
@@ -118,7 +121,10 @@ module Hive
             reservation_error: ReservationBlocked,
             occurrence_lifecycle: @occurrence_lifecycle
           )
+        @claim_maintenance_transitions =
+          Hive::RefactorPatrol::ClaimMaintenanceTransitions.new
         @events = []
+        @recovery_failures = {}
         @schemers = SUPPORTED_REPORT_SCHEMA_VERSIONS.to_h do |version|
           [ version, JSONSchemer.schema(Pathname.new(Hive::Schemas.schema_path("hive-refactor-patrol", version: version))) ]
         end
@@ -130,7 +136,9 @@ module Hive
         block_configuration_errors(now)
         due_by_project = managed.to_h do |entry|
           store = store_for(entry)
-          recover_projections(store, entry)
+          unless recover_occurrences(store, entry, now)
+            next [ entry.fetch("name"), [] ]
+          end
           discovery = if entry.dig("_refactor_patrol_cfg", "refactor_patrol", "enabled") == true
             store.claimable_jobs(now: now)
           else
@@ -325,9 +333,13 @@ module Hive
         return dispatch if @dry_run
         return dispatch if dispatch.dig(:dispatch_token, :phase) == :action
 
-        store_for(dispatch.fetch(:entry)).attach_discovery_process!(
-          dispatch.fetch(:dispatch_token), pid: pid,
-          process_start_time: process_start_time, pgid: pgid, now: now,
+        @claim_maintenance_transitions.attach_discovery(
+          store: store_for(dispatch.fetch(:entry)),
+          token: dispatch.fetch(:dispatch_token),
+          pid: pid,
+          process_start_time: process_start_time,
+          pgid: pgid,
+          now: now,
           lease_sec: @lease_sec
         )
       end
@@ -722,8 +734,45 @@ module Hive
         )
       end
 
-      def recover_projections(store, entry)
-        @occurrence_lifecycle.recover(store: store, entry: entry)
+      def recover_occurrences(store, entry, now)
+        project = entry.fetch("name")
+        deadline = @recovery_failures.dig(project, :next_eligible_at)
+        return false if deadline && now < deadline
+
+        @occurrence_lifecycle.recover(
+          store: store, entry: entry, now: now
+        ) do |aggregate|
+          @discovery_transitions.reconcile_recorded(
+            entry, store, aggregate, now
+          )
+        end
+        @recovery_failures.delete(project)
+        true
+      rescue Hive::RefactorPatrol::ArchitectureOccurrenceLifecycle::
+               RecoveryError => e
+        count = @recovery_failures.dig(project, :count).to_i + 1
+        interval = RECOVERY_BACKOFF_SCHEDULE[
+          [ count - 1, RECOVERY_BACKOFF_SCHEDULE.size - 1 ].min
+        ]
+        retry_at = now + interval
+        @recovery_failures[project] = {
+          count: count,
+          next_eligible_at: retry_at
+        }
+        @events << {
+          status: :blocked,
+          project: project,
+          occurrence_id: e.occurrence_id,
+          job_id: e.job_id,
+          recovery: "architecture_occurrence",
+          blocker: "recovery_failed",
+          error_class: e.error_class,
+          error: e.message.to_s.byteslice(0, RECOVERY_ERROR_LIMIT),
+          retry_count: count,
+          retry_in_sec: interval,
+          retry_at: retry_at.utc.iso8601
+        }
+        false
       end
 
       def parse_time(value)

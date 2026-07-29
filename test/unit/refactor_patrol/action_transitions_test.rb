@@ -3,6 +3,11 @@ require "hive/refactor_patrol/action_transitions"
 
 class RefactorPatrolActionTransitionsTest < Minitest::Test
   Capture = Data.define(:owner_epoch)
+  Intent = Data.define(
+    :intent_id, :module_name, :occurrence_id, :owner_epoch, :sink, :target,
+    :idempotency_key, :scope
+  )
+  INTENT_ID = "intent-#{'1' * 64}".freeze
 
   class Gateway
     attr_reader :options
@@ -29,6 +34,13 @@ class RefactorPatrolActionTransitionsTest < Minitest::Test
     def prepare_effect!(*) = true
     def read_job(*) = aggregate
     def plan_actions(*) = planned
+    def assert_recorded_transitions_terminal!(*) = true
+
+    def next_diagnostic_episode(aggregate, kind)
+      aggregate.fetch("attempts").filter_map do |attempt|
+        attempt["generation"] if attempt["kind"] == kind
+      end.max.to_i + 1
+    end
 
     def assert_action_claim!(*)
       if stale
@@ -85,6 +97,31 @@ class RefactorPatrolActionTransitionsTest < Minitest::Test
       aggregate
     end
 
+    def record_patch_receipt!(token, **options)
+      calls << [ :record_patch_receipt, token, options ]
+      aggregate
+    end
+
+    def record_publication_attempt_phase!(token, **options)
+      calls << [ :record_publication_phase, token, options ]
+      aggregate
+    end
+
+    def supersede_publication_attempt!(token, **options)
+      calls << [ :supersede_publication, token, options ]
+      aggregate
+    end
+
+    def record_fix_receipt!(token, **options)
+      calls << [ :record_fix_receipt, token, options ]
+      aggregate
+    end
+
+    def materialize_terminal_proof!(job_id, action_id, **options)
+      calls << [ :materialize_terminal_proof, job_id, action_id, options ]
+      aggregate
+    end
+
     def block_actions!(job_id, **options)
       calls << [ :block, job_id, options ]
       aggregate
@@ -100,12 +137,13 @@ class RefactorPatrolActionTransitionsTest < Minitest::Test
       action_record(
         claims: [
           claim_record(owner: "worker", state: "claimed")
-        ]
+        ],
+        transitions: [ transition_record ]
       )
     )
     gateway = Gateway.new do |options, _transition|
       [
-        options.fetch(:reconcile).call(nil),
+        options.fetch(:reconcile).call(intent),
         options.fetch(:replay).call(nil)
       ]
     end
@@ -123,7 +161,7 @@ class RefactorPatrolActionTransitionsTest < Minitest::Test
       )
     )
     gateway = Gateway.new do |options, _transition|
-      options.fetch(:reconcile).call(nil)
+      options.fetch(:reconcile).call(intent)
     end
     assert_equal(
       "ambiguous",
@@ -134,7 +172,7 @@ class RefactorPatrolActionTransitionsTest < Minitest::Test
 
     store.aggregate = aggregate_with(action_record)
     gateway = Gateway.new do |options, _transition|
-      options.fetch(:reconcile).call(nil)
+      options.fetch(:reconcile).call(intent)
     end
     assert_equal(
       "absent",
@@ -148,7 +186,7 @@ class RefactorPatrolActionTransitionsTest < Minitest::Test
     token = action_token
     store = Store.new
     gateway = Gateway.new do |options, _transition|
-      options.fetch(:reconcile).call(nil)
+      options.fetch(:reconcile).call(intent)
     end
     coordinator = claims(store, gateway)
 
@@ -157,7 +195,8 @@ class RefactorPatrolActionTransitionsTest < Minitest::Test
         terminal: true,
         outcome: "done",
         receipts: { "proof" => { "id" => 1 } },
-        claims: [ claim_record ]
+        claims: [ claim_record ],
+        transitions: [ transition_record ]
       )
     )
     assert_equal(
@@ -191,7 +230,8 @@ class RefactorPatrolActionTransitionsTest < Minitest::Test
       action_record(
         claims: [
           claim_record(state: "released", outcome: "retry")
-        ]
+        ],
+        transitions: [ transition_record ]
       )
     )
     assert_equal(
@@ -251,11 +291,12 @@ class RefactorPatrolActionTransitionsTest < Minitest::Test
           "creation_intent" => { "payload" => payload },
           "push_complete" => payload
         },
-        claims: [ claim_record ]
+        claims: [ claim_record ],
+        transitions: [ transition_record ]
       )
     )
     gateway = Gateway.new do |options, _transition|
-      options.fetch(:reconcile).call(nil)
+      options.fetch(:reconcile).call(intent)
     end
     coordinator = claims(store, gateway)
 
@@ -277,6 +318,18 @@ class RefactorPatrolActionTransitionsTest < Minitest::Test
         token, "push_complete", payload, now: now
       ).fetch("status")
     )
+    assert_equal(
+      "matched",
+      coordinator.record_patch_receipt(
+        token, receipt: payload, now: now
+      ).fetch("status")
+    )
+    assert_equal(
+      "matched",
+      coordinator.record_fix_receipt(
+        token, receipt: payload, now: now
+      ).fetch("status")
+    )
 
     store.aggregate = aggregate_with(
       action_record(claims: [ claim_record(state: "claimed") ])
@@ -287,7 +340,6 @@ class RefactorPatrolActionTransitionsTest < Minitest::Test
         token,
         operation: "custom",
         payload: payload,
-        matcher: ->(_action) { false },
         now: now
       ) { flunk("reconciliation must not send") }.fetch("status")
     )
@@ -299,7 +351,6 @@ class RefactorPatrolActionTransitionsTest < Minitest::Test
         token,
         operation: "custom",
         payload: payload,
-        matcher: ->(_action) { false },
         now: now
       ) { flunk("reconciliation must not send") }.fetch("status")
     )
@@ -309,11 +360,21 @@ class RefactorPatrolActionTransitionsTest < Minitest::Test
     store = Store.new
     store.planned = [ { "canonical_action_id" => "action-1" } ]
     gateway = Gateway.new do |options, _transition|
-      options.fetch(:reconcile).call(nil)
+      options.fetch(:reconcile).call(intent)
     end
     coordinator = plan(store, gateway)
 
-    store.aggregate = aggregate_with(action_record)
+    store.aggregate = aggregate_with(
+      action_record,
+      attempts: [
+        {
+          "kind" =>
+            Hive::RefactorPatrol::JobStore::JOB_TRANSITION_ATTEMPT_KIND,
+          "operation" => "initialize-actions",
+          "transitions" => [ transition_record ]
+        }
+      ]
+    )
     assert_equal(
       "matched",
       coordinator.initialize_actions(
@@ -349,10 +410,25 @@ class RefactorPatrolActionTransitionsTest < Minitest::Test
     )
 
     store.aggregate = aggregate_with(
-      action_record(terminal: true, outcome: "linked")
+      action_record(
+        terminal: true,
+        outcome: "linked",
+        transitions: [ transition_record ]
+      )
     )
     assert_equal(
       "matched",
+      coordinator.reconcile_linked(
+        aggregate_with,
+        action_record,
+        now: now
+      ).fetch("status")
+    )
+    store.aggregate = aggregate_with(
+      action_record(terminal: true, outcome: "linked")
+    )
+    assert_equal(
+      "ambiguous",
       coordinator.reconcile_linked(
         aggregate_with,
         action_record,
@@ -370,11 +446,26 @@ class RefactorPatrolActionTransitionsTest < Minitest::Test
     )
 
     store.aggregate = aggregate_with(
+      action_record(transitions: [ transition_record ])
+    )
+    assert_equal(
+      "matched",
+      coordinator.materialize_terminal_proof(
+        aggregate_with(action_record),
+        "action-1",
+        proof: { "kind" => "linked" },
+        now: now
+      ).fetch("status")
+    )
+
+    store.aggregate = aggregate_with(
       attempts: [
         {
           "kind" => "action_block",
+          "generation" => 1,
           "reason" => "revoked",
-          "evidence" => { "owner" => "other" }
+          "evidence" => { "owner" => "other" },
+          "transitions" => [ transition_record ]
         }
       ]
     )
@@ -437,7 +528,50 @@ class RefactorPatrolActionTransitionsTest < Minitest::Test
         now: now
       )
     )
+    assert_same(
+      durable,
+      plan(store, replay_gateway).materialize_terminal_proof(
+        aggregate_with(action_record),
+        "action-1",
+        proof: { "kind" => "linked" },
+        now: now
+      )
+    )
+    assert_same(
+      durable,
+      plan(store, replay_gateway).block(
+        aggregate_with,
+        reason: "revoked",
+        evidence: {},
+        backoff_sec: 5,
+        now: now
+      )
+    )
     assert_empty store.calls
+  end
+
+  def test_facade_delegates_patch_and_fix_receipts_to_claim_transitions
+    calls = []
+    claims = Object.new
+    claims.define_singleton_method(:record_patch_receipt) do |*args, **options|
+      calls << [ :patch, args, options ]
+    end
+    claims.define_singleton_method(:record_fix_receipt) do |*args, **options|
+      calls << [ :fix, args, options ]
+    end
+    facade = Hive::RefactorPatrol::ActionTransitions.allocate
+    facade.instance_variable_set(:@claims, claims)
+
+    facade.record_patch_receipt(:token, receipt: { "id" => 1 }, now: now)
+    facade.record_fix_receipt(:token, receipt: { "id" => 2 }, now: now)
+
+    assert_equal(
+      [
+        [ :patch, [ :token ], { receipt: { "id" => 1 }, now: now } ],
+        [ :fix, [ :token ], { receipt: { "id" => 2 }, now: now } ]
+      ],
+      calls
+    )
   end
 
   private
@@ -483,13 +617,14 @@ class RefactorPatrolActionTransitionsTest < Minitest::Test
   end
 
   def action_record(action_id: "action-1", claims: [], terminal: false,
-                    outcome: nil, receipts: {})
+                    outcome: nil, receipts: {}, transitions: [])
     {
       "canonical_action_id" => action_id,
       "claims" => claims,
       "terminal" => terminal,
       "outcome" => outcome,
-      "receipts" => receipts
+      "receipts" => receipts,
+      "transitions" => transitions
     }
   end
 
@@ -509,6 +644,30 @@ class RefactorPatrolActionTransitionsTest < Minitest::Test
       canonical_action_id: "action-1",
       generation: 1
     }
+  end
+
+  def transition_record
+    {
+      "intent_id" => INTENT_ID,
+      "outcome" => "applied",
+      "error_code" => nil
+    }
+  end
+
+  def intent
+    Intent.new(
+      INTENT_ID,
+      "architecture-patrol",
+      "occ-#{'2' * 64}",
+      7,
+      "action",
+      "job-1:action-1:operation",
+      "job-1:action-1:operation:7",
+      {
+        "job_id" => "job-1",
+        "canonical_action_id" => "action-1"
+      }
+    )
   end
 
   def now

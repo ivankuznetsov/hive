@@ -448,6 +448,47 @@ class ModulesMigrationPatrolsTest < Minitest::Test
     end
   end
 
+  def test_coordinator_blocks_ownership_epoch_on_durable_product_work
+    with_project do |project|
+      store = FakeStore.new
+      supervisor = FakeSupervisor.new
+      supervisor.live = false
+      durable = {
+        "patrol" => :live,
+        "architecture-patrol" => :live
+      }
+      probes = []
+      coordinator = Hive::Modules::Migration::Coordinator.new(
+        supervisor: supervisor,
+        attempt_store: FakeAttemptStore.new,
+        registry: -> { [ project ] },
+        store_factory: ->(_state) { store },
+        durable_work_probe: lambda do |entry, module_name|
+          probes << [ entry.fetch("name"), module_name ]
+          durable.fetch(module_name)
+        end
+      )
+
+      pending = coordinator.tick(now: NOW).fetch(0)
+
+      assert_equal :pending, pending.fetch(:status)
+      assert_equal(
+        {
+          "patrol" => "live",
+          "architecture-patrol" => "live"
+        },
+        pending.fetch(:blockers)
+      )
+      assert_equal(
+        [
+          [ "demo", "patrol" ],
+          [ "demo", "architecture-patrol" ]
+        ],
+        probes
+      )
+    end
+  end
+
   def test_coordinator_defaults_and_project_errors_are_bounded
     defaulted = Hive::Modules::Migration::Coordinator.new(
       supervisor: FakeSupervisor.new, attempt_store: FakeAttemptStore.new

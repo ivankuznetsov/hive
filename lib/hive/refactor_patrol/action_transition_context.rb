@@ -37,7 +37,6 @@ module Hive
           config_loader: @config_loader,
           module_execution: @module_execution,
           clock: @clock,
-          claimant: "architecture-action-transition-#{@owner}",
           diagnostic_transition: diagnostic_transition
         )
       end

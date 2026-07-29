@@ -409,7 +409,7 @@ class RefactorPatrolCommandTest < Minitest::Test
       assert_equal "https://github.com/acme/demo/pull/7", resolver.seen
       refute File.exist?(File.join(repo, ".hive-state", "refactor_patrol", "state.json"))
       aggregate = Hive::RefactorPatrol::JobStore.new(repo).read_job(manifest.fetch("job_id"))
-      assert aggregate.fetch("complete"), "manual PR replay must checkpoint the authoritative v2 job"
+      assert aggregate.fetch("complete"), "manual PR replay must checkpoint the authoritative v3 job"
       assert_equal [ "checkout" ], aggregate.fetch("feature_results").map { |item| item.fetch("feature_id") }
       assert_equal true, aggregate.dig("policy", "discovery")
       claim = aggregate.fetch("attempts").first
@@ -855,10 +855,6 @@ class RefactorPatrolCommandTest < Minitest::Test
       head = run!("git", "-C", repo, "rev-parse", "HEAD").strip
       manifest = with_manifest_checksum(pr_manifest(merge_sha: head))
       path = publish_job_manifest(repo, manifest)
-      source = manifest.fetch("source").merge(
-        "changed_paths" => manifest.fetch("changed_paths"),
-        "manifest_checksum" => manifest.fetch("manifest_checksum")
-      )
       cfg = Hive::Config.load(repo)
       policy = Hive::RefactorPatrol::Policy.capture(cfg, now: Time.utc(2026, 7, 10)).merge(
         "auto_fix" => false, "issue_filing" => false
@@ -870,10 +866,12 @@ class RefactorPatrolCommandTest < Minitest::Test
         "score" => item.expected_leverage.fetch("score"),
         "admissible" => true, "reasons" => [], "thesis" => item.to_h
       }
-      Hive::RefactorPatrol::JobStore.new(repo).write_job!(
-        {
-          "schema" => "hive-refactor-patrol-job", "schema_version" => 2,
-          "job_id" => manifest.fetch("job_id"), "source" => source,
+      store, enrolled = enroll_manifest!(
+        repo, manifest, policy: policy,
+        now: Time.utc(2026, 7, 10)
+      )
+      store.write_job!(
+        enrolled.merge(
           "analysis_sha" => head, "policy" => policy,
           "state" => "classified", "complete" => false,
           "dispositions" => { "accepted" => [ accepted ], "flagged" => [], "suppressed" => [] },
@@ -881,7 +879,7 @@ class RefactorPatrolCommandTest < Minitest::Test
           "attempts" => [ { "number" => 1, "outcome" => "classified" } ],
           "actions" => [], "created_at" => "2026-07-10T00:00:00Z",
           "updated_at" => "2026-07-10T00:00:00Z"
-        }
+        )
       )
       config_path = File.join(repo, ".hive-state", "config.yml")
       current_config = YAML.safe_load(File.read(config_path))
@@ -908,18 +906,16 @@ class RefactorPatrolCommandTest < Minitest::Test
       head = run!("git", "-C", repo, "rev-parse", "HEAD").strip
       manifest = with_manifest_checksum(pr_manifest(merge_sha: head))
       path = publish_job_manifest(repo, manifest)
-      source = manifest.fetch("source").merge(
-        "changed_paths" => manifest.fetch("changed_paths"),
-        "manifest_checksum" => manifest.fetch("manifest_checksum")
-      )
       cfg = Hive::Config.load(repo)
       policy = Hive::RefactorPatrol::Policy.capture(cfg, now: Time.utc(2026, 7, 10)).merge(
         "auto_fix" => false, "issue_filing" => false
       )
-      Hive::RefactorPatrol::JobStore.new(repo).write_job!(
-        {
-          "schema" => "hive-refactor-patrol-job", "schema_version" => 2,
-          "job_id" => manifest.fetch("job_id"), "source" => source,
+      store, enrolled = enroll_manifest!(
+        repo, manifest, policy: policy,
+        now: Time.utc(2026, 7, 10)
+      )
+      store.write_job!(
+        enrolled.merge(
           "analysis_sha" => head, "policy" => policy,
           "state" => "complete", "complete" => true,
           "dispositions" => { "accepted" => [], "flagged" => [], "suppressed" => [] },
@@ -930,7 +926,7 @@ class RefactorPatrolCommandTest < Minitest::Test
           "attempts" => [ { "number" => 1, "outcome" => "complete" } ],
           "actions" => [], "created_at" => "2026-07-10T00:00:00Z",
           "updated_at" => "2026-07-10T00:00:00Z"
-        }
+        )
       )
 
       out, err, status = with_captured_exit do
@@ -1441,9 +1437,12 @@ class RefactorPatrolCommandTest < Minitest::Test
     command.send(:renew_claim, { kind: :action, generation: 3 }, now)
     assert_equal [ 2, 3 ], renewed.map { |token| token.fetch(:generation) }
 
-    store.define_singleton_method(:release_discovery!) do |*|
+    transitions = Object.new
+    transitions.define_singleton_method(:release) do |**|
       raise Hive::RefactorPatrol::JobStore::CorruptRecord, "cannot release"
     end
+    command.instance_variable_set(:@manual_discovery_transitions, transitions)
+    command.instance_variable_set(:@transition_entry, { "path" => "/tmp/demo" })
     command.instance_variable_set(:@manual_claim_token, { kind: :discovery })
     assert_nil command.send(:release_manual_claim, "command_error")
     assert_nil command.instance_variable_get(:@manual_claim_token)
@@ -1605,10 +1604,9 @@ class RefactorPatrolCommandTest < Minitest::Test
   def test_job_list_and_show_are_schema_valid_read_only_queries_even_when_patrol_is_disabled
     with_refactor_patrol_project do |repo|
       cfg = Hive::Config.load(repo)
-      store = Hive::RefactorPatrol::JobStore.new(repo)
       manifest = with_manifest_checksum(pr_manifest)
-      store.enqueue_manifest!(
-        manifest,
+      store, = enroll_manifest!(
+        repo, manifest,
         policy: Hive::RefactorPatrol::Policy.capture(cfg, now: Time.utc(2026, 7, 12, 9, 0, 0)),
         now: Time.utc(2026, 7, 12, 9, 0, 0)
       )
@@ -1974,6 +1972,22 @@ class RefactorPatrolCommandTest < Minitest::Test
     path = File.join(root, "#{manifest.fetch('job_id')}.json")
     File.write(path, JSON.pretty_generate(manifest))
     path
+  end
+
+  def enroll_manifest!(repo, manifest, policy:, now:)
+    store = Hive::RefactorPatrol::JobStore.new(repo)
+    transitions =
+      Hive::RefactorPatrol::ArchitectureIntakeTransitions.new(
+        config_loader: ->(path) { Hive::Config.load(path) }
+      )
+    aggregate = transitions.enqueue(
+      entry: { "path" => repo, "name" => "demo" },
+      store: store,
+      manifest: manifest,
+      policy: policy,
+      now: now
+    )
+    [ store, aggregate ]
   end
 
   def canonical_json(value)

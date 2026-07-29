@@ -13,6 +13,7 @@ require "hive/process_kill"
 require "hive/patrol/mapper"
 require "hive/patrol/token_budget"
 require "hive/refactor_patrol/architecture_intake_transitions"
+require "hive/refactor_patrol/claim_maintenance_transitions"
 require "hive/refactor_patrol/caps"
 require "hive/refactor_patrol/action_runner"
 require "hive/refactor_patrol/collisions"
@@ -128,9 +129,10 @@ module Hive
         @architecture_intake_transitions =
           Hive::RefactorPatrol::ArchitectureIntakeTransitions.new(
             config_loader: @config_loader,
-            module_execution: @module_execution,
-            claimant: "architecture-command-#{Process.pid}"
+            module_execution: @module_execution
           )
+        @claim_maintenance_transitions =
+          Hive::RefactorPatrol::ClaimMaintenanceTransitions.new
       end
 
       def call
@@ -658,9 +660,10 @@ module Hive
       end
 
       def checkpoint_manual_discovery_transition!(token, envelope:, now:)
-        return @job_store.checkpoint_discovery!(
-          token, envelope: envelope, now: now
-        ) unless @manual_discovery_transitions
+        unless @manual_discovery_transitions
+          raise Hive::ConfigError,
+                "manual discovery transition coordinator is unavailable"
+        end
 
         @manual_discovery_transitions.checkpoint(
           entry: @transition_entry,
@@ -674,9 +677,10 @@ module Hive
 
       def checkpoint_manual_progress_transition!(token, envelope:, now:,
                                                  lease_sec:)
-        return @job_store.checkpoint_discovery_progress!(
-          token, envelope: envelope, now: now, lease_sec: lease_sec
-        ) unless @manual_discovery_transitions
+        unless @manual_discovery_transitions
+          raise Hive::ConfigError,
+                "manual discovery transition coordinator is unavailable"
+        end
 
         @manual_discovery_transitions.checkpoint_progress(
           entry: @transition_entry,
@@ -690,9 +694,10 @@ module Hive
 
       def release_manual_discovery_transition!(token, reason:, now:,
                                                backoff_sec:)
-        return @job_store.release_discovery!(
-          token, reason: reason, now: now, backoff_sec: backoff_sec
-        ) unless @manual_discovery_transitions
+        unless @manual_discovery_transitions
+          raise Hive::ConfigError,
+                "manual discovery transition coordinator is unavailable"
+        end
 
         @manual_discovery_transitions.release(
           entry: @transition_entry,
@@ -717,7 +722,6 @@ module Hive
           claim_resolver: claim_resolver,
           reservation_error: Hive::ConfigError,
           occurrence_lifecycle: nil,
-          claimant: "architecture-command-#{Process.pid}",
           claim_operation: "manual-discovery-claim",
           operation_prefix: ""
         )
@@ -859,17 +863,13 @@ module Hive
       end
 
       def renew_claim(token, now)
-        if token.fetch(:kind) == :discovery
-          @job_store.renew_discovery_claim!(
-            token, now: now, lease_sec: @heartbeat_lease_sec,
-            claim_resolver: @heartbeat_resolver
-          )
-        else
-          @job_store.renew_action_claim!(
-            token, now: now, lease_sec: @heartbeat_lease_sec,
-            claim_resolver: @heartbeat_resolver
-          )
-        end
+        @claim_maintenance_transitions.renew(
+          store: @job_store,
+          token: token,
+          now: now,
+          lease_sec: @heartbeat_lease_sec,
+          claim_resolver: @heartbeat_resolver
+        )
       end
 
       def release_manual_claim(reason)

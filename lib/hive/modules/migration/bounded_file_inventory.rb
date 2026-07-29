@@ -22,7 +22,7 @@ module Hive
 
         def initialize(directory:, relative:, filename_pattern:, max_entries:,
                        cursor_prefix:, malformed_message:, overflow_message:,
-                       missing: false)
+                       missing: false, ignore_unmatched: false)
           @directory = directory
           @relative = relative.to_s
           @filename_pattern = filename_pattern
@@ -31,8 +31,10 @@ module Hive
           @overflow_message = overflow_message.to_s
           @max_entries = Integer(max_entries)
           @missing = missing
+          @ignore_unmatched = ignore_unmatched
           malformed! unless @max_entries.positive? &&
-                            @cursor_prefix.match?(/\A[a-z0-9-]+\z/)
+                            @cursor_prefix.match?(/\A[a-z0-9-]+\z/) &&
+                            [ true, false ].include?(@ignore_unmatched)
           @binding = ::Digest::SHA256.hexdigest(
             "#{@cursor_prefix}\0#{@directory.root}\0#{@relative}"
           ).freeze
@@ -112,6 +114,9 @@ module Hive
 
         def each_valid_name
           @directory.each_child(@relative, missing: @missing) do |name|
+            next if @ignore_unmatched &&
+                    !@filename_pattern.match?(name)
+
             malformed! unless name.is_a?(String) &&
                               @filename_pattern.match?(name)
             yield name

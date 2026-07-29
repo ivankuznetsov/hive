@@ -16,11 +16,13 @@ module Hive
 
         def initialize(supervisor:, attempt_store:, registry: -> { Hive::Config.registered_projects },
                        store_factory: ->(state) { Hive::ModulePackage::ManagedStore.new(state) },
-                       dry_run: false)
+                       durable_work_probe: nil, dry_run: false)
           @supervisor = supervisor
           @attempt_store = attempt_store
           @registry = registry
           @store_factory = store_factory
+          @durable_work_probe =
+            durable_work_probe || method(:durable_work_quiescence)
           @dry_run = dry_run
         end
 
@@ -78,7 +80,47 @@ module Hive
             !attempt.final? && attempt["project"] == entry.fetch("name") &&
               attempt.module_hook? && attempt.subject["module"] == module_name
           end
-          active ? :live : :quiescent
+          return :live if active
+
+          status = @durable_work_probe.call(entry, module_name)
+          status = status == true ? :quiescent :
+            (status == false ? :live : status.to_sym)
+          %i[quiescent live ambiguous].include?(status) ?
+            status : :ambiguous
+        rescue StandardError
+          :ambiguous
+        end
+
+        def durable_work_quiescence(entry, module_name)
+          project_root = entry.fetch("path")
+          case module_name
+          when "patrol"
+            require "hive/patrol/state_store"
+            root = File.join(
+              project_root, ".hive-state", "patrol", "occurrences"
+            )
+            return :quiescent unless Dir.exist?(root)
+
+            store = Hive::Patrol::StateStore.new(project_root)
+            store.recovery_active_occurrences.empty? ?
+              :quiescent : :live
+          when "architecture-patrol"
+            require "hive/refactor_patrol/job_store"
+            root = File.join(
+              project_root, ".hive-state", "refactor_patrol", "v2"
+            )
+            return :quiescent unless Dir.exist?(root)
+
+            store = Hive::RefactorPatrol::JobStore.new(project_root)
+            if store.recovery_active_occurrences.any? ||
+               store.incomplete_jobs?
+              :live
+            else
+              :quiescent
+            end
+          else
+            :ambiguous
+          end
         end
       end
     end

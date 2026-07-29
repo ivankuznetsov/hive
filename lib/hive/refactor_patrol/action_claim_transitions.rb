@@ -1,4 +1,5 @@
 require "hive/refactor_patrol/publication_attempt"
+require "hive/refactor_patrol/transition_evidence"
 
 module Hive
   module RefactorPatrol
@@ -35,11 +36,17 @@ module Hive
           claim_generation: generation,
           scope: @context.action_scope(job_id, action_id),
           claim_validator: ->(**) { true },
-          reconcile: lambda do |_intent|
-            observed = @context.action_claim(
-              job_id, action_id, generation
+          reconcile: lambda do |intent|
+            aggregate = @store.read_job(job_id)
+            observed_action = @context.find_action(
+              aggregate, action_id
             )
-            claim_reconciliation(observed, generation)
+            observed = @context.find_claim(
+              observed_action, generation
+            )
+            claim_reconciliation(
+              observed_action, observed, intent.intent_id
+            )
           end,
           replay: lambda do |_result|
             observed = @context.action_claim(
@@ -56,9 +63,16 @@ module Hive
                 observed["authority"] == "continuation_only"
             }
           end
-        ) do
+        ) do |intent|
           claim_direct(
-            job_id, action_id, authority: authority, now: now
+            job_id,
+            action_id,
+            authority: authority,
+            now: now,
+            transition: transition(
+              intent,
+              operation: "claim"
+            )
           )
         end
       end
@@ -91,50 +105,125 @@ module Hive
           claim_generation: generation,
           scope: @context.action_scope(job_id, action_id),
           claim_validator: @context.claim_validator(token, now),
-          reconcile: lambda do |_intent|
+          reconcile: lambda do |intent|
             aggregate = @store.read_job(job_id)
             action = @context.find_action(aggregate, action_id)
             claim = @context.find_claim(action, generation)
-            settle_reconciliation(
-              aggregate,
-              action,
-              claim,
-              outcome: outcome,
-              receipts: receipts,
-              terminal: terminal
+            transition_reconciliation(
+              action, claim, intent.intent_id
             )
           end,
-          replay: ->(_result) { @store.read_job(job_id) }
-        ) do
+          replay: ->(_result) { @store.read_job(job_id) },
+          reject: rejection(
+            token,
+            operation: operation,
+            now: now
+          )
+        ) do |intent|
           settle_direct(
             token,
             outcome: outcome,
             receipts: receipts,
             terminal: terminal,
             backoff_sec: backoff_sec,
-            now: now
+            now: now,
+            transition: transition(
+              intent,
+              operation: operation
+            )
           )
         end
       end
 
       def record_patch_publication(token, patch:, now:)
-        attempt_id = PublicationAttempt.id_for(
-          publication_base_sha: patch.fetch("publication_base_sha"),
-          commit_sha: patch.fetch("commit_sha")
-        )
         claimed_transition(
           token,
           operation: "record-patch-publication",
           payload: patch,
-          now: now,
-          matcher: lambda do |action|
-            !PublicationAttempt.state_for(
-              action.fetch("receipts"), attempt_id
-            ).nil?
-          end
-        ) do
+          now: now
+        ) do |effect_transition|
           @store.record_patch_publication_attempt!(
-            token, receipt: patch, now: now
+            token,
+            receipt: patch,
+            now: now,
+            transition: effect_transition
+          )
+        end
+      end
+
+      def record_patch_receipt(token, receipt:, now:)
+        claimed_transition(
+          token,
+          operation: "record-patch-receipt",
+          payload: receipt,
+          now: now
+        ) do |effect_transition|
+          @store.record_patch_receipt!(
+            token,
+            receipt: receipt,
+            now: now,
+            transition: effect_transition
+          )
+        end
+      end
+
+      def record_publication_phase(token, attempt_id:, phase:, payload:,
+                                   now:)
+        evidence = {
+          "attempt_id" => attempt_id,
+          "phase" => phase,
+          "payload" => payload
+        }
+        claimed_transition(
+          token,
+          operation: "record-publication-#{phase}",
+          payload: evidence,
+          now: now
+        ) do |effect_transition|
+          @store.record_publication_attempt_phase!(
+            token,
+            attempt_id: attempt_id,
+            phase: phase,
+            payload: payload,
+            now: now,
+            transition: effect_transition
+          )
+        end
+      end
+
+      def supersede_publication(token, attempt_id:, observed_head_sha:, now:)
+        evidence = {
+          "attempt_id" => attempt_id,
+          "observed_head_sha" => observed_head_sha
+        }
+        claimed_transition(
+          token,
+          operation: "supersede-publication",
+          payload: evidence,
+          now: now
+        ) do |effect_transition|
+          @store.supersede_publication_attempt!(
+            token,
+            attempt_id: attempt_id,
+            observed_head_sha: observed_head_sha,
+            now: now,
+            transition: effect_transition
+          )
+        end
+      end
+
+      def record_fix_receipt(token, receipt:, now:)
+        claimed_transition(
+          token,
+          operation: "record-fix-receipt",
+          payload: receipt,
+          now: now
+        ) do |effect_transition|
+          @store.record_fix_receipt!(
+            token,
+            receipt: receipt,
+            now: now,
+            transition: effect_transition
           )
         end
       end
@@ -144,14 +233,13 @@ module Hive
           token,
           operation: "record-#{phase}",
           payload: payload,
-          now: now,
-          matcher: lambda do |action|
-            action.dig("receipts", "creation_intent", "payload") ==
-              payload
-          end
-        ) do
+          now: now
+        ) do |effect_transition|
           @store.record_creation_intent!(
-            token, intent: payload, now: now
+            token,
+            intent: payload,
+            now: now,
+            transition: effect_transition
           )
         end
       end
@@ -161,20 +249,21 @@ module Hive
           token,
           operation: "record-#{phase}",
           payload: payload,
-          now: now,
-          matcher: lambda do |action|
-            action.dig("receipts", phase) == payload
-          end
-        ) do
+          now: now
+        ) do |effect_transition|
           @store.record_action_receipt!(
-            token, key: phase, value: payload, now: now
+            token,
+            key: phase,
+            value: payload,
+            now: now,
+            transition: effect_transition
           )
         end
       end
 
-      def claimed_transition(token, operation:, payload:, matcher:, now:,
+      def claimed_transition(token, operation:, payload:, now:,
                              &transition)
-        return transition.call unless @context.gateway
+        return transition.call(nil) unless @context.gateway
 
         job_id = token.fetch(:job_id)
         action_id = token.fetch(:canonical_action_id)
@@ -192,29 +281,34 @@ module Hive
           claim_generation: generation,
           scope: @context.action_scope(job_id, action_id),
           claim_validator: @context.claim_validator(token, now),
-          reconcile: lambda do |_intent|
+          reconcile: lambda do |intent|
             aggregate = @store.read_job(job_id)
             action = @context.find_action(aggregate, action_id)
             claim = @context.find_claim(action, generation)
-            if action && matcher.call(action)
-              {
-                "status" => "matched",
-                "outcome" => { "state" => aggregate.fetch("state") }
-              }
-            elsif @context.active_claim?(claim)
-              @context.absent
-            else
-              @context.ambiguous
-            end
+            transition_reconciliation(
+              action, claim, intent.intent_id
+            )
           end,
           replay: ->(_result) { @store.read_job(job_id) },
-          &transition
-        )
+          reject: rejection(
+            token,
+            operation: operation,
+            now: now
+          )
+        ) do |intent|
+          transition.call(
+            transition(
+              intent,
+              operation: operation
+            )
+          )
+        end
       end
 
       private
 
-      def claim_direct(job_id, action_id, authority:, now:)
+      def claim_direct(job_id, action_id, authority:, now:,
+                       transition: nil)
         @store.claim_action!(
           job_id,
           action_id,
@@ -224,18 +318,20 @@ module Hive
           claim_resolver: @claim_resolver,
           owner_pid: @owner_pid,
           owner_process_start_time: @owner_process_start_time,
-          authority: authority
+          authority: authority,
+          transition: transition
         )
       end
 
       def settle_direct(token, outcome:, receipts:, terminal:, backoff_sec:,
-                        now:)
+                        now:, transition: nil)
         if terminal
           @store.finish_action!(
             token,
             outcome: outcome,
             receipts: receipts,
-            now: now
+            now: now,
+            transition: transition
           )
         else
           @store.release_action!(
@@ -243,17 +339,16 @@ module Hive
             outcome: outcome,
             receipts: receipts,
             now: now,
-            backoff_sec: backoff_sec
+            backoff_sec: backoff_sec,
+            transition: transition
           )
         end
       end
 
-      def claim_reconciliation(observed, generation)
-        if owned_active_claim?(observed)
-          {
-            "status" => "matched",
-            "outcome" => { "generation" => generation }
-          }
+      def claim_reconciliation(action, observed, intent_id)
+        entry = transition_entry(action, intent_id)
+        if owned_active_claim?(observed) && entry
+          TransitionEvidence.matched_result(entry)
         elsif observed
           @context.ambiguous
         else
@@ -261,23 +356,10 @@ module Hive
         end
       end
 
-      def settle_reconciliation(aggregate, action, claim, outcome:, receipts:,
-                                terminal:)
-        matched = if terminal
-          action && action["terminal"] == true &&
-            action["outcome"] == outcome.to_s &&
-            receipts.all? do |key, value|
-              action.fetch("receipts")[key.to_s] == value
-            end
-        else
-          claim && claim["state"] == "released" &&
-            claim["outcome"] == outcome.to_s
-        end
-        if matched
-          {
-            "status" => "matched",
-            "outcome" => { "state" => aggregate.fetch("state") }
-          }
+      def transition_reconciliation(action, claim, intent_id)
+        entry = transition_entry(action, intent_id)
+        if entry
+          TransitionEvidence.matched_result(entry)
         elsif @context.active_claim?(claim)
           @context.absent
         else
@@ -288,6 +370,34 @@ module Hive
       def owned_active_claim?(claim)
         claim && claim["owner"] == @owner &&
           @context.active_claim?(claim)
+      end
+
+      def transition(intent, operation:, error_code: nil)
+        TransitionEvidence.record(
+          intent,
+          operation: operation,
+          error_code: error_code
+        )
+      end
+
+      def rejection(token, operation:, now:)
+        lambda do |intent, _error, error_code|
+          @store.record_action_transition_rejection!(
+            token,
+            transition: transition(
+              intent,
+              operation: operation,
+              error_code: error_code
+            ),
+            now: now
+          )
+        end
+      end
+
+      def transition_entry(action, intent_id)
+        Array(action && action["transitions"]).find do |entry|
+          entry["intent_id"] == intent_id
+        end
       end
     end
   end

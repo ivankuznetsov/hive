@@ -9,6 +9,7 @@ module Hive
     # boundary without coupling the two product gateways.
     class EffectGateway
       Result = Hive::Modules::Migration::EffectDelivery::Result
+      RETRY_SAFE_SINKS = %w[job discovery action].freeze
       NotDelivered = Class.new(StandardError)
       Denied = Hive::RefactorPatrol::EffectDenied
       ReconciliationRequired =
@@ -50,12 +51,17 @@ module Hive
               hive_state_path: hive_state_path
             )
           end,
+          retry_safe_sinks: RETRY_SAFE_SINKS,
           **options
         )
       end
 
       def perform!(**attributes, &effect)
         @delivery.perform!(**attributes, &effect)
+      end
+
+      def reconcile_intent!(intent, &reconcile)
+        @delivery.reconcile_intent!(intent, &reconcile)
       end
     end
   end

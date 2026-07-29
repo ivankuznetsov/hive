@@ -1,4 +1,5 @@
 require "test_helper"
+require "digest"
 require "hive/managed_directory"
 
 class ManagedDirectoryTest < Minitest::Test
@@ -32,6 +33,21 @@ class ManagedDirectoryTest < Minitest::Test
       assert locked
       assert_equal 0o600, File.stat(File.join(root, "state.lock")).mode & 0o777
     end
+  end
+
+  def test_accepts_the_filesystem_root_as_the_nearest_existing_anchor
+    root = File.join(
+      File::SEPARATOR,
+      "hive-managed-directory-#{Process.pid}-#{SecureRandom.hex(6)}"
+    )
+    refute_path_exists root
+
+    directory = Hive::ManagedDirectory.new(
+      root: root,
+      label: "test state"
+    )
+
+    assert_equal root, directory.root
   end
 
   def test_rejects_unsafe_relative_paths_and_symlinked_components
@@ -107,6 +123,148 @@ class ManagedDirectoryTest < Minitest::Test
       assert_raises(Hive::ConfigError) do
         directory.atomic_write("folder", "unsafe")
       end
+    end
+  end
+
+  def test_expected_digest_fences_replacement_and_bounded_existing_reads
+    with_tmp_dir do |root|
+      directory = Hive::ManagedDirectory.new(
+        root: root, label: "test state"
+      )
+      path = File.join(root, "record")
+      File.write(path, "before")
+      digest = Digest::SHA256.hexdigest("before")
+
+      directory.atomic_write(
+        "record",
+        "after",
+        expected_digest: digest,
+        max_existing_bytes: 6
+      )
+      assert_equal "after", File.binread(path)
+
+      error = assert_raises(Hive::ConfigError) do
+        directory.atomic_write(
+          "record",
+          "wrong",
+          expected_digest: digest,
+          max_existing_bytes: 6
+        )
+      end
+      assert_equal "test state managed directory is unsafe", error.message
+      assert_equal "after", File.binread(path)
+
+      oversized = Digest::SHA256.hexdigest("after")
+      assert_raises(Hive::ConfigError) do
+        directory.atomic_write(
+          "record",
+          "wrong",
+          expected_digest: oversized,
+          max_existing_bytes: 4
+        )
+      end
+      assert_equal "after", File.binread(path)
+    end
+  end
+
+  def test_expected_digest_detects_replacement_race_before_atomic_rename
+    with_tmp_dir do |root|
+      directory = Hive::ManagedDirectory.new(
+        root: root, label: "test state"
+      )
+      target = File.join(root, "record")
+      File.write(target, "before")
+      original_open = File.method(:open)
+
+      with_replaced_singleton_method(
+        File,
+        :open,
+        lambda do |path, *arguments, **keywords, &block|
+          unless File.basename(path).start_with?(".record.tmp.")
+            next original_open.call(
+              path, *arguments, **keywords, &block
+            )
+          end
+
+          result = original_open.call(
+            path, *arguments, **keywords, &block
+          )
+          original_open.call(
+            target, File::WRONLY | File::TRUNC
+          ) { |file| file.write("raced!") }
+          result
+        end
+      ) do
+        assert_raises(Hive::ConfigError) do
+          directory.atomic_write(
+            "record",
+            "after",
+            expected_digest: Digest::SHA256.hexdigest("before"),
+            max_existing_bytes: 6
+          )
+        end
+      end
+
+      assert_equal "raced!", File.binread(target)
+      names = Dir.children(root)
+      refute names.any? { |name| name.start_with?(".record.tmp.") },
+             names.inspect
+    end
+  end
+
+  def test_unlink_is_digest_fenced_no_follow_and_missing_aware
+    with_tmp_dir do |root|
+      directory = Hive::ManagedDirectory.new(
+        root: root, label: "test state"
+      )
+      target = File.join(root, "record")
+      File.write(target, "retire")
+      digest = Digest::SHA256.hexdigest("retire")
+
+      assert_raises(Hive::ConfigError) do
+        directory.unlink(
+          "record",
+          expected_digest: Digest::SHA256.hexdigest("other"),
+          max_bytes: 6
+        )
+      end
+      assert File.file?(target)
+      assert directory.unlink(
+        "record", expected_digest: digest, max_bytes: 6
+      )
+      refute File.exist?(target)
+      refute directory.unlink("record", missing: true)
+
+      outside = File.join(root, "outside")
+      File.write(outside, "outside")
+      File.symlink(outside, target)
+      assert_raises(Hive::ConfigError) do
+        directory.unlink("record")
+      end
+      assert_equal "outside", File.binread(outside)
+
+      File.unlink(target)
+      FileUtils.mkdir_p(target)
+      assert_raises(Hive::ConfigError) do
+        directory.unlink("record")
+      end
+    end
+  end
+
+  def test_successful_unlink_fsyncs_its_verified_parent
+    with_tmp_dir do |root|
+      directory = Hive::ManagedDirectory.new(
+        root: root, label: "test state"
+      )
+      File.write(File.join(root, "record"), "retire")
+      calls = []
+      directory.define_singleton_method(:fsync_directory) do |path, stat|
+        calls << [ path, stat.dev, stat.ino ]
+      end
+
+      assert directory.unlink("record")
+      assert_equal 1, calls.size
+      assert_equal root, calls.first.first
     end
   end
 

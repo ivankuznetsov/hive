@@ -1,4 +1,5 @@
 require "hive/modules/migration/patrol_evidence"
+require "hive/modules/migration/occurrence_record_validator"
 
 module Hive
   module Modules
@@ -8,9 +9,7 @@ module Hive
       # transitions or authorization policy.
       class EffectReceiptLedger
         Result = Data.define(:status, :outcome, :receipt)
-        TERMINAL_STATES = %w[
-          committed reconciled denied failed
-        ].freeze
+        TERMINAL_STATES = OccurrenceContract::TERMINAL_STATES
 
         def initialize(delivery_store:, evidence_store:, denied_error:,
                        clock:)
@@ -28,8 +27,9 @@ module Hive
           terminal_result_from_state(intent, state)
         end
 
-        def replay_terminal(intent)
-          result = terminal_result(intent)
+        def replay_terminal(intent, result = terminal_result(intent))
+          return unless result
+
           drain(intent)
           result
         end
@@ -40,7 +40,22 @@ module Hive
             state.fetch("terminal_receipt_id"),
             occurrence_id: intent.occurrence_id
           )
-          outcome = state.fetch("outcome")
+          result_from_receipt(
+            receipt,
+            expected_status: status,
+            expected_outcome: state.fetch("outcome")
+          )
+        end
+
+        def result_from_receipt(receipt, expected_status: nil,
+                                expected_outcome: nil)
+          status = receipt.status
+          outcome = receipt.outcome
+          if (expected_status && status != expected_status) ||
+             (expected_outcome && outcome != expected_outcome)
+            raise Hive::ConfigError,
+                  "patrol effect receipt contradicts persisted state"
+          end
           if status == "denied"
             raise @denied_error.new(
               outcome.fetch("reason", "denied"), receipt
@@ -56,11 +71,9 @@ module Hive
         def deny!(intent, reason)
           reason = reason.to_s
           outcome = { "reason" => reason }
-          receipt = build(intent, "denied", outcome)
-          @delivery_store.deny_effect!(
+          receipt = @delivery_store.deny_effect!(
             intent,
             outcome: outcome,
-            receipt: receipt,
             now: @clock.call
           )
           drain(intent)
@@ -69,36 +82,14 @@ module Hive
 
         def shadow_denial!(intent, reason)
           outcome = { "attempted" => true, "reason" => reason }
-          receipt = build(intent, "attempted", outcome)
-          @evidence_store.append_receipt(receipt)
-          raise @denied_error.new(reason, receipt)
-        end
-
-        def known_not_sent(intent, outcome, receipt = nil)
-          Result.new(
-            status: :known_not_sent,
-            outcome: outcome,
-            receipt: receipt || build(
-              intent, "known_not_sent", outcome
-            )
-          )
-        end
-
-        def build(intent, status, outcome)
-          EffectReceipt.build(
+          receipt = EffectReceipt.build(
             intent: intent,
-            status: status,
+            status: "attempted",
             outcome: outcome,
             recorded_at: @clock.call
           )
-        end
-
-        def receipt_for_claim(intent, claim)
-          return nil unless claim.receipt
-
-          @delivery_store.effect_receipt(
-            claim.receipt, occurrence_id: intent.occurrence_id
-          )
+          @evidence_store.append_receipt(receipt)
+          raise @denied_error.new(reason, receipt)
         end
 
         def drain(intent)

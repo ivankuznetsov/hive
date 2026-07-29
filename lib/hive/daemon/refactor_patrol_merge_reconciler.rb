@@ -109,7 +109,6 @@ module Hive
             config_loader: @config_loader,
             migration_snapshot: @migration_snapshot,
             evidence_store_factory: @evidence_store_factory,
-            claimant: "architecture-intake-#{Process.pid}",
             admission_error: Blocked
           )
         @next_poll_at = nil

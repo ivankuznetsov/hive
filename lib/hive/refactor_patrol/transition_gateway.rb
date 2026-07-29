@@ -11,7 +11,7 @@ module Hive
     # Product port for authoritative JobStore lifecycle mutations. It reuses
     # Architecture Patrol's single effect gateway and occurrence journal, so
     # local job/discovery/action transitions receive the same live admission,
-    # sender CAS, uncertainty, and canonical receipt guarantees as remote
+    # stable sender lock, uncertainty, and canonical receipt guarantees as remote
     # sinks without becoming a second recovery mechanism.
     class TransitionGateway
       attr_reader :capture
@@ -65,7 +65,6 @@ module Hive
                      evidence_store:, config_loader:, module_execution: nil,
                      migration_lock: nil, ownership_loader: nil,
                      lifecycle_store_factory: nil, clock: -> { Time.now.utc },
-                     claimant: nil, lease_sec: 300,
                      diagnostic_transition: false)
         @project_root = File.expand_path(project_root)
         @hive_state_path = File.expand_path(hive_state_path)
@@ -78,13 +77,12 @@ module Hive
         @ownership_loader = ownership_loader
         @lifecycle_store_factory = lifecycle_store_factory
         @clock = clock
-        @claimant = claimant
-        @lease_sec = lease_sec
         @diagnostic_transition = diagnostic_transition == true
       end
 
       def perform!(sink:, target:, idempotency_key:, claim_generation: nil,
-                   scope:, claim_validator:, reconcile:, replay:, &transition)
+                   scope:, claim_validator:, reconcile:, replay:, reject: nil,
+                   &transition)
         raise ArgumentError, "a JobStore transition block is required" unless
           transition
         raise ArgumentError, "a JobStore replay reader is required" unless
@@ -92,6 +90,7 @@ module Hive
 
         applied = false
         value = nil
+        live_rejection = nil
         result = gateway(claim_validator).perform!(
           sink: sink,
           target: target,
@@ -100,20 +99,54 @@ module Hive
           claim_generation: claim_generation,
           scope: scope,
           reconcile: reconcile
-        ) do
-          value = transition.call
-          if value.nil?
-            raise Hive::RefactorPatrol::EffectGateway::NotDelivered,
-                  "transition_not_applied"
+        ) do |intent|
+          begin
+            value = call_transition(transition, intent)
+            if value.nil?
+              raise Hive::RefactorPatrol::EffectGateway::NotDelivered,
+                    "transition_not_applied"
+            end
+            applied = true
+            {
+              "transition_status" => "applied",
+              "transition_digest" => transition_digest(value)
+            }
+          rescue JobStore::Error => e
+            raise unless reject.respond_to?(:call)
+
+            error_code = transition_error_code(e)
+            rejection = reject.call(intent, e, error_code)
+            live_rejection = e
+            {
+              "transition_status" => "rejected",
+              "error_code" => error_code,
+              "transition_digest" => transition_digest(rejection)
+            }
           end
-          applied = true
-          {
-            "transition_digest" => transition_digest(value)
-          }
+        end
+        rejected = result.outcome["transition_status"] == "rejected"
+        if rejected
+          raise live_rejection ||
+                JobStore::InconsistentRecord.new(
+                  "refactor patrol transition was rejected " \
+                  "(#{result.outcome['error_code']})"
+                )
         end
         return value if applied
 
         replay.call(result)
+      end
+
+      def reconcile_recorded!(intent, transition)
+        outcome = {
+          "transition_status" => transition.fetch("outcome")
+        }
+        if transition.fetch("outcome") == "rejected"
+          outcome["error_code"] = transition.fetch("error_code")
+        end
+        gateway(->(**) { true }).reconcile_intent!(intent) do
+          { "status" => "matched", "outcome" => outcome }
+        end
       end
 
       private
@@ -131,14 +164,12 @@ module Hive
           capability_checker: method(:capability_allowed?),
           module_execution: @module_execution,
           diagnostic_transition: @diagnostic_transition,
-          clock: @clock,
-          lease_sec: @lease_sec
+          clock: @clock
         }
         options[:migration_lock] = @migration_lock if @migration_lock
         options[:ownership_loader] = @ownership_loader if @ownership_loader
         options[:lifecycle_store_factory] = @lifecycle_store_factory if
           @lifecycle_store_factory
-        options[:claimant] = @claimant if @claimant
         Hive::RefactorPatrol::EffectGateway.new(**options)
       end
 
@@ -161,6 +192,17 @@ module Hive
       rescue JSON::GeneratorError, TypeError
         raise Hive::ConfigError,
               "architecture patrol transition result is not JSON serializable"
+      end
+
+      def call_transition(transition, intent)
+        transition.arity.zero? ?
+          transition.call : transition.call(intent)
+      end
+
+      def transition_error_code(error)
+        error.class.name.to_s.split("::").last
+             .gsub(/([a-z\d])([A-Z])/, "\\1_\\2")
+             .downcase
       end
     end
   end

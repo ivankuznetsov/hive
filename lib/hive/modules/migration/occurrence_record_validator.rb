@@ -11,12 +11,10 @@ module Hive
         SCHEMA_VERSION = 2
         MAX_RECORD_BYTES = 2 * 1024 * 1024
         MAX_OUTBOX_ENTRIES = 512
-        DEFAULT_LEASE_SEC = 300
         OCCURRENCE_ID = /\Aocc-[0-9a-f]{64}\z/
         INTENT_ID = /\Aintent-[0-9a-f]{64}\z/
         DELIVERY_STATES = %w[
-          prepared leased dispatch_uncertain known_not_sent committed
-          reconciled denied failed
+          prepared dispatch_uncertain committed reconciled denied failed
         ].freeze
         TERMINAL_STATES = %w[
           committed reconciled denied failed
@@ -214,7 +212,6 @@ module Hive
             validate_receipt_bindings!(
               intent_id, cell, authorizations, receipts
             )
-            validate_claim(cell.fetch("claim"), cell)
             timestamp(cell.fetch("updated_at"))
           end
           referenced = effects.values.flat_map do |cell|
@@ -229,14 +226,11 @@ module Hive
           valid = INTENT_ID.match?(intent_id.to_s) &&
                   cell.is_a?(Hash) &&
                   cell.keys.sort == %w[
-                    authorizations claim delivery_generation intent_id
-                    outcome receipt_ids semantic state terminal_receipt_id
-                    updated_at
+                    authorizations intent_id outcome receipt_ids semantic
+                    state terminal_receipt_id updated_at
                   ] &&
                   cell["intent_id"] == intent_id &&
                   DELIVERY_STATES.include?(cell["state"]) &&
-                  cell["delivery_generation"].is_a?(Integer) &&
-                  cell["delivery_generation"] >= 0 &&
                   cell["outcome"].is_a?(Hash) &&
                   cell["receipt_ids"].is_a?(Array) &&
                   cell["receipt_ids"].uniq == cell["receipt_ids"] &&
@@ -275,27 +269,6 @@ module Hive
             end
           elsif !terminal_id.nil?
             malformed!("patrol effect terminal receipt is malformed")
-          end
-        end
-
-        def validate_claim(claim, cell)
-          if %w[leased dispatch_uncertain].include?(
-            cell.fetch("state")
-          )
-            valid = claim.is_a?(Hash) &&
-                    claim.keys.sort == %w[
-                      acquired_at claimant expires_at generation token
-                    ] &&
-                    claim["generation"] ==
-                      cell.fetch("delivery_generation") &&
-                    claim["generation"].positive? &&
-                    !claim["token"].to_s.empty? &&
-                    !claim["claimant"].to_s.empty?
-            malformed!("patrol effect claim is malformed") unless valid
-            timestamp(claim.fetch("acquired_at"))
-            timestamp(claim.fetch("expires_at"))
-          elsif !claim.nil?
-            malformed!("patrol effect inactive claim is malformed")
           end
         end
 
@@ -409,7 +382,15 @@ module Hive
         def validate_finalized_effects(record)
           return unless record.fetch("phase") == "finalized"
 
-          expected = record.fetch("effects").values.filter_map do |cell|
+          effects = record.fetch("effects").values
+          unless effects.all? do |cell|
+                   TERMINAL_STATES.include?(cell.fetch("state"))
+                 end
+            malformed!(
+              "patrol finalized occurrence has a nonterminal effect"
+            )
+          end
+          expected = effects.map do |cell|
             cell.fetch("terminal_receipt_id")
           end.sort
           actual = capture(

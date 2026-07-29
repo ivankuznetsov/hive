@@ -655,8 +655,10 @@ class RefactorPatrolFamilyStoreTest < Minitest::Test
     store.write_job!(
       {
         "schema" => "hive-refactor-patrol-job",
-        "schema_version" => 2,
+        "schema_version" => Hive::RefactorPatrol::JobStore::SCHEMA_VERSION,
         "job_id" => "job-1",
+        "occurrence_id" => "occ-#{'1' * 64}",
+        "intake_transition_id" => "intent-#{'2' * 64}",
         "source" => source.merge(
           "registration" => "polyglot",
           "base_branch" => "main",

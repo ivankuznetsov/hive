@@ -214,7 +214,7 @@ module Hive
     end
 
     # Repository-global family resolution. Family records are a rebuildable
-    # projection of authoritative v2 job aggregates; one lock protects repair,
+    # projection of authoritative v3 job aggregates; one lock protects repair,
     # resolution, and append while each JSON record is atomically persisted.
     class FamilyStore
       include FamilyStoreRecords

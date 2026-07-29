@@ -536,7 +536,10 @@ does not reinterpret the legacy reporting state:
 ├── reconciler.json               # host-bound catch-up checkpoint, schema v2
 ├── reconciler-progress.json      # restart-safe page/intake cursor, schema v1
 ├── manifests/<job-id>.json       # checksummed, write-once merge occurrence
-├── jobs/<job-id>.json            # authoritative aggregate
+├── jobs/<job-id>.json            # v3 aggregate + occurrence/transition authority
+├── occurrences/
+│   └── records/occ-*.json         # effects, exact receipts, projection outbox
+├── job-schema-v3-migration.json  # completed bounded v2 -> v3 conversion
 ├── families/<family-id>.json     # rebuildable semantic-family projection
 ├── indexes/                      # rebuildable fingerprint/action indexes
 │   └── job-query/                # active generation + immutable memberships

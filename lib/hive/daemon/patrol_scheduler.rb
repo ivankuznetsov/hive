@@ -20,6 +20,8 @@ module Hive
       PATROL_SLUG = "patrol".freeze
       MODULE_SCHEDULE = "*/10 * * * *".freeze
       FAILURE_BACKOFF_SCHEDULE = [ 60, 300, 900 ].freeze
+      RECOVERY_BACKOFF_SCHEDULE = [ 60, 300, 900 ].freeze
+      RECOVERY_ERROR_LIMIT = 512
 
       class GitHelper
         def default_branch(project_root, cfg:)
@@ -70,7 +72,9 @@ module Hive
         end
         @pending = {}
         @failures = {}
+        @recovery_failures = {}
         @next_check_at = {}
+        @events = []
       end
 
       def tick(now: Time.now)
@@ -87,15 +91,18 @@ module Hive
       # arbiter passes over is re-evaluated only after a full poll window,
       # and a second `candidates` call within one tick yields no work.
       def candidates(now: Time.now)
+        @events.clear
         dispatches = []
         @registry.call.each do |entry|
           project = entry.fetch("name")
-          recover_projections(entry)
+          recovery_occurrence = recover_projections(entry, now: now)
+          next if recovery_occurrence == false
           next unless @migration_ownership.call(entry, "patrol", @migration_authority)
           next if pending?(project)
-          if (record = pending_occurrence(entry))
+          if recovery_occurrence
             dispatches << dispatch_for(entry).merge(
-              recovery_occurrence_id: record.fetch("occurrence_id")
+              recovery_occurrence_id:
+                recovery_occurrence.fetch("occurrence_id")
             )
             next
           end
@@ -140,6 +147,12 @@ module Hive
         dispatches
       end
 
+      def drain_events
+        drained = @events.dup
+        @events.clear
+        drained
+      end
+
       def reserve(candidate, now: Time.now)
         project = candidate.fetch(:project)
         entry = candidate.fetch(:migration_entry)
@@ -153,18 +166,24 @@ module Hive
         capture = if candidate[:recovery_occurrence_id]
           state.occurrence_capture(candidate.fetch(:recovery_occurrence_id))
         else
-          capture_reservation(
-            entry, snapshot, now,
-            poll_interval_sec:
-              @config_loader.call(entry.fetch("path"))
-                            .dig("patrol", "poll_interval_sec") || 600
-          )
+          interval = @config_loader.call(entry.fetch("path"))
+                                   .dig("patrol", "poll_interval_sec") || 600
+          base_id = schedule_reservation_id(entry, now, interval)
+          state.reserve_attempt_occurrence!(base_id, now: now) do |generation|
+            capture_reservation(
+              entry, snapshot, now,
+              poll_interval_sec: interval,
+              attempt_generation: generation
+            )
+          end
         end
         return nil unless capture &&
                           capture.owner == snapshot.fetch("owner") &&
                           capture.owner_epoch == snapshot.fetch("epoch")
 
-        state.reserve_occurrence!(capture, now: now)
+        if candidate[:recovery_occurrence_id]
+          state.reserve_occurrence!(capture, now: now)
+        end
         @pending[project] = {
           started_at: now,
           entry: entry,
@@ -178,8 +197,16 @@ module Hive
 
       def complete(project:, exit_code:, envelope: nil, now: Time.now)
         pending = @pending.fetch(project, nil)
-        finalize_pending(pending, exit_code: exit_code, envelope: envelope, now: now) if pending
-        @pending.delete(project)
+        begin
+          finalize_pending(
+            pending, exit_code: exit_code, envelope: envelope, now: now
+          ) if pending
+        ensure
+          # The child has ended even when durable finalization fails. Keep the
+          # reserved occurrence as the recovery authority, but never let this
+          # process-local dispatch marker hide it from the next scheduler scan.
+          @pending.delete(project)
+        end
         if exit_code == Hive::ExitCodes::SUCCESS
           @failures.delete(project)
         else
@@ -295,15 +322,15 @@ module Hive
       end
 
       def capture_reservation(entry, snapshot, now, poll_interval_sec:,
-                              rationale: "due")
+                              rationale: "due", attempt_generation: 1)
         occurred = schedule_window(now, poll_interval_sec)
         occurred_at = occurred.iso8601(6)
-        reservation_id = [
-          "ordinary", entry.fetch("project_id"), occurred_at
-        ].join(":")
+        reservation_id = schedule_reservation_id(
+          entry, now, poll_interval_sec
+        )
         trigger = {
           "kind" => "schedule",
-          "id" => reservation_id,
+          "id" => "#{reservation_id}:attempt:#{attempt_generation}",
           "schedule" => MODULE_SCHEDULE,
           "occurred_at" => occurred_at
         }
@@ -315,13 +342,18 @@ module Hive
             "repository" => entry["repository"]
           },
           trigger: trigger,
-          reservation: { "kind" => "ordinary", "id" => reservation_id },
+          reservation: {
+            "kind" => "ordinary",
+            "id" => reservation_id,
+            "attempt_generation" => attempt_generation
+          },
           owner: snapshot.fetch("owner"),
           owner_epoch: snapshot.fetch("epoch"),
           decision_class: rationale,
           decision: {
             "rationale" => rationale,
-            "reservation_id" => reservation_id
+            "reservation_id" => reservation_id,
+            "attempt_generation" => attempt_generation
           },
           occurred_at: occurred,
           recorded_at: occurred
@@ -332,26 +364,76 @@ module Hive
         @state_store_factory.call(entry)
       end
 
-      def pending_occurrence(entry)
-        state_store(entry).pending_occurrences.min_by do |record|
-          record.fetch("created_at")
-        end
+      def schedule_reservation_id(entry, now, poll_interval_sec)
+        occurred = schedule_window(now, poll_interval_sec)
+        [
+          "ordinary", entry.fetch("project_id"),
+          occurred.iso8601(6)
+        ].join(":")
       end
 
-      def recover_projections(entry)
+      def recover_projections(entry, now:)
+        project = entry.fetch("name")
+        deadline = @recovery_failures.dig(project, :next_eligible_at)
+        return false if deadline && now < deadline
+
         store = state_store(entry)
-        pending = store.projection_pending_occurrences
-        return if pending.empty?
+        projection_ids = []
+        oldest_reserved = nil
+        store.each_occurrence do |record|
+          if record.fetch("phase") == "reserved" &&
+             (!oldest_reserved ||
+              record.fetch("created_at") <
+                oldest_reserved.fetch("created_at"))
+            oldest_reserved = record
+          end
+          if record.fetch("outbox").any? do |outbox_entry|
+            outbox_entry.fetch("acknowledged") == false
+          end
+            projection_ids << record.fetch("occurrence_id")
+          end
+        end
+        if projection_ids.empty?
+          @recovery_failures.delete(project)
+          return oldest_reserved
+        end
 
         evidence = @evidence_store_factory.call(entry)
-        pending.each do |record|
+        occurrence_id = nil
+        projection_ids.each do |pending_id|
+          occurrence_id = pending_id
           store.drain_occurrence_outbox!(
-            record.fetch("occurrence_id"),
+            occurrence_id,
             evidence_store: evidence,
             event_publisher: @event_publisher,
             project_entry: entry
           )
         end
+        @recovery_failures.delete(project)
+        oldest_reserved
+      rescue StandardError => e
+        count = @recovery_failures.dig(project, :count).to_i + 1
+        interval = RECOVERY_BACKOFF_SCHEDULE[
+          [ count - 1, RECOVERY_BACKOFF_SCHEDULE.size - 1 ].min
+        ]
+        retry_at = now + interval
+        @recovery_failures[project] = {
+          count: count,
+          next_eligible_at: retry_at
+        }
+        @events << {
+          status: :blocked,
+          project: project,
+          occurrence_id: occurrence_id,
+          recovery: "occurrence_outbox_projection",
+          blocker: "recovery_failed",
+          error_class: e.class.name,
+          error: e.message.to_s.byteslice(0, RECOVERY_ERROR_LIMIT),
+          retry_count: count,
+          retry_in_sec: interval,
+          retry_at: retry_at.utc.iso8601
+        }
+        false
       end
 
       def finalize_negative(entry, patrol:, rationale:, now:)

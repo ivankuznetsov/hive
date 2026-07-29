@@ -447,6 +447,55 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_restart_reconciles_exact_completed_checkpoint_from_active_occurrence
+    with_project do |dir, entry, store|
+      enqueue(store)
+      scheduler = scheduler(entry, store)
+      dispatch = scheduler.reserve(
+        scheduler.candidates(now: T0).first, now: T0
+      )
+      scheduler.spawned(
+        dispatch,
+        pid: 2235,
+        process_start_time: "boot-final",
+        pgid: 2235,
+        now: T0 + 1
+      )
+      original_settlement = store.method(:settle_effect!)
+      failed_intent = nil
+      store.define_singleton_method(:settle_effect!) do |intent, **options|
+        if failed_intent.nil? &&
+           intent.target.end_with?(":checkpoint")
+          failed_intent = intent
+          raise "simulated receipt crash"
+        end
+
+        original_settlement.call(intent, **options)
+      end
+
+      assert_raises(RuntimeError) do
+        scheduler.complete(
+          dispatch_token: dispatch.fetch(:dispatch_token),
+          exit_code: 0,
+          envelope: complete_zero_envelope(entry),
+          now: T0 + 2
+        )
+      end
+      assert store.read_job("job-7").fetch("complete")
+      assert_equal "dispatch_uncertain",
+                   store.effect_state(failed_intent).fetch("state")
+
+      restarted_store = Hive::RefactorPatrol::JobStore.new(dir)
+      restarted = scheduler(entry, restarted_store)
+      assert_empty restarted.candidates(now: T0 + 3)
+
+      assert_equal "reconciled",
+                   restarted_store.effect_state(failed_intent).fetch("state")
+      assert_equal "finalized",
+                   restarted_store.occurrence_for_job("job-7").fetch("phase")
+    end
+  end
+
   def test_stale_generation_cannot_complete_the_current_claim
     with_project do |_dir, entry, store|
       enqueue(store)
@@ -850,6 +899,7 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     with_tmp_dir do |dir|
       entry = entry(dir, "demo")
       failing_store = Object.new
+      failing_store.define_singleton_method(:recovery_active_occurrences) { [] }
       failing_store.define_singleton_method(:claimable_jobs) do |**|
         raise Hive::RefactorPatrol::JobStore::CorruptRecord, "broken index"
       end
@@ -863,6 +913,78 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       event = scheduler.drain_events.fetch(0)
       assert_equal "scheduler_error", event.fetch(:reason)
       assert_match(/broken index/, event.fetch(:error))
+    end
+  end
+
+  def test_occurrence_recovery_failure_is_identified_and_backed_off
+    with_tmp_dir do |dir|
+      entry = entry(dir, "demo")
+      capture = Hive::Modules::Migration::PatrolCapture.build(
+        module_name: "architecture-patrol",
+        project: {
+          "project_id" => entry.fetch("project_id"),
+          "name" => entry.fetch("name"),
+          "repository" => "acme/demo"
+        },
+        trigger: { "kind" => "pull_request.merged", "id" => "merge-7" },
+        reservation: {
+          "kind" => "architecture",
+          "id" => "job-7",
+          "job_id" => "job-7"
+        },
+        owner: "legacy",
+        owner_epoch: 1,
+        decision_class: "provenance",
+        decision: { "rationale" => "due" },
+        occurred_at: T0,
+        recorded_at: T0
+      )
+      reads = 0
+      failing_store = Object.new
+      failing_store.define_singleton_method(:recovery_active_occurrences) do
+        [
+          {
+            "occurrence_id" => capture.occurrence_id,
+            "phase" => "reserved",
+            "provisional_capture" => capture.to_h,
+            "outbox" => []
+          }
+        ]
+      end
+      failing_store.define_singleton_method(:read_job) do |_job_id|
+        reads += 1
+        raise Hive::RefactorPatrol::JobStore::CorruptRecord,
+              "recovery failed: #{"x" * 600}"
+      end
+      scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
+        registry: -> { [ entry ] },
+        config_loader: ->(_path) { enabled_cfg },
+        job_store_factory: ->(_path) { failing_store },
+        repository_resolver: ->(_entry, _cfg) { repository_identity }
+      )
+
+      assert_empty scheduler.candidates(now: T0)
+      first = scheduler.drain_events.fetch(0)
+      assert_equal "demo", first.fetch(:project)
+      assert_equal capture.occurrence_id,
+                   first.fetch(:occurrence_id)
+      assert_equal "job-7", first.fetch(:job_id)
+      assert_equal "architecture_occurrence",
+                   first.fetch(:recovery)
+      assert_equal "CorruptRecord", first.fetch(:error_class).split("::").last
+      assert_equal 512, first.fetch(:error).bytesize
+      assert_equal 1, first.fetch(:retry_count)
+      assert_equal 60, first.fetch(:retry_in_sec)
+
+      assert_empty scheduler.candidates(now: T0 + 59)
+      assert_empty scheduler.drain_events
+      assert_equal 1, reads
+
+      assert_empty scheduler.candidates(now: T0 + 60)
+      second = scheduler.drain_events.fetch(0)
+      assert_equal 2, reads
+      assert_equal 2, second.fetch(:retry_count)
+      assert_equal 300, second.fetch(:retry_in_sec)
     end
   end
 
@@ -894,6 +1016,7 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
   def test_cancel_ignores_a_claim_that_settled_after_dispatch_snapshot
     with_project do |_dir, entry, store|
       scheduler = scheduler(entry, store)
+      store.define_singleton_method(:occurrence_capture) { |_job_id| nil }
       store.define_singleton_method(:release_discovery!) do |*|
         raise Hive::RefactorPatrol::JobStore::StaleClaim, "already settled"
       end
@@ -1175,10 +1298,54 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
   def enqueue(store, job_id: "job-7", number: 7, merged_at: T0, registration: "demo")
     manifest = manifest(job_id: job_id, number: number, merged_at: merged_at, registration: registration)
     publish_manifest(store.project_root, manifest)
-    store.enqueue_manifest!(
+    enqueue_manifest(store,
       manifest,
       policy: { "discovery" => true, "auto_fix" => false, "issue_filing" => false },
       now: T0
+    )
+  end
+
+  def enqueue_manifest(store, value, **options)
+    capture = Hive::RefactorPatrol::TransitionGateway.capture_for_manifest(
+      manifest: value,
+      project_id: "demo-id",
+      owner: "legacy",
+      owner_epoch: 1,
+      recorded_at: options.fetch(:now)
+    )
+    store.reserve_manifest_occurrence!(
+      value, capture: capture, now: options.fetch(:now)
+    )
+    intent = Hive::Modules::Migration::EffectIntent.build(
+      module_name: "architecture-patrol",
+      occurrence_id: capture.occurrence_id,
+      authority: capture.owner,
+      owner_epoch: capture.owner_epoch,
+      sink: "job",
+      target: value.fetch("job_id"),
+      idempotency_key: [
+        value.fetch("job_id"),
+        "enqueue",
+        value.fetch("manifest_checksum")
+      ].join(":"),
+      capability: "filesystem_write",
+      claim_generation: capture.owner_epoch,
+      scope: { "job_id" => value.fetch("job_id") },
+      created_at: capture.recorded_at
+    )
+    store.prepare_effect!(intent, now: options.fetch(:now))
+    store.mark_dispatch_uncertain!(intent, now: options.fetch(:now))
+    store.settle_effect!(
+      intent,
+      status: "committed",
+      outcome: { "transition_status" => "applied" },
+      now: options.fetch(:now)
+    )
+    store.enqueue_manifest!(
+      value,
+      occurrence_id: capture.occurrence_id,
+      intake_transition_id: intent.intent_id,
+      **options
     )
   end
 
@@ -1236,9 +1403,15 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
   def write_action_job(dir, store)
     data = manifest(job_id: "action-job", number: 9, merged_at: T0, registration: "demo")
     publish_manifest(dir, data)
-    source = data.fetch("source").merge(
-      "changed_paths" => data.fetch("changed_paths"),
-      "manifest_checksum" => data.fetch("manifest_checksum")
+    aggregate = enqueue_manifest(
+      store,
+      data,
+      policy: {
+        "discovery" => true,
+        "auto_fix" => true,
+        "issue_filing" => false
+      },
+      now: T0
     )
     snapshot = {
       "id" => "accepted", "feature_id" => "checkout", "feature" => "Checkout",
@@ -1253,10 +1426,8 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       "follow_up_approval_state" => "pending", "fingerprint" => "fp-accepted"
     }
     store.write_job!(
-      {
-        "schema" => "hive-refactor-patrol-job", "schema_version" => 2,
-        "job_id" => "action-job", "source" => source, "analysis_sha" => "head",
-        "policy" => { "discovery" => true, "auto_fix" => true, "issue_filing" => false },
+      aggregate.merge(
+        "analysis_sha" => "head",
         "state" => "classified", "complete" => false,
         "dispositions" => {
           "accepted" => [
@@ -1268,9 +1439,9 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
           "flagged" => [], "suppressed" => []
         },
         "feature_results" => [], "review_errors" => [], "zero_reason" => nil,
-        "attempts" => [], "actions" => [], "created_at" => T0.iso8601,
+        "attempts" => [], "actions" => [],
         "updated_at" => T0.iso8601
-      }
+      )
     )
   end
 end

@@ -32,15 +32,17 @@ tags: [module, patrol, review, worktree, pr, codex]
 | `Hive::Patrol::Dismissals` | `lib/hive/patrol/dismissals.rb` | Reconciles closed-unmerged patrol PRs into `dismissed.json` so the same finding is not immediately re-filed. Retryable publication entries match only their exact receipted PR URL and remain retryable while that PR is open. |
 | `Hive::Patrol::BaseStateStore` | `lib/hive/patrol/base_state_store.rb` | Shared JSON lifecycle for ordinary patrol and architecture patrol's legacy reporting state: directory creation, state/fingerprint/dismissal files, run artifacts, and tolerant reads. It delegates atomic replacement to `Hive::AtomicFile` while preserving the stores' prior no-fsync behavior. |
 | `Hive::Patrol::StateStore` | `lib/hive/patrol/state_store.rb` | Defines the ordinary-patrol collections and exposes the ordinary product recovery API over the shared occurrence journal. Fingerprints retain PR mapping only; the removed effect-intent maps are not a parallel retry authority. |
-| `Hive::Modules::Migration::OccurrenceJournal` | `lib/hive/modules/migration/occurrence_journal.rb` | Public durable-occurrence facade. It composes a pure `OccurrenceRecordValidator`, one `OccurrenceRecordStore` lock/read/write owner, `OccurrenceOutbox`, and `OccurrenceEffects`; the final capture must bind exactly the terminal receipt ids. `StateStore` and `JobStore` remain the separate product-facing recovery authorities. |
-| `Hive::Modules::Migration::EffectDelivery` | `lib/hive/modules/migration/effect_delivery.rb` | Product-neutral composition facade shared by the two direct-`Object` gateways. `EffectAdmission` owns live owner/config/module-generation/grant/claim policy, `EffectSender` owns lease/fence/reconciliation transitions, and `EffectReceiptLedger` owns terminal replay and observational receipt projection. Dependencies point toward the injected product store; none of these collaborators owns persistence. |
+| `Hive::Modules::Migration::OccurrenceJournal` | `lib/hive/modules/migration/occurrence_journal.rb` | Public durable-occurrence facade. It composes a pure `OccurrenceRecordValidator`, one `OccurrenceRecordStore` lock/read/write owner, `OccurrenceOutbox`, `OccurrenceEffects`, stable sender locks, and durable ordinary-attempt allocation; the final capture rejects nonterminal effects and must bind exactly the terminal receipt ids. `StateStore` and `JobStore` remain the separate product-facing recovery authorities. |
+| `Hive::Modules::Migration::EffectDelivery` | `lib/hive/modules/migration/effect_delivery.rb` | Product-neutral composition facade shared by the two direct-`Object` gateways. `EffectAdmission` owns live owner/config/module-generation/grant/claim policy, `EffectSender` owns stable-lock/fence/reconciliation transitions, and `EffectReceiptLedger` owns terminal replay and observational receipt projection. The occurrence store, not the sender or ledger, mints authoritative receipt bytes. Dependencies point toward the injected product store; none of these collaborators owns persistence. |
 | `Hive::Patrol::EffectGateway` | `lib/hive/patrol/effect_gateway.rb` | Thin ordinary-patrol product port over `EffectDelivery`. It preserves the ordinary `perform!` and reconcile-only adoption API while authorizing ordinary state, finding, attempt, branch, PR, and review-handoff sinks. |
 | `Hive::RefactorPatrol::EffectGateway` | `lib/hive/refactor_patrol/effect_gateway.rb` | Thin Architecture Patrol product port over `EffectDelivery`. It retains architecture claim and `NotDelivered` policy while action claim generation fences authorization but remains outside semantic remote-effect identity. |
 | `Hive::RefactorPatrol::TransitionGateway` | `lib/hive/refactor_patrol/transition_gateway.rb` | Non-persistent product port that routes architecture `job`, `discovery`, and `action` transitions through the architecture gateway. It writes only by invoking a JobStore transition and replays JobStore after duplicate delivery. |
-| `Hive::RefactorPatrol::ArchitectureOccurrenceStore` | `lib/hive/refactor_patrol/architecture_occurrence_store.rb` | JobStore's product adapter over `OccurrenceJournal`. It validates manifest/job scope and delegates all occurrence/effect state; the composed `ArchitectureOccurrenceBinding` persists only the immutable job-to-occurrence identity edge and owns no retry state. |
+| `Hive::RefactorPatrol::ArchitectureOccurrenceStore` | `lib/hive/refactor_patrol/architecture_occurrence_store.rb` | JobStore's product adapter over `OccurrenceJournal`. It resolves the exact immutable `occurrence_id` held by the v3 job aggregate and delegates all occurrence/effect state; there is no sidecar binding or fallback index. |
+| `Hive::RefactorPatrol::JobStore` | `lib/hive/refactor_patrol/job_store.rb` | Architecture Patrol's v3 aggregate and product recovery authority. Each job owns immutable occurrence/intake transition ids; claim, action, job-level, and durable diagnostic-episode records append exact transition ids and semantic digests. Construction and semantic mutation call sites are statically confined to the declared composition and transition ports. |
 | `Hive::RefactorPatrol::ArchitectureIntakeTransitions` | `lib/hive/refactor_patrol/architecture_intake_transitions.rb` | Shared command/daemon coordinator for manifest occurrence reservation, exact enqueue reconciliation, and transition identity. Callers retain policy and cadence; this collaborator adds no persistence of its own. |
 | `Hive::RefactorPatrol::ActionTransitions` | `lib/hive/refactor_patrol/action_transitions.rb` | Facade used by `ActionRunner`: claim-scoped CAS/reconcile/receipt operations and job-level plan/link/block transitions live in separate coordinators over one immutable transition context. `ActionRunner` retains thesis, policy, fixer, publication, and issue decisions. |
 | `Hive::RefactorPatrol::DiscoveryTransitions` | `lib/hive/refactor_patrol/discovery_transitions.rb` | Facade used by `RefactorPatrolScheduler`: discovery claim/checkpoint/release and diagnostic block transitions live in separate coordinators. `ArchitectureOccurrenceLifecycle` alone reserves/finalizes occurrences and recovers capture/event/receipt projections; the scheduler retains cadence, candidate selection, spawn, and envelope handling. |
+| `Hive::RefactorPatrol::ClaimMaintenanceTransitions` | `lib/hive/refactor_patrol/claim_maintenance_transitions.rb` | Narrow non-outcome port for generation-fenced child-process attachment and discovery/action heartbeat renewal. Command and scheduler roots cannot call those JobStore mutators directly. |
 | `Hive::Modules::Migration::PatrolEvidence` | `lib/hive/modules/migration/patrol_evidence.rb` | Strict immutable ordinary/architecture capture, intent, and receipt values shared only as an observation protocol. `EvidenceStore` appends canonical records, maintains bounded occurrence/intent indices, and repairs them through portable lexicographic pages whose cursors freeze one high-water inventory plus an order-independent filename fingerprint. `ManagedDirectory` rejects linked managed components and descriptor-binds its bounded reads, locks, and atomic writes; evidence remains observation-only and has no mutation or recovery authority. |
 
 ## State
@@ -57,6 +59,8 @@ Patrol state is deliberately inspectable and removable:
   state.json                      # cycle state only
   fingerprints.json               # publication mappings only
   occurrences/occ-*.json          # authoritative occurrence/effect/outbox cells
+  occurrences/.sender-locks/*.lock # stable live-sender flock authorities
+  occurrences/.attempt-locks/*.lock # schedule-attempt allocation locks
   dismissed.json
 .hive-state/module-runtime/migration/patrol-evidence/
   captures/*.json
@@ -199,11 +203,19 @@ closed.
 `Hive::Modules::CapabilityContext` still preflights installed grants, and each
 mutation reloads the live owner epoch, enabled configuration, installed module
 generation, and effective grants at its separate ordinary/architecture
-gateway while migration admission remains held across the sink. A sender CAS
-is persisted before delivery; a crash leaves `dispatch_uncertain`, which can
-only continue after exact reconciliation. Terminal outcome plus canonical
-receipt bytes commit in the same occurrence update, and an ordered outbox keeps
-failed evidence/event projection retryable. Shadow authority can emit an
+gateway while migration admission remains held across the sink. Sender
+liveness is not persisted: a process-local keyed mutex plus a stable, never-unlinked
+`0600` flock file is the sole live-sender authority. The occurrence records
+only `prepared`, `dispatch_uncertain`, or a terminal
+`committed`/`reconciled`/`denied`/`failed` fact. A crash releases the kernel
+lock and leaves `dispatch_uncertain`; exact absence remains unresolved unless
+the product gateway's closed sink contract marks that sink retry-safe
+(`state`/`finding`/`review_handoff` for ordinary Patrol and
+`job`/`discovery`/`action` for Architecture Patrol). Remote branch, PR, and
+issue absence never authorizes redispatch. The occurrence store mints a
+terminal receipt once, persists its canonical bytes in the same update, and
+returns those exact bytes on every replay. An ordered outbox keeps failed
+evidence/event projection retryable. Shadow authority can emit an
 `attempted` evidence receipt but cannot alter StateStore, JobStore, GitHub, or
 ReviewHandoff. StateStore and JobStore are the only product recovery
 authorities; the append-only evidence tree is never a retry input. First-party
@@ -223,8 +235,12 @@ it or any mutator cutover can be claimed.
 - A non-dry-run cycle requires at least one configured validation command before mapping, review, or state mutation. `--dry-run` remains review-only and bypasses that preflight.
 - Each semantic root maps to at most one durable active lineage per target. Same-target terminal duplicates are suppressed; same-target active records are reused by shipping cycles without another finding file. A newer target may create a recurrence lineage, superseding older active evidence while keeping resolved/rejected history. An open PR still blocks additional variants from the same feature, and one feature normally supplies at most one fix per cycle.
 - A failed patrol-to-review handoff is not treated as an active fingerprint state, so later patrol cycles can retry instead of losing the opened PR from the review queue; an exact existing synthetic task is reconciled instead of duplicated.
-- Every mutating ordinary or architecture sink has one durable semantic intent, one active sender lease, and canonical replay bytes. An expired uncertain delivery cannot call the sink again until exact reconciliation proves absence.
+- Every mutating ordinary or architecture sink has one durable semantic intent, one process-and-thread sender lock, and canonical replay bytes. No lease expiry, heartbeat, or PID can authorize a competing sender. Exact absence authorizes redispatch only for the gateway-owned retry-safe local sink set; remote absence remains unresolved.
+- Ordinary schedule retries use a durable positive `attempt_generation` in the reservation and occurrence identity. Concurrent schedulers reuse one reserved attempt; only a terminal prior attempt advances the generation, and finalized occurrences reject new effect dispatch.
 - Architecture `job`, `discovery`, and `action` transitions pass through `TransitionGateway`; it owns no files or retry state, and JobStore remains authoritative.
+- JobStore runtime accepts v3 only. A fenced, bounded, resumable constructor migration converts v2 aggregates plus their binding sidecars once, validates exact occurrence and transition ownership, removes the sidecars, and stamps completion; it is not a compatibility reader.
+- Cutover and rollback quiescence include ordinary active occurrences, architecture active occurrences, and incomplete v3 jobs before advancing an ownership epoch.
+- Ordinary and architecture projection/recovery failures emit bounded project/occurrence/job diagnostics with retry count and next backoff time; durable outbox or exact-transition recovery remains pending while the scheduler backs off.
 - Closed-unmerged patrol PRs become dismissals and are skipped on future cycles.
 - Agent prompts treat findings and recommendations as data; validation commands come only from project config. Each admitted finding is bound to one configured validation key and the exact reviewed target SHA. Before the fixer agent starts, Hive checks out the fresh current base, runs that command as a clean baseline, and refuses a stale target, failing baseline, or baseline command that mutates the checkout.
 - Review launches are admitted only with conservative initial-context headroom,

@@ -3109,15 +3109,16 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     end
   end
 
-  def test_publication_attempt_matcher_handles_exact_and_malformed_receipts
+  def test_fix_publication_phase_routes_through_the_action_transition_port
     with_tmp_dir do |dir|
-      runner = build_runner(dir, store: Object.new)
-      captured_matcher = nil
-      runner.define_singleton_method(:action_claim_transition!) do |*,
-                                                                     matcher:,
-                                                                     **|
-        captured_matcher = matcher
+      calls = []
+      store = Object.new
+      store.define_singleton_method(
+        :record_publication_attempt_phase!
+      ) do |*arguments, **options|
+        calls << [ arguments, options ]
       end
+      runner = build_runner(dir, store: store)
       token = { job_id: "job-1", canonical_action_id: "action-1" }
       attempt_id = "a" * 64
       phase = Hive::RefactorPatrol::PrOpener::PUSH_INTENT
@@ -3128,15 +3129,21 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
         token, "fix", phase, payload, attempt_id: attempt_id
       )
 
-      exact = {
-        "receipts" => {
-          Hive::RefactorPatrol::PublicationAttempt::ATTEMPTS_KEY => {
-            attempt_id => { phase => payload }
-          }
-        }
-      }
-      assert captured_matcher.call(exact)
-      refute captured_matcher.call("receipts" => nil)
+      assert_equal(
+        [
+          [
+            [ token ],
+            {
+              attempt_id: attempt_id,
+              phase: phase,
+              payload: payload,
+              now: T0,
+              transition: nil
+            }
+          ]
+        ],
+        calls
+      )
     end
   end
 
@@ -3273,11 +3280,18 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
   def write_classified_job(dir, job_id: "job-1", policy:, dispositions:,
                            registration: "polyglot", analysis_sha: "c" * 40)
     store = Hive::RefactorPatrol::JobStore.new(dir)
+    capture = architecture_capture(
+      job_id: job_id,
+      registration: registration
+    )
+    intake_intent = architecture_intake_intent(capture, job_id)
     store.write_job!(
       {
         "schema" => "hive-refactor-patrol-job",
-        "schema_version" => 2,
+        "schema_version" => Hive::RefactorPatrol::JobStore::SCHEMA_VERSION,
         "job_id" => job_id,
+        "occurrence_id" => capture.occurrence_id,
+        "intake_transition_id" => intake_intent.intent_id,
         "source" => source(job_id == "job-1" ? 7 : 8, registration: registration),
         "analysis_sha" => analysis_sha,
         "policy" => policy,
@@ -3292,6 +3306,15 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
         "created_at" => T0.iso8601,
         "updated_at" => T0.iso8601
       }
+    )
+    store.reserve_occurrence!(job_id, capture: capture, now: T0)
+    store.prepare_effect!(intake_intent, now: T0)
+    store.mark_dispatch_uncertain!(intake_intent, now: T0)
+    store.settle_effect!(
+      intake_intent,
+      status: "committed",
+      outcome: { "transition_status" => "applied" },
+      now: T0
     )
     store
   end
@@ -3308,29 +3331,45 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     }
   end
 
-  def architecture_capture
+  def architecture_capture(job_id: "job-1", registration: "polyglot")
     Hive::Modules::Migration::PatrolCapture.build(
       module_name: "architecture-patrol",
       project: {
         "project_id" => "project-1",
-        "name" => "polyglot",
+        "name" => registration,
         "repository" => "acme/polyglot"
       },
       trigger: {
         "kind" => "pull_request.merged",
-        "id" => "acme/polyglot:7:#{'b' * 40}"
+        "id" => "acme/polyglot:#{job_id}:#{'b' * 40}"
       },
       reservation: {
         "kind" => "architecture",
-        "id" => "job-1",
-        "job_id" => "job-1"
+        "id" => job_id,
+        "job_id" => job_id
       },
       owner: "legacy",
       owner_epoch: 1,
       decision_class: "provenance",
-      decision: { "rationale" => "due", "job_id" => "job-1" },
+      decision: { "rationale" => "due", "job_id" => job_id },
       occurred_at: T0,
       recorded_at: T0
+    )
+  end
+
+  def architecture_intake_intent(capture, job_id)
+    Hive::Modules::Migration::EffectIntent.build(
+      module_name: "architecture-patrol",
+      occurrence_id: capture.occurrence_id,
+      authority: capture.owner,
+      owner_epoch: capture.owner_epoch,
+      sink: "job",
+      target: job_id,
+      idempotency_key: "#{job_id}:test-intake",
+      capability: "filesystem_write",
+      claim_generation: capture.owner_epoch,
+      scope: { "job_id" => job_id },
+      created_at: T0
     )
   end
 

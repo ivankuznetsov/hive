@@ -1,22 +1,21 @@
 module Hive
   module Modules
     module Migration
-      # Sender lease, dispatch fencing, exact reconciliation, and terminal
-      # settlement protocol. Authorization and receipt projection are injected
-      # collaborators so this class owns only delivery state transitions.
+      # Serializes one effect sender with a process mutex plus stable flock,
+      # records uncertainty before invocation, and allows redispatch only when
+      # the product gateway owns an explicit retry-safe sink contract.
       class EffectSender
         def initialize(product_label:, delivery_store:, receipt_ledger:,
                        reconciliation_error:, pass_intent:,
-                       not_delivered_error:, clock:, lease_sec:, claimant:)
+                       not_delivered_error:, retry_safe:, clock:)
           @product_label = product_label
           @delivery_store = delivery_store
           @receipt_ledger = receipt_ledger
           @reconciliation_error = reconciliation_error
           @pass_intent = pass_intent == true
           @not_delivered_error = not_delivered_error
+          @retry_safe = retry_safe
           @clock = clock
-          @lease_sec = positive_lease(lease_sec)
-          @claimant = claimant
         end
 
         def prepare(intent)
@@ -24,195 +23,140 @@ module Hive
         end
 
         def replay_if_terminal(intent)
-          return unless @receipt_ledger.terminal_result(intent)
+          result = @receipt_ledger.terminal_result(intent)
+          return unless result
 
-          @receipt_ledger.replay_terminal(intent)
+          @receipt_ledger.replay_terminal(intent, result)
         end
 
         def deliver_or_reconcile(intent, reconcile, effect)
-          claim = acquire(intent)
-          handle_claim(intent, claim, reconcile, effect)
+          with_sender_lock(intent) do
+            if (result = @receipt_ledger.terminal_result(intent))
+              return @receipt_ledger.replay_terminal(intent, result)
+            end
+
+            case delivery_state(intent)
+            when "prepared"
+              dispatch_prepared(intent, effect)
+            when "dispatch_uncertain"
+              reconcile_uncertain(intent, reconcile, effect)
+            else
+              unrecognized_state!
+            end
+          end
         end
 
         def reconcile_observed(intent, reconcile)
-          claim = acquire(intent)
-          case claim.status
-          when :terminal
-            @receipt_ledger.replay_terminal(intent)
-          when :busy
-            reconciliation_required!(
-              "active_sender_lease",
-              @receipt_ledger.receipt_for_claim(intent, claim)
-            )
-          when :acquired
-            fence_dispatch(intent, claim)
+          with_sender_lock(intent) do
+            if (result = @receipt_ledger.terminal_result(intent))
+              return @receipt_ledger.replay_terminal(intent, result)
+            end
+
+            state = delivery_state(intent)
+            if state == "prepared"
+              @delivery_store.mark_dispatch_uncertain!(
+                intent, now: @clock.call
+              )
+            elsif state != "dispatch_uncertain"
+              unrecognized_state!
+            end
             reconcile_uncertain(
-              intent,
-              claim,
-              reconcile,
-              nil,
-              send_after_absence: false
+              intent, reconcile, nil, send_after_absence: false
             )
-          when :reconcile
-            reconcile_uncertain(
-              intent,
-              claim,
-              reconcile,
-              nil,
-              send_after_absence: false
-            )
-          else
-            unrecognized_disposition!
           end
         end
 
         private
 
-        def handle_claim(intent, claim, reconcile, effect)
-          case claim.status
-          when :terminal
-            @receipt_ledger.replay_terminal(intent)
-          when :busy
-            reconciliation_required!(
-              "active_sender_lease",
-              @receipt_ledger.receipt_for_claim(intent, claim)
-            )
-          when :reconcile
-            reconcile_uncertain(intent, claim, reconcile, effect)
-          when :acquired
-            dispatch_claimed(intent, claim, effect)
-          else
-            unrecognized_disposition!
-          end
+        def with_sender_lock(intent, &block)
+          @delivery_store.with_effect_sender_lock(intent, &block)
         end
 
-        def acquire(intent)
-          @delivery_store.acquire_effect!(
-            intent,
-            claimant: @claimant,
-            now: @clock.call,
-            lease_sec: @lease_sec
-          )
+        def delivery_state(intent)
+          state = @delivery_store.effect_state(intent)
+          state && state.fetch("state")
+        rescue KeyError
+          unrecognized_state!
         end
 
-        def reconcile_uncertain(intent, claim, reconcile, effect,
+        def reconcile_uncertain(intent, reconcile, effect,
                                 send_after_absence: true)
           reconciliation = exact_reconciliation(intent, reconcile)
           case reconciliation.fetch("status")
           when "matched"
-            settle_reconciled(intent, claim, reconciliation)
+            settle(intent, "reconciled", reconciliation.fetch("outcome", {}))
           when "absent"
-            settle_absent(
+            handle_absence(
               intent,
-              claim,
-              reconciliation,
+              reconciliation.fetch("outcome", {}),
               effect,
               send_after_absence: send_after_absence
             )
           else
-            reconciliation_required!(
-              "remote_identity_ambiguous",
-              @receipt_ledger.receipt_for_claim(intent, claim)
-            )
+            reconciliation_required!("remote_identity_ambiguous")
           end
         end
 
-        def settle_reconciled(intent, claim, reconciliation)
-          outcome = reconciliation.fetch("outcome", {})
-          receipt = @receipt_ledger.build(
-            intent, "reconciled", outcome
-          )
-          state = @delivery_store.settle_effect_reconciled!(
-            intent,
-            expected_generation: claim.generation,
-            outcome: outcome,
-            receipt: receipt,
-            now: @clock.call
-          )
-          @receipt_ledger.drain(intent)
-          @receipt_ledger.terminal_result_from_state(intent, state)
-        end
-
-        def settle_absent(intent, claim, reconciliation, effect,
-                          send_after_absence:)
-          outcome = reconciliation.fetch("outcome", {})
-          receipt = @receipt_ledger.build(
-            intent, "known_not_sent", outcome
-          )
-          @delivery_store.resolve_effect_absent!(
-            intent,
-            expected_generation: claim.generation,
-            outcome: outcome,
-            receipt: receipt,
-            now: @clock.call
-          )
-          @receipt_ledger.drain(intent)
-          unless send_after_absence
-            return @receipt_ledger.known_not_sent(
-              intent, outcome, receipt
-            )
+        def handle_absence(intent, outcome, effect, send_after_absence:)
+          unless retry_safe?(intent)
+            reconciliation_required!("remote_absence_not_retry_safe")
           end
 
-          fresh = acquire(intent)
-          return dispatch_claimed(intent, fresh, effect) if
-            fresh.status == :acquired
-
-          reconciliation_required!(
-            "sender_lease_raced_after_reconciliation",
-            @receipt_ledger.receipt_for_claim(intent, fresh)
+          @delivery_store.reset_effect_prepared!(
+            intent, now: @clock.call
           )
+          return retry_safe_result(outcome) unless send_after_absence
+
+          dispatch_prepared(intent, effect)
         end
 
-        def dispatch_claimed(intent, claim, effect)
-          fence_dispatch(intent, claim)
+        def dispatch_prepared(intent, effect)
+          @delivery_store.mark_dispatch_uncertain!(
+            intent, now: @clock.call
+          )
           outcome = invoke_effect(effect, intent)
           unless outcome.is_a?(Hash)
             raise Hive::ConfigError,
                   "#{@product_label} effect outcome must be an object"
           end
-          receipt = @receipt_ledger.build(
-            intent, "committed", outcome
-          )
-          state = @delivery_store.settle_effect_claimed!(
-            intent,
-            token: claim.token,
-            status: "committed",
-            outcome: outcome,
-            receipt: receipt,
-            now: @clock.call
-          )
-          @receipt_ledger.drain(intent)
-          @receipt_ledger.terminal_result_from_state(intent, state)
+          settle(intent, "committed", outcome)
         rescue StandardError => e
           raise unless @not_delivered_error&.=== e
 
-          settle_not_delivered(intent, claim, e)
+          @delivery_store.reset_effect_prepared!(
+            intent, now: @clock.call
+          )
+          retry_safe_result("reason" => e.message.to_s)
         end
 
-        def fence_dispatch(intent, claim)
-          @delivery_store.mark_dispatch_uncertain!(
-            intent, token: claim.token, now: @clock.call
+        def settle(intent, status, outcome)
+          receipt = @delivery_store.settle_effect!(
+            intent,
+            status: status,
+            outcome: outcome,
+            now: @clock.call
           )
+          @receipt_ledger.drain(intent)
+          @receipt_ledger.result_from_receipt(receipt)
         end
 
         def invoke_effect(effect, intent)
           @pass_intent ? effect.call(intent) : effect.call
         end
 
-        def settle_not_delivered(intent, claim, error)
-          outcome = { "reason" => error.message.to_s }
-          receipt = @receipt_ledger.build(
-            intent, "known_not_sent", outcome
-          )
-          @delivery_store.resolve_effect_absent!(
-            intent,
-            expected_generation: claim.generation,
+        def retry_safe?(intent)
+          @retry_safe.respond_to?(:call) &&
+            @retry_safe.call(intent) == true
+        rescue StandardError
+          false
+        end
+
+        def retry_safe_result(outcome)
+          EffectReceiptLedger::Result.new(
+            status: :retry_safe,
             outcome: outcome,
-            receipt: receipt,
-            now: @clock.call
+            receipt: nil
           )
-          @receipt_ledger.drain(intent)
-          @receipt_ledger.known_not_sent(intent, outcome, receipt)
         end
 
         def exact_reconciliation(intent, reconcile)
@@ -230,26 +174,14 @@ module Hive
           { "status" => "ambiguous", "outcome" => {} }
         end
 
-        def positive_lease(value)
-          lease = Integer(value)
-          return lease if lease.positive?
-
-          raise Hive::ConfigError,
-                "#{@product_label} effect lease must be positive"
-        rescue ArgumentError, TypeError
-          raise Hive::ConfigError,
-                "#{@product_label} effect lease is malformed"
-        end
-
-        def unrecognized_disposition!
+        def unrecognized_state!
           reconciliation_required!(
-            "#{@product_label} sender disposition is unrecognized",
-            nil
+            "#{@product_label} sender state is unrecognized"
           )
         end
 
-        def reconciliation_required!(reason, receipt)
-          raise @reconciliation_error.new(reason, receipt)
+        def reconciliation_required!(reason)
+          raise @reconciliation_error.new(reason, nil)
         end
       end
     end

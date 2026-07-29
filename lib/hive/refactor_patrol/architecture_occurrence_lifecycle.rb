@@ -1,3 +1,4 @@
+require "hive/config"
 require "hive/modules/migration/patrol_evidence"
 
 module Hive
@@ -6,6 +7,17 @@ module Hive
     # and projection recovery. Scheduler cadence and process dispatch remain
     # outside this persistence boundary.
     class ArchitectureOccurrenceLifecycle
+      class RecoveryError < Hive::ConfigError
+        attr_reader :occurrence_id, :job_id, :error_class
+
+        def initialize(error:, occurrence_id:, job_id:)
+          @occurrence_id = occurrence_id
+          @job_id = job_id
+          @error_class = error.class.name
+          super(error.message)
+        end
+      end
+
       def initialize(migration_authority:, dry_run:, evidence_store_factory:,
                      event_publisher:, module_schedule:, reservation_error:)
         @migration_authority = migration_authority
@@ -104,11 +116,39 @@ module Hive
         drain(store, entry, capture.occurrence_id)
       end
 
-      def recover(store:, entry:)
-        return unless store.respond_to?(:projection_pending_occurrences)
+      def recover(store:, entry:, now:)
+        store.recovery_active_occurrences.each do |occurrence|
+          job_id = nil
+          if occurrence.fetch("phase") == "reserved"
+            job_id = recovery_job_id(occurrence)
+            aggregate = store.read_job(job_id)
+            unless aggregate.fetch("occurrence_id") ==
+                   occurrence.fetch("occurrence_id")
+              raise Hive::ConfigError,
+                    "architecture patrol recovery occurrence does not match its job"
+            end
+            aggregate = yield(aggregate)
+            if aggregate.fetch("complete")
+              publish_recovered_finalization(
+                store, entry, occurrence, aggregate, now
+              )
+              next
+            end
+          end
 
-        store.projection_pending_occurrences.each do |occurrence|
-          drain(store, entry, occurrence.fetch("occurrence_id"))
+          if occurrence.fetch("outbox").any? do |outbox_entry|
+            outbox_entry.fetch("acknowledged") == false
+          end
+            drain(store, entry, occurrence.fetch("occurrence_id"))
+          end
+        rescue RecoveryError
+          raise
+        rescue StandardError => e
+          raise RecoveryError.new(
+            error: e,
+            occurrence_id: occurrence["occurrence_id"],
+            job_id: job_id
+          )
         end
       end
 
@@ -120,6 +160,45 @@ module Hive
 
         raise @reservation_error.new(
           "architecture_patrol_occurrence_owner_changed"
+        )
+      end
+
+      def recovery_job_id(occurrence)
+        capture = Hive::Modules::Migration::PatrolCapture.from_h(
+          occurrence.fetch("provisional_capture")
+        )
+        reservation = capture.reservation
+        unless reservation.fetch("kind") == "architecture"
+          raise Hive::ConfigError,
+                "architecture patrol recovery capture is not architecture work"
+        end
+
+        reservation.fetch("job_id")
+      rescue KeyError => e
+        raise Hive::ConfigError,
+              "architecture patrol recovery capture is missing #{e.key.inspect}"
+      end
+
+      def publish_recovered_finalization(store, entry, occurrence, aggregate,
+                                         now)
+        provisional = Hive::Modules::Migration::PatrolCapture.from_h(
+          occurrence.fetch("provisional_capture")
+        )
+        token = {
+          job_id: aggregate.fetch("job_id"),
+          registration: entry.fetch("name"),
+          phase: aggregate.fetch("actions").empty? ? :discovery : :action,
+          occurrence_id: provisional.occurrence_id,
+          migration_owner: provisional.owner,
+          migration_epoch: provisional.owner_epoch
+        }
+        publish_finalized(
+          store: store,
+          entry: entry,
+          token: token,
+          result: { status: :closed },
+          aggregate: aggregate,
+          now: now
         )
       end
 

@@ -1,4 +1,5 @@
 require "securerandom"
+require "digest"
 require "hive/errors"
 
 module Hive
@@ -84,6 +85,7 @@ module Hive
         opened = file.stat
         unsafe! unless same_identity?(before, opened)
         bytes = file.read(limit + 1)
+        bytes = "".b if bytes.nil? && opened.size.zero?
         after = file.stat
         unsafe! unless unchanged_file?(opened, after)
         unsafe! if bytes.nil? || bytes.bytesize > limit
@@ -98,11 +100,18 @@ module Hive
       unsafe!
     end
 
-    def atomic_write(relative, content, mode: 0o600)
+    def atomic_write(relative, content, mode: 0o600,
+                     expected_digest: nil, max_existing_bytes: nil)
       path = absolute(relative)
       parent = File.dirname(path)
       parent_before = ensure_path(parent)
-      before = existing_regular_identity(path)
+      before = existing_regular_snapshot(path)
+      verify_digest!(
+        path,
+        before,
+        expected_digest,
+        max_bytes: max_existing_bytes
+      ) if expected_digest
       temporary = File.join(
         parent,
         ".#{File.basename(path)}.tmp.#{Process.pid}.#{SecureRandom.hex(6)}"
@@ -118,7 +127,7 @@ module Hive
         temporary_identity = identity(file.stat)
       end
       unsafe! unless same_identity?(parent_before, validate_directory_path(parent))
-      unsafe! unless before == existing_regular_identity(path)
+      unsafe! unless before == existing_regular_snapshot(path)
       File.rename(temporary, path)
       temporary = nil
       unsafe! unless temporary_identity == existing_regular_identity(path)
@@ -157,6 +166,45 @@ module Hive
     ensure
       lock&.flock(File::LOCK_UN) rescue nil
       lock&.close rescue nil
+    end
+
+    def unlink(relative, missing: false, expected_digest: nil,
+               max_bytes: nil)
+      path = absolute(relative)
+      parent = File.dirname(path)
+      existing = existing_read_target(path, missing: missing)
+      return false unless existing
+
+      parent_before, before = existing
+      validate_regular!(before)
+      snapshot = regular_snapshot(before)
+      File.open(path, File::RDONLY | nofollow) do |file|
+        opened = file.stat
+        unsafe! unless same_identity?(before, opened)
+        verify_open_digest!(
+          file,
+          opened,
+          expected_digest,
+          max_bytes: max_bytes
+        ) if expected_digest
+        unsafe! unless snapshot == existing_regular_snapshot(path)
+        unsafe! unless same_identity?(
+          parent_before,
+          validate_directory_path(parent)
+        )
+        File.unlink(path)
+        unsafe! if existing_regular_identity(path)
+        fsync_directory(parent, parent_before)
+      end
+      true
+    rescue Errno::ENOENT
+      return false if missing
+
+      unsafe!
+    rescue Hive::ConfigError
+      raise
+    rescue SystemCallError, IOError, ArgumentError, TypeError
+      unsafe!
     end
 
     private
@@ -242,6 +290,47 @@ module Hive
       nil
     end
 
+    def existing_regular_snapshot(path)
+      stat = File.lstat(path)
+      validate_regular!(stat)
+      regular_snapshot(stat)
+    rescue Errno::ENOENT
+      nil
+    end
+
+    def regular_snapshot(stat)
+      [
+        stat.dev, stat.ino, stat.mode, stat.size, stat.mtime, stat.ctime,
+        stat.nlink
+      ].freeze
+    end
+
+    def verify_digest!(path, snapshot, expected_digest, max_bytes:)
+      unsafe! unless snapshot
+      File.open(path, File::RDONLY | nofollow) do |file|
+        opened = file.stat
+        unsafe! unless regular_snapshot(opened) == snapshot
+        verify_open_digest!(
+          file, opened, expected_digest, max_bytes: max_bytes
+        )
+      end
+      unsafe! unless snapshot == existing_regular_snapshot(path)
+    end
+
+    def verify_open_digest!(file, opened, expected_digest, max_bytes:)
+      limit = Integer(max_bytes)
+      unsafe! if limit.negative? || opened.size > limit
+      bytes = file.read(limit + 1)
+      bytes = "".b if bytes.nil? && opened.size.zero?
+      after = file.stat
+      unsafe! unless unchanged_file?(opened, after)
+      unsafe! if bytes.nil? || bytes.bytesize > limit
+      unsafe! unless expected_digest.to_s.match?(/\A[0-9a-f]{64}\z/)
+      unsafe! unless Digest::SHA256.hexdigest(bytes) == expected_digest
+    rescue ArgumentError, TypeError
+      unsafe!
+    end
+
     def unchanged_file?(before, after)
       %i[dev ino size mtime ctime nlink].all? do |field|
         before.public_send(field) == after.public_send(field)
@@ -290,7 +379,9 @@ module Hive
     end
 
     def contained?(path, base)
-      path == base || path.start_with?("#{base}#{File::SEPARATOR}")
+      prefix = base.end_with?(File::SEPARATOR) ?
+        base : "#{base}#{File::SEPARATOR}"
+      path == base || path.start_with?(prefix)
     end
 
     def nearest_existing_ancestor(path)

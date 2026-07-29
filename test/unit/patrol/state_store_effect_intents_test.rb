@@ -14,22 +14,12 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
       intent = effect_intent
       store.reserve_occurrence!(capture, now: NOW)
       store.prepare_effect!(intent, now: NOW)
-      claim = store.acquire_effect!(
-        intent, claimant: "sender-one", now: NOW, lease_sec: 60
-      )
-      store.mark_dispatch_uncertain!(
-        intent, token: claim.token, now: NOW
-      )
+      store.mark_dispatch_uncertain!(intent, now: NOW)
       outcome = {
         "pr_url" => "https://github.com/owner/demo/pull/7"
       }
-      receipt = Hive::Modules::Migration::EffectReceipt.build(
-        intent: intent, status: "committed", outcome: outcome,
-        recorded_at: NOW
-      )
-      store.settle_effect_claimed!(
-        intent, token: claim.token, status: "committed",
-        outcome: outcome, receipt: receipt, now: NOW
+      receipt = store.settle_effect!(
+        intent, status: "committed", outcome: outcome, now: NOW
       )
 
       reloaded = Hive::Patrol::StateStore.new(root)
@@ -70,22 +60,12 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
       intent = effect_intent
       store.reserve_occurrence!(capture, now: NOW)
       store.prepare_effect!(intent, now: NOW)
-      claim = store.acquire_effect!(
-        intent, claimant: "sender-one", now: NOW, lease_sec: 60
-      )
-      store.mark_dispatch_uncertain!(
-        intent, token: claim.token, now: NOW
-      )
+      store.mark_dispatch_uncertain!(intent, now: NOW)
       outcome = {
         "pr_url" => "https://github.com/owner/demo/pull/7"
       }
-      receipt = Hive::Modules::Migration::EffectReceipt.build(
-        intent: intent, status: "committed", outcome: outcome,
-        recorded_at: NOW
-      )
-      store.settle_effect_claimed!(
-        intent, token: claim.token, status: "committed",
-        outcome: outcome, receipt: receipt, now: NOW
+      store.settle_effect!(
+        intent, status: "committed", outcome: outcome, now: NOW
       )
       path = File.join(
         store.root, "occurrences", "#{capture.occurrence_id}.json"
@@ -178,35 +158,20 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
     end
   end
 
-  def test_known_absent_effect_releases_the_sender_generation_for_retry
+  def test_retry_safe_absence_resets_only_to_prepared
     with_tmp_dir do |root|
       store = Hive::Patrol::StateStore.new(root)
       intent = effect_intent
       store.reserve_occurrence!(capture, now: NOW)
       store.prepare_effect!(intent, now: NOW)
-      claim = store.acquire_effect!(
-        intent, claimant: "sender-one", now: NOW, lease_sec: 60
-      )
-      store.mark_dispatch_uncertain!(intent, token: claim.token, now: NOW)
-      outcome = { "remote" => "absent" }
-      receipt = Hive::Modules::Migration::EffectReceipt.build(
-        intent: intent, status: "known_not_sent", outcome: outcome,
-        recorded_at: NOW
-      )
+      store.mark_dispatch_uncertain!(intent, now: NOW)
+      store.reset_effect_prepared!(intent, now: NOW + 1)
 
-      store.resolve_effect_absent!(
-        intent,
-        expected_generation: claim.generation,
-        outcome: outcome,
-        receipt: receipt,
-        now: NOW + 1
-      )
-
-      retry_claim = store.acquire_effect!(
-        intent, claimant: "sender-two", now: NOW + 2, lease_sec: 60
-      )
-      assert_equal :acquired, retry_claim.status
-      assert_operator retry_claim.generation, :>, claim.generation
+      state = store.effect_state(intent)
+      assert_equal "prepared", state.fetch("state")
+      assert_empty state.fetch("receipt_ids")
+      refute_includes state, "claim"
+      refute_includes state, "delivery_generation"
     end
   end
 

@@ -1,5 +1,6 @@
 require "json"
 require "time"
+require "hive/refactor_patrol/transition_evidence"
 
 module Hive
   module RefactorPatrol
@@ -43,12 +44,14 @@ module Hive
           claim_generation: generation,
           scope: { "job_id" => job_id },
           claim_validator: ->(**) { true },
-          reconcile: lambda do |_intent|
+          reconcile: lambda do |intent|
             observed = store.read_job(job_id)
             attempt = @context.discovery_attempt(
               observed, generation
             )
-            claim_reconciliation(attempt, generation)
+            claim_reconciliation(
+              attempt, intent.intent_id
+            )
           end,
           replay: lambda do |_result|
             observed = store.read_job(job_id)
@@ -64,13 +67,17 @@ module Hive
               generation: generation
             }
           end
-        ) do
+        ) do |intent|
           claimed = claim_direct(
             store,
             job_id,
             analysis_sha: analysis_sha,
             now: now,
-            resolver: resolver
+            resolver: resolver,
+            transition: transition(
+              intent,
+              operation: @claim_operation
+            )
           )
           unless claimed
             raise @reservation_error.new("claim_unavailable")
@@ -110,21 +117,33 @@ module Hive
           scope: { "job_id" => job_id },
           claim_validator:
             @context.claim_validator(store, token, now),
-          reconcile: lambda do |_intent|
+          reconcile: lambda do |intent|
             observed = store.read_job(job_id)
             attempt = @context.discovery_attempt(
               observed, generation
             )
-            release_reconciliation(observed, attempt, reason)
+            transition_reconciliation(
+              attempt, intent.intent_id
+            )
           end,
-          replay: ->(_result) { store.read_job(job_id) }
-        ) do
+          replay: ->(_result) { store.read_job(job_id) },
+          reject: rejection(
+            store,
+            token,
+            operation: operation_name("release"),
+            now: now
+          )
+        ) do |intent|
           release_direct(
             store,
             token,
             reason: reason,
             now: now,
-            backoff_sec: backoff_sec
+            backoff_sec: backoff_sec,
+            transition: transition(
+              intent,
+              operation: operation_name("release")
+            )
           )
         end
       end
@@ -162,23 +181,33 @@ module Hive
           scope: { "job_id" => job_id },
           claim_validator:
             @context.claim_validator(store, token, now),
-          reconcile: lambda do |_intent|
+          reconcile: lambda do |intent|
             observed = store.read_job(job_id)
             attempt = @context.discovery_attempt(
               observed, generation
             )
-            checkpoint_reconciliation(
-              observed, attempt, envelope
+            transition_reconciliation(
+              attempt, intent.intent_id
             )
           end,
-          replay: ->(_result) { store.read_job(job_id) }
-        ) do
+          replay: ->(_result) { store.read_job(job_id) },
+          reject: rejection(
+            store,
+            token,
+            operation: operation_name("checkpoint"),
+            now: now
+          )
+        ) do |intent|
           checkpoint_direct(
             store,
             token,
             envelope: envelope,
             now: now,
-            backoff_sec: backoff_sec
+            backoff_sec: backoff_sec,
+            transition: transition(
+              intent,
+              operation: operation_name("checkpoint")
+            )
           )
         end
       end
@@ -217,28 +246,41 @@ module Hive
           scope: { "job_id" => job_id },
           claim_validator:
             @context.claim_validator(store, token, now),
-          reconcile: lambda do |_intent|
+          reconcile: lambda do |intent|
             observed = store.read_job(job_id)
             attempt = @context.discovery_attempt(
               observed, generation
             )
-            progress_reconciliation(observed, attempt, envelope)
+            transition_reconciliation(
+              attempt, intent.intent_id
+            )
           end,
-          replay: ->(_result) { store.read_job(job_id) }
-        ) do
+          replay: ->(_result) { store.read_job(job_id) },
+          reject: rejection(
+            store,
+            token,
+            operation: operation_name("checkpoint-progress"),
+            now: now
+          )
+        ) do |intent|
           checkpoint_progress_direct(
             store,
             token,
             envelope: envelope,
             now: now,
-            lease_sec: lease_sec
+            lease_sec: lease_sec,
+            transition: transition(
+              intent,
+              operation: operation_name("checkpoint-progress")
+            )
           )
         end
       end
 
       private
 
-      def claim_direct(store, job_id, analysis_sha:, now:, resolver:)
+      def claim_direct(store, job_id, analysis_sha:, now:, resolver:,
+                       transition: nil)
         store.claim_discovery!(
           job_id,
           owner: @context.owner,
@@ -247,34 +289,41 @@ module Hive
           lease_sec: @lease_sec,
           claim_resolver: resolver,
           owner_pid: @owner_pid,
-          owner_process_start_time: @owner_process_start_time
+          owner_process_start_time: @owner_process_start_time,
+          transition: transition
         )
       end
 
-      def release_direct(store, token, reason:, now:, backoff_sec:)
+      def release_direct(store, token, reason:, now:, backoff_sec:,
+                         transition: nil)
         store.release_discovery!(
           token,
           reason: reason,
           now: now,
-          backoff_sec: backoff_sec
+          backoff_sec: backoff_sec,
+          transition: transition
         )
       end
 
-      def checkpoint_direct(store, token, envelope:, now:, backoff_sec:)
+      def checkpoint_direct(store, token, envelope:, now:, backoff_sec:,
+                            transition: nil)
         store.checkpoint_discovery!(
           token,
           envelope: envelope,
           now: now,
-          backoff_sec: backoff_sec
+          backoff_sec: backoff_sec,
+          transition: transition
         )
       end
 
-      def checkpoint_progress_direct(store, token, envelope:, now:, lease_sec:)
+      def checkpoint_progress_direct(store, token, envelope:, now:, lease_sec:,
+                                     transition: nil)
         store.checkpoint_discovery_progress!(
           token,
           envelope: envelope,
           now: now,
-          lease_sec: lease_sec
+          lease_sec: lease_sec,
+          transition: transition
         )
       end
 
@@ -307,12 +356,10 @@ module Hive
         end.max.to_i + 1
       end
 
-      def claim_reconciliation(attempt, generation)
-        if @context.owned_active_attempt?(attempt)
-          {
-            "status" => "matched",
-            "outcome" => { "generation" => generation }
-          }
+      def claim_reconciliation(attempt, intent_id)
+        entry = transition_entry(attempt, intent_id)
+        if @context.owned_active_attempt?(attempt) && entry
+          TransitionEvidence.matched_result(entry)
         elsif attempt
           @context.ambiguous
         else
@@ -320,32 +367,10 @@ module Hive
         end
       end
 
-      def release_reconciliation(aggregate, attempt, reason)
-        if attempt && attempt["state"] == "released" &&
-           attempt["outcome"] == reason.to_s
-          @context.matched(aggregate)
-        elsif @context.active_attempt?(attempt)
-          @context.absent
-        else
-          @context.ambiguous
-        end
-      end
-
-      def checkpoint_reconciliation(aggregate, attempt, envelope)
-        if checkpoint_matches?(aggregate, attempt, envelope)
-          @context.matched(aggregate)
-        elsif @context.active_attempt?(attempt)
-          @context.absent
-        else
-          @context.ambiguous
-        end
-      end
-
-      def progress_reconciliation(aggregate, attempt, envelope)
-        if @context.active_attempt?(attempt) &&
-           aggregate.fetch("feature_results") ==
-             envelope.fetch("feature_results")
-          @context.matched(aggregate)
+      def transition_reconciliation(attempt, intent_id)
+        entry = transition_entry(attempt, intent_id)
+        if entry
+          TransitionEvidence.matched_result(entry)
         elsif @context.active_attempt?(attempt)
           @context.absent
         else
@@ -357,25 +382,32 @@ module Hive
         "#{@operation_prefix}#{name}"
       end
 
-      def checkpoint_matches?(aggregate, attempt, envelope)
-        return false unless attempt
+      def transition(intent, operation:, error_code: nil)
+        TransitionEvidence.record(
+          intent,
+          operation: operation,
+          error_code: error_code
+        )
+      end
 
-        expected_state = envelope.fetch("complete") ?
-          "complete" : "released"
-        expected_outcome = if envelope.fetch("complete")
-          aggregate.fetch("complete") ? "complete" : "classified"
-        else
-          "partial_review"
+      def rejection(store, token, operation:, now:)
+        lambda do |intent, _error, error_code|
+          store.record_discovery_transition_rejection!(
+            token,
+            transition: transition(
+              intent,
+              operation: operation,
+              error_code: error_code
+            ),
+            now: now
+          )
         end
-        attempt["state"] == expected_state &&
-          attempt["outcome"] == expected_outcome &&
-          aggregate.fetch("feature_results") ==
-            envelope.fetch("feature_results") &&
-          JobStore::DISPOSITIONS.all? do |name|
-            aggregate.dig("dispositions", name) == envelope.fetch(name)
-          end
-      rescue KeyError
-        false
+      end
+
+      def transition_entry(attempt, intent_id)
+        Array(attempt && attempt["transitions"]).find do |entry|
+          entry["intent_id"] == intent_id
+        end
       end
     end
   end

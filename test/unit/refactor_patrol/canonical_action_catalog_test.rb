@@ -1,3 +1,4 @@
+require "digest"
 require "test_helper"
 require "hive/refactor_patrol/canonical_action_catalog"
 
@@ -746,6 +747,9 @@ class RefactorPatrolCanonicalActionCatalogTest < Minitest::Test
       "schema" => Hive::RefactorPatrol::JobStore::SCHEMA,
       "schema_version" => Hive::RefactorPatrol::JobStore::SCHEMA_VERSION,
       "job_id" => job_id,
+      "occurrence_id" => "occ-#{Digest::SHA256.hexdigest(job_id)}",
+      "intake_transition_id" =>
+        "intent-#{Digest::SHA256.hexdigest("intake:#{job_id}")}",
       "source" => {
         "url" => "https://github.com/acme/demo/pull/7",
         "number" => 7,
@@ -794,6 +798,7 @@ class RefactorPatrolCanonicalActionCatalogTest < Minitest::Test
       "terminal" => terminal,
       "receipts" => receipts,
       "claims" => [],
+      "transitions" => [],
       "created_at" => T0.iso8601,
       "updated_at" => T0.iso8601
     }

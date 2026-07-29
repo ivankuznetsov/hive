@@ -3,13 +3,13 @@ title: hive refactor-patrol
 type: command
 source: lib/hive/commands/refactor_patrol.rb, lib/hive/refactor_patrol/*
 created: 2026-07-02
-updated: 2026-07-22
+updated: 2026-07-28
 tags: [command, refactor-patrol, architecture, json, daemon]
 ---
 
 **TLDR**: `hive refactor-patrol` is Hive's language-neutral architecture
 patrol. The original on-demand v1 report remains available, while merged-PR
-mode emits the current v3 report over a durable v2 job lifecycle: immutable PR
+mode emits the current v3 report over a durable v3 job lifecycle: immutable PR
 scope, read-only discovery,
 exhaustive dispositions, and separately authorized isolated fixes or
 deduplicated issues. It is not Ruby- or Hive-specific: discovery maps generic
@@ -24,7 +24,7 @@ stays report/issue-only with `public_contract_safety_unavailable`.
 hive refactor-patrol my-project --json
 hive refactor-patrol my-project --feature route-home --changed-since origin/main
 
-# Explicit merged-PR replay (v2)
+# Explicit merged-PR replay (v3)
 hive refactor-patrol my-project --pr 123 --json
 hive refactor-patrol my-project --pr https://github.com/acme/app/pull/123 --json
 
@@ -254,7 +254,7 @@ fingerprint is stale and the next tick removes it. Earlier crashes resume the
 page/intake cursor; write-once manifest/job intake makes replay idempotent.
 Malformed or identity-drifted progress is quarantined and blocks.
 
-The v2 job lifecycle is `queued → analyzing → classified → acting → complete`.
+The v3 job lifecycle is `queued → analyzing → classified → acting → complete`.
 Discovery and actions use generation-fenced claims renewed by exact
 PID/process-start heartbeats; workers without verifiable process identity do
 not claim work. `JobStore` remains the sole aggregate lock/read/write facade,
@@ -540,7 +540,7 @@ for only the incomplete slices. Hive never mixes snapshots or resets trunk.
 
 `hive refactor-patrol` remains the frozen 0.x serializer and recovery protocol
 for the first-party `architecture-patrol` module adapter. All public and
-daemon-internal modes continue to use the existing v2 jobs, immutable merge
+daemon-internal modes use v3 jobs, immutable merge
 manifests, claims, progress, quarantine, result transport, publication
 attempts, and global terminal proofs. Module scheduling and
 `pull_request.merged` admission do not add a second GitHub poller; the current
@@ -562,9 +562,9 @@ and thesis schema. V2 uses a separate namespace:
   reconciler.json               # exact-host catch-up checkpoint, schema v2
   reconciler-progress.json      # identity-bound page/intake cursor, schema v1
   manifests/<job-id>.json       # write-once source occurrence
-  jobs/<job-id>.json            # authoritative aggregate + claims/receipts
-  occurrences/records/occ-*.json # job-bound effect leases/outbox journal
-  occurrences/jobs/*.json       # immutable job -> occurrence binding
+  jobs/<job-id>.json            # v3 aggregate + immutable occurrence/transition ids
+  occurrences/records/occ-*.json # prepared/uncertain/terminal effects + outbox
+  job-schema-v3-migration.json  # completed bounded v2 -> v3 one-off migration
   families/<family-id>.json     # rebuildable semantic-family projection
   indexes/                      # rebuildable fingerprint/action indexes
   results/<dispatch-id>.json    # daemon completion channel; removed on reap

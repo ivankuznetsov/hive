@@ -1,6 +1,7 @@
-require "fileutils"
+require "digest"
 require "json"
-require "hive/atomic_file"
+require "hive/managed_directory"
+require "hive/modules/migration/bounded_file_inventory"
 require "hive/modules/migration/occurrence_record_validator"
 
 module Hive
@@ -10,38 +11,56 @@ module Hive
       class OccurrenceRecordStore
         include OccurrenceContract
 
+        MAX_HISTORY_RECORDS = 4_096
+        MAX_PAGE_SIZE = 256
+        RECORD_PATTERN = /\Aocc-[0-9a-f]{64}\.json\z/
+
         attr_reader :root
 
         def initialize(root:, validator:)
           @root = File.expand_path(root)
           @validator = validator
+          @directory = Hive::ManagedDirectory.new(
+            root: @root,
+            label: "patrol occurrence store"
+          )
         end
 
         def fetch(occurrence_id)
           id = @validator.occurrence_id(occurrence_id)
           with_lock(id, shared: true) do
-            path = occurrence_path(id)
-            next nil unless File.file?(path)
-
-            read(path, expected_id: id)
+            read_record(id, missing: true)
           end
         end
 
         def records
-          occurrence_paths.map do |path|
-            record = read(
-              path, expected_id: File.basename(path, ".json")
-            )
-            @validator.copy(record).freeze
-          end.freeze
+          each_record.to_a.freeze
+        end
+
+        def each_record
+          return enum_for(__method__) unless block_given?
+
+          inventory = record_inventory
+          snapshot = inventory.snapshot
+          inventory.each_name(
+            page_size: MAX_PAGE_SIZE,
+            snapshot: snapshot
+          ) do |name|
+            id = File.basename(name, ".json")
+            record = read_record(id)
+            yield @validator.copy(record).freeze
+          end
+          nil
         end
 
         def mutate(occurrence_id, create: false)
           id = @validator.occurrence_id(occurrence_id)
           with_lock(id) do
-            path = occurrence_path(id)
-            record = File.file?(path) ?
-              read(path, expected_id: id) : nil
+            name = record_name(id)
+            original = @directory.read(
+              name, max_bytes: MAX_RECORD_BYTES, missing: true
+            )
+            record = original && parse(original, expected_id: id)
             if record.nil? && !create
               malformed!("patrol occurrence is missing")
             end
@@ -55,19 +74,38 @@ module Hive
                 "patrol occurrence exceeds the bounded size"
               )
             end
-            Hive::AtomicFile.write(path, bytes, mode: 0o600)
-            Hive::AtomicFile.fsync_directory(File.dirname(path))
+            next replacement if bytes == original
+
+            @directory.atomic_write(
+              name,
+              bytes,
+              mode: 0o600,
+              expected_digest:
+                original && Digest::SHA256.hexdigest(original),
+              max_existing_bytes: MAX_RECORD_BYTES
+            )
             replacement
           end
-        rescue SystemCallError, IOError => e
+        rescue Hive::ManagedDirectory::UnsafeError,
+               SystemCallError, IOError => e
           raise Hive::ConfigError,
                 "patrol occurrence store is unavailable: #{e.message}"
         end
 
         private
 
-        def read(path, expected_id:)
-          bytes = bounded_regular_read(path)
+        def read_record(occurrence_id, missing: false)
+          bytes = @directory.read(
+            record_name(occurrence_id),
+            max_bytes: MAX_RECORD_BYTES,
+            missing: missing
+          )
+          return nil unless bytes
+
+          parse(bytes, expected_id: occurrence_id)
+        end
+
+        def parse(bytes, expected_id:)
           data = JSON.parse(bytes)
           unless bytes == @validator.canonical(data)
             malformed!("patrol occurrence is not canonical")
@@ -78,73 +116,34 @@ module Hive
           malformed!("patrol occurrence is malformed")
         end
 
-        def bounded_regular_read(path)
-          stat = File.lstat(path)
-          unless stat.file? && !stat.symlink? &&
-                 stat.size <= MAX_RECORD_BYTES
-            malformed!("patrol occurrence is malformed")
-          end
-          flags = File::RDONLY
-          flags |= File::NOFOLLOW if defined?(File::NOFOLLOW)
-          File.open(path, flags) do |io|
-            current = io.stat
-            unless current.file? &&
-                   current.dev == stat.dev &&
-                   current.ino == stat.ino
-              malformed!("patrol occurrence is malformed")
-            end
-            bytes = io.read(MAX_RECORD_BYTES + 1)
-            if bytes.nil? || bytes.bytesize > MAX_RECORD_BYTES
-              malformed!("patrol occurrence is malformed")
-            end
-            bytes
-          end
+        def record_inventory
+          BoundedFileInventory.new(
+            directory: @directory,
+            relative: ".",
+            filename_pattern: RECORD_PATTERN,
+            max_entries: MAX_HISTORY_RECORDS,
+            cursor_prefix: "patrol-occurrences-v1",
+            malformed_message: "patrol occurrence store is malformed",
+            overflow_message:
+              "patrol occurrence history exceeds the bounded limit",
+            missing: true,
+            ignore_unmatched: true
+          )
         end
 
-        def occurrence_paths
-          return [] unless File.exist?(root)
-
-          stat = File.lstat(root)
-          unless stat.directory? && !stat.symlink?
-            malformed!("patrol occurrence store is malformed")
-          end
-          paths = []
-          Dir.each_child(root) do |name|
-            next unless name.match?(
-              /\Aocc-[0-9a-f]{64}\.json\z/
-            )
-
-            paths << File.join(root, name)
-            if paths.size > 4_096
-              malformed!(
-                "patrol occurrence history exceeds the bounded limit"
-              )
-            end
-          end
-          paths.sort
-        rescue SystemCallError => e
+        def with_lock(occurrence_id, shared: false)
+          @directory.with_lock(
+            "#{record_name(occurrence_id)}.lock",
+            shared: shared
+          ) { yield }
+        rescue Hive::ManagedDirectory::UnsafeError,
+               SystemCallError, IOError => e
           raise Hive::ConfigError,
                 "patrol occurrence store is unavailable: #{e.message}"
         end
 
-        def with_lock(occurrence_id, shared: false)
-          FileUtils.mkdir_p(root, mode: 0o700)
-          File.open(
-            "#{occurrence_path(occurrence_id)}.lock",
-            File::RDWR | File::CREAT,
-            0o600
-          ) do |lock|
-            lock.flock(shared ? File::LOCK_SH : File::LOCK_EX)
-            yield
-          ensure
-            lock&.flock(File::LOCK_UN)
-          end
-        end
-
-        def occurrence_path(occurrence_id)
-          File.join(
-            root, "#{@validator.occurrence_id(occurrence_id)}.json"
-          )
+        def record_name(occurrence_id)
+          "#{@validator.occurrence_id(occurrence_id)}.json"
         end
 
         def malformed!(message)

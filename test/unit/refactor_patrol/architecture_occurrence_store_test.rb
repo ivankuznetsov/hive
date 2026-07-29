@@ -8,37 +8,11 @@ class RefactorPatrolArchitectureOccurrenceStoreTest < Minitest::Test
   CorruptRecord = Class.new(StandardError)
   InconsistentRecord = Class.new(StandardError)
 
-  class Binding
-    attr_accessor :record
-    attr_reader :writes
-
-    def initialize
-      @writes = []
-    end
-
-    def synchronize(_job_id)
-      yield
-    end
-
-    def fetch(_job_id)
-      record
-    end
-
-    def write(job_id, occurrence_id)
-      self.record = {
-        "job_id" => job_id,
-        "occurrence_id" => occurrence_id
-      }
-      writes << record
-      record
-    end
-  end
-
   class Journal
     METHODS = %i[
-      prepare_effect! effect_state acquire_effect!
-      mark_dispatch_uncertain! resolve_absent! settle_reconciled!
-      settle_claimed! deny_prepared! receipt effect_receipt_ids finalize!
+      prepare_effect! effect_state effect_intent mark_dispatch_uncertain!
+      reset_effect_prepared! settle_effect! deny_effect! receipt
+      effect_receipt_ids finalize!
     ].freeze
 
     attr_accessor :record, :outbox, :failure
@@ -64,9 +38,9 @@ class RefactorPatrolArchitectureOccurrenceStoreTest < Minitest::Test
       record
     end
 
-    def projection_pending
-      fail_if!(:projection_pending)
-      calls << [ :projection_pending ]
+    def recovery_active
+      fail_if!(:recovery_active)
+      calls << [ :recovery_active ]
       [ record ].compact
     end
 
@@ -80,6 +54,12 @@ class RefactorPatrolArchitectureOccurrenceStoreTest < Minitest::Test
       fail_if!(:acknowledge_outbox!)
       calls << [ :acknowledge_outbox!, occurrence_id, options ]
       true
+    end
+
+    def with_effect_sender_lock(intent)
+      fail_if!(:with_effect_sender_lock)
+      calls << [ :with_effect_sender_lock, intent ]
+      yield
     end
 
     METHODS.each do |method_name|
@@ -126,55 +106,47 @@ class RefactorPatrolArchitectureOccurrenceStoreTest < Minitest::Test
     end
   end
 
-  def test_facade_reserves_one_binding_and_delegates_effect_protocol
-    binding = Binding.new
+  def test_facade_reserves_job_owned_occurrence_and_delegates_effect_protocol
     journal = Journal.new
-    store = occurrence_store(binding: binding, journal: journal)
+    store = occurrence_store(journal: journal)
 
     assert_equal capture.occurrence_id,
                  store.reserve_manifest!(
                    manifest, capture: capture.to_h, now: NOW
                  ).fetch("occurrence_id")
-    assert_equal 1, binding.writes.size
     assert_equal capture.occurrence_id,
                  store.reserve!(
                    "job-7", capture: capture, now: NOW
                  ).fetch("occurrence_id")
-    assert_equal 1, binding.writes.size
     assert_equal capture.occurrence_id,
                  store.capture_for_job("job-7").occurrence_id
     assert_equal [ capture.occurrence_id ],
-                 store.projection_pending.map { |row| row.fetch("occurrence_id") }
+                 store.recovery_active.map { |row| row.fetch("occurrence_id") }
 
     assert_equal :prepare_effect!,
                  store.prepare_effect!(intent.to_h, now: NOW)
     assert_equal :effect_state, store.effect_state(intent)
-    assert_equal :acquire_effect!,
-                 store.acquire_effect!(
-                   intent, claimant: "worker", now: NOW, lease_sec: 10
+    assert_equal :effect_intent,
+                 store.effect_intent(
+                   capture.occurrence_id, intent.intent_id
                  )
+    assert_equal :locked,
+                 store.with_effect_sender_lock(intent) { :locked }
     assert_equal :mark_dispatch_uncertain!,
                  store.mark_dispatch_uncertain!(
-                   intent, token: "token", now: NOW
+                   intent, now: NOW
                  )
-    assert_equal :resolve_absent!,
-                 store.resolve_effect_absent!(
-                   intent, expected_generation: 1, outcome: {},
-                   receipt: receipt, now: NOW
+    assert_equal :reset_effect_prepared!,
+                 store.reset_effect_prepared!(
+                   intent, now: NOW
                  )
-    assert_equal :settle_reconciled!,
-                 store.settle_effect_reconciled!(
-                   intent, expected_generation: 1, outcome: {},
-                   receipt: receipt, now: NOW
+    assert_equal :settle_effect!,
+                 store.settle_effect!(
+                   intent, status: "committed", outcome: {}, now: NOW
                  )
-    assert_equal :settle_claimed!,
-                 store.settle_effect_claimed!(
-                   intent, token: "token", status: "committed",
-                   outcome: {}, receipt: receipt, now: NOW
-                 )
-    assert_equal :deny_prepared!,
+    assert_equal :deny_effect!,
                  store.deny_effect!(
-                   intent, outcome: {}, receipt: receipt, now: NOW
+                   intent, outcome: {}, now: NOW
                  )
     assert_equal :receipt,
                  store.effect_receipt(
@@ -190,23 +162,20 @@ class RefactorPatrolArchitectureOccurrenceStoreTest < Minitest::Test
                  )
   end
 
-  def test_binding_conflicts_and_product_scope_mismatches_fail_closed
-    binding = Binding.new
+  def test_job_pointer_conflicts_and_product_scope_mismatches_fail_closed
     journal = Journal.new
-    store = occurrence_store(binding: binding, journal: journal)
+    store = occurrence_store(journal: journal)
     store.reserve!("job-7", capture: capture, now: NOW)
 
-    binding.record = {
-      "job_id" => "job-7",
-      "occurrence_id" => "occ-#{'f' * 64}"
-    }
+    conflicting = occurrence_store(
+      journal: journal,
+      job_reader: ->(_job_id) {
+        job.merge("occurrence_id" => "occ-#{'f' * 64}")
+      }
+    )
     assert_raises(InconsistentRecord) do
-      store.reserve!("job-7", capture: capture, now: NOW)
+      conflicting.reserve!("job-7", capture: capture, now: NOW)
     end
-    binding.record = {
-      "job_id" => "job-7",
-      "occurrence_id" => capture.occurrence_id
-    }
 
     mismatched_manifest = manifest.merge(
       "source" => manifest.fetch("source").merge(
@@ -261,7 +230,6 @@ class RefactorPatrolArchitectureOccurrenceStoreTest < Minitest::Test
     end
 
     action_store = occurrence_store(
-      binding: binding,
       journal: journal,
       job_reader: ->(_job_id) {
         job.merge(
@@ -295,11 +263,6 @@ class RefactorPatrolArchitectureOccurrenceStoreTest < Minitest::Test
   end
 
   def test_outbox_projects_exact_types_and_refuses_ambiguous_entries
-    binding = Binding.new
-    binding.record = {
-      "job_id" => "job-7",
-      "occurrence_id" => capture.occurrence_id
-    }
     journal = Journal.new
     journal.record = {
       "occurrence_id" => capture.occurrence_id,
@@ -307,7 +270,7 @@ class RefactorPatrolArchitectureOccurrenceStoreTest < Minitest::Test
     }
     evidence = Evidence.new
     publisher = Publisher.new
-    store = occurrence_store(binding: binding, journal: journal)
+    store = occurrence_store(journal: journal)
     journal.outbox = [
       outbox("receipt", receipt.receipt_id, receipt.to_h),
       outbox("capture", capture.capture_id, capture.to_h),
@@ -366,46 +329,33 @@ class RefactorPatrolArchitectureOccurrenceStoreTest < Minitest::Test
   end
 
   def test_shared_config_errors_are_translated_at_every_product_port
-    binding = Binding.new
-    binding.record = {
-      "job_id" => "job-7",
-      "occurrence_id" => capture.occurrence_id
-    }
     journal = Journal.new
     journal.record = {
       "occurrence_id" => capture.occurrence_id,
       "provisional_capture" => capture.to_h
     }
-    store = occurrence_store(binding: binding, journal: journal)
+    store = occurrence_store(journal: journal)
 
     inconsistent_calls = {
       reserve!: -> { store.reserve!("job-7", capture: capture) },
       prepare_effect!: -> { store.prepare_effect!(intent) },
       effect_state: -> { store.effect_state(intent) },
-      acquire_effect!: -> {
-        store.acquire_effect!(intent, claimant: "worker")
+      with_effect_sender_lock: -> {
+        store.with_effect_sender_lock(intent) { :locked }
       },
       mark_dispatch_uncertain!: -> {
-        store.mark_dispatch_uncertain!(intent, token: "token")
+        store.mark_dispatch_uncertain!(intent)
       },
-      resolve_absent!: -> {
-        store.resolve_effect_absent!(
-          intent, expected_generation: 1, outcome: {}, receipt: receipt
+      reset_effect_prepared!: -> {
+        store.reset_effect_prepared!(intent)
+      },
+      settle_effect!: -> {
+        store.settle_effect!(
+          intent, status: "committed", outcome: {}
         )
       },
-      settle_reconciled!: -> {
-        store.settle_effect_reconciled!(
-          intent, expected_generation: 1, outcome: {}, receipt: receipt
-        )
-      },
-      settle_claimed!: -> {
-        store.settle_effect_claimed!(
-          intent, token: "token", status: "committed",
-          outcome: {}, receipt: receipt
-        )
-      },
-      deny_prepared!: -> {
-        store.deny_effect!(intent, outcome: {}, receipt: receipt)
+      deny_effect!: -> {
+        store.deny_effect!(intent, outcome: {})
       },
       finalize!: -> {
         store.finalize!(capture: capture, event: { "event_id" => "one" })
@@ -439,44 +389,21 @@ class RefactorPatrolArchitectureOccurrenceStoreTest < Minitest::Test
     end
   end
 
-  def test_binding_rejects_noncanonical_symlinked_and_unavailable_paths
-    with_tmp_dir do |root|
-      binding = real_binding(root)
-      assert_nil binding.fetch("job-7")
-      binding.synchronize("job-7") do
-        binding.write("job-7", "occ-#{'a' * 64}")
-      end
-      assert_equal "occ-#{'a' * 64}",
-                   binding.fetch("job-7").fetch("occurrence_id")
+  def test_sender_lock_does_not_reclassify_a_downstream_config_error
+    journal = Journal.new
+    store = occurrence_store(journal: journal)
+    error = Hive::ConfigError.new("downstream failed")
 
-      path = binding_path(root)
-      File.write(path, JSON.pretty_generate(JSON.parse(File.read(path))))
-      assert_raises(CorruptRecord) { binding.fetch("job-7") }
-
-      File.unlink(path)
-      target = File.join(root, "target.json")
-      File.write(target, "{}")
-      File.symlink(target, path)
-      assert_raises(CorruptRecord) { binding.fetch("job-7") }
-
-      File.unlink(path)
-      File.write(path, "{")
-      assert_raises(CorruptRecord) { binding.fetch("job-7") }
+    observed = assert_raises(Hive::ConfigError) do
+      store.with_effect_sender_lock(intent) { raise error }
     end
 
-    with_tmp_dir do |root|
-      blocked_root = File.join(root, "blocked")
-      File.write(blocked_root, "not a directory")
-      binding = real_binding(blocked_root)
-      assert_raises(CorruptRecord) do
-        binding.synchronize("job-7") { flunk "lock unexpectedly opened" }
-      end
-    end
+    assert_same error, observed
   end
 
   private
 
-  def occurrence_store(binding:, journal:, job_reader: ->(_job_id) { job })
+  def occurrence_store(journal:, job_reader: ->(_job_id) { job })
     Hive::RefactorPatrol::ArchitectureOccurrenceStore.new(
       root: "/unused",
       job_reader: job_reader,
@@ -487,21 +414,8 @@ class RefactorPatrolArchitectureOccurrenceStoreTest < Minitest::Test
       end,
       corrupt_record: CorruptRecord,
       inconsistent_record: InconsistentRecord,
-      binding: binding,
       journal: journal
     )
-  end
-
-  def real_binding(root)
-    Hive::RefactorPatrol::ArchitectureOccurrenceBinding.new(
-      root: root,
-      id_validator: ->(job_id) { job_id },
-      corrupt_record: CorruptRecord
-    )
-  end
-
-  def binding_path(root)
-    File.join(root, "occurrences", "jobs", "job-7.json")
   end
 
   def manifest
@@ -602,6 +516,7 @@ class RefactorPatrolArchitectureOccurrenceStoreTest < Minitest::Test
 
   def job
     {
+      "occurrence_id" => capture.occurrence_id,
       "source" => {
         "registration" => "demo",
         "repository" => "owner/demo"

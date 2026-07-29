@@ -27,12 +27,11 @@ class RefactorPatrolEffectGatewayTest < Minitest::Test
     end
   end
 
-  def test_expired_uncertainty_requires_exact_reconciliation_and_never_blindly_retries
+  def test_crashed_uncertainty_requires_exact_reconciliation
     with_tmp_dir do |root|
       store, evidence = delivery(root)
       first = gateway(
-        root, store: store, evidence: evidence, lease_sec: 1,
-        claimant: "sender-one"
+        root, store: store, evidence: evidence
       )
       sink_calls = 0
 
@@ -41,8 +40,7 @@ class RefactorPatrolEffectGatewayTest < Minitest::Test
       end
 
       second = gateway(
-        root, store: store, evidence: evidence, now: NOW + 2,
-        lease_sec: 1, claimant: "sender-two"
+        root, store: store, evidence: evidence, now: NOW + 2
       )
       error = assert_raises(
         Hive::RefactorPatrol::EffectGateway::ReconciliationRequired
@@ -66,12 +64,11 @@ class RefactorPatrolEffectGatewayTest < Minitest::Test
     end
   end
 
-  def test_exact_absence_is_durable_before_one_fresh_sender_is_granted
+  def test_remote_absence_does_not_authorize_a_retry
     with_tmp_dir do |root|
       store, evidence = delivery(root)
       first = gateway(
-        root, store: store, evidence: evidence, lease_sec: 1,
-        claimant: "sender-one"
+        root, store: store, evidence: evidence
       )
       assert_raises(RuntimeError) do
         perform(first) { raise "crash before remote send" }
@@ -79,41 +76,46 @@ class RefactorPatrolEffectGatewayTest < Minitest::Test
 
       sink_calls = 0
       second = gateway(
-        root, store: store, evidence: evidence, now: NOW + 2,
-        lease_sec: 1, claimant: "sender-two"
+        root, store: store, evidence: evidence, now: NOW + 2
       )
-      result = perform(
-        second,
-        reconcile: ->(_intent) {
-          { "status" => "absent", "outcome" => { "remote" => "absent" } }
-        }
+      error = assert_raises(
+        Hive::RefactorPatrol::EffectGateway::ReconciliationRequired
       ) do
-        sink_calls += 1
-        { "issue_url" => "https://github.com/owner/demo/issues/7" }
+        perform(
+          second,
+          reconcile: ->(_intent) {
+            { "status" => "absent", "outcome" => { "remote" => "absent" } }
+          }
+        ) do
+          sink_calls += 1
+          { "issue_url" => "https://github.com/owner/demo/issues/7" }
+        end
       end
 
-      assert_equal :committed, result.status
-      assert_equal 1, sink_calls
-      assert_equal "committed", effect_state(store).fetch("state")
-      assert_equal %w[known_not_sent committed],
-                   evidence.receipts.map(&:status)
+      assert_equal "remote_absence_not_retry_safe", error.reason
+      assert_equal 0, sink_calls
+      assert_equal "dispatch_uncertain", effect_state(store).fetch("state")
+      assert_empty evidence.receipts
     end
   end
 
-  def test_only_one_concurrent_sender_holds_the_per_intent_lease
+  def test_only_one_concurrent_sender_invokes_the_external_effect
     with_tmp_dir do |root|
       store, evidence = delivery(root)
       entered = Queue.new
       release = Queue.new
       first = gateway(
-        root, store: store, evidence: evidence, claimant: "sender-one"
+        root, store: store, evidence: evidence
       )
       second = gateway(
-        root, store: store, evidence: evidence, claimant: "sender-two"
+        root, store: store, evidence: evidence
       )
       first_result = nil
+      second_result = nil
+      sink_calls = 0
       worker = Thread.new do
         first_result = perform(first) do
+          sink_calls += 1
           entered << true
           release.pop
           { "issue_url" => "https://github.com/owner/demo/issues/7" }
@@ -121,20 +123,26 @@ class RefactorPatrolEffectGatewayTest < Minitest::Test
       end
       entered.pop
 
-      error = assert_raises(
-        Hive::RefactorPatrol::EffectGateway::ReconciliationRequired
-      ) do
-        perform(second) { flunk "the second sender must not run" }
+      contender = Thread.new do
+        second_result = perform(second) do
+          sink_calls += 1
+          flunk "the second sender must not run"
+        end
       end
-      assert_equal "active_sender_lease", error.reason
+      Thread.pass
+      assert_predicate contender, :alive?
 
       release << true
       worker.join
+      contender.join
       assert_equal :committed, first_result.status
+      assert_equal first_result.receipt.to_h, second_result.receipt.to_h
+      assert_equal 1, sink_calls
       assert_equal 1, evidence.receipts.size
     ensure
       release << true if worker&.alive?
       worker&.join
+      contender&.join
     end
   end
 
@@ -185,8 +193,7 @@ class RefactorPatrolEffectGatewayTest < Minitest::Test
     [ store, Evidence.new ]
   end
 
-  def gateway(root, store:, evidence:, claim_valid: true, now: NOW,
-              lease_sec: 300, claimant: "sender")
+  def gateway(root, store:, evidence:, claim_valid: true, now: NOW)
     Hive::RefactorPatrol::EffectGateway.new(
       project_root: root,
       hive_state_path: File.join(root, ".hive-state"),
@@ -203,9 +210,7 @@ class RefactorPatrolEffectGatewayTest < Minitest::Test
       },
       capability_checker: ->(**) { true },
       claim_validator: ->(**) { claim_valid },
-      clock: -> { now },
-      lease_sec: lease_sec,
-      claimant: claimant
+      clock: -> { now }
     )
   end
 
@@ -269,8 +274,10 @@ class RefactorPatrolEffectGatewayTest < Minitest::Test
   def job
     {
       "schema" => "hive-refactor-patrol-job",
-      "schema_version" => 2,
+      "schema_version" => Hive::RefactorPatrol::JobStore::SCHEMA_VERSION,
       "job_id" => "job-7",
+      "occurrence_id" => capture.occurrence_id,
+      "intake_transition_id" => "intent-#{'1' * 64}",
       "source" => {
         "url" => "https://github.com/owner/demo/pull/7",
         "number" => 7,

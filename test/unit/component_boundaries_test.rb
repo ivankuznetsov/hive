@@ -108,6 +108,39 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal [ "U3" ],
                  patrol_effects.fetch("migration_exceptions")
                    .map { |entry| entry.fetch("removal_unit") }
+    refute_empty patrol_effects.fetch("forbidden_constructions")
+    %w[
+      Hive::Modules::Migration::OccurrenceJournal
+      Hive::Patrol::EffectGateway
+      Hive::RefactorPatrol::ActionTransitions
+      Hive::RefactorPatrol::ArchitectureIntakeTransitions
+      Hive::RefactorPatrol::ClaimMaintenanceTransitions
+      Hive::RefactorPatrol::DiscoveryTransitions
+      Hive::RefactorPatrol::JobStore
+      Hive::RefactorPatrol::TransitionGateway
+    ].each do |constant|
+      assert_includes patrol_effects.fetch("forbidden_constructions"),
+                      constant
+    end
+    authorizations = patrol_effects.fetch(
+      "authorized_internal_constructions"
+    ).to_h do |entry|
+      [ entry.fetch("constant"), entry.fetch("files") ]
+    end
+    assert_equal(
+      [
+        "lib/hive/commands/refactor_patrol.rb",
+        "lib/hive/daemon/refactor_patrol_scheduler.rb"
+      ],
+      authorizations.fetch(
+        "Hive::RefactorPatrol::ClaimMaintenanceTransitions"
+      )
+    )
+    refute_includes(
+      patrol_effects.to_s,
+      "ArchitectureOccurrenceBinding",
+      "the deleted compatibility store must not survive in the component contract"
+    )
 
     ready_components = [ user_service ]
 
@@ -328,6 +361,61 @@ class ComponentBoundariesTest < Minitest::Test
                  "Hive production consumers must require hive/agent_skills: #{offenders.join(', ')}"
   end
 
+  def test_job_store_semantic_mutations_stay_behind_transition_ports
+    semantic_mutators = %w[
+      enqueue_manifest!
+      block_actions!
+      claim_discovery!
+      attach_discovery_process!
+      renew_discovery_claim!
+      release_discovery!
+      block_discovery!
+      checkpoint_discovery!
+      checkpoint_discovery_progress!
+      record_discovery_transition_rejection!
+      record_job_transition_rejection!
+      initialize_actions!
+      materialize_terminal_proof!
+      claim_action!
+      attach_action_process!
+      renew_action_claim!
+      record_creation_intent!
+      record_action_receipt!
+      record_patch_receipt!
+      record_patch_publication_attempt!
+      record_publication_attempt_phase!
+      supersede_publication_attempt!
+      record_fix_receipt!
+      finish_action!
+      release_action!
+      record_action_transition_rejection!
+      reconcile_linked_action!
+      write_job!
+    ]
+    allowed = %w[
+      lib/hive/refactor_patrol/action_claim_transitions.rb
+      lib/hive/refactor_patrol/action_plan_transitions.rb
+      lib/hive/refactor_patrol/architecture_intake_transitions.rb
+      lib/hive/refactor_patrol/claim_maintenance_transitions.rb
+      lib/hive/refactor_patrol/discovery_block_transitions.rb
+      lib/hive/refactor_patrol/discovery_claim_transitions.rb
+    ]
+    call = /\.(?:#{semantic_mutators.map { |name| Regexp.escape(name) }.join('|')})(?![a-zA-Z0-9_!?])/
+    offenders = Dir.glob(
+      File.join(ROOT, "lib", "hive", "**", "*.rb")
+    ).sort.filter_map do |path|
+      relative = path.delete_prefix("#{ROOT}/")
+      next if relative == "lib/hive/refactor_patrol/job_store.rb"
+      next if allowed.include?(relative)
+
+      relative if File.read(path).match?(call)
+    end
+
+    assert_empty offenders,
+                 "JobStore semantic mutations must use transition ports: " \
+                 "#{offenders.join(', ')}"
+  end
+
   def test_production_consumers_do_not_require_managed_git_directly
     owned = contract_component_owned_files("safe-agent-git-gate")
     offenders = Dir.glob(File.join(ROOT, "lib", "hive", "**", "*.rb")).filter_map do |path|
@@ -381,7 +469,7 @@ class ComponentBoundariesTest < Minitest::Test
     end
     occurrence_writers = occurrence_sources.filter_map do |path, source|
       path if source.match?(
-        /AtomicFile\.write|File\.(?:write|rename)/
+        /AtomicFile\.write|File\.(?:write|rename)|\.atomic_write\(/
       )
     end
     assert_equal(

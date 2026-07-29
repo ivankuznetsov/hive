@@ -56,13 +56,12 @@ class PatrolEffectGatewayTest < Minitest::Test
     end
   end
 
-  def test_expired_uncertainty_is_reconciliation_only
+  def test_crashed_remote_dispatch_is_reconciliation_only
     with_tmp_dir do |root|
       operations = []
       store, evidence = delivery(root, operations)
       first = gateway(
-        root, store: store, evidence: evidence, operations: operations,
-        lease_sec: 1, claimant: "sender-one"
+        root, store: store, evidence: evidence, operations: operations
       )
       assert_raises(RuntimeError) do
         perform(first) { raise "crash at send boundary" }
@@ -70,7 +69,7 @@ class PatrolEffectGatewayTest < Minitest::Test
       calls = 0
       second = gateway(
         root, store: store, evidence: evidence, operations: operations,
-        now: NOW + 2, lease_sec: 1, claimant: "sender-two"
+        now: NOW + 2
       )
 
       error = assert_raises(
@@ -218,7 +217,7 @@ class PatrolEffectGatewayTest < Minitest::Test
       operations << :uncertain
       super(intent, **options)
     end
-    instrumentation.define_method(:settle_effect_claimed!) do |intent, **options|
+    instrumentation.define_method(:settle_effect!) do |intent, **options|
       operations << :outcome
       super(intent, **options)
     end
@@ -227,8 +226,7 @@ class PatrolEffectGatewayTest < Minitest::Test
   end
 
   def gateway(root, store:, evidence:, operations:, authority: "legacy",
-              capability_allowed: true, owner_epoch: 1, now: NOW,
-              lease_sec: 300, claimant: "sender")
+              capability_allowed: true, owner_epoch: 1, now: NOW)
     Hive::Patrol::EffectGateway.new(
       project_root: root,
       hive_state_path: File.join(root, ".hive-state"),
@@ -256,9 +254,7 @@ class PatrolEffectGatewayTest < Minitest::Test
         operations << :capability_check
         capability_allowed
       end,
-      clock: -> { now },
-      lease_sec: lease_sec,
-      claimant: claimant
+      clock: -> { now }
     )
   end
 

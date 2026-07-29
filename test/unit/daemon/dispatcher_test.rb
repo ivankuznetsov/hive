@@ -148,7 +148,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
   end
 
   class FakePatrolScheduler
-    attr_accessor :next_dispatches
+    attr_accessor :next_dispatches, :events
     attr_reader :completed, :cancelled, :reserved
 
     def initialize
@@ -156,6 +156,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       @completed = []
       @cancelled = []
       @reserved = []
+      @events = []
     end
 
     def tick(now:)
@@ -181,6 +182,12 @@ class HiveDaemonDispatcherTest < Minitest::Test
     def reserve(candidate, now:)
       @reserved << { candidate: candidate, now: now }
       candidate
+    end
+
+    def drain_events
+      drained = events.dup
+      events.clear
+      drained
     end
   end
 
@@ -2389,6 +2396,32 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal "patrol", sup.spawned.first[:stage]
     event = logger.events.find { |(name, attrs)| name == :dispatched && attrs[:trigger] == "patrol" }
     refute_nil event
+  end
+
+  def test_patrol_recovery_diagnostics_are_forwarded_to_the_daemon_log
+    dispatcher, _sup, _ctrl, logger, _mw, patrol = make_dispatcher(
+      rows: [], with_patrol_scheduler: true
+    )
+    patrol.events << {
+      status: :blocked,
+      project: "p1",
+      occurrence_id: "occ-1",
+      recovery: "occurrence_outbox_projection",
+      blocker: "recovery_failed",
+      retry_count: 1,
+      retry_in_sec: 60,
+      retry_at: (T0 + 60).utc.iso8601
+    }
+
+    dispatcher.tick(now: T0)
+
+    event = logger.events.find do |name, attrs|
+      name == :patrol_recovery_blocked &&
+        attrs[:occurrence_id] == "occ-1"
+    end
+    refute_nil event
+    refute event.last.key?(:status)
+    assert_equal 60, event.last.fetch(:retry_in_sec)
   end
 
   def test_patrol_dispatch_skips_when_project_disabled

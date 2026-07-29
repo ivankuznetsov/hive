@@ -14,7 +14,7 @@ class RefactorPatrolArchitectureIntakeTransitionsTest < Minitest::Test
 
     def perform!(**options)
       @perform_options = options
-      yield
+      yield Struct.new(:intent_id).new("intent-#{'1' * 64}")
     end
   end
 
@@ -30,7 +30,10 @@ class RefactorPatrolArchitectureIntakeTransitionsTest < Minitest::Test
     def prepare_effect!(*) = true
 
     def occurrence_capture(_job_id)
-      capture
+      return capture if capture
+
+      raise Hive::RefactorPatrol::JobStore::RecordNotFound,
+            "job is not enrolled yet"
     end
 
     def reserve_manifest_occurrence!(manifest, capture:, **options)
@@ -108,8 +111,8 @@ class RefactorPatrolArchitectureIntakeTransitionsTest < Minitest::Test
                  store.reservations.dig(0, 1).occurrence_id
     assert_equal "queued", result.fetch("state")
     gateway = gateways.fetch(0)
-    assert_equal "architecture-intake-test",
-                 gateway.constructor_options.fetch(:claimant)
+    refute gateway.constructor_options.key?(:claimant)
+    assert_equal NOW, gateway.constructor_options.fetch(:clock).call
     assert_equal manifest.fetch("job_id"),
                  gateway.perform_options.fetch(:target)
     assert gateway.perform_options.fetch(:claim_validator).call
@@ -208,7 +211,6 @@ class RefactorPatrolArchitectureIntakeTransitionsTest < Minitest::Test
         { "owner" => "legacy", "epoch" => 1, "admission" => true }
       },
       evidence_store_factory: ->(_entry) { Object.new },
-      claimant: "architecture-intake-test",
       admission_error: admission_error,
       gateway_factory: gateway_factory
     )

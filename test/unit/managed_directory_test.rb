@@ -174,24 +174,20 @@ class ManagedDirectoryTest < Minitest::Test
       )
       target = File.join(root, "record")
       File.write(target, "before")
-      original_open = File.method(:open)
+      native = directory.instance_variable_get(:@native)
+      original_open = native.method(:open_file)
 
       with_replaced_singleton_method(
-        File,
-        :open,
-        lambda do |path, *arguments, **keywords, &block|
-          unless File.basename(path).start_with?(".record.tmp.")
-            next original_open.call(
-              path, *arguments, **keywords, &block
-            )
+        native,
+        :open_file,
+        lambda do |parent, name, flags, mode: nil|
+          result = original_open.call(parent, name, flags, mode: mode)
+          if name.start_with?(".record.tmp.")
+            File.open(
+              target,
+              File::WRONLY | File::TRUNC
+            ) { |file| file.write("raced!") }
           end
-
-          result = original_open.call(
-            path, *arguments, **keywords, &block
-          )
-          original_open.call(
-            target, File::WRONLY | File::TRUNC
-          ) { |file| file.write("raced!") }
           result
         end
       ) do
@@ -209,6 +205,224 @@ class ManagedDirectoryTest < Minitest::Test
       names = Dir.children(root)
       refute names.any? { |name| name.start_with?(".record.tmp.") },
              names.inspect
+    end
+  end
+
+  def test_atomic_write_does_not_follow_a_substituted_parent
+    with_tmp_dir do |anchor|
+      root = File.join(anchor, "state")
+      outside = File.join(anchor, "outside")
+      FileUtils.mkdir_p(outside)
+      directory = Hive::ManagedDirectory.new(
+        root: root, anchor: anchor, label: "test state"
+      )
+      directory.ensure_directory("nested")
+      parent = File.join(root, "nested")
+      parked = File.join(root, "nested.parked")
+      target = File.join(parent, "record")
+      sentinel = File.join(outside, "record")
+      File.write(sentinel, "external sentinel")
+      sentinel_before = file_identity_and_digest(sentinel)
+      original_rename = File.method(:rename)
+      native = directory.instance_variable_get(:@native)
+      original_renameat = native.method(:renameat)
+      substituted = false
+
+      begin
+        with_replaced_singleton_method(
+          native,
+          :renameat,
+          lambda do |source_parent, source_name, target_parent, target_name|
+            if target_name == File.basename(target)
+              original_rename.call(parent, parked)
+              File.symlink(outside, parent)
+              substituted = true
+            end
+            original_renameat.call(
+              source_parent,
+              source_name,
+              target_parent,
+              target_name
+            )
+          end
+        ) do
+          assert_raises(Hive::ConfigError) do
+            directory.atomic_write("nested/record", "managed content")
+          end
+        end
+
+        assert substituted
+        assert_equal sentinel_before, file_identity_and_digest(sentinel)
+      ensure
+        File.unlink(parent) if File.symlink?(parent)
+        original_rename.call(parked, parent) if File.directory?(parked)
+      end
+    end
+  end
+
+  def test_temporary_creation_and_cleanup_stay_in_the_opened_parent
+    with_tmp_dir do |anchor|
+      root = File.join(anchor, "state")
+      outside = File.join(anchor, "outside")
+      FileUtils.mkdir_p(outside)
+      directory = Hive::ManagedDirectory.new(
+        root: root, anchor: anchor, label: "test state"
+      )
+      directory.ensure_directory("nested")
+      parent = File.join(root, "nested")
+      parked = File.join(root, "nested.parked")
+      native = directory.instance_variable_get(:@native)
+      original_open = native.method(:open_file)
+      original_rename = File.method(:rename)
+      identity_reader = method(:file_identity_and_digest)
+      external_temporary = {}
+
+      begin
+        with_replaced_singleton_method(
+          native,
+          :open_file,
+          lambda do |descriptor, name, flags, mode: nil|
+            if name.start_with?(".record.tmp.") && external_temporary.empty?
+              original_rename.call(parent, parked)
+              File.symlink(outside, parent)
+              external_temporary[:path] = File.join(outside, name)
+              File.write(external_temporary.fetch(:path), "external sentinel")
+              external_temporary[:identity] =
+                identity_reader.call(external_temporary.fetch(:path))
+            end
+            original_open.call(descriptor, name, flags, mode: mode)
+          end
+        ) do
+          assert_raises(Hive::ConfigError) do
+            directory.atomic_write("nested/record", "managed content")
+          end
+        end
+
+        refute_empty external_temporary
+        assert_equal external_temporary.fetch(:identity),
+                     file_identity_and_digest(external_temporary.fetch(:path))
+      ensure
+        File.unlink(parent) if File.symlink?(parent)
+        original_rename.call(parked, parent) if File.directory?(parked)
+      end
+
+      refute Dir.children(parent).any? { |name| name.start_with?(".record.tmp.") }
+    end
+  end
+
+  def test_read_and_lock_stay_in_the_opened_parent
+    with_tmp_dir do |anchor|
+      root = File.join(anchor, "state")
+      outside = File.join(anchor, "outside")
+      FileUtils.mkdir_p(outside)
+      directory = Hive::ManagedDirectory.new(
+        root: root, anchor: anchor, label: "test state"
+      )
+      directory.ensure_directory("nested")
+      parent = File.join(root, "nested")
+      parked = File.join(root, "nested.parked")
+      managed_record = File.join(parent, "record")
+      external_record = File.join(outside, "record")
+      File.write(managed_record, "managed content")
+      File.write(external_record, "external sentinel")
+      sentinel_before = file_identity_and_digest(external_record)
+      native = directory.instance_variable_get(:@native)
+      original_open = native.method(:open_file)
+      original_rename = File.method(:rename)
+
+      begin
+        substituted = false
+        with_replaced_singleton_method(
+          native,
+          :open_file,
+          lambda do |descriptor, name, flags, mode: nil|
+            if name == "record" && !substituted
+              original_rename.call(parent, parked)
+              File.symlink(outside, parent)
+              substituted = true
+            end
+            original_open.call(descriptor, name, flags, mode: mode)
+          end
+        ) do
+          assert_raises(Hive::ConfigError) do
+            directory.read("nested/record", max_bytes: 32)
+          end
+        end
+        assert substituted
+        assert_equal sentinel_before, file_identity_and_digest(external_record)
+      ensure
+        File.unlink(parent) if File.symlink?(parent)
+        original_rename.call(parked, parent) if File.directory?(parked)
+      end
+
+      external_lock = File.join(outside, "state.lock")
+      File.write(external_lock, "external lock sentinel")
+      lock_before = file_identity_and_digest(external_lock)
+      yielded = false
+      begin
+        substituted = false
+        with_replaced_singleton_method(
+          native,
+          :open_file,
+          lambda do |descriptor, name, flags, mode: nil|
+            if name == "state.lock" && !substituted
+              original_rename.call(parent, parked)
+              File.symlink(outside, parent)
+              substituted = true
+            end
+            original_open.call(descriptor, name, flags, mode: mode)
+          end
+        ) do
+          assert_raises(Hive::ConfigError) do
+            directory.with_lock("nested/state.lock") { yielded = true }
+          end
+        end
+        assert substituted
+        refute yielded
+        assert_equal lock_before, file_identity_and_digest(external_lock)
+      ensure
+        File.unlink(parent) if File.symlink?(parent)
+        original_rename.call(parked, parent) if File.directory?(parked)
+      end
+    end
+  end
+
+  def test_nested_operations_reuse_the_lock_descriptor_session
+    with_tmp_dir do |root|
+      directory = Hive::ManagedDirectory.new(root: root, label: "test state")
+      native = directory.instance_variable_get(:@native)
+      original_open = native.method(:open_absolute_directory)
+      anchor_opens = 0
+
+      with_replaced_singleton_method(
+        native,
+        :open_absolute_directory,
+        lambda do |path|
+          anchor_opens += 1
+          original_open.call(path)
+        end
+      ) do
+        directory.with_lock("state.lock") do
+          directory.atomic_write("record", "nested")
+          assert_equal "nested", directory.read("record", max_bytes: 6)
+        end
+      end
+
+      assert_equal 1, anchor_opens
+      assert_nil Thread.current[:hive_managed_directory_sessions]
+    end
+  end
+
+  def test_missing_root_does_not_leak_the_session_registry
+    with_tmp_dir do |anchor|
+      directory = Hive::ManagedDirectory.new(
+        root: File.join(anchor, "missing"),
+        anchor: anchor,
+        label: "test state"
+      )
+
+      assert_nil directory.read("record", max_bytes: 1, missing: true)
+      assert_nil Thread.current[:hive_managed_directory_sessions]
     end
   end
 
@@ -251,6 +465,55 @@ class ManagedDirectoryTest < Minitest::Test
     end
   end
 
+  def test_unlink_does_not_follow_a_substituted_parent
+    with_tmp_dir do |anchor|
+      root = File.join(anchor, "state")
+      outside = File.join(anchor, "outside")
+      FileUtils.mkdir_p(outside)
+      directory = Hive::ManagedDirectory.new(
+        root: root, anchor: anchor, label: "test state"
+      )
+      directory.ensure_directory("nested")
+      parent = File.join(root, "nested")
+      parked = File.join(root, "nested.parked")
+      target = File.join(parent, "record")
+      sentinel = File.join(outside, "record")
+      File.write(target, "managed content")
+      File.write(sentinel, "external sentinel")
+      sentinel_before = file_identity_and_digest(sentinel)
+      original_unlink = File.method(:unlink)
+      original_rename = File.method(:rename)
+      native = directory.instance_variable_get(:@native)
+      original_unlinkat = native.method(:unlinkat)
+      substituted = false
+
+      begin
+        with_replaced_singleton_method(
+          native,
+          :unlinkat,
+          lambda do |target_parent, name|
+            if name == File.basename(target)
+              original_rename.call(parent, parked)
+              File.symlink(outside, parent)
+              substituted = true
+            end
+            original_unlinkat.call(target_parent, name)
+          end
+        ) do
+          assert_raises(Hive::ConfigError) do
+            directory.unlink("nested/record")
+          end
+        end
+
+        assert substituted
+        assert_equal sentinel_before, file_identity_and_digest(sentinel)
+      ensure
+        original_unlink.call(parent) if File.symlink?(parent)
+        original_rename.call(parked, parent) if File.directory?(parked)
+      end
+    end
+  end
+
   def test_successful_unlink_fsyncs_its_verified_parent
     with_tmp_dir do |root|
       directory = Hive::ManagedDirectory.new(
@@ -258,13 +521,16 @@ class ManagedDirectoryTest < Minitest::Test
       )
       File.write(File.join(root, "record"), "retire")
       calls = []
-      directory.define_singleton_method(:fsync_directory) do |path, stat|
-        calls << [ path, stat.dev, stat.ino ]
+      native = directory.instance_variable_get(:@native)
+      native.define_singleton_method(:fsync_directory) do |parent|
+        stat = IO.for_fd(parent.fileno, autoclose: false).stat
+        calls << [ stat.dev, stat.ino ]
       end
 
       assert directory.unlink("record")
       assert_equal 1, calls.size
-      assert_equal root, calls.first.first
+      root_stat = File.stat(root)
+      assert_equal [ root_stat.dev, root_stat.ino ], calls.first
     end
   end
 
@@ -300,28 +566,28 @@ class ManagedDirectoryTest < Minitest::Test
         anchor: anchor,
         label: "test state"
       )
-      original_mkdir = Dir.method(:mkdir)
+      native = directory.instance_variable_get(:@native)
+      original_mkdir = native.method(:mkdirat)
       with_replaced_singleton_method(
-        Dir,
-        :mkdir,
-        lambda do |path, *arguments|
-          raise Errno::EIO, path if path == root
+        native,
+        :mkdirat,
+        lambda do |parent, name, mode|
+          raise Errno::EIO, name if name == "state"
 
-          original_mkdir.call(path, *arguments)
+          original_mkdir.call(parent, name, mode)
         end
       ) do
         assert_raises(Hive::ConfigError) { directory.prepare! }
       end
 
       directory.prepare!
-      nested = File.join(root, "nested")
       with_replaced_singleton_method(
-        Dir,
-        :mkdir,
-        lambda do |path, *arguments|
-          raise Errno::EIO, path if path == nested
+        native,
+        :mkdirat,
+        lambda do |parent, name, mode|
+          raise Errno::EIO, name if name == "nested"
 
-          original_mkdir.call(path, *arguments)
+          original_mkdir.call(parent, name, mode)
         end
       ) do
         assert_raises(Hive::ConfigError) do
@@ -329,14 +595,14 @@ class ManagedDirectoryTest < Minitest::Test
         end
       end
 
-      original_dir_open = Dir.method(:open)
+      original_dir_open = native.method(:open_directory)
       with_replaced_singleton_method(
-        Dir,
-        :open,
-        lambda do |path, *arguments, &block|
-          raise Errno::EIO, path if path == root
+        native,
+        :open_directory,
+        lambda do |parent, name|
+          raise Errno::EIO, name if name == "."
 
-          original_dir_open.call(path, *arguments, &block)
+          original_dir_open.call(parent, name)
         end
       ) do
         assert_raises(Hive::ConfigError) do
@@ -345,14 +611,14 @@ class ManagedDirectoryTest < Minitest::Test
       end
 
       directory.atomic_write("record", "data")
-      original_file_open = File.method(:open)
+      original_file_open = native.method(:open_file)
       with_replaced_singleton_method(
-        File,
-        :open,
-        lambda do |path, *arguments, **keywords, &block|
-          raise Errno::EIO, path if path == File.join(root, "record")
+        native,
+        :open_file,
+        lambda do |parent, name, flags, mode: nil|
+          raise Errno::EIO, name if name == "record"
 
-          original_file_open.call(path, *arguments, **keywords, &block)
+          original_file_open.call(parent, name, flags, mode: mode)
         end
       ) do
         assert_raises(Hive::ConfigError) do
@@ -360,14 +626,19 @@ class ManagedDirectoryTest < Minitest::Test
         end
       end
 
-      original_rename = File.method(:rename)
+      original_rename = native.method(:renameat)
       with_replaced_singleton_method(
-        File,
-        :rename,
-        lambda do |source, destination|
-          raise Errno::EIO, destination if destination == File.join(root, "next")
+        native,
+        :renameat,
+        lambda do |source_parent, source_name, target_parent, target_name|
+          raise Errno::EIO, target_name if target_name == "next"
 
-          original_rename.call(source, destination)
+          original_rename.call(
+            source_parent,
+            source_name,
+            target_parent,
+            target_name
+          )
         end
       ) do
         assert_raises(Hive::ConfigError) do
@@ -377,14 +648,20 @@ class ManagedDirectoryTest < Minitest::Test
       refute Dir.children(root).any? { |name| name.include?(".next.json.tmp.") }
       refute Dir.children(root).any? { |name| name.start_with?(".next.tmp.") }
 
-      lock_path = File.join(root, "broken.lock")
-      with_replaced_singleton_method(
-        File,
-        :open,
-        lambda do |path, *arguments, **keywords, &block|
-          raise Errno::EIO, path if path == lock_path
+      invalid_content = Object.new
+      invalid_content.define_singleton_method(:to_s) { raise TypeError }
+      assert_raises(Hive::ConfigError) do
+        directory.atomic_write("invalid", invalid_content)
+      end
+      refute Dir.children(root).any? { |name| name.start_with?(".invalid.tmp.") }
 
-          original_file_open.call(path, *arguments, **keywords, &block)
+      with_replaced_singleton_method(
+        native,
+        :open_file,
+        lambda do |parent, name, flags, mode: nil|
+          raise Errno::EIO, name if name == "broken.lock"
+
+          original_file_open.call(parent, name, flags, mode: mode)
         end
       ) do
         assert_raises(Hive::ConfigError) do
@@ -401,43 +678,56 @@ class ManagedDirectoryTest < Minitest::Test
   def test_directory_fsync_fallback_and_failed_cleanup_are_fail_safe
     with_tmp_dir do |root|
       directory = Hive::ManagedDirectory.new(root: root, label: "test state")
-      stat = File.lstat(root)
+      native = directory.instance_variable_get(:@native)
       proxy = Object.new
-      proxy.define_singleton_method(:stat) { stat }
       proxy.define_singleton_method(:fsync) { raise Errno::EINVAL }
-      original_open = File.method(:open)
-      with_replaced_singleton_method(
-        File,
-        :open,
-        lambda do |path, *arguments, **keywords, &block|
-          if path == root
-            block.call(proxy)
-          else
-            original_open.call(path, *arguments, **keywords, &block)
+      handle = Dir.open(root)
+      original_for_fd = IO.method(:for_fd)
+      begin
+        with_replaced_singleton_method(
+          IO,
+          :for_fd,
+          lambda do |descriptor, **keywords|
+            if descriptor == handle.fileno
+              proxy
+            else
+              original_for_fd.call(descriptor, **keywords)
+            end
+          end
+        ) do
+          assert_nil native.fsync_directory(handle)
+          proxy.define_singleton_method(:fsync) { raise Errno::EBADF }
+          assert_raises(Errno::EBADF) do
+            native.fsync_directory(handle)
           end
         end
-      ) do
-        assert_nil directory.send(:fsync_directory, root, stat)
+      ensure
+        handle.close
       end
 
-      original_rename = File.method(:rename)
-      original_unlink = File.method(:unlink)
+      original_rename = native.method(:renameat)
+      original_unlink = native.method(:unlinkat)
       with_replaced_singleton_method(
-        File,
-        :rename,
-        lambda do |source, destination|
-          raise Errno::EIO, destination if destination == File.join(root, "stuck")
+        native,
+        :renameat,
+        lambda do |source_parent, source_name, target_parent, target_name|
+          raise Errno::EIO, target_name if target_name == "stuck"
 
-          original_rename.call(source, destination)
+          original_rename.call(
+            source_parent,
+            source_name,
+            target_parent,
+            target_name
+          )
         end
       ) do
         with_replaced_singleton_method(
-          File,
-          :unlink,
-          lambda do |path|
-            raise Errno::EIO, path if File.basename(path).start_with?(".stuck.tmp.")
+          native,
+          :unlinkat,
+          lambda do |parent, name|
+            raise Errno::EIO, name if name.start_with?(".stuck.tmp.")
 
-            original_unlink.call(path)
+            original_unlink.call(parent, name)
           end
         ) do
           assert_raises(Hive::ConfigError) do
@@ -452,38 +742,46 @@ class ManagedDirectoryTest < Minitest::Test
     with_tmp_dir do |root|
       directory = Hive::ManagedDirectory.new(root: root, label: "test state")
       directory.atomic_write("record", "data")
-      original_lstat = File.method(:lstat)
+      native = directory.instance_variable_get(:@native)
+      original_open_file = native.method(:open_file)
+      original_rename = File.method(:rename)
+      parked = "#{root}.parked"
 
-      root_checks = 0
-      with_replaced_singleton_method(
-        File,
-        :lstat,
-        lambda do |path|
-          root_checks += 1 if path == root
-          raise Errno::ENOENT, path if path == root && root_checks == 2
-
-          original_lstat.call(path)
+      begin
+        with_replaced_singleton_method(
+          native,
+          :open_file,
+          lambda do |parent, name, flags, mode: nil|
+            file = original_open_file.call(parent, name, flags, mode: mode)
+            original_rename.call(root, parked) if name == "record"
+            file
+          end
+        ) do
+          assert_raises(Hive::ConfigError) do
+            directory.read("record", max_bytes: 4, missing: true)
+          end
         end
-      ) do
-        assert_raises(Hive::ConfigError) do
-          directory.read("record", max_bytes: 4, missing: true)
-        end
+      ensure
+        original_rename.call(parked, root) if File.directory?(parked)
       end
 
-      root_checks = 0
-      with_replaced_singleton_method(
-        File,
-        :lstat,
-        lambda do |path|
-          root_checks += 1 if path == root
-          raise Errno::ENOENT, path if path == root && root_checks == 2
-
-          original_lstat.call(path)
+      original_open_directory = native.method(:open_directory)
+      begin
+        with_replaced_singleton_method(
+          native,
+          :open_directory,
+          lambda do |parent, name|
+            opened = original_open_directory.call(parent, name)
+            original_rename.call(root, parked) if name == "."
+            opened
+          end
+        ) do
+          assert_raises(Hive::ConfigError) do
+            directory.each_child(".", missing: true).to_a
+          end
         end
-      ) do
-        assert_raises(Hive::ConfigError) do
-          directory.each_child(".", missing: true).to_a
-        end
+      ensure
+        original_rename.call(parked, root) if File.directory?(parked)
       end
     end
   end
@@ -491,11 +789,30 @@ class ManagedDirectoryTest < Minitest::Test
   def test_fails_closed_when_no_follow_is_unavailable
     original = File::Constants.const_get(:NOFOLLOW)
     File::Constants.send(:remove_const, :NOFOLLOW)
-    with_tmp_dir do |root|
-      directory = Hive::ManagedDirectory.new(root: root, label: "test state")
-      assert_raises(Hive::ConfigError) { directory.send(:nofollow) }
+    with_tmp_dir do |anchor|
+      root = File.join(anchor, "state")
+      assert_raises(Hive::ConfigError) do
+        Hive::ManagedDirectory.new(
+          root: root,
+          anchor: anchor,
+          label: "test state"
+        )
+      end
+      refute_path_exists root
     end
   ensure
     File::Constants.const_set(:NOFOLLOW, original) if original
+  end
+
+  private
+
+  def file_identity_and_digest(path)
+    stat = File.stat(path)
+    [
+      stat.dev,
+      stat.ino,
+      stat.size,
+      Digest::SHA256.file(path).hexdigest
+    ]
   end
 end

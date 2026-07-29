@@ -7,6 +7,7 @@ require "hive/modules/migration/evidence_store"
 require "hive/modules/migration/patrols"
 require "hive/modules/migration/shadow_comparator"
 require "hive/refactor_patrol/state_store"
+require "hive/refactor_patrol/decision_projection"
 
 module Hive
   module Modules
@@ -59,6 +60,10 @@ module Hive
         def dispatch(project, hook_id, event, configuration, context)
           mode = migration_mode(project, configuration)
           return shadow(project, configuration, event, "ownership_fenced") if mode == :fenced
+          if mode == :shadow &&
+             event.dig("payload", "legacy_mutator_capture")
+            return shadow(project, configuration, event, nil)
+          end
           require_observation_capabilities!(context)
           cfg = effective_config(project)
           scheduler = @scheduler_factory.call(
@@ -173,14 +178,28 @@ module Hive
           else
             capture = legacy_capture(event)
             receipts = capture ? occurrence_receipts(project, capture) : []
-            decision = {
-              "rationale" => rationale, "job_id" => record["job_id"], "phase" => record["phase"]
-            }
+            projection = if capture
+              Hive::RefactorPatrol::DecisionProjection.project(
+                capture.selection_input
+              )
+            elsif candidate
+              input =
+                Hive::RefactorPatrol::DecisionProjection.candidate_input(
+                  job_id: record.fetch("job_id"),
+                  phase: record.fetch("phase")
+                )
+              Hive::RefactorPatrol::DecisionProjection.project(input)
+            else
+              Hive::Modules::Migration::PatrolDecisionProjection.build(
+                module_name: "architecture-patrol",
+                rationale: "not_due"
+              )
+            end
             shadow_comparator(project).record!(
               module_name: "architecture-patrol",
               trigger: capture ? capture.trigger : event,
               legacy_capture: capture,
-              module_decision: decision,
+              module_projection: projection,
               legacy_effects: receipts.reject do |receipt|
                 receipt.intent.authority == "shadow"
               end,

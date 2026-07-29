@@ -65,6 +65,38 @@ class ModulesMigrationBoundedFileInventoryTest < Minitest::Test
     end
   end
 
+  def test_live_pass_terminates_without_repeats_when_rows_retire_and_later_rows_arrive
+    with_tmp_dir do |root|
+      directory = Hive::ManagedDirectory.new(root: root, label: "inventory")
+      original = %w[0001.json 0002.json 0003.json 0004.json]
+      original.each { |name| directory.atomic_write(name, name) }
+      inventory = inventory_for(directory)
+      seen = []
+      inserted = false
+
+      inventory.each_live_name(page_size: 2) do |name|
+        seen << name
+        File.unlink(File.join(root, name))
+        next if inserted
+
+        inserted = true
+        writer = Thread.new do
+          %w[0005.json 0006.json 0007.json].each do |later|
+            directory.atomic_write(later, later)
+          end
+        end
+        writer.join
+      end
+
+      assert_equal original, seen
+      assert_equal seen, seen.uniq
+      assert_equal(
+        %w[0005.json 0006.json 0007.json],
+        inventory.each_live_name(page_size: 2).to_a
+      )
+    end
+  end
+
   def test_rejects_foreign_or_malformed_cursors_and_invalid_limits
     with_tmp_dir do |root|
       first_root = File.join(root, "first")

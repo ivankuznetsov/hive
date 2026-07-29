@@ -88,7 +88,7 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       )
       assert scheduler.pending?("p1")
       state = Hive::Patrol::StateStore.new(dir)
-      occurrence = state.pending_occurrences.fetch(0)
+      occurrence = state.each_reserved_occurrence.first
       capture = state.occurrence_capture(occurrence.fetch("occurrence_id"))
       assert_equal "reserved", occurrence.fetch("phase")
       assert_equal capture.occurrence_id,
@@ -140,7 +140,19 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
           state_file_mtime: nil,
           state_file_path: nil,
           hive_state_path: entry.fetch("hive_state_path"),
-          migration_entry: entry
+          migration_entry: entry,
+          selection_input: {
+            "kind" => "schedule",
+            "enabled" => true,
+            "trigger" => "continuous",
+            "timer_due" => true,
+            "branch_changed" => true
+          },
+          selection:
+            Hive::Modules::Migration::PatrolDecisionProjection.build(
+              module_name: "patrol",
+              rationale: "due"
+            )
         },
         candidate
       )
@@ -153,7 +165,11 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       ownership_allowed = true
       dispatch = sched.reserve(candidate, now: T0)
       assert_equal(
-        candidate.reject { |key, _value| %i[patrol_kind command].include?(key) },
+        candidate.reject do |key, _value|
+          %i[
+            command patrol_kind selection selection_input
+          ].include?(key)
+        end,
         dispatch.reject { |key, _value| key == :command }
       )
       assert_match(/ --occurrence-id occ-[0-9a-f]{64}\z/, dispatch.fetch(:command))
@@ -409,23 +425,30 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       reservations = []
       enumerations = 0
       store = Object.new
-      store.define_singleton_method(:each_occurrence) do |&block|
+      records = [
+        {
+          "occurrence_id" => "occ-#{'b' * 64}",
+          "created_at" => (T0 + 1).iso8601(6),
+          "phase" => "reserved",
+          "outbox" => []
+        },
+        {
+          "occurrence_id" => capture.occurrence_id,
+          "created_at" => T0.iso8601(6),
+          "phase" => "reserved",
+          "outbox" => []
+        }
+      ]
+      store.define_singleton_method(
+        :each_recovery_active_occurrence
+      ) do |&block|
         enumerations += 1
-        records = [
-          {
-            "occurrence_id" => "occ-#{'b' * 64}",
-            "created_at" => (T0 + 1).iso8601(6),
-            "phase" => "reserved",
-            "outbox" => []
-          },
-          {
-            "occurrence_id" => capture.occurrence_id,
-            "created_at" => T0.iso8601(6),
-            "phase" => "reserved",
-            "outbox" => []
-          }
-        ]
         records.each(&block)
+      end
+      store.define_singleton_method(:occurrence) do |occurrence_id|
+        records.find do |record|
+          record.fetch("occurrence_id") == occurrence_id
+        end
       end
       store.define_singleton_method(:occurrence_capture) do |occurrence_id|
         capture if occurrence_id == capture.occurrence_id
@@ -433,6 +456,7 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       store.define_singleton_method(:reserve_occurrence!) do |reserved, now:|
         reservations << [ reserved, now ]
       end
+      install_recovery_protocol(store)
       sched = Hive::Daemon::PatrolScheduler.new(
         registry: -> { [ entry ] },
         config_loader: ->(_path) { raise "recovery must not reload config" },
@@ -460,7 +484,9 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       evidence = Object.new
       publisher = Object.new
       store = Object.new
-      store.define_singleton_method(:each_occurrence) do |&block|
+      store.define_singleton_method(
+        :each_recovery_active_occurrence
+      ) do |&block|
         %w[a b].each do |suffix|
           block.call(
             "occurrence_id" => "occ-#{suffix * 64}",
@@ -475,6 +501,7 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       store.define_singleton_method(:drain_occurrence_outbox!) do |occurrence_id, **options|
         drained << [ occurrence_id, options ]
       end
+      install_recovery_protocol(store)
       sched = Hive::Daemon::PatrolScheduler.new(
         registry: -> { [ entry ] },
         migration_ownership: ->(*) { false },
@@ -504,7 +531,9 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       reserved = []
       drained = []
       store = Object.new
-      store.define_singleton_method(:each_occurrence) { |&| nil }
+      store.define_singleton_method(
+        :each_recovery_active_occurrence
+      ) { |&| nil }
       store.define_singleton_method(:reserve_occurrence!) do |capture, now:|
         reserved << [ capture, now ]
       end
@@ -519,6 +548,7 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       store.define_singleton_method(:finalize_occurrence!) do |**|
         raise "an already-finalized occurrence must not be finalized twice"
       end
+      install_recovery_protocol(store)
       sched = Hive::Daemon::PatrolScheduler.new(
         registry: -> { [ entry ] },
         config_loader: ->(_path) { enabled_cfg("patrol" => { "enabled" => false }) },
@@ -532,7 +562,8 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       assert_empty sched.candidates(now: T0)
 
       capture, reservation_time = reserved.fetch(0)
-      assert_equal "disabled", capture.decision_class
+      assert_equal "disabled", capture.selection.rationale
+      assert_nil capture.outcome_class
       assert_equal T0, reservation_time
       assert_equal [ capture.occurrence_id ], drained.map(&:first)
       assert_same evidence, drained.first.last.fetch(:evidence_store)
@@ -544,7 +575,9 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       entry = project_entry(dir)
       drain_calls = 0
       store = Object.new
-      store.define_singleton_method(:each_occurrence) do |&block|
+      store.define_singleton_method(
+        :each_recovery_active_occurrence
+      ) do |&block|
         block.call(
           "occurrence_id" => "occ-recovery",
           "created_at" => T0.iso8601(6),
@@ -558,6 +591,7 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
         drain_calls += 1
         raise IOError, "projection failed: #{"x" * 600}"
       end
+      install_recovery_protocol(store)
       sched = Hive::Daemon::PatrolScheduler.new(
         registry: -> { [ entry ] },
         migration_ownership: ->(*) { true },
@@ -587,6 +621,50 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       assert_equal 2, second.fetch(:retry_count)
       assert_equal 300, second.fetch(:retry_in_sec)
       assert_equal (T0 + 360).utc.iso8601, second.fetch(:retry_at)
+    end
+  end
+
+  def test_recovery_store_initialization_errors_keep_the_original_diagnostic
+    with_tmp_dir do |dir|
+      entry = project_entry(dir)
+      error_class = Class.new(StandardError)
+      original = error_class.new("state unavailable: \xFF".b)
+      expected =
+        Hive::Modules::Migration::OccurrenceJournalState
+        .normalize_error(original)
+      masking_store = Object.new
+      masking_store.define_singleton_method(:recovery_backoff) do |now:|
+        now
+        raise original
+      end
+      masking_store.define_singleton_method(
+        :record_recovery_failure!
+      ) do |**|
+        raise RuntimeError, "masking persistence error"
+      end
+      factories = [
+        ->(_candidate) { raise original },
+        ->(_candidate) { masking_store }
+      ]
+
+      factories.each do |factory|
+        scheduler = Hive::Daemon::PatrolScheduler.new(
+          registry: -> { [ entry ] },
+          migration_ownership: ->(*) { true },
+          state_store_factory: factory
+        )
+
+        assert_empty scheduler.candidates(now: T0)
+        event = scheduler.drain_events.fetch(0)
+        assert_equal "recovery_state_unavailable",
+                     event.fetch(:blocker)
+        assert_equal expected.fetch("error_class"),
+                     event.fetch(:error_class)
+        assert_equal expected.fetch("error_message"),
+                     event.fetch(:error)
+        assert event.fetch(:error).valid_encoding?
+        refute_match(/masking persistence/, event.fetch(:error))
+      end
     end
   end
 
@@ -621,9 +699,9 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       )
       capture = evidence.captures.fetch(0)
       envelope.except("ok", "ignored").each do |key, value|
-        assert_equal value, capture.decision.fetch(key)
+        assert_equal value, capture.outcome.fetch(key)
       end
-      refute capture.decision.key?("ignored")
+      refute capture.outcome.key?("ignored")
       refute sched.pending?("p1")
     end
   end
@@ -714,7 +792,8 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       assert_equal "patrol poll interval is malformed", interval_error.message
       refute sched.pending?("p1"),
              "an ended child must not retain process-local dispatch ownership"
-      refute_empty Hive::Patrol::StateStore.new(dir).pending_occurrences,
+      refute_empty Hive::Patrol::StateStore.new(dir)
+                                          .each_reserved_occurrence.to_a,
                    "the reserved occurrence remains the recovery authority"
     end
   end
@@ -743,10 +822,66 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       },
       owner: "legacy",
       owner_epoch: 1,
-      decision_class: "due",
-      decision: { "rationale" => "due" },
+      selection_input: {
+        "kind" => "operation",
+        "operation" => "scheduler-recovery-test"
+      },
+      selection:
+        Hive::Modules::Migration::PatrolDecisionProjection.build(
+          module_name: "patrol",
+          rationale: "due"
+        ),
+      outcome_class: nil,
+      outcome: nil,
       occurred_at: T0,
       recorded_at: T0
     )
+  end
+
+  def install_recovery_protocol(store)
+    generation = 0
+    failure = nil
+    store.define_singleton_method(:recovery_backoff) do |now:|
+      {
+        "generation" => generation,
+        "failure" => failure,
+        "blocked" =>
+          failure &&
+          now < Time.iso8601(failure.fetch("next_eligible_at"))
+      }
+    end
+    store.define_singleton_method(
+      :record_recovery_failure!
+    ) do |operation:, occurrence_id: nil, job_id: nil, error:, now:|
+      same = failure &&
+             failure.fetch("operation") == operation &&
+             failure["occurrence_id"] == occurrence_id &&
+             failure["job_id"] == job_id
+      count = same ? failure.fetch("failure_count") + 1 : 1
+      interval = [ 60, 300, 900 ][[ count - 1, 2 ].min]
+      generation += 1
+      diagnostic =
+        Hive::Modules::Migration::OccurrenceJournalState
+        .normalize_error(error)
+      failure = {
+        "generation" => generation,
+        "operation" => operation,
+        "occurrence_id" => occurrence_id,
+        "job_id" => job_id,
+        "failure_count" => count,
+        "next_eligible_at" => (now + interval).iso8601(6),
+        "error_class" => diagnostic.fetch("error_class"),
+        "error_message" => diagnostic.fetch("error_message")
+      }
+    end
+    store.define_singleton_method(
+      :clear_recovery_failure!
+    ) do |expected_generation:|
+      next false unless expected_generation == generation
+
+      failure = nil
+      true
+    end
+    store
   end
 end

@@ -176,8 +176,34 @@ module Hive
         @architecture_occurrences.capture_for_job(job_id)
       end
 
-      def recovery_active_occurrences
-        @architecture_occurrences.recovery_active
+      def each_recovery_active_occurrence(&block)
+        return @architecture_occurrences.each_recovery_active unless block
+
+        @architecture_occurrences.each_recovery_active(&block)
+      end
+
+      def recovery_active? = @architecture_occurrences.recovery_active?
+
+      def recovery_backoff(now: Time.now.utc)
+        @architecture_occurrences.recovery_backoff(now: now)
+      end
+
+      def record_recovery_failure!(operation:, occurrence_id: nil,
+                                   job_id: nil, error:,
+                                   now: Time.now.utc)
+        @architecture_occurrences.record_recovery_failure!(
+          operation: operation,
+          occurrence_id: occurrence_id,
+          job_id: job_id,
+          error: error,
+          now: now
+        )
+      end
+
+      def clear_recovery_failure!(expected_generation:)
+        @architecture_occurrences.clear_recovery_failure!(
+          expected_generation: expected_generation
+        )
       end
 
       def prepare_effect!(intent, now: Time.now.utc)

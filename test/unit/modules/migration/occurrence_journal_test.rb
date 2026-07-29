@@ -13,9 +13,9 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
       journal.prepare_effect!(first, now: NOW)
       journal.prepare_effect!(alternate, now: NOW)
       assert_equal [ first.occurrence_id ],
-                   journal.pending.map { |record| record.fetch("occurrence_id") }
-      assert_equal 1, journal.records.size
-      assert_empty journal.projection_pending
+                   journal.each_reserved.map { |record| record.fetch("occurrence_id") }
+      assert_equal 1, journal.each_record.count
+      refute journal.projection_pending?
       journal.reserve!(patrol_capture, now: NOW)
 
       journal.mark_dispatch_uncertain!(first, now: NOW + 12)
@@ -47,13 +47,15 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
     with_journal do |journal|
       occurrence_id = patrol_capture.occurrence_id
       assert_equal [ occurrence_id ],
-                   journal.recovery_active.map { |record|
+                   journal.each_recovery_active.map { |record|
                      record.fetch("occurrence_id")
                    }
 
-      journal.finalize!(patrol_capture, now: NOW + 1)
+      journal.finalize!(
+        terminal_capture(patrol_capture), now: NOW + 1
+      )
       assert_equal [ occurrence_id ],
-                   journal.recovery_active.map { |record|
+                   journal.each_recovery_active.map { |record|
                      record.fetch("occurrence_id")
                    }
 
@@ -64,7 +66,38 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
           digest: entry.fetch("digest")
         )
       end
-      assert_empty journal.recovery_active
+      refute journal.recovery_active?
+    end
+  end
+
+  def test_recovery_stream_drains_more_than_one_page_while_records_retire
+    with_tmp_dir do |root|
+      journal = occurrence_journal(File.join(root, "occurrences"))
+      count =
+        Hive::Modules::Migration::OccurrenceRecordStore::MAX_PAGE_SIZE + 1
+      captures = count.times.map do |index|
+        window = NOW + index
+        base = "ordinary:project-1:stream-#{index}"
+        capture = schedule_capture(base, window: window, generation: 1)
+        journal.reserve!(capture, now: window)
+        journal.finalize!(
+          terminal_capture(capture),
+          now: window + 1
+        )
+        capture
+      end
+      recovered = []
+
+      journal.each_recovery_active do |record|
+        occurrence_id = record.fetch("occurrence_id")
+        recovered << occurrence_id
+        acknowledge_all(journal, occurrence_id)
+      end
+
+      assert_equal count, recovered.size
+      assert_equal recovered, recovered.uniq
+      assert_equal captures.map(&:occurrence_id).sort, recovered.sort
+      assert_equal 0, journal.each_record.count
     end
   end
 
@@ -123,7 +156,9 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
       base = "ordinary:project-1:2026-07-28T12:00:00.000000Z"
       captures = 2.times.map do
         Thread.new do
-          journal.reserve_attempt!(base, now: NOW) do |generation|
+          journal.reserve_attempt!(
+            base, window_started_at: NOW, now: NOW
+          ) do |generation|
             patrol_capture(
               trigger: {
                 "kind" => "schedule",
@@ -132,6 +167,7 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
               reservation: {
                 "kind" => "ordinary",
                 "id" => base,
+                "window_started_at" => NOW.iso8601(6),
                 "attempt_generation" => generation
               }
             )
@@ -142,8 +178,12 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
       assert_equal 1,
                    captures.first.reservation.fetch("attempt_generation")
 
-      journal.finalize!(captures.first, now: NOW + 1)
-      retry_capture = journal.reserve_attempt!(base, now: NOW + 2) do |generation|
+      journal.finalize!(
+        terminal_capture(captures.first), now: NOW + 1
+      )
+      retry_capture = journal.reserve_attempt!(
+        base, window_started_at: NOW, now: NOW + 2
+      ) do |generation|
         patrol_capture(
           trigger: {
             "kind" => "schedule",
@@ -152,6 +192,7 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
           reservation: {
             "kind" => "ordinary",
             "id" => base,
+            "window_started_at" => NOW.iso8601(6),
             "attempt_generation" => generation
           }
         )
@@ -163,11 +204,393 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
     end
   end
 
+  def test_retirement_fences_negative_replay_but_allows_next_retry_generation
+    with_tmp_dir do |root|
+      journal_root = File.join(root, "occurrences")
+      journal = occurrence_journal(journal_root)
+      base = "ordinary:project-1:#{NOW.iso8601(6)}"
+      provisional = schedule_capture(base, window: NOW, generation: 1)
+      journal.reserve!(provisional, now: NOW)
+      journal.finalize!(
+        terminal_capture(provisional), now: NOW + 1
+      )
+      acknowledge_all(journal, provisional.occurrence_id)
+
+      assert_nil journal.fetch(provisional.occurrence_id)
+      restarted = occurrence_journal(journal_root)
+      assert_raises(Hive::ConfigError) do
+        restarted.reserve!(provisional, now: NOW + 2)
+      end
+
+      retry_capture = restarted.reserve_attempt!(
+        base, window_started_at: NOW, now: NOW + 3
+      ) do |generation|
+        schedule_capture(base, window: NOW, generation: generation)
+      end
+      assert_equal 2,
+                   retry_capture.reservation.fetch("attempt_generation")
+      refute_equal provisional.occurrence_id, retry_capture.occurrence_id
+    end
+  end
+
+  def test_retirement_fences_non_attempt_occurrences_for_both_products
+    [
+      [ "patrol", patrol_capture ],
+      [ "architecture-patrol", architecture_capture ]
+    ].each do |module_name, provisional|
+      with_tmp_dir do |root|
+        journal_root = File.join(root, "occurrences")
+        journal = Hive::Modules::Migration::OccurrenceJournal.new(
+          journal_root, module_name: module_name
+        )
+        journal.reserve!(provisional, now: NOW)
+        journal.finalize!(
+          terminal_capture(provisional), now: NOW + 1
+        )
+        acknowledge_all(journal, provisional.occurrence_id)
+        assert_nil journal.fetch(provisional.occurrence_id)
+
+        restarted = Hive::Modules::Migration::OccurrenceJournal.new(
+          journal_root, module_name: module_name
+        )
+        assert_raises(Hive::ConfigError) do
+          restarted.reserve!(provisional, now: NOW + 2)
+        end
+      end
+    end
+  end
+
+  def test_full_retirement_fence_keeps_terminal_record_authoritative
+    with_tmp_dir do |root|
+      journal = occurrence_journal(File.join(root, "occurrences"))
+      first = patrol_capture
+      second = patrol_capture(
+        trigger: { "kind" => "manual", "id" => "second" }
+      )
+      third = patrol_capture(
+        trigger: { "kind" => "manual", "id" => "third" }
+      )
+      with_constant(
+        Hive::Modules::Migration::OccurrenceJournalState,
+        :MAX_RETIRED_OCCURRENCES,
+        1
+      ) do
+        journal.reserve!(first, now: NOW)
+        journal.finalize!(
+          terminal_capture(first), now: NOW + 1
+        )
+        acknowledge_all(journal, first.occurrence_id)
+
+        journal.reserve!(second, now: NOW + 2)
+        journal.finalize!(
+          terminal_capture(second), now: NOW + 3
+        )
+        acknowledge_all(journal, second.occurrence_id)
+        retained = journal.fetch(second.occurrence_id)
+        assert_equal "finalized", retained.fetch("phase")
+        assert retained.fetch("outbox").all? {
+          |entry| entry.fetch("acknowledged")
+        }
+
+        with_constant(
+          Hive::Modules::Migration::OccurrenceRecordStore,
+          :MAX_HISTORY_RECORDS,
+          1
+        ) do
+          assert_raises(Hive::ConfigError) do
+            journal.reserve!(third, now: NOW + 4)
+          end
+        end
+        assert journal.fetch(second.occurrence_id)
+      end
+    end
+  end
+
+  def test_high_water_compaction_survives_restarts_and_rejects_old_windows
+    with_tmp_dir do |root|
+      journal_root = File.join(root, "occurrences")
+      windows = 3.times.map { |index| NOW + (index * 600) }
+      with_constant(
+        Hive::Modules::Migration::OccurrenceJournalState,
+        :MAX_SEQUENCE_HIGH_WATERS,
+        2
+      ) do
+        windows.each do |window|
+          journal = occurrence_journal(journal_root)
+          base = "ordinary:project-1:#{window.iso8601(6)}"
+          capture = journal.reserve_attempt!(
+            base, window_started_at: window, now: window
+          ) do |generation|
+            schedule_capture(
+              base, window: window, generation: generation
+            )
+          end
+          journal.finalize!(
+            terminal_capture(capture), now: window + 1
+          )
+          acknowledge_all(journal, capture.occurrence_id)
+          assert_nil occurrence_journal(journal_root).fetch(
+            capture.occurrence_id
+          )
+        end
+
+        state = JSON.parse(
+          File.binread(File.join(journal_root, "journal-state.json"))
+        )
+        assert_equal 2, state.fetch("sequence_high_waters").size
+        assert_equal windows.first.iso8601(6),
+                     state.fetch("sequence_closed_through")
+
+        restarted = occurrence_journal(journal_root)
+        stale_base =
+          "ordinary:project-1:#{windows.first.iso8601(6)}"
+        assert_raises(Hive::ConfigError) do
+          restarted.reserve_attempt!(
+            stale_base,
+            window_started_at: windows.first,
+            now: windows.last + 2
+          ) do
+            flunk("an evicted closed window must stay retired")
+          end
+        end
+
+        new_window = windows.last + 600
+        new_base = "ordinary:project-1:#{new_window.iso8601(6)}"
+        admitted = restarted.reserve_attempt!(
+          new_base, window_started_at: new_window, now: new_window
+        ) do |generation|
+          schedule_capture(
+            new_base, window: new_window, generation: generation
+          )
+        end
+        assert_equal 1,
+                     admitted.reservation.fetch("attempt_generation")
+      end
+    end
+  end
+
+  def test_active_cap_never_retires_reserved_or_unacknowledged_work
+    with_tmp_dir do |root|
+      journal = occurrence_journal(File.join(root, "occurrences"))
+      first = patrol_capture
+      second = patrol_capture(
+        trigger: { "kind" => "manual", "id" => "second" }
+      )
+      third = patrol_capture(
+        trigger: { "kind" => "manual", "id" => "third" }
+      )
+      journal.reserve!(first, now: NOW)
+      journal.reserve!(second, now: NOW)
+
+      with_constant(
+        Hive::Modules::Migration::OccurrenceRecordStore,
+        :MAX_HISTORY_RECORDS,
+        2
+      ) do
+        journal.finalize!(
+          terminal_capture(first), now: NOW + 1
+        )
+        assert_raises(Hive::ConfigError) do
+          journal.reserve!(third, now: NOW + 2)
+        end
+        assert journal.fetch(first.occurrence_id)
+        assert journal.fetch(second.occurrence_id)
+
+        acknowledge_all(journal, first.occurrence_id)
+        assert_nil journal.fetch(first.occurrence_id)
+        assert journal.reserve!(third, now: NOW + 3)
+        assert journal.fetch(second.occurrence_id)
+      end
+    end
+  end
+
+  def test_recovery_backoff_is_durable_and_compare_and_set_cleared
+    with_tmp_dir do |root|
+      journal_root = File.join(root, "occurrences")
+      first = occurrence_journal(journal_root).record_recovery_failure!(
+        operation: "projection",
+        occurrence_id: patrol_capture.occurrence_id,
+        error: RuntimeError.new("boom"),
+        now: NOW
+      )
+      assert_equal 1, first.fetch("generation")
+      assert_equal 1, first.fetch("failure_count")
+      assert_equal (NOW + 60).iso8601(6),
+                   first.fetch("next_eligible_at")
+
+      restarted = occurrence_journal(journal_root)
+      assert restarted.recovery_backoff(now: NOW + 30).fetch("blocked")
+      second = restarted.record_recovery_failure!(
+        operation: "projection",
+        occurrence_id: patrol_capture.occurrence_id,
+        error: RuntimeError.new("boom again"),
+        now: NOW + 61
+      )
+      assert_equal 2, second.fetch("generation")
+      assert_equal 2, second.fetch("failure_count")
+      assert_equal (NOW + 361).iso8601(6),
+                   second.fetch("next_eligible_at")
+
+      refute occurrence_journal(journal_root).clear_recovery_failure!(
+        expected_generation: first.fetch("generation")
+      )
+      current = occurrence_journal(journal_root).recovery_backoff(
+        now: NOW + 62
+      )
+      assert_equal second.fetch("generation"),
+                   current.dig("failure", "generation")
+      assert occurrence_journal(journal_root).clear_recovery_failure!(
+        expected_generation: second.fetch("generation")
+      )
+      refute occurrence_journal(journal_root).recovery_backoff(
+        now: NOW + 62
+      ).fetch("blocked")
+    end
+  end
+
+  def test_recovery_failure_normalizes_unicode_and_anonymous_errors
+    with_tmp_dir do |root|
+      journal_root = File.join(root, "occurrences")
+      invalid_message = (
+        ("\u2603" * 300).b + "\xFF".b
+      ).force_encoding(Encoding::UTF_8)
+      anonymous_error = Class.new(StandardError).new(invalid_message)
+      failure = occurrence_journal(journal_root)
+                .record_recovery_failure!(
+                  operation: "projection",
+                  error: anonymous_error,
+                  now: NOW
+                )
+
+      assert_equal "AnonymousError", failure.fetch("error_class")
+      message = failure.fetch("error_message")
+      assert message.valid_encoding?
+      assert_operator message.bytesize, :<=,
+                      Hive::Modules::Migration::OccurrenceJournalState::
+                        MAX_ERROR_BYTES
+      persisted = occurrence_journal(journal_root).recovery_backoff(
+        now: NOW
+      ).fetch("failure")
+      assert_equal failure, persisted
+
+      named_error = Class.new(StandardError)
+      named_error.define_singleton_method(:name) { "\u03A9" * 200 }
+      bounded = occurrence_journal(journal_root)
+                .record_recovery_failure!(
+                  operation: "other-projection",
+                  error: named_error.new("bounded"),
+                  now: NOW + 1
+                )
+      assert bounded.fetch("error_class").valid_encoding?
+      assert_operator bounded.fetch("error_class").bytesize, :<=,
+                      Hive::Modules::Migration::OccurrenceJournalState::
+                        MAX_ERROR_CLASS_BYTES
+      assert_equal bounded,
+                   occurrence_journal(journal_root).recovery_backoff(
+                     now: NOW + 1
+                   ).fetch("failure")
+    end
+  end
+
+  def test_reserve_attempt_composes_locks_in_the_declared_order
+    with_tmp_dir do |root|
+      journal = occurrence_journal(File.join(root, "occurrences"))
+      events = []
+      stack = []
+      trace_journal_locks(journal, events: events, stack: stack)
+      base = "ordinary:project-1:#{NOW.iso8601(6)}"
+
+      journal.reserve_attempt!(
+        base, window_started_at: NOW, now: NOW
+      ) do |generation|
+        schedule_capture(base, window: NOW, generation: generation)
+      end
+
+      enters = events.select { |event| event.fetch(:event) == :enter }
+      identity = enters.find { |event| event.fetch(:lock) == :identity }
+      state = enters.find { |event| event.fetch(:lock) == :journal_state }
+      inventory = enters.find { |event| event.fetch(:lock) == :inventory }
+      record = enters.find { |event| event.fetch(:lock) == :record }
+      assert_equal [], identity.fetch(:held)
+      assert_equal [ :identity ], state.fetch(:held)
+      assert_equal %i[identity journal_state], inventory.fetch(:held)
+      assert_equal %i[identity journal_state inventory],
+                   record.fetch(:held)
+      assert_empty stack
+    end
+  end
+
+  def test_reserve_attempt_consumes_single_pass_records_without_retaining_them
+    with_tmp_dir do |root|
+      journal = occurrence_journal(File.join(root, "occurrences"))
+      base = "ordinary:project-1:#{NOW.iso8601(6)}"
+      expected = schedule_capture(base, window: NOW, generation: 1)
+      journal.reserve!(expected, now: NOW)
+      store = journal.instance_variable_get(:@store)
+      original_each = store.method(:each_record)
+      proxy_builder = method(:invalidating_record)
+      store.define_singleton_method(:each_record) do |&block|
+        return original_each.call unless block
+
+        original_each.call do |record|
+          proxy = proxy_builder.call(record)
+          block.call(proxy)
+          proxy.invalidate!
+        end
+      end
+
+      actual = journal.reserve_attempt!(
+        base, window_started_at: NOW, now: NOW + 1
+      ) do
+        flunk("the active reservation must be reused")
+      end
+      assert_equal expected.to_h, actual.to_h
+    end
+  end
+
+  def test_identity_lock_files_remain_bounded_after_many_occurrences
+    with_tmp_dir do |root|
+      journal = occurrence_journal(File.join(root, "occurrences"))
+      72.times do |index|
+        window = NOW + (index * 600)
+        base = "ordinary:project-1:#{window.iso8601(6)}"
+        journal.reserve_attempt!(
+          base, window_started_at: window, now: window
+        ) do |generation|
+          schedule_capture(
+            base, window: window, generation: generation
+          )
+        end
+        journal.with_effect_sender_lock(
+          effect_intent(target: "owner/demo:#{index}")
+        ) { }
+      end
+
+      %w[.attempt-locks .record-locks .sender-locks].each do |relative|
+        count = Dir.glob(
+          File.join(journal.root, relative, "*.lock")
+        ).size
+        assert_operator count, :>, 1
+        assert_operator count, :<=,
+                        Hive::Modules::Migration::OccurrenceJournal::
+                          LOCK_STRIPES
+      end
+      assert_equal 1, Dir.glob(
+        File.join(journal.root, ".inventory-locks", "*.lock")
+      ).size
+      assert_equal 1, Dir.glob(
+        File.join(journal.root, ".journal-state-locks", "*.lock")
+      ).size
+    end
+  end
+
   def test_schedule_attempt_allocation_rejects_malformed_or_ambiguous_history
     with_journal do |journal|
       base = "ordinary:project-1:2026-07-28T12:00:00.000000Z"
       assert_raises(Hive::ConfigError) do
-        journal.reserve_attempt!(base, now: NOW) do |generation|
+        journal.reserve_attempt!(
+          base, window_started_at: NOW, now: NOW
+        ) do |generation|
           patrol_capture(
             trigger: {
               "kind" => "schedule",
@@ -176,6 +599,7 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
             reservation: {
               "kind" => "ordinary",
               "id" => "wrong",
+              "window_started_at" => NOW.iso8601(6),
               "attempt_generation" => generation
             }
           )
@@ -193,6 +617,7 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
             reservation: {
               "kind" => "ordinary",
               "id" => base,
+              "window_started_at" => NOW.iso8601(6),
               "attempt_generation" => generation
             }
           ),
@@ -200,7 +625,9 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
         )
       end
       assert_raises(Hive::ConfigError) do
-        journal.reserve_attempt!(base, now: NOW) do
+        journal.reserve_attempt!(
+          base, window_started_at: NOW, now: NOW
+        ) do
           flunk("ambiguous history must not allocate")
         end
       end
@@ -310,8 +737,26 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
       assert_raises(Hive::ConfigError) do
         journal.finalize!(provisional, now: NOW)
       end
+      drifted_time = Hive::Modules::Migration::PatrolCapture.build(
+        module_name: provisional.module_name,
+        project: provisional.project,
+        trigger: provisional.trigger,
+        reservation: provisional.reservation,
+        owner: provisional.owner,
+        owner_epoch: provisional.owner_epoch,
+        selection_input: provisional.selection_input,
+        selection: provisional.selection,
+        outcome_class: "completed",
+        outcome: { "rationale" => "completed" },
+        occurred_at: NOW + 1,
+        recorded_at: NOW + 1
+      )
+      assert_equal provisional.occurrence_id, drifted_time.occurrence_id
+      assert_raises(Hive::ConfigError) do
+        journal.finalize!(drifted_time, now: NOW + 1)
+      end
       assert_equal [ provisional.occurrence_id ],
-                   journal.pending.map { |record| record.fetch("occurrence_id") }
+                   journal.each_reserved.map { |record| record.fetch("occurrence_id") }
       journal.mark_dispatch_uncertain!(intent, now: NOW)
       outcome = { "url" => "https://example.test/effect/1" }
       committed = journal.settle_effect!(
@@ -321,8 +766,8 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
         now: NOW
       )
       final = patrol_capture(
-        decision_class: "completed",
-        decision: { "rationale" => "completed" },
+        outcome_class: "completed",
+        outcome: { "rationale" => "completed" },
         effect_ids: [ committed.receipt_id ]
       )
       event = canonical(
@@ -331,8 +776,8 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
       )
 
       missing_effect = patrol_capture(
-        decision_class: "completed",
-        decision: { "rationale" => "completed" },
+        outcome_class: "completed",
+        outcome: { "rationale" => "completed" },
         effect_ids: []
       )
       assert_raises(Hive::ConfigError) do
@@ -353,7 +798,7 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
       assert_raises(Hive::ConfigError) do
         journal.mark_dispatch_uncertain!(intent, now: NOW + 2)
       end
-      pending_ids = journal.projection_pending.map do |record|
+      pending_ids = journal.each_projection_pending.map do |record|
         record.fetch("occurrence_id")
       end
       assert_equal [ final.occurrence_id ], pending_ids
@@ -362,8 +807,8 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
                          .sort
 
       conflicting = patrol_capture(
-        decision_class: "failed",
-        decision: { "rationale" => "failed" },
+        outcome_class: "failed",
+        outcome: { "rationale" => "failed" },
         effect_ids: [ committed.receipt_id ]
       )
       assert_equal provisional.occurrence_id, conflicting.occurrence_id
@@ -378,6 +823,18 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
           now: NOW + 3
         )
       end
+    end
+  end
+
+  def test_provisional_capture_cannot_claim_terminal_effects
+    with_tmp_dir do |root|
+      journal = occurrence_journal(File.join(root, "occurrences"))
+      provisional = patrol_capture(effect_ids: [ "receipt-forged" ])
+
+      assert_raises(Hive::ConfigError) do
+        journal.reserve!(provisional, now: NOW)
+      end
+      assert_equal 0, journal.each_record.count
     end
   end
 
@@ -798,7 +1255,7 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
         module_name: "patrol"
       )
       File.write(journal.root, "not-a-directory")
-      assert_raises(Hive::ConfigError) { journal.records }
+      assert_raises(Hive::ConfigError) { journal.each_record.count }
     end
 
     with_tmp_dir do |root|
@@ -818,7 +1275,7 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
         :MAX_HISTORY_RECORDS,
         1
       ) do
-        assert_raises(Hive::ConfigError) { journal.records }
+        assert_raises(Hive::ConfigError) { journal.each_record.count }
       end
     end
 
@@ -837,7 +1294,7 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
       with_replaced_singleton_method(
         File, :lstat, replacement
       ) do
-        assert_raises(Hive::ConfigError) { journal.records }
+        assert_raises(Hive::ConfigError) { journal.each_record.count }
       end
     end
   end
@@ -1042,8 +1499,20 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
       reservation: { "kind" => "ordinary", "id" => "reservation-1" },
       owner: "legacy",
       owner_epoch: 1,
-      decision_class: "due",
-      decision: {},
+      selection_input: {
+        "kind" => "candidate",
+        "job_id" => "job-1",
+        "phase" => "discovery"
+      },
+      selection:
+        Hive::Modules::Migration::PatrolDecisionProjection.build(
+          module_name: "architecture-patrol",
+          rationale: "due",
+          job_id: "job-1",
+          phase: "discovery"
+        ),
+      outcome_class: nil,
+      outcome: nil,
       occurred_at: NOW,
       recorded_at: NOW
     )
@@ -1147,6 +1616,124 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
 
   private
 
+  def occurrence_journal(root)
+    Hive::Modules::Migration::OccurrenceJournal.new(
+      root, module_name: "patrol"
+    )
+  end
+
+  def schedule_capture(base, window:, generation:)
+    patrol_capture(
+      trigger: {
+        "kind" => "schedule",
+        "id" => "#{base}:attempt:#{generation}"
+      },
+      reservation: {
+        "kind" => "ordinary",
+        "id" => base,
+        "window_started_at" => window.iso8601(6),
+        "attempt_generation" => generation
+      }
+    )
+  end
+
+  def architecture_capture
+    Hive::Modules::Migration::PatrolCapture.build(
+      module_name: "architecture-patrol",
+      project: {
+        "project_id" => "project-1",
+        "name" => "demo",
+        "repository" => "owner/demo"
+      },
+      trigger: { "kind" => "pull_request.merged", "id" => "merge-1" },
+      reservation: {
+        "kind" => "architecture",
+        "id" => "job-1",
+        "job_id" => "job-1"
+      },
+      owner: "legacy",
+      owner_epoch: 1,
+      selection_input: {
+        "kind" => "candidate",
+        "job_id" => "job-1",
+        "phase" => "discovery"
+      },
+      selection:
+        Hive::Modules::Migration::PatrolDecisionProjection.build(
+          module_name: "architecture-patrol",
+          rationale: "due",
+          job_id: "job-1",
+          phase: "discovery"
+        ),
+      outcome_class: nil,
+      outcome: nil,
+      occurred_at: NOW,
+      recorded_at: NOW
+    )
+  end
+
+  def acknowledge_all(journal, occurrence_id)
+    journal.pending_outbox(occurrence_id).each do |entry|
+      journal.acknowledge_outbox!(
+        occurrence_id,
+        entry_id: entry.fetch("id"),
+        digest: entry.fetch("digest")
+      )
+    end
+  end
+
+  def trace_journal_locks(journal, events:, stack:)
+    locks = [
+      [ journal, :@attempt_locks, :identity ],
+      [
+        journal.instance_variable_get(:@journal_state),
+        :@lock,
+        :journal_state
+      ],
+      [ journal, :@inventory_lock, :inventory ],
+      [
+        journal.instance_variable_get(:@store),
+        :@record_locks,
+        :record
+      ]
+    ]
+    locks.each do |owner, variable, label|
+      delegate = owner.instance_variable_get(variable)
+      wrapper = Object.new
+      wrapper.define_singleton_method(:synchronize) do |name, &block|
+        delegate.synchronize(name) do
+          events << { event: :enter, lock: label, held: stack.dup }
+          stack << label
+          begin
+            block.call
+          ensure
+            stack.pop
+            events << { event: :exit, lock: label, held: stack.dup }
+          end
+        end
+      end
+      owner.instance_variable_set(variable, wrapper)
+    end
+  end
+
+  def invalidating_record(record)
+    active = true
+    proxy = Object.new
+    check = lambda do
+      raise "single-pass record was retained" unless active
+    end
+    proxy.define_singleton_method(:fetch) do |*arguments, &block|
+      check.call
+      record.fetch(*arguments, &block)
+    end
+    proxy.define_singleton_method(:dig) do |*arguments|
+      check.call
+      record.dig(*arguments)
+    end
+    proxy.define_singleton_method(:invalidate!) { active = false }
+    proxy
+  end
+
   def with_journal
     with_tmp_dir do |root|
       journal = Hive::Modules::Migration::OccurrenceJournal.new(
@@ -1158,8 +1745,8 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
     end
   end
 
-  def patrol_capture(decision_class: "due",
-                     decision: { "rationale" => "due" },
+  def patrol_capture(outcome_class: nil,
+                     outcome: nil,
                      effect_ids: [],
                      trigger: { "kind" => "manual", "id" => "manual-1" },
                      reservation: {
@@ -1176,11 +1763,39 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
       reservation: reservation,
       owner: "legacy",
       owner_epoch: 1,
-      decision_class: decision_class,
-      decision: decision,
+      selection_input: {
+        "kind" => "operation",
+        "operation" => "test"
+      },
+      selection:
+        Hive::Modules::Migration::PatrolDecisionProjection.build(
+          module_name: "patrol",
+          rationale: "due"
+        ),
+      outcome_class: outcome_class,
+      outcome: outcome,
       effect_ids: effect_ids,
       occurred_at: NOW,
       recorded_at: NOW
+    )
+  end
+
+  def terminal_capture(capture, outcome_class: "completed",
+                       outcome: { "rationale" => "completed" })
+    Hive::Modules::Migration::PatrolCapture.build(
+      module_name: capture.module_name,
+      project: capture.project,
+      trigger: capture.trigger,
+      reservation: capture.reservation,
+      owner: capture.owner,
+      owner_epoch: capture.owner_epoch,
+      selection_input: capture.selection_input,
+      selection: capture.selection,
+      outcome_class: outcome_class,
+      outcome: outcome,
+      effect_ids: capture.effect_ids,
+      occurred_at: capture.occurred_at,
+      recorded_at: NOW + 1
     )
   end
 

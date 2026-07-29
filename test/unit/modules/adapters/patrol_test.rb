@@ -371,6 +371,89 @@ class ModulesAdaptersPatrolTest < Minitest::Test
     end
   end
 
+  def test_module_hook_retirement_compacts_and_still_fences_replay_after_restart
+    with_project(owner: "module") do |project|
+      adapter = Hive::Modules::Adapters::Patrol.new
+      evidence = adapter.send(:evidence_store, project)
+      captures = []
+
+      with_constant(
+        Hive::Modules::Migration::OccurrenceJournalState,
+        :MAX_SEQUENCE_HIGH_WATERS,
+        2
+      ) do
+        3.times do |index|
+          timestamp = NOW + index
+          module_event = schedule_event.merge(
+            "event_id" => "evt-#{format('%064x', index + 1)}",
+            "occurred_at" => timestamp.iso8601(6)
+          )
+          capture = adapter.send(
+            :module_capture, project, module_event
+          )
+          captures << capture
+          assert_equal "module_hook",
+                       capture.reservation.fetch("kind")
+          assert_equal timestamp.iso8601(6),
+                       capture.reservation.fetch(
+                         "window_started_at"
+                       )
+          assert_equal 1,
+                       capture.reservation.fetch(
+                         "attempt_generation"
+                       )
+          store = Hive::Patrol::StateStore.new(
+            project.fetch("path")
+          )
+          store.reserve_occurrence!(capture, now: timestamp)
+          final = Hive::Modules::Migration::PatrolCapture.build(
+            module_name: capture.module_name,
+            project: capture.project,
+            trigger: capture.trigger,
+            reservation: capture.reservation,
+            owner: capture.owner,
+            owner_epoch: capture.owner_epoch,
+            selection_input: capture.selection_input,
+            selection: capture.selection,
+            outcome_class: "completed",
+            outcome: { "rationale" => "completed" },
+            occurred_at: capture.occurred_at,
+            recorded_at: timestamp + 1
+          )
+          store.finalize_occurrence!(
+            capture: final,
+            evidence_store: evidence,
+            now: timestamp + 1
+          )
+          assert_nil Hive::Patrol::StateStore.new(
+            project.fetch("path")
+          ).occurrence(capture.occurrence_id)
+        end
+
+        restarted = Hive::Patrol::StateStore.new(
+          project.fetch("path")
+        )
+        assert_raises(Hive::ConfigError) do
+          restarted.reserve_occurrence!(
+            captures.first, now: NOW + 3
+          )
+        end
+        later_event = schedule_event.merge(
+          "event_id" => "evt-#{format('%064x', 4)}",
+          "occurred_at" => (NOW + 4).iso8601(6)
+        )
+        later = adapter.send(
+          :module_capture, project, later_event
+        )
+        restarted.reserve_occurrence!(later, now: NOW + 4)
+        assert_equal later.occurrence_id,
+                     restarted.occurrence(
+                       later.occurrence_id
+                     ).fetch("occurrence_id")
+      end
+    end
+  end
+
   private
 
   def with_project(owner: "legacy")
@@ -476,10 +559,30 @@ class ModulesAdaptersPatrolTest < Minitest::Test
       },
       owner: "legacy",
       owner_epoch: 1,
-      decision_class: "due",
-      decision: { "rationale" => "due" },
+      selection_input: {
+        "kind" => "operation",
+        "operation" => "adapter-test"
+      },
+      selection:
+        Hive::Modules::Migration::PatrolDecisionProjection.build(
+          module_name: "patrol",
+          rationale: "due"
+        ),
+      outcome_class: "complete",
+      outcome: { "rationale" => "complete" },
       occurred_at: NOW,
       recorded_at: NOW
     )
+  end
+
+  def with_constant(owner, name, replacement)
+    original = owner.const_get(name)
+    owner.send(:remove_const, name)
+    owner.const_set(name, replacement)
+    yield
+  ensure
+    owner.send(:remove_const, name) if
+      owner.const_defined?(name, false)
+    owner.const_set(name, original)
   end
 end

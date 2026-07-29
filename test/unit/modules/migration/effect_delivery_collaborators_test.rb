@@ -651,8 +651,17 @@ class ModulesMigrationEffectDeliveryCollaboratorsTest < Minitest::Test
       reservation: { "kind" => "ordinary", "id" => "cycle-1" },
       owner: "legacy",
       owner_epoch: 1,
-      decision_class: "due",
-      decision: { "rationale" => "due" },
+      selection_input: {
+        "kind" => "operation",
+        "operation" => "effect-delivery-test"
+      },
+      selection:
+        Hive::Modules::Migration::PatrolDecisionProjection.build(
+          module_name: "patrol",
+          rationale: "due"
+        ),
+      outcome_class: nil,
+      outcome: nil,
       occurred_at: Time.utc(2026, 7, 28, 18),
       recorded_at: Time.utc(2026, 7, 28, 18)
     )

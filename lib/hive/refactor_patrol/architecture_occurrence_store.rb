@@ -90,8 +90,38 @@ module Hive
         )
       end
 
-      def recovery_active
-        @journal.recovery_active
+      def each_recovery_active(&block)
+        return @journal.each_recovery_active unless block
+
+        @journal.each_recovery_active(&block)
+      end
+
+      def recovery_active? = @journal.recovery_active?
+
+      def recovery_backoff(now: Time.now.utc)
+        @journal.recovery_backoff(now: now)
+      end
+
+      def record_recovery_failure!(operation:, occurrence_id: nil,
+                                   job_id: nil, error:,
+                                   now: Time.now.utc)
+        @journal.record_recovery_failure!(
+          operation: operation,
+          occurrence_id: occurrence_id,
+          job_id: job_id,
+          error: error,
+          now: now
+        )
+      rescue Hive::ConfigError => e
+        raise @corrupt_record, e.message
+      end
+
+      def clear_recovery_failure!(expected_generation:)
+        @journal.clear_recovery_failure!(
+          expected_generation: expected_generation
+        )
+      rescue Hive::ConfigError => e
+        raise @corrupt_record, e.message
       end
 
       def prepare_effect!(intent, now: Time.now.utc)

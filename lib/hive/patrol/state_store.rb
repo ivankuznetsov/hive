@@ -39,10 +39,14 @@ module Hive
         @occurrence_store.reserve!(capture, now: now)
       end
 
-      def reserve_attempt_occurrence!(reservation_id, now: Time.now.utc,
+      def reserve_attempt_occurrence!(reservation_id, window_started_at:,
+                                      now: Time.now.utc,
                                       &capture_builder)
         @occurrence_store.reserve_attempt!(
-          reservation_id, now: now, &capture_builder
+          reservation_id,
+          window_started_at: window_started_at,
+          now: now,
+          &capture_builder
         )
       end
 
@@ -59,17 +63,25 @@ module Hive
         )
       end
 
-      def pending_occurrences
-        @occurrence_store.pending
+      def each_reserved_occurrence(&block)
+        return @occurrence_store.each_reserved unless block
+
+        @occurrence_store.each_reserved(&block)
       end
 
-      def projection_pending_occurrences
-        @occurrence_store.projection_pending
+      def each_projection_pending_occurrence(&block)
+        return @occurrence_store.each_projection_pending unless block
+
+        @occurrence_store.each_projection_pending(&block)
       end
 
-      def recovery_active_occurrences
-        @occurrence_store.recovery_active
+      def each_recovery_active_occurrence(&block)
+        return @occurrence_store.each_recovery_active unless block
+
+        @occurrence_store.each_recovery_active(&block)
       end
+
+      def recovery_active? = @occurrence_store.recovery_active?
 
       def each_occurrence(&block)
         return @occurrence_store.each_record unless block
@@ -82,7 +94,7 @@ module Hive
                                now: Time.now.utc)
         event_bytes = event && Hive::Modules::Migration::PatrolEvidence
                                .canonical(event)
-        @occurrence_store.finalize!(
+        finalized = @occurrence_store.finalize!(
           capture, event_bytes: event_bytes, now: now
         )
         drain_occurrence_outbox!(
@@ -91,7 +103,7 @@ module Hive
           event_publisher: event_publisher,
           project_entry: project_entry
         )
-        @occurrence_store.fetch(capture.occurrence_id)
+        finalized
       end
 
       # Projection acknowledgement happens only after the observational sink
@@ -179,6 +191,28 @@ module Hive
 
       def terminal_effect_receipt_ids(occurrence_id)
         @occurrence_store.effect_receipt_ids(occurrence_id)
+      end
+
+      def recovery_backoff(now: Time.now.utc)
+        @occurrence_store.recovery_backoff(now: now)
+      end
+
+      def record_recovery_failure!(operation:, occurrence_id: nil,
+                                   job_id: nil, error:,
+                                   now: Time.now.utc)
+        @occurrence_store.record_recovery_failure!(
+          operation: operation,
+          occurrence_id: occurrence_id,
+          job_id: job_id,
+          error: error,
+          now: now
+        )
+      end
+
+      def clear_recovery_failure!(expected_generation:)
+        @occurrence_store.clear_recovery_failure!(
+          expected_generation: expected_generation
+        )
       end
 
       def write_feature(feature)

@@ -7,6 +7,7 @@ require "hive/git_ops"
 require "hive/modules/event_publisher"
 require "hive/modules/migration/evidence_store"
 require "hive/modules/migration/patrols"
+require "hive/patrol/decision_projection"
 require "hive/patrol/state_store"
 
 module Hive
@@ -20,8 +21,6 @@ module Hive
       PATROL_SLUG = "patrol".freeze
       MODULE_SCHEDULE = "*/10 * * * *".freeze
       FAILURE_BACKOFF_SCHEDULE = [ 60, 300, 900 ].freeze
-      RECOVERY_BACKOFF_SCHEDULE = [ 60, 300, 900 ].freeze
-      RECOVERY_ERROR_LIMIT = 512
 
       class GitHelper
         def default_branch(project_root, cfg:)
@@ -72,7 +71,6 @@ module Hive
         end
         @pending = {}
         @failures = {}
-        @recovery_failures = {}
         @next_check_at = {}
         @events = []
       end
@@ -124,23 +122,31 @@ module Hive
           # reload its full config on every ~30s tick just to rediscover
           # patrol.enabled: false. A project that flips to enabled
           # mid-interval is picked up on its next poll window.
-          unless patrol["enabled"] == true
+          selection_input = schedule_selection_input(
+            entry, cfg, patrol, now
+          )
+          selection = Hive::Patrol::DecisionProjection.project(
+            selection_input
+          )
+          unless selection.rationale == "due"
             finalize_negative(
-              entry, patrol: patrol, rationale: "disabled", now: now
-            )
-            @next_check_at[project] = now + patrol.fetch("poll_interval_sec", 600).to_i
-            next
-          end
-          unless due?(entry, cfg, patrol, now)
-            finalize_negative(
-              entry, patrol: patrol, rationale: "not_due", now: now
+              entry,
+              patrol: patrol,
+              selection_input: selection_input,
+              selection: selection,
+              now: now
             )
             @next_check_at[project] = now + patrol.fetch("poll_interval_sec", 600).to_i
             next
           end
 
           @next_check_at[project] = now + patrol.fetch("poll_interval_sec", 600).to_i
-          dispatches << dispatch_for(entry, patrol: patrol)
+          dispatches << dispatch_for(
+            entry,
+            patrol: patrol,
+            selection_input: selection_input,
+            selection: selection
+          )
         rescue Hive::ConfigError, Hive::GitError, KeyError
           next
         end
@@ -169,11 +175,17 @@ module Hive
           interval = @config_loader.call(entry.fetch("path"))
                                    .dig("patrol", "poll_interval_sec") || 600
           base_id = schedule_reservation_id(entry, now, interval)
-          state.reserve_attempt_occurrence!(base_id, now: now) do |generation|
+          state.reserve_attempt_occurrence!(
+            base_id,
+            window_started_at: schedule_window(now, interval),
+            now: now
+          ) do |generation|
             capture_reservation(
               entry, snapshot, now,
               poll_interval_sec: interval,
-              attempt_generation: generation
+              attempt_generation: generation,
+              selection_input: candidate.fetch(:selection_input),
+              selection: candidate.fetch(:selection)
             )
           end
         end
@@ -252,16 +264,30 @@ module Hive
         deadline && now < deadline
       end
 
-      def due?(entry, cfg, patrol, now)
+      def schedule_selection_input(entry, cfg, patrol, now)
+        trigger = patrol.fetch("trigger", "continuous").to_s
+        unless patrol["enabled"] == true
+          return Hive::Patrol::DecisionProjection.schedule_input(
+            enabled: false,
+            trigger: trigger,
+            timer_due: nil,
+            branch_changed: nil
+          )
+        end
+
         state = read_state(entry.fetch("path"))
-        case patrol.fetch("trigger", "continuous")
-        when "timer"
-          timer_due?(state, patrol, now)
-        when "continuous"
-          default_branch_changed?(entry, cfg, state) || timer_due?(state, patrol, now)
-        else
+        branch_changed = if %w[continuous new_commits].include?(trigger)
           default_branch_changed?(entry, cfg, state)
         end
+        timer_due = if %w[continuous timer].include?(trigger)
+          timer_due?(state, patrol, now)
+        end
+        Hive::Patrol::DecisionProjection.schedule_input(
+          enabled: true,
+          trigger: trigger,
+          timer_due: timer_due,
+          branch_changed: branch_changed
+        )
       end
 
       def timer_due?(state, patrol, now)
@@ -291,7 +317,8 @@ module Hive
         nil
       end
 
-      def dispatch_for(entry, patrol: {})
+      def dispatch_for(entry, patrol: {}, selection_input: nil,
+                       selection: nil)
         project = entry.fetch("name")
         {
           project: project,
@@ -302,12 +329,16 @@ module Hive
           state_file_mtime: nil,
           state_file_path: nil,
           hive_state_path: entry["hive_state_path"],
-          migration_entry: entry
+          migration_entry: entry,
+          selection_input: selection_input,
+          selection: selection
         }
       end
 
       def public_dispatch(candidate, capture:)
-        dispatch = candidate.reject { |key, _value| key == :patrol_kind }
+        dispatch = candidate.reject do |key, _value|
+          %i[patrol_kind selection_input selection].include?(key)
+        end
         dispatch.merge(
           command: "#{dispatch.fetch(:command)} --occurrence-id #{capture.occurrence_id}"
         )
@@ -322,7 +353,8 @@ module Hive
       end
 
       def capture_reservation(entry, snapshot, now, poll_interval_sec:,
-                              rationale: "due", attempt_generation: 1)
+                              attempt_generation: 1, selection_input:,
+                              selection:)
         occurred = schedule_window(now, poll_interval_sec)
         occurred_at = occurred.iso8601(6)
         reservation_id = schedule_reservation_id(
@@ -345,16 +377,15 @@ module Hive
           reservation: {
             "kind" => "ordinary",
             "id" => reservation_id,
+            "window_started_at" => occurred_at,
             "attempt_generation" => attempt_generation
           },
           owner: snapshot.fetch("owner"),
           owner_epoch: snapshot.fetch("epoch"),
-          decision_class: rationale,
-          decision: {
-            "rationale" => rationale,
-            "reservation_id" => reservation_id,
-            "attempt_generation" => attempt_generation
-          },
+          selection_input: selection_input,
+          selection: selection,
+          outcome_class: nil,
+          outcome: nil,
           occurred_at: occurred,
           recorded_at: occurred
         )
@@ -374,69 +405,90 @@ module Hive
 
       def recover_projections(entry, now:)
         project = entry.fetch("name")
-        deadline = @recovery_failures.dig(project, :next_eligible_at)
-        return false if deadline && now < deadline
-
+        store = nil
+        occurrence_id = nil
         store = state_store(entry)
-        projection_ids = []
-        oldest_reserved = nil
-        store.each_occurrence do |record|
+        backoff = store.recovery_backoff(now: now)
+        return false if backoff.fetch("blocked")
+
+        expected_generation = backoff.fetch("generation")
+        oldest_reserved_id = nil
+        oldest_created_at = nil
+        evidence = nil
+        store.each_recovery_active_occurrence do |record|
           if record.fetch("phase") == "reserved" &&
-             (!oldest_reserved ||
-              record.fetch("created_at") <
-                oldest_reserved.fetch("created_at"))
-            oldest_reserved = record
+             (!oldest_created_at ||
+              record.fetch("created_at") < oldest_created_at)
+            oldest_reserved_id = record.fetch("occurrence_id")
+            oldest_created_at = record.fetch("created_at")
           end
           if record.fetch("outbox").any? do |outbox_entry|
             outbox_entry.fetch("acknowledged") == false
           end
-            projection_ids << record.fetch("occurrence_id")
+            occurrence_id = record.fetch("occurrence_id")
+            evidence ||= @evidence_store_factory.call(entry)
+            store.drain_occurrence_outbox!(
+              occurrence_id,
+              evidence_store: evidence,
+              event_publisher: @event_publisher,
+              project_entry: entry
+            )
           end
         end
-        if projection_ids.empty?
-          @recovery_failures.delete(project)
-          return oldest_reserved
-        end
+        return false unless store.clear_recovery_failure!(
+          expected_generation: expected_generation
+        )
 
-        evidence = @evidence_store_factory.call(entry)
-        occurrence_id = nil
-        projection_ids.each do |pending_id|
-          occurrence_id = pending_id
-          store.drain_occurrence_outbox!(
-            occurrence_id,
-            evidence_store: evidence,
-            event_publisher: @event_publisher,
-            project_entry: entry
-          )
-        end
-        @recovery_failures.delete(project)
-        oldest_reserved
+        oldest_reserved_id &&
+          store.occurrence(oldest_reserved_id)
       rescue StandardError => e
-        count = @recovery_failures.dig(project, :count).to_i + 1
-        interval = RECOVERY_BACKOFF_SCHEDULE[
-          [ count - 1, RECOVERY_BACKOFF_SCHEDULE.size - 1 ].min
-        ]
-        retry_at = now + interval
-        @recovery_failures[project] = {
-          count: count,
-          next_eligible_at: retry_at
-        }
+        failure = begin
+          store&.record_recovery_failure!(
+            operation: "occurrence_outbox_projection",
+            occurrence_id: occurrence_id,
+            error: e,
+            now: now
+          )
+        rescue StandardError
+          nil
+        end
+        unless failure
+          diagnostic =
+            Hive::Modules::Migration::OccurrenceJournalState
+            .normalize_error(e)
+          @events << {
+            status: :blocked,
+            project: project,
+            occurrence_id: occurrence_id,
+            recovery: "occurrence_outbox_projection",
+            blocker: "recovery_state_unavailable",
+            error_class: diagnostic.fetch("error_class"),
+            error: diagnostic.fetch("error_message")
+          }
+          return false
+        end
+        retry_at = Time.iso8601(
+          failure.fetch("next_eligible_at")
+        )
+        interval = [ (retry_at - now).to_i, 0 ].max
         @events << {
           status: :blocked,
           project: project,
           occurrence_id: occurrence_id,
           recovery: "occurrence_outbox_projection",
           blocker: "recovery_failed",
-          error_class: e.class.name,
-          error: e.message.to_s.byteslice(0, RECOVERY_ERROR_LIMIT),
-          retry_count: count,
+          error_class: failure.fetch("error_class"),
+          error: failure.fetch("error_message"),
+          retry_count: failure.fetch("failure_count"),
+          recovery_generation: failure.fetch("generation"),
           retry_in_sec: interval,
           retry_at: retry_at.utc.iso8601
         }
         false
       end
 
-      def finalize_negative(entry, patrol:, rationale:, now:)
+      def finalize_negative(entry, patrol:, selection_input:, selection:,
+                            now:)
         snapshot = @migration_snapshot.call(entry, "patrol")
         return unless reservation_owner?(snapshot)
 
@@ -444,7 +496,8 @@ module Hive
         capture = capture_reservation(
           entry, snapshot, now,
           poll_interval_sec: patrol.fetch("poll_interval_sec", 600).to_i,
-          rationale: rationale
+          selection_input: selection_input,
+          selection: selection
         )
         store.reserve_occurrence!(capture, now: now)
         existing = store.occurrence(capture.occurrence_id)
@@ -457,11 +510,25 @@ module Hive
           )
           return
         end
+        final_capture = Hive::Modules::Migration::PatrolCapture.build(
+          module_name: capture.module_name,
+          project: capture.project,
+          trigger: capture.trigger,
+          reservation: capture.reservation,
+          owner: capture.owner,
+          owner_epoch: capture.owner_epoch,
+          selection_input: capture.selection_input,
+          selection: capture.selection,
+          outcome_class: "not_dispatched",
+          outcome: { "rationale" => capture.selection.rationale },
+          occurred_at: capture.occurred_at,
+          recorded_at: now
+        )
         event = @event_publisher.prepare_patrol_finalized(
-          entry, capture, schedule: MODULE_SCHEDULE
+          entry, final_capture, schedule: MODULE_SCHEDULE
         )
         store.finalize_occurrence!(
-          capture: capture,
+          capture: final_capture,
           event: event,
           evidence_store: @evidence_store_factory.call(entry),
           event_publisher: @event_publisher,
@@ -490,7 +557,7 @@ module Hive
 
         success = exit_code == Hive::ExitCodes::SUCCESS &&
                   envelope.is_a?(Hash) && envelope["ok"] == true
-        decision = {
+        outcome = {
           "rationale" => success ? "completed" : "failed",
           "exit_code" => exit_code.nil? ? nil : Integer(exit_code),
           "ok" => success
@@ -500,7 +567,7 @@ module Hive
             features_mapped features_reviewed review_complete findings
             fixes_attempted prs_opened last_scanned_sha
           ].each do |key|
-            decision[key] = envelope[key] if envelope.key?(key)
+            outcome[key] = envelope[key] if envelope.key?(key)
           end
         end
         capture = Hive::Modules::Migration::PatrolCapture.build(
@@ -510,8 +577,10 @@ module Hive
           reservation: provisional.reservation,
           owner: provisional.owner,
           owner_epoch: provisional.owner_epoch,
-          decision_class: success ? "completed" : "failed",
-          decision: decision,
+          selection_input: provisional.selection_input,
+          selection: provisional.selection,
+          outcome_class: success ? "completed" : "failed",
+          outcome: outcome,
           effect_ids: store.terminal_effect_receipt_ids(
             provisional.occurrence_id
           ),

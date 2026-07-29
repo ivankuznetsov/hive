@@ -2,6 +2,7 @@ require "json"
 require "digest"
 require "time"
 require "hive/modules/migration/patrol_evidence"
+require "hive/refactor_patrol/decision_projection"
 require "hive/refactor_patrol/effect_gateway"
 require "hive/refactor_patrol/pr_manifest"
 require "hive/workflow_package/canonical_json"
@@ -25,6 +26,11 @@ module Hive
           source = data.fetch("source")
           occurred_at = Time.iso8601(source.fetch("merged_at"))
           recorded_at ||= occurred_at
+          selection_input =
+            Hive::RefactorPatrol::DecisionProjection.candidate_input(
+              job_id: data.fetch("job_id"),
+              phase: "discovery"
+            )
           Hive::Modules::Migration::PatrolCapture.build(
             module_name: "architecture-patrol",
             project: {
@@ -45,16 +51,19 @@ module Hive
             reservation: {
               "kind" => "architecture",
               "id" => data.fetch("job_id"),
-              "job_id" => data.fetch("job_id")
+              "job_id" => data.fetch("job_id"),
+              "window_started_at" => occurred_at.iso8601(6),
+              "attempt_generation" => 1
             },
             owner: owner,
             owner_epoch: owner_epoch,
-            decision_class: "provenance",
-            decision: {
-              "rationale" => "due",
-              "job_id" => data.fetch("job_id"),
-              "phase" => "discovery"
-            },
+            selection_input: selection_input,
+            selection:
+              Hive::RefactorPatrol::DecisionProjection.project(
+                selection_input
+              ),
+            outcome_class: nil,
+            outcome: nil,
             occurred_at: occurred_at,
             recorded_at: recorded_at
           )

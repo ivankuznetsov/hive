@@ -6,6 +6,7 @@ require "hive/modules/migration/evidence_store"
 require "hive/modules/migration/patrols"
 require "hive/modules/migration/shadow_comparator"
 require "hive/patrol/state_store"
+require "hive/patrol/decision_projection"
 
 module Hive
   module Modules
@@ -55,6 +56,10 @@ module Hive
         def scheduled_scan(project, context, cfg, configuration, event)
           mode = migration_mode(project, configuration)
           return shadow(project, configuration, event, "ownership_fenced") if mode == :fenced
+          if mode == :shadow &&
+             event.dig("payload", "legacy_mutator_capture")
+            return shadow(project, configuration, event, nil)
+          end
           context.require_filesystem_read!("repository")
           context.require_external_command!("git")
           scheduler = @scheduler_factory.call(
@@ -152,11 +157,23 @@ module Hive
           else
             capture = legacy_capture(event)
             receipts = capture ? occurrence_receipts(project, capture) : []
+            projection = if capture
+              Hive::Patrol::DecisionProjection.project(
+                capture.selection_input
+              )
+            else
+              Hive::Modules::Migration::PatrolDecisionProjection.build(
+                module_name: "patrol",
+                rationale:
+                  %w[due disabled].include?(rationale) ?
+                    rationale : "not_due"
+              )
+            end
             shadow_comparator(project).record!(
               module_name: "patrol",
               trigger: capture ? capture.trigger : event,
               legacy_capture: capture,
-              module_decision: { "rationale" => rationale },
+              module_projection: projection,
               legacy_effects: receipts.reject do |receipt|
                 receipt.intent.authority == "shadow"
               end,
@@ -165,7 +182,11 @@ module Hive
               end,
               configuration_digest: configuration.digest,
               occurred_at: event.fetch("occurred_at"),
-              comparable: comparable && !capture.nil?
+              comparable:
+                comparable && !capture.nil? &&
+                %w[due not_due disabled].include?(
+                  projection.rationale
+                )
             )
           end
           0
@@ -221,6 +242,10 @@ module Hive
                   "Patrol module occurrence lost mutation ownership"
           end
 
+          selection_input =
+            Hive::Patrol::DecisionProjection.module_event_input(
+              event.fetch("event_id")
+            )
           Hive::Modules::Migration::PatrolCapture.build(
             module_name: "patrol",
             project: {
@@ -237,15 +262,19 @@ module Hive
             },
             reservation: {
               "kind" => "module_hook",
-              "id" => event.fetch("event_id")
+              "id" => event.fetch("event_id"),
+              "window_started_at" => event.fetch("occurred_at"),
+              "attempt_generation" => 1
             },
             owner: "module",
             owner_epoch: snapshot.fetch("epoch"),
-            decision_class: "due",
-            decision: {
-              "rationale" => "due",
-              "event_id" => event.fetch("event_id")
-            },
+            selection_input: selection_input,
+            selection:
+              Hive::Patrol::DecisionProjection.project(
+                selection_input
+              ),
+            outcome_class: nil,
+            outcome: nil,
             occurred_at: event.fetch("occurred_at"),
             recorded_at: event.fetch("recorded_at", event.fetch("occurred_at"))
           )

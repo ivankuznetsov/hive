@@ -281,6 +281,17 @@ class ModulesMigrationPatrolsTest < Minitest::Test
       checks += 1
       checks == 1
     end
+    state_store = Object.new
+    state_store.define_singleton_method(:recovery_backoff) do |now:|
+      now
+      { "generation" => 0, "failure" => nil, "blocked" => false }
+    end
+    state_store.define_singleton_method(
+      :each_recovery_active_occurrence
+    ) { |&| nil }
+    state_store.define_singleton_method(
+      :clear_recovery_failure!
+    ) { |expected_generation:| expected_generation.zero? }
     scheduler = Hive::Daemon::PatrolScheduler.new(
       registry: -> { [ entry ] },
       config_loader: ->(_path) {
@@ -289,7 +300,8 @@ class ModulesMigrationPatrolsTest < Minitest::Test
           "patrol" => { "enabled" => true, "trigger" => "timer", "poll_interval_sec" => 60 }
         )
       },
-      migration_ownership: ownership
+      migration_ownership: ownership,
+      state_store_factory: ->(_candidate) { state_store }
     )
 
     candidate = scheduler.candidates(now: NOW).fetch(0)
@@ -399,6 +411,63 @@ class ModulesMigrationPatrolsTest < Minitest::Test
         hive_state_path: project.fetch("hive_state_path")
       )
       assert_empty coordinator.tick(now: NOW + 60)
+    end
+  end
+
+  def test_default_coordinator_probe_distinguishes_empty_and_active_ordinary_journals
+    with_project do |project|
+      supervisor = FakeSupervisor.new
+      supervisor.live = false
+      empty = Hive::Modules::Migration::Coordinator.new(
+        supervisor: supervisor,
+        attempt_store: FakeAttemptStore.new,
+        registry: -> { [ project ] },
+        store_factory: ->(_state) { FakeStore.new }
+      ).tick(now: NOW).fetch(0)
+
+      assert_equal :shadowing, empty.fetch(:status)
+      assert_empty empty.fetch(:blockers)
+    end
+
+    with_project do |project|
+      state_store = Hive::Patrol::StateStore.new(project.fetch("path"))
+      capture = Hive::Modules::Migration::PatrolCapture.build(
+        module_name: "patrol",
+        project: {
+          "project_id" => "project-1",
+          "name" => "demo",
+          "repository" => nil
+        },
+        trigger: { "kind" => "schedule", "id" => "tick-1" },
+        reservation: { "kind" => "ordinary", "id" => "reservation-1" },
+        owner: "legacy",
+        owner_epoch: 1,
+        selection_input: {
+          "kind" => "operation",
+          "operation" => "coordinator-proof"
+        },
+        selection:
+          Hive::Modules::Migration::PatrolDecisionProjection.build(
+            module_name: "patrol",
+            rationale: "due"
+          ),
+        outcome_class: nil,
+        outcome: nil,
+        occurred_at: NOW,
+        recorded_at: NOW
+      )
+      state_store.reserve_occurrence!(capture, now: NOW)
+      supervisor = FakeSupervisor.new
+      supervisor.live = false
+      active = Hive::Modules::Migration::Coordinator.new(
+        supervisor: supervisor,
+        attempt_store: FakeAttemptStore.new,
+        registry: -> { [ project ] },
+        store_factory: ->(_state) { FakeStore.new }
+      ).tick(now: NOW).fetch(0)
+
+      assert_equal :pending, active.fetch(:status)
+      assert_equal({ "patrol" => "live" }, active.fetch(:blockers))
     end
   end
 

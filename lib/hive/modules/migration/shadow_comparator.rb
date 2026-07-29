@@ -42,7 +42,7 @@ module Hive
           @admission_lock = admission_lock || default_admission_lock
         end
 
-        def record!(module_name:, trigger:, module_decision:, configuration_digest:,
+        def record!(module_name:, trigger:, module_projection:, configuration_digest:,
                     occurred_at:, legacy_capture: nil, legacy_effects: [],
                     module_effects: [], explained_paths: [], comparable: true)
           @admission_lock.call(shared: true) do
@@ -60,8 +60,14 @@ module Hive
               occurrence_id: capture&.occurrence_id,
               shadow_only: true
             )
-            normalized_legacy = normalize(capture ? capture.decision : {})
-            normalized_module = normalize(module_decision)
+            normalized_legacy = normalize(
+              capture ? capture.selection.to_h : {}
+            )
+            normalized_module = normalize(
+              projection_value(
+                module_projection, module_name
+              ).to_h
+            )
             all_differences = differences(normalized_legacy, normalized_module)
             explained = all_differences.select { |row| explained_paths.include?(row.fetch("path")) }
             unexplained = all_differences - explained
@@ -246,6 +252,18 @@ module Hive
           effects.sort_by(&:receipt_id).freeze
         end
 
+        def projection_value(value, module_name)
+          projection = PatrolDecisionProjection.coerce(value)
+          unless projection.module_name == module_name.to_s
+            raise Hive::ConfigError,
+                  "module shadow decision projection is malformed"
+          end
+          projection
+        rescue Hive::ConfigError
+          raise Hive::ConfigError,
+                "module shadow decision projection is malformed"
+        end
+
         def time(value)
           value.is_a?(Time) ? value.utc : Time.iso8601(value.to_s).utc
         rescue ArgumentError
@@ -383,8 +401,14 @@ module Hive
             occurrence_id: capture&.occurrence_id,
             shadow_only: true
           )
-          normalized_legacy = normalize(capture ? capture.decision : {})
-          normalized_module = normalize(data["module_decision"])
+          normalized_legacy = normalize(
+            capture ? capture.selection.to_h : {}
+          )
+          normalized_module = normalize(
+            projection_value(
+              data["module_decision"], data["module"]
+            ).to_h
+          )
           all_differences = differences(normalized_legacy, normalized_module)
           explained_paths = difference_paths(data["explained_differences"])
           expected_explained = all_differences.select do |row|

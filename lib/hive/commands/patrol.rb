@@ -16,6 +16,7 @@ require "hive/patrol/feature_batch"
 require "hive/patrol/mapper"
 require "hive/patrol/pr_opener"
 require "hive/patrol/reviewer"
+require "hive/patrol/decision_projection"
 require "hive/patrol/state_store"
 require "hive/patrol/token_budget"
 require "hive/patrol/validator"
@@ -281,6 +282,8 @@ module Hive
           identity = [
             "manual", entry.fetch("project_id"), now.utc.iso8601(6)
           ].join(":")
+          selection_input =
+            Hive::Patrol::DecisionProjection.operation_input("manual")
           Hive::Modules::Migration::PatrolCapture.build(
             module_name: "patrol",
             project: {
@@ -292,8 +295,13 @@ module Hive
             reservation: { "kind" => "ordinary", "id" => identity },
             owner: snapshot.fetch("owner"),
             owner_epoch: snapshot.fetch("epoch"),
-            decision_class: "due",
-            decision: { "rationale" => "manual" },
+            selection_input: selection_input,
+            selection:
+              Hive::Patrol::DecisionProjection.project(
+                selection_input
+              ),
+            outcome_class: nil,
+            outcome: nil,
             occurred_at: now,
             recorded_at: now
           )
@@ -346,8 +354,10 @@ module Hive
           reservation: provisional.reservation,
           owner: provisional.owner,
           owner_epoch: provisional.owner_epoch,
-          decision_class: "completed",
-          decision: {
+          selection_input: provisional.selection_input,
+          selection: provisional.selection,
+          outcome_class: "completed",
+          outcome: {
             "rationale" => "manual_completed",
             "ok" => payload.fetch("ok"),
             "findings" => payload.fetch("findings"),

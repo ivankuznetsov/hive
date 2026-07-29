@@ -6,6 +6,7 @@ require "hive/git_ops"
 require "hive/modules/migration/evidence_store"
 require "hive/modules/migration/patrols"
 require "hive/patrol/effect_gateway"
+require "hive/patrol/decision_projection"
 require "hive/patrol/fingerprint"
 require "hive/patrol/review_handoff"
 require "hive/patrol/state_store"
@@ -497,6 +498,10 @@ module Hive
           finding.fingerprint, patch.id, patch.branch,
           validated_oid!(patch.head_sha, "validated patch head")
         ].join(":")
+        selection_input =
+          Hive::Patrol::DecisionProjection.operation_input(
+            "validated_patch"
+          )
         capture = Hive::Modules::Migration::PatrolCapture.build(
           module_name: "patrol",
           project: {
@@ -508,11 +513,13 @@ module Hive
           reservation: { "kind" => "ordinary", "id" => identity },
           owner: owner,
           owner_epoch: epoch,
-          decision_class: "publication",
-          decision: {
-            "rationale" => "validated_patch",
-            "fingerprint" => finding.fingerprint
-          },
+          selection_input: selection_input,
+          selection:
+            Hive::Patrol::DecisionProjection.project(
+              selection_input
+            ),
+          outcome_class: nil,
+          outcome: nil,
           occurred_at: Time.at(0).utc,
           recorded_at: Time.at(0).utc
         )

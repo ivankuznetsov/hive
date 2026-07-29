@@ -58,9 +58,20 @@ module Hive
           unless provisional.occurrence_id == expected_id
             malformed!("patrol occurrence capture is malformed")
           end
+          unless provisional.outcome_class.nil? &&
+                 provisional.outcome.nil? &&
+                 provisional.effect_ids.empty?
+            malformed!(
+              "patrol occurrence provisional capture is terminal"
+            )
+          end
           if record.fetch("phase") == "finalized"
             final = capture(record.fetch("final_capture"))
-            unless final.occurrence_id == expected_id
+            unless final.occurrence_id == expected_id &&
+                   !final.outcome_class.nil? &&
+                   !final.outcome.nil? &&
+                   immutable_capture_fields(final) ==
+                     immutable_capture_fields(provisional)
               malformed!("patrol occurrence final capture is malformed")
             end
           elsif !record["final_capture"].nil?
@@ -188,6 +199,21 @@ module Hive
         end
 
         private
+
+        def immutable_capture_fields(capture)
+          [
+            capture.module_name,
+            capture.occurrence_id,
+            capture.project,
+            capture.trigger,
+            capture.reservation,
+            capture.owner,
+            capture.owner_epoch,
+            capture.selection_input,
+            capture.selection,
+            capture.occurred_at
+          ]
+        end
 
         def validate_effects(effects, occurrence_id, receipts:)
           if effects.size >

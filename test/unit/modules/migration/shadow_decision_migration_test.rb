@@ -1,6 +1,7 @@
 require "test_helper"
 require "digest"
 require "json"
+require "json_schemer"
 require "hive/modules/migration/shadow_comparator"
 require "hive/modules/migration/shadow_decision_migration"
 
@@ -39,6 +40,17 @@ class ModulesMigrationShadowDecisionMigrationTest < Minitest::Test
         },
         migrated.fetch("migration")
       )
+      schema = JSONSchemer.schema(
+        JSON.parse(
+          File.read(
+            File.join(
+              Hive::Schemas.schema_dir,
+              "hive-module-shadow-decision.v2.json"
+            )
+          )
+        )
+      )
+      assert schema.valid?(migrated), schema.validate(migrated).to_a.inspect
 
       repeated = migrate(root)
       assert_equal 0, repeated.migrated
@@ -122,8 +134,20 @@ class ModulesMigrationShadowDecisionMigrationTest < Minitest::Test
         reservation: { "kind" => "architecture", "id" => "job-1" },
         owner: "legacy",
         owner_epoch: 1,
-        decision_class: "complete",
-        decision: { "rationale" => "complete" },
+        selection_input: {
+          "kind" => "candidate",
+          "job_id" => "job-1",
+          "phase" => "discovery"
+        },
+        selection:
+          Hive::Modules::Migration::PatrolDecisionProjection.build(
+            module_name: "architecture-patrol",
+            rationale: "due",
+            job_id: "job-1",
+            phase: "discovery"
+          ),
+        outcome_class: "complete",
+        outcome: { "rationale" => "complete" },
         occurred_at: START,
         recorded_at: START
       )
@@ -131,7 +155,7 @@ class ModulesMigrationShadowDecisionMigrationTest < Minitest::Test
         module_name: "architecture-patrol",
         trigger: trigger,
         legacy_capture: capture,
-        module_decision: capture.decision,
+        module_projection: capture.selection,
         configuration_digest: "d" * 64,
         occurred_at: START
       )
@@ -235,8 +259,17 @@ class ModulesMigrationShadowDecisionMigrationTest < Minitest::Test
         reservation: { "kind" => "ordinary", "id" => "reservation-1" },
         owner: "legacy",
         owner_epoch: 1,
-        decision_class: "due",
-        decision: {},
+        selection_input: {
+          "kind" => "operation",
+          "operation" => "shadow-migration"
+        },
+        selection:
+          Hive::Modules::Migration::PatrolDecisionProjection.build(
+            module_name: "patrol",
+            rationale: "due"
+          ),
+        outcome_class: "complete",
+        outcome: {},
         occurred_at: START,
         recorded_at: START
       )
@@ -244,7 +277,7 @@ class ModulesMigrationShadowDecisionMigrationTest < Minitest::Test
         module_name: "patrol",
         trigger: trigger,
         legacy_capture: capture,
-        module_decision: {},
+        module_projection: capture.selection,
         configuration_digest: "c" * 64,
         occurred_at: START
       )

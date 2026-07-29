@@ -3350,8 +3350,20 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       },
       owner: "legacy",
       owner_epoch: 1,
-      decision_class: "provenance",
-      decision: { "rationale" => "due", "job_id" => job_id },
+      selection_input: {
+        "kind" => "candidate",
+        "job_id" => job_id,
+        "phase" => "discovery"
+      },
+      selection:
+        Hive::Modules::Migration::PatrolDecisionProjection.build(
+          module_name: "architecture-patrol",
+          rationale: "due",
+          job_id: job_id,
+          phase: "discovery"
+        ),
+      outcome_class: nil,
+      outcome: nil,
       occurred_at: T0,
       recorded_at: T0
     )

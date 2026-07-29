@@ -140,9 +140,9 @@ class ModulesEventRoutingTest < Minitest::Test
     architecture = capture(
       "architecture-patrol",
       decision: {
-        "rationale" => "not_due",
-        "job_id" => nil,
-        "phase" => nil
+        "rationale" => "due",
+        "job_id" => "architecture-patrol-reservation",
+        "phase" => "discovery"
       }
     )
 
@@ -236,6 +236,29 @@ class ModulesEventRoutingTest < Minitest::Test
 
   def capture(module_name, decision:)
     identity = "#{module_name}-reservation"
+    architecture = module_name == "architecture-patrol"
+    selection_input = if architecture
+      {
+        "kind" => "candidate",
+        "job_id" => identity,
+        "phase" => "discovery"
+      }
+    else
+      {
+        "kind" => "operation",
+        "operation" => "event-routing"
+      }
+    end
+    projection_attributes = {
+      module_name: module_name,
+      rationale: decision.fetch("rationale")
+    }
+    if architecture
+      projection_attributes.merge!(
+        job_id: identity,
+        phase: "discovery"
+      )
+    end
     Hive::Modules::Migration::PatrolCapture.build(
       module_name: module_name,
       project: {
@@ -250,8 +273,13 @@ class ModulesEventRoutingTest < Minitest::Test
       },
       owner: "legacy",
       owner_epoch: 1,
-      decision_class: "scheduler_outcome",
-      decision: decision,
+      selection_input: selection_input,
+      selection:
+        Hive::Modules::Migration::PatrolDecisionProjection.build(
+          **projection_attributes
+        ),
+      outcome_class: "scheduler_outcome",
+      outcome: decision,
       occurred_at: NOW,
       recorded_at: NOW
     )

@@ -1,4 +1,5 @@
 require "test_helper"
+require "json_schemer"
 require "hive/modules/migration/report"
 require "hive/modules/migration/shadow_comparator"
 
@@ -17,12 +18,12 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
       )
       record = comparator.record!(
         module_name: "patrol", trigger: trigger, legacy_capture: capture,
-        module_decision: { "status" => "due", "engine" => "module" },
+        module_projection: projection_for("patrol", trigger, "due"),
         configuration_digest: "a" * 64, occurred_at: START, comparable: false
       )
       repeated = comparator.record!(
         module_name: "patrol", trigger: trigger, legacy_capture: capture,
-        module_decision: { "status" => "due", "engine" => "module" },
+        module_projection: projection_for("patrol", trigger, "due"),
         configuration_digest: "a" * 64, occurred_at: START, comparable: false
       )
 
@@ -31,6 +32,64 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
       assert_equal "legacy_mutator_capture", record.fetch("evidence_source")
       assert_equal record, repeated
       assert_equal 1, comparator.each_record("patrol").count
+    end
+  end
+
+  def test_published_schema_enforces_exact_capture_and_projection_shapes
+    with_tmp_dir do |root|
+      comparator = Hive::Modules::Migration::ShadowComparator.new(root: root)
+      trigger = { "id" => "tick-1" }
+      capture = capture_for(
+        "patrol", trigger, { "status" => "due" }
+      )
+      record = comparator.record!(
+        module_name: "patrol",
+        trigger: trigger,
+        legacy_capture: capture,
+        module_projection: projection_for("patrol", trigger, "due"),
+        configuration_digest: "a" * 64,
+        occurred_at: START
+      )
+      schema = JSONSchemer.schema(
+        JSON.parse(
+          File.read(
+            File.join(
+              Hive::Schemas.schema_dir,
+              "hive-module-shadow-decision.v2.json"
+            )
+          )
+        )
+      )
+
+      assert schema.valid?(record), schema.validate(record).to_a.inspect
+      malformed = [
+        record.merge(
+          "module_decision" =>
+            record.fetch("module_decision").reject {
+              |key, _value| key == "phase"
+            }
+        ),
+        record.merge(
+          "module_decision" =>
+            record.fetch("module_decision").merge("extra" => true)
+        ),
+        record.merge(
+          "legacy_capture" =>
+            record.fetch("legacy_capture").merge("extra" => true)
+        ),
+        record.merge(
+          "legacy_capture" =>
+            record.fetch("legacy_capture").merge(
+              "selection" =>
+                record.dig("legacy_capture", "selection").merge(
+                  "extra" => true
+                )
+            )
+        )
+      ]
+      malformed.each do |value|
+        refute schema.valid?(value), value.inspect
+      end
     end
   end
 
@@ -50,7 +109,8 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
             module_name: module_name,
             trigger: trigger,
             legacy_capture: capture,
-            module_decision: decision,
+            module_projection:
+              projection_for(module_name, trigger, "due"),
             configuration_digest: "#{module_name == 'patrol' ? 'a' : 'b'}" * 64,
             occurred_at: START + (index * 24 * 60 * 60),
             legacy_effects: [
@@ -75,7 +135,8 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
       capture = capture_for("patrol", trigger, { "status" => "due" })
       comparator.record!(
         module_name: "patrol", trigger: trigger,
-        legacy_capture: capture, module_decision: { "status" => "skip" },
+        legacy_capture: capture,
+        module_projection: projection_for("patrol", trigger, "not_due"),
         configuration_digest: "a" * 64, occurred_at: reviewed_at,
         module_effects: [
           receipt_for(capture, "unexpected-pr", authority: "shadow", status: "denied")
@@ -97,7 +158,7 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
       trigger = { "id" => "same" }
       capture = capture_for(
         "patrol", trigger,
-        { "rows" => [ "due", { "value" => 1 } ] }
+        { "status" => "due" }
       )
       legacy_receipt = receipt_for(capture, "legacy", authority: "legacy")
       module_receipt = receipt_for(
@@ -105,15 +166,18 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
       )
       attributes = {
         module_name: "patrol", trigger: trigger, legacy_capture: capture,
-        module_decision: { "rows" => [ :skip, { "value" => 2 } ] },
+        module_projection: projection_for("patrol", trigger, "not_due"),
         configuration_digest: "a" * 64, occurred_at: START,
-        explained_paths: [ "$.rows[0]" ],
+        explained_paths: [ "$.rationale" ],
         legacy_effects: [ legacy_receipt, legacy_receipt ],
         module_effects: [ module_receipt ]
       }
       record = comparator.record!(**attributes)
-      assert_equal [ "$.rows[0]" ], record.fetch("explained_differences").map { |row| row.fetch("path") }
-      assert_equal [ "$.rows[1].value" ], record.fetch("unexplained_differences").map { |row| row.fetch("path") }
+      assert_equal [ "$.rationale" ],
+                   record.fetch("explained_differences").map {
+                     |row| row.fetch("path")
+                   }
+      assert_empty record.fetch("unexplained_differences")
       assert_equal 2, record.fetch("duplicate_effects").size
 
       assert_raises(Hive::ConfigError) do
@@ -126,7 +190,9 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
         comparator.record!(**attributes.merge(occurred_at: "not-a-time"))
       end
       assert_raises(Hive::ConfigError) do
-        comparator.record!(**attributes.merge(module_decision: { "rows" => [] }))
+        comparator.record!(
+          **attributes.merge(module_projection: { "rows" => [] })
+        )
       end
       assert_raises(Hive::ConfigError) do
         comparator.record!(**attributes.merge(legacy_capture: {}))
@@ -164,7 +230,7 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
           module_name: "patrol",
           trigger: trigger,
           legacy_capture: foreign_capture,
-          module_decision: { "status" => "due" },
+          module_projection: projection_for("patrol", trigger, "due"),
           configuration_digest: "a" * 64,
           occurred_at: START
         )
@@ -178,7 +244,7 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
           module_name: "patrol",
           trigger: trigger,
           legacy_capture: patrol_capture,
-          module_decision: { "status" => "due" },
+          module_projection: projection_for("patrol", trigger, "due"),
           configuration_digest: "a" * 64,
           occurred_at: START,
           module_effects: [ foreign_effect ]
@@ -189,7 +255,7 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
         module_name: "patrol",
         trigger: trigger,
         legacy_capture: patrol_capture,
-        module_decision: { "status" => "due" },
+        module_projection: projection_for("patrol", trigger, "due"),
         configuration_digest: "a" * 64,
         occurred_at: START
       )
@@ -239,7 +305,7 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
         module_name: "patrol",
         trigger: trigger,
         legacy_capture: capture,
-        module_decision: { "status" => "due" },
+        module_projection: projection_for("patrol", trigger, "due"),
         configuration_digest: "a" * 64,
         occurred_at: START
       )
@@ -311,7 +377,7 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
           module_name: "patrol",
           trigger: trigger,
           legacy_capture: capture_for("patrol", trigger, decision),
-          module_decision: decision,
+          module_projection: projection_for("patrol", trigger, "due"),
           configuration_digest: "a" * 64,
           occurred_at: START
         )
@@ -334,7 +400,7 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
           module_name: "patrol",
           trigger: trigger,
           legacy_capture: capture,
-          module_decision: decision,
+          module_projection: projection_for("patrol", trigger, "due"),
           configuration_digest: "a" * 64,
           occurred_at: START
         )
@@ -365,7 +431,7 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
         module_name: "patrol",
         trigger: trigger,
         legacy_capture: capture,
-        module_decision: decision,
+        module_projection: projection_for("patrol", trigger, "due"),
         configuration_digest: "a" * 64,
         occurred_at: START
       )
@@ -386,7 +452,7 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
         module_name: "patrol",
         trigger: trigger,
         legacy_capture: capture,
-        module_decision: decision,
+        module_projection: projection_for("patrol", trigger, "due"),
         configuration_digest: "a" * 64,
         occurred_at: START
       )
@@ -462,7 +528,7 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
           module_name: "patrol",
           trigger: trigger,
           legacy_capture: capture_for("patrol", trigger, decision),
-          module_decision: decision,
+          module_projection: projection_for("patrol", trigger, "due"),
           configuration_digest: (index.zero? ? "a" : "b") * 64,
           occurred_at: START + index
         )
@@ -510,7 +576,7 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
           module_name: "patrol",
           trigger: trigger,
           legacy_capture: capture_for("patrol", trigger, decision),
-          module_decision: decision,
+          module_projection: projection_for("patrol", trigger, "due"),
           configuration_digest: "a" * 64,
           occurred_at: START + index
         )
@@ -551,7 +617,8 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
           module_name: module_name,
           trigger: trigger,
           legacy_capture: capture_for(module_name, trigger, decision),
-          module_decision: decision,
+          module_projection:
+            projection_for(module_name, trigger, "due"),
           configuration_digest: "a" * 64,
           occurred_at: START + index
         )
@@ -602,6 +669,23 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
   end
 
   def capture_for(module_name, trigger, decision)
+    selection = projection_for(
+      module_name,
+      trigger,
+      decision.fetch("status", "due") == "skip" ? "not_due" : "due"
+    )
+    selection_input = if module_name == "patrol"
+      {
+        "kind" => "operation",
+        "operation" => "shadow-comparison"
+      }
+    else
+      {
+        "kind" => "candidate",
+        "job_id" => trigger.fetch("id"),
+        "phase" => "discovery"
+      }
+    end
     Hive::Modules::Migration::PatrolCapture.build(
       module_name: module_name,
       project: {
@@ -616,11 +700,25 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
       },
       owner: "legacy",
       owner_epoch: 1,
-      decision_class: decision.fetch("status", "due"),
-      decision: decision,
+      selection_input: selection_input,
+      selection: selection,
+      outcome_class: "test",
+      outcome: decision,
       occurred_at: START,
       recorded_at: START
     )
+  end
+
+  def projection_for(module_name, trigger, rationale)
+    attributes = {
+      module_name: module_name,
+      rationale: rationale
+    }
+    if module_name == "architecture-patrol"
+      attributes[:job_id] = trigger.fetch("id")
+      attributes[:phase] = "discovery"
+    end
+    Hive::Modules::Migration::PatrolDecisionProjection.build(**attributes)
   end
 
   def receipt_for(capture, id, authority:, status: "committed")

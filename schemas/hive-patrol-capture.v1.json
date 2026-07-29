@@ -15,8 +15,10 @@
     "reservation",
     "owner",
     "owner_epoch",
-    "decision_class",
-    "decision",
+    "selection_input",
+    "selection",
+    "outcome_class",
+    "outcome",
     "effect_ids",
     "occurred_at",
     "recorded_at"
@@ -46,14 +48,175 @@
     "reservation": {"type": "object"},
     "owner": {"enum": ["legacy", "module"]},
     "owner_epoch": {"type": "integer", "minimum": 1},
-    "decision_class": {"type": "string", "minLength": 1},
-    "decision": {"type": "object"},
+    "selection_input": {"type": "object"},
+    "selection": {"$ref": "#/$defs/decision_projection"},
+    "outcome_class": {
+      "anyOf": [
+        {"type": "string", "minLength": 1},
+        {"type": "null"}
+      ]
+    },
+    "outcome": {
+      "anyOf": [
+        {"type": "object"},
+        {"type": "null"}
+      ]
+    },
     "effect_ids": {
       "type": "array",
       "uniqueItems": true,
+      "maxItems": 128,
       "items": {"type": "string", "minLength": 1}
     },
     "occurred_at": {"type": "string", "format": "date-time"},
     "recorded_at": {"type": "string", "format": "date-time"}
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"module": {"const": "patrol"}},
+        "required": ["module"]
+      },
+      "then": {
+        "properties": {
+          "selection_input": {"$ref": "#/$defs/patrol_selection_input"},
+          "selection": {"$ref": "#/$defs/patrol_projection"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"module": {"const": "architecture-patrol"}},
+        "required": ["module"]
+      },
+      "then": {
+        "properties": {
+          "selection_input": {"$ref": "#/$defs/architecture_selection_input"},
+          "selection": {"$ref": "#/$defs/architecture_projection"}
+        }
+      }
+    },
+    {
+      "oneOf": [
+        {
+          "properties": {
+            "outcome_class": {"type": "null"},
+            "outcome": {"type": "null"}
+          },
+          "required": ["outcome_class", "outcome"]
+        },
+        {
+          "properties": {
+            "outcome_class": {"type": "string", "minLength": 1},
+            "outcome": {"type": "object"}
+          },
+          "required": ["outcome_class", "outcome"]
+        }
+      ]
+    }
+  ],
+  "$defs": {
+    "patrol_selection_input": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "enabled", "trigger", "timer_due", "branch_changed"],
+          "properties": {
+            "kind": {"const": "schedule"},
+            "enabled": {"type": "boolean"},
+            "trigger": {"enum": ["continuous", "timer", "new_commits"]},
+            "timer_due": {"type": ["boolean", "null"]},
+            "branch_changed": {"type": ["boolean", "null"]}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "event_id"],
+          "properties": {
+            "kind": {"const": "module_event"},
+            "event_id": {"type": "string", "minLength": 1}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "operation"],
+          "properties": {
+            "kind": {"const": "operation"},
+            "operation": {"type": "string", "minLength": 1}
+          }
+        }
+      ]
+    },
+    "architecture_selection_input": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "job_id", "phase"],
+          "properties": {
+            "kind": {"const": "candidate"},
+            "job_id": {"type": "string", "minLength": 1},
+            "phase": {"enum": ["discovery", "action"]}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "job_id", "phase", "operation"],
+          "properties": {
+            "kind": {"const": "operation"},
+            "job_id": {"type": "string", "minLength": 1},
+            "phase": {"enum": ["discovery", "action"]},
+            "operation": {"type": "string", "minLength": 1}
+          }
+        }
+      ]
+    },
+    "patrol_projection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["module", "rationale", "job_id", "phase"],
+      "properties": {
+        "module": {"const": "patrol"},
+        "rationale": {"enum": ["disabled", "not_due", "due"]},
+        "job_id": {"type": "null"},
+        "phase": {"type": "null"}
+      }
+    },
+    "architecture_projection": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["module", "rationale", "job_id", "phase"],
+          "properties": {
+            "module": {"const": "architecture-patrol"},
+            "rationale": {"const": "due"},
+            "job_id": {"type": "string", "minLength": 1},
+            "phase": {"enum": ["discovery", "action"]}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["module", "rationale", "job_id", "phase"],
+          "properties": {
+            "module": {"const": "architecture-patrol"},
+            "rationale": {"const": "not_due"},
+            "job_id": {"type": "null"},
+            "phase": {"type": "null"}
+          }
+        }
+      ]
+    },
+    "decision_projection": {
+      "oneOf": [
+        {"$ref": "#/$defs/patrol_projection"},
+        {"$ref": "#/$defs/architecture_projection"}
+      ]
+    }
   }
 }

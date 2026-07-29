@@ -1,3 +1,4 @@
+require "digest"
 require "thread"
 require "hive/managed_directory"
 
@@ -45,13 +46,24 @@ module Hive
           end
         end
 
-        def initialize(root:, label:)
+        def initialize(root:, label:, stripes: nil)
           @root = File.expand_path(root).freeze
           @label = label.to_s.freeze
+          @stripes = stripes && Integer(stripes)
+          if @stripes && !@stripes.positive?
+            raise Hive::ConfigError,
+                  "patrol stable lock stripe count is malformed"
+          end
         end
 
         def synchronize(name)
-          lock_name = "#{validated_name(name)}.lock"
+          name = validated_name(name)
+          lock_name = if @stripes
+            index = Digest::SHA256.hexdigest(name).to_i(16) % @stripes
+            "stripe-#{index.to_s(16).rjust(3, '0')}.lock"
+          else
+            "#{name}.lock"
+          end
           directory = managed_directory
           path = File.join(directory.root, lock_name)
           self.class.synchronize(path) do

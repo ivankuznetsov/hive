@@ -38,10 +38,12 @@ class RefactorPatrolArchitectureOccurrenceStoreTest < Minitest::Test
       record
     end
 
-    def recovery_active
-      fail_if!(:recovery_active)
-      calls << [ :recovery_active ]
-      [ record ].compact
+    def each_recovery_active
+      return enum_for(__method__) unless block_given?
+
+      fail_if!(:each_recovery_active)
+      calls << [ :each_recovery_active ]
+      [ record ].compact.each { |value| yield value }
     end
 
     def pending_outbox(occurrence_id)
@@ -121,7 +123,9 @@ class RefactorPatrolArchitectureOccurrenceStoreTest < Minitest::Test
     assert_equal capture.occurrence_id,
                  store.capture_for_job("job-7").occurrence_id
     assert_equal [ capture.occurrence_id ],
-                 store.recovery_active.map { |row| row.fetch("occurrence_id") }
+                 store.each_recovery_active.map {
+                   |row| row.fetch("occurrence_id")
+                 }
 
     assert_equal :prepare_effect!,
                  store.prepare_effect!(intent.to_h, now: NOW)
@@ -451,8 +455,31 @@ class RefactorPatrolArchitectureOccurrenceStoreTest < Minitest::Test
   end
 
   def capture_for(value, module_name: "architecture-patrol",
-                  project: nil, reservation: nil, decision: nil)
+                  project: nil, reservation: nil)
     source = value.fetch("source")
+    architecture = module_name == "architecture-patrol"
+    selection_input = if architecture
+      {
+        "kind" => "candidate",
+        "job_id" => value.fetch("job_id"),
+        "phase" => "action"
+      }
+    else
+      {
+        "kind" => "operation",
+        "operation" => "architecture-store-test"
+      }
+    end
+    projection_attributes = {
+      module_name: module_name,
+      rationale: "due"
+    }
+    if architecture
+      projection_attributes.merge!(
+        job_id: value.fetch("job_id"),
+        phase: "action"
+      )
+    end
     Hive::Modules::Migration::PatrolCapture.build(
       module_name: module_name,
       project: project || {
@@ -473,9 +500,14 @@ class RefactorPatrolArchitectureOccurrenceStoreTest < Minitest::Test
       },
       owner: "legacy",
       owner_epoch: 1,
-      decision_class: "action",
-      decision: decision || {
-        "rationale" => "due",
+      selection_input: selection_input,
+      selection:
+        Hive::Modules::Migration::PatrolDecisionProjection.build(
+          **projection_attributes
+        ),
+      outcome_class: "action",
+      outcome: {
+        "rationale" => "complete",
         "job_id" => value.fetch("job_id")
       },
       occurred_at: NOW,

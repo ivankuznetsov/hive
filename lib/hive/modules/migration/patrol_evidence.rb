@@ -1,6 +1,7 @@
 require "digest"
 require "time"
 require "hive/errors"
+require "hive/modules/migration/patrol_decision_projection"
 require "hive/workflow_package/canonical_json"
 
 module Hive
@@ -128,15 +129,16 @@ module Hive
 
       class PatrolCaptureValidator
         KEYS = %w[
-          capture_id decision decision_class effect_ids module occurred_at
-          occurrence_id owner owner_epoch project recorded_at reservation
-          schema schema_version trigger
+          capture_id effect_ids module occurred_at occurrence_id outcome
+          outcome_class owner owner_epoch project recorded_at reservation schema
+          schema_version selection selection_input trigger
         ].freeze
         PROJECT_KEYS = %w[name project_id repository].freeze
 
         class << self
           def build(module_name:, project:, trigger:, reservation:, owner:, owner_epoch:,
-                    decision_class:, decision:, effect_ids: [], occurred_at:, recorded_at:)
+                    selection_input:, selection:, outcome_class:, outcome:,
+                    effect_ids: [], occurred_at:, recorded_at:)
             label = "patrol capture"
             module_name = PatrolEvidence.enum(module_name, PatrolEvidence::MODULES, label: label)
             owner = PatrolEvidence.enum(owner, PatrolEvidence::OWNERS, label: label)
@@ -144,8 +146,15 @@ module Hive
             project = project_value(project, label)
             trigger = object(trigger, label)
             reservation = object(reservation, label)
-            decision = object(decision, label)
-            decision_class = PatrolEvidence.nonempty(decision_class, label: label)
+            selection_input = selection_input_value(
+              module_name, selection_input, label
+            )
+            selection = PatrolDecisionProjection.coerce(selection)
+            PatrolEvidence.malformed!(label) unless
+              selection.module_name == module_name
+            outcome_class, outcome = outcome_value(
+              outcome_class, outcome, label
+            )
             effect_ids = Array(effect_ids).map do |effect_id|
               PatrolEvidence.nonempty(effect_id, label: label)
             end
@@ -161,14 +170,16 @@ module Hive
               "trigger" => trigger,
               "reservation" => reservation,
               "owner" => owner,
-              "owner_epoch" => owner_epoch
+              "owner_epoch" => owner_epoch,
+              "selection_input" => selection_input,
+              "selection" => selection.to_h
             }
             occurrence_id = PatrolEvidence.digest("occ", occurrence_identity)
             capture_id = PatrolEvidence.digest(
               "cap",
               occurrence_identity.merge(
-                "decision_class" => decision_class,
-                "decision" => decision,
+                "outcome_class" => outcome_class,
+                "outcome" => outcome,
                 "effect_ids" => effect_ids
               )
             )
@@ -181,8 +192,10 @@ module Hive
               reservation: reservation,
               owner: owner,
               owner_epoch: owner_epoch,
-              decision_class: decision_class,
-              decision: decision,
+              selection_input: selection_input,
+              selection: selection,
+              outcome_class: outcome_class,
+              outcome: outcome,
               effect_ids: effect_ids,
               occurred_at: occurred_at,
               recorded_at: recorded_at
@@ -191,7 +204,21 @@ module Hive
               {
                 "schema" => "hive-patrol-capture",
                 "schema_version" => 1,
-                **attributes.transform_keys(&:to_s)
+                "capture_id" => capture_id,
+                "module" => module_name,
+                "occurrence_id" => occurrence_id,
+                "project" => project,
+                "trigger" => trigger,
+                "reservation" => reservation,
+                "owner" => owner,
+                "owner_epoch" => owner_epoch,
+                "selection_input" => selection_input,
+                "selection" => selection.to_h,
+                "outcome_class" => outcome_class,
+                "outcome" => outcome,
+                "effect_ids" => effect_ids,
+                "occurred_at" => occurred_at,
+                "recorded_at" => recorded_at
               },
               max_bytes: PatrolEvidence::MAX_CAPTURE_BYTES,
               label: label
@@ -211,8 +238,10 @@ module Hive
               reservation: value["reservation"],
               owner: value["owner"],
               owner_epoch: value["owner_epoch"],
-              decision_class: value["decision_class"],
-              decision: value["decision"],
+              selection_input: value["selection_input"],
+              selection: value["selection"],
+              outcome_class: value["outcome_class"],
+              outcome: value["outcome"],
               effect_ids: value["effect_ids"],
               occurred_at: value["occurred_at"],
               recorded_at: value["recorded_at"]
@@ -242,13 +271,82 @@ module Hive
             PatrolEvidence.malformed!(label) unless immutable.is_a?(Hash)
             immutable
           end
+
+          def outcome_value(outcome_class, outcome, label)
+            return [ nil, nil ] if outcome_class.nil? && outcome.nil?
+
+            PatrolEvidence.malformed!(label) if
+              outcome_class.nil? || outcome.nil?
+            [
+              PatrolEvidence.nonempty(outcome_class, label: label),
+              object(outcome, label)
+            ]
+          end
+
+          def selection_input_value(module_name, value, label)
+            input = object(value, label)
+            kind = input["kind"].to_s
+            case [ module_name, kind ]
+            when [ "patrol", "schedule" ]
+              PatrolEvidence.exact_keys!(
+                input,
+                %w[branch_changed enabled kind timer_due trigger],
+                label: label
+              )
+              PatrolEvidence.malformed!(label) unless
+                [ true, false ].include?(input["enabled"]) &&
+                %w[continuous timer new_commits].include?(input["trigger"]) &&
+                boolean_or_nil?(input["timer_due"]) &&
+                boolean_or_nil?(input["branch_changed"])
+            when [ "patrol", "module_event" ]
+              PatrolEvidence.exact_keys!(
+                input, %w[event_id kind], label: label
+              )
+              PatrolEvidence.nonempty(input["event_id"], label: label)
+            when [ "patrol", "operation" ]
+              PatrolEvidence.exact_keys!(
+                input, %w[kind operation], label: label
+              )
+              PatrolEvidence.nonempty(input["operation"], label: label)
+            when [ "architecture-patrol", "candidate" ]
+              validate_architecture_input!(input, label)
+            when [ "architecture-patrol", "operation" ]
+              PatrolEvidence.exact_keys!(
+                input, %w[job_id kind operation phase], label: label
+              )
+              validate_architecture_values!(input, label)
+              PatrolEvidence.nonempty(input["operation"], label: label)
+            else
+              PatrolEvidence.malformed!(label)
+            end
+            input
+          end
+
+          def validate_architecture_input!(input, label)
+            PatrolEvidence.exact_keys!(
+              input, %w[job_id kind phase], label: label
+            )
+            validate_architecture_values!(input, label)
+          end
+
+          def validate_architecture_values!(input, label)
+            PatrolEvidence.nonempty(input["job_id"], label: label)
+            PatrolEvidence.enum(
+              input["phase"], PatrolDecisionProjection::ARCHITECTURE_PHASES,
+              label: label
+            )
+          end
+
+          def boolean_or_nil?(value)
+            value.nil? || value == true || value == false
+          end
         end
       end
 
       PatrolCapture = Data.define(
         :capture_id, :module_name, :occurrence_id, :project, :trigger,
-        :reservation, :owner, :owner_epoch, :decision_class, :decision,
-        :effect_ids, :occurred_at, :recorded_at
+        :reservation, :owner, :owner_epoch, :selection_input, :selection,
+        :outcome_class, :outcome, :effect_ids, :occurred_at, :recorded_at
       ) do
         class << self
           def build(**attributes)
@@ -272,8 +370,10 @@ module Hive
             "reservation" => reservation,
             "owner" => owner,
             "owner_epoch" => owner_epoch,
-            "decision_class" => decision_class,
-            "decision" => decision,
+            "selection_input" => selection_input,
+            "selection" => selection.to_h,
+            "outcome_class" => outcome_class,
+            "outcome" => outcome,
             "effect_ids" => effect_ids,
             "occurred_at" => occurred_at,
             "recorded_at" => recorded_at

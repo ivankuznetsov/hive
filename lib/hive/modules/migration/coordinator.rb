@@ -102,8 +102,8 @@ module Hive
             return :quiescent unless Dir.exist?(root)
 
             store = Hive::Patrol::StateStore.new(project_root)
-            store.recovery_active_occurrences.empty? ?
-              :quiescent : :live
+            store.recovery_active? ?
+              :live : :quiescent
           when "architecture-patrol"
             require "hive/refactor_patrol/job_store"
             root = File.join(
@@ -112,7 +112,7 @@ module Hive
             return :quiescent unless Dir.exist?(root)
 
             store = Hive::RefactorPatrol::JobStore.new(project_root)
-            if store.recovery_active_occurrences.any? ||
+            if store.recovery_active? ||
                store.incomplete_jobs?
               :live
             else

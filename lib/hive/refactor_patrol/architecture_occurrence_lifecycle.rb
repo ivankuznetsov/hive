@@ -1,5 +1,6 @@
 require "hive/config"
 require "hive/modules/migration/patrol_evidence"
+require "hive/refactor_patrol/decision_projection"
 
 module Hive
   module RefactorPatrol
@@ -36,7 +37,14 @@ module Hive
         end
 
         source = aggregate.fetch("source")
-        occurred_at = source["merged_at"] || aggregate.fetch("created_at")
+        occurred_at = canonical_time(
+          source["merged_at"] || aggregate.fetch("created_at")
+        )
+        selection_input =
+          Hive::RefactorPatrol::DecisionProjection.candidate_input(
+            job_id: aggregate.fetch("job_id"),
+            phase: "discovery"
+          )
         capture = Hive::Modules::Migration::PatrolCapture.build(
           module_name: "architecture-patrol",
           project: {
@@ -57,16 +65,19 @@ module Hive
           reservation: {
             "kind" => "architecture",
             "id" => aggregate.fetch("job_id"),
-            "job_id" => aggregate.fetch("job_id")
+            "job_id" => aggregate.fetch("job_id"),
+            "window_started_at" => occurred_at.iso8601(6),
+            "attempt_generation" => 1
           },
           owner: migration.fetch("owner"),
           owner_epoch: migration.fetch("epoch"),
-          decision_class: "provenance",
-          decision: {
-            "rationale" => "due",
-            "job_id" => aggregate.fetch("job_id"),
-            "phase" => "discovery"
-          },
+          selection_input: selection_input,
+          selection:
+            Hive::RefactorPatrol::DecisionProjection.project(
+              selection_input
+            ),
+          outcome_class: nil,
+          outcome: nil,
           occurred_at: occurred_at,
           recorded_at: occurred_at
         )
@@ -117,7 +128,7 @@ module Hive
       end
 
       def recover(store:, entry:, now:)
-        store.recovery_active_occurrences.each do |occurrence|
+        store.each_recovery_active_occurrence do |occurrence|
           job_id = nil
           if occurrence.fetch("phase") == "reserved"
             job_id = recovery_job_id(occurrence)
@@ -153,6 +164,14 @@ module Hive
       end
 
       private
+
+      def canonical_time(value)
+        time = value.is_a?(Time) ? value : Time.iso8601(value.to_s)
+        time.utc
+      rescue ArgumentError, TypeError
+        raise Hive::ConfigError,
+              "architecture patrol occurrence time is malformed"
+      end
 
       def assert_same_owner!(capture, migration)
         return if capture.owner == migration.fetch("owner") &&
@@ -204,7 +223,7 @@ module Hive
 
       def final_capture(store, provisional, token:, result:, aggregate:, now:)
         actions = aggregate.fetch("actions")
-        decision = {
+        outcome = {
           "rationale" => "complete",
           "job_id" => aggregate.fetch("job_id"),
           "state" => aggregate.fetch("state"),
@@ -225,8 +244,10 @@ module Hive
           reservation: provisional.reservation,
           owner: provisional.owner,
           owner_epoch: provisional.owner_epoch,
-          decision_class: "complete",
-          decision: decision,
+          selection_input: provisional.selection_input,
+          selection: provisional.selection,
+          outcome_class: "complete",
+          outcome: outcome,
           effect_ids: store.terminal_effect_receipt_ids(
             provisional.occurrence_id
           ),

@@ -1,6 +1,7 @@
 require "json"
 require "digest"
 require "hive/modules/migration/occurrence_effects"
+require "hive/modules/migration/occurrence_journal_state"
 require "hive/modules/migration/occurrence_record_store"
 require "hive/modules/migration/stable_process_lock"
 
@@ -20,6 +21,7 @@ module Hive
         DELIVERY_STATES = OccurrenceContract::DELIVERY_STATES
         TERMINAL_STATES = OccurrenceContract::TERMINAL_STATES
         OUTBOX_KINDS = OccurrenceContract::OUTBOX_KINDS
+        LOCK_STRIPES = 64
 
         attr_reader :root
 
@@ -32,6 +34,10 @@ module Hive
             root: root, validator: @validator
           )
           @root = @store.root
+          @journal_state = OccurrenceJournalState.new(
+            root: @root,
+            module_name: @module_name
+          )
           @outbox = OccurrenceOutbox.new(validator: @validator)
           @effects = OccurrenceEffects.new(
             store: @store,
@@ -40,24 +46,32 @@ module Hive
           )
           @sender_locks = StableProcessLock.new(
             root: File.join(@root, ".sender-locks"),
-            label: "patrol effect sender locks"
+            label: "patrol effect sender locks",
+            stripes: LOCK_STRIPES
           )
           @attempt_locks = StableProcessLock.new(
             root: File.join(@root, ".attempt-locks"),
-            label: "patrol occurrence attempt locks"
+            label: "patrol occurrence attempt locks",
+            stripes: LOCK_STRIPES
+          )
+          @inventory_lock = StableProcessLock.new(
+            root: File.join(@root, ".inventory-locks"),
+            label: "patrol occurrence inventory lock",
+            stripes: 1
           )
         end
 
         def reserve!(capture, now: Time.now.utc)
           capture = @validator.capture(capture)
-          @store.mutate(capture.occurrence_id, create: true) do |record|
-            if record
-              validate_occurrence_identity!(record, capture)
-              next record
+          @journal_state.synchronize do |state, checkpoint|
+            @inventory_lock.synchronize("inventory") do
+              reserve_coordinated!(
+                capture,
+                state: state,
+                checkpoint: checkpoint,
+                now: now
+              )
             end
-
-            timestamp = @validator.timestamp(now)
-            build_record(capture, timestamp)
           end
           fetch(capture.occurrence_id)
         end
@@ -65,48 +79,73 @@ module Hive
         # Allocates one durable attempt generation for an ordinary schedule
         # identity. A concurrent/restarted scheduler reuses the sole reserved
         # attempt; only a terminal prior attempt advances the generation.
-        def reserve_attempt!(reservation_id, now: Time.now.utc)
+        def reserve_attempt!(reservation_id, window_started_at:,
+                             now: Time.now.utc)
           base_id = @validator.nonempty(
             reservation_id, "patrol reservation identity"
           )
+          window = @validator.timestamp(window_started_at)
           key = Digest::SHA256.hexdigest(base_id)
           @attempt_locks.synchronize(key) do
-            attempts = each_record.filter_map do |record|
-              reservation = record.dig(
-                "provisional_capture", "reservation"
-              )
-              next unless reservation.is_a?(Hash) &&
-                          reservation["kind"] == "ordinary" &&
-                          reservation["id"] == base_id
+            @journal_state.synchronize do |state, checkpoint|
+              @inventory_lock.synchronize("inventory") do
+                reserved_capture = nil
+                reserved_count = 0
+                observed_generation = 0
+                each_record do |record|
+                  reservation = record.dig(
+                    "provisional_capture", "reservation"
+                  )
+                  next unless reservation.is_a?(Hash) &&
+                              reservation["kind"] == "ordinary" &&
+                              reservation["id"] == base_id
 
-              [ record, attempt_generation(reservation) ]
-            end
-            reserved = attempts.select do |record, _generation|
-              record.fetch("phase") == "reserved"
-            end
-            if reserved.size > 1
-              malformed!(
-                "patrol schedule has multiple reserved attempts"
-              )
-            end
-            if reserved.one?
-              return @validator.capture(
-                reserved.first.first.fetch("provisional_capture")
-              )
-            end
+                  generation = attempt_generation(reservation)
+                  observed_generation = [
+                    observed_generation, generation
+                  ].max
+                  next unless record.fetch("phase") == "reserved"
 
-            generation = attempts.map(&:last).max.to_i + 1
-            capture = @validator.capture(yield(generation))
-            reservation = capture.reservation
-            unless reservation["kind"] == "ordinary" &&
-                   reservation["id"] == base_id &&
-                   attempt_generation(reservation) == generation
-              malformed!(
-                "patrol schedule attempt capture is malformed"
-              )
+                  reserved_count += 1
+                  reserved_capture = @validator.capture(
+                    record.fetch("provisional_capture")
+                  )
+                end
+                if reserved_count > 1
+                  malformed!(
+                    "patrol schedule has multiple reserved attempts"
+                  )
+                end
+                return reserved_capture if reserved_capture
+
+                generation = @journal_state.allocate_attempt!(
+                  state,
+                  reservation_id: base_id,
+                  window_started_at: window,
+                  observed_generation: observed_generation
+                )
+                capture = @validator.capture(yield(generation))
+                reservation = capture.reservation
+                unless reservation["kind"] == "ordinary" &&
+                       reservation["id"] == base_id &&
+                       reservation["window_started_at"] == window &&
+                       attempt_generation(reservation) == generation
+                  malformed!(
+                    "patrol schedule attempt capture is malformed"
+                  )
+                end
+                # A crash after this checkpoint may skip a generation, but
+                # it can never allocate the same generation twice.
+                checkpoint.call
+                reserve_coordinated!(
+                  capture,
+                  state: state,
+                  checkpoint: checkpoint,
+                  now: now
+                )
+                capture
+              end
             end
-            reserve!(capture, now: now)
-            capture
           end
         end
 
@@ -114,36 +153,42 @@ module Hive
           @store.fetch(occurrence_id)
         end
 
-        def pending
-          each_record.select do |record|
-            record.fetch("phase") == "reserved"
-          end.freeze
+        def each_reserved
+          return enum_for(__method__) unless block_given?
+
+          each_record do |record|
+            yield record if record.fetch("phase") == "reserved"
+          end
+          nil
         end
 
         # One bounded pass over the sole occurrence journal is the durable
         # scheduler recovery inventory. Reserved occurrences still own product
         # work; finalized occurrences remain active only while their projection
         # outbox has unacknowledged entries.
-        def recovery_active
-          each_record.select do |record|
-            record.fetch("phase") == "reserved" ||
-              record.fetch("outbox").any? do |entry|
-              entry.fetch("acknowledged") == false
+        def each_recovery_active
+          return enum_for(__method__) unless block_given?
+
+          each_record do |record|
+            if record.fetch("phase") == "reserved" ||
+               projection_pending_record?(record)
+              yield record
             end
-          end.freeze
+          end
+          nil
         end
 
-        def projection_pending
-          each_record.select do |record|
-            record.fetch("outbox").any? do |entry|
-              entry.fetch("acknowledged") == false
-            end
-          end.freeze
+        def each_projection_pending
+          return enum_for(__method__) unless block_given?
+
+          each_record do |record|
+            yield record if projection_pending_record?(record)
+          end
+          nil
         end
 
-        def records
-          @store.records
-        end
+        def recovery_active? = each_recovery_active.any?
+        def projection_pending? = each_projection_pending.any?
 
         def each_record(&block)
           return @store.each_record unless block
@@ -257,14 +302,121 @@ module Hive
         end
 
         def acknowledge_outbox!(occurrence_id, entry_id:, digest:)
-          @store.mutate(occurrence_id) do |record|
+          record = @store.mutate(occurrence_id) do |value|
             @outbox.acknowledge(
-              record, entry_id: entry_id, digest: digest
+              value, entry_id: entry_id, digest: digest
             )
+          end
+          retire_if_terminal!(record)
+          record
+        end
+
+        def recovery_backoff(now: Time.now.utc)
+          @journal_state.synchronize do |state, _checkpoint|
+            @journal_state.recovery_snapshot(state, now: now)
+          end
+        end
+
+        def record_recovery_failure!(operation:, occurrence_id: nil,
+                                     job_id: nil, error:,
+                                     now: Time.now.utc)
+          @journal_state.synchronize do |state, checkpoint|
+            failure = @journal_state.record_recovery_failure!(
+              state,
+              operation: operation,
+              occurrence_id: occurrence_id,
+              job_id: job_id,
+              error: error,
+              now: now
+            )
+            checkpoint.call
+            failure
+          end
+        end
+
+        def clear_recovery_failure!(expected_generation:)
+          @journal_state.synchronize do |state, checkpoint|
+            cleared = @journal_state.clear_recovery_failure!(
+              state,
+              expected_generation: expected_generation
+            )
+            checkpoint.call if cleared
+            cleared
           end
         end
 
         private
+
+        def reserve_coordinated!(capture, state:, checkpoint:, now:)
+          existing = @store.fetch(capture.occurrence_id)
+          if existing
+            validate_occurrence_identity!(existing, capture)
+            return existing
+          end
+          if @journal_state.retired_occurrence?(state, capture)
+            malformed!("patrol occurrence was already retired")
+          end
+
+          candidate = @store.retirement_candidate_if_full do |record|
+            provisional = @validator.capture(
+              record.fetch("provisional_capture")
+            )
+            @journal_state.retirement_fence_available?(
+              state, provisional
+            )
+          end
+          if candidate
+            provisional = @validator.capture(
+              candidate.fetch("provisional_capture")
+            )
+            unless @journal_state.fence_retirement!(state, provisional)
+              malformed!("patrol occurrence retirement fence is full")
+            end
+            checkpoint.call
+            @store.retire!(candidate.fetch("occurrence_id"))
+          end
+          timestamp = @validator.timestamp(now)
+          @store.mutate(capture.occurrence_id, create: true) do |record|
+            if record
+              validate_occurrence_identity!(record, capture)
+              next record
+            end
+            build_record(capture, timestamp)
+          end
+        end
+
+        def retire_if_terminal!(record)
+          return false unless retireable?(record)
+
+          @journal_state.synchronize do |state, checkpoint|
+            @inventory_lock.synchronize("inventory") do
+              current = @store.fetch(record.fetch("occurrence_id"))
+              next false unless current && retireable?(current)
+
+              provisional = @validator.capture(
+                current.fetch("provisional_capture")
+              )
+              next false unless
+                @journal_state.fence_retirement!(state, provisional)
+
+              checkpoint.call
+              @store.retire!(current.fetch("occurrence_id"))
+            end
+          end
+        end
+
+        def retireable?(record)
+          record.fetch("phase") == "finalized" &&
+            record.fetch("outbox").all? do |entry|
+              entry.fetch("acknowledged") == true
+            end
+        end
+
+        def projection_pending_record?(record)
+          record.fetch("outbox").any? do |entry|
+            entry.fetch("acknowledged") == false
+          end
+        end
 
         def attempt_generation(reservation)
           @validator.positive_integer(
@@ -301,8 +453,8 @@ module Hive
           provisional = @validator.capture(
             record.fetch("provisional_capture")
           )
-          unless provisional.occurrence_id ==
-                 capture.occurrence_id
+          unless immutable_capture_fields(provisional) ==
+                 immutable_capture_fields(capture)
             malformed!(
               "patrol occurrence capture conflicts"
             )
@@ -310,6 +462,21 @@ module Hive
           true
         rescue KeyError
           malformed!("patrol occurrence is malformed")
+        end
+
+        def immutable_capture_fields(capture)
+          [
+            capture.module_name,
+            capture.occurrence_id,
+            capture.project,
+            capture.trigger,
+            capture.reservation,
+            capture.owner,
+            capture.owner_epoch,
+            capture.selection_input,
+            capture.selection,
+            capture.occurred_at
+          ]
         end
 
         def append_finalized_projections!(record, capture, event_bytes)

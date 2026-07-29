@@ -300,8 +300,17 @@ class PatrolEffectGatewayTest < Minitest::Test
       reservation: { "kind" => "ordinary", "id" => "reservation-1" },
       owner: "legacy",
       owner_epoch: 1,
-      decision_class: "due",
-      decision: { "rationale" => "due" },
+      selection_input: {
+        "kind" => "operation",
+        "operation" => "effect-gateway-test"
+      },
+      selection:
+        Hive::Modules::Migration::PatrolDecisionProjection.build(
+          module_name: "patrol",
+          rationale: "due"
+        ),
+      outcome_class: nil,
+      outcome: nil,
       occurred_at: NOW,
       recorded_at: NOW
     )

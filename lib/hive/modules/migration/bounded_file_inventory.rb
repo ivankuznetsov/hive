@@ -110,6 +110,47 @@ module Hive
           nil
         end
 
+        # Streams one bounded inventory pass while allowing callers to remove
+        # already-yielded names. The initial high-water name and count bound
+        # the pass; each page rescans after the last yielded name, so removals
+        # cannot invalidate a frozen fingerprint and later names wait for the
+        # next pass.
+        def each_live_name(page_size:)
+          return enum_for(__method__, page_size: page_size) unless
+            block_given?
+
+          page_size = Integer(page_size)
+          malformed! unless
+            page_size.positive? && page_size <= @max_entries
+          state = snapshot
+          after = nil
+          remaining = state.count
+          while remaining.positive?
+            limit = [ page_size, remaining ].min
+            selected = []
+            visited = 0
+            each_valid_name do |name|
+              visited += 1
+              overflow! if visited > @max_entries
+              next unless name <= state.through
+              next if after && name <= after
+
+              insert_bounded(selected, name, limit)
+            end
+            break if selected.empty?
+
+            selected.each { |name| yield name }
+            after = selected.last
+            remaining -= selected.size
+            break if selected.size < limit
+          end
+          nil
+        rescue Hive::ConfigError
+          raise
+        rescue ArgumentError, TypeError
+          malformed!
+        end
+
         private
 
         def each_valid_name

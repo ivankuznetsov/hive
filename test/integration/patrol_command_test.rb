@@ -1502,8 +1502,17 @@ class PatrolCommandTest < Minitest::Test
       reservation: { "kind" => "ordinary", "id" => "reservation-1" },
       owner: "legacy",
       owner_epoch: 1,
-      decision_class: "due",
-      decision: { "rationale" => "manual" },
+      selection_input: {
+        "kind" => "operation",
+        "operation" => "patrol-command-test"
+      },
+      selection:
+        Hive::Modules::Migration::PatrolDecisionProjection.build(
+          module_name: "patrol",
+          rationale: "due"
+        ),
+      outcome_class: nil,
+      outcome: nil,
       occurred_at: now,
       recorded_at: now
     )

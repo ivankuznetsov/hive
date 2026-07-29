@@ -30,8 +30,6 @@ module Hive
       PATROL_SLUG_PREFIX = "refactor-patrol".freeze
       MODULE_SCHEDULE = "*/10 * * * *".freeze
       RETRY_BACKOFF_SEC = 60
-      RECOVERY_BACKOFF_SCHEDULE = [ 60, 300, 900 ].freeze
-      RECOVERY_ERROR_LIMIT = 512
       SUPPORTED_REPORT_SCHEMA_VERSIONS = [ 2, Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol") ].uniq.freeze
 
       class ReservationBlocked < StandardError
@@ -124,7 +122,6 @@ module Hive
         @claim_maintenance_transitions =
           Hive::RefactorPatrol::ClaimMaintenanceTransitions.new
         @events = []
-        @recovery_failures = {}
         @schemers = SUPPORTED_REPORT_SCHEMA_VERSIONS.to_h do |version|
           [ version, JSONSchemer.schema(Pathname.new(Hive::Schemas.schema_path("hive-refactor-patrol", version: version))) ]
         end
@@ -135,7 +132,14 @@ module Hive
         managed = managed_entries
         block_configuration_errors(now)
         due_by_project = managed.to_h do |entry|
-          store = store_for(entry)
+          store = begin
+            store_for(entry)
+          rescue StandardError => error
+            recovery_state_unavailable(entry, error)
+            nil
+          end
+          next [ entry.fetch("name"), [] ] unless store
+
           unless recover_occurrences(store, entry, now)
             next [ entry.fetch("name"), [] ]
           end
@@ -736,8 +740,9 @@ module Hive
 
       def recover_occurrences(store, entry, now)
         project = entry.fetch("name")
-        deadline = @recovery_failures.dig(project, :next_eligible_at)
-        return false if deadline && now < deadline
+        backoff = store.recovery_backoff(now: now)
+        return false if backoff.fetch("blocked")
+        expected_generation = backoff.fetch("generation")
 
         @occurrence_lifecycle.recover(
           store: store, entry: entry, now: now
@@ -746,31 +751,95 @@ module Hive
             entry, store, aggregate, now
           )
         end
-        @recovery_failures.delete(project)
-        true
+        store.clear_recovery_failure!(
+          expected_generation: expected_generation
+        )
       rescue Hive::RefactorPatrol::ArchitectureOccurrenceLifecycle::
                RecoveryError => e
-        count = @recovery_failures.dig(project, :count).to_i + 1
-        interval = RECOVERY_BACKOFF_SCHEDULE[
-          [ count - 1, RECOVERY_BACKOFF_SCHEDULE.size - 1 ].min
-        ]
-        retry_at = now + interval
-        @recovery_failures[project] = {
-          count: count,
-          next_eligible_at: retry_at
-        }
-        @events << {
-          status: :blocked,
+        failure = begin
+          store.record_recovery_failure!(
+            operation: "architecture_occurrence",
+            occurrence_id: e.occurrence_id,
+            job_id: e.job_id,
+            error: e.cause || e,
+            now: now
+          )
+        rescue StandardError
+          nil
+        end
+        unless failure
+          return recovery_state_unavailable(
+            entry, e.cause || e,
+            occurrence_id: e.occurrence_id,
+            job_id: e.job_id
+          )
+        end
+        recovery_failure_event(
           project: project,
           occurrence_id: e.occurrence_id,
           job_id: e.job_id,
+          failure: failure,
+          now: now
+        )
+        false
+      rescue StandardError => e
+        failure = begin
+          store.record_recovery_failure!(
+            operation: "architecture_occurrence",
+            error: e,
+            now: now
+          )
+        rescue StandardError
+          nil
+        end
+        return recovery_state_unavailable(entry, e) unless failure
+
+        recovery_failure_event(
+          project: project,
+          occurrence_id: nil,
+          job_id: nil,
+          failure: failure,
+          now: now
+        )
+        false
+      end
+
+      def recovery_failure_event(project:, occurrence_id:, job_id:,
+                                 failure:, now:)
+        retry_at = Time.iso8601(
+          failure.fetch("next_eligible_at")
+        )
+        interval = [ (retry_at - now).to_i, 0 ].max
+        @events << {
+          status: :blocked,
+          project: project,
+          occurrence_id: occurrence_id,
+          job_id: job_id,
           recovery: "architecture_occurrence",
           blocker: "recovery_failed",
-          error_class: e.error_class,
-          error: e.message.to_s.byteslice(0, RECOVERY_ERROR_LIMIT),
-          retry_count: count,
+          error_class: failure.fetch("error_class"),
+          error: failure.fetch("error_message"),
+          retry_count: failure.fetch("failure_count"),
+          recovery_generation: failure.fetch("generation"),
           retry_in_sec: interval,
           retry_at: retry_at.utc.iso8601
+        }
+      end
+
+      def recovery_state_unavailable(entry, error, occurrence_id: nil,
+                                     job_id: nil)
+        diagnostic =
+          Hive::Modules::Migration::OccurrenceJournalState
+          .normalize_error(error)
+        @events << {
+          status: :blocked,
+          project: entry && entry["name"],
+          occurrence_id: occurrence_id,
+          job_id: job_id,
+          recovery: "architecture_occurrence",
+          blocker: "recovery_state_unavailable",
+          error_class: diagnostic.fetch("error_class"),
+          error: diagnostic.fetch("error_message")
         }
         false
       end

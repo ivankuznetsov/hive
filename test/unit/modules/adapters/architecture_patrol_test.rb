@@ -276,7 +276,8 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
       record = JSON.parse(File.binread(file))
       assert record.fetch("comparable")
       assert_equal "legacy_mutator_capture", record.fetch("evidence_source")
-      assert_equal "job-7", record.dig("legacy_capture", "decision", "job_id")
+      assert_equal "job-7",
+                   record.dig("legacy_capture", "selection", "job_id")
     end
   end
 
@@ -572,12 +573,20 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
       },
       owner: "legacy",
       owner_epoch: 1,
-      decision_class: "scheduler_outcome",
-      decision: {
-        "rationale" => "due",
+      selection_input: {
+        "kind" => "candidate",
         "job_id" => "job-7",
         "phase" => "discovery"
       },
+      selection:
+        Hive::Modules::Migration::PatrolDecisionProjection.build(
+          module_name: "architecture-patrol",
+          rationale: "due",
+          job_id: "job-7",
+          phase: "discovery"
+        ),
+      outcome_class: "scheduler_outcome",
+      outcome: { "status" => "classified" },
       occurred_at: NOW,
       recorded_at: NOW
     )

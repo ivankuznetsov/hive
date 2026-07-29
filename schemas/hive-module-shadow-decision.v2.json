@@ -43,23 +43,7 @@
     "comparable": {"type": "boolean"},
     "legacy_capture": {
       "anyOf": [
-        {
-          "type": "object",
-          "required": [
-            "schema",
-            "schema_version",
-            "capture_id",
-            "occurrence_id",
-            "decision"
-          ],
-          "properties": {
-            "schema": {"const": "hive-patrol-capture"},
-            "schema_version": {"const": 1},
-            "capture_id": {"type": "string", "pattern": "^cap-[0-9a-f]{64}$"},
-            "occurrence_id": {"type": "string", "pattern": "^occ-[0-9a-f]{64}$"},
-            "decision": {"type": "object"}
-          }
-        },
+        {"$ref": "#/$defs/capture"},
         {"type": "null"}
       ]
     },
@@ -101,7 +85,311 @@
       ]
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "allOf": [
+          {
+            "properties": {"module": {"const": "patrol"}},
+            "required": ["module"]
+          },
+          {
+            "properties": {"migration": {"type": "null"}},
+            "required": ["migration"]
+          }
+        ]
+      },
+      "then": {
+        "properties": {
+          "legacy_capture": {
+            "anyOf": [
+              {"type": "null"},
+              {
+                "allOf": [
+                  {"$ref": "#/$defs/capture"},
+                  {"properties": {"module": {"const": "patrol"}}}
+                ]
+              }
+            ]
+          },
+          "module_decision": {"$ref": "#/$defs/patrol_projection"}
+        }
+      }
+    },
+    {
+      "if": {
+        "allOf": [
+          {
+            "properties": {
+              "module": {"const": "architecture-patrol"}
+            },
+            "required": ["module"]
+          },
+          {
+            "properties": {"migration": {"type": "null"}},
+            "required": ["migration"]
+          }
+        ]
+      },
+      "then": {
+        "properties": {
+          "legacy_capture": {
+            "anyOf": [
+              {"type": "null"},
+              {
+                "allOf": [
+                  {"$ref": "#/$defs/capture"},
+                  {
+                    "properties": {
+                      "module": {"const": "architecture-patrol"}
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "module_decision": {
+            "$ref": "#/$defs/architecture_projection"
+          }
+        }
+      }
+    }
+  ],
   "$defs": {
+    "patrol_selection_input": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "enabled", "trigger", "timer_due", "branch_changed"],
+          "properties": {
+            "kind": {"const": "schedule"},
+            "enabled": {"type": "boolean"},
+            "trigger": {"enum": ["continuous", "timer", "new_commits"]},
+            "timer_due": {"type": ["boolean", "null"]},
+            "branch_changed": {"type": ["boolean", "null"]}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "event_id"],
+          "properties": {
+            "kind": {"const": "module_event"},
+            "event_id": {"type": "string", "minLength": 1}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "operation"],
+          "properties": {
+            "kind": {"const": "operation"},
+            "operation": {"type": "string", "minLength": 1}
+          }
+        }
+      ]
+    },
+    "architecture_selection_input": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "job_id", "phase"],
+          "properties": {
+            "kind": {"const": "candidate"},
+            "job_id": {"type": "string", "minLength": 1},
+            "phase": {"enum": ["discovery", "action"]}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "job_id", "phase", "operation"],
+          "properties": {
+            "kind": {"const": "operation"},
+            "job_id": {"type": "string", "minLength": 1},
+            "phase": {"enum": ["discovery", "action"]},
+            "operation": {"type": "string", "minLength": 1}
+          }
+        }
+      ]
+    },
+    "patrol_projection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["module", "rationale", "job_id", "phase"],
+      "properties": {
+        "module": {"const": "patrol"},
+        "rationale": {"enum": ["disabled", "not_due", "due"]},
+        "job_id": {"type": "null"},
+        "phase": {"type": "null"}
+      }
+    },
+    "architecture_projection": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["module", "rationale", "job_id", "phase"],
+          "properties": {
+            "module": {"const": "architecture-patrol"},
+            "rationale": {"const": "due"},
+            "job_id": {"type": "string", "minLength": 1},
+            "phase": {"enum": ["discovery", "action"]}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["module", "rationale", "job_id", "phase"],
+          "properties": {
+            "module": {"const": "architecture-patrol"},
+            "rationale": {"const": "not_due"},
+            "job_id": {"type": "null"},
+            "phase": {"type": "null"}
+          }
+        }
+      ]
+    },
+    "decision_projection": {
+      "oneOf": [
+        {"$ref": "#/$defs/patrol_projection"},
+        {"$ref": "#/$defs/architecture_projection"}
+      ]
+    },
+    "capture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "capture_id",
+        "module",
+        "occurrence_id",
+        "project",
+        "trigger",
+        "reservation",
+        "owner",
+        "owner_epoch",
+        "selection_input",
+        "selection",
+        "outcome_class",
+        "outcome",
+        "effect_ids",
+        "occurred_at",
+        "recorded_at"
+      ],
+      "properties": {
+        "schema": {"const": "hive-patrol-capture"},
+        "schema_version": {"const": 1},
+        "capture_id": {
+          "type": "string",
+          "pattern": "^cap-[0-9a-f]{64}$"
+        },
+        "module": {"enum": ["patrol", "architecture-patrol"]},
+        "occurrence_id": {
+          "type": "string",
+          "pattern": "^occ-[0-9a-f]{64}$"
+        },
+        "project": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["project_id", "name", "repository"],
+          "properties": {
+            "project_id": {"type": "string", "minLength": 1},
+            "name": {"type": "string", "minLength": 1},
+            "repository": {
+              "anyOf": [
+                {"type": "string", "minLength": 1},
+                {"type": "null"}
+              ]
+            }
+          }
+        },
+        "trigger": {"type": "object"},
+        "reservation": {"type": "object"},
+        "owner": {"enum": ["legacy", "module"]},
+        "owner_epoch": {"type": "integer", "minimum": 1},
+        "selection_input": {"type": "object"},
+        "selection": {"$ref": "#/$defs/decision_projection"},
+        "outcome_class": {
+          "anyOf": [
+            {"type": "string", "minLength": 1},
+            {"type": "null"}
+          ]
+        },
+        "outcome": {
+          "anyOf": [
+            {"type": "object"},
+            {"type": "null"}
+          ]
+        },
+        "effect_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 128,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "occurred_at": {"type": "string", "format": "date-time"},
+        "recorded_at": {"type": "string", "format": "date-time"}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"module": {"const": "patrol"}},
+            "required": ["module"]
+          },
+          "then": {
+            "properties": {
+              "selection_input": {
+                "$ref": "#/$defs/patrol_selection_input"
+              },
+              "selection": {"$ref": "#/$defs/patrol_projection"}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "module": {"const": "architecture-patrol"}
+            },
+            "required": ["module"]
+          },
+          "then": {
+            "properties": {
+              "selection_input": {
+                "$ref": "#/$defs/architecture_selection_input"
+              },
+              "selection": {
+                "$ref": "#/$defs/architecture_projection"
+              }
+            }
+          }
+        },
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "outcome_class": {"type": "null"},
+                "outcome": {"type": "null"}
+              },
+              "required": ["outcome_class", "outcome"]
+            },
+            {
+              "properties": {
+                "outcome_class": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "outcome": {"type": "object"}
+              },
+              "required": ["outcome_class", "outcome"]
+            }
+          ]
+        }
+      ]
+    },
     "difference": {
       "type": "object",
       "additionalProperties": false,

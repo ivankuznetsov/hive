@@ -13,6 +13,7 @@ class PackagingRenderTest < Minitest::Test
   RENDER_RB = File.expand_path("../../../packaging/render.rb", __dir__).freeze
   HOMEBREW_ERB = File.expand_path("../../../packaging/homebrew/hive.rb.erb", __dir__).freeze
   PKGBUILD_TEMPLATE = File.expand_path("../../../packaging/aur/PKGBUILD.template", __dir__).freeze
+  AUR_INSTALL = File.expand_path("../../../packaging/aur/hive.install", __dir__).freeze
 
   SAMPLE_SHA = "a" * 64
 
@@ -27,6 +28,10 @@ class PackagingRenderTest < Minitest::Test
     assert_includes out, %(sha256 "#{SAMPLE_SHA}")
     assert_includes out, "releases/download/v0.1.1/hive-cli-0.1.1.gem"
     assert_includes out, 'depends_on "cosign"'
+    assert_includes out,
+                    'system bin/"hive", "refactor-patrol-migrate-installed"'
+    assert_includes out,
+                    "Other users of this Homebrew installation are migrated"
   end
 
   def test_renders_pkgbuild_with_version_and_sha
@@ -50,6 +55,15 @@ class PackagingRenderTest < Minitest::Test
     assert_includes out, export_line
     assert_includes out, exec_line
     assert_operator out.index(export_line), :<, out.index(exec_line)
+  end
+
+  def test_aur_hook_activates_each_user_on_first_use_without_root_home_scan
+    hook = File.read(AUR_INSTALL)
+
+    assert_includes hook, "each user's next eligible `hive` invocation"
+    assert_includes hook, "every project in that user's registered-project catalog"
+    assert_includes hook, "root package hook never scans user home directories"
+    refute_match(%r{\bfind\s+/home\b}, hook)
   end
 
   def test_render_raises_on_undefined_variable

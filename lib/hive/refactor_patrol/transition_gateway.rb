@@ -59,8 +59,11 @@ module Hive
             owner_epoch: owner_epoch,
             selection_input: selection_input,
             selection:
-              Hive::RefactorPatrol::DecisionProjection.project(
-                selection_input
+              Hive::Modules::Migration::PatrolDecisionProjection.build(
+                module_name: "architecture-patrol",
+                rationale: "due",
+                job_id: data.fetch("job_id"),
+                phase: "discovery"
               ),
             outcome_class: nil,
             outcome: nil,
@@ -74,7 +77,7 @@ module Hive
                      evidence_store:, config_loader:, module_execution: nil,
                      migration_lock: nil, ownership_loader: nil,
                      lifecycle_store_factory: nil, clock: -> { Time.now.utc },
-                     diagnostic_transition: false)
+                     diagnostic_transition: false, gateway_factory: nil)
         @project_root = File.expand_path(project_root)
         @hive_state_path = File.expand_path(hive_state_path)
         @capture = capture
@@ -87,6 +90,10 @@ module Hive
         @lifecycle_store_factory = lifecycle_store_factory
         @clock = clock
         @diagnostic_transition = diagnostic_transition == true
+        @gateway_factory = gateway_factory ||
+                           lambda do |**options|
+                             Hive::RefactorPatrol::EffectGateway.new(**options)
+                           end
       end
 
       def perform!(sink:, target:, idempotency_key:, claim_generation: nil,
@@ -179,7 +186,7 @@ module Hive
         options[:ownership_loader] = @ownership_loader if @ownership_loader
         options[:lifecycle_store_factory] = @lifecycle_store_factory if
           @lifecycle_store_factory
-        Hive::RefactorPatrol::EffectGateway.new(**options)
+        @gateway_factory.call(**options)
       end
 
       def capability_allowed?(capability_context:, **)

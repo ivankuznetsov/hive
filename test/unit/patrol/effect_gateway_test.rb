@@ -1,4 +1,6 @@
 require "test_helper"
+require "hive/modules/migration/evidence_store"
+require "hive/modules/migration/shadow_comparator"
 require "hive/patrol/effect_gateway"
 require "hive/patrol/state_store"
 
@@ -111,6 +113,71 @@ class PatrolEffectGatewayTest < Minitest::Test
       assert_equal 1, calls
       assert_equal first.receipt.to_h, duplicate.receipt.to_h
       assert_equal 1, evidence.receipts.size
+    end
+  end
+
+  def test_persistence_boundary_recursively_redacts_effect_outcomes
+    with_tmp_dir do |root|
+      operations = []
+      store = Hive::Patrol::StateStore.new(root)
+      store.reserve_occurrence!(capture, now: NOW)
+      evidence = Hive::Modules::Migration::EvidenceStore.new(
+        root: File.join(root, "evidence")
+      )
+      gateway = gateway(
+        root, store: store, evidence: evidence, operations: operations
+      )
+      token = "github_pat_#{'a' * 24}"
+      outcome = {
+        "validation" => {
+          "stdout" => "validator emitted #{token}",
+          "exit_status" => 1
+        },
+        "samples" => [ token, 7, true, nil ]
+      }
+
+      result = perform(gateway) { outcome }
+      duplicate = perform(gateway) do
+        flunk("terminal replay must not invoke the effect")
+      end
+
+      redacted = "[REDACTED:github_fine_grained_pat]"
+      assert_equal "validator emitted #{redacted}",
+                   result.outcome.dig("validation", "stdout")
+      assert_equal [ redacted, 7, true, nil ],
+                   result.outcome.fetch("samples")
+      assert_equal result.receipt.to_h, duplicate.receipt.to_h
+      assert_equal result.outcome,
+                   effect_state(store).fetch("outcome")
+      assert_equal result.outcome,
+                   evidence.receipts.fetch(0).outcome
+
+      comparison_root = File.join(root, "comparison")
+      comparison = Hive::Modules::Migration::ShadowComparator.new(
+        root: comparison_root,
+        clock: -> { NOW }
+      )
+      comparison.record!(
+        module_name: "patrol",
+        trigger: capture.trigger,
+        module_projection: capture.selection,
+        configuration_digest: "c" * 64,
+        occurred_at: NOW,
+        legacy_capture: capture,
+        legacy_effects: [ result.receipt ]
+      )
+
+      persisted = [
+        Dir.glob(
+          File.join(root, ".hive-state", "patrol", "occurrences", "*.json")
+        ),
+        Dir.glob(File.join(evidence.root, "receipts", "*.json")),
+        Dir.glob(File.join(comparison_root, "patrol", "*.json"))
+      ].flatten.map { |path| File.binread(path) }
+      refute_empty persisted
+      persisted.each do |bytes|
+        refute_includes bytes, token
+      end
     end
   end
 

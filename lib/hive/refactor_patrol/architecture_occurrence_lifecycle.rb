@@ -73,8 +73,11 @@ module Hive
           owner_epoch: migration.fetch("epoch"),
           selection_input: selection_input,
           selection:
-            Hive::RefactorPatrol::DecisionProjection.project(
-              selection_input
+            Hive::Modules::Migration::PatrolDecisionProjection.build(
+              module_name: "architecture-patrol",
+              rationale: "due",
+              job_id: aggregate.fetch("job_id"),
+              phase: "discovery"
             ),
           outcome_class: nil,
           outcome: nil,

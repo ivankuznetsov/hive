@@ -19,6 +19,18 @@ tags: [gap, todo, release-proof, agent-skills]
   migration qualification claim. Longer elapsed telemetry remains useful but
   is not a substitute for that protocol.
 
+- The installation-wide JobStore v2-to-v3 startup sweep is source- and
+  focused-test-pinned, including 120 released-format jobs with many attempts,
+  interruption/resume checkpoints, multiple healthy projects, corrupt and
+  identity-drift holds, custom state roots, realpath alias deduplication,
+  persisted read-only status, hourly retry, runtime admission from the latest
+  completed sweep, and first-open fallback. Registry membership is
+  ownership-agnostic: every row is attempted even when another user created or
+  owns the project, while the installation process's real OS permissions still
+  fail closed. There is not yet an installed-upgrade artifact from a registry
+  containing genuinely cross-owner filesystem trees, including a repaired
+  permission failure followed by the hourly successful retry.
+
 - `agent-cli-runtime` 0.1.0 has a self-contained package, exact-artifact
   verifier, Linux/macOS install matrix, and component-scoped trusted-publishing
   workflow. Repository-hosted controls remain operator work: the
@@ -307,8 +319,6 @@ consent. The native-default work adds default-on web-service setup, versioned
 service/readiness schemas, release-layout dependency resolution,
 signed-manifest/digest enforcement, and a package-layout integration fixture.
 
-53. **Daemon status `unreadable` drift is source/test-pinned but schema-unpinned.** Branch `arch-review-local-web-install` extracts the daemon-status envelope into `Hive::Daemon::StatusReport`; that producer now owns `BINARY_DRIFT_STATES` / `BINARY_DRIFT_ACTIONABLE`, can emit `binary_drift: "unreadable"` when an installed same-path binary cannot answer `--version`, and the hivebox `_daemon` view treats that value as actionable through `StatusReport::BINARY_DRIFT_ACTIONABLE`. Focused daemon tests cover `StatusReport#safe_payload`, `binary_state`, `binary_version`, and the `unreadable` drift branch. However, `schemas/hive-daemon-status.v1.json` still enumerates only `none`, `path`, `version`, `unparseable`, and `not_applicable`, so an actual `unreadable` payload would not validate against the published daemon-status schema. A follow-up should add `unreadable` to the schema enum/description and pin a schema validation test for that payload shape. The 2026-07-01 post-commit audit for `arch-review-local-web-install` rechecked the branch diff, `Hive::Daemon::StatusReport`, daemon CLI wiring, hivebox `_daemon` rendering, the daemon-status schema, and focused daemon tests; it found no schema update or live repair artifact closing this gap.
-
 The focused eval-wrapper guard now recognizes bundled, abbreviated, underscored,
 and shell-quoted Rake dry-run options; validates complete passing scenario
 records; and isolates concurrent report generation before atomic publication.
@@ -372,15 +382,20 @@ Dependency lock uncertainty is unchanged: the root bundle has
 
 The package, lifecycle, event, attempt, adapter, migration, comparison, and
 rollback contracts have deterministic fixture coverage. U2 now supplies
-finalized ordinary positive and negative captures, durable per-window attempt
-generations, one occurrence spanning the Architecture Patrol job, discovery,
-action, and final decision, live effect-time generation/grant checks, stable
-process/thread sender locks with persisted uncertainty but no lease/PID
-authority, gateway-owned retry-safe local absence, remote-absence refusal,
-store-minted byte-stable receipts, canonical outboxes, a bounded one-off
-JobStore v2-to-v3 migration with v3-only runtime reads, and bounded
-occurrence/intent evidence indices. Those fixtures prove the repaired boundary
-but intentionally do not satisfy the operational rollout gate.
+finalized ordinary positive and negative captures with strict immutable
+selection inputs/projections separated from terminal outcomes, durable
+per-window attempt generations, compacted sequence high-water/floor fences for
+scheduled/module-event/architecture-job traffic, a bounded fail-closed exact
+fence for manual/direct traffic, one occurrence spanning the Architecture
+Patrol job, discovery, action, and final decision, live effect-time
+generation/grant checks, stable process/thread sender locks with persisted
+uncertainty but no lease/PID authority, gateway-owned retry-safe local absence,
+remote-absence refusal, store-minted byte-stable receipts, canonical outboxes,
+restart-persistent normalized recovery backoff, a bounded one-off JobStore
+v2-to-v3 migration with v3-only runtime reads, exact-digest-bound shadow-v1
+conversion, and bounded occurrence/intent evidence indices. Those fixtures
+prove the repaired boundary but intentionally do not satisfy the operational
+rollout gate.
 
 U3 still needs to make the candidate-bound compressed evidence protocol part of
 the test harness, feed it from these finalized occurrences without consulting
@@ -388,10 +403,12 @@ EvidenceStore for recovery, and produce the elapsed production qualification
 set. Until that proof exists, Patrol Effect Evidence remains a catalog
 `candidate`; neither module mutator cutover nor boundary promotion is complete.
 The local storage contract now covers portable bounded repair/history cursors,
-streamed report aggregation, managed-component and lock symlink refusal, and
-bounded no-follow v1 archives. It is a same-user integrity/custody guard, not a
-hostile-process sandbox; the U3 live qualification still has to prove the
-operational evidence stream under the supported deployment filesystems.
+streamed occurrence/report inventories, descriptor-relative component custody,
+managed-component and lock symlink refusal, public oversized-record failure,
+and source/archive/replacement-bound v1 conversion. It is a same-user
+integrity/custody guard, not a hostile-process sandbox; the U3 live
+qualification still has to prove the operational evidence stream under the
+supported deployment filesystems.
 
 Native module workflow targets also remain execution-disabled. Activation
 validates and snapshots their package files, but safe admission still needs

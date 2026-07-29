@@ -827,6 +827,128 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     end
   end
 
+  def test_registered_relative_and_absolute_state_paths_keep_action_effects_out_of_default_tree
+    with_tmp_dir do |dir|
+      custom_state_paths(dir).each do |state_path|
+        item = thesis(
+          id: "custom-effects-#{File.basename(state_path)}",
+          flags: [ "cross_feature_impact" ]
+        )
+        store = write_classified_job(
+          dir,
+          hive_state_path: state_path,
+          policy: snapshot_policy("issue_filing" => true),
+          dispositions: dispositions(
+            flagged: [ disposition(item, reasons: [ "cross_feature_impact" ]) ]
+          )
+        )
+
+        result = build_runner(
+          dir,
+          store: store,
+          hive_state_path: state_path,
+          family_store: nil,
+          issue_filer: FakeIssueFiler.new(issue_result)
+        ).run(job_id: "job-1")
+
+        registered_state = File.expand_path(state_path, dir)
+        assert result.complete?, state_path
+        assert File.directory?(File.join(
+          registered_state, "module-runtime", "migration", "patrol-evidence"
+        )), state_path
+        assert File.directory?(File.join(
+          registered_state, "refactor_patrol", "v2", "families"
+        )), state_path
+        refute Dir.exist?(File.join(dir, ".hive-state")), state_path
+      end
+    end
+  end
+
+  def test_registered_state_path_effect_recovery_resumes_without_default_tree
+    with_tmp_dir do |dir|
+      custom_state_paths(dir).each do |state_path|
+        item = thesis(id: "custom-recovery-#{File.basename(state_path)}")
+        store = write_classified_job(
+          dir,
+          hive_state_path: state_path,
+          policy: snapshot_policy("auto_fix" => true),
+          dispositions: dispositions(accepted: [ disposition(item) ])
+        )
+        fixer = FakeFixer.new(validated_patch(fingerprint: item.fingerprint))
+
+        first = build_runner(
+          dir,
+          store: store,
+          hive_state_path: state_path,
+          fixer: fixer,
+          pr_opener: FakePrOpener.new(crash_after_intent: true),
+          backoff_sec: 0
+        ).run(job_id: "job-1")
+        recovered = build_runner(
+          dir,
+          store: store,
+          hive_state_path: state_path,
+          fixer: fixer,
+          pr_opener: FakePrOpener.new(pr_result),
+          backoff_sec: 0
+        ).run(job_id: "job-1")
+
+        assert_equal "remote_outcome_unknown", first.actions.first.fetch("outcome"), state_path
+        assert recovered.complete?, state_path
+        assert_equal 1, fixer.calls.size, state_path
+        refute Dir.exist?(File.join(dir, ".hive-state")), state_path
+      end
+    end
+  end
+
+  def test_registered_state_path_reconciles_linked_canonical_actions_without_default_tree
+    with_tmp_dir do |dir|
+      custom_state_paths(dir).each do |state_path|
+        first_thesis = thesis(
+          id: "custom-owner-#{File.basename(state_path)}",
+          fingerprint: "custom-canonical-#{File.basename(state_path)}"
+        )
+        store = write_classified_job(
+          dir,
+          hive_state_path: state_path,
+          policy: snapshot_policy("auto_fix" => true),
+          dispositions: dispositions(accepted: [ disposition(first_thesis) ])
+        )
+        first = build_runner(
+          dir,
+          store: store,
+          hive_state_path: state_path,
+          fixer: FakeFixer.new(fix_result("no_diff", terminal: true))
+        ).run(job_id: "job-1")
+        second_thesis = thesis(
+          id: "custom-link-#{File.basename(state_path)}",
+          fingerprint: first_thesis.fingerprint
+        )
+        write_classified_job(
+          dir,
+          job_id: "job-2",
+          hive_state_path: state_path,
+          policy: snapshot_policy("auto_fix" => true),
+          dispositions: dispositions(accepted: [ disposition(second_thesis) ])
+        )
+
+        linked = build_runner(
+          dir,
+          store: store,
+          hive_state_path: state_path,
+          fixer: FakeFixer.new(validated_patch),
+          pr_opener: FakePrOpener.new(pr_result)
+        ).run(job_id: "job-2")
+
+        assert first.complete?, state_path
+        assert linked.complete?, state_path
+        assert_equal "job-1", linked.actions.first.fetch("owner_job_id"), state_path
+        assert_equal "no_diff", linked.actions.first.fetch("outcome"), state_path
+        refute Dir.exist?(File.join(dir, ".hive-state")), state_path
+      end
+    end
+  end
+
   def test_review_handoff_retry_reuses_the_persisted_patch_and_remote_intent
     with_tmp_dir do |dir|
       store = write_classified_job(
@@ -1435,6 +1557,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       ]
       ownership = Hive::RefactorPatrol::RepositoryOwnership.new(
         registry: -> { entries }, config_loader: ->(_path) { cfg },
+        continuation_resolver: ->(*) { [] },
         identity_resolver: ->(_entry, _current_cfg) {
           { "repository" => "acme/polyglot", "host" => "github.com" }
         }
@@ -1501,6 +1624,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
           ]
         },
         config_loader: ->(_path) { cfg },
+        continuation_resolver: ->(*) { [] },
         identity_resolver: ->(_entry, _current_cfg) {
           { "repository" => "acme/polyglot", "host" => "github.com" }
         }
@@ -1534,6 +1658,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       entries = [ { "name" => "polyglot", "path" => dir } ]
       ownership = Hive::RefactorPatrol::RepositoryOwnership.new(
         registry: -> { entries }, config_loader: ->(_path) { cfg },
+        continuation_resolver: ->(*) { [] },
         identity_resolver: ->(_entry, _current_cfg) {
           { "repository" => "acme/polyglot", "host" => "github.com" }
         }
@@ -1665,6 +1790,74 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       assert_empty linked.actions.first.fetch("receipts")
       assert_empty fixer.calls
       assert_empty opener.calls
+    end
+  end
+
+  def test_linked_action_waits_without_receipt_then_reconciles_after_owner_finishes
+    with_tmp_dir do |dir|
+      first_thesis =
+        thesis(id: "first", fingerprint: "shared-pending-fp")
+      store = write_classified_job(
+        dir,
+        policy: snapshot_policy("auto_fix" => true),
+        dispositions:
+          dispositions(
+            accepted: [ disposition(first_thesis) ]
+          )
+      )
+      owner = store.initialize_actions!(
+        "job-1",
+        specifications: [
+          { "thesis_id" => "first", "kind" => "fix" }
+        ],
+        now: T0
+      ).fetch("actions").first
+      second_thesis =
+        thesis(id: "second", fingerprint: "shared-pending-fp")
+      write_classified_job(
+        dir,
+        job_id: "job-2",
+        policy: snapshot_policy("auto_fix" => true),
+        dispositions:
+          dispositions(
+            accepted: [ disposition(second_thesis) ]
+          )
+      )
+      store.initialize_actions!(
+        "job-2",
+        specifications: [
+          { "thesis_id" => "second", "kind" => "fix" }
+        ],
+        now: T0
+      )
+
+      early = build_runner(dir, store: store).run(job_id: "job-2")
+
+      refute early.complete?
+      linked = early.aggregate.fetch("actions").first
+      refute linked.fetch("terminal")
+      assert_empty linked.fetch("transitions"),
+                   "not-ready reconciliation must not consume an effect id"
+
+      token = store.claim_action!(
+        "job-1",
+        owner.fetch("canonical_action_id"),
+        owner: "owner-runner",
+        now: T0 + 1
+      )
+      store.finish_action!(
+        token, outcome: "no_diff", now: T0 + 2
+      )
+
+      retried = build_runner(
+        dir, store: store
+      ).run(job_id: "job-2")
+
+      assert retried.complete?
+      linked = retried.aggregate.fetch("actions").first
+      assert linked.fetch("terminal")
+      assert_equal "no_diff", linked.fetch("outcome")
+      assert_equal 1, linked.fetch("transitions").size
     end
   end
 
@@ -1875,11 +2068,16 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       state_home = File.join(root, "state")
       item = thesis(id: "shared-pr", fingerprint: "fp-shared-pr")
       policy = snapshot_policy("auto_fix" => true)
+      entries = [
+        registered_entry("old", old_root),
+        registered_entry("new", new_root)
+      ]
       old_store = write_classified_job(
         old_root,
         policy: policy,
         dispositions: dispositions(accepted: [ disposition(item) ]),
-        registration: "old"
+        registration: "old",
+        project: entries.fetch(0)
       )
       action_id = finish_foreign_action(
         old_store,
@@ -1898,12 +2096,9 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
         job_id: "job-2",
         policy: policy,
         dispositions: dispositions(accepted: [ disposition(item) ]),
-        registration: "new"
+        registration: "new",
+        project: entries.fetch(1)
       )
-      entries = [
-        { "name" => "old", "path" => old_root },
-        { "name" => "new", "path" => new_root }
-      ]
       catalog = Hive::RefactorPatrol::CanonicalActionCatalog.new(
         state_home: state_home, registry: -> { entries }, clock: -> { T0 }
       )
@@ -1949,8 +2144,16 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       classified = dispositions(
         flagged: [ disposition(item, reasons: [ "cross_feature_impact" ]) ]
       )
+      entries = [
+        registered_entry("old", old_root),
+        registered_entry("new", new_root)
+      ]
       old_store = write_classified_job(
-        old_root, policy: policy, dispositions: classified, registration: "old"
+        old_root,
+        policy: policy,
+        dispositions: classified,
+        registration: "old",
+        project: entries.fetch(0)
       )
       family_id = FakeFamilyStore.new.resolve(
         thesis: item, source: source(7, registration: "old"), dry_run: false
@@ -1968,16 +2171,12 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
         job_id: "job-2",
         policy: policy,
         dispositions: classified,
-        registration: "new"
+        registration: "new",
+        project: entries.fetch(1)
       )
       catalog = Hive::RefactorPatrol::CanonicalActionCatalog.new(
         state_home: File.join(root, "state"),
-        registry: -> {
-          [
-            { "name" => "old", "path" => old_root },
-            { "name" => "new", "path" => new_root }
-          ]
-        },
+        registry: -> { entries },
         clock: -> { T0 }
       )
       runner = build_runner(
@@ -2961,6 +3160,27 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     end
   end
 
+  def test_run_fails_closed_when_a_live_job_has_no_occurrence_capture
+    with_tmp_dir do |dir|
+      aggregate = {
+        "job_id" => "job-1",
+        "complete" => false,
+        "source" => source(7),
+        "actions" => []
+      }
+      store = Object.new
+      store.define_singleton_method(:read_job) { |_job_id| aggregate }
+      store.define_singleton_method(:occurrence_capture) { |_job_id| nil }
+      runner = build_runner(dir, store: store)
+
+      error = assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        runner.run(job_id: "job-1")
+      end
+
+      assert_equal "architecture patrol job occurrence is unavailable", error.message
+    end
+  end
+
   def test_effect_executors_reject_mutated_publication_and_handoff_payloads
     with_tmp_dir do |dir|
       runner = build_runner(dir, store: Object.new)
@@ -3095,20 +3315,6 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     end
   end
 
-  def test_effect_project_identity_falls_back_when_registry_is_corrupt
-    with_tmp_global_config do |hive_home|
-      with_tmp_dir do |dir|
-        File.write(File.join(hive_home, "config.yml"), "[")
-        runner = build_runner(dir, store: Object.new)
-
-        assert_equal(
-          "local-#{::Digest::SHA256.hexdigest(File.expand_path(dir))}",
-          runner.send(:effect_project_id)
-        )
-      end
-    end
-  end
-
   def test_fix_publication_phase_routes_through_the_action_transition_port
     with_tmp_dir do |dir|
       calls = []
@@ -3229,7 +3435,8 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
 
   private
 
-  def build_runner(dir, store:, cfg: config, family_store: FakeFamilyStore.new,
+  def build_runner(dir, store:, cfg: config, hive_state_path: nil,
+                   family_store: FakeFamilyStore.new,
                    fixer: FakeFixer.new, pr_opener: FakePrOpener.new,
                    issue_filer: FakeIssueFiler.new, backoff_sec: 0,
                    authority_backoff_sec: backoff_sec,
@@ -3245,6 +3452,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     Hive::RefactorPatrol::ActionRunner.new(
       dir,
       cfg: cfg,
+      hive_state_path: hive_state_path,
       job_store: store,
       family_store: family_store,
       fixer: fixer,
@@ -3277,9 +3485,13 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     }
   end
 
-  def write_classified_job(dir, job_id: "job-1", policy:, dispositions:,
-                           registration: "polyglot", analysis_sha: "c" * 40)
-    store = Hive::RefactorPatrol::JobStore.new(dir)
+  def write_classified_job(dir, job_id: "job-1", hive_state_path: nil,
+                           policy:, dispositions:,
+                           registration: "polyglot", analysis_sha: "c" * 40,
+                           project: nil)
+    store = Hive::RefactorPatrol::JobStore.new(
+      dir, hive_state_path: hive_state_path, project: project
+    )
     capture = architecture_capture(
       job_id: job_id,
       registration: registration
@@ -3317,6 +3529,22 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       now: T0
     )
     store
+  end
+
+  def registered_entry(name, path)
+    {
+      "name" => name,
+      "path" => path,
+      "hive_state_path" => File.join(path, ".hive-state"),
+      "project_id" => "project-#{name}"
+    }
+  end
+
+  def custom_state_paths(dir)
+    [
+      File.join("registered-state", "relative"),
+      File.join(dir, "registered-state", "absolute")
+    ]
   end
 
   def source(number, registration: "polyglot")
@@ -3463,7 +3691,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
 
   def validated_patch(fingerprint: "fp-accepted-1", publication_base_sha: "c" * 40,
                       commit_sha: "e" * 40)
-    action_id = Hive::RefactorPatrol::JobStore.new("/tmp/refactor-action-id").canonical_action_id(
+    action_id = Hive::RefactorPatrol::JobStore.canonical_action_id(
       repository: "acme/polyglot", host: "github.com",
       kind: "fix", identity: fingerprint
     )

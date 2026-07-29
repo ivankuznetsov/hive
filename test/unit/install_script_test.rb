@@ -78,6 +78,20 @@ class InstallScriptTest < Minitest::Test
     end
   end
 
+  def test_installer_runs_candidate_registry_migration_before_daemon_setup
+    script = File.read(INSTALL_SCRIPT)
+    migration = script.rindex("job_schema_migration_setup")
+    daemon = script.rindex("daemon_autostart_setup")
+
+    refute_nil migration
+    refute_nil daemon
+    assert_operator migration, :<, daemon
+    assert_includes script,
+                    '"$link_path" refactor-patrol-migrate-installed'
+    assert_includes script,
+                    "retry on each user's next eligible invocation"
+  end
+
   def test_installer_requires_cosign_for_release_identity_verification
     script = File.read(INSTALL_SCRIPT)
 

@@ -30,6 +30,7 @@ require "hive/conditions/attempt_observer"
 require "hive/modules/event_publisher"
 require "hive/modules/daemon_runtime"
 require "hive/modules/migration/coordinator"
+require "hive/refactor_patrol/registered_project_migration_coordinator"
 require "hive/commands/service_installer/result_presenter"
 require "hive/recovery/migration"
 
@@ -121,6 +122,13 @@ module Hive
       end
 
       private
+
+      def registered_project_migration_coordinator
+        @registered_project_migration_coordinator ||=
+          Hive::RefactorPatrol::RegisteredProjectMigrationCoordinator.new(
+            dry_run: @dry_run
+          )
+      end
 
       def start_daemon
         warn_unsupported_json_flag if @json
@@ -220,8 +228,21 @@ module Hive
         )
         status_consumer = Hive::Daemon::StatusConsumer.new
         Hive::Config.ensure_project_identities!
+        schema_migration_coordinator =
+          registered_project_migration_coordinator
+        schema_migrations = schema_migration_coordinator.run
+        schema_migrations.each do |result|
+          logger.event(
+            :refactor_patrol_schema_migration,
+            **result.to_h
+          )
+        end
+        refactor_patrol_registry = lambda do
+          schema_migration_coordinator.eligible_projects
+        end
         module_event_publisher = Hive::Modules::EventPublisher.new
         refactor_patrol_merge_reconciler = Hive::Daemon::RefactorPatrolMergeReconciler.new(
+          registry: refactor_patrol_registry,
           poll_interval_sec: daemon_cfg.fetch("pr_merge_poll_interval_sec"),
           dry_run: @dry_run, module_event_publisher: module_event_publisher
         )
@@ -235,6 +256,7 @@ module Hive
           event_publisher: module_event_publisher
         )
         refactor_patrol_scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
+          registry: refactor_patrol_registry,
           dry_run: @dry_run,
           event_publisher: module_event_publisher
         )
@@ -261,7 +283,8 @@ module Hive
           attempt_store: attempt_store, attempt_dispatcher: attempts_api
         )
         module_migration_coordinator = Hive::Modules::Migration::Coordinator.new(
-          supervisor: supervisor, attempt_store: attempt_store, dry_run: @dry_run
+          supervisor: supervisor, attempt_store: attempt_store,
+          registry: refactor_patrol_registry, dry_run: @dry_run
         )
         attempt_process_identity = Hive::Attempts::ProcessIdentity.new
         attempt_reconciler = Hive::Attempts::Reconciler.new(
@@ -305,7 +328,9 @@ module Hive
           lost_outcome_processor: lost_outcome_processor,
           operational_snapshot: operational_snapshot,
           module_runtime: module_runtime,
-          module_migration_coordinator: module_migration_coordinator
+          module_migration_coordinator: module_migration_coordinator,
+          registered_project_migration_coordinator:
+            schema_migration_coordinator
         )
 
         reexec_requested = false

@@ -6,10 +6,11 @@ require "hive/errors"
 module Hive
   module Modules
     module Migration
-      # Filesystem-order-independent inventory with constant-sized snapshots
-      # and O(page-size) selection. A cursor freezes a lexicographic high-water
-      # mark so restarts neither skip nor duplicate names that belonged to the
-      # original bounded inventory.
+      # Filesystem-order-independent inventory with constant-sized cursor
+      # snapshots, O(page-size) stateless page selection, and one bounded
+      # sorted allocation for full traversals. A cursor freezes a lexicographic
+      # high-water mark so restarts neither skip nor duplicate names that
+      # belonged to the original bounded inventory.
       class BoundedFileInventory
         Snapshot = Data.define(:count, :through, :fingerprint, :binding)
         Page = Data.define(:names, :next_cursor)
@@ -99,50 +100,31 @@ module Hive
         def each_name(page_size:, snapshot: nil)
           return enum_for(__method__, page_size: page_size, snapshot: snapshot) unless block_given?
 
-          state = validate_snapshot(snapshot || self.snapshot)
-          cursor = nil
-          loop do
-            page = page(limit: page_size, cursor: cursor, snapshot: cursor ? nil : state)
-            page.names.each { |name| yield name }
-            cursor = page.next_cursor
-            break unless cursor
+          page_size = validated_page_size(page_size)
+          names = sorted_snapshot_names(
+            expected: snapshot && validate_snapshot(snapshot)
+          )
+          names.each_slice(page_size) do |page_names|
+            page_names.each { |name| yield name }
           end
           nil
+        rescue Hive::ConfigError
+          raise
+        rescue ArgumentError, TypeError
+          malformed!
         end
 
         # Streams one bounded inventory pass while allowing callers to remove
-        # already-yielded names. The initial high-water name and count bound
-        # the pass; each page rescans after the last yielded name, so removals
-        # cannot invalidate a frozen fingerprint and later names wait for the
-        # next pass.
+        # already-yielded names. One bounded sorted snapshot freezes the pass,
+        # so removals cannot skip later names and additions wait for the next
+        # pass.
         def each_live_name(page_size:)
           return enum_for(__method__, page_size: page_size) unless
             block_given?
 
-          page_size = Integer(page_size)
-          malformed! unless
-            page_size.positive? && page_size <= @max_entries
-          state = snapshot
-          after = nil
-          remaining = state.count
-          while remaining.positive?
-            limit = [ page_size, remaining ].min
-            selected = []
-            visited = 0
-            each_valid_name do |name|
-              visited += 1
-              overflow! if visited > @max_entries
-              next unless name <= state.through
-              next if after && name <= after
-
-              insert_bounded(selected, name, limit)
-            end
-            break if selected.empty?
-
-            selected.each { |name| yield name }
-            after = selected.last
-            remaining -= selected.size
-            break if selected.size < limit
+          page_size = validated_page_size(page_size)
+          sorted_snapshot_names.each_slice(page_size) do |page_names|
+            page_names.each { |name| yield name }
           end
           nil
         rescue Hive::ConfigError
@@ -152,6 +134,36 @@ module Hive
         end
 
         private
+
+        def sorted_snapshot_names(expected: nil)
+          names = []
+          visited = 0
+          observed = 0
+          fingerprint = 0
+          each_valid_name do |name|
+            visited += 1
+            overflow! if visited > @max_entries
+            next if expected &&
+                    (!expected.through || name > expected.through)
+
+            names << name
+            observed += 1
+            fingerprint = fingerprint_add(fingerprint, name)
+          end
+          if expected
+            malformed! unless observed == expected.count &&
+                              fingerprint_hex(fingerprint) ==
+                                expected.fingerprint
+          end
+          names.sort!.freeze
+        end
+
+        def validated_page_size(value)
+          page_size = Integer(value)
+          malformed! unless
+            page_size.positive? && page_size <= @max_entries
+          page_size
+        end
 
         def each_valid_name
           @directory.each_child(@relative, missing: @missing) do |name|

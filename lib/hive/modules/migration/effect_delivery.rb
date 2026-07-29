@@ -1,6 +1,7 @@
 require "hive/modules/migration/effect_admission"
 require "hive/modules/migration/effect_receipt_ledger"
 require "hive/modules/migration/effect_sender"
+require "hive/secret_patterns"
 
 module Hive
   module Modules
@@ -10,6 +11,52 @@ module Hive
       # retain distinct APIs while sharing these collaborators by composition.
       class EffectDelivery
         Result = EffectReceiptLedger::Result
+
+        class RedactedDeliveryStore
+          def initialize(store)
+            @store = store
+          end
+
+          def settle_effect!(intent, outcome:, **options)
+            @store.settle_effect!(
+              intent,
+              outcome: redact(outcome),
+              **options
+            )
+          end
+
+          def deny_effect!(intent, outcome:, **options)
+            @store.deny_effect!(
+              intent,
+              outcome: redact(outcome),
+              **options
+            )
+          end
+
+          def method_missing(name, ...)
+            @store.public_send(name, ...)
+          end
+
+          def respond_to_missing?(name, include_private = false)
+            @store.respond_to?(name, include_private) || super
+          end
+
+          private
+
+          def redact(value)
+            case value
+            when Hash
+              value.transform_values { |nested| redact(nested) }
+            when Array
+              value.map { |nested| redact(nested) }
+            when String
+              Hive::SecretPatterns.redact(value)
+            else
+              value
+            end
+          end
+        end
+        private_constant :RedactedDeliveryStore
 
         def initialize(module_name:, product_label:, config_key:,
                        project_root:, hive_state_path:, capture:, authority:,
@@ -45,6 +92,7 @@ module Hive
             lifecycle_store_factory: lifecycle_store_factory,
             diagnostic_transition: diagnostic_transition
           )
+          delivery_store = RedactedDeliveryStore.new(delivery_store)
           @receipt_ledger = EffectReceiptLedger.new(
             delivery_store: delivery_store,
             evidence_store: evidence_store,

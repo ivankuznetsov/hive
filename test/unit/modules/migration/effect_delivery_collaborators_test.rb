@@ -569,6 +569,106 @@ class ModulesMigrationEffectDeliveryCollaboratorsTest < Minitest::Test
     assert_equal :committed, result.status
   end
 
+  def test_delivery_redacts_nested_outcomes_before_settlement_and_replay
+    capture = patrol_capture
+    store = DeliveryStore.new
+    delivery = Hive::Modules::Migration::EffectDelivery.new(
+      module_name: "patrol",
+      product_label: "patrol",
+      config_key: "patrol",
+      project_root: "/tmp/project",
+      hive_state_path: "/tmp/project/.hive-state",
+      capture: capture,
+      authority: "legacy",
+      evidence_store: EvidenceStore.new,
+      delivery_store: store,
+      denied_error: DeliveryError,
+      reconciliation_error: DeliveryError,
+      migration_lock: ->(&block) { block.call },
+      ownership_loader: lambda do
+        { "owner" => "legacy", "epoch" => 1, "admission" => true }
+      end,
+      config_loader: ->(*) { { "patrol" => { "enabled" => true } } },
+      clock: -> { Time.utc(2026, 7, 28, 18) }
+    )
+    token = "github_pat_#{'b' * 24}"
+    attributes = {
+      sink: "state",
+      target: "state",
+      idempotency_key: "redacted-settlement",
+      capability: "filesystem_write"
+    }
+
+    result = delivery.perform!(**attributes) do
+      {
+        "validation" => {
+          "stdout" => "found #{token}",
+          "exit_status" => 1
+        },
+        "values" => [ token, 7, false, nil ]
+      }
+    end
+    replay = delivery.perform!(**attributes) do
+      flunk("terminal replay must not invoke the effect")
+    end
+
+    redacted = "[REDACTED:github_fine_grained_pat]"
+    expected = {
+      "validation" => {
+        "stdout" => "found #{redacted}",
+        "exit_status" => 1
+      },
+      "values" => [ redacted, 7, false, nil ]
+    }
+    assert_equal expected, result.outcome
+    assert_equal expected, store.state.fetch("outcome")
+    assert_equal result.receipt, replay.receipt
+    refute_includes store.calls.to_s, token
+  end
+
+  def test_recovery_reconciliation_requires_a_block_rejects_foreign_intents_and_replays_terminal_receipts
+    capture = patrol_capture
+    store = DeliveryStore.new
+    store.state = {
+      "state" => "committed",
+      "terminal_receipt_id" => "receipt-1",
+      "outcome" => { "remote" => "present" }
+    }
+    store.receipt = Receipt.new(
+      receipt_id: "receipt-1", status: "committed",
+      outcome: { "remote" => "present" }
+    )
+    delivery = Hive::Modules::Migration::EffectDelivery.new(
+      module_name: "patrol", product_label: "patrol", config_key: "patrol",
+      project_root: "/tmp/project", hive_state_path: "/tmp/project/.hive-state",
+      capture: capture, authority: "legacy", evidence_store: EvidenceStore.new,
+      delivery_store: store, denied_error: DeliveryError,
+      reconciliation_error: DeliveryError, migration_lock: ->(&block) { block.call },
+      ownership_loader: -> { { "owner" => "legacy", "epoch" => 1, "admission" => true } },
+      config_loader: ->(*) { { "patrol" => {} } }
+    )
+    valid = Hive::Modules::Migration::EffectIntent.build(
+      module_name: "patrol", occurrence_id: capture.occurrence_id,
+      authority: "legacy", owner_epoch: capture.owner_epoch,
+      sink: "state", target: "target", idempotency_key: "terminal",
+      capability: "filesystem_write", created_at: capture.recorded_at
+    )
+
+    assert_raises(ArgumentError) { delivery.reconcile_intent!(valid) }
+    foreign = Hive::Modules::Migration::EffectIntent.build(
+      module_name: "patrol", occurrence_id: "occ-#{'f' * 64}", authority: "legacy",
+      owner_epoch: capture.owner_epoch, sink: "state", target: "target",
+      idempotency_key: "terminal", capability: "filesystem_write",
+      created_at: capture.recorded_at
+    )
+    assert_raises(Hive::ConfigError) { delivery.reconcile_intent!(foreign) { {} } }
+    result = delivery.reconcile_intent!(valid) do
+      flunk("a terminal recovery receipt must not reconcile remotely")
+    end
+
+    assert_equal :committed, result.status
+  end
+
   def test_sender_maps_known_not_delivered_errors_to_retry_safe_prepared
     store = DeliveryStore.new
     result = sender_with(store, ReceiptLedger.new).deliver_or_reconcile(

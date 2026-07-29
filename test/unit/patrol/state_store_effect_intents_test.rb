@@ -13,6 +13,7 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
       store.ensure!
       intent = effect_intent
       store.reserve_occurrence!(capture, now: NOW)
+
       store.prepare_effect!(intent, now: NOW)
       store.mark_dispatch_uncertain!(intent, now: NOW)
       outcome = {
@@ -51,6 +52,48 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
         .include?(legacy_method.to_sym)
       refute Hive::Patrol::StateStore.private_instance_methods(false)
         .include?(legacy_method.to_sym)
+    end
+  end
+
+  def test_occurrence_enumeration_preserves_the_journal_recovery_views
+    with_tmp_dir do |root|
+      store = Hive::Patrol::StateStore.new(root)
+      store.reserve_occurrence!(capture, now: NOW)
+      finalized = Hive::Modules::Migration::PatrolCapture.build(
+        module_name: capture.module_name, project: capture.project,
+        trigger: capture.trigger, reservation: capture.reservation,
+        owner: capture.owner, owner_epoch: capture.owner_epoch,
+        selection_input: capture.selection_input, selection: capture.selection,
+        outcome_class: "completed", outcome: { "rationale" => "completed" },
+        occurred_at: capture.occurred_at, recorded_at: NOW + 1
+      )
+      unavailable_evidence = Object.new
+      unavailable_evidence.define_singleton_method(:append_capture) do |_capture|
+        raise IOError, "comparison projection unavailable"
+      end
+      assert_raises(IOError) do
+        store.finalize_occurrence!(
+          capture: finalized, evidence_store: unavailable_evidence, now: NOW + 1
+        )
+      end
+
+      reserved = []
+      projection_pending = []
+      all = []
+      store.each_reserved_occurrence { |record| reserved << record.fetch("occurrence_id") }
+      store.each_projection_pending_occurrence do |record|
+        projection_pending << record.fetch("occurrence_id")
+      end
+      store.each_occurrence { |record| all << record.fetch("occurrence_id") }
+
+      assert_empty reserved
+      assert_equal [ capture.occurrence_id ], projection_pending
+      assert_equal [ capture.occurrence_id ], all
+      assert_equal reserved,
+                   store.each_reserved_occurrence.map { |record| record.fetch("occurrence_id") }
+      assert_equal projection_pending,
+                   store.each_projection_pending_occurrence.map { |record| record.fetch("occurrence_id") }
+      assert_equal all, store.each_occurrence.map { |record| record.fetch("occurrence_id") }
     end
   end
 

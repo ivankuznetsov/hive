@@ -297,6 +297,27 @@ daemon_autostart_setup() {
   fi
 }
 
+job_schema_migration_setup() {
+  local out err rc
+  out="${tmpdir}/job-schema-migration.out"
+  err="${tmpdir}/job-schema-migration.err"
+
+  if "$link_path" refactor-patrol-migrate-installed >"$out" 2>"$err"; then
+    log "registered-project JobStore migration completed"
+    return 0
+  else
+    rc=$?
+    warn "registered-project JobStore migration did not complete (exit ${rc}); Hive will retry on each user's next eligible invocation"
+    if [[ -s "$err" ]]; then
+      sed 's/^/hive install: migration stderr: /' "$err" >&2
+    fi
+    if [[ -s "$out" ]]; then
+      sed 's/^/hive install: migration output: /' "$out" >&2
+    fi
+    return 0
+  fi
+}
+
 qmd_install_enabled() {
   case "$INSTALL_QMD" in
     0|false|False|FALSE|no|No|NO) return 1 ;;
@@ -409,6 +430,7 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   log "dry run: would download ${gem_url}"
   log "dry run: would verify SHA256SUMS and write ${data_home}/install-channel"
   log "dry run: would gem install --install-dir ${gem_home} ${gem_file}"
+  log "dry run: would migrate every project in the installing user's Hive registry"
   log "dry run: would run ${link_path} daemon install to enable daemon autostart"
   if qmd_install_enabled; then
     log "dry run: would npm install --global --prefix ${data_home}/qmd ${QMD_NPM_PACKAGE}"
@@ -633,6 +655,7 @@ else
 fi
 
 runtime_preflight
+job_schema_migration_setup
 daemon_autostart_setup
 
 log "installed hive ${version} (hive-cli rubygem)"

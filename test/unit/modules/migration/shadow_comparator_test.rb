@@ -35,6 +35,33 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
     end
   end
 
+  def test_schema_import_capture_can_never_qualify_as_comparable_runtime_evidence
+    with_tmp_dir do |root|
+      comparator = Hive::Modules::Migration::ShadowComparator.new(root: root)
+      trigger = {
+        "kind" => "job_store.schema_v2_import",
+        "id" => "job-7"
+      }
+      capture = capture_for(
+        "architecture-patrol", trigger, { "status" => "migrated" }
+      )
+
+      record = comparator.record!(
+        module_name: "architecture-patrol",
+        trigger: trigger,
+        legacy_capture: capture,
+        module_projection:
+          projection_for("architecture-patrol", trigger, "due"),
+        configuration_digest: "a" * 64,
+        occurred_at: START,
+        comparable: true
+      )
+
+      refute record.fetch("comparable")
+      assert_equal "legacy_mutator_capture", record.fetch("evidence_source")
+    end
+  end
+
   def test_published_schema_enforces_exact_capture_and_projection_shapes
     with_tmp_dir do |root|
       comparator = Hive::Modules::Migration::ShadowComparator.new(root: root)
@@ -197,6 +224,47 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
       assert_raises(Hive::ConfigError) do
         comparator.record!(**attributes.merge(legacy_capture: {}))
       end
+    end
+  end
+
+  def test_shadow_projection_identity_and_symbolic_triggers_fail_closed_or_normalize
+    with_tmp_dir do |root|
+      comparator = Hive::Modules::Migration::ShadowComparator.new(root: root)
+      trigger = { "id" => "tick-1", :metadata => :symbolic }
+      capture = capture_for("patrol", { "id" => "tick-1", "metadata" => "symbolic" }, { "status" => "due" })
+
+      record = comparator.record!(
+        module_name: "patrol", trigger: trigger, legacy_capture: capture,
+        module_projection: projection_for("patrol", trigger, "due"),
+        configuration_digest: "a" * 64, occurred_at: START
+      )
+      assert_equal "symbolic", record.dig("trigger", "metadata")
+
+      assert_raises(Hive::ConfigError) do
+        comparator.record!(
+          module_name: "patrol", trigger: { "id" => "other" },
+          module_projection: projection_for("architecture-patrol", { "id" => "other" }, "due"),
+          configuration_digest: "a" * 64, occurred_at: START
+        )
+      end
+
+      assert_raises(Hive::Modules::Migration::ShadowComparator::IdentityConflict) do
+        comparator.record!(
+          module_name: "patrol", trigger: trigger, legacy_capture: capture,
+          module_projection: projection_for("patrol", trigger, "not_due"),
+          configuration_digest: "a" * 64, occurred_at: START
+        )
+      end
+
+      differing_trigger = { "id" => "different" }
+      comparator.record!(
+        module_name: "patrol", trigger: differing_trigger,
+        legacy_capture: capture_for("patrol", differing_trigger, { "status" => "due" }),
+        module_projection: projection_for("patrol", differing_trigger, "not_due"),
+        configuration_digest: "a" * 64, occurred_at: START,
+        explained_paths: [ "$.rationale" ]
+      )
+      assert_equal 2, comparator.each_record("patrol").count
     end
   end
 

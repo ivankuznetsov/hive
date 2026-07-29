@@ -136,6 +136,175 @@ class HiveCommandsDaemonTest < Minitest::Test
     refute File.exist?(command.pid_file), "clean shutdown must remove the YAML PID file it wrote"
   end
 
+  def test_start_migrates_registered_projects_before_architecture_runtime_and_holds_failures
+    command = daemon("start")
+    dispatcher = FakeDispatcher.new([])
+    bad_path = File.join(@home, "bad")
+    good_path = File.join(@home, "good")
+    FileUtils.mkdir_p([ bad_path, good_path ])
+    registry = [
+      { "name" => "bad", "path" => bad_path },
+      { "name" => "good", "path" => good_path }
+    ]
+    result_class =
+      Hive::RefactorPatrol::RegisteredProjectMigrationCoordinator::Result
+    results = [
+      result_class.new(
+        project: "bad", project_id: "project-bad", path: bad_path,
+        real_path: bad_path,
+        hive_state_path: File.join(bad_path, ".hive-state"),
+        status: :failed, current_schema_version: nil,
+        target_schema_version: 3, snapshot_id: nil,
+        retryable: true,
+        next_retry_at: "2026-07-29T16:00:00.000000Z",
+        remediation: "repair project state",
+        error: "CorruptRecord: broken"
+      ),
+      result_class.new(
+        project: "good", project_id: "project-good", path: good_path,
+        real_path: good_path,
+        hive_state_path: File.join(good_path, ".hive-state"),
+        status: :current, current_schema_version: 3,
+        target_schema_version: 3, snapshot_id: "snapshot-good",
+        retryable: false, next_retry_at: nil, remediation: nil, error: nil
+      )
+    ]
+    construction_order = []
+    migration = Object.new
+    migration.define_singleton_method(:run) do
+      construction_order << :schema_migration
+      results
+    end
+    migration.define_singleton_method(:eligible_projects) do
+      registry.reject { |entry| entry.fetch("name") == "bad" }
+    end
+    command.define_singleton_method(
+      :registered_project_migration_coordinator
+    ) { migration }
+    captured_registry_names = nil
+    original_reconciler_new =
+      Hive::Daemon::RefactorPatrolMergeReconciler.method(:new)
+
+    with_replaced_singleton_method(
+      Hive::Config, :registered_projects, -> { registry }
+    ) do
+      with_replaced_singleton_method(
+        Hive::Config, :ensure_project_identities!, -> { true }
+      ) do
+        with_replaced_singleton_method(
+          Hive::Lock, :process_start_time, ->(pid) { "start-#{pid}" }
+        ) do
+          with_global_start_config(daemon_config) do
+            with_replaced_singleton_method(
+              Hive::Daemon::RefactorPatrolMergeReconciler,
+              :new,
+              lambda do |**options|
+                construction_order << :architecture_runtime
+                original_reconciler_new.call(**options)
+              end
+            ) do
+              with_replaced_singleton_method(
+                Hive::Daemon::Dispatcher,
+                :new,
+                lambda do |**kwargs|
+                  captured_registry_names = [
+                    kwargs.fetch(:refactor_patrol_merge_reconciler),
+                    kwargs.fetch(:refactor_patrol_scheduler),
+                    kwargs.fetch(:module_migration_coordinator)
+                  ].map do |collaborator|
+                    collaborator.instance_variable_get(:@registry).call.map do |entry|
+                      entry.fetch("name")
+                    end
+                  end
+                  dispatcher
+                end
+              ) do
+                command.call
+              end
+            end
+          end
+        end
+      end
+    end
+
+    assert_equal [ :run_forever ], dispatcher.calls
+    assert_equal(
+      %i[schema_migration architecture_runtime],
+      construction_order,
+      "schema sweep must finish before runtime construction"
+    )
+    assert_equal(
+      [ [ "good" ], [ "good" ], [ "good" ] ],
+      captured_registry_names
+    )
+    events = File.readlines(daemon_config.fetch("log_file")).map do |line|
+      JSON.parse(line)
+    end
+    migration_events = events.select do |event|
+      event.fetch("event") == "refactor_patrol_schema_migration"
+    end
+    assert_equal %w[bad good],
+                 migration_events.map { |event| event.fetch("project") }
+    assert_equal %w[failed current],
+                 migration_events.map { |event| event.fetch("status") }
+  end
+
+  def test_start_sweeps_every_registered_project_before_runtime_filters_to_eligible_projects
+    command = daemon("start", dry_run: true)
+    dispatcher = FakeDispatcher.new([])
+    roots = %w[dormant-owner-a dormant-owner-b].map do |name|
+      path = File.join(@home, name)
+      FileUtils.mkdir_p(path)
+      path
+    end
+    registry = roots.each_with_index.map do |path, index|
+      {
+        "name" => "project-#{index + 1}",
+        "path" => path,
+        "real_path" => File.realpath(path),
+        "hive_state_path" => File.join(path, ".custom-state-#{index + 1}"),
+        "project_id" => "project-id-#{index + 1}"
+      }
+    end
+    File.write(
+      File.join(@home, "config.yml"),
+      { "registered_projects" => registry }.to_yaml
+    )
+    captured_runtime_registries = nil
+
+    with_env("HIVE_HOME" => @home) do
+      with_replaced_singleton_method(
+        Hive::Lock, :process_start_time, ->(pid) { "start-#{pid}" }
+      ) do
+        with_global_start_config(daemon_config) do
+          with_replaced_singleton_method(
+            Hive::Daemon::Dispatcher, :new,
+            lambda do |**kwargs|
+              captured_runtime_registries = [
+                kwargs.fetch(:refactor_patrol_merge_reconciler),
+                kwargs.fetch(:refactor_patrol_scheduler),
+                kwargs.fetch(:module_migration_coordinator)
+              ].map do |collaborator|
+                collaborator.instance_variable_get(:@registry).call
+              end
+              dispatcher
+            end
+          ) do
+            command.call
+          end
+        end
+      end
+    end
+
+    assert_equal [ :run_forever ], dispatcher.calls
+    events = File.readlines(daemon_config.fetch("log_file")).map { |line| JSON.parse(line) }
+    sweep = events.select { |event| event.fetch("event") == "refactor_patrol_schema_migration" }
+    assert_equal %w[project-1 project-2], sweep.map { |event| event.fetch("project") }
+    assert_equal %w[dry_run dry_run], sweep.map { |event| event.fetch("status") }
+    assert_equal [ [], [], [] ], captured_runtime_registries,
+                 "only the runtime is filtered after the full registry sweep"
+  end
+
   def test_manual_daemon_start_pins_children_to_the_invoked_hive_binary
     command = daemon("start")
     invoked = File.join(@home, "checkout", "bin", "hive")

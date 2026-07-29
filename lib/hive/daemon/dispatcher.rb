@@ -78,7 +78,8 @@ module Hive
                      lost_outcome_store: nil, lost_outcome_processor: nil,
                      operational_snapshot: nil, recovery_coordinator: nil,
                      module_runtime: nil,
-                     module_migration_coordinator: nil)
+                     module_migration_coordinator: nil,
+                     registered_project_migration_coordinator: nil)
         @config = config
         @controller = controller
         @supervisor = supervisor
@@ -98,6 +99,8 @@ module Hive
         @operational_snapshot = operational_snapshot
         @module_runtime = module_runtime
         @module_migration_coordinator = module_migration_coordinator
+        @registered_project_migration_coordinator =
+          registered_project_migration_coordinator
         @attempt_snapshot = nil
         @last_terminal_recovery_prune_at = nil
         @recovery_coordinator = recovery_coordinator || RecoveryCoordinator.new(
@@ -344,6 +347,23 @@ module Hive
         )
         run_refactor_patrol_merge_reconciler_tick(now: now)
 
+        begin
+          @registered_project_migration_coordinator&.tick(now: now)&.each do |migration_result|
+            @logger.event(
+              :refactor_patrol_schema_migration,
+              **migration_result.to_h
+            )
+          end
+        rescue StandardError => e
+          @logger.event(
+            :fatal,
+            message:
+              "registered project schema migration raised: " \
+              "#{e.class}: #{e.message}",
+            keeping_previous: true
+          )
+        end
+
         # Project-local module occurrences are already durable at this point.
         # Drain them only from the daemon, after attempt reconciliation and PR
         # intake, so no command-side producer can become a second dispatcher.
@@ -529,11 +549,26 @@ module Hive
         record_completed(Array(shutdown_entries), now: Time.now)
         # One final reap to catch any last completions
         reap_completed(now: Time.now)
+        publish_shutdown_acknowledgement(now: Time.now)
         @logger.close
       end
 
       def request_shutdown!
         @shutdown = true
+      end
+
+      def publish_shutdown_acknowledgement(now:)
+        return unless @operational_snapshot
+
+        proof = @supervisor.respond_to?(:shutdown_proof) ? @supervisor.shutdown_proof : nil
+        @operational_snapshot.shutdown(
+          admission_closed: true,
+          drained: proof && proof.fetch(:drained, false),
+          child_inventory: proof ? proof.fetch(:child_inventory, []) : [],
+          now: now
+        )
+      rescue StandardError => e
+        log_operational_snapshot_failure(phase: "shutdown", error: e)
       end
 
       def request_reload!

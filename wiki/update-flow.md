@@ -3,11 +3,11 @@ title: Update flow (daemon-driven version check + nudge)
 type: feature
 source: lib/hive/update_check.rb, lib/hive/update_check/state.rb, lib/hive/daemon/dispatcher.rb, lib/hive/bot/supervisor.rb, lib/hive/tui/bubble_model.rb
 created: 2026-05-27
-updated: 2026-05-27
+updated: 2026-07-29
 tags: [architecture, daemon, bot, tui, update, decision]
 ---
 
-**TLDR**: During the fast dev-release period the daemon checks the latest GitHub release on a throttled (~daily) cadence and, when the running version is behind, records a nudge (version + exact update command) that the TUI footer renders and the bot pushes once per version. Auto-update is **not** implemented yet — every channel is nudge-only until the bash auto-update spike (U7) lands. See [[commands/update]] and [[decisions]].
+**TLDR**: During the fast dev-release period the daemon checks the latest GitHub release on a throttled (~daily) cadence and, when the running version is behind, records a nudge (version + exact update command) that the TUI footer renders and the bot pushes once per version. Updates remain operator-invoked: `hive update` now performs a verified daemon quiesce, package replacement, complete invoking-user migration sweep, and conditional restart; every other user of a shared package crosses the same boundary on first eligible use. The daemon never self-updates. See [[commands/update]] and [[decisions]].
 
 ## Pieces
 

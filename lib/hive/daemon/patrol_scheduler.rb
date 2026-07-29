@@ -67,7 +67,9 @@ module Hive
         end
         @event_publisher = event_publisher || Hive::Modules::EventPublisher.new
         @state_store_factory = state_store_factory || lambda do |entry|
-          Hive::Patrol::StateStore.new(entry.fetch("path"))
+          Hive::Patrol::StateStore.new(
+            entry.fetch("path"), hive_state_path: entry.fetch("hive_state_path")
+          )
         end
         @pending = {}
         @failures = {}
@@ -125,9 +127,7 @@ module Hive
           selection_input = schedule_selection_input(
             entry, cfg, patrol, now
           )
-          selection = Hive::Patrol::DecisionProjection.project(
-            selection_input
-          )
+          selection = legacy_schedule_selection(selection_input)
           unless selection.rationale == "due"
             finalize_negative(
               entry,
@@ -275,7 +275,7 @@ module Hive
           )
         end
 
-        state = read_state(entry.fetch("path"))
+        state = read_state(entry)
         branch_changed = if %w[continuous new_commits].include?(trigger)
           default_branch_changed?(entry, cfg, state)
         end
@@ -290,6 +290,31 @@ module Hive
         )
       end
 
+      # This is intentionally independent from the module-side decision
+      # projector. Shadow evidence is useful only when the legacy producer
+      # records its own actual decision instead of asking the implementation
+      # under comparison to predict it.
+      def legacy_schedule_selection(input)
+        rationale = if input.fetch("enabled") == false
+          "disabled"
+        else
+          due = case input.fetch("trigger")
+          when "timer"
+            input["timer_due"] == true
+          when "continuous"
+            input["timer_due"] == true ||
+              input["branch_changed"] == true
+          when "new_commits"
+            input["branch_changed"] == true
+          end
+          due ? "due" : "not_due"
+        end
+        Hive::Modules::Migration::PatrolDecisionProjection.build(
+          module_name: "patrol",
+          rationale: rationale
+        )
+      end
+
       def timer_due?(state, patrol, now)
         last = parse_time(state["last_run_at"])
         last.nil? || (now - last) >= patrol.fetch("poll_interval_sec", 600)
@@ -301,8 +326,10 @@ module Hive
         current != state["last_scanned_sha"]
       end
 
-      def read_state(project_root)
-        path = File.join(project_root, ".hive-state", "patrol", "state.json")
+      def read_state(entry)
+        path = File.join(
+          entry.fetch("hive_state_path"), "patrol", "state.json"
+        )
         return {} unless File.exist?(path)
 
         parsed = JSON.parse(File.read(path))

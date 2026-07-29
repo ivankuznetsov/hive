@@ -604,6 +604,31 @@ begin
   normalize_leading_json_options!(ARGV)
   rewrite_help_flag!(ARGV)
   lift_new_options!(ARGV)
+  require "hive/refactor_patrol/installed_job_schema_migration"
+  migration_class =
+    Hive::RefactorPatrol::InstalledJobSchemaMigration
+  if migration_class.eligible_argv?(
+    original_argv,
+    strict_no_write: strict_no_write_route
+  )
+    installation_migration = migration_class.new
+    migration_payload = installation_migration.call(
+      restart_daemon:
+        migration_class.restart_daemon_after?(original_argv)
+    )
+    if installation_migration.last_ran
+      held = Array(migration_payload["projects"]).count do |project|
+        project["retryable"] == true
+      end
+      if held.positive?
+        warn(
+          "hive: warning: JobStore migration held #{held} registered " \
+          "project#{held == 1 ? '' : 's'}; inspect " \
+          "`hive daemon status --json` for retry details"
+        )
+      end
+    end
+  end
   Hive::CLI.start(ARGV, debug: true)
 rescue Thor::Error => e
   error = thor_usage_error(original_argv, e)

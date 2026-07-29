@@ -20,6 +20,9 @@ module Hive
         MAX_RECORDS = 4_096
         MAX_PAGE_SIZE = 256
         EVIDENCE_SOURCES = %w[legacy_mutator_capture archived_v1].freeze
+        NON_COMPARABLE_TRIGGER_KINDS = %w[
+          job_store.schema_v2_import
+        ].freeze
         IGNORED_KEYS = %w[duration_ms engine owner recorded_at representation].freeze
         EXPECTED_KEYS = %w[
           comparable configuration_digest decision_id duplicate_effects
@@ -73,7 +76,10 @@ module Hive
             unexplained = all_differences - explained
             trigger_digest = digest(trigger)
             source = capture && "legacy_mutator_capture"
-            comparable = comparable == true && !capture.nil?
+            comparable =
+              comparable == true &&
+              !capture.nil? &&
+              !NON_COMPARABLE_TRIGGER_KINDS.include?(trigger["kind"])
             decision_id = digest(
               "module" => module_name,
               "trigger_digest" => trigger_digest
@@ -295,11 +301,6 @@ module Hive
           if left.is_a?(Hash) && right.is_a?(Hash)
             return (left.keys | right.keys).sort.flat_map do |key|
               differences(left[key], right[key], "#{path}.#{key}")
-            end
-          end
-          if left.is_a?(Array) && right.is_a?(Array) && left.length == right.length
-            return left.each_index.flat_map do |index|
-              differences(left[index], right[index], "#{path}[#{index}]")
             end
           end
 

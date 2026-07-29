@@ -112,7 +112,7 @@ module Hive
         @manifest_resolver_factory = manifest_resolver_factory
         @repository_ownership = repository_ownership || Hive::RefactorPatrol::RepositoryOwnership.new
         @action_runner_factory = action_runner_factory
-        @job_store_factory = job_store_factory || ->(root) { Hive::RefactorPatrol::JobStore.new(root) }
+        @job_store_factory = job_store_factory
         @checkout_guard_factory = checkout_guard_factory || lambda do |root, branch|
           Hive::RefactorPatrol::CheckoutGuard.new(root, default_branch: branch)
         end
@@ -160,13 +160,13 @@ module Hive
         require_module_observation_capabilities!
         require_module_mutation_capabilities! unless @dry_run
         @manifest = resolve_manifest(entry, project_root, cfg)
-        validate_result_file!(project_root) if @result_file
-        @job_store = @job_store_factory.call(project_root)
+        validate_result_file!(entry, project_root) if @result_file
+        @job_store = job_store_for(entry, project_root)
         assert_repository_ownership!(
           entry, cfg, aggregate: @job_store.read_job(@manifest.fetch("job_id"))
         )
         token_budget = Hive::Patrol::TokenBudget.new(project_root, cfg: cfg)
-        runner = build_action_runner(project_root, cfg, token_budget)
+        runner = build_action_runner(project_root, cfg, token_budget, entry: entry)
         result = with_claim_heartbeat(@manifest.fetch("job_id")) do
           runner.run(job_id: @manifest.fetch("job_id"), dry_run: @dry_run)
         end
@@ -179,13 +179,15 @@ module Hive
         require_module_mutation_capabilities! if pr_mode? && !@dry_run
         assert_repository_ownership!(entry, cfg) if pr_mode?
         @manifest = resolve_manifest(entry, project_root, cfg) if pr_mode?
-        validate_result_file!(project_root) if @result_file
+        validate_result_file!(entry, project_root) if @result_file
         prepare_checkout_and_discovery!(entry, project_root, cfg) if pr_mode?
         if @existing_lifecycle
           return [ lifecycle_payload(entry, project_root, @existing_lifecycle), lifecycle_theses(@existing_lifecycle) ]
         end
         analysis_root = pr_mode? ? materialize_analysis_worktree!(project_root, cfg) : project_root
-        state = Hive::RefactorPatrol::StateStore.new(project_root)
+        state = Hive::RefactorPatrol::StateStore.new(
+          project_root, hive_state_path: entry.fetch("hive_state_path")
+        )
         @capability_context&.require_filesystem_write!(".hive-state/refactor_patrol/**") unless ephemeral_discovery?
         # A dry run must not create durable artifacts under
         # .hive-state/refactor_patrol/; all reads tolerate a missing dir.
@@ -349,7 +351,7 @@ module Hive
         return {} unless pr_mode?
         return {} if @explicit_replay
 
-        store = @job_store || @job_store_factory.call(project_root)
+        store = @job_store || job_store_for(project_root: project_root)
         if @dry_run
           store.jobs.select { |job| job.fetch("complete") }.each_with_object({}) do |job, result|
             Hive::RefactorPatrol::JobStore::DISPOSITIONS.each do |name|
@@ -408,11 +410,13 @@ module Hive
         )
       end
 
-      def build_action_runner(root, cfg, token_budget)
+      def build_action_runner(root, cfg, token_budget, entry:)
         return @action_runner_factory.call(root, cfg) if @action_runner_factory
 
         Hive::RefactorPatrol::ActionRunner.new(
           root, cfg: cfg, registration: @project,
+          hive_state_path: entry.fetch("hive_state_path"),
+          job_store: @job_store,
           repository_ownership: @repository_ownership,
           token_budget: token_budget,
           occurrence_id: @occurrence_id,
@@ -587,7 +591,7 @@ module Hive
       end
 
       def prepare_durable_discovery!(entry, project_root, cfg)
-        @job_store = @job_store_factory.call(project_root)
+        @job_store = job_store_for(entry, project_root)
         @transition_entry = entry.merge("path" => project_root)
         aggregate = if @pr
           @architecture_intake_transitions.enqueue(
@@ -603,7 +607,9 @@ module Hive
           @job_store.read_job(@manifest.fetch("job_id"))
         end
         if @pr && aggregate.fetch("complete")
-          @manifest = publish_manual_replay_manifest!(project_root, @manifest)
+          @manifest = publish_manual_replay_manifest!(
+            project_root, @manifest, hive_state_path: entry.fetch("hive_state_path")
+          )
           @explicit_replay = true
           aggregate = @architecture_intake_transitions.enqueue(
             entry: @transition_entry,
@@ -619,7 +625,10 @@ module Hive
           raise Hive::ConfigError, "refactor patrol manifest does not match its authoritative job"
         end
         @durable_aggregate = aggregate
-        return unless @pr
+        unless @pr
+          prepare_discovery_transition_coordinator!
+          return
+        end
 
         if aggregate.fetch("complete") || %w[classified acting].include?(aggregate.fetch("state")) ||
            aggregate.fetch("actions").any?
@@ -632,23 +641,12 @@ module Hive
         # branch instead of inheriting the completed occurrence's snapshot.
         # Incomplete occurrences still reuse their durable analysis_sha.
         pin_checkout!(project_root, cfg)
-        process_start_time = Hive::Lock.process_start_time(Process.pid)
-        if process_start_time.to_s.empty?
-          raise Hive::ConfigError, "refactor patrol cannot verify the current process identity"
-        end
-        @manual_discovery_transitions = build_manual_discovery_transitions(
-          owner: "manual-#{Process.pid}-#{process_start_time}",
-          owner_pid: Process.pid,
-          owner_process_start_time: process_start_time,
-          claim_resolver: Hive::RefactorPatrol::ProcessGroupResolver.new
-        )
-        capture = if @job_store.respond_to?(:occurrence_capture)
-          @job_store.occurrence_capture(aggregate.fetch("job_id"))
-        end
+        prepare_discovery_transition_coordinator!
         @manual_claim_token = @manual_discovery_transitions.claim(
           entry: @transition_entry,
           store: @job_store,
-          capture: capture,
+          capture: @job_store.respond_to?(:occurrence_capture) ?
+            @job_store.occurrence_capture(aggregate.fetch("job_id")) : nil,
           aggregate: aggregate,
           analysis_sha: @checkout_snapshot.fetch("analysis_sha"),
           now: Time.now
@@ -659,12 +657,20 @@ module Hive
         @durable_aggregate = @job_store.read_job(aggregate.fetch("job_id"))
       end
 
-      def checkpoint_manual_discovery_transition!(token, envelope:, now:)
-        unless @manual_discovery_transitions
-          raise Hive::ConfigError,
-                "manual discovery transition coordinator is unavailable"
+      def prepare_discovery_transition_coordinator!
+        process_start_time = Hive::Lock.process_start_time(Process.pid)
+        if process_start_time.to_s.empty?
+          raise Hive::ConfigError, "refactor patrol cannot verify the current process identity"
         end
+        @manual_discovery_transitions = build_manual_discovery_transitions(
+          owner: "manual-#{Process.pid}-#{process_start_time}",
+          owner_pid: Process.pid,
+          owner_process_start_time: process_start_time,
+          claim_resolver: Hive::RefactorPatrol::ProcessGroupResolver.new
+        )
+      end
 
+      def checkpoint_manual_discovery_transition!(token, envelope:, now:)
         @manual_discovery_transitions.checkpoint(
           entry: @transition_entry,
           store: @job_store,
@@ -677,11 +683,6 @@ module Hive
 
       def checkpoint_manual_progress_transition!(token, envelope:, now:,
                                                  lease_sec:)
-        unless @manual_discovery_transitions
-          raise Hive::ConfigError,
-                "manual discovery transition coordinator is unavailable"
-        end
-
         @manual_discovery_transitions.checkpoint_progress(
           entry: @transition_entry,
           store: @job_store,
@@ -694,11 +695,6 @@ module Hive
 
       def release_manual_discovery_transition!(token, reason:, now:,
                                                backoff_sec:)
-        unless @manual_discovery_transitions
-          raise Hive::ConfigError,
-                "manual discovery transition coordinator is unavailable"
-        end
-
         @manual_discovery_transitions.release(
           entry: @transition_entry,
           store: @job_store,
@@ -727,9 +723,10 @@ module Hive
         )
       end
 
-      def publish_manual_replay_manifest!(project_root, original)
+      def publish_manual_replay_manifest!(project_root, original,
+                                          hive_state_path: File.join(project_root, ".hive-state"))
         root = File.join(
-          project_root, ".hive-state", "refactor_patrol", "v2", "manifests"
+          hive_state_path, "refactor_patrol", "v2", "manifests"
         )
         FileUtils.mkdir_p(root)
         File.open(File.join(root, "manual-replays.lock"), File::RDWR | File::CREAT, 0o600) do |lock|
@@ -983,13 +980,18 @@ module Hive
       # merge intake. It never asks GitHub to reinterpret a PR number/URL.
       def load_job_manifest!(entry, project_root, cfg)
         path = File.expand_path(@job_manifest.to_s)
-        root = File.expand_path(File.join(project_root, ".hive-state", "refactor_patrol", "v2", "manifests"))
+        hive_state_path = entry.fetch(
+          "hive_state_path", File.join(project_root, ".hive-state")
+        )
+        root = File.expand_path(File.join(
+          hive_state_path, "refactor_patrol", "v2", "manifests"
+        ))
         unless File.dirname(path) == root && File.file?(path)
           raise Hive::ConfigError, "refactor patrol job manifest must be a published file under #{root}"
         end
 
         default_branch = if @actions
-          store = @job_store_factory.call(project_root)
+          store = job_store_for(entry, project_root)
           store.read_job(File.basename(path, ".json")).dig("source", "base_branch")
         else
           cfg["default_branch"] || Hive::GitOps.new(project_root).default_branch
@@ -1136,7 +1138,19 @@ module Hive
 
       def run_job_query
         entry, project_root, = resolve_project!
-        query = Hive::RefactorPatrol::JobQuery.new(@job_store_factory.call(project_root))
+        schema = Hive::RefactorPatrol::JobStore.schema_status(
+          project_root,
+          hive_state_path: entry.fetch("hive_state_path"),
+          project: entry
+        )
+        if schema.fetch("status") == "migration_required"
+          raise Hive::RefactorPatrol::JobQuery::MigrationRequired,
+                "refactor patrol JobStore migration is required; the Hive " \
+                "daemon will retry the registered project automatically"
+        end
+        query = Hive::RefactorPatrol::JobQuery.new(
+          job_store_for(entry, project_root, migrate: false)
+        )
         payload = if @list_jobs
           query.list_envelope(
             project: entry.fetch("name"), project_root: project_root,
@@ -1185,10 +1199,24 @@ module Hive
       end
 
       def pinned_analysis_sha(project_root)
-        store = @job_store || @job_store_factory.call(project_root)
+        store = @job_store || job_store_for(project_root: project_root)
         store.read_job(@manifest.fetch("job_id"))["analysis_sha"]
       rescue Hive::RefactorPatrol::JobStore::RecordNotFound
         nil
+      end
+
+      def job_store_for(entry = nil, project_root = nil, migrate: true,
+                        **options)
+        project_root ||= options.fetch(:project_root)
+        entry ||= @project_entry || Hive::Config.find_project(@project)
+        return @job_store_factory.call(project_root) if @job_store_factory
+
+        Hive::RefactorPatrol::JobStore.new(
+          project_root,
+          hive_state_path: entry.fetch("hive_state_path"),
+          project: entry,
+          migrate: migrate
+        )
       end
 
       def materialize_analysis_worktree!(project_root, cfg)
@@ -1286,10 +1314,16 @@ module Hive
         puts JSON.generate(payload)
       end
 
-      def validate_result_file!(project_root)
+      def validate_result_file!(entry, project_root = nil)
+        if project_root.nil?
+          project_root = entry
+          entry = {
+            "hive_state_path" => File.join(project_root, ".hive-state")
+          }
+        end
         path = File.expand_path(@result_file.to_s)
         root = File.expand_path(
-          File.join(project_root, ".hive-state", "refactor_patrol", "v2", "results")
+          File.join(entry.fetch("hive_state_path"), "refactor_patrol", "v2", "results")
         )
         basename = File.basename(path)
         unless File.dirname(path) == root && basename.start_with?("#{@manifest.fetch('job_id')}-") &&

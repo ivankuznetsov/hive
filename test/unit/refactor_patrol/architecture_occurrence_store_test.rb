@@ -52,6 +52,18 @@ class RefactorPatrolArchitectureOccurrenceStoreTest < Minitest::Test
       outbox
     end
 
+    def record_recovery_failure!(**options)
+      fail_if!(:record_recovery_failure!)
+      calls << [ :record_recovery_failure!, options ]
+      { "next_eligible_at" => NOW.iso8601 }
+    end
+
+    def clear_recovery_failure!(**options)
+      fail_if!(:clear_recovery_failure!)
+      calls << [ :clear_recovery_failure!, options ]
+      true
+    end
+
     def acknowledge_outbox!(occurrence_id, **options)
       fail_if!(:acknowledge_outbox!)
       calls << [ :acknowledge_outbox!, occurrence_id, options ]
@@ -403,6 +415,32 @@ class RefactorPatrolArchitectureOccurrenceStoreTest < Minitest::Test
     end
 
     assert_same error, observed
+  end
+
+  def test_recovery_failure_ports_keep_corruption_distinct_from_effect_state
+    journal = Journal.new
+    store = occurrence_store(journal: journal)
+
+    journal.failure = :record_recovery_failure!
+    assert_raises(CorruptRecord) do
+      store.record_recovery_failure!(
+        operation: "architecture_occurrence", occurrence_id: capture.occurrence_id,
+        job_id: "job-7", error: RuntimeError.new("interrupted"), now: NOW
+      )
+    end
+
+    journal.failure = :clear_recovery_failure!
+    assert_raises(CorruptRecord) do
+      store.clear_recovery_failure!(expected_generation: 3)
+    end
+
+    journal.failure = :effect_state
+    assert_raises(InconsistentRecord) { store.effect_state(intent) }
+
+    journal.failure = :effect_intent
+    assert_raises(CorruptRecord) do
+      store.effect_intent(capture.occurrence_id, intent.intent_id)
+    end
   end
 
   private

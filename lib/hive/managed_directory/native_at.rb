@@ -9,11 +9,16 @@ module Hive
     class NativeAt
       class Unavailable < StandardError; end
 
-      PLATFORM_FLAGS = if RUBY_PLATFORM.include?("linux")
-        { directory: 0o200000, cloexec: 0o2000000 }.freeze
-      elsif RUBY_PLATFORM.include?("darwin")
-        { directory: 0x00100000, cloexec: 0x01000000 }.freeze
+      def self.platform_flags(platform)
+        if platform.include?("linux")
+          { directory: 0o200000, cloexec: 0o2000000 }.freeze
+        elsif platform.include?("darwin")
+          { directory: 0x00100000, cloexec: 0x01000000 }.freeze
+        end
       end
+
+      PLATFORM_FLAGS = platform_flags(RUBY_PLATFORM)
+      EXCHANGE_FLAG = 0x00000002
 
       def initialize
         raise Unavailable, "unsupported platform" unless PLATFORM_FLAGS
@@ -40,6 +45,16 @@ module Hive
           handle,
           "renameat",
           [ integer, pointer, integer, pointer ]
+        )
+        @exchangeat = optional_function(
+          handle,
+          RUBY_PLATFORM.include?("darwin") ? "renameatx_np" : "renameat2",
+          [ integer, pointer, integer, pointer, integer ]
+        )
+        @futimens = function(
+          handle,
+          "futimens",
+          [ integer, pointer ]
         )
         @unlinkat = function(
           handle,
@@ -104,6 +119,28 @@ module Hive
         nil
       end
 
+      # Atomically swaps two existing sibling entries. Linux and Darwin expose
+      # different libc names for the same required primitive. Callers must not
+      # emulate this with two ordinary renames: the gap would let a retired
+      # writer recreate the legacy path.
+      def exchangeat(directory, first_name, second_name)
+        component!(first_name)
+        component!(second_name)
+        raise Unavailable, "atomic exchange capability is unavailable" unless
+          @exchangeat
+
+        call(
+          @exchangeat,
+          directory.fileno,
+          first_name,
+          directory.fileno,
+          second_name,
+          EXCHANGE_FLAG,
+          operation: "atomic exchange"
+        )
+        nil
+      end
+
       def unlinkat(directory, name)
         component!(name)
         call(@unlinkat, directory.fileno, name, 0, operation: "unlinkat")
@@ -113,6 +150,21 @@ module Hive
       def fsync_directory(directory)
         IO.for_fd(directory.fileno, autoclose: false).fsync
       rescue NotImplementedError, Errno::EINVAL, Errno::ENOTSUP
+        nil
+      end
+
+      def set_file_mtime(file, value)
+        time = value.is_a?(Time) ? value : Time.at(value)
+        timespec = [
+          time.to_i, time.nsec,
+          time.to_i, time.nsec
+        ].pack("l!4")
+        call(
+          @futimens,
+          file.fileno,
+          timespec,
+          operation: "futimens"
+        )
         nil
       end
 
@@ -145,6 +197,12 @@ module Hive
           Fiddle::TYPE_INT,
           need_gvl: true
         )
+      end
+
+      def optional_function(handle, name, argument_types)
+        function(handle, name, argument_types)
+      rescue Fiddle::DLError
+        nil
       end
 
       def call_openat(directory_fd, name, flags, mode: nil)

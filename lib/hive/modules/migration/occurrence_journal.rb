@@ -89,6 +89,8 @@ module Hive
           @attempt_locks.synchronize(key) do
             @journal_state.synchronize do |state, checkpoint|
               @inventory_lock.synchronize("inventory") do
+                @journal_state.mark_recovery_dirty!(state)
+                checkpoint.call
                 reserved_capture = nil
                 reserved_count = 0
                 observed_generation = 0
@@ -169,10 +171,26 @@ module Hive
         def each_recovery_active
           return enum_for(__method__) unless block_given?
 
+          inventory = @journal_state.synchronize do |state, _checkpoint|
+            @journal_state.recovery_inventory(state)
+          end
+          return nil unless inventory.fetch("dirty")
+
+          active = false
           each_record do |record|
             if record.fetch("phase") == "reserved" ||
                projection_pending_record?(record)
+              active = true
               yield record
+            end
+          end
+          unless active
+            @journal_state.synchronize do |state, checkpoint|
+              cleared = @journal_state.clear_recovery_dirty!(
+                state,
+                expected_generation: inventory.fetch("generation")
+              )
+              checkpoint.call if cleared
             end
           end
           nil
@@ -348,6 +366,8 @@ module Hive
         private
 
         def reserve_coordinated!(capture, state:, checkpoint:, now:)
+          @journal_state.mark_recovery_dirty!(state)
+          checkpoint.call
           existing = @store.fetch(capture.occurrence_id)
           if existing
             validate_occurrence_identity!(existing, capture)
@@ -369,9 +389,9 @@ module Hive
             provisional = @validator.capture(
               candidate.fetch("provisional_capture")
             )
-            unless @journal_state.fence_retirement!(state, provisional)
-              malformed!("patrol occurrence retirement fence is full")
-            end
+            # The candidate predicate above ran against this same locked state,
+            # so its retirement fence cannot become unavailable here.
+            @journal_state.fence_retirement!(state, provisional)
             checkpoint.call
             @store.retire!(candidate.fetch("occurrence_id"))
           end

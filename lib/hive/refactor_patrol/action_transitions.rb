@@ -6,12 +6,13 @@ module Hive
   module RefactorPatrol
     # Facade for ActionRunner's durable transition collaborators.
     class ActionTransitions
-      def initialize(project_root:, job_store:, evidence_store:, capture:,
+      def initialize(project_root:, hive_state_path: nil, job_store:, evidence_store:, capture:,
                      config_loader:, module_execution:, clock:, owner:,
                      owner_pid:, owner_process_start_time:, lease_sec:,
                      claim_resolver:)
         context = ActionTransitionContext.new(
           project_root: project_root,
+          hive_state_path: hive_state_path,
           job_store: job_store,
           evidence_store: evidence_store,
           capture: capture,

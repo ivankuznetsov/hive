@@ -28,7 +28,8 @@
         "cli_version",
         "binary_drift",
         "current_version",
-        "update_nudge"
+        "update_nudge",
+        "schema_migrations"
       ],
       "properties": {
         "schema": { "const": "hive-daemon-status" },
@@ -84,7 +85,7 @@
         },
         "binary_drift": {
           "type": "string",
-          "enum": ["none", "path", "version", "unparseable", "not_applicable"],
+          "enum": ["none", "path", "version", "unparseable", "unreadable", "not_applicable"],
           "description": "Whether the installed unit's binary diverges from the current one: none (matches), path (different binary path), version (same path, older version), unparseable (unit present but its binary could not be read), not_applicable (no unit installed / probe could not run)."
         },
         "current_version": {
@@ -101,6 +102,79 @@
             "channel": { "type": "string", "description": "Detected install channel (brew/aur/bash)." },
             "command": { "type": "string", "description": "Exact command to update on this channel." }
           }
+        },
+        "schema_migrations": {
+          "type": "object",
+          "description": "Installation-wide JobStore upgrade inventory. Failed projects are held from Architecture Patrol and retried by the daemon.",
+          "required": [
+            "ok",
+            "schema",
+            "schema_version",
+            "target_schema_version",
+            "registry_digest",
+            "updated_at",
+            "projects"
+          ],
+          "properties": {
+            "ok": { "type": "boolean" },
+            "schema": { "const": "hive-installation-job-schema-migration" },
+            "schema_version": { "const": 2 },
+            "target_schema_version": { "const": 3 },
+            "registry_digest": {
+              "type": ["string", "null"],
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "updated_at": { "type": ["string", "null"], "format": "date-time" },
+            "error": { "type": "string" },
+            "projects": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "project",
+                  "project_id",
+                  "path",
+                  "real_path",
+                  "hive_state_path",
+                  "status",
+                  "current_schema_version",
+                  "target_schema_version",
+                  "snapshot_id",
+                  "retryable",
+                  "next_retry_at",
+                  "remediation",
+                  "error"
+                ],
+                "properties": {
+                  "project": { "type": ["string", "null"] },
+                  "project_id": { "type": ["string", "null"] },
+                  "path": { "type": ["string", "null"] },
+                  "real_path": { "type": ["string", "null"] },
+                  "hive_state_path": { "type": ["string", "null"] },
+                  "status": {
+                    "enum": [
+                      "absent",
+                      "current",
+                      "dry_run",
+                      "duplicate",
+                      "failed",
+                      "migrated",
+                      "migration_required"
+                    ]
+                  },
+                  "current_schema_version": { "type": ["integer", "null"] },
+                  "target_schema_version": { "const": 3 },
+                  "snapshot_id": { "type": ["string", "null"] },
+                  "retryable": { "type": "boolean" },
+                  "next_retry_at": { "type": ["string", "null"], "format": "date-time" },
+                  "remediation": { "type": ["string", "null"] },
+                  "error": { "type": ["string", "null"] }
+                }
+              }
+            }
+          },
+          "additionalProperties": false
         }
       }
     }

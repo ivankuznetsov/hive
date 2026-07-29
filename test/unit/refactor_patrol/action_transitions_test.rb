@@ -182,6 +182,32 @@ class RefactorPatrolActionTransitionsTest < Minitest::Test
     )
   end
 
+  def test_transition_context_expands_a_custom_registered_state_path_for_its_gateway
+    options = nil
+    store = Store.new
+    context = Hive::RefactorPatrol::ActionTransitionContext.new(
+      project_root: "/tmp/project",
+      hive_state_path: "registered-state",
+      job_store: store,
+      evidence_store: Object.new,
+      capture: Capture.new(owner_epoch: 7),
+      config_loader: ->(*) { {} },
+      module_execution: nil,
+      clock: -> { now },
+      owner: "worker",
+      gateway_factory: lambda do |**gateway_options|
+        options = gateway_options
+        Gateway.new { |_arguments, _transition| {} }
+      end
+    )
+
+    context.gateway
+
+    assert_equal "/tmp/project/registered-state",
+                 options.fetch(:hive_state_path)
+    assert_same store, options.fetch(:job_store)
+  end
+
   def test_settle_reconciliation_covers_terminal_release_and_claim_fences
     token = action_token
     store = Store.new
@@ -551,30 +577,89 @@ class RefactorPatrolActionTransitionsTest < Minitest::Test
   end
 
   def test_facade_delegates_patch_and_fix_receipts_to_claim_transitions
-    calls = []
-    claims = Object.new
-    claims.define_singleton_method(:record_patch_receipt) do |*args, **options|
-      calls << [ :patch, args, options ]
-    end
-    claims.define_singleton_method(:record_fix_receipt) do |*args, **options|
-      calls << [ :fix, args, options ]
-    end
-    facade = Hive::RefactorPatrol::ActionTransitions.allocate
-    facade.instance_variable_set(:@claims, claims)
+    store = Store.new
+    facade = direct_facade(store)
+    token = action_token
 
-    facade.record_patch_receipt(:token, receipt: { "id" => 1 }, now: now)
-    facade.record_fix_receipt(:token, receipt: { "id" => 2 }, now: now)
+    facade.record_patch_receipt(
+      token, receipt: { "id" => 1 }, now: now
+    )
+    facade.record_fix_receipt(
+      token, receipt: { "id" => 2 }, now: now
+    )
 
     assert_equal(
       [
-        [ :patch, [ :token ], { receipt: { "id" => 1 }, now: now } ],
-        [ :fix, [ :token ], { receipt: { "id" => 2 }, now: now } ]
+        [
+          :record_patch_receipt, token,
+          { receipt: { "id" => 1 }, now: now, transition: nil }
+        ],
+        [
+          :record_fix_receipt, token,
+          { receipt: { "id" => 2 }, now: now, transition: nil }
+        ]
       ],
-      calls
+      store.calls
     )
   end
 
+  def test_facade_claimed_transition_uses_the_public_direct_path
+    facade = direct_facade(Store.new)
+    token = {
+      job_id: "job-1", canonical_action_id: "action-1", generation: 1,
+      owner: "worker", continuation_only: false
+    }
+
+    result = facade.claimed_transition(
+      token,
+      operation: "record-test",
+      payload: { "value" => true },
+      now: now
+    ) do |transition|
+      assert_nil transition
+      :direct
+    end
+
+    assert_equal :direct, result
+  end
+
+  def test_applied_patch_and_fix_receipts_use_the_claim_scoped_store_writes
+    store = Store.new
+    store.aggregate = aggregate_with(action_record(claims: [ claim_record ]))
+    gateway = Gateway.new do |_options, transition|
+      transition.call(intent)
+    end
+    coordinator = claims(store, gateway)
+    token = {
+      job_id: "job-1", canonical_action_id: "action-1", generation: 1,
+      owner: "worker", continuation_only: false
+    }
+
+    coordinator.record_patch_receipt(token, receipt: { "patch" => true }, now: now)
+    coordinator.record_fix_receipt(token, receipt: { "fix" => true }, now: now)
+
+    assert_equal %i[record_patch_receipt record_fix_receipt],
+                 store.calls.map(&:first)
+  end
+
   private
+
+  def direct_facade(store)
+    Hive::RefactorPatrol::ActionTransitions.new(
+      project_root: "/tmp/project",
+      job_store: store,
+      evidence_store: Object.new,
+      capture: nil,
+      config_loader: ->(*) { {} },
+      module_execution: nil,
+      clock: -> { now },
+      owner: "worker",
+      owner_pid: 10,
+      owner_process_start_time: "20",
+      lease_sec: 30,
+      claim_resolver: nil
+    )
+  end
 
   def claims(store, gateway)
     Hive::RefactorPatrol::ActionClaimTransitions.new(

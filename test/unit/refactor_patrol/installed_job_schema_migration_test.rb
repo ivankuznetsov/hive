@@ -1,0 +1,482 @@
+require "test_helper"
+require "hive/refactor_patrol/installed_job_schema_migration"
+
+class HiveRefactorPatrolInstalledJobSchemaMigrationTest < Minitest::Test
+  include HiveTestHelper
+
+  Migration = Hive::RefactorPatrol::InstalledJobSchemaMigration
+  MigrationStatus =
+    Hive::RefactorPatrol::RegisteredProjectMigrationStatus
+
+  class FakeStatusStore
+    attr_accessor :payload
+
+    def initialize(payload = nil)
+      @payload = payload
+    end
+
+    def read
+      payload
+    end
+  end
+
+  class FakeCoordinator
+    attr_reader :last_status_payload, :runs
+
+    def initialize(status_store:, payload:, error: nil)
+      @status_store = status_store
+      @payload = payload
+      @error = error
+      @runs = []
+    end
+
+    def run(now:, entries:)
+      @runs << { now: now, entries: entries }
+      raise @error if @error
+
+      @status_store.payload = @payload
+      @last_status_payload = @payload
+      []
+    end
+  end
+
+  class FakeLifecycle
+    attr_reader :calls
+
+    def initialize(running: false)
+      @running = running
+      @calls = []
+    end
+
+    def quiesce!
+      @calls << :quiesce
+      @running
+    end
+
+    def restart!
+      @calls << :restart
+      true
+    end
+  end
+
+  class MutableRunningStatus
+    attr_accessor :running
+
+    def initialize(pid:)
+      @pid = pid
+      @running = true
+    end
+
+    def running_state
+      { running: running, pid: running ? @pid : nil }
+    end
+  end
+
+  def test_cli_gate_preserves_observation_restore_and_internal_routes
+    refute Migration.eligible_argv?([])
+    refute Migration.eligible_argv?([ "status", "--json" ])
+    refute Migration.eligible_argv?([ "refactor-patrol", "hive", "--list" ])
+    refute Migration.eligible_argv?([ "refactor-patrol", "hive", "--show", "job-1" ])
+    refute Migration.eligible_argv?([ "daemon", "status", "--json" ])
+    refute Migration.eligible_argv?([ "web", "status", "--json" ])
+    refute Migration.eligible_argv?([ "connect", "--json" ])
+    refute Migration.eligible_argv?([ "update", "--dry-run" ])
+    refute Migration.eligible_argv?([ "run", "task" ], strict_no_write: true)
+    refute Migration.eligible_argv?(
+      [ "run", "task" ], env: { Migration::INTERNAL_ENV => "1" }
+    )
+    refute Migration.eligible_argv?(
+      [ "run", "task" ], env: { "HIVE_ATTEMPT_INTERNAL" => "1" }
+    )
+    assert Migration.eligible_argv?([ "run", "task" ])
+    assert Migration.eligible_argv?([ "--json", "daemon", "start", "--detach" ])
+    assert Migration.eligible_argv?([ "migrate", "/shared/project" ])
+    refute Migration.restart_daemon_after?([ "daemon", "start", "--detach" ])
+    assert Migration.restart_daemon_after?([ "run", "task" ])
+  end
+
+  def test_current_registry_digest_skips_conversion_and_daemon_fence
+    with_tmp_dir do |root|
+      entries = [
+        {
+          "name" => "shared",
+          "path" => "/srv/shared",
+          "project_id" => "project-shared"
+        }
+      ]
+      digest = MigrationStatus.registry_digest(entries)
+      status_store = FakeStatusStore.new(
+        status_payload(digest: digest, projects: [])
+      )
+      lifecycle = FakeLifecycle.new(running: true)
+      factory_called = false
+      migration = build_migration(
+        root: root,
+        entries: entries,
+        status_store: status_store,
+        lifecycle: lifecycle,
+        coordinator_factory: lambda do |**|
+          factory_called = true
+        end
+      )
+
+      payload = migration.call(now: Time.utc(2026, 7, 29, 12))
+
+      assert_equal status_store.payload, payload
+      refute migration.last_ran
+      refute factory_called
+      assert_empty lifecycle.calls
+    end
+  end
+
+  def test_due_sweep_passes_every_registered_row_and_restarts_prior_daemon
+    with_tmp_dir do |root|
+      entries = [
+        {
+          "name" => "mine",
+          "path" => "/home/me/project",
+          "project_id" => "project-mine"
+        },
+        {
+          "name" => "shared-from-another-user",
+          "path" => "/srv/team/project",
+          "hive_state_path" => "/var/lib/team/hive-state",
+          "project_id" => "project-shared",
+          "registered_by" => "another-user"
+        }
+      ].freeze
+      digest = MigrationStatus.registry_digest(entries)
+      expected = status_payload(
+        digest: digest,
+        projects: [
+          project_status("mine", "current"),
+          project_status("shared-from-another-user", "migrated")
+        ]
+      )
+      status_store = FakeStatusStore.new
+      lifecycle = FakeLifecycle.new(running: true)
+      coordinator = FakeCoordinator.new(
+        status_store: status_store, payload: expected
+      )
+      ensured = 0
+      migration = build_migration(
+        root: root,
+        entries: entries,
+        status_store: status_store,
+        lifecycle: lifecycle,
+        identity_ensurer: -> { ensured += 1 },
+        coordinator_factory: ->(**) { coordinator }
+      )
+
+      payload = migration.call(now: "2026-07-29T12:00:00Z")
+
+      assert_equal expected, payload
+      assert_equal entries, coordinator.runs.fetch(0).fetch(:entries)
+      assert_equal digest, migration.last_registry_digest
+      assert migration.last_ran
+      assert migration.last_daemon_was_running
+      assert migration.last_daemon_restarted
+      assert_equal [ :quiesce, :restart ], lifecycle.calls
+      assert_equal 1, ensured
+    end
+  end
+
+  def test_retryable_row_runs_only_when_its_persisted_deadline_is_due
+    with_tmp_dir do |root|
+      entries = [ { "name" => "blocked", "path" => "/srv/blocked" } ]
+      digest = MigrationStatus.registry_digest(entries)
+      future = status_payload(
+        digest: digest,
+        projects: [
+          project_status(
+            "blocked", "failed", retryable: true,
+            next_retry_at: "2026-07-29T13:00:00.000000Z"
+          )
+        ]
+      )
+      status_store = FakeStatusStore.new(future)
+      lifecycle = FakeLifecycle.new
+      coordinator = FakeCoordinator.new(
+        status_store: status_store,
+        payload: status_payload(digest: digest, projects: [])
+      )
+      migration = build_migration(
+        root: root,
+        entries: entries,
+        status_store: status_store,
+        lifecycle: lifecycle,
+        coordinator_factory: ->(**) { coordinator }
+      )
+
+      migration.call(now: "2026-07-29T12:59:59Z")
+      refute migration.last_ran
+
+      migration.call(now: "2026-07-29T13:00:00Z")
+      assert migration.last_ran
+      assert_equal 1, coordinator.runs.length
+      assert_equal [ :quiesce ], lifecycle.calls
+    end
+  end
+
+  def test_failed_conversion_restarts_a_daemon_that_was_stopped
+    with_tmp_dir do |root|
+      entries = [ { "name" => "shared", "path" => "/srv/shared" } ]
+      status_store = FakeStatusStore.new
+      lifecycle = FakeLifecycle.new(running: true)
+      coordinator = FakeCoordinator.new(
+        status_store: status_store,
+        payload: nil,
+        error: Hive::ConfigError.new("status storage unavailable")
+      )
+      migration = build_migration(
+        root: root,
+        entries: entries,
+        status_store: status_store,
+        lifecycle: lifecycle,
+        coordinator_factory: ->(**) { coordinator }
+      )
+
+      error = assert_raises(Hive::ConfigError) do
+        migration.call(restart_daemon: false)
+      end
+
+      assert_match(/status storage unavailable/, error.message)
+      assert_equal [ :quiesce, :restart ], lifecycle.calls
+      assert migration.last_daemon_restarted
+      refute migration.last_ran
+    end
+  end
+
+  def test_candidate_daemon_start_owns_restart_after_successful_migration
+    with_tmp_dir do |root|
+      entries = [ { "name" => "shared", "path" => "/srv/shared" } ]
+      digest = MigrationStatus.registry_digest(entries)
+      status_store = FakeStatusStore.new
+      lifecycle = FakeLifecycle.new(running: true)
+      coordinator = FakeCoordinator.new(
+        status_store: status_store,
+        payload: status_payload(digest: digest, projects: [])
+      )
+      migration = build_migration(
+        root: root,
+        entries: entries,
+        status_store: status_store,
+        lifecycle: lifecycle,
+        coordinator_factory: ->(**) { coordinator }
+      )
+
+      migration.call(restart_daemon: false)
+
+      assert_equal [ :quiesce ], lifecycle.calls
+      refute migration.last_daemon_restarted
+    end
+  end
+
+  def test_daemon_lifecycle_fences_released_process_tree_and_restarts_candidate
+    with_tmp_dir do |root|
+      binary = File.join(root, "hive")
+      File.binwrite(binary, "#!/bin/sh\nexit 0\n")
+      FileUtils.chmod(0o755, binary)
+      status = MutableRunningStatus.new(pid: 41_001)
+      stopped = false
+      restarted = []
+      targets = [
+        { pid: 41_002, ppid: 41_001, pgid: 41_002, start_time: "child", depth: 1 },
+        { pid: 41_001, ppid: 1, pgid: 41_001, start_time: "daemon", depth: 0 }
+      ]
+      daemon = Object.new
+      daemon.define_singleton_method(:call) do
+        stopped = true
+        status.running = false
+      end
+      lifecycle = Migration::DaemonLifecycle.new(
+        hive_home: root,
+        status_report: status,
+        daemon_factory: ->(command) {
+          assert_equal "stop", command
+          daemon
+        },
+        tree_probe: ->(pid) {
+          assert_equal 41_001, pid
+          targets
+        },
+        tree_confirmer: ->(pid, initial) {
+          assert_equal 41_001, pid
+          assert_same targets, initial
+          targets
+        },
+        captured_process_alive: ->(_target) { !stopped },
+        process_group_alive: ->(_pgid) { false },
+        binary_path: -> { binary },
+        command_runner: lambda do |argv, environment|
+          restarted << [ argv, environment ]
+          status.running = true
+          true
+        end
+      )
+
+      assert lifecycle.quiesce!
+      assert lifecycle.restart!
+      assert_equal [
+        [
+          [ binary, "daemon", "start", "--detach" ],
+          { Migration::INTERNAL_ENV => "1" }
+        ]
+      ], restarted
+    end
+  end
+
+  def test_daemon_lifecycle_refuses_an_unbound_released_process
+    status = MutableRunningStatus.new(pid: 41_010)
+    daemon_called = false
+    lifecycle = Migration::DaemonLifecycle.new(
+      status_report: status,
+      daemon_factory: ->(_command) {
+        daemon_called = true
+      },
+      tree_probe: ->(_pid) {
+        [
+          {
+            pid: 41_010, ppid: 1, pgid: 41_010,
+            start_time: nil, depth: 0
+          }
+        ]
+      },
+      tree_confirmer: ->(_pid, targets) { targets }
+    )
+
+    error = assert_raises(Hive::ConcurrentRunError) do
+      lifecycle.quiesce!
+    end
+
+    assert_match(/stable identities/, error.message)
+    refute daemon_called
+  end
+
+  def test_each_users_first_use_migrates_every_real_registered_project
+    with_tmp_dir do |root|
+      installations = %w[user-a user-b].to_h do |user|
+        home = File.join(root, "#{user}-hive-home")
+        projects = %w[first second].map.with_index do |suffix, index|
+          project_root = File.join(root, "#{user}-#{suffix}")
+          state_root = File.join(
+            root, "custom-state", user, suffix
+          )
+          FileUtils.mkdir_p([ project_root, state_root ])
+          install_released_job(state_root)
+          {
+            "name" => "#{user}-#{suffix}",
+            "path" => project_root,
+            "real_path" => File.realpath(project_root),
+            "hive_state_path" => state_root,
+            "project_id" => format(
+              "00000000-0000-4000-a000-%012d",
+              (user == "user-a" ? 0 : 100) + index + 1
+            )
+          }
+        end
+        FileUtils.mkdir_p(home)
+        File.write(
+          File.join(home, "config.yml"),
+          { "registered_projects" => projects }.to_yaml
+        )
+        [ user, { home: home, projects: projects } ]
+      end
+
+      installations.each_value do |installation|
+        payload = with_env("HIVE_HOME" => installation.fetch(:home)) do
+          Migration.new(
+            daemon_lifecycle: FakeLifecycle.new
+          ).call(force: true, now: Time.utc(2026, 7, 29, 17))
+        end
+
+        assert_equal(
+          %w[migrated migrated],
+          payload.fetch("projects").map { |project| project.fetch("status") }
+        )
+        installation.fetch(:projects).each do |project|
+          current = Hive::RefactorPatrol::JobStore.root_for(
+            project.fetch("path"),
+            hive_state_path: project.fetch("hive_state_path")
+          )
+          migrated = JSON.parse(File.binread(File.join(
+            current, "jobs", "job-released.json"
+          )))
+          assert_equal 3, migrated.fetch("schema_version")
+          assert_equal(
+            :regular,
+            Hive::ManagedDirectory.new(
+              root: Hive::RefactorPatrol::JobStore.legacy_root_for(
+                project.fetch("path"),
+                hive_state_path: project.fetch("hive_state_path")
+              ),
+              anchor: project.fetch("hive_state_path"),
+              label: "test released JobStore"
+            ).entry_type("jobs")
+          )
+        end
+      end
+    end
+  end
+
+  private
+
+  def install_released_job(state_root)
+    path = File.join(
+      state_root, "refactor_patrol", "v2", "jobs",
+      "job-released.json"
+    )
+    FileUtils.mkdir_p(File.dirname(path))
+    File.binwrite(
+      path,
+      File.binread(File.expand_path(
+        "../../fixtures/refactor_patrol/released_v2_job.json",
+        __dir__
+      ))
+    )
+  end
+
+  def build_migration(root:, entries:, status_store:, lifecycle:,
+                      coordinator_factory:, identity_ensurer: -> { nil })
+    Migration.new(
+      registry: -> { entries },
+      identity_ensurer: identity_ensurer,
+      status_store: status_store,
+      coordinator_factory: coordinator_factory,
+      daemon_lifecycle: lifecycle,
+      activation_directory: Hive::ManagedDirectory.new(
+        root: File.join(root, "schema-migrations"),
+        label: "test installation migration"
+      )
+    )
+  end
+
+  def status_payload(digest:, projects:)
+    {
+      "schema" => MigrationStatus::SCHEMA,
+      "schema_version" => MigrationStatus::SCHEMA_VERSION,
+      "target_schema_version" => 3,
+      "registry_digest" => digest,
+      "updated_at" => "2026-07-29T12:00:00.000000Z",
+      "projects" => projects
+    }
+  end
+
+  def project_status(name, status, retryable: false, next_retry_at: nil)
+    {
+      "project" => name,
+      "project_id" => "project-#{name}",
+      "path" => "/projects/#{name}",
+      "real_path" => "/projects/#{name}",
+      "hive_state_path" => "/projects/#{name}/.hive-state",
+      "status" => status,
+      "current_schema_version" => status == "current" ? 3 : nil,
+      "target_schema_version" => 3,
+      "snapshot_id" => nil,
+      "retryable" => retryable,
+      "next_retry_at" => next_retry_at,
+      "remediation" => nil,
+      "error" => nil
+    }
+  end
+end

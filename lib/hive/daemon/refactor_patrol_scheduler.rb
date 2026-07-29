@@ -30,7 +30,9 @@ module Hive
       PATROL_SLUG_PREFIX = "refactor-patrol".freeze
       MODULE_SCHEDULE = "*/10 * * * *".freeze
       RETRY_BACKOFF_SEC = 60
-      SUPPORTED_REPORT_SCHEMA_VERSIONS = [ 2, Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol") ].uniq.freeze
+      SUPPORTED_REPORT_SCHEMA_VERSIONS = [
+        Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol")
+      ].freeze
 
       class ReservationBlocked < StandardError
         attr_reader :reason, :evidence
@@ -46,7 +48,7 @@ module Hive
 
       def initialize(registry: -> { Hive::Config.registered_projects },
                      config_loader: ->(path) { Hive::Config.load(path) },
-                     job_store_factory: ->(path) { Hive::RefactorPatrol::JobStore.new(path) },
+                     job_store_factory: nil,
                      checkout_guard_factory: nil, repository_resolver: nil,
                      repository_ownership: nil,
                      owner: nil, claim_resolver: ProcessGroupResolver.new,
@@ -533,12 +535,18 @@ module Hive
       end
 
       def store_for(entry)
-        @job_store_factory.call(entry.fetch("path"))
+        return @job_store_factory.call(entry.fetch("path")) if @job_store_factory
+
+        Hive::RefactorPatrol::JobStore.new(
+          entry.fetch("path"),
+          hive_state_path: entry.fetch("hive_state_path"),
+          project: entry
+        )
       end
 
       def result_path_for(entry, job_id, phase)
         File.join(
-          entry.fetch("path"), ".hive-state", "refactor_patrol", "v2", "results",
+          entry.fetch("hive_state_path"), "refactor_patrol", "v2", "results",
           "#{job_id}-#{phase}-#{SecureRandom.hex(8)}.json"
         )
       end
@@ -587,7 +595,7 @@ module Hive
           source: source, entry: entry,
           slug: "#{PATROL_SLUG_PREFIX}-#{aggregate.fetch('job_id')}", stage: PATROL_STAGE,
           manifest_path: File.join(
-            entry.fetch("path"), ".hive-state", "refactor_patrol", "v2", "manifests",
+            entry.fetch("hive_state_path"), "refactor_patrol", "v2", "manifests",
             "#{aggregate.fetch('job_id')}.json"
           )
         }

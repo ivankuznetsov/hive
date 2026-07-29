@@ -1,9 +1,9 @@
 ---
 title: State Model
 type: data-model
-source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/completion_time.rb, lib/hive/completed_at_backfiller.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/review_handoff.rb, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
+source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/completion_time.rb, lib/hive/completed_at_backfiller.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/modules/migration/occurrence_*.rb, lib/hive/modules/migration/patrol_*.rb, lib/hive/modules/migration/shadow_*.rb, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
 created: 2026-04-25
-updated: 2026-07-26
+updated: 2026-07-29
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, retention, dependencies, admission, web]
 ---
 
@@ -526,27 +526,123 @@ only after Turbo accepts any confirmation.
 Reconnect freshness is an Action Cable token handshake, not a browser
 MutationObserver.
 
-## Architecture-patrol v2 state
+## Patrol occurrence, selection, and recovery state
 
-Scheduled/manual merged-PR architecture patrol uses a versioned namespace that
-does not reinterpret the legacy reporting state:
+Ordinary Patrol and Architecture Patrol expose separate product stores over the
+same occurrence protocol. Each occurrence record is the sole effect/outbox
+recovery authority for that product operation. A provisional `PatrolCapture`
+binds project, trigger, reservation, owner epoch, strict `selection_input`, and
+the shared `PatrolDecisionProjection`; it cannot contain an outcome or receipt
+ids. A final capture must retain every immutable field and adds the terminal
+outcome plus exactly the terminal receipt ids. Consequently due/not-due/disabled
+selection cannot be rewritten by a later execution result, and an outcome cannot
+be misread as the scheduling decision.
+
+Each occurrence directory also has one canonical
+`journal-state.json` (`hive-patrol-occurrence-journal-state` v1), capped at
+64 KiB. This file is coordination metadata only:
+
+- scheduled ordinary attempts, module events, and Architecture Patrol jobs use
+  canonical window/generation identities with bounded high-water entries and a
+  compacted closed-through floor;
+- non-sequenced manual/direct occurrences use at most 128 exact retirement
+  digests; saturation retains the terminal occurrence and fails closed;
+- a monotonic dirty generation marks possible reserved or projection-pending
+  work before its occurrence write; a generation-matched empty repair clears
+  it so idle scheduler ticks do not reread retained terminal history;
+- one normalized recovery-failure cell records generation, operation,
+  occurrence/job identity, bounded UTF-8 error class/message/digest, failure
+  count, and the next 60/300/900-second eligibility boundary.
+
+The journal locks in the fixed order
+identity → journal state → inventory → occurrence record. Inventory views
+take one bounded sorted filename snapshot per full traversal; stateless cursors
+retain their high-water fingerprint validation. The dirty generation is only a
+repair hint, not a second recovery map: occurrence records retain authoritative
+effects and projection outbox bytes, while `journal-state.json` contains
+neither. StateStore and JobStore remain the separate product-facing owners, and
+observational EvidenceStore records are never consulted to authorize a retry.
+Before terminal effect outcomes cross from `EffectDelivery` into either
+product store, every nested string value passes through
+`Hive::SecretPatterns`; journal, evidence, comparison, and replay therefore use
+the same redacted receipt bytes without changing array/object shape or scalar
+types.
+
+Shadow-decision runtime state is v2-only. A native v2 record with
+`migration: null` must satisfy the strict selection/projection/outcome schema.
+The quiescence-fenced one-off converter archives each v1 source as
+non-comparable, writes a v2 diagnostic replacement, and checkpoints exact
+source/archive/replacement digests before completion. A restart adopts a
+replacement only when those bindings match; the completion stamp requires a
+fresh inventory with no remaining live v1 record.
+
+## Architecture-patrol split-generation state
+
+Only JobStore-owned authority moves to v3. Manifests, semantic-family
+projections, merge reconciliation, child results, runs, and logs remain under
+their existing v2 owners until those components intentionally migrate:
 
 ```text
-<project>/.hive-state/refactor_patrol/v2/
-├── reconciler.json               # host-bound catch-up checkpoint, schema v2
-├── reconciler-progress.json      # restart-safe page/intake cursor, schema v1
-├── manifests/<job-id>.json       # checksummed, write-once merge occurrence
-├── jobs/<job-id>.json            # v3 aggregate + occurrence/transition authority
-├── occurrences/
-│   └── records/occ-*.json         # effects, exact receipts, projection outbox
-├── job-schema-v3-migration.json  # completed bounded v2 -> v3 conversion
-├── families/<family-id>.json     # rebuildable semantic-family projection
-├── indexes/                      # rebuildable fingerprint/action indexes
-│   └── job-query/                # active generation + immutable memberships
-├── results/<dispatch-id>.json    # atomic daemon-child result; removed on reap
-├── runs/
-└── logs/
+<hive_state_path>/refactor_patrol/
+├── v2/
+│   ├── reconciler.json                  # host-bound catch-up checkpoint
+│   ├── reconciler-progress.json         # restart-safe page/intake cursor
+│   ├── manifests/<job-id>.json          # checksummed immutable merge input
+│   ├── jobs                              # regular-file v3 cutover tombstone
+│   ├── .job-schema-v3-source-<nonce>/   # sealed exact released-v2 source
+│   ├── families/<family-id>.json
+│   ├── results/<dispatch-id>.json
+│   ├── runs/
+│   └── logs/
+├── v3/
+│   ├── jobs/<job-id>.json               # v3-only aggregate authority
+│   ├── occurrences/records/             # effects and exact receipts
+│   ├── indexes/job-query/               # rebuildable ordered query index
+│   ├── job-schema-v2-backup/
+│   │   ├── manifest.json                # exact bytes/metadata snapshot
+│   │   └── jobs/<job-id>.json
+│   ├── job-schema-v3-conversions/       # one proof per converted aggregate
+│   ├── job-schema-v3-migration.json     # completed conversion marker
+│   └── job-schema-v3-cutover.json       # generation transaction identity
+└── job-schema-restore-quarantine/
+    └── migration-<nonce>/               # complete preserved v3 generation
 ```
+
+The job-schema converter is a shipped upgrade boundary, not a v2 runtime
+reader. Every user-scoped Hive installation runs it over that user's complete
+registered-project inventory: package hooks activate the installing user, and
+the shipped CLI activates every other user on first eligible use. One user's
+status receipt cannot satisfy another user's installation. Within a sweep Hive
+deduplicates realpath aliases and invokes the same per-project converter before
+constructing any architecture-patrol scheduler, merge reconciler, or
+module-migration coordinator. Registry membership, not the project directory's
+Unix owner, defines the sweep: shared projects owned or created by another user
+and custom state roots are attempted with the invoking process's actual OS
+permissions. Package hooks never root-scan unrelated homes.
+
+The v2 `jobs/` directory is atomically exchanged with a regular-file tombstone
+before conversion. Its former directory becomes a sealed hidden archive, so an
+old lexical writer cannot reach it and v3 has an independent namespace. Each
+project retains its own lock, immutable canonical-path check, exact-byte source
+inventory, restart checkpoints, conversion proofs, and completion marker.
+
+One malformed, inaccessible, or identity-drifted project produces a persisted
+failed/retryable result and a project-local architecture-patrol hold; it does
+not prevent later registered projects from migrating or unrelated workflow
+tasks from running. Runtime admission is an allowlist from the latest completed
+sweep. A registry-digest change causes immediate rescan; otherwise failed rows
+retry hourly. The installation status lives under
+`<state_home>/schema-migrations/refactor-patrol-job-v3.json` and is surfaced by
+`hive daemon status --json`. Direct JobStore construction retains the same
+one-off conversion entrypoint for dormant state, while normal records and child
+completion payloads validate only v3.
+
+The snapshot manifest binds project id, sorted name set, exact bytes, SHA-256,
+size, mode, and source mtime before the first replacement. A completed marker
+and the v2 tombstone bind the same snapshot and transaction identities.
+Emergency restore is an explicit operator-fenced command: it revalidates every
+binding, atomically reactivates exact v2 bytes, and quarantines the entire v3
+generation. It is not a reverse-schema runtime; see [[commands/migrate]].
 
 Read-only job listing is bounded by the `indexes/job-query/` sequence
 projection rather than a scan of every aggregate. Each authoritative new job

@@ -155,6 +155,42 @@ class ModulesMigrationBoundedFileInventoryTest < Minitest::Test
     end
   end
 
+  def test_live_inventory_translates_non_integer_page_sizes
+    with_tmp_dir do |root|
+      directory = Hive::ManagedDirectory.new(root: root, label: "inventory")
+      directory.atomic_write("0001.json", "record")
+
+      error = assert_raises(Hive::ConfigError) do
+        inventory_for(directory).each_live_name(page_size: Object.new).to_a
+      end
+      assert_equal "inventory is malformed", error.message
+    end
+  end
+
+  def test_full_scale_traversals_enumerate_the_directory_once
+    names = 4_096.times.map { |index| "#{format('%04x', index)}.json" }
+    calls = 0
+    directory = Object.new
+    directory.define_singleton_method(:root) { "/virtual/inventory" }
+    directory.define_singleton_method(
+      :each_child
+    ) do |_relative, missing:, &block|
+      missing
+      calls += 1
+      names.reverse_each(&block)
+    end
+    inventory = inventory_for(directory, max_entries: names.size)
+
+    assert_equal names,
+                 inventory.each_name(page_size: 256).to_a
+    assert_equal 1, calls
+
+    calls = 0
+    assert_equal names,
+                 inventory.each_live_name(page_size: 256).to_a
+    assert_equal 1, calls
+  end
+
   private
 
   def inventory_for(directory, max_entries: 8)

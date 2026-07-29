@@ -1681,7 +1681,7 @@ class SchemaFilesTest < Minitest::Test
       schema schema_version ok running pid uptime_sec pid_file log_file
       service_installed service_enabled unit_path
       installed_binary expected_binary installed_binary_version cli_version binary_drift
-      current_version update_nudge
+      current_version update_nudge schema_migrations
     ].sort
     assert_equal producer_required, schema_required,
                  "schema/producer required-key drift in hive-daemon-status.v1.json"

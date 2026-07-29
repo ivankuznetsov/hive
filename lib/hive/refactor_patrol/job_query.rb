@@ -28,6 +28,12 @@ module Hive
         end
       end
 
+      class MigrationRequired < Hive::Error
+        def exit_code
+          Hive::ExitCodes::TEMPFAIL
+        end
+      end
+
       def self.normalize_limit(limit)
         return DEFAULT_LIMIT if limit.nil?
 
@@ -407,6 +413,7 @@ module Hive
 
       def self.error_kind(error)
         case error
+        when MigrationRequired then "migration_required"
         when NotFound then "not_found"
         when UsageError then "usage"
         when Hive::ConfigError then "config"

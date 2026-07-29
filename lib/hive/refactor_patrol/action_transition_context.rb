@@ -9,10 +9,13 @@ module Hive
     class ActionTransitionContext
       attr_reader :store, :capture
 
-      def initialize(project_root:, job_store:, evidence_store:, capture:,
+      def initialize(project_root:, hive_state_path: nil, job_store:, evidence_store:, capture:,
                      config_loader:, module_execution:, clock:, owner:,
                      gateway_factory: nil)
-        @project_root = project_root
+        @project_root = File.expand_path(project_root)
+        @hive_state_path = File.expand_path(
+          hive_state_path || ".hive-state", @project_root
+        )
         @store = job_store
         @evidence_store = evidence_store
         @capture = capture
@@ -30,7 +33,7 @@ module Hive
 
         @gateway_factory.call(
           project_root: @project_root,
-          hive_state_path: File.join(@project_root, ".hive-state"),
+          hive_state_path: @hive_state_path,
           capture: capture,
           job_store: store,
           evidence_store: @evidence_store,

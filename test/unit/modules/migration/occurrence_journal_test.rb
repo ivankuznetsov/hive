@@ -291,6 +291,19 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
         assert retained.fetch("outbox").all? {
           |entry| entry.fetch("acknowledged")
         }
+        record_store = journal.instance_variable_get(:@store)
+        enumerations = 0
+        instrumentation = Module.new do
+          define_method(:each_record) do |&block|
+            enumerations += 1
+            super(&block)
+          end
+        end
+        record_store.singleton_class.prepend(instrumentation)
+
+        3.times { refute journal.recovery_active? }
+        assert_equal 1, enumerations,
+                     "the first clean repair may scan, idle checks must not"
 
         with_constant(
           Hive::Modules::Migration::OccurrenceRecordStore,
@@ -303,6 +316,39 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
         end
         assert journal.fetch(second.occurrence_id)
       end
+    end
+  end
+
+  def test_recovery_index_does_not_clear_across_a_concurrent_reservation
+    with_tmp_dir do |root|
+      journal = occurrence_journal(File.join(root, "occurrences"))
+      refute journal.recovery_active?
+      capture = patrol_capture(
+        trigger: { "kind" => "manual", "id" => "raced-reservation" }
+      )
+      record_store = journal.instance_variable_get(:@store)
+      original_each_record = record_store.method(:each_record)
+      injected = false
+      record_store.define_singleton_method(:each_record) do |&block|
+        original_each_record.call(&block)
+        next if injected
+
+        injected = true
+        journal.reserve!(capture, now: NOW)
+      end
+      journal_state = journal.instance_variable_get(:@journal_state)
+      journal_state.synchronize do |state, checkpoint|
+        journal_state.mark_recovery_dirty!(state)
+        checkpoint.call
+      end
+
+      refute journal.recovery_active?
+      assert_equal(
+        [ capture.occurrence_id ],
+        journal.each_recovery_active.map { |record|
+          record.fetch("occurrence_id")
+        }
+      )
     end
   end
 
@@ -1197,46 +1243,6 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
         File.join(root, "occurrences"),
         module_name: "patrol"
       )
-      journal.reserve!(patrol_capture, now: NOW)
-      path = File.join(
-        journal.root, "#{patrol_capture.occurrence_id}.json"
-      )
-      other = File.join(root, "other")
-      File.write(other, "{}")
-      original = File.method(:open)
-      replacement = lambda do |candidate, *args, **kwargs, &block|
-        unless candidate == path
-          next original.call(
-            candidate, *args, **kwargs, &block
-          )
-        end
-
-        source = original.call(candidate, *args, **kwargs)
-        proxy = Object.new
-        proxy.define_singleton_method(:stat) { File.stat(other) }
-        proxy.define_singleton_method(:read) do |limit|
-          source.read(limit)
-        end
-        begin
-          block.call(proxy)
-        ensure
-          source.close
-        end
-      end
-      with_replaced_singleton_method(
-        File, :open, replacement
-      ) do
-        assert_raises(Hive::ConfigError) do
-          journal.fetch(patrol_capture.occurrence_id)
-        end
-      end
-    end
-
-    with_tmp_dir do |root|
-      journal = Hive::Modules::Migration::OccurrenceJournal.new(
-        File.join(root, "occurrences"),
-        module_name: "patrol"
-      )
       FileUtils.mkdir_p(journal.root)
       target = File.join(root, "target")
       File.write(target, "{}")
@@ -1274,25 +1280,6 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
         Hive::Modules::Migration::OccurrenceRecordStore,
         :MAX_HISTORY_RECORDS,
         1
-      ) do
-        assert_raises(Hive::ConfigError) { journal.each_record.count }
-      end
-    end
-
-    with_tmp_dir do |root|
-      journal = Hive::Modules::Migration::OccurrenceJournal.new(
-        File.join(root, "occurrences"),
-        module_name: "patrol"
-      )
-      FileUtils.mkdir_p(journal.root)
-      original = File.method(:lstat)
-      replacement = lambda do |path|
-        raise Errno::EACCES, path if path == journal.root
-
-        original.call(path)
-      end
-      with_replaced_singleton_method(
-        File, :lstat, replacement
       ) do
         assert_raises(Hive::ConfigError) { journal.each_record.count }
       end
@@ -1611,6 +1598,334 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
           store.fetch(occurrence_id)
         end
       end
+    end
+  end
+
+  def test_storage_retires_a_fenced_terminal_candidate_before_admitting_new_work
+    with_tmp_dir do |root|
+      journal = occurrence_journal(File.join(root, "occurrences"))
+      first = patrol_capture(
+        trigger: { "kind" => "manual", "id" => "first" },
+        reservation: { "kind" => "ordinary", "id" => "first-reservation" }
+      )
+      second = patrol_capture(
+        trigger: { "kind" => "manual", "id" => "second" },
+        reservation: { "kind" => "ordinary", "id" => "second-reservation" }
+      )
+
+      with_constant(
+        Hive::Modules::Migration::OccurrenceRecordStore,
+        :MAX_HISTORY_RECORDS,
+        1
+      ) do
+        with_constant(
+          Hive::Modules::Migration::OccurrenceRecordStore,
+          :MAX_PAGE_SIZE,
+          1
+        ) do
+          journal.reserve!(first, now: NOW)
+          journal.finalize!(terminal_capture(first), now: NOW + 1)
+          store = journal.instance_variable_get(:@store)
+          store.mutate(first.occurrence_id) do |record|
+            record.fetch("outbox").each { |entry| entry["acknowledged"] = true }
+            record
+          end
+          racer = occurrence_journal(File.join(root, "raced-occurrences"))
+          raced_record = racer.reserve!(second, now: NOW + 2)
+          original_mutate = store.method(:mutate)
+          raced = false
+          store.define_singleton_method(:mutate) do |occurrence_id, create: false, &block|
+            if occurrence_id == second.occurrence_id && create && !raced
+              raced = true
+              original_mutate.call(occurrence_id, create: true) do |existing|
+                existing || raced_record
+              end
+            end
+            original_mutate.call(occurrence_id, create: create, &block)
+          end
+
+          assert_equal second.occurrence_id,
+                       journal.reserve!(second, now: NOW + 2).fetch("occurrence_id")
+          assert raced
+          assert_nil journal.fetch(first.occurrence_id)
+        end
+      end
+    end
+  end
+
+  def test_journal_state_fails_closed_for_corruption_and_an_uncompactable_index
+    with_tmp_dir do |root|
+      journal = occurrence_journal(File.join(root, "occurrences"))
+      FileUtils.mkdir_p(journal.root)
+      File.write(File.join(journal.root, "journal-state.json"), "{bad")
+      assert_raises(Hive::ConfigError) { journal.recovery_backoff(now: NOW) }
+    end
+
+    with_tmp_dir do |root|
+      state = occurrence_journal(File.join(root, "occurrences"))
+              .instance_variable_get(:@journal_state)
+      state.synchronize do |raw, _checkpoint|
+        Hive::Modules::Migration::OccurrenceJournalState::MAX_SEQUENCE_HIGH_WATERS.times do |index|
+          state.allocate_attempt!(
+            raw,
+            reservation_id: "identity-#{index}",
+            window_started_at: NOW + index,
+            observed_generation: 0
+          )
+        end
+        assert_raises(Hive::ConfigError) do
+          state.allocate_attempt!(
+            raw,
+            reservation_id: "overflow",
+            window_started_at: NOW + 512,
+            observed_generation: 0
+          )
+        end
+        raw.fetch("sequence_high_waters").pop
+      end
+    end
+  end
+
+  def test_stable_process_lock_rejects_zero_stripes_and_uses_named_locks_without_stripes
+    with_tmp_dir do |root|
+      assert_raises(Hive::ConfigError) do
+        Hive::Modules::Migration::StableProcessLock.new(
+          root: root, label: "test lock", stripes: 0
+        )
+      end
+
+      lock = Hive::Modules::Migration::StableProcessLock.new(
+        root: root, label: "test lock"
+      )
+      assert_equal :locked, lock.synchronize("ordinary-name") { :locked }
+      assert_path_exists File.join(root, "ordinary-name.lock")
+    end
+  end
+
+  def test_journal_state_rejects_a_reused_schedule_identity_with_a_new_window
+    with_tmp_dir do |root|
+      journal = occurrence_journal(File.join(root, "occurrences"))
+      base = "ordinary:project-1:stable-identity"
+      first = journal.reserve_attempt!(
+        base, window_started_at: NOW, now: NOW
+      ) { |generation| schedule_capture(base, window: NOW, generation: generation) }
+      journal.finalize!(terminal_capture(first), now: NOW + 1)
+      acknowledge_all(journal, first.occurrence_id)
+
+      assert_raises(Hive::ConfigError) do
+        journal.reserve_attempt!(
+          base, window_started_at: NOW + 60, now: NOW + 60
+        ) do |generation|
+          schedule_capture(base, window: NOW + 60, generation: generation)
+        end
+      end
+    end
+  end
+
+  def test_journal_state_normalizes_unreadable_error_details_and_invalid_inputs
+    with_tmp_dir do |root|
+      journal = occurrence_journal(File.join(root, "occurrences"))
+      unreadable = RuntimeError.new("ignored")
+      unreadable_message = Object.new
+      unreadable_message.define_singleton_method(:to_s) do
+        raise EncodingError, "bad"
+      end
+      unreadable.define_singleton_method(:message) { unreadable_message }
+      failure = journal.record_recovery_failure!(
+        operation: "recovery", error: unreadable, now: NOW
+      )
+      assert_equal "recovery failed", failure.fetch("error_message")
+      assert_raises(Hive::ConfigError) do
+        journal.clear_recovery_failure!(
+          expected_generation: Object.new
+        )
+      end
+
+      state = journal.instance_variable_get(:@journal_state)
+      corrupt_capture = Object.new
+      corrupt_capture.define_singleton_method(:reservation) do
+        {
+          "kind" => "ordinary",
+          "id" => "corrupt",
+          "window_started_at" => NOW.iso8601(6),
+          "attempt_generation" => "not-an-integer"
+        }
+      end
+      corrupt_capture.define_singleton_method(:occurrence_id) { "occ-corrupt" }
+      state.synchronize do |raw, _checkpoint|
+        assert_raises(Hive::ConfigError) do
+          state.allocate_attempt!(
+            raw,
+            reservation_id: "bad-window",
+            window_started_at: "not-a-time",
+            observed_generation: 0
+          )
+        end
+        assert_raises(Hive::ConfigError) do
+          state.allocate_attempt!(
+            raw,
+            reservation_id: "negative-generation",
+            window_started_at: NOW,
+            observed_generation: -1
+          )
+        end
+        assert_raises(Hive::ConfigError) do
+          state.close_sequence!(raw, corrupt_capture)
+        end
+      end
+    end
+  end
+
+  def test_record_store_rejects_active_retirement_and_translates_storage_failures
+    with_tmp_dir do |root|
+      journal = occurrence_journal(File.join(root, "occurrences"))
+      capture = patrol_capture
+      journal.reserve!(capture, now: NOW)
+      store = journal.instance_variable_get(:@store)
+
+      with_constant(
+        Hive::Modules::Migration::OccurrenceRecordStore,
+        :MAX_HISTORY_RECORDS,
+        1
+      ) do
+        with_constant(
+          Hive::Modules::Migration::OccurrenceRecordStore,
+          :MAX_PAGE_SIZE,
+          1
+        ) do
+          assert_raises(Hive::ConfigError) do
+            store.retirement_candidate_if_full
+          end
+        end
+      end
+      assert_raises(Hive::ConfigError) { store.retire!(capture.occurrence_id) }
+
+      journal.finalize!(terminal_capture(capture), now: NOW + 1)
+      store.mutate(capture.occurrence_id) do |record|
+        record.fetch("outbox").each { |entry| entry["acknowledged"] = true }
+        record
+      end
+      directory = store.instance_variable_get(:@directory)
+      original_unlink = directory.method(:unlink)
+      with_replaced_singleton_method(
+        directory,
+        :unlink,
+        ->(*_arguments, **_keywords) { raise Errno::EIO, "unlink" }
+      ) do
+        error = assert_raises(Hive::ConfigError) do
+          store.retire!(capture.occurrence_id)
+        end
+        assert_includes error.message, "patrol occurrence store is unavailable"
+      end
+      assert original_unlink
+
+      original_write = directory.method(:atomic_write)
+      with_replaced_singleton_method(
+        directory,
+        :atomic_write,
+        ->(*_arguments, **_keywords) { raise Errno::ENOSPC, "write" }
+      ) do
+        error = assert_raises(Hive::ConfigError) do
+          store.mutate(capture.occurrence_id) do |record|
+            record["updated_at"] = (NOW + 2).iso8601(6)
+            record
+          end
+        end
+        assert_includes error.message, "patrol occurrence store is unavailable"
+      end
+      assert original_write
+    end
+  end
+
+  def test_validator_rejects_finalized_projection_and_effect_binding_corruption
+    with_tmp_dir do |root|
+      journal = occurrence_journal(File.join(root, "occurrences"))
+      provisional = patrol_capture
+      journal.reserve!(provisional, now: NOW)
+      journal.finalize!(terminal_capture(provisional), now: NOW + 1)
+      validator = occurrence_validator
+      finalized = mutable(journal.fetch(provisional.occurrence_id))
+
+      missing_capture_projection = mutable(finalized)
+      missing_capture_projection["outbox"] = []
+      missing_capture_projection["next_outbox_sequence"] = 1
+      assert_invalid_record(validator, missing_capture_projection)
+
+      prepared = occurrence_journal(File.join(root, "prepared"))
+      prepared.reserve!(provisional, now: NOW)
+      intent = effect_intent
+      prepared.prepare_effect!(intent, now: NOW)
+      nonterminal = mutable(finalized)
+      nonterminal["effects"] = mutable(
+        prepared.fetch(provisional.occurrence_id).fetch("effects")
+      )
+      assert_invalid_record(validator, nonterminal)
+
+      matching_receipt = receipt(intent, "committed", {})
+      assert_equal matching_receipt,
+                   validator.receipt(matching_receipt, intent: intent)
+      assert_raises(Hive::ConfigError) do
+        validator.positive_integer(0, "patrol test integer")
+      end
+      assert_raises(Hive::ConfigError) do
+        validator.positive_integer(Object.new, "patrol test integer")
+      end
+      assert_raises(Hive::ConfigError) do
+        validator.nonempty(nil, "patrol test string")
+      end
+
+      terminal_journal = occurrence_journal(File.join(root, "terminal"))
+      terminal_journal.reserve!(provisional, now: NOW)
+      terminal_intent = effect_intent
+      terminal_journal.prepare_effect!(terminal_intent, now: NOW)
+      terminal_journal.mark_dispatch_uncertain!(terminal_intent, now: NOW)
+      settled = terminal_journal.settle_effect!(
+        terminal_intent, status: "reconciled", outcome: {}, now: NOW + 1
+      )
+      terminal_capture = Hive::Modules::Migration::PatrolCapture.build(
+        module_name: provisional.module_name,
+        project: provisional.project,
+        trigger: provisional.trigger,
+        reservation: provisional.reservation,
+        owner: provisional.owner,
+        owner_epoch: provisional.owner_epoch,
+        selection_input: provisional.selection_input,
+        selection: provisional.selection,
+        outcome_class: "completed",
+        outcome: { "rationale" => "completed" },
+        effect_ids: [ settled.receipt_id ],
+        occurred_at: provisional.occurred_at,
+        recorded_at: NOW + 1
+      )
+      terminal_journal.finalize!(terminal_capture, now: NOW + 1)
+      wrong_effect_binding = mutable(
+        terminal_journal.fetch(provisional.occurrence_id)
+      )
+      wrong_capture = Hive::Modules::Migration::PatrolCapture.build(
+        module_name: terminal_capture.module_name,
+        project: terminal_capture.project,
+        trigger: terminal_capture.trigger,
+        reservation: terminal_capture.reservation,
+        owner: terminal_capture.owner,
+        owner_epoch: terminal_capture.owner_epoch,
+        selection_input: terminal_capture.selection_input,
+        selection: terminal_capture.selection,
+        outcome_class: terminal_capture.outcome_class,
+        outcome: terminal_capture.outcome,
+        effect_ids: [],
+        occurred_at: terminal_capture.occurred_at,
+        recorded_at: terminal_capture.recorded_at
+      ).to_h
+      wrong_effect_binding["final_capture"] = wrong_capture
+      capture_entry = wrong_effect_binding.fetch("outbox").find do |entry|
+        entry.fetch("kind") == "capture"
+      end
+      capture_entry["id"] = wrong_capture.fetch("capture_id")
+      capture_entry["bytes"] = canonical(wrong_capture)
+      capture_entry["digest"] = Digest::SHA256.hexdigest(
+        capture_entry.fetch("bytes")
+      )
+      assert_invalid_record(validator, wrong_effect_binding)
     end
   end
 

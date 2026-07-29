@@ -44,6 +44,13 @@ class Hive < Formula
     bin.install_symlink "hive" => "hv"
   end
 
+  def post_install
+    # Homebrew upgrades one user's installation. The candidate command fences
+    # any released daemon and sweeps that user's complete registered-project
+    # catalog; shared-package users are covered by Hive's first-use gate.
+    system bin/"hive", "refactor-patrol-migrate-installed"
+  end
+
   def caveats
     <<~EOS
       Run `hive setup` inside a project to bootstrap Hive web, install and load
@@ -55,6 +62,10 @@ class Hive < Formula
       stable Homebrew bin/hive symlink, so `brew upgrade hive` keeps the daemon
       path current. If you previously customized the plist, remove it and re-run
       `hive daemon install --force` to install the current template.
+
+      Hive migrates every project registered to this user during upgrade.
+      Other users of this Homebrew installation are migrated on their next
+      eligible Hive invocation; Hive never scans unrelated home directories.
     EOS
   end
 

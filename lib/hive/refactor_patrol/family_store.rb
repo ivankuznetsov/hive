@@ -252,11 +252,26 @@ module Hive
 
       attr_reader :project_root, :root
 
-      def initialize(project_root, clock: -> { Time.now }, job_store: nil)
+      def initialize(project_root, hive_state_path: nil,
+                     clock: -> { Time.now }, job_store: nil)
         @project_root = File.expand_path(project_root)
-        @root = File.join(@project_root, ".hive-state", "refactor_patrol", "v2", "families")
+        @hive_state_path = File.expand_path(
+          hive_state_path || ".hive-state", @project_root
+        )
+        @root = File.join(@hive_state_path, "refactor_patrol", "v2", "families")
         @clock = clock
-        @job_store = job_store || JobStore.new(@project_root)
+        project = begin
+          Hive::Config.registered_projects.find do |entry|
+            File.expand_path(entry.fetch("path")) == @project_root
+          end
+        rescue Hive::ConfigError, KeyError, TypeError
+          nil
+        end
+        @job_store = job_store || JobStore.new(
+          @project_root,
+          hive_state_path: @hive_state_path,
+          project: project
+        )
       end
 
       def resolve(thesis:, repository:, job_id:, source:, hinted_family_id: nil, dry_run: false)

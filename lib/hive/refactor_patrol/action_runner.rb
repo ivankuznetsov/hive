@@ -54,7 +54,7 @@ module Hive
 
       attr_reader :fixer, :pr_opener, :issue_filer
 
-      def initialize(project_root, cfg:, job_store: nil, family_store: nil,
+      def initialize(project_root, cfg:, hive_state_path: nil, job_store: nil, family_store: nil,
                      fixer: nil, pr_opener: nil, issue_filer: nil,
                      owner: nil, clock: -> { Time.now }, gate_reader: nil,
                      claim_resolver: nil, repository_resolver: nil, config_loader: nil,
@@ -67,10 +67,28 @@ module Hive
                      authority_backoff_sec: AUTHORITY_RECHECK_SEC)
         @project_root = File.expand_path(project_root)
         @cfg = cfg
+        @hive_state_path = File.expand_path(
+          hive_state_path || cfg["hive_state_path"] || ".hive-state",
+          @project_root
+        )
         @token_budget = token_budget
         @registration = registration.to_s.empty? ? cfg["project_name"].to_s : registration.to_s
-        @job_store = job_store || JobStore.new(@project_root)
-        @family_store = family_store || FamilyStore.new(@project_root, clock: clock)
+        project_entry = begin
+          Hive::Config.registered_projects.find do |entry|
+            File.expand_path(entry.fetch("path")) == @project_root
+          end
+        rescue Hive::ConfigError, KeyError, TypeError
+          nil
+        end
+        @job_store = job_store || JobStore.new(
+          @project_root,
+          hive_state_path: @hive_state_path,
+          project: project_entry
+        )
+        @family_store = family_store || FamilyStore.new(
+          @project_root, hive_state_path: @hive_state_path,
+          clock: clock, job_store: @job_store
+        )
         @fixer_override = fixer
         @pr_opener_override = pr_opener
         @issue_filer_override = issue_filer
@@ -82,7 +100,7 @@ module Hive
         @owner_process_start_time = Hive::Lock.process_start_time(@owner_pid)
         @clock = clock
         @gate_reader = gate_reader
-        managed_config = File.file?(File.join(@project_root, ".hive-state", "config.yml"))
+        managed_config = File.file?(File.join(@hive_state_path, "config.yml"))
         @config_loader = config_loader
         @config_loader ||= if managed_config
           ->(root) { Hive::Config.load(root) }
@@ -106,7 +124,19 @@ module Hive
         if @canonical_action_catalog.nil? && managed_config
           @canonical_action_catalog = CanonicalActionCatalog.new(
             registry: ownership_registry,
-            job_store_factory: ->(root) { JobStore.new(root) }
+            job_store_factory: lambda do |root|
+              expanded_root = File.expand_path(root)
+              next @job_store if expanded_root == @project_root
+
+              entry = ownership_registry.call.find do |candidate|
+                File.expand_path(candidate.fetch("path")) == expanded_root
+              end
+              JobStore.new(
+                expanded_root,
+                hive_state_path: entry && entry["hive_state_path"],
+                project: entry
+              )
+            end
           )
         end
         @lease_sec = lease_sec
@@ -118,7 +148,7 @@ module Hive
         @effect_evidence_store = evidence_store ||
                                  Hive::Modules::Migration::EvidenceStore.new(
                                    root: File.join(
-                                     @project_root, ".hive-state",
+                                     @hive_state_path,
                                      "module-runtime", "migration",
                                      "patrol-evidence"
                                    )
@@ -459,6 +489,8 @@ module Hive
           end
 
           if action.fetch("owner_job_id") != aggregate.fetch("job_id")
+            next unless @job_store.linked_action_ready?(action)
+
             reconcile_linked_action_transition!(
               aggregate, action, now: now
             )
@@ -861,6 +893,7 @@ module Hive
       def action_transitions
         @action_transitions ||= Hive::RefactorPatrol::ActionTransitions.new(
           project_root: @project_root,
+          hive_state_path: @hive_state_path,
           job_store: @job_store,
           evidence_store: @effect_evidence_store,
           capture: @effect_capture,
@@ -1021,7 +1054,7 @@ module Hive
                                persist_publication: true)
         options = {
           project_root: @project_root,
-          hive_state_path: File.join(@project_root, ".hive-state"),
+          hive_state_path: @hive_state_path,
           capture: capture,
           authority: capture.owner,
           evidence_store: @effect_evidence_store,
@@ -1113,21 +1146,6 @@ module Hive
           raise JobStore::InconsistentRecord,
                 "architecture patrol effect phase is unsupported"
         end
-      end
-
-      def effect_project_id
-        registered = Hive::Config.registered_projects.find do |entry|
-          entry["name"].to_s == effect_project_name &&
-            File.expand_path(entry.fetch("path")) == @project_root
-        end
-        registered&.fetch("project_id", nil) ||
-          "local-#{::Digest::SHA256.hexdigest(@project_root)}"
-      rescue Hive::ConfigError, KeyError, SystemCallError
-        "local-#{::Digest::SHA256.hexdigest(@project_root)}"
-      end
-
-      def effect_project_name
-        @registration.empty? ? File.basename(@project_root) : @registration
       end
 
       def external_effect_fence(token, kind)

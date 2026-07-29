@@ -3,7 +3,7 @@ title: hive migrate
 type: command
 source: lib/hive/commands/migrate.rb, lib/hive/stages.rb
 created: 2026-05-21
-updated: 2026-07-26
+updated: 2026-07-29
 tags: [command, migration, config, reviewers, stages, task-id, display-name, recovery]
 ---
 
@@ -55,9 +55,101 @@ flow mapping must be converted manually before the comment-preserving rewrite
 can run.
 
 `hive update` replaces the installed CLI through its package channel and does
-not mutate or commit every registered project's tracked state. The compatibility
-alias is what makes that binary update safe; run `hive migrate` in each warned
-project to persist the correction.
+not mutate or commit registered projects' tracked task/config state. The
+compatibility alias is what makes that binary update safe; run `hive migrate`
+in each warned project to persist the correction.
+
+Architecture Patrol's installation-managed JobStore cutover is different: it
+is an automatic shipped installation migration over untracked runtime state. A
+candidate generation sweeps the installation's complete current registry
+before any Architecture Patrol runtime restart. Hive installations and
+registries are user-scoped, so the shipped binary repeats this boundary for
+every user: the package hook covers the installing user immediately, and each
+other user's first eligible Hive invocation sweeps that user's entire
+registered-project catalog. One user's completion receipt never suppresses a
+different user's sweep because each lives under that user's `HIVE_HOME`.
+
+Each sweep attempts every registry row without filtering on the project
+directory's Unix owner, including shared projects created or owned by another
+user and relative or absolute custom `hive_state_path` values. The invoking
+process still cannot exceed its operating-system permissions; an inaccessible
+project becomes a persisted failed/retryable row instead of being silently
+skipped. Package managers running as root do not crawl arbitrary home
+directories: Homebrew and `install.sh` run the candidate command for the
+invoking user, while AUR tells every user that first use is the activation
+boundary. `status`, `watch`, `doctor`, findings inspection, dry runs, and other
+strict observation routes remain mutation-free; a daemon start or the next
+eligible mutating command performs the sweep.
+
+A newly registered or path-drifted project changes the registry digest and
+forces a new sweep without waiting for the normal hourly retry. First JobStore
+open retains the same one-off converter for otherwise dormant state, but
+normal readers accept only v3.
+
+### Candidate installation sweep
+
+```bash
+hive refactor-patrol-migrate-installed
+```
+
+This is the narrow, candidate-only installation entrypoint used by `hive
+update` after a package replacement and before it restarts a daemon it stopped.
+It first backfills immutable registry identities with
+`Config.ensure_project_identities!`, then runs
+`RegisteredProjectMigrationCoordinator` across the complete current registry.
+It prints the same typed document persisted at
+`$HIVE_HOME/schema-migrations/refactor-patrol-job-v3.json` (`schema:
+"hive-installation-job-schema-migration"`, `schema_version: 2`). The document's
+registry digest binds the complete user-scoped catalog, so adding or changing a
+registration invalidates the prior completion receipt.
+
+A failed or retryable project row still means the sweep itself completed: the
+document records its error, remediation, retry time, and custom
+`hive_state_path`, while later registered projects continue. Registry,
+identity, and status-store failures remain structural command failures. The
+command is deliberately not a replacement for user-directed `hive migrate`,
+which updates tracked project state.
+
+## Architecture Patrol JobStore cutover and emergency restore
+
+The released aggregate-only JobStore v2 shape is converted directly to v3. No
+binding-sidecar compatibility format is recognized. Before the first live job
+is replaced, Hive writes and verifies
+`<hive_state_path>/refactor_patrol/v2/job-schema-v2-backup/manifest.json` plus
+the exact source bytes under `job-schema-v2-backup/jobs/`. The manifest binds
+project id, sorted job names, SHA-256, byte size, original mode, and original
+mtime into `snapshot-<sha256>`. Each written v3 job is a restart checkpoint;
+the completion marker is written only after a final bounded scan finds no v2
+job. `hive daemon status --json` exposes that snapshot id and every registered
+project's current/target schema, status, retry time, remediation, and error
+under `schema_migrations`.
+
+Executable rollback alone is unsafe because the previous package reads only
+v2. Emergency state restore is therefore an explicit, fenced operator command,
+not a compatibility reader or an automatic downgrade:
+
+```bash
+hive daemon stop
+hive daemon status --json
+hive refactor-patrol-schema-restore PROJECT SNAPSHOT_ID --json
+```
+
+Do not run the restore until status proves the daemon stopped and any
+separately launched Architecture Patrol worker is also stopped. The command
+requires an exact registered-project identity and snapshot id, revalidates the
+complete v3 aggregate/conversion ledger, exact v2 backup and sealed source
+archive, refuses active claims or changed/new jobs, and stages the exact v2
+bytes with their original mode and mtime. It then atomically exchanges that
+staged directory with the v2 tombstone and moves the complete v3 generation to
+`<hive_state_path>/refactor_patrol/job-schema-restore-quarantine/<transaction-id>/`.
+It never deletes the v3 generation or chooses an unverified filesystem path.
+Interrupted and repeated restores resume from validated transaction identities.
+
+Only after that command succeeds may an old v2-only package start. On a later
+forward upgrade, stop the old daemon again and use the normal installed update
+path. The candidate seals the then-current v2 bytes under a fresh transaction,
+creates a new v3 generation, and retains the prior quarantine as audit and
+recovery evidence.
 
 `Stages::Finalize` likewise reads legacy `budget_usd.pr` /
 `timeout_sec.pr` as fallbacks. `hive migrate` rewrites those keys to
@@ -175,6 +267,9 @@ A rerun after successful migration prints that there is nothing to move and keep
   receipt idempotency, archived final compatibility records, queue upgrades,
   empty post-cutover v1 skeleton cleanup, and live/ambiguous-state refusal.
 - Status integration scenarios prove hidden legacy tasks surface before migrate and disappear after migration.
+- `test/unit/commands/refactor_patrol_candidate_migration_test.rb` covers the
+  installation-wide candidate sweep, identity backfill, typed persisted/printed
+  status, isolated retryable failures, released-v2 jobs, and custom state roots.
 
 ## Backlinks
 

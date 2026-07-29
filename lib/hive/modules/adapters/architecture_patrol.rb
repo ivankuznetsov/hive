@@ -31,7 +31,7 @@ module Hive
           @scheduler_factory = scheduler_factory || lambda do |**options|
             Hive::Daemon::RefactorPatrolScheduler.new(**options)
           end
-          @state_store_factory = state_store_factory || ->(root) { Hive::RefactorPatrol::StateStore.new(root) }
+          @state_store_factory = state_store_factory
           @shadow_sink = shadow_sink
         end
 
@@ -53,7 +53,7 @@ module Hive
             comparable: false
           ) unless mode == :mutator
 
-          @state_store_factory.call(project.fetch("path")).ensure!
+          state_store_for(project).ensure!
           0
         end
 
@@ -86,6 +86,14 @@ module Hive
 
           require_mutation_capabilities!(context) unless configuration.settings.fetch("dry_run")
           run_candidate(project, cfg, configuration, context, scheduler, candidate, event)
+        end
+
+        def state_store_for(project)
+          return @state_store_factory.call(project.fetch("path")) if @state_store_factory
+
+          Hive::RefactorPatrol::StateStore.new(
+            project.fetch("path"), hive_state_path: project.fetch("hive_state_path")
+          )
         end
 
         def run_candidate(project, cfg, configuration, context, scheduler, candidate, event)

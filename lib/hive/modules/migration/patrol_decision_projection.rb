@@ -52,7 +52,7 @@ module Hive
           end
 
           def coerce(value)
-            value.is_a?(self) ? value : from_h(value)
+            from_h(value.is_a?(self) ? value.to_h : value)
           end
 
           private

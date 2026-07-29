@@ -90,7 +90,9 @@ module Hive
         require_module_observation_capabilities!
         require_module_mutation_capabilities! unless @dry_run
         ensure_validation_configured!(cfg) unless @dry_run
-        state = Hive::Patrol::StateStore.new(project_root)
+        state = Hive::Patrol::StateStore.new(
+          project_root, hive_state_path: entry.fetch("hive_state_path")
+        )
         state.ensure!
         capture = patrol_capture(entry, state)
         unless @dry_run
@@ -297,8 +299,9 @@ module Hive
             owner_epoch: snapshot.fetch("epoch"),
             selection_input: selection_input,
             selection:
-              Hive::Patrol::DecisionProjection.project(
-                selection_input
+              Hive::Modules::Migration::PatrolDecisionProjection.build(
+                module_name: "patrol",
+                rationale: "due"
               ),
             outcome_class: nil,
             outcome: nil,

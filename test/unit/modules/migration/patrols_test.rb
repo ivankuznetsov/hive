@@ -575,7 +575,7 @@ class ModulesMigrationPatrolsTest < Minitest::Test
 
     with_project do |project|
       store = Hive::RefactorPatrol::JobStore.new(
-        project.fetch("path")
+        project.fetch("path"), project: project
       )
       manifest = architecture_manifest
       capture = architecture_capture(manifest)
@@ -594,7 +594,7 @@ class ModulesMigrationPatrolsTest < Minitest::Test
 
     with_project do |project|
       store = Hive::RefactorPatrol::JobStore.new(
-        project.fetch("path")
+        project.fetch("path"), project: project
       )
       256.times do |index|
         store.write_job!(architecture_job(index))
@@ -619,6 +619,48 @@ class ModulesMigrationPatrolsTest < Minitest::Test
     end
   end
 
+  def test_durable_stores_and_coordinator_use_configured_relative_and_absolute_state_paths
+    with_tmp_dir do |root|
+      [ "var/hive-state", File.join(root, "absolute-hive-state") ].each do |configured|
+        state_path = File.expand_path(configured, root)
+        FileUtils.mkdir_p(state_path)
+        File.write(
+          File.join(state_path, "config.yml"),
+          { "hive_state_path" => configured }.to_yaml
+        )
+        project = {
+          "name" => "demo-#{File.basename(state_path)}",
+          "path" => root,
+          "hive_state_path" => state_path
+        }
+
+        patrol = Hive::Patrol::StateStore.new(
+          root, hive_state_path: configured
+        )
+        assert_equal File.join(state_path, "patrol"), patrol.root
+        patrol.reserve_occurrence!(patrol_capture, now: NOW)
+
+        architecture = Hive::RefactorPatrol::JobStore.new(
+          root, hive_state_path: configured
+        )
+        assert_equal File.join(state_path, "refactor_patrol", "v3"), architecture.root
+
+        supervisor = FakeSupervisor.new
+        supervisor.live = false
+        result = Hive::Modules::Migration::Coordinator.new(
+          supervisor: supervisor,
+          attempt_store: FakeAttemptStore.new,
+          registry: -> { [ project ] },
+          store_factory: ->(_state) { FakeStore.new }
+        ).tick(now: NOW).fetch(0)
+
+        assert_equal :pending, result.fetch(:status)
+        assert_equal({ "patrol" => "live" }, result.fetch(:blockers))
+        refute Dir.exist?(File.join(root, ".hive-state", "patrol", "occurrences"))
+      end
+    end
+  end
+
   def test_default_coordinator_probe_accepts_completed_state_and_fails_closed
     with_project do |project|
       store = Hive::Patrol::StateStore.new(project.fetch("path"))
@@ -627,7 +669,7 @@ class ModulesMigrationPatrolsTest < Minitest::Test
       evidence_store = Object.new
       evidence_store.define_singleton_method(:append_capture) { |_capture| }
       store.finalize_occurrence!(
-        capture: capture,
+        capture: terminal_patrol_capture(capture),
         evidence_store: evidence_store,
         now: NOW
       )
@@ -640,7 +682,7 @@ class ModulesMigrationPatrolsTest < Minitest::Test
 
     with_project do |project|
       Hive::RefactorPatrol::JobStore.new(
-        project.fetch("path")
+        project.fetch("path"), project: project
       ).write_job!(architecture_job(1))
 
       result = default_coordinator(project).tick(now: NOW).fetch(0)
@@ -651,7 +693,7 @@ class ModulesMigrationPatrolsTest < Minitest::Test
 
     with_project do |project|
       store = Hive::RefactorPatrol::JobStore.new(
-        project.fetch("path")
+        project.fetch("path"), project: project
       )
       aggregate = architecture_job(1)
       store.write_job!(aggregate)
@@ -1009,6 +1051,42 @@ class ModulesMigrationPatrolsTest < Minitest::Test
     end
   end
 
+  def test_existing_shadowing_module_and_rolled_back_states_upgrade_v1_shadow_decisions
+    %w[shadowing module rolled_back].each do |status|
+      with_project do |project|
+        migration = Hive::Modules::Migration::Patrols.new(
+          project_root: project.fetch("path"), project: "demo",
+          hive_state_path: project.fetch("hive_state_path"), module_store: FakeStore.new,
+          quiescence_probe: ->(_name, _root) { :quiescent }
+        )
+        adopted = migration.adopt!(now: NOW)
+        original = adopted.state.merge("status" => status)
+        migration.send(:write, original)
+
+        shadow_root = File.join(
+          project.fetch("hive_state_path"), "module-runtime", "migration", "shadow"
+        )
+        FileUtils.rm_rf(File.join(shadow_root, "migrations"))
+        v1_path = File.join(shadow_root, "patrol", "#{'a' * 64}.json")
+        FileUtils.mkdir_p(File.dirname(v1_path))
+        File.binwrite(
+          v1_path,
+          Hive::WorkflowPackage::CanonicalJSON.generate(legacy_shadow_decision)
+        )
+
+        upgraded = migration.adopt!(now: NOW + 1)
+
+        assert_equal "already_current", upgraded.status, status
+        assert_equal status, upgraded.state.fetch("status"), status
+        assert_equal original.fetch("admissions"), upgraded.state.fetch("admissions"), status
+        assert_equal 2, JSON.parse(File.binread(v1_path)).fetch("schema_version"), status
+        assert File.file?(File.join(
+          shadow_root, "migrations", "shadow-decision-v2.json"
+        )), status
+      end
+    end
+  end
+
   def test_shadow_inventory_distinguishes_live_quiescence_failure
     with_project do |project|
       migration = Hive::Modules::Migration::Patrols.new(
@@ -1062,6 +1140,24 @@ class ModulesMigrationPatrolsTest < Minitest::Test
       outcome_class: nil,
       outcome: nil,
       occurred_at: NOW,
+      recorded_at: NOW
+    )
+  end
+
+  def terminal_patrol_capture(capture)
+    Hive::Modules::Migration::PatrolCapture.build(
+      module_name: capture.module_name,
+      project: capture.project,
+      trigger: capture.trigger,
+      reservation: capture.reservation,
+      owner: capture.owner,
+      owner_epoch: capture.owner_epoch,
+      selection_input: capture.selection_input,
+      selection: capture.selection,
+      outcome_class: "completed",
+      outcome: { "rationale" => "completed" },
+      effect_ids: capture.effect_ids,
+      occurred_at: capture.occurred_at,
       recorded_at: NOW
     )
   end
@@ -1140,7 +1236,36 @@ class ModulesMigrationPatrolsTest < Minitest::Test
       state = File.join(root, ".hive-state")
       FileUtils.mkdir_p(state)
       File.write(File.join(state, "config.yml"), { "hive_state_path" => ".hive-state" }.to_yaml)
-      yield({ "name" => "demo", "path" => root, "hive_state_path" => state })
+      yield(
+        {
+          "name" => "demo",
+          "project_id" => "project-1",
+          "path" => root,
+          "hive_state_path" => state
+        }
+      )
     end
+  end
+
+  def legacy_shadow_decision
+    {
+      "schema" => "hive-module-shadow-decision",
+      "schema_version" => 1,
+      "module" => "patrol",
+      "decision_id" => "a" * 64,
+      "trigger_digest" => "b" * 64,
+      "occurred_at" => NOW.iso8601(6),
+      "recorded_at" => (NOW + 1).iso8601(6),
+      "evidence_source" => "legacy_mutator_capture",
+      "configuration_digest" => "c" * 64,
+      "comparable" => true,
+      "legacy" => { "rationale" => "due" },
+      "module_decision" => { "rationale" => "due" },
+      "explained_differences" => [],
+      "unexplained_differences" => [],
+      "legacy_effects" => [ "legacy-effect" ],
+      "module_effects" => [],
+      "duplicate_effects" => []
+    }
   end
 end

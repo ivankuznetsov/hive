@@ -79,6 +79,21 @@ class RefactorPatrolJobStoreCollaboratorsTest < Minitest::Test
     assert_match(/terminal action cannot retain an active claim/, error.message)
   end
 
+  def test_record_validator_rejects_a_gap_in_diagnostic_retry_episodes
+    aggregate = accepted_job
+    transition = effect_transition.merge("generation" => 2)
+    aggregate["attempts"] = [
+      diagnostic_attempt(aggregate.fetch("occurrence_id"), transition)
+        .merge("generation" => 2)
+    ]
+
+    error = assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+      validator.validate_job!(aggregate, path: "/tmp/job.json")
+    end
+
+    assert_match(/diagnostic retry episodes must be contiguous/, error.message)
+  end
+
   def test_record_validator_covers_publication_identity_phase_and_supersession_guards
     wrong_kind = publication_job
     wrong_kind.dig("actions", 0)["kind"] = "issue"

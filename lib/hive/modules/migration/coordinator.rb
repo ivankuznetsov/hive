@@ -45,7 +45,15 @@ module Hive
           return unless Patrols::MODULES.all? { |name| selections.dig(name, "installed") == true }
 
           state = Patrols.read_state(entry.fetch("path"), hive_state_path: entry.fetch("hive_state_path"))
-          return unless state.nil? || %w[pending cutover_pending rollback_pending].include?(state.fetch("status"))
+          return unless state.nil? || %w[
+            pending shadowing cutover_pending module rollback_pending rolled_back
+          ].include?(state.fetch("status"))
+          if state && %w[shadowing module rolled_back].include?(state.fetch("status"))
+            return unless Patrols.shadow_decision_upgrade_required?(
+              entry.fetch("path"),
+              hive_state_path: entry.fetch("hive_state_path")
+            )
+          end
           return { project: entry.fetch("name"), status: :dry_run } if @dry_run
 
           migration = Patrols.new(
@@ -93,25 +101,41 @@ module Hive
 
         def durable_work_quiescence(entry, module_name)
           project_root = entry.fetch("path")
+          hive_state_path = entry.fetch("hive_state_path")
           case module_name
           when "patrol"
             require "hive/patrol/state_store"
             root = File.join(
-              project_root, ".hive-state", "patrol", "occurrences"
+              hive_state_path, "patrol", "occurrences"
             )
             return :quiescent unless Dir.exist?(root)
 
-            store = Hive::Patrol::StateStore.new(project_root)
+            store = Hive::Patrol::StateStore.new(
+              project_root, hive_state_path: hive_state_path
+            )
             store.recovery_active? ?
               :live : :quiescent
           when "architecture-patrol"
             require "hive/refactor_patrol/job_store"
-            root = File.join(
-              project_root, ".hive-state", "refactor_patrol", "v2"
-            )
-            return :quiescent unless Dir.exist?(root)
+            return :quiescent unless
+              Hive::RefactorPatrol::JobStore.schema_state_present?(
+                project_root, hive_state_path: hive_state_path
+              )
 
-            store = Hive::RefactorPatrol::JobStore.new(project_root)
+            schema = Hive::RefactorPatrol::JobStore.schema_status(
+              project_root,
+              hive_state_path: hive_state_path,
+              project: entry
+            )
+            return :ambiguous unless
+              %w[current absent].include?(schema.fetch("status"))
+
+            store = Hive::RefactorPatrol::JobStore.new(
+              project_root,
+              hive_state_path: hive_state_path,
+              migrate: false,
+              project: entry
+            )
             if store.recovery_active? ||
                store.incomplete_jobs?
               :live

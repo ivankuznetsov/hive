@@ -35,7 +35,7 @@ module Hive
 
         def fetch(occurrence_id)
           id = @validator.occurrence_id(occurrence_id)
-          with_lock(id, shared: true) do
+          with_lock(id) do
             read_record(id, missing: true)
           end
         end
@@ -100,10 +100,6 @@ module Hive
               max_bytes: MAX_RECORD_BYTES
             )
           end
-        rescue Hive::ManagedDirectory::UnsafeError,
-               SystemCallError, IOError => e
-          raise Hive::ConfigError,
-                "patrol occurrence store is unavailable: #{e.message}"
         end
 
         def mutate(occurrence_id, create: false)
@@ -139,10 +135,6 @@ module Hive
             )
             replacement
           end
-        rescue Hive::ManagedDirectory::UnsafeError,
-               SystemCallError, IOError => e
-          raise Hive::ConfigError,
-                "patrol occurrence store is unavailable: #{e.message}"
         end
 
         private
@@ -184,7 +176,7 @@ module Hive
           )
         end
 
-        def with_lock(occurrence_id, shared: false)
+        def with_lock(occurrence_id)
           # Stripe files are stable and never unlinked. A collision only
           # serializes unrelated records; it cannot transfer ownership.
           @record_locks.synchronize(

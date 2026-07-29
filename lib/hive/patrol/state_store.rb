@@ -9,8 +9,13 @@ require "hive/modules/migration/patrol_evidence"
 module Hive
   module Patrol
     class StateStore < BaseStateStore
-      def initialize(project_root)
-        super(project_root, state_directory: "patrol", collections: %w[features findings patches reports runs])
+      def initialize(project_root, hive_state_path: nil)
+        super(
+          project_root,
+          state_directory: "patrol",
+          collections: %w[features findings patches reports runs],
+          hive_state_path: hive_state_path
+        )
         @occurrence_store = Hive::Modules::Migration::OccurrenceJournal.new(
           File.join(root, "occurrences"), module_name: "patrol"
         )
@@ -23,7 +28,7 @@ module Hive
         @effect_evidence_store = evidence_store
         @state_effect_gateway = Hive::Patrol::EffectGateway.new(
           project_root: project_root,
-          hive_state_path: File.join(project_root, ".hive-state"),
+          hive_state_path: hive_state_path,
           capture: capture,
           authority: capture.owner,
           evidence_store: evidence_store,

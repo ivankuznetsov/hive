@@ -515,8 +515,9 @@ module Hive
           owner_epoch: epoch,
           selection_input: selection_input,
           selection:
-            Hive::Patrol::DecisionProjection.project(
-              selection_input
+            Hive::Modules::Migration::PatrolDecisionProjection.build(
+              module_name: "patrol",
+              rationale: "due"
             ),
           outcome_class: nil,
           outcome: nil,

@@ -119,7 +119,7 @@ class ModulesMigrationShadowDecisionMigrationTest < Minitest::Test
 
       stdout, stderr, restarted = Open3.capture3(
         RbConfig.ruby,
-        "-I#{File.expand_path("../../../lib", __dir__)}",
+        "-I#{File.expand_path("../../../../lib", __dir__)}",
         "-e",
         <<~'RUBY',
           require "json"

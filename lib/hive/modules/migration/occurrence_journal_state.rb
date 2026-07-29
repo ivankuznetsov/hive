@@ -235,6 +235,31 @@ module Hive
           floor && Time.iso8601(window) <= Time.iso8601(floor)
         end
 
+        def recovery_inventory(state)
+          {
+            "dirty" => state.fetch("recovery_inventory_dirty"),
+            "generation" =>
+              state.fetch("recovery_inventory_generation")
+          }.freeze
+        end
+
+        def mark_recovery_dirty!(state)
+          state["recovery_inventory_generation"] =
+            state.fetch("recovery_inventory_generation") + 1
+          state["recovery_inventory_dirty"] = true
+          state.fetch("recovery_inventory_generation")
+        end
+
+        def clear_recovery_dirty!(state, expected_generation:)
+          expected = nonnegative(expected_generation)
+          return false unless state.fetch("recovery_inventory_dirty")
+          return false unless
+            state.fetch("recovery_inventory_generation") == expected
+
+          state["recovery_inventory_dirty"] = false
+          true
+        end
+
         def recovery_snapshot(state, now:)
           now = Time.iso8601(timestamp(now))
           failure = state["recovery_failure"]
@@ -317,6 +342,8 @@ module Hive
             "sequence_closed_through" => nil,
             "sequence_high_waters" => [],
             "retired_occurrence_digests" => [],
+            "recovery_inventory_dirty" => true,
+            "recovery_inventory_generation" => 0,
             "recovery_generation" => 0,
             "recovery_failure" => nil
           }
@@ -325,6 +352,7 @@ module Hive
         def validate!(state)
           required = %w[
             module recovery_failure recovery_generation
+            recovery_inventory_dirty recovery_inventory_generation
             retired_occurrence_digests schema schema_version
             sequence_closed_through sequence_high_waters
           ]
@@ -339,6 +367,11 @@ module Hive
                   state["retired_occurrence_digests"].is_a?(Array) &&
                   state["retired_occurrence_digests"].size <=
                     MAX_RETIRED_OCCURRENCES &&
+                  [ true, false ].include?(
+                    state["recovery_inventory_dirty"]
+                  ) &&
+                  state["recovery_inventory_generation"].is_a?(Integer) &&
+                  state["recovery_inventory_generation"] >= 0 &&
                   state["recovery_generation"].is_a?(Integer) &&
                   state["recovery_generation"] >= 0
           malformed! unless valid

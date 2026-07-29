@@ -5,6 +5,7 @@ require "timeout"
 require "hive"
 require "hive/paths"
 require "hive/pid_file"
+require "hive/refactor_patrol/registered_project_migration_status"
 require "hive/update_check/state"
 
 module Hive
@@ -27,9 +28,16 @@ module Hive
 
       attr_reader :pid_file, :log_file
 
-      def initialize(hive_home: Hive::Paths.state_home)
+      def initialize(
+        hive_home: Hive::Paths.state_home,
+        migration_status:
+          Hive::RefactorPatrol::RegisteredProjectMigrationStatus.new(
+            root: File.join(hive_home, "schema-migrations")
+          )
+      )
         @pid_file = File.join(hive_home, ".daemon.pid")
         @log_file = File.join(hive_home, "logs", "daemon.log")
+        @migration_status = migration_status
       end
 
       # Liveness snapshot ({running:, pid:, uptime_sec:}) from the PID file.
@@ -72,7 +80,8 @@ module Hive
           # Agent-native parity with the TUI footer / bot push: expose the
           # update nudge so a programmatic caller can detect "behind" too.
           "current_version" => Hive::VERSION,
-          "update_nudge" => update_nudge_payload
+          "update_nudge" => update_nudge_payload,
+          "schema_migrations" => schema_migration_payload
         }
       end
 
@@ -171,6 +180,36 @@ module Hive
         { "latest" => nudge.latest, "channel" => nudge.channel, "command" => nudge.command }
       rescue StandardError
         nil
+      end
+
+      def schema_migration_payload
+        value = @migration_status.read
+        return {
+          "ok" => true,
+          "schema" =>
+            Hive::RefactorPatrol::RegisteredProjectMigrationStatus::SCHEMA,
+          "schema_version" =>
+            Hive::RefactorPatrol::RegisteredProjectMigrationStatus::SCHEMA_VERSION,
+          "target_schema_version" => 3,
+          "registry_digest" => nil,
+          "updated_at" => nil,
+          "projects" => []
+        } unless value
+
+        { "ok" => true }.merge(value)
+      rescue StandardError => error
+        {
+          "ok" => false,
+          "schema" =>
+            Hive::RefactorPatrol::RegisteredProjectMigrationStatus::SCHEMA,
+          "schema_version" =>
+            Hive::RefactorPatrol::RegisteredProjectMigrationStatus::SCHEMA_VERSION,
+          "target_schema_version" => 3,
+          "registry_digest" => nil,
+          "updated_at" => nil,
+          "projects" => [],
+          "error" => "#{error.class}: #{error.message}"
+        }
       end
     end
   end

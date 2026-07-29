@@ -185,6 +185,33 @@ class ModulesAdaptersPatrolTest < Minitest::Test
     end
   end
 
+  def test_default_shadow_normalizes_non_schedule_rationales_to_not_due
+    with_project do |project|
+      adapter = Hive::Modules::Adapters::Patrol.new(
+        command_factory: ->(*) { flunk("a shadow occurrence must not invoke patrol") },
+        scheduler_factory: ->(**) { FakeScheduler.new(project: project.fetch("name")) }
+      )
+
+      assert_equal 0, adapter.call(
+        project: project, hook_id: "scheduled-scan", event: schedule_event,
+        configuration: configuration(shadow: true, workflows: "coding")
+      )
+
+      assert_equal 0, adapter.call(
+        project: project, hook_id: "task-completed", event: task_event("research"),
+        configuration: configuration(shadow: true, workflows: "coding")
+      )
+
+      file = Dir.glob(File.join(
+        project.fetch("hive_state_path"), "module-runtime", "migration", "shadow", "**", "*.json"
+      )).fetch(0)
+      records = Dir.glob(File.join(File.dirname(file), "*.json")).map do |path|
+        JSON.parse(File.binread(path)).dig("module_decision", "rationale")
+      end
+      assert_equal %w[due not_due], records.sort
+    end
+  end
+
   def test_default_command_factory_forwards_to_the_legacy_command
     with_project(owner: "module") do |project|
       calls = []

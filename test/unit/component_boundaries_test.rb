@@ -473,7 +473,10 @@ class ComponentBoundariesTest < Minitest::Test
       )
     end
     assert_equal(
-      [ "lib/hive/modules/migration/occurrence_record_store.rb" ],
+      [
+        "lib/hive/modules/migration/occurrence_journal_state.rb",
+        "lib/hive/modules/migration/occurrence_record_store.rb"
+      ],
       occurrence_writers
     )
 

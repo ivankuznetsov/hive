@@ -49,7 +49,9 @@ module Hive
           mode = migration_mode(project, configuration)
           return shadow(project, configuration, event, mode == :fenced ? "ownership_fenced" : "setup", comparable: false) unless mode == :mutator
 
-          Hive::Patrol::StateStore.new(project.fetch("path")).ensure!
+          Hive::Patrol::StateStore.new(
+            project.fetch("path"), hive_state_path: project.fetch("hive_state_path")
+          ).ensure!
           0
         end
 

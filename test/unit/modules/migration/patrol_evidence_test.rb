@@ -71,6 +71,28 @@ class ModulesMigrationPatrolEvidenceTest < Minitest::Test
         selection.to_h.merge("extra" => true)
       )
     end
+    bypassed = Hive::Modules::Migration::PatrolDecisionProjection.new(
+      module_name: "patrol",
+      rationale: "invalid",
+      job_id: nil,
+      phase: nil
+    )
+    assert_raises(Hive::ConfigError) do
+      Hive::Modules::Migration::PatrolCapture.build(
+        module_name: provisional.module_name,
+        project: provisional.project,
+        trigger: provisional.trigger,
+        reservation: provisional.reservation,
+        owner: provisional.owner,
+        owner_epoch: provisional.owner_epoch,
+        selection_input: provisional.selection_input,
+        selection: bypassed,
+        outcome_class: nil,
+        outcome: nil,
+        occurred_at: provisional.occurred_at,
+        recorded_at: provisional.recorded_at
+      )
+    end
   end
 
   def test_capture_is_strict_deeply_immutable_and_schema_valid
@@ -419,6 +441,42 @@ class ModulesMigrationPatrolEvidenceTest < Minitest::Test
       Hive::Modules::Migration::EffectReceipt.from_h(
         receipt.to_h.merge("receipt_id" => "receipt-#{'0' * 64}")
       )
+    end
+  end
+
+  def test_architecture_operation_selection_is_strict_and_round_trips
+    selection = Hive::Modules::Migration::PatrolDecisionProjection.build(
+      module_name: "architecture-patrol",
+      rationale: "due",
+      job_id: "job-1",
+      phase: "action"
+    )
+    capture = Hive::Modules::Migration::PatrolCapture.build(
+      module_name: "architecture-patrol",
+      project: { "project_id" => "project-1", "name" => "demo", "repository" => nil },
+      trigger: { "kind" => "manual", "id" => "architecture-operation" },
+      reservation: { "kind" => "architecture", "id" => "job-1", "job_id" => "job-1" },
+      owner: "legacy",
+      owner_epoch: 1,
+      selection_input: {
+        "kind" => "operation",
+        "job_id" => "job-1",
+        "operation" => "resume",
+        "phase" => "action"
+      },
+      selection: selection,
+      outcome_class: nil,
+      outcome: nil,
+      occurred_at: NOW,
+      recorded_at: NOW
+    )
+
+    assert_equal capture.to_h,
+                 Hive::Modules::Migration::PatrolCapture.from_h(capture.to_h).to_h
+    invalid = capture.to_h
+                    .merge("selection_input" => { "kind" => "unexpected" })
+    assert_raises(Hive::ConfigError) do
+      Hive::Modules::Migration::PatrolCapture.from_h(invalid)
     end
   end
 

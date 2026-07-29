@@ -256,6 +256,30 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
     end
   end
 
+  def test_default_shadow_projects_a_candidate_without_legacy_capture
+    with_project do |project|
+      scheduler = FakeScheduler.new([ candidate ])
+      adapter = Hive::Modules::Adapters::ArchitecturePatrol.new(
+        command_factory: ->(*) { flunk("shadow discovery must not invoke the engine") },
+        scheduler_factory: ->(**) { scheduler }
+      )
+
+      assert_equal 0, adapter.call(
+        project: project, hook_id: "scheduled-discovery", event: schedule_event,
+        configuration: configuration(shadow: true)
+      )
+
+      file = Dir.glob(File.join(
+        project.fetch("hive_state_path"), "module-runtime", "migration", "shadow", "**", "*.json"
+      )).fetch(0)
+      record = JSON.parse(File.binread(file))
+      assert_equal "job-7", record.dig("module_decision", "job_id")
+      assert_equal "discovery", record.dig("module_decision", "phase")
+      assert_equal "due", record.dig("module_decision", "rationale")
+      refute record.fetch("comparable")
+    end
+  end
+
   def test_default_shadow_comparator_accepts_finalized_scheduler_capture
     with_project do |project|
       scheduler = FakeScheduler.new([ candidate ])
@@ -278,6 +302,39 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
       assert_equal "legacy_mutator_capture", record.fetch("evidence_source")
       assert_equal "job-7",
                    record.dig("legacy_capture", "selection", "job_id")
+    end
+  end
+
+  def test_default_shadow_comparator_detects_independent_decision_divergence
+    with_project do |project|
+      scheduler = FakeScheduler.new([ candidate ])
+      adapter = Hive::Modules::Adapters::ArchitecturePatrol.new(
+        scheduler_factory: ->(**) { scheduler }
+      )
+      capture = finalized_capture(
+        selection:
+          Hive::Modules::Migration::PatrolDecisionProjection.build(
+            module_name: "architecture-patrol",
+            rationale: "not_due"
+          )
+      )
+      event = schedule_event
+      event["payload"]["legacy_mutator_capture"] = capture.to_h
+
+      assert_equal 0, adapter.call(
+        project: project, hook_id: "scheduled-discovery", event: event,
+        configuration: configuration(shadow: true)
+      )
+      file = Dir.glob(File.join(
+        project.fetch("hive_state_path"), "module-runtime", "migration", "shadow", "**", "*.json"
+      )).fetch(0)
+      record = JSON.parse(File.binread(file))
+
+      assert record.fetch("comparable")
+      assert_equal(
+        %w[$.job_id $.phase $.rationale],
+        record.fetch("unexplained_differences").map { |row| row.fetch("path") }
+      )
     end
   end
 
@@ -550,7 +607,14 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
     }.merge(overrides)
   end
 
-  def finalized_capture
+  def finalized_capture(selection: nil)
+    selection ||=
+      Hive::Modules::Migration::PatrolDecisionProjection.build(
+        module_name: "architecture-patrol",
+        rationale: "due",
+        job_id: "job-7",
+        phase: "discovery"
+      )
     Hive::Modules::Migration::PatrolCapture.build(
       module_name: "architecture-patrol",
       project: {
@@ -579,12 +643,7 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
         "phase" => "discovery"
       },
       selection:
-        Hive::Modules::Migration::PatrolDecisionProjection.build(
-          module_name: "architecture-patrol",
-          rationale: "due",
-          job_id: "job-7",
-          phase: "discovery"
-        ),
+        selection,
       outcome_class: "scheduler_outcome",
       outcome: { "status" => "classified" },
       occurred_at: NOW,

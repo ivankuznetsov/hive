@@ -3,7 +3,7 @@ title: Component boundaries
 type: reference
 source: config/component-boundaries.yml, test/support/component_boundary_contract.rb
 created: 2026-07-25
-updated: 2026-07-28
+updated: 2026-07-29
 tags: [architecture, components, boundaries, monorepo]
 ---
 
@@ -34,7 +34,7 @@ has earned a gem, version, repository, or release.
 
 ## Final graph audit
 
-The U2 resolution on 2026-07-28 retains eight components: six are
+The final U2 resolution on 2026-07-29 retains eight components: six are
 `boundary-ready`; Attempts and Patrol Effect Evidence remain `candidate`.
 Patrol retains one bounded U3 exception for compressed evidence qualification
 and cutover proof. Every retained entry point has a focused clean-process load
@@ -66,13 +66,19 @@ This is an internal architecture verdict, not a packaging verdict. None of the
 six ready components currently has the named non-Hive adopter and independent
 package proof required by the standalone-gem plan.
 
-`Patrol Effect Evidence` owns the immutable cross-product capture, intent, and
-receipt values, the single lower-level occurrence facade, bounded observational
-indices, and the two deliberately separate product gateways. The facade
-composes one pure validator, one store that alone locks and writes, one outbox,
-and one effect state machine. Both product gateways compose the same admission,
-sender, and receipt-projection collaborators without inheriting from a shared
-product superclass. `TransitionGateway` is a persistence-free Architecture
+`Patrol Effect Evidence` owns the immutable cross-product capture, selection,
+intent, and receipt values, the single lower-level occurrence facade, bounded
+observational indices, and the two deliberately separate product gateways.
+Separate ordinary and architecture projectors validate their own input
+vocabularies before producing the strict shared selection value; terminal
+outcome is a different capture field. The facade composes one pure validator,
+one occurrence store that alone writes work/effect/outbox records, one bounded
+coordination-state writer, one outbox, and one effect state machine. The
+coordination cell owns compacted sequence fences, the bounded non-sequence
+retirement fence, and durable recovery backoff, but no product work or delivery
+state. Both product gateways compose the same admission, sender, and
+receipt-projection collaborators without inheriting from a shared product
+superclass. `TransitionGateway` is a persistence-free Architecture
 Patrol port: it routes `job`, `discovery`, and `action` mutations into the
 architecture gateway but can only mutate by invoking JobStore. ActionRunner and
 the scheduler delegate transition identities, claim fencing, reconciliation,
@@ -82,8 +88,10 @@ decisions and cadence. Command and daemon manifest intake share
 job scope over the shared journal from the immutable occurrence pointer in the
 v3 JobStore aggregate. There is no binding sidecar or compatibility lookup.
 StateStore and JobStore expose the separate product recovery APIs over the one
-occurrence store. Terminal outcomes and canonical projection bytes commit
-together; EvidenceStore is never consulted to decide a retry or mutation.
+streamed occurrence journal. Terminal outcomes and canonical projection bytes
+commit together; sequenced completions compact through high-water/floor state,
+and a saturated non-sequence fence retains terminal proof rather than replaying.
+EvidenceStore is never consulted to decide a retry or mutation.
 
 The Patrol row has a non-empty construction boundary. Shared stores and
 mechanisms, both product gateways, and intake/discovery/action/claim-maintenance

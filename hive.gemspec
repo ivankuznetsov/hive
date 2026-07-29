@@ -75,6 +75,10 @@ Gem::Specification.new do |spec|
   spec.add_dependency "erb", ">= 4.0"
   spec.add_dependency "faraday", ">= 2.14.2", "< 3.0"
   spec.add_dependency "faraday-multipart", "~> 1.0"
+  # Descriptor-relative managed storage calls the POSIX *at family through
+  # Fiddle. Ruby 4 no longer guarantees Fiddle as a default gem, so installed
+  # Hive packages must carry the runtime dependency explicitly.
+  spec.add_dependency "fiddle", ">= 1.1"
   # Architecture-patrol manifests are runtime JSON contracts. The scheduler
   # loads their validator in daemon/web-supervisor processes, so keeping this
   # dependency test-only makes installed gems and hivebox crash on daemon boot.

@@ -112,6 +112,21 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_scheduler_recovers_and_reserves_from_the_registered_state_path
+    with_tmp_dir do |dir|
+      configured = File.join(dir, "state", "hive")
+      entry = project_entry(dir).merge("hive_state_path" => configured)
+      state = Hive::Patrol::StateStore.new(dir, hive_state_path: configured)
+      state.update_state("last_scanned_sha" => "old")
+
+      dispatch = scheduler(entry, enabled_cfg).tick(now: T0).fetch(0)
+
+      occurrence_id = dispatch.fetch(:command).split.last
+      assert state.occurrence(occurrence_id)
+      refute File.exist?(File.join(dir, ".hive-state", "patrol", "state.json"))
+    end
+  end
+
   def test_candidate_boundary_preserves_identity_and_reservation_rechecks_ownership
     with_tmp_dir do |dir|
       write_state(dir, "last_scanned_sha" => "old")
@@ -313,6 +328,47 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
                    "after success the project waits the slow poll interval"
       assert_equal 1, sched.tick(now: T0 + 672).size,
                    "project is due again once poll_interval_sec elapses"
+    end
+  end
+
+  def test_completion_after_a_crash_finalization_only_replays_the_pending_outbox
+    with_tmp_dir do |dir|
+      write_state(dir, "last_scanned_sha" => "old")
+      entry = project_entry(dir)
+      sched = scheduler(entry, enabled_cfg)
+      occurrence_id = sched.tick(now: T0).fetch(0).fetch(:command).split.last
+      state = Hive::Patrol::StateStore.new(dir)
+      provisional = state.occurrence_capture(occurrence_id)
+      finalized = Hive::Modules::Migration::PatrolCapture.build(
+        module_name: provisional.module_name, project: provisional.project,
+        trigger: provisional.trigger, reservation: provisional.reservation,
+        owner: provisional.owner, owner_epoch: provisional.owner_epoch,
+        selection_input: provisional.selection_input, selection: provisional.selection,
+        outcome_class: "completed", outcome: { "rationale" => "completed" },
+        occurred_at: provisional.occurred_at, recorded_at: T0 + 1
+      )
+      unavailable_evidence = Object.new
+      unavailable_evidence.define_singleton_method(:append_capture) do |_capture|
+        raise IOError, "crash after finalization before projection"
+      end
+      assert_raises(IOError) do
+        state.finalize_occurrence!(
+          capture: finalized, evidence_store: unavailable_evidence, now: T0 + 1
+        )
+      end
+
+      sched.complete(
+        project: "p1", exit_code: Hive::ExitCodes::SUCCESS,
+        envelope: { "ok" => true }, now: T0 + 2
+      )
+
+      assert_nil state.occurrence(occurrence_id),
+                 "the replayed and acknowledged terminal occurrence may retire"
+      evidence = Hive::Modules::Migration::EvidenceStore.new(
+        root: File.join(entry.fetch("hive_state_path"), "module-runtime", "migration", "patrol-evidence")
+      )
+      assert_equal 1, evidence.captures.length
+      refute sched.pending?("p1")
     end
   end
 

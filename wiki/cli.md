@@ -3,7 +3,7 @@ title: CLI Surface
 type: api
 source: bin/hive, bin/hv, lib/hive/cli.rb
 created: 2026-04-25
-updated: 2026-07-25
+updated: 2026-07-29
 tags: [cli, api, skills, agents, operational, provisioning]
 ---
 
@@ -128,6 +128,7 @@ contracts retain their established unversioned or schema-less shapes.
 | `hive update` | Re-run the install channel that originally placed the binary (xdg/homebrew/aur). Reads channel from `~/.local/state/hive/install-channel` (or `Hive::InstallChannel.detect`) and re-invokes the matching installer; refuses to act when the channel is unknown. See `lib/hive/commands/update.rb`. | `Hive::Commands::Update` | — |
 | `hive uninstall [--purge]` | Remove user-scoped hive runtime: stop daemon/bot, remove launchd/systemd units, drop xdg-installed binary, prune `~/.local/state/hive`. `--purge` also removes the global registry at `~/.config/hive/config.yml` (or `HIVE_HOME/config.yml` when overridden). Never touches per-project `.hive-state/` working trees. See `lib/hive/commands/uninstall.rb`. | `Hive::Commands::Uninstall` | — |
 | `hive migrate [PROJECT_PATH]` | Migrate legacy project config, rename older in-flight task folders, backfill task metadata, and assign identities to pre-v2 recoverable markers. | `Hive::CLI#migrate` | [[commands/migrate]] |
+| `hive refactor-patrol-migrate-installed` | Candidate-only JobStore sweep for the invoking user's installation: backfill registration identities, migrate that user's complete current registry, persist, and print its typed migration status. Every other user receives the same shipped boundary on first eligible use. | `Hive::Commands::RefactorPatrolCandidateMigration` | [[commands/migrate]] |
 | `hive doctor [--json]` | Read-only inspection of always-required Hive operating skills, configured managed capabilities, native resolution/provenance, and OpenClaw/ClawHub inventory. Emits `hive-doctor.v2`; legacy checks remain separate. | `Hive::Commands::Doctor` | [[commands/doctor]] |
 | `hive forget NAME [--if-exists] [--json]` | Drop one named entry from the global registry (`~/.config/hive/config.yml`, or `HIVE_HOME/config.yml` when overridden). Inverse of `hive init`. The project's `.hive-state` directory on disk is not touched. Unknown name → exit 64 unless `--if-exists` makes it an exit-0 no-op. | `Hive::Commands::Forget` | [[commands/forget]] |
 | `hive prune [--dry-run] [--json]` | Drop every registry entry whose `path` is no longer a directory on disk, whose stored `real_path` no longer matches the current target, OR whose row shape is invalid (hand-edit accident). `--dry-run` returns the would-be-removed list without writing. | `Hive::Commands::Prune` | [[commands/prune]] |

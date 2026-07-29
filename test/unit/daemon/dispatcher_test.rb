@@ -47,7 +47,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
   class FakeSupervisor
     attr_reader :spawned, :next_pid
-    attr_accessor :next_exits, :shutdown_exits, :identity, :terminate_result, :spawn_error
+    attr_accessor :next_exits, :shutdown_exits, :identity, :terminate_result, :spawn_error,
+                  :shutdown_proof
     def initialize
       @spawned = []
       @next_pid = 100
@@ -55,6 +56,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       @shutdown_exits = []
       @identity = { process_start_time: "start", pgid: 100 }
       @terminate_result = true
+      @shutdown_proof = { drained: true, child_inventory: [] }
     end
 
     def spawn(command_string:, project:, slug:, stage:,
@@ -1039,6 +1041,10 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
     def complete(**attributes)
       record(:complete, attributes)
+    end
+
+    def shutdown(**attributes)
+      record(:shutdown, attributes)
     end
 
     def reconfigure(**attributes)
@@ -3214,6 +3220,23 @@ def test_run_forever_reloads_ticks_and_shuts_down_cleanly
   assert events_include?(logger, :dispatcher_started)
   assert events_include?(logger, :dispatcher_stopping)
   assert_equal 0, supervisor.spawned.size
+end
+
+def test_shutdown_acknowledgement_records_closed_admission_and_child_inventory
+  snapshot = FakeOperationalSnapshot.new
+  dispatcher, supervisor = make_dispatcher(operational_snapshot: snapshot)
+  supervisor.shutdown_proof = {
+    drained: true,
+    child_inventory: [ { pid: 88, pgid: 88, start_time: "child-start" } ]
+  }
+
+  dispatcher.send(:publish_shutdown_acknowledgement, now: T0)
+
+  method, payload = snapshot.calls.last
+  assert_equal :shutdown, method
+  assert_equal true, payload.fetch(:admission_closed)
+  assert_equal true, payload.fetch(:drained)
+  assert_equal [ 88 ], payload.fetch(:child_inventory).map { |entry| entry.fetch(:pid) }
 end
 
 def test_run_forever_routes_shutdown_child_exit_through_architecture_completion

@@ -86,7 +86,7 @@ module Hive
           backoff_max_sec: backoff_max_sec, jitter: jitter
         )
         @resolver_factory = resolver_factory || method(:build_resolver)
-        @job_store_factory = job_store_factory || ->(root) { Hive::RefactorPatrol::JobStore.new(root) }
+        @job_store_factory = job_store_factory
         @dry_run = dry_run
         @module_event_publisher = module_event_publisher
         @migration_snapshot = migration_snapshot || lambda do |entry|
@@ -202,7 +202,9 @@ module Hive
       end
 
       def state_path(project_root)
-        File.join(project_root, ".hive-state", "refactor_patrol", "v2", "reconciler.json")
+        File.join(
+          hive_state_path_for(project_root), "refactor_patrol", "v2", "reconciler.json"
+        )
       end
 
       def progress_path(project_root)
@@ -229,6 +231,16 @@ module Hive
       end
 
       private
+
+      def hive_state_path_for(project_root)
+        expanded = File.expand_path(project_root)
+        entry = Array(@registry.call).find do |candidate|
+          File.expand_path(candidate.fetch("path")) == expanded
+        end
+        return entry.fetch("hive_state_path") if entry && entry["hive_state_path"]
+
+        File.join(expanded, ".hive-state")
+      end
 
       def reconcile_step(entry, cfg, now:, timeout_sec:)
         project_root = entry.fetch("path")
@@ -327,7 +339,7 @@ module Hive
         resolver = @resolver_factory.call(entry, cfg, @github_gateway, @dry_run)
         manifest = resolver.resolve(pr, timeout_sec: timeout_sec)
         assert_manifest_matches!(manifest, expected) if expected
-        store = @job_store_factory.call(entry.fetch("path"))
+        store = job_store_for(entry)
         result = @architecture_intake_transitions.enqueue(
           entry: entry,
           store: store,
@@ -348,6 +360,16 @@ module Hive
           cfg: cfg,
           github_gateway: github_gateway,
           dry_run: dry_run
+        )
+      end
+
+      def job_store_for(entry)
+        return @job_store_factory.call(entry.fetch("path")) if @job_store_factory
+
+        Hive::RefactorPatrol::JobStore.new(
+          entry.fetch("path"),
+          hive_state_path: entry.fetch("hive_state_path"),
+          project: entry
         )
       end
 

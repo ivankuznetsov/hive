@@ -53,7 +53,7 @@ module Hive
 
       def initialize(state_home: Hive::Paths.state_home,
                      registry: -> { Hive::Config.registered_projects },
-                     job_store_factory: ->(project_root) { JobStore.new(project_root) },
+                     job_store_factory: nil,
                      clock: -> { Time.now })
         @state_root = File.join(File.expand_path(state_home), "refactor_patrol", "v2")
         @root = File.join(@state_root, "indexes")
@@ -61,7 +61,21 @@ module Hive
         @archive_root = File.join(@state_root, "terminal-proofs")
         @lock_path = File.join(@state_root, "canonical-actions.lock")
         @registry = registry
-        @job_store_factory = job_store_factory
+        @job_store_factory = job_store_factory || lambda do |project_root|
+          expanded = File.expand_path(project_root)
+          entry = Array(@registry.call).find do |candidate|
+            File.expand_path(candidate.fetch("path")) == expanded
+          end
+          unless entry
+            raise ProofUnresolved,
+                  "cannot scan an unregistered canonical action owner"
+          end
+          JobStore.new(
+            expanded,
+            hive_state_path: entry["hive_state_path"],
+            project: entry
+          )
+        end
         @clock = clock
       end
 
@@ -105,8 +119,6 @@ module Hive
 
       def build_snapshot(existing, archived)
         roots = registered_roots
-        roots.concat(existing_witness_roots(existing)) if existing
-        roots.concat(archived_owner_roots(archived))
         entries = archived.transform_values { |entry| archive_witness_entry(entry) }
         scan_roots(roots.uniq.sort).each do |action_id, candidate|
           entries[action_id] = merge_entry(entries[action_id], candidate)
@@ -132,16 +144,6 @@ module Hive
         raise
       rescue StandardError => e
         raise ProofUnresolved, "cannot enumerate registered projects: #{e.class}: #{e.message}"
-      end
-
-      def existing_witness_roots(existing)
-        existing.fetch("actions").values.flat_map do |entry|
-          entry.fetch("witnesses").map { |witness| witness.fetch("project_root") }
-        end
-      end
-
-      def archived_owner_roots(archived)
-        archived.values.map { |entry| entry.dig("owner", "project_root") }
       end
 
       def archive_witness_entry(entry)
@@ -452,7 +454,7 @@ module Hive
         end
         proof = terminal_proof(core)
         validate_terminal_proof!(proof, expected_action_id: action_id)
-        expected_id = JobStore.new(core.dig("owner", "project_root")).canonical_action_id(
+        expected_id = JobStore.canonical_action_id(
           repository: core.fetch("repository"), host: core.fetch("host"),
           kind: core.fetch("kind"), identity: core.fetch("identity")
         )

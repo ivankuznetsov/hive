@@ -100,9 +100,9 @@ class RefactorPatrolDiscoveryTransitionsTest < Minitest::Test
 
     def occurrence_for_job(*) = occurrence
     def terminal_effect_receipt_ids(*) = terminal_receipts
-    def recovery_active_occurrences
+    def each_recovery_active_occurrence
       @recovery_inventory_calls += 1
-      pending_occurrences
+      pending_occurrences.each { |record| yield record }
     end
 
     def finalize_occurrence!(**options)
@@ -713,7 +713,7 @@ class RefactorPatrolDiscoveryTransitionsTest < Minitest::Test
     end.fetch(1).fetch(:capture)
     assert_equal(
       { "action-1" => "done" },
-      finalized.decision.fetch("action_outcomes")
+      finalized.outcome.fetch("action_outcomes")
     )
     assert_equal "actions",
                  publisher.calls.last.fetch(2).fetch(:target_hook)

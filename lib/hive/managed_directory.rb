@@ -9,11 +9,22 @@ module Hive
   # resolved relative to directory descriptors held for one reentrant session.
   class ManagedDirectory
     class UnsafeError < Hive::ConfigError; end
+    class ExchangeUnavailable < Hive::ConfigError; end
 
     private_constant :NativeAt
 
     class MissingEntry < StandardError; end
     private_constant :MissingEntry
+
+    class YieldFailure < StandardError
+      attr_reader :error
+
+      def initialize(error)
+        @error = error
+        super(error.message)
+      end
+    end
+    private_constant :YieldFailure
 
     ACTIVE_SESSIONS_KEY = :hive_managed_directory_sessions
     private_constant :ACTIVE_SESSIONS_KEY
@@ -45,6 +56,253 @@ module Hive
         session.with_directory(components, create: true) { nil }
       end
       absolute(relative)
+    rescue Hive::ConfigError
+      raise
+    rescue SystemCallError, IOError, ArgumentError, TypeError
+      unsafe!
+    end
+
+    # Descriptor-stable directory metadata probe. A missing directory is
+    # distinct from an unsafe symlink or non-directory binding.
+    def directory_metadata(relative = ".", missing: false)
+      components = relative_components(relative)
+      with_session(create_root: false) do |session|
+        session.with_directory(components, missing: missing) do |handle|
+          stat = IO.for_fd(
+            handle.directory.fileno, autoclose: false
+          ).stat
+          validate_directory!(stat)
+          {
+            mode: stat.mode & 0o777,
+            mtime: stat.mtime.utc
+          }.freeze
+        end
+      end
+    rescue MissingEntry
+      return nil if missing
+
+      unsafe!
+    rescue Errno::ENOENT
+      unsafe!
+    rescue Hive::ConfigError
+      raise
+    rescue SystemCallError, IOError, ArgumentError, TypeError
+      unsafe!
+    end
+
+    # Returns :directory or :regular without following a symbolic link. This
+    # is intentionally narrower than lstat: managed stores accept no other
+    # entry kinds, and regular files must have exactly one link.
+    def entry_type(relative, missing: false)
+      parent_components, name = target_components(relative)
+      with_session(create_root: false) do |session|
+        session.with_directory(parent_components, missing: missing) do |parent|
+          begin
+            directory = @native.open_directory(parent.directory, name)
+            validate_directory!(
+              IO.for_fd(directory.fileno, autoclose: false).stat
+            )
+            :directory
+          rescue Errno::ENOTDIR
+            file = @native.open_file(
+              parent.directory, name, File::RDONLY
+            )
+            validate_regular!(file.stat)
+            :regular
+          ensure
+            directory&.close
+            file&.close
+          end
+        end
+      end
+    rescue MissingEntry
+      return nil if missing
+
+      unsafe!
+    rescue Errno::ENOENT
+      return nil if missing
+
+      unsafe!
+    rescue Hive::ConfigError
+      raise
+    rescue SystemCallError, IOError, ArgumentError, TypeError
+      unsafe!
+    end
+
+    # Moves one directory child into quarantine and activates a sibling
+    # replacement. Every lookup and rename stays relative to held
+    # parent/quarantine descriptors, so path rebinding and symlink substitution
+    # fail before the live child is moved.
+    def quarantine_and_replace_child!(
+      live_name:, replacement_name:, quarantine_directory:, quarantine_name:
+    )
+      names = [
+        live_name, replacement_name, quarantine_directory, quarantine_name
+      ].map { |value| single_component(value) }
+      live, replacement, quarantine_root, quarantine = names
+      with_session(create_root: false) do |session|
+        session.with_directory([], create: false) do |parent|
+          session.with_directory(
+            [ quarantine_root ], create: true
+          ) do |quarantine_parent|
+            live_identity = directory_identity_at(
+              parent.directory, live
+            )
+            replacement_identity = directory_identity_at(
+              parent.directory, replacement
+            )
+            unsafe! unless live_identity && replacement_identity
+            unsafe! if entry_identity_at(
+              quarantine_parent.directory, quarantine
+            )
+            session.verify_binding!(parent)
+            session.verify_binding!(quarantine_parent)
+            unsafe! unless live_identity ==
+              directory_identity_at(parent.directory, live)
+            unsafe! unless replacement_identity ==
+              directory_identity_at(parent.directory, replacement)
+
+            @native.renameat(
+              parent.directory,
+              live,
+              quarantine_parent.directory,
+              quarantine
+            )
+            unsafe! unless live_identity ==
+              directory_identity_at(
+                quarantine_parent.directory, quarantine
+              )
+            begin
+              unsafe! if entry_identity_at(parent.directory, live)
+              @native.renameat(
+                parent.directory,
+                replacement,
+                parent.directory,
+                live
+              )
+            rescue StandardError
+              @native.renameat(
+                quarantine_parent.directory,
+                quarantine,
+                parent.directory,
+                live
+              ) unless entry_identity_at(parent.directory, live)
+              @native.fsync_directory(quarantine_parent.directory)
+              @native.fsync_directory(parent.directory)
+              raise
+            end
+            unsafe! unless replacement_identity ==
+              directory_identity_at(parent.directory, live)
+            @native.fsync_directory(quarantine_parent.directory)
+            @native.fsync_directory(parent.directory)
+            session.verify_binding!(quarantine_parent)
+            session.verify_binding!(parent)
+            File.join(root, quarantine_root, quarantine)
+          end
+        end
+      end
+    rescue Hive::ConfigError
+      raise
+    rescue SystemCallError, IOError, ArgumentError, TypeError
+      unsafe!
+    end
+
+    # Moves one directory child into a managed quarantine without following any
+    # public path after verification. This is the terminal half of an explicit
+    # rollback: the restored legacy namespace is already active before the
+    # current generation is retained here.
+    def quarantine_child!(
+      live_name:, quarantine_directory:, quarantine_name:
+    )
+      live = single_component(live_name)
+      quarantine_root = single_component(quarantine_directory)
+      quarantine = single_component(quarantine_name)
+      with_session(create_root: false) do |session|
+        session.with_directory([], create: false) do |parent|
+          session.with_directory(
+            [ quarantine_root ], create: true
+          ) do |quarantine_parent|
+            live_identity = directory_identity_at(
+              parent.directory, live
+            )
+            unsafe! unless live_identity
+            unsafe! if entry_identity_at(
+              quarantine_parent.directory, quarantine
+            )
+            session.verify_binding!(parent)
+            session.verify_binding!(quarantine_parent)
+            unsafe! unless live_identity ==
+              directory_identity_at(parent.directory, live)
+
+            @native.renameat(
+              parent.directory,
+              live,
+              quarantine_parent.directory,
+              quarantine
+            )
+            unsafe! if entry_identity_at(parent.directory, live)
+            unsafe! unless live_identity ==
+              directory_identity_at(
+                quarantine_parent.directory, quarantine
+              )
+            @native.fsync_directory(quarantine_parent.directory)
+            @native.fsync_directory(parent.directory)
+            session.verify_binding!(quarantine_parent)
+            session.verify_binding!(parent)
+            File.join(root, quarantine_root, quarantine)
+          end
+        end
+      end
+    rescue Hive::ConfigError
+      raise
+    rescue SystemCallError, IOError, ArgumentError, TypeError
+      unsafe!
+    end
+
+    # Atomically swaps one directory child with one regular-file sibling. This
+    # is the only safe primitive for retiring a legacy writable namespace:
+    # after the syscall, the public name is already the regular-file
+    # tombstone, while the exact directory survives under +archive_name+.
+    # A two-rename fallback is intentionally forbidden.
+    def exchange_directory_with_regular!(
+      directory_name:, regular_name:
+    )
+      live = single_component(directory_name)
+      archive = single_component(regular_name)
+      with_session(create_root: false) do |session|
+        session.with_directory([], create: false) do |parent|
+          directory_identity = directory_identity_at(
+            parent.directory, live
+          )
+          regular_identity = regular_identity_at(
+            parent.directory, archive
+          )
+          unsafe! unless directory_identity && regular_identity
+          session.verify_binding!(parent)
+          unsafe! unless directory_identity ==
+            directory_identity_at(parent.directory, live)
+          unsafe! unless regular_identity ==
+            regular_identity_at(parent.directory, archive)
+
+          @native.exchangeat(parent.directory, live, archive)
+
+          unsafe! unless regular_identity ==
+            regular_identity_at(parent.directory, live)
+          unsafe! unless directory_identity ==
+            directory_identity_at(parent.directory, archive)
+          @native.fsync_directory(parent.directory)
+          session.verify_binding!(parent)
+          {
+            tombstone_path: File.join(root, live),
+            archive_path: File.join(root, archive)
+          }.freeze
+        end
+      end
+    rescue NativeAt::Unavailable, Errno::ENOSYS, Errno::EINVAL,
+           Errno::EOPNOTSUPP, Errno::ENOTSUP => error
+      raise ExchangeUnavailable,
+            "#{@label} requires atomic filesystem exchange " \
+            "(#{error.class}: #{error.message})"
     rescue Hive::ConfigError
       raise
     rescue SystemCallError, IOError, ArgumentError, TypeError
@@ -92,6 +350,16 @@ module Hive
     end
 
     def read(relative, max_bytes:, missing: false)
+      snapshot = read_with_metadata(
+        relative, max_bytes: max_bytes, missing: missing
+      )
+      snapshot && snapshot.fetch(:bytes)
+    end
+
+    # Returns bytes and the metadata from the same descriptor-stable read.
+    # Callers that must preserve mode/mtime must not reopen the public path
+    # after reading because that would introduce a binding race.
+    def read_with_metadata(relative, max_bytes:, missing: false)
       limit = Integer(max_bytes)
       unsafe! if limit.negative?
       parent_components, name = target_components(relative)
@@ -111,7 +379,11 @@ module Hive
             unsafe! if bytes.nil? || bytes.bytesize > limit
             unsafe! unless regular_snapshot(before) ==
               session.regular_snapshot_at(parent, name)
-            bytes.b.freeze
+            {
+              bytes: bytes.b.freeze,
+              mode: before.mode & 0o777,
+              mtime: before.mtime.utc
+            }.freeze
           ensure
             file.close
           end
@@ -129,7 +401,7 @@ module Hive
       unsafe!
     end
 
-    def atomic_write(relative, content, mode: 0o600,
+    def atomic_write(relative, content, mode: 0o600, mtime: nil,
                      expected_digest: nil, max_existing_bytes: nil)
       path = absolute(relative)
       parent_components, name = target_components(relative)
@@ -165,6 +437,7 @@ module Hive
             file.chmod(mode)
             file.write(content)
             file.flush
+            @native.set_file_mtime(file, mtime) if mtime
             file.fsync
             unsafe! unless temporary_identity == identity(file.stat)
           ensure
@@ -220,12 +493,18 @@ module Hive
           session.verify_binding!(parent)
           lock.flock(shared ? File::LOCK_SH : File::LOCK_EX)
           unsafe! unless opened == session.regular_identity_at(parent, name)
-          result = yield
+          result = begin
+            yield
+          rescue SystemCallError, IOError, ArgumentError, TypeError => error
+            raise YieldFailure.new(error)
+          end
           unsafe! unless opened == session.regular_identity_at(parent, name)
           session.verify_binding!(parent)
           result
         end
       end
+    rescue YieldFailure => failure
+      raise failure.error
     rescue Hive::ConfigError
       raise
     rescue SystemCallError, IOError, ArgumentError, TypeError
@@ -563,6 +842,14 @@ module Hive
       [ components[0...-1], components.last ]
     end
 
+    def single_component(value)
+      text = value.to_s
+      unsafe! unless validated_relative(text) == text &&
+                     !text.include?(File::SEPARATOR) &&
+                     text != "."
+      text
+    end
+
     def validated_relative(value)
       unsafe! unless value.is_a?(String) && !value.empty?
       components = value.split(File::SEPARATOR, -1)
@@ -581,6 +868,38 @@ module Hive
     def validate_regular!(stat)
       unsafe! unless stat.file? && !stat.symlink? && stat.nlink == 1
       stat
+    end
+
+    def directory_identity_at(parent, name)
+      directory = @native.open_directory(parent, name)
+      stat = IO.for_fd(
+        directory.fileno, autoclose: false
+      ).stat
+      validate_directory!(stat)
+      identity(stat)
+    rescue Errno::ENOENT
+      nil
+    ensure
+      directory&.close
+    end
+
+    def regular_identity_at(parent, name)
+      file = @native.open_file(parent, name, File::RDONLY)
+      stat = validate_regular!(file.stat)
+      identity(stat)
+    rescue Errno::ENOENT
+      nil
+    ensure
+      file&.close
+    end
+
+    def entry_identity_at(parent, name)
+      file = @native.open_file(parent, name, File::RDONLY)
+      identity(file.stat)
+    rescue Errno::ENOENT
+      nil
+    ensure
+      file&.close
     end
 
     def regular_snapshot(stat)

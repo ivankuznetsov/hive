@@ -368,6 +368,47 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
     assert_equal 1, reap_calls
   end
 
+  def test_terminate_all_retains_a_child_that_appears_after_the_initial_tree_snapshot
+    sup = make
+    sup.instance_variable_set(:@running, {
+      123 => {
+        project: "p1", slug: "a", stage: "6-review", command: "hive run a",
+        dry_run: false, pgid: 99
+      }
+    })
+    initial = [ { pid: 123, ppid: 1, pgid: 99, start_time: "root", depth: 0 } ]
+    late_child = { pid: 124, ppid: 123, pgid: 124, start_time: "late", depth: 1 }
+    snapshots = [
+      { 123 => { pgid: 99, tree: initial } },
+      { 123 => { pgid: 99, tree: initial } },
+      { 123 => { pgid: 99, tree: initial + [ late_child ] } }
+    ]
+    exit_entry = Hive::Daemon::ChildSupervisor::ChildExit.new(
+      pid: 123, exit_code: nil, project: "p1", slug: "a", stage: "6-review",
+      command: "hive run a", started_at: Time.now, finished_at: Time.now
+    )
+    sup.define_singleton_method(:capture_shutdown_targets) { snapshots.shift || {} }
+    sup.define_singleton_method(:signal_shutdown_targets) { |_signal, _targets, **| nil }
+    sup.define_singleton_method(:process_group_alive?) { |_pgid| false }
+    sup.define_singleton_method(:reap_all) do
+      next [] if instance_variable_get(:@reaped)
+
+      instance_variable_set(:@reaped, true)
+      instance_variable_get(:@running).clear
+      [ exit_entry ]
+    end
+
+    with_replaced_singleton_method(
+      Hive::ProcessKill, :captured_process_alive?, ->(_process) { false }
+    ) do
+      assert_equal [ exit_entry ], sup.terminate_all(grace_sec: 1)
+    end
+
+    proof = sup.shutdown_proof
+    assert_equal true, proof.fetch(:drained)
+    assert_equal [ 123, 124 ], proof.fetch(:child_inventory).map { |entry| entry.fetch(:pid) }.sort
+  end
+
   def test_capture_shutdown_targets_requires_a_stable_full_tree
     sup = make
     sup.instance_variable_set(:@running, {

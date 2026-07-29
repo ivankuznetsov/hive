@@ -3,6 +3,7 @@ require "json"
 require "open3"
 require "rbconfig"
 require "hive/commands/init"
+require "hive/refactor_patrol/job_store"
 require "hive/task_meta"
 
 class CliVersionTest < Minitest::Test
@@ -12,6 +13,84 @@ class CliVersionTest < Minitest::Test
     out = run!(RbConfig.ruby, "-Ilib", "bin/hive", "--version")
 
     assert_equal "#{Hive::VERSION}\n", out
+  end
+
+  def test_first_eligible_cli_use_migrates_the_complete_registered_job_store
+    with_tmp_dir do |root|
+      %w[user-a user-b].each_with_index do |user, user_index|
+        home = File.join(root, user, "hive-home")
+        FileUtils.mkdir_p(home)
+        projects = %w[first second].map.with_index do |suffix, project_index|
+          project = File.join(root, user, suffix, "project")
+          state = File.join(root, user, suffix, "custom-state")
+          FileUtils.mkdir_p([
+            state,
+            File.join(project, ".hive-state", "stages")
+          ])
+          File.write(
+            File.join(project, ".hive-state", "config.yml"),
+            {
+              "project_name" => "#{user}-#{suffix}",
+              "hive_state_path" => ".hive-state"
+            }.to_yaml
+          )
+          legacy_job = File.join(
+            state, "refactor_patrol", "v2", "jobs",
+            "job-released.json"
+          )
+          FileUtils.mkdir_p(File.dirname(legacy_job))
+          File.binwrite(
+            legacy_job,
+            File.binread(File.expand_path(
+              "../fixtures/refactor_patrol/released_v2_job.json",
+              __dir__
+            ))
+          )
+          {
+            "name" => "#{user}-#{suffix}",
+            "path" => project,
+            "real_path" => File.realpath(project),
+            "hive_state_path" => state,
+            "project_id" => format(
+              "00000000-0000-4000-a000-%012d",
+              (user_index * 100) + project_index + 1
+            )
+          }
+        end
+        File.write(
+          File.join(home, "config.yml"),
+          { "registered_projects" => projects }.to_yaml
+        )
+
+        out, err, status = Open3.capture3(
+          {
+            "HIVE_HOME" => home,
+            "HOME" => home,
+            "HIVE_BIN" => "/nonexistent/hive",
+            "PATH" => ENV.fetch("PATH", "")
+          },
+          RbConfig.ruby, "-Ilib", "bin/hive", "migrate",
+          projects.first.fetch("path")
+        )
+
+        assert status.success?, err
+        assert_includes out, "hive: migrate found nothing to move"
+        projects.each do |project|
+          current = Hive::RefactorPatrol::JobStore.root_for(
+            project.fetch("path"),
+            hive_state_path: project.fetch("hive_state_path")
+          )
+          migrated = JSON.parse(File.binread(File.join(
+            current, "jobs", "job-released.json"
+          )))
+          assert_equal 3, migrated.fetch("schema_version")
+        end
+        assert File.file?(File.join(
+          home, "schema-migrations",
+          "refactor-patrol-job-v3.json"
+        ))
+      end
+    end
   end
 
   def test_strict_no_write_routes_skip_scheduler_reconciliation

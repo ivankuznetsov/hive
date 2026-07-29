@@ -108,6 +108,31 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
     end
   end
 
+  def test_shutdown_acknowledgement_is_generation_bound_and_read_only
+    with_tmp_dir do |dir|
+      path = File.join(dir, "private", "operational-snapshot.json")
+      _store, assembler, reader = build(path)
+      assembler.begin_tick(now: T0)
+      assembler.shutdown(
+        admission_closed: true, drained: true,
+        child_inventory: [ { pid: 77, pgid: 77, start_time: "child-start" } ],
+        now: T0 + 1
+      )
+      before = File.binread(path)
+
+      acknowledgement = reader.shutdown_acknowledgement(
+        expected_daemon: IDENTITY, now: T0 + 2
+      )
+
+      assert_equal before, File.binread(path)
+      assert_equal true, acknowledgement.fetch("admission_closed")
+      assert_equal [ 77 ], acknowledgement.fetch("child_inventory").map { |entry| entry.fetch("pid") }
+      assert_nil reader.shutdown_acknowledgement(
+        expected_daemon: IDENTITY.merge("generation" => "other"), now: T0 + 2
+      )
+    end
+  end
+
   def test_reconfigured_validity_is_measured_from_tick_completion
     with_tmp_dir do |dir|
       path = File.join(dir, "private", "operational-snapshot.json")

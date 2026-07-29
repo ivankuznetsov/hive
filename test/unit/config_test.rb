@@ -46,6 +46,38 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_registry_backfill_adds_canonical_path_even_when_project_id_exists
+    with_tmp_global_config do |home|
+      project = Dir.mktmpdir("hive-registry-real-path")
+      path = File.join(home, "config.yml")
+      project_id = SecureRandom.uuid
+      File.write(
+        path,
+        {
+          "registered_projects" => [
+            {
+              "name" => "old",
+              "path" => project,
+              "project_id" => project_id
+            }
+          ]
+        }.to_yaml
+      )
+
+      assert Hive::Config.ensure_project_identities!
+      row = YAML.safe_load(
+        File.read(path)
+      ).fetch("registered_projects").first
+      assert_equal project_id, row.fetch("project_id")
+      assert_equal File.realpath(project), row.fetch("real_path")
+      assert_equal File.realpath(project),
+                   Hive::Config.registered_projects.first
+                               .fetch("real_path")
+    ensure
+      FileUtils.rm_rf(project) if project
+    end
+  end
+
   include HiveTestHelper
 
   def test_load_returns_defaults_when_no_config_file

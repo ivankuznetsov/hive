@@ -356,52 +356,31 @@ class ModulesMigrationEvidenceStoreTest < Minitest::Test
     end
   end
 
-  def test_bounded_reads_detect_directory_and_inode_races
+  def test_public_reads_reject_missing_history_and_oversized_evidence
     with_tmp_dir do |root|
       store = Hive::Modules::Migration::EvidenceStore.new(root: root)
-      assert_raises(Hive::ConfigError) do
-        store.send(
-          :bounded_paths,
-          File.join(root, "missing")
-        )
-      end
+      capture = capture_for(recorded_at: NOW)
+      store.append_capture(capture)
+      path = File.join(root, "captures", "#{capture.capture_id}.json")
+      File.binwrite(
+        path,
+        "x" * (Hive::Modules::Migration::PatrolEvidence::MAX_CAPTURE_BYTES + 1)
+      )
 
-      assert_raises(Hive::ConfigError) do
-        store.send(
-          :bounded_regular_read,
-          "/proc/self/stat",
-          max_bytes: 0
-        )
+      error = assert_raises(Hive::ConfigError) do
+        store.fetch_capture(capture.capture_id)
       end
+      assert_equal "patrol evidence is malformed", error.message
 
-      path = File.join(root, "race.json")
-      File.write(path, "{}")
-      fake_stat = File.stat(__FILE__)
-      fake_io = Object.new
-      fake_io.define_singleton_method(:stat) { fake_stat }
-      with_file_open_override(path, fake_io) do
-        assert_raises(Hive::ConfigError) do
-          store.send(:bounded_regular_read, path, max_bytes: 16)
-        end
+      FileUtils.rm_r(File.join(root, "captures"))
+      error = assert_raises(Hive::ConfigError) do
+        store.captures
       end
+      assert_equal "patrol evidence is malformed", error.message
     end
   end
 
   private
-
-  def with_file_open_override(target, fake_io)
-    original = File.method(:open)
-    File.singleton_class.define_method(:open) do |path, *args, &block|
-      if path == target
-        block ? block.call(fake_io) : fake_io
-      else
-        original.call(path, *args, &block)
-      end
-    end
-    yield
-  ensure
-    File.singleton_class.define_method(:open, original)
-  end
 
   def capture_for(recorded_at:)
     Hive::Modules::Migration::PatrolCapture.build(

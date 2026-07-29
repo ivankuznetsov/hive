@@ -1181,6 +1181,7 @@ module Hive
         project = {
           "name" => entry["name"],
           "path" => abs_path,
+          "real_path" => registry_real_path(entry),
           "hive_state_path" => entry["hive_state_path"],
           "repository_identity" => entry["repository_identity"],
           "project_id" => registry_project_id(entry),
@@ -1206,13 +1207,21 @@ module Hive
 
         Array(data["registered_projects"]).each do |entry|
           next unless valid_registry_entry?(entry)
-          next if valid_project_id?(entry["project_id"])
 
-          project_id = registry_project_id(entry)
-          entry["project_id"] = project_id
-          entry["registration_id"] ||= "legacy:#{project_id}"
-          entry["registered_at"] ||= now.utc.iso8601(6)
-          changed = true
+          unless valid_project_id?(entry["project_id"])
+            project_id = registry_project_id(entry)
+            entry["project_id"] = project_id
+            entry["registration_id"] ||= "legacy:#{project_id}"
+            entry["registered_at"] ||= now.utc.iso8601(6)
+            changed = true
+          end
+          if entry["real_path"].nil?
+            real_path = realpath_or_nil(File.expand_path(entry.fetch("path")))
+            if real_path
+              entry["real_path"] = real_path
+              changed = true
+            end
+          end
         end
         write_global_config_atomic!(data) if changed
       end

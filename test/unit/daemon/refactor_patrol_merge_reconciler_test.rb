@@ -166,7 +166,7 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
     with_tmp_dir do |dir|
       gh = FakeGh.new
       gh.pages = { nil => page([ summary(1, at: T0) ]) }
-      entry = { "name" => "demo", "path" => dir, "hive_state_path" => File.join(dir, ".hive-state") }
+      entry = entry_for(dir)
       intake = Hive::Daemon::RefactorPatrolMergeReconciler.new(
         registry: -> { [ entry ] },
         config_loader: ->(_path) { enabled_cfg },
@@ -397,8 +397,8 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
         gh = MultiProjectGh.new(identities: identities, clock: clock)
         gh.slow_repository = "acme/slow"
         entries = [
-          { "name" => "slow", "path" => slow_dir },
-          { "name" => "fast", "path" => fast_dir }
+          entry_for(slow_dir, name: "slow"),
+          entry_for(fast_dir, name: "fast")
         ]
         intake = Hive::Daemon::RefactorPatrolMergeReconciler.new(
           registry: -> { entries }, config_loader: ->(*) { enabled_cfg },
@@ -813,7 +813,7 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
 
   def test_tick_isolates_registry_config_failures_and_default_loader_is_constructible
     with_tmp_dir do |dir|
-      entry = { "name" => "demo", "path" => dir }
+      entry = entry_for(dir)
       intake = Hive::Daemon::RefactorPatrolMergeReconciler.new(
         registry: -> { [ entry ] },
         config_loader: ->(_path) { raise Hive::ConfigError, "broken config" },
@@ -845,7 +845,7 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
       clock = FakeMonotonic.new
       gh = FakeGh.new
       gh.pages = { nil => page([]) }
-      entry = { "name" => "demo", "path" => dir }
+      entry = entry_for(dir)
       intake = Hive::Daemon::RefactorPatrolMergeReconciler.new(
         registry: -> { [ entry ] },
         config_loader: lambda { |_path|
@@ -867,7 +867,7 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
 
   def test_watcher_timeout_falls_back_when_enabled_project_config_fails
     with_tmp_dir do |dir|
-      entry = { "name" => "demo", "path" => dir }
+      entry = entry_for(dir)
       intake = Hive::Daemon::RefactorPatrolMergeReconciler.new(
         registry: -> { [ entry ] },
         config_loader: ->(_path) { raise Hive::ConfigError, "broken" },
@@ -985,7 +985,7 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
       )
       error = assert_raises(Hive::Daemon::RefactorPatrolMergeReconciler::GithubFailure) do
         intake.send(
-          :scan_page_step, { "name" => "demo", "path" => dir }, enabled_cfg,
+          :scan_page_step, entry_for(dir), enabled_cfg,
           nil, progress, now: T0, timeout_sec: 1
         )
       end
@@ -1018,7 +1018,7 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
         default_branch: "main", previous: nil,
         merged_since: T0 - 3600, now: T0
       )
-      entry = { "name" => "demo", "path" => dir }
+      entry = entry_for(dir)
 
       assert_raises(Hive::Daemon::RefactorPatrolMergeReconciler::ScanInvalidated) do
         intake.send(
@@ -1157,7 +1157,7 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
   private
 
   def reconciler(dir, gh, cfg: enabled_cfg, name: "demo", **options)
-    entry = { "name" => name, "path" => dir, "hive_state_path" => File.join(dir, ".hive-state") }
+    entry = entry_for(dir, name: name)
     Hive::Daemon::RefactorPatrolMergeReconciler.new(
       registry: -> { [ entry ] },
       config_loader: ->(_path) { cfg },
@@ -1231,7 +1231,16 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
   end
 
   def job_store(dir)
-    Hive::RefactorPatrol::JobStore.new(dir)
+    Hive::RefactorPatrol::JobStore.new(dir, project: entry_for(dir))
+  end
+
+  def entry_for(dir, name: "demo")
+    {
+      "name" => name,
+      "path" => dir,
+      "hive_state_path" => File.join(dir, ".hive-state"),
+      "project_id" => "project-#{name}"
+    }
   end
 
   def quarantine_paths(dir)

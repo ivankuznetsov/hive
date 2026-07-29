@@ -446,6 +446,16 @@ module Hive
       Hive::Commands::Migrate.new(project_path).call
     end
 
+    desc(
+      "refactor-patrol-migrate-installed",
+      "Run the candidate-only installation JobStore migration sweep",
+      hide: true
+    )
+    def refactor_patrol_migrate_installed
+      require "hive/commands/refactor_patrol_candidate_migration"
+      Hive::Commands::RefactorPatrolCandidateMigration.new.call
+    end
+
     desc "wiki SUBCOMMAND", "Manage generated wiki artifacts (compile-log)"
     long_desc <<~DESC
       Subcommands:
@@ -979,6 +989,25 @@ module Hive
         limit: options[:limit],
         cursor: options[:cursor],
         full: options[:full]
+      ).call
+    end
+
+    desc(
+      "refactor-patrol-schema-restore PROJECT SNAPSHOT_ID",
+      "Restore one exact JobStore v2 snapshot while preserving v3 state",
+      hide: true
+    )
+    long_desc <<~DESC
+      Performs an explicit offline reverse transition for the registered
+      project's JobStore. SNAPSHOT_ID must identify the exact verified v2
+      backup. Hive refuses the operation while a daemon or worker is active,
+      or when any job changed after forward migration. The complete candidate
+      v3 tree is moved to a durable quarantine; it is never deleted.
+    DESC
+    def refactor_patrol_schema_restore(project, snapshot_id)
+      require "hive/commands/refactor_patrol_schema_restore"
+      Hive::Commands::RefactorPatrolSchemaRestore.new(
+        project, snapshot_id, json: options[:json]
       ).call
     end
 

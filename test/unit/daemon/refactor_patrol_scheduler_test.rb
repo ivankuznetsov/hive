@@ -40,6 +40,30 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_scheduler_uses_the_registered_state_path_for_jobs_and_manifests
+    with_tmp_dir do |dir|
+      configured = File.join(dir, "state", "hive")
+      entry = entry(dir, "demo").merge("hive_state_path" => configured)
+      store = Hive::RefactorPatrol::JobStore.new(
+        dir, hive_state_path: configured, project: entry
+      )
+      enqueue(store)
+      scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
+        registry: -> { [ entry ] }, config_loader: ->(_path) { enabled_cfg },
+        repository_resolver: ->(_entry, _cfg) { repository_identity },
+        checkout_guard_factory: ->(*) { Guard.new }, owner: "daemon-a",
+        claim_resolver: ->(_attempt) { :resolved }
+      )
+
+      candidate = scheduler.candidates(now: T0).fetch(0)
+
+      assert_equal File.join(
+        configured, "refactor_patrol", "v2", "manifests", "job-7.json"
+      ), candidate.fetch(:manifest_path)
+      refute Dir.exist?(File.join(dir, ".hive-state", "refactor_patrol", "v2"))
+    end
+  end
+
   def test_reservation_rechecks_migration_ownership_after_candidate_discovery
     with_project do |_dir, entry, store|
       enqueue(store)
@@ -238,9 +262,16 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       second_dir = File.join(root, "second")
       [ first_dir, second_dir ].each { |dir| FileUtils.mkdir_p(dir) }
       entries = [ entry(first_dir, "one"), entry(second_dir, "two") ]
-      first_store = Hive::RefactorPatrol::JobStore.new(first_dir)
+      first_store = Hive::RefactorPatrol::JobStore.new(
+        first_dir, project: entries.fetch(0)
+      )
       enqueue(first_store, registration: "one")
-      stores = { first_dir => first_store, second_dir => Hive::RefactorPatrol::JobStore.new(second_dir) }
+      stores = {
+        first_dir => first_store,
+        second_dir => Hive::RefactorPatrol::JobStore.new(
+          second_dir, project: entries.fetch(1)
+        )
+      }
       scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
         registry: -> { entries }, config_loader: ->(_path) { enabled_cfg },
         job_store_factory: ->(path) { stores.fetch(path) },
@@ -262,7 +293,9 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       second_dir = File.join(root, "second")
       [ first_dir, second_dir ].each { |dir| FileUtils.mkdir_p(dir) }
       entries = [ entry(first_dir, "one"), entry(second_dir, "two") ]
-      first_store = Hive::RefactorPatrol::JobStore.new(first_dir)
+      first_store = Hive::RefactorPatrol::JobStore.new(
+        first_dir, project: entries.fetch(0)
+      )
       enqueue(first_store, registration: "one")
       configs = {
         first_dir => enabled_cfg,
@@ -288,11 +321,15 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       second_dir = File.join(root, "second")
       [ first_dir, second_dir ].each { |dir| FileUtils.mkdir_p(dir) }
       entries = [ entry(first_dir, "one"), entry(second_dir, "two") ]
-      first_store = Hive::RefactorPatrol::JobStore.new(first_dir)
+      first_store = Hive::RefactorPatrol::JobStore.new(
+        first_dir, project: entries.fetch(0)
+      )
       enqueue(first_store, registration: "one")
       stores = {
         first_dir => first_store,
-        second_dir => Hive::RefactorPatrol::JobStore.new(second_dir)
+        second_dir => Hive::RefactorPatrol::JobStore.new(
+          second_dir, project: entries.fetch(1)
+        )
       }
       identities = {
         "one" => repository_identity,
@@ -346,7 +383,9 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       second_dir = File.join(root, "second")
       [ first_dir, second_dir ].each { |dir| FileUtils.mkdir_p(dir) }
       entries = [ entry(first_dir, "demo"), entry(second_dir, "duplicate") ]
-      first_store = Hive::RefactorPatrol::JobStore.new(first_dir)
+      first_store = Hive::RefactorPatrol::JobStore.new(
+        first_dir, project: entries.fetch(0)
+      )
       write_action_job(first_dir, first_store)
       initialized = first_store.initialize_actions!(
         "action-job",
@@ -369,7 +408,9 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       )
       stores = {
         first_dir => first_store,
-        second_dir => Hive::RefactorPatrol::JobStore.new(second_dir)
+        second_dir => Hive::RefactorPatrol::JobStore.new(
+          second_dir, project: entries.fetch(1)
+        )
       }
       scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
         registry: -> { entries }, config_loader: ->(_path) { enabled_cfg },
@@ -392,6 +433,7 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       valid = complete_zero_envelope(entry)
       failures = [
         [ 0, { "schema" => "hive-refactor-patrol" } ],
+        [ 0, valid.merge("schema_version" => 2) ],
         [ 1, valid ],
         [ 0, valid.merge("complete" => false, "zero_reason" => nil) ],
         [ 0, valid.merge("job_id" => "wrong-job") ],
@@ -485,7 +527,9 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       assert_equal "dispatch_uncertain",
                    store.effect_state(failed_intent).fetch("state")
 
-      restarted_store = Hive::RefactorPatrol::JobStore.new(dir)
+      restarted_store = Hive::RefactorPatrol::JobStore.new(
+        dir, project: entry
+      )
       restarted = scheduler(entry, restarted_store)
       assert_empty restarted.candidates(now: T0 + 3)
 
@@ -869,7 +913,10 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
 
       assert_equal "demo", scheduler.instance_variable_get(:@config_loader).call(dir).fetch("project_name")
       assert_instance_of Hive::RefactorPatrol::JobStore,
-                         scheduler.instance_variable_get(:@job_store_factory).call(dir)
+                         scheduler.send(
+                           :store_for,
+                           entry(dir, "demo")
+                         )
       assert_instance_of Hive::RefactorPatrol::CheckoutGuard,
                          scheduler.instance_variable_get(:@checkout_guard_factory).call(dir, "main")
       expected = repository_identity
@@ -1234,6 +1281,98 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_recovery_persistence_failure_and_unscoped_failure_are_reported
+    with_tmp_dir do |dir|
+      project = entry(dir, "demo")
+      capture = Hive::Modules::Migration::PatrolCapture.build(
+        module_name: "architecture-patrol",
+        project: {
+          "project_id" => project.fetch("project_id"),
+          "name" => project.fetch("name"),
+          "repository" => "acme/demo"
+        },
+        trigger: { "kind" => "pull_request.merged", "id" => "merge-7" },
+        reservation: {
+          "kind" => "architecture",
+          "id" => "job-7",
+          "job_id" => "job-7"
+        },
+        owner: "legacy",
+        owner_epoch: 1,
+        selection_input: {
+          "kind" => "candidate",
+          "job_id" => "job-7",
+          "phase" => "discovery"
+        },
+        selection:
+          Hive::Modules::Migration::PatrolDecisionProjection.build(
+            module_name: "architecture-patrol",
+            rationale: "due",
+            job_id: "job-7",
+            phase: "discovery"
+          ),
+        outcome_class: nil,
+        outcome: nil,
+        occurred_at: T0,
+        recorded_at: T0
+      )
+      occurrence_failure = Object.new
+      occurrence_failure.define_singleton_method(
+        :each_recovery_active_occurrence
+      ) do |&block|
+        block.call(
+          "occurrence_id" => capture.occurrence_id,
+          "phase" => "reserved",
+          "provisional_capture" => capture.to_h,
+          "outbox" => []
+        )
+      end
+      occurrence_failure.define_singleton_method(:recovery_backoff) do |now:|
+        now
+        { "generation" => 0, "failure" => nil, "blocked" => false }
+      end
+      occurrence_failure.define_singleton_method(:read_job) do |_job_id|
+        raise Hive::RefactorPatrol::JobStore::CorruptRecord,
+              "occurrence recovery failed"
+      end
+      occurrence_failure.define_singleton_method(
+        :record_recovery_failure!
+      ) { |**| raise IOError, "journal unavailable" }
+      scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
+        registry: -> { [ project ] },
+        config_loader: ->(_path) { enabled_cfg },
+        job_store_factory: ->(_path) { occurrence_failure },
+        repository_resolver: ->(_entry, _cfg) { repository_identity }
+      )
+
+      assert_empty scheduler.candidates(now: T0)
+      unavailable = scheduler.drain_events.fetch(0)
+      assert_equal "recovery_state_unavailable",
+                   unavailable.fetch(:blocker)
+      assert_equal capture.occurrence_id,
+                   unavailable.fetch(:occurrence_id)
+
+      unscoped_failure = Object.new
+      install_recovery_protocol(unscoped_failure)
+      unscoped_failure.define_singleton_method(
+        :each_recovery_active_occurrence
+      ) { raise IOError, "inventory unavailable" }
+      scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
+        registry: -> { [ project ] },
+        config_loader: ->(_path) { enabled_cfg },
+        job_store_factory: ->(_path) { unscoped_failure },
+        repository_resolver: ->(_entry, _cfg) { repository_identity }
+      )
+
+      assert_empty scheduler.candidates(now: T0)
+      blocked = scheduler.drain_events.fetch(0)
+      assert_equal "recovery_failed", blocked.fetch(:blocker)
+      assert_nil blocked.fetch(:occurrence_id)
+      assert_nil blocked.fetch(:job_id)
+      assert_equal 1, blocked.fetch(:retry_count)
+    end
+  end
+
   def test_checkout_guard_error_is_durably_blocked_with_specific_reason
     with_project do |_dir, entry, store|
       enqueue(store)
@@ -1505,7 +1644,11 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
   def with_project
     with_tmp_dir do |dir|
       entry = entry(dir, "demo")
-      yield dir, entry, Hive::RefactorPatrol::JobStore.new(dir)
+      yield(
+        dir,
+        entry,
+        Hive::RefactorPatrol::JobStore.new(dir, project: entry)
+      )
     end
   end
 
@@ -1543,7 +1686,7 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
 
   def enqueue(store, job_id: "job-7", number: 7, merged_at: T0, registration: "demo")
     manifest = manifest(job_id: job_id, number: number, merged_at: merged_at, registration: registration)
-    publish_manifest(store.project_root, manifest)
+    publish_manifest(store, manifest)
     enqueue_manifest(store,
       manifest,
       policy: { "discovery" => true, "auto_fix" => false, "issue_filing" => false },
@@ -1669,14 +1812,18 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     payload.merge("manifest_checksum" => Hive::RefactorPatrol::PrManifest.checksum(payload))
   end
 
-  def publish_manifest(dir, manifest)
-    root = File.join(dir, ".hive-state", "refactor_patrol", "v2", "manifests")
+  def publish_manifest(store, manifest)
+    root = File.join(File.dirname(store.root), "v2", "manifests")
     FileUtils.mkdir_p(root)
     File.write(File.join(root, "#{manifest.fetch('job_id')}.json"), JSON.generate(manifest))
   end
 
   def complete_zero_envelope(entry)
-    aggregate = Hive::RefactorPatrol::JobStore.new(entry.fetch("path")).read_job("job-7")
+    aggregate = Hive::RefactorPatrol::JobStore.new(
+      entry.fetch("path"),
+      hive_state_path: entry.fetch("hive_state_path"),
+      project: entry
+    ).read_job("job-7")
     {
       "schema" => "hive-refactor-patrol", "schema_version" => 3, "ok" => true,
       "job_id" => "job-7", "project" => entry.fetch("name"), "project_root" => entry.fetch("path"),
@@ -1692,9 +1839,7 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
 
   def action_envelope(entry, aggregate)
     {
-      # A child launched before an upgrade may still return the frozen v2
-      # contract. The scheduler must accept that in-flight result.
-      "schema" => "hive-refactor-patrol", "schema_version" => 2, "ok" => true,
+      "schema" => "hive-refactor-patrol", "schema_version" => 3, "ok" => true,
       "job_id" => aggregate.fetch("job_id"), "project" => entry.fetch("name"),
       "project_root" => entry.fetch("path"), "dry_run" => false,
       "source_pr" => aggregate.fetch("source"), "analysis_sha" => aggregate.fetch("analysis_sha"),
@@ -1706,7 +1851,7 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
 
   def write_action_job(dir, store)
     data = manifest(job_id: "action-job", number: 9, merged_at: T0, registration: "demo")
-    publish_manifest(dir, data)
+    publish_manifest(store, data)
     aggregate = enqueue_manifest(
       store,
       data,

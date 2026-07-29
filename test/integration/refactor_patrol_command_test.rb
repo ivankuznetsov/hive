@@ -85,6 +85,31 @@ class RefactorPatrolCommandTest < Minitest::Test
     end
   end
 
+  class CheckpointingReviewer
+    attr_reader :review_errors, :seen_feature_ids, :feature_results
+
+    def initialize(thesis)
+      @thesis = thesis
+      @review_errors = []
+      @seen_feature_ids = []
+      @feature_results = []
+    end
+
+    def call(features, leverage_by_feature:)
+      feature = features.fetch(0)
+      @seen_feature_ids << feature.id
+      result = {
+        "feature_id" => feature.id.to_s,
+        "complete" => true,
+        "thesis_ids" => [ @thesis.id ],
+        "errors" => []
+      }
+      @feature_results << result
+      yield feature, [ @thesis ], result
+      [ @thesis ]
+    end
+  end
+
   class MutatingCompleteReviewer
     attr_reader :review_errors, :seen_feature_ids, :feature_results
 
@@ -847,6 +872,83 @@ class RefactorPatrolCommandTest < Minitest::Test
       assert_nil forbidden_resolver.seen, "persisted-manifest mode must not resolve mutable GitHub PR metadata"
       assert v3_refactor_schemer.valid?(JSON.parse(scheduled_out))
       assert_equal JSON.parse(scheduled_out), JSON.parse(File.read(result_file))
+    end
+  end
+
+  def test_job_manifest_child_checkpoints_with_its_daemon_attached_claim
+    with_refactor_patrol_project do |repo|
+      head = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      manifest = with_manifest_checksum(
+        pr_manifest(
+          merge_sha: head,
+          changed_paths: [ "lib/checkout.rb" ]
+        )
+      )
+      path = publish_job_manifest(repo, manifest)
+      cfg = Hive::Config.load(repo)
+      store, = enroll_manifest!(
+        repo,
+        manifest,
+        policy: Hive::RefactorPatrol::Policy.capture(cfg),
+        now: Time.now.utc
+      )
+      process_start = Hive::Lock.process_start_time(Process.pid)
+      token = store.claim_discovery!(
+        manifest.fetch("job_id"),
+        owner: "daemon-test",
+        analysis_sha: head,
+        now: Time.now.utc,
+        lease_sec: 3600
+      )
+      store.attach_discovery_process!(
+        token,
+        pid: Process.pid,
+        process_start_time: process_start,
+        pgid: Process.getpgrp,
+        now: Time.now.utc,
+        lease_sec: 3600
+      )
+      item = thesis(
+        "checkpointed",
+        feature_id: "checkout",
+        fingerprint: "fp-checkpointed"
+      )
+      reviewer = CheckpointingReviewer.new(item)
+      result_file = File.join(
+        repo,
+        ".hive-state",
+        "refactor_patrol",
+        "v2",
+        "results",
+        "#{manifest.fetch('job_id')}-checkpoint.json"
+      )
+
+      out, err, status = with_captured_exit do
+        command_for(
+          job_manifest: path,
+          result_file: result_file,
+          features: [
+            feature("checkout", files: [ "lib/checkout.rb" ])
+          ],
+          reviewer: reviewer,
+          leverage_scores: leverage_scores("checkout" => 0.9)
+        ).call
+      end
+
+      assert_equal Hive::ExitCodes::SUCCESS, status, "#{out}\n#{err}"
+      aggregate = Hive::RefactorPatrol::JobStore.new(repo).read_job(
+        manifest.fetch("job_id")
+      )
+      assert_equal(
+        [ "checkout" ],
+        aggregate.fetch("feature_results").map do |result|
+          result.fetch("feature_id")
+        end
+      )
+      assert_equal [ "checkpointed" ],
+                   aggregate.dig("dispositions", "accepted")
+                            .map { |entry| entry.fetch("id") }
+      assert JSON.parse(out).fetch("complete")
     end
   end
 
@@ -1615,9 +1717,7 @@ class RefactorPatrolCommandTest < Minitest::Test
       raw.fetch("refactor_patrol")["enabled"] = false
       File.write(config_path, raw.to_yaml)
       v2_root = File.join(repo, ".hive-state", "refactor_patrol", "v2")
-      before = Dir.glob(File.join(v2_root, "**", "*"), File::FNM_DOTMATCH)
-                  .select { |path| File.file?(path) }
-                  .to_h { |path| [ path, File.binread(path) ] }
+      before = durable_tree_snapshot(v2_root)
 
       list_out, = capture_io do
         Hive::Commands::RefactorPatrol.new(
@@ -1647,11 +1747,10 @@ class RefactorPatrolCommandTest < Minitest::Test
       assert_includes text_out, "hive refactor-patrol jobs: demo"
       assert_includes text_out, manifest.fetch("job_id")
 
-      after = Dir.glob(File.join(v2_root, "**", "*"), File::FNM_DOTMATCH)
-                 .select { |path| File.file?(path) }
-                 .to_h { |path| [ path, File.binread(path) ] }
+      after = durable_tree_snapshot(v2_root)
       assert_equal before, after,
-                   "list/show must not enqueue, claim, replay, or rewrite durable patrol state"
+                   "status/list/show must not create locks or change any " \
+                   "durable patrol entry"
 
       invalid_out, = capture_io do
         error = assert_raises(Hive::RefactorPatrol::JobQuery::UsageError) do
@@ -1665,6 +1764,92 @@ class RefactorPatrolCommandTest < Minitest::Test
       assert_empty job_query_schemer.validate(invalid_payload).to_a
       assert_equal "usage", invalid_payload.fetch("error_kind")
       assert_equal Hive::ExitCodes::USAGE, invalid_payload.fetch("exit_code")
+    end
+  end
+
+  def test_job_list_reports_migration_required_without_rewriting_v2
+    with_refactor_patrol_project do |repo|
+      cfg = Hive::Config.load(repo)
+      manifest = with_manifest_checksum(pr_manifest)
+      store, = enroll_manifest!(
+        repo, manifest,
+        policy:
+          Hive::RefactorPatrol::Policy.capture(
+            cfg, now: Time.utc(2026, 7, 12, 9, 0, 0)
+          ),
+        now: Time.utc(2026, 7, 12, 9, 0, 0)
+      )
+      aggregate = store.read_job(manifest.fetch("job_id"))
+      legacy = aggregate.reject do |key, _value|
+        %w[occurrence_id intake_transition_id].include?(key)
+      end.merge("schema_version" => 2)
+      path = File.join(
+        store.root, "jobs", "#{manifest.fetch('job_id')}.json"
+      )
+      File.binwrite(path, "#{JSON.pretty_generate(legacy)}\n")
+      before = File.binread(path)
+
+      out, = capture_io do
+        error = assert_raises(
+          Hive::RefactorPatrol::JobQuery::MigrationRequired
+        ) do
+          Hive::Commands::RefactorPatrol.new(
+            "demo", json: true, list: true
+          ).call
+        end
+        assert_equal Hive::ExitCodes::TEMPFAIL, error.exit_code
+      end
+      payload = JSON.parse(out)
+      assert_empty job_query_schemer.validate(payload).to_a
+      assert_equal "migration_required",
+                   payload.fetch("error_kind")
+      assert_equal before, File.binread(path),
+                   "read-only list must not run the converter"
+    end
+  end
+
+  def test_migrated_released_v2_job_is_immediately_listable_and_showable
+    with_refactor_patrol_project do |repo|
+      entry = Hive::Config.find_project("demo")
+      root = Hive::RefactorPatrol::JobStore.legacy_root_for(
+        repo, hive_state_path: entry.fetch("hive_state_path")
+      )
+      FileUtils.mkdir_p(File.join(root, "jobs"))
+      File.binwrite(
+        File.join(root, "jobs", "job-released.json"),
+        File.binread(File.expand_path(
+          "../fixtures/refactor_patrol/released_v2_job.json",
+          __dir__
+        ))
+      )
+      fence = Object.new
+      fence.define_singleton_method(:assert_quiescent!) { true }
+
+      assert Hive::RefactorPatrol::JobStore.migrate_schema!(
+        repo,
+        hive_state_path: entry.fetch("hive_state_path"),
+        project: entry,
+        writer_fence: fence
+      )
+
+      list_out, = capture_io do
+        Hive::Commands::RefactorPatrol.new(
+          "demo", json: true, list: true, limit: 10
+        ).call
+      end
+      list = JSON.parse(list_out)
+      assert_empty job_query_schemer.validate(list).to_a
+      assert_equal [ "job-released" ],
+                   list.fetch("jobs").map { |job| job.fetch("job_id") }
+
+      show_out, = capture_io do
+        Hive::Commands::RefactorPatrol.new(
+          "demo", json: true, show: "job-released"
+        ).call
+      end
+      show = JSON.parse(show_out)
+      assert_empty job_query_schemer.validate(show).to_a
+      assert_equal "job-released", show.dig("job", "job_id")
     end
   end
 
@@ -1988,6 +2173,28 @@ class RefactorPatrolCommandTest < Minitest::Test
       now: now
     )
     [ store, aggregate ]
+  end
+
+  def durable_tree_snapshot(root)
+    Dir.glob(
+      File.join(root, "**", "*"), File::FNM_DOTMATCH
+    ).sort.to_h do |path|
+      relative = path.delete_prefix("#{root}/")
+      stat = File.lstat(path)
+      value = if stat.file?
+        [
+          :file, stat.mode & 0o777, stat.mtime,
+          Digest::SHA256.hexdigest(File.binread(path))
+        ]
+      elsif stat.directory?
+        [ :directory, stat.mode & 0o777, stat.mtime ]
+      elsif stat.symlink?
+        [ :symlink, File.readlink(path) ]
+      else
+        [ :other, stat.mode, stat.mtime ]
+      end
+      [ relative, value ]
+    end
   end
 
   def canonical_json(value)

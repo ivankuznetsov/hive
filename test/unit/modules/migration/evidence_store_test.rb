@@ -14,7 +14,7 @@ class ModulesMigrationEvidenceStoreTest < Minitest::Test
       receipt = Hive::Modules::Migration::EffectReceipt.build(
         intent: intent,
         status: "committed",
-        outcome: { "state" => "open", "remote_id" => "owner/demo#7" },
+        outcome: { "pr_url" => "https://example.test/owner/demo/pull/7" },
         recorded_at: NOW + 1
       )
 
@@ -390,7 +390,12 @@ class ModulesMigrationEvidenceStoreTest < Minitest::Test
         "name" => "demo",
         "repository" => "owner/demo"
       },
-      trigger: { "kind" => "schedule", "id" => "timer-1" },
+      trigger: {
+        "kind" => "schedule",
+        "id" => "timer-1",
+        "schedule" => "ordinary",
+        "occurred_at" => NOW.iso8601(6)
+      },
       reservation: { "kind" => "ordinary", "id" => "reservation-1" },
       owner: "legacy",
       owner_epoch: 2,
@@ -439,7 +444,7 @@ class ModulesMigrationEvidenceStoreTest < Minitest::Test
     Hive::Modules::Migration::EffectReceipt.build(
       intent: intent,
       status: "committed",
-      outcome: { "target" => target },
+      outcome: { "pr_url" => "https://example.test/#{target}" },
       recorded_at: NOW + 1
     )
   end

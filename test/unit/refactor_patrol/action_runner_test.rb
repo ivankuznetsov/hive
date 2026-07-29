@@ -3569,7 +3569,9 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       },
       trigger: {
         "kind" => "pull_request.merged",
-        "id" => "acme/polyglot:#{job_id}:#{'b' * 40}"
+        "id" => "acme/polyglot:#{job_id}:#{'b' * 40}",
+        "manifest_digest" => "a" * 64,
+        "merge_sha" => "b" * 40
       },
       reservation: {
         "kind" => "architecture",

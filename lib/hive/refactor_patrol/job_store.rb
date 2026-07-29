@@ -1,10 +1,8 @@
 require "json"
-require "fileutils"
 require "digest"
 require "time"
 require "uri"
 require "forwardable"
-require "hive/atomic_file"
 require "hive/config"
 require "hive/refactor_patrol/architecture_occurrence_store"
 require "hive/refactor_patrol/job_occurrence_lifecycle"
@@ -15,6 +13,7 @@ require "hive/refactor_patrol/job_query_index"
 require "hive/refactor_patrol/job_record_validator"
 require "hive/refactor_patrol/job_schema_restore"
 require "hive/refactor_patrol/job_store_generation_cutover"
+require "hive/refactor_patrol/job_store_files"
 require "hive/refactor_patrol/state_paths"
 require "hive/modules/migration/patrols"
 require "hive/refactor_patrol/pr_manifest"
@@ -198,6 +197,15 @@ module Hive
           ).status
         end
 
+        def schema_admission_status(project_root, hive_state_path: nil,
+                                    project: nil)
+          generation_cutover(
+            project_root,
+            hive_state_path: hive_state_path,
+            project: project
+          ).admission_status
+        end
+
         def schema_snapshot_id(project_root, hive_state_path: nil,
                                project: nil)
           generation_cutover(
@@ -347,6 +355,12 @@ module Hive
         @hive_state_path = File.expand_path(hive_state_path || ".hive-state", @project_root)
         @root = self.class.root_for(@project_root, hive_state_path: @hive_state_path)
         @record_validator = JobRecordValidator.new(contract: self.class)
+        @job_files = JobStoreFiles.new(
+          root: @root,
+          anchor: @hive_state_path,
+          corrupt_record: CorruptRecord,
+          inconsistent_record: InconsistentRecord
+        )
         @schema_options = {
           hive_state_path: @hive_state_path,
           project: project,
@@ -365,10 +379,11 @@ module Hive
           inconsistent_record: InconsistentRecord
         )
         @job_query_index = JobQueryIndex.new(
-          root: @root,
+          files: @job_files,
           id_pattern: ID_PATTERN,
           corrupt_record: CorruptRecord,
-          inconsistent_record: InconsistentRecord
+          inconsistent_record: InconsistentRecord,
+          max_entries: JobStoreFiles::MAX_JOB_ENTRIES
         )
         @architecture_occurrences = ArchitectureOccurrenceStore.new(
           root: @root,
@@ -397,7 +412,8 @@ module Hive
                     :reserve_manifest_occurrence!, :reserve_occurrence!,
                     :occurrence_for_job, :occurrence_capture,
                     :each_recovery_active_occurrence, :recovery_active?,
-                    :recovery_backoff, :record_recovery_failure!,
+                    :rebuild_recovery_index!, :recovery_backoff,
+                    :record_recovery_failure!,
                     :clear_recovery_failure!, :prepare_effect!, :effect_state,
                     :effect_intent, :recorded_effect_transitions,
                     :unsettled_recorded_transitions,
@@ -445,21 +461,20 @@ module Hive
         return aggregate if dry_run
 
         prepare_schema_namespace!
-        path = job_path(aggregate.fetch("job_id"))
-        FileUtils.mkdir_p(File.dirname(path))
-        result = File.open("#{path}.lock", File::RDWR | File::CREAT, 0o600) do |lock|
-          lock.flock(File::LOCK_EX)
-          existing_file = File.file?(path)
+        job_id = aggregate.fetch("job_id")
+        path = job_path(job_id)
+        result = @job_files.with_job_admission(job_id) do
+          existing_file = @job_files.job_exists?(job_id)
           @job_query_index.with_registration(
-            aggregate.fetch("job_id"),
+            job_id,
             existing: existing_file,
             migration_job_ids: method(:ordered_job_query_ids)
           ) do
             if existing_file
-              existing = read_job(aggregate.fetch("job_id"))
+              existing = read_job(job_id)
               unless existing.fetch("source") == source
                 quarantine_job_source!(
-                  aggregate.fetch("job_id"),
+                  job_id,
                   authoritative: existing.fetch("source"),
                   candidate: source
                 )
@@ -1458,18 +1473,17 @@ module Hive
         return data if dry_run
 
         prepare_schema_namespace!
-        path = job_path(data.fetch("job_id"))
-        FileUtils.mkdir_p(File.dirname(path))
-        result = File.open("#{path}.lock", File::RDWR | File::CREAT, 0o600) do |lock|
-          lock.flock(File::LOCK_EX)
-          existing_file = File.file?(path)
+        job_id = data.fetch("job_id")
+        path = job_path(job_id)
+        result = @job_files.with_job_admission(job_id) do
+          existing_file = @job_files.job_exists?(job_id)
           @job_query_index.with_registration(
-            data.fetch("job_id"),
+            job_id,
             existing: existing_file,
             migration_job_ids: method(:ordered_job_query_ids)
           ) do
             if existing_file
-              existing = read_job(data.fetch("job_id"))
+              existing = read_job(job_id)
               validate_transition!(existing, data, path)
               if existing == data
                 existing
@@ -1489,7 +1503,12 @@ module Hive
       def read_job(job_id)
         id = validate_id!(job_id)
         path = job_path(id)
-        raise RecordNotFound.new("refactor patrol job not found", path: path) unless File.file?(path)
+        unless @job_files.job_exists?(id)
+          raise RecordNotFound.new(
+            "refactor patrol job not found",
+            path: path
+          )
+        end
 
         read_job_path(path, expected_job_id: id)
       end
@@ -1533,10 +1552,12 @@ module Hive
 
       def each_job
         return enum_for(__method__) unless block_given?
-        return unless Dir.exist?(jobs_dir)
 
-        Dir.glob(File.join(jobs_dir, "*.json")).sort.each do |path|
-          yield read_job_path(path, expected_job_id: File.basename(path, ".json"))
+        @job_files.each_job_id do |job_id|
+          yield read_job_path(
+            job_path(job_id),
+            expected_job_id: job_id
+          )
         end
       end
 
@@ -1601,12 +1622,7 @@ module Hive
 
       def with_action_catalog_lock
         prepare_schema_namespace!
-        FileUtils.mkdir_p(root)
-        path = File.join(root, "actions.lock")
-        File.open(path, File::RDWR | File::CREAT, 0o600) do |lock|
-          lock.flock(File::LOCK_EX)
-          yield
-        end
+        @job_files.with_action_catalog_lock { yield }
       end
 
       def normalize_action_specifications(aggregate, specifications, path)
@@ -2073,9 +2089,13 @@ module Hive
         prepare_schema_namespace!
         id = validate_id!(job_id)
         path = job_path(id)
-        FileUtils.mkdir_p(File.dirname(path))
-        File.open("#{path}.lock", File::RDWR | File::CREAT, 0o600) do |lock|
-          lock.flock(File::LOCK_EX)
+        unless @job_files.job_exists?(id)
+          raise RecordNotFound.new(
+            "refactor patrol job not found",
+            path: path
+          )
+        end
+        @job_files.with_job_lock(id) do
           @job_query_index.with_registration(
             id,
             existing: true,
@@ -2240,10 +2260,14 @@ module Hive
       end
 
       def quarantine_job_source!(job_id, authoritative:, candidate:)
-        directory = File.join(root, "quarantine", "jobs")
         digest = ::Digest::SHA256.hexdigest(JSON.generate(candidate.sort.to_h))
-        path = File.join(directory, "#{job_id}-#{digest}.json")
-        return path if File.file?(path)
+        relative = File.join(
+          "quarantine",
+          "jobs",
+          "#{job_id}-#{digest}.json"
+        )
+        path = @job_files.absolute_path(relative)
+        return path if @job_files.regular?(relative)
 
         evidence = {
           "schema" => "hive-refactor-patrol-job-intake-conflict",
@@ -2261,7 +2285,7 @@ module Hive
       end
 
       def job_path(job_id)
-        File.join(jobs_dir, "#{validate_id!(job_id)}.json")
+        @job_files.job_path(validate_id!(job_id))
       end
 
       def validate_id!(job_id)
@@ -2269,7 +2293,10 @@ module Hive
       end
 
       def read_job_path(path, expected_job_id:)
-        data = JSON.parse(File.read(path))
+        data = @job_files.read_json(
+          @job_files.relative_path(path),
+          max_bytes: JobStoreFiles::MAX_JOB_BYTES
+        )
         raise CorruptRecord.new("refactor patrol job must contain a JSON object", path: path) unless data.is_a?(Hash)
 
         version = data["schema_version"]
@@ -2325,9 +2352,9 @@ module Hive
       end
 
       def read_derived_index(path, schema:, collection:)
-        return yield unless File.file?(path)
-
-        data = JSON.parse(File.read(path))
+        relative = @job_files.relative_path(path)
+        data = @job_files.read_json(relative, missing: true)
+        return yield unless data
         unless data.is_a?(Hash) && data["schema"] == schema && data["schema_version"] == SCHEMA_VERSION &&
                data[collection].is_a?(Hash) && (data.keys - %w[schema schema_version] - [ collection ]).empty?
           return yield
@@ -2339,9 +2366,10 @@ module Hive
 
       def atomic_write(path, data)
         prepare_schema_namespace!
-        dir = File.dirname(path)
-        Hive::AtomicFile.write(path, "#{JSON.pretty_generate(data)}\n", mode: 0o600)
-        Hive::AtomicFile.fsync_directory(dir)
+        @job_files.write_json(
+          @job_files.relative_path(path),
+          data
+        )
         path
       end
 
@@ -2351,6 +2379,7 @@ module Hive
         self.class.ensure_schema_namespace!(
           @project_root, **@schema_options
         )
+        @job_files.prepare!
         @schema_namespace_ready = true
       end
 

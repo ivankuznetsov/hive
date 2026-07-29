@@ -11,7 +11,7 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
   def test_normalizes_representation_fields_and_is_idempotent
     with_tmp_dir do |root|
       comparator = Hive::Modules::Migration::ShadowComparator.new(root: root)
-      trigger = { "id" => "tick-1" }
+      trigger = direct_trigger("tick-1")
       capture = capture_for(
         "patrol", trigger,
         { "status" => "due", "owner" => "legacy", "duration_ms" => 10 }
@@ -40,7 +40,9 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
       comparator = Hive::Modules::Migration::ShadowComparator.new(root: root)
       trigger = {
         "kind" => "job_store.schema_v2_import",
-        "id" => "job-7"
+        "id" => "job-7",
+        "source_schema_version" => 2,
+        "source_digest" => "a" * 64
       }
       capture = capture_for(
         "architecture-patrol", trigger, { "status" => "migrated" }
@@ -65,7 +67,7 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
   def test_published_schema_enforces_exact_capture_and_projection_shapes
     with_tmp_dir do |root|
       comparator = Hive::Modules::Migration::ShadowComparator.new(root: root)
-      trigger = { "id" => "tick-1" }
+      trigger = direct_trigger("tick-1")
       capture = capture_for(
         "patrol", trigger, { "status" => "due" }
       )
@@ -129,7 +131,7 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
       10.times do |index|
         captured_at = START + (index * 24 * 60 * 60)
         %w[patrol architecture-patrol].each do |module_name|
-          trigger = { "id" => "#{module_name}-#{index}", "snapshot" => index }
+          trigger = direct_trigger("#{module_name}-#{index}")
           decision = { "status" => "due", "reason" => "matched" }
           capture = capture_for(module_name, trigger, decision)
           comparator.record!(
@@ -158,7 +160,7 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
                       7 * 24 * 60 * 60
 
       captured_at = reviewed_at
-      trigger = { "id" => "mismatch" }
+      trigger = direct_trigger("mismatch")
       capture = capture_for("patrol", trigger, { "status" => "due" })
       comparator.record!(
         module_name: "patrol", trigger: trigger,
@@ -182,7 +184,7 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
   def test_shadow_identity_time_and_conflicting_replay_fail_closed
     with_tmp_dir do |root|
       comparator = Hive::Modules::Migration::ShadowComparator.new(root: root)
-      trigger = { "id" => "same" }
+      trigger = direct_trigger("same")
       capture = capture_for(
         "patrol", trigger,
         { "status" => "due" }
@@ -230,21 +232,41 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
   def test_shadow_projection_identity_and_symbolic_triggers_fail_closed_or_normalize
     with_tmp_dir do |root|
       comparator = Hive::Modules::Migration::ShadowComparator.new(root: root)
-      trigger = { "id" => "tick-1", :metadata => :symbolic }
-      capture = capture_for("patrol", { "id" => "tick-1", "metadata" => "symbolic" }, { "status" => "due" })
+      trigger = {
+        "kind" => :manual,
+        "id" => "tick-1",
+        "duration_ms" => 17
+      }
+      capture = capture_for(
+        "patrol", direct_trigger("tick-1"), { "status" => "due" }
+      )
 
       record = comparator.record!(
         module_name: "patrol", trigger: trigger, legacy_capture: capture,
         module_projection: projection_for("patrol", trigger, "due"),
         configuration_digest: "a" * 64, occurred_at: START
       )
-      assert_equal "symbolic", record.dig("trigger", "metadata")
+      assert_equal direct_trigger("tick-1"), record.fetch("trigger")
 
       assert_raises(Hive::ConfigError) do
         comparator.record!(
-          module_name: "patrol", trigger: { "id" => "other" },
-          module_projection: projection_for("architecture-patrol", { "id" => "other" }, "due"),
+          module_name: "patrol", trigger: direct_trigger("other"),
+          module_projection:
+            projection_for(
+              "architecture-patrol", direct_trigger("other"), "due"
+            ),
           configuration_digest: "a" * 64, occurred_at: START
+        )
+      end
+
+      assert_raises(Hive::ConfigError) do
+        comparator.record!(
+          module_name: "patrol",
+          trigger: direct_trigger("unknown").merge("metadata" => "symbolic"),
+          module_projection:
+            projection_for("patrol", direct_trigger("unknown"), "due"),
+          configuration_digest: "a" * 64,
+          occurred_at: START
         )
       end
 
@@ -256,7 +278,7 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
         )
       end
 
-      differing_trigger = { "id" => "different" }
+      differing_trigger = direct_trigger("different")
       comparator.record!(
         module_name: "patrol", trigger: differing_trigger,
         legacy_capture: capture_for("patrol", differing_trigger, { "status" => "due" }),
@@ -286,7 +308,7 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
   def test_shadow_binding_and_bounded_history_guards_fail_closed
     with_tmp_dir do |root|
       comparator = Hive::Modules::Migration::ShadowComparator.new(root: root)
-      trigger = { "id" => "tick-1" }
+      trigger = direct_trigger("tick-1")
       patrol_capture = capture_for(
         "patrol", trigger, { "status" => "due" }
       )
@@ -367,7 +389,7 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
 
     with_tmp_dir do |root|
       comparator = Hive::Modules::Migration::ShadowComparator.new(root: root)
-      trigger = { "id" => "tick-1" }
+      trigger = direct_trigger("tick-1")
       capture = capture_for("patrol", trigger, { "status" => "due" })
       record = comparator.record!(
         module_name: "patrol",
@@ -437,7 +459,7 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
       FileUtils.mkdir_p(outside)
       File.symlink(outside, File.join(root, "patrol"))
       comparator = Hive::Modules::Migration::ShadowComparator.new(root: root)
-      trigger = { "id" => "tick-1" }
+      trigger = direct_trigger("tick-1")
       decision = { "status" => "due" }
 
       assert_raises(Hive::ConfigError) do
@@ -461,7 +483,7 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
     ].each do |field|
       with_tmp_dir do |root|
         comparator = Hive::Modules::Migration::ShadowComparator.new(root: root)
-        trigger = { "id" => "tick-1" }
+        trigger = direct_trigger("tick-1")
         decision = { "status" => "due" }
         capture = capture_for("patrol", trigger, decision)
         record = comparator.record!(
@@ -492,7 +514,7 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
 
     with_tmp_dir do |root|
       comparator = Hive::Modules::Migration::ShadowComparator.new(root: root)
-      trigger = { "id" => "tick-1" }
+      trigger = direct_trigger("tick-1")
       decision = { "status" => "due" }
       capture = capture_for("patrol", trigger, decision)
       record = comparator.record!(
@@ -513,7 +535,7 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
   def test_report_revalidates_raw_comparison_records
     with_tmp_dir do |root|
       comparator = Hive::Modules::Migration::ShadowComparator.new(root: root)
-      trigger = { "id" => "tick-1" }
+      trigger = direct_trigger("tick-1")
       decision = { "status" => "due" }
       capture = capture_for("patrol", trigger, decision)
       record = comparator.record!(
@@ -590,7 +612,7 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
     with_tmp_dir do |root|
       comparator = Hive::Modules::Migration::ShadowComparator.new(root: root)
       records = 2.times.map do |index|
-        trigger = { "id" => "tick-#{index}" }
+        trigger = direct_trigger("tick-#{index}")
         decision = { "status" => "due" }
         comparator.record!(
           module_name: "patrol",
@@ -638,7 +660,7 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
     with_tmp_dir do |root|
       comparator = Hive::Modules::Migration::ShadowComparator.new(root: root)
       3.times do |index|
-        trigger = { "id" => "tick-#{index}" }
+        trigger = direct_trigger("tick-#{index}")
         decision = { "status" => "due", "index" => index }
         comparator.record!(
           module_name: "patrol",
@@ -679,7 +701,7 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
       comparator = Hive::Modules::Migration::ShadowComparator.new(root: root)
       2.times do |index|
         module_name = index.zero? ? "patrol" : "architecture-patrol"
-        trigger = { "id" => "tick-#{index}" }
+        trigger = direct_trigger("tick-#{index}")
         decision = { "status" => "due" }
         comparator.record!(
           module_name: module_name,
@@ -762,19 +784,36 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
         "repository" => "owner/demo"
       },
       trigger: trigger,
-      reservation: {
-        "kind" => module_name == "patrol" ? "ordinary" : "architecture",
-        "id" => trigger.fetch("id")
-      },
+      reservation:
+        module_name == "patrol" ?
+          {
+            "kind" => "ordinary",
+            "id" => trigger.fetch("id")
+          } :
+          {
+            "kind" => "architecture",
+            "id" => trigger.fetch("id"),
+            "job_id" => trigger.fetch("id")
+          },
       owner: "legacy",
       owner_epoch: 1,
       selection_input: selection_input,
       selection: selection,
-      outcome_class: "test",
-      outcome: decision,
+      outcome_class: "completed",
+      outcome: {
+        "rationale" =>
+          decision.fetch("reason", decision.fetch("status", "completed")).to_s
+      },
       occurred_at: START,
       recorded_at: START
     )
+  end
+
+  def direct_trigger(id)
+    {
+      "kind" => "manual",
+      "id" => id
+    }
   end
 
   def projection_for(module_name, trigger, rationale)
@@ -804,7 +843,7 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
     Hive::Modules::Migration::EffectReceipt.build(
       intent: intent,
       status: status,
-      outcome: { "attempted" => true },
+      outcome: { "transition_status" => "applied" },
       recorded_at: START
     )
   end

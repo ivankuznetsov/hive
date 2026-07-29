@@ -335,6 +335,7 @@ module Hive
 
         reexec_requested = false
         begin
+          schema_migration_coordinator.acknowledge_daemon_restart
           dispatcher.run_forever
           reexec_requested = dispatcher.reexec_requested?
         ensure

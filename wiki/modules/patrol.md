@@ -35,6 +35,7 @@ tags: [module, patrol, review, worktree, pr, codex]
 | `Hive::Modules::Migration::PatrolDecisionProjection` | `lib/hive/modules/migration/patrol_decision_projection.rb` | Strict shared value for the immutable selection result. Separate ordinary and architecture projectors validate their own input vocabularies before constructing it; terminal outcome and effect evidence are not selection fields. |
 | `Hive::Modules::Migration::OccurrenceJournal` | `lib/hive/modules/migration/occurrence_journal.rb` | Public durable-occurrence facade. It composes a pure `OccurrenceRecordValidator`, one `OccurrenceRecordStore` lock/read/write owner, bounded `OccurrenceJournalState`, `OccurrenceOutbox`, `OccurrenceEffects`, stable sender locks, and durable attempt allocation; the final capture must retain the exact selection, reject nonterminal effects, and bind exactly the terminal receipt ids. `StateStore` and `JobStore` remain the separate product-facing recovery authorities. |
 | `Hive::Modules::Migration::OccurrenceJournalState` | `lib/hive/modules/migration/occurrence_journal_state.rb` | One bounded 64 KiB coordination cell per product journal. It persists compacted schedule high-water/floor fences, a bounded exact fence for non-sequenced terminal captures, and normalized restart-safe recovery backoff; it contains no effect, outbox, or product work state. |
+| `Hive::Modules::Migration::OccurrenceRecoveryIndex` | `lib/hive/modules/migration/occurrence_recovery_index.rb` | Descriptor-confined, bounded locator for exact reserved or projection-pending occurrence ids. Its generation is fenced by `OccurrenceJournalState`; missing, malformed, stale, or dirty state receives one bounded authoritative-record repair. It never authorizes work or stores effect bytes. |
 | `Hive::Modules::Migration::EffectDelivery` | `lib/hive/modules/migration/effect_delivery.rb` | Product-neutral composition facade shared by the two direct-`Object` gateways. `EffectAdmission` owns live owner/config/module-generation/grant/claim policy, `EffectSender` owns stable-lock/fence/reconciliation transitions, and `EffectReceiptLedger` owns terminal replay and observational receipt projection. The occurrence store, not the sender or ledger, mints authoritative receipt bytes. Dependencies point toward the injected product store; none of these collaborators owns persistence. |
 | `Hive::Patrol::EffectGateway` | `lib/hive/patrol/effect_gateway.rb` | Thin ordinary-patrol product port over `EffectDelivery`. It preserves the ordinary `perform!` and reconcile-only adoption API while authorizing ordinary state, finding, attempt, branch, PR, and review-handoff sinks. |
 | `Hive::RefactorPatrol::EffectGateway` | `lib/hive/refactor_patrol/effect_gateway.rb` | Thin Architecture Patrol product port over `EffectDelivery`. It retains architecture claim and `NotDelivered` policy while action claim generation fences authorization but remains outside semantic remote-effect identity. |
@@ -271,6 +272,12 @@ it or any mutator cutover can be claimed.
 - Ordinary schedules, module hooks, and Architecture Patrol merged-PR jobs use canonical window/generation reservations and compacted high-water/floor fences. Concurrent retries reuse one reserved attempt; only a terminal prior attempt advances the generation, stale compacted generations fail closed, and finalized occurrences reject new effect dispatch.
 - Manual/direct non-sequenced occurrences use a bounded exact retirement fence. Saturation retains the terminal occurrence instead of deleting its replay proof; it never authorizes duplicate work.
 - Architecture `job`, `discovery`, and `action` transitions pass through `TransitionGateway`; it owns no files or retry state, and JobStore remains authoritative.
+- Active occurrence recovery uses the bounded `recovery-index.json` locator.
+  Reservation publishes membership before its occurrence record, retirement
+  removes membership only after the record is inactive, and crash recovery
+  performs at most one bounded authoritative scan to repair a missing,
+  malformed, stale, or dirty index. Idle ticks never scan retained terminal
+  history.
 - A daemon-launched `--job-manifest` discovery child reconstructs the same
   transition coordinator before reviewing. It never claims independently; its
   incremental checkpoints and heartbeats use only the exact PID/start-time and
@@ -292,6 +299,11 @@ it or any mutator cutover can be claimed.
   A fixed exact-byte v2 snapshot is verified before the first write, and its
   identity is exposed through daemon status for the fenced exact restore
   command in [[commands/migrate]].
+- Live v3 jobs, query sidecars, quarantine evidence, and action locks are
+  accessed only through one descriptor-confined `JobStoreFiles` port. A
+  store-wide admission lock enforces the 8,192-job bound before any new
+  per-job lock or query membership is created; the compact completion record
+  cross-checks both snapshot id and migrated-job count.
 - Cutover and rollback quiescence include ordinary active occurrences, architecture active occurrences, and incomplete v3 jobs before advancing an ownership epoch.
 - Ordinary and architecture projection/recovery failures emit bounded project/occurrence/job diagnostics with retry count and next backoff time; durable outbox or exact-transition recovery remains pending while the scheduler backs off.
 - Closed-unmerged patrol PRs become dismissals and are skipped on future cycles.

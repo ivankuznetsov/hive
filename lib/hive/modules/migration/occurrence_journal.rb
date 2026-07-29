@@ -2,6 +2,7 @@ require "json"
 require "digest"
 require "hive/modules/migration/occurrence_effects"
 require "hive/modules/migration/occurrence_journal_state"
+require "hive/modules/migration/occurrence_recovery_index"
 require "hive/modules/migration/occurrence_record_store"
 require "hive/modules/migration/stable_process_lock"
 
@@ -37,6 +38,11 @@ module Hive
           @journal_state = OccurrenceJournalState.new(
             root: @root,
             module_name: @module_name
+          )
+          @recovery_index = OccurrenceRecoveryIndex.new(
+            root: @root,
+            module_name: @module_name,
+            validator: @validator
           )
           @outbox = OccurrenceOutbox.new(validator: @validator)
           @effects = OccurrenceEffects.new(
@@ -89,8 +95,9 @@ module Hive
           @attempt_locks.synchronize(key) do
             @journal_state.synchronize do |state, checkpoint|
               @inventory_lock.synchronize("inventory") do
-                @journal_state.mark_recovery_dirty!(state)
-                checkpoint.call
+                ensure_recovery_index_current_locked!(
+                  state, checkpoint
+                )
                 reserved_capture = nil
                 reserved_count = 0
                 observed_generation = 0
@@ -158,48 +165,37 @@ module Hive
         def each_reserved
           return enum_for(__method__) unless block_given?
 
-          each_record do |record|
+          each_recovery_active do |record|
             yield record if record.fetch("phase") == "reserved"
           end
           nil
         end
 
-        # One bounded pass over the sole occurrence journal is the durable
-        # scheduler recovery inventory. Reserved occurrences still own product
-        # work; finalized occurrences remain active only while their projection
-        # outbox has unacknowledged entries.
+        # Normal recovery reads only the bounded durable active-ID projection.
+        # Occurrence records remain authoritative, so a missing, stale, dirty,
+        # or malformed projection receives one descriptor-safe history repair.
         def each_recovery_active
           return enum_for(__method__) unless block_given?
 
-          inventory = @journal_state.synchronize do |state, _checkpoint|
-            @journal_state.recovery_inventory(state)
-          end
-          return nil unless inventory.fetch("dirty")
+          snapshot = recovery_index_snapshot
+          stale = false
+          snapshot.fetch("occurrence_ids").each do |occurrence_id|
+            record = @store.fetch(occurrence_id)
+            unless record && recovery_active_record?(record)
+              stale = true
+              next
+            end
 
-          active = false
-          each_record do |record|
-            if record.fetch("phase") == "reserved" ||
-               projection_pending_record?(record)
-              active = true
-              yield record
-            end
+            yield record
           end
-          unless active
-            @journal_state.synchronize do |state, checkpoint|
-              cleared = @journal_state.clear_recovery_dirty!(
-                state,
-                expected_generation: inventory.fetch("generation")
-              )
-              checkpoint.call if cleared
-            end
-          end
+          repair_recovery_index! if stale
           nil
         end
 
         def each_projection_pending
           return enum_for(__method__) unless block_given?
 
-          each_record do |record|
+          each_recovery_active do |record|
             yield record if projection_pending_record?(record)
           end
           nil
@@ -207,6 +203,24 @@ module Hive
 
         def recovery_active? = each_recovery_active.any?
         def projection_pending? = each_projection_pending.any?
+
+        def rebuild_recovery_index!
+          @journal_state.synchronize do |state, checkpoint|
+            @inventory_lock.synchronize("inventory") do
+              generation =
+                @journal_state.mark_recovery_dirty!(state)
+              checkpoint.call
+              snapshot = @recovery_index.write(
+                generation: generation,
+                occurrence_ids: recovery_active_ids_from_records
+              )
+              clear_recovery_index_dirty!(
+                state, checkpoint, generation
+              )
+              snapshot
+            end
+          end
+        end
 
         def each_record(&block)
           return @store.each_record unless block
@@ -366,8 +380,9 @@ module Hive
         private
 
         def reserve_coordinated!(capture, state:, checkpoint:, now:)
-          @journal_state.mark_recovery_dirty!(state)
-          checkpoint.call
+          recovery_index = ensure_recovery_index_current_locked!(
+            state, checkpoint
+          )
           existing = @store.fetch(capture.occurrence_id)
           if existing
             validate_occurrence_identity!(existing, capture)
@@ -395,14 +410,29 @@ module Hive
             checkpoint.call
             @store.retire!(candidate.fetch("occurrence_id"))
           end
+          generation = @journal_state.mark_recovery_dirty!(state)
+          checkpoint.call
+          @recovery_index.write(
+            generation: generation,
+            occurrence_ids:
+              recovery_index.fetch("occurrence_ids") +
+                [ capture.occurrence_id ]
+          )
           timestamp = @validator.timestamp(now)
-          @store.mutate(capture.occurrence_id, create: true) do |record|
-            if record
-              validate_occurrence_identity!(record, capture)
-              next record
+          record = @store.mutate(capture.occurrence_id, create: true) do |value|
+            if value
+              validate_occurrence_identity!(value, capture)
+              next value
             end
             build_record(capture, timestamp)
           end
+          unless recovery_active_record?(record)
+            malformed!("patrol occurrence reservation is not recovery active")
+          end
+          clear_recovery_index_dirty!(
+            state, checkpoint, generation
+          )
+          record
         end
 
         def retire_if_terminal!(record)
@@ -410,17 +440,38 @@ module Hive
 
           @journal_state.synchronize do |state, checkpoint|
             @inventory_lock.synchronize("inventory") do
+              recovery_index = ensure_recovery_index_current_locked!(
+                state, checkpoint
+              )
               current = @store.fetch(record.fetch("occurrence_id"))
               next false unless current && retireable?(current)
 
               provisional = @validator.capture(
                 current.fetch("provisional_capture")
               )
-              next false unless
-                @journal_state.fence_retirement!(state, provisional)
-
+              retire = @journal_state.fence_retirement!(
+                state, provisional
+              )
+              generation =
+                @journal_state.mark_recovery_dirty!(state)
               checkpoint.call
-              @store.retire!(current.fetch("occurrence_id"))
+              @recovery_index.write(
+                generation: generation,
+                occurrence_ids:
+                  recovery_index.fetch("occurrence_ids") -
+                    [ current.fetch("occurrence_id") ]
+              )
+              @store.retire!(current.fetch("occurrence_id")) if retire
+              retained = @store.fetch(current.fetch("occurrence_id"))
+              if retained && recovery_active_record?(retained)
+                malformed!(
+                  "retired patrol occurrence remains recovery active"
+                )
+              end
+              clear_recovery_index_dirty!(
+                state, checkpoint, generation
+              )
+              retire
             end
           end
         end
@@ -436,6 +487,71 @@ module Hive
           record.fetch("outbox").any? do |entry|
             entry.fetch("acknowledged") == false
           end
+        end
+
+        def recovery_active_record?(record)
+          record.fetch("phase") == "reserved" ||
+            projection_pending_record?(record)
+        end
+
+        def recovery_index_snapshot
+          @journal_state.synchronize do |state, checkpoint|
+            @inventory_lock.synchronize("inventory") do
+              ensure_recovery_index_current_locked!(
+                state, checkpoint
+              )
+            end
+          end
+        end
+
+        def repair_recovery_index!
+          @journal_state.synchronize do |state, checkpoint|
+            @inventory_lock.synchronize("inventory") do
+              ensure_recovery_index_current_locked!(
+                state, checkpoint, force: true
+              )
+            end
+          end
+        end
+
+        def ensure_recovery_index_current_locked!(
+          state, checkpoint, force: false
+        )
+          inventory = @journal_state.recovery_inventory(state)
+          snapshot = @recovery_index.snapshot
+          if !force && !inventory.fetch("dirty") && snapshot &&
+             snapshot.fetch("generation") ==
+               inventory.fetch("generation")
+            return snapshot
+          end
+
+          snapshot = @recovery_index.write(
+            generation: inventory.fetch("generation"),
+            occurrence_ids: recovery_active_ids_from_records
+          )
+          clear_recovery_index_dirty!(
+            state, checkpoint, inventory.fetch("generation")
+          )
+          snapshot
+        end
+
+        def clear_recovery_index_dirty!(
+          state, checkpoint, generation
+        )
+          cleared = @journal_state.clear_recovery_dirty!(
+            state, expected_generation: generation
+          )
+          checkpoint.call if cleared
+          cleared
+        end
+
+        def recovery_active_ids_from_records
+          ids = []
+          each_record do |record|
+            ids << record.fetch("occurrence_id") if
+              recovery_active_record?(record)
+          end
+          ids.sort
         end
 
         def attempt_generation(reservation)

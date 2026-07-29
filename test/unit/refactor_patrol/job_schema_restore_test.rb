@@ -20,6 +20,22 @@ class RefactorPatrolJobSchemaRestoreTest < Minitest::Test
     def kill(_signal, _pid) = true
   end
 
+  class InventoryDirectory
+    attr_reader :root
+
+    def initialize(root, names)
+      @root = root
+      @names = names
+    end
+
+    def each_child(_relative, missing: false)
+      return enum_for(__method__, _relative, missing: missing) unless
+        block_given?
+
+      @names.each { |name| yield name }
+    end
+  end
+
   PROJECT = {
     "name" => "demo",
     "project_id" => "project-demo"
@@ -333,6 +349,35 @@ class RefactorPatrolJobSchemaRestoreTest < Minitest::Test
         root, "jobs", "job-released.json.lock"
       )
     end
+  end
+
+  def test_restore_inventory_accepts_jobs_with_paired_persistent_locks
+    names = 4_097.times.flat_map do |index|
+      name = format("job-%04d.json", index)
+      [ name, "#{name}.lock" ]
+    end
+    restore = Hive::RefactorPatrol::JobSchemaRestore.new(
+      target_root: "/tmp/hive-restore-inventory/v3",
+      legacy_root: "/tmp/hive-restore-inventory/v2",
+      target_version: 3,
+      validator: Object.new,
+      corrupt_record: Hive::RefactorPatrol::JobStore::CorruptRecord,
+      inconsistent_record:
+        Hive::RefactorPatrol::JobStore::InconsistentRecord,
+      project_id: "project-demo",
+      writer_fence: NullWriterFence.new
+    )
+    restore.instance_variable_set(
+      :@directory,
+      InventoryDirectory.new(
+        "/tmp/hive-restore-inventory/v3",
+        names
+      )
+    )
+
+    inventory = restore.send(:candidate_job_inventory)
+    assert_equal names.sort,
+                 restore.send(:inventory_names, inventory)
   end
 
   private

@@ -267,11 +267,15 @@ module Hive
         rescue Hive::ConfigError, KeyError, TypeError
           nil
         end
-        @job_store = job_store || JobStore.new(
-          @project_root,
-          hive_state_path: @hive_state_path,
-          project: project
-        )
+        @job_store = job_store
+        @job_store_factory = lambda do |migrate:|
+          JobStore.new(
+            @project_root,
+            hive_state_path: @hive_state_path,
+            project: project,
+            migrate: migrate
+          )
+        end
       end
 
       def resolve(thesis:, repository:, job_id:, source:, hinted_family_id: nil, dry_run: false)
@@ -290,7 +294,7 @@ module Hive
         ensure_root!
         File.open(lock_path, File::RDWR | File::CREAT, 0o600) do |lock|
           lock.flock(File::LOCK_EX)
-          replace_records!(authoritative_records)
+          replace_records!(authoritative_records(dry_run: false))
         end
       end
 
@@ -393,7 +397,7 @@ module Hive
       end
 
       def indexed_records(dry_run:)
-        authoritative = authoritative_records
+        authoritative = authoritative_records(dry_run: dry_run)
         current = salvaged_records(quarantine: !dry_run)
         return current unless stale_against_authority?(current, authoritative)
 
@@ -401,16 +405,17 @@ module Hive
         dry_run ? repaired : replace_records!(repaired)
       end
 
-      def authoritative_records
-        authoritative_entries.group_by { |entry| entry.fetch("family_id") }
+      def authoritative_records(dry_run:)
+        authoritative_entries(dry_run: dry_run)
+                             .group_by { |entry| entry.fetch("family_id") }
                              .sort.map { |_family_id, entries| authoritative_record(entries) }
                              .each do |record|
           validate_record!(record, File.join(@root, "#{record.fetch('family_id')}.json"))
         end
       end
 
-      def authoritative_entries
-        @job_store.jobs.flat_map do |aggregate|
+      def authoritative_entries(dry_run:)
+        job_store(migrate: !dry_run).jobs.flat_map do |aggregate|
           aggregate.fetch("actions").filter_map do |action|
             next unless action.fetch("kind") == "issue" && action.key?("family_id")
 
@@ -440,6 +445,16 @@ module Hive
         raise InconsistentRecord.new("cannot rebuild architecture families from jobs (#{e.message})", path: e.path)
       rescue ArgumentError, KeyError => e
         raise InconsistentRecord, "cannot rebuild architecture families from jobs (#{e.message})"
+      end
+
+      def job_store(migrate:)
+        return @job_store if @job_store
+
+        if migrate
+          @job_store = @job_store_factory.call(migrate: true)
+        else
+          @readonly_job_store ||= @job_store_factory.call(migrate: false)
+        end
       end
 
       def authoritative_record(entries)

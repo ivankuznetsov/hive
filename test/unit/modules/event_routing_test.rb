@@ -266,9 +266,18 @@ class ModulesEventRoutingTest < Minitest::Test
         "name" => "demo",
         "repository" => "owner/demo"
       },
-      trigger: { "kind" => "schedule", "id" => identity },
-      reservation: {
-        "kind" => module_name == "patrol" ? "ordinary" : "architecture",
+      trigger: {
+        "kind" => "schedule",
+        "id" => identity,
+        "occurred_at" => NOW.iso8601(6),
+        "schedule" => "event-routing"
+      },
+      reservation: architecture ? {
+        "kind" => "architecture",
+        "id" => identity,
+        "job_id" => identity
+      } : {
+        "kind" => "ordinary",
         "id" => identity
       },
       owner: "legacy",
@@ -277,9 +286,9 @@ class ModulesEventRoutingTest < Minitest::Test
       selection:
         Hive::Modules::Migration::PatrolDecisionProjection.build(
           **projection_attributes
-        ),
-      outcome_class: "scheduler_outcome",
-      outcome: decision,
+      ),
+      outcome_class: "completed",
+      outcome: { "rationale" => decision.fetch("rationale") },
       occurred_at: NOW,
       recorded_at: NOW
     )

@@ -111,12 +111,15 @@ class ComponentBoundariesTest < Minitest::Test
     refute_empty patrol_effects.fetch("forbidden_constructions")
     %w[
       Hive::Modules::Migration::OccurrenceJournal
+      Hive::Modules::Migration::OccurrenceRecoveryIndex
       Hive::Patrol::EffectGateway
       Hive::RefactorPatrol::ActionTransitions
       Hive::RefactorPatrol::ArchitectureIntakeTransitions
       Hive::RefactorPatrol::ClaimMaintenanceTransitions
       Hive::RefactorPatrol::DiscoveryTransitions
+      Hive::RefactorPatrol::JobQueryIndex
       Hive::RefactorPatrol::JobStore
+      Hive::RefactorPatrol::JobStoreFiles
       Hive::RefactorPatrol::TransitionGateway
     ].each do |constant|
       assert_includes patrol_effects.fetch("forbidden_constructions"),
@@ -475,7 +478,8 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal(
       [
         "lib/hive/modules/migration/occurrence_journal_state.rb",
-        "lib/hive/modules/migration/occurrence_record_store.rb"
+        "lib/hive/modules/migration/occurrence_record_store.rb",
+        "lib/hive/modules/migration/occurrence_recovery_index.rb"
       ],
       occurrence_writers
     )
@@ -846,6 +850,34 @@ class ComponentBoundariesTest < Minitest::Test
       end
 
       assert_match(/example/, error.message)
+      assert_match(/lib\/consumer\.rb/, error.message)
+      assert_match(/Example::Internal/, error.message)
+    end
+  end
+
+  def test_lexically_resolved_internal_construction_cannot_evade_boundary
+    with_contract_fixture(
+      entrypoint_source: <<~RUBY,
+        module Example
+          class API; end
+          class Internal; end
+        end
+      RUBY
+      consumer_source: <<~RUBY
+        module Example
+          class Consumer
+            def build
+              Internal.new
+            end
+          end
+        end
+      RUBY
+    ) do |contract|
+      error = assert_raises(ComponentBoundaryContract::ValidationError) do
+        contract.validate_static_boundaries!
+      end
+
+      assert_match(/example\.forbidden_constructions/, error.message)
       assert_match(/lib\/consumer\.rb/, error.message)
       assert_match(/Example::Internal/, error.message)
     end

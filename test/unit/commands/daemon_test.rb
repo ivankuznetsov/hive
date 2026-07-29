@@ -178,6 +178,9 @@ class HiveCommandsDaemonTest < Minitest::Test
     migration.define_singleton_method(:eligible_projects) do
       registry.reject { |entry| entry.fetch("name") == "bad" }
     end
+    migration.define_singleton_method(:acknowledge_daemon_restart) do
+      construction_order << :migration_restart_acknowledged
+    end
     command.define_singleton_method(
       :registered_project_migration_coordinator
     ) { migration }
@@ -229,9 +232,12 @@ class HiveCommandsDaemonTest < Minitest::Test
 
     assert_equal [ :run_forever ], dispatcher.calls
     assert_equal(
-      %i[schema_migration architecture_runtime],
+      %i[
+        schema_migration architecture_runtime
+        migration_restart_acknowledged
+      ],
       construction_order,
-      "schema sweep must finish before runtime construction"
+      "restart acknowledgement must wait for runtime construction"
     )
     assert_equal(
       [ [ "good" ], [ "good" ], [ "good" ] ],

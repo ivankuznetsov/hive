@@ -609,7 +609,8 @@ begin
     Hive::RefactorPatrol::InstalledJobSchemaMigration
   if migration_class.eligible_argv?(
     original_argv,
-    strict_no_write: strict_no_write_route
+    strict_no_write: strict_no_write_route,
+    commands: Hive::CLI.all_commands
   )
     installation_migration = migration_class.new
     migration_payload = installation_migration.call(

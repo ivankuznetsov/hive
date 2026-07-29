@@ -52,7 +52,10 @@ module Hive
             validate_identity!(module_name, configuration_digest)
             timestamp = time(occurred_at)
             recorded_at = time(@clock.call)
-            trigger = normalize(trigger)
+            trigger = PatrolEvidence.trigger(
+              normalize(trigger),
+              label: "module shadow trigger"
+            )
             capture = capture_value(legacy_capture, module_name, trigger)
             legacy_effects = effect_values(
               legacy_effects, module_name: module_name,
@@ -388,6 +391,10 @@ module Hive
           return false if data["comparable"] && capture.nil?
           return false unless data["evidence_source"] == (capture && "legacy_mutator_capture")
           return false if capture && capture.module_name != data["module"]
+          PatrolEvidence.trigger(
+            data["trigger"],
+            label: "module shadow trigger"
+          )
           return false unless digest(data["trigger"]) == data["trigger_digest"]
           return false if capture && digest(capture.trigger) != data["trigger_digest"]
 
@@ -454,6 +461,12 @@ module Hive
             data["legacy_effects"].empty? &&
             data["module_effects"].empty? &&
             data["duplicate_effects"].empty? &&
+            data["trigger"].is_a?(Hash) &&
+            data["trigger"].keys.sort ==
+              %w[archived_v1_trigger_digest kind] &&
+            data["trigger"]["kind"] == "archived_v1" &&
+            data["trigger"]["archived_v1_trigger_digest"]
+              .to_s.match?(/\A[0-9a-f]{64}\z/) &&
             digest(data["trigger"]) == data["trigger_digest"] &&
             data["semantic_digest"] == semantic_digest(data)
         end

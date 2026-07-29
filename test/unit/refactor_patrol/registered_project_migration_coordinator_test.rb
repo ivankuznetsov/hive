@@ -38,7 +38,7 @@ class RefactorPatrolRegisteredProjectMigrationCoordinatorTest <
     ).run
 
     assert_equal %i[migrated current absent], results.map(&:status)
-    assert_equal [ migrated_path, current_path, absent_path ], calls
+    assert_equal [ migrated_path, absent_path ], calls
     assert results.all? { |result| result.error.nil? }
   end
 
@@ -147,6 +147,45 @@ class RefactorPatrolRegisteredProjectMigrationCoordinatorTest <
     }
   end
 
+  def test_same_repository_with_distinct_custom_state_roots_migrates_both
+    real_path = project_path("shared-repository")
+    first_state = File.join(real_path, ".first-hive-state")
+    second_state = File.join(real_path, ".second-hive-state")
+    registry = [
+      registry_entry("first", real_path).merge(
+        "hive_state_path" => first_state
+      ),
+      registry_entry("second", real_path).merge(
+        "hive_state_path" => second_state
+      )
+    ]
+    migrated = []
+    migration = Coordinator.new(
+      registry: -> { registry },
+      project_migrator: lambda do |identity, ownership:|
+        assert_equal "legacy", ownership.fetch("owner")
+        migrated << identity.fetch(:hive_state_path)
+        true
+      end,
+      schema_status: lambda do |identity|
+        status =
+          migrated.include?(identity.fetch(:hive_state_path)) ?
+            "current" : "migration_required"
+        { "status" => status, "snapshot_id" => nil }
+      end,
+      status_store: nil
+    )
+
+    results = migration.run
+
+    assert_equal %i[migrated migrated], results.map(&:status)
+    assert_equal [ first_state, second_state ], migrated
+    assert_equal(
+      %w[first second],
+      migration.eligible_projects.map { |entry| entry.fetch("name") }
+    )
+  end
+
   def test_dry_run_never_invokes_mutating_or_state_probes
     path = project_path("dry-run")
     result = coordinator(
@@ -210,8 +249,15 @@ class RefactorPatrolRegisteredProjectMigrationCoordinatorTest <
                   identity.fetch(:hive_state_path) ]
         true
       end,
-      schema_status: ->(*) do
-        { "status" => "current", "snapshot_id" => "snapshot-test" }
+      schema_status: lambda do |identity|
+        status =
+          seen.any? do |_project, _path, state_path|
+            state_path == identity.fetch(:hive_state_path)
+          end ? "current" : "migration_required"
+        {
+          "status" => status,
+          "snapshot_id" => status == "current" ? "snapshot-test" : nil
+        }
       end,
       status_store: nil
     )
@@ -256,8 +302,11 @@ class RefactorPatrolRegisteredProjectMigrationCoordinatorTest <
           migrated << identity.fetch(:project)
           true
         end,
-        schema_status: ->(*) do
-          { "status" => "current", "snapshot_id" => nil }
+        schema_status: lambda do |identity|
+          status =
+            migrated.include?(identity.fetch(:project)) ?
+              "current" : "migration_required"
+          { "status" => status, "snapshot_id" => nil }
         end,
         status_store: nil
       )
@@ -297,10 +346,12 @@ class RefactorPatrolRegisteredProjectMigrationCoordinatorTest <
         migrated << identity.fetch(:project)
         true
       end,
-      schema_status: ->(*) do
+      schema_status: lambda do |identity|
+        current = migrated.include?(identity.fetch(:project))
         {
-          "status" => "current",
-          "snapshot_id" => "snapshot-#{"a" * 64}"
+          "status" => current ? "current" : "migration_required",
+          "snapshot_id" =>
+            current ? "snapshot-#{"a" * 64}" : nil
         }
       end,
       status_store: status_store
@@ -395,6 +446,53 @@ class RefactorPatrolRegisteredProjectMigrationCoordinatorTest <
     assert_equal 2, calls
   end
 
+  def test_current_project_uses_compact_probe_without_reinvoking_migrator
+    path = project_path("already-current")
+    probes = 0
+    coordinator = Coordinator.new(
+      registry: -> { entries(path) },
+      project_migrator:
+        ->(*, **) { flunk("current project invoked the converter") },
+      schema_status: lambda do |_identity|
+        probes += 1
+        { "status" => "current", "snapshot_id" => nil }
+      end,
+      status_store: nil
+    )
+    started_at = Time.utc(2026, 7, 29, 16, 0, 0)
+
+    assert_equal [ :current ],
+                 coordinator.tick(now: started_at).map(&:status)
+    assert_equal [ :current ],
+                 coordinator.tick(
+                   now: started_at + Coordinator::RETRY_INTERVAL
+                 ).map(&:status)
+    assert_equal 2, probes
+  end
+
+  def test_empty_interrupted_native_target_is_repaired_and_admitted
+    path = project_path("interrupted-native")
+    target = Hive::RefactorPatrol::JobStore.root_for(path)
+    FileUtils.mkdir_p(target)
+
+    coordinator = Coordinator.new(
+      registry: -> { entries(path) },
+      status_store: nil
+    )
+    result = coordinator.run.fetch(0)
+
+    assert_equal :current, result.status
+    assert_nil result.snapshot_id
+    assert_equal [ "interrupted-native" ],
+                 coordinator.eligible_projects.map {
+                   |entry| entry.fetch("name")
+                 }
+    legacy = Hive::RefactorPatrol::JobStore.legacy_root_for(path)
+    tombstone = JSON.parse(File.binread(File.join(legacy, "jobs")))
+    assert_equal "native", tombstone.fetch("origin")
+    assert_equal "complete", tombstone.fetch("status")
+  end
+
   def test_registry_change_bypasses_the_hourly_retry_delay
     first_path = project_path("first-registration")
     later_path = project_path("later-registration")
@@ -406,8 +504,11 @@ class RefactorPatrolRegisteredProjectMigrationCoordinatorTest <
         migrated << identity.fetch(:project)
         true
       end,
-      schema_status: ->(*) do
-        { "status" => "current", "snapshot_id" => nil }
+      schema_status: lambda do |identity|
+        status =
+          migrated.include?(identity.fetch(:project)) ?
+            "current" : "migration_required"
+        { "status" => status, "snapshot_id" => nil }
       end,
       status_store: nil
     )
@@ -422,7 +523,7 @@ class RefactorPatrolRegisteredProjectMigrationCoordinatorTest <
       refreshed.map(&:project)
     )
     assert_equal(
-      %w[first-registration first-registration later-registration],
+      %w[first-registration later-registration],
       migrated
     )
     assert_equal(
@@ -479,10 +580,18 @@ class RefactorPatrolRegisteredProjectMigrationCoordinatorTest <
   def coordinator(registry,
                   project_migrator: ->(*, **) { false },
                   state_present: ->(*) { false }, dry_run: false)
+    migrated_paths = {}
+    wrapped_migrator = lambda do |identity, **options|
+      result = project_migrator.call(identity, **options)
+      migrated_paths[identity.fetch(:real_path)] = true if result
+      result
+    end
     Coordinator.new(
       registry: -> { registry },
-      project_migrator: project_migrator,
-      state_present: state_present,
+      project_migrator: wrapped_migrator,
+      state_present: lambda do |path|
+        migrated_paths.key?(path) || state_present.call(path)
+      end,
       status_store: nil,
       dry_run: dry_run
     )

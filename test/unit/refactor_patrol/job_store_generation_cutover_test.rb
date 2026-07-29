@@ -34,6 +34,77 @@ class RefactorPatrolJobStoreGenerationCutoverTest < Minitest::Test
     end
   end
 
+  class ExplodingWriterFence
+    def assert_quiescent!
+      raise "writer fence reached"
+    end
+  end
+
+  class InterruptingExchangeDirectory
+    def initialize(delegate, timing:)
+      @delegate = delegate
+      @timing = timing
+    end
+
+    def exchange_directory_with_regular!(**attributes)
+      raise Interrupt, "injected before source exchange" if
+        @timing == :before
+
+      @delegate.exchange_directory_with_regular!(**attributes)
+      raise Interrupt, "injected after source exchange" if
+        @timing == :after
+    end
+
+    def method_missing(name, ...)
+      @delegate.public_send(name, ...)
+    end
+
+    def respond_to_missing?(name, include_private = false)
+      @delegate.respond_to?(name, include_private) || super
+    end
+  end
+
+  class InterruptingPrepareDirectory
+    def initialize(delegate)
+      @delegate = delegate
+    end
+
+    def prepare!
+      @delegate.prepare!
+      raise Interrupt, "injected after target preparation"
+    end
+
+    def method_missing(name, ...)
+      @delegate.public_send(name, ...)
+    end
+
+    def respond_to_missing?(name, include_private = false)
+      @delegate.respond_to?(name, include_private) || super
+    end
+  end
+
+  class NoDeepReadDirectory
+    def initialize(delegate)
+      @delegate = delegate
+    end
+
+    def each_child(...)
+      raise "deep inventory read reached"
+    end
+
+    def read_with_metadata(...)
+      raise "deep record read reached"
+    end
+
+    def method_missing(name, ...)
+      @delegate.public_send(name, ...)
+    end
+
+    def respond_to_missing?(name, include_private = false)
+      @delegate.respond_to?(name, include_private) || super
+    end
+  end
+
   def test_seals_released_jobs_before_conversion_and_admits_only_v3
     with_tmp_dir do |project_root|
       state = File.join(project_root, ".hive-state")
@@ -201,7 +272,8 @@ class RefactorPatrolJobStoreGenerationCutoverTest < Minitest::Test
         Hive::RefactorPatrol::JobStore::InconsistentRecord
       ) { migration.run! }
 
-      assert_match(/changed while it was copied/, error.message)
+      assert_match(/changed (?:before it was copied|while it was copied)/,
+                   error.message)
       record = JSON.parse(File.binread(
         File.join(target_root, "job-schema-v3-cutover.json")
       ))
@@ -271,6 +343,269 @@ class RefactorPatrolJobStoreGenerationCutoverTest < Minitest::Test
     end
   end
 
+  def test_completed_migration_skips_writer_fence_and_deep_inventory
+    with_tmp_dir do |project_root|
+      state = File.join(project_root, ".hive-state")
+      legacy_root = File.join(state, "refactor_patrol", "v2")
+      target_root = File.join(state, "refactor_patrol", "v3")
+      install_released_job(legacy_root)
+      assert cutover(
+        legacy_root: legacy_root,
+        target_root: target_root,
+        anchor: state
+      ).run!
+
+      completed = cutover(
+        legacy_root: legacy_root,
+        target_root: target_root,
+        anchor: state,
+        writer_fence: ExplodingWriterFence.new
+      )
+      completed.instance_variable_set(
+        :@legacy_directory,
+        NoDeepReadDirectory.new(
+          Hive::ManagedDirectory.new(
+            root: legacy_root,
+            anchor: state,
+            label: "completed released JobStore"
+          )
+        )
+      )
+      completed.instance_variable_set(
+        :@target_directory,
+        NoDeepReadDirectory.new(
+          Hive::ManagedDirectory.new(
+            root: target_root,
+            anchor: state,
+            label: "completed v3 JobStore"
+          )
+        )
+      )
+
+      assert_equal "current",
+                   completed.admission_status.fetch("status")
+      refute completed.run!
+    end
+  end
+
+  def test_mismatched_completion_receipt_reaches_writer_fence
+    with_tmp_dir do |project_root|
+      state = File.join(project_root, ".hive-state")
+      legacy_root = File.join(state, "refactor_patrol", "v2")
+      target_root = File.join(state, "refactor_patrol", "v3")
+      install_released_job(legacy_root)
+      assert cutover(
+        legacy_root: legacy_root,
+        target_root: target_root,
+        anchor: state
+      ).run!
+      marker_path = File.join(
+        target_root,
+        Hive::RefactorPatrol::JobStoreSchemaMigration::MARKER_NAME
+      )
+      marker = JSON.parse(File.binread(marker_path))
+      marker["snapshot_id"] = "snapshot-#{"f" * 64}"
+      File.binwrite(
+        marker_path,
+        Hive::WorkflowPackage::CanonicalJSON.generate(marker)
+      )
+
+      repair = cutover(
+        legacy_root: legacy_root,
+        target_root: target_root,
+        anchor: state,
+        writer_fence: ExplodingWriterFence.new
+      )
+      assert_equal "migration_required",
+                   repair.admission_status.fetch("status")
+      error = assert_raises(RuntimeError) { repair.run! }
+      assert_equal "writer fence reached", error.message
+    end
+  end
+
+  def test_mismatched_completion_job_count_reaches_writer_fence
+    with_tmp_dir do |project_root|
+      state = File.join(project_root, ".hive-state")
+      legacy_root = File.join(state, "refactor_patrol", "v2")
+      target_root = File.join(state, "refactor_patrol", "v3")
+      install_released_job(legacy_root)
+      assert cutover(
+        legacy_root: legacy_root,
+        target_root: target_root,
+        anchor: state
+      ).run!
+      marker_path = File.join(
+        target_root,
+        Hive::RefactorPatrol::JobStoreSchemaMigration::MARKER_NAME
+      )
+      marker = JSON.parse(File.binread(marker_path))
+      marker["migrated_jobs"] += 1
+      File.binwrite(
+        marker_path,
+        Hive::WorkflowPackage::CanonicalJSON.generate(marker)
+      )
+
+      repair = cutover(
+        legacy_root: legacy_root,
+        target_root: target_root,
+        anchor: state,
+        writer_fence: ExplodingWriterFence.new
+      )
+      assert_equal "migration_required",
+                   repair.admission_status.fetch("status")
+      error = assert_raises(RuntimeError) { repair.run! }
+      assert_equal "writer fence reached", error.message
+    end
+  end
+
+  def test_atomic_write_residue_fails_before_source_seal_or_record
+    with_tmp_dir do |project_root|
+      state = File.join(project_root, ".hive-state")
+      legacy_root = File.join(state, "refactor_patrol", "v2")
+      target_root = File.join(state, "refactor_patrol", "v3")
+      install_released_job(legacy_root)
+      File.binwrite(
+        File.join(
+          legacy_root,
+          "jobs",
+          ".job-released.json.tmp.123.abcdef12"
+        ),
+        "partial"
+      )
+
+      error = assert_raises(
+        Hive::RefactorPatrol::JobStore::CorruptRecord
+      ) do
+        cutover(
+          legacy_root: legacy_root,
+          target_root: target_root,
+          anchor: state
+        ).run!
+      end
+
+      assert_match(/incomplete atomic write/, error.message)
+      assert File.directory?(File.join(legacy_root, "jobs"))
+      refute_path_exists File.join(
+        target_root,
+        Hive::RefactorPatrol::JobStoreGenerationCutover::RECORD_NAME
+      )
+      assert_empty Dir.glob(
+        File.join(legacy_root, ".job-schema-v3-source-*")
+      )
+    end
+  end
+
+  def test_preflight_and_post_exchange_interruptions_resume_exactly
+    %i[before after].each do |timing|
+      with_tmp_dir do |project_root|
+        state = File.join(project_root, ".hive-state")
+        legacy_root = File.join(state, "refactor_patrol", "v2")
+        target_root = File.join(state, "refactor_patrol", "v3")
+        install_released_job(legacy_root)
+        interrupted = cutover(
+          legacy_root: legacy_root,
+          target_root: target_root,
+          anchor: state
+        )
+        interrupted.instance_variable_set(
+          :@legacy_directory,
+          InterruptingExchangeDirectory.new(
+            Hive::ManagedDirectory.new(
+              root: legacy_root,
+              anchor: state,
+              label: "interrupting released JobStore"
+            ),
+            timing: timing
+          )
+        )
+
+        error = assert_raises(Interrupt) { interrupted.run! }
+        assert_match(/source exchange/, error.message)
+        record = JSON.parse(File.binread(File.join(
+          target_root,
+          Hive::RefactorPatrol::JobStoreGenerationCutover::RECORD_NAME
+        )))
+        assert_equal "preflighted", record.fetch("status")
+        assert_match(
+          /\A[0-9a-f]{64}\z/,
+          record.fetch("source_inventory_digest")
+        )
+        expected_kind = timing == :before ? "directory" : "file"
+        assert_equal expected_kind,
+                     File.ftype(File.join(legacy_root, "jobs"))
+
+        resumed = cutover(
+          legacy_root: legacy_root,
+          target_root: target_root,
+          anchor: state
+        )
+        assert resumed.run!
+        assert_equal "current",
+                     resumed.admission_status.fetch("status")
+      end
+    end
+  end
+
+  def test_interrupted_native_preparation_is_repaired_but_nonempty_is_not
+    with_tmp_dir do |project_root|
+      state = File.join(project_root, ".hive-state")
+      legacy_root = File.join(state, "refactor_patrol", "v2")
+      target_root = File.join(state, "refactor_patrol", "v3")
+      interrupted = cutover(
+        legacy_root: legacy_root,
+        target_root: target_root,
+        anchor: state
+      )
+      interrupted.instance_variable_set(
+        :@target_directory,
+        InterruptingPrepareDirectory.new(
+          Hive::ManagedDirectory.new(
+            root: target_root,
+            anchor: state,
+            label: "interrupting v3 JobStore"
+          )
+        )
+      )
+
+      error = assert_raises(Interrupt) do
+        interrupted.ensure_native_namespace!
+      end
+      assert_match(/target preparation/, error.message)
+      assert File.directory?(target_root)
+      assert_empty Dir.children(target_root)
+
+      repaired = cutover(
+        legacy_root: legacy_root,
+        target_root: target_root,
+        anchor: state
+      )
+      assert_equal "migration_required",
+                   repaired.admission_status.fetch("status")
+      refute repaired.run!
+      assert_equal "current",
+                   repaired.admission_status.fetch("status")
+    end
+
+    with_tmp_dir do |project_root|
+      state = File.join(project_root, ".hive-state")
+      legacy_root = File.join(state, "refactor_patrol", "v2")
+      target_root = File.join(state, "refactor_patrol", "v3")
+      FileUtils.mkdir_p(target_root)
+      File.binwrite(File.join(target_root, "foreign"), "data")
+      unsafe = cutover(
+        legacy_root: legacy_root,
+        target_root: target_root,
+        anchor: state
+      )
+
+      error = assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) { unsafe.run! }
+      assert_match(/without a legacy jobs namespace/, error.message)
+      refute_path_exists File.join(legacy_root, "jobs")
+    end
+  end
+
   private
 
   def install_released_job(legacy_root)
@@ -283,7 +618,8 @@ class RefactorPatrolJobStoreGenerationCutoverTest < Minitest::Test
     source
   end
 
-  def cutover(legacy_root:, target_root:, anchor:, migration_factory: nil)
+  def cutover(legacy_root:, target_root:, anchor:, migration_factory: nil,
+              writer_fence: NullWriterFence.new)
     Hive::RefactorPatrol::JobStoreGenerationCutover.new(
       legacy_root: legacy_root,
       target_root: target_root,
@@ -303,7 +639,7 @@ class RefactorPatrolJobStoreGenerationCutoverTest < Minitest::Test
         "epoch" => 1
       },
       anchor: anchor,
-      writer_fence: NullWriterFence.new,
+      writer_fence: writer_fence,
       nonce: -> { "a" * 32 },
       migration_factory: migration_factory
     )

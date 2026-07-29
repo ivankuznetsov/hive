@@ -116,7 +116,7 @@ class PatrolEffectGatewayTest < Minitest::Test
     end
   end
 
-  def test_persistence_boundary_recursively_redacts_effect_outcomes
+  def test_persistence_boundary_redacts_closed_effect_outcomes
     with_tmp_dir do |root|
       operations = []
       store = Hive::Patrol::StateStore.new(root)
@@ -129,11 +129,7 @@ class PatrolEffectGatewayTest < Minitest::Test
       )
       token = "github_pat_#{'a' * 24}"
       outcome = {
-        "validation" => {
-          "stdout" => "validator emitted #{token}",
-          "exit_status" => 1
-        },
-        "samples" => [ token, 7, true, nil ]
+        "reason" => "validator emitted #{token}"
       }
 
       result = perform(gateway) { outcome }
@@ -143,9 +139,7 @@ class PatrolEffectGatewayTest < Minitest::Test
 
       redacted = "[REDACTED:github_fine_grained_pat]"
       assert_equal "validator emitted #{redacted}",
-                   result.outcome.dig("validation", "stdout")
-      assert_equal [ redacted, 7, true, nil ],
-                   result.outcome.fetch("samples")
+                   result.outcome.fetch("reason")
       assert_equal result.receipt.to_h, duplicate.receipt.to_h
       assert_equal result.outcome,
                    effect_state(store).fetch("outcome")
@@ -363,7 +357,12 @@ class PatrolEffectGatewayTest < Minitest::Test
         "name" => "demo",
         "repository" => "owner/demo"
       },
-      trigger: { "kind" => "schedule", "id" => "schedule-1" },
+      trigger: {
+        "kind" => "schedule",
+        "id" => "schedule-1",
+        "schedule" => "ordinary",
+        "occurred_at" => NOW.iso8601(6)
+      },
       reservation: { "kind" => "ordinary", "id" => "reservation-1" },
       owner: "legacy",
       owner_epoch: 1,

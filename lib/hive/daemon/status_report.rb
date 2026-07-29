@@ -193,6 +193,7 @@ module Hive
           "target_schema_version" => 3,
           "registry_digest" => nil,
           "updated_at" => nil,
+          "daemon_restart_pending" => false,
           "projects" => []
         } unless value
 
@@ -207,6 +208,7 @@ module Hive
           "target_schema_version" => 3,
           "registry_digest" => nil,
           "updated_at" => nil,
+          "daemon_restart_pending" => false,
           "projects" => [],
           "error" => "#{error.class}: #{error.message}"
         }

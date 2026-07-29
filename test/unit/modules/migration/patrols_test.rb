@@ -442,7 +442,12 @@ class ModulesMigrationPatrolsTest < Minitest::Test
           "name" => "demo",
           "repository" => nil
         },
-        trigger: { "kind" => "schedule", "id" => "tick-1" },
+        trigger: {
+          "kind" => "schedule",
+          "id" => "tick-1",
+          "schedule" => "ordinary",
+          "occurred_at" => NOW.iso8601(6)
+        },
         reservation: { "kind" => "ordinary", "id" => "reservation-1" },
         owner: "legacy",
         owner_epoch: 1,

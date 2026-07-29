@@ -10,6 +10,7 @@ require "hive/refactor_patrol/job_schema_conversion_proof"
 require "hive/refactor_patrol/job_schema_snapshot"
 require "hive/refactor_patrol/job_schema_transition_lock"
 require "hive/refactor_patrol/job_query_index"
+require "hive/refactor_patrol/job_store_files"
 require "hive/refactor_patrol/legacy_job_transformer"
 require "hive/refactor_patrol/migration_writer_fence"
 require "hive/workflow_package/canonical_json"
@@ -27,9 +28,13 @@ module Hive
       LOCK_NAME = "job-schema-v3-migration.lock".freeze
       MARKER_NAME = "job-schema-v3-migration.json".freeze
       JOB_ID_SOURCE = "[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}".freeze
-      JOB_ENTRY_PATTERN =
-        /\A#{JOB_ID_SOURCE}\.json(?:\.lock)?\z/
+      JOB_JSON_PATTERN = /\A#{JOB_ID_SOURCE}\.json\z/
+      JOB_LOCK_PATTERN = /\A#{JOB_ID_SOURCE}\.json\.lock\z/
+      ATOMIC_RESIDUE_PATTERN =
+        /\A\.(#{JOB_ID_SOURCE}\.json)\.tmp\.[0-9]+\.[0-9a-f]{8}\z/
+      INVENTORY_NAME_PATTERN = /\A[^\/]+\z/
       MAX_JOB_ENTRIES = 8_192
+      MAX_JOB_FILES = MAX_JOB_ENTRIES * 2
       MAX_JOB_BYTES = 8 * 1024 * 1024
       MAX_MARKER_BYTES = 32 * 1024
       MAX_CONVERSION_BYTES = JobSchemaConversionProof::MAX_BYTES
@@ -43,6 +48,57 @@ module Hive
       ].freeze
 
       attr_reader :snapshot_id
+
+      class << self
+        # The released store may contain one authoritative JSON record and
+        # one persistent lock for each job. AtomicFile crash residue is
+        # recognized separately so repair guidance is precise; it is never
+        # admitted as an authoritative source.
+        def validate_job_inventory_names!(values)
+          names = Array(values)
+          unless names.size <= MAX_JOB_FILES &&
+                 names.uniq.size == names.size &&
+                 names.all? { |name| name.is_a?(String) }
+            raise Hive::ConfigError,
+                  "refactor patrol job inventory is malformed"
+          end
+
+          residue = names.find { |name| name.match?(ATOMIC_RESIDUE_PATTERN) }
+          if residue
+            raise Hive::ConfigError,
+                  "refactor patrol job inventory contains incomplete " \
+                  "atomic write #{residue.inspect}"
+          end
+
+          unknown = names.find do |name|
+            !name.match?(JOB_JSON_PATTERN) &&
+              !name.match?(JOB_LOCK_PATTERN)
+          end
+          if unknown
+            raise Hive::ConfigError,
+                  "refactor patrol job inventory contains unknown entry " \
+                  "#{unknown.inspect}"
+          end
+
+          jobs = names.select { |name| name.match?(JOB_JSON_PATTERN) }
+          locks = names.select { |name| name.match?(JOB_LOCK_PATTERN) }
+          if jobs.size > MAX_JOB_ENTRIES
+            raise Hive::ConfigError,
+                  "refactor patrol job inventory has too many jobs"
+          end
+          job_set = jobs.to_h { |name| [ name, true ] }
+          orphan = locks.find do |name|
+            !job_set.key?(name.delete_suffix(".lock"))
+          end
+          if orphan
+            raise Hive::ConfigError,
+                  "refactor patrol job inventory contains orphan lock " \
+                  "#{orphan.inspect}"
+          end
+
+          names.sort.freeze
+        end
+      end
 
       def initialize(root:, target_version:, validator:,
                      corrupt_record:, inconsistent_record:,
@@ -155,6 +211,24 @@ module Hive
              TypeError => error
         raise @corrupt_record.new(
           "cannot inspect refactor patrol job schema " \
+          "(#{error.class}: #{error.message})",
+          path: @root
+        )
+      end
+
+      # Compact completion receipt used by command admission and the hourly
+      # installation sweep. It validates only the canonical marker envelope;
+      # explicit status and restore paths retain the full snapshot/job audit.
+      def completion_receipt
+        return nil unless root_present?
+
+        read_completion_marker
+      rescue @corrupt_record, @inconsistent_record
+        raise
+      rescue Hive::ConfigError, SystemCallError, IOError, ArgumentError,
+             TypeError => error
+        raise @corrupt_record.new(
+          "cannot inspect refactor patrol job completion receipt " \
           "(#{error.class}: #{error.message})",
           path: @root
         )
@@ -511,7 +585,7 @@ module Hive
         end
       end
 
-      def completed_marker
+      def read_completion_marker
         bytes = directory.read(
           MARKER_NAME, max_bytes: MAX_MARKER_BYTES, missing: true
         )
@@ -535,6 +609,19 @@ module Hive
           "refactor patrol job migration marker is malformed",
           MARKER_NAME
         ) unless valid
+        data.freeze
+      rescue JSON::ParserError, EncodingError, ArgumentError => error
+        corrupt!(
+          "refactor patrol job migration marker is malformed " \
+          "(#{error.message})",
+          MARKER_NAME
+        )
+      end
+
+      def completed_marker
+        data = read_completion_marker
+        return nil unless data
+
         snapshot = snapshot_store.manifest
         inconsistent!(
           "refactor patrol job migration snapshot is missing",
@@ -551,12 +638,6 @@ module Hive
         ) unless snapshot.fetch("entries").size ==
                  data.fetch("migrated_jobs")
         data
-      rescue JSON::ParserError, EncodingError, ArgumentError => error
-        corrupt!(
-          "refactor patrol job migration marker is malformed " \
-          "(#{error.message})",
-          MARKER_NAME
-        )
       end
 
       def write_marker(snapshot, migrated)
@@ -769,17 +850,18 @@ module Hive
 
       def inventory_names(inventory)
         snapshot = inventory.snapshot
-        inventory.each_name(
+        names = inventory.each_name(
           page_size: 256, snapshot: snapshot
         ).to_a
+        self.class.validate_job_inventory_names!(names)
       end
 
       def job_inventory
         Hive::Modules::Migration::BoundedFileInventory.new(
           directory: directory,
           relative: "jobs",
-          filename_pattern: JOB_ENTRY_PATTERN,
-          max_entries: MAX_JOB_ENTRIES,
+          filename_pattern: INVENTORY_NAME_PATTERN,
+          max_entries: MAX_JOB_FILES,
           cursor_prefix: "refactor-job-migration",
           malformed_message:
             "refactor patrol job migration inventory is malformed",
@@ -808,11 +890,19 @@ module Hive
       end
 
       def query_index
-        @query_index ||= JobQueryIndex.new(
+        @query_files ||= JobStoreFiles.new(
           root: @root,
+          anchor: @anchor,
+          corrupt_record: @corrupt_record,
+          inconsistent_record: @inconsistent_record,
+          directory: directory
+        )
+        @query_index ||= JobQueryIndex.new(
+          files: @query_files,
           id_pattern: /\A#{JOB_ID_SOURCE}\z/,
           corrupt_record: @corrupt_record,
-          inconsistent_record: @inconsistent_record
+          inconsistent_record: @inconsistent_record,
+          max_entries: MAX_JOB_ENTRIES
         )
       end
 

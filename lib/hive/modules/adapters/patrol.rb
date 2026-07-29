@@ -173,7 +173,7 @@ module Hive
             end
             shadow_comparator(project).record!(
               module_name: "patrol",
-              trigger: capture ? capture.trigger : event,
+              trigger: capture ? capture.trigger : shadow_trigger(event),
               legacy_capture: capture,
               module_projection: projection,
               legacy_effects: receipts.reject do |receipt|
@@ -199,6 +199,15 @@ module Hive
           Hive::Modules::Migration::ShadowComparator.new(
             root: File.join(state, "module-runtime", "migration", "shadow")
           )
+        end
+
+        def shadow_trigger(event)
+          {
+            "kind" => "module_event",
+            "id" => event.fetch("event_id"),
+            "event_name" => event.fetch("event_name"),
+            "occurred_at" => event.fetch("occurred_at")
+          }
         end
 
         def legacy_capture(event)
@@ -259,8 +268,7 @@ module Hive
               "kind" => "module_event",
               "id" => event.fetch("event_id"),
               "event_name" => event.fetch("event_name"),
-              "occurred_at" => event.fetch("occurred_at"),
-              "payload" => event.fetch("payload")
+              "occurred_at" => event.fetch("occurred_at")
             },
             reservation: {
               "kind" => "module_hook",

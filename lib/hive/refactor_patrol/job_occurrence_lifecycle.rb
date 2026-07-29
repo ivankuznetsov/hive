@@ -14,6 +14,7 @@ module Hive
         occurrence_capture: :capture_for_job,
         each_recovery_active_occurrence: :each_recovery_active,
         recovery_active?: :recovery_active?,
+        rebuild_recovery_index!: :rebuild_recovery_index!,
         recovery_backoff: :recovery_backoff,
         record_recovery_failure!: :record_recovery_failure!,
         clear_recovery_failure!: :clear_recovery_failure!,
@@ -33,6 +34,10 @@ module Hive
       MUTATING_METHODS = %i[
         reserve_manifest_occurrence!
         reserve_occurrence!
+        each_recovery_active_occurrence
+        recovery_active?
+        rebuild_recovery_index!
+        recovery_backoff
         record_recovery_failure!
         clear_recovery_failure!
         prepare_effect!

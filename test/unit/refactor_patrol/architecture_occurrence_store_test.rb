@@ -52,6 +52,12 @@ class RefactorPatrolArchitectureOccurrenceStoreTest < Minitest::Test
       outbox
     end
 
+    def rebuild_recovery_index!
+      fail_if!(:rebuild_recovery_index!)
+      calls << [ :rebuild_recovery_index! ]
+      { "occurrence_ids" => [] }
+    end
+
     def record_recovery_failure!(**options)
       fail_if!(:record_recovery_failure!)
       calls << [ :record_recovery_failure!, options ]
@@ -138,6 +144,9 @@ class RefactorPatrolArchitectureOccurrenceStoreTest < Minitest::Test
                  store.each_recovery_active.map {
                    |row| row.fetch("occurrence_id")
                  }
+    assert_empty store.rebuild_recovery_index!.fetch(
+      "occurrence_ids"
+    )
 
     assert_equal :prepare_effect!,
                  store.prepare_effect!(intent.to_h, now: NOW)
@@ -543,11 +552,16 @@ class RefactorPatrolArchitectureOccurrenceStoreTest < Minitest::Test
         Hive::Modules::Migration::PatrolDecisionProjection.build(
           **projection_attributes
         ),
-      outcome_class: "action",
-      outcome: {
-        "rationale" => "complete",
-        "job_id" => value.fetch("job_id")
-      },
+      outcome_class: "completed",
+      outcome:
+        architecture ?
+          {
+            "rationale" => "complete",
+            "job_id" => value.fetch("job_id")
+          } :
+          {
+            "rationale" => "complete"
+          },
       occurred_at: NOW,
       recorded_at: NOW
     )
@@ -579,7 +593,7 @@ class RefactorPatrolArchitectureOccurrenceStoreTest < Minitest::Test
     @receipt ||= Hive::Modules::Migration::EffectReceipt.build(
       intent: intent,
       status: "committed",
-      outcome: { "url" => "https://example.test/issue/7" },
+      outcome: { "issue_url" => "https://example.test/issue/7" },
       recorded_at: NOW
     )
   end

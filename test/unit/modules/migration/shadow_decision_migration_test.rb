@@ -833,7 +833,10 @@ class ModulesMigrationShadowDecisionMigrationTest < Minitest::Test
   end
 
   def record_native_v2(root, module_name:, trigger_id:, now: START)
-    trigger = { "id" => trigger_id }
+    trigger = {
+      "kind" => "manual",
+      "id" => trigger_id
+    }
     architecture = module_name == "architecture-patrol"
     job_id = "job-#{trigger_id}"
     selection_input = if architecture

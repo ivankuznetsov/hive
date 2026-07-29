@@ -44,21 +44,29 @@
         }
       }
     },
-    "trigger": {"type": "object"},
-    "reservation": {"type": "object"},
+    "trigger": {"$ref": "#/$defs/trigger"},
+    "reservation": {"$ref": "#/$defs/reservation"},
     "owner": {"enum": ["legacy", "module"]},
     "owner_epoch": {"type": "integer", "minimum": 1},
     "selection_input": {"type": "object"},
     "selection": {"$ref": "#/$defs/decision_projection"},
     "outcome_class": {
       "anyOf": [
-        {"type": "string", "minLength": 1},
+        {
+          "enum": [
+            "complete",
+            "completed",
+            "failed",
+            "not_dispatched",
+            "schema_v2_import"
+          ]
+        },
         {"type": "null"}
       ]
     },
     "outcome": {
       "anyOf": [
-        {"type": "object"},
+        {"$ref": "#/$defs/capture_outcome"},
         {"type": "null"}
       ]
     },
@@ -116,6 +124,166 @@
     }
   ],
   "$defs": {
+    "trigger": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "id"],
+          "properties": {
+            "kind": {"enum": ["manual", "direct"]},
+            "id": {"type": "string", "minLength": 1}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "id", "schedule", "occurred_at"],
+          "properties": {
+            "kind": {"const": "schedule"},
+            "id": {"type": "string", "minLength": 1},
+            "schedule": {"type": "string", "minLength": 1},
+            "occurred_at": {"type": "string", "format": "date-time"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "id", "event_name", "occurred_at"],
+          "properties": {
+            "kind": {"const": "module_event"},
+            "id": {"type": "string", "minLength": 1},
+            "event_name": {"type": "string", "minLength": 1},
+            "occurred_at": {"type": "string", "format": "date-time"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "id", "manifest_digest", "merge_sha"],
+          "properties": {
+            "kind": {"const": "pull_request.merged"},
+            "id": {"type": "string", "minLength": 1},
+            "manifest_digest": {"type": "string", "minLength": 1},
+            "merge_sha": {"type": "string", "minLength": 1}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id",
+            "source_schema_version",
+            "source_digest"
+          ],
+          "properties": {
+            "kind": {"const": "job_store.schema_v2_import"},
+            "id": {"type": "string", "minLength": 1},
+            "source_schema_version": {"const": 2},
+            "source_digest": {"type": "string", "minLength": 1}
+          }
+        }
+      ]
+    },
+    "reservation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "id"],
+          "properties": {
+            "kind": {"const": "ordinary"},
+            "id": {"type": "string", "minLength": 1}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id",
+            "window_started_at",
+            "attempt_generation"
+          ],
+          "properties": {
+            "kind": {"enum": ["ordinary", "module_hook"]},
+            "id": {"type": "string", "minLength": 1},
+            "window_started_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "attempt_generation": {"type": "integer", "minimum": 1}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "id", "job_id"],
+          "properties": {
+            "kind": {"const": "architecture"},
+            "id": {"type": "string", "minLength": 1},
+            "job_id": {"type": "string", "minLength": 1}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id",
+            "job_id",
+            "window_started_at",
+            "attempt_generation"
+          ],
+          "properties": {
+            "kind": {"const": "architecture"},
+            "id": {"type": "string", "minLength": 1},
+            "job_id": {"type": "string", "minLength": 1},
+            "window_started_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "attempt_generation": {"type": "integer", "minimum": 1}
+          }
+        }
+      ]
+    },
+    "capture_outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "rationale": {"type": "string"},
+        "ok": {"type": "boolean"},
+        "exit_code": {"type": ["integer", "null"]},
+        "features_mapped": {"type": "integer", "minimum": 0},
+        "features_reviewed": {"type": "integer", "minimum": 0},
+        "findings": {"type": "integer", "minimum": 0},
+        "fixes_attempted": {"type": "integer", "minimum": 0},
+        "prs_opened": {"type": "integer", "minimum": 0},
+        "review_complete": {"type": "boolean"},
+        "last_scanned_sha": {"type": ["string", "null"]},
+        "finding_ids": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1}
+        },
+        "job_id": {"type": "string", "minLength": 1},
+        "state": {"type": "string"},
+        "complete": {"type": "boolean"},
+        "zero_reason": {"type": ["string", "null"]},
+        "action_count": {"type": "integer", "minimum": 0},
+        "action_outcomes": {
+          "type": "object",
+          "propertyNames": {"minLength": 1},
+          "additionalProperties": {"type": "string"}
+        },
+        "completion_status": {"type": "string"}
+      },
+      "anyOf": [
+        {"required": ["rationale"]},
+        {"required": ["job_id", "state", "complete"]}
+      ]
+    },
     "patrol_selection_input": {
       "oneOf": [
         {

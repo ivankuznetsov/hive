@@ -23,9 +23,20 @@ module Hive
 
       def self.path_key(path)
         expanded = File.expand_path(path)
-        File.realpath(expanded)
-      rescue SystemCallError
-        expanded
+        candidate = expanded
+        suffix = []
+        loop do
+          resolved = File.realpath(candidate)
+          return File.join(resolved, *suffix)
+        rescue Errno::ENOENT
+          parent = File.dirname(candidate)
+          return expanded if parent == candidate
+
+          suffix.unshift(File.basename(candidate))
+          candidate = parent
+        rescue SystemCallError
+          return expanded
+        end
       end
 
       def self.registry_digest(entries)
@@ -101,35 +112,41 @@ module Hive
       def eligible_projects
         admitted = @last_results.filter_map do |result|
           next unless ADMITTED_STATUSES.include?(result.status)
-          next unless result.real_path
+          next unless result.real_path && result.hive_state_path
 
-          [
-            [
-              result.project.to_s,
-              result.project_id.to_s,
-              File.expand_path(result.real_path)
-            ],
-            true
-          ]
+          [ result_identity_key(result), true ]
         end.to_h
         Array(@registry.call).select do |entry|
-          identity = [
-            entry.fetch("name").to_s,
-            entry.fetch("project_id").to_s,
-            self.class.path_key(entry.fetch("path"))
-          ]
-          admitted.key?(identity)
+          admitted.key?(identity_key(entry_identity(entry)))
         rescue KeyError, TypeError, SystemCallError
           false
         end
+      end
+
+      # `hive daemon start` deliberately lets the new foreground/detached
+      # process own restoration after the installation preflight quiesces an
+      # older daemon. Clear that durable obligation only after the new daemon
+      # has completed construction and is ready to enter its dispatch loop.
+      def acknowledge_daemon_restart(now: Time.now.utc)
+        payload = @last_status_payload || @status_store&.read
+        return payload unless payload.is_a?(Hash)
+        return payload unless payload["daemon_restart_pending"] == true
+
+        @last_status_payload =
+          @status_store.write_daemon_restart_pending(
+            payload,
+            pending: false,
+            now: utc(now)
+          )
       end
 
       private
 
       def migrate_entry(entry, seen, now:)
         identity = entry_identity(entry)
-        duplicate = seen.key?(identity.fetch(:real_path))
-        seen[identity.fetch(:real_path)] = true
+        state_key = self.class.path_key(identity.fetch(:hive_state_path))
+        duplicate = seen.key?(state_key)
+        seen[state_key] = true
         return result_for(
           identity,
           status: :duplicate,
@@ -146,6 +163,7 @@ module Hive
         ) if @dry_run
 
         migrated = nil
+        schema = nil
         @migration_lock.call(identity) do
           ownership = @ownership_loader.call(identity)
           unless %w[legacy module].include?(ownership["owner"]) &&
@@ -154,16 +172,18 @@ module Hive
             raise Hive::ConfigError,
                   "architecture patrol ownership is unresolved"
           end
-          migrated = @project_migrator.call(
-            identity, ownership: ownership
-          )
+          schema = @schema_status.call(identity)
+          unless schema.fetch("status") == "current"
+            migrated = @project_migrator.call(
+              identity, ownership: ownership
+            )
+            schema = @schema_status.call(identity)
+          end
         end
-        schema = @schema_status.call(identity)
-        status = if migrated
-          :migrated
-        elsif schema.fetch("status") == "current"
-          :current
-        elsif schema.fetch("status") == "absent"
+        status = case schema.fetch("status")
+        when "current"
+          migrated ? :migrated : :current
+        when "absent"
           :absent
         else
           :migration_required
@@ -230,6 +250,24 @@ module Hive
         }.freeze
       end
 
+      def identity_key(identity)
+        [
+          identity.fetch(:project).to_s,
+          identity.fetch(:project_id).to_s,
+          self.class.path_key(identity.fetch(:real_path)),
+          self.class.path_key(identity.fetch(:hive_state_path))
+        ].freeze
+      end
+
+      def result_identity_key(result)
+        [
+          result.project.to_s,
+          result.project_id.to_s,
+          self.class.path_key(result.real_path),
+          self.class.path_key(result.hive_state_path)
+        ].freeze
+      end
+
       def partial_identity(entry)
         entry = entry.is_a?(Hash) ? entry : {}
         path = begin
@@ -291,7 +329,7 @@ module Hive
             "snapshot_id" => nil
           }
         end
-        Hive::RefactorPatrol::JobStore.schema_status(
+        Hive::RefactorPatrol::JobStore.schema_admission_status(
           identity.fetch(:real_path),
           hive_state_path: identity.fetch(:hive_state_path),
           project: identity.fetch(:entry)

@@ -870,7 +870,9 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       },
       trigger: {
         "kind" => "schedule",
-        "id" => "ordinary:#{entry.fetch('project_id')}:#{T0.iso8601(6)}"
+        "id" => "ordinary:#{entry.fetch('project_id')}:#{T0.iso8601(6)}",
+        "occurred_at" => T0.iso8601(6),
+        "schedule" => "scheduler-recovery-test"
       },
       reservation: {
         "kind" => "ordinary",

@@ -540,7 +540,9 @@ be misread as the scheduling decision.
 
 Each occurrence directory also has one canonical
 `journal-state.json` (`hive-patrol-occurrence-journal-state` v1), capped at
-64 KiB. This file is coordination metadata only:
+64 KiB, and one canonical `recovery-index.json`
+(`hive-patrol-occurrence-recovery-index` v1), capped at 512 KiB and 4,096
+active ids. These files are coordination metadata only:
 
 - scheduled ordinary attempts, module events, and Architecture Patrol jobs use
   canonical window/generation identities with bounded high-water entries and a
@@ -550,6 +552,11 @@ Each occurrence directory also has one canonical
 - a monotonic dirty generation marks possible reserved or projection-pending
   work before its occurrence write; a generation-matched empty repair clears
   it so idle scheduler ticks do not reread retained terminal history;
+- `recovery-index.json` locates only exact reserved or projection-pending
+  records. Reservation publishes its id before the authoritative occurrence
+  write, retirement removes it only after the record becomes inactive, and a
+  missing, malformed, stale-generation, or dirty index receives one bounded
+  record-store repair;
 - one normalized recovery-failure cell records generation, operation,
   occurrence/job identity, bounded UTF-8 error class/message/digest, failure
   count, and the next 60/300/900-second eligibility boundary.
@@ -557,11 +564,16 @@ Each occurrence directory also has one canonical
 The journal locks in the fixed order
 identity → journal state → inventory → occurrence record. Inventory views
 take one bounded sorted filename snapshot per full traversal; stateless cursors
-retain their high-water fingerprint validation. The dirty generation is only a
-repair hint, not a second recovery map: occurrence records retain authoritative
-effects and projection outbox bytes, while `journal-state.json` contains
-neither. StateStore and JobStore remain the separate product-facing owners, and
+retain their high-water fingerprint validation. The dirty generation is a
+repair fence and the recovery index is a bounded locator, never a second
+recovery authority: occurrence records retain authoritative effects and
+projection outbox bytes, while neither coordination file can authorize work.
+StateStore and JobStore remain the separate product-facing owners, and
 observational EvidenceStore records are never consulted to authorize a retry.
+JobStore establishes its admitted native-v3 namespace before any architecture
+recovery backoff or active-index repair can write coordination state. Semantic
+family dry-run resolution instead uses a non-migrating JobStore reader, so a
+preview cannot create that namespace or any other project state.
 Before terminal effect outcomes cross from `EffectDelivery` into either
 product store, every nested string value passes through
 `Hive::SecretPatterns`; journal, evidence, comparison, and replay therefore use
@@ -597,6 +609,7 @@ their existing v2 owners until those components intentionally migrate:
 ├── v3/
 │   ├── jobs/<job-id>.json               # v3-only aggregate authority
 │   ├── occurrences/records/             # effects and exact receipts
+│   ├── occurrences/recovery-index.json   # bounded active-record locator
 │   ├── indexes/job-query/               # rebuildable ordered query index
 │   ├── job-schema-v2-backup/
 │   │   ├── manifest.json                # exact bytes/metadata snapshot
@@ -638,8 +651,11 @@ one-off conversion entrypoint for dormant state, while normal records and child
 completion payloads validate only v3.
 
 The snapshot manifest binds project id, sorted name set, exact bytes, SHA-256,
-size, mode, and source mtime before the first replacement. A completed marker
-and the v2 tombstone bind the same snapshot and transaction identities.
+size, mode, and source mtime before the first replacement. A completed marker,
+compact cutover record, and the v2 tombstone bind the same snapshot and
+transaction identities; the marker and cutover record also bind the exact
+migrated-job count, so compact admission cannot accept count drift that a full
+audit would reject.
 Emergency restore is an explicit operator-fenced command: it revalidates every
 binding, atomically reactivates exact v2 bytes, and quarantines the entire v3
 generation. It is not a reverse-schema runtime; see [[commands/migrate]].
@@ -648,6 +664,10 @@ Read-only job listing is bounded by the `indexes/job-query/` sequence
 projection rather than a scan of every aggregate. Each authoritative new job
 reserves an immutable monotonic entry/pointer pair before its job write;
 `active.json` publishes only the contiguous prefix whose job files are durable.
+`JobStoreFiles` owns descriptor-confined access to live jobs, index sidecars,
+quarantine evidence, and locks. Its store-wide admission lock checks the
+bounded authoritative inventory before creating a per-job lock, so concurrent
+writers cannot persist an 8,193rd job or leave an over-capacity orphan lock.
 An exact retry can adopt the next fully written membership after a crash, while
 a permanent hole keeps later entries invisible until an explicit authoritative
 rebuild. Rebuild scans while holding the writer lock, prepares a complete new

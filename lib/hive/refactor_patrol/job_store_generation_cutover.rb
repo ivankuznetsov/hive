@@ -25,15 +25,15 @@ module Hive
       RECORD_VERSION = 1
       RECORD_NAME = "job-schema-v3-cutover.json".freeze
       MAX_RECORD_BYTES = 32 * 1024
-      MAX_JOB_ENTRIES = 8_192
+      MAX_JOB_ENTRIES = JobStoreSchemaMigration::MAX_JOB_ENTRIES
+      MAX_JOB_FILES = JobStoreSchemaMigration::MAX_JOB_FILES
       MAX_JOB_BYTES = 8 * 1024 * 1024
-      JOB_ENTRY = /\A[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}\.json(?:\.lock)?\z/
       RECORD_KEYS = %w[
-        archive_name completed_at created_at project_id schema schema_version
-        snapshot_id source_inventory_digest source_schema_version status
-        target_schema_version transaction_id
+        archive_name completed_at created_at migrated_jobs project_id schema
+        schema_version snapshot_id source_inventory_digest
+        source_schema_version status target_schema_version transaction_id
       ].freeze
-      RECORD_STATUSES = %w[prepared sealed complete].freeze
+      RECORD_STATUSES = %w[prepared preflighted sealed complete].freeze
 
       def initialize(
         legacy_root:, target_root:, target_version:, validator:,
@@ -57,18 +57,19 @@ module Hive
       end
 
       def run!
-        kind = legacy_jobs_type
-        return false if kind.nil? && !cutover_record_present?
-        return false if native_tombstone?(kind)
-
         JobSchemaTransitionLock.with_lock(@target_root) do
           kind = legacy_jobs_type
-          return false if native_tombstone?(kind)
           if kind.nil?
+            return false unless target_present?
+            return complete_native_preparation! if
+              recoverable_native_preparation?
+
             inconsistent!(
               "JobStore cutover state exists without a legacy jobs namespace"
             )
           end
+          return false if native_tombstone?(kind)
+          return false if completed_migrated_receipt(kind)
 
           @writer_fence.assert_quiescent!
           record = prepare_record
@@ -84,19 +85,29 @@ module Hive
               "v3 JobStore is not complete after schema conversion"
             )
           end
-          snapshot_id = status.fetch("snapshot_id")
           assert_source_inventory!(
             record,
             sealed_source_inventory(record.fetch("archive_name")),
             message:
               "sealed v2 JobStore changed during schema conversion"
           )
+          receipt = schema_migration.completion_receipt
+          unless receipt &&
+                 receipt.fetch("snapshot_id") ==
+                   status.fetch("snapshot_id")
+            inconsistent!(
+              "v3 JobStore completion receipt conflicts with its audit"
+            )
+          end
+          snapshot_id = receipt.fetch("snapshot_id")
+          migrated_jobs = receipt.fetch("migrated_jobs")
           complete_tombstone!(record, snapshot_id: snapshot_id)
           was_complete = record.fetch("status") == "complete"
           write_record(
             record.merge(
               "status" => "complete",
               "snapshot_id" => snapshot_id,
+              "migrated_jobs" => migrated_jobs,
               "completed_at" =>
                 record["completed_at"] || timestamp(@clock.call)
             )
@@ -126,23 +137,20 @@ module Hive
             )
           end
 
-          target_directory.prepare!
-          legacy_directory.prepare!
           if kind.nil?
-            tombstone.write(
-              origin: "native",
-              status: "complete",
-              transaction_id: "native-#{@nonce.call}"
-            )
+            target_directory.prepare! unless target_present?
+            complete_native_preparation!
           else
             payload = tombstone.read
             if payload.fetch("origin") == "migrated"
-              snapshot_id = schema_migration.snapshot_identity
-              tombstone.assert_complete!(
-                payload, snapshot_id: snapshot_id
-              )
+              inconsistent!(
+                "migrated JobStore admission is incomplete"
+              ) unless completed_migrated_receipt(kind)
             else
               tombstone.assert_complete!(payload, snapshot_id: nil)
+              inconsistent!(
+                "native JobStore tombstone exists without the v3 namespace"
+              ) unless target_present?
             end
           end
           true
@@ -158,38 +166,51 @@ module Hive
         )
       end
 
-      def status
-        kind = legacy_jobs_type
-        if kind == :directory
-          return status_payload("migration_required")
+      def admission_status
+        JobSchemaTransitionLock.with_lock(@target_root) do
+          compact_status
         end
-        if kind.nil?
-          if target_present? || cutover_record_present?
-            inconsistent!(
-              "v3 JobStore exists without a legacy namespace tombstone"
-            )
-          end
-          return status_payload("absent")
-        end
-
-        payload = tombstone.read
-        target = schema_migration.status
-        if payload.fetch("origin") == "native"
-          tombstone.assert_complete!(payload, snapshot_id: nil)
-          return target
-        end
-
-        snapshot_id = target["snapshot_id"]
-        unless payload.fetch("status") == "complete" &&
-               target.fetch("status") == "current"
-          return target.merge("status" => "migration_required")
-        end
-        tombstone.assert_complete!(
-          payload, snapshot_id: snapshot_id
+      rescue @corrupt_record, @inconsistent_record
+        raise
+      rescue Hive::ConfigError, SystemCallError, IOError, ArgumentError,
+             TypeError => error
+        raise @corrupt_record.new(
+          "cannot inspect the JobStore generation admission " \
+          "(#{error.class}: #{error.message})",
+          path: @target_root
         )
-        record = read_record
-        validate_record_tombstone!(record, payload)
-        target
+      end
+
+      def status
+        JobSchemaTransitionLock.with_lock(@target_root) do
+          compact = compact_status
+          kind = legacy_jobs_type
+          return compact if kind.nil? || kind == :directory
+
+          payload = tombstone.read
+          target = schema_migration.status
+          if payload.fetch("origin") == "native"
+            tombstone.assert_complete!(payload, snapshot_id: nil)
+            return target
+          end
+
+          unless compact.fetch("status") == "current" &&
+                 target.fetch("status") == "current" &&
+                 compact.fetch("snapshot_id") == target["snapshot_id"]
+            return target.merge("status" => "migration_required")
+          end
+
+          snapshot_id = target.fetch("snapshot_id")
+          tombstone.assert_complete!(payload, snapshot_id: snapshot_id)
+          record = read_record
+          validate_record_tombstone!(record, payload)
+          assert_source_inventory!(
+            record,
+            sealed_source_inventory(record.fetch("archive_name")),
+            message: "sealed v2 JobStore changed after schema admission"
+          )
+          target
+        end
       rescue @corrupt_record, @inconsistent_record
         raise
       rescue Hive::ConfigError, SystemCallError, IOError, ArgumentError,
@@ -208,9 +229,102 @@ module Hive
 
       private
 
+      def compact_status
+        kind = legacy_jobs_type
+        return status_payload("migration_required") if kind == :directory
+        if kind.nil?
+          return status_payload("absent") unless target_present?
+          return status_payload("migration_required") if
+            recoverable_native_preparation?
+
+          inconsistent!(
+            "v3 JobStore exists without a legacy namespace tombstone"
+          )
+        end
+        return status_payload("current") if native_tombstone?(kind)
+
+        if (receipt = completed_migrated_receipt(kind))
+          return status_payload(
+            "current",
+            snapshot_id: receipt.fetch("snapshot_id")
+          )
+        end
+
+        payload = tombstone.read
+        validate_incomplete_migrated_state!(payload)
+        status_payload("migration_required")
+      end
+
+      def completed_migrated_receipt(kind)
+        return nil unless kind == :regular
+
+        payload = tombstone.read
+        return nil unless payload.fetch("origin") == "migrated" &&
+                          payload.fetch("status") == "complete"
+        record = read_record
+        return nil unless record &&
+                          record.fetch("status") == "complete"
+
+        validate_record_tombstone!(record, payload)
+        receipt = schema_migration.completion_receipt
+        return nil unless receipt
+
+        snapshot_id = receipt.fetch("snapshot_id")
+        return nil unless record.fetch("snapshot_id") == snapshot_id &&
+                          payload.fetch("snapshot_id") == snapshot_id &&
+                          record.fetch("migrated_jobs") ==
+                            receipt.fetch("migrated_jobs")
+
+        tombstone.assert_complete!(payload, snapshot_id: snapshot_id)
+        receipt
+      end
+
+      def validate_incomplete_migrated_state!(payload)
+        inconsistent!("legacy JobStore namespace is malformed") unless
+          payload.fetch("origin") == "migrated" &&
+          target_present?
+        record = read_record
+        validate_record_tombstone!(record, payload)
+        if record.fetch("status") == "prepared"
+          inconsistent!(
+            "sealed v2 JobStore has no persisted preflight inventory"
+          )
+        end
+        true
+      end
+
+      def recoverable_native_preparation?
+        return false unless target_present?
+        return false if read_record
+
+        directory_empty?(target_directory)
+      end
+
+      def complete_native_preparation!
+        inconsistent!(
+          "unclaimed v3 JobStore namespace is not empty"
+        ) unless recoverable_native_preparation?
+
+        legacy_directory.prepare!
+        tombstone.write(
+          origin: "native",
+          status: "complete",
+          transaction_id: "native-#{@nonce.call}"
+        )
+        payload = tombstone.read
+        tombstone.assert_complete!(payload, snapshot_id: nil)
+        false
+      end
+
       def prepare_record
         existing = read_record
         return existing if existing
+        if target_present? &&
+           !directory_empty?(target_directory)
+          inconsistent!(
+            "unclaimed v3 JobStore namespace is not empty"
+          )
+        end
 
         transaction_suffix = @nonce.call
         unless transaction_suffix.to_s.match?(/\A[0-9a-f]{32}\z/)
@@ -227,18 +341,37 @@ module Hive
             ".job-schema-v3-source-#{transaction_suffix}",
           "status" => "prepared",
           "snapshot_id" => nil,
+          "migrated_jobs" => nil,
           "source_inventory_digest" => nil,
           "created_at" => timestamp(@clock.call),
           "completed_at" => nil
         }
-        target_directory.prepare!
-        write_record(record)
+        validate_record!(record)
+        record.freeze
       end
 
       def seal_source!(record, kind:)
         archive_name = record.fetch("archive_name")
         transaction_id = record.fetch("transaction_id")
         if kind == :directory
+          unless %w[prepared preflighted].include?(
+            record.fetch("status")
+          )
+            inconsistent!(
+              "live v2 JobStore conflicts with sealed migration state"
+            )
+          end
+          source_inventory = source_inventory(
+            JobSchemaTombstone::FILE_NAME
+          )
+          target_directory.prepare!
+          record = write_record(
+            record.merge(
+              "status" => "preflighted",
+              "source_inventory_digest" =>
+                source_inventory_digest(source_inventory)
+            )
+          )
           archive_kind = legacy_directory.entry_type(
             archive_name, missing: true
           )
@@ -262,9 +395,20 @@ module Hive
             directory_name: JobSchemaTombstone::FILE_NAME,
             regular_name: archive_name
           )
+          sealed_inventory = sealed_source_inventory(archive_name)
+          unless sealed_inventory == source_inventory
+            inconsistent!(
+              "released v2 JobStore changed during source sealing"
+            )
+          end
         elsif kind == :regular
           sealed = tombstone.read
           validate_record_tombstone!(record, sealed)
+          if record.fetch("status") == "prepared"
+            inconsistent!(
+              "sealed v2 JobStore has no persisted preflight inventory"
+            )
+          end
           unless legacy_directory.entry_type(
             archive_name, missing: true
           ) == :directory
@@ -275,18 +419,15 @@ module Hive
         end
 
         inventory = sealed_source_inventory(archive_name)
-        inventory_digest = source_inventory_digest(inventory)
-        if record["source_inventory_digest"] &&
-           record["source_inventory_digest"] != inventory_digest
-          inconsistent!(
-            "sealed v2 JobStore changed after source admission"
-          )
-        end
+        assert_source_inventory!(
+          record,
+          inventory,
+          message: "sealed v2 JobStore changed after source admission"
+        )
         return record if record.fetch("status") == "complete"
 
         sealed_record = record.merge(
-          "status" => "sealed",
-          "source_inventory_digest" => inventory_digest
+          "status" => "sealed"
         )
         write_record(sealed_record)
       end
@@ -305,9 +446,13 @@ module Hive
           missing: true
         )
         target_directory.ensure_directory("jobs")
-        target_names = target_directory.each_child(
-          "jobs", missing: true
-        ).to_a.sort
+        target_names = bounded_child_names(
+          target_directory,
+          "jobs",
+          max_entries: MAX_JOB_FILES,
+          missing: true,
+          overflow_message: "v3 JobStore inventory is too large"
+        )
         unless snapshot_present
           extra = target_names - source_names
           inconsistent!(
@@ -351,17 +496,29 @@ module Hive
       end
 
       def sealed_source_inventory(archive)
-        names = legacy_directory.each_child(archive).to_a.sort
-        unless names.size <= MAX_JOB_ENTRIES * 2 &&
-               names.all? { |name| name.match?(JOB_ENTRY) }
-          corrupt!("sealed v2 JobStore inventory is malformed")
-        end
+        source_inventory(archive)
+      end
+
+      def source_inventory(relative)
+        names = bounded_child_names(
+          legacy_directory,
+          relative,
+          max_entries: MAX_JOB_FILES,
+          overflow_message:
+            "released v2 JobStore inventory is too large"
+        )
+        JobStoreSchemaMigration.validate_job_inventory_names!(names)
         names.map do |name|
           source = legacy_directory.read_with_metadata(
-            File.join(archive, name), max_bytes: MAX_JOB_BYTES
+            File.join(relative, name), max_bytes: MAX_JOB_BYTES
           )
           source_metadata(source, name: name)
         end.freeze
+      rescue Hive::ConfigError => error
+        corrupt!(
+          "released v2 JobStore inventory is malformed " \
+          "(#{error.message})"
+        )
       end
 
       def source_metadata(source, name:)
@@ -377,6 +534,20 @@ module Hive
 
       def source_inventory_digest(inventory)
         Digest::SHA256.hexdigest(canonical(inventory))
+      end
+
+      def directory_empty?(directory)
+        directory.each_child.none?
+      end
+
+      def bounded_child_names(directory, relative, max_entries:, missing: false,
+                              overflow_message:)
+        names = []
+        directory.each_child(relative, missing: missing) do |name|
+          names << name
+          inconsistent!(overflow_message) if names.size > max_entries
+        end
+        names.sort.freeze
       end
 
       def assert_source_inventory!(record, inventory, message:)
@@ -495,13 +666,18 @@ module Hive
             record["snapshot_id"].to_s.match?(
               JobSchemaTombstone::SNAPSHOT_ID
             ) &&
+            record["migrated_jobs"].is_a?(Integer) &&
+            record["migrated_jobs"].between?(1, MAX_JOB_ENTRIES) &&
             record["source_inventory_digest"].to_s.match?(
               /\A[0-9a-f]{64}\z/
             ) &&
             valid_timestamp?(record["completed_at"])
-        elsif record.fetch("status") == "sealed"
-          corrupt!("sealed JobStore cutover record is incomplete") unless
+        elsif %w[preflighted sealed].include?(
+          record.fetch("status")
+        )
+          corrupt!("admitted JobStore cutover record is incomplete") unless
             record["snapshot_id"].nil? &&
+            record["migrated_jobs"].nil? &&
             record["source_inventory_digest"].to_s.match?(
               /\A[0-9a-f]{64}\z/
             ) &&
@@ -509,6 +685,7 @@ module Hive
         else
           corrupt!("incomplete JobStore cutover record has terminal data") unless
             record["snapshot_id"].nil? &&
+            record["migrated_jobs"].nil? &&
             record["source_inventory_digest"].nil? &&
             record["completed_at"].nil?
         end
@@ -605,12 +782,12 @@ module Hive
         }.freeze
       end
 
-      def status_payload(status)
+      def status_payload(status, snapshot_id: nil)
         {
           "status" => status,
           "source_schema_version" => 2,
           "target_schema_version" => @target_version,
-          "snapshot_id" => nil
+          "snapshot_id" => snapshot_id
         }
       end
 

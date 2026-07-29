@@ -63,7 +63,10 @@ class ModuleMigrationIntegrationTest < Minitest::Test
         %w[patrol architecture-patrol].each do |module_name|
           comparator.record!(
             module_name: module_name,
-            trigger: { "fixture" => true, "module" => module_name, "index" => index },
+            trigger: {
+              "kind" => "manual",
+              "id" => "fixture:#{module_name}:#{index}"
+            },
             module_projection:
               Hive::Modules::Migration::PatrolDecisionProjection.build(
                 module_name: module_name,

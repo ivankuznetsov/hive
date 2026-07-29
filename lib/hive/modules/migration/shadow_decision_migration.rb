@@ -285,6 +285,7 @@ module Hive
 
         def v2_record(data, bytes)
           trigger = {
+            "kind" => "archived_v1",
             "archived_v1_trigger_digest" => data.fetch("trigger_digest")
           }
           record = {

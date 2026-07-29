@@ -88,6 +88,10 @@ module Hive
 
       def recovery_active? = @occurrence_store.recovery_active?
 
+      def rebuild_recovery_index!
+        @occurrence_store.rebuild_recovery_index!
+      end
+
       def each_occurrence(&block)
         return @occurrence_store.each_record unless block
 
@@ -279,6 +283,20 @@ module Hive
         ) { write_json(File.join(root, "patches", "#{id}.json"), data) }
       end
 
+      def patch_record(id)
+        identifier = id.to_s
+        raise Hive::ConfigError, "patrol patch identity is malformed" unless
+          identifier.match?(/\A[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}\z/)
+
+        value = read_json(
+          File.join(root, "patches", "#{identifier}.json")
+        )
+        unless value["id"].to_s == identifier
+          raise Hive::ConfigError, "patrol patch record is unavailable"
+        end
+        value
+      end
+
       def update_state(data)
         desired = state.merge(data)
         effect_write(
@@ -334,7 +352,10 @@ module Hive
         return { "status" => "absent", "outcome" => {} } if matches.empty?
         return { "status" => "ambiguous", "outcome" => {} } unless matches.one?
 
-        { "status" => "matched", "outcome" => { "patch" => matches.first } }
+        {
+          "status" => "matched",
+          "outcome" => { "patch_id" => matches.first.fetch("id") }
+        }
       end
 
       # Fingerprint publication remains ordinary Patrol's product recovery

@@ -535,12 +535,12 @@ class ModulesMigrationEffectDeliveryCollaboratorsTest < Minitest::Test
     store.state = {
       "state" => "committed",
       "terminal_receipt_id" => "receipt-1",
-      "outcome" => { "remote" => "present" }
+      "outcome" => { "transition_status" => "present" }
     }
     store.receipt = Receipt.new(
       receipt_id: "receipt-1",
       status: "committed",
-      outcome: { "remote" => "present" }
+      outcome: { "transition_status" => "present" }
     )
     delivery = Hive::Modules::Migration::EffectDelivery.new(
       module_name: "patrol",
@@ -569,7 +569,7 @@ class ModulesMigrationEffectDeliveryCollaboratorsTest < Minitest::Test
     assert_equal :committed, result.status
   end
 
-  def test_delivery_redacts_nested_outcomes_before_settlement_and_replay
+  def test_delivery_redacts_closed_outcomes_before_settlement_and_replay
     capture = patrol_capture
     store = DeliveryStore.new
     delivery = Hive::Modules::Migration::EffectDelivery.new(
@@ -601,11 +601,7 @@ class ModulesMigrationEffectDeliveryCollaboratorsTest < Minitest::Test
 
     result = delivery.perform!(**attributes) do
       {
-        "validation" => {
-          "stdout" => "found #{token}",
-          "exit_status" => 1
-        },
-        "values" => [ token, 7, false, nil ]
+        "reason" => "found #{token}"
       }
     end
     replay = delivery.perform!(**attributes) do
@@ -614,11 +610,7 @@ class ModulesMigrationEffectDeliveryCollaboratorsTest < Minitest::Test
 
     redacted = "[REDACTED:github_fine_grained_pat]"
     expected = {
-      "validation" => {
-        "stdout" => "found #{redacted}",
-        "exit_status" => 1
-      },
-      "values" => [ redacted, 7, false, nil ]
+      "reason" => "found #{redacted}"
     }
     assert_equal expected, result.outcome
     assert_equal expected, store.state.fetch("outcome")
@@ -632,11 +624,11 @@ class ModulesMigrationEffectDeliveryCollaboratorsTest < Minitest::Test
     store.state = {
       "state" => "committed",
       "terminal_receipt_id" => "receipt-1",
-      "outcome" => { "remote" => "present" }
+      "outcome" => { "transition_status" => "present" }
     }
     store.receipt = Receipt.new(
       receipt_id: "receipt-1", status: "committed",
-      outcome: { "remote" => "present" }
+      outcome: { "transition_status" => "present" }
     )
     delivery = Hive::Modules::Migration::EffectDelivery.new(
       module_name: "patrol", product_label: "patrol", config_key: "patrol",
@@ -747,7 +739,12 @@ class ModulesMigrationEffectDeliveryCollaboratorsTest < Minitest::Test
         "name" => "demo",
         "repository" => "owner/demo"
       },
-      trigger: { "kind" => "schedule", "id" => "timer-1" },
+      trigger: {
+        "kind" => "schedule",
+        "id" => "timer-1",
+        "schedule" => "continuous",
+        "occurred_at" => Time.utc(2026, 7, 28, 18).iso8601(6)
+      },
       reservation: { "kind" => "ordinary", "id" => "cycle-1" },
       owner: "legacy",
       owner_epoch: 1,

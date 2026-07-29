@@ -30,7 +30,8 @@ module Hive
       attr_reader :last_payload, :last_registry_digest, :last_ran,
                   :last_daemon_was_running, :last_daemon_restarted
 
-      def self.eligible_argv?(argv, strict_no_write: false, env: ENV)
+      def self.eligible_argv?(argv, strict_no_write: false, env: ENV,
+                              commands: nil)
         args = Array(argv).map(&:to_s)
         return false if strict_no_write
         return false if env[INTERNAL_ENV] == "1"
@@ -58,14 +59,11 @@ module Hive
           subcommand = subcommand_after(args, "web")
           return false if EXEMPT_WEB_SUBCOMMANDS.include?(subcommand)
         end
-        # Let Thor own missing-argument usage errors before any installation
-        # activation. This preserves the command's human/JSON error contract
-        # and avoids creating migration receipts for an invocation that could
-        # never dispatch.
-        return false if command == "connect" &&
-                        subcommand_after(args, "connect").nil?
-
-        true
+        valid_cli_invocation?(
+          args,
+          command: command,
+          commands: commands || command_catalog
+        )
       end
 
       def self.restart_daemon_after?(argv)
@@ -112,6 +110,70 @@ module Hive
       end
       private_class_method :boolean_option?
 
+      def self.command_catalog
+        require "hive/cli"
+        Hive::CLI.all_commands
+      end
+      private_class_method :command_catalog
+
+      def self.valid_cli_invocation?(args, command:, commands:)
+        definition = commands.values.find do |candidate|
+          candidate.usage.to_s.split.first == command
+        end
+        return false unless definition
+
+        required = definition.usage.to_s.split.drop(1).count do |token|
+          !token.start_with?("[") &&
+            token.match?(/\A[A-Z][A-Z0-9_]*(?:\.\.\.)?\z/)
+        end
+        positionals = invocation_positionals(
+          args,
+          command: command,
+          options:
+            definition.options.merge(Hive::CLI.class_options)
+        )
+        positionals && positionals.length >= required
+      rescue NoMethodError, TypeError
+        false
+      end
+      private_class_method :valid_cli_invocation?
+
+      def self.invocation_positionals(args, command:, options:)
+        command_index = Array(args).index(command)
+        return nil unless command_index
+
+        by_token = options.each_with_object({}) do |(name, option), index|
+          canonical = "--#{name.to_s.tr('_', '-')}"
+          index[canonical] = option
+          Array(option.aliases).each { |alias_name| index[alias_name] = option }
+        end
+        positionals = []
+        index = command_index + 1
+        options_enabled = true
+        while index < args.length
+          token = args.fetch(index)
+          if options_enabled && token == "--"
+            options_enabled = false
+          elsif options_enabled && token.start_with?("-")
+            option_name = token.split("=", 2).first
+            normalized = option_name.sub(/\A--(?:no|skip)-/, "--")
+            option = by_token[normalized]
+            return nil unless option
+
+            if !token.include?("=") && option.type != :boolean &&
+               !option_name.match?(/\A--(?:no|skip)-/)
+              index += 1
+              return nil if index >= args.length
+            end
+          else
+            positionals << token
+          end
+          index += 1
+        end
+        positionals
+      end
+      private_class_method :invocation_positionals
+
       def initialize(
         registry: -> {
           Hive::Config.registered_project_entries(preserve_invalid: true)
@@ -155,30 +217,57 @@ module Hive
           digest = RegisteredProjectMigrationStatus.registry_digest(entries)
           current = readable_status
           @last_registry_digest = digest
-          unless force || due?(current, digest: digest, now: time)
+          migration_due = force ||
+            migration_due?(current, digest: digest, now: time)
+          restart_pending =
+            current.is_a?(Hash) &&
+            current["daemon_restart_pending"] == true
+          unless migration_due || restart_pending
             @last_payload = current
             next current
           end
 
           daemon_was_running = daemon_lifecycle.quiesce!
           @last_daemon_was_running = daemon_was_running
+          restart_required = restart_pending || daemon_was_running
           succeeded = false
           begin
-            coordinator = @coordinator_factory.call(
-              entries: entries, status_store: @status_store
-            )
-            coordinator.run(now: time, entries: entries)
-            payload = coordinator.last_status_payload || @status_store.read
-            unless payload
-              raise Hive::ConfigError,
-                    "installation migration did not persist status"
+            payload = current
+            if migration_due
+              coordinator = @coordinator_factory.call(
+                entries: entries, status_store: @status_store
+              )
+              coordinator.run(now: time, entries: entries)
+              payload =
+                coordinator.last_status_payload || @status_store.read
+              unless payload
+                raise Hive::ConfigError,
+                      "installation migration did not persist status"
+              end
+              @last_ran = true
+            end
+            if restart_required
+              payload = @status_store.write_daemon_restart_pending(
+                payload,
+                pending: true,
+                now: time
+              )
             end
             @last_payload = payload
-            @last_ran = true
             succeeded = true
+            if restart_required && restart_daemon
+              daemon_lifecycle.restart!
+              @last_daemon_restarted = true
+              payload = @status_store.write_daemon_restart_pending(
+                payload,
+                pending: false,
+                now: time
+              )
+              @last_payload = payload
+            end
             payload
           ensure
-            if daemon_was_running && (restart_daemon || !succeeded)
+            if daemon_was_running && !succeeded
               daemon_lifecycle.restart!
               @last_daemon_restarted = true
             end
@@ -206,7 +295,7 @@ module Hive
         nil
       end
 
-      def due?(payload, digest:, now:)
+      def migration_due?(payload, digest:, now:)
         return true unless payload.is_a?(Hash)
         return true unless payload["registry_digest"] == digest
 

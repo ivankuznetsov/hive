@@ -65,7 +65,7 @@
             {"type": "null"}
           ]
         },
-        "scope": {"type": "object"},
+        "scope": {"$ref": "#/$defs/scope"},
         "created_at": {"type": "string", "format": "date-time"}
       }
     },
@@ -80,7 +80,187 @@
         "failed"
       ]
     },
-    "outcome": {"type": "object"},
+    "outcome": {"$ref": "#/$defs/outcome"},
     "recorded_at": {"type": "string", "format": "date-time"}
+  },
+  "$defs": {
+    "scope": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "maxProperties": 0
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["fingerprint"],
+          "properties": {
+            "fingerprint": {"type": "string", "minLength": 1}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["job_id"],
+          "properties": {
+            "job_id": {"type": "string", "minLength": 1}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["job_id", "operation"],
+          "properties": {
+            "job_id": {"type": "string", "minLength": 1},
+            "operation": {"type": "string", "minLength": 1}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["job_id", "canonical_action_id"],
+          "properties": {
+            "job_id": {"type": "string", "minLength": 1},
+            "canonical_action_id": {"type": "string", "minLength": 1}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "patch_id",
+            "worktree_path",
+            "base_sha",
+            "head_sha",
+            "fingerprint",
+            "branch"
+          ],
+          "properties": {
+            "patch_id": {"type": "string", "minLength": 1},
+            "worktree_path": {"type": "string", "minLength": 1},
+            "base_sha": {"type": "string", "minLength": 1},
+            "head_sha": {"type": "string", "minLength": 1},
+            "fingerprint": {"type": "string", "minLength": 1},
+            "branch": {"type": "string", "minLength": 1}
+          }
+        }
+      ]
+    },
+    "outcome": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "maxProperties": 0
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["attempted", "reason"],
+          "properties": {
+            "attempted": {"const": true},
+            "reason": {"type": "string"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["reason"],
+          "properties": {"reason": {"type": "string"}}
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["content_digest"],
+          "properties": {"content_digest": {"type": "string"}}
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["finding_id"],
+          "properties": {"finding_id": {"type": "string"}}
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["patch_id"],
+          "properties": {"patch_id": {"type": "string", "minLength": 1}}
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["remote_oid"],
+          "properties": {"remote_oid": {"type": ["string", "null"]}}
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["pr_url"],
+          "properties": {"pr_url": {"type": "string"}}
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["pr_url", "state", "head_oid", "base_oid"],
+          "properties": {
+            "pr_url": {"type": "string"},
+            "state": {"type": "string"},
+            "head_oid": {"type": "string"},
+            "base_oid": {"type": "string"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["issue_url"],
+          "properties": {"issue_url": {"type": "string"}}
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["task_path"],
+          "properties": {"task_path": {"type": "string"}}
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["transition_status"],
+          "properties": {"transition_status": {"type": "string"}}
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["transition_status", "transition_digest"],
+          "properties": {
+            "transition_status": {"type": "string"},
+            "transition_digest": {"type": "string"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "transition_status",
+            "transition_digest",
+            "error_code"
+          ],
+          "properties": {
+            "transition_status": {"type": "string"},
+            "transition_digest": {"type": "string"},
+            "error_code": {"type": "string"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["transition_status", "migration"],
+          "properties": {
+            "transition_status": {"type": "string"},
+            "migration": {"type": "string"}
+          }
+        }
+      ]
+    }
   }
 }

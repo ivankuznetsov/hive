@@ -113,6 +113,7 @@
             "target_schema_version",
             "registry_digest",
             "updated_at",
+            "daemon_restart_pending",
             "projects"
           ],
           "properties": {
@@ -125,6 +126,10 @@
               "pattern": "^[0-9a-f]{64}$"
             },
             "updated_at": { "type": ["string", "null"], "format": "date-time" },
+            "daemon_restart_pending": {
+              "type": "boolean",
+              "description": "True when the catalog migration completed after quiescing a daemon but restoring that daemon has not yet succeeded."
+            },
             "error": { "type": "string" },
             "projects": {
               "type": "array",

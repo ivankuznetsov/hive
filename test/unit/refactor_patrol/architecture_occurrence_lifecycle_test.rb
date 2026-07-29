@@ -44,7 +44,9 @@ class RefactorPatrolArchitectureOccurrenceLifecycleTest < Minitest::Test
   end
 
   def test_recovery_rejects_a_non_architecture_provisional_capture
-    occurrence = reserved_occurrence("job-7", kind: "ordinary")
+    occurrence = mutable(reserved_occurrence("job-7"))
+    occurrence.dig("provisional_capture", "reservation")["kind"] =
+      "ordinary"
     store = Object.new
     store.define_singleton_method(:each_recovery_active_occurrence) do |&block|
       block.call(occurrence)
@@ -55,7 +57,7 @@ class RefactorPatrolArchitectureOccurrenceLifecycleTest < Minitest::Test
     end
 
     assert_nil error.job_id
-    assert_equal "architecture patrol recovery capture is not architecture work", error.message
+    assert_equal "patrol capture is malformed", error.message
   end
 
   def test_reservation_rejects_a_malformed_source_time_before_writing
@@ -80,7 +82,8 @@ class RefactorPatrolArchitectureOccurrenceLifecycleTest < Minitest::Test
   end
 
   def test_recovery_reports_a_capture_without_the_job_binding
-    occurrence = reserved_occurrence("job-7", include_job_id: false)
+    occurrence = mutable(reserved_occurrence("job-7"))
+    occurrence.dig("provisional_capture", "reservation").delete("job_id")
     store = Object.new
     store.define_singleton_method(:each_recovery_active_occurrence) do |&block|
       block.call(occurrence)
@@ -90,7 +93,7 @@ class RefactorPatrolArchitectureOccurrenceLifecycleTest < Minitest::Test
       lifecycle.recover(store: store, entry: { "name" => "demo" }, now: NOW) { |job| job }
     end
 
-    assert_equal "architecture patrol recovery capture is missing \"job_id\"", error.message
+    assert_equal "patrol capture is malformed", error.message
   end
 
   private
@@ -103,13 +106,21 @@ class RefactorPatrolArchitectureOccurrenceLifecycleTest < Minitest::Test
     )
   end
 
-  def reserved_occurrence(job_id, kind: "architecture", include_job_id: true)
-    reservation = { "kind" => kind, "id" => job_id }
-    reservation["job_id"] = job_id if include_job_id
+  def reserved_occurrence(job_id)
+    reservation = {
+      "kind" => "architecture",
+      "id" => job_id,
+      "job_id" => job_id
+    }
     capture = Hive::Modules::Migration::PatrolCapture.build(
       module_name: "architecture-patrol",
       project: { "project_id" => "project-1", "name" => "demo", "repository" => "owner/demo" },
-      trigger: { "kind" => "pull_request.merged", "id" => "owner/demo:7:#{'a' * 40}" },
+      trigger: {
+        "kind" => "pull_request.merged",
+        "id" => "owner/demo:7:#{'a' * 40}",
+        "manifest_digest" => "b" * 64,
+        "merge_sha" => "a" * 40
+      },
       reservation: reservation,
       owner: "legacy", owner_epoch: 1,
       selection_input: { "kind" => "candidate", "job_id" => job_id, "phase" => "discovery" },
@@ -125,5 +136,9 @@ class RefactorPatrolArchitectureOccurrenceLifecycleTest < Minitest::Test
       "provisional_capture" => capture.to_h,
       "outbox" => []
     }
+  end
+
+  def mutable(value)
+    JSON.parse(JSON.generate(value))
   end
 end

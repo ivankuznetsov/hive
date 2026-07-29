@@ -504,21 +504,23 @@ class ComponentBoundaryContract
       sexp = Ripper.sexp(source)
       raise ValidationError, "#{path}: Ruby syntax could not be parsed" unless sexp
 
-      walk(sexp)
+      walk(sexp, [])
       @requires.uniq!
       @constructions.uniq!
     end
 
     private
 
-    def walk(node)
+    def walk(node, namespace)
       return unless node.is_a?(Array)
 
       required = require_literal(node)
       @requires << required if required
-      construction = construction_constant(node)
-      @constructions << construction if construction
-      node.each { |child| walk(child) if child.is_a?(Array) }
+      @constructions.concat(construction_constants(node, namespace))
+      child_namespace = definition_namespace(node, namespace) || namespace
+      node.each do |child|
+        walk(child, child_namespace) if child.is_a?(Array)
+      end
     end
 
     def require_literal(node)
@@ -537,10 +539,41 @@ class ComponentBoundaryContract
       relative_require_path(required) if required
     end
 
-    def construction_constant(node)
-      return unless node[0] == :call && identifier(node[3]) == "new"
+    def construction_constants(node, namespace)
+      return [] unless node[0] == :call &&
+                       identifier(node[3]) == "new"
 
-      constant_path(node[1])
+      receiver = constant_path(node[1])
+      return [] unless receiver
+
+      candidates = [ receiver ]
+      unless absolute_constant_path?(node[1])
+        namespace.length.downto(1) do |length|
+          candidates << [ *namespace.first(length), receiver ].join("::")
+        end
+      end
+      candidates.uniq
+    end
+
+    def definition_namespace(node, namespace)
+      return unless %i[module class].include?(node[0])
+
+      name_node = node[1]
+      name = constant_path(name_node)
+      return unless name
+      return name.split("::") if absolute_constant_path?(name_node)
+
+      first = name.split("::").first
+      return name.split("::") if first == namespace.first
+
+      [ *namespace, *name.split("::") ]
+    end
+
+    def absolute_constant_path?(node)
+      return false unless node.is_a?(Array)
+      return true if node[0] == :top_const_ref
+
+      node[0] == :const_path_ref && absolute_constant_path?(node[1])
     end
 
     def fcall_identifier(node)

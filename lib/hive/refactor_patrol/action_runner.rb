@@ -992,6 +992,8 @@ module Hive
           persist_publication_phase(
             token, kind, phase, payload, attempt_id: attempt_id
           )
+          delivered = false
+          delivered_value = nil
           result = gateway.perform!(
             sink: descriptor.fetch(:sink),
             target: descriptor.fetch(:target),
@@ -1000,9 +1002,18 @@ module Hive
             claim_generation: token.fetch(:generation),
             scope: effect_scope(token)
           ) do
-            { "value" => json_copy(effect.call) }
+            delivered_value = json_copy(effect.call)
+            delivered = true
+            publication_effect_outcome(
+              descriptor.fetch(:sink),
+              delivered_value,
+              payload
+            )
           end
-          result.outcome.fetch("value")
+          delivered ? delivered_value :
+            publication_effect_value(
+              descriptor.fetch(:sink), result.outcome
+            )
         end
       end
 
@@ -1044,10 +1055,43 @@ module Hive
             claim_generation: token.fetch(:generation),
             scope: effect_scope(token)
           ) do
-            { "value" => json_copy(effect.call) }
+            {
+              "task_path" => json_copy(effect.call).to_s
+            }
           end
-          result.outcome.fetch("value")
+          result.outcome.fetch("task_path")
         end
+      end
+
+      def publication_effect_outcome(sink, value, payload)
+        case sink
+        when "branch"
+          { "remote_oid" => payload.fetch("commit_sha").to_s }
+        when "pull_request"
+          { "pr_url" => value.to_s }
+        when "issue"
+          { "issue_url" => value.to_s }
+        else
+          raise JobStore::InconsistentRecord,
+                "publication effect sink is unsupported"
+        end
+      end
+
+      def publication_effect_value(sink, outcome)
+        case sink
+        when "branch"
+          outcome.fetch("remote_oid")
+        when "pull_request"
+          outcome.fetch("pr_url")
+        when "issue"
+          outcome.fetch("issue_url")
+        else
+          raise JobStore::InconsistentRecord,
+                "publication effect sink is unsupported"
+        end
+      rescue KeyError, TypeError
+        raise JobStore::InconsistentRecord,
+              "publication effect receipt is malformed"
       end
 
       def build_effect_gateway(token, kind, phase, payload, capture, attempt_id:,

@@ -25,6 +25,46 @@ module Hive
         RECEIPT_STATUSES = %w[
           attempted denied known_not_sent unknown committed reconciled failed
         ].freeze
+        TRIGGER_KINDS = %w[
+          direct job_store.schema_v2_import manual module_event
+          pull_request.merged schedule
+        ].freeze
+        SCOPE_KEY_SETS = [
+          [],
+          %w[fingerprint],
+          %w[job_id],
+          %w[job_id operation],
+          %w[canonical_action_id job_id],
+          %w[
+            base_sha branch fingerprint head_sha patch_id worktree_path
+          ]
+        ].map(&:sort).freeze
+        EFFECT_OUTCOME_KEY_SETS = [
+          [],
+          %w[attempted reason],
+          %w[base_oid head_oid pr_url state],
+          %w[content_digest],
+          %w[error_code transition_digest transition_status],
+          %w[finding_id],
+          %w[issue_url],
+          %w[migration transition_status],
+          %w[patch_id],
+          %w[pr_url],
+          %w[reason],
+          %w[remote_oid],
+          %w[task_path],
+          %w[transition_digest transition_status],
+          %w[transition_status]
+        ].map(&:sort).freeze
+        PATROL_OUTCOME_KEYS = %w[
+          exit_code features_mapped features_reviewed finding_ids findings
+          fixes_attempted last_scanned_sha ok prs_opened rationale
+          review_complete
+        ].freeze
+        ARCHITECTURE_OUTCOME_KEYS = %w[
+          action_count action_outcomes complete completion_status job_id
+          rationale state zero_reason
+        ].freeze
 
         module_function
 
@@ -110,6 +150,14 @@ module Hive
           value
         end
 
+        def allowed_keys!(value, allowed, required:, label:)
+          malformed!(label) unless value.is_a?(Hash)
+          keys = value.keys
+          malformed!(label) unless (keys - allowed).empty? &&
+                                   (required - keys).empty?
+          value
+        end
+
         def enum(value, allowed, label:)
           string = value.to_s
           malformed!(label) unless allowed.include?(string)
@@ -125,6 +173,147 @@ module Hive
         def malformed!(label)
           raise Hive::ConfigError, "#{label} is malformed"
         end
+
+        def trigger(value, label:)
+          object = immutable_json(value, label: label)
+          malformed!(label) unless object.is_a?(Hash)
+          kind = enum(object["kind"], TRIGGER_KINDS, label: label)
+          keys = case kind
+          when "manual", "direct"
+            %w[id kind]
+          when "schedule"
+            %w[id kind occurred_at schedule]
+          when "module_event"
+            %w[event_name id kind occurred_at]
+          when "pull_request.merged"
+            %w[id kind manifest_digest merge_sha]
+          when "job_store.schema_v2_import"
+            %w[id kind source_digest source_schema_version]
+          end
+          exact_keys!(object, keys, label: label)
+          nonempty(object["id"], label: label)
+          case kind
+          when "schedule"
+            nonempty(object["schedule"], label: label)
+            timestamp(object["occurred_at"], label: label)
+          when "module_event"
+            nonempty(object["event_name"], label: label)
+            timestamp(object["occurred_at"], label: label)
+          when "pull_request.merged"
+            nonempty(object["manifest_digest"], label: label)
+            nonempty(object["merge_sha"], label: label)
+          when "job_store.schema_v2_import"
+            malformed!(label) unless object["source_schema_version"] == 2
+            nonempty(object["source_digest"], label: label)
+          end
+          object
+        end
+
+        def reservation(value, label:)
+          object = immutable_json(value, label: label)
+          malformed!(label) unless object.is_a?(Hash)
+          kind = enum(
+            object["kind"],
+            %w[ordinary module_hook architecture],
+            label: label
+          )
+          scheduled = object.key?("window_started_at") ||
+                      object.key?("attempt_generation")
+          keys = %w[id kind]
+          keys << "job_id" if kind == "architecture"
+          keys.concat(%w[attempt_generation window_started_at]) if scheduled
+          exact_keys!(object, keys, label: label)
+          nonempty(object["id"], label: label)
+          nonempty(object["job_id"], label: label) if
+            kind == "architecture"
+          if scheduled
+            positive_integer(object["attempt_generation"], label: label)
+            timestamp(object["window_started_at"], label: label)
+          end
+          object
+        end
+
+        def scope(value, label:)
+          object = immutable_json(value, label: label)
+          malformed!(label) unless object.is_a?(Hash) &&
+                                   SCOPE_KEY_SETS.include?(object.keys.sort)
+          object.each_value { |item| nonempty(item, label: label) }
+          object
+        end
+
+        def capture_outcome(module_name, outcome_class, value, label:)
+          return [ nil, nil ] if outcome_class.nil? && value.nil?
+          malformed!(label) if outcome_class.nil? || value.nil?
+
+          klass = enum(
+            outcome_class,
+            %w[complete completed failed not_dispatched schema_v2_import],
+            label: label
+          )
+          outcome = immutable_json(value, label: label)
+          allowed = module_name == "patrol" ?
+            PATROL_OUTCOME_KEYS : ARCHITECTURE_OUTCOME_KEYS
+          allowed_keys!(
+            outcome, allowed,
+            required:
+              klass == "schema_v2_import" ?
+                %w[complete job_id state] : %w[rationale],
+            label: label
+          )
+          validate_capture_outcome_scalars!(
+            module_name, outcome, label: label
+          )
+          [ klass, outcome ]
+        end
+
+        def effect_outcome(value, label:)
+          outcome = immutable_json(value, label: label)
+          malformed!(label) unless outcome.is_a?(Hash) &&
+                                   EFFECT_OUTCOME_KEY_SETS.include?(
+                                     outcome.keys.sort
+                                   )
+          outcome.each_value do |item|
+            malformed!(label) unless
+              item.is_a?(String) || item.is_a?(Integer) ||
+              item == true || item == false || item.nil?
+          end
+          malformed!(label) if
+            outcome.key?("attempted") && outcome["attempted"] != true
+          outcome
+        end
+
+        def validate_capture_outcome_scalars!(module_name, outcome, label:)
+          outcome.each do |key, value|
+            case key
+            when "ok", "review_complete", "complete"
+              malformed!(label) unless [ true, false ].include?(value)
+            when "exit_code"
+              malformed!(label) unless value.nil? || value.is_a?(Integer)
+            when "features_mapped", "features_reviewed", "findings",
+                 "fixes_attempted", "prs_opened", "action_count"
+              malformed!(label) unless value.is_a?(Integer) &&
+                                       value >= 0
+            when "finding_ids"
+              malformed!(label) unless value.is_a?(Array) &&
+                                       value.all? do |item|
+                                         item.is_a?(String) && !item.empty?
+                                       end
+            when "action_outcomes"
+              malformed!(label) unless
+                module_name == "architecture-patrol" &&
+                value.is_a?(Hash) &&
+                value.all? do |action_id, action_outcome|
+                  action_id.is_a?(String) && !action_id.empty? &&
+                    action_outcome.is_a?(String)
+                end
+            else
+              malformed!(label) unless value.nil? ||
+                                       value.is_a?(String)
+            end
+          end
+          true
+        end
+        private_class_method :validate_capture_outcome_scalars!
       end
 
       class PatrolCaptureValidator
@@ -144,16 +333,18 @@ module Hive
             owner = PatrolEvidence.enum(owner, PatrolEvidence::OWNERS, label: label)
             owner_epoch = PatrolEvidence.positive_integer(owner_epoch, label: label)
             project = project_value(project, label)
-            trigger = object(trigger, label)
-            reservation = object(reservation, label)
+            trigger = PatrolEvidence.trigger(trigger, label: label)
+            reservation = PatrolEvidence.reservation(
+              reservation, label: label
+            )
             selection_input = selection_input_value(
               module_name, selection_input, label
             )
             selection = PatrolDecisionProjection.coerce(selection)
             PatrolEvidence.malformed!(label) unless
               selection.module_name == module_name
-            outcome_class, outcome = outcome_value(
-              outcome_class, outcome, label
+            outcome_class, outcome = PatrolEvidence.capture_outcome(
+              module_name, outcome_class, outcome, label: label
             )
             effect_ids = Array(effect_ids).map do |effect_id|
               PatrolEvidence.nonempty(effect_id, label: label)
@@ -270,17 +461,6 @@ module Hive
             immutable = PatrolEvidence.immutable_json(value, label: label)
             PatrolEvidence.malformed!(label) unless immutable.is_a?(Hash)
             immutable
-          end
-
-          def outcome_value(outcome_class, outcome, label)
-            return [ nil, nil ] if outcome_class.nil? && outcome.nil?
-
-            PatrolEvidence.malformed!(label) if
-              outcome_class.nil? || outcome.nil?
-            [
-              PatrolEvidence.nonempty(outcome_class, label: label),
-              object(outcome, label)
-            ]
           end
 
           def selection_input_value(module_name, value, label)
@@ -403,8 +583,7 @@ module Hive
             capability = PatrolEvidence.nonempty(capability, label: label)
             claim_generation = PatrolEvidence.optional_generation(claim_generation, label: label)
             created_at = PatrolEvidence.timestamp(created_at, label: label)
-            scope = PatrolEvidence.immutable_json(scope, label: label)
-            PatrolEvidence.malformed!(label) unless scope.is_a?(Hash)
+            scope = PatrolEvidence.scope(scope, label: label)
             identity = {
               "module" => module_name,
               "occurrence_id" => occurrence_id,
@@ -521,8 +700,9 @@ module Hive
             label = "patrol effect receipt"
             intent = intent.is_a?(EffectIntent) ? intent : EffectIntent.from_h(intent)
             status = PatrolEvidence.enum(status, PatrolEvidence::RECEIPT_STATUSES, label: label)
-            outcome = PatrolEvidence.immutable_json(outcome, label: label)
-            PatrolEvidence.malformed!(label) unless outcome.is_a?(Hash)
+            outcome = PatrolEvidence.effect_outcome(
+              outcome, label: label
+            )
             recorded_at = PatrolEvidence.timestamp(recorded_at, label: label)
             receipt_id = PatrolEvidence.digest(
               "receipt",

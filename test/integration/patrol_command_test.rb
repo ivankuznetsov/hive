@@ -1330,7 +1330,15 @@ class PatrolCommandTest < Minitest::Test
     state = Object.new
     state.define_singleton_method(:reconcile_attempt) do |fingerprint|
       reconciliations << fingerprint
-      { "status" => "matched", "outcome" => { "patch" => serialized_patch } }
+      {
+        "status" => "matched",
+        "outcome" => { "patch_id" => serialized_patch.fetch("id") }
+      }
+    end
+    state.define_singleton_method(:patch_record) do |patch_id|
+      raise "unexpected patch" unless patch_id == serialized_patch.fetch("id")
+
+      serialized_patch
     end
     state.define_singleton_method(:perform_cycle_effect!) do |reconcile:, **_attributes, &_effect|
       reconciliation = reconcile.call(nil)
@@ -1365,7 +1373,12 @@ class PatrolCommandTest < Minitest::Test
 
   def test_malformed_reconciled_patch_fails_closed
     error = assert_raises(Hive::ConfigError) do
-      command_for.send(:patch_from_effect_outcome, sample_finding, {})
+      command_for.send(
+        :patch_from_effect_outcome,
+        Object.new,
+        sample_finding,
+        {}
+      )
     end
 
     assert_equal "patrol attempt reconciliation returned a malformed patch", error.message

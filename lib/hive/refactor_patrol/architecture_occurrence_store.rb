@@ -98,6 +98,12 @@ module Hive
 
       def recovery_active? = @journal.recovery_active?
 
+      def rebuild_recovery_index!
+        @journal.rebuild_recovery_index!
+      rescue Hive::ConfigError => e
+        raise @corrupt_record, e.message
+      end
+
       def recovery_backoff(now: Time.now.utc)
         @journal.recovery_backoff(now: now)
       end

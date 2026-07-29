@@ -27,6 +27,7 @@ module Hive
       JOB_ENTRY =
         /\A[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}\.json(?:\.lock)?\z/
       MAX_JOB_ENTRIES = 8_192
+      MAX_JOB_FILES = JobStoreSchemaMigration::MAX_JOB_FILES
       MAX_JOB_BYTES = 8 * 1024 * 1024
       MAX_CONVERSION_BYTES = JobSchemaConversionProof::MAX_BYTES
       MAX_MARKER_BYTES = JobStoreSchemaMigration::MAX_MARKER_BYTES
@@ -426,11 +427,10 @@ module Hive
           inconsistent!("sealed v2 JobStore archive is unavailable")
         end
         names = legacy_directory.each_child(archive).to_a.sort
+        JobStoreSchemaMigration.validate_job_inventory_names!(names)
         json_names = names.select { |name| name.end_with?(".json") }
         expected = manifest.fetch("entries").map { |entry| entry.fetch("name") }
-        unless names.size <= MAX_JOB_ENTRIES * 2 &&
-               names.all? { |name| name.match?(JOB_ENTRY) } &&
-               json_names == expected
+        unless json_names == expected
           inconsistent!("sealed v2 JobStore archive inventory conflicts")
         end
         manifest.fetch("entries").each do |entry|
@@ -562,8 +562,8 @@ module Hive
           directory: directory,
           relative: "jobs",
           filename_pattern:
-            /\A[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}\.json(?:\.lock)?\z/,
-          max_entries: MAX_JOB_ENTRIES,
+            JobStoreSchemaMigration::INVENTORY_NAME_PATTERN,
+          max_entries: MAX_JOB_FILES,
           cursor_prefix: "refactor-job-restore",
           malformed_message:
             "refactor patrol restore inventory is malformed",
@@ -575,9 +575,10 @@ module Hive
 
       def inventory_names(inventory)
         snapshot = inventory.snapshot
-        inventory.each_name(
+        names = inventory.each_name(
           page_size: 256, snapshot: snapshot
         ).to_a
+        JobStoreSchemaMigration.validate_job_inventory_names!(names)
       end
 
       def snapshot_store

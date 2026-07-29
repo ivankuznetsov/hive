@@ -25,7 +25,7 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
       refute_includes uncertain, "delivery_generation"
       journal.reset_effect_prepared!(first, now: NOW + 13)
       journal.mark_dispatch_uncertain!(first, now: NOW + 13)
-      outcome = { "url" => "https://example.test/effect/1" }
+      outcome = { "pr_url" => "https://example.test/effect/1" }
       committed = journal.settle_effect!(
         first,
         status: "committed",
@@ -67,6 +67,207 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
         )
       end
       refute journal.recovery_active?
+    end
+  end
+
+  def test_recovery_active_reuses_the_durable_index_without_history_scans
+    with_journal do |journal|
+      record_store = journal.instance_variable_get(:@store)
+      scans = 0
+      instrumentation = Module.new do
+        define_method(:each_record) do |&block|
+          scans += 1
+          super(&block)
+        end
+      end
+      record_store.singleton_class.prepend(instrumentation)
+
+      3.times do
+        assert_equal(
+          [ patrol_capture.occurrence_id ],
+          journal.each_recovery_active.map do |record|
+            record.fetch("occurrence_id")
+          end
+        )
+      end
+      assert_equal 0, scans
+      assert_path_exists File.join(
+        journal.root, "recovery-index.json"
+      )
+    end
+  end
+
+  def test_missing_recovery_index_is_repaired_once_and_reused_after_restart
+    with_tmp_dir do |root|
+      journal_root = File.join(root, "occurrences")
+      capture = patrol_capture
+      occurrence_journal(journal_root).reserve!(capture, now: NOW)
+      FileUtils.rm_f(File.join(journal_root, "recovery-index.json"))
+      restarted = occurrence_journal(journal_root)
+      record_store = restarted.instance_variable_get(:@store)
+      scans = 0
+      instrumentation = Module.new do
+        define_method(:each_record) do |&block|
+          scans += 1
+          super(&block)
+        end
+      end
+      record_store.singleton_class.prepend(instrumentation)
+
+      2.times do
+        assert_equal(
+          [ capture.occurrence_id ],
+          restarted.each_recovery_active.map do |record|
+            record.fetch("occurrence_id")
+          end
+        )
+      end
+      assert_equal 1, scans
+
+      second_restart = occurrence_journal(journal_root)
+      second_store = second_restart.instance_variable_get(:@store)
+      second_store.define_singleton_method(:each_record) do
+        flunk("a repaired recovery index must survive restart")
+      end
+      assert second_restart.recovery_active?
+    end
+  end
+
+  def test_explicit_recovery_index_rebuild_repairs_malformed_projection
+    with_journal do |journal|
+      path = File.join(journal.root, "recovery-index.json")
+      File.write(path, "{bad")
+
+      rebuilt = journal.rebuild_recovery_index!
+
+      assert_equal [ patrol_capture.occurrence_id ],
+                   rebuilt.fetch("occurrence_ids")
+      assert_equal [ patrol_capture.occurrence_id ],
+                   journal.each_recovery_active.map { |record|
+                     record.fetch("occurrence_id")
+                   }
+    end
+  end
+
+  def test_reservation_recovers_when_interrupted_after_dirty_checkpoint
+    with_tmp_dir do |root|
+      journal_root = File.join(root, "occurrences")
+      journal = occurrence_journal(journal_root)
+      refute journal.recovery_active?
+      recovery_index = journal.instance_variable_get(:@recovery_index)
+      with_replaced_singleton_method(
+        recovery_index,
+        :write,
+        ->(**) { raise IOError, "index unavailable" }
+      ) do
+        assert_raises(Hive::ConfigError) do
+          journal.reserve!(patrol_capture, now: NOW)
+        end
+      end
+
+      restarted = occurrence_journal(journal_root)
+      refute restarted.recovery_active?
+      assert restarted.reserve!(patrol_capture, now: NOW + 1)
+      assert restarted.recovery_active?
+    end
+  end
+
+  def test_reservation_recovers_when_interrupted_after_index_publication
+    with_tmp_dir do |root|
+      journal_root = File.join(root, "occurrences")
+      journal = occurrence_journal(journal_root)
+      refute journal.recovery_active?
+      record_store = journal.instance_variable_get(:@store)
+      original = record_store.method(:mutate)
+      with_replaced_singleton_method(
+        record_store,
+        :mutate,
+        lambda do |occurrence_id, create: false, &block|
+          raise IOError, "record unavailable" if create
+
+          original.call(occurrence_id, create: create, &block)
+        end
+      ) do
+        assert_raises(Hive::ConfigError) do
+          journal.reserve!(patrol_capture, now: NOW)
+        end
+      end
+
+      restarted = occurrence_journal(journal_root)
+      refute restarted.recovery_active?
+      assert restarted.reserve!(patrol_capture, now: NOW + 1)
+      assert restarted.recovery_active?
+    end
+  end
+
+  def test_reservation_recovers_when_interrupted_before_dirty_clear
+    with_tmp_dir do |root|
+      journal_root = File.join(root, "occurrences")
+      journal = occurrence_journal(journal_root)
+      refute journal.recovery_active?
+      journal_state = journal.instance_variable_get(:@journal_state)
+      with_replaced_singleton_method(
+        journal_state,
+        :clear_recovery_dirty!,
+        ->(*) { raise IOError, "state unavailable" }
+      ) do
+        assert_raises(Hive::ConfigError) do
+          journal.reserve!(patrol_capture, now: NOW)
+        end
+      end
+
+      restarted = occurrence_journal(journal_root)
+      record_store = restarted.instance_variable_get(:@store)
+      scans = 0
+      original = record_store.method(:each_record)
+      record_store.define_singleton_method(:each_record) do |&block|
+        scans += 1
+        original.call(&block)
+      end
+      assert restarted.recovery_active?
+      assert restarted.recovery_active?
+      assert_equal 1, scans
+    end
+  end
+
+  def test_last_acknowledgement_recovers_after_index_removal_interruption
+    with_tmp_dir do |root|
+      journal_root = File.join(root, "occurrences")
+      journal = occurrence_journal(journal_root)
+      capture = patrol_capture
+      journal.reserve!(capture, now: NOW)
+      journal.finalize!(
+        terminal_capture(capture), now: NOW + 1
+      )
+      entry = journal.pending_outbox(capture.occurrence_id).fetch(0)
+      recovery_index = journal.instance_variable_get(:@recovery_index)
+      with_replaced_singleton_method(
+        recovery_index,
+        :write,
+        ->(**) { raise IOError, "index unavailable" }
+      ) do
+        assert_raises(Hive::ConfigError) do
+          journal.acknowledge_outbox!(
+            capture.occurrence_id,
+            entry_id: entry.fetch("id"),
+            digest: entry.fetch("digest")
+          )
+        end
+      end
+
+      restarted = occurrence_journal(journal_root)
+      refute restarted.recovery_active?
+      retained = restarted.fetch(capture.occurrence_id)
+      assert retained.fetch("outbox").all? { |item|
+        item.fetch("acknowledged")
+      }
+      restarted.acknowledge_outbox!(
+        capture.occurrence_id,
+        entry_id: entry.fetch("id"),
+        digest: entry.fetch("digest")
+      )
+      assert_nil restarted.fetch(capture.occurrence_id)
+      refute restarted.recovery_active?
     end
   end
 
@@ -162,7 +363,9 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
             patrol_capture(
               trigger: {
                 "kind" => "schedule",
-                "id" => "#{base}:attempt:#{generation}"
+                "id" => "#{base}:attempt:#{generation}",
+                "schedule" => "ordinary",
+                "occurred_at" => NOW.iso8601(6)
               },
               reservation: {
                 "kind" => "ordinary",
@@ -187,7 +390,9 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
         patrol_capture(
           trigger: {
             "kind" => "schedule",
-            "id" => "#{base}:attempt:#{generation}"
+            "id" => "#{base}:attempt:#{generation}",
+            "schedule" => "ordinary",
+            "occurred_at" => NOW.iso8601(6)
           },
           reservation: {
             "kind" => "ordinary",
@@ -302,8 +507,8 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
         record_store.singleton_class.prepend(instrumentation)
 
         3.times { refute journal.recovery_active? }
-        assert_equal 1, enumerations,
-                     "the first clean repair may scan, idle checks must not"
+        assert_equal 0, enumerations,
+                     "a maintained empty index must make idle checks constant"
 
         with_constant(
           Hive::Modules::Migration::OccurrenceRecordStore,
@@ -328,27 +533,52 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
       )
       record_store = journal.instance_variable_get(:@store)
       original_each_record = record_store.method(:each_record)
-      injected = false
-      record_store.define_singleton_method(:each_record) do |&block|
-        original_each_record.call(&block)
-        next if injected
-
-        injected = true
-        journal.reserve!(capture, now: NOW)
-      end
       journal_state = journal.instance_variable_get(:@journal_state)
       journal_state.synchronize do |state, checkpoint|
         journal_state.mark_recovery_dirty!(state)
         checkpoint.call
       end
 
-      refute journal.recovery_active?
+      scan_started = Queue.new
+      release_scan = Queue.new
+      recovery_result = Queue.new
+      reservation_result = Queue.new
+      recovery = nil
+      reservation = nil
+      replacement = lambda do |&block|
+        scan_started << true
+        release_scan.pop
+        original_each_record.call(&block)
+      end
+      with_replaced_singleton_method(
+        record_store, :each_record, replacement
+      ) do
+        recovery = Thread.new do
+          recovery_result << journal.recovery_active?
+        end
+        scan_started.pop
+        reservation = Thread.new do
+          reservation_result << journal.reserve!(capture, now: NOW)
+        end
+        assert_raises(ThreadError) { reservation_result.pop(true) }
+        release_scan << true
+        assert recovery.join(2), "recovery repair did not finish"
+        assert reservation.join(2), "concurrent reservation did not finish"
+      end
+
+      refute recovery_result.pop
+      assert_equal capture.occurrence_id,
+                   reservation_result.pop.fetch("occurrence_id")
       assert_equal(
         [ capture.occurrence_id ],
         journal.each_recovery_active.map { |record|
           record.fetch("occurrence_id")
         }
       )
+    ensure
+      release_scan << true if release_scan && recovery&.alive?
+      recovery&.join(2)
+      reservation&.join(2)
     end
   end
 
@@ -640,7 +870,9 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
           patrol_capture(
             trigger: {
               "kind" => "schedule",
-              "id" => "wrong:attempt:#{generation}"
+              "id" => "wrong:attempt:#{generation}",
+              "schedule" => "ordinary",
+              "occurred_at" => NOW.iso8601(6)
             },
             reservation: {
               "kind" => "ordinary",
@@ -658,7 +890,9 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
           patrol_capture(
             trigger: {
               "kind" => "schedule",
-              "id" => "#{base}:attempt:#{generation}"
+              "id" => "#{base}:attempt:#{generation}",
+              "schedule" => "ordinary",
+              "occurred_at" => NOW.iso8601(6)
             },
             reservation: {
               "kind" => "ordinary",
@@ -741,7 +975,7 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
       intent = effect_intent
       journal.prepare_effect!(intent, now: NOW)
       journal.mark_dispatch_uncertain!(intent, now: NOW)
-      outcome = { "remote" => "matched" }
+      outcome = { "pr_url" => "https://example.test/matched" }
       reconciled = journal.settle_effect!(
         intent,
         status: "reconciled",
@@ -760,7 +994,7 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
         journal.settle_effect!(
           intent,
           status: "reconciled",
-          outcome: { "remote" => "different" },
+          outcome: { "pr_url" => "https://example.test/different" },
           now: NOW + 4
         )
       end
@@ -804,7 +1038,7 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
       assert_equal [ provisional.occurrence_id ],
                    journal.each_reserved.map { |record| record.fetch("occurrence_id") }
       journal.mark_dispatch_uncertain!(intent, now: NOW)
-      outcome = { "url" => "https://example.test/effect/1" }
+      outcome = { "pr_url" => "https://example.test/effect/1" }
       committed = journal.settle_effect!(
         intent,
         status: "committed",
@@ -1941,7 +2175,9 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
     patrol_capture(
       trigger: {
         "kind" => "schedule",
-        "id" => "#{base}:attempt:#{generation}"
+        "id" => "#{base}:attempt:#{generation}",
+        "schedule" => "ordinary",
+        "occurred_at" => window.iso8601(6)
       },
       reservation: {
         "kind" => "ordinary",
@@ -1960,7 +2196,12 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
         "name" => "demo",
         "repository" => "owner/demo"
       },
-      trigger: { "kind" => "pull_request.merged", "id" => "merge-1" },
+      trigger: {
+        "kind" => "pull_request.merged",
+        "id" => "merge-1",
+        "manifest_digest" => "manifest-1",
+        "merge_sha" => "a" * 40
+      },
       reservation: {
         "kind" => "architecture",
         "id" => "job-1",

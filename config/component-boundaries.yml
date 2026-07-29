@@ -27,7 +27,9 @@ components:
       - lib/hive/modules/migration/effect_sender.rb
       - lib/hive/modules/migration/occurrence_effects.rb
       - lib/hive/modules/migration/occurrence_journal.rb
+      - lib/hive/modules/migration/occurrence_journal_state.rb
       - lib/hive/modules/migration/occurrence_outbox.rb
+      - lib/hive/modules/migration/occurrence_recovery_index.rb
       - lib/hive/modules/migration/occurrence_record_store.rb
       - lib/hive/modules/migration/occurrence_record_validator.rb
       - lib/hive/modules/migration/stable_process_lock.rb
@@ -46,6 +48,8 @@ components:
       - lib/hive/refactor_patrol/discovery_transitions.rb
       - lib/hive/refactor_patrol/effect_errors.rb
       - lib/hive/refactor_patrol/effect_gateway.rb
+      - lib/hive/refactor_patrol/job_query_index.rb
+      - lib/hive/refactor_patrol/job_store_files.rb
       - lib/hive/refactor_patrol/job_store_schema_migration.rb
       - lib/hive/refactor_patrol/transition_evidence.rb
       - lib/hive/refactor_patrol/transition_gateway.rb
@@ -55,13 +59,16 @@ components:
       - "Canonical occurrence records atomically bind prepared or uncertain delivery, terminal outcomes, and ordered projection outbox bytes; persisted sender leases and PID authority do not exist"
       - "EvidenceStore is an append-only bounded observational projection under module-runtime/migration/patrol-evidence and is never consulted for retry"
       - "ActionRunner and RefactorPatrolScheduler decide product work; composed action/discovery transition coordinators own durable transition identities, claim fences, and replay"
+      - "JobStoreFiles is the sole descriptor-confined physical I/O port for live v3 jobs, query indexes, quarantine evidence, and action locks; JobQueryIndex owns only their bounded logical projection"
     schema_contracts:
       - "hive-patrol-capture v1 and hive-patrol-effect-receipt v1 are strict canonical observation records"
       - "hive-refactor-patrol-job v3 is the sole runtime JobStore schema; JobStoreSchemaMigration is the bounded one-off v2 converter"
+      - "hive-patrol-occurrence-recovery-index v1 is a bounded rebuildable active-ID projection tied to the journal-state recovery generation; occurrence records remain authoritative"
     lock_contracts:
       - "Persist intent before shared migration admission; under live owner, epoch, config, module-generation, capability, and claim checks, one process-local keyed mutex plus one stable mode-0600 flock serializes each sender"
       - "Dispatch uncertainty is reconciliation-only; exact absence must settle before a retry-safe local sink may resend, while remote absence never grants resend authority"
       - "Architecture manifest reservation and the JobStore occurrence pointer serialize before the enqueue transition; command and daemon intake share the same coordinator"
+      - "Every live JobStore read, write, enumeration, quarantine publication, index publication, and action/job lock resolves through one verified ManagedDirectory anchor"
     component_dependencies: []
     allowed_hive_dependencies:
       - hive/atomic_file
@@ -84,6 +91,7 @@ components:
       - Hive::Modules::Migration::OccurrenceEffects
       - Hive::Modules::Migration::OccurrenceJournal
       - Hive::Modules::Migration::OccurrenceOutbox
+      - Hive::Modules::Migration::OccurrenceRecoveryIndex
       - Hive::Modules::Migration::OccurrenceRecordStore
       - Hive::Modules::Migration::OccurrenceRecordValidator
       - Hive::Modules::Migration::StableProcessLock
@@ -101,7 +109,9 @@ components:
       - Hive::RefactorPatrol::DiscoveryTransitionContext
       - Hive::RefactorPatrol::DiscoveryTransitions
       - Hive::RefactorPatrol::EffectGateway
+      - Hive::RefactorPatrol::JobQueryIndex
       - Hive::RefactorPatrol::JobStore
+      - Hive::RefactorPatrol::JobStoreFiles
       - Hive::RefactorPatrol::JobStoreSchemaMigration
       - Hive::RefactorPatrol::TransitionEvidence
       - Hive::RefactorPatrol::TransitionGateway
@@ -112,6 +122,7 @@ components:
       - Hive::Modules::Migration::EffectSender
       - Hive::Modules::Migration::EvidenceStore
       - Hive::Modules::Migration::OccurrenceJournal
+      - Hive::Modules::Migration::OccurrenceRecoveryIndex
       - Hive::Modules::Migration::OccurrenceRecordStore
       - Hive::Modules::Migration::OccurrenceRecordValidator
       - Hive::Modules::Migration::StableProcessLock
@@ -129,7 +140,9 @@ components:
       - Hive::RefactorPatrol::DiscoveryTransitionContext
       - Hive::RefactorPatrol::DiscoveryTransitions
       - Hive::RefactorPatrol::EffectGateway
+      - Hive::RefactorPatrol::JobQueryIndex
       - Hive::RefactorPatrol::JobStore
+      - Hive::RefactorPatrol::JobStoreFiles
       - Hive::RefactorPatrol::JobStoreSchemaMigration
       - Hive::RefactorPatrol::TransitionGateway
     authorized_internal_constructions:
@@ -166,6 +179,10 @@ components:
         files:
           - lib/hive/daemon/refactor_patrol_scheduler.rb
         reason: "The architecture scheduler owns occurrence reservation, recovery, finalization, and projection composition."
+      - constant: Hive::RefactorPatrol::ArchitectureOccurrenceStore
+        files:
+          - lib/hive/refactor_patrol/job_store.rb
+        reason: "JobStore is the public aggregate facade and privately composes the occurrence-recovery collaborator it exposes."
       - constant: Hive::RefactorPatrol::ClaimMaintenanceTransitions
         files:
           - lib/hive/commands/refactor_patrol.rb
@@ -186,7 +203,23 @@ components:
           - lib/hive/daemon/refactor_patrol_merge_reconciler.rb
           - lib/hive/daemon/refactor_patrol_scheduler.rb
           - lib/hive/modules/migration/coordinator.rb
-        reason: "Only command, scheduler, merge-intake, and ownership-cutover composition roots construct the architecture aggregate store."
+          - lib/hive/refactor_patrol/action_runner.rb
+          - lib/hive/refactor_patrol/canonical_action_catalog.rb
+          - lib/hive/refactor_patrol/family_store.rb
+          - lib/hive/refactor_patrol/repository_ownership.rb
+        reason: "Explicit command, scheduler, migration, action, catalog, family, and ownership composition roots construct the public architecture aggregate facade; lexical aliases are enforced too."
+      - constant: Hive::RefactorPatrol::JobQueryIndex
+        files:
+          - lib/hive/refactor_patrol/job_store.rb
+        reason: "JobStore privately composes the bounded logical listing projection; schema migration constructs it inside the component to rebuild converted state."
+      - constant: Hive::RefactorPatrol::JobStoreFiles
+        files:
+          - lib/hive/refactor_patrol/job_store.rb
+        reason: "JobStore privately composes the descriptor-confined physical storage port; schema migration constructs it inside the component over the same ManagedDirectory."
+      - constant: Hive::RefactorPatrol::JobStoreSchemaMigration
+        files:
+          - lib/hive/refactor_patrol/job_store_generation_cutover.rb
+        reason: "The physical generation cutover is the sole coordinator allowed to construct the one-off released-v2 converter."
     hive_consumers:
       - lib/hive/commands/patrol.rb
       - lib/hive/commands/refactor_patrol.rb
@@ -206,6 +239,7 @@ components:
       - test/unit/modules/migration/evidence_store_test.rb
       - test/unit/modules/migration/effect_delivery_collaborators_test.rb
       - test/unit/modules/migration/occurrence_journal_test.rb
+      - test/unit/modules/migration/occurrence_recovery_index_test.rb
       - test/unit/modules/migration/patrol_evidence_test.rb
       - test/unit/daemon/refactor_patrol_scheduler_test.rb
       - test/unit/patrol/effect_gateway_test.rb
@@ -217,6 +251,7 @@ components:
       - test/unit/refactor_patrol/claim_maintenance_transitions_test.rb
       - test/unit/refactor_patrol/discovery_transitions_test.rb
       - test/unit/refactor_patrol/effect_gateway_test.rb
+      - test/unit/refactor_patrol/job_store_files_test.rb
       - test/unit/refactor_patrol/transition_gateway_test.rb
     migration_exceptions:
       - reason: "U3 must prove candidate-bound compressed evidence and production qualification before this internal transition boundary can be promoted."

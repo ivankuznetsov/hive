@@ -495,13 +495,13 @@ module Hive
           reconcile: ->(_intent) { state.reconcile_attempt(finding.fingerprint) }
         ) do
           patch = fixer.attempt(finding)
-          { "patch" => JSON.parse(JSON.generate(patch.to_h)) }
+          { "patch_id" => patch.id.to_s }
         end
-        patch || patch_from_effect_outcome(finding, result.outcome)
+        patch || patch_from_effect_outcome(state, finding, result.outcome)
       end
 
-      def patch_from_effect_outcome(finding, outcome)
-        data = outcome.fetch("patch")
+      def patch_from_effect_outcome(state, finding, outcome)
+        data = state.patch_record(outcome.fetch("patch_id"))
         Hive::Patrol::Fixer::PatchAttempt.new(
           id: data.fetch("id"),
           finding: finding,

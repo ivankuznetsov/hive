@@ -984,7 +984,12 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
           "name" => entry.fetch("name"),
           "repository" => "acme/demo"
         },
-        trigger: { "kind" => "pull_request.merged", "id" => "merge-7" },
+        trigger: {
+          "kind" => "pull_request.merged",
+          "id" => "merge-7",
+          "manifest_digest" => "m" * 64,
+          "merge_sha" => "a" * 40
+        },
         reservation: {
           "kind" => "architecture",
           "id" => "job-7",
@@ -1291,7 +1296,12 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
           "name" => project.fetch("name"),
           "repository" => "acme/demo"
         },
-        trigger: { "kind" => "pull_request.merged", "id" => "merge-7" },
+        trigger: {
+          "kind" => "pull_request.merged",
+          "id" => "merge-7",
+          "manifest_digest" => "m" * 64,
+          "merge_sha" => "a" * 40
+        },
         reservation: {
           "kind" => "architecture",
           "id" => "job-7",

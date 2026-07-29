@@ -20,6 +20,10 @@ class HiveRefactorPatrolJobOccurrenceLifecycleTest < Minitest::Test
       { "blocked" => false }
     end
 
+    def rebuild_recovery_index!
+      record(:rebuild_recovery_index!, [], {})
+    end
+
     def with_effect_sender_lock(intent)
       record(:with_effect_sender_lock, [ intent ], {})
       yield
@@ -67,13 +71,18 @@ class HiveRefactorPatrolJobOccurrenceLifecycleTest < Minitest::Test
       { "job_id" => "job-7" }, capture: :capture, now: Time.utc(2026, 7, 29)
     )
     assert_equal({ "blocked" => false }, lifecycle.recovery_backoff(now: Time.utc(2026, 7, 29)))
+    assert_equal :rebuild_recovery_index!,
+                 lifecycle.rebuild_recovery_index!
     assert_equal :sent, lifecycle.with_effect_sender_lock(:intent) { :sent }
     assert lifecycle.drain_occurrence_outbox!(
       "occ-7", evidence_store: :evidence, project_entry: { "name" => "demo" }
     )
 
     assert_equal(
-      %i[reserve_manifest! recovery_backoff with_effect_sender_lock drain_outbox!],
+      %i[
+        reserve_manifest! recovery_backoff rebuild_recovery_index!
+        with_effect_sender_lock drain_outbox!
+      ],
       occurrences.calls.map(&:first)
     )
   end

@@ -43,6 +43,16 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     end
   end
 
+  class MarkerOnlyDirectory < SimpleDelegator
+    def each_child(...)
+      raise "job inventory must not be read"
+    end
+
+    def read_with_metadata(...)
+      raise "job metadata must not be read"
+    end
+  end
+
   def test_one_off_schema_migration_imports_the_released_aggregate
     with_tmp_dir do |dir|
       legacy = released_v2_job
@@ -181,11 +191,10 @@ class RefactorPatrolJobStoreTest < Minitest::Test
         )
       end
 
-      assert_match(/migration-only path predates/, error.message)
-      tombstone = JSON.parse(File.binread(File.join(root, "jobs")))
-      assert_equal source_bytes, File.binread(File.join(
-        root, tombstone.fetch("archive_name"), File.basename(path)
-      ))
+      assert_match(/unclaimed v3 JobStore namespace is not empty/,
+                   error.message)
+      assert File.directory?(File.join(root, "jobs"))
+      assert_equal source_bytes, File.binread(path)
       refute_path_exists File.join(
         target_root, "job-schema-v2-backup", "manifest.json"
       )
@@ -291,10 +300,10 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       File.unlink(File.join(root, "jobs", "job-001.json"))
 
       error = assert_raises(
-        Hive::RefactorPatrol::JobStore::InconsistentRecord
+        Hive::RefactorPatrol::JobStore::CorruptRecord
       ) { schema_migration(root).run! }
 
-      assert_match(/exact job name set/, error.message)
+      assert_match(/orphan lock/, error.message)
       refute_path_exists File.join(
         root,
         Hive::RefactorPatrol::JobStoreSchemaMigration::MARKER_NAME
@@ -455,6 +464,68 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     end
   end
 
+  def test_compact_completion_receipt_does_not_read_jobs_or_snapshot
+    with_tmp_dir do |dir|
+      root, = write_released_v2_job(dir, released_v2_job)
+      assert Hive::RefactorPatrol::JobStore.migrate_schema!(
+        dir, **migration_options
+      )
+      root = Hive::RefactorPatrol::JobStore.root_for(dir)
+      migration = schema_migration(
+        root,
+        directory: MarkerOnlyDirectory.new(
+          migration_directory(root)
+        )
+      )
+
+      receipt = migration.completion_receipt
+
+      assert_equal "complete", receipt.fetch("status")
+      assert_match(
+        /\Asnapshot-[0-9a-f]{64}\z/,
+        receipt.fetch("snapshot_id")
+      )
+    end
+  end
+
+  def test_job_inventory_allows_paired_locks_up_to_the_job_bound
+    validator =
+      Hive::RefactorPatrol::JobStoreSchemaMigration
+    accepted = 4_097.times.flat_map do |index|
+      name = format("job-%04d.json", index)
+      [ name, "#{name}.lock" ]
+    end
+
+    assert_equal accepted.sort,
+                 validator.validate_job_inventory_names!(accepted)
+
+    too_many = 8_193.times.map do |index|
+      format("job-%04d.json", index)
+    end
+    assert_match(
+      /too many jobs/,
+      assert_raises(Hive::ConfigError) do
+        validator.validate_job_inventory_names!(too_many)
+      end.message
+    )
+    assert_match(
+      /orphan lock/,
+      assert_raises(Hive::ConfigError) do
+        validator.validate_job_inventory_names!(
+          [ "job-0001.json.lock" ]
+        )
+      end.message
+    )
+    assert_match(
+      /incomplete atomic write/,
+      assert_raises(Hive::ConfigError) do
+        validator.validate_job_inventory_names!(
+          [ ".job-0001.json.tmp.123.abcdef12" ]
+        )
+      end.message
+    )
+  end
+
   def test_writes_and_strictly_reads_authoritative_job_aggregate
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
@@ -602,6 +673,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def test_job_query_index_missing_for_existing_jobs_fails_closed_until_explicit_rebuild
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
+      store.send(:prepare_schema_namespace!)
       jobs_dir = File.join(store.root, "jobs")
       FileUtils.mkdir_p(jobs_dir)
       File.write(
@@ -620,6 +692,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def test_existing_job_write_migrates_all_pre_index_jobs_in_created_order
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
+      store.send(:prepare_schema_namespace!)
       jobs_dir = File.join(store.root, "jobs")
       FileUtils.mkdir_p(jobs_dir)
       later = classified_job(
@@ -643,6 +716,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def test_existing_lifecycle_mutation_migrates_pre_index_job
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
+      store.send(:prepare_schema_namespace!)
       jobs_dir = File.join(store.root, "jobs")
       FileUtils.mkdir_p(jobs_dir)
       aggregate = classified_job("job_id" => "job-legacy")
@@ -673,6 +747,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def test_corrupt_newer_and_inconsistent_jobs_fail_visibly_without_rewrite
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
+      store.send(:prepare_schema_namespace!)
       jobs_dir = File.join(store.root, "jobs")
       FileUtils.mkdir_p(jobs_dir)
 
@@ -2845,6 +2920,71 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       assert_equal "job-1", store.action_index.dig("actions", "fix-fp-accepted", "owner_job_id")
       File.write(store.action_index_path, "{")
       assert_equal "job-1", store.action_index.dig("actions", "fix-fp-accepted", "owner_job_id")
+    end
+  end
+
+  def test_new_job_capacity_is_rejected_without_orphan_job_or_index_state
+    with_tmp_dir do |dir|
+      with_constant(
+        Hive::RefactorPatrol::JobStoreFiles,
+        :MAX_JOB_ENTRIES,
+        1
+      ) do
+        store = Hive::RefactorPatrol::JobStore.new(dir)
+        store.write_job!(classified_job)
+
+        assert_raises(
+          Hive::RefactorPatrol::JobStore::InconsistentRecord
+        ) do
+          store.write_job!(classified_job("job_id" => "job-2"))
+        end
+
+        refute_path_exists File.join(
+          store.root, "jobs", "job-2.json.lock"
+        )
+        refute_path_exists File.join(
+          store.root, "jobs", "job-2.json"
+        )
+        page = store.job_query_page(limit: 10)
+        assert_equal [ "job-1" ], page.fetch("job_ids")
+        assert_equal 1, page.fetch("total")
+      end
+    end
+  end
+
+  def test_missing_job_mutation_is_rejected_before_lock_at_full_capacity
+    with_tmp_dir do |dir|
+      with_constant(
+        Hive::RefactorPatrol::JobStoreFiles,
+        :MAX_JOB_ENTRIES,
+        1
+      ) do
+        with_constant(
+          Hive::RefactorPatrol::JobStoreFiles,
+          :MAX_JOB_FILES,
+          2
+        ) do
+          store = Hive::RefactorPatrol::JobStore.new(dir)
+          store.write_job!(classified_job)
+
+          yielded = false
+          assert_raises(
+            Hive::RefactorPatrol::JobStore::RecordNotFound
+          ) do
+            store.send(:mutate_job, "job-2") do |aggregate|
+              yielded = true
+              aggregate
+            end
+          end
+
+          refute yielded
+          refute_path_exists File.join(
+            store.root, "jobs", "job-2.json.lock"
+          )
+          assert_equal [ "job-1" ],
+                       store.jobs.map { |job| job.fetch("job_id") }
+        end
+      end
     end
   end
 

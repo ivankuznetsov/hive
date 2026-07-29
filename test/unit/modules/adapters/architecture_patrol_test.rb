@@ -623,17 +623,17 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
         "repository" => "acme/demo"
       },
       trigger: {
-        "kind" => "finalized_scheduler",
+        "kind" => "schedule",
         "id" => "reservation-1",
         "schedule" => "*/10 * * * *",
-        "phase" => "discovery"
+        "occurred_at" => NOW.iso8601(6)
       },
       reservation: {
         "kind" => "architecture",
         "id" => "reservation-1",
         "job_id" => "job-7",
-        "phase" => "discovery",
-        "outcome" => { "status" => "classified" }
+        "window_started_at" => NOW.iso8601(6),
+        "attempt_generation" => 1
       },
       owner: "legacy",
       owner_epoch: 1,
@@ -644,8 +644,13 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
       },
       selection:
         selection,
-      outcome_class: "scheduler_outcome",
-      outcome: { "status" => "classified" },
+      outcome_class: "completed",
+      outcome: {
+        "rationale" => "classified",
+        "job_id" => "job-7",
+        "state" => "classified",
+        "complete" => true
+      },
       occurred_at: NOW,
       recorded_at: NOW
     )

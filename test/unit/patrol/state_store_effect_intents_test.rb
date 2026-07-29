@@ -94,6 +94,10 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
       assert_equal projection_pending,
                    store.each_projection_pending_occurrence.map { |record| record.fetch("occurrence_id") }
       assert_equal all, store.each_occurrence.map { |record| record.fetch("occurrence_id") }
+      assert_equal(
+        [ capture.occurrence_id ],
+        store.rebuild_recovery_index!.fetch("occurrence_ids")
+      )
     end
   end
 
@@ -303,7 +307,7 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
       write_patch_record(store, "only", record)
 
       assert_equal(
-        { "status" => "matched", "outcome" => { "patch" => record } },
+        { "status" => "matched", "outcome" => { "patch_id" => "only" } },
         store.reconcile_attempt("fingerprint-1")
       )
     end
@@ -392,7 +396,7 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
       reconcile: ->(_intent) { store.reconcile_attempt("fingerprint-1") }
     ) do
       store.write_patch("patch-1", patch)
-      { "patch" => patch }
+      { "patch_id" => "patch-1" }
     end
   end
 

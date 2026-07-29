@@ -115,7 +115,7 @@ which updates tracked project state.
 The released aggregate-only JobStore v2 shape is converted directly to v3. No
 binding-sidecar compatibility format is recognized. Before the first live job
 is replaced, Hive writes and verifies
-`<hive_state_path>/refactor_patrol/v2/job-schema-v2-backup/manifest.json` plus
+`<hive_state_path>/refactor_patrol/v3/job-schema-v2-backup/manifest.json` plus
 the exact source bytes under `job-schema-v2-backup/jobs/`. The manifest binds
 project id, sorted job names, SHA-256, byte size, original mode, and original
 mtime into `snapshot-<sha256>`. Each written v3 job is a restart checkpoint;

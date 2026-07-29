@@ -18,6 +18,13 @@ class HiveRefactorPatrolInstalledJobSchemaMigrationTest < Minitest::Test
     def read
       payload
     end
+
+    def write_daemon_restart_pending(value = nil, pending:, now:)
+      @payload = (value || payload).merge(
+        "daemon_restart_pending" => pending == true,
+        "updated_at" => now.utc.iso8601(6)
+      )
+    end
   end
 
   class FakeCoordinator
@@ -43,18 +50,25 @@ class HiveRefactorPatrolInstalledJobSchemaMigrationTest < Minitest::Test
   class FakeLifecycle
     attr_reader :calls
 
-    def initialize(running: false)
+    def initialize(running: false, restart_errors: [])
       @running = running
+      @restart_errors = Array(restart_errors)
       @calls = []
     end
 
     def quiesce!
       @calls << :quiesce
-      @running
+      was_running = @running
+      @running = false
+      was_running
     end
 
     def restart!
       @calls << :restart
+      error = @restart_errors.shift
+      raise error if error
+
+      @running = true
       true
     end
   end
@@ -80,6 +94,9 @@ class HiveRefactorPatrolInstalledJobSchemaMigrationTest < Minitest::Test
     refute Migration.eligible_argv?([ "daemon", "status", "--json" ])
     refute Migration.eligible_argv?([ "web", "status", "--json" ])
     refute Migration.eligible_argv?([ "connect", "--json" ])
+    refute Migration.eligible_argv?([ "patrol" ])
+    refute Migration.eligible_argv?([ "refactor-patrol", "--json" ])
+    refute Migration.eligible_argv?([ "banana" ])
     refute Migration.eligible_argv?([ "update", "--dry-run" ])
     refute Migration.eligible_argv?([ "run", "task" ], strict_no_write: true)
     refute Migration.eligible_argv?(
@@ -269,6 +286,52 @@ class HiveRefactorPatrolInstalledJobSchemaMigrationTest < Minitest::Test
 
       assert_equal [ :quiesce ], lifecycle.calls
       refute migration.last_daemon_restarted
+      assert_equal true, status_store.payload.fetch("daemon_restart_pending")
+    end
+  end
+
+  def test_failed_daemon_restart_stays_pending_and_retries_without_reconverting
+    with_tmp_dir do |root|
+      entries = [ { "name" => "shared", "path" => "/srv/shared" } ]
+      digest = MigrationStatus.registry_digest(entries)
+      status_store = FakeStatusStore.new
+      lifecycle = FakeLifecycle.new(
+        running: true,
+        restart_errors: [ Hive::Error.new("temporary service failure") ]
+      )
+      coordinator = FakeCoordinator.new(
+        status_store: status_store,
+        payload: status_payload(digest: digest, projects: [])
+      )
+      factory_calls = 0
+      migration = build_migration(
+        root: root,
+        entries: entries,
+        status_store: status_store,
+        lifecycle: lifecycle,
+        coordinator_factory: lambda do |**|
+          factory_calls += 1
+          coordinator
+        end
+      )
+
+      error = assert_raises(Hive::Error) do
+        migration.call(now: "2026-07-29T12:00:00Z")
+      end
+
+      assert_match(/temporary service failure/, error.message)
+      assert_equal true, status_store.payload.fetch("daemon_restart_pending")
+      assert_equal 1, factory_calls
+      assert_equal [ :quiesce, :restart ], lifecycle.calls
+
+      payload = migration.call(now: "2026-07-29T12:01:00Z")
+
+      assert_equal false, payload.fetch("daemon_restart_pending")
+      assert_equal 1, factory_calls,
+                   "restart recovery must not rerun a current catalog"
+      assert_equal [ :quiesce, :restart, :quiesce, :restart ], lifecycle.calls
+      assert migration.last_daemon_restarted
+      refute migration.last_ran
     end
   end
 
@@ -458,6 +521,7 @@ class HiveRefactorPatrolInstalledJobSchemaMigrationTest < Minitest::Test
       "target_schema_version" => 3,
       "registry_digest" => digest,
       "updated_at" => "2026-07-29T12:00:00.000000Z",
+      "daemon_restart_pending" => false,
       "projects" => projects
     }
   end

@@ -26,7 +26,12 @@ class ModulesMigrationPatrolEvidenceTest < Minitest::Test
         "name" => "demo",
         "repository" => "owner/demo"
       },
-      trigger: { "kind" => "schedule", "id" => "tick-1" },
+      trigger: {
+        "kind" => "schedule",
+        "id" => "tick-1",
+        "schedule" => "continuous",
+        "occurred_at" => NOW.iso8601(6)
+      },
       reservation: { "kind" => "ordinary", "id" => "reservation-1" },
       owner: "legacy",
       owner_epoch: 3,
@@ -97,9 +102,10 @@ class ModulesMigrationPatrolEvidenceTest < Minitest::Test
 
   def test_capture_is_strict_deeply_immutable_and_schema_valid
     trigger = {
-      "event_id" => "evt-#{'a' * 64}",
       "kind" => "schedule",
-      "repository_sha" => "b" * 40
+      "id" => "tick-1",
+      "schedule" => "continuous",
+      "occurred_at" => NOW.iso8601(6)
     }
     outcome = { "rationale" => "completed", "finding_ids" => [ "finding-1" ] }
     capture = Hive::Modules::Migration::PatrolCapture.build(
@@ -141,6 +147,15 @@ class ModulesMigrationPatrolEvidenceTest < Minitest::Test
       Hive::Modules::Migration::PatrolCapture.from_h(malformed)
     end
     assert_equal "patrol capture is malformed", error.message
+    %w[trigger reservation].each do |field|
+      nested = capture.to_h.merge(
+        field => capture.to_h.fetch(field).merge("unexpected" => true)
+      )
+      assert_raises(Hive::ConfigError) do
+        Hive::Modules::Migration::PatrolCapture.from_h(nested)
+      end
+      refute schema.valid?(nested)
+    end
   end
 
   def test_capture_and_projection_schemas_reject_runtime_invalid_combinations
@@ -231,12 +246,7 @@ class ModulesMigrationPatrolEvidenceTest < Minitest::Test
       },
       created_at: NOW
     )
-    outcome = {
-      "remote_identity" => {
-        "repository" => "owner/demo",
-        "number" => 7
-      }
-    }
+    outcome = { "pr_url" => "https://github.com/owner/demo/pull/7" }
     receipt = Hive::Modules::Migration::EffectReceipt.build(
       intent: intent,
       status: "committed",
@@ -244,18 +254,38 @@ class ModulesMigrationPatrolEvidenceTest < Minitest::Test
       recorded_at: NOW + 1
     )
 
-    outcome["remote_identity"]["number"] = 8
+    outcome["pr_url"] = "https://github.com/owner/demo/pull/8"
 
     assert intent.frozen?
     assert receipt.frozen?
     assert receipt.outcome.frozen?
-    assert_equal 7, receipt.outcome.dig("remote_identity", "number")
+    assert_equal(
+      "https://github.com/owner/demo/pull/7",
+      receipt.outcome.fetch("pr_url")
+    )
     assert_match(/\Aintent-[0-9a-f]{64}\z/, intent.intent_id)
     assert_match(/\Aauth-[0-9a-f]{64}\z/, intent.authorization_digest)
     assert_match(/\Areceipt-[0-9a-f]{64}\z/, receipt.receipt_id)
 
     schema = schema_for("hive-patrol-effect-receipt.v1.json")
     assert_empty schema.validate(receipt.to_h).to_a
+
+    unknown_scope = intent.to_h.merge(
+      "scope" => intent.scope.merge("unexpected" => true)
+    )
+    assert_raises(Hive::ConfigError) do
+      Hive::Modules::Migration::EffectIntent.from_h(unknown_scope)
+    end
+    refute schema.valid?(
+      receipt.to_h.merge("intent" => unknown_scope)
+    )
+    unknown_outcome = receipt.to_h.merge(
+      "outcome" => receipt.outcome.merge("unexpected" => true)
+    )
+    assert_raises(Hive::ConfigError) do
+      Hive::Modules::Migration::EffectReceipt.from_h(unknown_outcome)
+    end
+    refute schema.valid?(unknown_outcome)
 
     changed_identity = intent.to_h.merge("target" => "github.com/owner/other:head-ref")
     error = assert_raises(Hive::ConfigError) do

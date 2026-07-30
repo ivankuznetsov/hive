@@ -252,7 +252,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: workflow-creator-evidence-openclaw-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/workflow-creator-evidence/openclaw-workflow-creator.json
+          path: ${{ runner.temp }}/workflow-creator-evidence
           if-no-files-found: error
           retention-days: 7
 

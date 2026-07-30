@@ -58,6 +58,38 @@ class ReleaseCandidateArtifactsTest < Minitest::Test
     end
   end
 
+  def test_verifier_rejects_missing_or_substituted_creator_builder_sources
+    with_tmp_dir do |dir|
+      {
+        "missing" => lambda do |stage|
+          FileUtils.rm_f(
+            File.join(
+              stage,
+              "packaging/live_agent_skills/workflow_creator_evidence.rb"
+            )
+          )
+        end,
+        "substituted" => lambda do |stage|
+          File.binwrite(
+            File.join(
+              stage,
+              "packaging/live_agent_skills/workflow_creator_contract.rb"
+            ),
+            "substituted contract\n"
+          )
+        end
+      }.each do |name, mutate|
+        artifacts = fixture_artifacts(File.join(dir, name))
+        rewrite_source_archive!(artifacts.candidate_dir, mutate)
+
+        error = assert_raises(HiveReleaseCandidate::Error, name) do
+          artifacts.verify!
+        end
+        assert_match(/builder input|builder revision/, error.message)
+      end
+    end
+  end
+
   def test_artifact_path_collision_fails_before_any_build
     with_tmp_dir do |dir|
       candidate = File.join(dir, "candidate")
@@ -147,12 +179,13 @@ class ReleaseCandidateArtifactsTest < Minitest::Test
       File.binwrite(path, bytes)
     end
     source_name = "hive-source-#{'a' * 40}.tar.gz"
-    proof_bytes = "proof builder\n"
-    build_bytes = "build wrapper\n"
+    builder_sources =
+      HiveReleaseCandidate::Artifacts::LIVE_AGENT_BUILDER_INPUTS.to_h do |path|
+        [ path, "fixture #{File.basename(path)}\n" ]
+      end
     build_source_fixture(
       File.join(candidate, source_name),
-      proof_bytes: proof_bytes,
-      build_bytes: build_bytes,
+      builder_sources: builder_sources,
       root: dir
     )
     files[source_name] = [ "source", nil ]
@@ -168,8 +201,10 @@ class ReleaseCandidateArtifactsTest < Minitest::Test
       ]
     end
     builder_digest = Digest::SHA256.new
-    builder_digest << "proof.rb\0" << proof_bytes << "\0"
-    builder_digest << "build.rb\0" << build_bytes << "\0"
+    HiveReleaseCandidate::Artifacts::LIVE_AGENT_BUILDER_INPUTS.each do |path|
+      builder_digest << File.basename(path) << "\0" <<
+        builder_sources.fetch(path) << "\0"
+    end
     managed = File.expand_path("../../../packaging/managed_web_archive.rb", __dir__)
     builder_digest << "managed_web_archive.rb\0" << File.binread(managed) << "\0"
     manifest = {
@@ -188,14 +223,33 @@ class ReleaseCandidateArtifactsTest < Minitest::Test
     )
   end
 
-  def build_source_fixture(destination, proof_bytes:, build_bytes:, root:)
+  def build_source_fixture(destination, builder_sources:, root:)
     stage = File.join(root, "source-stage")
-    builders = File.join(stage, "packaging/live_agent_skills")
-    FileUtils.mkdir_p(builders)
-    File.binwrite(File.join(builders, "proof.rb"), proof_bytes)
-    File.binwrite(File.join(builders, "build.rb"), build_bytes)
+    builder_sources.each do |relative, bytes|
+      path = File.join(stage, relative)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.binwrite(path, bytes)
+    end
     _stdout, stderr, status = Open3.capture3("tar", "-czf", destination, "-C", stage, ".")
     raise stderr unless status.success?
+  end
+
+  def rewrite_source_archive!(candidate, mutate)
+    source = Dir[File.join(candidate, "hive-source-*.tar.gz")].fetch(0)
+    stage = File.join(File.dirname(candidate), "rewritten-source")
+    FileUtils.mkdir_p(stage)
+    _stdout, stderr, status = Open3.capture3("tar", "-xzf", source, "-C", stage)
+    raise stderr unless status.success?
+    mutate.call(stage)
+    _stdout, stderr, status = Open3.capture3("tar", "-czf", source, "-C", stage, ".")
+    raise stderr unless status.success?
+
+    manifest_path = File.join(candidate, "manifest.json")
+    manifest = JSON.parse(File.read(manifest_path))
+    source_record = manifest.fetch("files").fetch(File.basename(source))
+    source_record["sha256"] = Digest::SHA256.file(source).hexdigest
+    source_record["size"] = File.size(source)
+    File.write(manifest_path, JSON.generate(manifest))
   end
 
   def run_git(repo, *argv)

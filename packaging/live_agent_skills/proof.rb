@@ -29,45 +29,6 @@ module HiveLiveAgentProof
     "--timeout", "20", "--max-events", "5", "--interval", "1", "--json-lines"
   ].freeze
   OBSERVATION_COMMANDS = [ STATUS_ARGV, WATCH_ARGV ].freeze
-  WORKFLOW_CREATOR_REQUEST =
-    "Create a three-stage editorial workflow that researches, drafts, and requires approval before publishing.".freeze
-  WORKFLOW_CREATOR_PROMPT = <<~PROMPT.freeze
-    /hive
-    #{WORKFLOW_CREATOR_REQUEST}
-    Use the installed Hive workflow-creator capability in this initialized project.
-    This is creation-only: validate the result, report the defaults, and do not create or run a task.
-  PROMPT
-  WORKFLOW_CREATOR_TASK_REQUEST = "Research and draft the launch announcement for approval.".freeze
-  WORKFLOW_CREATOR_TASK_KEY = "workflow-creator-proof:editorial:live-proof".freeze
-  WORKFLOW_CREATOR_TASK_SLUG = "editorial-live-proof".freeze
-  WORKFLOW_CREATOR_TASK_PROMPT = <<~PROMPT.freeze
-    /hive
-    Use the validated editorial workflow to create and run one task for:
-    "#{WORKFLOW_CREATOR_TASK_REQUEST}"
-    Use idempotency key #{WORKFLOW_CREATOR_TASK_KEY}. In this exact order: create the task,
-    run its first stage once, repeat the same creation command once to prove the retry is a no-op,
-    then query operational status. Do not publish or perform any other external action.
-  PROMPT
-  WORKFLOW_CREATOR_TASK_NEW_ARGV = [
-    "new", "workflow-creator-proof", "--workflow", "editorial",
-    "--idempotency-key", WORKFLOW_CREATOR_TASK_KEY, "--json", WORKFLOW_CREATOR_TASK_REQUEST
-  ].freeze
-  WORKFLOW_CREATOR_COMMANDS = [
-    [ "version" ],
-    [ "workflow", "list", "--json" ],
-    [ "workflow", "new", "editorial", "--json" ],
-    [ "workflow", "validate", "editorial", "--json" ],
-    [ "workflow", "commit", "editorial" ],
-    WORKFLOW_CREATOR_TASK_NEW_ARGV,
-    [ "run", WORKFLOW_CREATOR_TASK_SLUG ],
-    WORKFLOW_CREATOR_TASK_NEW_ARGV,
-    [ "status", "--operational", "--json" ]
-  ].freeze
-  WORKFLOW_CREATOR_FILES = [
-    ".hive-state/workflows/editorial.yml",
-    ".hive-state/workflows/editorial/draft.md",
-    ".hive-state/workflows/editorial/research.md"
-  ].freeze
   SAFE_SHA = /\A[0-9a-f]{40}\z/.freeze
   SAFE_REPOSITORY = /\A[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\z/.freeze
   SECRET_PATTERNS = [
@@ -114,6 +75,15 @@ module HiveLiveAgentProof
     value
   end
 
+  def safe_relative_path?(value)
+    return false unless value.is_a?(String) && !value.empty?
+
+    clean = Pathname.new(value).cleanpath
+    !clean.absolute? &&
+      !clean.each_filename.include?("..") &&
+      clean.to_s == value
+  end
+
   def relative_file!(root, relative)
     raise Error, "unsafe artifact path #{relative.inspect}" unless relative.is_a?(String)
 
@@ -145,9 +115,10 @@ module HiveLiveAgentProof
       "pattern:#{pattern.source}" if pattern.match?(text)
     end
     exact_secrets.each_with_index do |secret, index|
-      next if secret.to_s.empty?
+      needle = secret.to_s
+      next if needle.empty?
 
-      findings << "exact-secret:#{index}" if text.include?(secret)
+      findings << "exact-secret:#{index}" if text.include?(needle)
     end
     findings
   end
@@ -157,6 +128,9 @@ module HiveLiveAgentProof
       value["kind"] == NATIVE_ACTIVATION_KINDS.fetch(platform) &&
       value["invocation"] == INVOCATIONS.fetch(platform)
   end
+
+  require_relative "workflow_creator_contract"
+  require_relative "workflow_creator_evidence"
 
   class Builder
     def initialize(candidate_sha:, gem_path:, source_archive:, output_dir:, canonical:)
@@ -369,7 +343,18 @@ module HiveLiveAgentProof
     def call
       manifest = validate_artifacts!
       evidence = validate_evidence!(manifest)
-      creator_evidence = validate_creator_evidence!(manifest)
+      creator_evidence = HiveLiveAgentProof.read_json(
+        File.join(
+          @creator_evidence_dir,
+          WorkflowCreatorBundle::PRIMARY_NAME
+        )
+      )
+      creator_bundle = WorkflowCreatorContract.validate_success!(
+        row: creator_evidence,
+        manifest: manifest,
+        candidate_sha: @candidate_sha,
+        bundle_dir: @creator_evidence_dir
+      )
       raise Error, "proof output already exists: #{@output_dir}" if File.exist?(@output_dir)
       FileUtils.mkdir_p(File.join(@output_dir, "artifacts"), mode: 0o700)
       FileUtils.mkdir_p(File.join(@output_dir, "evidence"), mode: 0o700)
@@ -382,10 +367,8 @@ module HiveLiveAgentProof
       evidence.each do |platform, row|
         HiveLiveAgentProof.write_json(File.join(@output_dir, "evidence", "#{platform}.json"), row)
       end
-      HiveLiveAgentProof.write_json(
-        File.join(@output_dir, "evidence", "openclaw-workflow-creator.json"),
-        creator_evidence
-      )
+      creator_output = File.join(@output_dir, "evidence", "workflow-creator")
+      creator_bundle.copy_to!(creator_output)
 
       attestation = {
         "schema" => "hive-live-agent-skills-attestation",
@@ -405,7 +388,7 @@ module HiveLiveAgentProof
         "secret_scan" => {
           "status" => "passed",
           "scanner" => "hive-live-agent-proof/v1",
-          "files_scanned" => PLATFORMS.length + 2
+          "files_scanned" => PLATFORMS.length + WorkflowCreatorBundle::FILENAMES.length + 1
         }
       }
       attestation_path = File.join(@output_dir, "attestation.json")
@@ -475,82 +458,6 @@ module HiveLiveAgentProof
               "#{platform} must use exactly one operational status and one bounded native watch"
       end
     end
-
-    def validate_creator_evidence!(manifest)
-      actual_names = Dir.glob(File.join(@creator_evidence_dir, "*.json")).map { |path| File.basename(path) }
-      unless actual_names == [ "openclaw-workflow-creator.json" ]
-        raise Error, "workflow-creator evidence must contain exactly openclaw-workflow-creator.json"
-      end
-
-      path = File.join(@creator_evidence_dir, actual_names.fetch(0))
-      row = HiveLiveAgentProof.read_json(path)
-      unless row.is_a?(Hash) && row["schema"] == "hive-live-workflow-creator-evidence" &&
-             row["schema_version"] == SCHEMA_VERSION && row["platform"] == "openclaw" &&
-             row["candidate_sha"] == @candidate_sha && row["result"] == "passed"
-        raise Error, "workflow-creator evidence identity or result is invalid"
-      end
-      unless row.dig("skill", "canonical_digest") == manifest["canonical_digest"] &&
-             row.dig("skill", "skill_version") == manifest["skill_version"]
-        raise Error, "workflow-creator evidence canonical provenance mismatch"
-      end
-      unless HiveLiveAgentProof.valid_native_activation?("openclaw", row["native_activation"])
-        raise Error, "workflow-creator native activation evidence is invalid"
-      end
-      expected_prompt = Digest::SHA256.hexdigest(WORKFLOW_CREATOR_PROMPT)
-      expected_task_prompt = Digest::SHA256.hexdigest(WORKFLOW_CREATOR_TASK_PROMPT)
-      unless row["prompt_sha256"] == expected_prompt &&
-             row["task_prompt_sha256"] == expected_task_prompt &&
-             row["hive_commands"] == WORKFLOW_CREATOR_COMMANDS
-        raise Error, "workflow-creator prompt or command sequence is invalid"
-      end
-      validate_creator_result!(row)
-      unless row.dig("secret_scan", "status") == "passed" && row.dig("cleanup", "status") == "passed"
-        raise Error, "workflow-creator evidence lacks secret-scan or cleanup proof"
-      end
-      findings = HiveLiveAgentProof.secret_findings(File.read(path))
-      raise Error, "workflow-creator evidence secret scan failed: #{findings.join(', ')}" unless findings.empty?
-
-      row
-    end
-
-    def validate_creator_result!(row)
-      created = row["created_files"]
-      unless created.is_a?(Array) && created.map { |record| record["path"] }.sort == WORKFLOW_CREATOR_FILES
-        raise Error, "workflow-creator created files are incomplete"
-      end
-      unless created.all? { |record| record.keys.sort == %w[path sha256 size] &&
-        record["sha256"].to_s.match?(/\A[0-9a-f]{64}\z/) && record["size"].to_i.positive? }
-        raise Error, "workflow-creator created-file records are invalid"
-      end
-
-      validation = row["validation"]
-      stages = validation.is_a?(Hash) ? validation["stages"] : nil
-      outcomes = validation.is_a?(Hash) ? validation["human_outcomes"] : nil
-      unless validation&.fetch("valid", false) == true &&
-             stages == %w[research draft approval] &&
-             validation["automatic_edges"] == [ %w[research draft], %w[draft approval] ] &&
-             outcomes == [
-               { "stage" => "approval", "name" => "approve", "complete" => true,
-                 "artifact" => "draft.md", "to" => nil },
-               { "stage" => "approval", "name" => "reject", "complete" => false,
-                 "artifact" => nil, "to" => "draft" }
-             ]
-        raise Error, "workflow-creator normalized graph is invalid"
-      end
-      task = row["task"]
-      unless row["creation_only_task_count"] == 0 && row["task_count"] == 1 &&
-             task == {
-               "slug" => WORKFLOW_CREATOR_TASK_SLUG,
-               "workflow" => "editorial",
-               "first_created" => true,
-               "retry_created" => false,
-               "run_count" => 1,
-               "current_stage" => "1-research"
-             } &&
-             row["external_actions"] == []
-        raise Error, "workflow-creator proof contains an unauthorized side effect"
-      end
-    end
   end
 
   class Verifier
@@ -584,7 +491,12 @@ module HiveLiveAgentProof
         HiveLiveAgentProof.verify_file_record!(artifact_root, name, record)
       end
       validate_platforms!(manifest)
-      validate_workflow_creator!(manifest)
+      WorkflowCreatorContract.validate_success!(
+        row: @attestation["workflow_creator"],
+        manifest: manifest,
+        candidate_sha: @candidate_sha,
+        bundle_dir: File.join(@proof_dir, "evidence", "workflow-creator")
+      )
       findings = HiveLiveAgentProof.secret_findings(File.read(path))
       raise Error, "proof secret scan failed: #{findings.join(', ')}" unless findings.empty?
 
@@ -630,27 +542,6 @@ module HiveLiveAgentProof
         unless HiveLiveAgentProof.valid_native_activation?(platform, row["native_activation"])
           raise Error, "#{platform} attested native activation evidence is invalid"
         end
-      end
-    end
-
-    def validate_workflow_creator!(manifest)
-      row = @attestation["workflow_creator"]
-      unless row.is_a?(Hash) && row["schema"] == "hive-live-workflow-creator-evidence" &&
-             row["platform"] == "openclaw" && row["candidate_sha"] == @candidate_sha &&
-             row["result"] == "passed" && row.dig("skill", "canonical_digest") == manifest["canonical_digest"] &&
-             row.dig("secret_scan", "status") == "passed" && row.dig("cleanup", "status") == "passed"
-        raise Error, "workflow-creator attested evidence is incomplete"
-      end
-      unless HiveLiveAgentProof.valid_native_activation?("openclaw", row["native_activation"])
-        raise Error, "workflow-creator attested native activation evidence is invalid"
-      end
-      unless row["prompt_sha256"] == Digest::SHA256.hexdigest(WORKFLOW_CREATOR_PROMPT) &&
-             row["task_prompt_sha256"] == Digest::SHA256.hexdigest(WORKFLOW_CREATOR_TASK_PROMPT) &&
-             row["hive_commands"] == WORKFLOW_CREATOR_COMMANDS &&
-             row["creation_only_task_count"] == 0 && row["task_count"] == 1 &&
-             row["task"].is_a?(Hash) && row["task"]["retry_created"] == false &&
-             row["task"]["run_count"] == 1 && row["external_actions"] == []
-        raise Error, "workflow-creator attested contract is invalid"
       end
     end
   end

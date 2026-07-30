@@ -614,6 +614,34 @@ The protected `live-agent-skills.yml` workflow can additionally:
 7. validate all four evidence rows, assemble the candidate/provenance-bound
    private proof, and create a `live-agent-skills` Check Run on the exact SHA.
 
+The workflow-creator branch of that proof now has one packaging-owned schema-v1
+contract. Its producer first atomically persists an owner-private, non-passing
+receipt with a no-clobber same-directory link; replacement uses a sibling
+temporary file, file `fsync`, rename, and parent-directory `fsync`, so a
+concurrent initializer cannot overwrite a winner and a failed write or rename
+cannot truncate the last valid receipt. A passing receipt additionally requires
+an exact four-file retained bundle: the creator row, candidate and OpenClaw
+installed manifests, and an execution/cleanup receipt. The fixed bundle records
+bind canonical bytes, digest, integer size, and bounded installed inventory;
+the execution receipt must agree with the creator row's command, effect, instruction,
+containment, teardown, and cleanup claims. Attestation copies those exact
+bytes, and verification replays the same contract after runner-local install
+roots have disappeared. Classification stays explicit across the boundary: the
+creator row can pass only as `authenticated_openclaw` with an executed model
+loop, while the retained execution receipt is
+`deterministic_fixture`/`not_exercised`; swapping or conflating those roles is
+rejected.
+
+This is intentionally a non-claiming intermediate state. The current smoke
+adapter can upload a schema-valid failure with
+`reason=u14_execution_custody_unavailable`, but it cannot fabricate installed
+manifests or a successful execution receipt, so no weaker trusted creator
+Check can be issued. Exact execution custody remains U14 work and authenticated
+OpenClaw/provider orchestration remains U15 work. Focused coverage lives in
+`test/unit/packaging/workflow_creator_evidence_test.rb`,
+`test/unit/packaging/live_agent_proof_test.rb`, and the release-candidate
+artifact tests.
+
 The repository-owned selector and attestation verifier remain covered by
 executable fixtures for optional diagnostic runs. They validate workflow/run
 identity, all four matrix jobs, one unexpired artifact, and its downloaded

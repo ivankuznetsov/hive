@@ -11,6 +11,16 @@ tags: [gap, todo, release-proof, agent-skills]
 
 ## Current release gap
 
+- The workflow-creator proof now has a single strict contract, crash-safe
+  schema-v1 failure receipt, authored/executed instruction binding, retained
+  bundle validation, and release-builder closure. It deliberately cannot
+  produce a passing protected-main creator Check yet: U14 must still produce
+  the real candidate/OpenClaw installed manifests plus an independently bound
+  execution/containment/teardown receipt, and U15 must still run the
+  authenticated exact-head OpenClaw model loop without a transition reader.
+  Keep missing/partial/unknown custody non-passing; fixture bundles prove the
+  contract, not the live installation or provider boundary.
+
 - Patrol capture/effect boundaries are source- and focused-test-pinned, but
   they are not yet compressed-campaign or live-cutover evidence. The permanent
   U3 harness must still exercise real scheduler/event/adapter/store paths,

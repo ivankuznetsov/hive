@@ -93,6 +93,7 @@ class LiveAgentProofTest < Minitest::Test
       creator_evidence = prepare_creator_evidence(dir, artifacts)
       proof = File.join(dir, "proof")
       result = attest(artifacts, evidence, creator_evidence, proof)
+      FileUtils.rm_rf(creator_evidence)
 
       verified = HiveLiveAgentProof::Verifier.new(
         proof_dir: proof, candidate_sha: SHA, workflow_revision: WORKFLOW_SHA,
@@ -134,6 +135,246 @@ class LiveAgentProofTest < Minitest::Test
       )
       assert_match(/hive-cli-1\.2\.3\.gem\z/, verified.fetch("gem"))
       assert_match(/hive-agent-skills-#{SHA}\.tar\.gz\z/, verified.fetch("skills"))
+    end
+  end
+
+  def test_attestor_and_verifier_share_authored_execution_cross_binding
+    with_tmp_dir do |dir|
+      artifacts = prepare_artifacts(dir)
+      evidence = prepare_evidence(dir, artifacts)
+      creator = prepare_creator_evidence(dir, artifacts)
+      primary = File.join(creator, "openclaw-workflow-creator.json")
+      row = JSON.parse(File.read(primary))
+      row["executed_instruction"]["sha256"] = "0" * 64
+      HiveLiveAgentProof.write_json(primary, row)
+
+      attestor_error = assert_raises(HiveLiveAgentProof::Error) do
+        attest(artifacts, evidence, creator, File.join(dir, "rejected-proof"))
+      end
+
+      creator = prepare_creator_evidence(File.join(dir, "verifier"), artifacts)
+      proof = File.join(dir, "proof")
+      result = attest(artifacts, evidence, creator, proof)
+      attestation_path = File.join(proof, "attestation.json")
+      attestation = JSON.parse(File.read(attestation_path))
+      attestation["workflow_creator"]["executed_instruction"]["sha256"] = "0" * 64
+      HiveLiveAgentProof.write_json(attestation_path, attestation)
+      retained = File.join(
+        proof, "evidence", "workflow-creator",
+        "openclaw-workflow-creator.json"
+      )
+      retained_row = JSON.parse(File.read(retained))
+      retained_row["executed_instruction"]["sha256"] = "0" * 64
+      HiveLiveAgentProof.write_json(retained, retained_row)
+      verifier_error = assert_raises(HiveLiveAgentProof::Error) do
+        verifier(proof, HiveLiveAgentProof.sha256(attestation_path)).call
+      end
+
+      assert_equal(
+        "workflow-creator authored and executed instructions do not match",
+        attestor_error.message
+      )
+      assert_equal attestor_error.message, verifier_error.message
+      refute_equal result.fetch("sha256"), HiveLiveAgentProof.sha256(attestation_path)
+    end
+  end
+
+  def test_attestor_rejects_missing_extra_reordered_duplicate_unsafe_or_mismatched_bundle_entries
+    mutations = {
+      "missing" => lambda do |root, _row|
+        FileUtils.rm_f(File.join(root, "candidate-installed-manifest.json"))
+      end,
+      "extra" => lambda do |root, _row|
+        HiveLiveAgentProof.write_json(File.join(root, "extra.json"), {})
+      end,
+      "reordered" => lambda do |_root, row|
+        row["evidence_bundle"][0], row["evidence_bundle"][1] =
+          row["evidence_bundle"][1], row["evidence_bundle"][0]
+      end,
+      "duplicate" => lambda do |_root, row|
+        row["evidence_bundle"][1] = row["evidence_bundle"][0].dup
+      end,
+      "digest" => lambda do |_root, row|
+        row["evidence_bundle"][0]["sha256"] = "0" * 64
+      end,
+      "symlink" => lambda do |root, _row|
+        path = File.join(root, "candidate-installed-manifest.json")
+        outside = File.join(File.dirname(root), "outside-manifest.json")
+        FileUtils.mv(path, outside)
+        File.symlink(outside, path)
+      end,
+      "oversized" => lambda do |_root, row|
+        row["evidence_bundle"][0]["size"] =
+          HiveLiveAgentProof::WorkflowCreatorBundle::MAX_FILE_BYTES + 1
+      end
+    }
+
+    with_tmp_dir do |dir|
+      artifacts = prepare_artifacts(dir)
+      evidence = prepare_evidence(dir, artifacts)
+      mutations.each do |name, mutate|
+        creator = prepare_creator_evidence(File.join(dir, name), artifacts)
+        primary = File.join(creator, "openclaw-workflow-creator.json")
+        row = JSON.parse(File.read(primary))
+        mutate.call(creator, row)
+        HiveLiveAgentProof.write_json(primary, row)
+
+        assert_raises(HiveLiveAgentProof::Error, name) do
+          attest(
+            artifacts, evidence, creator,
+            File.join(dir, "proof-bundle-#{name}")
+          )
+        end
+      end
+    end
+  end
+
+  def test_missing_failed_partial_or_unknown_execution_receipt_never_attests
+    mutations = {
+      "failed" => ->(receipt) { receipt["result"] = "failed" },
+      "partial" => ->(receipt) { receipt.delete("teardown") },
+      "unknown" => ->(receipt) { receipt["containment"]["status"] = "unknown" },
+      "unbound" => ->(receipt) { receipt["installed_manifests"] = [] },
+      "conflated" => lambda do |receipt|
+        receipt["execution_kind"] = "authenticated_openclaw"
+        receipt["model_loop"] = "executed"
+      end
+    }
+
+    with_tmp_dir do |dir|
+      artifacts = prepare_artifacts(dir)
+      evidence = prepare_evidence(dir, artifacts)
+      mutations.each do |name, mutate|
+        creator = prepare_creator_evidence(File.join(dir, name), artifacts)
+        receipt_path = File.join(creator, "execution-receipt.json")
+        receipt = JSON.parse(File.read(receipt_path))
+        mutate.call(receipt)
+        HiveLiveAgentProof.write_json(receipt_path, receipt)
+        refresh_creator_bundle_record!(creator, "execution-receipt.json")
+
+        assert_raises(HiveLiveAgentProof::Error, name) do
+          attest(
+            artifacts, evidence, creator,
+            File.join(dir, "proof-receipt-#{name}")
+          )
+        end
+      end
+    end
+  end
+
+  def test_nonpassing_temporary_receipt_is_uploadable_but_not_attestable
+    with_tmp_dir do |dir|
+      artifacts = prepare_artifacts(dir)
+      evidence = prepare_evidence(dir, artifacts)
+      creator = File.join(dir, "creator-evidence")
+      path = File.join(creator, "openclaw-workflow-creator.json")
+      HiveLiveAgentProof::WorkflowCreatorEvidence.new(path: path)
+                                                   .initialize!(candidate_sha: SHA)
+
+      assert File.file?(path)
+      error = assert_raises(HiveLiveAgentProof::Error) do
+        attest(artifacts, evidence, creator, File.join(dir, "proof"))
+      end
+      assert_includes error.message, "fields are invalid"
+    end
+  end
+
+  def test_atomic_store_replaces_nonpassing_receipt_with_validated_success
+    with_tmp_dir do |dir|
+      artifacts = prepare_artifacts(dir)
+      creator = prepare_creator_evidence(dir, artifacts)
+      manifest = JSON.parse(
+        File.read(File.join(artifacts, "artifact-manifest.json"))
+      )
+      path = File.join(creator, "openclaw-workflow-creator.json")
+      success = JSON.parse(File.read(path))
+      FileUtils.rm_f(path)
+      store = HiveLiveAgentProof::WorkflowCreatorEvidence.new(path: path)
+      store.initialize!(candidate_sha: SHA)
+
+      stored = store.replace_success!(
+        success,
+        manifest: manifest,
+        bundle_dir: creator,
+        candidate_sha: SHA
+      )
+
+      assert_equal success, stored
+      assert_equal success, JSON.parse(File.read(path))
+      assert_equal 0o600, File.stat(path).mode & 0o777
+    end
+  end
+
+  def test_validated_bundle_snapshot_copies_the_exact_bytes_it_checked
+    with_tmp_dir do |dir|
+      artifacts = prepare_artifacts(dir)
+      creator = prepare_creator_evidence(dir, artifacts)
+      manifest = JSON.parse(
+        File.read(File.join(artifacts, "artifact-manifest.json"))
+      )
+      primary = File.join(creator, "openclaw-workflow-creator.json")
+      row = JSON.parse(File.read(primary))
+      expected = HiveLiveAgentProof::WorkflowCreatorBundle::FILENAMES.to_h do |name|
+        [ name, File.binread(File.join(creator, name)) ]
+      end
+
+      snapshot = HiveLiveAgentProof::WorkflowCreatorContract.validate_success!(
+        row: row,
+        manifest: manifest,
+        candidate_sha: SHA,
+        bundle_dir: creator
+      )
+      File.binwrite(
+        File.join(creator, "execution-receipt.json"),
+        "mutated after validation\n"
+      )
+      retained = File.join(dir, "retained")
+      snapshot.copy_to!(retained)
+
+      expected.each do |name, bytes|
+        assert_equal bytes, File.binread(File.join(retained, name)), name
+      end
+    end
+  end
+
+  def test_atomic_store_rejects_an_exact_secret_in_supporting_evidence
+    with_tmp_dir do |dir|
+      artifacts = prepare_artifacts(dir)
+      creator = prepare_creator_evidence(dir, artifacts)
+      manifest = JSON.parse(
+        File.read(File.join(artifacts, "artifact-manifest.json"))
+      )
+      secret = "opaque-provider-credential"
+      installed_path = File.join(creator, "openclaw-installed-manifest.json")
+      installed = JSON.parse(File.read(installed_path))
+      installed["identity"]["integrity"] = secret
+      HiveLiveAgentProof.write_json(installed_path, installed)
+      refresh_creator_bundle_record!(creator, "openclaw-installed-manifest.json")
+      primary = File.join(creator, "openclaw-workflow-creator.json")
+      row = JSON.parse(File.read(primary))
+      receipt_path = File.join(creator, "execution-receipt.json")
+      receipt = JSON.parse(File.read(receipt_path))
+      receipt["installed_manifests"] = row.fetch("evidence_bundle").first(2)
+      HiveLiveAgentProof.write_json(receipt_path, receipt)
+      refresh_creator_bundle_record!(creator, "execution-receipt.json")
+      path = File.join(creator, "openclaw-workflow-creator.json")
+      success = JSON.parse(File.read(path))
+      FileUtils.rm_f(path)
+      store = HiveLiveAgentProof::WorkflowCreatorEvidence.new(path: path)
+      store.initialize!(candidate_sha: SHA)
+
+      error = assert_raises(HiveLiveAgentProof::Error) do
+        store.replace_success!(
+          success,
+          manifest: manifest,
+          bundle_dir: creator,
+          candidate_sha: SHA,
+          exact_secrets: [ secret ]
+        )
+      end
+
+      assert_includes error.message, "secret-shaped material"
+      assert_equal "failed", JSON.parse(File.read(path)).fetch("result")
     end
   end
 
@@ -338,6 +579,86 @@ class LiveAgentProofTest < Minitest::Test
     FileUtils.rm_rf(evidence)
     FileUtils.mkdir_p(evidence)
     manifest = JSON.parse(File.read(File.join(artifacts, "artifact-manifest.json")))
+    created_files = HiveLiveAgentProof::WORKFLOW_CREATOR_FILES.map do |path|
+      { "path" => path, "sha256" => "c" * 64, "size" => 10 }
+    end
+    executed_instruction = created_files.find do |record|
+      record["path"] == HiveLiveAgentProof::WORKFLOW_CREATOR_EXECUTED_INSTRUCTION
+    end
+    gem_name, gem_record = manifest.fetch("files").find do |name, _record|
+      name.match?(/\Ahive-cli-[0-9].*\.gem\z/)
+    end
+    candidate_installation = {
+      "schema" => HiveLiveAgentProof::WorkflowCreatorBundle::INSTALLED_MANIFEST_SCHEMA,
+      "schema_version" => 1,
+      "installation" => "candidate",
+      "candidate_sha" => SHA,
+      "identity" => {
+        "kind" => "candidate_gem",
+        "name" => "hive-cli",
+        "version" => manifest.fetch("hive_version"),
+        "artifact_sha256" => gem_record.fetch("sha256"),
+        "artifact_size" => gem_record.fetch("size")
+      },
+      "inventory" => [
+        { "path" => "bin/hive", "sha256" => "d" * 64, "size" => 100 }
+      ]
+    }
+    openclaw_installation = {
+      "schema" => HiveLiveAgentProof::WorkflowCreatorBundle::INSTALLED_MANIFEST_SCHEMA,
+      "schema_version" => 1,
+      "installation" => "openclaw",
+      "candidate_sha" => SHA,
+      "identity" => {
+        "kind" => "openclaw_npm",
+        "name" => "openclaw",
+        "version" => "1.2.3",
+        "integrity" => "sha512-fixture",
+        "lock_sha256" => "e" * 64,
+        "package_count" => 12
+      },
+      "inventory" => [
+        { "path" => "bin/openclaw", "sha256" => "f" * 64, "size" => 200 }
+      ]
+    }
+    HiveLiveAgentProof.write_json(
+      File.join(evidence, "candidate-installed-manifest.json"),
+      candidate_installation
+    )
+    HiveLiveAgentProof.write_json(
+      File.join(evidence, "openclaw-installed-manifest.json"),
+      openclaw_installation
+    )
+    bundle = [
+      creator_bundle_record(
+        evidence, "candidate_installation", "candidate-installed-manifest.json"
+      ),
+      creator_bundle_record(
+        evidence, "openclaw_installation", "openclaw-installed-manifest.json"
+      )
+    ]
+    execution_receipt = {
+      "schema" => HiveLiveAgentProof::WorkflowCreatorBundle::EXECUTION_RECEIPT_SCHEMA,
+      "schema_version" => 1,
+      "candidate_sha" => SHA,
+      "result" => "passed",
+      "execution_kind" => "deterministic_fixture",
+      "model_loop" => "not_exercised",
+      "installed_manifests" => bundle,
+      "hive_commands" => HiveLiveAgentProof::WORKFLOW_CREATOR_COMMANDS,
+      "executed_instruction" => executed_instruction,
+      "external_actions" => [],
+      "containment" => { "status" => "passed" },
+      "teardown" => { "status" => "passed" },
+      "cleanup" => { "status" => "passed" }
+    }
+    HiveLiveAgentProof.write_json(
+      File.join(evidence, "execution-receipt.json"),
+      execution_receipt
+    )
+    bundle << creator_bundle_record(
+      evidence, "execution_receipt", "execution-receipt.json"
+    )
     row = {
       "schema" => "hive-live-workflow-creator-evidence",
       "schema_version" => 1,
@@ -356,9 +677,7 @@ class LiveAgentProofTest < Minitest::Test
         "invocation" => HiveLiveAgentProof::INVOCATIONS.fetch("openclaw")
       },
       "hive_commands" => HiveLiveAgentProof::WORKFLOW_CREATOR_COMMANDS,
-      "created_files" => HiveLiveAgentProof::WORKFLOW_CREATOR_FILES.map do |path|
-        { "path" => path, "sha256" => "c" * 64, "size" => 10 }
-      end,
+      "created_files" => created_files,
       "validation" => {
         "valid" => true,
         "stages" => %w[research draft approval],
@@ -381,11 +700,42 @@ class LiveAgentProofTest < Minitest::Test
         "current_stage" => "1-research"
       },
       "external_actions" => [],
-      "secret_scan" => { "status" => "passed" },
-      "cleanup" => { "status" => "passed" }
+      "secret_scan" => {
+        "status" => "passed",
+        "scanner" => HiveLiveAgentProof::WorkflowCreatorContract::SCANNER
+      },
+      "cleanup" => { "status" => "passed" },
+      "execution_kind" => "authenticated_openclaw",
+      "model_loop" => "executed",
+      "executed_instruction" => executed_instruction,
+      "evidence_bundle" => bundle,
+      "containment" => { "status" => "passed" },
+      "teardown" => { "status" => "passed" }
     }
     HiveLiveAgentProof.write_json(File.join(evidence, "openclaw-workflow-creator.json"), row)
     evidence
+  end
+
+  def creator_bundle_record(root, kind, name)
+    path = File.join(root, name)
+    {
+      "kind" => kind,
+      "path" => name,
+      "sha256" => Digest::SHA256.file(path).hexdigest,
+      "size" => File.size(path)
+    }
+  end
+
+  def refresh_creator_bundle_record!(root, name)
+    primary = File.join(root, "openclaw-workflow-creator.json")
+    row = JSON.parse(File.read(primary))
+    record = row.fetch("evidence_bundle").find do |candidate|
+      candidate.fetch("path") == name
+    end
+    path = File.join(root, name)
+    record["sha256"] = Digest::SHA256.file(path).hexdigest
+    record["size"] = File.size(path)
+    HiveLiveAgentProof.write_json(primary, row)
   end
 
   def attest(artifacts, evidence, creator_evidence, proof)

@@ -15,6 +15,12 @@ module HiveReleaseCandidate
   class Artifacts
     MANIFEST_SCHEMA = "hive-release-candidate-artifacts"
     KINDS = %w[gem source skills web].freeze
+    LIVE_AGENT_BUILDER_INPUTS = %w[
+      packaging/live_agent_skills/proof.rb
+      packaging/live_agent_skills/build.rb
+      packaging/live_agent_skills/workflow_creator_contract.rb
+      packaging/live_agent_skills/workflow_creator_evidence.rb
+    ].freeze
 
     attr_reader :repo_root, :candidate_sha, :candidate_dir
 
@@ -235,11 +241,8 @@ module HiveReleaseCandidate
     end
 
     def builder_revision(export)
-      paths = [
-        File.join(export, "packaging", "live_agent_skills", "proof.rb"),
-        File.join(export, "packaging", "live_agent_skills", "build.rb"),
-        File.expand_path("../managed_web_archive.rb", __dir__)
-      ]
+      paths = LIVE_AGENT_BUILDER_INPUTS.map { |path| File.join(export, path) }
+      paths << File.expand_path("../managed_web_archive.rb", __dir__)
       digest = Digest::SHA256.new
       paths.each do |path|
         raise Error, "candidate builder input is missing: #{path}" unless File.file?(path) && !File.symlink?(path)
@@ -252,10 +255,7 @@ module HiveReleaseCandidate
       source_name, = files.find { |_name, record| record["kind"] == "source" }
       raise Error, "candidate source artifact is missing" unless source_name
 
-      wanted = %w[
-        packaging/live_agent_skills/proof.rb
-        packaging/live_agent_skills/build.rb
-      ]
+      wanted = LIVE_AGENT_BUILDER_INPUTS
       contents = {}
       Zlib::GzipReader.open(File.join(directory, source_name)) do |gzip|
         Gem::Package::TarReader.new(gzip) do |tar|

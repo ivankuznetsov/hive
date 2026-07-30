@@ -29,18 +29,22 @@ class LiveHiveWorkflowCreatorSmokeTest < Minitest::Test
     evidence_path = ENV["HIVE_CREATOR_EVIDENCE_PATH"].to_s
     credential = ENV["OPENAI_API_KEY"].to_s
     binary = find_executable("openclaw")
-    availability!(HiveLiveAgentProof::SAFE_SHA.match?(candidate_sha),
-                  "HIVE_CANDIDATE_SHA must be a full commit SHA")
-    availability!(File.directory?(artifacts), "HIVE_PROOF_ARTIFACTS is missing")
     availability!(!evidence_path.empty?, "HIVE_CREATOR_EVIDENCE_PATH is missing")
-    availability!(!credential.empty?, "OPENAI_API_KEY is unavailable")
-    availability!(!binary.nil?, "openclaw binary is not on PATH")
 
-    root = Dir.mktmpdir("hive-live-workflow-creator")
-    FileUtils.chmod(0o700, root)
-    evidence = base_evidence(candidate_sha)
+    store = HiveLiveAgentProof::WorkflowCreatorEvidence.new(path: evidence_path)
+    store.initialize!(candidate_sha: candidate_sha)
+    root = nil
+    succeeded = false
     failure = nil
     begin
+      availability!(HiveLiveAgentProof::SAFE_SHA.match?(candidate_sha),
+                    "HIVE_CANDIDATE_SHA must be a full commit SHA")
+      availability!(File.directory?(artifacts), "HIVE_PROOF_ARTIFACTS is missing")
+      availability!(!credential.empty?, "OPENAI_API_KEY is unavailable")
+      availability!(!binary.nil?, "openclaw binary is not on PATH")
+
+      root = Dir.mktmpdir("hive-live-workflow-creator")
+      FileUtils.chmod(0o700, root)
       manifest = validate_candidate_artifacts!(artifacts, candidate_sha)
       skill_root = extract_openclaw_skill!(root, artifacts, manifest)
       workspace, environment, destination = prepare_openclaw_home(
@@ -52,7 +56,7 @@ class LiveHiveWorkflowCreatorSmokeTest < Minitest::Test
       install_controlled_hive(workspace, root, audit_path, validation_path, task_proof_path)
       environment["PATH"] = [ File.join(root, "bin"), environment.fetch("PATH") ].join(File::PATH_SEPARATOR)
 
-      discovery = discover_openclaw_skill(binary, environment, workspace, destination, credential)
+      discover_openclaw_skill(binary, environment, workspace, destination, credential)
       stdout, stderr, status = run_bounded(
         environment,
         [
@@ -89,7 +93,6 @@ class LiveHiveWorkflowCreatorSmokeTest < Minitest::Test
 
       commands = read_audited_commands(audit_path)
       assert_equal HiveLiveAgentProof::WORKFLOW_CREATOR_COMMANDS, commands
-      task_proof = JSON.parse(File.read(task_proof_path))
       assert_equal 1, task_count(workspace)
       findings = HiveLiveAgentProof.secret_findings("#{stdout}\n#{stderr}", exact_secrets: [ credential ])
       findings.concat(
@@ -98,47 +101,21 @@ class LiveHiveWorkflowCreatorSmokeTest < Minitest::Test
         )
       )
       assert_empty findings, "OpenClaw retained output contains credential material"
-
-      projection = JSON.parse(File.read(File.join(skill_root, ".hive-skill.json")))
-      evidence.merge!(
-        "result" => "passed",
-        "prompt_sha256" => Digest::SHA256.hexdigest(HiveLiveAgentProof::WORKFLOW_CREATOR_PROMPT),
-        "task_prompt_sha256" =>
-          Digest::SHA256.hexdigest(HiveLiveAgentProof::WORKFLOW_CREATOR_TASK_PROMPT),
-        "agent" => {
-          "binary" => "openclaw",
-          "native_output_sha256" => Digest::SHA256.hexdigest("#{stdout}\n#{task_stdout}"),
-          "native_stderr_sha256" => Digest::SHA256.hexdigest("#{stderr}\n#{task_stderr}"),
-          "discovery_sha256" => Digest::SHA256.hexdigest(JSON.generate(discovery))
-        },
-        "skill" => {
-          "skill_version" => projection.fetch("skill_version"),
-          "canonical_digest" => projection.fetch("canonical_digest"),
-          "projection_manifest_sha256" =>
-            Digest::SHA256.file(File.join(skill_root, ".hive-skill.json")).hexdigest
-        },
-        "native_activation" => {
-          "kind" => HiveLiveAgentProof::NATIVE_ACTIVATION_KINDS.fetch("openclaw"),
-          "invocation" => HiveLiveAgentProof::INVOCATIONS.fetch("openclaw")
-        },
-        "hive_commands" => commands,
-        "created_files" => created_files,
-        "validation" => normalized_validation(validation),
-        "creation_only_task_count" => 0,
-        "task_count" => 1,
-        "task" => task_proof,
-        "external_actions" => [],
-        "secret_scan" => { "status" => "passed", "scanner" => "hive-live-agent-proof/v1" }
-      )
+      succeeded = true
     rescue Minitest::Assertion, StandardError => e
       failure = e
-      evidence["result"] = "failed"
-      evidence["failure"] = redact(e.message.to_s, credential).byteslice(0, 1_000)
-      evidence["secret_scan"] ||= { "status" => "passed", "scanner" => "hive-live-agent-proof/v1" }
     ensure
-      FileUtils.rm_rf(root)
-      evidence["cleanup"] = { "status" => File.exist?(root) ? "failed" : "passed" }
-      write_evidence(evidence_path, evidence)
+      FileUtils.rm_rf(root) if root
+      terminal = HiveLiveAgentProof::WorkflowCreatorContract.failure(
+        candidate_sha: candidate_sha,
+        phase: "evidence",
+        reason: succeeded ? "u14_execution_custody_unavailable" : "proof_failed",
+        detail: failure&.message,
+        execution_kind: succeeded ? "authenticated_openclaw" : "unavailable",
+        model_loop: succeeded ? "executed" : "not_started",
+        exact_secrets: [ credential ]
+      )
+      store.replace_nonpassing!(terminal, exact_secrets: [ credential ])
     end
     raise failure if failure
   end
@@ -213,16 +190,6 @@ class LiveHiveWorkflowCreatorSmokeTest < Minitest::Test
     raise Minitest::Assertion, message if ENV["HIVE_RELEASE_GATE"] == "1"
 
     skip message
-  end
-
-  def base_evidence(candidate_sha)
-    {
-      "schema" => "hive-live-workflow-creator-evidence",
-      "schema_version" => 1,
-      "platform" => "openclaw",
-      "candidate_sha" => candidate_sha,
-      "result" => "failed"
-    }
   end
 
   def validate_candidate_artifacts!(root, candidate_sha)
@@ -545,16 +512,6 @@ class LiveHiveWorkflowCreatorSmokeTest < Minitest::Test
     File.readlines(path, chomp: true).map { |line| JSON.parse(line).fetch("argv") }
   end
 
-  def normalized_validation(payload)
-    {
-      "valid" => payload.fetch("valid"),
-      "stages" => payload.fetch("stages").map { |stage| stage.fetch("name") },
-      "automatic_edges" =>
-        payload.fetch("automatic_edges").map { |edge| edge.values_at("from", "to") },
-      "human_outcomes" => payload.fetch("human_outcomes")
-    }
-  end
-
   def created_file_records(workspace)
     HiveLiveAgentProof::WORKFLOW_CREATOR_FILES.map do |relative|
       path = File.join(workspace, relative)
@@ -595,25 +552,15 @@ class LiveHiveWorkflowCreatorSmokeTest < Minitest::Test
   end
 
   def redact(text, *secrets)
-    redacted = text.to_s.dup
-    secrets.flatten.compact.reject(&:empty?).each { |secret| redacted.gsub!(secret, "[REDACTED]") }
-    HiveLiveAgentProof::SECRET_PATTERNS.each { |pattern| redacted.gsub!(pattern, "[REDACTED]") }
-    redacted
+    HiveLiveAgentProof::WorkflowCreatorContract.sanitize(
+      text.to_s,
+      exact_secrets: secrets.flatten.compact
+    )
   end
 
   def secure_write(path, body)
     FileUtils.mkdir_p(File.dirname(path), mode: 0o700)
     File.open(path, File::WRONLY | File::CREAT | File::TRUNC, 0o600) { |file| file.write(body) }
-  end
-
-  def write_evidence(path, evidence)
-    return if path.to_s.empty?
-
-    findings = HiveLiveAgentProof.secret_findings(JSON.generate(evidence))
-    evidence["secret_scan"] = {
-      "status" => "failed", "scanner" => "hive-live-agent-proof/v1"
-    } unless findings.empty?
-    HiveLiveAgentProof.write_json(path, evidence)
   end
 
   def find_executable(name)

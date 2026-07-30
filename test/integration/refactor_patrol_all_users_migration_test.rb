@@ -306,16 +306,38 @@ class RefactorPatrolAllUsersMigrationTest < Minitest::Test
     path = File.join(root, "candidate", "hive")
     FileUtils.mkdir_p(File.dirname(path))
     ruby = RbConfig.ruby
-    lib = File.expand_path("../../lib", __dir__)
-    bin = File.expand_path("../../bin/hive", __dir__)
+    lib, bin, gem_home, gem_path =
+      if ENV[PROVISION_ENV] == "1"
+        copy_candidate_runtime(root)
+      else
+        [
+          File.expand_path("../../lib", __dir__),
+          File.expand_path("../../bin/hive", __dir__),
+          Gem.dir,
+          Gem.path.join(File::PATH_SEPARATOR)
+        ]
+      end
     File.write(path, <<~SH)
       #!/bin/sh
-      export GEM_HOME=#{Shellwords.escape(Gem.dir)}
-      export GEM_PATH=#{Shellwords.escape(Gem.path.join(File::PATH_SEPARATOR))}
+      export GEM_HOME=#{Shellwords.escape(gem_home)}
+      export GEM_PATH=#{Shellwords.escape(gem_path)}
       exec #{Shellwords.escape(ruby)} -I#{Shellwords.escape(lib)} #{Shellwords.escape(bin)} "$@"
     SH
     FileUtils.chmod(0o755, path)
     path
+  end
+
+  def copy_candidate_runtime(root)
+    runtime = File.join(root, "candidate-runtime")
+    lib = File.join(runtime, "lib")
+    bin = File.join(runtime, "bin", "hive")
+    gem_home = File.join(runtime, "gems")
+    FileUtils.mkdir_p([ runtime, File.dirname(bin) ])
+    FileUtils.cp_r(File.expand_path("../../lib", __dir__), lib)
+    FileUtils.cp(File.expand_path("../../bin/hive", __dir__), bin)
+    FileUtils.chmod(0o755, bin)
+    FileUtils.cp_r(Gem.dir, gem_home)
+    [ lib, bin, gem_home, gem_home ]
   end
 
   def prepare_profile(root, account, index)

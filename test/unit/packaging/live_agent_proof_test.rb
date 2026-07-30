@@ -229,6 +229,134 @@ class LiveAgentProofTest < Minitest::Test
     end
   end
 
+  def test_attestor_admits_primary_through_bounded_no_follow_reader
+    mutations = {
+      "symlink" => lambda do |root|
+        path = File.join(root, "openclaw-workflow-creator.json")
+        outside = File.join(File.dirname(root), "outside-primary.json")
+        FileUtils.mv(path, outside)
+        File.symlink(outside, path)
+      end,
+      "oversized" => lambda do |root|
+        File.binwrite(
+          File.join(root, "openclaw-workflow-creator.json"),
+          "x" * (HiveLiveAgentProof::WorkflowCreatorBundle::MAX_FILE_BYTES + 1)
+        )
+      end
+    }
+
+    with_tmp_dir do |dir|
+      artifacts = prepare_artifacts(dir)
+      evidence = prepare_evidence(dir, artifacts)
+      mutations.each do |name, mutate|
+        creator = prepare_creator_evidence(File.join(dir, name), artifacts)
+        mutate.call(creator)
+
+        error = assert_raises(HiveLiveAgentProof::Error, name) do
+          attest(
+            artifacts, evidence, creator,
+            File.join(dir, "proof-primary-#{name}")
+          )
+        end
+        assert_includes error.message, "unsafe or oversized"
+      end
+    end
+  end
+
+  def test_attestor_rejects_invalid_installed_inventory_boundaries
+    max_entries =
+      HiveLiveAgentProof::WorkflowCreatorBundle::MAX_INVENTORY_ENTRIES
+    max_file =
+      HiveLiveAgentProof::WorkflowCreatorBundle::MAX_INSTALLED_FILE_BYTES
+    mutations = {
+      "empty" => [],
+      "over-count" => Array.new(max_entries + 1) do |index|
+        inventory_record(format("files/%04d", index), size: 1)
+      end,
+      "oversized-file" => [
+        inventory_record("bin/hive", size: max_file + 1)
+      ],
+      "oversized-total" => Array.new(5) do |index|
+        inventory_record(format("files/%04d", index), size: max_file)
+      end,
+      "dot-path" => [ inventory_record(".", size: 1) ],
+      "nul-path" => [ inventory_record("bin/hi\0ve", size: 1) ]
+    }
+
+    with_tmp_dir do |dir|
+      artifacts = prepare_artifacts(dir)
+      evidence = prepare_evidence(dir, artifacts)
+      mutations.each do |name, inventory|
+        creator = prepare_creator_evidence(File.join(dir, name), artifacts)
+        installed_path =
+          File.join(creator, "candidate-installed-manifest.json")
+        installed = JSON.parse(File.read(installed_path))
+        installed["inventory"] = inventory
+        HiveLiveAgentProof.write_json(installed_path, installed)
+        refresh_creator_bundle_record!(
+          creator,
+          "candidate-installed-manifest.json"
+        )
+
+        assert_raises(HiveLiveAgentProof::Error, name) do
+          attest(
+            artifacts, evidence, creator,
+            File.join(dir, "proof-inventory-#{name}")
+          )
+        end
+      end
+    end
+  end
+
+  def test_attestor_normalizes_malformed_creator_values
+    with_tmp_dir do |dir|
+      artifacts = prepare_artifacts(dir)
+      evidence = prepare_evidence(dir, artifacts)
+      creator = prepare_creator_evidence(dir, artifacts)
+      primary = File.join(creator, "openclaw-workflow-creator.json")
+      row = JSON.parse(File.read(primary))
+      row["created_files"] = [
+        row.fetch("created_files").first,
+        "not-a-file-record"
+      ]
+      HiveLiveAgentProof.write_json(primary, row)
+
+      assert_raises(HiveLiveAgentProof::Error) do
+        attest(
+          artifacts, evidence, creator,
+          File.join(dir, "proof-malformed-creator")
+        )
+      end
+    end
+  end
+
+  def test_attestor_rejects_missing_extra_or_wrong_type_creator_fields
+    mutations = {
+      "missing" => ->(row) { row.delete("task") },
+      "extra" => ->(row) { row["unexpected"] = true },
+      "wrong-type" => ->(row) { row["task_count"] = "1" }
+    }
+
+    with_tmp_dir do |dir|
+      artifacts = prepare_artifacts(dir)
+      evidence = prepare_evidence(dir, artifacts)
+      mutations.each do |name, mutate|
+        creator = prepare_creator_evidence(File.join(dir, name), artifacts)
+        primary = File.join(creator, "openclaw-workflow-creator.json")
+        row = JSON.parse(File.read(primary))
+        mutate.call(row)
+        HiveLiveAgentProof.write_json(primary, row)
+
+        assert_raises(HiveLiveAgentProof::Error, name) do
+          attest(
+            artifacts, evidence, creator,
+            File.join(dir, "proof-fields-#{name}")
+          )
+        end
+      end
+    end
+  end
+
   def test_missing_failed_partial_or_unknown_execution_receipt_never_attests
     mutations = {
       "failed" => ->(receipt) { receipt["result"] = "failed" },
@@ -275,7 +403,7 @@ class LiveAgentProofTest < Minitest::Test
       error = assert_raises(HiveLiveAgentProof::Error) do
         attest(artifacts, evidence, creator, File.join(dir, "proof"))
       end
-      assert_includes error.message, "fields are invalid"
+      assert_includes error.message, "bundle inventory is invalid"
     end
   end
 
@@ -302,6 +430,34 @@ class LiveAgentProofTest < Minitest::Test
       assert_equal success, stored
       assert_equal success, JSON.parse(File.read(path))
       assert_equal 0o600, File.stat(path).mode & 0o777
+    end
+  end
+
+  def test_atomic_store_rejects_a_mismatched_bundle_root_before_publication
+    with_tmp_dir do |dir|
+      artifacts = prepare_artifacts(dir)
+      creator = prepare_creator_evidence(dir, artifacts)
+      manifest = JSON.parse(
+        File.read(File.join(artifacts, "artifact-manifest.json"))
+      )
+      canonical_path =
+        File.join(creator, "openclaw-workflow-creator.json")
+      success = JSON.parse(File.read(canonical_path))
+      other_path = File.join(dir, "other", "openclaw-workflow-creator.json")
+      store = HiveLiveAgentProof::WorkflowCreatorEvidence.new(path: other_path)
+      store.initialize!(candidate_sha: SHA)
+      previous = File.binread(other_path)
+
+      assert_raises(HiveLiveAgentProof::Error) do
+        store.replace_success!(
+          success,
+          manifest: manifest,
+          bundle_dir: creator,
+          candidate_sha: SHA
+        )
+      end
+
+      assert_equal previous, File.binread(other_path)
     end
   end
 
@@ -723,6 +879,14 @@ class LiveAgentProofTest < Minitest::Test
       "path" => name,
       "sha256" => Digest::SHA256.file(path).hexdigest,
       "size" => File.size(path)
+    }
+  end
+
+  def inventory_record(path, size:)
+    {
+      "path" => path,
+      "sha256" => "9" * 64,
+      "size" => size
     }
   end
 

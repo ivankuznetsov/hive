@@ -34,6 +34,7 @@ class LiveHiveWorkflowCreatorSmokeTest < Minitest::Test
     store = HiveLiveAgentProof::WorkflowCreatorEvidence.new(path: evidence_path)
     store.initialize!(candidate_sha: candidate_sha)
     root = nil
+    model_loop_executed = false
     succeeded = false
     failure = nil
     begin
@@ -69,6 +70,7 @@ class LiveHiveWorkflowCreatorSmokeTest < Minitest::Test
       assert status.success?,
              "OpenClaw workflow creator failed: #{redact(stderr, credential).lines.first(12).join}\n" \
              "#{redact(stdout, credential).lines.first(12).join}"
+      model_loop_executed = true
 
       assert_equal HiveLiveAgentProof::WORKFLOW_CREATOR_COMMANDS.first(5),
                    read_audited_commands(audit_path)
@@ -106,13 +108,11 @@ class LiveHiveWorkflowCreatorSmokeTest < Minitest::Test
       failure = e
     ensure
       FileUtils.rm_rf(root) if root
-      terminal = HiveLiveAgentProof::WorkflowCreatorContract.failure(
+      terminal = HiveLiveAgentProof::WorkflowCreatorContract.terminal_failure(
         candidate_sha: candidate_sha,
-        phase: "evidence",
-        reason: succeeded ? "u14_execution_custody_unavailable" : "proof_failed",
+        proof_succeeded: succeeded,
+        model_loop_executed: model_loop_executed,
         detail: failure&.message,
-        execution_kind: succeeded ? "authenticated_openclaw" : "unavailable",
-        model_loop: succeeded ? "executed" : "not_started",
         exact_secrets: [ credential ]
       )
       store.replace_nonpassing!(terminal, exact_secrets: [ credential ])

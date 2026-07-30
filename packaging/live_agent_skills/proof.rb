@@ -77,11 +77,15 @@ module HiveLiveAgentProof
 
   def safe_relative_path?(value)
     return false unless value.is_a?(String) && !value.empty?
+    return false if value.include?("\0")
 
     clean = Pathname.new(value).cleanpath
-    !clean.absolute? &&
+    clean.to_s != "." &&
+      !clean.absolute? &&
       !clean.each_filename.include?("..") &&
       clean.to_s == value
+  rescue ArgumentError
+    false
   end
 
   def relative_file!(root, relative)
@@ -343,11 +347,8 @@ module HiveLiveAgentProof
     def call
       manifest = validate_artifacts!
       evidence = validate_evidence!(manifest)
-      creator_evidence = HiveLiveAgentProof.read_json(
-        File.join(
-          @creator_evidence_dir,
-          WorkflowCreatorBundle::PRIMARY_NAME
-        )
+      creator_evidence = WorkflowCreatorBundle.load_primary!(
+        @creator_evidence_dir
       )
       creator_bundle = WorkflowCreatorContract.validate_success!(
         row: creator_evidence,

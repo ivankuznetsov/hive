@@ -19,7 +19,10 @@ tags: [gap, todo, release-proof, agent-skills]
   execution/containment/teardown receipt, and U15 must still run the
   authenticated exact-head OpenClaw model loop without a transition reader.
   Keep missing/partial/unknown custody non-passing; fixture bundles prove the
-  contract, not the live installation or provider boundary.
+  contract, not the live installation or provider boundary. U15 must also
+  retain proof that the producer used the exact selected credential for its
+  pre-serialization secret scan; Attestor and Verifier intentionally cannot
+  repeat an opaque exact-secret comparison after that credential is absent.
 
 - Patrol capture/effect boundaries are source- and focused-test-pinned, but
   they are not yet compressed-campaign or live-cutover evidence. The permanent

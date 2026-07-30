@@ -96,6 +96,30 @@ class WorkflowCreatorEvidenceTest < Minitest::Test
     end
   end
 
+  def test_directory_fsync_failure_leaves_a_complete_retryable_receipt
+    with_tmp_dir do |dir|
+      path = File.join(dir, "openclaw-workflow-creator.json")
+      HiveLiveAgentProof::WorkflowCreatorEvidence.new(path: path)
+                                                   .initialize!(candidate_sha: SHA)
+      replacement = failed_document("proof_failed")
+      store = HiveLiveAgentProof::WorkflowCreatorEvidence.new(
+        path: path,
+        directory_sync: ->(*) { raise IOError, "directory fsync failed" }
+      )
+
+      assert_raises(IOError) do
+        store.replace_nonpassing!(replacement)
+      end
+
+      assert_equal replacement, JSON.parse(File.read(path))
+      assert_empty Dir.glob(File.join(dir, ".*.tmp"))
+      recovered = failed_document("retry_completed")
+      HiveLiveAgentProof::WorkflowCreatorEvidence.new(path: path)
+                                                   .replace_nonpassing!(recovered)
+      assert_equal recovered, JSON.parse(File.read(path))
+    end
+  end
+
   def test_initializer_cannot_clobber_a_receipt_won_by_a_concurrent_writer
     with_tmp_dir do |dir|
       path = File.join(dir, "openclaw-workflow-creator.json")
@@ -136,6 +160,61 @@ class WorkflowCreatorEvidenceTest < Minitest::Test
     refute_includes serialized, secret
     assert_includes serialized, "[REDACTED]"
     assert_operator document.fetch("detail").bytesize, :<=, 1_000
+  end
+
+  def test_failure_document_redacts_exact_secret_before_detail_is_bounded
+    secret = "opaque-provider-credential"
+    document = HiveLiveAgentProof::WorkflowCreatorContract.failure(
+      candidate_sha: SHA,
+      phase: "proof",
+      reason: "proof_failed",
+      detail: ("x" * 995) + secret,
+      exact_secrets: [ secret ]
+    )
+
+    refute_includes document.fetch("detail"), secret
+    refute_includes document.fetch("detail"), secret.byteslice(0, 5)
+    assert_operator document.fetch("detail").bytesize, :<=, 1_000
+  end
+
+  def test_terminal_failure_preserves_model_loop_progress_without_passing
+    preflight = HiveLiveAgentProof::WorkflowCreatorContract.terminal_failure(
+      candidate_sha: SHA,
+      proof_succeeded: false,
+      model_loop_executed: false
+    )
+    post_start = HiveLiveAgentProof::WorkflowCreatorContract.terminal_failure(
+      candidate_sha: SHA,
+      proof_succeeded: false,
+      model_loop_executed: true
+    )
+    custody_gap = HiveLiveAgentProof::WorkflowCreatorContract.terminal_failure(
+      candidate_sha: SHA,
+      proof_succeeded: true,
+      model_loop_executed: true
+    )
+
+    assert_equal(
+      [ "failed", "preflight", "proof_failed", "unavailable", "not_started" ],
+      preflight.values_at(
+        "result", "phase", "reason", "execution_kind", "model_loop"
+      )
+    )
+    assert_equal(
+      [ "failed", "proof", "proof_failed", "authenticated_openclaw", "executed" ],
+      post_start.values_at(
+        "result", "phase", "reason", "execution_kind", "model_loop"
+      )
+    )
+    assert_equal(
+      [
+        "failed", "evidence", "u14_execution_custody_unavailable",
+        "authenticated_openclaw", "executed"
+      ],
+      custody_gap.values_at(
+        "result", "phase", "reason", "execution_kind", "model_loop"
+      )
+    )
   end
 
   def test_nonpassing_contract_rejects_contradictory_classification

@@ -39,6 +39,13 @@ module HiveLiveAgentProof
         document,
         exact_secrets: exact_secrets
       )
+      expected_path = File.join(
+        File.expand_path(bundle_dir),
+        WorkflowCreatorBundle::PRIMARY_NAME
+      )
+      unless @path == expected_path
+        raise Error, "workflow-creator evidence path does not match bundle root"
+      end
       WorkflowCreatorContract.validate_success_supporting!(
         row: sanitized,
         manifest: manifest,
@@ -47,13 +54,6 @@ module HiveLiveAgentProof
         exact_secrets: exact_secrets
       )
       atomic_write(WorkflowCreatorContract.canonical_json(sanitized))
-      WorkflowCreatorContract.validate_success!(
-        row: sanitized,
-        manifest: manifest,
-        candidate_sha: candidate_sha,
-        bundle_dir: bundle_dir,
-        exact_secrets: exact_secrets
-      )
       sanitized
     end
 

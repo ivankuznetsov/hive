@@ -74,9 +74,46 @@ module HiveLiveAgentProof
         )
       end
 
+      def terminal_failure(candidate_sha:, proof_succeeded:,
+                           model_loop_executed:, detail: nil,
+                           exact_secrets: [])
+        unless [ true, false ].include?(proof_succeeded) &&
+               [ true, false ].include?(model_loop_executed) &&
+               (!proof_succeeded || model_loop_executed)
+          fail_contract!("workflow-creator terminal state is invalid")
+        end
+
+        phase, reason =
+          if proof_succeeded
+            [ "evidence", "u14_execution_custody_unavailable" ]
+          elsif model_loop_executed
+            [ "proof", "proof_failed" ]
+          else
+            [ "preflight", "proof_failed" ]
+          end
+        execution_kind, model_loop =
+          model_loop_executed ? LIVE_CLASSIFICATION : CLASSIFICATIONS.first
+        failure(
+          candidate_sha: candidate_sha,
+          phase: phase,
+          reason: reason,
+          detail: detail,
+          execution_kind: execution_kind,
+          model_loop: model_loop,
+          exact_secrets: exact_secrets
+        )
+      end
+
       def failure(candidate_sha:, phase:, reason:, detail: nil,
                   execution_kind: "unavailable", model_loop: "not_started",
                   exact_secrets: [])
+        bounded_detail =
+          unless detail.nil?
+            sanitize(
+              detail.to_s.scrub,
+              exact_secrets: exact_secrets
+            ).byteslice(0, DETAIL_LIMIT).to_s.scrub
+          end
         document = {
           "schema" => EVIDENCE_SCHEMA,
           "schema_version" => SCHEMA_VERSION,
@@ -85,7 +122,7 @@ module HiveLiveAgentProof
           "result" => "failed",
           "phase" => phase.to_s,
           "reason" => reason.to_s,
-          "detail" => detail.nil? ? nil : detail.to_s.byteslice(0, DETAIL_LIMIT).to_s.scrub,
+          "detail" => bounded_detail,
           "execution_kind" => execution_kind.to_s,
           "model_loop" => model_loop.to_s,
           "secret_scan" => {
@@ -134,7 +171,7 @@ module HiveLiveAgentProof
           candidate_sha: candidate_sha,
           exact_secrets: exact_secrets
         )
-      rescue KeyError, TypeError, NoMethodError => e
+      rescue KeyError, TypeError, NoMethodError, ArgumentError => e
         raise Error, "workflow-creator contract is invalid: #{e.message}"
       end
 
@@ -152,7 +189,7 @@ module HiveLiveAgentProof
           candidate_sha: candidate_sha,
           exact_secrets: exact_secrets
         )
-      rescue KeyError, TypeError, NoMethodError => e
+      rescue KeyError, TypeError, NoMethodError, ArgumentError => e
         raise Error, "workflow-creator contract is invalid: #{e.message}"
       end
 
@@ -388,6 +425,18 @@ module HiveLiveAgentProof
     end
 
     class << self
+      def load_primary!(directory)
+        root = File.expand_path(directory)
+        validate_root!(root)
+        validate_bundle_inventory!(root)
+        parse_canonical!(
+          read_regular!(root, PRIMARY_NAME),
+          PRIMARY_NAME
+        )
+      rescue SystemCallError, JSON::ParserError => e
+        raise Error, "cannot validate workflow-creator evidence bundle: #{e.message}"
+      end
+
       def validate!(directory:, row:, manifest:, candidate_sha:,
                     exact_secrets: [])
         snapshot = validate_supporting!(

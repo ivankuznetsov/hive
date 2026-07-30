@@ -634,6 +634,8 @@ Canonicalization errors, including invalid UTF-8 accepted by the JSON parser
 but rejected by the generator, normalize to the proof error surface for both
 Attestor and Verifier. The four-file retained bundle also has an independently
 tested aggregate byte cap in addition to its per-file bounds.
+Malformed JSON diagnostics never interpolate producer bytes, and focused
+primary admission covers hard links as well as symlinks and oversized files.
 The execution receipt must agree with the creator row's command, effect, instruction,
 containment, teardown, and cleanup claims. Attestation copies those exact
 bytes, and verification replays the same contract after runner-local install

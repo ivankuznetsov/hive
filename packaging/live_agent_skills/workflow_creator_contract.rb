@@ -436,7 +436,7 @@ module HiveLiveAgentProof
           read_regular!(root, PRIMARY_NAME),
           PRIMARY_NAME
         )
-      rescue SystemCallError, JSON::ParserError => e
+      rescue SystemCallError => e
         raise Error, "cannot validate workflow-creator evidence bundle: #{e.message}"
       end
 
@@ -520,7 +520,7 @@ module HiveLiveAgentProof
           end
         end
         Snapshot.new(bytes: bytes_by_name)
-      rescue SystemCallError, JSON::ParserError => e
+      rescue SystemCallError => e
         raise Error, "cannot validate workflow-creator evidence bundle: #{e.message}"
       end
 
@@ -584,6 +584,8 @@ module HiveLiveAgentProof
           raise Error, "workflow-creator evidence bundle entry is not canonical JSON: #{name}"
         end
         document
+      rescue JSON::ParserError
+        raise Error, "workflow-creator evidence bundle entry is invalid JSON: #{name}"
       end
 
       def validate_installation!(document, kind:, candidate_sha:, artifact_manifest:)

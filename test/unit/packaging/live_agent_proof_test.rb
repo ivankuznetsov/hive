@@ -237,6 +237,11 @@ class LiveAgentProofTest < Minitest::Test
         FileUtils.mv(path, outside)
         File.symlink(outside, path)
       end,
+      "hard-link" => lambda do |root|
+        path = File.join(root, "openclaw-workflow-creator.json")
+        outside = File.join(File.dirname(root), "outside-primary-hard-link.json")
+        File.link(path, outside)
+      end,
       "oversized" => lambda do |root|
         File.binwrite(
           File.join(root, "openclaw-workflow-creator.json"),
@@ -388,6 +393,85 @@ class LiveAgentProofTest < Minitest::Test
 
       assert_includes primary_error.message, "cannot be canonicalized"
       assert_includes sidecar_error.message, "cannot be canonicalized"
+    end
+  end
+
+  def test_attestor_and_verifier_do_not_echo_malformed_json_bytes
+    secret = "opaque-secret-ABCDEF"
+    malformed = "{#{secret}}\n"
+
+    with_tmp_dir do |dir|
+      artifacts = prepare_artifacts(dir)
+      evidence = prepare_evidence(dir, artifacts)
+      creator = prepare_creator_evidence(File.join(dir, "primary"), artifacts)
+      File.binwrite(
+        File.join(creator, "openclaw-workflow-creator.json"),
+        malformed
+      )
+      primary_error = assert_raises(HiveLiveAgentProof::Error) do
+        attest(
+          artifacts, evidence, creator,
+          File.join(dir, "proof-malformed-primary")
+        )
+      end
+
+      creator = prepare_creator_evidence(File.join(dir, "sidecar"), artifacts)
+      File.binwrite(
+        File.join(creator, "candidate-installed-manifest.json"),
+        malformed
+      )
+      refresh_creator_bundle_record!(
+        creator,
+        "candidate-installed-manifest.json"
+      )
+      sidecar_error = assert_raises(HiveLiveAgentProof::Error) do
+        attest(
+          artifacts, evidence, creator,
+          File.join(dir, "proof-malformed-sidecar")
+        )
+      end
+
+      creator = prepare_creator_evidence(File.join(dir, "verifier"), artifacts)
+      proof = File.join(dir, "proof")
+      attest(artifacts, evidence, creator, proof)
+      retained = File.join(proof, "evidence", "workflow-creator")
+      File.binwrite(
+        File.join(retained, "candidate-installed-manifest.json"),
+        malformed
+      )
+      refresh_creator_bundle_record!(
+        retained,
+        "candidate-installed-manifest.json"
+      )
+      retained_primary =
+        File.join(retained, "openclaw-workflow-creator.json")
+      attestation_path = File.join(proof, "attestation.json")
+      attestation = JSON.parse(File.read(attestation_path))
+      attestation["workflow_creator"] =
+        JSON.parse(File.read(retained_primary))
+      HiveLiveAgentProof.write_json(attestation_path, attestation)
+      verifier_error = assert_raises(HiveLiveAgentProof::Error) do
+        verifier(
+          proof,
+          HiveLiveAgentProof.sha256(attestation_path)
+        ).call
+      end
+
+      errors = {
+        primary_error =>
+          "workflow-creator evidence bundle entry is invalid JSON: " \
+          "openclaw-workflow-creator.json",
+        sidecar_error =>
+          "workflow-creator evidence bundle entry is invalid JSON: " \
+          "candidate-installed-manifest.json",
+        verifier_error =>
+          "workflow-creator evidence bundle entry is invalid JSON: " \
+          "candidate-installed-manifest.json"
+      }
+      errors.each do |error, expected|
+        assert_equal expected, error.message
+        refute_includes error.message, secret
+      end
     end
   end
 

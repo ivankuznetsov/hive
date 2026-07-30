@@ -99,6 +99,39 @@ class LiveAgentProofTest < Minitest::Test
         repository: REPOSITORY, run_id: "42", run_attempt: "1", attestation_sha256: result.fetch("sha256")
       ).call
 
+      attestation = result.fetch("attestation")
+      assert_equal(
+        [ "hive-live-agent-skills-attestation", 1, SHA ],
+        attestation.values_at("schema", "schema_version", "candidate_sha")
+      )
+      assert_equal(
+        {
+          "path" => ".github/workflows/live-agent-skills.yml",
+          "revision" => WORKFLOW_SHA,
+          "event" => "workflow_dispatch",
+          "repository" => REPOSITORY,
+          "run_id" => 42,
+          "run_attempt" => 1
+        },
+        attestation.fetch("workflow")
+      )
+      creator = attestation.fetch("workflow_creator")
+      assert_equal(
+        [ "hive-live-workflow-creator-evidence", 1, "openclaw", SHA, "passed" ],
+        creator.values_at("schema", "schema_version", "platform", "candidate_sha", "result")
+      )
+      assert_equal HiveLiveAgentProof::WORKFLOW_CREATOR_COMMANDS, creator.fetch("hive_commands")
+      assert_equal HiveLiveAgentProof::WORKFLOW_CREATOR_FILES,
+                   creator.fetch("created_files").map { |record| record.fetch("path") }.sort
+      assert_equal(
+        [ 0, 1, false, 1 ],
+        [
+          creator.fetch("creation_only_task_count"),
+          creator.fetch("task_count"),
+          creator.dig("task", "retry_created"),
+          creator.dig("task", "run_count")
+        ]
+      )
       assert_match(/hive-cli-1\.2\.3\.gem\z/, verified.fetch("gem"))
       assert_match(/hive-agent-skills-#{SHA}\.tar\.gz\z/, verified.fetch("skills"))
     end
@@ -171,6 +204,33 @@ class LiveAgentProofTest < Minitest::Test
         attest(artifacts, evidence, creator_evidence, File.join(dir, "proof-publish"))
       end
       assert_includes error.message, "normalized graph"
+    end
+  end
+
+  def test_attestor_rejects_missing_reordered_duplicate_or_extra_creator_commands
+    with_tmp_dir do |dir|
+      artifacts = prepare_artifacts(dir)
+      evidence = prepare_evidence(dir, artifacts)
+      expected = HiveLiveAgentProof::WORKFLOW_CREATOR_COMMANDS.map(&:dup)
+      command_variants = {
+        "missing" => expected.first(expected.length - 1),
+        "reordered" => expected.map(&:dup).tap { |commands| commands[0], commands[1] = commands[1], commands[0] },
+        "duplicate" => expected.map(&:dup).insert(1, expected.first.dup),
+        "extra" => expected.map(&:dup).push([ "doctor", "--json" ])
+      }
+
+      command_variants.each do |name, commands|
+        creator_evidence = prepare_creator_evidence(File.join(dir, name), artifacts)
+        row_path = File.join(creator_evidence, "openclaw-workflow-creator.json")
+        row = JSON.parse(File.read(row_path))
+        row["hive_commands"] = commands
+        HiveLiveAgentProof.write_json(row_path, row)
+
+        error = assert_raises(HiveLiveAgentProof::Error) do
+          attest(artifacts, evidence, creator_evidence, File.join(dir, "proof-#{name}"))
+        end
+        assert_equal "workflow-creator prompt or command sequence is invalid", error.message
+      end
     end
   end
 

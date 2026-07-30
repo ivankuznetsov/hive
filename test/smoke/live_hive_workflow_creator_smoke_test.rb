@@ -182,6 +182,30 @@ class LiveHiveWorkflowCreatorSmokeTest < Minitest::Test
     end
   end
 
+  def test_controlled_hive_rejects_out_of_order_commands_before_audit
+    with_tmp_dir do |root|
+      workspace = File.join(root, "workspace")
+      FileUtils.mkdir_p(workspace)
+      audit_path = File.join(root, "audit.jsonl")
+      binary = install_controlled_hive(
+        workspace, root, audit_path,
+        File.join(root, "validation.json"), File.join(root, "task-proof.json")
+      )
+
+      stdout, stderr, status = Open3.capture3(
+        binary, "workflow", "list", "--json", chdir: workspace
+      )
+
+      assert_equal 64, status.exitstatus
+      assert_empty stdout
+      assert_equal(
+        "workflow-creator proof expected [\"version\"], got [\"workflow\", \"list\", \"--json\"]\n",
+        stderr
+      )
+      assert_empty read_audited_commands(audit_path)
+    end
+  end
+
   private
 
   def availability!(condition, message)

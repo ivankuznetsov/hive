@@ -813,15 +813,6 @@ module Hive
       file&.close
     end
 
-    def entry_identity_at(parent, name)
-      file = @native.open_file(parent, name, File::RDONLY)
-      identity(file.stat)
-    rescue Errno::ENOENT
-      nil
-    ensure
-      file&.close
-    end
-
     def regular_snapshot(stat)
       [
         stat.dev, stat.ino, stat.mode, stat.size, stat.mtime, stat.ctime,

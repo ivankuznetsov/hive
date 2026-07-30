@@ -240,6 +240,14 @@ class ManagedDirectoryTest < Minitest::Test
 
       tombstone = File.join(root, ".v2-cutover")
       File.binwrite(tombstone, "tombstone")
+      FileUtils.rm_rf(File.join(root, "v2"))
+      assert_raises(Hive::ConfigError) do
+        directory.exchange_directory_with_regular!(
+          directory_name: "v2", regular_name: ".v2-cutover"
+        )
+      end
+
+      FileUtils.mkdir_p(File.join(root, "v2"))
       native = directory.instance_variable_get(:@native)
       with_replaced_singleton_method(
         native,

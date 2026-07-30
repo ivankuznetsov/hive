@@ -15,13 +15,16 @@ class RefactorPatrolAllUsersMigrationTest < Minitest::Test
   NAMESPACE_ENV = "HIVE_ALL_USERS_NAMESPACE_CHILD".freeze
   HOME_ROOT_ENV = "HIVE_ALL_USERS_HOME_ROOT".freeze
   REQUIRED_ENV = "HIVE_REQUIRE_TEST_RUNS".freeze
+  PROVISION_ENV = "HIVE_ALL_USERS_PROVISION_ACCOUNTS".freeze
 
   def test_one_candidate_migrates_three_inactive_uid_profiles
     return run_in_user_namespace unless ENV[NAMESPACE_ENV] == "1" ||
                                         Process.euid.zero?
 
     profiles = []
-    accounts = eligible_accounts
+    provisioned_accounts =
+      ENV[PROVISION_ENV] == "1" ? provision_test_accounts : []
+    accounts = eligible_accounts(provisioned_accounts)
     assert_operator accounts.length, :>=, 3
     accounts = accounts.first(3)
 
@@ -77,6 +80,7 @@ class RefactorPatrolAllUsersMigrationTest < Minitest::Test
       profiles.each do |profile|
         FileUtils.rm_rf(profile[:home]) if profile[:home]
       end
+      cleanup_provisioned_accounts
     end
   end
 
@@ -215,7 +219,9 @@ class RefactorPatrolAllUsersMigrationTest < Minitest::Test
     raise
   end
 
-  def eligible_accounts
+  def eligible_accounts(provisioned_accounts = [])
+    return provisioned_accounts unless provisioned_accounts.empty?
+
     root_members = Etc.getgrgid(0).mem
     entries = []
     Etc.passwd { |entry| entries << entry }
@@ -226,6 +232,74 @@ class RefactorPatrolAllUsersMigrationTest < Minitest::Test
         entry.gid <= 65_535 &&
         !root_members.include?(entry.name)
     end.sort_by(&:uid)
+  end
+
+  def provision_test_accounts
+    raise "account provisioning requires root" unless Process.euid.zero?
+
+    @provisioned_home_root = Dir.mktmpdir("hive-all-users-root")
+    FileUtils.chmod(0o755, @provisioned_home_root)
+    ENV[HOME_ROOT_ENV] = @provisioned_home_root
+    used_uids = []
+    Etc.passwd { |entry| used_uids << entry.uid }
+    used_gids = []
+    Etc.group { |entry| used_gids << entry.gid }
+    ids = (40_000..49_999).reject do |id|
+      used_uids.include?(id) || used_gids.include?(id)
+    end.first(3)
+    raise "three unused uid/gid pairs are required" unless ids.length == 3
+
+    @provisioned_account_records = []
+    ids.each_with_index do |id, index|
+      name = "hiveci#{Process.pid}#{index}"
+      home = File.join(@provisioned_home_root, name)
+      record = { name: name, home: home, group: false, user: false }
+      @provisioned_account_records << record
+      run_account_command!("groupadd", "--gid", id.to_s, name)
+      record[:group] = true
+      run_account_command!(
+        "useradd",
+        "--uid", id.to_s,
+        "--gid", id.to_s,
+        "--home-dir", home,
+        "--no-create-home",
+        "--shell", "/usr/sbin/nologin",
+        name
+      )
+      record[:user] = true
+    end
+    @provisioned_account_records.map do |record|
+      Etc.getpwnam(record.fetch(:name))
+    end
+  rescue StandardError
+    cleanup_provisioned_accounts
+    raise
+  end
+
+  def cleanup_provisioned_accounts
+    Array(@provisioned_account_records).reverse_each do |record|
+      run_account_command("userdel", record.fetch(:name)) if record[:user]
+      run_account_command("groupdel", record.fetch(:name)) if record[:group]
+    end
+    FileUtils.rm_rf(@provisioned_home_root) if @provisioned_home_root
+    @provisioned_account_records = []
+    @provisioned_home_root = nil
+  end
+
+  def run_account_command!(name, *arguments)
+    output, error, status = run_account_command(name, *arguments)
+    return if status.success?
+
+    raise "#{name} failed: #{error.empty? ? output : error}"
+  end
+
+  def run_account_command(name, *arguments)
+    executable = ENV.fetch("PATH", "").split(File::PATH_SEPARATOR)
+      .map { |directory| File.join(directory, name) }
+      .find { |candidate| File.executable?(candidate) }
+    raise "#{name} is unavailable" unless executable
+
+    Open3.capture3(executable, *arguments)
   end
 
   def write_candidate(root)

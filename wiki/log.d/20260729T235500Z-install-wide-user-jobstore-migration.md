@@ -22,5 +22,9 @@ area: refactor-patrol, migration, packaging, testing
 - Persisted exact `HIVE_HOME`/XDG roots in newly rendered user daemon units and
   suppressed unrelated LLM-wiki startup repair during the migration command.
 - Added a permanent Linux merge gate that converts released-v2 projects under
-  three distinct kernel UIDs using default, `HIVE_HOME`, and split-XDG profiles
-  and proves the dropped identities own all resulting state.
+  three temporary NSS/kernel identities on the isolated CI VM (or subordinate
+  user-namespace UIDs locally), using default, `HIVE_HOME`, and split-XDG
+  profiles, and proves the dropped identities own all resulting state.
+- Detached candidate-daemon restarts now receive null stdio, preventing a live
+  restarted daemon from retaining an all-user capture pipe and causing a false
+  migration timeout after the receipt was already persisted.

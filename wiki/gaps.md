@@ -20,8 +20,9 @@ tags: [gap, todo, release-proof, agent-skills]
   is not a substitute for that protocol.
 
 - The installation-wide JobStore v2-to-v3 startup sweep is source-, focused-,
-  and real-UID-gate pinned. The Linux merge gate gives one candidate three
-  inactive NSS identities with default, `HIVE_HOME`, and split-XDG profiles,
+  and real-UID-gate pinned. The Linux merge gate creates three temporary NSS
+  accounts on its isolated hosted VM (and uses a subordinate-id user namespace
+  locally), then gives one candidate default, `HIVE_HOME`, and split-XDG profiles,
   converts one released-v2 project per uid, and proves both v3 data and
   per-profile receipts are owned by the dropped identity. Focused coverage
   additionally includes 120 released-format jobs with many attempts,

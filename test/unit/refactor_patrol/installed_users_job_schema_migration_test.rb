@@ -1347,6 +1347,57 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
     end
   end
 
+  def test_executor_capture_finishes_while_restarted_user_daemon_stays_live
+    with_tmp_dir do |root|
+      home = File.join(root, "home")
+      FileUtils.mkdir_p(home)
+      candidate = profile(
+        "alice", Process.uid, home, gid: Process.gid
+      )
+      payload = installation_payload("alice", profile: candidate)
+      daemon_pid_path = File.join(root, "restarted-daemon.pid")
+      library_path = File.expand_path("../../../lib", __dir__)
+      daemon_program = <<~RUBY
+        Process.daemon(true, true)
+        File.write(ARGV.fetch(0), Process.pid)
+        sleep 30
+      RUBY
+      body = <<~RUBY
+        $LOAD_PATH.unshift(#{library_path.dump})
+        require "hive"
+        require "hive/refactor_patrol/installed_job_schema_migration"
+        lifecycle =
+          Hive::RefactorPatrol::InstalledJobSchemaMigration::DaemonLifecycle.new(
+            status_report: Object.new
+          )
+        lifecycle.send(
+          :run_command,
+          [#{RbConfig.ruby.dump}, "-e", #{daemon_program.dump}, #{daemon_pid_path.dump}],
+          {}
+        )
+        STDOUT.write(#{JSON.generate(payload).dump})
+      RUBY
+      binary = write_executable(root, "hive-restarts-daemon", body)
+      executor = Migration::Executor.new(
+        binary: binary,
+        effective_uid: -> { 0 },
+        identity_drop: IDENTITY_OK,
+        identity_validator: IDENTITY_OK,
+        timeout_sec: 3
+      )
+
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      assert_equal payload, executor.call(candidate)
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+      assert_operator elapsed, :<, 2
+      wait_for_path(daemon_pid_path)
+      daemon_pid = Integer(File.binread(daemon_pid_path))
+      assert_equal 1, Process.kill(0, daemon_pid)
+    ensure
+      terminate_pid_from(daemon_pid_path)
+    end
+  end
+
   def test_executor_kills_timed_out_or_oversized_child
     with_tmp_dir do |root|
       home = File.join(root, "home")
@@ -1610,6 +1661,23 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
     io = Object.new
     io.define_singleton_method(:close) { calls << [ :close, name ] }
     io
+  end
+
+  def wait_for_path(path, timeout: 1)
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+    until File.file?(path)
+      raise "timed out waiting for #{path}" if
+        Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+
+      sleep 0.01
+    end
+  end
+
+  def terminate_pid_from(path)
+    wait_for_path(path, timeout: 0.5)
+    Process.kill("KILL", Integer(File.binread(path)))
+  rescue Errno::ENOENT, Errno::ESRCH, ArgumentError, RuntimeError
+    nil
   end
 
   def without_file_nofollow

@@ -158,6 +158,11 @@ identity, and status-store failures remain structural command failures. The
 command is deliberately not a replacement for user-directed `hive migrate`,
 which updates tracked project state.
 
+When a profile migration quiesces and restarts an existing daemon, the restart
+command receives `/dev/null` for stdin/stdout/stderr. A detached daemon
+therefore cannot retain the privileged coordinator's bounded capture pipes and
+turn an already successful migration into a false 900-second timeout.
+
 ## Architecture Patrol JobStore cutover and emergency restore
 
 The released aggregate-only JobStore v2 shape is converted directly to v3. No

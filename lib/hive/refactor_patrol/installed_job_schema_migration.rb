@@ -483,7 +483,15 @@ module Hive
         end
 
         def run_command(argv, environment)
-          _pid, status = Process.wait2(Process.spawn(environment, *argv))
+          pid = Process.spawn(
+            environment,
+            *argv,
+            in: File::NULL,
+            out: File::NULL,
+            err: File::NULL,
+            close_others: true
+          )
+          _pid, status = Process.wait2(pid)
           status
         end
 

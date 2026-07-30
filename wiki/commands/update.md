@@ -70,7 +70,9 @@ First use is only a fallback. A
 failed/retryable project row is an observed completed sweep, not a process
 crash. If the candidate command fails structurally, a daemon that was running
 before the update is still restarted in `ensure`, then the candidate failure
-is returned.
+is returned. Candidate-owned daemon restarts detach from migration capture
+stdio, so a live restarted daemon cannot keep an updater or all-user
+coordinator waiting for pipe EOF.
 
 Hive starts a daemon only when it had stopped one, using the stable invoked
 wrapper so the new process loads the post-update package generation. If package

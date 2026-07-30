@@ -195,6 +195,9 @@ module HiveLiveAgentProof
 
       def canonical_json(document)
         "#{JSON.pretty_generate(document)}\n"
+      rescue JSON::GeneratorError => e
+        raise Error,
+              "workflow-creator document cannot be canonicalized: #{e.message}"
       end
 
       def sanitize(value, exact_secrets: [])

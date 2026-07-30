@@ -308,6 +308,123 @@ class LiveAgentProofTest < Minitest::Test
     end
   end
 
+  def test_attestor_rejects_aggregate_retained_bundle_over_limit
+    with_tmp_dir do |dir|
+      artifacts = prepare_artifacts(dir)
+      evidence = prepare_evidence(dir, artifacts)
+      creator = prepare_creator_evidence(dir, artifacts)
+      %w[
+        candidate-installed-manifest.json
+        openclaw-installed-manifest.json
+      ].each do |name|
+        path = File.join(creator, name)
+        installed = JSON.parse(File.read(path))
+        installed["inventory"] = large_inventory
+        HiveLiveAgentProof.write_json(path, installed)
+        refresh_creator_bundle_record!(creator, name)
+      end
+      primary = File.join(creator, "openclaw-workflow-creator.json")
+      row = JSON.parse(File.read(primary))
+      receipt_path = File.join(creator, "execution-receipt.json")
+      receipt = JSON.parse(File.read(receipt_path))
+      receipt["installed_manifests"] = row.fetch("evidence_bundle").first(2)
+      HiveLiveAgentProof.write_json(receipt_path, receipt)
+      refresh_creator_bundle_record!(creator, "execution-receipt.json")
+      sizes = HiveLiveAgentProof::WorkflowCreatorBundle::FILENAMES.map do |name|
+        File.size(File.join(creator, name))
+      end
+
+      assert(
+        sizes.all? do |size|
+          size <= HiveLiveAgentProof::WorkflowCreatorBundle::MAX_FILE_BYTES
+        end
+      )
+      assert_operator(
+        sizes.sum,
+        :>,
+        HiveLiveAgentProof::WorkflowCreatorBundle::MAX_TOTAL_BYTES
+      )
+      error = assert_raises(HiveLiveAgentProof::Error) do
+        attest(
+          artifacts, evidence, creator,
+          File.join(dir, "proof-aggregate-oversized")
+        )
+      end
+      assert_includes error.message, "bundle is oversized"
+    end
+  end
+
+  def test_attestor_normalizes_invalid_utf8_primary_and_sidecar
+    with_tmp_dir do |dir|
+      artifacts = prepare_artifacts(dir)
+      evidence = prepare_evidence(dir, artifacts)
+      creator = prepare_creator_evidence(File.join(dir, "primary"), artifacts)
+      File.binwrite(
+        File.join(creator, "openclaw-workflow-creator.json"),
+        invalid_utf8_json
+      )
+      primary_error = assert_raises(HiveLiveAgentProof::Error) do
+        attest(
+          artifacts, evidence, creator,
+          File.join(dir, "proof-invalid-primary")
+        )
+      end
+
+      creator = prepare_creator_evidence(File.join(dir, "sidecar"), artifacts)
+      File.binwrite(
+        File.join(creator, "candidate-installed-manifest.json"),
+        invalid_utf8_json
+      )
+      refresh_creator_bundle_record!(
+        creator,
+        "candidate-installed-manifest.json"
+      )
+      sidecar_error = assert_raises(HiveLiveAgentProof::Error) do
+        attest(
+          artifacts, evidence, creator,
+          File.join(dir, "proof-invalid-sidecar")
+        )
+      end
+
+      assert_includes primary_error.message, "cannot be canonicalized"
+      assert_includes sidecar_error.message, "cannot be canonicalized"
+    end
+  end
+
+  def test_verifier_normalizes_invalid_utf8_retained_sidecar
+    with_tmp_dir do |dir|
+      artifacts = prepare_artifacts(dir)
+      evidence = prepare_evidence(dir, artifacts)
+      creator = prepare_creator_evidence(dir, artifacts)
+      proof = File.join(dir, "proof")
+      attest(artifacts, evidence, creator, proof)
+      retained = File.join(proof, "evidence", "workflow-creator")
+      File.binwrite(
+        File.join(retained, "candidate-installed-manifest.json"),
+        invalid_utf8_json
+      )
+      refresh_creator_bundle_record!(
+        retained,
+        "candidate-installed-manifest.json"
+      )
+      retained_primary =
+        File.join(retained, "openclaw-workflow-creator.json")
+      attestation_path = File.join(proof, "attestation.json")
+      attestation = JSON.parse(File.read(attestation_path))
+      attestation["workflow_creator"] =
+        JSON.parse(File.read(retained_primary))
+      HiveLiveAgentProof.write_json(attestation_path, attestation)
+
+      error = assert_raises(HiveLiveAgentProof::Error) do
+        verifier(
+          proof,
+          HiveLiveAgentProof.sha256(attestation_path)
+        ).call
+      end
+      assert_includes error.message, "cannot be canonicalized"
+    end
+  end
+
   def test_attestor_normalizes_malformed_creator_values
     with_tmp_dir do |dir|
       artifacts = prepare_artifacts(dir)
@@ -888,6 +1005,22 @@ class LiveAgentProofTest < Minitest::Test
       "sha256" => "9" * 64,
       "size" => size
     }
+  end
+
+  def large_inventory
+    padding = "x" * 1_905
+    Array.new(
+      HiveLiveAgentProof::WorkflowCreatorBundle::MAX_INVENTORY_ENTRIES
+    ) do |index|
+      inventory_record(
+        format("files/%04d-%s", index, padding),
+        size: 1
+      )
+    end
+  end
+
+  def invalid_utf8_json
+    "{\"value\":\"\xFF\"}\n".b
   end
 
   def refresh_creator_bundle_record!(root, name)

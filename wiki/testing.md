@@ -630,6 +630,10 @@ installed inventory; dot, NUL, unsafe, over-count, per-file oversized, and
 aggregate-oversized inventory values fail closed. Attestation admits the primary
 through the same owner, regular-file, no-follow, link-count, and byte-bound
 reader used for the retained sidecars before parsing any producer bytes.
+Canonicalization errors, including invalid UTF-8 accepted by the JSON parser
+but rejected by the generator, normalize to the proof error surface for both
+Attestor and Verifier. The four-file retained bundle also has an independently
+tested aggregate byte cap in addition to its per-file bounds.
 The execution receipt must agree with the creator row's command, effect, instruction,
 containment, teardown, and cleanup claims. Attestation copies those exact
 bytes, and verification replays the same contract after runner-local install

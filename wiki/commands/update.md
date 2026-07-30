@@ -64,7 +64,11 @@ root-inventoried custom profile, then migrates every project registered in each
 profile after dropping to that user's exact identity. Root bash-channel updates
 also add `--ensure-retry-service`, installing an hourly systemd system timer or
 launchd LaunchDaemon before the first sweep. AUR performs the same all-user
-boundary from its package hook and packaged hourly timer.
+boundary from its package hook and packaged hourly timer. Each child keeps the
+full project receipt in its user-owned state root; the privileged parent
+accepts a separately bounded canonical receipt wire and stores only a compact
+digest/count summary. Thus a user with many projects cannot overflow the
+machine checkpoint or prevent later users from being attempted.
 
 Homebrew and non-root `install.sh` remain deliberately user-scoped. They must
 never be elevated: shared-host coverage requires a separately installed,

@@ -304,8 +304,16 @@ it or any mutator cutover can be claimed.
   package-candidate command. Its installation-wide completion unit is the
   whole host: every eligible OS user, every profile bound to each user, and
   every registered project in every profile; completion is never scoped to
-  the invoking account. Normal CLI startup and JobStore construction
-  reject dormant released-v2 state without modifying it.
+  the invoking account. The user process owns the detailed project receipt;
+  the root coordinator transports at most 2 MiB of canonical receipt JSON,
+  bounds stderr separately, and persists only a fixed identity-free summary.
+  Its 4-MiB traversal checkpoint therefore cannot be inflated by one user's
+  project rows or starve users later in the host inventory. Resume also
+  reconciles the deterministic conversion occurrence before stamping
+  completion: a completed import must have an exact live finalized/all-acked
+  record or an exact retirement fence, while an incomplete import keeps its
+  reserved continuation occurrence. Normal CLI startup and JobStore
+  construction reject dormant released-v2 state without modifying it.
   A fixed exact-byte v2 snapshot is verified before the first write, and its
   identity is exposed through daemon status for the fenced exact restore
   command in [[commands/migrate]].

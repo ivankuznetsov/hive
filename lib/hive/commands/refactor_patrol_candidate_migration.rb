@@ -3,6 +3,7 @@ require "hive/refactor_patrol/installed_job_schema_migration"
 require "hive/refactor_patrol/installed_users_job_schema_migration"
 require "hive/refactor_patrol/all_users_authority"
 require "hive/refactor_patrol/install_wide_retry_service"
+require "hive/workflow_package/canonical_json"
 
 module Hive
   module Commands
@@ -55,7 +56,9 @@ module Hive
           else
             @migration.call(force: @force)
           end
-        @output.puts JSON.generate(payload)
+        @output.write(
+          "#{Hive::WorkflowPackage::CanonicalJSON.generate(payload)}\n"
+        )
         if @all_users && payload["status"] != "complete"
           raise Hive::Error,
                 "install-wide JobStore migration is #{payload['status']}; " \

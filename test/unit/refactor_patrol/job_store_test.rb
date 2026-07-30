@@ -348,6 +348,176 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     end
   end
 
+  def test_schema_migration_resume_finalizes_a_completed_occurrence_after_the_v3_write
+    with_tmp_dir do |dir|
+      legacy = released_v2_job
+      root, = write_released_v2_job(dir, legacy)
+      interrupted = schema_migration(root)
+      interrupted.define_singleton_method(
+        :finalize_completed_import!
+      ) do |*_arguments, **_options|
+        raise Interrupt, "injected post-v3-write interruption"
+      end
+
+      error = assert_raises(Interrupt) { interrupted.run! }
+      assert_match(/post-v3-write interruption/, error.message)
+      checkpoint_path = File.join(
+        root, "jobs", "#{legacy.fetch('job_id')}.json"
+      )
+      checkpoint_bytes = File.binread(checkpoint_path)
+      checkpoint = JSON.parse(checkpoint_bytes)
+      assert_equal 3, checkpoint.fetch("schema_version")
+      occurrence_id = checkpoint.fetch("occurrence_id")
+      journal = Hive::Modules::Migration::OccurrenceJournal.new(
+        File.join(root, "occurrences", "records"),
+        module_name: "architecture-patrol"
+      )
+      assert journal.recovery_active?
+      provisional = journal.fetch(occurrence_id)
+                           .fetch("provisional_capture")
+
+      assert schema_migration(root).run!
+
+      assert_equal checkpoint_bytes, File.binread(checkpoint_path)
+      assert_path_exists File.join(
+        root,
+        Hive::RefactorPatrol::JobStoreSchemaMigration::MARKER_NAME
+      )
+      refute journal.recovery_active?,
+             "resume must finalize and retire #{occurrence_id} before the marker"
+      assert journal.terminal_fence?(provisional)
+    end
+  end
+
+  def test_schema_migration_marker_fast_path_repairs_an_active_completed_occurrence
+    with_tmp_dir do |dir|
+      legacy = released_v2_job
+      root, = write_released_v2_job(dir, legacy)
+      interrupted = schema_migration(root)
+      interrupted.define_singleton_method(
+        :finalize_completed_import!
+      ) do |*_arguments, **_options|
+        raise Interrupt, "injected post-v3-write interruption"
+      end
+      assert_raises(Interrupt) { interrupted.run! }
+      checkpoint = JSON.parse(File.binread(File.join(
+        root, "jobs", "#{legacy.fetch('job_id')}.json"
+      )))
+      journal = Hive::Modules::Migration::OccurrenceJournal.new(
+        File.join(root, "occurrences", "records"),
+        module_name: "architecture-patrol"
+      )
+      provisional =
+        journal.fetch(checkpoint.fetch("occurrence_id"))
+               .fetch("provisional_capture")
+      manifest = JSON.parse(File.binread(File.join(
+        root, "job-schema-v2-backup", "manifest.json"
+      )))
+      marker = {
+        "schema" =>
+          Hive::RefactorPatrol::JobStoreSchemaMigration::MARKER_SCHEMA,
+        "schema_version" =>
+          Hive::RefactorPatrol::JobStoreSchemaMigration::MARKER_VERSION,
+        "source_schema_version" => 2,
+        "target_schema_version" => 3,
+        "migrated_jobs" => manifest.fetch("entries").length,
+        "snapshot_id" => manifest.fetch("snapshot_id"),
+        "status" => "complete"
+      }
+      File.binwrite(
+        File.join(
+          root,
+          Hive::RefactorPatrol::JobStoreSchemaMigration::MARKER_NAME
+        ),
+        Hive::WorkflowPackage::CanonicalJSON.generate(marker)
+      )
+      assert journal.recovery_active?
+
+      refute schema_migration(root).run!
+
+      refute journal.recovery_active?
+      assert journal.terminal_fence?(provisional)
+    end
+  end
+
+  def test_schema_migration_resume_rejects_a_missing_unfenced_occurrence
+    with_tmp_dir do |dir|
+      legacy = released_v2_job
+      root, = write_released_v2_job(dir, legacy)
+      interrupted = schema_migration(root)
+      interrupted.define_singleton_method(
+        :finalize_completed_import!
+      ) do |*_arguments, **_options|
+        raise Interrupt, "injected post-v3-write interruption"
+      end
+      assert_raises(Interrupt) { interrupted.run! }
+      checkpoint = JSON.parse(File.binread(File.join(
+        root, "jobs", "#{legacy.fetch('job_id')}.json"
+      )))
+      occurrence_id = checkpoint.fetch("occurrence_id")
+      journal = Hive::Modules::Migration::OccurrenceJournal.new(
+        File.join(root, "occurrences", "records"),
+        module_name: "architecture-patrol"
+      )
+      provisional =
+        journal.fetch(occurrence_id).fetch("provisional_capture")
+      File.unlink(File.join(journal.root, "#{occurrence_id}.json"))
+      refute journal.terminal_fence?(provisional)
+
+      error = assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) { schema_migration(root).run! }
+
+      assert_match(/verified v3 checkpoint occurrence is missing/,
+                   error.message)
+      refute_path_exists File.join(
+        root,
+        Hive::RefactorPatrol::JobStoreSchemaMigration::MARKER_NAME
+      )
+    end
+  end
+
+  def test_schema_migration_incomplete_import_retains_terminal_reserved_occurrence
+    with_tmp_dir do |dir|
+      legacy = released_v2_job(
+        "state" => "classified",
+        "complete" => false,
+        "actions" => [],
+        "zero_reason" => nil
+      )
+      root, = write_released_v2_job(dir, legacy)
+
+      assert schema_migration(root).run!
+
+      checkpoint = JSON.parse(File.binread(File.join(
+        root, "jobs", "#{legacy.fetch('job_id')}.json"
+      )))
+      journal = Hive::Modules::Migration::OccurrenceJournal.new(
+        File.join(root, "occurrences", "records"),
+        module_name: "architecture-patrol"
+      )
+      record = journal.fetch(checkpoint.fetch("occurrence_id"))
+      assert_equal "reserved", record.fetch("phase")
+      assert_equal(
+        "committed",
+        record.fetch("effects")
+              .fetch(checkpoint.fetch("intake_transition_id"))
+              .fetch("state")
+      )
+      assert journal.recovery_active?
+      refute journal.terminal_fence?(
+        record.fetch("provisional_capture")
+      )
+
+      refute schema_migration(root).run!
+
+      assert journal.recovery_active?
+      assert_equal "reserved",
+                   journal.fetch(checkpoint.fetch("occurrence_id"))
+                          .fetch("phase")
+    end
+  end
+
   def test_schema_migration_resume_refuses_a_deleted_snapshotted_job
     with_tmp_dir do |dir|
       jobs = 3.times.map do |index|
@@ -3233,9 +3403,20 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       migration.define_singleton_method(:assert_no_source_records!) do
         checked = true
       end
+      snapshot = Object.new
+      migration.define_singleton_method(:snapshot_store) { snapshot }
+      reconciled = false
+      migration.define_singleton_method(
+        :assert_completed_inventory!
+      ) do |candidate|
+        raise "wrong snapshot" unless candidate.equal?(snapshot)
+
+        reconciled = true
+      end
 
       refute migration.run!(transition_lock: false)
       assert checked
+      assert reconciled
       assert_equal "snapshot-#{"1" * 64}",
                    migration.instance_variable_get(:@snapshot_id)
     end

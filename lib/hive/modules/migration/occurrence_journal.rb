@@ -204,6 +204,31 @@ module Hive
         def recovery_active? = each_recovery_active.any?
         def projection_pending? = each_projection_pending.any?
 
+        # Exact bounded proof that a missing occurrence was finalized,
+        # fully acknowledged, and retired. Callers must supply the immutable
+        # capture so a digest or sequence fence cannot be applied to a
+        # different occurrence.
+        def terminal_fence?(capture)
+          capture = @validator.capture(capture)
+          @journal_state.synchronize do |state, _checkpoint|
+            @journal_state.retired_occurrence?(state, capture)
+          end
+        end
+
+        # Exact terminal proof for one immutable occurrence. A finalized,
+        # fully acknowledged live record remains authoritative when the
+        # bounded retirement-fence inventory is full; a missing record must
+        # have its exact durable retirement fence.
+        def terminalized?(capture)
+          capture = @validator.capture(capture)
+          record = @store.fetch(capture.occurrence_id)
+          return terminal_fence?(capture) unless record
+
+          record.fetch("provisional_capture") == capture.to_h &&
+            retireable?(record) &&
+            !recovery_active_record?(record)
+        end
+
         def rebuild_recovery_index!
           @journal_state.synchronize do |state, checkpoint|
             @inventory_lock.synchronize("inventory") do

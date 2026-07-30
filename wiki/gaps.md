@@ -35,7 +35,11 @@ tags: [gap, todo, release-proof, agent-skills]
   exact supplementary-group drops, cross-profile exact/nested root collision
   refusal, full ancestor-custody revalidation, strict bounded JSON catalog
   transport, contradictory nested receipt refusal, redacted child diagnostics,
-  and v3-only normal runtime admission.
+  canonical 2-MiB receipt transport with independent stderr bounds, six
+  near-maximum receipts without later-profile starvation, a bounded
+  identity-free 4,096-summary checkpoint, deterministic interrupted-v3
+  occurrence reconciliation, live terminal proof after retirement-fence
+  saturation, and v3-only normal runtime admission.
   There is not yet a checked-in artifact from an actual AUR package upgrade
   with three long-lived host accounts and running old daemons, nor a repaired
   offline/permission failure followed by the installed system timer's

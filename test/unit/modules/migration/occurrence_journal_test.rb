@@ -506,6 +506,7 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
       base = "ordinary:project-1:#{NOW.iso8601(6)}"
       provisional = schedule_capture(base, window: NOW, generation: 1)
       journal.reserve!(provisional, now: NOW)
+      refute journal.terminal_fence?(provisional)
       journal.finalize!(
         terminal_capture(provisional), now: NOW + 1
       )
@@ -513,6 +514,7 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
 
       assert_nil journal.fetch(provisional.occurrence_id)
       restarted = occurrence_journal(journal_root)
+      assert restarted.terminal_fence?(provisional)
       assert_raises(Hive::ConfigError) do
         restarted.reserve!(provisional, now: NOW + 2)
       end
@@ -548,6 +550,7 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
         restarted = Hive::Modules::Migration::OccurrenceJournal.new(
           journal_root, module_name: module_name
         )
+        assert restarted.terminal_fence?(provisional)
         assert_raises(Hive::ConfigError) do
           restarted.reserve!(provisional, now: NOW + 2)
         end
@@ -586,6 +589,10 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
         assert retained.fetch("outbox").all? {
           |entry| entry.fetch("acknowledged")
         }
+        refute journal.terminal_fence?(second)
+        assert journal.terminalized?(second),
+               "a live finalized record must remain terminal proof when " \
+               "the retirement-fence inventory is full"
         record_store = journal.instance_variable_get(:@store)
         enumerations = 0
         instrumentation = Module.new do

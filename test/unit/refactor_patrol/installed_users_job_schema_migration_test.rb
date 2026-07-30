@@ -141,12 +141,17 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
                    executor.calls.map(&:username)
       assert_equal %w[completed failed completed],
                    payload.fetch("profiles").map { |row| row.fetch("status") }
-      assert_equal(
-        [ "job-alice", "job-carol" ],
-        payload.fetch("profiles").flat_map do |row|
-          row.fetch("projects").map { |project| project.fetch("project") }
-        end
-      )
+      assert_equal [ 1, 0, 1 ],
+                   payload.fetch("profiles").map { |row|
+                     row.fetch("project_count")
+                   }
+      assert_equal [ 0, 0, 1 ],
+                   payload.fetch("profiles").map { |row|
+                     row.fetch("failed_project_count")
+                   }
+      assert payload.fetch("profiles").all? do |row|
+        (row.keys & %w[home projects uid username]).empty?
+      end
       assert_empty schema_errors(
         "hive-installed-users-job-schema-migration.v1.json", payload
       )
@@ -164,9 +169,16 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
         profile(name, index + 1_001, home)
       end
       monotonic = 0.0
+      alice_attempts = 0
       progress_root = File.join(root, "machine-progress")
       executor = Executor.new do |candidate|
-        monotonic = 9.9 if candidate.username == "alice"
+        if candidate.username == "alice"
+          alice_attempts += 1
+          if alice_attempts == 1
+            monotonic = 9.9
+            raise Hive::Error, "injected profile failure"
+          end
+        end
         installation_payload(candidate.username, profile: candidate)
       end
       build_migration = lambda do
@@ -187,8 +199,9 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
         now: Time.utc(2026, 7, 29, 20)
       )
 
-      assert_equal "partial", first.fetch("status")
+      assert_equal "failed", first.fetch("status")
       assert_equal [ "alice" ], executor.calls.map(&:username)
+      assert_equal 1, first.fetch("failed_profiles")
       assert_equal "sweep_budget_exhausted",
                    first.fetch("discovery_issues").last.fetch("kind")
       persisted = Migration::SweepProgress.new(root: progress_root).read
@@ -206,10 +219,119 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
       assert_equal 3, second.fetch("attempted_users")
       final_progress =
         Migration::SweepProgress.new(root: progress_root).read
-      assert_equal 3, final_progress.fetch("results").length
-      assert final_progress.fetch("results").values.all? do |row|
+      assert_equal 3, final_progress.fetch("summaries").length
+      assert final_progress.fetch("summaries").values.all? do |row|
         row.fetch("status") == "completed"
       end
+    end
+  end
+
+  def test_bounded_sweep_compacts_near_max_receipts_without_starving_later_profiles
+    with_tmp_dir do |root|
+      profiles = 6.times.map do |index|
+        name = "user-#{index}"
+        home = File.join(root, name)
+        FileUtils.mkdir_p(home)
+        profile(name, index + 1_001, home)
+      end
+      receipts = profiles.to_h do |candidate|
+        payload = sized_installation_payload(
+          candidate.username,
+          bytes: 961_076,
+          profile: candidate
+        )
+        validator =
+          Hive::RefactorPatrol::RegisteredProjectMigrationStatus.new(
+            root: File.join(root, "unused"),
+            user_profile: payload.fetch("user_profile")
+          )
+        assert validator.valid_payload?(payload)
+        [ candidate.username, payload ]
+      end
+      executor = Executor.new do |candidate|
+        receipts.fetch(candidate.username)
+      end
+      progress_root = File.join(root, "machine-progress")
+      migration = Migration.new(
+        catalog: Catalog.new(snapshot(profiles, closed: true)),
+        executor: executor,
+        candidate: candidate_identity,
+        effective_uid: -> { 0 },
+        status_store: Migration::SweepProgress.new(root: progress_root)
+      )
+
+      payload = migration.call(now: Time.utc(2026, 7, 29, 20))
+
+      assert_equal "complete", payload.fetch("status")
+      assert_equal profiles.map(&:username),
+                   executor.calls.map(&:username)
+      summaries = payload.fetch("profiles")
+      assert_equal 6, summaries.length
+      assert summaries.all? do |summary|
+        summary.keys.sort ==
+          Migration::SweepProgress::SUMMARY_KEYS
+      end
+      forbidden = %w[
+        home path projects real_path source uid username
+      ]
+      assert summaries.all? do |summary|
+        (summary.keys & forbidden).empty?
+      end
+      checkpoint =
+        Migration::SweepProgress.new(root: progress_root).read
+      assert_equal summaries.sort_by { |row| row.fetch("profile_digest") },
+                   checkpoint.fetch("summaries").values.sort_by { |row|
+                     row.fetch("profile_digest")
+                   }
+      assert_operator(
+        Hive::WorkflowPackage::CanonicalJSON.generate(checkpoint).bytesize,
+        :<=,
+        Migration::SweepProgress::MAX_BYTES
+      )
+    end
+  end
+
+  def test_sweep_checkpoint_maximum_summary_inventory_fits_its_global_bound
+    with_tmp_dir do |root|
+      summary_sizes = []
+      summaries = Migration::SweepProgress::MAX_RESULTS.times.to_h do |index|
+        digest = format("%064x", index + 1)
+        row = {
+          "profile_digest" => digest,
+          "status" => "failed",
+          "retryable" => true,
+          "registry_digest" => nil,
+          "receipt_sha256" => nil,
+          "receipt_bytes" => nil,
+          "project_count" => 0,
+          "failed_project_count" => 0,
+          "retryable_project_count" => 0,
+          "daemon_restart_pending" => false,
+          "error" =>
+            "x" * Migration::SweepProgress::MAX_SUMMARY_ERROR_BYTES
+        }
+        summary_sizes <<
+          Hive::WorkflowPackage::CanonicalJSON.generate(row).bytesize
+        [ digest, row ]
+      end
+      payload = {
+        "schema" => Migration::SweepProgress::SCHEMA,
+        "schema_version" => Migration::SweepProgress::SCHEMA_VERSION,
+        "sweep_key" => "f" * 64,
+        "cursor" => 0,
+        "summaries" => summaries,
+        "updated_at" => "2026-07-29T20:00:00.000000Z"
+      }
+      progress = Migration::SweepProgress.new(root: root)
+
+      assert_operator summary_sizes.max, :<=,
+                      Migration::SweepProgress::MAX_SUMMARY_BYTES
+      assert_equal payload, progress.write(payload)
+      assert_operator(
+        Hive::WorkflowPackage::CanonicalJSON.generate(payload).bytesize,
+        :<=,
+        Migration::SweepProgress::MAX_BYTES
+      )
     end
   end
 
@@ -237,60 +359,28 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
     end
   end
 
-  def test_machine_checkpoint_rejects_mismatched_profile_and_project_rows
+  def test_machine_checkpoint_rejects_mismatched_and_contradictory_summaries
     with_tmp_dir do |root|
       home = File.join(root, "alice")
       FileUtils.mkdir_p(home)
       candidate = profile("alice", 1_001, home)
-      digest = "a" * 64
-      row = {
-        "username" => "alice",
-        "uid" => 1_001,
-        "home" => home,
-        "profile_digest" => digest,
-        "source" => "default-home",
-        "status" => "completed",
-        "retryable" => false,
-        "registry_digest" => "b" * 64,
-        "projects" =>
-          installation_payload("alice", profile: candidate)
-            .fetch("projects")
-      }
       progress = Migration::SweepProgress.new(
         root: File.join(root, "progress")
       )
-      payload = {
-        "schema" => Migration::SweepProgress::SCHEMA,
-        "schema_version" => Migration::SweepProgress::SCHEMA_VERSION,
-        "sweep_key" => "c" * 64,
-        "cursor" => 1,
-        "results" => { digest => row },
-        "updated_at" => "2026-07-29T20:00:00.000000Z"
-      }
+      payload = sweep_progress_payload(candidate)
 
       mismatched = JSON.parse(JSON.generate(payload))
-      mismatched["results"].values.first["profile_digest"] = "d" * 64
+      mismatched["summaries"].values.first["profile_digest"] = "d" * 64
       assert_raises(Hive::ConfigError) { progress.write(mismatched) }
 
-      malformed = JSON.parse(JSON.generate(payload))
-      malformed["results"].values.first
-        .fetch("projects").first.delete("real_path")
-      assert_raises(Hive::ConfigError) { progress.write(malformed) }
+      identity_leak = JSON.parse(JSON.generate(payload))
+      identity_leak["summaries"].values.first["username"] = "alice"
+      assert_raises(Hive::ConfigError) { progress.write(identity_leak) }
 
       contradictory = JSON.parse(JSON.generate(payload))
-      project = contradictory["results"].values.first
-        .fetch("projects").first
-      project.merge!(
-        "status" => "failed",
-        "current_schema_version" => nil,
-        "retryable" => true,
-        "next_retry_at" => "2026-07-29T21:00:00.000000Z",
-        "remediation" => "retry later",
-        "error" => "Hive::Error: retry later"
-      )
-      assert(
-        Hive::RefactorPatrol::RegisteredProjectMigrationStatus
-          .valid_projects?([ project ])
+      contradictory["summaries"].values.first.merge!(
+        "retryable" => false,
+        "retryable_project_count" => 1
       )
       assert_raises(Hive::ConfigError) do
         progress.write(contradictory)
@@ -344,17 +434,58 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
     end
   end
 
-  def test_machine_checkpoint_validates_failed_rows_paths_and_timestamps
+  def test_sweep_discards_an_old_draft_checkpoint_without_parsing_its_rows
+    with_tmp_dir do |root|
+      home = File.join(root, "alice")
+      FileUtils.mkdir_p(home)
+      candidate = profile("alice", 1_001, home)
+      progress_root = File.join(root, "progress")
+      FileUtils.mkdir_p(progress_root)
+      old_draft = old_sweep_progress_payload(candidate)
+      File.binwrite(
+        File.join(
+          progress_root, Migration::SweepProgress::FILE_NAME
+        ),
+        Hive::WorkflowPackage::CanonicalJSON.generate(old_draft)
+      )
+      executor = Executor.new do |profile|
+        installation_payload("alice", profile: profile)
+      end
+      migration = Migration.new(
+        catalog: Catalog.new(snapshot([ candidate ], closed: true)),
+        executor: executor,
+        candidate: candidate_identity,
+        effective_uid: -> { 0 },
+        status_store: Migration::SweepProgress.new(root: progress_root)
+      )
+
+      payload = migration.call(now: Time.utc(2026, 7, 29, 20))
+
+      assert_equal "complete", payload.fetch("status")
+      assert_equal [ "alice" ], executor.calls.map(&:username)
+      checkpoint =
+        Migration::SweepProgress.new(root: progress_root).read
+      assert_equal 1, checkpoint.fetch("summaries").length
+      refute checkpoint.key?("results")
+    end
+  end
+
+  def test_machine_checkpoint_validates_failed_summaries_and_timestamps
     with_tmp_dir do |home|
       payload = sweep_progress_payload(
         profile("alice", Process.uid, home, gid: Process.gid)
       )
-      row = payload.fetch("results").values.fetch(0)
+      row = payload.fetch("summaries").values.fetch(0)
       row.merge!(
         "status" => "failed",
         "retryable" => true,
         "registry_digest" => nil,
-        "projects" => [],
+        "receipt_sha256" => nil,
+        "receipt_bytes" => nil,
+        "project_count" => 0,
+        "failed_project_count" => 0,
+        "retryable_project_count" => 0,
+        "daemon_restart_pending" => false,
         "error" => "Hive::ConfigError: registry unavailable"
       )
       writes = []
@@ -370,9 +501,12 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
       assert_equal payload, progress.write(payload)
       assert_equal 1, writes.length
 
-      invalid_path = deep_copy(payload)
-      invalid_path.fetch("results").values.fetch(0)["home"] = "\0"
-      assert_raises(Hive::ConfigError) { progress.write(invalid_path) }
+      oversized_error = deep_copy(payload)
+      oversized_error.fetch("summaries").values.fetch(0)["error"] =
+        "x" * (Migration::SweepProgress::MAX_SUMMARY_ERROR_BYTES + 1)
+      assert_raises(Hive::ConfigError) do
+        progress.write(oversized_error)
+      end
 
       invalid_timestamp = deep_copy(payload)
       invalid_timestamp["updated_at"] = nil
@@ -3067,7 +3201,11 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
       payload = installation_payload("alice", profile: candidate)
       binary = write_executable(
         root, "hive-success",
-        "STDOUT.write(#{JSON.generate(payload).dump})"
+        "STDOUT.write(#{
+          (
+            Hive::WorkflowPackage::CanonicalJSON.generate(payload) + "\n"
+          ).dump
+        })"
       )
       executor = Migration::Executor.new(
         binary: binary,
@@ -3094,7 +3232,7 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
 
       malformed_binary = write_executable(
         root, "hive-malformed",
-        "STDOUT.write(\"not-json\")"
+        "STDOUT.write(\"not-json\\n\")"
       )
       malformed = Migration::Executor.new(
         binary: malformed_binary,
@@ -3118,6 +3256,109 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
       end
       assert_match(/exit 126/, error.message)
       assert_match(/drop failed/, error.message)
+    end
+  end
+
+  def test_executor_transports_a_valid_profile_receipt_larger_than_one_megabyte
+    with_tmp_dir do |root|
+      home = File.join(root, "home")
+      FileUtils.mkdir_p(home)
+      candidate = profile(
+        "alice", Process.uid, home, gid: Process.gid
+      )
+      payload = installation_payload("alice", profile: candidate)
+      target_bytes =
+        Hive::RefactorPatrol::RegisteredProjectMigrationStatus::MAX_BYTES
+      serialized =
+        Hive::WorkflowPackage::CanonicalJSON.generate(payload)
+      payload.fetch("projects").first["project"] << (
+        "x" * (target_bytes - serialized.bytesize)
+      )
+      serialized =
+        Hive::WorkflowPackage::CanonicalJSON.generate(payload)
+      status =
+        Hive::RefactorPatrol::RegisteredProjectMigrationStatus.new(
+          root: File.join(root, "status"),
+          user_profile: payload.fetch("user_profile")
+        )
+
+      assert_equal target_bytes, serialized.bytesize
+      assert_equal Migration::Executor::MAX_STDOUT_BYTES,
+                   serialized.bytesize + 1
+      assert status.valid_payload?(payload)
+      assert_operator serialized.bytesize, :<=, status.class::MAX_BYTES
+
+      binary = write_executable(
+        root, "hive-large-valid-receipt",
+        "STDERR.write(\"bounded warning\\n\")\n" \
+          "STDOUT.write(#{("#{serialized}\n").dump})"
+      )
+      executor = Migration::Executor.new(
+        binary: binary,
+        effective_uid: -> { 0 },
+        identity_drop: IDENTITY_OK,
+        identity_validator: IDENTITY_OK
+      )
+
+      assert_equal payload, executor.call(candidate)
+    end
+  end
+
+  def test_executor_bounds_stdout_and_stderr_independently
+    with_tmp_dir do |root|
+      home = File.join(root, "home")
+      FileUtils.mkdir_p(home)
+      candidate = profile(
+        "alice", Process.uid, home, gid: Process.gid
+      )
+      payload = installation_payload("alice", profile: candidate)
+      receipt =
+        "#{Hive::WorkflowPackage::CanonicalJSON.generate(payload)}\n"
+      at_limit = write_executable(
+        root, "hive-independent-stream-limits",
+        "STDERR.write(\"w\" * #{Migration::Executor::MAX_STDERR_BYTES})\n" \
+          "STDOUT.write(#{receipt.dump})"
+      )
+      executor = Migration::Executor.new(
+        binary: at_limit,
+        effective_uid: -> { 0 },
+        identity_drop: IDENTITY_OK,
+        identity_validator: IDENTITY_OK
+      )
+      assert_equal payload, executor.call(candidate)
+
+      stderr_overflow = write_executable(
+        root, "hive-stderr-overflow",
+        "STDERR.write(\"x\" * " \
+          "#{Migration::Executor::MAX_STDERR_BYTES + 1})\n" \
+          "STDOUT.write(#{receipt.dump})"
+      )
+      executor = Migration::Executor.new(
+        binary: stderr_overflow,
+        effective_uid: -> { 0 },
+        identity_drop: IDENTITY_OK,
+        identity_validator: IDENTITY_OK
+      )
+      error = assert_raises(Hive::ConfigError) do
+        executor.call(candidate)
+      end
+      assert_match(/stderr exceeded its bounded capture/, error.message)
+
+      stdout_overflow = write_executable(
+        root, "hive-stdout-overflow",
+        "STDOUT.write(\"x\" * " \
+          "#{Migration::Executor::MAX_STDOUT_BYTES + 1})"
+      )
+      executor = Migration::Executor.new(
+        binary: stdout_overflow,
+        effective_uid: -> { 0 },
+        identity_drop: IDENTITY_OK,
+        identity_validator: IDENTITY_OK
+      )
+      error = assert_raises(Hive::ConfigError) do
+        executor.call(candidate)
+      end
+      assert_match(/stdout exceeded its bounded capture/, error.message)
     end
   end
 
@@ -3149,7 +3390,11 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
           [#{RbConfig.ruby.dump}, "-e", #{daemon_program.dump}, #{daemon_pid_path.dump}],
           {}
         )
-        STDOUT.write(#{JSON.generate(payload).dump})
+        STDOUT.write(#{
+          (
+            Hive::WorkflowPackage::CanonicalJSON.generate(payload) + "\n"
+          ).dump
+        })
       RUBY
       binary = write_executable(root, "hive-restarts-daemon", body)
       executor = Migration::Executor.new(
@@ -3196,7 +3441,7 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
 
       oversized_binary = write_executable(
         root, "hive-oversized",
-        "STDOUT.write(\"x\" * #{Migration::Executor::MAX_CAPTURE_BYTES + 1})"
+        "STDOUT.write(\"x\" * #{Migration::Executor::MAX_STDOUT_BYTES + 1})"
       )
       oversized = Migration::Executor.new(
         binary: oversized_binary,
@@ -3207,7 +3452,7 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
       error = assert_raises(Hive::ConfigError) do
         oversized.call(candidate)
       end
-      assert_match(/bounded capture/, error.message)
+      assert_match(/stdout exceeded its bounded capture/, error.message)
     end
   end
 
@@ -3410,6 +3655,36 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
 
   def sweep_progress_payload(candidate)
     digest = "a" * 64
+    receipt =
+      Hive::WorkflowPackage::CanonicalJSON.generate(
+        installation_payload(candidate.username, profile: candidate)
+      )
+    {
+      "schema" => Migration::SweepProgress::SCHEMA,
+      "schema_version" => Migration::SweepProgress::SCHEMA_VERSION,
+      "sweep_key" => "b" * 64,
+      "cursor" => 0,
+      "summaries" => {
+        digest => {
+          "profile_digest" => digest,
+          "status" => "completed",
+          "retryable" => false,
+          "registry_digest" => "c" * 64,
+          "receipt_sha256" => Digest::SHA256.hexdigest(receipt),
+          "receipt_bytes" => receipt.bytesize,
+          "project_count" => 1,
+          "failed_project_count" => 0,
+          "retryable_project_count" => 0,
+          "daemon_restart_pending" => false,
+          "error" => nil
+        }
+      },
+      "updated_at" => "2026-07-29T20:00:00.000000Z"
+    }
+  end
+
+  def old_sweep_progress_payload(candidate)
+    digest = "a" * 64
     {
       "schema" => Migration::SweepProgress::SCHEMA,
       "schema_version" => Migration::SweepProgress::SCHEMA_VERSION,
@@ -3512,6 +3787,19 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
         "error" => retryable ? "migration pending" : nil
       } ]
     }
+  end
+
+  def sized_installation_payload(name, bytes:, profile:)
+    payload = installation_payload(name, profile: profile)
+    canonical =
+      Hive::WorkflowPackage::CanonicalJSON.generate(payload)
+    raise ArgumentError, "receipt target is too small" if
+      canonical.bytesize > bytes
+
+    payload.fetch("projects").first["project"] << (
+      "x" * (bytes - canonical.bytesize)
+    )
+    payload
   end
 
   def candidate_identity

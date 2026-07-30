@@ -67,14 +67,16 @@ class RefactorPatrolAllUsersMigrationTest < Minitest::Test
       assert_equal 3, payload.fetch("attempted_profiles")
       assert_equal 0, payload.fetch("failed_users")
       assert_equal 0, payload.fetch("retryable_users")
-      assert_equal accounts.map(&:uid).sort,
-                   payload.fetch("profiles").map { |row| row.fetch("uid") }.sort
+      assert_equal 3,
+                   payload.fetch("profiles").map { |row|
+                     row.fetch("profile_digest")
+                   }.uniq.length
       assert(payload.fetch("profiles").all? do |row|
         row.fetch("status") == "completed" &&
-          row.fetch("projects").length == 2 &&
-          row.fetch("projects").all? do |project|
-            project.fetch("status") == "migrated"
-          end
+          row.fetch("project_count") == 2 &&
+          row.fetch("failed_project_count").zero? &&
+          row.fetch("retryable_project_count").zero? &&
+          (row.keys & %w[home path projects uid username]).empty?
       end)
 
       profiles.each do |profile|
@@ -82,7 +84,7 @@ class RefactorPatrolAllUsersMigrationTest < Minitest::Test
       end
 
       changed_profile = profiles.fetch(1)
-      late_project = add_profile_project(changed_profile, "late")
+      add_profile_project(changed_profile, "late")
       resumed = migration.call(
         now: Time.utc(2026, 7, 30, 0, 45),
         force: false
@@ -91,15 +93,11 @@ class RefactorPatrolAllUsersMigrationTest < Minitest::Test
                    JSON.pretty_generate(resumed)
       assert_equal 3, resumed.fetch("attempted_users")
       changed_row = resumed.fetch("profiles").find do |row|
-        row.fetch("uid") == changed_profile.dig(:account).uid
+        row.fetch("project_count") == 3
       end
       refute_nil changed_row
-      assert_equal 3, changed_row.fetch("projects").length
-      late_row = changed_row.fetch("projects").find do |project|
-        project.fetch("project") == late_project.fetch(:name)
-      end
-      refute_nil late_row
-      assert_equal "migrated", late_row.fetch("status")
+      assert_equal 0, changed_row.fetch("failed_project_count")
+      assert_equal 0, changed_row.fetch("retryable_project_count")
       assert_profile_migrated(changed_profile)
     end
   ensure

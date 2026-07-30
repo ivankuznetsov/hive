@@ -127,6 +127,7 @@ module Hive
             if (marker = completed_marker)
               @snapshot_id = marker.fetch("snapshot_id")
               assert_no_source_records!
+              assert_completed_inventory!(snapshot_store)
               next false
             end
 
@@ -540,6 +541,11 @@ module Hive
             digest: entry.fetch("digest")
           )
         end
+        unless journal.terminalized?(provisional)
+          corrupt!(
+            "completed migration occurrence is not terminal"
+          )
+        end
       rescue Hive::ConfigError, KeyError => error
         corrupt!(
           "cannot finalize completed migration occurrence " \
@@ -822,7 +828,7 @@ module Hive
         proof_bytes = directory.read(
           proof_path, max_bytes: MAX_CONVERSION_BYTES
         )
-        conversion_proof.verify!(
+        proof = conversion_proof.verify!(
           proof_bytes: proof_bytes,
           name: name,
           snapshot_id: @snapshot_id,
@@ -830,6 +836,80 @@ module Hive
           source_data: source_data,
           live_bytes: live.fetch(:bytes),
           path: absolute_path(proof_path)
+        )
+        capture = migration_capture(
+          source_data, snapshot_entry.fetch("digest")
+        )
+        intent = migration_intent(capture, source_data)
+        unless proof.fetch("occurrence_id") == capture.occurrence_id &&
+               proof.fetch("intake_transition_id") == intent.intent_id &&
+               live.fetch(:data).fetch("occurrence_id") ==
+                 capture.occurrence_id &&
+               live.fetch(:data).fetch("intake_transition_id") ==
+                 intent.intent_id
+          inconsistent!(
+            "conversion proof does not match the deterministic migration " \
+            "occurrence",
+            proof_path
+          )
+        end
+        reconcile_v3_occurrence!(
+          live.fetch(:data), capture, intent,
+          now: occurred_at(source_data)
+        )
+        proof
+      end
+
+      def reconcile_v3_occurrence!(job, capture, intent, now:)
+        record = journal.fetch(capture.occurrence_id)
+        unless record
+          return true if
+            job.fetch("complete") &&
+            journal.terminal_fence?(capture)
+
+          inconsistent!(
+            "verified v3 checkpoint occurrence is missing",
+            relative_path("occurrences", "records")
+          )
+        end
+        unless record.fetch("provisional_capture") == capture.to_h
+          inconsistent!(
+            "verified v3 checkpoint occurrence capture conflicts",
+            relative_path("occurrences", "records")
+          )
+        end
+        cell = journal.effect_state(intent)
+        outcome = {
+          "transition_status" => "applied",
+          "migration" => "schema_v2_import"
+        }
+        unless cell &&
+               cell.fetch("state") == "committed" &&
+               cell.fetch("outcome") == outcome
+          inconsistent!(
+            "verified v3 checkpoint intake transition is not terminal",
+            relative_path("occurrences", "records")
+          )
+        end
+        receipt = journal.settle_effect!(
+          intent, status: "committed", outcome: outcome, now: now
+        )
+        if job.fetch("complete")
+          finalize_completed_import!(
+            job, capture, receipt, now: now
+          )
+        elsif record.fetch("phase") != "reserved"
+          inconsistent!(
+            "incomplete v3 checkpoint occurrence is not reserved",
+            relative_path("occurrences", "records")
+          )
+        end
+        true
+      rescue KeyError, Hive::ConfigError => error
+        inconsistent!(
+          "cannot reconcile verified v3 checkpoint occurrence " \
+          "(#{error.class}: #{error.message})",
+          relative_path("occurrences", "records")
         )
       end
 

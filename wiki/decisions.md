@@ -702,10 +702,25 @@ the sweep. Every machine retry re-enters every discovered profile; its
 dropped-identity child uses the live registry digest, so a root traversal
 checkpoint cannot hide a project registered later by any user. Per-user
 daemons retain registry-change and hourly project retry.
+Each dropped-identity child owns the detailed, at-most-2-MiB project receipt
+in that user's state root and emits the same canonical JSON plus one newline.
+The parent bounds stdout and stderr independently, validates the exact profile
+and candidate version, then retains only a fixed-size summary: profile and
+registry digests, receipt digest/size, project/retry/failure counts, and daemon
+restart state. The root checkpoint contains no username, home, project path,
+or nested project receipt, and its maximum 4,096 summaries remain below the
+4-MiB machine bound. An old draft traversal checkpoint is discarded as cache,
+not parsed through a compatibility path.
 Homebrew and non-root direct installs remain current-user-only and are never
 elevated; a shared host requires a separate root-owned system runtime. Normal
 CLI startup and JobStore construction support only v3. Released-v2 conversion
-exists only in the explicit package-candidate command.
+exists only in the explicit package-candidate command. Resume reconstructs the
+deterministic occurrence and intake intent from the immutable v2 snapshot,
+checks them against the exact conversion proof and live v3 bytes, and refuses
+the completion marker until a completed import is finalized with every outbox
+entry acknowledged. Terminal proof is either the exact live finalized record
+or its exact retirement fence; incomplete imports retain their exact reserved
+continuation occurrence.
 
 **Consequences:** One failed profile or project is persisted and isolated while
 later profiles still run under their owners. Multiple `HIVE_HOME`/XDG profiles

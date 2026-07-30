@@ -67,6 +67,10 @@ class RefactorPatrolCandidateMigrationCommandTest < Minitest::Test
 
       printed = JSON.parse(output.string)
       assert_equal payload, printed
+      assert_equal(
+        "#{Hive::WorkflowPackage::CanonicalJSON.generate(payload)}\n",
+        output.string
+      )
       assert_equal "hive-user-profile-job-schema-migration", payload.fetch("schema")
       assert_equal 1, payload.fetch("schema_version")
       assert_equal Process.uid, payload.dig("user_profile", "uid")

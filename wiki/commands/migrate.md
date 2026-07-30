@@ -130,9 +130,12 @@ The root-only form prints `hive-installed-users-job-schema-migration.v1`. It
 binds the exact candidate path/version/SHA-256 plus size, mode, uid, and gid
 custody, root inventory path/digest,
 distinct attempted/failed/retryable OS-user and Hive-profile counts, every
-attempted profile digest, all per-project rows, discovery issues, and
-`complete|partial|failed`. Multiple custom profiles can belong to one uid; the
-counters never mislabel those profiles as additional OS users. Missing
+attempted profile digest, fixed receipt/count summaries, discovery issues, and
+`complete|partial|failed`. It deliberately contains no username, home, project
+path, or nested project row. Full project results remain only in each
+dropped-identity child's user-owned receipt. Multiple custom profiles can
+belong to one uid; the counters never mislabel those profiles as additional OS
+users. Missing
 inventory closure, UID/home drift,
 inaccessible profiles, or an operator-known unindexed custom root must remain
 `partial`/`failed`; they can never be reported as complete.
@@ -147,7 +150,19 @@ Catalog discovery crosses the isolated root process boundary as a bounded,
 versioned, strict JSON document rather than an object-deserialization stream.
 Cross-profile equal or nested roots fail closed, and the executor revalidates
 the complete root ancestor custody chain immediately before candidate
-execution.
+execution. A child receipt is canonical JSON plus one newline, with a 2-MiB
+body bound and a separate 2-KiB stderr bound. The machine checkpoint stores
+only fixed summaries and remains below 4 MiB at the 4,096-profile maximum, so
+one large registry cannot block later users. A malformed old draft checkpoint
+is discarded as non-authoritative traversal cache; there is no legacy reader.
+
+An interrupted released-v2 conversion may already have written exact v3 bytes.
+Resume re-derives its occurrence and intake intent from the immutable snapshot,
+verifies both against the conversion proof, and reconciles that exact
+occurrence before writing or trusting the completion marker. Completed jobs
+must be finalized and fully acknowledged, represented either by a retained
+terminal record or its retirement fence. Incomplete jobs keep the exact
+reserved occurrence needed for later work.
 
 The optional root-owned inventory has this exact form and must be a regular
 root-owned file with no group/world write bit:

@@ -586,6 +586,13 @@ module Hive
         DEFAULT_ROOT = "/var/lib/hive/schema-migrations".freeze
         MAX_BYTES = 4 * 1024 * 1024
         MAX_RESULTS = 4_096
+        MAX_SUMMARY_BYTES = 768
+        MAX_SUMMARY_ERROR_BYTES = 256
+        SUMMARY_KEYS = %w[
+          daemon_restart_pending error failed_project_count profile_digest
+          project_count receipt_bytes receipt_sha256 registry_digest retryable
+          retryable_project_count status
+        ].sort.freeze
 
         def initialize(root: DEFAULT_ROOT, directory: nil)
           @root = File.expand_path(root)
@@ -647,72 +654,88 @@ module Hive
         def valid?(payload)
           payload.is_a?(Hash) &&
             payload.keys.sort ==
-              %w[cursor results schema schema_version sweep_key updated_at] &&
+              %w[
+                cursor schema schema_version summaries sweep_key updated_at
+              ] &&
             payload["schema"] == SCHEMA &&
             payload["schema_version"] == SCHEMA_VERSION &&
             payload["sweep_key"].to_s.match?(/\A[0-9a-f]{64}\z/) &&
             payload["cursor"].is_a?(Integer) &&
             payload["cursor"] >= 0 &&
-            payload["results"].is_a?(Hash) &&
-            payload["results"].length <= MAX_RESULTS &&
-            payload["results"].all? do |digest, row|
+            payload["summaries"].is_a?(Hash) &&
+            payload["summaries"].length <= MAX_RESULTS &&
+            payload["summaries"].all? do |digest, row|
               digest.match?(/\A[0-9a-f]{64}\z/) &&
                 row.is_a?(Hash) &&
                 row["profile_digest"] == digest &&
-                valid_result_row?(row)
+                valid_summary?(row)
             end &&
             timestamp?(payload["updated_at"])
         end
 
-        def valid_result_row?(row)
-          return false unless row.is_a?(Hash)
-
-          required = %w[
-            home profile_digest projects registry_digest retryable source
-            status uid username
-          ]
-          keys = required.dup
-          keys << "error" if row["status"] == "failed"
-          valid = row.keys.sort == keys.sort &&
+        def valid_summary?(row)
+          valid = row.is_a?(Hash) &&
+            row.keys.sort == SUMMARY_KEYS &&
             %w[completed failed].include?(row["status"]) &&
             [ true, false ].include?(row["retryable"]) &&
-            row["username"].is_a?(String) &&
-            !row["username"].empty? &&
-            row["uid"].is_a?(Integer) && row["uid"] >= 0 &&
-            row["home"].is_a?(String) &&
-            File.absolute_path(row["home"]) == row["home"] &&
             row["profile_digest"].to_s.match?(/\A[0-9a-f]{64}\z/) &&
-            %w[default-home root-inventory].include?(row["source"]) &&
+            [ true, false ].include?(
+              row["daemon_restart_pending"]
+            ) &&
+            %w[
+              project_count failed_project_count retryable_project_count
+            ].all? do |key|
+              row[key].is_a?(Integer) && row[key] >= 0
+            end &&
+            row["failed_project_count"] <= row["project_count"] &&
+            row["retryable_project_count"] <= row["project_count"] &&
             (row["registry_digest"].nil? ||
               row["registry_digest"].to_s.match?(/\A[0-9a-f]{64}\z/)) &&
-            RegisteredProjectMigrationStatus.valid_projects?(
-              row["projects"]
-            )
+            (row["receipt_sha256"].nil? ||
+              row["receipt_sha256"].to_s.match?(/\A[0-9a-f]{64}\z/)) &&
+            (row["receipt_bytes"].nil? ||
+              (
+                row["receipt_bytes"].is_a?(Integer) &&
+                row["receipt_bytes"].between?(
+                  1, RegisteredProjectMigrationStatus::MAX_BYTES
+                )
+              )) &&
+            Hive::WorkflowPackage::CanonicalJSON.generate(row).bytesize <=
+              MAX_SUMMARY_BYTES
           return false unless valid
 
           if row["status"] == "failed"
             row["retryable"] == true &&
               row["registry_digest"].nil? &&
-              row["projects"].empty? &&
-              valid_diagnostic?(row["error"])
+              row["receipt_sha256"].nil? &&
+              row["receipt_bytes"].nil? &&
+              row["project_count"].zero? &&
+              row["failed_project_count"].zero? &&
+              row["retryable_project_count"].zero? &&
+              row["daemon_restart_pending"] == false &&
+              valid_diagnostic?(
+                row["error"], max_bytes: MAX_SUMMARY_ERROR_BYTES
+              )
           else
             row["registry_digest"].to_s.match?(/\A[0-9a-f]{64}\z/) &&
-              (
-                row["retryable"] == true ||
-                row["projects"].none? do |project|
-                  project["retryable"] == true
-                end
+              row["receipt_sha256"].to_s
+                .match?(/\A[0-9a-f]{64}\z/) &&
+              row["receipt_bytes"].is_a?(Integer) &&
+              row["error"].nil? &&
+              row["retryable"] == (
+                row["daemon_restart_pending"] == true ||
+                row["retryable_project_count"].positive?
               )
           end
         rescue ArgumentError, TypeError
           false
         end
 
-        def valid_diagnostic?(value)
+        def valid_diagnostic?(value, max_bytes: MAX_ERROR_BYTES)
           value.is_a?(String) &&
             !value.empty? &&
             value.valid_encoding? &&
-            value.bytesize <= MAX_ERROR_BYTES &&
+            value.bytesize <= max_bytes &&
             value == BoundedDiagnostic.call(value)
         end
 
@@ -1369,7 +1392,7 @@ module Hive
           profile_digests: pairs.map(&:first)
         )
         progress = matching_progress(sweep_key)
-        results = progress.fetch("results").dup
+        summaries = progress.fetch("summaries").dup
         cursor =
           pairs.empty? ? 0 : progress.fetch("cursor") % pairs.length
         order = (0...pairs.length).to_a.rotate(cursor)
@@ -1382,23 +1405,25 @@ module Hive
             deferred = order.length - offset
             break
           end
-          prior_result = results[digest]
+          prior_summary = summaries[digest]
           prior_cursor = cursor
-          results[digest] = migrate_profile(
+          summaries[digest] = migrate_profile(
             profile, executor, deadline: deadline
           )
           cursor = pairs.empty? ? 0 : (index + 1) % pairs.length
-          unless results[digest] == prior_result && cursor == prior_cursor
+          unless summaries[digest] == prior_summary &&
+                 cursor == prior_cursor
             persist_progress(
               sweep_key: sweep_key,
               cursor: cursor,
-              results: results,
+              summaries: summaries,
               time: time
             )
           end
         end
-        profiles = pairs.filter_map do |digest, _profile|
-          results[digest]
+        profile_results = pairs.filter_map do |digest, profile|
+          summary = summaries[digest]
+          [ profile, summary ] if summary
         end
         issues = snapshot.issues.dup
         if exhausted
@@ -1415,7 +1440,7 @@ module Hive
           time: time,
           candidate: candidate,
           snapshot: snapshot,
-          profiles: profiles,
+          profile_results: profile_results,
           issues: issues
         )
       end
@@ -1454,7 +1479,9 @@ module Hive
         )
       end
 
-      def build_payload(time:, candidate:, snapshot:, profiles:, issues:)
+      def build_payload(
+        time:, candidate:, snapshot:, profile_results:, issues:
+      )
         issues = issues.map do |issue|
           {
             "kind" => issue.kind,
@@ -1463,16 +1490,19 @@ module Hive
             "detail" => BoundedDiagnostic.call(issue.detail)
           }
         end.freeze
+        summaries = profile_results.map(&:last)
         failed_profiles =
-          profiles.count { |row| row["status"] == "failed" }
+          summaries.count { |row| row["status"] == "failed" }
         retryable_profiles =
-          profiles.count { |row| row["retryable"] == true }
-        attempted_uids = profiles.map { |row| row.fetch("uid") }.uniq
-        failed_uids = profiles.filter_map do |row|
-          row.fetch("uid") if row["status"] == "failed"
+          summaries.count { |row| row["retryable"] == true }
+        attempted_uids = profile_results.map do |profile, _summary|
+          profile.uid
         end.uniq
-        retryable_uids = profiles.filter_map do |row|
-          row.fetch("uid") if row["retryable"] == true
+        failed_uids = profile_results.filter_map do |profile, summary|
+          profile.uid if summary["status"] == "failed"
+        end.uniq
+        retryable_uids = profile_results.filter_map do |profile, summary|
+          profile.uid if summary["retryable"] == true
         end.uniq
         status =
           if failed_profiles.positive?
@@ -1492,7 +1522,7 @@ module Hive
           "attempted_users" => attempted_uids.length,
           "failed_users" => failed_uids.length,
           "retryable_users" => retryable_uids.length,
-          "attempted_profiles" => profiles.length,
+          "attempted_profiles" => summaries.length,
           "failed_profiles" => failed_profiles,
           "retryable_profiles" => retryable_profiles,
           "completed_at" => time.iso8601(6),
@@ -1510,7 +1540,7 @@ module Hive
             "sha256" => snapshot.inventory_digest,
             "discovery_closed" => snapshot.closed == true
           },
-          "profiles" => profiles,
+          "profiles" => summaries,
           "discovery_issues" => issues
         }.freeze
       end
@@ -1527,7 +1557,7 @@ module Hive
           time: time,
           candidate: candidate,
           snapshot: snapshot,
-          profiles: [],
+          profile_results: [],
           issues: [
             DiscoveryIssue.new(
               kind: "sweep_lock_busy",
@@ -1547,16 +1577,26 @@ module Hive
           current.is_a?(Hash) &&
           current["sweep_key"] == sweep_key
 
+        empty_progress(sweep_key)
+      rescue Hive::ConfigError => error
+        raise unless error.message.match?(
+          /\Ainstall-wide schema sweep checkpoint is (?:malformed|unreadable)/
+        )
+
+        empty_progress(sweep_key)
+      end
+
+      def empty_progress(sweep_key)
         {
           "schema" => SweepProgress::SCHEMA,
           "schema_version" => SweepProgress::SCHEMA_VERSION,
           "sweep_key" => sweep_key,
           "cursor" => 0,
-          "results" => {}
+          "summaries" => {}
         }
       end
 
-      def persist_progress(sweep_key:, cursor:, results:, time:)
+      def persist_progress(sweep_key:, cursor:, summaries:, time:)
         return unless @status_store
 
         @status_store.write(
@@ -1564,7 +1604,7 @@ module Hive
           "schema_version" => SweepProgress::SCHEMA_VERSION,
           "sweep_key" => sweep_key,
           "cursor" => cursor,
-          "results" => results,
+          "summaries" => summaries,
           "updated_at" => time.iso8601(6)
         )
       end
@@ -1618,46 +1658,73 @@ module Hive
           else
             executor.call(profile)
           end
-        projects = Array(payload["projects"])
+        receipt =
+          Hive::WorkflowPackage::CanonicalJSON.generate(payload)
+        if receipt.bytesize >
+           RegisteredProjectMigrationStatus::MAX_BYTES
+          raise Hive::ConfigError,
+                "candidate migration returned an oversized " \
+                "user-profile receipt"
+        end
+        projects = Array(payload.fetch("projects"))
+        failed_projects = projects.count do |project|
+          project["status"] == "failed"
+        end
+        retryable_projects = projects.count do |project|
+          project["retryable"] == true
+        end
+        daemon_restart_pending =
+          payload["daemon_restart_pending"] == true
         retryable =
-          payload["daemon_restart_pending"] == true ||
-          projects.any? { |project| project["retryable"] == true }
+          daemon_restart_pending || retryable_projects.positive?
         {
-          "username" => profile.username,
-          "uid" => profile.uid,
-          "home" => profile.home,
           "profile_digest" => profile_digest(profile),
-          "source" => profile.source,
           "status" => "completed",
           "retryable" => retryable,
-          "registry_digest" => payload["registry_digest"],
-          "projects" => projects
+          "registry_digest" => payload.fetch("registry_digest"),
+          "receipt_sha256" => Digest::SHA256.hexdigest(receipt),
+          "receipt_bytes" => receipt.bytesize,
+          "project_count" => projects.length,
+          "failed_project_count" => failed_projects,
+          "retryable_project_count" => retryable_projects,
+          "daemon_restart_pending" => daemon_restart_pending,
+          "error" => nil
         }
       rescue StandardError => error
         {
-          "username" => profile.username,
-          "uid" => profile.uid,
-          "home" => profile.home,
           "profile_digest" => profile_digest(profile),
-          "source" => profile.source,
           "status" => "failed",
           "retryable" => true,
           "registry_digest" => nil,
-          "projects" => [],
-          "error" =>
-            BoundedDiagnostic.call("#{error.class}: #{error.message}")
+          "receipt_sha256" => nil,
+          "receipt_bytes" => nil,
+          "project_count" => 0,
+          "failed_project_count" => 0,
+          "retryable_project_count" => 0,
+          "daemon_restart_pending" => false,
+          "error" => summary_error(error)
         }
       end
 
       def profile_digest(profile)
-        Digest::SHA256.hexdigest(JSON.generate(
+        Digest::SHA256.hexdigest(
+          Hive::WorkflowPackage::CanonicalJSON.generate(
           "uid" => profile.uid,
           "home" => profile.home,
           "real_home" => profile.real_home,
           "environment" => profile.environment.sort.to_h,
           "supplementary_gids" => profile.supplementary_gids,
           "root_bindings" => profile.root_bindings.map(&:to_h)
-        ))
+          )
+        )
+      end
+
+      def summary_error(error)
+        BoundedDiagnostic.call(
+          "#{error.class}: #{error.message}"
+        ).byteslice(
+          0, SweepProgress::MAX_SUMMARY_ERROR_BYTES
+        ).to_s.scrub("")
       end
 
       def utc(value)
@@ -2395,7 +2462,9 @@ module Hive
       end
 
       class Executor
-        MAX_CAPTURE_BYTES = 1024 * 1024
+        MAX_STDOUT_BYTES =
+          RegisteredProjectMigrationStatus::MAX_BYTES + 1
+        MAX_STDERR_BYTES = MAX_ERROR_BYTES
         DEFAULT_TIMEOUT_SEC = 900
         SAFE_PATHS = [
           File.dirname(RbConfig.ruby),
@@ -2467,7 +2536,7 @@ module Hive
                     "candidate migration failed for uid #{profile.uid} " \
                     "(exit #{status.exitstatus}): #{detail}"
             end
-            validate_payload!(JSON.parse(stdout), profile)
+            validate_wire_payload!(stdout, profile)
           ensure
             CandidateIdentity.verify!(@candidate)
           end
@@ -2570,7 +2639,11 @@ module Hive
         def read_and_wait_bounded(pid, streams, deadline:, waiter:)
           outputs = streams.to_h { |name, _io| [ name, +"" ] }
           captures = streams.to_h { |name, io| [ io, name ] }
-          total = 0
+          sizes = streams.to_h { |name, _io| [ name, 0 ] }
+          limits = {
+            stdout: MAX_STDOUT_BYTES,
+            stderr: MAX_STDERR_BYTES
+          }.freeze
           status = nil
           until status && captures.empty?
             remaining = deadline - @monotonic_clock.call
@@ -2593,13 +2666,15 @@ module Hive
                 end
                 next if chunk == :wait_readable
 
-                total += chunk.bytesize
-                if total > MAX_CAPTURE_BYTES
+                stream = captures.fetch(io)
+                sizes[stream] += chunk.bytesize
+                if sizes.fetch(stream) > limits.fetch(stream)
                   kill_child(pid)
                   raise Hive::ConfigError,
-                        "candidate migration output exceeded the bounded capture"
+                        "candidate migration #{stream} exceeded its " \
+                        "bounded capture"
                 end
-                outputs.fetch(captures.fetch(io)) << chunk
+                outputs.fetch(stream) << chunk
               end
             else
               IO.select(nil, nil, nil, [ remaining, 0.05 ].min)
@@ -2615,7 +2690,26 @@ module Hive
           ]
         end
 
-        def validate_payload!(payload, profile)
+        def validate_wire_payload!(stdout, profile)
+          unless stdout.end_with?("\n")
+            raise Hive::ConfigError,
+                  "candidate migration receipt is not canonical"
+          end
+          body = stdout.byteslice(0, stdout.bytesize - 1)
+          payload = JSON.parse(body)
+          canonical =
+            Hive::WorkflowPackage::CanonicalJSON.generate(payload)
+          unless stdout == "#{canonical}\n"
+            raise Hive::ConfigError,
+                  "candidate migration receipt is not canonical"
+          end
+
+          validate_payload!(
+            payload, profile, canonical_bytes: canonical
+          )
+        end
+
+        def validate_payload!(payload, profile, canonical_bytes: nil)
           user_profile = expected_user_profile(profile)
           validator =
             Hive::RefactorPatrol::RegisteredProjectMigrationStatus.new(
@@ -2629,6 +2723,14 @@ module Hive
           )
             raise Hive::ConfigError,
                   "candidate migration returned an invalid user-profile receipt"
+          end
+          bytes = canonical_bytes ||
+            Hive::WorkflowPackage::CanonicalJSON.generate(payload)
+          if bytes.bytesize >
+             RegisteredProjectMigrationStatus::MAX_BYTES
+            raise Hive::ConfigError,
+                  "candidate migration returned an oversized " \
+                  "user-profile receipt"
           end
 
           payload

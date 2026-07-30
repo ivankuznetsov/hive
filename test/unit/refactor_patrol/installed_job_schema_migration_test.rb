@@ -603,10 +603,12 @@ class HiveRefactorPatrolInstalledJobSchemaMigrationTest < Minitest::Test
 
       assert_equal "complete", payload.fetch("status")
       assert_equal 2, payload.fetch("attempted_users")
-      payload.fetch("profiles").each do |user|
-        assert_equal(
-          %w[migrated migrated],
-          user.fetch("projects").map { |project| project.fetch("status") }
+      payload.fetch("profiles").each do |summary|
+        assert_equal 2, summary.fetch("project_count")
+        assert_equal 0, summary.fetch("failed_project_count")
+        assert_equal 0, summary.fetch("retryable_project_count")
+        assert_empty(
+          summary.keys & %w[home path projects uid username]
         )
       end
       installations.each_value do |installation|

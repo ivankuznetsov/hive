@@ -30,9 +30,12 @@ class InstallScriptTest < Minitest::Test
   def test_installer_temporarily_removes_and_restores_its_managed_hive_wrapper
     script = File.read(INSTALL_SCRIPT)
     removal = script.index('rm -f "$installed_bin"')
-    install = script.index('GEM_HOME="$gem_home" gem install')
+    install = script.index(
+      'GEM_HOME="$gem_home" "$GEM_COMMAND" install'
+    )
 
     refute_nil removal, "a managed wrapper must be removed before RubyGems writes its binstub"
+    refute_nil install, "the managed gem install command must remain present"
     assert_operator removal, :<, install
     assert_includes script, "hive-managed: install-wrapper/v1"
     assert_includes script, "launcher_rollback_armed=1"
@@ -91,7 +94,8 @@ class InstallScriptTest < Minitest::Test
     assert_includes script,
                     "migration_args+=(--all-users --ensure-retry-service)"
     assert_includes script, "--ensure-retry-service"
-    assert_includes script, 'bin_home="${XDG_BIN_HOME:-/usr/local/bin}"'
+    assert_includes script, 'data_base="/usr/local/share"'
+    assert_includes script, 'bin_home="/usr/local/bin"'
     assert_includes script,
                     "shared installation coverage is not complete"
     assert_includes script,

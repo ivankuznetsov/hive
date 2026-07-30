@@ -190,6 +190,29 @@ module Hive
           end
         end
 
+        # Restarts an already-authorized retry-safe local intent. Prepared
+        # intents dispatch once; uncertain intents reconcile first and
+        # redispatch only after exact absence.
+        def recover_intent!(intent, reconcile:, &effect)
+          raise ArgumentError, "an effect block is required" unless effect
+          unless reconcile
+            raise ArgumentError, "a reconciliation block is required"
+          end
+          intent = validate_recovery_intent(intent)
+          return shadow_attempt(intent) if @authority == "shadow"
+
+          if (result = @sender.replay_if_terminal(intent))
+            return result
+          end
+          @sender.prepare(intent)
+
+          with_live_authorization(intent) do
+            @sender.deliver_or_reconcile(
+              intent, reconcile, effect
+            )
+          end
+        end
+
         private
 
         def validate_recovery_intent(value)

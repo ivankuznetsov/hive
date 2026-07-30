@@ -22,22 +22,32 @@ module Hive
       end
 
       def configure_effect_gateway!(capture:, evidence_store:, config_loader:,
-                                    capability_checker:, module_execution: nil)
+                                    capability_checker:, module_execution: nil,
+                                    gateway_factory: nil)
         @effect_capture = capture
         reserve_occurrence!(capture)
-        @effect_evidence_store = evidence_store
-        @state_effect_gateway = Hive::Patrol::EffectGateway.new(
+        @effect_gateway_options = {
           project_root: project_root,
           hive_state_path: hive_state_path,
-          capture: capture,
-          authority: capture.owner,
           evidence_store: evidence_store,
           delivery_store: self,
           config_loader: config_loader,
           capability_checker: capability_checker,
           module_execution: module_execution
-        )
+        }.freeze
+        @effect_gateway_factory = gateway_factory
+        @state_effect_gateway = effect_gateway_for(capture)
         self
+      end
+
+      def configured_effect_gateway!(capture: @effect_capture)
+        unless @state_effect_gateway && capture &&
+               @effect_capture&.occurrence_id == capture.occurrence_id
+          raise Hive::ConfigError,
+                "patrol state effect gateway is unavailable"
+        end
+
+        @state_effect_gateway
       end
 
       def reserve_occurrence!(capture, now: Time.now.utc)
@@ -305,6 +315,7 @@ module Hive
       end
 
       def write_fingerprints(data)
+        configured_effect_gateway!
         effect_write(
           sink: "state", target: "fingerprints", value: data
         ) { raw_write_fingerprints(data) }
@@ -363,27 +374,37 @@ module Hive
       # contract. Gateway admission happens before the fingerprint lock; no
       # gateway-less fallback can regain this write authority.
       def mutate_fingerprints!(
-        gateway:, fingerprint:, idempotency_key:, scope:, set:, deleted:,
-        capability: "filesystem_write"
+        fingerprint:, idempotency_key:, scope:, set:, deleted:,
+        replace: false, capability: "filesystem_write"
       )
-        content_digest = fingerprint_mapping_digest(
-          fingerprint, set: set, deleted: deleted
+        gateway = configured_effect_gateway!
+        operation = fingerprint_operation(
+          fingerprint, set: set, deleted: deleted, replace: replace
+        )
+        content_digest = fingerprint_operation_digest(operation)
+        recovery_scope = scope.merge(
+          "fingerprint_operation" =>
+            Hive::Modules::Migration::PatrolEvidence.canonical(operation)
         )
         result = gateway.perform!(
           sink: "state",
           target: "fingerprints/#{fingerprint}",
-          idempotency_key: idempotency_key,
+          idempotency_key: "#{idempotency_key}:#{content_digest}",
           capability: capability,
-          scope: scope,
+          scope: recovery_scope,
           reconcile: lambda do |_intent|
             reconcile_fingerprint_mapping(
-              fingerprint, set: set, deleted: deleted
+              fingerprint, set: set, deleted: deleted,
+              replace: replace
             )
           end
         ) do
           with_fingerprint_lock do
             data = fingerprints
-            yield data
+            apply_fingerprint_operation!(
+              data, fingerprint, set: set, deleted: deleted,
+              replace: replace
+            )
             raw_write_fingerprints(data)
           end
           { "content_digest" => content_digest }
@@ -391,22 +412,30 @@ module Hive
         result
       end
 
-      def reconcile_fingerprint_mapping(fingerprint, set:, deleted:)
+      def reconcile_fingerprint_mapping(fingerprint, set:, deleted:,
+                                        replace: false)
         entry = fingerprints[fingerprint.to_s]
         return { "status" => "absent", "outcome" => {} } unless
           entry.is_a?(Hash)
 
-        matches = set.all? do |key, value|
-          entry[key.to_s] == value
-        end && Array(deleted).all? do |key|
-          !entry.key?(key.to_s)
-        end
+        expected = set.transform_keys(&:to_s)
+        matches =
+          if replace
+            entry == expected
+          else
+            expected.all? do |key, value|
+              entry[key] == value
+            end && Array(deleted).all? do |key|
+              !entry.key?(key.to_s)
+            end
+          end
         return {
           "status" => "matched",
           "outcome" => {
             "content_digest" =>
               fingerprint_mapping_digest(
-                fingerprint, set: set, deleted: deleted
+                fingerprint, set: set, deleted: deleted,
+                replace: replace
               )
           }
         } if matches
@@ -417,18 +446,159 @@ module Hive
         }
       end
 
+      # Runs before any fingerprint read capable of suppressing a finding.
+      # Every recovery-active predecessor's exact persisted operations are
+      # eligible; competing predecessors for one fingerprint are ambiguous
+      # and block.
+      def recover_pending_fingerprint_effects!
+        configured_effect_gateway!
+        intents = []
+        each_recovery_active_occurrence do |record|
+          capture = Hive::Modules::Migration::PatrolCapture.from_h(
+            record.fetch("provisional_capture")
+          )
+          unless same_effect_project?(capture, @effect_capture)
+            raise Hive::ConfigError,
+                  "patrol fingerprint recovery project is malformed"
+          end
+          record.fetch("effects").each do |intent_id, cell|
+            next if cell["terminal_receipt_id"]
+            next unless %w[prepared dispatch_uncertain].include?(
+              cell["state"]
+            )
+
+            intent = @occurrence_store.effect_intent(
+              capture.occurrence_id, intent_id
+            )
+            next unless intent.sink == "state" &&
+                        intent.target.start_with?("fingerprints/")
+
+            intents << [ intent, capture ]
+          end
+        end
+        duplicate = intents.group_by { |intent, _capture| intent.target }
+                           .find do |_target, members|
+          members.length > 1
+        end
+        if duplicate
+          raise Hive::ConfigError,
+                "multiple nonterminal fingerprint effects share " \
+                "#{duplicate.first.inspect}"
+        end
+
+        intents.sort_by do |intent, _capture|
+          [ intent.target, intent.occurrence_id ]
+        end.map do |intent, capture|
+          operation = parse_fingerprint_operation(intent)
+          fingerprint = operation.fetch("fingerprint")
+          set = operation.fetch("set")
+          deleted = operation.fetch("deleted")
+          replace = operation.fetch("replace")
+          digest = fingerprint_mapping_digest(
+            fingerprint, set: set, deleted: deleted,
+            replace: replace
+          )
+          effect_gateway_for(capture).recover_intent!(
+            intent,
+            reconcile: lambda do |_stored_intent|
+              reconcile_fingerprint_mapping(
+                fingerprint, set: set, deleted: deleted,
+                replace: replace
+              )
+            end
+          ) do
+            with_fingerprint_lock do
+              data = fingerprints
+              apply_fingerprint_operation!(
+                data, fingerprint, set: set, deleted: deleted,
+                replace: replace
+              )
+              raw_write_fingerprints(data)
+            end
+            { "content_digest" => digest }
+          end
+        end
+      rescue KeyError, JSON::ParserError, TypeError
+        raise Hive::ConfigError,
+              "patrol fingerprint recovery operation is malformed"
+      end
+
       private
 
-      def fingerprint_mapping_digest(fingerprint, set:, deleted:)
-        ::Digest::SHA256.hexdigest(
-          Hive::Modules::Migration::PatrolEvidence.canonical(
-            {
-              "deleted" => Array(deleted).map(&:to_s).sort,
-              "fingerprint" => fingerprint.to_s,
-              "set" => set.transform_keys(&:to_s)
-            }
-          )
+      def effect_gateway_for(capture)
+        options = @effect_gateway_options.merge(
+          capture: capture,
+          authority: capture.owner
         )
+        if @effect_gateway_factory
+          @effect_gateway_factory.call(**options)
+        else
+          Hive::Patrol::EffectGateway.new(**options)
+        end
+      end
+
+      def same_effect_project?(left, right)
+        left.module_name == right.module_name &&
+          left.project == right.project
+      end
+
+      def fingerprint_mapping_digest(fingerprint, set:, deleted:,
+                                     replace: false)
+        operation = fingerprint_operation(
+          fingerprint, set: set, deleted: deleted, replace: replace
+        )
+        fingerprint_operation_digest(operation)
+      end
+
+      def fingerprint_operation_digest(operation)
+        ::Digest::SHA256.hexdigest(
+          Hive::Modules::Migration::PatrolEvidence.canonical(operation)
+        )
+      end
+
+      def fingerprint_operation(fingerprint, set:, deleted:, replace:)
+        {
+          "deleted" => Array(deleted).map(&:to_s).uniq.sort,
+          "fingerprint" => fingerprint.to_s,
+          "replace" => replace == true,
+          "set" => effect_object(set)
+        }.freeze
+      end
+
+      def parse_fingerprint_operation(intent)
+        encoded = intent.scope.fetch("fingerprint_operation")
+        operation = JSON.parse(encoded)
+        unless operation.is_a?(Hash) &&
+               operation.keys.sort ==
+                 %w[deleted fingerprint replace set] &&
+               operation["fingerprint"].is_a?(String) &&
+               !operation["fingerprint"].empty? &&
+               operation["set"].is_a?(Hash) &&
+               operation["deleted"].is_a?(Array) &&
+               operation["deleted"].all? { |key| key.is_a?(String) } &&
+               [ true, false ].include?(operation["replace"]) &&
+               intent.target ==
+                 "fingerprints/#{operation.fetch('fingerprint')}"
+          raise Hive::ConfigError,
+                "patrol fingerprint recovery operation is malformed"
+        end
+
+        operation
+      end
+
+      def apply_fingerprint_operation!(data, fingerprint, set:, deleted:,
+                                       replace:)
+        key = fingerprint.to_s
+        if replace
+          data[key] = effect_object(set)
+        else
+          entry = data[key]
+          entry = {} unless entry.is_a?(Hash)
+          set.each { |field, value| entry[field.to_s] = value }
+          Array(deleted).each { |field| entry.delete(field.to_s) }
+          data[key] = entry
+        end
+        data
       end
 
       def effect_write(sink:, target:, value:, capability: "filesystem_write")
@@ -481,6 +651,8 @@ module Hive
           dismissed
         else
           collection, identity = target.split("/", 2)
+          return fingerprints[identity] if
+            collection == "fingerprints" && identity
           return nil unless identity &&
                             %w[features findings patches runs].include?(collection)
 

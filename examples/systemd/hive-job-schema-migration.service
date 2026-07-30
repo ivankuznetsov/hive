@@ -6,7 +6,9 @@ After=local-fs.target
 
 [Service]
 Type=oneshot
-ExecStart=@HIVE_BINARY@ refactor-patrol-migrate-installed --all-users --resume
+ExecStart=@CLEAN_ENV@ -i HOME=/root USER=root LOGNAME=root PATH=@SERVICE_PATH@ LANG=C.UTF-8 GEM_HOME=@GEM_HOME@ GEM_PATH=@GEM_HOME@ HIVE_INVOKED_BIN=@HIVE_BINARY@ HIVE_ROOT_RUNTIME_LAUNCHER=1 HIVE_ROOT_RUNTIME_MANIFEST=@MANIFEST@ @RUBY@ @SCRIPT@ refactor-patrol-migrate-installed --all-users --resume
+TimeoutStartSec=@TIMEOUT_SEC@
+KillMode=control-group
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectKernelLogs=true

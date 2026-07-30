@@ -330,8 +330,6 @@ module Hive
         path = File.join(
           entry.fetch("hive_state_path"), "patrol", "state.json"
         )
-        return {} unless File.exist?(path)
-
         parsed = JSON.parse(File.read(path))
         parsed.is_a?(Hash) ? parsed : {}
       rescue JSON::ParserError, SystemCallError

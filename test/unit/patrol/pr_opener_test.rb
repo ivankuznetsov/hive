@@ -9,6 +9,59 @@ require "hive/task"
 class HivePatrolPrOpenerTest < Minitest::Test
   include HiveTestHelper
 
+  def test_custom_hive_state_path_is_used_for_evidence_and_effect_admission
+    with_tmp_dir do |root|
+      custom_state = File.join(root, "external-state")
+      state = Hive::Patrol::StateStore.new(
+        root, hive_state_path: custom_state
+      )
+      capture = Hive::Modules::Migration::PatrolCapture.build(
+        module_name: "patrol",
+        project: {
+          "project_id" => "project-custom",
+          "name" => "custom",
+          "repository" => "owner/custom"
+        },
+        trigger: { "kind" => "manual", "id" => "custom-state" },
+        reservation: { "kind" => "ordinary", "id" => "custom-state" },
+        owner: "legacy",
+        owner_epoch: 1,
+        selection_input: {
+          "kind" => "operation",
+          "operation" => "custom-state-test"
+        },
+        selection:
+          Hive::Modules::Migration::PatrolDecisionProjection.build(
+            module_name: "patrol", rationale: "due"
+          ),
+        outcome_class: nil,
+        outcome: nil,
+        occurred_at: Time.at(0).utc,
+        recorded_at: Time.at(0).utc
+      )
+      options = nil
+      gateway = Object.new
+      factory = lambda do |**attributes|
+        options = attributes
+        gateway
+      end
+      opener = Hive::Patrol::PrOpener.new(
+        root,
+        cfg: cfg,
+        state: state,
+        capture: capture,
+        effect_gateway_factory: factory
+      )
+
+      assert_same gateway, opener.send(:effect_gateway, capture)
+      assert_equal custom_state, options.fetch(:hive_state_path)
+      evidence = opener.instance_variable_get(:@evidence_store)
+      assert evidence.root.start_with?(
+        File.join(custom_state, "module-runtime")
+      )
+    end
+  end
+
   BASE_SHA = "a" * 40
   HEAD_SHA = "b" * 40
 
@@ -259,13 +312,13 @@ class HivePatrolPrOpenerTest < Minitest::Test
         original_settle.call(intent, **options)
       end
       original_mutate = state.method(:mutate_fingerprints!)
-      state.define_singleton_method(:mutate_fingerprints!) do |**attributes, &mutation|
-        original_mutate.call(**attributes) do |fingerprints|
-          previous = fingerprints.dig("fp1", "state")
-          mutation.call(fingerprints)
-          current = fingerprints.dig("fp1", "state")
-          operations << "mapping:#{current}" if current && current != previous
-        end
+      state.define_singleton_method(:mutate_fingerprints!) do |**attributes|
+        previous = fingerprints.dig("fp1", "state")
+        result = original_mutate.call(**attributes)
+        current = fingerprints.dig("fp1", "state")
+        operations << "mapping:#{current}" if
+          current && current != previous
+        result
       end
 
       handoff = RecordingReviewHandoff.new
@@ -289,14 +342,14 @@ class HivePatrolPrOpenerTest < Minitest::Test
           :create_pr,
           "effect:pull_request:committed",
           "effect:state:intent",
-          "mapping:reconciliation_pending",
           "effect:state:committed",
+          "mapping:reconciliation_pending",
           "effect:review_handoff:intent",
           :review_handoff,
           "effect:review_handoff:committed",
           "effect:state:intent",
-          "mapping:open",
-          "effect:state:committed"
+          "effect:state:committed",
+          "mapping:open"
         ],
         operations
       )
@@ -834,7 +887,7 @@ class HivePatrolPrOpenerTest < Minitest::Test
     with_tmp_dir do |dir|
       state = Hive::Patrol::StateStore.new(dir)
       validated_patch = patch(worktree_path: dir)
-      state.write_fingerprints(
+      state.send(:raw_write_fingerprints,
         "fp1" => {
           "state" => "reconciliation_pending",
           "branch" => validated_patch.branch,
@@ -892,7 +945,7 @@ class HivePatrolPrOpenerTest < Minitest::Test
           "publication_receipt" => receipt
         }
         mutate.call(entry, receipt)
-        state.write_fingerprints("fp1" => entry)
+        state.send(:raw_write_fingerprints, "fp1" => entry)
 
         error = assert_raises(Hive::GhError, message) do
           opener.send(:reconciliation_pending_entry, finding, validated_patch)
@@ -907,7 +960,7 @@ class HivePatrolPrOpenerTest < Minitest::Test
       state = Hive::Patrol::StateStore.new(dir)
       validated_patch = patch(worktree_path: dir)
       opener = Hive::Patrol::PrOpener.new(dir, cfg: cfg, state: state, gh: FakeGh.new)
-      state.write_fingerprints(
+      state.send(:raw_write_fingerprints,
         "fp1" => {
           "state" => "reconciliation_pending",
           "branch" => validated_patch.branch,

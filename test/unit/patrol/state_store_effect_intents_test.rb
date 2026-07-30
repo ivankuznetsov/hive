@@ -269,16 +269,17 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
           "owner changed", nil
         )
       end
+      store.instance_variable_set(:@state_effect_gateway, denied)
+      store.instance_variable_set(:@effect_capture, capture)
 
       error = assert_raises(Hive::Patrol::EffectGateway::Denied) do
         store.mutate_fingerprints!(
-          gateway: denied,
           fingerprint: "fp-1",
           idempotency_key: "fp-1:publish",
           scope: { "fingerprint" => "fp-1" },
           set: { "state" => "open" },
           deleted: []
-        ) { flunk("mutation must not run") }
+        )
       end
 
       assert_match(/owner changed/, error.message)
@@ -297,21 +298,20 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
         captured = attributes.fetch(:reconcile)
         effect.call
       end
+      store.instance_variable_set(:@state_effect_gateway, gateway)
+      store.instance_variable_set(:@effect_capture, capture)
       expected = {
         "state" => "open",
         "branch" => "patrol/fp-1"
       }
 
       outcome = store.mutate_fingerprints!(
-        gateway: gateway,
         fingerprint: "fp-1",
         idempotency_key: "fp-1:publish",
         scope: { "fingerprint" => "fp-1" },
         set: expected,
         deleted: [ "publication_receipt" ]
-      ) do |fingerprints|
-        fingerprints["fp-1"] = expected.dup
-      end
+      )
 
       assert_match(/\A[0-9a-f]{64}\z/,
                    outcome.fetch("content_digest"))
@@ -325,6 +325,122 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
         store.send(:raw_write_fingerprints, rows)
       end
       assert_equal "ambiguous", captured.call(nil).fetch("status")
+    end
+  end
+
+  def test_uncertain_fingerprint_effect_is_recovered_before_later_reads
+    with_tmp_dir do |root|
+      evidence_root = File.join(root, "evidence")
+      store = configured_store(root, evidence_root)
+      original_settle = store.method(:settle_effect!)
+      crashed = false
+      store.define_singleton_method(:settle_effect!) do |intent, **options|
+        unless crashed
+          crashed = true
+          raise IOError, "crash after fingerprint write"
+        end
+        original_settle.call(intent, **options)
+      end
+
+      assert_raises(IOError) do
+        store.mutate_fingerprints!(
+          fingerprint: "fp-written",
+          idempotency_key: "fp-written:open",
+          scope: { "fingerprint" => "fp-written" },
+          set: { "state" => "open" },
+          deleted: [],
+          replace: true
+        )
+      end
+      assert_equal "open",
+                   store.fingerprints.dig("fp-written", "state")
+
+      reloaded = configured_store(root, evidence_root)
+      recovered = reloaded.recover_pending_fingerprint_effects!
+
+      assert_equal 1, recovered.length
+      assert_equal "reconciled",
+                   reloaded.occurrence(capture.occurrence_id)
+                     .fetch("effects").values.first.fetch("state")
+    end
+  end
+
+  def test_later_occurrence_recovers_a_predecessor_before_fingerprint_reads
+    with_tmp_dir do |root|
+      evidence_root = File.join(root, "evidence")
+      predecessor = capture
+      store = configured_store(
+        root, evidence_root, capture_value: predecessor
+      )
+      original_settle = store.method(:settle_effect!)
+      crashed = false
+      store.define_singleton_method(:settle_effect!) do |intent, **options|
+        unless crashed
+          crashed = true
+          raise IOError, "crash after predecessor fingerprint write"
+        end
+        original_settle.call(intent, **options)
+      end
+      assert_raises(IOError) do
+        store.mutate_fingerprints!(
+          fingerprint: "fp-predecessor",
+          idempotency_key: "fp-predecessor:open",
+          scope: { "fingerprint" => "fp-predecessor" },
+          set: { "state" => "open" },
+          deleted: [],
+          replace: true
+        )
+      end
+
+      successor = capture(identity: "manual-2", at: NOW + 60)
+      reloaded = configured_store(
+        root, evidence_root, capture_value: successor
+      )
+      recovered = reloaded.recover_pending_fingerprint_effects!
+
+      assert_equal 1, recovered.length
+      assert_equal "reconciled",
+                   reloaded.occurrence(predecessor.occurrence_id)
+                     .fetch("effects").values.first.fetch("state")
+      assert_empty reloaded.occurrence(successor.occurrence_id)
+                           .fetch("effects")
+    end
+  end
+
+  def test_absent_uncertain_fingerprint_effect_is_safely_redispatched
+    with_tmp_dir do |root|
+      evidence_root = File.join(root, "evidence")
+      store = configured_store(root, evidence_root)
+      original_write = store.method(:raw_write_fingerprints)
+      crashed = false
+      store.define_singleton_method(:raw_write_fingerprints) do |data|
+        unless crashed
+          crashed = true
+          raise "crash before write"
+        end
+        original_write.call(data)
+      end
+      assert_raises(RuntimeError) do
+        store.mutate_fingerprints!(
+          fingerprint: "fp-absent",
+          idempotency_key: "fp-absent:open",
+          scope: { "fingerprint" => "fp-absent" },
+          set: { "state" => "open" },
+          deleted: [],
+          replace: true
+        )
+      end
+      assert_nil store.fingerprints["fp-absent"]
+
+      reloaded = configured_store(root, evidence_root)
+      recovered = reloaded.recover_pending_fingerprint_effects!
+
+      assert_equal 1, recovered.length
+      assert_equal "open",
+                   reloaded.fingerprints.dig("fp-absent", "state")
+      assert_equal "committed",
+                   reloaded.occurrence(capture.occurrence_id)
+                     .fetch("effects").values.first.fetch("state")
     end
   end
 
@@ -436,15 +552,16 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
       gateway.define_singleton_method(:perform!) do |**_attributes, &effect|
         effect.call
       end
+      store.instance_variable_set(:@state_effect_gateway, gateway)
+      store.instance_variable_set(:@effect_capture, capture)
       lock_error = assert_raises(Hive::ConfigError) do
         store.mutate_fingerprints!(
-          gateway: gateway,
           fingerprint: "fingerprint-1",
           idempotency_key: "mapping-1",
           scope: {},
           set: { "state" => "open" },
           deleted: []
-        ) { |_data| }
+        )
       end
 
       assert_equal "patrol effect recovery state is malformed", non_object.message
@@ -484,6 +601,20 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
   end
 
   private
+
+  def configured_store(root, evidence_root, capture_value: capture)
+    store = Hive::Patrol::StateStore.new(root)
+    store.ensure!
+    store.configure_effect_gateway!(
+      capture: capture_value,
+      evidence_store:
+        Hive::Modules::Migration::EvidenceStore.new(root: evidence_root),
+      config_loader:
+        ->(_path) { { "patrol" => { "enabled" => true } } },
+      capability_checker: ->(**) { true }
+    )
+    store
+  end
 
   def outbox_entry(kind, bytes)
     {
@@ -528,7 +659,7 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
     )
   end
 
-  def capture
+  def capture(identity: "manual-1", at: NOW)
     Hive::Modules::Migration::PatrolCapture.build(
       module_name: "patrol",
       project: {
@@ -536,8 +667,8 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
         "name" => "demo",
         "repository" => "owner/demo"
       },
-      trigger: { "kind" => "manual", "id" => "manual-1" },
-      reservation: { "kind" => "ordinary", "id" => "reservation-1" },
+      trigger: { "kind" => "manual", "id" => identity },
+      reservation: { "kind" => "ordinary", "id" => identity },
       owner: "legacy",
       owner_epoch: 1,
       selection_input: {
@@ -551,8 +682,8 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
         ),
       outcome_class: nil,
       outcome: nil,
-      occurred_at: NOW,
-      recorded_at: NOW
+      occurred_at: at,
+      recorded_at: at
     )
   end
 end

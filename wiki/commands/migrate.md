@@ -61,21 +61,25 @@ in each warned project to persist the correction.
 
 Architecture Patrol's installation-managed JobStore cutover is different: it
 is an automatic shipped installation migration over untracked runtime state. A
-candidate generation must sweep every known local Hive user's complete current
+candidate generation must sweep every eligible OS user, every Hive profile
+bound to that identity, and every project in each profile's complete current
 registry before an install-wide completion claim. The privileged coordinator
-enumerates fixed registry anchors for NSS users plus exact custom roots in the
-root-owned `/var/lib/hive/installed-users.v1.json` inventory. It binds each NSS
-identity and canonical home, drops supplementary groups/gid/uid, scrubs the
-environment, then invokes the exact candidate as that user. Root never parses a
-non-root user's registry or mutates that user's project before the identity
-drop; a root account's own profile necessarily remains uid 0 inside its child.
+enumerates fixed registry anchors for all NSS users plus every exact custom root
+in the root-owned `/var/lib/hive/installed-users.v1.json` inventory. It binds
+each NSS identity and canonical home, drops supplementary groups/gid/uid,
+scrubs the environment, then invokes the exact candidate as that user. Root
+never parses a non-root user's registry or mutates that user's project before
+the identity drop; a root account's own profile necessarily remains uid 0
+inside its child.
 
-Each user-profile sweep attempts every registry row without filtering on the project
-directory's Unix owner, including shared projects created or owned by another
-user and relative or absolute custom `hive_state_path` values. The dropped
-user process cannot exceed that user's operating-system permissions; an inaccessible
-project becomes a persisted failed/retryable row instead of being silently
-skipped. One failed user cannot block later users. AUR runs the all-user
+Each user-profile child attempts every registry row before that profile can be
+complete, without filtering on the project directory's Unix owner. That
+includes shared projects created or owned by another user and relative or
+absolute custom `hive_state_path` values. The dropped user process cannot
+exceed that user's operating-system permissions; an inaccessible project
+becomes a persisted failed/retryable row instead of being silently skipped.
+One failed project, profile, or user cannot block later projects or users. AUR
+runs the all-user
 coordinator during package activation and enables
 `hive-job-schema-migration.timer` for hourly `--resume` retry, so completed
 profiles are not force-swept every hour. Root `install.sh` installs the

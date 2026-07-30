@@ -54,12 +54,14 @@ class PackagingRenderTest < Minitest::Test
     out = Hive::PackagingRender.render(
       template, { "version" => "0.1.1", "sha256_gem" => SAMPLE_SHA }, PKGBUILD_TEMPLATE
     )
-    export_line = 'export HIVE_INVOKED_BIN="\${HIVE_INVOKED_BIN:-\$0}"'
-    exec_line = 'exec "/usr/share/hive/gems/bin/hive" "\$@"'
+    export_line = 'export HIVE_INVOKED_BIN="/usr/bin/hive"'
+    exec_line =
+      'exec /usr/bin/ruby "/usr/share/hive/gems/bin/hive" "\$@"'
 
     assert_includes out, export_line
     assert_includes out, exec_line
     assert_operator out.index(export_line), :<, out.index(exec_line)
+    refute_includes out, "HIVE_INVOKED_BIN:-"
   end
 
   def test_aur_hook_runs_all_users_and_enables_hourly_retry
@@ -71,7 +73,8 @@ class PackagingRenderTest < Minitest::Test
                     "systemctl enable --now hive-job-schema-migration.timer"
     assert_includes File.read(AUR_MIGRATION_SERVICE),
                     "refactor-patrol-migrate-installed --all-users --resume"
-    assert_includes hook, "First use is a fallback"
+    assert_includes hook,
+                    "bounded hourly sweep resumes any deferred profile"
     refute_match(%r{\bfind\s+/home\b}, hook)
   end
 

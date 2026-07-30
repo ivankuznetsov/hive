@@ -37,11 +37,15 @@ module Hive
         end
         payload =
           if @all_users
+            runtime = nil
             candidate = nil
             if @all_users_migration.nil? || @ensure_retry_service
-              candidate = @all_users_authority.authorize!
+              runtime = @all_users_authority.authorize!
+              candidate =
+                runtime.respond_to?(:candidate) ?
+                  runtime.candidate : runtime
             end
-            @retry_service_installer.ensure!(candidate: candidate) if
+            @retry_service_installer.ensure!(runtime: runtime) if
               @ensure_retry_service
             migration = @all_users_migration ||
               Hive::RefactorPatrol::InstalledUsersJobSchemaMigration.new(

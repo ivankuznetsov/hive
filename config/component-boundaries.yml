@@ -163,9 +163,8 @@ components:
         reason: "Ordinary Patrol StateStore is the sole product facade over the shared occurrence journal."
       - constant: Hive::Patrol::EffectGateway
         files:
-          - lib/hive/patrol/pr_opener.rb
           - lib/hive/patrol/state_store.rb
-        reason: "Ordinary Patrol composes its product gateway only at the state and pull-request ports."
+        reason: "Ordinary Patrol StateStore is the sole composition root for its product gateway."
       - constant: Hive::RefactorPatrol::ActionTransitions
         files:
           - lib/hive/refactor_patrol/action_runner.rb

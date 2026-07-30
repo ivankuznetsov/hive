@@ -104,6 +104,7 @@ class RefactorPatrolRegisteredProjectMigrationCoordinatorTest <
 
     results = Coordinator.new(
       registry: -> { entries(bad_path, good_path) },
+      project_migrator: method(:migrate_project),
       status_store: nil
     ).run
 
@@ -528,7 +529,7 @@ class RefactorPatrolRegisteredProjectMigrationCoordinatorTest <
     assert_equal 2, probes
   end
 
-  def test_empty_interrupted_native_target_is_repaired_and_admitted
+  def test_empty_interrupted_native_target_is_held_for_explicit_migration
     path = project_path("interrupted-native")
     target = Hive::RefactorPatrol::JobStore.root_for(path)
     FileUtils.mkdir_p(target)
@@ -539,16 +540,14 @@ class RefactorPatrolRegisteredProjectMigrationCoordinatorTest <
     )
     result = coordinator.run.fetch(0)
 
-    assert_equal :current, result.status
+    assert_equal :migration_required, result.status
     assert_nil result.snapshot_id
-    assert_equal [ "interrupted-native" ],
-                 coordinator.eligible_projects.map {
-                   |entry| entry.fetch("name")
-                 }
-    legacy = Hive::RefactorPatrol::JobStore.legacy_root_for(path)
-    tombstone = JSON.parse(File.binread(File.join(legacy, "jobs")))
-    assert_equal "native", tombstone.fetch("origin")
-    assert_equal "complete", tombstone.fetch("status")
+    assert_empty coordinator.eligible_projects
+    refute_path_exists(
+      File.join(
+        Hive::RefactorPatrol::JobStore.legacy_root_for(path), "jobs"
+      )
+    )
   end
 
   def test_registry_change_bypasses_the_hourly_retry_delay
@@ -703,7 +702,7 @@ class RefactorPatrolRegisteredProjectMigrationCoordinatorTest <
     ) do
       refute store.send(:absolute_path?, "/otherwise-valid")
     end
-    refute store.send(:valid_timestamp?, "not-a-time")
+    refute klass.valid_timestamp?("not-a-time")
   end
 
   def test_coordinator_acknowledges_restart_and_covers_failure_remediation
@@ -748,6 +747,7 @@ class RefactorPatrolRegisteredProjectMigrationCoordinatorTest <
     path = project_path("invalid-ownership")
     coordinator = Coordinator.new(
       registry: -> { entries(path) },
+      project_migrator: ->(*, **) { flunk "invalid ownership converted" },
       ownership_loader: ->(_identity) {
         { "owner" => "unknown", "epoch" => 0 }
       },
@@ -867,5 +867,14 @@ class RefactorPatrolRegisteredProjectMigrationCoordinatorTest <
     )
     FileUtils.mkdir_p(File.dirname(path))
     File.binwrite(path, "#{JSON.pretty_generate(job)}\n")
+  end
+
+  def migrate_project(identity, ownership:)
+    Hive::RefactorPatrol::JobStore.migrate_schema!(
+      identity.fetch(:real_path),
+      hive_state_path: identity.fetch(:hive_state_path),
+      project: identity.fetch(:entry),
+      ownership: ownership
+    )
   end
 end

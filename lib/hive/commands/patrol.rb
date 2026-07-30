@@ -48,7 +48,11 @@ module Hive
         @reviewer_factory = reviewer_factory
         @fixer_factory = fixer_factory
         @pr_opener_factory = pr_opener_factory
-        @dismissals_factory = dismissals_factory || ->(root, state) { Hive::Patrol::Dismissals.new(root, state: state) }
+        @dismissals_factory = dismissals_factory || lambda do |root, state|
+          Hive::Patrol::Dismissals.new(
+            root, state: state, persist: !@dry_run
+          )
+        end
         @project_entry = project_entry
         @capability_context = capability_context
         @module_execution = module_execution
@@ -103,6 +107,7 @@ module Hive
             capability_checker: method(:effect_capability_allowed?),
             module_execution: @module_execution
           )
+          state.recover_pending_fingerprint_effects!
         end
         token_budget = Hive::Patrol::TokenBudget.new(project_root, cfg: cfg)
         dismissed = @dismissals_factory.call(project_root, state).reconcile

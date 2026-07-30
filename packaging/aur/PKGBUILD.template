@@ -69,13 +69,23 @@ package() {
   # user's default GEM_PATH includes the vendored gem home.
   install -dm755 "${pkgdir}/usr/bin"
   cat > "${pkgdir}/usr/bin/hive" <<WRAPPER
-#!/usr/bin/env bash
+#!/bin/bash
+unset RUBYOPT RUBYLIB RUBYGEMS_GEMDEPS BUNDLE_PATH BUNDLE_GEMFILE BUNDLE_BIN_PATH
 export GEM_HOME="/usr/share/hive/gems"
-export GEM_PATH="\${GEM_HOME}\${GEM_PATH:+:\$GEM_PATH}"
-export HIVE_INVOKED_BIN="\${HIVE_INVOKED_BIN:-\$0}"
-exec "/usr/share/hive/gems/bin/hive" "\$@"
+export GEM_PATH="/usr/share/hive/gems"
+export HIVE_INVOKED_BIN="/usr/bin/hive"
+export HIVE_ROOT_RUNTIME_LAUNCHER=1
+export HIVE_ROOT_RUNTIME_MANIFEST="/usr/share/hive/root-runtime.json"
+if [[ "\$EUID" -eq 0 ]]; then
+  exec /usr/bin/env -i HOME=/root USER=root LOGNAME=root PATH=/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/sbin:/usr/local/bin LANG=C.UTF-8 GEM_HOME="/usr/share/hive/gems" GEM_PATH="/usr/share/hive/gems" HIVE_INVOKED_BIN="/usr/bin/hive" HIVE_ROOT_RUNTIME_LAUNCHER=1 HIVE_ROOT_RUNTIME_MANIFEST="/usr/share/hive/root-runtime.json" /usr/bin/ruby "/usr/share/hive/gems/bin/hive" "\$@"
+fi
+exec /usr/bin/ruby "/usr/share/hive/gems/bin/hive" "\$@"
 WRAPPER
   chmod 755 "${pkgdir}/usr/bin/hive"
+  printf '%s' \
+    '{"gem_home":"/usr/share/hive/gems","launcher":"/usr/bin/hive","ruby":"/usr/bin/ruby","schema":"hive-root-runtime","schema_version":1,"script":"/usr/share/hive/gems/bin/hive"}' \
+    > "${pkgdir}/usr/share/hive/root-runtime.json"
+  chmod 644 "${pkgdir}/usr/share/hive/root-runtime.json"
 
   # `hv` is a symlink to our hive wrapper, NOT the gem's bin/hv: bin/hv is
   # a bash script, but `gem install` generates a Ruby binstub for every

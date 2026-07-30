@@ -58,6 +58,33 @@ module Hive
         end
       end
 
+      def self.valid_projects?(projects)
+        projects.is_a?(Array) && projects.all? do |project|
+          project.is_a?(Hash) &&
+            project.keys.sort == PROJECT_KEYS &&
+            %w[
+              project project_id path real_path hive_state_path remediation
+              error
+            ].all? { |key| string_or_nil?(project[key]) } &&
+            STATUSES.include?(project["status"]) &&
+            [ nil, 2, 3 ].include?(project["current_schema_version"]) &&
+            project["target_schema_version"] == 3 &&
+            snapshot_id?(project["snapshot_id"]) &&
+            [ true, false ].include?(project["retryable"]) &&
+            (
+              project["next_retry_at"].nil? ||
+              valid_timestamp?(project["next_retry_at"])
+            )
+        end
+      end
+
+      def self.valid_timestamp?(value)
+        Time.iso8601(value.to_s)
+        true
+      rescue ArgumentError, TypeError
+        false
+      end
+
       def initialize(
         root: File.join(
           Hive::Paths.state_home, "schema-migrations"
@@ -180,11 +207,11 @@ module Hive
           data["hive_version"] == hive_version &&
           data["target_schema_version"] == 3 &&
           data["registry_digest"].to_s.match?(/\A[0-9a-f]{64}\z/) &&
-          valid_timestamp?(data["updated_at"]) &&
+          self.class.valid_timestamp?(data["updated_at"]) &&
           [ true, false ].include?(data["daemon_restart_pending"]) &&
           data["user_profile"] == user_profile &&
           valid_user_profile?(data["user_profile"]) &&
-          valid_projects?(data["projects"])
+          self.class.valid_projects?(data["projects"])
       end
 
       private
@@ -244,41 +271,16 @@ module Hive
         false
       end
 
-      def valid_projects?(projects)
-        projects.is_a?(Array) && projects.all? do |project|
-          project.is_a?(Hash) &&
-            project.keys.sort == PROJECT_KEYS &&
-            %w[
-              project project_id path real_path hive_state_path remediation
-              error
-            ].all? { |key| string_or_nil?(project[key]) } &&
-            STATUSES.include?(project["status"]) &&
-            [ nil, 2, 3 ].include?(project["current_schema_version"]) &&
-            project["target_schema_version"] == 3 &&
-            snapshot_id?(project["snapshot_id"]) &&
-            [ true, false ].include?(project["retryable"]) &&
-            (
-              project["next_retry_at"].nil? ||
-              valid_timestamp?(project["next_retry_at"])
-            )
-        end
-      end
-
-      def string_or_nil?(value)
+      def self.string_or_nil?(value)
         value.nil? || value.is_a?(String)
       end
+      private_class_method :string_or_nil?
 
-      def snapshot_id?(value)
+      def self.snapshot_id?(value)
         value.nil? ||
           value.to_s.match?(/\Asnapshot-[0-9a-f]{64}\z/)
       end
-
-      def valid_timestamp?(value)
-        Time.iso8601(value.to_s)
-        true
-      rescue ArgumentError, TypeError
-        false
-      end
+      private_class_method :snapshot_id?
 
       def timestamp(value)
         time = value.is_a?(Time) ? value : Time.iso8601(value.to_s)

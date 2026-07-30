@@ -8,6 +8,10 @@ VERSION="${HIVE_VERSION:-}"
 PREFIX="${HIVE_PREFIX:-}"
 INSTALL_QMD="${HIVE_INSTALL_QMD:-1}"
 QMD_NPM_PACKAGE="${HIVE_QMD_NPM_PACKAGE:-@tobilu/qmd}"
+ROOT_INSTALL=0
+PREFIX_OPTION_SEEN=0
+RUBY_COMMAND="ruby"
+GEM_COMMAND="gem"
 
 usage() {
   cat <<USAGE
@@ -55,6 +59,33 @@ die() {
   exit 1
 }
 
+root_install_guard() {
+  local name
+  [[ "$EUID" -eq 0 ]] || return 0
+
+  ROOT_INSTALL=1
+  if [[ "$PREFIX_OPTION_SEEN" -eq 1 || -n "$PREFIX" ]]; then
+    die "root installation uses the fixed /usr/local Hive layout; --prefix and HIVE_PREFIX are not accepted"
+  fi
+  for name in \
+    HIVE_HOME XDG_BIN_HOME XDG_CACHE_HOME XDG_CONFIG_HOME XDG_DATA_HOME \
+    XDG_STATE_HOME RUBYOPT RUBYLIB GEM_HOME GEM_PATH RUBYGEMS_GEMDEPS \
+    BUNDLE_PATH BUNDLE_GEMFILE BUNDLE_BIN_PATH BUNDLE_USER_HOME \
+    RBENV_ROOT RBENV_VERSION MISE_DATA_DIR MISE_CONFIG_DIR ASDF_DIR \
+    LD_PRELOAD LD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH \
+    BASH_ENV ENV CDPATH TMPDIR HIVE_REPO_OWNER HIVE_REPO_NAME \
+    HIVE_QMD_NPM_PACKAGE; do
+    if [[ -v "$name" ]]; then
+      die "root installation refuses inherited ${name}; use the fixed system channel"
+    fi
+  done
+  PATH="/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/sbin:/usr/local/bin"
+  export PATH
+  INSTALL_QMD=0
+  RUBY_COMMAND="/usr/bin/ruby"
+  GEM_COMMAND="/usr/bin/gem"
+}
+
 # Validate caller-controlled env vars so we never interpolate
 # attacker-shaped values into curl URLs.
 validate_inputs() {
@@ -75,6 +106,7 @@ while [[ $# -gt 0 ]]; do
       DRY_RUN=1
       ;;
     --prefix=*)
+      PREFIX_OPTION_SEEN=1
       PREFIX="${1#--prefix=}"
       ;;
     --version=*)
@@ -91,6 +123,7 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
+root_install_guard
 validate_inputs
 
 # musl Linux and NixOS rejected at this layer because precompiled
@@ -217,8 +250,8 @@ installer_preflight() {
 # argument-shape lint and CI runners often pin older system Rubies.
 ruby_preflight() {
   local dep missing=0
-  for dep in ruby gem; do
-    if ! command -v "$dep" >/dev/null 2>&1; then
+  for dep in "$RUBY_COMMAND" "$GEM_COMMAND"; do
+    if [[ ! -x "$dep" ]] && ! command -v "$dep" >/dev/null 2>&1; then
       warn "missing installer prerequisite '${dep}' (install Ruby 3.4 with rbenv / mise / asdf, or your OS package manager)"
       missing=1
     fi
@@ -226,9 +259,56 @@ ruby_preflight() {
   if [[ "$missing" -ne 0 ]]; then
     die "install aborted: Ruby 3.4 is required — fix the warnings above and re-run"
   fi
-  if ! ruby -e 'exit(RUBY_VERSION.to_f >= 3.4)' 2>/dev/null; then
-    die "Ruby 3.4+ required; found $(ruby -e 'print RUBY_VERSION' 2>/dev/null || echo unknown)"
+  if ! "$RUBY_COMMAND" -e 'exit(RUBY_VERSION.to_f >= 3.4)' 2>/dev/null; then
+    die "Ruby 3.4+ required; found $("$RUBY_COMMAND" -e 'print RUBY_VERSION' 2>/dev/null || echo unknown)"
   fi
+}
+
+root_owned_immutable_path() {
+  local path="$1" canonical owner mode numeric_mode
+  [[ -e "$path" && ! -L "$path" ]] ||
+    die "root system channel requires a non-symlink path at ${path}"
+  canonical="$(readlink -f "$path")"
+  [[ "$canonical" == "$path" ]] ||
+    die "root system channel refuses redirected path ${path}"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    owner="$(stat -f '%u' "$path")"
+    mode="$(stat -f '%Lp' "$path")"
+  else
+    owner="$(stat -c '%u' "$path")"
+    mode="$(stat -c '%a' "$path")"
+  fi
+  numeric_mode=$((8#$mode))
+  [[ "$owner" -eq 0 && $((numeric_mode & 8#022)) -eq 0 ]] ||
+    die "root system channel path is not root-owned and immutable: ${path}"
+}
+
+root_system_preflight() {
+  [[ "$ROOT_INSTALL" -eq 1 ]] || return 0
+  root_owned_immutable_path "/usr/local"
+  [[ ! -e /usr/local/share ]] ||
+    root_owned_immutable_path "/usr/local/share"
+  root_owned_immutable_path "/usr/local/bin"
+  if [[ "$DRY_RUN" -eq 0 ]]; then
+    root_owned_immutable_path "$RUBY_COMMAND"
+    root_owned_immutable_path "$GEM_COMMAND"
+    ruby_preflight
+  fi
+}
+
+root_installer_tool_preflight() {
+  local tool resolved
+  [[ "$ROOT_INSTALL" -eq 1 && "$DRY_RUN" -eq 0 ]] || return 0
+  for tool in curl jq cosign; do
+    resolved="$(command -v "$tool" 2>/dev/null || true)"
+    [[ -n "$resolved" ]] ||
+      die "root system channel is missing trusted installer tool ${tool}"
+    root_owned_immutable_path "$resolved"
+  done
+  resolved="$(command -v sha256sum 2>/dev/null || command -v shasum 2>/dev/null || true)"
+  [[ -n "$resolved" ]] ||
+    die "root system channel is missing a trusted checksum tool"
+  root_owned_immutable_path "$resolved"
 }
 
 # Warn-only check for runtime tools the installed CLI uses at run time
@@ -409,16 +489,18 @@ install_qmd() {
   log "qmd: installed ${qmd_version:-${QMD_NPM_PACKAGE}}"
 }
 
+root_system_preflight
 platform="$(detect_platform)"
 # Hard-fail BEFORE any network call when the installer itself is
 # missing required tools.
 installer_preflight
+root_installer_tool_preflight
 version="${VERSION:-$(latest_version)}"
 [[ -n "$version" ]] || die "could not resolve a hive release version"
 
-if [[ "$(id -u)" -eq 0 && -z "$PREFIX" ]]; then
-  data_base="${XDG_DATA_HOME:-/usr/local/share}"
-  bin_home="${XDG_BIN_HOME:-/usr/local/bin}"
+if [[ "$ROOT_INSTALL" -eq 1 ]]; then
+  data_base="/usr/local/share"
+  bin_home="/usr/local/bin"
 else
   data_base="${PREFIX:-${XDG_DATA_HOME:-${HOME}/.local/share}}"
   bin_home="${XDG_BIN_HOME:-${HOME}/.local/bin}"
@@ -471,10 +553,16 @@ fi
 
 # Probe Ruby/gem now that we know this is not a dry-run; the gem
 # install path requires Ruby 3.4 on PATH.
-ruby_preflight
+if [[ "$ROOT_INSTALL" -eq 0 ]]; then
+  ruby_preflight
+fi
 command -v cosign >/dev/null 2>&1 || die "missing installer prerequisite 'cosign'"
 
-tmpdir="$(mktemp -d)"
+if [[ "$ROOT_INSTALL" -eq 1 ]]; then
+  tmpdir="$(mktemp -d /var/tmp/hive-install.XXXXXXXX)"
+else
+  tmpdir="$(mktemp -d)"
+fi
 launcher_rollback_armed=0
 launcher_wrapper_had_original=0
 launcher_hv_had_original=0
@@ -576,7 +664,7 @@ fi
 # deps (bubbletea, lipgloss, thor, telegram-bot-ruby) are pulled from
 # rubygems.org with platform-correct precompiled binaries. --no-document
 # skips rdoc/ri generation (saves ~30s on first install).
-if ! GEM_HOME="$gem_home" gem install \
+if ! GEM_HOME="$gem_home" "$GEM_COMMAND" install \
   "${tmpdir}/${gem_file}" \
   --install-dir "$gem_home" \
   --bindir "${gem_home}/bin" \
@@ -603,6 +691,23 @@ staged_wrapper="${gem_home}/bin/.hive-wrapper.$$"
 staged_hv="${gem_home}/bin/.hv-wrapper.$$"
 staged_shim="${gem_home}/shims/.hive-shim.$$"
 mv "${gem_home}/bin/hive" "$staged_shim"
+root_runtime_manifest="${data_home}/root-runtime.json"
+if [[ "$ROOT_INSTALL" -eq 1 ]]; then
+cat > "$staged_wrapper" <<WRAPPER
+#!/bin/bash
+# hive-managed: install-wrapper/v1
+unset RUBYOPT RUBYLIB RUBYGEMS_GEMDEPS BUNDLE_PATH BUNDLE_GEMFILE BUNDLE_BIN_PATH
+export GEM_HOME="${gem_home}"
+export GEM_PATH="${gem_home}"
+export HIVE_INVOKED_BIN="${installed_bin}"
+export HIVE_ROOT_RUNTIME_LAUNCHER=1
+export HIVE_ROOT_RUNTIME_MANIFEST="${root_runtime_manifest}"
+if [[ "\$EUID" -eq 0 ]]; then
+  exec /usr/bin/env -i HOME=/root USER=root LOGNAME=root PATH=/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/sbin:/usr/local/bin LANG=C.UTF-8 GEM_HOME="${gem_home}" GEM_PATH="${gem_home}" HIVE_INVOKED_BIN="${installed_bin}" HIVE_ROOT_RUNTIME_LAUNCHER=1 HIVE_ROOT_RUNTIME_MANIFEST="${root_runtime_manifest}" "${RUBY_COMMAND}" "${installed_shim}" "\$@"
+fi
+exec "${RUBY_COMMAND}" "${installed_shim}" "\$@"
+WRAPPER
+else
 cat > "$staged_wrapper" <<WRAPPER
 #!/usr/bin/env bash
 # hive-managed: install-wrapper/v1
@@ -611,6 +716,7 @@ export GEM_PATH="\${GEM_HOME}\${GEM_PATH:+:\$GEM_PATH}"
 export HIVE_INVOKED_BIN="\${HIVE_INVOKED_BIN:-\$0}"
 exec "${gem_home}/shims/hive" "\$@"
 WRAPPER
+fi
 cat > "$staged_hv" <<WRAPPER
 #!/usr/bin/env bash
 export GEM_HOME="${gem_home}"
@@ -638,6 +744,13 @@ grep -Fq "hive-managed: install-wrapper/v1" "$installed_bin"
 if [[ "$(id -u)" -eq 0 ]]; then
   chmod -R go-w,a+rX "$gem_home"
   chmod 0755 "$installed_shim" "$installed_bin" "$hv_installed_bin"
+fi
+if [[ "$ROOT_INSTALL" -eq 1 ]]; then
+  printf '{"gem_home":"%s","launcher":"%s","ruby":"%s","schema":"hive-root-runtime","schema_version":1,"script":"%s"}' \
+    "$gem_home" "$installed_bin" "$RUBY_COMMAND" "$installed_shim" \
+    > "${root_runtime_manifest}.tmp"
+  chmod 0644 "${root_runtime_manifest}.tmp"
+  mv -f "${root_runtime_manifest}.tmp" "$root_runtime_manifest"
 fi
 launcher_rollback_armed=0
 
@@ -687,7 +800,9 @@ fi
 
 runtime_preflight
 job_schema_migration_setup
-daemon_autostart_setup
+if [[ "$ROOT_INSTALL" -eq 0 ]]; then
+  daemon_autostart_setup
+fi
 
 log "installed hive ${version} (hive-cli rubygem)"
 log "next: run 'hive --version', then 'hive init' in a project to enroll it for daemon dispatch"

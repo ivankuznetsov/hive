@@ -32,11 +32,16 @@ module Hive
         SCOPE_KEY_SETS = [
           [],
           %w[fingerprint],
+          %w[fingerprint fingerprint_operation],
           %w[job_id],
           %w[job_id operation],
           %w[canonical_action_id job_id],
           %w[
             base_sha branch fingerprint head_sha patch_id worktree_path
+          ],
+          %w[
+            base_sha branch fingerprint fingerprint_operation head_sha
+            patch_id worktree_path
           ]
         ].map(&:sort).freeze
         EFFECT_OUTCOME_KEY_SETS = [

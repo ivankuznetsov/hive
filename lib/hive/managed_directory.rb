@@ -514,6 +514,56 @@ module Hive
       lock&.close rescue nil
     end
 
+    # Attempts one descriptor-bound exclusive lock without waiting. A false
+    # return means another process owns the lock; all unsafe path conditions
+    # still raise exactly like `with_lock`.
+    def try_with_lock(relative)
+      parent_components, name = target_components(relative)
+      lock = nil
+
+      with_session(create_root: true) do |session|
+        session.with_directory(parent_components, create: true) do |parent|
+          before = session.regular_identity_at(parent, name)
+          lock = @native.open_file(
+            parent.directory,
+            name,
+            File::RDWR | File::CREAT,
+            mode: 0o600
+          )
+          validate_regular!(lock.stat)
+          lock.chmod(0o600)
+          opened = identity(lock.stat)
+          unsafe! unless before.nil? || before == opened
+          unsafe! unless opened ==
+            session.regular_identity_at(parent, name)
+          session.verify_binding!(parent)
+          next false unless
+            lock.flock(File::LOCK_EX | File::LOCK_NB)
+
+          unsafe! unless opened ==
+            session.regular_identity_at(parent, name)
+          result = begin
+            yield
+          rescue SystemCallError, IOError, ArgumentError, TypeError => error
+            raise YieldFailure.new(error)
+          end
+          unsafe! unless opened ==
+            session.regular_identity_at(parent, name)
+          session.verify_binding!(parent)
+          result
+        end
+      end
+    rescue YieldFailure => failure
+      raise failure.error
+    rescue Hive::ConfigError
+      raise
+    rescue SystemCallError, IOError, ArgumentError, TypeError
+      unsafe!
+    ensure
+      lock&.flock(File::LOCK_UN) rescue nil
+      lock&.close rescue nil
+    end
+
     def unlink(relative, missing: false, expected_digest: nil,
                max_bytes: nil)
       parent_components, name = target_components(relative)

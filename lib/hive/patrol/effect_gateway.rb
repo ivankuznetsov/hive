@@ -77,6 +77,12 @@ module Hive
       def reconcile!(**attributes, &reconcile)
         @delivery.reconcile!(**attributes, &reconcile)
       end
+
+      def recover_intent!(intent, reconcile:, &effect)
+        @delivery.recover_intent!(
+          intent, reconcile: reconcile, &effect
+        )
+      end
     end
   end
 end

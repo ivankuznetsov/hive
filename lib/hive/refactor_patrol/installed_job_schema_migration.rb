@@ -136,7 +136,15 @@ module Hive
         require "hive/refactor_patrol/registered_project_migration_coordinator"
         RegisteredProjectMigrationCoordinator.new(
           registry: -> { entries },
-          status_store: status_store
+          status_store: status_store,
+          project_migrator: lambda do |identity, ownership:|
+            Hive::RefactorPatrol::JobStore.migrate_schema!(
+              identity.fetch(:real_path),
+              hive_state_path: identity.fetch(:hive_state_path),
+              project: identity.fetch(:entry),
+              ownership: ownership
+            )
+          end
         )
       end
 

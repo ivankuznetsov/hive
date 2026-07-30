@@ -17,7 +17,7 @@ class RefactorPatrolAllUsersMigrationTest < Minitest::Test
   REQUIRED_ENV = "HIVE_REQUIRE_TEST_RUNS".freeze
   PROVISION_ENV = "HIVE_ALL_USERS_PROVISION_ACCOUNTS".freeze
 
-  def test_one_candidate_migrates_three_inactive_uid_profiles
+  def test_one_candidate_migrates_every_project_for_three_inactive_users
     return run_in_user_namespace unless ENV[NAMESPACE_ENV] == "1" ||
                                         Process.euid.zero?
 
@@ -67,8 +67,10 @@ class RefactorPatrolAllUsersMigrationTest < Minitest::Test
                    payload.fetch("profiles").map { |row| row.fetch("uid") }.sort
       assert(payload.fetch("profiles").all? do |row|
         row.fetch("status") == "completed" &&
-          row.fetch("projects").one? &&
-          row.dig("projects", 0, "status") == "migrated"
+          row.fetch("projects").length == 2 &&
+          row.fetch("projects").all? do |project|
+            project.fetch("status") == "migrated"
+          end
       end)
 
       profiles.each do |profile|
@@ -343,8 +345,6 @@ class RefactorPatrolAllUsersMigrationTest < Minitest::Test
   def prepare_profile(root, account, index)
     home = account.dir
     assert_equal ENV.fetch(HOME_ROOT_ENV), File.dirname(home)
-    project = File.join(home, "project")
-    FileUtils.mkdir_p(project)
     environment =
       case index
       when 0
@@ -359,15 +359,28 @@ class RefactorPatrolAllUsersMigrationTest < Minitest::Test
       end
     roots = profile_roots(home, environment)
     FileUtils.mkdir_p([ roots.fetch(:config), roots.fetch(:state) ])
-    state = File.join(project, ".architecture-state")
-    write_released_v2_job(state, "job-#{account.name}")
+    projects = %w[first second].map do |suffix|
+      project = File.join(home, "projects", suffix)
+      state = File.join(project, ".architecture-state")
+      FileUtils.mkdir_p(project)
+      write_released_v2_job(
+        state, "job-#{account.name}-#{suffix}"
+      )
+      {
+        name: "project-#{account.name}-#{suffix}",
+        path: project,
+        state: state
+      }
+    end
     registry = {
-      "registered_projects" => [ {
-        "name" => "project-#{account.name}",
-        "path" => project,
-        "real_path" => File.realpath(project),
-        "hive_state_path" => state
-      } ]
+      "registered_projects" => projects.map do |project|
+        {
+          "name" => project.fetch(:name),
+          "path" => project.fetch(:path),
+          "real_path" => File.realpath(project.fetch(:path)),
+          "hive_state_path" => project.fetch(:state)
+        }
+      end
     }
     File.write(File.join(roots.fetch(:config), "config.yml"), registry.to_yaml)
     FileUtils.chown_R(account.uid, account.gid, home)
@@ -376,8 +389,7 @@ class RefactorPatrolAllUsersMigrationTest < Minitest::Test
     {
       account: account,
       home: home,
-      project: project,
-      state: state,
+      projects: projects,
       roots: roots,
       environment: environment
     }
@@ -430,23 +442,27 @@ class RefactorPatrolAllUsersMigrationTest < Minitest::Test
 
   def assert_profile_migrated(profile)
     uid = profile.dig(:account).uid
-    job_path = File.join(
-      profile.fetch(:state),
-      "refactor_patrol", "v3", "jobs",
-      "job-#{profile.dig(:account).name}.json"
-    )
     status_path = File.join(
       profile.dig(:roots, :state),
       "schema-migrations", "refactor-patrol-job-v3.json"
     )
-    job = JSON.parse(File.binread(job_path))
     status = JSON.parse(File.binread(status_path))
 
-    assert_equal 3, job.fetch("schema_version")
+    profile.fetch(:projects).each do |project|
+      suffix = File.basename(project.fetch(:path))
+      job_path = File.join(
+        project.fetch(:state),
+        "refactor_patrol", "v3", "jobs",
+        "job-#{profile.dig(:account).name}-#{suffix}.json"
+      )
+      job = JSON.parse(File.binread(job_path))
+
+      assert_equal 3, job.fetch("schema_version")
+      assert_equal uid, File.stat(job_path).uid
+    end
     assert_equal uid, status.dig("user_profile", "uid")
     assert_equal profile.fetch(:home),
                  status.dig("user_profile", "home")
-    assert_equal uid, File.stat(job_path).uid
     assert_equal uid, File.stat(status_path).uid
     root_owned = Dir.glob(
       File.join(profile.fetch(:home), "**", "*"),

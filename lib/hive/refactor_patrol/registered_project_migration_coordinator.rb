@@ -62,7 +62,11 @@ module Hive
         retry_interval: RETRY_INTERVAL
       )
         @registry = registry
-        @project_migrator = project_migrator || method(:migrate_project)
+        # Runtime callers are admission-only by default.  The one-off
+        # installed migration must inject the converter explicitly so daemon
+        # startup and hourly registry refreshes can never regain v2 mutation
+        # authority by constructing this coordinator.
+        @project_migrator = project_migrator
         @schema_status = schema_status || method(:project_schema_status)
         @schema_snapshot_id =
           schema_snapshot_id || method(:project_schema_snapshot_id)
@@ -92,9 +96,9 @@ module Hive
         results
       end
 
-      # The daemon calls the same converter on bounded cadence. No separate
-      # recovery state machine is introduced: current/absent projects are
-      # cheap probes, and failed projects retry after repair.
+      # Runtime callers repeat the admission probe on bounded cadence.
+      # Conversion remains exclusive to InstalledJobSchemaMigration; a
+      # released-schema row stays held until the package-owned retry runs.
       def tick(now: Time.now.utc)
         time = utc(now)
         entries = Array(@registry.call)
@@ -184,6 +188,8 @@ module Hive
             "run without --dry-run to convert this registered project"
         ) if @dry_run
 
+        return admit_identity(identity, now: now) unless @project_migrator
+
         migrated = nil
         schema = nil
         @migration_lock.call(identity) do
@@ -224,6 +230,38 @@ module Hive
             status == :migration_required ?
               "repair the reported project state; Hive retries this same " \
               "migration automatically" : nil
+        )
+      rescue StandardError => error
+        failure_result(identity, error, now: now)
+      end
+
+      def admit_identity(identity, now:)
+        schema = nil
+        @migration_lock.call(identity) do
+          schema = @schema_status.call(identity)
+        end
+        status = case schema.fetch("status")
+        when "current"
+          :current
+        when "absent"
+          :absent
+        else
+          :migration_required
+        end
+        result_for(
+          identity,
+          status: status,
+          current_schema_version:
+            current_schema_version(schema.fetch("status")),
+          snapshot_id: schema["snapshot_id"],
+          retryable: status == :migration_required,
+          next_retry_at:
+            status == :migration_required ?
+              timestamp(now + @retry_interval) : nil,
+          remediation:
+            status == :migration_required ?
+              "run the install-wide JobStore migration; runtime admission " \
+              "does not convert released schemas" : nil
         )
       rescue StandardError => error
         failure_result(identity, error, now: now)
@@ -379,15 +417,6 @@ module Hive
         raise Hive::ConfigError,
               "registered project state path identity is unavailable " \
               "(#{error.class}: #{error.message})"
-      end
-
-      def migrate_project(identity, ownership:)
-        Hive::RefactorPatrol::JobStore.migrate_schema!(
-          identity.fetch(:real_path),
-          hive_state_path: identity.fetch(:hive_state_path),
-          project: identity.fetch(:entry),
-          ownership: ownership
-        )
       end
 
       def current_schema_version(status)

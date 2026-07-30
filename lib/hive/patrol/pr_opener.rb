@@ -55,7 +55,7 @@ module Hive
         @effect_gateway_factory = effect_gateway_factory
         @evidence_store = evidence_store || Hive::Modules::Migration::EvidenceStore.new(
           root: File.join(
-            @project_root, ".hive-state", "module-runtime", "migration",
+            @state.hive_state_path, "module-runtime", "migration",
             "patrol-evidence"
           )
         )
@@ -70,7 +70,7 @@ module Hive
 
         assert_local_patch_identity!(patch)
         capture = effect_capture(finding, patch)
-        gateway = effect_gateway(finding, patch, capture)
+        gateway = effect_gateway(capture)
         pending = reconciliation_pending_entry(finding, patch)
         preserve_worktree = !pending.nil?
 
@@ -111,7 +111,7 @@ module Hive
               # durable patch receipt on the next cycle, allowing handoff
               # recovery without rebuilding a different commit.
               record_mapping(
-                gateway, finding, patch, existing["url"],
+                finding, patch, existing["url"],
                 "review_handoff_failed", now
               )
               return Result.new(
@@ -122,7 +122,7 @@ module Hive
             end
 
             record_mapping(
-              gateway, finding, patch, existing["url"],
+              finding, patch, existing["url"],
               existing["state"].downcase, now
             )
             return Result.new(
@@ -134,7 +134,7 @@ module Hive
           end
 
           record_mapping(
-            gateway, finding, patch, existing["url"],
+            finding, patch, existing["url"],
             existing["state"].downcase, now
           )
           # The branch already has a PR; this validated worktree is now
@@ -169,7 +169,7 @@ module Hive
         # identity reconciliation and mandatory review handoff settle. Keep
         # the validated patch receipt retryable across read-after-write lag.
         record_mapping(
-          gateway, finding, patch, pr_url, "reconciliation_pending", now
+          finding, patch, pr_url, "reconciliation_pending", now
         )
         preserve_worktree = true
         assert_local_patch_identity!(patch)
@@ -188,7 +188,7 @@ module Hive
           # next cycle can retry only the failed review handoff. Rebuilding
           # from a newer base would produce a different commit than the PR.
           record_mapping(
-            gateway, finding, patch, pr_url, "review_handoff_failed", now
+            finding, patch, pr_url, "review_handoff_failed", now
           )
           return Result.new(
             status: :opened_review_handoff_failed,
@@ -196,7 +196,7 @@ module Hive
             reason: "review_handoff_failed"
           )
         end
-        record_mapping(gateway, finding, patch, pr_url, "open", now)
+        record_mapping(finding, patch, pr_url, "open", now)
         preserve_worktree = false
         if !review_task_path && !review_prs_enabled?
           # The branch is pushed; the local worktree is no longer needed
@@ -464,61 +464,43 @@ module Hive
         "exit=#{value['exit_code']} timed_out=#{value['timed_out'] == true}"
       end
 
-      def record_mapping(gateway, finding, patch, pr_url, state, now)
-        expected = fingerprint_mapping_fields(
-          finding, patch, pr_url, state
+      def record_mapping(finding, patch, pr_url, state, now)
+        fingerprint = finding.fingerprint
+        current = @state.fingerprints[fingerprint]
+        projected = {
+          fingerprint =>
+            current.is_a?(Hash) ?
+              JSON.parse(JSON.generate(current)) : {}
+        }
+        Fingerprint.record_seen(
+          projected,
+          fingerprint,
+          branch: patch.branch,
+          pr_url: pr_url,
+          state: state,
+          finding: finding,
+          now: now
         )
-        deleted =
-          state == "reconciliation_pending" ? [] : [ "publication_receipt" ]
+        expected = projected.fetch(fingerprint)
+        if state == "reconciliation_pending"
+          expected["publication_receipt"] =
+            publication_receipt_for(patch)
+        else
+          expected.delete("publication_receipt")
+        end
         perform_effect do
           @state.mutate_fingerprints!(
-            gateway: gateway,
-            fingerprint: finding.fingerprint,
+            fingerprint: fingerprint,
             idempotency_key:
-              "#{finding.fingerprint}:#{patch.id}:" \
+              "#{fingerprint}:#{patch.id}:" \
               "fingerprint-publication:#{state}",
             capability: "filesystem_write",
             scope: effect_scope(finding, patch),
             set: expected,
-            deleted: deleted
-          ) do |fingerprints|
-            Fingerprint.record_seen(
-              fingerprints,
-              finding.fingerprint,
-              branch: patch.branch,
-              pr_url: pr_url,
-              state: state,
-              finding: finding,
-              now: now
-            )
-            entry = fingerprints.fetch(finding.fingerprint)
-            if state == "reconciliation_pending"
-              entry["publication_receipt"] =
-                publication_receipt_for(patch)
-            else
-              entry.delete("publication_receipt")
-            end
-          end
+            deleted: [],
+            replace: true
+          )
         end
-      end
-
-      def fingerprint_mapping_fields(finding, patch, pr_url, state)
-        fields = {
-          "branch" => patch.branch,
-          "pr_url" => pr_url,
-          "state" => state,
-          "category" => finding.category.to_s,
-          "feature_id" => finding.feature_id.to_s,
-          "title_tokens" => Fingerprint.title_tokens(finding)
-        }
-        target_sha = finding.target_sha.to_s
-        fields["target_sha"] = target_sha unless target_sha.empty?
-        root_cause = Fingerprint.semantic_tokens(finding)
-        fields["root_cause_tokens"] = root_cause unless root_cause.empty?
-        if state == "reconciliation_pending"
-          fields["publication_receipt"] = publication_receipt_for(patch)
-        end
-        fields.freeze
       end
 
       def default_config_loader
@@ -540,7 +522,7 @@ module Hive
 
         snapshot = Hive::Modules::Migration::Patrols.ownership_snapshot(
           @project_root, "patrol",
-          hive_state_path: File.join(@project_root, ".hive-state")
+          hive_state_path: @state.hive_state_path
         )
         owner = snapshot["owner"] == "none" ? "legacy" : snapshot.fetch("owner")
         epoch = snapshot["epoch"].to_i.positive? ? snapshot.fetch("epoch") : 1
@@ -578,22 +560,16 @@ module Hive
         capture
       end
 
-      def effect_gateway(finding, patch, capture)
-        @state.reserve_occurrence!(capture)
-        options = {
-          project_root: @project_root,
-          hive_state_path: File.join(@project_root, ".hive-state"),
+      def effect_gateway(capture)
+        @state.configure_effect_gateway!(
           capture: capture,
-          authority: capture.owner,
           evidence_store: @evidence_store,
-          delivery_store: @state,
           config_loader: @config_loader,
           capability_checker: @capability_checker,
-          module_execution: @module_execution
-        }
-        return @effect_gateway_factory.call(**options) if @effect_gateway_factory
-
-        Hive::Patrol::EffectGateway.new(**options)
+          module_execution: @module_execution,
+          gateway_factory: @effect_gateway_factory
+        )
+        @state.configured_effect_gateway!(capture: capture)
       end
 
       def perform_branch_effect!(gateway, finding, patch)

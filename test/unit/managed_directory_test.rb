@@ -674,6 +674,27 @@ class ManagedDirectoryTest < Minitest::Test
     end
   end
 
+  def test_try_with_lock_returns_without_yielding_when_an_owner_exists
+    with_tmp_dir do |root|
+      directory = Hive::ManagedDirectory.new(
+        root: root, label: "test state"
+      )
+      directory.prepare!
+      lock_path = File.join(root, "state.lock")
+      File.open(lock_path, File::RDWR | File::CREAT, 0o600) do |owner|
+        owner.flock(File::LOCK_EX)
+        yielded = false
+
+        assert_equal false, directory.try_with_lock("state.lock") {
+          yielded = true
+        }
+        refute yielded
+      end
+
+      assert_equal :owned, directory.try_with_lock("state.lock") { :owned }
+    end
+  end
+
   def test_read_and_lock_stay_in_the_opened_parent
     with_tmp_dir do |anchor|
       root = File.join(anchor, "state")

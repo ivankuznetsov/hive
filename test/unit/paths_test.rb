@@ -4,6 +4,32 @@ require "hive/paths"
 class PathsTest < Minitest::Test
   include HiveTestHelper
 
+  def test_job_schema_exact_roots_are_private_to_the_internal_child
+    with_tmp_dir do |dir|
+      exact_config = File.join(dir, "exact-config")
+      exact_state = File.join(dir, "exact-state")
+      environment = {
+        "HOME" => dir,
+        "HIVE_HOME" => File.join(dir, "ordinary"),
+        Hive::Paths::JOB_SCHEMA_CONFIG_HOME => exact_config,
+        Hive::Paths::JOB_SCHEMA_STATE_HOME => exact_state
+      }
+
+      with_env(environment) do
+        assert_equal File.join(dir, "ordinary"), Hive::Paths.config_home
+        assert_equal File.join(dir, "ordinary"), Hive::Paths.state_home
+      end
+      with_env(
+        environment.merge(
+          Hive::Paths::JOB_SCHEMA_MIGRATION_INTERNAL => "1"
+        )
+      ) do
+        assert_equal exact_config, Hive::Paths.config_home
+        assert_equal exact_state, Hive::Paths.state_home
+      end
+    end
+  end
+
   def with_env(values)
     old = values.keys.to_h { |key| [ key, ENV.fetch(key, nil) ] }
     values.each do |key, value|

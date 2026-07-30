@@ -22,7 +22,7 @@ post_install() {
   cat <<'MSG'
 hive-bin installed.
 Run `hive setup` in a project to install and start the native Hive web and daemon services, bootstrap the managed web bundle, and enroll the project. Use `hive setup --no-service` to keep Hive web foreground-only.
-The root package hook probes fixed Hive registry anchors for every NSS user and runs each migration after dropping to that user's identity. Custom HIVE_HOME/XDG roots must be listed in the root-owned /var/lib/hive/installed-users.v1.json inventory. First use is a fallback, not install-wide completion evidence.
+The root package hook probes fixed Hive registry anchors for every NSS user and runs each migration after dropping to that user's identity. Custom HIVE_HOME/XDG roots must be listed in the root-owned /var/lib/hive/installed-users.v1.json inventory. Runtime admission is v3-only; the bounded hourly sweep resumes any deferred profile.
 MSG
 }
 

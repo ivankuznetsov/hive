@@ -39,8 +39,8 @@ class RefactorPatrolCandidateMigrationCommandTest < Minitest::Test
       @candidates = []
     end
 
-    def ensure!(candidate:)
-      @candidates << candidate
+    def ensure!(runtime:)
+      @candidates << runtime
     end
   end
 

@@ -1,6 +1,7 @@
 require "cgi"
 require "rbconfig"
 require "hive/atomic_file"
+require "hive/refactor_patrol/all_users_authority"
 require "hive/refactor_patrol/installed_users_job_schema_migration"
 
 module Hive
@@ -15,6 +16,10 @@ module Hive
       SYSTEMD_TIMER = "hive-job-schema-migration.timer".freeze
       LAUNCHD_LABEL = "local.hive-job-schema-migration".freeze
       MAX_UNIT_BYTES = 64 * 1024
+      SERVICE_TIMEOUT_SEC = 615
+      CLEAN_ENV = "/usr/bin/env".freeze
+      SERVICE_PATH =
+        "/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/sbin:/usr/local/bin".freeze
 
       Result = Data.define(:platform, :changed, :active)
 
@@ -24,6 +29,7 @@ module Hive
         trusted_uid: 0,
         systemd_unit_directory: "/etc/systemd/system",
         launchd_unit_directory: "/Library/LaunchDaemons",
+        clean_env: CLEAN_ENV,
         systemctl: "/usr/bin/systemctl",
         launchctl: "/bin/launchctl",
         runner: lambda { |argv|
@@ -44,6 +50,7 @@ module Hive
           File.expand_path(systemd_unit_directory)
         @launchd_unit_directory =
           File.expand_path(launchd_unit_directory)
+        @clean_env = File.expand_path(clean_env)
         @systemctl = File.expand_path(systemctl)
         @launchctl = File.expand_path(launchctl)
         @runner = runner
@@ -53,19 +60,41 @@ module Hive
         @writer = writer
       end
 
-      def ensure!(candidate:)
+      def ensure!(runtime:)
         unless @effective_uid.call == @trusted_uid
           raise Hive::ConfigError,
                 "install-wide retry service requires root authority"
         end
+        unless runtime.is_a?(AllUsersAuthority::RuntimeIdentity)
+          raise Hive::ConfigError,
+                "install-wide retry service requires an authorized runtime"
+        end
+        candidate = runtime.candidate
         validate_candidate_path!(candidate.path)
-        InstalledUsersJobSchemaMigration::CandidateIdentity.verify!(candidate)
+        [
+          runtime.interpreter.path,
+          runtime.script.path,
+          runtime.manifest.path,
+          runtime.gem_home
+        ].each { |path| validate_candidate_path!(path) }
+        AllUsersAuthority.verify_runtime!(
+          runtime, trusted_uid: @trusted_uid, lstat: @lstat
+        )
 
+        validate_trusted_executable!(
+          @clean_env, label: "clean-environment launcher"
+        )
         case platform
         when :linux
-          ensure_systemd!(candidate.path)
+          validate_trusted_executable!(
+            @systemctl, label: "systemd manager"
+          )
+          ensure_systemd!(runtime)
         when :macos
-          ensure_launchd!(candidate.path)
+          validate_trusted_executable!(
+            @launchctl, label: "launchd manager"
+          )
+          ensure_launchd!(runtime)
         else
           raise Hive::UnavailableError,
                 "install-wide retry service is unsupported on this platform"
@@ -81,13 +110,13 @@ module Hive
         :unsupported
       end
 
-      def ensure_systemd!(binary)
+      def ensure_systemd!(runtime)
         validate_unit_directory!(@systemd_unit_directory)
         service_path =
           File.join(@systemd_unit_directory, SYSTEMD_SERVICE)
         timer_path = File.join(@systemd_unit_directory, SYSTEMD_TIMER)
         units = {
-          service_path => render_systemd_service(binary),
+          service_path => render_systemd_service(runtime),
           timer_path => systemd_timer_template
         }
         changed = apply_units!(units)
@@ -98,13 +127,13 @@ module Hive
         Result.new(platform: "linux", changed: changed, active: true)
       end
 
-      def ensure_launchd!(binary)
+      def ensure_launchd!(runtime)
         validate_unit_directory!(@launchd_unit_directory)
         path = File.join(
           @launchd_unit_directory, "#{LAUNCHD_LABEL}.plist"
         )
         changed = apply_units!(
-          path => render_launchd(binary)
+          path => render_launchd(runtime)
         )
         run_manager!(
           [ @launchctl, "bootout", "system/#{LAUNCHD_LABEL}" ],
@@ -184,6 +213,30 @@ module Hive
         end
       end
 
+      def validate_trusted_executable!(path, label:)
+        validate_candidate_path!(path)
+        stat = @lstat.call(path)
+        parent = File.dirname(path)
+        parent_stat = @lstat.call(parent)
+        valid = stat.file? && !stat.symlink? && stat.nlink == 1 &&
+          stat.uid == @trusted_uid &&
+          (stat.mode & 0o022).zero? &&
+          (stat.mode & 0o005) == 0o005 &&
+          parent_stat.directory? && !parent_stat.symlink? &&
+          parent_stat.uid == @trusted_uid &&
+          (parent_stat.mode & 0o022).zero? &&
+          @realpath.call(path) == path &&
+          @realpath.call(parent) == parent
+        return true if valid
+
+        raise Hive::ConfigError,
+              "install-wide retry #{label} is not trusted: #{path}"
+      rescue SystemCallError, IOError => error
+        raise Hive::ConfigError,
+              "cannot validate install-wide retry #{label} " \
+              "(#{error.class}: #{error.message})"
+      end
+
       def run_manager!(argv, allow_failure: false)
         succeeded = @runner.call(argv)
         return true if succeeded
@@ -193,12 +246,38 @@ module Hive
               "cannot activate install-wide retry service: #{argv.join(' ')}"
       end
 
-      def render_systemd_service(binary)
-        systemd_service_template.sub("@HIVE_BINARY@", binary)
+      def render_systemd_service(runtime)
+        render_runtime_template(systemd_service_template, runtime)
       end
 
-      def render_launchd(binary)
-        launchd_template.sub("@HIVE_BINARY@", CGI.escapeHTML(binary))
+      def render_launchd(runtime)
+        values = runtime_template_values(runtime).transform_values do |value|
+          CGI.escapeHTML(value)
+        end
+        render_values(launchd_template, values)
+      end
+
+      def render_runtime_template(template, runtime)
+        render_values(template, runtime_template_values(runtime))
+      end
+
+      def runtime_template_values(runtime)
+        {
+          "@CLEAN_ENV@" => @clean_env,
+          "@GEM_HOME@" => runtime.gem_home,
+          "@HIVE_BINARY@" => runtime.candidate.path,
+          "@MANIFEST@" => runtime.manifest.path,
+          "@RUBY@" => runtime.interpreter.path,
+          "@SCRIPT@" => runtime.script.path,
+          "@SERVICE_PATH@" => SERVICE_PATH,
+          "@TIMEOUT_SEC@" => SERVICE_TIMEOUT_SEC.to_s
+        }
+      end
+
+      def render_values(template, values)
+        values.reduce(template) do |bytes, (placeholder, value)|
+          bytes.gsub(placeholder, value)
+        end
       end
 
       def systemd_service_template

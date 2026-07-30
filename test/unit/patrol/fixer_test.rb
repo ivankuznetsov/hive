@@ -671,7 +671,7 @@ class HivePatrolFixerTest < Minitest::Test
         ledger, finding.fingerprint, branch: first.branch,
         state: "review_handoff_failed", finding: finding
       )
-      state.write_fingerprints(ledger)
+      state.send(:raw_write_fingerprints, ledger)
       second = fixer.attempt(finding)
 
       assert first.passed
@@ -713,7 +713,7 @@ class HivePatrolFixerTest < Minitest::Test
         "base_sha" => first.base_sha,
         "head_sha" => first.head_sha
       }
-      state.write_fingerprints(ledger)
+      state.send(:raw_write_fingerprints, ledger)
 
       second = nil
       with_replaced_singleton_method(Dir, :glob, ->(*) { raise "exact receipt must not scan patch history" }) do
@@ -734,7 +734,8 @@ class HivePatrolFixerTest < Minitest::Test
     with_tmp_git_repo do |repo|
       state = Hive::Patrol::StateStore.new(repo)
       branch = "hive-patrol/#{finding.feature_id}-#{finding.fingerprint[0, 8]}"
-      state.write_fingerprints(
+      state.send(
+        :raw_write_fingerprints,
         finding.fingerprint => {
           "state" => "review_handoff_failed",
           "branch" => branch

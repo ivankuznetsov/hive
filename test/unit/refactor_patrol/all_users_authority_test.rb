@@ -37,7 +37,7 @@ class AllUsersAuthorityTest < Minitest::Test
         }
       )
 
-      candidate = authority.authorize!
+      candidate = authority.authorize!.candidate
 
       assert_equal File.realpath(binary), candidate.path
       assert_equal Process.uid, candidate.uid
@@ -85,6 +85,35 @@ class AllUsersAuthorityTest < Minitest::Test
     end
   end
 
+  def test_rejects_a_user_owned_interpreter_even_when_the_gem_is_trusted
+    with_runtime do |binary, runtime|
+      ruby = File.join(File.dirname(binary), "ruby")
+      authority = authority_for(
+        binary, runtime, unsafe_path: ruby
+      )
+
+      error = assert_raises(Hive::ConfigError) do
+        authority.authorize!
+      end
+
+      assert_match(/Ruby interpreter.*root-owned/i, error.message)
+    end
+  end
+
+  def test_rejects_non_builtin_relative_loaded_features
+    with_runtime do |binary, runtime|
+      authority = authority_for(
+        binary, runtime, loaded_features: -> { [ "attacker.rb" ] }
+      )
+
+      error = assert_raises(Hive::ConfigError) do
+        authority.authorize!
+      end
+
+      assert_match(/loaded feature path is not absolute/, error.message)
+    end
+  end
+
   private
 
   def with_runtime
@@ -95,11 +124,28 @@ class AllUsersAuthorityTest < Minitest::Test
       binary = File.join(root, "hive")
       File.write(binary, "#!/bin/sh\nexit 0\n")
       FileUtils.chmod(0o755, binary)
+      ruby = File.join(root, "ruby")
+      File.write(ruby, "#!/bin/sh\nexit 0\n")
+      FileUtils.chmod(0o755, ruby)
+      manifest = File.join(root, "root-runtime.json")
+      File.write(
+        manifest,
+        JSON.generate(
+          "gem_home" => root,
+          "launcher" => binary,
+          "ruby" => ruby,
+          "schema" => "hive-root-runtime",
+          "schema_version" => 1,
+          "script" => File.join(runtime, "lib", "hive.rb")
+        )
+      )
       yield binary, runtime
     end
   end
 
-  def authority_for(binary, runtime, loaded_specs: nil)
+  def authority_for(binary, runtime, loaded_specs: nil,
+                    loaded_features: -> { [] },
+                    unsafe_path: nil)
     trusted_lstat = lambda do |path|
       stat = File.lstat(path)
       mode =
@@ -110,7 +156,10 @@ class AllUsersAuthorityTest < Minitest::Test
         else
           stat.mode
         end
-      TrustedStat.new(stat, uid: Process.uid, mode: mode)
+      uid =
+        File.expand_path(path) == File.expand_path(unsafe_path.to_s) ?
+          Process.uid + 1 : Process.uid
+      TrustedStat.new(stat, uid: uid, mode: mode)
     end
     Authority.new(
       effective_uid: -> { Process.uid },
@@ -119,7 +168,15 @@ class AllUsersAuthorityTest < Minitest::Test
       loaded_specs: loaded_specs || -> {
         [ Spec.new(name: "hive-cli", full_gem_path: runtime) ]
       },
-      lstat: trusted_lstat
+      loaded_features: loaded_features,
+      interpreter_path: -> { File.join(File.dirname(binary), "ruby") },
+      program_path: -> { File.join(runtime, "lib", "hive.rb") },
+      environment: {
+        Authority::MANIFEST_ENV =>
+          File.join(File.dirname(binary), "root-runtime.json")
+      },
+      lstat: trusted_lstat,
+      require_launcher_marker: false
     )
   end
 end

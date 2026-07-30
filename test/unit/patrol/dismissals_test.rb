@@ -29,7 +29,10 @@ class HivePatrolDismissalsTest < Minitest::Test
       })
       gh = FakeGh.new([ { "state" => "CLOSED", "url" => "https://example.com/pr/1" } ])
 
-      dismissed = Hive::Patrol::Dismissals.new(dir, gh: gh).reconcile(now: Time.utc(2026, 5, 28, 12))
+      state = configured_state(dir)
+      dismissed = Hive::Patrol::Dismissals.new(
+        dir, state: state, gh: gh
+      ).reconcile(now: Time.utc(2026, 5, 28, 12))
 
       assert_equal "https://example.com/pr/1", dismissed["fp1"]["pr_url"]
       fingerprints = JSON.parse(File.read(File.join(dir, ".hive-state", "patrol", "fingerprints.json")))
@@ -51,7 +54,10 @@ class HivePatrolDismissalsTest < Minitest::Test
       })
       gh = FakeGh.new([ { "state" => "CLOSED", "url" => "https://example.com/pr/1" } ])
 
-      dismissed = Hive::Patrol::Dismissals.new(dir, gh: gh).reconcile(now: Time.utc(2026, 5, 28, 12))
+      state = configured_state(dir)
+      dismissed = Hive::Patrol::Dismissals.new(
+        dir, state: state, gh: gh
+      ).reconcile(now: Time.utc(2026, 5, 28, 12))
 
       assert_equal "security", dismissed["fp1"]["category"]
       assert_equal "command-bin-x", dismissed["fp1"]["feature_id"]
@@ -68,7 +74,10 @@ class HivePatrolDismissalsTest < Minitest::Test
       })
       gh = FakeGh.new([ { "state" => "MERGED", "url" => "https://example.com/pr/1" } ])
 
-      Hive::Patrol::Dismissals.new(dir, gh: gh).reconcile
+      state = configured_state(dir)
+      Hive::Patrol::Dismissals.new(
+        dir, state: state, gh: gh
+      ).reconcile
 
       fingerprints = JSON.parse(File.read(File.join(dir, ".hive-state", "patrol", "fingerprints.json")))
       assert_equal "merged", fingerprints["fp1"]["state"]
@@ -78,10 +87,11 @@ class HivePatrolDismissalsTest < Minitest::Test
   def test_reconcile_updates_open_prs_and_ignores_gh_errors
     with_tmp_dir do |dir|
       state = Hive::Patrol::StateStore.new(dir)
-      state.write_fingerprints(
+      state.send(:raw_write_fingerprints,
         "fp-open" => { "branch" => "b1", "pr_url" => "https://example.com/1" },
         "fp-error" => { "branch" => "b2", "pr_url" => "https://example.com/2" }
       )
+      configure_state(state)
       gh = Object.new
       gh.define_singleton_method(:lookup_prs_for_branch) do |_root, branch|
         raise Hive::GhError, "gh down" if branch == "b2"
@@ -101,13 +111,14 @@ class HivePatrolDismissalsTest < Minitest::Test
     %w[reconciliation_pending review_handoff_failed].each do |retry_state|
       with_tmp_dir do |dir|
         state = Hive::Patrol::StateStore.new(dir)
-        state.write_fingerprints(
+        state.send(:raw_write_fingerprints,
           "fp1" => {
             "branch" => "hive-patrol/x",
             "pr_url" => "https://example.com/pr/1",
             "state" => retry_state
           }
         )
+        configure_state(state)
         gh = FakeGh.new([ { "state" => "OPEN", "url" => "https://example.com/pr/1" } ])
 
         Hive::Patrol::Dismissals.new(dir, state: state, gh: gh).reconcile
@@ -121,13 +132,14 @@ class HivePatrolDismissalsTest < Minitest::Test
   def test_publication_retry_does_not_reconcile_a_different_pr_on_the_branch
     with_tmp_dir do |dir|
       state = Hive::Patrol::StateStore.new(dir)
-      state.write_fingerprints(
+      state.send(:raw_write_fingerprints,
         "fp1" => {
           "branch" => "hive-patrol/x",
           "pr_url" => "https://example.com/pr/expected",
           "state" => "reconciliation_pending"
         }
       )
+      configure_state(state)
       gh = FakeGh.new([ { "state" => "CLOSED", "url" => "https://example.com/pr/other" } ])
 
       dismissed = Hive::Patrol::Dismissals.new(dir, state: state, gh: gh).reconcile
@@ -135,5 +147,20 @@ class HivePatrolDismissalsTest < Minitest::Test
       assert_empty dismissed
       assert_equal "reconciliation_pending", state.fingerprints.fetch("fp1").fetch("state")
     end
+  end
+
+  def configured_state(root)
+    configure_state(Hive::Patrol::StateStore.new(root))
+  end
+
+  def configure_state(state)
+    capture = Struct.new(:occurrence_id).new("occ-#{"a" * 64}")
+    gateway = Object.new
+    gateway.define_singleton_method(:perform!) do |**_attributes, &effect|
+      effect.call
+    end
+    state.instance_variable_set(:@effect_capture, capture)
+    state.instance_variable_set(:@state_effect_gateway, gateway)
+    state
   end
 end

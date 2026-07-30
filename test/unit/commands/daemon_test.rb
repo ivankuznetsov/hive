@@ -697,6 +697,26 @@ class HiveCommandsDaemonTest < Minitest::Test
     assert_includes row.fetch("error"), "KeyError"
   end
 
+  def test_job_store_reset_status_degrades_an_unavailable_registry
+    report = Hive::Daemon::StatusReport.new(
+      hive_home: @home,
+      project_registry: -> {
+        raise IOError, "synthetic registry failure"
+      }
+    )
+
+    payload = report.send(:job_store_reset_payload)
+
+    refute payload.fetch("ok")
+    assert_empty payload.fetch("projects")
+    assert_equal(
+      "hive-refactor-patrol-jobstore-generation-status",
+      payload.fetch("schema")
+    )
+    assert_match(/IOError: synthetic registry failure/,
+                 payload.fetch("error"))
+  end
+
   def test_status_payload_reads_legacy_registry_without_mutating_disk
     with_tmp_dir do |root|
       home = File.join(root, "home")

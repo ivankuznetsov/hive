@@ -1181,6 +1181,70 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
     end
   end
 
+  def test_pull_request_settlement_rejects_unknown_or_duplicate_projections
+    [
+      [ "publication", "publication" ],
+      [ "receipt" ]
+    ].each do |projections|
+      with_journal do |journal|
+        intent = publication_intent
+        journal.prepare_effect!(intent, now: NOW)
+        journal.mark_dispatch_uncertain!(intent, now: NOW + 1)
+        before = journal.fetch(intent.occurrence_id)
+
+        error = assert_raises(Hive::ConfigError) do
+          journal.settle_effect!(
+            intent,
+            status: "committed",
+            outcome: {
+              "pr_url" => "https://github.com/owner/demo/pull/17",
+              "state" => "OPEN",
+              "head_oid" => "b" * 40,
+              "base_oid" => "a" * 40
+            },
+            projections: projections,
+            now: NOW + 2
+          )
+        end
+
+        assert_match(/projections are malformed/, error.message)
+        assert_equal before, journal.fetch(intent.occurrence_id)
+        assert_equal(
+          "dispatch_uncertain",
+          journal.effect_state(intent).fetch("state")
+        )
+        assert_empty journal.pending_outbox(intent.occurrence_id)
+      end
+    end
+  end
+
+  def test_publication_projection_rejects_a_nonpublication_terminal_receipt
+    with_journal do |journal|
+      intent = publication_intent
+      journal.prepare_effect!(intent, now: NOW)
+      journal.mark_dispatch_uncertain!(intent, now: NOW + 1)
+      before = journal.fetch(intent.occurrence_id)
+
+      error = assert_raises(Hive::ConfigError) do
+        journal.settle_effect!(
+          intent,
+          status: "failed",
+          outcome: { "reason" => "remote rejected publication" },
+          projections: [ "publication" ],
+          now: NOW + 2
+        )
+      end
+
+      assert_match(/publication is malformed/, error.message)
+      assert_equal before, journal.fetch(intent.occurrence_id)
+      assert_equal(
+        "dispatch_uncertain",
+        journal.effect_state(intent).fetch("state")
+      )
+      assert_empty journal.pending_outbox(intent.occurrence_id)
+    end
+  end
+
   def test_terminal_pull_request_replay_requires_its_atomic_publication
     with_journal do |journal|
       intent = publication_intent
@@ -1333,6 +1397,20 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
         intent, outcome: outcome, now: NOW
       )
       entry = journal.pending_outbox(intent.occurrence_id).fetch(0)
+
+      error = assert_raises(Hive::ConfigError) do
+        journal.acknowledge_outbox!(
+          intent.occurrence_id,
+          kind: "unknown",
+          entry_id: entry.fetch("id"),
+          digest: entry.fetch("digest")
+        )
+      end
+      assert_match(/outbox kind is malformed/, error.message)
+      assert_equal(
+        [ entry ],
+        journal.pending_outbox(intent.occurrence_id)
+      )
 
       assert_raises(Hive::ConfigError) do
         journal.acknowledge_outbox!(

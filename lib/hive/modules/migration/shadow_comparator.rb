@@ -20,9 +20,6 @@ module Hive
         MAX_RECORDS = 4_096
         MAX_PAGE_SIZE = 256
         EVIDENCE_SOURCES = %w[legacy_mutator_capture archived_v1].freeze
-        NON_COMPARABLE_TRIGGER_KINDS = %w[
-          job_store.schema_v2_import
-        ].freeze
         IGNORED_KEYS = %w[duration_ms engine owner recorded_at representation].freeze
         EXPECTED_KEYS = %w[
           comparable configuration_digest decision_id duplicate_effects
@@ -81,8 +78,7 @@ module Hive
             source = capture && "legacy_mutator_capture"
             comparable =
               comparable == true &&
-              !capture.nil? &&
-              !NON_COMPARABLE_TRIGGER_KINDS.include?(trigger["kind"])
+              !capture.nil?
             decision_id = digest(
               "module" => module_name,
               "trigger_digest" => trigger_digest

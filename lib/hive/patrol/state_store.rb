@@ -227,8 +227,6 @@ module Hive
           )
         end
         true
-      rescue JSON::ParserError
-        raise Hive::ConfigError, "patrol outbox bytes are malformed"
       end
 
       def recover_pending_publications!
@@ -266,10 +264,6 @@ module Hive
                         semantic["sink"] == "pull_request"
             repository =
               capture.project.fetch("repository", nil).to_s
-            if repository.empty?
-              raise Hive::ConfigError,
-                    "patrol publication recovery repository is malformed"
-            end
             scope = semantic["scope"]
             next unless scope.is_a?(Hash) &&
                         scope.keys.sort ==
@@ -290,9 +284,6 @@ module Hive
                 "multiple retryable patrol publications share a fingerprint"
         end
         unique.first
-      rescue KeyError
-        raise Hive::ConfigError,
-              "patrol publication recovery seed is malformed"
       end
 
       def prepare_effect!(intent, now: Time.now.utc)
@@ -344,11 +335,16 @@ module Hive
         )
         if receipt.intent.sink == "pull_request" &&
            %w[committed reconciled].include?(receipt.status)
-          @occurrence_store.assert_effect_projection!(
-            receipt, projection: "publication"
-          )
+          @occurrence_store.assert_publication!(receipt)
         end
         receipt
+      end
+
+      def publication_binding_for_receipt(receipt_id, occurrence_id:)
+        receipt = effect_receipt(
+          receipt_id, occurrence_id: occurrence_id
+        )
+        publication_binding_from(receipt).fetch(0)
       end
 
       def terminal_effect_receipt_ids(occurrence_id)
@@ -690,16 +686,17 @@ module Hive
         intent = receipt.intent
         scope = intent.scope
         outcome = receipt.outcome
-        finding = publication_finding_projection(scope)
         capture = occurrence_capture(intent.occurrence_id)
         capture_repository =
           capture&.project&.fetch("repository", nil).to_s
-        valid = intent.module_name == "patrol" &&
+        valid = scope.is_a?(Hash) &&
+                outcome.is_a?(Hash) &&
+                scope.keys.sort == PUBLICATION_SCOPE_KEYS.sort &&
+                outcome.keys.sort == PUBLICATION_OUTCOME_KEYS.sort &&
+                intent.module_name == "patrol" &&
                 !capture_repository.empty? &&
                 capture_repository == scope["repository"] &&
                 intent.sink == "pull_request" &&
-                scope.keys.sort == PUBLICATION_SCOPE_KEYS.sort &&
-                outcome.keys.sort == PUBLICATION_OUTCOME_KEYS.sort &&
                 %w[committed reconciled].include?(receipt.status) &&
                 outcome["base_oid"] == scope["base_sha"] &&
                 outcome["head_oid"] == scope["head_sha"] &&
@@ -711,6 +708,7 @@ module Hive
           raise Hive::ConfigError,
                 "patrol publication receipt is malformed"
         end
+        finding = publication_finding_projection(scope)
 
         binding = {
           "receipt_id" => receipt.receipt_id,
@@ -729,9 +727,6 @@ module Hive
           "base_oid" => outcome.fetch("base_oid")
         }.freeze
         [ effect_object(binding), finding ].freeze
-      rescue KeyError
-        raise Hive::ConfigError,
-              "patrol publication receipt is malformed"
       end
 
       def publication_finding_projection(scope)
@@ -767,7 +762,7 @@ module Hive
                 "patrol publication finding projection is malformed"
         end
         effect_object(value)
-      rescue JSON::ParserError, KeyError
+      rescue JSON::ParserError
         raise Hive::ConfigError,
               "patrol publication finding projection is malformed"
       end

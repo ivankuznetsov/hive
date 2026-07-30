@@ -66,6 +66,16 @@ class RefactorPatrolResetCommandTest < Minitest::Test
     end
   end
 
+  class BrokenOutput
+    def initialize(error)
+      @error = error
+    end
+
+    def write(*)
+      raise @error
+    end
+  end
+
   def test_requires_explicit_confirmation_before_daemon_or_storage_effects
     lifecycle = FakeQuiescence.new
     command = Hive::Commands::RefactorPatrolReset.new(
@@ -303,6 +313,149 @@ class RefactorPatrolResetCommandTest < Minitest::Test
       assert_match(/canonical path/, error.message)
     end
     assert_empty lifecycle.calls
+  end
+
+  def test_default_project_resolver_and_resetter_use_registered_identity
+    with_tmp_dir do |root|
+      state = File.join(root, ".hive-state")
+      entry = registered_entry(root, state)
+      calls = []
+      result = {
+        "status" => "fresh",
+        "changed" => false,
+        "archive_path" => nil,
+        "receipt_path" => nil
+      }
+      resolver = lambda do |name|
+        calls << [ :resolve, name ]
+        entry
+      end
+      resetter = lambda do |project_root, hive_state_path:, project:|
+        calls << [
+          :reset, project_root, hive_state_path,
+          project.fetch("project_id")
+        ]
+        result
+      end
+
+      with_replaced_singleton_method(
+        Hive::Config, :find_project, resolver
+      ) do
+        with_replaced_singleton_method(
+          Hive::RefactorPatrol::JobStore,
+          :reset_released_jobs!,
+          resetter
+        ) do
+          payload = Hive::Commands::RefactorPatrolReset.new(
+            "demo",
+            confirm: true,
+            output: StringIO.new,
+            daemon_quiescence: FakeQuiescence.new,
+            activation_lock: FakeActivationLock.new,
+            patrol_fence: FakePatrolFence.new
+          ).call
+
+          assert_equal "fresh", payload.fetch("status")
+        end
+      end
+
+      assert_equal(
+        [
+          [ :resolve, "demo" ],
+          [ :reset, root, state, "project-demo" ]
+        ],
+        calls
+      )
+    end
+  end
+
+  def test_error_kinds_cover_concurrency_availability_and_internal_failures
+    command = Hive::Commands::RefactorPatrolReset.new(
+      "demo", confirm: true
+    )
+
+    assert_equal(
+      "concurrent_run",
+      command.envelope_error_kind(
+        Hive::ConcurrentRunError.new("busy")
+      )
+    )
+    assert_equal(
+      "unavailable",
+      command.envelope_error_kind(Hive::UnavailableError.new("down"))
+    )
+    assert_equal(
+      "internal",
+      command.envelope_error_kind(Hive::InternalError.new("bug"))
+    )
+    assert_equal(
+      "error",
+      command.envelope_error_kind(Hive::Error.new("failure"))
+    )
+  end
+
+  def test_error_envelope_tolerates_a_closed_pipe
+    command = Hive::Commands::RefactorPatrolReset.new(
+      "demo",
+      confirm: true,
+      json: true,
+      output: BrokenOutput.new(Errno::EPIPE.new)
+    )
+
+    command.emit_envelope(Hive::ConfigError.new("invalid"))
+
+    assert_equal true, command.instance_variable_get(:@stdout_written)
+  end
+
+  def test_error_envelope_warns_when_canonical_json_cannot_serialize
+    command = Hive::Commands::RefactorPatrolReset.new(
+      "demo",
+      confirm: true,
+      json: true,
+      output: StringIO.new
+    )
+
+    _out, err = capture_io do
+      with_replaced_singleton_method(
+        Hive::WorkflowPackage::CanonicalJSON,
+        :generate,
+        ->(*) { raise JSON::GeneratorError, "synthetic encoding failure" }
+      ) do
+        command.emit_envelope(Hive::ConfigError.new("invalid"))
+      end
+    end
+
+    assert_match(/error envelope was not serialisable/, err)
+    assert_match(/synthetic encoding failure/, err)
+    assert_equal true, command.instance_variable_get(:@stdout_written)
+  end
+
+  def test_rejects_empty_and_malformed_registered_project_identities
+    with_tmp_dir do |root|
+      state = File.join(root, ".hive-state")
+      empty_id = Hive::Commands::RefactorPatrolReset.new(
+        "demo",
+        confirm: true,
+        project_resolver: ->(*) {
+          registered_entry(root, state).merge("project_id" => "")
+        }
+      )
+      error = assert_raises(Hive::ConfigError) { empty_id.call }
+      assert_match(/has no project_id/, error.message)
+
+      malformed = Hive::Commands::RefactorPatrolReset.new(
+        "demo",
+        confirm: true,
+        project_resolver: ->(*) {
+          registered_entry(root, state).tap {
+            |entry| entry.delete("hive_state_path")
+          }
+        }
+      )
+      error = assert_raises(Hive::ConfigError) { malformed.call }
+      assert_match(/identity is unavailable/, error.message)
+      assert_match(/KeyError/, error.message)
+    end
   end
 
   def test_cli_routes_project_confirmation_and_json

@@ -178,6 +178,261 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
     end
   end
 
+  def test_recovery_projects_every_pending_publication_after_restart
+    with_tmp_dir do |root|
+      store = Hive::Patrol::StateStore.new(root)
+      publications = [
+        [ capture(identity: "publication-one"),
+          {
+            fingerprint: "fingerprint-1",
+            branch: "hive-patrol/fix-one",
+            patch_id: "patch-1",
+            worktree_path: "/tmp/patrol-patch-1",
+            head_sha: "b" * 40
+          } ],
+        [ capture(identity: "publication-two", at: NOW + 1),
+          {
+            fingerprint: "fingerprint-2",
+            branch: "hive-patrol/fix-two",
+            patch_id: "patch-2",
+            worktree_path: "/tmp/patrol-patch-2",
+            head_sha: "c" * 40
+          } ]
+      ]
+      publications.each do |capture_value, identity|
+        intent = effect_intent(
+          capture_value: capture_value, **identity
+        )
+        store.reserve_occurrence!(capture_value, now: NOW)
+        store.prepare_effect!(intent, now: NOW)
+        store.mark_dispatch_uncertain!(intent, now: NOW)
+        store.settle_effect!(
+          intent,
+          status: "committed",
+          outcome: publication_outcome(
+            head_oid: identity.fetch(:head_sha)
+          ),
+          now: NOW
+        )
+      end
+
+      reloaded = Hive::Patrol::StateStore.new(root)
+      assert reloaded.recover_pending_publications!
+
+      assert_equal(
+        %w[fingerprint-1 fingerprint-2],
+        reloaded.fingerprints.keys.sort
+      )
+      publications.each do |capture_value, identity|
+        binding = reloaded.fingerprints.fetch(
+          identity.fetch(:fingerprint)
+        ).fetch("publication_binding")
+        assert_equal identity.fetch(:patch_id),
+                     binding.fetch("patch_id")
+        assert_empty(
+          reloaded.instance_variable_get(:@occurrence_store)
+                  .pending_outbox(capture_value.occurrence_id)
+                  .select { |entry|
+                    entry.fetch("kind") == "publication"
+                  }
+        )
+      end
+    end
+  end
+
+  def test_retryable_publication_seed_rejects_multiple_exact_candidates
+    with_tmp_dir do |root|
+      store = Hive::Patrol::StateStore.new(root)
+      captures = [
+        capture(identity: "retryable-one"),
+        capture(identity: "retryable-two", at: NOW + 1)
+      ]
+      captures.each_with_index do |capture_value, index|
+        intent = effect_intent(
+          capture_value: capture_value,
+          fingerprint: "shared-fingerprint",
+          branch: "hive-patrol/shared",
+          patch_id: "patch-#{index + 1}",
+          worktree_path: "/tmp/patrol-patch-#{index + 1}",
+          head_sha: (index.zero? ? "b" : "c") * 40
+        )
+        store.reserve_occurrence!(capture_value, now: NOW)
+        store.prepare_effect!(intent, now: NOW)
+        store.mark_dispatch_uncertain!(intent, now: NOW)
+      end
+      before = captures.to_h do |capture_value|
+        [
+          capture_value.occurrence_id,
+          store.occurrence(capture_value.occurrence_id)
+        ]
+      end
+
+      error = assert_raises(Hive::ConfigError) do
+        store.retryable_publication_seed(
+          fingerprint: "shared-fingerprint",
+          branch: "hive-patrol/shared"
+        )
+      end
+
+      assert_match(/multiple retryable patrol publications/,
+                   error.message)
+      assert_equal(
+        before,
+        captures.to_h do |capture_value|
+          [
+            capture_value.occurrence_id,
+            store.occurrence(capture_value.occurrence_id)
+          ]
+        end
+      )
+    end
+  end
+
+  def test_publication_projection_validates_existing_fingerprint_state
+    with_tmp_dir do |root|
+      store = Hive::Patrol::StateStore.new(root)
+      intent = effect_intent
+      store.reserve_occurrence!(capture, now: NOW)
+      store.prepare_effect!(intent, now: NOW)
+      store.mark_dispatch_uncertain!(intent, now: NOW)
+      store.settle_effect!(
+        intent,
+        status: "committed",
+        outcome: publication_outcome,
+        now: NOW
+      )
+      store.send(
+        :raw_write_fingerprints,
+        "fingerprint-1" => "malformed"
+      )
+
+      error = assert_raises(Hive::ConfigError) do
+        store.drain_publication_outbox!(intent.occurrence_id)
+      end
+
+      assert_match(/fingerprint is malformed/, error.message)
+      assert_includes(
+        store.instance_variable_get(:@occurrence_store)
+             .pending_outbox(intent.occurrence_id)
+             .map { |entry| entry.fetch("kind") },
+        "publication"
+      )
+    end
+
+    with_tmp_dir do |root|
+      projection = Hive::Modules::Migration::PatrolEvidence.canonical(
+        "category" => "correctness",
+        "feature_id" => "feature-1",
+        "root_cause_tokens" => [],
+        "target_sha" => "a" * 40,
+        "title_tokens" => [ "shared", "title" ]
+      )
+      store = Hive::Patrol::StateStore.new(root)
+      intent = effect_intent(finding_projection: projection)
+      store.reserve_occurrence!(capture, now: NOW)
+      store.prepare_effect!(intent, now: NOW)
+      store.mark_dispatch_uncertain!(intent, now: NOW)
+      store.settle_effect!(
+        intent,
+        status: "committed",
+        outcome: publication_outcome,
+        now: NOW
+      )
+      store.send(
+        :raw_write_fingerprints,
+        "fingerprint-1" => {
+          "branch" => "hive-patrol/fix",
+          "category" => "correctness",
+          "root_cause_tokens" => [ "stale" ]
+        }
+      )
+
+      store.drain_publication_outbox!(intent.occurrence_id)
+
+      projected = store.fingerprints.fetch("fingerprint-1")
+      assert_equal "hive-patrol/fix",
+                   projected.fetch("branch")
+      assert_equal "correctness", projected.fetch("category")
+      refute projected.key?("root_cause_tokens")
+    end
+
+    with_tmp_dir do |root|
+      store = Hive::Patrol::StateStore.new(root)
+      intent = effect_intent
+      store.reserve_occurrence!(capture, now: NOW)
+      store.prepare_effect!(intent, now: NOW)
+      store.mark_dispatch_uncertain!(intent, now: NOW)
+      store.settle_effect!(
+        intent,
+        status: "committed",
+        outcome: publication_outcome,
+        now: NOW
+      )
+      store.send(
+        :raw_write_fingerprints,
+        "fingerprint-1" => {
+          "branch" => "hive-patrol/other"
+        }
+      )
+
+      error = assert_raises(Hive::ConfigError) do
+        store.drain_publication_outbox!(intent.occurrence_id)
+      end
+
+      assert_match(/fingerprint conflicts/, error.message)
+      assert_equal(
+        "hive-patrol/other",
+        store.fingerprints.dig("fingerprint-1", "branch")
+      )
+    end
+  end
+
+  def test_publication_settlement_rejects_malformed_identity_without_mutation
+    cases = {
+      repository_mismatch: effect_intent(repository: "owner/other"),
+      malformed_projection:
+        effect_intent(finding_projection: "{"),
+      invalid_projection:
+        effect_intent(
+          finding_projection:
+            Hive::Modules::Migration::PatrolEvidence.canonical(
+              "category" => "correctness",
+              "feature_id" => "feature-1",
+              "target_sha" => "a" * 40,
+              "title_tokens" => [ "shared", "title" ]
+            )
+        )
+    }
+    cases.each do |label, intent|
+      with_tmp_dir do |root|
+        store = Hive::Patrol::StateStore.new(root)
+        store.reserve_occurrence!(capture, now: NOW)
+        store.prepare_effect!(intent, now: NOW)
+        store.mark_dispatch_uncertain!(intent, now: NOW)
+
+        error = assert_raises(Hive::ConfigError, label.to_s) do
+          store.settle_effect!(
+            intent,
+            status: "committed",
+            outcome: publication_outcome,
+            now: NOW
+          )
+        end
+
+        assert_match(/publication .*malformed/, error.message)
+        assert_equal(
+          "dispatch_uncertain",
+          store.effect_state(intent).fetch("state")
+        )
+        assert_empty(
+          store.instance_variable_get(:@occurrence_store)
+               .pending_outbox(intent.occurrence_id)
+        )
+        assert_empty store.fingerprints
+      end
+    end
+  end
+
   def test_generic_recovery_drain_projects_publication_and_receipt
     with_tmp_dir do |root|
       store = Hive::Patrol::StateStore.new(root)
@@ -928,44 +1183,58 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
     end
   end
 
-  def effect_intent
+  def effect_intent(
+    capture_value: capture,
+    repository: "owner/demo",
+    branch: "hive-patrol/fix",
+    fingerprint: "fingerprint-1",
+    patch_id: "patch-1",
+    worktree_path: "/tmp/patrol-patch-1",
+    base_sha: "a" * 40,
+    head_sha: "b" * 40,
+    finding_projection: nil
+  )
+    finding_projection ||=
+      Hive::Modules::Migration::PatrolEvidence.canonical(
+        "category" => "correctness",
+        "feature_id" => "feature-1",
+        "root_cause_tokens" => [ "shared", "cause" ],
+        "target_sha" => base_sha,
+        "title_tokens" => [ "shared", "title" ]
+      )
     Hive::Modules::Migration::EffectIntent.build(
       module_name: "patrol",
-      occurrence_id: capture.occurrence_id,
+      occurrence_id: capture_value.occurrence_id,
       authority: "legacy",
       owner_epoch: 1,
       sink: "pull_request",
-      target: "owner/demo:hive-patrol/fix",
-      idempotency_key: "fingerprint-1:pr",
+      target: "#{repository}:#{branch}",
+      idempotency_key: "#{fingerprint}:#{patch_id}:pr",
       capability: "github_pull_requests",
       scope: {
-        "repository" => "owner/demo",
-        "branch" => "hive-patrol/fix",
+        "repository" => repository,
+        "branch" => branch,
         "base_branch" => "main",
-        "finding_projection" =>
-          Hive::Modules::Migration::PatrolEvidence.canonical(
-            "category" => "correctness",
-            "feature_id" => "feature-1",
-            "root_cause_tokens" => [ "shared", "cause" ],
-            "target_sha" => "a" * 40,
-            "title_tokens" => [ "shared", "title" ]
-          ),
-        "fingerprint" => "fingerprint-1",
-        "patch_id" => "patch-1",
-        "worktree_path" => "/tmp/patrol-patch-1",
-        "base_sha" => "a" * 40,
-        "head_sha" => "b" * 40
+        "finding_projection" => finding_projection,
+        "fingerprint" => fingerprint,
+        "patch_id" => patch_id,
+        "worktree_path" => worktree_path,
+        "base_sha" => base_sha,
+        "head_sha" => head_sha
       },
       created_at: NOW
     )
   end
 
-  def publication_outcome
+  def publication_outcome(
+    head_oid: "b" * 40,
+    base_oid: "a" * 40
+  )
     {
       "pr_url" => "https://github.com/owner/demo/pull/7",
       "state" => "OPEN",
-      "head_oid" => "b" * 40,
-      "base_oid" => "a" * 40
+      "head_oid" => head_oid,
+      "base_oid" => base_oid
     }
   end
 

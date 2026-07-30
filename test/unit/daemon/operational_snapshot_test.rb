@@ -187,6 +187,28 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
     end
   end
 
+  def test_runtime_readiness_auto_identity_degrades_missing_storage_to_nil
+    with_tmp_dir do |dir|
+      private_dir = File.join(dir, "private")
+      FileUtils.mkdir_p(private_dir, mode: 0o700)
+      pid_path = File.join(dir, ".daemon.pid")
+      process_start_time = Hive::Lock.process_start_time(Process.pid)
+      File.write(
+        pid_path,
+        {
+          "pid" => Process.pid,
+          "process_start_time" => process_start_time
+        }.to_yaml
+      )
+      reader = Hive::Daemon::OperationalSnapshot::Reader.new(
+        path: File.join(private_dir, "missing.json"),
+        pid_path: pid_path
+      )
+
+      assert_nil reader.runtime_readiness(now: T0)
+    end
+  end
+
   def test_reconfigured_validity_is_measured_from_tick_completion
     with_tmp_dir do |dir|
       path = File.join(dir, "private", "operational-snapshot.json")

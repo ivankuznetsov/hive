@@ -8,6 +8,25 @@ require "hive/usage_db"
 class HivePatrolFixerTest < Minitest::Test
   include HiveTestHelper
 
+  class RecoveryWorktreeSpy
+    attr_reader :path, :calls
+
+    def initialize(path)
+      @path = path
+      @calls = []
+    end
+
+    def create_exact!(*, **)
+      @calls << :create_exact
+      raise "publication recovery must not recreate its worktree"
+    end
+
+    def remove!(*, **)
+      @calls << :remove
+      raise "publication recovery must not remove its worktree"
+    end
+  end
+
   def cfg(repo)
     Hive::Config.deep_merge(
       Hive::Config.deep_dup(Hive::Config::DEFAULTS),
@@ -844,7 +863,7 @@ class HivePatrolFixerTest < Minitest::Test
     end
   end
 
-  def test_review_handoff_retry_requires_an_immutable_publication_binding
+  def test_review_handoff_retry_fails_closed_without_a_publication_binding
     with_tmp_git_repo do |repo|
       state = Hive::Patrol::StateStore.new(repo)
       branch = "hive-patrol/#{finding.feature_id}-#{finding.fingerprint[0, 8]}"
@@ -858,12 +877,123 @@ class HivePatrolFixerTest < Minitest::Test
       fixer = Hive::Patrol::Fixer.new(repo, cfg: cfg(repo), state: state)
       worktree = Struct.new(:path).new(repo)
 
-      assert_nil fixer.send(:reusable_publication_patch, finding, branch, worktree)
+      error = nil
       with_replaced_singleton_method(
         Dir, :glob,
         ->(*) { raise "missing bindings must not scan patch history" }
       ) do
-        assert_nil fixer.send(:reusable_publication_patch, finding, branch, worktree)
+        error = assert_raises(
+          Hive::Patrol::Fixer::PublicationRecoveryError
+        ) do
+          fixer.send(
+            :reusable_publication_patch, finding, branch, worktree
+          )
+        end
+      end
+      assert_match(/binding is malformed/, error.message)
+    end
+  end
+
+  def test_bound_publication_recovery_never_rebuilds_without_exact_patch_receipt
+    %i[
+      missing_receipt mismatched_receipt unreadable_receipt
+      missing_binding non_hash_binding branch_mismatch
+    ].each do |failure|
+      with_tmp_git_repo do |repo|
+        File.write(File.join(repo, "app.rb"), "if\n")
+        run!("git", "-C", repo, "add", ".")
+        run!(
+          "git", "-C", repo, "commit", "-m", "broken app", "--quiet"
+        )
+        agent_runs = 0
+        agent = lambda do |worktree_path:, output_path:, **|
+          agent_runs += 1
+          raise "publication recovery must not rerun the fixer" if
+            agent_runs > 1
+
+          File.write(
+            File.join(worktree_path, "app.rb"), "puts 'fixed'\n"
+          )
+          write_regression(worktree_path)
+          write_fix_proof(output_path)
+        end
+        state = Hive::Patrol::StateStore.new(repo)
+        first = Hive::Patrol::Fixer.new(
+          repo, cfg: cfg(repo), state: state, agent_runner: agent
+        ).attempt(finding)
+        ledger = state.fingerprints
+        Hive::Patrol::Fingerprint.record_seen(
+          ledger, finding.fingerprint, branch: first.branch,
+          state: "review_handoff_failed", finding: finding
+        )
+        ledger.fetch(
+          finding.fingerprint
+        )["publication_binding"] = publication_binding_for(
+          first, repository: "owner/demo"
+        )
+        state.send(:raw_write_fingerprints, ledger)
+        patch_path = File.join(
+          state.root, "patches", "#{first.id}.json"
+        )
+        case failure
+        when :missing_receipt
+          FileUtils.rm_f(patch_path)
+        when :mismatched_receipt
+          record = JSON.parse(File.binread(patch_path))
+          record["head_sha"] = "c" * 40
+          File.binwrite(patch_path, JSON.generate(record))
+        when :missing_binding
+          ledger.fetch(
+            finding.fingerprint
+          ).delete("publication_binding")
+          state.send(:raw_write_fingerprints, ledger)
+        when :non_hash_binding
+          ledger.fetch(
+            finding.fingerprint
+          )["publication_binding"] = "malformed"
+          state.send(:raw_write_fingerprints, ledger)
+        when :branch_mismatch
+          ledger.fetch(
+            finding.fingerprint
+          )["branch"] = "hive-patrol/unrelated"
+          state.send(:raw_write_fingerprints, ledger)
+        end
+        patch_files_before = Dir.glob(
+          File.join(state.root, "patches", "*.json")
+        ).sort
+        worktree = RecoveryWorktreeSpy.new(first.worktree_path)
+        fixer = Hive::Patrol::Fixer.new(
+          repo,
+          cfg: cfg(repo),
+          state: state,
+          agent_runner: agent,
+          worktree_factory: ->(**) { worktree }
+        )
+        invoke = lambda do
+          assert_raises(
+            Hive::Patrol::Fixer::PublicationRecoveryError,
+            failure.to_s
+          ) { fixer.attempt(finding) }
+        end
+
+        if failure == :unreadable_receipt
+          with_replaced_singleton_method(
+            File, :mtime, ->(*) {
+              raise Errno::EACCES, "synthetic unreadable receipt"
+            }
+          ) { invoke.call }
+        else
+          invoke.call
+        end
+
+        assert_equal 1, agent_runs, failure.to_s
+        assert_empty worktree.calls, failure.to_s
+        assert File.directory?(first.worktree_path), failure.to_s
+        assert_equal(
+          patch_files_before,
+          Dir.glob(File.join(state.root, "patches", "*.json")).sort,
+          failure.to_s
+        )
       end
     end
   end

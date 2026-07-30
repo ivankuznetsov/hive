@@ -106,6 +106,7 @@ like a successful fresh start.
 
 The reset is idempotent after completion. It refuses a non-empty v3 store,
 foreign entry types, malformed/noncanonical markers or receipts, missing
-archives, changed transaction bindings, live writers, and filesystems that
-cannot provide atomic exchange. These conditions require operator repair; Hive
-does not guess which data to keep.
+archives, an archive whose public marker is missing, changed transaction
+bindings, live writers, and filesystems that cannot provide atomic exchange.
+These conditions require operator repair; Hive does not guess which data to
+keep.

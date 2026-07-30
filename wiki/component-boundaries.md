@@ -92,6 +92,14 @@ streamed occurrence journal. Terminal outcomes and canonical projection bytes
 commit together; sequenced completions compact through high-water/floor state,
 and a saturated non-sequence fence retains terminal proof rather than replaying.
 EvidenceStore is never consulted to decide a retry or mutation.
+Ordinary Patrol publication recovery additionally treats a durable binding or
+uncertain-effect seed as custody of one exact validated patch. If its receipt
+is missing, mismatched, or unreadable, Fixer stops without resetting the
+branch, rerunning the agent, minting another patch, or deleting the worktree.
+A terminal PR effect permits error cleanup only after the projected binding
+is byte-for-byte equivalent to the complete binding derived from its terminal
+receipt and matches the attempted patch; absent, partial, or conflicting
+bindings retain the checkout for operator-visible recovery.
 
 `JobStoreFreshStart` is the only cross-generation JobStore boundary. It has no
 v2 reader or converter: an explicitly confirmed, daemon-fenced command
@@ -105,6 +113,12 @@ That effect lock, a stable JobStore generation lock, and an independent
 PID/start-time writer fence remain held across the exchange, empty-v3
 admission, and receipt publication. A restarted daemon is accepted only after
 the same generation-bound operational snapshot reports runtime readiness.
+The deterministic archive name is also a generation-presence sentinel:
+archive-without-marker is corrupt/incomplete state and can never be treated as
+a fresh project.
+The shared Patrol capture and shadow-decision protocols contain no
+`job_store.schema_v2_import` trigger or `schema_v2_import` outcome. Opaque
+reset, not an effect-journal import, is the only released-JobStore transition.
 
 The Patrol row has a non-empty construction boundary. Shared stores and
 mechanisms, both product gateways, and intake/discovery/action/claim-maintenance

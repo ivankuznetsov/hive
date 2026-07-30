@@ -713,6 +713,11 @@ backlog rather than promising continuity, but preserves its exact bytes for
 manual audit and reconciles future remote work only from current terminal proof
 and exact hosted-object evidence. A daemon restarted by the command must
 publish generation-bound runtime readiness before reset success is returned.
+The Patrol capture and shadow-decision schemas do not accept a v2-import
+trigger or outcome; no dormant effect-journal compatibility path can convert
+the archived backlog. The deterministic opaque archive name remains a
+generation sentinel: if its public marker is missing, runtime fails closed
+rather than interpreting the project as fresh.
 
 ## ADR-032: Per-stage controls overlay the current durable identity
 

@@ -3272,6 +3272,27 @@ def test_run_forever_keeps_activation_fenced_when_readiness_cannot_publish
   refute_nil event
 end
 
+def test_run_forever_requires_a_readiness_store_before_releasing_activation
+  callback_called = false
+  dispatcher, _supervisor, _controller, logger = make_dispatcher(
+    operational_snapshot: nil,
+    runtime_ready_callback: -> { callback_called = true }
+  )
+  dispatcher.define_singleton_method(:install_signal_handlers!) { true }
+
+  error = assert_raises(Hive::UnavailableError) do
+    dispatcher.run_forever
+  end
+
+  assert_match(/readiness store is unavailable/, error.message)
+  refute callback_called
+  event = logger.events.find do |name, attributes|
+    name == :operational_snapshot_publish_failed &&
+      attributes.fetch(:phase) == "runtime_ready"
+  end
+  refute_nil event
+end
+
 def test_shutdown_acknowledgement_records_closed_admission_and_child_inventory
   snapshot = FakeOperationalSnapshot.new
   dispatcher, supervisor = make_dispatcher(operational_snapshot: snapshot)

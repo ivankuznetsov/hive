@@ -359,10 +359,8 @@ module Hive
           )
         end
 
-        def assert_effect_projection!(receipt, projection:)
-          @effects.assert_projection!(
-            receipt, projection: projection
-          )
+        def assert_publication!(receipt)
+          @effects.assert_publication!(receipt)
         end
 
         def acknowledge_outbox!(occurrence_id, kind:, entry_id:, digest:)

@@ -33,9 +33,17 @@ module Hive
       RECEIPT_KEYS = (
         MARKER_KEYS + %w[completed_at marker_digest]
       ).sort.freeze
-      STATUSES = %w[
-        fresh current reset_required reset_incomplete conflict
-      ].freeze
+
+      def self.archive_name_for(project_id)
+        identity = project_id.to_s
+        raise ArgumentError, "project_id must be non-empty" if
+          identity.empty?
+
+        suffix = Digest::SHA256.hexdigest(
+          [ SCHEMA, identity ].join("\0")
+        ).slice(0, 32)
+        ".jobs-v2-archive-#{suffix}"
+      end
 
       attr_reader :state_root, :target_root
 
@@ -55,9 +63,9 @@ module Hive
         @writer_fence = writer_fence
         @clock = clock
         @nonce = nonce || lambda do
-          Digest::SHA256.hexdigest(
-            [ SCHEMA, @project_id ].join("\0")
-          ).slice(0, 32)
+          self.class.archive_name_for(
+            @project_id
+          ).delete_prefix(".jobs-v2-archive-")
         end
         @generation_directory = managed_directory(
           @generation_root, "refactor patrol JobStore generations"
@@ -225,18 +233,20 @@ module Hive
               "JobStore fresh-start receipt exists without its v2 marker"
             )
           end
+          if @legacy_directory.entry_type(
+            expected_archive_name, missing: true
+          )
+            corrupt!(
+              "archived v2 JobStore exists without its reset marker"
+            )
+          end
           status_payload(target_kind ? "current" : "fresh")
-        else
-          corrupt!("released v2 jobs name has an unsupported type")
         end
       end
 
       def seal_legacy_jobs!
-        suffix = @nonce.call.to_s
-        unless suffix.match?(/\A[0-9a-f]{32}\z/)
-          raise ArgumentError, "fresh-start nonce is malformed"
-        end
-        archive_name = ".jobs-v2-archive-#{suffix}"
+        archive_name = expected_archive_name
+        suffix = archive_name.delete_prefix(".jobs-v2-archive-")
         archive_kind = @legacy_directory.entry_type(
           archive_name, missing: true
         )
@@ -281,6 +291,14 @@ module Hive
         end
         assert_archive!(sealed)
         sealed
+      end
+
+      def expected_archive_name
+        suffix = @nonce.call.to_s
+        unless suffix.match?(/\A[0-9a-f]{32}\z/)
+          raise ArgumentError, "fresh-start nonce is malformed"
+        end
+        ".jobs-v2-archive-#{suffix}"
       end
 
       def build_marker(suffix)
@@ -357,8 +375,6 @@ module Hive
           corrupt!("reset marker archive identity conflicts")
         end
         value
-      rescue KeyError
-        corrupt!("reset marker has an invalid shape")
       end
 
       def validate_receipt!(value)
@@ -373,8 +389,6 @@ module Hive
         )
         timestamp(value.fetch("completed_at"))
         value
-      rescue KeyError
-        corrupt!("reset receipt has an invalid shape")
       end
 
       def validate_receipt_binding!(receipt, marker)
@@ -432,9 +446,6 @@ module Hive
       end
 
       def status_payload(status, marker: nil, archive_path: nil)
-        unless STATUSES.include?(status)
-          raise ArgumentError, "unknown JobStore generation status"
-        end
         {
           "schema" => STATUS_SCHEMA,
           "schema_version" => STATUS_VERSION,

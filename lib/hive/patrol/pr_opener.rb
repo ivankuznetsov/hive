@@ -159,11 +159,7 @@ module Hive
         )
         pr_url = publication.outcome.fetch("pr_url")
         drain_publication!(publication)
-        pending = reconciliation_pending_entry(finding, patch)
-        unless pending
-          raise Hive::GhError,
-                "created patrol PR #{pr_url} is missing its durable binding"
-        end
+        reconciliation_pending_entry(finding, patch)
         assert_local_patch_identity!(patch)
         assert_remote_patch_identity!(patch)
         review_task_path = if review_prs_enabled?
@@ -694,14 +690,13 @@ module Hive
       end
 
       def drain_publication!(result)
-        receipt = result.respond_to?(:receipt) && result.receipt
-        unless receipt
-          raise Hive::GhError,
-                "patrol PR effect is missing its terminal receipt"
-        end
+        receipt = result.receipt
         @state.drain_publication_outbox!(
           receipt.intent.occurrence_id
         )
+      rescue Hive::ConfigError => error
+        raise Hive::GhError,
+              "patrol PR publication projection failed: #{error.message}"
       end
 
       def retain_publication_worktree?(finding, patch)
@@ -709,9 +704,6 @@ module Hive
         if entry.is_a?(Hash) &&
            Fingerprint::RETRYABLE_PUBLICATION_STATES.include?(
              entry["state"]
-           ) &&
-           publication_binding_matches_patch?(
-             entry["publication_binding"], patch
            )
           return true
         end
@@ -749,28 +741,16 @@ module Hive
           entry["publication_binding"]
         return true unless binding.is_a?(Hash)
 
-        exact = binding["receipt_id"] == terminal_id &&
-                binding["occurrence_id"] ==
-                  @capture.occurrence_id &&
-                patch_identity_for(patch).all? do |field, value|
-                  binding[field] == value
-                end
-        exact &&
-          Fingerprint::RETRYABLE_PUBLICATION_STATES.include?(
-            entry["state"]
-          )
+        expected = @state.publication_binding_for_receipt(
+          terminal_id, occurrence_id: @capture.occurrence_id
+        )
+        return true unless patch_identity_for(patch).all? do |field, value|
+          expected[field] == value
+        end
+
+        binding != expected
       rescue StandardError
         true
-      end
-
-      def publication_binding_matches_patch?(binding, patch)
-        binding.is_a?(Hash) &&
-          binding["repository"] == effect_repository(nil) &&
-          binding["branch"] == patch.branch &&
-          binding["base_branch"] == default_branch &&
-          patch_identity_for(patch).all? do |field, value|
-            binding[field] == value
-          end
       end
     end
   end

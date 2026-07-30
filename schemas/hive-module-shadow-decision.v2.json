@@ -216,22 +216,6 @@
             "manifest_digest": {"type": "string", "minLength": 1},
             "merge_sha": {"type": "string", "minLength": 1}
           }
-        },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "kind",
-            "id",
-            "source_schema_version",
-            "source_digest"
-          ],
-          "properties": {
-            "kind": {"const": "job_store.schema_v2_import"},
-            "id": {"type": "string", "minLength": 1},
-            "source_schema_version": {"const": 2},
-            "source_digest": {"type": "string", "minLength": 1}
-          }
         }
       ]
     },
@@ -675,8 +659,7 @@
                 "complete",
                 "completed",
                 "failed",
-                "not_dispatched",
-                "schema_v2_import"
+                "not_dispatched"
               ]
             },
             {"type": "null"}

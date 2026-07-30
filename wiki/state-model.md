@@ -638,7 +638,9 @@ before command success. See [[commands/refactor-patrol-reset]].
 The same command resumes an exchange that completed before its receipt was
 written. A non-empty v3 store alongside released or incomplete v2 state is a
 `conflict`, never an overwrite candidate. Malformed markers, receipts,
-archives, entry types, or writer evidence fail closed for operator repair.
+archives, entry types, or writer evidence fail closed for operator repair. The
+deterministic archive path is itself generation evidence, so an archive without
+its public marker is never interpreted as a fresh project.
 `hive daemon status --json` reports `fresh`, `current`,
 `reset_required`, `reset_incomplete`, `conflict`, or an isolated
 per-project `error` without performing the reset.

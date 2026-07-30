@@ -144,14 +144,11 @@ module Hive
           @outbox.receipt(record, receipt_id)
         end
 
-        def assert_projection!(receipt, projection:)
+        def assert_publication!(receipt)
           intent = @validator.intent(receipt.intent)
           receipt = @validator.receipt(
             receipt, intent: intent
           )
-          unless projection.to_s == "publication"
-            malformed!("patrol effect projection is malformed")
-          end
           record = @store.fetch(receipt.intent.occurrence_id)
           malformed!("patrol occurrence is missing") unless record
           @outbox.assert_publication(record, receipt)

@@ -119,7 +119,9 @@ module Hive
             require "hive/refactor_patrol/job_store"
             return :quiescent unless
               Hive::RefactorPatrol::JobStore.generation_state_present?(
-                project_root, hive_state_path: hive_state_path
+                project_root,
+                hive_state_path: hive_state_path,
+                project: entry
               )
 
             generation = Hive::RefactorPatrol::JobStore.generation_status(

@@ -1795,6 +1795,33 @@ class RefactorPatrolCommandTest < Minitest::Test
     end
   end
 
+  def test_job_list_reports_incomplete_and_conflicting_fresh_start_states
+    with_refactor_patrol_project do
+      {
+        "reset_incomplete" => /fresh start is incomplete/,
+        "conflict" => /JobStore generations conflict/
+      }.each do |status, message|
+        out, = capture_io do
+          with_replaced_singleton_method(
+            Hive::RefactorPatrol::JobStore,
+            :generation_status,
+            ->(*, **) { { "status" => status } }
+          ) do
+            error = assert_raises(Hive::ConfigError) do
+              Hive::Commands::RefactorPatrol.new(
+                "demo", json: true, list: true
+              ).call
+            end
+            assert_match message, error.message
+          end
+        end
+
+        payload = JSON.parse(out)
+        assert_equal "config", payload.fetch("error_kind")
+      end
+    end
+  end
+
   def test_explicit_fresh_start_archives_v2_opaquely_and_lists_empty_v3
     with_refactor_patrol_project do |repo|
       entry = Hive::Config.find_project("demo")

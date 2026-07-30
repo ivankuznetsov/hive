@@ -222,7 +222,9 @@ module Hive
 
         status =
           if Hive::RefactorPatrol::JobStore.generation_state_present?(
-            project_root, hive_state_path: state
+            project_root,
+            hive_state_path: state,
+            project: identity
           )
             Hive::RefactorPatrol::JobStore.generation_status(
               project_root,

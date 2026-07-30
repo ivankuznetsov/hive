@@ -138,21 +138,34 @@ module Hive
           )
         end
 
-        def generation_state_present?(project_root, hive_state_path: nil)
+        def generation_state_present?(
+          project_root, hive_state_path: nil, project: nil
+        )
           state = state_path_for(project_root, hive_state_path)
-          [
+          direct_paths = [
             StatePaths.current_root(state),
             StatePaths.released_jobs_root(state),
             File.join(
               StatePaths.generation_root(state),
               JobStoreFreshStart::RECEIPT_NAME
             )
-          ].any? do |path|
-            File.lstat(path)
-            true
-          rescue Errno::ENOENT
-            false
+          ]
+          return true if direct_paths.any? do |path|
+            generation_path_present?(path)
           end
+
+          released_root = StatePaths.released_root(state)
+          return false unless generation_path_present?(released_root)
+
+          identity = project_identity(project_root, project)
+          generation_path_present?(
+            File.join(
+              released_root,
+              JobStoreFreshStart.archive_name_for(
+                identity.fetch("project_id")
+              )
+            )
+          )
         end
 
         def reset_released_jobs!(
@@ -235,6 +248,13 @@ module Hive
         end
 
         private
+
+        def generation_path_present?(path)
+          File.lstat(path)
+          true
+        rescue Errno::ENOENT
+          false
+        end
 
         def fresh_start(
           project_root,
@@ -2314,7 +2334,9 @@ module Hive
       # constructed.
       def assert_runtime_generation_admission!
         return true unless self.class.generation_state_present?(
-          @project_root, hive_state_path: @hive_state_path
+          @project_root,
+          hive_state_path: @hive_state_path,
+          project: @generation_options[:project]
         )
 
         status = self.class.generation_status(

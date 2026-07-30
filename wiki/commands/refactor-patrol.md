@@ -313,7 +313,7 @@ an action or family identity.
 
 ## Read-only job inspection
 
-`--list` and `--show JOB_ID` query the authoritative v2 `JobStore` in the CLI
+`--list` and `--show JOB_ID` query the authoritative v3 `JobStore` in the CLI
 process. They do not enqueue, claim, replay, resume, or otherwise mutate a job,
 and they remain available for a registered project even when architecture
 discovery is currently disabled. `--list` returns jobs in their immutable
@@ -325,7 +325,7 @@ snapshot, so jobs arriving later, equal timestamps, and wall-clock rollback
 cannot skip or enter that pagination run. `count` and `page.total` report that
 snapshot's total while `page.returned` is the current page size.
 
-The sequence projection lives under `v2/indexes/job-query/` as immutable
+The sequence projection lives under `v3/indexes/job-query/` as immutable
 per-sequence sidecars plus an O(1) high-water record. Writer paths publish it
 only after the authoritative job exists. A list query reads the high-water
 once, opens at most `limit + 1` membership records, and parses only the selected

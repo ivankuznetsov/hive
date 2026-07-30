@@ -4,6 +4,14 @@ require "hive/daemon/activation_lock"
 class DaemonActivationLockTest < Minitest::Test
   include HiveTestHelper
 
+  class FailingUnlockHandle
+    def flock(*)
+      raise IOError, "synthetic unlock failure"
+    end
+
+    def close = true
+  end
+
   def test_serializes_profile_activation_on_one_stable_inode
     with_tmp_dir do |dir|
       first = Hive::Daemon::ActivationLock.new(
@@ -47,6 +55,40 @@ class DaemonActivationLockTest < Minitest::Test
 
       refute lock.release!
     end
+  end
+
+  def test_busy_lock_waits_until_a_nonzero_timeout
+    with_tmp_dir do |dir|
+      holder = Hive::Daemon::ActivationLock.new(
+        hive_home: dir, timeout_sec: 0
+      )
+      holder.acquire!
+      contender = Hive::Daemon::ActivationLock.new(
+        hive_home: dir, timeout_sec: 0.001
+      )
+
+      error = assert_raises(Hive::ConcurrentRunError) do
+        contender.acquire!
+      end
+
+      assert_match(/0.001s/, error.message)
+    ensure
+      holder&.release!
+    end
+  end
+
+  def test_release_wraps_lock_handle_failures
+    lock = Hive::Daemon::ActivationLock.new(
+      hive_home: "/tmp/hive-activation-release-test",
+      timeout_sec: 0
+    )
+    lock.instance_variable_set(:@handle, FailingUnlockHandle.new)
+
+    error = assert_raises(Hive::ConfigError) { lock.release! }
+
+    assert_match(/could not be released/, error.message)
+    assert_match(/synthetic unlock failure/, error.message)
+    assert_nil lock.instance_variable_get(:@handle)
   end
 
   def test_rejects_a_symlinked_lock_path

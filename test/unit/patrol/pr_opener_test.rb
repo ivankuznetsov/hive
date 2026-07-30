@@ -201,7 +201,8 @@ class HivePatrolPrOpenerTest < Minitest::Test
   end
 
   class FakeGh
-    attr_reader :pushed, :push_options, :created_args, :git_commands
+    attr_reader :pushed, :push_options, :created_args, :created_calls,
+                :git_commands
     attr_accessor :prs, :diff, :diff_status, :head_sha, :status_output,
                   :remote_oid, :base_remote_oid, :created_base_oid, :push_updates_remote
 
@@ -217,6 +218,7 @@ class HivePatrolPrOpenerTest < Minitest::Test
       @pushed = []
       @push_options = []
       @created_args = nil
+      @created_calls = 0
       @git_commands = []
     end
 
@@ -264,6 +266,7 @@ class HivePatrolPrOpenerTest < Minitest::Test
       end
 
       @created_args = cmd
+      @created_calls += 1
       [ "https://example.com/pr/2\n", "", Hive::Gh::CommandStatus.new(exitstatus: 0) ]
     end
   end
@@ -1222,6 +1225,162 @@ class HivePatrolPrOpenerTest < Minitest::Test
     end
   end
 
+  def test_any_terminal_publication_binding_mismatch_retains_exact_worktree
+    cases = {
+      patch: ->(binding) { binding["head_sha"] = "d" * 40 },
+      intent: lambda { |binding|
+        binding["intent_id"] = "intent-#{"d" * 64}"
+      },
+      repository: ->(binding) { binding["repository"] = "owner/other" },
+      base_branch: ->(binding) { binding["base_branch"] = "other" },
+      pr_url: lambda { |binding|
+        binding["pr_url"] = "https://example.com/pr/other"
+      },
+      pr_state: ->(binding) { binding["pr_state"] = "MERGED" },
+      head_oid: ->(binding) { binding["head_oid"] = "d" * 40 },
+      base_oid: ->(binding) { binding["base_oid"] = "d" * 40 },
+      extra_key: ->(binding) { binding["unexpected"] = true },
+      missing_key: ->(binding) { binding.delete("head_oid") }
+    }
+    cases.each do |label, mutate|
+      with_tmp_dir do |dir|
+        state = Hive::Patrol::StateStore.new(dir)
+        gh = FakeGh.new
+        validated_patch = patch(worktree_path: dir)
+        opener = pr_opener(
+          dir, cfg: cfg, state: state, gh: gh
+        )
+        entry = seed_publication_binding(
+          opener, state, validated_patch
+        )
+        mutate.call(entry.fetch("publication_binding"))
+        state.send(:raw_write_fingerprints, "fp1" => entry)
+        cleaned = false
+        opener.define_singleton_method(
+          :cleanup_worktree
+        ) { |_patch| cleaned = true }
+
+        result = opener.open(finding, validated_patch)
+
+        assert_equal :error, result.status, label.to_s
+        assert_equal "gh_error", result.reason, label.to_s
+        refute cleaned,
+               "a terminal effect with a non-exact #{label} binding is unresolved"
+        assert_empty gh.pushed, label.to_s
+        assert_nil gh.created_args, label.to_s
+      end
+    end
+  end
+
+  def test_publication_projection_failure_recovers_after_restart_without_a_second_pr
+    with_tmp_dir do |dir|
+      state = Hive::Patrol::StateStore.new(dir)
+      gh = FakeGh.new
+      validated_patch = patch(worktree_path: dir)
+      handoff = RecordingReviewHandoff.new
+      opener = pr_opener(
+        dir, cfg: cfg, state: state, gh: gh,
+        review_handoff: handoff
+      )
+      capture = opener.instance_variable_get(:@capture)
+      drain = state.method(:drain_publication_outbox!)
+      drain_calls = 0
+      state.define_singleton_method(
+        :drain_publication_outbox!
+      ) do |occurrence_id|
+        drain_calls += 1
+        if drain_calls == 1
+          raise Hive::ConfigError,
+                "synthetic publication projection failure"
+        end
+        drain.call(occurrence_id)
+      end
+      cleanups = 0
+      opener.define_singleton_method(
+        :cleanup_worktree
+      ) { |_patch| cleanups += 1 }
+
+      first = opener.open(finding, validated_patch)
+
+      assert_equal :error, first.status
+      assert_match(/publication projection failure/, first.detail)
+      assert_equal 1, gh.pushed.length
+      assert_equal 1, gh.created_calls
+      refute_nil gh.created_args
+      assert_equal 0, cleanups
+      occurrence = state.occurrence(
+        capture.occurrence_id
+      )
+      publication_cell = occurrence.fetch("effects").values.find do |cell|
+        cell.dig("semantic", "sink") == "pull_request"
+      end
+      assert_equal "committed", publication_cell.fetch("state")
+      receipt_id = publication_cell.fetch("terminal_receipt_id")
+      assert occurrence.fetch("outbox").any? do |entry|
+        entry["kind"] == "publication" &&
+          entry["acknowledged"] == false
+      end
+
+      reloaded = Hive::Patrol::StateStore.new(dir)
+      retry_opener = pr_opener(
+        dir, cfg: cfg, state: reloaded, gh: gh,
+        review_handoff: handoff
+      )
+      retry_opener.define_singleton_method(
+        :cleanup_worktree
+      ) { |_patch| cleanups += 1 }
+
+      second = retry_opener.open(finding, validated_patch)
+
+      assert_equal :skipped, second.status
+      assert_equal "existing_pr", second.reason
+      assert_equal 1, gh.pushed.length
+      assert_equal 1, gh.created_calls
+      assert_equal 0, cleanups
+      assert_equal 1, handoff.calls.length
+      binding = reloaded.fingerprints.fetch(
+        finding.fingerprint
+      ).fetch("publication_binding")
+      assert_equal receipt_id, binding.fetch("receipt_id")
+      assert_empty(
+        reloaded.instance_variable_get(:@occurrence_store)
+                .pending_outbox(capture.occurrence_id)
+                .select { |entry| entry.fetch("kind") == "publication" }
+      )
+    end
+  end
+
+  def test_exact_settled_publication_allows_error_cleanup_when_not_retryable
+    with_tmp_dir do |dir|
+      state = Hive::Patrol::StateStore.new(dir)
+      gh = FakeGh.new
+      validated_patch = patch(worktree_path: dir)
+      opener = pr_opener(
+        dir, cfg: cfg, state: state, gh: gh
+      )
+      entry = seed_publication_binding(
+        opener, state, validated_patch
+      )
+      entry["state"] = "open"
+      state.send(:raw_write_fingerprints, "fp1" => entry)
+      gh.define_singleton_method(:ensure_authenticated!) do |_cfg|
+        raise Hive::GhError, "synthetic post-settlement failure"
+      end
+      cleaned = false
+      opener.define_singleton_method(
+        :cleanup_worktree
+      ) { |_patch| cleaned = true }
+
+      result = opener.open(finding, validated_patch)
+
+      assert_equal :error, result.status
+      assert_match(/post-settlement failure/, result.detail)
+      assert cleaned
+      assert_empty gh.pushed
+      assert_nil gh.created_args
+    end
+  end
+
   def test_successor_cycle_uses_predecessor_binding_without_second_pr_effect
     with_tmp_dir do |dir|
       state = Hive::Patrol::StateStore.new(dir)
@@ -1273,10 +1432,25 @@ class HivePatrolPrOpenerTest < Minitest::Test
       "missing its exact branch or URL identity" => lambda { |entry, binding|
         entry["publication_binding"] = binding
         entry["pr_url"] = ""
+      },
+      "publication binding is malformed: receipt id" => lambda {
+        |entry, binding|
+        entry["publication_binding"] =
+          binding.merge("receipt_id" => "malformed")
+      },
+      "publication binding is malformed: extra key" => lambda {
+        |entry, binding|
+        entry["publication_binding"] =
+          binding.merge("unexpected" => true)
+      },
+      "publication binding is malformed: missing key" => lambda {
+        |entry, binding|
+        entry["publication_binding"] =
+          binding.reject { |key, _| key == "head_oid" }
       }
     }
 
-    cases.each do |message, mutate|
+    cases.each do |label, mutate|
       with_tmp_dir do |dir|
         state = Hive::Patrol::StateStore.new(dir)
         validated_patch = patch(worktree_path: dir)
@@ -1288,10 +1462,13 @@ class HivePatrolPrOpenerTest < Minitest::Test
         mutate.call(entry, binding)
         state.send(:raw_write_fingerprints, "fp1" => entry)
 
-        error = assert_raises(Hive::GhError, message) do
+        error = assert_raises(Hive::GhError, label) do
           opener.send(:reconciliation_pending_entry, finding, validated_patch)
         end
-        assert_includes error.message, message
+        expected = label.start_with?(
+          "publication binding is malformed:"
+        ) ? "publication binding is malformed" : label
+        assert_includes error.message, expected
       end
     end
   end

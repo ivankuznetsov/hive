@@ -26,8 +26,7 @@ module Hive
           attempted denied known_not_sent unknown committed reconciled failed
         ].freeze
         TRIGGER_KINDS = %w[
-          direct job_store.schema_v2_import manual module_event
-          pull_request.merged schedule
+          direct manual module_event pull_request.merged schedule
         ].freeze
         SCOPE_KEY_SETS = [
           [],
@@ -196,8 +195,6 @@ module Hive
             %w[event_name id kind occurred_at]
           when "pull_request.merged"
             %w[id kind manifest_digest merge_sha]
-          when "job_store.schema_v2_import"
-            %w[id kind source_digest source_schema_version]
           end
           exact_keys!(object, keys, label: label)
           nonempty(object["id"], label: label)
@@ -211,9 +208,6 @@ module Hive
           when "pull_request.merged"
             nonempty(object["manifest_digest"], label: label)
             nonempty(object["merge_sha"], label: label)
-          when "job_store.schema_v2_import"
-            malformed!(label) unless object["source_schema_version"] == 2
-            nonempty(object["source_digest"], label: label)
           end
           object
         end
@@ -256,7 +250,7 @@ module Hive
 
           klass = enum(
             outcome_class,
-            %w[complete completed failed not_dispatched schema_v2_import],
+            %w[complete completed failed not_dispatched],
             label: label
           )
           outcome = immutable_json(value, label: label)
@@ -264,9 +258,7 @@ module Hive
             PATROL_OUTCOME_KEYS : ARCHITECTURE_OUTCOME_KEYS
           allowed_keys!(
             outcome, allowed,
-            required:
-              klass == "schema_v2_import" ?
-                %w[complete job_id state] : %w[rationale],
+            required: %w[rationale],
             label: label
           )
           validate_capture_outcome_scalars!(

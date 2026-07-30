@@ -35,35 +35,6 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
     end
   end
 
-  def test_schema_import_capture_can_never_qualify_as_comparable_runtime_evidence
-    with_tmp_dir do |root|
-      comparator = Hive::Modules::Migration::ShadowComparator.new(root: root)
-      trigger = {
-        "kind" => "job_store.schema_v2_import",
-        "id" => "job-7",
-        "source_schema_version" => 2,
-        "source_digest" => "a" * 64
-      }
-      capture = capture_for(
-        "architecture-patrol", trigger, { "status" => "migrated" }
-      )
-
-      record = comparator.record!(
-        module_name: "architecture-patrol",
-        trigger: trigger,
-        legacy_capture: capture,
-        module_projection:
-          projection_for("architecture-patrol", trigger, "due"),
-        configuration_digest: "a" * 64,
-        occurred_at: START,
-        comparable: true
-      )
-
-      refute record.fetch("comparable")
-      assert_equal "legacy_mutator_capture", record.fetch("evidence_source")
-    end
-  end
-
   def test_published_schema_enforces_exact_capture_and_projection_shapes
     with_tmp_dir do |root|
       comparator = Hive::Modules::Migration::ShadowComparator.new(root: root)

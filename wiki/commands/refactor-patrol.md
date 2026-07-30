@@ -3,13 +3,13 @@ title: hive refactor-patrol
 type: command
 source: lib/hive/commands/refactor_patrol.rb, lib/hive/refactor_patrol/*
 created: 2026-07-02
-updated: 2026-07-22
+updated: 2026-07-28
 tags: [command, refactor-patrol, architecture, json, daemon]
 ---
 
 **TLDR**: `hive refactor-patrol` is Hive's language-neutral architecture
 patrol. The original on-demand v1 report remains available, while merged-PR
-mode emits the current v3 report over a durable v2 job lifecycle: immutable PR
+mode emits the current v3 report over a durable v3 job lifecycle: immutable PR
 scope, read-only discovery,
 exhaustive dispositions, and separately authorized isolated fixes or
 deduplicated issues. It is not Ruby- or Hive-specific: discovery maps generic
@@ -24,7 +24,7 @@ stays report/issue-only with `public_contract_safety_unavailable`.
 hive refactor-patrol my-project --json
 hive refactor-patrol my-project --feature route-home --changed-since origin/main
 
-# Explicit merged-PR replay (v2)
+# Explicit merged-PR replay (v3)
 hive refactor-patrol my-project --pr 123 --json
 hive refactor-patrol my-project --pr https://github.com/acme/app/pull/123 --json
 
@@ -254,7 +254,7 @@ fingerprint is stale and the next tick removes it. Earlier crashes resume the
 page/intake cursor; write-once manifest/job intake makes replay idempotent.
 Malformed or identity-drifted progress is quarantined and blocks.
 
-The v2 job lifecycle is `queued → analyzing → classified → acting → complete`.
+The v3 job lifecycle is `queued → analyzing → classified → acting → complete`.
 Discovery and actions use generation-fenced claims renewed by exact
 PID/process-start heartbeats; workers without verifiable process identity do
 not claim work. `JobStore` remains the sole aggregate lock/read/write facade,
@@ -263,6 +263,11 @@ but delegates deterministic responsibilities to three collaborators:
 `ClaimTransitions` constructs, renews, and finishes in-memory discovery/action
 claims, and `JobIndexes` projects rebuildable fingerprint/action indexes from
 terminal aggregates. None of those collaborators persists independently.
+Every production `job`, `discovery`, and `action` mutation enters JobStore
+through the persistence-free `TransitionGateway`, which applies the separate
+Architecture Patrol authorization gateway and the job-bound occurrence sender
+CAS before invoking the transition. JobStore still owns the aggregate and
+replay decision; the gateway adds no state file or recovery path.
 `PatrolArbiter` gives
 ordinary and architecture scans the same per-project patrol-scan budget and
 alternates kinds across ticks; architecture occurrences are oldest-first.
@@ -308,7 +313,7 @@ an action or family identity.
 
 ## Read-only job inspection
 
-`--list` and `--show JOB_ID` query the authoritative v2 `JobStore` in the CLI
+`--list` and `--show JOB_ID` query the authoritative v3 `JobStore` in the CLI
 process. They do not enqueue, claim, replay, resume, or otherwise mutate a job,
 and they remain available for a registered project even when architecture
 discovery is currently disabled. `--list` returns jobs in their immutable
@@ -320,7 +325,7 @@ snapshot, so jobs arriving later, equal timestamps, and wall-clock rollback
 cannot skip or enter that pagination run. `count` and `page.total` report that
 snapshot's total while `page.returned` is the current page size.
 
-The sequence projection lives under `v2/indexes/job-query/` as immutable
+The sequence projection lives under `v3/indexes/job-query/` as immutable
 per-sequence sidecars plus an O(1) high-water record. Writer paths publish it
 only after the authoritative job exists. A list query reads the high-water
 once, opens at most `limit + 1` membership records, and parses only the selected
@@ -535,7 +540,7 @@ for only the incomplete slices. Hive never mixes snapshots or resets trunk.
 
 `hive refactor-patrol` remains the frozen 0.x serializer and recovery protocol
 for the first-party `architecture-patrol` module adapter. All public and
-daemon-internal modes continue to use the existing v2 jobs, immutable merge
+daemon-internal modes use v3 jobs, immutable merge
 manifests, claims, progress, quarantine, result transport, publication
 attempts, and global terminal proofs. Module scheduling and
 `pull_request.merged` admission do not add a second GitHub poller; the current
@@ -547,22 +552,35 @@ does not copy state or replay merged-PR history.
 
 ## State and JSON
 
-Legacy state remains under `.hive-state/refactor_patrol/`. It shares directory,
+On-demand state remains under `.hive-state/refactor_patrol/`. It shares directory,
 atomic JSON-write, tolerant-read, and run-artifact mechanics with ordinary
 patrol through `Hive::Patrol::BaseStateStore`, while retaining its own namespace
-and thesis schema. V2 uses a separate namespace:
+and thesis schema. Scheduled JobStore state uses a split namespace:
 
 ```text
-.hive-state/refactor_patrol/v2/
-  reconciler.json               # exact-host catch-up checkpoint, schema v2
-  reconciler-progress.json      # identity-bound page/intake cursor, schema v1
-  manifests/<job-id>.json       # write-once source occurrence
-  jobs/<job-id>.json            # authoritative aggregate + claims/receipts
-  families/<family-id>.json     # rebuildable semantic-family projection
-  indexes/                      # rebuildable fingerprint/action indexes
-  results/<dispatch-id>.json    # daemon completion channel; removed on reap
-  runs/ and logs/               # agent evidence
+.hive-state/refactor_patrol/
+  jobstore-fresh-start.json      # completed opaque reset receipt, when needed
+  v2/
+    reconciler.json              # exact-host catch-up checkpoint, schema v2
+    reconciler-progress.json     # identity-bound page/intake cursor, schema v1
+    manifests/<job-id>.json      # write-once source occurrence
+    jobs/                        # obsolete backlog before explicit reset
+    jobs                         # regular reset marker after explicit reset
+    .jobs-v2-archive-<nonce>/    # exact opaque archived backlog
+    families/<family-id>.json    # rebuildable semantic-family projection
+    results/<dispatch-id>.json   # daemon completion channel; removed on reap
+    runs/ and logs/              # agent evidence
+  v3/
+    jobs/<job-id>.json           # sole aggregate authority
+    occurrences/records/occ-*.json # prepared/uncertain/terminal effects + outbox
+    indexes/                     # rebuildable job/action/query projections
 ```
+
+Hive never reads or converts the obsolete v2 jobs directory. Its presence
+blocks scheduled runtime until the operator explicitly archives it and accepts
+an empty v3 start with `hive refactor-patrol-reset PROJECT --confirm`; see
+[[commands/refactor-patrol-reset]]. Every non-JobStore v2 owner above remains
+live across that reset.
 
 Terminal remote-effect proof is repository-global rather than registration
 local:

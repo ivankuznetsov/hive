@@ -1,35 +1,41 @@
 require "json"
-require "fileutils"
 require "digest"
 require "time"
 require "uri"
-require "hive/atomic_file"
+require "forwardable"
+require "hive/config"
+require "hive/refactor_patrol/architecture_occurrence_store"
+require "hive/refactor_patrol/job_occurrence_lifecycle"
 require "hive/refactor_patrol/claim_transitions"
 require "hive/refactor_patrol/caps"
 require "hive/refactor_patrol/job_indexes"
 require "hive/refactor_patrol/job_query_index"
 require "hive/refactor_patrol/job_record_validator"
+require "hive/refactor_patrol/job_store_fresh_start"
+require "hive/refactor_patrol/job_store_files"
+require "hive/refactor_patrol/state_paths"
+require "hive/modules/migration/patrols"
 require "hive/refactor_patrol/pr_manifest"
 require "hive/refactor_patrol/publication_attempt"
 require "hive/refactor_patrol/thesis"
 
 module Hive
   module RefactorPatrol
-    # Authoritative v2 lifecycle storage. A job aggregate owns discovery and
+    # Authoritative v3 lifecycle storage. A job aggregate owns discovery and
     # action receipts; the indexes below are disposable projections rebuilt by
     # scanning terminal aggregates.
     class JobStore
       SCHEMA = "hive-refactor-patrol-job".freeze
-      SCHEMA_VERSION = 2
-      SUPPORTED_DISCOVERY_PAYLOAD_SCHEMA_VERSIONS = [ 2, 3 ].freeze
+      SCHEMA_VERSION = 3
+      SUPPORTED_DISCOVERY_PAYLOAD_SCHEMA_VERSIONS = [ 3 ].freeze
       ID_PATTERN = /\A[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}\z/
       STATES = %w[queued analyzing classified acting blocked complete].freeze
       DISPOSITIONS = %w[accepted flagged suppressed].freeze
       ZERO_REASONS = %w[no_mapped_slice no_theses all_suppressed].freeze
       TOP_LEVEL_KEYS = %w[
-        schema schema_version job_id source analysis_sha policy state complete
-        dispositions feature_results review_errors zero_reason attempts actions
-        created_at updated_at
+        schema schema_version job_id occurrence_id intake_transition_id source
+        analysis_sha policy state complete dispositions feature_results
+        review_errors zero_reason attempts actions created_at updated_at
       ].freeze
       SOURCE_KEYS = %w[
         url number repository registration base_branch base_sha merge_sha
@@ -54,7 +60,7 @@ module Hive
       FEATURE_RESULT_KEYS = %w[feature_id complete thesis_ids errors].freeze
       ACTION_REQUIRED_KEYS = %w[
         canonical_action_id thesis_id thesis_fingerprint kind owner_job_id
-        outcome terminal receipts
+        outcome terminal receipts transitions
       ].freeze
       ACTION_KEYS = (ACTION_REQUIRED_KEYS + %w[
         family_id claims created_at updated_at
@@ -70,15 +76,33 @@ module Hive
         pr_url review_task_path issue_url issue_number duplicate_issue_urls
       ].freeze
       ACTION_CLAIM_KEYS = %w[
-        owner owner_pid owner_process_start_time generation state authority
-        claimed_at heartbeat_at expires_at pid process_start_time pgid
-        finished_at outcome next_eligible_at
+        owner owner_pid owner_process_start_time occurrence_id generation state
+        authority claimed_at heartbeat_at expires_at pid process_start_time
+        pgid finished_at outcome next_eligible_at
       ].freeze
       DISCOVERY_ATTEMPT_KEYS = %w[
-        kind owner owner_pid owner_process_start_time generation state
-        claimed_at heartbeat_at expires_at pid process_start_time pgid
-        finished_at outcome next_eligible_at
+        kind owner owner_pid owner_process_start_time occurrence_id generation
+        state transitions claimed_at heartbeat_at expires_at pid
+        process_start_time pgid finished_at outcome next_eligible_at
       ].freeze
+      DIAGNOSTIC_ATTEMPT_KEYS = %w[
+        kind occurrence_id generation state reason evidence transitions
+        finished_at next_eligible_at
+      ].freeze
+      DIAGNOSTIC_ATTEMPT_OPTIONAL_KEYS =
+        %w[action_claim_generations].freeze
+      JOB_TRANSITION_ATTEMPT_KEYS = %w[
+        kind operation occurrence_id generation transitions recorded_at
+      ].freeze
+      DIAGNOSTIC_ATTEMPT_KINDS =
+        %w[discovery_block action_block].freeze
+      JOB_TRANSITION_ATTEMPT_KIND = "job_transition".freeze
+      TRANSITION_KEYS = %w[
+        intent_id operation generation semantic_digest outcome error_code
+        recorded_at
+      ].freeze
+      TRANSITION_OUTCOMES = %w[applied rejected].freeze
+      MAX_TRANSITIONS_PER_GENERATION = 256
       ACTIVE_ACTION_CLAIM_STATES = %w[claimed running].freeze
 
       class Error < StandardError
@@ -101,10 +125,199 @@ module Hive
 
       attr_reader :project_root, :root
 
-      def initialize(project_root)
+      class << self
+        def root_for(project_root, hive_state_path: nil)
+          StatePaths.current_root(
+            state_path_for(project_root, hive_state_path)
+          )
+        end
+
+        def released_jobs_root_for(project_root, hive_state_path: nil)
+          StatePaths.released_jobs_root(
+            state_path_for(project_root, hive_state_path)
+          )
+        end
+
+        def generation_state_present?(
+          project_root, hive_state_path: nil, project: nil
+        )
+          state = state_path_for(project_root, hive_state_path)
+          direct_paths = [
+            StatePaths.current_root(state),
+            StatePaths.released_jobs_root(state),
+            File.join(
+              StatePaths.generation_root(state),
+              JobStoreFreshStart::RECEIPT_NAME
+            )
+          ]
+          return true if direct_paths.any? do |path|
+            generation_path_present?(path)
+          end
+
+          released_root = StatePaths.released_root(state)
+          return false unless generation_path_present?(released_root)
+
+          identity = project_identity(project_root, project)
+          generation_path_present?(
+            File.join(
+              released_root,
+              JobStoreFreshStart.archive_name_for(
+                identity.fetch("project_id")
+              )
+            )
+          )
+        end
+
+        def reset_released_jobs!(
+          project_root,
+          hive_state_path: nil,
+          project: nil,
+          writer_fence: Hive::RefactorPatrol::JobStoreWriterFence.new
+        )
+          fresh_start(
+            project_root,
+            hive_state_path: hive_state_path,
+            project: project,
+            writer_fence: writer_fence
+          ).reset!
+        end
+
+        def ensure_current_namespace!(
+          project_root,
+          hive_state_path: nil,
+          project: nil,
+          writer_fence: Hive::RefactorPatrol::JobStoreWriterFence.new
+        )
+          fresh_start(
+            project_root,
+            hive_state_path: hive_state_path,
+            project: project,
+            writer_fence: writer_fence
+          ).ensure_current!
+        end
+
+        def generation_status(project_root, hive_state_path: nil, project: nil)
+          fresh_start(
+            project_root,
+            hive_state_path: hive_state_path,
+            project: project
+          ).status
+        end
+
+        def canonical_action_id(repository:, kind:, identity:,
+                                host: "github.com")
+          normalized_host = host.to_s.strip.downcase
+          uri = URI.parse("https://#{normalized_host}")
+          unless !normalized_host.empty? &&
+                 uri.host == normalized_host &&
+                 uri.path.empty? &&
+                 uri.userinfo.nil? &&
+                 uri.query.nil? &&
+                 uri.fragment.nil?
+            raise InconsistentRecord,
+                  "canonical action host must be an exact hostname"
+          end
+          normalized_repository = repository.to_s.strip.downcase
+          unless normalized_repository.match?(
+            %r{\A[a-z0-9][a-z0-9_.-]*/[a-z0-9][a-z0-9_.-]*\z}
+          )
+            raise InconsistentRecord,
+                  "canonical action repository must be an owner/name identity"
+          end
+          action_kind = kind.to_s
+          unless ACTION_KINDS.include?(action_kind)
+            raise InconsistentRecord,
+                  "canonical action kind must be one of #{ACTION_KINDS.inspect}"
+          end
+          action_identity = identity.to_s.strip
+          if action_identity.empty?
+            raise InconsistentRecord,
+                  "canonical action identity must be non-empty"
+          end
+
+          payload = [
+            normalized_host,
+            normalized_repository,
+            action_kind,
+            action_identity
+          ]
+          "#{action_kind}-#{::Digest::SHA256.hexdigest(JSON.generate(payload))}"
+        rescue URI::InvalidURIError
+          raise InconsistentRecord,
+                "canonical action host must be an exact hostname"
+        end
+
+        private
+
+        def generation_path_present?(path)
+          File.lstat(path)
+          true
+        rescue Errno::ENOENT
+          false
+        end
+
+        def fresh_start(
+          project_root,
+          hive_state_path: nil,
+          project: nil,
+          writer_fence: Hive::RefactorPatrol::JobStoreWriterFence.new
+        )
+          state = state_path_for(project_root, hive_state_path)
+          JobStoreFreshStart.new(
+            state_root: state,
+            project: project_identity(project_root, project),
+            target_version: SCHEMA_VERSION,
+            corrupt_record: CorruptRecord,
+            inconsistent_record: InconsistentRecord,
+            writer_fence: writer_fence
+          )
+        end
+
+        def state_path_for(project_root, hive_state_path)
+          File.expand_path(
+            hive_state_path || ".hive-state",
+            File.expand_path(project_root)
+          )
+        end
+
+        def project_identity(project_root, project)
+          return project if project
+
+          expanded_root = File.expand_path(project_root)
+          registered = Hive::Config.registered_projects.select do |entry|
+            File.expand_path(entry.fetch("path")) == expanded_root
+          end
+          if registered.size > 1
+            raise ArgumentError,
+                  "JobStore project identity is ambiguous for #{expanded_root}"
+          end
+          registered.first || {
+            "name" => File.basename(File.expand_path(project_root)),
+            "project_id" =>
+              "local-#{Digest::SHA256.hexdigest(File.expand_path(project_root))}"
+          }
+        end
+      end
+
+      def initialize(project_root, hive_state_path: nil, project: nil,
+                     writer_fence: nil)
         @project_root = File.expand_path(project_root)
-        @root = File.join(@project_root, ".hive-state", "refactor_patrol", "v2")
+        @hive_state_path = File.expand_path(hive_state_path || ".hive-state", @project_root)
+        @root = self.class.root_for(@project_root, hive_state_path: @hive_state_path)
         @record_validator = JobRecordValidator.new(contract: self.class)
+        @job_files = JobStoreFiles.new(
+          root: @root,
+          anchor: @hive_state_path,
+          corrupt_record: CorruptRecord,
+          inconsistent_record: InconsistentRecord
+        )
+        @generation_options = {
+          hive_state_path: @hive_state_path,
+          project: project
+        }
+        @generation_options[:writer_fence] = writer_fence if writer_fence
+        assert_runtime_generation_admission!
+        @current_namespace_ready = false
         @claim_transitions = ClaimTransitions.new(inconsistent_record: InconsistentRecord)
         @job_indexes = JobIndexes.new(
           schema_version: SCHEMA_VERSION,
@@ -112,48 +325,115 @@ module Hive
           inconsistent_record: InconsistentRecord
         )
         @job_query_index = JobQueryIndex.new(
-          root: @root,
+          files: @job_files,
           id_pattern: ID_PATTERN,
+          corrupt_record: CorruptRecord,
+          inconsistent_record: InconsistentRecord,
+          max_entries: JobStoreFiles::MAX_JOB_ENTRIES
+        )
+        @architecture_occurrences = ArchitectureOccurrenceStore.new(
+          root: @root,
+          job_reader: method(:read_job),
+          id_validator: method(:validate_id!),
           corrupt_record: CorruptRecord,
           inconsistent_record: InconsistentRecord
         )
+        @occurrence_lifecycle = JobOccurrenceLifecycle.new(
+          inconsistent_record: InconsistentRecord,
+          record_validator: @record_validator,
+          aggregate_reader: lambda do |job|
+            job.is_a?(Hash) ? json_copy(job) : read_job(job)
+          end,
+          job_path: method(:job_path),
+          before_mutation: method(:prepare_current_namespace!),
+          architecture_occurrences: -> { @architecture_occurrences }
+        )
       end
+
+      # Architecture Patrol owns one durable occurrence per immutable job.
+      # Discovery claims and every later action generation reuse this identity;
+      # action claim generations remain authorization fences, not effect IDs.
+      extend Forwardable
+      def_delegators :@occurrence_lifecycle,
+                    :reserve_manifest_occurrence!, :reserve_occurrence!,
+                    :occurrence_for_job, :occurrence_capture,
+                    :each_recovery_active_occurrence, :recovery_active?,
+                    :rebuild_recovery_index!, :recovery_backoff,
+                    :record_recovery_failure!,
+                    :clear_recovery_failure!, :prepare_effect!, :effect_state,
+                    :effect_intent, :recorded_effect_transitions,
+                    :unsettled_recorded_transitions,
+                    :assert_recorded_transitions_terminal!,
+                    :with_effect_sender_lock, :mark_dispatch_uncertain!,
+                    :reset_effect_prepared!, :settle_effect!, :deny_effect!,
+                    :effect_receipt, :terminal_effect_receipt_ids,
+                    :finalize_occurrence!, :drain_occurrence_outbox!
+
+      def record_job_transition_rejection!(job_id, operation:, generation:,
+                                           transition:, now: Time.now)
+        mutate_job(job_id) do |aggregate, _path|
+          appended = append_job_transition!(
+            aggregate,
+            operation: operation,
+            transition: transition,
+            generation: generation,
+            now: now,
+            outcome: "rejected"
+          )
+          aggregate["updated_at"] = now.utc.iso8601 if appended
+          aggregate
+        end
+      end
+
 
       # Intake is the only bridge from an immutable PR manifest to the
       # authoritative lifecycle aggregate. The per-job lock makes duplicate
       # watcher/reconciler producers preserve the first policy snapshot and
       # timestamp instead of racing two otherwise equivalent queued writes.
-      def enqueue_manifest!(manifest, policy:, now: Time.now, dry_run: false)
+      def enqueue_manifest!(manifest, policy:, occurrence_id:,
+                            intake_transition_id:, now: Time.now,
+                            dry_run: false)
         data = json_copy(manifest)
         source = source_from_manifest(data)
         aggregate = queued_aggregate(
           job_id: data.fetch("job_id"),
           source: source,
           policy: json_copy(policy),
+          occurrence_id: occurrence_id,
+          intake_transition_id: intake_transition_id,
           now: now
         )
         validate_job!(aggregate)
         return aggregate if dry_run
 
-        path = job_path(aggregate.fetch("job_id"))
-        FileUtils.mkdir_p(File.dirname(path))
-        result = File.open("#{path}.lock", File::RDWR | File::CREAT, 0o600) do |lock|
-          lock.flock(File::LOCK_EX)
-          existing_file = File.file?(path)
+        prepare_current_namespace!
+        job_id = aggregate.fetch("job_id")
+        path = job_path(job_id)
+        result = @job_files.with_job_admission(job_id) do
+          existing_file = @job_files.job_exists?(job_id)
           @job_query_index.with_registration(
-            aggregate.fetch("job_id"),
+            job_id,
             existing: existing_file,
             migration_job_ids: method(:ordered_job_query_ids)
           ) do
             if existing_file
-              existing = read_job(aggregate.fetch("job_id"))
+              existing = read_job(job_id)
               unless existing.fetch("source") == source
                 quarantine_job_source!(
-                  aggregate.fetch("job_id"),
+                  job_id,
                   authoritative: existing.fetch("source"),
                   candidate: source
                 )
                 raise InconsistentRecord.new("refactor patrol intake source is immutable", path: path)
+              end
+              unless existing.fetch("occurrence_id") ==
+                     aggregate.fetch("occurrence_id") &&
+                     existing.fetch("intake_transition_id") ==
+                       aggregate.fetch("intake_transition_id")
+                raise InconsistentRecord.new(
+                  "refactor patrol intake occurrence identity is immutable",
+                  path: path
+                )
               end
               existing
             else
@@ -229,6 +509,15 @@ module Hive
         raise InconsistentRecord, "refactor patrol action has invalid scheduling evidence (#{e.message})"
       end
 
+      def linked_action_ready?(action)
+        owner = read_job(action.fetch("owner_job_id"))
+        owner_action = owner.fetch("actions").find do |candidate|
+          candidate.fetch("canonical_action_id") ==
+            action.fetch("canonical_action_id")
+        end
+        owner_action&.fetch("terminal") == true
+      end
+
       def action_phase_backoff_active?(aggregate, now: Time.now)
         attempt = aggregate.fetch("attempts").reverse_each.find do |item|
           item["kind"] == "action_block"
@@ -239,16 +528,27 @@ module Hive
         raise InconsistentRecord, "refactor patrol action backoff is invalid (#{e.message})"
       end
 
-      def block_actions!(job_id, reason:, evidence: {}, now: Time.now, backoff_sec: 60)
+      def block_actions!(job_id, reason:, evidence: {}, now: Time.now,
+                         backoff_sec: 60, episode: nil, transition: nil)
         mutate_job(job_id) do |aggregate, _path|
           next aggregate if aggregate.fetch("complete")
 
           timestamp = now.utc.iso8601
+          generation = diagnostic_episode!(
+            aggregate, "action_block", episode
+          )
           aggregate.fetch("attempts") << {
             "kind" => "action_block",
+            "occurrence_id" => aggregate.fetch("occurrence_id"),
+            "generation" => generation,
             "state" => "blocked",
             "reason" => reason.to_s,
             "evidence" => json_copy(evidence),
+            "transitions" => transition ? [
+              transition_record(
+                transition, generation: generation, now: now
+              )
+            ] : [],
             "action_claim_generations" => aggregate.fetch("actions").to_h do |action|
               generation = Array(action["claims"]).filter_map { |claim| claim["generation"] }.max.to_i
               [ action.fetch("canonical_action_id"), generation ]
@@ -263,8 +563,14 @@ module Hive
         end
       end
 
+      def next_diagnostic_episode(job, kind)
+        aggregate = job.is_a?(Hash) ? json_copy(job) : read_job(job)
+        diagnostic_generation(aggregate, kind.to_s) + 1
+      end
+
       def claim_discovery!(job_id, owner:, analysis_sha:, now: Time.now, lease_sec: 3600,
-                           claim_resolver: nil, owner_pid: nil, owner_process_start_time: nil)
+                           claim_resolver: nil, owner_pid: nil,
+                           owner_process_start_time: nil, transition: nil)
         mutate_job(job_id) do |aggregate, path|
           return nil if aggregate.fetch("complete")
           return nil unless %w[queued blocked analyzing].include?(aggregate.fetch("state"))
@@ -300,10 +606,17 @@ module Hive
             owner: owner,
             owner_pid: owner_pid,
             owner_process_start_time: owner_process_start_time,
+            occurrence_id: aggregate.fetch("occurrence_id"),
             now: now,
             lease_sec: lease_sec
           )
           aggregate["analysis_sha"] ||= analysis_sha.to_s
+          append_transition!(
+            attempt.fetch("transitions"),
+            transition_record(
+              transition, generation: attempt.fetch("generation"), now: now
+            )
+          ) if transition
           aggregate["state"] = "analyzing"
           aggregate["complete"] = false
           aggregate.fetch("attempts") << attempt
@@ -330,6 +643,15 @@ module Hive
         end
       end
 
+      # Read-fence equivalent for discovery transitions. The claim lock and
+      # generation/lease checks are shared with all discovery mutations.
+      def assert_discovery_claim!(token, now: Time.now)
+        mutate_claim(token, now: now) do |aggregate, _attempt|
+          aggregate
+        end
+        true
+      end
+
       # Heartbeats are generation-fenced and refuse expired claims. The
       # liveness resolver gates renewal on proof of death, not proof of life:
       # renewal is refused only when the recorded PID/start-time tuple is
@@ -351,9 +673,16 @@ module Hive
         end
       end
 
-      def release_discovery!(token, reason:, now: Time.now, backoff_sec: 60)
+      def release_discovery!(token, reason:, now: Time.now, backoff_sec: 60,
+                             transition: nil)
         mutate_claim(token, now: now) do |aggregate, attempt|
           timestamp = now.utc.iso8601
+          append_transition!(
+            attempt.fetch("transitions"),
+            transition_record(
+              transition, generation: attempt.fetch("generation"), now: now
+            )
+          ) if transition
           @claim_transitions.finish!(
             attempt,
             state: "released",
@@ -374,16 +703,27 @@ module Hive
       # Checkout/identity failures before a claim still need durable evidence
       # and retry throttling; otherwise the daemon would repeat shell/network
       # probes and identical log lines on every fast tick.
-      def block_discovery!(job_id, reason:, evidence: {}, now: Time.now, backoff_sec: 60)
+      def block_discovery!(job_id, reason:, evidence: {}, now: Time.now,
+                           backoff_sec: 60, episode: nil, transition: nil)
         mutate_job(job_id) do |aggregate, _path|
           next aggregate if aggregate.fetch("complete")
 
           timestamp = now.utc.iso8601
+          generation = diagnostic_episode!(
+            aggregate, "discovery_block", episode
+          )
           aggregate.fetch("attempts") << {
             "kind" => "discovery_block",
+            "occurrence_id" => aggregate.fetch("occurrence_id"),
+            "generation" => generation,
             "state" => "blocked",
             "reason" => reason.to_s,
             "evidence" => json_copy(evidence),
+            "transitions" => transition ? [
+              transition_record(
+                transition, generation: generation, now: now
+              )
+            ] : [],
             "finished_at" => timestamp,
             "next_eligible_at" => (now + backoff_sec.to_i).utc.iso8601
           }
@@ -394,11 +734,18 @@ module Hive
         end
       end
 
-      def checkpoint_discovery!(token, envelope:, now: Time.now, backoff_sec: 60)
+      def checkpoint_discovery!(token, envelope:, now: Time.now,
+                                backoff_sec: 60, transition: nil)
         payload = json_copy(envelope)
         mutate_claim(token, now: now) do |aggregate, attempt|
           assert_matching_discovery_payload!(aggregate, payload)
           merge_discovery_progress!(aggregate, payload)
+          append_transition!(
+            attempt.fetch("transitions"),
+            transition_record(
+              transition, generation: attempt.fetch("generation"), now: now
+            )
+          ) if transition
           timestamp = now.utc.iso8601
           if payload.fetch("complete")
             aggregate["review_errors"] = []
@@ -436,15 +783,40 @@ module Hive
       # active. Only complete feature slices enter the aggregate; an eventual
       # malformed/partial result is still handled by checkpoint_discovery!,
       # while a process death can resume after the last committed slice.
-      def checkpoint_discovery_progress!(token, envelope:, now: Time.now, lease_sec: 3600)
+      def checkpoint_discovery_progress!(token, envelope:, now: Time.now,
+                                         lease_sec: 3600,
+                                         transition: nil)
         validate_lease_sec!(lease_sec)
         payload = json_copy(envelope)
         mutate_claim(token, now: now) do |aggregate, attempt|
           assert_matching_discovery_payload!(aggregate, payload, intermediate: true)
           merge_discovery_progress!(aggregate, payload)
+          append_transition!(
+            attempt.fetch("transitions"),
+            transition_record(
+              transition, generation: attempt.fetch("generation"), now: now
+            )
+          ) if transition
           timestamp = now.utc.iso8601
           @claim_transitions.renew!(attempt, now: now, lease_sec: lease_sec)
           aggregate["updated_at"] = timestamp
+          aggregate
+        end
+      end
+
+      def record_discovery_transition_rejection!(token, transition:,
+                                                 now: Time.now)
+        mutate_claim(token, now: now) do |aggregate, attempt|
+          append_transition!(
+            attempt.fetch("transitions"),
+            transition_record(
+              transition,
+              generation: attempt.fetch("generation"),
+              now: now,
+              outcome: "rejected"
+            )
+          )
+          aggregate["updated_at"] = now.utc.iso8601
           aggregate
         end
       end
@@ -453,27 +825,12 @@ module Hive
       # keeps repository names, family ids, and fingerprints out of filesystem
       # paths while still binding all three identity dimensions.
       def canonical_action_id(repository:, kind:, identity:, host: "github.com")
-        normalized_host = host.to_s.strip.downcase
-        uri = URI.parse("https://#{normalized_host}")
-        unless !normalized_host.empty? && uri.host == normalized_host && uri.path.empty? &&
-               uri.userinfo.nil? && uri.query.nil? && uri.fragment.nil?
-          raise InconsistentRecord, "canonical action host must be an exact hostname"
-        end
-        normalized_repository = repository.to_s.strip.downcase
-        unless normalized_repository.match?(%r{\A[a-z0-9][a-z0-9_.-]*/[a-z0-9][a-z0-9_.-]*\z})
-          raise InconsistentRecord, "canonical action repository must be an owner/name identity"
-        end
-        action_kind = kind.to_s
-        unless ACTION_KINDS.include?(action_kind)
-          raise InconsistentRecord, "canonical action kind must be one of #{ACTION_KINDS.inspect}"
-        end
-        action_identity = identity.to_s.strip
-        raise InconsistentRecord, "canonical action identity must be non-empty" if action_identity.empty?
-
-        payload = [ normalized_host, normalized_repository, action_kind, action_identity ]
-        "#{action_kind}-#{::Digest::SHA256.hexdigest(JSON.generate(payload))}"
-      rescue URI::InvalidURIError
-        raise InconsistentRecord, "canonical action host must be an exact hostname"
+        self.class.canonical_action_id(
+          repository: repository,
+          host: host,
+          kind: kind,
+          identity: identity
+        )
       end
 
       # Classification is immutable. This transition snapshots only the action
@@ -489,7 +846,9 @@ module Hive
         normalize_action_specifications(aggregate, specs, job_path(aggregate.fetch("job_id")))
       end
 
-      def initialize_actions!(job_id, specifications:, terminal_proofs: {}, now: Time.now)
+      def initialize_actions!(job_id, specifications:, terminal_proofs: {},
+                              now: Time.now, transition: nil,
+                              transition_generation: nil)
         specs = json_copy(specifications)
         unless specs.is_a?(Array) && specs.all? { |item| item.is_a?(Hash) }
           raise CorruptRecord, "action specifications must be an array of objects"
@@ -505,6 +864,13 @@ module Hive
                 raise InconsistentRecord.new("refactor patrol action snapshot is immutable", path: path)
               end
 
+              append_job_transition!(
+                aggregate,
+                operation: "initialize-actions",
+                transition: transition,
+                generation: transition_generation,
+                now: now
+              ) if transition
               next aggregate
             end
             if aggregate.fetch("complete")
@@ -522,6 +888,13 @@ module Hive
                 terminal_proof: proofs[specification.fetch("canonical_action_id")]
               )
             end
+            append_job_transition!(
+              aggregate,
+              operation: "initialize-actions",
+              transition: transition,
+              generation: transition_generation,
+              now: now
+            ) if transition
             recompute_parent_state!(aggregate)
             aggregate["updated_at"] = timestamp
             aggregate
@@ -533,7 +906,9 @@ module Hive
       # was initialized but before this occurrence began a remote transition.
       # Finished claim history is retained; any active claim or receipt makes
       # the race ambiguous and therefore blocks instead of overwriting state.
-      def materialize_terminal_proof!(job_id, canonical_action_id, proof:, now: Time.now)
+      def materialize_terminal_proof!(job_id, canonical_action_id, proof:,
+                                      now: Time.now, transition: nil,
+                                      transition_generation: nil)
         normalized = validate_terminal_proof!(json_copy(proof), canonical_action_id, job_path(job_id))
         mutate_job(job_id) do |aggregate, path|
           action = find_action!(aggregate, canonical_action_id, path)
@@ -554,6 +929,14 @@ module Hive
           end
 
           apply_terminal_proof!(action, normalized, now)
+          append_transition!(
+            action.fetch("transitions"),
+            transition_record(
+              transition,
+              generation: transition_generation,
+              now: now
+            )
+          ) if transition
           recompute_parent_state!(aggregate)
           aggregate["updated_at"] = now.utc.iso8601
           aggregate
@@ -565,7 +948,7 @@ module Hive
       # previous worker has been resolved.
       def claim_action!(job_id, canonical_action_id, owner:, now: Time.now, lease_sec: 3600,
                         claim_resolver: nil, owner_pid: nil, owner_process_start_time: nil,
-                        authority: true)
+                        authority: true, transition: nil)
         raise InconsistentRecord, "action claim owner must be non-empty" if owner.to_s.empty?
         unless lease_sec.is_a?(Integer) && lease_sec.positive?
           raise InconsistentRecord, "action claim lease_sec must be a positive integer"
@@ -615,11 +998,18 @@ module Hive
             owner: owner,
             owner_pid: owner_pid,
             owner_process_start_time: owner_process_start_time,
+            occurrence_id: aggregate.fetch("occurrence_id"),
             authority: continuation_only ? "continuation_only" : "full",
             now: now,
             lease_sec: lease_sec
           )
           claims << claim
+          append_transition!(
+            action.fetch("transitions"),
+            transition_record(
+              transition, generation: claim.fetch("generation"), now: now
+            )
+          ) if transition
           action["outcome"] = "claimed" unless continuation_only
           action["updated_at"] = timestamp if action.key?("updated_at")
           aggregate["state"] = "acting"
@@ -694,7 +1084,8 @@ module Hive
       # The durable creation intent is write-once and must precede the remote
       # request. Retrying the same payload returns the authoritative aggregate;
       # a different payload is a conflicting external transaction.
-      def record_creation_intent!(token, intent:, now: Time.now)
+      def record_creation_intent!(token, intent:, now: Time.now,
+                                  transition: nil)
         payload = json_copy(intent)
         unless payload.is_a?(Hash) && payload.any?
           raise CorruptRecord, "refactor patrol creation intent must be a non-empty object"
@@ -706,12 +1097,18 @@ module Hive
             unless existing && existing["payload"] == payload
               raise InconsistentRecord, "revoked action claim cannot create a new remote intent"
             end
+            append_action_transition!(
+              action, claim, transition, now
+            ) if transition
             next aggregate
           end
           if existing
             unless existing["payload"] == payload
               raise InconsistentRecord, "refactor patrol creation intent is immutable"
             end
+            append_action_transition!(
+              action, claim, transition, now
+            ) if transition
             next aggregate
           end
 
@@ -719,21 +1116,31 @@ module Hive
             "payload" => payload,
             "recorded_at" => now.utc.iso8601
           }
+          append_action_transition!(
+            action, claim, transition, now
+          ) if transition
           touch_action!(aggregate, action, now)
         end
       end
       alias record_action_intent! record_creation_intent!
 
-      def record_action_receipt!(token, key:, value:, now: Time.now)
+      def record_action_receipt!(token, key:, value:, now: Time.now,
+                                 transition: nil)
         receipt_key = key.to_s
         if receipt_key.empty? || receipt_key == "creation_intent"
           raise InconsistentRecord, "action receipt key is invalid"
         end
 
-        record_action_receipts!(token, receipts: { receipt_key => value }, now: now)
+        record_action_receipts!(
+          token,
+          receipts: { receipt_key => value },
+          now: now,
+          transition: transition
+        )
       end
 
-      def record_action_receipts!(token, receipts:, now: Time.now)
+      def record_action_receipts!(token, receipts:, now: Time.now,
+                                  transition: nil)
         additions = json_copy(receipts)
         unless additions.is_a?(Hash) && additions.keys.all? { |key| key.is_a?(String) && !key.empty? }
           raise CorruptRecord, "action receipts must be an object with non-empty string keys"
@@ -745,26 +1152,43 @@ module Hive
           raise InconsistentRecord, "publication attempts require the fenced publication API"
         end
 
-        mutate_action_claim(token, now: now) do |aggregate, action, _claim|
+        mutate_action_claim(token, now: now) do |aggregate, action, claim|
           changed = merge_receipts!(action.fetch("receipts"), additions)
-          changed ? touch_action!(aggregate, action, now) : aggregate
+          prior = action.fetch("transitions").size
+          append_action_transition!(
+            action, claim, transition, now
+          ) if transition
+          if changed || action.fetch("transitions").size != prior
+            touch_action!(aggregate, action, now)
+          else
+            aggregate
+          end
         end
       end
 
-      def record_patch_receipt!(token, receipt:, now: Time.now)
+      def record_patch_receipt!(token, receipt:, now: Time.now,
+                                transition: nil)
         payload = json_copy(receipt)
-        mutate_action_claim(token, now: now) do |aggregate, action, _claim|
+        mutate_action_claim(token, now: now) do |aggregate, action, claim|
           receipts = action.fetch("receipts")
           patch_keys = receipts.keys.grep(/\Apatch(?:_\d+)?\z/).sort_by do |key|
             key == "patch" ? 1 : key.delete_prefix("patch_").to_i
           end
-          next aggregate if patch_keys.any? { |key| receipts.fetch(key) == payload }
+          if patch_keys.any? { |key| receipts.fetch(key) == payload }
+            append_action_transition!(
+              action, claim, transition, now
+            ) if transition
+            next transition ? touch_action!(aggregate, action, now) : aggregate
+          end
 
           sequence = patch_keys.empty? ? 1 : patch_keys.map do |key|
             key == "patch" ? 1 : key.delete_prefix("patch_").to_i
           end.max + 1
           key = sequence == 1 ? "patch" : "patch_#{sequence}"
           receipts[key] = payload
+          append_action_transition!(
+            action, claim, transition, now
+          ) if transition
           touch_action!(aggregate, action, now)
         end
       end
@@ -772,7 +1196,8 @@ module Hive
       # Atomically binds one validated patch receipt to its content-derived
       # publication attempt. Existing flat publication receipts are copied into
       # the matching namespace on first resume but remain readable and immutable.
-      def record_patch_publication_attempt!(token, receipt:, now: Time.now)
+      def record_patch_publication_attempt!(token, receipt:, now: Time.now,
+                                            transition: nil)
         payload = json_copy(receipt)
         mutate_action_claim(token, now: now) do |aggregate, action, claim|
           updated = PublicationAttempt.ensure_for_patch(
@@ -781,9 +1206,20 @@ module Hive
             recorded_at: now.utc.iso8601,
             continuation_only: claim.fetch("authority") == "continuation_only"
           )
-          next aggregate if updated == action.fetch("receipts")
+          if updated == action.fetch("receipts")
+            if transition
+              append_action_transition!(
+                action, claim, transition, now
+              )
+              next touch_action!(aggregate, action, now)
+            end
+            next aggregate
+          end
 
           action["receipts"] = updated
+          append_action_transition!(
+            action, claim, transition, now
+          ) if transition
           touch_action!(aggregate, action, now)
         end
       rescue PublicationAttempt::Error => e
@@ -793,7 +1229,9 @@ module Hive
       # Appends exactly one phase to an active publication attempt under the
       # current action-claim fence. Phase grammar and ordering are validated by
       # JobRecordValidator before the aggregate is committed.
-      def record_publication_attempt_phase!(token, attempt_id:, phase:, payload:, now: Time.now)
+      def record_publication_attempt_phase!(token, attempt_id:, phase:,
+                                            payload:, now: Time.now,
+                                            transition: nil)
         value = json_copy(payload)
         mutate_action_claim(token, now: now) do |aggregate, action, claim|
           updated = PublicationAttempt.append_phase(
@@ -803,9 +1241,17 @@ module Hive
             payload: value,
             continuation_only: claim.fetch("authority") == "continuation_only"
           )
-          next aggregate if updated == action.fetch("receipts")
+          if updated == action.fetch("receipts")
+            append_action_transition!(
+              action, claim, transition, now
+            ) if transition
+            next transition ? touch_action!(aggregate, action, now) : aggregate
+          end
 
           action["receipts"] = updated
+          append_action_transition!(
+            action, claim, transition, now
+          ) if transition
           touch_action!(aggregate, action, now)
         end
       rescue PublicationAttempt::Error => e
@@ -815,29 +1261,46 @@ module Hive
       # Trunk drift can retire only the exact active pre-create attempt. The
       # observed head is durable so a replacement cannot be authorized by an
       # uncorroborated local marker.
-      def supersede_publication_attempt!(token, attempt_id:, observed_head_sha:, now: Time.now)
-        mutate_action_claim(token, now: now) do |aggregate, action, _claim|
+      def supersede_publication_attempt!(token, attempt_id:,
+                                         observed_head_sha:, now: Time.now,
+                                         transition: nil)
+        mutate_action_claim(token, now: now) do |aggregate, action, claim|
           updated = PublicationAttempt.supersede(
             receipts: action.fetch("receipts"),
             attempt_id: attempt_id,
             observed_head_sha: observed_head_sha,
             recorded_at: now.utc.iso8601
           )
-          next aggregate if updated == action.fetch("receipts")
+          if updated == action.fetch("receipts")
+            append_action_transition!(
+              action, claim, transition, now
+            ) if transition
+            next transition ? touch_action!(aggregate, action, now) : aggregate
+          end
 
           action["receipts"] = updated
+          append_action_transition!(
+            action, claim, transition, now
+          ) if transition
           touch_action!(aggregate, action, now)
         end
       rescue PublicationAttempt::Error => e
         raise InconsistentRecord, e.message
       end
 
-      def record_fix_receipt!(token, receipt:, now: Time.now)
-        record_action_receipt!(token, key: "fix", value: receipt, now: now)
+      def record_fix_receipt!(token, receipt:, now: Time.now,
+                              transition: nil)
+        record_action_receipt!(
+          token,
+          key: "fix",
+          value: receipt,
+          now: now,
+          transition: transition
+        )
       end
 
       def record_action_outcome!(token, outcome:, terminal:, receipts: {}, blocked: false, now: Time.now,
-                                 backoff_sec: 0)
+                                 backoff_sec: 0, transition: nil)
         unless [ true, false ].include?(terminal)
           raise InconsistentRecord, "action outcome terminal must be boolean"
         end
@@ -858,6 +1321,9 @@ module Hive
         mutate_action_claim(token, now: now) do |aggregate, action, claim|
           normalize_creation_intent_receipt!(action.fetch("receipts"), additions)
           merge_receipts!(action.fetch("receipts"), additions)
+          append_action_transition!(
+            action, claim, transition, now
+          ) if transition
           action["outcome"] = outcome_value
           action["terminal"] = terminal
           if terminal
@@ -877,11 +1343,20 @@ module Hive
         end
       end
 
-      def finish_action!(token, outcome:, receipts: {}, now: Time.now)
-        record_action_outcome!(token, outcome: outcome, terminal: true, receipts: receipts, now: now)
+      def finish_action!(token, outcome:, receipts: {}, now: Time.now,
+                         transition: nil)
+        record_action_outcome!(
+          token,
+          outcome: outcome,
+          terminal: true,
+          receipts: receipts,
+          now: now,
+          transition: transition
+        )
       end
 
-      def release_action!(token, outcome:, receipts: {}, now: Time.now, backoff_sec: 60)
+      def release_action!(token, outcome:, receipts: {}, now: Time.now,
+                          backoff_sec: 60, transition: nil)
         record_action_outcome!(
           token,
           outcome: outcome,
@@ -889,14 +1364,27 @@ module Hive
           receipts: receipts,
           blocked: true,
           now: now,
-          backoff_sec: backoff_sec
+          backoff_sec: backoff_sec,
+          transition: transition
         )
+      end
+
+      def record_action_transition_rejection!(token, transition:,
+                                              now: Time.now)
+        mutate_action_claim(token, now: now) do |aggregate, action, claim|
+          append_action_transition!(
+            action, claim, transition, now, outcome: "rejected"
+          )
+          touch_action!(aggregate, action, now)
+        end
       end
 
       # A linked occurrence owns no receipts. It may atomically copy only the
       # owner's terminal proof so its parent can settle without duplicating an
       # external effect.
-      def reconcile_linked_action!(job_id, canonical_action_id, now: Time.now)
+      def reconcile_linked_action!(job_id, canonical_action_id,
+                                   now: Time.now, transition: nil,
+                                   transition_generation: nil)
         mutate_job(job_id) do |aggregate, path|
           action = find_action!(aggregate, canonical_action_id, path)
           next aggregate if action.fetch("terminal")
@@ -910,6 +1398,14 @@ module Hive
 
           action["outcome"] = owner_action.fetch("outcome")
           action["terminal"] = true
+          append_transition!(
+            action.fetch("transitions"),
+            transition_record(
+              transition,
+              generation: transition_generation,
+              now: now
+            )
+          ) if transition
           action["updated_at"] = now.utc.iso8601 if action.key?("updated_at")
           recompute_parent_state!(aggregate)
           aggregate["updated_at"] = now.utc.iso8601
@@ -922,18 +1418,18 @@ module Hive
         validate_job!(data)
         return data if dry_run
 
-        path = job_path(data.fetch("job_id"))
-        FileUtils.mkdir_p(File.dirname(path))
-        result = File.open("#{path}.lock", File::RDWR | File::CREAT, 0o600) do |lock|
-          lock.flock(File::LOCK_EX)
-          existing_file = File.file?(path)
+        prepare_current_namespace!
+        job_id = data.fetch("job_id")
+        path = job_path(job_id)
+        result = @job_files.with_job_admission(job_id) do
+          existing_file = @job_files.job_exists?(job_id)
           @job_query_index.with_registration(
-            data.fetch("job_id"),
+            job_id,
             existing: existing_file,
             migration_job_ids: method(:ordered_job_query_ids)
           ) do
             if existing_file
-              existing = read_job(data.fetch("job_id"))
+              existing = read_job(job_id)
               validate_transition!(existing, data, path)
               if existing == data
                 existing
@@ -953,7 +1449,12 @@ module Hive
       def read_job(job_id)
         id = validate_id!(job_id)
         path = job_path(id)
-        raise RecordNotFound.new("refactor patrol job not found", path: path) unless File.file?(path)
+        unless @job_files.job_exists?(id)
+          raise RecordNotFound.new(
+            "refactor patrol job not found",
+            path: path
+          )
+        end
 
         read_job_path(path, expected_job_id: id)
       end
@@ -969,9 +1470,27 @@ module Hive
         page.merge("jobs" => page.fetch("job_ids").map { |job_id| read_job(job_id) })
       end
 
+      def incomplete_jobs?
+        cursor = nil
+        loop do
+          page = job_query_page(limit: 256, cursor: cursor)
+          return true if page.fetch("jobs").any? do |aggregate|
+            aggregate.fetch("complete") == false
+          end
+          return false unless page.fetch("has_more")
+
+          cursor = {
+            "generation" => page.fetch("generation"),
+            "after_sequence" => page.fetch("next_after_sequence"),
+            "through_sequence" => page.fetch("through_sequence")
+          }
+        end
+      end
+
       # Explicit writer-side repair. Rebuilding changes the index generation,
       # so existing cursors fail closed instead of silently changing pages.
       def rebuild_job_query_index!
+        prepare_current_namespace!
         @job_query_index.rebuild! { ordered_job_query_ids }
       rescue ArgumentError, KeyError => e
         raise InconsistentRecord, "cannot rebuild refactor patrol job query index (#{e.message})"
@@ -979,14 +1498,17 @@ module Hive
 
       def each_job
         return enum_for(__method__) unless block_given?
-        return unless Dir.exist?(jobs_dir)
 
-        Dir.glob(File.join(jobs_dir, "*.json")).sort.each do |path|
-          yield read_job_path(path, expected_job_id: File.basename(path, ".json"))
+        @job_files.each_job_id do |job_id|
+          yield read_job_path(
+            job_path(job_id),
+            expected_job_id: job_id
+          )
         end
       end
 
       def rebuild_indexes!
+        prepare_current_namespace!
         indexes = @job_indexes.project(each_job)
         atomic_write(fingerprint_index_path, indexes.fetch("fingerprints"))
         atomic_write(action_index_path, indexes.fetch("actions"))
@@ -1045,12 +1567,8 @@ module Hive
       end
 
       def with_action_catalog_lock
-        FileUtils.mkdir_p(root)
-        path = File.join(root, "actions.lock")
-        File.open(path, File::RDWR | File::CREAT, 0o600) do |lock|
-          lock.flock(File::LOCK_EX)
-          yield
-        end
+        prepare_current_namespace!
+        @job_files.with_action_catalog_lock { yield }
       end
 
       def normalize_action_specifications(aggregate, specifications, path)
@@ -1155,6 +1673,7 @@ module Hive
           "terminal" => linked && owner_action.fetch("terminal"),
           "receipts" => {},
           "claims" => [],
+          "transitions" => [],
           "created_at" => timestamp,
           "updated_at" => timestamp
         }
@@ -1240,14 +1759,6 @@ module Hive
           receipts.key?("issue") || receipts.key?("issue_url") ||
           receipts.key?("review_task_path") || publication_continuation?(receipts) ||
           action.fetch("outcome").match?(/remote_outcome_unknown|pr_opened|handoff|merged/)
-      end
-
-      def linked_action_ready?(action)
-        owner = read_job(action.fetch("owner_job_id"))
-        owner_action = owner.fetch("actions").find do |candidate|
-          candidate.fetch("canonical_action_id") == action.fetch("canonical_action_id")
-        end
-        owner_action&.fetch("terminal") == true
       end
 
       def action_claim_token(aggregate, action, claim)
@@ -1363,6 +1874,128 @@ module Hive
         Array(action["claims"]).last&.fetch("state", nil) == "released"
       end
 
+      def diagnostic_generation(aggregate, kind)
+        unless DIAGNOSTIC_ATTEMPT_KINDS.include?(kind)
+          raise InconsistentRecord,
+                "diagnostic attempt kind is invalid"
+        end
+
+        aggregate.fetch("attempts").filter_map do |attempt|
+          attempt["generation"] if attempt["kind"] == kind
+        end.max.to_i
+      end
+
+      def diagnostic_episode!(aggregate, kind, expected)
+        episode = diagnostic_generation(aggregate, kind) + 1
+        if expected && expected.to_i != episode
+          raise InconsistentRecord,
+                "diagnostic retry episode is stale"
+        end
+
+        episode
+      end
+
+      def append_job_transition!(aggregate, operation:, transition:,
+                                 generation:, now:, outcome: "applied")
+        unless generation.is_a?(Integer) && generation.positive?
+          raise InconsistentRecord,
+                "job transition generation must be a positive integer"
+        end
+
+        desired = transition_record(
+          transition,
+          generation: generation,
+          now: now,
+          outcome: outcome
+        )
+        intent_id = desired.fetch("intent_id")
+        existing_attempt = aggregate.fetch("attempts").find do |attempt|
+          Array(attempt["transitions"]).any? do |record|
+            record["intent_id"] == intent_id
+          end
+        end
+        if existing_attempt
+          existing = existing_attempt.fetch("transitions").find do |record|
+            record.fetch("intent_id") == intent_id
+          end
+          comparable_keys = TRANSITION_KEYS - [ "recorded_at" ]
+          valid = existing_attempt["kind"] ==
+                    JOB_TRANSITION_ATTEMPT_KIND &&
+                  existing_attempt["operation"] == operation.to_s &&
+                  existing_attempt["occurrence_id"] ==
+                    aggregate.fetch("occurrence_id") &&
+                  existing_attempt["generation"] == generation &&
+                  existing.slice(*comparable_keys) ==
+                    desired.slice(*comparable_keys)
+          unless valid
+            raise InconsistentRecord,
+                  "refactor patrol transition identity conflicts"
+          end
+          return false
+        end
+
+        aggregate.fetch("attempts") << {
+          "kind" => JOB_TRANSITION_ATTEMPT_KIND,
+          "operation" => operation.to_s,
+          "occurrence_id" => aggregate.fetch("occurrence_id"),
+          "generation" => generation,
+          "transitions" => [ desired ],
+          "recorded_at" => now.utc.iso8601
+        }
+        true
+      end
+
+      def transition_record(value, generation:, now:, outcome: "applied")
+        data = json_copy(value)
+        error_code = outcome == "rejected" ?
+          data.fetch("error_code").to_s : nil
+        {
+          "intent_id" => data.fetch("intent_id").to_s,
+          "operation" => data.fetch("operation").to_s,
+          "generation" => generation,
+          "semantic_digest" => data.fetch("semantic_digest").to_s,
+          "outcome" => outcome,
+          "error_code" => error_code,
+          "recorded_at" => now.utc.iso8601
+        }
+      rescue KeyError => e
+        raise CorruptRecord,
+              "refactor patrol transition is missing #{e.key.inspect}"
+      end
+
+      def append_transition!(records, transition)
+        existing = records.find do |record|
+          record.fetch("intent_id") == transition.fetch("intent_id")
+        end
+        if existing
+          unless existing == transition
+            raise InconsistentRecord,
+                  "refactor patrol transition identity conflicts"
+          end
+          return existing
+        end
+        if records.size >= MAX_TRANSITIONS_PER_GENERATION
+          raise InconsistentRecord,
+                "refactor patrol transition history exceeds the bounded limit"
+        end
+
+        records << transition
+        transition
+      end
+
+      def append_action_transition!(action, claim, transition, now,
+                                    outcome: "applied")
+        append_transition!(
+          action.fetch("transitions"),
+          transition_record(
+            transition,
+            generation: claim.fetch("generation"),
+            now: now,
+            outcome: outcome
+          )
+        )
+      end
+
       def scheduling_key(aggregate)
         source = aggregate.fetch("source")
         merged_at = source["merged_at"] ? Time.iso8601(source.fetch("merged_at")).utc : Time.at(0).utc
@@ -1399,11 +2032,16 @@ module Hive
       end
 
       def mutate_job(job_id)
+        prepare_current_namespace!
         id = validate_id!(job_id)
         path = job_path(id)
-        FileUtils.mkdir_p(File.dirname(path))
-        File.open("#{path}.lock", File::RDWR | File::CREAT, 0o600) do |lock|
-          lock.flock(File::LOCK_EX)
+        unless @job_files.job_exists?(id)
+          raise RecordNotFound.new(
+            "refactor patrol job not found",
+            path: path
+          )
+        end
+        @job_files.with_job_lock(id) do
           @job_query_index.with_registration(
             id,
             existing: true,
@@ -1542,12 +2180,15 @@ module Hive
         )
       end
 
-      def queued_aggregate(job_id:, source:, policy:, now:)
+      def queued_aggregate(job_id:, source:, policy:, occurrence_id:,
+                           intake_transition_id:, now:)
         timestamp = now.utc.iso8601
         {
           "schema" => SCHEMA,
           "schema_version" => SCHEMA_VERSION,
           "job_id" => job_id,
+          "occurrence_id" => occurrence_id.to_s,
+          "intake_transition_id" => intake_transition_id.to_s,
           "source" => source,
           "analysis_sha" => nil,
           "policy" => policy,
@@ -1565,10 +2206,14 @@ module Hive
       end
 
       def quarantine_job_source!(job_id, authoritative:, candidate:)
-        directory = File.join(root, "quarantine", "jobs")
         digest = ::Digest::SHA256.hexdigest(JSON.generate(candidate.sort.to_h))
-        path = File.join(directory, "#{job_id}-#{digest}.json")
-        return path if File.file?(path)
+        relative = File.join(
+          "quarantine",
+          "jobs",
+          "#{job_id}-#{digest}.json"
+        )
+        path = @job_files.absolute_path(relative)
+        return path if @job_files.regular?(relative)
 
         evidence = {
           "schema" => "hive-refactor-patrol-job-intake-conflict",
@@ -1586,7 +2231,7 @@ module Hive
       end
 
       def job_path(job_id)
-        File.join(jobs_dir, "#{validate_id!(job_id)}.json")
+        @job_files.job_path(validate_id!(job_id))
       end
 
       def validate_id!(job_id)
@@ -1594,7 +2239,10 @@ module Hive
       end
 
       def read_job_path(path, expected_job_id:)
-        data = JSON.parse(File.read(path))
+        data = @job_files.read_json(
+          @job_files.relative_path(path),
+          max_bytes: JobStoreFiles::MAX_JOB_BYTES
+        )
         raise CorruptRecord.new("refactor patrol job must contain a JSON object", path: path) unless data.is_a?(Hash)
 
         version = data["schema_version"]
@@ -1650,9 +2298,9 @@ module Hive
       end
 
       def read_derived_index(path, schema:, collection:)
-        return yield unless File.file?(path)
-
-        data = JSON.parse(File.read(path))
+        relative = @job_files.relative_path(path)
+        data = @job_files.read_json(relative, missing: true)
+        return yield unless data
         unless data.is_a?(Hash) && data["schema"] == schema && data["schema_version"] == SCHEMA_VERSION &&
                data[collection].is_a?(Hash) && (data.keys - %w[schema schema_version] - [ collection ]).empty?
           return yield
@@ -1663,10 +2311,50 @@ module Hive
       end
 
       def atomic_write(path, data)
-        dir = File.dirname(path)
-        Hive::AtomicFile.write(path, "#{JSON.pretty_generate(data)}\n", mode: 0o600)
-        Hive::AtomicFile.fsync_directory(dir)
+        prepare_current_namespace!
+        @job_files.write_json(
+          @job_files.relative_path(path),
+          data
+        )
         path
+      end
+
+      def prepare_current_namespace!
+        return true if @current_namespace_ready
+
+        self.class.ensure_current_namespace!(
+          @project_root, **@generation_options
+        )
+        @job_files.prepare!
+        @current_namespace_ready = true
+      end
+
+      # Runtime never reads, converts, or retires released v2 jobs. The
+      # operator must explicitly archive them before this v3-only store can be
+      # constructed.
+      def assert_runtime_generation_admission!
+        return true unless self.class.generation_state_present?(
+          @project_root,
+          hive_state_path: @hive_state_path,
+          project: @generation_options[:project]
+        )
+
+        status = self.class.generation_status(
+          @project_root,
+          hive_state_path: @hive_state_path,
+          project: @generation_options[:project]
+        ).fetch("status")
+        return true if %w[fresh current].include?(status)
+
+        raise InconsistentRecord.new(
+          "explicit fresh-start reset is required before v3 runtime admission",
+          path: @hive_state_path
+        )
+      rescue KeyError
+        raise InconsistentRecord.new(
+          "JobStore generation status is malformed",
+          path: @hive_state_path
+        )
       end
 
       def json_copy(value)

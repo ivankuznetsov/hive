@@ -1,4 +1,6 @@
 require "test_helper"
+require "hive/modules/migration/occurrence_journal"
+require "hive/refactor_patrol/transition_gateway"
 require "hive/refactor_patrol/job_store"
 require "hive/refactor_patrol/pr_opener"
 
@@ -7,6 +9,35 @@ class RefactorPatrolJobStoreTest < Minitest::Test
 
   T0 = Time.utc(2026, 7, 10, 12, 0, 0)
 
+  def test_runtime_admission_rejects_a_malformed_generation_status
+    store = Hive::RefactorPatrol::JobStore.allocate
+    store.instance_variable_set(:@project_root, "/projects/demo")
+    store.instance_variable_set(
+      :@hive_state_path, "/projects/demo/.hive-state"
+    )
+    store.instance_variable_set(:@generation_options, { project: nil })
+
+    error = with_replaced_singleton_method(
+      Hive::RefactorPatrol::JobStore,
+      :generation_state_present?,
+      ->(*, **) { true }
+    ) do
+      with_replaced_singleton_method(
+        Hive::RefactorPatrol::JobStore,
+        :generation_status,
+        ->(*, **) { {} }
+      ) do
+        assert_raises(
+          Hive::RefactorPatrol::JobStore::InconsistentRecord
+        ) do
+          store.send(:assert_runtime_generation_admission!)
+        end
+      end
+    end
+
+    assert_match(/generation status is malformed/, error.message)
+  end
+
   def test_writes_and_strictly_reads_authoritative_job_aggregate
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
@@ -14,8 +45,68 @@ class RefactorPatrolJobStoreTest < Minitest::Test
 
       assert_equal aggregate, store.write_job!(aggregate)
       assert_equal aggregate, store.read_job("job-1")
-      assert_equal File.join(dir, ".hive-state", "refactor_patrol", "v2"), store.root
+      assert_equal File.join(dir, ".hive-state", "refactor_patrol", "v3"), store.root
       assert_empty Dir.glob(File.join(store.root, "jobs", ".*.tmp.*"))
+    end
+  end
+
+  def test_incomplete_job_probe_uses_the_bounded_query_index
+    with_tmp_dir do |dir|
+      incomplete = Hive::RefactorPatrol::JobStore.new(
+        File.join(dir, "incomplete")
+      )
+      incomplete.write_job!(
+        classified_job("attempts" => [])
+      )
+      assert incomplete.incomplete_jobs?
+
+      complete = Hive::RefactorPatrol::JobStore.new(
+        File.join(dir, "complete")
+      )
+      complete.write_job!(job)
+      refute complete.incomplete_jobs?
+    end
+  end
+
+  def test_effect_recovery_delegates_the_store_minted_receipt_contract
+    with_tmp_dir do |dir|
+      calls = []
+      occurrences = Object.new
+      occurrences.define_singleton_method(:reset_effect_prepared!) do |intent, **options|
+        calls << [ :reset, intent, options ]
+        :reset
+      end
+      occurrences.define_singleton_method(:settle_effect!) do |intent, **options|
+        calls << [ :settle, intent, options ]
+        :settled
+      end
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      store.instance_variable_set(:@architecture_occurrences, occurrences)
+      intent = { "effect_id" => "effect-1" }
+
+      assert_equal :reset,
+                   store.reset_effect_prepared!(intent, now: T0)
+      result = store.settle_effect!(
+        intent,
+        status: "reconciled",
+        outcome: { "state" => "complete" },
+        now: T0
+      )
+
+      assert_equal :settled, result
+      assert_equal(
+        [
+          :settle,
+          intent,
+          {
+            status: "reconciled",
+            outcome: { "state" => "complete" },
+            now: T0
+          }
+        ],
+        calls.fetch(1)
+      )
+      assert_equal [ :reset, intent, { now: T0 } ], calls.fetch(0)
     end
   end
 
@@ -94,6 +185,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def test_job_query_index_missing_for_existing_jobs_fails_closed_until_explicit_rebuild
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
+      store.send(:prepare_current_namespace!)
       jobs_dir = File.join(store.root, "jobs")
       FileUtils.mkdir_p(jobs_dir)
       File.write(
@@ -112,6 +204,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def test_existing_job_write_migrates_all_pre_index_jobs_in_created_order
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
+      store.send(:prepare_current_namespace!)
       jobs_dir = File.join(store.root, "jobs")
       FileUtils.mkdir_p(jobs_dir)
       later = classified_job(
@@ -135,6 +228,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def test_existing_lifecycle_mutation_migrates_pre_index_job
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
+      store.send(:prepare_current_namespace!)
       jobs_dir = File.join(store.root, "jobs")
       FileUtils.mkdir_p(jobs_dir)
       aggregate = classified_job("job_id" => "job-legacy")
@@ -165,6 +259,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def test_corrupt_newer_and_inconsistent_jobs_fail_visibly_without_rewrite
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
+      store.send(:prepare_current_namespace!)
       jobs_dir = File.join(store.root, "jobs")
       FileUtils.mkdir_p(jobs_dir)
 
@@ -287,8 +382,9 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
 
-      created = store.enqueue_manifest!(manifest, policy: intake_policy, now: T0)
-      duplicate = store.enqueue_manifest!(
+      created = enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
+      duplicate = enqueue_manifest(
+        store,
         manifest,
         policy: intake_policy.merge("auto_fix" => true),
         now: T0 + 60
@@ -300,13 +396,22 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       assert_equal manifest.fetch("manifest_checksum"), created.dig("source", "manifest_checksum")
       assert_equal created, duplicate, "duplicate producers must preserve the first policy snapshot and bytes"
       assert_equal [ "pr-7-stable" ], store.jobs.map { |entry| entry.fetch("job_id") }
+      assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        store.enqueue_manifest!(
+          manifest,
+          policy: intake_policy,
+          occurrence_id: "occ-#{"f" * 64}",
+          intake_transition_id: "intent-#{"f" * 64}",
+          now: T0 + 120
+        )
+      end
     end
   end
 
   def test_manifest_intake_rejects_divergent_source_without_overwrite
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
-      original = store.enqueue_manifest!(manifest, policy: intake_policy, now: T0)
+      original = enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
       path = File.join(store.root, "jobs", "pr-7-stable.json")
       bytes = File.binread(path)
       divergent = manifest.merge(
@@ -315,7 +420,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       )
 
       assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
-        store.enqueue_manifest!(divergent, policy: intake_policy, now: T0 + 60)
+        enqueue_manifest(store, divergent, policy: intake_policy, now: T0 + 60)
       end
       assert_equal original, store.read_job("pr-7-stable")
       assert_equal bytes, File.binread(path)
@@ -331,7 +436,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       first_manifest = manifest(
         "source" => manifest.fetch("source").merge("merged_at" => "2026-07-10T13:00:00+01:00")
       )
-      first = store.enqueue_manifest!(first_manifest, policy: intake_policy, now: T0)
+      first = enqueue_manifest(store, first_manifest, policy: intake_policy, now: T0)
       second_manifest = manifest(
         "job_id" => "pr-8-stable",
         "source" => manifest.fetch("source").merge(
@@ -342,7 +447,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
         ),
         "manifest_checksum" => "e" * 64
       )
-      second = store.enqueue_manifest!(second_manifest, policy: intake_policy, now: T0 + 60)
+      second = enqueue_manifest(store, second_manifest, policy: intake_policy, now: T0 + 60)
       store.write_job!(
         first.merge(
           "state" => "blocked",
@@ -361,7 +466,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def test_discovery_claim_is_fenced_and_only_exact_owner_generation_can_checkpoint
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
-      store.enqueue_manifest!(manifest, policy: intake_policy, now: T0)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
 
       token = store.claim_discovery!(
         "pr-7-stable", owner: "daemon-a", analysis_sha: "c" * 40,
@@ -390,7 +495,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
       policy = intake_policy.merge("issue_filing" => true)
-      store.enqueue_manifest!(manifest, policy: policy, now: T0)
+      enqueue_manifest(store, manifest, policy: policy, now: T0)
       token = store.claim_discovery!(
         "pr-7-stable", owner: "daemon-a", analysis_sha: "c" * 40,
         now: T0, lease_sec: 60
@@ -422,7 +527,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
       policy = intake_policy.merge("issue_filing" => true)
-      store.enqueue_manifest!(manifest, policy: policy, now: T0)
+      enqueue_manifest(store, manifest, policy: policy, now: T0)
       token = store.claim_discovery!(
         "pr-7-stable", owner: "daemon-a", analysis_sha: "c" * 40,
         now: T0, lease_sec: 60
@@ -452,7 +557,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def test_expired_claim_reclaims_only_after_process_identity_is_resolved
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
-      store.enqueue_manifest!(manifest, policy: intake_policy, now: T0)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
       first = store.claim_discovery!(
         "pr-7-stable", owner: "daemon-a", analysis_sha: "c" * 40,
         now: T0, lease_sec: 10
@@ -542,7 +647,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def test_stale_prior_generation_token_cannot_renew_or_checkpoint_after_supersede_and_release
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
-      store.enqueue_manifest!(manifest, policy: intake_policy, now: T0)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
       stale = store.claim_discovery!(
         "pr-7-stable", owner: "daemon-a", analysis_sha: "c" * 40,
         now: T0, lease_sec: 10
@@ -571,7 +676,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def test_discovery_heartbeat_renews_only_the_live_exact_generation
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
-      store.enqueue_manifest!(manifest, policy: intake_policy, now: T0)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
       token = store.claim_discovery!(
         "pr-7-stable", owner: "daemon-a", analysis_sha: "c" * 40,
         now: T0, lease_sec: 60, owner_pid: 1234,
@@ -613,7 +718,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def test_claim_heartbeat_rejects_dead_owner_and_matches_pid_start_time
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
-      store.enqueue_manifest!(manifest, policy: intake_policy, now: T0)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
       token = store.claim_discovery!(
         "pr-7-stable", owner: "daemon-a", analysis_sha: "c" * 40,
         now: T0, lease_sec: 60, owner_pid: 1234,
@@ -640,7 +745,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def test_release_records_durable_retry_without_disposition_checkpoint
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
-      store.enqueue_manifest!(manifest, policy: intake_policy, now: T0)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
       token = store.claim_discovery!(
         "pr-7-stable", owner: "daemon-a", analysis_sha: "c" * 40,
         now: T0, lease_sec: 60
@@ -659,7 +764,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def test_partial_checkpoint_preserves_completed_features_and_retries_only_incomplete_work
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
-      store.enqueue_manifest!(manifest, policy: intake_policy, now: T0)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
       token = store.claim_discovery!(
         "pr-7-stable", owner: "daemon-a", analysis_sha: "c" * 40,
         now: T0, lease_sec: 60
@@ -721,7 +826,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def test_feature_checkpoint_is_durable_without_releasing_the_discovery_claim
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
-      store.enqueue_manifest!(manifest, policy: intake_policy, now: T0)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
       token = store.claim_discovery!(
         "pr-7-stable", owner: "daemon-a", analysis_sha: "c" * 40,
         now: T0, lease_sec: 60
@@ -1580,10 +1685,10 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
       assert_raises(Hive::RefactorPatrol::JobStore::CorruptRecord) do
-        store.enqueue_manifest!(manifest.except("job_id"), policy: intake_policy, now: T0)
+        enqueue_manifest(store, manifest.except("job_id"), policy: intake_policy, now: T0)
       end
 
-      store.enqueue_manifest!(manifest, policy: intake_policy, now: T0)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
       token = store.claim_discovery!(
         "pr-7-stable", owner: "daemon", analysis_sha: "c" * 40,
         now: T0, lease_sec: 10
@@ -1628,7 +1733,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def test_discovery_claim_guards_resolver_checkout_and_child_identity
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
-      store.enqueue_manifest!(manifest, policy: intake_policy, now: T0)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
       first = store.claim_discovery!(
         "pr-7-stable", owner: "one", analysis_sha: "c" * 40,
         now: T0, lease_sec: 10
@@ -1656,7 +1761,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def test_block_discovery_records_retry_evidence_and_is_idempotent_for_complete_jobs
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
-      store.enqueue_manifest!(manifest, policy: intake_policy, now: T0)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
       blocked = store.block_discovery!(
         "pr-7-stable", reason: "checkout_failed", evidence: { "ref" => "main" },
         now: T0, backoff_sec: 30
@@ -1664,6 +1769,23 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       assert_equal "blocked", blocked.fetch("state")
       assert_equal "checkout_failed", blocked.fetch("attempts").last.fetch("reason")
       assert_equal (T0 + 30).iso8601, blocked.fetch("attempts").last.fetch("next_eligible_at")
+      retried = store.block_discovery!(
+        "pr-7-stable",
+        reason: "checkout_failed",
+        evidence: { "ref" => "main" },
+        now: T0 + 10,
+        backoff_sec: 60
+      )
+      episodes = retried.fetch("attempts").select do |attempt|
+        attempt["kind"] == "discovery_block"
+      end
+      assert_equal [ 1, 2 ], episodes.map { |attempt|
+        attempt.fetch("generation")
+      }
+      assert_equal(
+        (T0 + 70).iso8601,
+        episodes.last.fetch("next_eligible_at")
+      )
 
       completed = Hive::RefactorPatrol::JobStore.new(File.join(dir, "complete"))
       completed.write_job!(job)
@@ -1865,7 +1987,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       end
 
       queued = Hive::RefactorPatrol::JobStore.new(File.join(dir, "queued"))
-      queued.enqueue_manifest!(manifest, policy: intake_policy, now: T0)
+      enqueue_manifest(queued, manifest, policy: intake_policy, now: T0)
       assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
         queued.plan_actions("pr-7-stable", specifications: [])
       end
@@ -1944,7 +2066,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def test_discovery_payload_validation_rejects_each_inconsistent_progress_shape
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
-      store.enqueue_manifest!(manifest, policy: intake_policy, now: T0)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
       store.claim_discovery!("pr-7-stable", owner: "runner", analysis_sha: "c" * 40, now: T0)
       aggregate = store.read_job("pr-7-stable")
       valid = complete_zero_envelope(dir)
@@ -2029,7 +2151,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
       assert_raises(Hive::RefactorPatrol::JobStore::CorruptRecord) do
-        store.enqueue_manifest!(manifest("schema_version" => 1), policy: intake_policy, now: T0)
+        enqueue_manifest(store, manifest("schema_version" => 1), policy: intake_policy, now: T0)
       end
       jobs_dir = File.join(store.root, "jobs")
       FileUtils.mkdir_p(jobs_dir)
@@ -2118,7 +2240,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def test_feature_completion_cannot_claim_success_while_retaining_errors
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
-      store.enqueue_manifest!(manifest, policy: intake_policy, now: T0)
+      enqueue_manifest(store, manifest, policy: intake_policy, now: T0)
       store.claim_discovery!("pr-7-stable", owner: "runner", analysis_sha: "c" * 40, now: T0)
       aggregate = store.read_job("pr-7-stable")
       retry_error = { "feature_id" => "checkout", "error" => "timeout" }
@@ -2313,7 +2435,236 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     end
   end
 
+  def test_new_job_capacity_is_rejected_without_orphan_job_or_index_state
+    with_tmp_dir do |dir|
+      with_constant(
+        Hive::RefactorPatrol::JobStoreFiles,
+        :MAX_JOB_ENTRIES,
+        1
+      ) do
+        store = Hive::RefactorPatrol::JobStore.new(dir)
+        store.write_job!(classified_job)
+
+        assert_raises(
+          Hive::RefactorPatrol::JobStore::InconsistentRecord
+        ) do
+          store.write_job!(classified_job("job_id" => "job-2"))
+        end
+
+        refute_path_exists File.join(
+          store.root, "jobs", "job-2.json.lock"
+        )
+        refute_path_exists File.join(
+          store.root, "jobs", "job-2.json"
+        )
+        page = store.job_query_page(limit: 10)
+        assert_equal [ "job-1" ], page.fetch("job_ids")
+        assert_equal 1, page.fetch("total")
+      end
+    end
+  end
+
+  def test_missing_job_mutation_is_rejected_before_lock_at_full_capacity
+    with_tmp_dir do |dir|
+      with_constant(
+        Hive::RefactorPatrol::JobStoreFiles,
+        :MAX_JOB_ENTRIES,
+        1
+      ) do
+        with_constant(
+          Hive::RefactorPatrol::JobStoreFiles,
+          :MAX_JOB_FILES,
+          2
+        ) do
+          store = Hive::RefactorPatrol::JobStore.new(dir)
+          store.write_job!(classified_job)
+
+          yielded = false
+          assert_raises(
+            Hive::RefactorPatrol::JobStore::RecordNotFound
+          ) do
+            store.send(:mutate_job, "job-2") do |aggregate|
+              yielded = true
+              aggregate
+            end
+          end
+
+          refute yielded
+          refute_path_exists File.join(
+            store.root, "jobs", "job-2.json.lock"
+          )
+          assert_equal [ "job-1" ],
+                       store.jobs.map { |job| job.fetch("job_id") }
+        end
+      end
+    end
+  end
+
+  def test_canonical_action_rejects_an_empty_identity_and_ambiguous_project_registration
+    store = Hive::RefactorPatrol::JobStore.new("/tmp/example")
+    assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+      store.canonical_action_id(
+        repository: "acme/demo",
+        kind: "fix",
+        identity: " "
+      )
+    end
+
+    with_tmp_dir do |root|
+      duplicate = {
+        "name" => "demo",
+        "path" => root,
+        "project_id" => "project-demo"
+      }
+      with_replaced_singleton_method(
+        Hive::Config,
+        :registered_projects,
+        -> { [ duplicate, duplicate.dup ] }
+      ) do
+        error = assert_raises(ArgumentError) do
+          Hive::RefactorPatrol::JobStore.send(
+            :project_identity,
+            root,
+            nil
+          )
+        end
+        assert_match(/identity is ambiguous/, error.message)
+      end
+    end
+  end
+
+  def test_diagnostic_and_transition_helpers_reject_stale_or_malformed_history
+    with_tmp_dir do |root|
+      store = Hive::RefactorPatrol::JobStore.new(root)
+      aggregate = {
+        "occurrence_id" => "occ-#{"1" * 64}",
+        "attempts" => []
+      }
+      assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        store.send(:diagnostic_generation, aggregate, "unsupported")
+      end
+      assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        store.send(
+          :diagnostic_episode!,
+          aggregate,
+          "discovery_block",
+          2
+        )
+      end
+      assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        store.send(
+          :append_job_transition!,
+          aggregate,
+          operation: "migrate",
+          transition: {},
+          generation: 0,
+          now: T0
+        )
+      end
+      assert_raises(Hive::RefactorPatrol::JobStore::CorruptRecord) do
+        store.send(
+          :transition_record,
+          { "intent_id" => "intent-1", "operation" => "migrate" },
+          generation: 1,
+          now: T0
+        )
+      end
+    end
+  end
+
+  def test_job_transition_append_is_idempotent_and_conflicts_fail_closed
+    with_tmp_dir do |root|
+      store = Hive::RefactorPatrol::JobStore.new(root)
+      aggregate = {
+        "occurrence_id" => "occ-#{"1" * 64}",
+        "attempts" => []
+      }
+      transition = {
+        "intent_id" => "intent-#{"2" * 64}",
+        "operation" => "migrate",
+        "semantic_digest" => "3" * 64
+      }
+
+      assert store.send(
+        :append_job_transition!,
+        aggregate,
+        operation: "migrate",
+        transition: transition,
+        generation: 1,
+        now: T0
+      )
+      refute store.send(
+        :append_job_transition!,
+        aggregate,
+        operation: "migrate",
+        transition: transition,
+        generation: 1,
+        now: T0 + 1
+      )
+
+      aggregate.fetch("attempts").first["operation"] = "changed"
+      assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        store.send(
+          :append_job_transition!,
+          aggregate,
+          operation: "migrate",
+          transition: transition,
+          generation: 1,
+          now: T0
+        )
+      end
+    end
+  end
+
+  def test_transition_history_is_idempotent_conflict_checked_and_bounded
+    with_tmp_dir do |root|
+      store = Hive::RefactorPatrol::JobStore.new(root)
+      transition = {
+        "intent_id" => "intent-1",
+        "operation" => "migrate",
+        "generation" => 1
+      }
+      records = [ transition ]
+
+      assert_same transition,
+                  store.send(:append_transition!, records, transition.dup)
+      assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        store.send(
+          :append_transition!,
+          records,
+          transition.merge("operation" => "changed")
+        )
+      end
+
+      with_constant(
+        Hive::RefactorPatrol::JobStore,
+        :MAX_TRANSITIONS_PER_GENERATION,
+        1
+      ) do
+        assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+          store.send(
+            :append_transition!,
+            records,
+            transition.merge("intent_id" => "intent-2")
+          )
+        end
+      end
+      assert_equal File.join(store.root, "jobs"),
+                   store.send(:jobs_dir)
+    end
+  end
+
   private
+
+  def with_constant(owner, name, replacement)
+    original = owner.const_get(name, false)
+    owner.send(:remove_const, name)
+    owner.const_set(name, replacement)
+    yield
+  ensure
+    owner.send(:remove_const, name) if owner.const_defined?(name, false)
+    owner.const_set(name, original)
+  end
 
   def classified_job(overrides = {})
     job(
@@ -2433,8 +2784,10 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def job(overrides = {})
     {
       "schema" => "hive-refactor-patrol-job",
-      "schema_version" => 2,
+      "schema_version" => Hive::RefactorPatrol::JobStore::SCHEMA_VERSION,
       "job_id" => "job-1",
+      "occurrence_id" => "occ-#{'1' * 64}",
+      "intake_transition_id" => "intent-#{'2' * 64}",
       "source" => source,
       "analysis_sha" => "c" * 40,
       "policy" => { "discovery" => true, "auto_fix" => true, "issue_filing" => false },
@@ -2487,8 +2840,10 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       "owner" => owner,
       "owner_pid" => nil,
       "owner_process_start_time" => nil,
+      "occurrence_id" => "occ-#{'1' * 64}",
       "generation" => generation,
       "state" => state,
+      "transitions" => [],
       "claimed_at" => (T0 + generation).iso8601,
       "heartbeat_at" => (T0 + generation).iso8601,
       "expires_at" => (T0 + 3600).iso8601,
@@ -2510,7 +2865,8 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       "owner_job_id" => "job-1",
       "outcome" => "pr_opened",
       "terminal" => true,
-      "receipts" => { "pr_url" => "https://github.com/acme/demo/pull/9" }
+      "receipts" => { "pr_url" => "https://github.com/acme/demo/pull/9" },
+      "transitions" => []
     }
   end
 
@@ -2537,10 +2893,57 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     }
   end
 
+  def architecture_capture(manifest_value = manifest)
+    Hive::RefactorPatrol::TransitionGateway.capture_for_manifest(
+      manifest: manifest_value,
+      project_id: "project-7",
+      owner: "module",
+      owner_epoch: 7,
+      recorded_at: T0
+    )
+  end
+
+  def architecture_intent(capture, sink:, target:, idempotency_key:,
+                          claim_generation:, job_id: "pr-7-stable",
+                          canonical_action_id: nil)
+    scope = { "job_id" => job_id }
+    if canonical_action_id
+      scope["canonical_action_id"] = canonical_action_id
+    end
+    Hive::Modules::Migration::EffectIntent.build(
+      module_name: "architecture-patrol",
+      occurrence_id: capture.occurrence_id,
+      authority: capture.owner,
+      owner_epoch: capture.owner_epoch,
+      sink: sink,
+      target: target,
+      idempotency_key: idempotency_key,
+      capability: "filesystem_write",
+      claim_generation: claim_generation,
+      scope: scope,
+      created_at: capture.recorded_at
+    )
+  end
+
+  def enqueue_manifest(store, value, **options)
+    identity = Digest::SHA256.hexdigest(
+      [
+        value["job_id"],
+        value["manifest_checksum"]
+      ].join(":")
+    )
+    store.enqueue_manifest!(
+      value,
+      occurrence_id: "occ-#{identity}",
+      intake_transition_id: "intent-#{identity}",
+      **options
+    )
+  end
+
   def complete_zero_envelope(project_root)
     {
       "schema" => "hive-refactor-patrol",
-      "schema_version" => 2,
+      "schema_version" => 3,
       "ok" => true,
       "job_id" => "pr-7-stable",
       "project" => "demo",

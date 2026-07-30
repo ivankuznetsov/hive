@@ -3,8 +3,10 @@ require "time"
 require "timeout"
 
 require "hive"
+require "hive/config"
 require "hive/paths"
 require "hive/pid_file"
+require "hive/refactor_patrol/job_store"
 require "hive/update_check/state"
 
 module Hive
@@ -27,9 +29,14 @@ module Hive
 
       attr_reader :pid_file, :log_file
 
-      def initialize(hive_home: Hive::Paths.state_home)
+      def initialize(
+        hive_home: Hive::Paths.state_home,
+        project_registry:
+          -> { Hive::Config.registered_projects_read_only }
+      )
         @pid_file = File.join(hive_home, ".daemon.pid")
         @log_file = File.join(hive_home, "logs", "daemon.log")
+        @project_registry = project_registry
       end
 
       # Liveness snapshot ({running:, pid:, uptime_sec:}) from the PID file.
@@ -72,7 +79,8 @@ module Hive
           # Agent-native parity with the TUI footer / bot push: expose the
           # update nudge so a programmatic caller can detect "behind" too.
           "current_version" => Hive::VERSION,
-          "update_nudge" => update_nudge_payload
+          "update_nudge" => update_nudge_payload,
+          "job_store_resets" => job_store_reset_payload
         }
       end
 
@@ -165,12 +173,97 @@ module Hive
       # The daemon-written update nudge, as a plain Hash for the envelope
       # (nil when current or unknown). Never raises out of status.
       def update_nudge_payload
-        nudge = Hive::UpdateCheck::State.new.nudge
+        nudge = Hive::UpdateCheck::State.new(
+          cleanup_orphans: false
+        ).nudge
         return nil unless nudge
 
         { "latest" => nudge.latest, "channel" => nudge.channel, "command" => nudge.command }
       rescue StandardError
         nil
+      end
+
+      def job_store_reset_payload
+        projects = Array(@project_registry.call).map do |entry|
+          job_store_reset_project(entry)
+        end
+        {
+          "ok" => projects.none? { |entry| entry.fetch("status") == "error" },
+          "schema" =>
+            Hive::RefactorPatrol::JobStoreFreshStart::STATUS_SCHEMA,
+          "schema_version" =>
+            Hive::RefactorPatrol::JobStoreFreshStart::STATUS_VERSION,
+          "projects" => projects
+        }
+      rescue StandardError => error
+        {
+          "ok" => false,
+          "schema" =>
+            Hive::RefactorPatrol::JobStoreFreshStart::STATUS_SCHEMA,
+          "schema_version" =>
+            Hive::RefactorPatrol::JobStoreFreshStart::STATUS_VERSION,
+          "projects" => [],
+          "error" => "#{error.class}: #{error.message}"
+        }
+      end
+
+      def job_store_reset_project(entry)
+        identity = entry.transform_keys(&:to_s)
+        project_root = File.expand_path(
+          identity["real_path"] || identity.fetch("path")
+        )
+        state = File.expand_path(
+          identity.fetch("hive_state_path", ".hive-state"),
+          project_root
+        )
+        project_id = identity.fetch("project_id").to_s
+        raise Hive::ConfigError, "registered project has no project_id" if
+          project_id.empty?
+
+        status =
+          if Hive::RefactorPatrol::JobStore.generation_state_present?(
+            project_root,
+            hive_state_path: state,
+            project: identity
+          )
+            Hive::RefactorPatrol::JobStore.generation_status(
+              project_root,
+              hive_state_path: state,
+              project: identity.merge(
+                "project_id" => project_id,
+                "real_path" => project_root,
+                "hive_state_path" => state
+              )
+            )
+          else
+            {
+              "status" => "fresh",
+              "archive_path" => nil,
+              "receipt_path" => nil
+            }
+          end
+        {
+          "project" => identity["name"],
+          "project_id" => project_id,
+          "hive_state_path" => state,
+          "status" => status.fetch("status"),
+          "archive_path" => status["archive_path"],
+          "receipt_path" => status["receipt_path"],
+          "error" => nil
+        }
+      rescue StandardError => error
+        {
+          "project" => entry.is_a?(Hash) &&
+            (entry["name"] || entry[:name]),
+          "project_id" => entry.is_a?(Hash) &&
+            (entry["project_id"] || entry[:project_id]),
+          "hive_state_path" => entry.is_a?(Hash) &&
+            (entry["hive_state_path"] || entry[:hive_state_path]),
+          "status" => "error",
+          "archive_path" => nil,
+          "receipt_path" => nil,
+          "error" => "#{error.class}: #{error.message}"
+        }
       end
     end
   end

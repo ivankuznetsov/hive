@@ -3,6 +3,10 @@ require "hive/daemon/patrol_scheduler"
 require "hive/daemon/refactor_patrol_scheduler"
 require "hive/modules/migration/patrols"
 require "hive/modules/migration/coordinator"
+require "hive/patrol/state_store"
+require "hive/refactor_patrol/job_store"
+require "hive/refactor_patrol/pr_manifest"
+require "hive/refactor_patrol/transition_gateway"
 
 class ModulesMigrationPatrolsTest < Minitest::Test
   include HiveTestHelper
@@ -281,6 +285,17 @@ class ModulesMigrationPatrolsTest < Minitest::Test
       checks += 1
       checks == 1
     end
+    state_store = Object.new
+    state_store.define_singleton_method(:recovery_backoff) do |now:|
+      now
+      { "generation" => 0, "failure" => nil, "blocked" => false }
+    end
+    state_store.define_singleton_method(
+      :each_recovery_active_occurrence
+    ) { |&| nil }
+    state_store.define_singleton_method(
+      :clear_recovery_failure!
+    ) { |expected_generation:| expected_generation.zero? }
     scheduler = Hive::Daemon::PatrolScheduler.new(
       registry: -> { [ entry ] },
       config_loader: ->(_path) {
@@ -289,7 +304,8 @@ class ModulesMigrationPatrolsTest < Minitest::Test
           "patrol" => { "enabled" => true, "trigger" => "timer", "poll_interval_sec" => 60 }
         )
       },
-      migration_ownership: ownership
+      migration_ownership: ownership,
+      state_store_factory: ->(_candidate) { state_store }
     )
 
     candidate = scheduler.candidates(now: NOW).fetch(0)
@@ -402,6 +418,68 @@ class ModulesMigrationPatrolsTest < Minitest::Test
     end
   end
 
+  def test_default_coordinator_probe_distinguishes_empty_and_active_ordinary_journals
+    with_project do |project|
+      supervisor = FakeSupervisor.new
+      supervisor.live = false
+      empty = Hive::Modules::Migration::Coordinator.new(
+        supervisor: supervisor,
+        attempt_store: FakeAttemptStore.new,
+        registry: -> { [ project ] },
+        store_factory: ->(_state) { FakeStore.new }
+      ).tick(now: NOW).fetch(0)
+
+      assert_equal :shadowing, empty.fetch(:status)
+      assert_empty empty.fetch(:blockers)
+    end
+
+    with_project do |project|
+      state_store = Hive::Patrol::StateStore.new(project.fetch("path"))
+      capture = Hive::Modules::Migration::PatrolCapture.build(
+        module_name: "patrol",
+        project: {
+          "project_id" => "project-1",
+          "name" => "demo",
+          "repository" => nil
+        },
+        trigger: {
+          "kind" => "schedule",
+          "id" => "tick-1",
+          "schedule" => "ordinary",
+          "occurred_at" => NOW.iso8601(6)
+        },
+        reservation: { "kind" => "ordinary", "id" => "reservation-1" },
+        owner: "legacy",
+        owner_epoch: 1,
+        selection_input: {
+          "kind" => "operation",
+          "operation" => "coordinator-proof"
+        },
+        selection:
+          Hive::Modules::Migration::PatrolDecisionProjection.build(
+            module_name: "patrol",
+            rationale: "due"
+          ),
+        outcome_class: nil,
+        outcome: nil,
+        occurred_at: NOW,
+        recorded_at: NOW
+      )
+      state_store.reserve_occurrence!(capture, now: NOW)
+      supervisor = FakeSupervisor.new
+      supervisor.live = false
+      active = Hive::Modules::Migration::Coordinator.new(
+        supervisor: supervisor,
+        attempt_store: FakeAttemptStore.new,
+        registry: -> { [ project ] },
+        store_factory: ->(_state) { FakeStore.new }
+      ).tick(now: NOW).fetch(0)
+
+      assert_equal :pending, active.fetch(:status)
+      assert_equal({ "patrol" => "live" }, active.fetch(:blockers))
+    end
+  end
+
   def test_coordinator_blocks_invalid_attempt_state_and_live_module_attempts
     with_project do |project|
       store = FakeStore.new
@@ -445,6 +523,219 @@ class ModulesMigrationPatrolsTest < Minitest::Test
       assert_equal :pending, result.fetch(:status)
       assert_equal({ "architecture-patrol" => "live" }, result.fetch(:blockers))
       assert_equal 2, attempt_store.calls
+    end
+  end
+
+  def test_coordinator_blocks_ownership_epoch_on_durable_product_work
+    with_project do |project|
+      store = FakeStore.new
+      supervisor = FakeSupervisor.new
+      supervisor.live = false
+      durable = {
+        "patrol" => :live,
+        "architecture-patrol" => :live
+      }
+      probes = []
+      coordinator = Hive::Modules::Migration::Coordinator.new(
+        supervisor: supervisor,
+        attempt_store: FakeAttemptStore.new,
+        registry: -> { [ project ] },
+        store_factory: ->(_state) { store },
+        durable_work_probe: lambda do |entry, module_name|
+          probes << [ entry.fetch("name"), module_name ]
+          durable.fetch(module_name)
+        end
+      )
+
+      pending = coordinator.tick(now: NOW).fetch(0)
+
+      assert_equal :pending, pending.fetch(:status)
+      assert_equal(
+        {
+          "patrol" => "live",
+          "architecture-patrol" => "live"
+        },
+        pending.fetch(:blockers)
+      )
+      assert_equal(
+        [
+          [ "demo", "patrol" ],
+          [ "demo", "architecture-patrol" ]
+        ],
+        probes
+      )
+    end
+  end
+
+  def test_default_coordinator_probe_observes_real_durable_product_work
+    with_project do |project|
+      state = Hive::Patrol::StateStore.new(project.fetch("path"))
+      state.reserve_occurrence!(patrol_capture, now: NOW)
+
+      result = default_coordinator(project).tick(now: NOW).fetch(0)
+
+      assert_equal :pending, result.fetch(:status)
+      assert_equal({ "patrol" => "live" }, result.fetch(:blockers))
+    end
+
+    with_project do |project|
+      store = Hive::RefactorPatrol::JobStore.new(
+        project.fetch("path"), project: project
+      )
+      manifest = architecture_manifest
+      capture = architecture_capture(manifest)
+      store.reserve_manifest_occurrence!(
+        manifest, capture: capture, now: NOW
+      )
+
+      result = default_coordinator(project).tick(now: NOW).fetch(0)
+
+      assert_equal :pending, result.fetch(:status)
+      assert_equal(
+        { "architecture-patrol" => "live" },
+        result.fetch(:blockers)
+      )
+    end
+
+    with_project do |project|
+      store = Hive::RefactorPatrol::JobStore.new(
+        project.fetch("path"), project: project
+      )
+      256.times do |index|
+        store.write_job!(architecture_job(index))
+      end
+      store.write_job!(
+        architecture_job(
+          999,
+          "state" => "queued",
+          "complete" => false,
+          "analysis_sha" => nil,
+          "zero_reason" => nil
+        )
+      )
+
+      result = default_coordinator(project).tick(now: NOW).fetch(0)
+
+      assert_equal :pending, result.fetch(:status)
+      assert_equal(
+        { "architecture-patrol" => "live" },
+        result.fetch(:blockers)
+      )
+    end
+  end
+
+  def test_durable_stores_and_coordinator_use_configured_relative_and_absolute_state_paths
+    with_tmp_dir do |root|
+      [ "var/hive-state", File.join(root, "absolute-hive-state") ].each do |configured|
+        state_path = File.expand_path(configured, root)
+        FileUtils.mkdir_p(state_path)
+        File.write(
+          File.join(state_path, "config.yml"),
+          { "hive_state_path" => configured }.to_yaml
+        )
+        project = {
+          "name" => "demo-#{File.basename(state_path)}",
+          "path" => root,
+          "hive_state_path" => state_path
+        }
+
+        patrol = Hive::Patrol::StateStore.new(
+          root, hive_state_path: configured
+        )
+        assert_equal File.join(state_path, "patrol"), patrol.root
+        patrol.reserve_occurrence!(patrol_capture, now: NOW)
+
+        architecture = Hive::RefactorPatrol::JobStore.new(
+          root, hive_state_path: configured
+        )
+        assert_equal File.join(state_path, "refactor_patrol", "v3"), architecture.root
+
+        supervisor = FakeSupervisor.new
+        supervisor.live = false
+        result = Hive::Modules::Migration::Coordinator.new(
+          supervisor: supervisor,
+          attempt_store: FakeAttemptStore.new,
+          registry: -> { [ project ] },
+          store_factory: ->(_state) { FakeStore.new }
+        ).tick(now: NOW).fetch(0)
+
+        assert_equal :pending, result.fetch(:status)
+        assert_equal({ "patrol" => "live" }, result.fetch(:blockers))
+        refute Dir.exist?(File.join(root, ".hive-state", "patrol", "occurrences"))
+      end
+    end
+  end
+
+  def test_default_coordinator_probe_accepts_completed_state_and_fails_closed
+    with_project do |project|
+      store = Hive::Patrol::StateStore.new(project.fetch("path"))
+      capture = patrol_capture
+      store.reserve_occurrence!(capture, now: NOW)
+      evidence_store = Object.new
+      evidence_store.define_singleton_method(:append_capture) { |_capture| }
+      store.finalize_occurrence!(
+        capture: terminal_patrol_capture(capture),
+        evidence_store: evidence_store,
+        now: NOW
+      )
+
+      result = default_coordinator(project).tick(now: NOW).fetch(0)
+
+      assert_equal :shadowing, result.fetch(:status)
+      assert_empty result.fetch(:blockers)
+    end
+
+    with_project do |project|
+      Hive::RefactorPatrol::JobStore.new(
+        project.fetch("path"), project: project
+      ).write_job!(architecture_job(1))
+
+      result = default_coordinator(project).tick(now: NOW).fetch(0)
+
+      assert_equal :shadowing, result.fetch(:status)
+      assert_empty result.fetch(:blockers)
+    end
+
+    with_project do |project|
+      store = Hive::RefactorPatrol::JobStore.new(
+        project.fetch("path"), project: project
+      )
+      aggregate = architecture_job(1)
+      store.write_job!(aggregate)
+      File.write(
+        File.join(store.root, "jobs", "#{aggregate.fetch('job_id')}.json"),
+        "{"
+      )
+
+      result = default_coordinator(project).tick(now: NOW).fetch(0)
+
+      assert_equal :pending, result.fetch(:status)
+      assert_equal(
+        { "architecture-patrol" => "ambiguous" },
+        result.fetch(:blockers)
+      )
+    end
+  end
+
+  def test_default_coordinator_probe_fails_closed_on_unreset_v2_jobs
+    with_project do |project|
+      released = Hive::RefactorPatrol::JobStore.released_jobs_root_for(
+        project.fetch("path"),
+        hive_state_path: project.fetch("hive_state_path")
+      )
+      FileUtils.mkdir_p(released)
+      opaque = File.join(released, "opaque-job.bytes")
+      bytes = "\x00unread-v2-job\xff".b
+      File.binwrite(opaque, bytes)
+
+      result = default_coordinator(project).tick(now: NOW).fetch(0)
+
+      assert_equal :pending, result.fetch(:status)
+      assert_equal(
+        { "architecture-patrol" => "ambiguous" },
+        result.fetch(:blockers)
+      )
+      assert_equal bytes, File.binread(opaque)
     end
   end
 
@@ -684,14 +975,397 @@ class ModulesMigrationPatrolsTest < Minitest::Test
     end
   end
 
+  def test_ownership_snapshot_and_adoption_lock_fail_closed
+    with_project do |project|
+      state_path = Hive::Modules::Migration::Patrols.state_file(
+        project.fetch("path"),
+        hive_state_path: project.fetch("hive_state_path")
+      )
+      FileUtils.mkdir_p(File.dirname(state_path))
+      File.write(state_path, "{bad")
+      assert_equal(
+        {
+          "owner" => "none",
+          "epoch" => 0,
+          "admission" => false
+        },
+        Hive::Modules::Migration::Patrols.ownership_snapshot(
+          project.fetch("path"),
+          "patrol",
+          hive_state_path: project.fetch("hive_state_path")
+        )
+      )
+    end
+
+    with_project do |project|
+      migration = Hive::Modules::Migration::Patrols.new(
+        project_root: project.fetch("path"),
+        project: "demo",
+        hive_state_path: project.fetch("hive_state_path"),
+        module_store: FakeStore.new,
+        quiescence_probe: ->(_name, _root) { :quiescent }
+      )
+      migration.define_singleton_method(:mutate) do |&_block|
+        nil
+      end
+      error = assert_raises(Hive::ConfigError) do
+        migration.adopt!(now: NOW)
+      end
+      assert_match(/admission is unavailable/, error.message)
+    end
+  end
+
+  def test_adoption_rechecks_concurrent_state_after_inventory
+    with_project do |project|
+      migration = Hive::Modules::Migration::Patrols.new(
+        project_root: project.fetch("path"),
+        project: "demo",
+        hive_state_path: project.fetch("hive_state_path"),
+        module_store: FakeStore.new,
+        quiescence_probe: ->(_name, _root) { :quiescent }
+      )
+      migration.define_singleton_method(
+        :migrate_shadow_decisions!
+      ) do
+        send(:write, read.merge("status" => "shadowing"))
+      end
+      assert_equal "already_current", migration.adopt!(now: NOW).status
+    end
+
+    with_project do |project|
+      migration = Hive::Modules::Migration::Patrols.new(
+        project_root: project.fetch("path"),
+        project: "demo",
+        hive_state_path: project.fetch("hive_state_path"),
+        module_store: FakeStore.new,
+        quiescence_probe: ->(_name, _root) { :quiescent }
+      )
+      migration.define_singleton_method(
+        :migrate_shadow_decisions!
+      ) do
+        send(:write, read.merge("status" => "rolled_back"))
+      end
+      error = assert_raises(Hive::ConfigError) do
+        migration.adopt!(now: NOW)
+      end
+      assert_match(/changed during adoption/, error.message)
+    end
+
+    with_project do |project|
+      probes = 0
+      migration = Hive::Modules::Migration::Patrols.new(
+        project_root: project.fetch("path"),
+        project: "demo",
+        hive_state_path: project.fetch("hive_state_path"),
+        module_store: FakeStore.new,
+        quiescence_probe: lambda do |_name, _root|
+          probes += 1
+          probes <= 2 ? :quiescent : :live
+        end
+      )
+      migration.define_singleton_method(
+        :migrate_shadow_decisions!
+      ) { nil }
+      outcome = migration.adopt!(now: NOW)
+      assert_equal "pending", outcome.status
+      assert_equal(
+        {
+          "patrol" => "live",
+          "architecture-patrol" => "live"
+        },
+        outcome.blockers
+      )
+    end
+  end
+
+  def test_existing_shadowing_module_and_rolled_back_states_upgrade_v1_shadow_decisions
+    %w[shadowing module rolled_back].each do |status|
+      with_project do |project|
+        migration = Hive::Modules::Migration::Patrols.new(
+          project_root: project.fetch("path"), project: "demo",
+          hive_state_path: project.fetch("hive_state_path"), module_store: FakeStore.new,
+          quiescence_probe: ->(_name, _root) { :quiescent }
+        )
+        adopted = migration.adopt!(now: NOW)
+        original = adopted.state.merge("status" => status)
+        migration.send(:write, original)
+
+        shadow_root = File.join(
+          project.fetch("hive_state_path"), "module-runtime", "migration", "shadow"
+        )
+        FileUtils.rm_rf(File.join(shadow_root, "migrations"))
+        v1_path = File.join(shadow_root, "patrol", "#{'a' * 64}.json")
+        FileUtils.mkdir_p(File.dirname(v1_path))
+        File.binwrite(
+          v1_path,
+          Hive::WorkflowPackage::CanonicalJSON.generate(legacy_shadow_decision)
+        )
+
+        upgraded = migration.adopt!(now: NOW + 1)
+
+        assert_equal "already_current", upgraded.status, status
+        assert_equal status, upgraded.state.fetch("status"), status
+        assert_equal original.fetch("admissions"), upgraded.state.fetch("admissions"), status
+        assert_equal 2, JSON.parse(File.binread(v1_path)).fetch("schema_version"), status
+        assert File.file?(File.join(
+          shadow_root, "migrations", "shadow-decision-v2.json"
+        )), status
+      end
+    end
+  end
+
+  def test_existing_shadow_upgrade_stays_fenced_while_product_work_is_live
+    with_project do |project|
+      current = Hive::Modules::Migration::Patrols.new(
+        project_root: project.fetch("path"),
+        project: "demo",
+        hive_state_path: project.fetch("hive_state_path"),
+        module_store: FakeStore.new,
+        quiescence_probe: ->(*) { :quiescent }
+      )
+      assert_equal "shadowing", current.adopt!(now: NOW).status
+      write_legacy_shadow_decision(project)
+
+      blocked = Hive::Modules::Migration::Patrols.new(
+        project_root: project.fetch("path"),
+        project: "demo",
+        hive_state_path: project.fetch("hive_state_path"),
+        module_store: FakeStore.new,
+        quiescence_probe: ->(*) { :live }
+      ).adopt!(now: NOW + 1)
+
+      assert_equal "shadowing", blocked.status
+      assert_equal(
+        {
+          "patrol" => "live",
+          "architecture-patrol" => "live"
+        },
+        blocked.blockers
+      )
+      assert blocked.state.fetch("admissions").values.none?
+    end
+  end
+
+  def test_existing_shadow_upgrade_rejects_concurrent_state_change
+    with_project do |project|
+      migration = Hive::Modules::Migration::Patrols.new(
+        project_root: project.fetch("path"),
+        project: "demo",
+        hive_state_path: project.fetch("hive_state_path"),
+        module_store: FakeStore.new,
+        quiescence_probe: ->(*) { :quiescent }
+      )
+      assert_equal "shadowing", migration.adopt!(now: NOW).status
+      write_legacy_shadow_decision(project)
+      migration.define_singleton_method(:migrate_shadow_decisions!) do
+        send(:write, read.merge("status" => "rolled_back"))
+      end
+
+      error = assert_raises(Hive::ConfigError) do
+        migration.adopt!(now: NOW + 1)
+      end
+
+      assert_match(/changed during shadow upgrade/, error.message)
+    end
+  end
+
+  def test_shadow_inventory_distinguishes_live_quiescence_failure
+    with_project do |project|
+      migration = Hive::Modules::Migration::Patrols.new(
+        project_root: project.fetch("path"),
+        project: "demo",
+        hive_state_path: project.fetch("hive_state_path"),
+        module_store: FakeStore.new,
+        quiescence_probe: ->(_name, _root) { :live }
+      )
+      error = assert_raises(Hive::ConfigError) do
+        migration.send(:migrate_shadow_decisions!)
+      end
+      assert_match(/requires quiescence/, error.message)
+    end
+  end
+
   private
+
+  def write_legacy_shadow_decision(project)
+    shadow_root = File.join(
+      project.fetch("hive_state_path"),
+      "module-runtime",
+      "migration",
+      "shadow"
+    )
+    FileUtils.rm_rf(File.join(shadow_root, "migrations"))
+    path = File.join(shadow_root, "patrol", "#{"a" * 64}.json")
+    FileUtils.mkdir_p(File.dirname(path))
+    File.binwrite(
+      path,
+      Hive::WorkflowPackage::CanonicalJSON.generate(
+        legacy_shadow_decision
+      )
+    )
+  end
+
+  def default_coordinator(project)
+    supervisor = FakeSupervisor.new
+    supervisor.live = false
+    Hive::Modules::Migration::Coordinator.new(
+      supervisor: supervisor,
+      attempt_store: FakeAttemptStore.new,
+      registry: -> { [ project ] },
+      store_factory: ->(_state) { FakeStore.new }
+    )
+  end
+
+  def patrol_capture
+    Hive::Modules::Migration::PatrolCapture.build(
+      module_name: "patrol",
+      project: {
+        "project_id" => "project-1",
+        "name" => "demo",
+        "repository" => "acme/demo"
+      },
+      trigger: { "kind" => "manual", "id" => "manual-1" },
+      reservation: { "kind" => "ordinary", "id" => "reservation-1" },
+      owner: "legacy",
+      owner_epoch: 1,
+      selection_input: {
+        "kind" => "operation",
+        "operation" => "coordinator-proof"
+      },
+      selection:
+        Hive::Modules::Migration::PatrolDecisionProjection.build(
+          module_name: "patrol",
+          rationale: "due"
+        ),
+      outcome_class: nil,
+      outcome: nil,
+      occurred_at: NOW,
+      recorded_at: NOW
+    )
+  end
+
+  def terminal_patrol_capture(capture)
+    Hive::Modules::Migration::PatrolCapture.build(
+      module_name: capture.module_name,
+      project: capture.project,
+      trigger: capture.trigger,
+      reservation: capture.reservation,
+      owner: capture.owner,
+      owner_epoch: capture.owner_epoch,
+      selection_input: capture.selection_input,
+      selection: capture.selection,
+      outcome_class: "completed",
+      outcome: { "rationale" => "completed" },
+      effect_ids: capture.effect_ids,
+      occurred_at: capture.occurred_at,
+      recorded_at: NOW
+    )
+  end
+
+  def architecture_manifest
+    Hive::RefactorPatrol::PrManifest.build(
+      source: {
+        "url" => "https://github.com/acme/demo/pull/7",
+        "number" => 7,
+        "repository" => "acme/demo",
+        "registration" => "demo",
+        "base_branch" => "main",
+        "base_sha" => "a" * 40,
+        "merge_sha" => "b" * 40,
+        "merged_at" => NOW.iso8601
+      },
+      files: [
+        { "path" => "lib/demo.rb", "status" => "modified" }
+      ]
+    )
+  end
+
+  def architecture_capture(manifest)
+    Hive::RefactorPatrol::TransitionGateway.capture_for_manifest(
+      manifest: manifest,
+      project_id: "project-1",
+      owner: "legacy",
+      owner_epoch: 1,
+      recorded_at: NOW
+    )
+  end
+
+  def architecture_job(index, overrides = {})
+    digest = Digest::SHA256.hexdigest("coordinator-job-#{index}")
+    {
+      "schema" => Hive::RefactorPatrol::JobStore::SCHEMA,
+      "schema_version" =>
+        Hive::RefactorPatrol::JobStore::SCHEMA_VERSION,
+      "job_id" => format("job-%03d", index),
+      "occurrence_id" => "occ-#{digest}",
+      "intake_transition_id" => "intent-#{digest}",
+      "source" => {
+        "url" => "https://github.com/acme/demo/pull/#{index + 1}",
+        "number" => index + 1,
+        "repository" => "acme/demo",
+        "registration" => "demo",
+        "base_branch" => "main",
+        "base_sha" => "a" * 40,
+        "merge_sha" => "b" * 40
+      },
+      "analysis_sha" => "c" * 40,
+      "policy" => {
+        "discovery" => true,
+        "auto_fix" => false,
+        "issue_filing" => false
+      },
+      "state" => "complete",
+      "complete" => true,
+      "dispositions" => {
+        "accepted" => [],
+        "flagged" => [],
+        "suppressed" => []
+      },
+      "feature_results" => [],
+      "review_errors" => [],
+      "zero_reason" => "no_mapped_slice",
+      "attempts" => [],
+      "actions" => [],
+      "created_at" => NOW.iso8601,
+      "updated_at" => NOW.iso8601
+    }.merge(overrides)
+  end
 
   def with_project
     with_tmp_dir do |root|
       state = File.join(root, ".hive-state")
       FileUtils.mkdir_p(state)
       File.write(File.join(state, "config.yml"), { "hive_state_path" => ".hive-state" }.to_yaml)
-      yield({ "name" => "demo", "path" => root, "hive_state_path" => state })
+      yield(
+        {
+          "name" => "demo",
+          "project_id" => "project-1",
+          "path" => root,
+          "hive_state_path" => state
+        }
+      )
     end
+  end
+
+  def legacy_shadow_decision
+    {
+      "schema" => "hive-module-shadow-decision",
+      "schema_version" => 1,
+      "module" => "patrol",
+      "decision_id" => "a" * 64,
+      "trigger_digest" => "b" * 64,
+      "occurred_at" => NOW.iso8601(6),
+      "recorded_at" => (NOW + 1).iso8601(6),
+      "evidence_source" => "legacy_mutator_capture",
+      "configuration_digest" => "c" * 64,
+      "comparable" => true,
+      "legacy" => { "rationale" => "due" },
+      "module_decision" => { "rationale" => "due" },
+      "explained_differences" => [],
+      "unexplained_differences" => [],
+      "legacy_effects" => [ "legacy-effect" ],
+      "module_effects" => [],
+      "duplicate_effects" => []
+    }
   end
 end

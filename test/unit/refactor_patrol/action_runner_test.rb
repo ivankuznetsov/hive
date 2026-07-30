@@ -698,6 +698,257 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     end
   end
 
+  def test_effect_gateway_wraps_remote_sinks_and_records_evidence_after_job_settlement
+    with_tmp_dir do |dir|
+      item = thesis(id: "effect-order", fingerprint: "fp-effect-order")
+      store = write_classified_job(
+        dir,
+        policy: snapshot_policy("auto_fix" => true),
+        dispositions: dispositions(accepted: [ disposition(item) ])
+      )
+      operations = []
+      recording = Module.new
+      recording.define_method(:prepare_effect!) do |intent, **options|
+        operations << [ :effect_intent, intent.sink ]
+        super(intent, **options)
+      end
+      recording.define_method(:finish_action!) do |token, **arguments|
+        result = super(token, **arguments)
+        operations << :job_settled
+        result
+      end
+      store.singleton_class.prepend(recording)
+
+      durable_evidence = Hive::Modules::Migration::EvidenceStore.new(
+        root: File.join(dir, "effect-evidence")
+      )
+      evidence = Object.new
+      evidence.define_singleton_method(:append_capture) do |capture|
+        operations << :capture
+        durable_evidence.append_capture(capture)
+      end
+      evidence.define_singleton_method(:append_receipt) do |receipt|
+        operations << [ :effect_evidence, receipt.intent.sink ]
+        durable_evidence.append_receipt(receipt)
+      end
+
+      patch = validated_patch(fingerprint: item.fingerprint)
+      success = pr_result
+      opener = Object.new
+      opener.define_singleton_method(:open) do |record_intent:, execute_effect:,
+                                                execute_handoff:,
+                                                canonical_action_id:, source:, patch:, **|
+        push_intent = Hive::RefactorPatrol::PrOpener.push_intent_payload(
+          canonical_action_id: canonical_action_id,
+          repository: source.fetch("repository"), branch: patch.branch,
+          commit_sha: patch.commit_sha, expected_remote_oid: nil
+        )
+        push_complete = Hive::RefactorPatrol::PrOpener.push_complete_payload(
+          canonical_action_id: canonical_action_id,
+          repository: source.fetch("repository"), branch: patch.branch,
+          commit_sha: patch.commit_sha
+        )
+        pr_intent = Hive::RefactorPatrol::PrOpener.pr_create_intent_payload(
+          canonical_action_id: canonical_action_id,
+          repository: source.fetch("repository"), branch: patch.branch,
+          commit_sha: patch.commit_sha
+        )
+        raise "push intent failed" unless record_intent.call(
+          phase: "push_intent", payload: push_intent
+        )
+        execute_effect.call(phase: "push_intent", payload: push_intent) do
+          operations << :push_sink
+        end
+        raise "push completion failed" unless record_intent.call(
+          phase: "push_complete", payload: push_complete
+        )
+        raise "PR intent failed" unless record_intent.call(
+          phase: "pr_create_intent", payload: pr_intent
+        )
+        execute_effect.call(phase: "pr_create_intent", payload: pr_intent) do
+          operations << :pr_sink
+          success.pr_url
+        end
+        execute_handoff.call(
+          phase: "review_handoff",
+          payload: {
+            "pr_url" => success.pr_url,
+            "job_id" => "job-1",
+            "canonical_action_id" => canonical_action_id,
+            "commit_sha" => patch.commit_sha
+          }
+        ) do
+          operations << :handoff_sink
+          success.review_task_path
+        end
+        success
+      end
+
+      result = build_runner(
+        dir,
+        store: store,
+        fixer: FakeFixer.new(patch),
+        pr_opener: opener,
+        evidence_store: evidence
+      ).run(job_id: "job-1")
+
+      assert result.complete?
+      intents = operations.filter_map do |operation|
+        operation.last if operation.is_a?(Array) &&
+                          operation.first == :effect_intent
+      end
+      assert_equal 1, intents.count("branch")
+      assert_equal 1, intents.count("pull_request")
+      assert_equal 1, intents.count("review_handoff")
+      assert_operator intents.count("action"), :>=, 4
+      assert_operator(
+        operations.index([ :effect_intent, "branch" ]),
+        :<,
+        operations.index(:push_sink)
+      )
+      assert_operator(
+        operations.index([ :effect_intent, "review_handoff" ]),
+        :<,
+        operations.index(:handoff_sink)
+      )
+      assert_operator(
+        operations.index(:job_settled),
+        :<,
+        operations.rindex([ :effect_evidence, "action" ])
+      )
+      receipt_sinks = durable_evidence.receipts.map do |receipt|
+        receipt.intent.sink
+      end
+      assert_equal 1, receipt_sinks.count("branch")
+      assert_equal 1, receipt_sinks.count("pull_request")
+      assert_equal 1, receipt_sinks.count("review_handoff")
+      assert_operator receipt_sinks.count("action"), :>=, 4
+      assert durable_evidence.receipts.all? { |receipt| receipt.status == "committed" }
+    end
+  end
+
+  def test_registered_relative_and_absolute_state_paths_keep_action_effects_out_of_default_tree
+    with_tmp_dir do |dir|
+      custom_state_paths(dir).each do |state_path|
+        item = thesis(
+          id: "custom-effects-#{File.basename(state_path)}",
+          flags: [ "cross_feature_impact" ]
+        )
+        store = write_classified_job(
+          dir,
+          hive_state_path: state_path,
+          policy: snapshot_policy("issue_filing" => true),
+          dispositions: dispositions(
+            flagged: [ disposition(item, reasons: [ "cross_feature_impact" ]) ]
+          )
+        )
+
+        result = build_runner(
+          dir,
+          store: store,
+          hive_state_path: state_path,
+          family_store: nil,
+          issue_filer: FakeIssueFiler.new(issue_result)
+        ).run(job_id: "job-1")
+
+        registered_state = File.expand_path(state_path, dir)
+        assert result.complete?, state_path
+        assert File.directory?(File.join(
+          registered_state, "module-runtime", "migration", "patrol-evidence"
+        )), state_path
+        assert File.directory?(File.join(
+          registered_state, "refactor_patrol", "v2", "families"
+        )), state_path
+        refute Dir.exist?(File.join(dir, ".hive-state")), state_path
+      end
+    end
+  end
+
+  def test_registered_state_path_effect_recovery_resumes_without_default_tree
+    with_tmp_dir do |dir|
+      custom_state_paths(dir).each do |state_path|
+        item = thesis(id: "custom-recovery-#{File.basename(state_path)}")
+        store = write_classified_job(
+          dir,
+          hive_state_path: state_path,
+          policy: snapshot_policy("auto_fix" => true),
+          dispositions: dispositions(accepted: [ disposition(item) ])
+        )
+        fixer = FakeFixer.new(validated_patch(fingerprint: item.fingerprint))
+
+        first = build_runner(
+          dir,
+          store: store,
+          hive_state_path: state_path,
+          fixer: fixer,
+          pr_opener: FakePrOpener.new(crash_after_intent: true),
+          backoff_sec: 0
+        ).run(job_id: "job-1")
+        recovered = build_runner(
+          dir,
+          store: store,
+          hive_state_path: state_path,
+          fixer: fixer,
+          pr_opener: FakePrOpener.new(pr_result),
+          backoff_sec: 0
+        ).run(job_id: "job-1")
+
+        assert_equal "remote_outcome_unknown", first.actions.first.fetch("outcome"), state_path
+        assert recovered.complete?, state_path
+        assert_equal 1, fixer.calls.size, state_path
+        refute Dir.exist?(File.join(dir, ".hive-state")), state_path
+      end
+    end
+  end
+
+  def test_registered_state_path_reconciles_linked_canonical_actions_without_default_tree
+    with_tmp_dir do |dir|
+      custom_state_paths(dir).each do |state_path|
+        first_thesis = thesis(
+          id: "custom-owner-#{File.basename(state_path)}",
+          fingerprint: "custom-canonical-#{File.basename(state_path)}"
+        )
+        store = write_classified_job(
+          dir,
+          hive_state_path: state_path,
+          policy: snapshot_policy("auto_fix" => true),
+          dispositions: dispositions(accepted: [ disposition(first_thesis) ])
+        )
+        first = build_runner(
+          dir,
+          store: store,
+          hive_state_path: state_path,
+          fixer: FakeFixer.new(fix_result("no_diff", terminal: true))
+        ).run(job_id: "job-1")
+        second_thesis = thesis(
+          id: "custom-link-#{File.basename(state_path)}",
+          fingerprint: first_thesis.fingerprint
+        )
+        write_classified_job(
+          dir,
+          job_id: "job-2",
+          hive_state_path: state_path,
+          policy: snapshot_policy("auto_fix" => true),
+          dispositions: dispositions(accepted: [ disposition(second_thesis) ])
+        )
+
+        linked = build_runner(
+          dir,
+          store: store,
+          hive_state_path: state_path,
+          fixer: FakeFixer.new(validated_patch),
+          pr_opener: FakePrOpener.new(pr_result)
+        ).run(job_id: "job-2")
+
+        assert first.complete?, state_path
+        assert linked.complete?, state_path
+        assert_equal "job-1", linked.actions.first.fetch("owner_job_id"), state_path
+        assert_equal "no_diff", linked.actions.first.fetch("outcome"), state_path
+        refute Dir.exist?(File.join(dir, ".hive-state")), state_path
+      end
+    end
+  end
+
   def test_review_handoff_retry_reuses_the_persisted_patch_and_remote_intent
     with_tmp_dir do |dir|
       store = write_classified_job(
@@ -1306,6 +1557,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       ]
       ownership = Hive::RefactorPatrol::RepositoryOwnership.new(
         registry: -> { entries }, config_loader: ->(_path) { cfg },
+        continuation_resolver: ->(*) { [] },
         identity_resolver: ->(_entry, _current_cfg) {
           { "repository" => "acme/polyglot", "host" => "github.com" }
         }
@@ -1372,6 +1624,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
           ]
         },
         config_loader: ->(_path) { cfg },
+        continuation_resolver: ->(*) { [] },
         identity_resolver: ->(_entry, _current_cfg) {
           { "repository" => "acme/polyglot", "host" => "github.com" }
         }
@@ -1405,6 +1658,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       entries = [ { "name" => "polyglot", "path" => dir } ]
       ownership = Hive::RefactorPatrol::RepositoryOwnership.new(
         registry: -> { entries }, config_loader: ->(_path) { cfg },
+        continuation_resolver: ->(*) { [] },
         identity_resolver: ->(_entry, _current_cfg) {
           { "repository" => "acme/polyglot", "host" => "github.com" }
         }
@@ -1536,6 +1790,74 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       assert_empty linked.actions.first.fetch("receipts")
       assert_empty fixer.calls
       assert_empty opener.calls
+    end
+  end
+
+  def test_linked_action_waits_without_receipt_then_reconciles_after_owner_finishes
+    with_tmp_dir do |dir|
+      first_thesis =
+        thesis(id: "first", fingerprint: "shared-pending-fp")
+      store = write_classified_job(
+        dir,
+        policy: snapshot_policy("auto_fix" => true),
+        dispositions:
+          dispositions(
+            accepted: [ disposition(first_thesis) ]
+          )
+      )
+      owner = store.initialize_actions!(
+        "job-1",
+        specifications: [
+          { "thesis_id" => "first", "kind" => "fix" }
+        ],
+        now: T0
+      ).fetch("actions").first
+      second_thesis =
+        thesis(id: "second", fingerprint: "shared-pending-fp")
+      write_classified_job(
+        dir,
+        job_id: "job-2",
+        policy: snapshot_policy("auto_fix" => true),
+        dispositions:
+          dispositions(
+            accepted: [ disposition(second_thesis) ]
+          )
+      )
+      store.initialize_actions!(
+        "job-2",
+        specifications: [
+          { "thesis_id" => "second", "kind" => "fix" }
+        ],
+        now: T0
+      )
+
+      early = build_runner(dir, store: store).run(job_id: "job-2")
+
+      refute early.complete?
+      linked = early.aggregate.fetch("actions").first
+      refute linked.fetch("terminal")
+      assert_empty linked.fetch("transitions"),
+                   "not-ready reconciliation must not consume an effect id"
+
+      token = store.claim_action!(
+        "job-1",
+        owner.fetch("canonical_action_id"),
+        owner: "owner-runner",
+        now: T0 + 1
+      )
+      store.finish_action!(
+        token, outcome: "no_diff", now: T0 + 2
+      )
+
+      retried = build_runner(
+        dir, store: store
+      ).run(job_id: "job-2")
+
+      assert retried.complete?
+      linked = retried.aggregate.fetch("actions").first
+      assert linked.fetch("terminal")
+      assert_equal "no_diff", linked.fetch("outcome")
+      assert_equal 1, linked.fetch("transitions").size
     end
   end
 
@@ -1746,11 +2068,16 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       state_home = File.join(root, "state")
       item = thesis(id: "shared-pr", fingerprint: "fp-shared-pr")
       policy = snapshot_policy("auto_fix" => true)
+      entries = [
+        registered_entry("old", old_root),
+        registered_entry("new", new_root)
+      ]
       old_store = write_classified_job(
         old_root,
         policy: policy,
         dispositions: dispositions(accepted: [ disposition(item) ]),
-        registration: "old"
+        registration: "old",
+        project: entries.fetch(0)
       )
       action_id = finish_foreign_action(
         old_store,
@@ -1769,12 +2096,9 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
         job_id: "job-2",
         policy: policy,
         dispositions: dispositions(accepted: [ disposition(item) ]),
-        registration: "new"
+        registration: "new",
+        project: entries.fetch(1)
       )
-      entries = [
-        { "name" => "old", "path" => old_root },
-        { "name" => "new", "path" => new_root }
-      ]
       catalog = Hive::RefactorPatrol::CanonicalActionCatalog.new(
         state_home: state_home, registry: -> { entries }, clock: -> { T0 }
       )
@@ -1820,8 +2144,16 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       classified = dispositions(
         flagged: [ disposition(item, reasons: [ "cross_feature_impact" ]) ]
       )
+      entries = [
+        registered_entry("old", old_root),
+        registered_entry("new", new_root)
+      ]
       old_store = write_classified_job(
-        old_root, policy: policy, dispositions: classified, registration: "old"
+        old_root,
+        policy: policy,
+        dispositions: classified,
+        registration: "old",
+        project: entries.fetch(0)
       )
       family_id = FakeFamilyStore.new.resolve(
         thesis: item, source: source(7, registration: "old"), dry_run: false
@@ -1839,16 +2171,12 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
         job_id: "job-2",
         policy: policy,
         dispositions: classified,
-        registration: "new"
+        registration: "new",
+        project: entries.fetch(1)
       )
       catalog = Hive::RefactorPatrol::CanonicalActionCatalog.new(
         state_home: File.join(root, "state"),
-        registry: -> {
-          [
-            { "name" => "old", "path" => old_root },
-            { "name" => "new", "path" => new_root }
-          ]
-        },
+        registry: -> { entries },
         clock: -> { T0 }
       )
       runner = build_runner(
@@ -2806,9 +3134,497 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     end
   end
 
+  def test_run_rejects_an_effect_occurrence_from_another_dispatch
+    with_tmp_dir do |dir|
+      item = thesis(id: "accepted")
+      store = write_classified_job(
+        dir,
+        policy: snapshot_policy,
+        dispositions: dispositions(accepted: [ disposition(item) ])
+      )
+      runner = build_runner(dir, store: store)
+      runner.instance_variable_set(
+        :@expected_occurrence_id,
+        "occ-#{'f' * 64}"
+      )
+
+      error = assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        runner.run(job_id: "job-1")
+      end
+
+      assert_equal(
+        "architecture patrol action occurrence does not match dispatch",
+        error.message
+      )
+      refute_nil store.occurrence_capture("job-1")
+    end
+  end
+
+  def test_run_fails_closed_when_a_live_job_has_no_occurrence_capture
+    with_tmp_dir do |dir|
+      aggregate = {
+        "job_id" => "job-1",
+        "complete" => false,
+        "source" => source(7),
+        "actions" => []
+      }
+      store = Object.new
+      store.define_singleton_method(:read_job) { |_job_id| aggregate }
+      store.define_singleton_method(:occurrence_capture) { |_job_id| nil }
+      runner = build_runner(dir, store: store)
+
+      error = assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        runner.run(job_id: "job-1")
+      end
+
+      assert_equal "architecture patrol job occurrence is unavailable", error.message
+    end
+  end
+
+  def test_effect_executors_reject_mutated_publication_and_handoff_payloads
+    with_tmp_dir do |dir|
+      runner = build_runner(dir, store: Object.new)
+      token = {
+        job_id: "job-1",
+        canonical_action_id: "action-1",
+        generation: 1,
+        continuation_only: false
+      }
+      aggregate = { "job_id" => "job-1", "source" => source(7) }
+      action = {
+        "canonical_action_id" => "action-1",
+        "family_id" => "family-1",
+        "thesis_fingerprint" => "fingerprint-1"
+      }
+      patch = validated_patch(fingerprint: "fingerprint-1")
+      publication = runner.send(
+        :publication_effect_executor,
+        token, "issue", aggregate, action
+      )
+      handoff = runner.send(
+        :handoff_effect_executor,
+        token, "fix", aggregate, action, patch
+      )
+
+      publication_error = assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        publication.call(
+          phase: "issue_create_intent",
+          payload: { "operation" => "create_issue", "mutated" => true }
+        ) { {} }
+      end
+      handoff_error = assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        handoff.call(
+          phase: "review_handoff",
+          payload: {
+            "pr_url" => "http://github.com/acme/polyglot/pull/99",
+            "job_id" => "job-1",
+            "canonical_action_id" => "action-1",
+            "commit_sha" => patch.commit_sha
+          }
+        ) { {} }
+      end
+
+      assert_equal "publication effect payload is invalid", publication_error.message
+      assert_equal "review handoff effect payload is invalid", handoff_error.message
+    end
+  end
+
+  def test_initializer_falls_back_when_project_registry_is_unreadable
+    with_tmp_dir do |dir|
+      with_replaced_singleton_method(
+        Hive::Config,
+        :registered_projects,
+        -> { raise Hive::ConfigError, "registry unavailable" }
+      ) do
+        runner = build_runner(dir, store: Object.new)
+        assert_equal File.expand_path(dir),
+                     runner.instance_variable_get(:@project_root)
+      end
+    end
+  end
+
+  def test_managed_catalog_factory_binds_other_registered_project_state
+    with_tmp_dir do |dir|
+      state = File.join(dir, ".hive-state")
+      other = File.join(dir, "other")
+      other_state = File.join(other, ".custom-state")
+      FileUtils.mkdir_p([ state, other, other_state ])
+      File.binwrite(File.join(state, "config.yml"), "--- {}\n")
+      entries = [
+        {
+          "name" => "demo",
+          "path" => dir,
+          "real_path" => File.realpath(dir),
+          "hive_state_path" => state,
+          "project_id" => "project-demo"
+        },
+        {
+          "name" => "other",
+          "path" => other,
+          "real_path" => File.realpath(other),
+          "hive_state_path" => other_state,
+          "project_id" => "project-other"
+        }
+      ]
+
+      with_replaced_singleton_method(
+        Hive::Config,
+        :registered_projects,
+        -> { entries }
+      ) do
+        runner = build_runner(
+          dir,
+          store: Object.new,
+          hive_state_path: state,
+          config_loader: ->(_root) { config }
+        )
+        catalog = runner.instance_variable_get(:@canonical_action_catalog)
+        factory = catalog.instance_variable_get(:@job_store_factory)
+        other_store = factory.call(other)
+
+        assert_equal(
+          Hive::RefactorPatrol::JobStore.root_for(
+            other,
+            hive_state_path: other_state
+          ),
+          other_store.root
+        )
+      end
+    end
+  end
+
+  def test_publication_receipt_projection_covers_all_sinks_and_failures
+    with_tmp_dir do |dir|
+      runner = build_runner(dir, store: Object.new)
+
+      assert_equal(
+        { "remote_oid" => "a" * 40 },
+        runner.send(
+          :publication_effect_outcome,
+          "branch",
+          nil,
+          { "commit_sha" => "a" * 40 }
+        )
+      )
+      assert_equal(
+        { "pr_url" => "https://github.com/acme/demo/pull/1" },
+        runner.send(
+          :publication_effect_outcome,
+          "pull_request",
+          "https://github.com/acme/demo/pull/1",
+          {}
+        )
+      )
+      assert_equal(
+        { "issue_url" => "https://github.com/acme/demo/issues/1" },
+        runner.send(
+          :publication_effect_outcome,
+          "issue",
+          "https://github.com/acme/demo/issues/1",
+          {}
+        )
+      )
+      assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        runner.send(:publication_effect_outcome, "unknown", nil, {})
+      end
+
+      assert_equal(
+        "a" * 40,
+        runner.send(
+          :publication_effect_value,
+          "branch",
+          { "remote_oid" => "a" * 40 }
+        )
+      )
+      assert_equal(
+        "https://github.com/acme/demo/pull/1",
+        runner.send(
+          :publication_effect_value,
+          "pull_request",
+          { "pr_url" => "https://github.com/acme/demo/pull/1" }
+        )
+      )
+      assert_equal(
+        "https://github.com/acme/demo/issues/1",
+        runner.send(
+          :publication_effect_value,
+          "issue",
+          { "issue_url" => "https://github.com/acme/demo/issues/1" }
+        )
+      )
+      assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        runner.send(:publication_effect_value, "unknown", {})
+      end
+      malformed = assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        runner.send(:publication_effect_value, "branch", {})
+      end
+      assert_match(/receipt is malformed/, malformed.message)
+    end
+  end
+
+  def test_publication_executor_recovers_a_previously_delivered_effect
+    with_tmp_dir do |dir|
+      runner = build_runner(dir, store: Object.new)
+      payload = { "operation" => "create_issue" }
+      gateway = Object.new
+      result = Struct.new(:outcome).new(
+        { "issue_url" => "https://github.com/acme/demo/issues/7" }
+      )
+      gateway.define_singleton_method(:perform!) do |**|
+        result
+      end
+      runner.define_singleton_method(:expected_publication_payload) do |*,
+                                                                         **|
+        payload
+      end
+      runner.define_singleton_method(:effect_capture) { |*| :capture }
+      runner.define_singleton_method(:effect_descriptor) do |*, **|
+        {
+          sink: "issue",
+          target: "acme/demo",
+          idempotency_key: "issue:job-1",
+          capability: "github_issues"
+        }
+      end
+      runner.define_singleton_method(:build_effect_gateway) do |*, **|
+        gateway
+      end
+      runner.define_singleton_method(:persist_publication_phase) do |*, **|
+        true
+      end
+      runner.define_singleton_method(:effect_scope) { |*| {} }
+      token = {
+        job_id: "job-1",
+        canonical_action_id: "action-1",
+        generation: 1
+      }
+      executor = runner.send(
+        :publication_effect_executor,
+        token,
+        "issue",
+        { "job_id" => "job-1" },
+        { "canonical_action_id" => "action-1" }
+      )
+
+      value = executor.call(
+        phase: "issue_create_intent",
+        payload: payload
+      ) { flunk("recovered effect must not redeliver") }
+
+      assert_equal "https://github.com/acme/demo/issues/7", value
+    end
+  end
+
+  def test_effect_gateway_claim_validator_fails_closed_on_a_stale_claim
+    with_tmp_dir do |dir|
+      store = Object.new
+      store.define_singleton_method(:assert_action_claim!) do |_token, **|
+        raise Hive::RefactorPatrol::JobStore::StaleClaim, "claim replaced"
+      end
+      runner = build_runner(dir, store: store)
+      options = nil
+      runner.instance_variable_set(
+        :@effect_gateway_factory,
+        lambda do |**gateway_options|
+          options = gateway_options
+          Object.new
+        end
+      )
+      token = {
+        job_id: "job-1",
+        canonical_action_id: "action-1",
+        generation: 7,
+        continuation_only: false
+      }
+
+      runner.send(
+        :build_effect_gateway,
+        token,
+        "fix",
+        Hive::RefactorPatrol::PrOpener::PUSH_INTENT,
+        {},
+        architecture_capture,
+        attempt_id: "attempt-1"
+      )
+
+      refute options.fetch(:claim_validator).call(claim_generation: 7)
+      refute options.fetch(:claim_validator).call(claim_generation: 8)
+    end
+  end
+
+  def test_effect_capture_and_descriptor_guards_are_explicit
+    with_tmp_dir do |dir|
+      runner = build_runner(dir, store: Object.new)
+      token = {
+        job_id: "job-1",
+        canonical_action_id: "action-1",
+        generation: 1,
+        continuation_only: false
+      }
+      aggregate = { "source" => source(7) }
+      issue_action = {
+        "canonical_action_id" => "action-1",
+        "family_id" => "family-1"
+      }
+
+      capture_error = assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        runner.send(:effect_capture, token, aggregate, issue_action)
+      end
+      issue = runner.send(
+        :effect_descriptor,
+        token, "issue", "issue_create_intent", {},
+        aggregate, issue_action, attempt_id: nil
+      )
+      phase_error = assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        runner.send(
+          :effect_descriptor,
+          token, "fix", "unknown", {},
+          aggregate, issue_action, attempt_id: nil
+        )
+      end
+
+      assert_equal "architecture patrol effect occurrence is unavailable",
+                   capture_error.message
+      assert_equal "issue", issue.fetch(:sink)
+      assert_equal "acme/polyglot:family-1", issue.fetch(:target)
+      assert_equal "github_issues", issue.fetch(:capability)
+      assert_equal "architecture patrol effect phase is unsupported",
+                   phase_error.message
+    end
+  end
+
+  def test_fix_publication_phase_routes_through_the_action_transition_port
+    with_tmp_dir do |dir|
+      calls = []
+      store = Object.new
+      store.define_singleton_method(
+        :record_publication_attempt_phase!
+      ) do |*arguments, **options|
+        calls << [ arguments, options ]
+      end
+      runner = build_runner(dir, store: store)
+      token = { job_id: "job-1", canonical_action_id: "action-1" }
+      attempt_id = "a" * 64
+      phase = Hive::RefactorPatrol::PrOpener::PUSH_INTENT
+      payload = { "operation" => "push_branch" }
+
+      runner.send(
+        :persist_publication_phase,
+        token, "fix", phase, payload, attempt_id: attempt_id
+      )
+
+      assert_equal(
+        [
+          [
+            [ token ],
+            {
+              attempt_id: attempt_id,
+              phase: phase,
+              payload: payload,
+              now: T0,
+              transition: nil
+            }
+          ]
+        ],
+        calls
+      )
+    end
+  end
+
+  def test_claim_effect_capability_checks_cover_every_external_sink
+    with_tmp_dir do |dir|
+      runner = build_runner(dir, store: Object.new)
+      runner.define_singleton_method(:effect_authorized?) { |_kind| true }
+      token = {
+        job_id: "job-1",
+        canonical_action_id: "action-1",
+        generation: 1,
+        continuation_only: false
+      }
+      calls = []
+      context = Object.new
+      {
+        require_repository_write!: [],
+        require_github_mutation!: nil,
+        require_external_command!: nil,
+        require_network_host!: nil,
+        require_filesystem_write!: nil
+      }.each do |method_name, fixed_arguments|
+        context.define_singleton_method(method_name) do |*arguments|
+          calls << [ method_name, *(fixed_arguments || arguments) ]
+          true
+        end
+      end
+
+      refute runner.send(
+        :claim_effect_authorized?,
+        token, "fix", capability_context: context, capability: nil
+      )
+      assert runner.send(
+        :claim_effect_authorized?,
+        token, "fix", capability_context: context,
+        capability: "repository_write"
+      )
+      assert runner.send(
+        :claim_effect_authorized?,
+        token, "fix", capability_context: context,
+        capability: "github_pull_requests"
+      )
+      assert runner.send(
+        :claim_effect_authorized?,
+        token, "issue", capability_context: context,
+        capability: "github_issues"
+      )
+      assert runner.send(
+        :claim_effect_authorized?,
+        token, "fix", capability_context: context,
+        capability: "review_handoff"
+      )
+      refute runner.send(
+        :claim_effect_authorized?,
+        token, "fix", capability_context: context,
+        capability: "unknown"
+      )
+      assert_equal(
+        [
+          [ :require_repository_write! ],
+          [ :require_github_mutation!, "pull_requests" ],
+          [ :require_external_command!, "gh" ],
+          [ :require_network_host!, "api.github.com" ],
+          [ :require_github_mutation!, "issues" ],
+          [ :require_external_command!, "gh" ],
+          [ :require_network_host!, "api.github.com" ],
+          [ :require_filesystem_write!, ".hive-state/stages/**" ]
+        ],
+        calls
+      )
+
+      denied = Object.new
+      denied.define_singleton_method(:require_repository_write!) do
+        raise Hive::Modules::CapabilityDenied, "denied"
+      end
+      refute runner.send(
+        :claim_effect_authorized?,
+        token, "fix", capability_context: denied,
+        capability: "repository_write"
+      )
+    end
+  end
+
   private
 
-  def build_runner(dir, store:, cfg: config, family_store: FakeFamilyStore.new,
+  def build_runner(dir, store:, cfg: config, hive_state_path: nil,
+                   family_store: FakeFamilyStore.new,
                    fixer: FakeFixer.new, pr_opener: FakePrOpener.new,
                    issue_filer: FakeIssueFiler.new, backoff_sec: 0,
                    authority_backoff_sec: backoff_sec,
@@ -2816,6 +3632,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
                    gate_reader: nil,
                    repository_ownership: nil,
                    canonical_action_catalog: nil,
+                   evidence_store: nil,
                    clock: -> { T0 },
                    repository_resolver: ->(*) {
                      { "repository" => "acme/polyglot", "host" => "github.com" }
@@ -2823,6 +3640,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     Hive::RefactorPatrol::ActionRunner.new(
       dir,
       cfg: cfg,
+      hive_state_path: hive_state_path,
       job_store: store,
       family_store: family_store,
       fixer: fixer,
@@ -2833,6 +3651,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       repository_resolver: repository_resolver,
       repository_ownership: repository_ownership,
       canonical_action_catalog: canonical_action_catalog,
+      evidence_store: evidence_store,
       config_loader: config_loader,
       gate_reader: gate_reader,
       lease_sec: 60,
@@ -2854,14 +3673,25 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     }
   end
 
-  def write_classified_job(dir, job_id: "job-1", policy:, dispositions:,
-                           registration: "polyglot", analysis_sha: "c" * 40)
-    store = Hive::RefactorPatrol::JobStore.new(dir)
+  def write_classified_job(dir, job_id: "job-1", hive_state_path: nil,
+                           policy:, dispositions:,
+                           registration: "polyglot", analysis_sha: "c" * 40,
+                           project: nil)
+    store = Hive::RefactorPatrol::JobStore.new(
+      dir, hive_state_path: hive_state_path, project: project
+    )
+    capture = architecture_capture(
+      job_id: job_id,
+      registration: registration
+    )
+    intake_intent = architecture_intake_intent(capture, job_id)
     store.write_job!(
       {
         "schema" => "hive-refactor-patrol-job",
-        "schema_version" => 2,
+        "schema_version" => Hive::RefactorPatrol::JobStore::SCHEMA_VERSION,
         "job_id" => job_id,
+        "occurrence_id" => capture.occurrence_id,
+        "intake_transition_id" => intake_intent.intent_id,
         "source" => source(job_id == "job-1" ? 7 : 8, registration: registration),
         "analysis_sha" => analysis_sha,
         "policy" => policy,
@@ -2877,7 +3707,32 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
         "updated_at" => T0.iso8601
       }
     )
+    store.reserve_occurrence!(job_id, capture: capture, now: T0)
+    store.prepare_effect!(intake_intent, now: T0)
+    store.mark_dispatch_uncertain!(intake_intent, now: T0)
+    store.settle_effect!(
+      intake_intent,
+      status: "committed",
+      outcome: { "transition_status" => "applied" },
+      now: T0
+    )
     store
+  end
+
+  def registered_entry(name, path)
+    {
+      "name" => name,
+      "path" => path,
+      "hive_state_path" => File.join(path, ".hive-state"),
+      "project_id" => "project-#{name}"
+    }
+  end
+
+  def custom_state_paths(dir)
+    [
+      File.join("registered-state", "relative"),
+      File.join(dir, "registered-state", "absolute")
+    ]
   end
 
   def source(number, registration: "polyglot")
@@ -2890,6 +3745,62 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       "base_sha" => "a" * 40,
       "merge_sha" => number == 7 ? "b" * 40 : "d" * 40
     }
+  end
+
+  def architecture_capture(job_id: "job-1", registration: "polyglot")
+    Hive::Modules::Migration::PatrolCapture.build(
+      module_name: "architecture-patrol",
+      project: {
+        "project_id" => "project-1",
+        "name" => registration,
+        "repository" => "acme/polyglot"
+      },
+      trigger: {
+        "kind" => "pull_request.merged",
+        "id" => "acme/polyglot:#{job_id}:#{'b' * 40}",
+        "manifest_digest" => "a" * 64,
+        "merge_sha" => "b" * 40
+      },
+      reservation: {
+        "kind" => "architecture",
+        "id" => job_id,
+        "job_id" => job_id
+      },
+      owner: "legacy",
+      owner_epoch: 1,
+      selection_input: {
+        "kind" => "candidate",
+        "job_id" => job_id,
+        "phase" => "discovery"
+      },
+      selection:
+        Hive::Modules::Migration::PatrolDecisionProjection.build(
+          module_name: "architecture-patrol",
+          rationale: "due",
+          job_id: job_id,
+          phase: "discovery"
+        ),
+      outcome_class: nil,
+      outcome: nil,
+      occurred_at: T0,
+      recorded_at: T0
+    )
+  end
+
+  def architecture_intake_intent(capture, job_id)
+    Hive::Modules::Migration::EffectIntent.build(
+      module_name: "architecture-patrol",
+      occurrence_id: capture.occurrence_id,
+      authority: capture.owner,
+      owner_epoch: capture.owner_epoch,
+      sink: "job",
+      target: job_id,
+      idempotency_key: "#{job_id}:test-intake",
+      capability: "filesystem_write",
+      claim_generation: capture.owner_epoch,
+      scope: { "job_id" => job_id },
+      created_at: T0
+    )
   end
 
   def snapshot_policy(overrides = {})
@@ -2970,7 +3881,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
 
   def validated_patch(fingerprint: "fp-accepted-1", publication_base_sha: "c" * 40,
                       commit_sha: "e" * 40)
-    action_id = Hive::RefactorPatrol::JobStore.new("/tmp/refactor-action-id").canonical_action_id(
+    action_id = Hive::RefactorPatrol::JobStore.canonical_action_id(
       repository: "acme/polyglot", host: "github.com",
       kind: "fix", identity: fingerprint
     )

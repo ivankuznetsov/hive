@@ -2,6 +2,7 @@ require "test_helper"
 require "yaml"
 require "hive/config"
 require "hive/markers"
+require "hive/modules/migration/evidence_store"
 require "hive/patrol/pr_opener"
 require "hive/patrol/finding"
 require "hive/task"
@@ -9,14 +10,199 @@ require "hive/task"
 class HivePatrolPrOpenerTest < Minitest::Test
   include HiveTestHelper
 
+  def test_custom_hive_state_path_is_used_for_evidence_and_effect_admission
+    with_tmp_dir do |root|
+      custom_state = File.join(root, "external-state")
+      state = Hive::Patrol::StateStore.new(
+        root, hive_state_path: custom_state
+      )
+      capture = Hive::Modules::Migration::PatrolCapture.build(
+        module_name: "patrol",
+        project: {
+          "project_id" => "project-custom",
+          "name" => "custom",
+          "repository" => "owner/custom"
+        },
+        trigger: { "kind" => "manual", "id" => "custom-state" },
+        reservation: { "kind" => "ordinary", "id" => "custom-state" },
+        owner: "legacy",
+        owner_epoch: 1,
+        selection_input: {
+          "kind" => "operation",
+          "operation" => "custom-state-test"
+        },
+        selection:
+          Hive::Modules::Migration::PatrolDecisionProjection.build(
+            module_name: "patrol", rationale: "due"
+          ),
+        outcome_class: nil,
+        outcome: nil,
+        occurred_at: Time.at(0).utc,
+        recorded_at: Time.at(0).utc
+      )
+      options = nil
+      gateway = Object.new
+      factory = lambda do |**attributes|
+        options = attributes
+        gateway
+      end
+      opener = pr_opener(
+        root,
+        cfg: cfg,
+        state: state,
+        capture: capture,
+        effect_gateway_factory: factory
+      )
+
+      assert_same gateway, opener.send(:effect_gateway)
+      assert_equal custom_state, options.fetch(:hive_state_path)
+      evidence = options.fetch(:evidence_store)
+      assert evidence.root.start_with?(
+        File.join(custom_state, "module-runtime")
+      )
+    end
+  end
+
+  def test_initializer_requires_an_admitted_capture_and_configured_state
+    with_tmp_dir do |root|
+      assert_raises(ArgumentError) do
+        Hive::Patrol::PrOpener.new(
+          root, cfg: cfg, gh: FakeGh.new
+        )
+      end
+
+      state = Hive::Patrol::StateStore.new(root)
+      capture = admitted_capture(root)
+      gh = FakeGh.new
+      opener = Hive::Patrol::PrOpener.new(
+        root,
+        cfg: cfg,
+        state: state,
+        capture: capture,
+        gh: gh
+      )
+
+      error = assert_raises(Hive::ConfigError) do
+        opener.open(finding, patch(worktree_path: root))
+      end
+      assert_match(/effect gateway is unavailable/, error.message)
+      assert_empty gh.pushed
+      assert_nil gh.created_args
+    end
+  end
+
+  def test_live_configuration_and_capabilities_can_revoke_publication
+    denied_cases = {
+      "configuration_disabled" => {
+        live_config:
+          Hive::Config.deep_merge(
+            Hive::Config.deep_dup(cfg),
+            "patrol" => { "enabled" => false }
+          )
+      },
+      "capability_revoked" => {
+        capability_checker: ->(**) { false }
+      }
+    }
+    denied_cases.each do |reason, options|
+      with_tmp_dir do |root|
+        gh = FakeGh.new
+        result = pr_opener(
+          root, cfg: cfg, gh: gh, **options
+        ).open(finding, patch(worktree_path: root))
+
+        assert_equal :error, result.status
+        assert_equal "gh_error", result.reason
+        assert_includes result.detail, reason
+        assert_empty gh.pushed
+        assert_nil gh.created_args
+      end
+    end
+  end
+
+  def test_publication_requires_an_exact_capture_repository
+    with_tmp_dir do |root|
+      gh = FakeGh.new
+      result = pr_opener(
+        root,
+        cfg: cfg,
+        gh: gh,
+        capture: admitted_capture(root, repository: nil)
+      ).open(finding, patch(worktree_path: root))
+
+      assert_equal :error, result.status
+      assert_equal "gh_error", result.reason
+      assert_match(/requires an exact repository identity/,
+                   result.detail)
+      assert_empty gh.pushed
+      assert_nil gh.created_args
+    end
+  end
+
+  def test_recovery_precedes_the_first_fingerprint_read
+    with_tmp_dir do |root|
+      state = Hive::Patrol::StateStore.new(root)
+      gh = FakeGh.new
+      gh.define_singleton_method(:ensure_authenticated!) do |_cfg|
+        raise Hive::GhError, "stop after predecessor check"
+      end
+      opener = pr_opener(root, cfg: cfg, state: state, gh: gh)
+      events = []
+      original_recovery = state.method(
+        :recover_pending_fingerprint_effects!
+      )
+      state.define_singleton_method(
+        :recover_pending_fingerprint_effects!
+      ) do
+        events << :recover
+        original_recovery.call
+      end
+      original_fingerprints = state.method(:fingerprints)
+      state.define_singleton_method(:fingerprints) do
+        events << :fingerprints
+        original_fingerprints.call
+      end
+
+      result = opener.open(finding, patch(worktree_path: root))
+
+      assert_equal :error, result.status
+      assert_equal :recover, events.fetch(0)
+      assert_operator events.index(:recover), :<, events.index(:fingerprints)
+      assert_empty gh.pushed
+    end
+  end
+
   BASE_SHA = "a" * 40
   HEAD_SHA = "b" * 40
 
   FakePatch = Struct.new(:id, :finding, :branch, :worktree_path, :validation,
                          :passed, :diffstat, :base_sha, :head_sha, keyword_init: true)
+  GatewayResult = Struct.new(:outcome, keyword_init: true)
+
+  class ReconcilingGateway
+    attr_reader :reconciliations, :effect_calls
+
+    def initialize
+      @reconciliations = []
+      @effect_calls = 0
+    end
+
+    def perform!(reconcile:, **)
+      reconciliation = reconcile.call({})
+      @reconciliations << reconciliation
+      outcome = if reconciliation.fetch("status") == "matched"
+        reconciliation.fetch("outcome")
+      else
+        @effect_calls += 1
+        yield
+      end
+      GatewayResult.new(outcome: outcome)
+    end
+  end
 
   class FakeGh
-    attr_reader :pushed, :push_options, :created_args, :git_commands
+    attr_reader :pushed, :push_options, :created_args, :created_calls,
+                :git_commands
     attr_accessor :prs, :diff, :diff_status, :head_sha, :status_output,
                   :remote_oid, :base_remote_oid, :created_base_oid, :push_updates_remote
 
@@ -32,6 +218,7 @@ class HivePatrolPrOpenerTest < Minitest::Test
       @pushed = []
       @push_options = []
       @created_args = nil
+      @created_calls = 0
       @git_commands = []
     end
 
@@ -79,6 +266,7 @@ class HivePatrolPrOpenerTest < Minitest::Test
       end
 
       @created_args = cmd
+      @created_calls += 1
       [ "https://example.com/pr/2\n", "", Hive::Gh::CommandStatus.new(exitstatus: 0) ]
     end
   end
@@ -126,6 +314,74 @@ class HivePatrolPrOpenerTest < Minitest::Test
     )
   end
 
+  def pr_opener(project_root, cfg:, gh: Hive::Gh, state: nil,
+                capture: nil, review_handoff: nil,
+                effect_gateway_factory: nil, live_config: nil,
+                capability_checker: nil, module_execution: nil)
+    state ||= Hive::Patrol::StateStore.new(project_root)
+    state.ensure!
+    capture ||= admitted_capture(project_root)
+    admitted_config = live_config || Hive::Config.deep_merge(
+      Hive::Config.deep_dup(cfg),
+      "patrol" => { "enabled" => true }
+    )
+    evidence_store = Hive::Modules::Migration::EvidenceStore.new(
+      root: File.join(
+        state.hive_state_path, "module-runtime", "migration",
+        "patrol-evidence"
+      )
+    )
+    state.configure_effect_gateway!(
+      capture: capture,
+      evidence_store: evidence_store,
+      config_loader: ->(_root) { admitted_config },
+      capability_checker: capability_checker || ->(**) { true },
+      module_execution: module_execution,
+      gateway_factory: effect_gateway_factory
+    )
+    Hive::Patrol::PrOpener.new(
+      project_root,
+      cfg: cfg,
+      state: state,
+      capture: capture,
+      gh: gh,
+      review_handoff: review_handoff
+    )
+  end
+
+  def admitted_capture(
+    project_root,
+    repository:
+      "owner/#{File.basename(File.expand_path(project_root))}"
+  )
+    @capture_counter = @capture_counter.to_i + 1
+    identity = "pr-opener-test-#{@capture_counter}"
+    Hive::Modules::Migration::PatrolCapture.build(
+      module_name: "patrol",
+      project: {
+        "project_id" => "pr-opener-test",
+        "name" => File.basename(File.expand_path(project_root)),
+        "repository" => repository
+      },
+      trigger: { "kind" => "manual", "id" => identity },
+      reservation: { "kind" => "ordinary", "id" => identity },
+      owner: "legacy",
+      owner_epoch: 1,
+      selection_input: {
+        "kind" => "operation",
+        "operation" => "validated_patch"
+      },
+      selection:
+        Hive::Modules::Migration::PatrolDecisionProjection.build(
+          module_name: "patrol", rationale: "due"
+        ),
+      outcome_class: nil,
+      outcome: nil,
+      occurred_at: Time.at(0).utc,
+      recorded_at: Time.at(0).utc
+    )
+  end
+
   def finding
     Hive::Patrol::Finding.new(
       id: "f1",
@@ -162,6 +418,49 @@ class HivePatrolPrOpenerTest < Minitest::Test
     )
   end
 
+  def seed_publication_binding(opener, state, validated_patch,
+                               pr_url: "https://example.com/pr/2")
+    capture = opener.instance_variable_get(:@capture)
+    gateway = opener.send(:effect_gateway)
+    scope = opener.send(
+      :publication_scope, finding, validated_patch, gateway
+    )
+    intent = Hive::Modules::Migration::EffectIntent.build(
+      module_name: "patrol",
+      occurrence_id: capture.occurrence_id,
+      authority: capture.owner,
+      owner_epoch: capture.owner_epoch,
+      sink: "pull_request",
+      target: [
+        scope.fetch("repository"), validated_patch.branch
+      ].join(":"),
+      idempotency_key:
+        "#{finding.fingerprint}:#{validated_patch.id}:pull_request",
+      capability: "github_pull_requests",
+      scope: scope,
+      created_at: Time.at(0).utc
+    )
+    state.prepare_effect!(intent, now: Time.at(0).utc)
+    state.mark_dispatch_uncertain!(
+      intent, now: Time.at(0).utc
+    )
+    state.settle_effect!(
+      intent,
+      status: "committed",
+      outcome: {
+        "pr_url" => pr_url,
+        "state" => "OPEN",
+        "head_oid" => validated_patch.head_sha,
+        "base_oid" => validated_patch.base_sha
+      },
+      now: Time.at(0).utc
+    )
+    state.drain_publication_outbox!(capture.occurrence_id)
+    JSON.parse(JSON.generate(
+      state.fingerprints.fetch(finding.fingerprint)
+    ))
+  end
+
   def matching_pr(state: "OPEN", url: "https://example.com/pr/1")
     {
       "state" => state,
@@ -177,7 +476,7 @@ class HivePatrolPrOpenerTest < Minitest::Test
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
       gh = FakeGh.new
 
-      result = Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh).open(finding, patch(worktree_path: dir))
+      result = pr_opener(dir, cfg: cfg, gh: gh).open(finding, patch(worktree_path: dir))
 
       assert result.opened?
       assert_equal [ [ dir, "hive-patrol/feature-fp1" ] ], gh.pushed
@@ -208,8 +507,161 @@ class HivePatrolPrOpenerTest < Minitest::Test
     end
   end
 
+  def test_publication_orders_remote_effects_mapping_receipts_and_review_handoff
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      operations = []
+      gh = FakeGh.new
+      original_push = gh.method(:push_branch!)
+      gh.define_singleton_method(:push_branch!) do |*args, **options|
+        operations << :push
+        original_push.call(*args, **options)
+      end
+      original_capture = gh.method(:capture3)
+      gh.define_singleton_method(:capture3) do |*command, chdir: nil, cfg: nil|
+        operations << :create_pr unless command.first == "git"
+        original_capture.call(*command, chdir: chdir, cfg: cfg)
+      end
+
+      state = Hive::Patrol::StateStore.new(dir)
+      state.ensure!
+      original_prepare = state.method(:prepare_effect!)
+      state.define_singleton_method(:prepare_effect!) do |intent, **options|
+        operations << "effect:#{intent.sink}:intent"
+        original_prepare.call(intent, **options)
+      end
+      original_settle = state.method(:settle_effect!)
+      state.define_singleton_method(:settle_effect!) do |intent, **options|
+        operations << "effect:#{intent.sink}:#{options.fetch(:status)}"
+        original_settle.call(intent, **options)
+      end
+      original_mutate = state.method(:mutate_fingerprints!)
+      state.define_singleton_method(:mutate_fingerprints!) do |**attributes|
+        previous = fingerprints.dig("fp1", "state")
+        result = original_mutate.call(**attributes)
+        current = fingerprints.dig("fp1", "state")
+        operations << "mapping:#{current}" if
+          current && current != previous
+        result
+      end
+      original_publication_drain =
+        state.method(:drain_publication_outbox!)
+      state.define_singleton_method(
+        :drain_publication_outbox!
+      ) do |occurrence_id|
+        result = original_publication_drain.call(occurrence_id)
+        operations << "mapping:reconciliation_pending"
+        result
+      end
+
+      handoff = RecordingReviewHandoff.new
+      original_enqueue = handoff.method(:enqueue)
+      handoff.define_singleton_method(:enqueue) do |**attributes|
+        operations << :review_handoff
+        original_enqueue.call(**attributes)
+      end
+
+      result = pr_opener(
+        dir, cfg: cfg, state: state, gh: gh, review_handoff: handoff
+      ).open(finding, patch(worktree_path: dir))
+
+      assert result.opened?
+      assert_equal(
+        [
+          "effect:branch:intent",
+          :push,
+          "effect:branch:committed",
+          "effect:pull_request:intent",
+          :create_pr,
+          "effect:pull_request:committed",
+          "mapping:reconciliation_pending",
+          "effect:review_handoff:intent",
+          :review_handoff,
+          "effect:review_handoff:committed",
+          "effect:state:intent",
+          "effect:state:committed",
+          "mapping:open"
+        ],
+        operations
+      )
+    end
+  end
+
+  def test_terminal_pr_is_bound_before_later_state_admission_can_close
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      state = Hive::Patrol::StateStore.new(dir)
+      capture = admitted_capture(dir)
+      gh = FakeGh.new
+      created = 0
+      original_capture = gh.method(:capture3)
+      gh.define_singleton_method(:capture3) do |*command, chdir: nil, cfg: nil|
+        answer = original_capture.call(
+          *command, chdir: chdir, cfg: cfg
+        )
+        created += 1 unless command.first == "git"
+        answer
+      end
+      admissions = []
+      capability_checker = lambda do |sink:, capability:, **|
+        allowed = !(created.positive? && sink == "state")
+        admissions << [ sink, capability, allowed ]
+        allowed
+      end
+      review_handoff = RecordingReviewHandoff.new
+      opener = pr_opener(
+        dir,
+        cfg: cfg,
+        state: state,
+        capture: capture,
+        gh: gh,
+        capability_checker: capability_checker,
+        review_handoff: review_handoff
+      )
+      cleaned = []
+      opener.define_singleton_method(:cleanup_worktree) do |value|
+        cleaned << value.worktree_path
+      end
+
+      result = opener.open(finding, patch(worktree_path: dir))
+
+      record = state.occurrence(capture.occurrence_id)
+      pr_cell = record.fetch("effects").values.find do |cell|
+        cell.fetch("authorizations").values.any? do |intent|
+          intent.fetch("sink") == "pull_request"
+        end
+      end
+      receipt = state.effect_receipt(
+        pr_cell.fetch("terminal_receipt_id"),
+        occurrence_id: capture.occurrence_id
+      )
+      assert_equal 1, created
+      assert_equal "committed", receipt.status
+      assert_equal(
+        "https://example.com/pr/2", receipt.outcome.fetch("pr_url")
+      )
+      assert_includes admissions, [ "state", "filesystem_write", false ]
+      assert_equal(
+        [ 0, true ],
+        [ cleaned.length, state.fingerprints.key?("fp1") ],
+        "a terminal remote PR must retain its worktree until a durable " \
+        "product binding exists"
+      )
+      binding = state.fingerprints.fetch("fp1")
+      assert_equal "https://example.com/pr/2", binding.fetch("pr_url")
+      assert_equal "reconciliation_pending", binding.fetch("state")
+      assert_equal(
+        receipt.receipt_id,
+        binding.fetch("publication_binding").fetch("receipt_id")
+      )
+      assert_equal 1, review_handoff.calls.size
+      assert_equal :error, result.status
+      assert_match(/capability_revoked/, result.detail)
+    end
+  end
+
   def test_pr_body_preserves_alpha_and_root_cause_evidence
-    opener = Hive::Patrol::PrOpener.new(Dir.pwd, cfg: cfg, gh: FakeGh.new)
+    opener = pr_opener(Dir.pwd, cfg: cfg, gh: FakeGh.new)
 
     body = opener.send(:body_for, finding, patch)
 
@@ -235,7 +687,7 @@ class HivePatrolPrOpenerTest < Minitest::Test
       "after" => { "exit_code" => 0, "timed_out" => false }
     }
 
-    body = Hive::Patrol::PrOpener.new(Dir.pwd, cfg: cfg, gh: FakeGh.new).send(:body_for, finding, observed)
+    body = pr_opener(Dir.pwd, cfg: cfg, gh: FakeGh.new).send(:body_for, finding, observed)
 
     assert_includes body, "## Observed fix proof"
     assert_includes body, "Agent-reported root cause"
@@ -250,7 +702,7 @@ class HivePatrolPrOpenerTest < Minitest::Test
       unsafe = finding
       unsafe.title = "Fix sk-#{'x' * 24}"
 
-      result = Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh).open(
+      result = pr_opener(dir, cfg: cfg, gh: gh).open(
         unsafe, patch(worktree_path: dir)
       )
 
@@ -265,7 +717,7 @@ class HivePatrolPrOpenerTest < Minitest::Test
       gh = FakeGh.new
       gh.diff_status = 1
 
-      result = Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh).open(
+      result = pr_opener(dir, cfg: cfg, gh: gh).open(
         finding, patch(worktree_path: dir)
       )
 
@@ -281,7 +733,7 @@ class HivePatrolPrOpenerTest < Minitest::Test
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
       gh = FakeGh.new
 
-      result = Hive::Patrol::PrOpener.new(
+      result = pr_opener(
         dir,
         cfg: cfg,
         gh: gh,
@@ -309,7 +761,7 @@ class HivePatrolPrOpenerTest < Minitest::Test
       unsafe.id = "finding: one\nsecond"
       unsafe.fingerprint = "fp: one\nsecond"
 
-      result = Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh).open(unsafe, patch(worktree_path: dir))
+      result = pr_opener(dir, cfg: cfg, gh: gh).open(unsafe, patch(worktree_path: dir))
 
       assert result.opened?
       task = Hive::Task.new(result.review_task_path)
@@ -331,7 +783,7 @@ class HivePatrolPrOpenerTest < Minitest::Test
       gh.prs = [ matching_pr ]
       gh.remote_oid = HEAD_SHA
 
-      result = Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh).open(finding, patch(worktree_path: dir))
+      result = pr_opener(dir, cfg: cfg, gh: gh).open(finding, patch(worktree_path: dir))
 
       assert_equal :skipped, result.status
       assert_equal "existing_pr", result.reason
@@ -347,7 +799,7 @@ class HivePatrolPrOpenerTest < Minitest::Test
       gh.prs = [ matching_pr ]
       gh.remote_oid = HEAD_SHA
 
-      result = Hive::Patrol::PrOpener.new(
+      result = pr_opener(
         dir,
         cfg: cfg,
         gh: gh,
@@ -370,7 +822,7 @@ class HivePatrolPrOpenerTest < Minitest::Test
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
       gh = FakeGh.new
-      failed = Hive::Patrol::PrOpener.new(
+      failed = pr_opener(
         dir,
         cfg: cfg,
         gh: gh,
@@ -380,7 +832,7 @@ class HivePatrolPrOpenerTest < Minitest::Test
 
       gh.base_remote_oid = "d" * 40
       handoff = RecordingReviewHandoff.new
-      retried = Hive::Patrol::PrOpener.new(
+      retried = pr_opener(
         dir,
         cfg: cfg,
         gh: gh,
@@ -410,7 +862,7 @@ class HivePatrolPrOpenerTest < Minitest::Test
         result
       end
 
-      result = Hive::Patrol::PrOpener.new(
+      result = pr_opener(
         dir,
         cfg: cfg,
         gh: gh,
@@ -430,7 +882,7 @@ class HivePatrolPrOpenerTest < Minitest::Test
       gh = FakeGh.new
       gh.prs = [ matching_pr(state: "MERGED") ]
 
-      result = Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh).open(finding, patch(worktree_path: dir))
+      result = pr_opener(dir, cfg: cfg, gh: gh).open(finding, patch(worktree_path: dir))
 
       assert_equal :skipped, result.status
       assert_equal "existing_pr", result.reason
@@ -446,7 +898,7 @@ class HivePatrolPrOpenerTest < Minitest::Test
       config = cfg(draft: false)
       config["patrol"]["review_prs"] = false
 
-      result = Hive::Patrol::PrOpener.new(dir, cfg: config, gh: gh).open(finding, patch(worktree_path: dir))
+      result = pr_opener(dir, cfg: config, gh: gh).open(finding, patch(worktree_path: dir))
 
       assert result.opened?
       assert_nil result.review_task_path
@@ -460,7 +912,7 @@ class HivePatrolPrOpenerTest < Minitest::Test
       gh = FakeGh.new
       gh.diff = "+api_key=#{'a' * 24}\n"
 
-      result = Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh).open(finding, patch(worktree_path: dir))
+      result = pr_opener(dir, cfg: cfg, gh: gh).open(finding, patch(worktree_path: dir))
 
       assert_equal :blocked, result.status
       assert_equal "secret_detected", result.reason
@@ -484,7 +936,7 @@ class HivePatrolPrOpenerTest < Minitest::Test
         [ output, "", Hive::Gh::CommandStatus.new(exitstatus: 0) ]
       end
 
-      Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh).open(finding, patch(worktree_path: dir))
+      pr_opener(dir, cfg: cfg, gh: gh).open(finding, patch(worktree_path: dir))
 
       assert_includes captured, "#{BASE_SHA}..#{HEAD_SHA}",
                       "secret scan must bind to the exact validated patch identity"
@@ -499,7 +951,7 @@ class HivePatrolPrOpenerTest < Minitest::Test
         raise Hive::GhError, "push rejected"
       end
 
-      result = Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh).open(finding, patch(worktree_path: dir))
+      result = pr_opener(dir, cfg: cfg, gh: gh).open(finding, patch(worktree_path: dir))
 
       assert_equal :error, result.status
       assert_equal "gh_error", result.reason
@@ -515,7 +967,7 @@ class HivePatrolPrOpenerTest < Minitest::Test
         raise Hive::GhError, "git diff failed"
       end
 
-      opener = Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh)
+      opener = pr_opener(dir, cfg: cfg, gh: gh)
       error = assert_raises(Hive::GhError) { opener.send(:diff_for, patch(worktree_path: dir)) }
       assert_includes error.message, "git diff failed"
     end
@@ -527,7 +979,7 @@ class HivePatrolPrOpenerTest < Minitest::Test
       gh = FakeGh.new
       gh.head_sha = "c" * 40
 
-      result = Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh).open(
+      result = pr_opener(dir, cfg: cfg, gh: gh).open(
         finding, patch(worktree_path: dir)
       )
 
@@ -541,7 +993,7 @@ class HivePatrolPrOpenerTest < Minitest::Test
       gh = FakeGh.new
       gh.status_output = "?? unvalidated.txt\n"
 
-      result = Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh).open(
+      result = pr_opener(dir, cfg: cfg, gh: gh).open(
         finding, patch(worktree_path: dir)
       )
 
@@ -558,7 +1010,7 @@ class HivePatrolPrOpenerTest < Minitest::Test
       invalid = patch(worktree_path: dir)
       invalid.head_sha = "short"
 
-      result = Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh).open(finding, invalid)
+      result = pr_opener(dir, cfg: cfg, gh: gh).open(finding, invalid)
 
       assert_equal :error, result.status
       assert_equal "gh_error", result.reason
@@ -576,7 +1028,7 @@ class HivePatrolPrOpenerTest < Minitest::Test
         end
       end
 
-      result = Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh).open(
+      result = pr_opener(dir, cfg: cfg, gh: gh).open(
         finding, patch(worktree_path: dir)
       )
 
@@ -597,7 +1049,7 @@ class HivePatrolPrOpenerTest < Minitest::Test
         gh = FakeGh.new
         gh.prs = [ matching_pr.merge(override) ]
 
-        result = Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh).open(
+        result = pr_opener(dir, cfg: cfg, gh: gh).open(
           finding, patch(worktree_path: dir)
         )
 
@@ -614,7 +1066,7 @@ class HivePatrolPrOpenerTest < Minitest::Test
       gh = FakeGh.new
       gh.base_remote_oid = "d" * 40
 
-      result = Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh).open(
+      result = pr_opener(dir, cfg: cfg, gh: gh).open(
         finding, patch(worktree_path: dir)
       )
 
@@ -631,13 +1083,13 @@ class HivePatrolPrOpenerTest < Minitest::Test
       gh = FakeGh.new
       gh.created_base_oid = "d" * 40
 
-      result = Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh).open(
+      result = pr_opener(dir, cfg: cfg, gh: gh).open(
         finding, patch(worktree_path: dir)
       )
 
       assert_equal :error, result.status
       assert_equal "gh_error", result.reason
-      assert_match(/existing PR identity mismatch/, result.detail)
+      assert_match(/could not be reconciled/, result.detail)
       refute_nil gh.created_args, "the simulated base race occurs during PR creation"
     end
   end
@@ -665,8 +1117,10 @@ class HivePatrolPrOpenerTest < Minitest::Test
         end
       end
       review_handoff = RecordingReviewHandoff.new
-      opener = Hive::Patrol::PrOpener.new(
-        dir, cfg: cfg, gh: gh, review_handoff: review_handoff
+      state = Hive::Patrol::StateStore.new(dir)
+      opener = pr_opener(
+        dir, cfg: cfg, state: state, gh: gh,
+        review_handoff: review_handoff
       )
       cleanup_count = 0
       opener.define_singleton_method(:cleanup_worktree) do |_patch|
@@ -681,19 +1135,14 @@ class HivePatrolPrOpenerTest < Minitest::Test
       assert_includes first.detail, "could not be reconciled"
       assert_includes first.detail, "https://example.com/pr/2",
                       "the error must name the created PR so an operator can find it"
-      fingerprints = JSON.parse(File.read(File.join(dir, ".hive-state", "patrol", "fingerprints.json")))
-      pending = fingerprints.fetch("fp1")
-      assert_equal "https://example.com/pr/2", pending.fetch("pr_url")
-      assert_equal "reconciliation_pending", pending.fetch("state")
-      assert_equal(
-        {
-          "patch_id" => validated_patch.id,
-          "worktree_path" => dir,
-          "base_sha" => BASE_SHA,
-          "head_sha" => HEAD_SHA
-        },
-        pending.fetch("publication_receipt")
-      )
+      assert_nil state.fingerprints["fp1"]
+      pr_cell = state.occurrence(
+        opener.instance_variable_get(:@capture).occurrence_id
+      ).fetch("effects").values.find do |cell|
+        cell.dig("semantic", "sink") == "pull_request"
+      end
+      assert_equal "dispatch_uncertain",
+                   pr_cell.fetch("state")
       assert_equal 0, cleanup_count, "pending reconciliation must retain the exact worktree"
       assert_empty review_handoff.calls
 
@@ -710,6 +1159,9 @@ class HivePatrolPrOpenerTest < Minitest::Test
       assert_equal "open", JSON.parse(
         File.read(File.join(dir, ".hive-state", "patrol", "fingerprints.json"))
       ).fetch("fp1").fetch("state")
+      assert state.fingerprints.dig(
+        "fp1", "publication_binding"
+      ).is_a?(Hash)
     end
   end
 
@@ -718,20 +1170,30 @@ class HivePatrolPrOpenerTest < Minitest::Test
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
       gh = FakeGh.new
       gh.created_base_oid = "d" * 40
+      state = Hive::Patrol::StateStore.new(dir)
+      opener = pr_opener(dir, cfg: cfg, state: state, gh: gh)
+      cleaned = false
+      opener.define_singleton_method(
+        :cleanup_worktree
+      ) { |_patch| cleaned = true }
 
-      result = Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh).open(
+      result = opener.open(
         finding, patch(worktree_path: dir)
       )
 
       assert_equal :error, result.status
       assert_equal "gh_error", result.reason
-      assert_match(/existing PR identity mismatch/, result.detail)
+      assert_match(/could not be reconciled/, result.detail)
       assert_includes result.detail, "https://example.com/pr/2",
                       "the error must name the created PR so an operator can find it"
-      fingerprints = JSON.parse(File.read(File.join(dir, ".hive-state", "patrol", "fingerprints.json")))
-      assert_equal "https://example.com/pr/2", fingerprints.fetch("fp1").fetch("pr_url")
-      assert_equal "reconciliation_pending", fingerprints.fetch("fp1").fetch("state"),
-                   "an unverified PR must remain retryable, not become an active suppression"
+      assert_nil state.fingerprints["fp1"]
+      refute cleaned
+      assert state.each_recovery_active_occurrence.any? do |occurrence|
+        occurrence.fetch("effects").values.any? do |cell|
+          cell["state"] == "dispatch_uncertain" &&
+            cell.dig("semantic", "sink") == "pull_request"
+        end
+      end
     end
   end
 
@@ -739,24 +1201,17 @@ class HivePatrolPrOpenerTest < Minitest::Test
     with_tmp_dir do |dir|
       state = Hive::Patrol::StateStore.new(dir)
       validated_patch = patch(worktree_path: dir)
-      state.write_fingerprints(
-        "fp1" => {
-          "state" => "reconciliation_pending",
-          "branch" => validated_patch.branch,
-          "pr_url" => "https://example.com/pr/2",
-          "publication_receipt" => {
-            "patch_id" => validated_patch.id,
-            "worktree_path" => dir,
-            "base_sha" => BASE_SHA,
-            "head_sha" => HEAD_SHA
-          }
-        }
+      predecessor = pr_opener(
+        dir, cfg: cfg, state: state, gh: FakeGh.new
+      )
+      seed_publication_binding(
+        predecessor, state, validated_patch
       )
       gh = FakeGh.new
       gh.define_singleton_method(:ensure_authenticated!) do |_cfg|
         raise Hive::GhError, "authentication temporarily unavailable"
       end
-      opener = Hive::Patrol::PrOpener.new(dir, cfg: cfg, state: state, gh: gh)
+      opener = pr_opener(dir, cfg: cfg, state: state, gh: gh)
       cleaned = false
       opener.define_singleton_method(:cleanup_worktree) { |_patch| cleaned = true }
 
@@ -770,39 +1225,250 @@ class HivePatrolPrOpenerTest < Minitest::Test
     end
   end
 
-  def test_pending_reconciliation_requires_the_exact_durable_receipt
+  def test_any_terminal_publication_binding_mismatch_retains_exact_worktree
     cases = {
-      "missing its publication receipt" => lambda { |entry, _receipt|
-        entry.delete("publication_receipt")
+      patch: ->(binding) { binding["head_sha"] = "d" * 40 },
+      intent: lambda { |binding|
+        binding["intent_id"] = "intent-#{"d" * 64}"
       },
-      "publication receipt mismatch" => lambda { |entry, receipt|
-        entry["publication_receipt"] = receipt.merge("head_sha" => "d" * 40)
+      repository: ->(binding) { binding["repository"] = "owner/other" },
+      base_branch: ->(binding) { binding["base_branch"] = "other" },
+      pr_url: lambda { |binding|
+        binding["pr_url"] = "https://example.com/pr/other"
       },
-      "missing its exact branch or URL identity" => lambda { |entry, receipt|
-        entry["publication_receipt"] = receipt
+      pr_state: ->(binding) { binding["pr_state"] = "MERGED" },
+      head_oid: ->(binding) { binding["head_oid"] = "d" * 40 },
+      base_oid: ->(binding) { binding["base_oid"] = "d" * 40 },
+      extra_key: ->(binding) { binding["unexpected"] = true },
+      missing_key: ->(binding) { binding.delete("head_oid") }
+    }
+    cases.each do |label, mutate|
+      with_tmp_dir do |dir|
+        state = Hive::Patrol::StateStore.new(dir)
+        gh = FakeGh.new
+        validated_patch = patch(worktree_path: dir)
+        opener = pr_opener(
+          dir, cfg: cfg, state: state, gh: gh
+        )
+        entry = seed_publication_binding(
+          opener, state, validated_patch
+        )
+        mutate.call(entry.fetch("publication_binding"))
+        state.send(:raw_write_fingerprints, "fp1" => entry)
+        cleaned = false
+        opener.define_singleton_method(
+          :cleanup_worktree
+        ) { |_patch| cleaned = true }
+
+        result = opener.open(finding, validated_patch)
+
+        assert_equal :error, result.status, label.to_s
+        assert_equal "gh_error", result.reason, label.to_s
+        refute cleaned,
+               "a terminal effect with a non-exact #{label} binding is unresolved"
+        assert_empty gh.pushed, label.to_s
+        assert_nil gh.created_args, label.to_s
+      end
+    end
+  end
+
+  def test_publication_projection_failure_recovers_after_restart_without_a_second_pr
+    with_tmp_dir do |dir|
+      state = Hive::Patrol::StateStore.new(dir)
+      gh = FakeGh.new
+      validated_patch = patch(worktree_path: dir)
+      handoff = RecordingReviewHandoff.new
+      opener = pr_opener(
+        dir, cfg: cfg, state: state, gh: gh,
+        review_handoff: handoff
+      )
+      capture = opener.instance_variable_get(:@capture)
+      drain = state.method(:drain_publication_outbox!)
+      drain_calls = 0
+      state.define_singleton_method(
+        :drain_publication_outbox!
+      ) do |occurrence_id|
+        drain_calls += 1
+        if drain_calls == 1
+          raise Hive::ConfigError,
+                "synthetic publication projection failure"
+        end
+        drain.call(occurrence_id)
+      end
+      cleanups = 0
+      opener.define_singleton_method(
+        :cleanup_worktree
+      ) { |_patch| cleanups += 1 }
+
+      first = opener.open(finding, validated_patch)
+
+      assert_equal :error, first.status
+      assert_match(/publication projection failure/, first.detail)
+      assert_equal 1, gh.pushed.length
+      assert_equal 1, gh.created_calls
+      refute_nil gh.created_args
+      assert_equal 0, cleanups
+      occurrence = state.occurrence(
+        capture.occurrence_id
+      )
+      publication_cell = occurrence.fetch("effects").values.find do |cell|
+        cell.dig("semantic", "sink") == "pull_request"
+      end
+      assert_equal "committed", publication_cell.fetch("state")
+      receipt_id = publication_cell.fetch("terminal_receipt_id")
+      assert occurrence.fetch("outbox").any? do |entry|
+        entry["kind"] == "publication" &&
+          entry["acknowledged"] == false
+      end
+
+      reloaded = Hive::Patrol::StateStore.new(dir)
+      retry_opener = pr_opener(
+        dir, cfg: cfg, state: reloaded, gh: gh,
+        review_handoff: handoff
+      )
+      retry_opener.define_singleton_method(
+        :cleanup_worktree
+      ) { |_patch| cleanups += 1 }
+
+      second = retry_opener.open(finding, validated_patch)
+
+      assert_equal :skipped, second.status
+      assert_equal "existing_pr", second.reason
+      assert_equal 1, gh.pushed.length
+      assert_equal 1, gh.created_calls
+      assert_equal 0, cleanups
+      assert_equal 1, handoff.calls.length
+      binding = reloaded.fingerprints.fetch(
+        finding.fingerprint
+      ).fetch("publication_binding")
+      assert_equal receipt_id, binding.fetch("receipt_id")
+      assert_empty(
+        reloaded.instance_variable_get(:@occurrence_store)
+                .pending_outbox(capture.occurrence_id)
+                .select { |entry| entry.fetch("kind") == "publication" }
+      )
+    end
+  end
+
+  def test_exact_settled_publication_allows_error_cleanup_when_not_retryable
+    with_tmp_dir do |dir|
+      state = Hive::Patrol::StateStore.new(dir)
+      gh = FakeGh.new
+      validated_patch = patch(worktree_path: dir)
+      opener = pr_opener(
+        dir, cfg: cfg, state: state, gh: gh
+      )
+      entry = seed_publication_binding(
+        opener, state, validated_patch
+      )
+      entry["state"] = "open"
+      state.send(:raw_write_fingerprints, "fp1" => entry)
+      gh.define_singleton_method(:ensure_authenticated!) do |_cfg|
+        raise Hive::GhError, "synthetic post-settlement failure"
+      end
+      cleaned = false
+      opener.define_singleton_method(
+        :cleanup_worktree
+      ) { |_patch| cleaned = true }
+
+      result = opener.open(finding, validated_patch)
+
+      assert_equal :error, result.status
+      assert_match(/post-settlement failure/, result.detail)
+      assert cleaned
+      assert_empty gh.pushed
+      assert_nil gh.created_args
+    end
+  end
+
+  def test_successor_cycle_uses_predecessor_binding_without_second_pr_effect
+    with_tmp_dir do |dir|
+      state = Hive::Patrol::StateStore.new(dir)
+      validated_patch = patch(worktree_path: dir)
+      predecessor = pr_opener(
+        dir, cfg: cfg, state: state, gh: FakeGh.new
+      )
+      seeded = seed_publication_binding(
+        predecessor, state, validated_patch
+      )
+      receipt_id =
+        seeded.fetch("publication_binding").fetch("receipt_id")
+      gh = FakeGh.new
+      gh.remote_oid = HEAD_SHA
+      gh.prs = [
+        matching_pr(url: "https://example.com/pr/2")
+      ]
+      successor = pr_opener(
+        dir, cfg: cfg, state: state, gh: gh,
+        review_handoff: RecordingReviewHandoff.new
+      )
+
+      result = successor.open(finding, validated_patch)
+
+      assert_equal :skipped, result.status
+      assert_equal "existing_pr", result.reason
+      assert_equal receipt_id,
+                   state.fingerprints.dig(
+                     "fp1", "publication_binding", "receipt_id"
+                   )
+      successor_occurrence = state.occurrence(
+        successor.instance_variable_get(:@capture).occurrence_id
+      )
+      refute successor_occurrence.fetch("effects").values.any? {
+        |cell| cell.dig("semantic", "sink") == "pull_request"
+      }
+    end
+  end
+
+  def test_pending_reconciliation_requires_the_exact_durable_binding
+    cases = {
+      "missing its publication binding" => lambda { |entry, _binding|
+        entry.delete("publication_binding")
+      },
+      "publication binding mismatch" => lambda { |entry, binding|
+        entry["publication_binding"] =
+          binding.merge("head_sha" => "d" * 40)
+      },
+      "missing its exact branch or URL identity" => lambda { |entry, binding|
+        entry["publication_binding"] = binding
         entry["pr_url"] = ""
+      },
+      "publication binding is malformed: receipt id" => lambda {
+        |entry, binding|
+        entry["publication_binding"] =
+          binding.merge("receipt_id" => "malformed")
+      },
+      "publication binding is malformed: extra key" => lambda {
+        |entry, binding|
+        entry["publication_binding"] =
+          binding.merge("unexpected" => true)
+      },
+      "publication binding is malformed: missing key" => lambda {
+        |entry, binding|
+        entry["publication_binding"] =
+          binding.reject { |key, _| key == "head_oid" }
       }
     }
 
-    cases.each do |message, mutate|
+    cases.each do |label, mutate|
       with_tmp_dir do |dir|
         state = Hive::Patrol::StateStore.new(dir)
         validated_patch = patch(worktree_path: dir)
-        opener = Hive::Patrol::PrOpener.new(dir, cfg: cfg, state: state, gh: FakeGh.new)
-        receipt = opener.send(:publication_receipt_for, validated_patch)
-        entry = {
-          "state" => "reconciliation_pending",
-          "branch" => validated_patch.branch,
-          "pr_url" => "https://example.com/pr/2",
-          "publication_receipt" => receipt
-        }
-        mutate.call(entry, receipt)
-        state.write_fingerprints("fp1" => entry)
+        opener = pr_opener(dir, cfg: cfg, state: state, gh: FakeGh.new)
+        entry = seed_publication_binding(
+          opener, state, validated_patch
+        )
+        binding = entry.fetch("publication_binding")
+        mutate.call(entry, binding)
+        state.send(:raw_write_fingerprints, "fp1" => entry)
 
-        error = assert_raises(Hive::GhError, message) do
+        error = assert_raises(Hive::GhError, label) do
           opener.send(:reconciliation_pending_entry, finding, validated_patch)
         end
-        assert_includes error.message, message
+        expected = label.start_with?(
+          "publication binding is malformed:"
+        ) ? "publication binding is malformed" : label
+        assert_includes error.message, expected
       end
     end
   end
@@ -811,15 +1477,8 @@ class HivePatrolPrOpenerTest < Minitest::Test
     with_tmp_dir do |dir|
       state = Hive::Patrol::StateStore.new(dir)
       validated_patch = patch(worktree_path: dir)
-      opener = Hive::Patrol::PrOpener.new(dir, cfg: cfg, state: state, gh: FakeGh.new)
-      state.write_fingerprints(
-        "fp1" => {
-          "state" => "reconciliation_pending",
-          "branch" => validated_patch.branch,
-          "pr_url" => "https://example.com/pr/2",
-          "publication_receipt" => opener.send(:publication_receipt_for, validated_patch)
-        }
-      )
+      opener = pr_opener(dir, cfg: cfg, state: state, gh: FakeGh.new)
+      seed_publication_binding(opener, state, validated_patch)
       opener.instance_variable_get(:@gh).define_singleton_method(:lookup_prs_for_branch) { |*| [] }
 
       result = opener.open(finding, validated_patch)
@@ -837,7 +1496,7 @@ class HivePatrolPrOpenerTest < Minitest::Test
       previous = "c" * 40
       gh.remote_oid = previous
 
-      result = Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh).open(
+      result = pr_opener(dir, cfg: cfg, gh: gh).open(
         finding, patch(worktree_path: dir)
       )
 
@@ -851,7 +1510,7 @@ class HivePatrolPrOpenerTest < Minitest::Test
       gh = FakeGh.new
       gh.push_updates_remote = false
 
-      result = Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh).open(
+      result = pr_opener(dir, cfg: cfg, gh: gh).open(
         finding, patch(worktree_path: dir)
       )
 
@@ -875,6 +1534,116 @@ class HivePatrolPrOpenerTest < Minitest::Test
     end
     assert_raises(ArgumentError) do
       Hive::Patrol::PrOpener::Result.new(status: :error, reason: "free-form error")
+    end
+  end
+
+  def test_review_handoff_effect_reconciles_existing_task_and_supports_legacy_absence
+    validated_patch = patch
+    gh = FakeGh.new
+    gh.remote_oid = HEAD_SHA
+    reconciled_handoff = RecordingReviewHandoff.new
+    reconciled_handoff.define_singleton_method(:reconcile) do |**|
+      {
+        "status" => "matched",
+        "outcome" => { "task_path" => "/tmp/reconciled-review-task" }
+      }
+    end
+    opener = pr_opener(
+      Dir.pwd, cfg: cfg, gh: gh, review_handoff: reconciled_handoff
+    )
+    gateway = ReconcilingGateway.new
+
+    task_path = opener.send(
+      :enqueue_review_task, gateway, finding, validated_patch,
+      "https://example.com/pr/7", Time.at(0)
+    )
+
+    assert_equal "/tmp/reconciled-review-task", task_path
+    assert_equal 0, gateway.effect_calls
+    assert_empty reconciled_handoff.calls
+
+    legacy_handoff = RecordingReviewHandoff.new
+    legacy_opener = pr_opener(
+      Dir.pwd, cfg: cfg, gh: gh, review_handoff: legacy_handoff
+    )
+    legacy_gateway = ReconcilingGateway.new
+
+    task_path = legacy_opener.send(
+      :enqueue_review_task, legacy_gateway, finding, validated_patch,
+      "https://example.com/pr/8", Time.at(0)
+    )
+
+    assert_equal "/tmp/review-task", task_path
+    assert_equal(
+      [ { "status" => "absent", "outcome" => {} } ],
+      legacy_gateway.reconciliations
+    )
+    assert_equal 1, legacy_gateway.effect_calls
+    assert_equal 1, legacy_handoff.calls.size
+  end
+
+  def test_branch_effect_reconciles_matching_remote_and_retries_confirmed_absence
+    validated_patch = patch
+    gh = FakeGh.new
+    opener = pr_opener(Dir.pwd, cfg: cfg, gh: gh)
+
+    gh.remote_oid = HEAD_SHA
+    matched_gateway = ReconcilingGateway.new
+    result = opener.send(
+      :perform_branch_effect!, matched_gateway, finding, validated_patch
+    )
+
+    assert_equal HEAD_SHA, result.outcome.fetch("remote_oid")
+    assert_equal "matched", matched_gateway.reconciliations.first.fetch("status")
+    assert_equal 0, matched_gateway.effect_calls
+    assert_empty gh.pushed
+
+    gh.remote_oid = nil
+    absent_gateway = ReconcilingGateway.new
+    result = opener.send(
+      :perform_branch_effect!, absent_gateway, finding, validated_patch
+    )
+
+    assert_equal HEAD_SHA, result.outcome.fetch("remote_oid")
+    assert_equal(
+      {
+        "status" => "absent",
+        "outcome" => { "observed_oid" => nil }
+      },
+      absent_gateway.reconciliations.first
+    )
+    assert_equal 1, absent_gateway.effect_calls
+    assert_equal [ [ Dir.pwd, validated_patch.branch ] ], gh.pushed
+  end
+
+  def test_pull_request_effect_reconciles_the_exact_existing_pr
+    opener = pr_opener(Dir.pwd, cfg: cfg, gh: FakeGh.new)
+    gateway = ReconcilingGateway.new
+
+    result = opener.send(
+      :perform_pull_request_effect!, gateway, finding, patch, "unused body",
+      observed_prs: [ matching_pr ]
+    )
+
+    assert_equal "https://example.com/pr/1",
+                 result.outcome.fetch("pr_url")
+    assert_equal "matched", gateway.reconciliations.first.fetch("status")
+    assert_equal 0, gateway.effect_calls
+  end
+
+  def test_effect_gateway_failures_are_normalized_as_github_errors
+    errors = [
+      Hive::Patrol::EffectGateway::Denied.new("authority revoked", nil),
+      Hive::Patrol::EffectGateway::ReconciliationRequired.new("outcome unknown")
+    ]
+    opener = pr_opener(Dir.pwd, cfg: cfg, gh: FakeGh.new)
+
+    errors.each do |gateway_error|
+      error = assert_raises(Hive::GhError) do
+        opener.send(:perform_effect) { raise gateway_error }
+      end
+
+      assert_equal gateway_error.message, error.message
     end
   end
 end

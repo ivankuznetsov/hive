@@ -17,6 +17,7 @@ class ComponentBoundariesTest < Minitest::Test
       agent-abi
       agent-artifact-firewall
       attempts
+      patrol-effects
       safe-agent-git-gate
       skillpack
       user-service
@@ -89,6 +90,60 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal [ "Hive::UserService::Manager" ],
                  user_service.fetch("forbidden_constructions")
     assert_empty user_service.fetch("migration_exceptions")
+
+    patrol_effects = contract.component("patrol-effects")
+    assert_equal "candidate", patrol_effects.fetch("state")
+    assert_equal "hive/modules/migration/patrol_evidence",
+                 patrol_effects.dig("entrypoint", "require")
+    assert_equal "Hive::Modules::Migration::PatrolEvidence",
+                 patrol_effects.dig("entrypoint", "constant")
+    assert_equal(
+      %w[
+        Hive::Modules::Migration::EffectIntent
+        Hive::Modules::Migration::EffectReceipt
+        Hive::Modules::Migration::PatrolCapture
+      ],
+      patrol_effects.dig("public_contract", "values").sort
+    )
+    assert_equal [ "U3" ],
+                 patrol_effects.fetch("migration_exceptions")
+                   .map { |entry| entry.fetch("removal_unit") }
+    refute_empty patrol_effects.fetch("forbidden_constructions")
+    %w[
+      Hive::Modules::Migration::OccurrenceJournal
+      Hive::Modules::Migration::OccurrenceRecoveryIndex
+      Hive::Patrol::EffectGateway
+      Hive::RefactorPatrol::ActionTransitions
+      Hive::RefactorPatrol::ArchitectureIntakeTransitions
+      Hive::RefactorPatrol::ClaimMaintenanceTransitions
+      Hive::RefactorPatrol::DiscoveryTransitions
+      Hive::RefactorPatrol::JobQueryIndex
+      Hive::RefactorPatrol::JobStore
+      Hive::RefactorPatrol::JobStoreFiles
+      Hive::RefactorPatrol::TransitionGateway
+    ].each do |constant|
+      assert_includes patrol_effects.fetch("forbidden_constructions"),
+                      constant
+    end
+    authorizations = patrol_effects.fetch(
+      "authorized_internal_constructions"
+    ).to_h do |entry|
+      [ entry.fetch("constant"), entry.fetch("files") ]
+    end
+    assert_equal(
+      [
+        "lib/hive/commands/refactor_patrol.rb",
+        "lib/hive/daemon/refactor_patrol_scheduler.rb"
+      ],
+      authorizations.fetch(
+        "Hive::RefactorPatrol::ClaimMaintenanceTransitions"
+      )
+    )
+    refute_includes(
+      patrol_effects.to_s,
+      "ArchitectureOccurrenceBinding",
+      "the deleted compatibility store must not survive in the component contract"
+    )
 
     ready_components = [ user_service ]
 
@@ -193,7 +248,8 @@ class ComponentBoundariesTest < Minitest::Test
     remaining_candidates = contract.components.reject do |component|
       ready_components.include?(component)
     end
-    assert_equal [ attempts ], remaining_candidates
+    assert_equal %w[attempts patrol-effects],
+                 remaining_candidates.map { |entry| entry.fetch("id") }.sort
     assert remaining_candidates.all? { |component| component.fetch("state") == "candidate" }
 
     ready_loads = contract.validate_clean_loads!
@@ -229,6 +285,11 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal "Hive::WorkLedger", work_ledger_load.fetch("constant")
     assert_empty work_ledger_load.fetch("forbidden_loaded_features")
     assert_empty work_ledger_load.fetch("forbidden_constants")
+    patrol_effects_load = contract.validate_clean_load!("patrol-effects")
+    assert_equal "Hive::Modules::Migration::PatrolEvidence",
+                 patrol_effects_load.fetch("constant")
+    assert_empty patrol_effects_load.fetch("forbidden_loaded_features")
+    assert_empty patrol_effects_load.fetch("forbidden_constants")
   end
 
   def test_final_graph_and_wiki_inventory_agree_with_the_catalog
@@ -251,8 +312,14 @@ class ComponentBoundariesTest < Minitest::Test
       wiki_link = component.fetch("wiki_page").delete_prefix("wiki/").delete_suffix(".md")
       assert_includes row, "[[#{wiki_link}]]"
       assert_includes wiki_index, "[[#{wiki_link}]]"
-      assert_empty component.fetch("migration_exceptions"),
-                   "#{component.fetch('id')} retained an expired migration exception"
+      exceptions = component.fetch("migration_exceptions")
+      if component.fetch("id") == "patrol-effects"
+        assert_equal [ "U3" ],
+                     exceptions.map { |entry| entry.fetch("removal_unit") }
+      else
+        assert_empty exceptions,
+                     "#{component.fetch('id')} retained an expired migration exception"
+      end
 
       component_dependencies = component.fetch("component_dependencies")
       dependencies[component.fetch("id")] = component_dependencies unless component_dependencies.empty?
@@ -297,6 +364,61 @@ class ComponentBoundariesTest < Minitest::Test
                  "Hive production consumers must require hive/agent_skills: #{offenders.join(', ')}"
   end
 
+  def test_job_store_semantic_mutations_stay_behind_transition_ports
+    semantic_mutators = %w[
+      enqueue_manifest!
+      block_actions!
+      claim_discovery!
+      attach_discovery_process!
+      renew_discovery_claim!
+      release_discovery!
+      block_discovery!
+      checkpoint_discovery!
+      checkpoint_discovery_progress!
+      record_discovery_transition_rejection!
+      record_job_transition_rejection!
+      initialize_actions!
+      materialize_terminal_proof!
+      claim_action!
+      attach_action_process!
+      renew_action_claim!
+      record_creation_intent!
+      record_action_receipt!
+      record_patch_receipt!
+      record_patch_publication_attempt!
+      record_publication_attempt_phase!
+      supersede_publication_attempt!
+      record_fix_receipt!
+      finish_action!
+      release_action!
+      record_action_transition_rejection!
+      reconcile_linked_action!
+      write_job!
+    ]
+    allowed = %w[
+      lib/hive/refactor_patrol/action_claim_transitions.rb
+      lib/hive/refactor_patrol/action_plan_transitions.rb
+      lib/hive/refactor_patrol/architecture_intake_transitions.rb
+      lib/hive/refactor_patrol/claim_maintenance_transitions.rb
+      lib/hive/refactor_patrol/discovery_block_transitions.rb
+      lib/hive/refactor_patrol/discovery_claim_transitions.rb
+    ]
+    call = /\.(?:#{semantic_mutators.map { |name| Regexp.escape(name) }.join('|')})(?![a-zA-Z0-9_!?])/
+    offenders = Dir.glob(
+      File.join(ROOT, "lib", "hive", "**", "*.rb")
+    ).sort.filter_map do |path|
+      relative = path.delete_prefix("#{ROOT}/")
+      next if relative == "lib/hive/refactor_patrol/job_store.rb"
+      next if allowed.include?(relative)
+
+      relative if File.read(path).match?(call)
+    end
+
+    assert_empty offenders,
+                 "JobStore semantic mutations must use transition ports: " \
+                 "#{offenders.join(', ')}"
+  end
+
   def test_production_consumers_do_not_require_managed_git_directly
     owned = contract_component_owned_files("safe-agent-git-gate")
     offenders = Dir.glob(File.join(ROOT, "lib", "hive", "**", "*.rb")).filter_map do |path|
@@ -328,6 +450,88 @@ class ComponentBoundariesTest < Minitest::Test
 
     assert_empty offenders,
                  "Hive production consumers must use Hive::WorkLedger: #{offenders.join(', ')}"
+  end
+
+  def test_patrol_effect_recovery_has_one_journal_and_no_parallel_legacy_maps
+    ruby_sources = Dir.glob(
+      File.join(ROOT, "lib", "hive", "**", "*.rb")
+    ).to_h do |path|
+      [ path.delete_prefix("#{ROOT}/"), File.read(path) ]
+    end
+    journal_definitions = ruby_sources.filter_map do |path, source|
+      path if source.match?(/^\s*class OccurrenceJournal\b/)
+    end
+    assert_equal(
+      [ "lib/hive/modules/migration/occurrence_journal.rb" ],
+      journal_definitions
+    )
+    occurrence_sources = ruby_sources.select do |path, _source|
+      path.start_with?(
+        "lib/hive/modules/migration/occurrence_"
+      )
+    end
+    occurrence_writers = occurrence_sources.filter_map do |path, source|
+      path if source.match?(
+        /AtomicFile\.write|File\.(?:write|rename)|\.atomic_write\(/
+      )
+    end
+    assert_equal(
+      [
+        "lib/hive/modules/migration/occurrence_journal_state.rb",
+        "lib/hive/modules/migration/occurrence_record_store.rb",
+        "lib/hive/modules/migration/occurrence_recovery_index.rb"
+      ],
+      occurrence_writers
+    )
+
+    legacy_methods = %w[
+      reserve_effect_intent effect_intent_state record_effect_outcome
+      reserve_cycle_effect_intent cycle_effect_intent_state
+      record_cycle_effect_outcome
+    ]
+    legacy_methods.each do |method_name|
+      offenders = ruby_sources.filter_map do |path, source|
+        path if source.include?("def #{method_name}")
+      end
+      assert_empty offenders, "#{method_name} restored a parallel recovery map"
+    end
+
+    action_runner = ruby_sources.fetch(
+      "lib/hive/refactor_patrol/action_runner.rb"
+    )
+    %w[@authorized_effects @effect_captures effect_outcome_ effect_intent_]
+      .each do |legacy_state|
+        refute_includes action_runner, legacy_state
+      end
+
+    transition_port = ruby_sources.fetch(
+      "lib/hive/refactor_patrol/transition_gateway.rb"
+    )
+    assert_includes transition_port,
+                    "Hive::RefactorPatrol::EffectGateway.new"
+    refute_match(/AtomicFile|File\.(?:write|open|rename)|OccurrenceJournal\.new/,
+                 transition_port)
+
+    product_gateways = %w[
+      lib/hive/patrol/effect_gateway.rb
+      lib/hive/refactor_patrol/effect_gateway.rb
+    ]
+    product_gateways.each do |path|
+      source = ruby_sources.fetch(path)
+      assert_includes source,
+                      "Hive::Modules::Migration::EffectDelivery.new"
+      refute_match(/class EffectGateway\s*</, source)
+    end
+
+    transition_consumers = %w[
+      lib/hive/refactor_patrol/action_runner.rb
+      lib/hive/daemon/refactor_patrol_scheduler.rb
+    ]
+    transition_consumers.each do |path|
+      source = ruby_sources.fetch(path)
+      refute_includes source, "TransitionGateway.new"
+      refute_match(/AtomicFile|File\.(?:write|rename)/, source)
+    end
   end
 
   def test_invalid_catalog_rows_name_the_component_and_field
@@ -646,6 +850,34 @@ class ComponentBoundariesTest < Minitest::Test
       end
 
       assert_match(/example/, error.message)
+      assert_match(/lib\/consumer\.rb/, error.message)
+      assert_match(/Example::Internal/, error.message)
+    end
+  end
+
+  def test_lexically_resolved_internal_construction_cannot_evade_boundary
+    with_contract_fixture(
+      entrypoint_source: <<~RUBY,
+        module Example
+          class API; end
+          class Internal; end
+        end
+      RUBY
+      consumer_source: <<~RUBY
+        module Example
+          class Consumer
+            def build
+              Internal.new
+            end
+          end
+        end
+      RUBY
+    ) do |contract|
+      error = assert_raises(ComponentBoundaryContract::ValidationError) do
+        contract.validate_static_boundaries!
+      end
+
+      assert_match(/example\.forbidden_constructions/, error.message)
       assert_match(/lib\/consumer\.rb/, error.message)
       assert_match(/Example::Internal/, error.message)
     end

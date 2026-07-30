@@ -108,6 +108,107 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
     end
   end
 
+  def test_shutdown_acknowledgement_is_generation_bound_and_read_only
+    with_tmp_dir do |dir|
+      path = File.join(dir, "private", "operational-snapshot.json")
+      _store, assembler, reader = build(path)
+      assembler.begin_tick(now: T0)
+      assembler.shutdown(
+        admission_closed: true, drained: true,
+        child_inventory: [ { pid: 77, pgid: 77, start_time: "child-start" } ],
+        now: T0 + 1
+      )
+      before = File.binread(path)
+
+      acknowledgement = reader.shutdown_acknowledgement(
+        expected_daemon: IDENTITY, now: T0 + 2
+      )
+
+      assert_equal before, File.binread(path)
+      assert_equal true, acknowledgement.fetch("admission_closed")
+      assert_equal [ 77 ], acknowledgement.fetch("child_inventory").map { |entry| entry.fetch("pid") }
+      assert_nil reader.shutdown_acknowledgement(
+        expected_daemon: IDENTITY.merge("generation" => "other"), now: T0 + 2
+      )
+    end
+  end
+
+  def test_shutdown_acknowledgement_degrades_unavailable_storage_to_nil
+    with_tmp_dir do |dir|
+      reader = Hive::Daemon::OperationalSnapshot::Reader.new(
+        path: File.join(dir, "missing", "snapshot.json"),
+        expected_daemon: IDENTITY
+      )
+
+      assert_nil reader.shutdown_acknowledgement(
+        expected_daemon: IDENTITY,
+        now: T0
+      )
+    end
+  end
+
+  def test_runtime_readiness_is_generation_bound_retained_and_read_only
+    with_tmp_dir do |dir|
+      path = File.join(
+        dir, "private", "operational-snapshot.json"
+      )
+      _store, assembler, reader = build(path)
+      assembler.runtime_ready(now: T0)
+      ready_bytes = File.binread(path)
+
+      readiness = reader.runtime_readiness(
+        expected_daemon: IDENTITY, now: T0 + 1
+      )
+
+      assert_equal ready_bytes, File.binread(path)
+      assert_equal true, readiness.fetch("runtime_ready")
+      assert_equal "complete", readiness.fetch("phase")
+      assert_nil reader.runtime_readiness(
+        expected_daemon:
+          IDENTITY.merge("generation" => "other"),
+        now: T0 + 1
+      )
+
+      assembler.begin_tick(now: T0 + 2)
+      assert_equal "started", reader.runtime_readiness(
+        expected_daemon: IDENTITY, now: T0 + 3
+      ).fetch("phase")
+      assert_nil reader.runtime_readiness(
+        expected_daemon: IDENTITY, now: T0 + 100
+      )
+
+      assembler.shutdown(
+        admission_closed: true, drained: true,
+        child_inventory: [], now: T0 + 4
+      )
+      assert_nil reader.runtime_readiness(
+        expected_daemon: IDENTITY, now: T0 + 5
+      )
+    end
+  end
+
+  def test_runtime_readiness_auto_identity_degrades_missing_storage_to_nil
+    with_tmp_dir do |dir|
+      private_dir = File.join(dir, "private")
+      FileUtils.mkdir_p(private_dir, mode: 0o700)
+      pid_path = File.join(dir, ".daemon.pid")
+      process_start_time = Hive::Lock.process_start_time(Process.pid)
+      File.write(
+        pid_path,
+        {
+          "pid" => Process.pid,
+          "process_start_time" => process_start_time
+        }.to_yaml
+      )
+      reader = Hive::Daemon::OperationalSnapshot::Reader.new(
+        path: File.join(private_dir, "missing.json"),
+        pid_path: pid_path
+      )
+
+      assert_nil reader.runtime_readiness(now: T0)
+    end
+  end
+
   def test_reconfigured_validity_is_measured_from_tick_completion
     with_tmp_dir do |dir|
       path = File.join(dir, "private", "operational-snapshot.json")

@@ -10,3 +10,9 @@ terminal action proofs under the configured Hive home. Installations begin in
 shadow mode and may become mutators only through the durable migration cutover.
 The `hive refactor-patrol` command and `refactor_patrol.*` settings remain
 compatible throughout Hive 0.x.
+
+The merged-PR manifest remains immutable enqueue provenance. A distinct
+finalized scheduler capture is emitted only after the authoritative JobStore
+checkpoint or release, and branch, issue, pull-request, and review-handoff
+mutations pass through the Architecture Patrol gateway while its live claim
+and migration ownership are valid. Evidence never replaces JobStore recovery.

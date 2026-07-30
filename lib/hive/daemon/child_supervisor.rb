@@ -18,6 +18,8 @@ module Hive
     # polling. Failures are isolated per child; a segfault in one
     # `hive run` doesn't take the daemon down.
     class ChildSupervisor
+      attr_reader :shutdown_proof
+
       ChildExit = Struct.new(:pid, :exit_code, :project, :slug, :stage, :command,
                              :state_file_path, :started_at, :finished_at, :json_envelope,
                              :request_id, :dispatch_token,
@@ -64,6 +66,7 @@ module Hive
         #         timeout_sec, terminating_at, killed }
         @running = {}
         @forced_completions = []
+        @shutdown_proof = { drained: true, child_inventory: [] }.freeze
       end
 
       # Resolve the wall-clock timeout (seconds) for a hive verb. A
@@ -233,14 +236,21 @@ module Hive
       # scheduler's existing durable claim remains fenced for restart recovery.
       def terminate_all(grace_sec: 600)
         completed = []
-        return completed if @running.empty?
+        if @running.empty?
+          @shutdown_proof = { drained: true, child_inventory: [] }.freeze
+          return completed
+        end
 
         completed.concat(reap_dry_run)
-        return completed if @running.empty?
+        if @running.empty?
+          @shutdown_proof = { drained: true, child_inventory: [] }.freeze
+          return completed
+        end
 
         targets = capture_shutdown_targets
         pending = []
         signal_shutdown_targets(:TERM, targets)
+        merge_shutdown_targets!(targets, capture_shutdown_targets)
 
         drain_shutdown(
           targets: targets,
@@ -248,7 +258,10 @@ module Hive
           completed: completed,
           deadline: Time.now + grace_sec
         )
-        return completed if shutdown_drained?(pending)
+        if shutdown_drained?(pending)
+          record_shutdown_proof(targets, drained: true)
+          return completed
+        end
 
         signal_shutdown_targets(:KILL, targets, require_identity: true)
         drain_shutdown(
@@ -258,6 +271,7 @@ module Hive
           deadline: Time.now + Hive::ProcessKill::KILL_GRACE_SECONDS
         )
 
+        record_shutdown_proof(targets, drained: shutdown_drained?(pending))
         completed
       end
 
@@ -381,8 +395,25 @@ module Hive
             confirmed
           end
           captured[pid] = {
-            pgid: entry[:pgid] || pgid_for(pid),
+            pgids: ([ entry[:pgid] || pgid_for(pid) ] +
+              Array(tree).filter_map { |target| target[:pgid] }).compact.uniq,
             tree: tree
+          }
+        end
+      end
+
+      # A child can fork after the initial capture and before it observes
+      # TERM. Retain a second inventory while the direct child is still
+      # tracked, and keep every observed group fenced through the drain.
+      def merge_shutdown_targets!(targets, fresh_targets)
+        fresh_targets.each do |pid, fresh|
+          previous = targets[pid] || { pgids: [], tree: [] }
+          tree = (Array(previous[:tree]) + Array(fresh[:tree])).uniq do |target|
+            [ target[:pid], target[:ppid], target[:pgid], target[:start_time] ]
+          end
+          targets[pid] = {
+            pgids: (target_pgids(previous) + target_pgids(fresh)).uniq,
+            tree: tree.empty? ? nil : tree
           }
         end
       end
@@ -394,13 +425,17 @@ module Hive
             signal.to_s, tree, require_identity: require_identity
           ) if tree
 
-          pgid = target[:pgid]
-          safe_kill(signal, -pgid) if pgid && process_group_alive?(pgid)
+          target_pgids(target).each do |pgid|
+            safe_kill(signal, -pgid) if pgid && process_group_alive?(pgid)
+          end
         end
       end
 
       def drain_shutdown(targets:, pending:, completed:, deadline:)
         loop do
+          merge_shutdown_targets!(
+            targets, capture_shutdown_targets
+          ) unless @running.empty?
           pending.concat(reap_all)
           releasable, held = pending.partition do |entry|
             shutdown_exit_safe?(entry, targets.fetch(entry.pid, nil))
@@ -422,8 +457,21 @@ module Hive
         return false unless target && target[:tree]
         return false if target[:tree].any? { |process| Hive::ProcessKill.captured_process_alive?(process) }
 
-        pgid = target[:pgid]
-        pgid && !process_group_alive?(pgid)
+        pgids = target_pgids(target)
+        pgids.any? && pgids.none? { |pgid| process_group_alive?(pgid) }
+      end
+
+      def target_pgids(target)
+        Array(target[:pgids] || target[:pgid])
+      end
+
+      def record_shutdown_proof(targets, drained:)
+        inventory = targets.values.flat_map { |target| Array(target[:tree]) }
+                           .uniq { |entry| [ entry[:pid], entry[:pgid], entry[:start_time] ] }
+                           .map do |entry|
+          { pid: entry.fetch(:pid), pgid: entry.fetch(:pgid), start_time: entry.fetch(:start_time) }
+        end
+        @shutdown_proof = { drained: drained == true, child_inventory: inventory }.freeze
       end
 
       def process_group_alive?(pgid)

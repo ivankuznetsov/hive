@@ -1,3 +1,4 @@
+require "hive/refactor_patrol/effect_errors"
 require "hive/refactor_patrol/github_gateway"
 require "hive/refactor_patrol/semantic_descriptor"
 require "hive/refactor_patrol/semantic_family"
@@ -88,7 +89,8 @@ module Hive
       def publish(thesis:, family_id:, canonical_action_id:, job_id:, source:, reasons: [],
                   record_intent:, creation_attempted: false,
                   publication_state: nil,
-                  authorize_create: -> { true })
+                  authorize_create: -> { true },
+                  execute_effect: ->(phase:, payload:, &effect) { effect.call })
         request_sent = false
         publication = normalize_publication_state(publication_state, creation_attempted)
         return result("invalid_publication_state", false) unless valid_publication_state?(
@@ -143,14 +145,31 @@ module Hive
         unless authorize_create.call.equal?(true)
           return result("authority_revoked", false, receipts: base_receipts(family_id, action_id))
         end
-        request_sent = true
-        url = @github_gateway.create_issue(
-          repository: repository, host: host, title: title_for(thesis), body: body, cfg: @cfg
-        )
+        url = execute_effect.call(
+          phase: "issue_create_intent", payload: intent_payload
+        ) do
+          request_sent = true
+          @github_gateway.create_issue(
+            repository: repository, host: host,
+            title: title_for(thesis), body: body, cfg: @cfg
+          )
+        end
         result(
           "issue_created", true, issue_url: url,
           receipts: base_receipts(family_id, action_id).merge(
             "creation_intent" => true, "issue_url" => url
+          )
+        )
+      rescue Hive::RefactorPatrol::EffectDenied
+        result(
+          "authority_revoked", false,
+          receipts: base_receipts(family_id, canonical_action_id)
+        )
+      rescue Hive::RefactorPatrol::EffectReconciliationRequired => e
+        result(
+          "remote_outcome_unknown", false,
+          receipts: base_receipts(family_id, canonical_action_id).merge(
+            "error" => e.message
           )
         )
       rescue Hive::GhError => e

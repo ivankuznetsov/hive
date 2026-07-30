@@ -93,16 +93,58 @@ class RefactorPatrolPrOpenerTest < Minitest::Test
     with_tmp_git_repo do |repo|
       gh = FakeGh.new
       handoff = Handoff.new
-      intents = 0
+      operations = []
+      original_push = gh.method(:push_branch!)
+      gh.define_singleton_method(:push_branch!) do |*args, **options|
+        operations << "push"
+        original_push.call(*args, **options)
+      end
+      original_capture = gh.method(:capture3)
+      gh.define_singleton_method(:capture3) do |*args, **options|
+        operations << "create_pr"
+        original_capture.call(*args, **options)
+      end
+      original_enqueue = handoff.method(:enqueue)
+      handoff.define_singleton_method(:enqueue) do |**arguments|
+        operations << "review_handoff"
+        original_enqueue.call(**arguments)
+      end
       result = opener(repo, gh, handoff).open(
         thesis: thesis, patch: patch(repo), job_id: "job-7",
         canonical_action_id: "fix-fp", source: source,
-        record_intent: -> { intents += 1; true }
+        record_intent: lambda do |phase:, payload:|
+          operations << phase
+          !payload.empty?
+        end,
+        execute_effect: lambda do |phase:, payload:, &effect|
+          refute_empty payload
+          operations << "gateway_begin:#{phase}"
+          value = effect.call
+          operations << "gateway_end:#{phase}"
+          value
+        end,
+        execute_handoff: lambda do |phase:, payload:, &effect|
+          assert_equal "review_handoff", phase
+          assert_equal "https://github.com/acme/demo/pull/9", payload.fetch("pr_url")
+          operations << "gateway_begin:#{phase}"
+          value = effect.call
+          operations << "gateway_end:#{phase}"
+          value
+        end
       )
 
       assert_equal "pr_opened", result.outcome
       assert result.terminal
-      assert_equal 2, intents, "push and PR create require distinct durable intents"
+      assert_equal(
+        %w[
+          push_intent gateway_begin:push_intent push gateway_end:push_intent
+          push_complete pr_create_intent gateway_begin:pr_create_intent
+          create_pr gateway_end:pr_create_intent
+          gateway_begin:review_handoff review_handoff gateway_end:review_handoff
+        ],
+        operations,
+        "each remote effect is bracketed by its incumbent durable callbacks"
+      )
       assert_equal(
         [ [ repo, "master", nil, true, "git@github.com:acme/demo.git", false ] ],
         gh.pushed
@@ -1299,6 +1341,75 @@ class RefactorPatrolPrOpenerTest < Minitest::Test
       end
 
       assert_includes error.message, "superseded refactor patch commit is invalid"
+    end
+  end
+
+  def test_publication_effect_gateway_failures_keep_the_action_retryable
+    cases = [
+      [
+        Hive::RefactorPatrol::EffectDenied.new("authority revoked", nil),
+        "authority_revoked"
+      ],
+      [
+        Hive::RefactorPatrol::EffectReconciliationRequired.new(
+          "remote outcome unknown", nil
+        ),
+        "remote_outcome_unknown"
+      ]
+    ]
+
+    cases.each do |gateway_error, expected_outcome|
+      with_tmp_git_repo do |repo|
+        result = opener(repo, FakeGh.new, Handoff.new).open(
+          thesis: thesis,
+          patch: patch(repo),
+          job_id: "job-7",
+          canonical_action_id: "fix-fp",
+          source: source,
+          record_intent: ->(**) { true },
+          execute_effect: ->(**) { raise gateway_error }
+        )
+
+        assert_equal expected_outcome, result.outcome
+        refute result.terminal
+        if gateway_error.is_a?(Hive::RefactorPatrol::EffectReconciliationRequired)
+          assert_includes result.receipts.fetch("error"), "remote outcome unknown"
+        end
+      end
+    end
+  end
+
+  def test_handoff_effect_gateway_failures_return_visible_pending_receipts
+    errors = [
+      Hive::RefactorPatrol::EffectDenied.new("authority revoked", nil),
+      Hive::RefactorPatrol::EffectReconciliationRequired.new(
+        "remote outcome unknown", nil
+      )
+    ]
+
+    with_tmp_git_repo do |repo|
+      subject = opener(repo, FakeGh.new, Handoff.new)
+      errors.each do |gateway_error|
+        result = subject.send(
+          :handoff,
+          thesis,
+          patch(repo),
+          "https://github.com/acme/demo/pull/9",
+          "job-7",
+          "fix-fp",
+          source,
+          authorize_handoff: -> { true },
+          execute_handoff: ->(**) { raise gateway_error }
+        )
+
+        assert_equal "review_handoff_pending", result.outcome
+        refute result.terminal
+        assert_equal(
+          "https://github.com/acme/demo/pull/9",
+          result.receipts.fetch("pr_url")
+        )
+        assert_equal gateway_error.message, result.receipts.fetch("handoff_error")
+      end
     end
   end
 

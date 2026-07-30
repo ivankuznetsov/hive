@@ -96,6 +96,10 @@ JSON_USAGE_ERROR_CONTRACTS = {
   "findings" => { schema: "hive-findings", error_kind: "invalid_task_path" },
   "patrol" => { schema: "hive-patrol", error_kind: "error" },
   "refactor-patrol" => { reporter: :refactor_patrol, error_kind: "error" },
+  "refactor-patrol-reset" => {
+    schema: "hive-refactor-patrol-jobstore-reset",
+    error_kind: "usage"
+  },
   "setup" => { schema: "hive-setup", error_kind: "usage" },
   "connect" => { error_kind: "usage", extras: { "service" => "screenote" } },
   "disconnect" => { error_kind: "usage", extras: { "service" => "screenote" } },

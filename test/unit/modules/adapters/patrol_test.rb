@@ -6,7 +6,7 @@ class ModulesAdaptersPatrolTest < Minitest::Test
   include HiveTestHelper
 
   NOW = Time.utc(2026, 7, 22, 15, 0, 0)
-  Configuration = Data.define(:settings, :grants, :digest)
+  Configuration = Data.define(:settings, :grants, :digest, :generation)
 
   class FakeCommand
     def initialize(result = { "ok" => true }) = @result = result
@@ -150,13 +150,16 @@ class ModulesAdaptersPatrolTest < Minitest::Test
 
   def test_default_shadow_journal_and_hook_event_validation_fail_closed
     with_project do |project|
+      commands = []
       adapter = Hive::Modules::Adapters::Patrol.new(
+        command_factory: ->(*args) { commands << args; FakeCommand.new },
         scheduler_factory: ->(**) { FakeScheduler.new(nil) }
       )
       assert_equal 0, adapter.call(
         project: project, hook_id: "scheduled-scan", event: schedule_event,
         configuration: configuration(shadow: true)
       )
+      assert_empty commands
       shadow_files = Dir.glob(File.join(
         project.fetch("hive_state_path"), "module-runtime", "migration", "shadow", "**", "*.json"
       ))
@@ -164,7 +167,8 @@ class ModulesAdaptersPatrolTest < Minitest::Test
       record = JSON.parse(File.binread(shadow_files.fetch(0)))
       refute record.fetch("comparable")
       assert_nil record.fetch("evidence_source")
-      assert_empty record.fetch("legacy")
+      assert_nil record.fetch("legacy_capture")
+      assert_empty record.fetch("legacy_effects")
 
       assert_raises(Hive::ConfigError) do
         adapter.call(
@@ -178,6 +182,33 @@ class ModulesAdaptersPatrolTest < Minitest::Test
           configuration: configuration(shadow: true)
         )
       end
+    end
+  end
+
+  def test_default_shadow_normalizes_non_schedule_rationales_to_not_due
+    with_project do |project|
+      adapter = Hive::Modules::Adapters::Patrol.new(
+        command_factory: ->(*) { flunk("a shadow occurrence must not invoke patrol") },
+        scheduler_factory: ->(**) { FakeScheduler.new(project: project.fetch("name")) }
+      )
+
+      assert_equal 0, adapter.call(
+        project: project, hook_id: "scheduled-scan", event: schedule_event,
+        configuration: configuration(shadow: true, workflows: "coding")
+      )
+
+      assert_equal 0, adapter.call(
+        project: project, hook_id: "task-completed", event: task_event("research"),
+        configuration: configuration(shadow: true, workflows: "coding")
+      )
+
+      file = Dir.glob(File.join(
+        project.fetch("hive_state_path"), "module-runtime", "migration", "shadow", "**", "*.json"
+      )).fetch(0)
+      records = Dir.glob(File.join(File.dirname(file), "*.json")).map do |path|
+        JSON.parse(File.binread(path)).dig("module_decision", "rationale")
+      end
+      assert_equal %w[due not_due], records.sort
     end
   end
 
@@ -231,19 +262,223 @@ class ModulesAdaptersPatrolTest < Minitest::Test
     end
     assert_match(/legacy shadow capture is malformed/, error.message)
 
-    valid = {
-      "decision" => { "rationale" => "due" }, "effects" => []
-    }
+    valid = capture
     assert_equal(
       valid,
       adapter.send(
         :legacy_capture,
         event(
           "schedule",
-          "payload" => { "legacy_mutator_capture" => valid }
+          "payload" => { "legacy_mutator_capture" => valid.to_h }
         )
       )
     )
+
+    with_project do |project|
+      commands = []
+      malformed_event = schedule_event
+      malformed_event["payload"]["legacy_mutator_capture"] = {
+        "decision" => {}, "effects" => {}
+      }
+      adapter = Hive::Modules::Adapters::Patrol.new(
+        command_factory: ->(*args) { commands << args; FakeCommand.new },
+        scheduler_factory: ->(**) { FakeScheduler.new(nil) }
+      )
+
+      assert_raises(Hive::ConfigError) do
+        adapter.call(
+          project: project, hook_id: "scheduled-scan", event: malformed_event,
+          configuration: configuration(shadow: true)
+        )
+      end
+      assert_empty commands
+      assert_empty Dir.glob(File.join(
+        project.fetch("hive_state_path"), "module-runtime", "migration", "shadow", "**", "*.json"
+      ))
+    end
+  end
+
+  def test_shadow_partitions_receipts_and_rejects_cross_project_capture
+    adapter = Hive::Modules::Adapters::Patrol.new
+    wrong_project = event(
+      "schedule",
+      "project" => "other",
+      "payload" => { "legacy_mutator_capture" => capture.to_h }
+    )
+    assert_raises(Hive::ConfigError) do
+      adapter.send(:legacy_capture, wrong_project)
+    end
+
+    receipt_type = Data.define(:intent)
+    intent_type = Data.define(:module_name, :authority)
+    legacy = receipt_type.new(
+      intent: intent_type.new(
+        module_name: "patrol", authority: "legacy"
+      )
+    )
+    shadow = receipt_type.new(
+      intent: intent_type.new(
+        module_name: "patrol", authority: "shadow"
+      )
+    )
+    recorded = []
+    comparator = Object.new
+    comparator.define_singleton_method(:record!) do |**attributes|
+      recorded << attributes
+    end
+    adapter.define_singleton_method(:occurrence_receipts) do |*, **|
+      [ legacy, shadow ]
+    end
+    adapter.define_singleton_method(:shadow_comparator) do |_project|
+      comparator
+    end
+    shadow_event = schedule_event
+    shadow_event["payload"]["legacy_mutator_capture"] = capture.to_h
+    assert_equal 0, adapter.send(
+      :shadow,
+      { "path" => "/tmp/project" },
+      configuration(shadow: true),
+      shadow_event,
+      "due"
+    )
+    assert_equal [ legacy ], recorded.fetch(0).fetch(:legacy_effects)
+    assert_equal [ shadow ], recorded.fetch(0).fetch(:module_effects)
+  end
+
+  def test_occurrence_receipt_index_is_bounded_and_module_filtered
+    adapter = Hive::Modules::Adapters::Patrol.new
+    page_type = Data.define(:records, :next_cursor)
+    receipt_type = Data.define(:intent)
+    intent_type = Data.define(:module_name)
+    patrol_receipt = receipt_type.new(
+      intent: intent_type.new(module_name: "patrol")
+    )
+    foreign_receipt = receipt_type.new(
+      intent: intent_type.new(module_name: "architecture-patrol")
+    )
+    store = Object.new
+    store.define_singleton_method(:receipts_for_occurrence) do |*, **|
+      page_type.new(
+        records: [ patrol_receipt, foreign_receipt ],
+        next_cursor: nil
+      )
+    end
+    adapter.define_singleton_method(:evidence_store) { |_project| store }
+    assert_equal(
+      [ patrol_receipt ],
+      adapter.send(
+        :occurrence_receipts,
+        { "path" => "/tmp/project" },
+        capture
+      )
+    )
+
+    store.define_singleton_method(:receipts_for_occurrence) do |*, **|
+      page_type.new(records: [], next_cursor: "receipt-next")
+    end
+    assert_raises(Hive::ConfigError) do
+      adapter.send(
+        :occurrence_receipts,
+        { "path" => "/tmp/project" },
+        capture
+      )
+    end
+  end
+
+  def test_module_capture_and_default_evidence_store_obey_ownership
+    with_project(owner: "legacy") do |project|
+      adapter = Hive::Modules::Adapters::Patrol.new
+      assert_raises(Hive::ConfigError) do
+        adapter.send(:module_capture, project, schedule_event)
+      end
+      assert_instance_of(
+        Hive::Modules::Migration::EvidenceStore,
+        adapter.send(:evidence_store, project)
+      )
+    end
+  end
+
+  def test_module_hook_retirement_compacts_and_still_fences_replay_after_restart
+    with_project(owner: "module") do |project|
+      adapter = Hive::Modules::Adapters::Patrol.new
+      evidence = adapter.send(:evidence_store, project)
+      captures = []
+
+      with_constant(
+        Hive::Modules::Migration::OccurrenceJournalState,
+        :MAX_SEQUENCE_HIGH_WATERS,
+        2
+      ) do
+        3.times do |index|
+          timestamp = NOW + index
+          module_event = schedule_event.merge(
+            "event_id" => "evt-#{format('%064x', index + 1)}",
+            "occurred_at" => timestamp.iso8601(6)
+          )
+          capture = adapter.send(
+            :module_capture, project, module_event
+          )
+          captures << capture
+          assert_equal "module_hook",
+                       capture.reservation.fetch("kind")
+          assert_equal timestamp.iso8601(6),
+                       capture.reservation.fetch(
+                         "window_started_at"
+                       )
+          assert_equal 1,
+                       capture.reservation.fetch(
+                         "attempt_generation"
+                       )
+          store = Hive::Patrol::StateStore.new(
+            project.fetch("path")
+          )
+          store.reserve_occurrence!(capture, now: timestamp)
+          final = Hive::Modules::Migration::PatrolCapture.build(
+            module_name: capture.module_name,
+            project: capture.project,
+            trigger: capture.trigger,
+            reservation: capture.reservation,
+            owner: capture.owner,
+            owner_epoch: capture.owner_epoch,
+            selection_input: capture.selection_input,
+            selection: capture.selection,
+            outcome_class: "completed",
+            outcome: { "rationale" => "completed" },
+            occurred_at: capture.occurred_at,
+            recorded_at: timestamp + 1
+          )
+          store.finalize_occurrence!(
+            capture: final,
+            evidence_store: evidence,
+            now: timestamp + 1
+          )
+          assert_nil Hive::Patrol::StateStore.new(
+            project.fetch("path")
+          ).occurrence(capture.occurrence_id)
+        end
+
+        restarted = Hive::Patrol::StateStore.new(
+          project.fetch("path")
+        )
+        assert_raises(Hive::ConfigError) do
+          restarted.reserve_occurrence!(
+            captures.first, now: NOW + 3
+          )
+        end
+        later_event = schedule_event.merge(
+          "event_id" => "evt-#{format('%064x', 4)}",
+          "occurred_at" => (NOW + 4).iso8601(6)
+        )
+        later = adapter.send(
+          :module_capture, project, later_event
+        )
+        restarted.reserve_occurrence!(later, now: NOW + 4)
+        assert_equal later.occurrence_id,
+                     restarted.occurrence(
+                       later.occurrence_id
+                     ).fetch("occurrence_id")
+      end
+    end
   end
 
   private
@@ -260,7 +495,10 @@ class ModulesAdaptersPatrolTest < Minitest::Test
           "refactor_patrol" => { "enabled" => true }
         }.to_yaml
       )
-      project = { "name" => "demo", "path" => root, "hive_state_path" => state }
+      project = {
+        "name" => "demo", "project_id" => "project-1",
+        "path" => root, "hive_state_path" => state
+      }
       write_migration_state(project, owner)
       yield(project)
     end
@@ -303,9 +541,12 @@ class ModulesAdaptersPatrolTest < Minitest::Test
       grants: {
         "repository_write" => true, "github_mutations" => [ "pull_requests" ],
         "external_commands" => %w[gh git], "network_hosts" => [ "api.github.com" ],
-        "filesystem_read" => [ "repository" ], "filesystem_write" => [ ".hive-state/patrol/**" ],
+        "filesystem_read" => [ "repository" ],
+        "filesystem_write" => [ ".hive-state/patrol/**", ".hive-state/stages/**" ],
         "secrets" => []
-      }, digest: "d" * 64
+      },
+      digest: "d" * 64,
+      generation: { "source_commit" => "a" * 40 }
     )
   end
 
@@ -320,7 +561,55 @@ class ModulesAdaptersPatrolTest < Minitest::Test
   def event(name, overrides = {})
     {
       "event_id" => "evt-#{'a' * 64}", "event_name" => name,
+      "project_id" => "project-1", "project" => "demo",
       "occurred_at" => NOW.iso8601(6), "payload" => {}
     }.merge(overrides)
+  end
+
+  def capture
+    Hive::Modules::Migration::PatrolCapture.build(
+      module_name: "patrol",
+      project: {
+        "project_id" => "project-1",
+        "name" => "demo",
+        "repository" => nil
+      },
+      trigger: {
+        "kind" => "schedule",
+        "id" => "ordinary:project-1:#{NOW.iso8601(6)}",
+        "schedule" => "*/10 * * * *",
+        "occurred_at" => NOW.iso8601(6)
+      },
+      reservation: {
+        "kind" => "ordinary",
+        "id" => "ordinary:project-1:#{NOW.iso8601(6)}"
+      },
+      owner: "legacy",
+      owner_epoch: 1,
+      selection_input: {
+        "kind" => "operation",
+        "operation" => "adapter-test"
+      },
+      selection:
+        Hive::Modules::Migration::PatrolDecisionProjection.build(
+          module_name: "patrol",
+          rationale: "due"
+        ),
+      outcome_class: "complete",
+      outcome: { "rationale" => "complete" },
+      occurred_at: NOW,
+      recorded_at: NOW
+    )
+  end
+
+  def with_constant(owner, name, replacement)
+    original = owner.const_get(name)
+    owner.send(:remove_const, name)
+    owner.const_set(name, replacement)
+    yield
+  ensure
+    owner.send(:remove_const, name) if
+      owner.const_defined?(name, false)
+    owner.const_set(name, original)
   end
 end

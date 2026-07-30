@@ -78,7 +78,8 @@ module Hive
                      lost_outcome_store: nil, lost_outcome_processor: nil,
                      operational_snapshot: nil, recovery_coordinator: nil,
                      module_runtime: nil,
-                     module_migration_coordinator: nil)
+                     module_migration_coordinator: nil,
+                     runtime_ready_callback: nil)
         @config = config
         @controller = controller
         @supervisor = supervisor
@@ -96,6 +97,7 @@ module Hive
         @lost_outcome_store = lost_outcome_store
         @lost_outcome_processor = lost_outcome_processor
         @operational_snapshot = operational_snapshot
+        @runtime_ready_callback = runtime_ready_callback
         @module_runtime = module_runtime
         @module_migration_coordinator = module_migration_coordinator
         @attempt_snapshot = nil
@@ -429,6 +431,13 @@ module Hive
         else
           @patrol_scheduler&.tick(now: now)
         end
+        patrol_events = @patrol_scheduler&.drain_events
+        Array(patrol_events).each do |event|
+          @logger.event(
+            :patrol_recovery_blocked,
+            **event.reject { |key, _value| key == :status }
+          )
+        end
         architecture_events = @refactor_patrol_scheduler&.drain_events
         Array(architecture_events).each do |event|
           @logger.event(:architecture_patrol_blocked, **event.reject { |key, _value| key == :status })
@@ -481,6 +490,9 @@ module Hive
         # before the first tick, so a crash-restart neither re-dispatches
         # an already-run request nor leaks claim files for dead owners.
         recover_dispatch_claims(now: Time.now)
+        publish_runtime_readiness(now: Time.now)
+        @runtime_ready_callback&.call
+        @runtime_ready_callback = nil
 
         until @shutdown
           now = Time.now
@@ -522,11 +534,41 @@ module Hive
         record_completed(Array(shutdown_entries), now: Time.now)
         # One final reap to catch any last completions
         reap_completed(now: Time.now)
+        publish_shutdown_acknowledgement(now: Time.now)
         @logger.close
       end
 
       def request_shutdown!
         @shutdown = true
+      end
+
+      def publish_runtime_readiness(now:)
+        if @runtime_ready_callback && !@operational_snapshot
+          raise Hive::UnavailableError,
+                "daemon operational readiness store is unavailable"
+        end
+        return unless @operational_snapshot
+
+        @operational_snapshot.runtime_ready(now: now)
+      rescue StandardError => error
+        log_operational_snapshot_failure(
+          phase: "runtime_ready", error: error
+        )
+        raise if @runtime_ready_callback
+      end
+
+      def publish_shutdown_acknowledgement(now:)
+        return unless @operational_snapshot
+
+        proof = @supervisor.respond_to?(:shutdown_proof) ? @supervisor.shutdown_proof : nil
+        @operational_snapshot.shutdown(
+          admission_closed: true,
+          drained: proof && proof.fetch(:drained, false),
+          child_inventory: proof ? proof.fetch(:child_inventory, []) : [],
+          now: now
+        )
+      rescue StandardError => e
+        log_operational_snapshot_failure(phase: "shutdown", error: e)
       end
 
       def request_reload!
@@ -739,7 +781,12 @@ module Hive
             @logger.event(:project_dropped, project: entry.project)
           end
           if entry.stage == Hive::Daemon::PatrolScheduler::PATROL_STAGE
-            @patrol_scheduler&.complete(project: entry.project, exit_code: entry.exit_code, now: now)
+            @patrol_scheduler&.complete(
+              project: entry.project,
+              exit_code: entry.exit_code,
+              envelope: entry.json_envelope,
+              now: now
+            )
           end
           if entry.dispatch_token && entry.dispatch_token[:kind] == :architecture_patrol
             result = @refactor_patrol_scheduler&.complete(

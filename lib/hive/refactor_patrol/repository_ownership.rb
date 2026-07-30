@@ -237,17 +237,21 @@ module Hive
       end
 
       def stored_continuation_identities(entry, _cfg)
-        JobStore.new(entry.fetch("path")).each_job.filter_map do |aggregate|
+        JobStore.new(
+          entry.fetch("path"),
+          hive_state_path: entry["hive_state_path"],
+          project: entry
+        ).each_job.filter_map do |aggregate|
           self.class.identity_from_source(aggregate.fetch("source")) if
             self.class.remote_continuation_evidence?(aggregate)
         end.uniq
       end
 
       def normalized_entry(entry)
-        {
+        entry.merge(
           "name" => entry.fetch("name").to_s,
           "path" => File.expand_path(entry.fetch("path"))
-        }
+        )
       end
 
       def entry_key(entry)

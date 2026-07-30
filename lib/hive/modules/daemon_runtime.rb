@@ -9,6 +9,7 @@ require "hive/modules/event_ledger"
 require "hive/modules/event_router"
 require "hive/modules/event_scope"
 require "hive/modules/hook_attempt"
+require "hive/modules/migration/patrols"
 require "hive/modules/schedule_planner"
 
 module Hive
@@ -21,11 +22,18 @@ module Hive
       RETRY_DELAY_SEC = 3600
 
       def initialize(attempt_store:, attempt_dispatcher:, registry: -> { Hive::Config.registered_projects },
-                     planner: SchedulePlanner.new, clock: -> { Time.now.utc })
+                     planner: SchedulePlanner.new, migration_owner: nil,
+                     clock: -> { Time.now.utc })
         @attempt_store = attempt_store
         @attempt_dispatcher = attempt_dispatcher
         @registry = registry
         @planner = planner
+        @migration_owner = migration_owner || lambda do |entry, module_name|
+          Hive::Modules::Migration::Patrols.owner_for(
+            entry.fetch("path"), module_name,
+            hive_state_path: entry["hive_state_path"]
+          )
+        end
         @clock = clock
       end
 
@@ -124,14 +132,21 @@ module Hive
 
       def dispatch_schedules(selections, store:, ledger:, entry:, now:)
         schedules = selections.flat_map do |selection|
+          module_name = selection.fetch("name")
+          next [] unless schedule_owner?(entry, module_name)
+
           configuration = store.configuration(
-            selection.fetch("name"), selection.dig("active", "configuration_digest")
+            module_name, selection.dig("active", "configuration_digest")
           )
-          configuration.contract.fetch("hooks").flat_map { |hook| hook.fetch("schedules") }
+          configuration.contract.fetch("hooks").flat_map do |hook|
+            hook.fetch("schedules").map do |schedule|
+              [ module_name, schedule, Time.iso8601(selection.fetch("high_water_at")) ]
+            end
+          end
         end.uniq
-        schedules.count do |schedule|
-          previous = ledger.latest_schedule(schedule)
-          baseline = previous || selections.map { |selection| Time.iso8601(selection.fetch("high_water_at")) }.min
+        schedules.count do |module_name, schedule, high_water_at|
+          previous = ledger.latest_schedule(schedule, target_module: module_name)
+          baseline = previous || high_water_at
           occurrence = @planner.due(schedule: schedule, after: baseline, now: now)
           next false unless occurrence
 
@@ -139,16 +154,23 @@ module Hive
           ledger.record(
             project_id: entry.fetch("project_id"), project: entry.fetch("name"),
             event_name: "schedule", occurred_at: instant,
-            source: { "type" => "daemon_schedule", "id" => "daemon" },
-            idempotency_key: "schedule:#{schedule}:#{instant}",
+            source: { "type" => "daemon_schedule", "id" => module_name },
+            idempotency_key: "schedule:#{module_name}:#{schedule}:#{instant}",
             payload: {
               "schedule" => schedule, "due_at" => instant,
-              "missed_windows" => occurrence.missed_windows
+              "missed_windows" => occurrence.missed_windows,
+              "target_module" => module_name
             },
             recorded_at: now
           )
           true
         end
+      end
+
+      def schedule_owner?(entry, module_name)
+        return true unless Hive::Modules::Migration::Patrols::MODULES.include?(module_name)
+
+        @migration_owner.call(entry, module_name) == "module"
       end
 
       def read_event_cursor(path)

@@ -63,9 +63,15 @@ class ModuleMigrationIntegrationTest < Minitest::Test
         %w[patrol architecture-patrol].each do |module_name|
           comparator.record!(
             module_name: module_name,
-            trigger: { "fixture" => true, "module" => module_name, "index" => index },
-            legacy_decision: { "status" => "skip", "reason" => "not_due" },
-            module_decision: { "status" => "skip", "reason" => "not_due" },
+            trigger: {
+              "kind" => "manual",
+              "id" => "fixture:#{module_name}:#{index}"
+            },
+            module_projection:
+              Hive::Modules::Migration::PatrolDecisionProjection.build(
+                module_name: module_name,
+                rationale: "not_due"
+              ),
             configuration_digest: digests.fetch(module_name),
             occurred_at: START + (index * 24 * 60 * 60)
           )
@@ -79,7 +85,10 @@ class ModuleMigrationIntegrationTest < Minitest::Test
       refute report.fetch("eligible")
       assert_includes report.fetch("blockers"), "patrol:decision_count_below_10"
       assert_includes report.fetch("blockers"), "architecture-patrol:decision_count_below_10"
-      assert_schema("hive-module-shadow-decision", comparator.records.first)
+      assert_schema(
+        "hive-module-shadow-decision",
+        comparator.each_record.first
+      )
       assert_schema("hive-module-migration-report", report)
 
       assert_raises(Hive::ConfigError) do

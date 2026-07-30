@@ -8,7 +8,6 @@ require "hive/git_ops"
 require "hive/patrol/fingerprint"
 require "hive/patrol/runner_task"
 require "hive/patrol/agent_launch"
-require "hive/patrol/state_store"
 require "hive/patrol/token_budget"
 require "hive/patrol/validator"
 require "hive/stages/base"
@@ -23,6 +22,7 @@ module Hive
       MAX_AUDITED_PATHS = 24
       MAX_REGRESSION_PATHS = 12
       FixProofReadError = Class.new(StandardError)
+      PublicationRecoveryError = Class.new(Hive::ConfigError)
       FAILURE_REASONS = %w[
         fix_agent_failed fix_agent_rejected missing_fix_proof no_validation_commands
         invalid_validation_key missing_regression regression_not_reproduced
@@ -83,12 +83,12 @@ module Hive
         def binding_for_erb = binding
       end
 
-      def initialize(project_root, cfg:, state: StateStore.new(project_root),
+      def initialize(project_root, cfg:, state: nil,
                      validator: nil, worktree_factory: nil, agent_runner: nil,
                      token_budget: nil)
         @project_root = File.expand_path(project_root)
         @cfg = cfg
-        @state = state
+        @state = state || default_state_store
         @validator = validator || Validator.new(
           cfg.dig("patrol", "commands"),
           timeout_sec: cfg.dig("timeout_sec", "patrol") || Validator::DEFAULT_TIMEOUT_SEC
@@ -162,6 +162,12 @@ module Hive
         @state.write_patch(patch.id, patch.to_h)
         worktree.remove!(path: worktree.path, force: true) unless passed
         patch
+      rescue PublicationRecoveryError
+        # A durable publication binding or uncertain-effect seed owns this
+        # exact validated worktree. Never turn missing/corrupt proof into an
+        # ordinary failed patch: that path removes the checkout and permits a
+        # later cycle to mint a different commit for the same remote effect.
+        raise
       rescue StandardError => e
         patch = failed_patch(finding, branch, worktree&.path, base_sha, e)
         @state.write_patch(patch.id, patch.to_h)
@@ -175,21 +181,46 @@ module Hive
 
       private
 
+      def default_state_store
+        require "hive/patrol/state_store"
+        StateStore.new(@project_root)
+      end
+
       def reusable_publication_patch(finding, branch, worktree)
+        @state.recover_pending_publications!
         entry = @state.fingerprints[finding.fingerprint]
-        return unless entry.is_a?(Hash)
-        return unless Fingerprint::RETRYABLE_PUBLICATION_STATES.include?(entry["state"])
-        return unless entry["branch"] == branch
+        retryable = entry.is_a?(Hash) &&
+          Fingerprint::RETRYABLE_PUBLICATION_STATES.include?(
+            entry["state"]
+          )
+        identity =
+          if retryable
+            binding = entry["publication_binding"]
+            unless entry["branch"] == branch &&
+                   binding.is_a?(Hash)
+              raise PublicationRecoveryError,
+                    "patrol publication recovery binding is malformed; " \
+                    "preserving the bound worktree"
+            end
+            binding
+          else
+            @state.retryable_publication_seed(
+              fingerprint: finding.fingerprint,
+              branch: branch
+            )
+          end
+        return unless identity.is_a?(Hash)
 
-        receipt = entry["publication_receipt"]
-        return if entry["state"] == "reconciliation_pending" && !receipt.is_a?(Hash)
-
-        patch_paths(receipt)
+        paths = patch_paths(identity)
+        paths
           .sort_by { |path| -File.mtime(path).to_f }
           .each do |path|
           record = @state.read_json(path)
+          next unless record.is_a?(Hash)
           next unless reusable_patch_record?(record, finding, branch, worktree.path)
-          next if receipt.is_a?(Hash) && !publication_receipt_matches?(receipt, record)
+          next unless publication_identity_matches?(
+            identity, record
+          )
 
           return PatchAttempt.new(
             id: record.fetch("id"), finding: finding, branch: branch,
@@ -198,27 +229,34 @@ module Hive
             base_sha: record.fetch("base_sha"), head_sha: record.fetch("head_sha")
           )
         end
-        nil
-      rescue SystemCallError
-        nil
+        raise PublicationRecoveryError,
+              "patrol publication recovery cannot verify its exact " \
+              "validated patch receipt; preserving the bound worktree"
+      rescue PublicationRecoveryError
+        raise
+      rescue StandardError => error
+        raise PublicationRecoveryError,
+              "patrol publication recovery cannot read its exact validated " \
+              "patch receipt (#{error.class}: #{error.message}); preserving " \
+              "the bound worktree"
       end
 
-      def patch_paths(receipt)
-        return Dir.glob(File.join(@state.root, "patches", "*.json")) unless receipt.is_a?(Hash)
+      def patch_paths(identity)
+        return [] unless identity.is_a?(Hash)
 
-        patch_id = receipt["patch_id"].to_s
+        patch_id = identity["patch_id"].to_s
         return [] unless patch_id.match?(/\Apatch-[a-zA-Z0-9_-]+\z/)
 
         [ File.join(@state.root, "patches", "#{patch_id}.json") ]
       end
 
-      def publication_receipt_matches?(receipt, record)
+      def publication_identity_matches?(identity, record)
         {
           "patch_id" => record["id"],
           "worktree_path" => record["worktree_path"],
           "base_sha" => record["base_sha"],
           "head_sha" => record["head_sha"]
-        }.all? { |field, value| receipt[field] == value }
+        }.all? { |field, value| identity[field] == value }
       end
 
       def reusable_patch_record?(record, finding, branch, expected_path)

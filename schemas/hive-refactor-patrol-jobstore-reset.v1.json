@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-refactor-patrol-jobstore-reset.v1.json",
+  "title": "hive refactor-patrol-reset output (v1)",
+  "description": "Stable success contract emitted by `hive refactor-patrol-reset PROJECT --confirm --json`. The operation archives the exact released v2/jobs directory and admits an empty v3 JobStore; it never converts or imports the archived backlog.",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "project",
+        "project_id",
+        "project_root",
+        "status",
+        "changed",
+        "source_generation",
+        "target_generation",
+        "target_schema_version",
+        "transaction_id",
+        "archive_path",
+        "receipt_path"
+      ],
+      "properties": {
+        "schema": {
+          "const": "hive-refactor-patrol-jobstore-reset"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "ok": {
+          "const": true
+        },
+        "project": {
+          "type": "string",
+          "minLength": 1
+        },
+        "project_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "project_root": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "enum": ["fresh", "current"]
+        },
+        "changed": {
+          "type": "boolean"
+        },
+        "source_generation": {
+          "const": "v2"
+        },
+        "target_generation": {
+          "const": "v3"
+        },
+        "target_schema_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "transaction_id": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^reset-[0-9a-f]{32}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "archive_path": {
+          "type": ["string", "null"]
+        },
+        "receipt_path": {
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "error_class",
+        "error_kind",
+        "exit_code",
+        "message"
+      ],
+      "properties": {
+        "schema": {
+          "const": "hive-refactor-patrol-jobstore-reset"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "ok": {
+          "const": false
+        },
+        "error_class": {
+          "type": "string",
+          "minLength": 1
+        },
+        "error_kind": {
+          "enum": [
+            "usage",
+            "confirmation_required",
+            "config",
+            "concurrent_run",
+            "unavailable",
+            "internal",
+            "error"
+          ]
+        },
+        "exit_code": {
+          "type": "integer",
+          "enum": [1, 64, 69, 70, 75, 78]
+        },
+        "message": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "holder": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "lock_path": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

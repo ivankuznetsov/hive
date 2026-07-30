@@ -6,6 +6,7 @@ require "hive/config"
 require "hive/paths"
 require "hive/lock"
 require "hive/pid_file"
+require "hive/daemon/activation_lock"
 require "hive/daemon/dispatcher"
 require "hive/daemon/concurrency_controller"
 require "hive/daemon/dispatch_baselines"
@@ -74,7 +75,8 @@ module Hive
       def initialize(subcommand, target = nil, detach: false, dry_run: false,
                      all: false, json: false, force: false,
                      queue_args: [],
-                     hive_home: Hive::Paths.state_home)
+                     hive_home: Hive::Paths.state_home,
+                     activation_lock: nil)
         @subcommand = subcommand
         @target = target
         @detach = detach
@@ -84,6 +86,7 @@ module Hive
         @force = force
         @queue_args = Array(queue_args)
         @hive_home = hive_home
+        @activation_lock = activation_lock
       end
 
       def call
@@ -126,6 +129,8 @@ module Hive
         warn_unsupported_json_flag if @json
         FileUtils.mkdir_p(@hive_home)
         FileUtils.mkdir_p(File.dirname(log_file))
+        activation_lock = daemon_activation_lock
+        activation_lock.acquire!
 
         # Single-instance check: if a live daemon already owns the PID
         # file, refuse with TEMPFAIL.
@@ -231,8 +236,13 @@ module Hive
           store: Hive::Daemon::PrMergeReconciliationStore.new(dry_run: @dry_run),
           dry_run: @dry_run
         )
-        patrol_scheduler = Hive::Daemon::PatrolScheduler.new
-        refactor_patrol_scheduler = Hive::Daemon::RefactorPatrolScheduler.new(dry_run: @dry_run)
+        patrol_scheduler = Hive::Daemon::PatrolScheduler.new(
+          event_publisher: module_event_publisher
+        )
+        refactor_patrol_scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
+          dry_run: @dry_run,
+          event_publisher: module_event_publisher
+        )
         patrol_arbiter = Hive::Daemon::PatrolArbiter.new(
           ordinary_scheduler: patrol_scheduler,
           architecture_scheduler: refactor_patrol_scheduler,
@@ -256,7 +266,8 @@ module Hive
           attempt_store: attempt_store, attempt_dispatcher: attempts_api
         )
         module_migration_coordinator = Hive::Modules::Migration::Coordinator.new(
-          supervisor: supervisor, attempt_store: attempt_store, dry_run: @dry_run
+          supervisor: supervisor, attempt_store: attempt_store,
+          dry_run: @dry_run
         )
         attempt_process_identity = Hive::Attempts::ProcessIdentity.new
         attempt_reconciler = Hive::Attempts::Reconciler.new(
@@ -300,7 +311,8 @@ module Hive
           lost_outcome_processor: lost_outcome_processor,
           operational_snapshot: operational_snapshot,
           module_runtime: module_runtime,
-          module_migration_coordinator: module_migration_coordinator
+          module_migration_coordinator: module_migration_coordinator,
+          runtime_ready_callback: -> { activation_lock.release! }
         )
 
         reexec_requested = false
@@ -324,6 +336,7 @@ module Hive
 
         reexec_with_fresh_code!
       ensure
+        activation_lock&.release!
         if defined?(runtime_hive_bin_was_set)
           if runtime_hive_bin_was_set
             ENV["HIVE_BIN"] = original_runtime_hive_bin
@@ -331,6 +344,12 @@ module Hive
             ENV.delete("HIVE_BIN")
           end
         end
+      end
+
+      def daemon_activation_lock
+        @activation_lock ||= Hive::Daemon::ActivationLock.new(
+          hive_home: @hive_home
+        )
       end
 
       # Source-file drift detected (e.g. `git pull` bumped a schema

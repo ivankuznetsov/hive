@@ -5,10 +5,13 @@ require "time"
 require "uri"
 require "hive/gh"
 require "hive/lock"
+require "hive/modules/migration/evidence_store"
+require "hive/modules/migration/patrols"
 require "hive/refactor_patrol/canonical_action_catalog"
 require "hive/refactor_patrol/caps"
 require "hive/refactor_patrol/family_store"
 require "hive/refactor_patrol/fixer"
+require "hive/refactor_patrol/effect_gateway"
 require "hive/refactor_patrol/issue_filer"
 require "hive/refactor_patrol/job_store"
 require "hive/refactor_patrol/policy"
@@ -16,6 +19,7 @@ require "hive/refactor_patrol/pr_opener"
 require "hive/refactor_patrol/process_group_resolver"
 require "hive/refactor_patrol/publication_attempt"
 require "hive/refactor_patrol/repository_ownership"
+require "hive/refactor_patrol/action_transitions"
 require "hive/refactor_patrol/thesis"
 
 module Hive
@@ -50,21 +54,41 @@ module Hive
 
       attr_reader :fixer, :pr_opener, :issue_filer
 
-      def initialize(project_root, cfg:, job_store: nil, family_store: nil,
+      def initialize(project_root, cfg:, hive_state_path: nil, job_store: nil, family_store: nil,
                      fixer: nil, pr_opener: nil, issue_filer: nil,
                      owner: nil, clock: -> { Time.now }, gate_reader: nil,
                      claim_resolver: nil, repository_resolver: nil, config_loader: nil,
                      repository_ownership: nil,
                      canonical_action_catalog: nil,
                      registration: nil, token_budget: nil,
+                     effect_gateway_factory: nil, evidence_store: nil,
+                     occurrence_id: nil, module_execution: nil,
                      lease_sec: 3600, backoff_sec: 60,
                      authority_backoff_sec: AUTHORITY_RECHECK_SEC)
         @project_root = File.expand_path(project_root)
         @cfg = cfg
+        @hive_state_path = File.expand_path(
+          hive_state_path || cfg["hive_state_path"] || ".hive-state",
+          @project_root
+        )
         @token_budget = token_budget
         @registration = registration.to_s.empty? ? cfg["project_name"].to_s : registration.to_s
-        @job_store = job_store || JobStore.new(@project_root)
-        @family_store = family_store || FamilyStore.new(@project_root, clock: clock)
+        project_entry = begin
+          Hive::Config.registered_projects.find do |entry|
+            File.expand_path(entry.fetch("path")) == @project_root
+          end
+        rescue Hive::ConfigError, KeyError, TypeError
+          nil
+        end
+        @job_store = job_store || JobStore.new(
+          @project_root,
+          hive_state_path: @hive_state_path,
+          project: project_entry
+        )
+        @family_store = family_store || FamilyStore.new(
+          @project_root, hive_state_path: @hive_state_path,
+          clock: clock, job_store: @job_store
+        )
         @fixer_override = fixer
         @pr_opener_override = pr_opener
         @issue_filer_override = issue_filer
@@ -76,7 +100,7 @@ module Hive
         @owner_process_start_time = Hive::Lock.process_start_time(@owner_pid)
         @clock = clock
         @gate_reader = gate_reader
-        managed_config = File.file?(File.join(@project_root, ".hive-state", "config.yml"))
+        managed_config = File.file?(File.join(@hive_state_path, "config.yml"))
         @config_loader = config_loader
         @config_loader ||= if managed_config
           ->(root) { Hive::Config.load(root) }
@@ -100,17 +124,47 @@ module Hive
         if @canonical_action_catalog.nil? && managed_config
           @canonical_action_catalog = CanonicalActionCatalog.new(
             registry: ownership_registry,
-            job_store_factory: ->(root) { JobStore.new(root) }
+            job_store_factory: lambda do |root|
+              expanded_root = File.expand_path(root)
+              next @job_store if expanded_root == @project_root
+
+              entry = ownership_registry.call.find do |candidate|
+                File.expand_path(candidate.fetch("path")) == expanded_root
+              end
+              JobStore.new(
+                expanded_root,
+                hive_state_path: entry && entry["hive_state_path"],
+                project: entry
+              )
+            end
           )
         end
         @lease_sec = lease_sec
         @backoff_sec = backoff_sec
         @authority_backoff_sec = authority_backoff_sec
+        @effect_gateway_factory = effect_gateway_factory
+        @expected_occurrence_id = occurrence_id
+        @module_execution = module_execution
+        @effect_evidence_store = evidence_store ||
+                                 Hive::Modules::Migration::EvidenceStore.new(
+                                   root: File.join(
+                                     @hive_state_path,
+                                     "module-runtime", "migration",
+                                     "patrol-evidence"
+                                   )
+                                 )
       end
 
       def run(job_id:, dry_run: false)
         @events = []
+        @action_transitions = nil
         aggregate = @job_store.read_job(job_id)
+        @effect_capture = ensure_effect_occurrence(aggregate) unless dry_run
+        if @expected_occurrence_id && @effect_capture &&
+           @effect_capture.occurrence_id != @expected_occurrence_id
+          raise JobStore::InconsistentRecord,
+                "architecture patrol action occurrence does not match dispatch"
+        end
         @source = aggregate.fetch("source")
         return result(aggregate, dry_run: dry_run) if aggregate.fetch("complete")
         if !dry_run && @owner_process_start_time.to_s.empty?
@@ -205,8 +259,8 @@ module Hive
             return result(aggregate, dry_run: false, reason: "discovery_revoked")
           end
 
-          aggregate = @job_store.initialize_actions!(
-            aggregate.fetch("job_id"),
+          aggregate = initialize_actions_transition!(
+            aggregate,
             specifications: specifications,
             terminal_proofs: terminal_proofs,
             now: now
@@ -435,7 +489,11 @@ module Hive
           end
 
           if action.fetch("owner_job_id") != aggregate.fetch("job_id")
-            @job_store.reconcile_linked_action!(job_id, action_id, now: now)
+            next unless @job_store.linked_action_ready?(action)
+
+            reconcile_linked_action_transition!(
+              aggregate, action, now: now
+            )
             next
           end
 
@@ -545,16 +603,13 @@ module Hive
           return nil
         end
 
-        @job_store.claim_action!(
-          aggregate.fetch("job_id"),
-          action.fetch("canonical_action_id"),
-          owner: @owner,
-          now: now,
-          lease_sec: @lease_sec,
-          claim_resolver: @claim_resolver,
-          owner_pid: @owner_pid,
-          owner_process_start_time: @owner_process_start_time,
-          authority: !@repository_identity_drift && effect_authorized?(action.fetch("kind"))
+        action_transitions.claim(
+          aggregate,
+          action,
+          authority:
+            !@repository_identity_drift &&
+              effect_authorized?(action.fetch("kind")),
+          now: now
         )
       end
 
@@ -593,10 +648,8 @@ module Hive
         end
 
         begin
-          @job_store.record_patch_publication_attempt!(
-            token,
-            receipt: json_copy(patch.to_h),
-            now: now
+          record_patch_publication_transition!(
+            token, patch: json_copy(patch.to_h), now: now
           )
         rescue JobStore::InconsistentRecord, JobStore::CorruptRecord
           release(token, "invalid_creation_intent")
@@ -627,12 +680,18 @@ module Hive
           authorize_push: external_effect_fence(token, "fix"),
           authorize_create: external_effect_fence(token, "fix"),
           authorize_handoff: continuation_fence(token, aggregate),
+          execute_effect: publication_effect_executor(
+            token, "fix", aggregate, action, patch, attempt_id: attempt_id
+          ),
+          execute_handoff: handoff_effect_executor(
+            token, "fix", aggregate, action, patch
+          ),
           creation_attempted: publication.any?,
           publication_state: publication,
           superseded_patch_commits: superseded_patch_commits(fresh_action)
         )
         if result.is_a?(PrOpener::Result) && result.outcome == "trunk_drift_retry"
-          @job_store.supersede_publication_attempt!(
+          action_transitions.supersede_publication(
             token,
             attempt_id: attempt_id,
             observed_head_sha: result.observed_head_sha,
@@ -663,6 +722,9 @@ module Hive
           reasons: reasons,
           record_intent: publication_intent_callback(token, "issue", aggregate, action),
           authorize_create: external_effect_fence(token, "issue"),
+          execute_effect: publication_effect_executor(
+            token, "issue", aggregate, action
+          ),
           creation_attempted: publication.any? || remote_continuation ||
             remote_continuation_evidence?(fresh_action),
           publication_state: publication
@@ -717,7 +779,9 @@ module Hive
           return
         end
 
-        @job_store.finish_action!(token, outcome: outcome, now: now)
+        settle_action_transition!(
+          token, outcome: outcome, receipts: {}, terminal: true
+        )
       end
 
       def settle(token, adapter_result, receipts: nil, adapter:)
@@ -732,22 +796,13 @@ module Hive
                                         {}
                                       end
         result_receipts = json_copy(result_receipts || {})
-        if adapter_result.terminal == true
-          @job_store.finish_action!(
-            token,
-            outcome: adapter_result.outcome,
-            receipts: result_receipts,
-            now: now
-          )
-        else
-          @job_store.release_action!(
-            token,
-            outcome: adapter_result.outcome,
-            receipts: result_receipts,
-            now: now,
-            backoff_sec: backoff_sec_for(adapter_result.outcome)
-          )
-        end
+        aggregate = settle_action_transition!(
+          token,
+          outcome: adapter_result.outcome,
+          receipts: result_receipts,
+          terminal: adapter_result.terminal == true
+        )
+        aggregate
       end
 
       def valid_adapter_result?(adapter, result)
@@ -785,11 +840,71 @@ module Hive
       end
 
       def release(token, outcome)
-        @job_store.release_action!(
+        settle_action_transition!(
+          token, outcome: outcome, receipts: {}, terminal: false
+        )
+      end
+
+      def settle_action_transition!(token, outcome:, receipts:, terminal:)
+        action_transitions.settle(
           token,
           outcome: outcome,
-          now: now,
-          backoff_sec: backoff_sec_for(outcome)
+          receipts: receipts,
+          terminal: terminal,
+          backoff_sec: backoff_sec_for(outcome),
+          now: now
+        )
+      end
+
+      def initialize_actions_transition!(aggregate, specifications:,
+                                         terminal_proofs:, now:)
+        action_transitions.initialize_actions(
+          aggregate,
+          specifications: specifications,
+          terminal_proofs: terminal_proofs,
+          now: now
+        )
+      end
+
+      def reconcile_linked_action_transition!(aggregate, action, now:)
+        action_transitions.reconcile_linked(
+          aggregate, action, now: now
+        )
+      end
+
+      def record_patch_publication_transition!(token, patch:, now:)
+        action_transitions.record_patch_publication(
+          token, patch: patch, now: now
+        )
+      end
+
+      def record_creation_intent_transition!(token, phase, payload)
+        action_transitions.record_creation_intent(
+          token, phase, payload, now: now
+        )
+      end
+
+      def record_action_receipt_transition!(token, phase, payload)
+        action_transitions.record_action_receipt(
+          token, phase, payload, now: now
+        )
+      end
+
+      def action_transitions
+        @action_transitions ||= Hive::RefactorPatrol::ActionTransitions.new(
+          project_root: @project_root,
+          hive_state_path: @hive_state_path,
+          job_store: @job_store,
+          evidence_store: @effect_evidence_store,
+          capture: @effect_capture,
+          config_loader: @config_loader,
+          module_execution: @module_execution,
+          clock: @clock,
+          owner: @owner,
+          owner_pid: @owner_pid,
+          owner_process_start_time: @owner_process_start_time,
+          lease_sec: @lease_sec,
+          claim_resolver: @claim_resolver
         )
       end
 
@@ -841,12 +956,239 @@ module Hive
           unless payload == expected
             raise JobStore::InconsistentRecord, "publication intent payload is invalid"
           end
-          unless phase == PrOpener::PUSH_COMPLETE
-            next false unless effect_authorized?(kind)
+          persist_publication_phase(
+            token, kind, phase, payload, attempt_id: attempt_id
+          )
+          true
+        end
+      end
+
+      def publication_effect_executor(token, kind, aggregate, action, patch = nil,
+                                      attempt_id: nil)
+        lambda do |phase:, payload:, &effect|
+          expected = expected_publication_payload(
+            kind, phase, aggregate, action, patch,
+            expected_remote_oid: payload.is_a?(Hash) ?
+              payload["expected_remote_oid"] : nil
+          )
+          unless payload == expected
+            raise JobStore::InconsistentRecord,
+                  "publication effect payload is invalid"
           end
 
-          persist_publication_phase(token, kind, phase, payload, attempt_id: attempt_id)
-          true
+          capture = effect_capture(token, aggregate, action)
+          descriptor = effect_descriptor(
+            token, kind, phase, payload, aggregate, action,
+            attempt_id: attempt_id
+          )
+          gateway = build_effect_gateway(
+            token,
+            kind,
+            phase,
+            payload,
+            capture,
+            attempt_id: attempt_id
+          )
+          persist_publication_phase(
+            token, kind, phase, payload, attempt_id: attempt_id
+          )
+          delivered = false
+          delivered_value = nil
+          result = gateway.perform!(
+            sink: descriptor.fetch(:sink),
+            target: descriptor.fetch(:target),
+            idempotency_key: descriptor.fetch(:idempotency_key),
+            capability: descriptor.fetch(:capability),
+            claim_generation: token.fetch(:generation),
+            scope: effect_scope(token)
+          ) do
+            delivered_value = json_copy(effect.call)
+            delivered = true
+            publication_effect_outcome(
+              descriptor.fetch(:sink),
+              delivered_value,
+              payload
+            )
+          end
+          delivered ? delivered_value :
+            publication_effect_value(
+              descriptor.fetch(:sink), result.outcome
+            )
+        end
+      end
+
+      def handoff_effect_executor(token, kind, aggregate, action, patch)
+        lambda do |phase:, payload:, &effect|
+          expected = {
+            "pr_url" => payload.is_a?(Hash) ? payload["pr_url"] : nil,
+            "job_id" => aggregate.fetch("job_id"),
+            "canonical_action_id" => action.fetch("canonical_action_id"),
+            "commit_sha" => patch.commit_sha
+          }
+          unless phase == "review_handoff" &&
+                 expected["pr_url"].to_s.match?(%r{\Ahttps://}) &&
+                 payload == expected
+            raise JobStore::InconsistentRecord,
+                  "review handoff effect payload is invalid"
+          end
+
+          capture = effect_capture(token, aggregate, action)
+          gateway = build_effect_gateway(
+            token,
+            kind,
+            phase,
+            payload,
+            capture,
+            attempt_id: nil,
+            persist_publication: false
+          )
+          result = gateway.perform!(
+            sink: "review_handoff",
+            target: payload.fetch("pr_url"),
+            idempotency_key: [
+              token.fetch(:job_id),
+              token.fetch(:canonical_action_id),
+              "review_handoff",
+              payload.fetch("pr_url")
+            ].join(":"),
+            capability: "review_handoff",
+            claim_generation: token.fetch(:generation),
+            scope: effect_scope(token)
+          ) do
+            {
+              "task_path" => json_copy(effect.call).to_s
+            }
+          end
+          result.outcome.fetch("task_path")
+        end
+      end
+
+      def publication_effect_outcome(sink, value, payload)
+        case sink
+        when "branch"
+          { "remote_oid" => payload.fetch("commit_sha").to_s }
+        when "pull_request"
+          { "pr_url" => value.to_s }
+        when "issue"
+          { "issue_url" => value.to_s }
+        else
+          raise JobStore::InconsistentRecord,
+                "publication effect sink is unsupported"
+        end
+      end
+
+      def publication_effect_value(sink, outcome)
+        case sink
+        when "branch"
+          outcome.fetch("remote_oid")
+        when "pull_request"
+          outcome.fetch("pr_url")
+        when "issue"
+          outcome.fetch("issue_url")
+        else
+          raise JobStore::InconsistentRecord,
+                "publication effect sink is unsupported"
+        end
+      rescue KeyError, TypeError
+        raise JobStore::InconsistentRecord,
+              "publication effect receipt is malformed"
+      end
+
+      def build_effect_gateway(token, kind, phase, payload, capture, attempt_id:,
+                               persist_publication: true)
+        options = {
+          project_root: @project_root,
+          hive_state_path: @hive_state_path,
+          capture: capture,
+          authority: capture.owner,
+          evidence_store: @effect_evidence_store,
+          delivery_store: @job_store,
+          claim_validator: lambda do |claim_generation:, **|
+            next false unless claim_generation == token.fetch(:generation)
+
+            @job_store.assert_action_claim!(token, now: now)
+          rescue JobStore::StaleClaim
+            false
+          end,
+          config_loader: @config_loader,
+          capability_checker: lambda do |capability_context: nil,
+                                                capability:, **|
+            claim_effect_authorized?(
+              token, kind,
+              capability_context: capability_context,
+              capability: capability
+            )
+          end,
+          module_execution: @module_execution,
+          clock: @clock
+        }
+        return @effect_gateway_factory.call(**options) if @effect_gateway_factory
+
+        Hive::RefactorPatrol::EffectGateway.new(**options)
+      end
+
+      def effect_capture(token, _aggregate, _action)
+        unless @effect_capture &&
+               @effect_capture.reservation["job_id"] ==
+                 token.fetch(:job_id)
+          raise JobStore::InconsistentRecord,
+                "architecture patrol effect occurrence is unavailable"
+        end
+        @effect_capture
+      end
+
+      def ensure_effect_occurrence(aggregate)
+        existing = @job_store.occurrence_capture(
+          aggregate.fetch("job_id")
+        )
+        return existing if existing
+
+        raise JobStore::InconsistentRecord,
+              "architecture patrol job occurrence is unavailable"
+      end
+
+      def effect_scope(token)
+        {
+          "job_id" => token.fetch(:job_id),
+          "canonical_action_id" =>
+            token.fetch(:canonical_action_id)
+        }
+      end
+
+      def effect_descriptor(token, kind, phase, payload, aggregate, action,
+                            attempt_id:)
+        repository = aggregate.dig("source", "repository")
+        base = [
+          token.fetch(:job_id),
+          action.fetch("canonical_action_id"),
+          phase,
+          attempt_id
+        ].compact.join(":")
+        case phase
+        when PrOpener::PUSH_INTENT
+          {
+            sink: "branch",
+            target: "#{repository}:#{payload.fetch('branch')}",
+            idempotency_key: base,
+            capability: "repository_write"
+          }
+        when PrOpener::PR_CREATE_INTENT
+          {
+            sink: "pull_request",
+            target: "#{repository}:#{payload.fetch('branch')}",
+            idempotency_key: base,
+            capability: "github_pull_requests"
+          }
+        when "issue_create_intent"
+          {
+            sink: "issue",
+            target: "#{repository}:#{action.fetch('family_id')}",
+            idempotency_key: base,
+            capability: "github_issues"
+          }
+        else
+          raise JobStore::InconsistentRecord,
+                "architecture patrol effect phase is unsupported"
         end
       end
 
@@ -876,7 +1218,7 @@ module Hive
 
       def persist_publication_phase(token, kind, phase, payload, attempt_id: nil)
         if kind == "fix"
-          @job_store.record_publication_attempt_phase!(
+          action_transitions.record_publication_phase(
             token,
             attempt_id: attempt_id,
             phase: phase,
@@ -888,15 +1230,15 @@ module Hive
 
         case phase
         when PrOpener::PUSH_INTENT, "issue_create_intent"
-          @job_store.record_creation_intent!(token, intent: payload, now: now)
+          record_creation_intent_transition!(token, phase, payload)
         when PrOpener::PUSH_COMPLETE
-          @job_store.record_action_receipt!(token, key: phase, value: payload, now: now)
+          record_action_receipt_transition!(token, phase, payload)
         when PrOpener::PR_CREATE_INTENT
           current = current_action(token)
           if current.dig("receipts", "creation_intent")
-            @job_store.record_action_receipt!(token, key: phase, value: payload, now: now)
+            record_action_receipt_transition!(token, phase, payload)
           else
-            @job_store.record_creation_intent!(token, intent: payload, now: now)
+            record_creation_intent_transition!(token, phase, payload)
           end
         else
           raise JobStore::InconsistentRecord, "publication intent phase is invalid"
@@ -1125,8 +1467,34 @@ module Hive
           repository_effect_authorized?(current.config)
       end
 
-      def claim_effect_authorized?(token, kind)
-        token.fetch(:continuation_only) != true && effect_authorized?(kind)
+      def claim_effect_authorized?(token, kind, capability_context: nil,
+                                   capability: nil)
+        return false if token.fetch(:continuation_only) == true
+        return false unless effect_authorized?(kind)
+        return true unless capability_context
+        return false if capability.to_s.empty?
+
+        case capability.to_s
+        when "repository_write"
+          capability_context.require_repository_write!
+        when "github_pull_requests"
+          capability_context.require_github_mutation!("pull_requests")
+          capability_context.require_external_command!("gh")
+          capability_context.require_network_host!("api.github.com")
+        when "github_issues"
+          capability_context.require_github_mutation!("issues")
+          capability_context.require_external_command!("gh")
+          capability_context.require_network_host!("api.github.com")
+        when "review_handoff"
+          capability_context.require_filesystem_write!(
+            ".hive-state/stages/**"
+          )
+        else
+          return false
+        end
+        true
+      rescue Hive::Modules::CapabilityDenied
+        false
       end
 
       def enforce_repository_authority(aggregate)
@@ -1229,8 +1597,8 @@ module Hive
         )[action_id]
         return false unless proof
 
-        @job_store.materialize_terminal_proof!(
-          aggregate.fetch("job_id"), action_id, proof: proof, now: now
+        action_transitions.materialize_terminal_proof(
+          aggregate, action_id, proof: proof, now: now
         )
         @events << event(
           "canonical_action_linked",
@@ -1379,9 +1747,12 @@ module Hive
       end
 
       def block_action_phase(aggregate, reason, evidence = {})
-        @job_store.block_actions!(
-          aggregate.fetch("job_id"), reason: reason,
-          evidence: evidence, now: now, backoff_sec: backoff_sec_for(reason)
+        action_transitions.block(
+          aggregate,
+          reason: reason,
+          evidence: evidence,
+          backoff_sec: backoff_sec_for(reason),
+          now: now
         )
       end
 

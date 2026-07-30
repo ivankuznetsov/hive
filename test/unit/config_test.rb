@@ -46,6 +46,38 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_registry_backfill_adds_canonical_path_even_when_project_id_exists
+    with_tmp_global_config do |home|
+      project = Dir.mktmpdir("hive-registry-real-path")
+      path = File.join(home, "config.yml")
+      project_id = SecureRandom.uuid
+      File.write(
+        path,
+        {
+          "registered_projects" => [
+            {
+              "name" => "old",
+              "path" => project,
+              "project_id" => project_id
+            }
+          ]
+        }.to_yaml
+      )
+
+      assert Hive::Config.ensure_project_identities!
+      row = YAML.safe_load(
+        File.read(path)
+      ).fetch("registered_projects").first
+      assert_equal project_id, row.fetch("project_id")
+      assert_equal File.realpath(project), row.fetch("real_path")
+      assert_equal File.realpath(project),
+                   Hive::Config.registered_projects.first
+                               .fetch("real_path")
+    ensure
+      FileUtils.rm_rf(project) if project
+    end
+  end
+
   include HiveTestHelper
 
   def test_load_returns_defaults_when_no_config_file
@@ -2032,6 +2064,106 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_registered_projects_read_only_reads_legacy_registry_in_place
+    with_tmp_dir do |root|
+      home = File.join(root, "home")
+      project = File.join(root, "project")
+      legacy = File.join(home, "Dev", "hive", "config.yml")
+      current = File.join(root, "config", "hive", "config.yml")
+      FileUtils.mkdir_p([ File.dirname(legacy), project ])
+      File.write(
+        legacy,
+        {
+          "registered_projects" => [
+            {
+              "name" => "legacy",
+              "path" => project,
+              "project_id" => "11111111-1111-4111-a111-111111111111"
+            }
+          ]
+        }.to_yaml
+      )
+
+      with_env(
+        "HOME" => home,
+        "HIVE_HOME" => nil,
+        "XDG_CONFIG_HOME" => File.join(root, "config")
+      ) do
+        projects = Hive::Config.registered_projects_read_only
+
+        assert_equal [ "legacy" ], projects.map { |entry| entry.fetch("name") }
+        assert File.file?(legacy),
+               "an observation-only registry read must preserve the legacy file"
+        refute File.exist?(current),
+               "an observation-only registry read must not migrate into XDG config"
+        refute File.exist?(File.join(File.dirname(current), ".migrated-from"))
+      end
+    end
+  end
+
+  def test_registration_state_identity_fails_closed_and_skips_malformed_legacy_rows
+    with_tmp_dir do |root|
+      candidate = {
+        "name" => "candidate",
+        "path" => root,
+        "hive_state_path" => root,
+        "project_id" => "11111111-1111-4111-a111-111111111111"
+      }
+      malformed = {
+        "name" => "malformed",
+        "path" => "\0",
+        "project_id" => "22222222-2222-4222-a222-222222222222"
+      }
+      registrations = [ malformed ]
+
+      assert_same registrations, Hive::Config.send(
+        :assert_registration_state_root_available!,
+        candidate,
+        registrations,
+        replacing: nil
+      )
+
+      socket_path = File.join(root, "state.sock")
+      socket = UNIXServer.new(socket_path)
+      unsafe = assert_raises(Hive::ConfigError) do
+        Hive::Config.send(
+          :canonical_registration_state_path, socket_path
+        )
+      end
+      assert_match(/unsafe Hive state path/, unsafe.message)
+    ensure
+      socket&.close
+      FileUtils.rm_f(socket_path) if socket_path
+    end
+
+    missing = with_replaced_singleton_method(
+      File,
+      :realpath,
+      ->(_path) { raise Errno::ENOENT }
+    ) do
+      assert_raises(Hive::ConfigError) do
+        Hive::Config.send(
+          :canonical_registration_state_path, "/never-resolves"
+        )
+      end
+    end
+    assert_match(/cannot establish the Hive state path identity/,
+                 missing.message)
+
+    unavailable = with_replaced_singleton_method(
+      File,
+      :realpath,
+      ->(_path) { raise Errno::EACCES }
+    ) do
+      assert_raises(Hive::ConfigError) do
+        Hive::Config.send(
+          :canonical_registration_state_path, "/unavailable"
+        )
+      end
+    end
+    assert_match(/Errno::EACCES/, unavailable.message)
+  end
+
   def test_project_for_path_resolves_registered_repo_from_cwd
     with_tmp_global_config do
       with_tmp_dir do |repo|
@@ -2138,6 +2270,29 @@ class ConfigTest < Minitest::Test
       projects = Hive::Config.registered_projects
       assert_equal 1, projects.size
       assert_equal "/tmp/new", projects.first["path"]
+    end
+  end
+
+  def test_register_project_rejects_distinct_identities_sharing_state_root
+    with_tmp_global_config do |home|
+      project = File.join(home, "project")
+      project_alias = File.join(home, "project-alias")
+      FileUtils.mkdir_p(project)
+      File.symlink(project, project_alias)
+      Hive::Config.register_project(name: "primary", path: project)
+
+      error = assert_raises(
+        Hive::Config::ProjectRegistrationCollision
+      ) do
+        Hive::Config.register_project(
+          name: "alias", path: project_alias
+        )
+      end
+
+      assert_match(/would share Hive state/, error.message)
+      assert_equal project, error.existing_path
+      assert_equal [ "primary" ],
+                   Hive::Config.registered_projects.map { |row| row["name"] }
     end
   end
 

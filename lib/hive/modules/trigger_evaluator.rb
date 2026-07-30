@@ -31,7 +31,9 @@ module Hive
         return result("skip", "activation_fenced", binding_digest, cursor, cursor) if activation_fenced
         enabled = configuration.hooks.fetch(hook.fetch("id")) && hook_state&.fetch("enabled", false)
         return result("skip", "hook_disabled", binding_digest, cursor, after) unless enabled
-        return result("skip", "no_match", binding_digest, cursor, after) unless binding_matches?(hook, event)
+        unless binding_matches?(selection, hook, event)
+          return result("skip", "no_match", binding_digest, cursor, after)
+        end
         return result("skip", "duplicate", binding_digest, cursor, after) if duplicate
         if stale?(selection, event, cursor: cursor) || cursor == after
           return result("skip", "cursor_stale", binding_digest, cursor, after)
@@ -49,11 +51,16 @@ module Hive
 
       private
 
-      def binding_matches?(hook, event)
+      def binding_matches?(selection, hook, event)
         case event.fetch("event_name")
         when "schedule"
           binding = event.dig("payload", "schedule")
-          binding.is_a?(String) && hook.fetch("schedules").include?(binding)
+          target = event.dig("payload", "target_module")
+          target_hook = event.dig("payload", "target_hook")
+          target_matches = target.nil? || target == selection.fetch("name")
+          hook_matches = target_hook.nil? || target_hook == hook.fetch("id")
+          target_matches && hook_matches && binding.is_a?(String) &&
+            hook.fetch("schedules").include?(binding)
         else
           hook.fetch("events").include?(event.fetch("event_name"))
         end

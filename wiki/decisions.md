@@ -3,7 +3,7 @@ title: Architectural Decisions
 type: decisions
 source: code + author's local planning notes (not committed)
 created: 2026-04-25
-updated: 2026-07-26
+updated: 2026-07-30
 tags: [decisions, adr]
 ---
 
@@ -18,16 +18,21 @@ tags: [decisions, adr]
 **Decision:** Hive remains the canonical monorepo and the first and primary consumer of every reusable component. Establish and enforce internal Ruby boundaries first: one supported entry point or facade, structured public values and errors, an acyclic dependency direction, explicit state/schema/lock ownership, clean-process loading, and all Hive production consumers routed through the boundary. Existing module wiki pages plus one component catalog are the canonical agent context; do not add a parallel `.context.md` hierarchy.
 
 Implementation readiness and standalone product value are different rankings.
-The final audit retains six `boundary-ready` components: UserService, Agent ABI,
-Agent Artifact Firewall, Skillpack, Safe Agent Git Gate, and WorkLedger.
-`Hive::Attempts::API` remains the sole guarded `candidate`: its focused
-clean-load behavior, result contracts, and exact internal composition and
-compatibility sites are enforced without adding generic lifecycle,
-cancellation, export, or raw-store APIs. U8 removed the former reciprocal
-Attempts/WorkLedger catalog edge by keeping `TaskProjection::Store` as a
-Hive-owned adapter rather than WorkLedger-owned source, so the final catalog has
-no migration exceptions. RunReceipt remains the strongest standalone
-opportunity without forcing the largest refactor first. Operational
+The current audit retains six `boundary-ready` components: UserService, Agent
+ABI, Agent Artifact Firewall, Skillpack, Safe Agent Git Gate, and WorkLedger.
+`Hive::Attempts::API` and Patrol Effect Evidence remain guarded `candidate`
+rows. Attempts has focused clean-load behavior, result contracts, and exact
+internal composition sites without adding generic lifecycle, cancellation,
+export, or raw-store APIs. Patrol has one bounded U3 exception: its single
+occurrence store sits behind a validator/outbox/effect facade; separate product
+gateways compose admission, sender, and receipt collaborators; and oversized
+runner/scheduler transition mechanics are delegated to claim/plan/discovery/
+occurrence coordinators. Compressed candidate-bound evidence and production
+qualification are not complete. U8
+removed the former reciprocal Attempts/WorkLedger catalog edge by keeping
+`TaskProjection::Store` as a Hive-owned adapter rather than WorkLedger-owned
+source. RunReceipt remains the strongest standalone opportunity without
+forcing the largest refactor first. Operational
 status/Statewatch, layout migration, standalone capability probes, separate
 lease/capsule products, generic status rendering, and a new local-agent
 framework remain rejected or folded ideas rather than package commitments.
@@ -665,6 +670,54 @@ rejected when the Hive daemon starts, with those migration commands.
 **Consequences:** Hive has no PR-digest command, cursor, catch-up policy, result
 envelope, or runtime coupling. The unrelated Hive answer digest remains. ADR-030
 and ADR-031 describe removed behavior and are superseded by this decision.
+
+## ADR-041: Released JobStore v2 is an explicit opaque fresh start
+
+**Status:** Active
+
+**Context:** Preserving an obsolete Architecture Patrol backlog across a
+JobStore schema change required a privileged, all-user discovery and execution
+system, conversion proofs, compatibility readers, restore machinery, package
+hooks, retry services, and multiple new recovery authorities. Hive has few
+installations, and this backlog is not core workflow task state. Silently
+ignoring or deleting v2 would still be unsafe because pending actions and remote
+publication evidence may exist.
+
+**Decision:** Runtime supports only the v3 JobStore. Hive never reads or
+converts released `v2/jobs`, never sweeps other OS users, and never performs an
+install-time or constructor transition. Its presence blocks Architecture Patrol
+with `reset_required`.
+
+One explicit per-project command,
+`hive refactor-patrol-reset PROJECT --confirm`, is the sole transition. It
+binds the exact registered project and holds one stable profile activation
+lock while it gracefully stops and verifies the current daemon and supervised
+process tree. After daemon drain, it holds the existing Patrol effect lock
+exclusively through an independent storage writer fence, the atomic exchange
+of only the public `v2/jobs` directory with a canonical regular marker,
+empty-v3 admission, and receipt publication. This order lets shutdown settle
+already-admitted effects without deadlocking while preventing any effect or
+daemon start from crossing the destructive boundary. The exact opaque
+directory survives under a transaction-bound hidden archive; Hive does not
+enumerate it. Every other v2 Architecture Patrol owner and the separate global
+terminal-proof catalog remain untouched. Another OS user makes the same
+explicit choice under their own profile.
+
+**Consequences:** A fresh installation starts directly with v3. A reset can
+resume after the atomic exchange but before receipt publication and is
+idempotent once current. Existing non-empty v3 state, live writers, malformed
+markers or receipts, a missing archive, or lack of atomic filesystem exchange
+fails closed for operator repair. Daemon status reports the per-project state
+without performing the reset. Hive intentionally abandons the archived v2 jobs
+backlog rather than promising continuity, but preserves its exact bytes for
+manual audit and reconciles future remote work only from current terminal proof
+and exact hosted-object evidence. A daemon restarted by the command must
+publish generation-bound runtime readiness before reset success is returned.
+The Patrol capture and shadow-decision schemas do not accept a v2-import
+trigger or outcome; no dormant effect-journal compatibility path can convert
+the archived backlog. The deterministic opaque archive name remains a
+generation sentinel: if its public marker is missing, runtime fails closed
+rather than interpreting the project as fresh.
 
 ## ADR-032: Per-stage controls overlay the current durable identity
 

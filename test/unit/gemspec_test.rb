@@ -90,6 +90,16 @@ class GemspecTest < Minitest::Test
     refute_nil spec.runtime_dependencies.find { |candidate| candidate.name == "base64" }
   end
 
+  def test_runtime_dependencies_include_fiddle_for_managed_storage
+    spec = Gem::Specification.load(GEMSPEC_PATH)
+    dependency = spec.runtime_dependencies.find do |candidate|
+      candidate.name == "fiddle"
+    end
+
+    refute_nil dependency
+    assert dependency.requirement.satisfied_by?(Gem::Version.new("1.1.0"))
+  end
+
   def test_runtime_dependencies_include_the_managed_web_locked_bundler
     spec = Gem::Specification.load(GEMSPEC_PATH)
     dependency = spec.runtime_dependencies.find { |candidate| candidate.name == "bundler" }

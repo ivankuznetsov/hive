@@ -394,7 +394,11 @@ class RefactorPatrolRepositoryOwnershipTest < Minitest::Test
       )
       fake_store = Object.new
       fake_store.define_singleton_method(:each_job) { [ aggregate ] }
-      replacement = ->(_path) { fake_store }
+      captured_project = nil
+      replacement = lambda do |_path, project:, **_options|
+        captured_project = project
+        fake_store
+      end
 
       with_replaced_singleton_method(Hive::RefactorPatrol::JobStore, :new, replacement) do
         guard = Hive::RefactorPatrol::RepositoryOwnership.new(
@@ -402,6 +406,7 @@ class RefactorPatrolRepositoryOwnershipTest < Minitest::Test
         )
         assert_equal [ identity("acme/demo", "github.com") ],
                      guard.send(:stored_continuation_identities, target, config(enabled: false))
+        assert_equal target.fetch("project_id"), captured_project.fetch("project_id")
       end
     end
   end
@@ -499,7 +504,11 @@ class RefactorPatrolRepositoryOwnershipTest < Minitest::Test
   end
 
   def entry(name, path)
-    { "name" => name, "path" => path }
+    {
+      "name" => name,
+      "path" => path,
+      "project_id" => "#{name}-project-id"
+    }
   end
 
   def identity(repository, host)

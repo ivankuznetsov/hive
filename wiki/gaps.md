@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-07-27
+updated: 2026-07-30
 tags: [gap, todo, release-proof, agent-skills]
 ---
 
@@ -11,6 +11,25 @@ tags: [gap, todo, release-proof, agent-skills]
 
 ## Current release gap
 
+- Patrol capture/effect boundaries are source- and focused-test-pinned, but
+  they are not yet compressed-campaign or live-cutover evidence. The permanent
+  U3 harness must still exercise real scheduler/event/adapter/store paths,
+  restarts around intent and outcome boundaries, shadow attempted-effect
+  denial, exact reconciliation, and run-level duplicate detection before any
+  migration qualification claim. Longer elapsed telemetry remains useful but
+  is not a substitute for that protocol.
+
+- The explicit JobStore fresh-start reset is source- and focused-test-pinned,
+  including no-write fresh status, exact registered-project binding,
+  daemon/process-tree quiescence, independent PID/start-time writer fencing,
+  atomic opaque-directory exchange, interrupted reset resume, other-v2-owner
+  preservation, empty-v3 admission, and non-empty-v3 conflict refusal. This goal
+  deliberately does not run the command against a live project. Before release,
+  dogfood it on a disposable registered project on each supported deployment
+  filesystem and retain evidence that the daemon restarts, archive bytes remain
+  exact, status advances from `reset_required` to `current`, and no unrelated
+  v2 owner changes. The abandoned v2 jobs backlog is an explicit product
+  tradeoff, not a continuity promise or an unimplemented migration.
 - `agent-cli-runtime` 0.1.0 has a self-contained package, exact-artifact
   verifier, Linux/macOS install matrix, and component-scoped trusted-publishing
   workflow. Repository-hosted controls remain operator work: the
@@ -103,13 +122,14 @@ tags: [gap, todo, release-proof, agent-skills]
 
 ## Internal component boundary gap
 
-- The final internal graph audit retains seven catalog rows: UserService, Agent
+- The final internal graph audit retains eight catalog rows: UserService, Agent
   ABI, Agent Artifact Firewall, Skillpack, Safe Agent Git Gate, and WorkLedger
-  are `boundary-ready`; Attempts admission remains the sole `candidate`.
-  Skillpack to Agent ABI is the only component dependency, and no migration
-  exceptions remain. Attempts is not ready because Hive has no demonstrated
-  need for a supported reconciliation, supervision, capacity, loss-processing,
-  cancellation, export, or raw-store lifecycle API.
+  are `boundary-ready`; Attempts admission and Patrol Effect Evidence remain
+  `candidate`. Skillpack to Agent ABI is the only component dependency. Patrol
+  retains one bounded U3 exception for compressed candidate evidence and
+  production qualification; Attempts remains unready because Hive has no
+  demonstrated need for a supported reconciliation, supervision, capacity,
+  loss-processing, cancellation, export, or raw-store lifecycle API.
 - No ready component has yet earned standalone packaging. There is no named
   non-Hive adopter, independently installed component artifact, separate
   compatibility promise, or explicit release decision. Those proofs belong to
@@ -298,8 +318,6 @@ consent. The native-default work adds default-on web-service setup, versioned
 service/readiness schemas, release-layout dependency resolution,
 signed-manifest/digest enforcement, and a package-layout integration fixture.
 
-53. **Daemon status `unreadable` drift is source/test-pinned but schema-unpinned.** Branch `arch-review-local-web-install` extracts the daemon-status envelope into `Hive::Daemon::StatusReport`; that producer now owns `BINARY_DRIFT_STATES` / `BINARY_DRIFT_ACTIONABLE`, can emit `binary_drift: "unreadable"` when an installed same-path binary cannot answer `--version`, and the hivebox `_daemon` view treats that value as actionable through `StatusReport::BINARY_DRIFT_ACTIONABLE`. Focused daemon tests cover `StatusReport#safe_payload`, `binary_state`, `binary_version`, and the `unreadable` drift branch. However, `schemas/hive-daemon-status.v1.json` still enumerates only `none`, `path`, `version`, `unparseable`, and `not_applicable`, so an actual `unreadable` payload would not validate against the published daemon-status schema. A follow-up should add `unreadable` to the schema enum/description and pin a schema validation test for that payload shape. The 2026-07-01 post-commit audit for `arch-review-local-web-install` rechecked the branch diff, `Hive::Daemon::StatusReport`, daemon CLI wiring, hivebox `_daemon` rendering, the daemon-status schema, and focused daemon tests; it found no schema update or live repair artifact closing this gap.
-
 The focused eval-wrapper guard now recognizes bundled, abbreviated, underscored,
 and shell-quoted Rake dry-run options; validates complete passing scenario
 records; and isolates concurrent report generation before atomic publication.
@@ -362,15 +380,40 @@ Dependency lock uncertainty is unchanged: the root bundle has
 ## Installable patrol modules require live shadow evidence (2026-07-22)
 
 The package, lifecycle, event, attempt, adapter, migration, comparison, and
-rollback contracts have deterministic fixture coverage. Those fixtures prove
-the gate logic but intentionally do not satisfy the operational rollout gate.
-The adapters now refuse self-comparison and admit comparable evidence only
-from an independently supplied immutable `legacy_mutator_capture`, but the
-legacy Patrol producers do not yet publish that snapshot. Adapter permission
-checks are still preflight-only until the existing Patrol engines accept
-capability-bound side-effect gateways. Reservation-to-child registration now
-shares the migration lock with cutover, removing that ownership race without
-claiming the remaining evidence and capability gates are complete.
+rollback contracts have deterministic fixture coverage. U2 now supplies
+finalized ordinary positive and negative captures with strict immutable
+selection inputs/projections separated from terminal outcomes, durable
+per-window attempt generations, compacted sequence high-water/floor fences for
+scheduled/module-event/architecture-job traffic, a bounded fail-closed exact
+fence for manual/direct traffic, one occurrence spanning the Architecture
+Patrol job, discovery, action, and final decision, live effect-time
+generation/grant checks, stable process/thread sender locks with persisted
+uncertainty but no lease/PID authority, gateway-owned retry-safe local absence,
+remote-absence refusal, store-minted byte-stable receipts, canonical outboxes,
+restart-persistent normalized recovery backoff, v3-only JobStore runtime with
+an explicit opaque fresh-start reset for released v2, exact-digest-bound
+shadow-v1 conversion, and bounded occurrence/intent evidence indices. Those fixtures
+prove the repaired boundary but intentionally do not satisfy the operational
+rollout gate.
+
+No live project reset was run while building U2. The destructive boundary is
+covered only by hermetic storage, process, lock-order, crash-resume, and
+runtime-readiness tests. An operator must still explicitly confirm any real
+per-project archive/reset after reviewing `daemon status --json`; U2 does not
+perform that cutover automatically.
+
+U3 still needs to make the candidate-bound compressed evidence protocol part of
+the test harness, feed it from these finalized occurrences without consulting
+EvidenceStore for recovery, and produce the elapsed production qualification
+set. Until that proof exists, Patrol Effect Evidence remains a catalog
+`candidate`; neither module mutator cutover nor boundary promotion is complete.
+The local storage contract now covers portable bounded repair/history cursors,
+streamed occurrence/report inventories, descriptor-relative component custody,
+managed-component and lock symlink refusal, public oversized-record failure,
+and source/archive/replacement-bound v1 conversion. It is a same-user
+integrity/custody guard, not a hostile-process sandbox; the U3 live
+qualification still has to prove the operational evidence stream under the
+supported deployment filesystems.
 
 Native module workflow targets also remain execution-disabled. Activation
 validates and snapshots their package files, but safe admission still needs

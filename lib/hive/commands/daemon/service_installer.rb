@@ -6,6 +6,16 @@ module Hive
   module Commands
     class Daemon
       class ServiceInstaller < Hive::Commands::ServiceInstaller::Base
+        PERSISTED_RUNTIME_ENV = %w[
+          HIVE_HOME XDG_CACHE_HOME XDG_CONFIG_HOME XDG_DATA_HOME
+          XDG_STATE_HOME
+        ].freeze
+
+        def initialize(environment: ENV, **kwargs)
+          @runtime_environment = environment
+          super(**kwargs)
+        end
+
         def service_name
           "hive-daemon"
         end
@@ -73,14 +83,53 @@ module Hive
         end
 
         def render_systemd
-          render_systemd_from(
+          rendered = render_systemd_from(
             File.expand_path("../../../../examples/systemd/hive-daemon.service", __dir__),
             "daemon start"
           )
+          lines = resolved_runtime_environment.map do |name, value|
+            "Environment=#{name}=#{Shellwords.escape(value)}"
+          end
+          rendered.sub(/^Environment=HIVE_BIN=.*$/) do |line|
+            ([ line ] + lines).join("\n")
+          end
         end
 
         def render_launchd
-          render_launchd_from(File.expand_path("../../../../examples/launchd/hive-daemon.plist", __dir__))
+          rendered = render_launchd_from(
+            File.expand_path(
+              "../../../../examples/launchd/hive-daemon.plist", __dir__
+            )
+          )
+          entries = resolved_runtime_environment.map do |name, value|
+            "    <key>#{CGI.escapeHTML(name)}</key>\n" \
+              "    <string>#{CGI.escapeHTML(value)}</string>"
+          end.join("\n")
+          rendered.sub(
+            "    <key>PATH</key>",
+            "#{entries}\n    <key>PATH</key>"
+          )
+        end
+
+        def resolved_runtime_environment
+          PERSISTED_RUNTIME_ENV.each_with_object({}) do |name, result|
+            value = @runtime_environment[name].to_s
+            next if value.empty?
+
+            unsafe = value.each_byte.any? do |byte|
+              byte < 0x20 || byte == 0x7f
+            end
+            absolute = File.absolute_path(value) == value
+            if unsafe || !absolute
+              raise Hive::ConfigError,
+                    "#{name} must be an absolute path without control bytes"
+            end
+
+            result[name] = File.expand_path(value)
+          rescue ArgumentError
+            raise Hive::ConfigError,
+                  "#{name} must be an absolute path without control bytes"
+          end
         end
       end
     end

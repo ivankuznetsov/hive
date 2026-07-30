@@ -47,7 +47,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
   class FakeSupervisor
     attr_reader :spawned, :next_pid
-    attr_accessor :next_exits, :shutdown_exits, :identity, :terminate_result, :spawn_error
+    attr_accessor :next_exits, :shutdown_exits, :identity, :terminate_result, :spawn_error,
+                  :shutdown_proof
     def initialize
       @spawned = []
       @next_pid = 100
@@ -55,6 +56,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       @shutdown_exits = []
       @identity = { process_start_time: "start", pgid: 100 }
       @terminate_result = true
+      @shutdown_proof = { drained: true, child_inventory: [] }
     end
 
     def spawn(command_string:, project:, slug:, stage:,
@@ -148,7 +150,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
   end
 
   class FakePatrolScheduler
-    attr_accessor :next_dispatches
+    attr_accessor :next_dispatches, :events
     attr_reader :completed, :cancelled, :reserved
 
     def initialize
@@ -156,6 +158,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       @completed = []
       @cancelled = []
       @reserved = []
+      @events = []
     end
 
     def tick(now:)
@@ -164,8 +167,14 @@ class HiveDaemonDispatcherTest < Minitest::Test
       out
     end
 
-    def complete(project:, exit_code:, now:)
-      @completed << { project: project, exit_code: exit_code, now: now }
+    def complete(project:, exit_code:, envelope: nil, now:)
+      completion = {
+        project: project,
+        exit_code: exit_code,
+        now: now
+      }
+      completion[:envelope] = envelope if envelope
+      @completed << completion
     end
 
     def cancel(project:)
@@ -175,6 +184,12 @@ class HiveDaemonDispatcherTest < Minitest::Test
     def reserve(candidate, now:)
       @reserved << { candidate: candidate, now: now }
       candidate
+    end
+
+    def drain_events
+      drained = events.dup
+      events.clear
+      drained
     end
   end
 
@@ -379,7 +394,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
                       attempt_dispatcher: nil, attempt_reconciler: nil,
                       operational_snapshot: nil, module_runtime: nil,
                       module_migration_coordinator: nil,
-                      recovery_coordinator: nil)
+                      recovery_coordinator: nil,
+                      runtime_ready_callback: nil)
     config = {
       "daemon" => {
         "edit_debounce_sec" => 30,
@@ -431,7 +447,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
       operational_snapshot: operational_snapshot,
       module_runtime: module_runtime,
       module_migration_coordinator: module_migration_coordinator,
-      recovery_coordinator: recovery_coordinator
+      recovery_coordinator: recovery_coordinator,
+      runtime_ready_callback: runtime_ready_callback
     )
     # Generic dispatcher tests exercise routing, not the detached production
     # name generator. Rows intentionally omit display names in many fixtures;
@@ -897,7 +914,17 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
     refute controller.project_dropped?("p1")
     refute logger.events.any? { |name, attrs| name == :project_dropped && attrs[:project] == "p1" }
-    assert_equal [ { project: "p1", exit_code: Hive::ExitCodes::CONFIG, now: T0 } ], patrol.completed
+    assert_equal(
+      [
+        {
+          project: "p1",
+          exit_code: Hive::ExitCodes::CONFIG,
+          envelope: { "ok" => false, "error_kind" => "config" },
+          now: T0
+        }
+      ],
+      patrol.completed
+    )
   end
 
   def test_unverified_architecture_child_claim_is_preserved_if_termination_cannot_be_proved
@@ -1016,6 +1043,14 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
     def complete(**attributes)
       record(:complete, attributes)
+    end
+
+    def shutdown(**attributes)
+      record(:shutdown, attributes)
+    end
+
+    def runtime_ready(**attributes)
+      record(:runtime_ready, attributes)
     end
 
     def reconfigure(**attributes)
@@ -2375,6 +2410,32 @@ class HiveDaemonDispatcherTest < Minitest::Test
     refute_nil event
   end
 
+  def test_patrol_recovery_diagnostics_are_forwarded_to_the_daemon_log
+    dispatcher, _sup, _ctrl, logger, _mw, patrol = make_dispatcher(
+      rows: [], with_patrol_scheduler: true
+    )
+    patrol.events << {
+      status: :blocked,
+      project: "p1",
+      occurrence_id: "occ-1",
+      recovery: "occurrence_outbox_projection",
+      blocker: "recovery_failed",
+      retry_count: 1,
+      retry_in_sec: 60,
+      retry_at: (T0 + 60).utc.iso8601
+    }
+
+    dispatcher.tick(now: T0)
+
+    event = logger.events.find do |name, attrs|
+      name == :patrol_recovery_blocked &&
+        attrs[:occurrence_id] == "occ-1"
+    end
+    refute_nil event
+    refute event.last.key?(:status)
+    assert_equal 60, event.last.fetch(:retry_in_sec)
+  end
+
   def test_patrol_dispatch_skips_when_project_disabled
     dispatcher, sup, _ctrl, logger, _mw, patrol = make_dispatcher(
       rows: [], with_patrol_scheduler: true, project_enabled: false
@@ -3165,6 +3226,88 @@ def test_run_forever_reloads_ticks_and_shuts_down_cleanly
   assert events_include?(logger, :dispatcher_started)
   assert events_include?(logger, :dispatcher_stopping)
   assert_equal 0, supervisor.spawned.size
+end
+
+def test_run_forever_publishes_runtime_readiness_before_releasing_activation
+  snapshot = FakeOperationalSnapshot.new
+  callback_observation = nil
+  dispatcher, = make_dispatcher(
+    operational_snapshot: snapshot,
+    runtime_ready_callback: lambda {
+      callback_observation = snapshot.calls.map(&:first)
+    }
+  )
+  dispatcher.define_singleton_method(:install_signal_handlers!) { true }
+  dispatcher.define_singleton_method(:interruptible_sleep) { |_| }
+  dispatcher.define_singleton_method(:tick) do |now: Time.now|
+    request_shutdown!
+  end
+
+  dispatcher.run_forever
+
+  assert_equal [ :runtime_ready ], callback_observation
+  assert_equal :runtime_ready, snapshot.calls.first.fetch(0)
+end
+
+def test_run_forever_keeps_activation_fenced_when_readiness_cannot_publish
+  snapshot = FakeOperationalSnapshot.new(
+    fail_on: :runtime_ready,
+    error: IOError.new("readiness unavailable")
+  )
+  callback_called = false
+  dispatcher, _supervisor, _controller, logger = make_dispatcher(
+    operational_snapshot: snapshot,
+    runtime_ready_callback: -> { callback_called = true }
+  )
+  dispatcher.define_singleton_method(:install_signal_handlers!) { true }
+
+  error = assert_raises(IOError) { dispatcher.run_forever }
+
+  assert_equal "readiness unavailable", error.message
+  refute callback_called
+  event = logger.events.find do |name, attributes|
+    name == :operational_snapshot_publish_failed &&
+      attributes.fetch(:phase) == "runtime_ready"
+  end
+  refute_nil event
+end
+
+def test_run_forever_requires_a_readiness_store_before_releasing_activation
+  callback_called = false
+  dispatcher, _supervisor, _controller, logger = make_dispatcher(
+    operational_snapshot: nil,
+    runtime_ready_callback: -> { callback_called = true }
+  )
+  dispatcher.define_singleton_method(:install_signal_handlers!) { true }
+
+  error = assert_raises(Hive::UnavailableError) do
+    dispatcher.run_forever
+  end
+
+  assert_match(/readiness store is unavailable/, error.message)
+  refute callback_called
+  event = logger.events.find do |name, attributes|
+    name == :operational_snapshot_publish_failed &&
+      attributes.fetch(:phase) == "runtime_ready"
+  end
+  refute_nil event
+end
+
+def test_shutdown_acknowledgement_records_closed_admission_and_child_inventory
+  snapshot = FakeOperationalSnapshot.new
+  dispatcher, supervisor = make_dispatcher(operational_snapshot: snapshot)
+  supervisor.shutdown_proof = {
+    drained: true,
+    child_inventory: [ { pid: 88, pgid: 88, start_time: "child-start" } ]
+  }
+
+  dispatcher.send(:publish_shutdown_acknowledgement, now: T0)
+
+  method, payload = snapshot.calls.last
+  assert_equal :shutdown, method
+  assert_equal true, payload.fetch(:admission_closed)
+  assert_equal true, payload.fetch(:drained)
+  assert_equal [ 88 ], payload.fetch(:child_inventory).map { |entry| entry.fetch(:pid) }
 end
 
 def test_run_forever_routes_shutdown_child_exit_through_architecture_completion
@@ -5884,6 +6027,28 @@ end
     end
     refute_nil fatal, "a raising id backfiller must be caught and logged as :fatal"
     assert_includes fatal[1][:message], "id backfiller boom"
+  end
+
+  def test_shutdown_snapshot_failure_is_advisory
+    snapshot = FakeOperationalSnapshot.new(
+      fail_on: :shutdown,
+      error: IOError.new("shutdown snapshot unavailable")
+    )
+    dispatcher, _supervisor, _controller, logger =
+      make_dispatcher(operational_snapshot: snapshot)
+
+    dispatcher.send(
+      :publish_shutdown_acknowledgement,
+      now: T0
+    )
+
+    event = logger.events.find do |name, attributes|
+      name == :operational_snapshot_publish_failed &&
+        attributes.fetch(:phase) == "shutdown"
+    end
+    refute_nil event
+    assert_includes event.fetch(1).fetch(:error),
+                    "shutdown snapshot unavailable"
   end
 
   private

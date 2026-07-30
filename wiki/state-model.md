@@ -1,9 +1,9 @@
 ---
 title: State Model
 type: data-model
-source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/completion_time.rb, lib/hive/completed_at_backfiller.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/review_handoff.rb, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
+source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/completion_time.rb, lib/hive/completed_at_backfiller.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/modules/migration/occurrence_*.rb, lib/hive/modules/migration/patrol_*.rb, lib/hive/modules/migration/shadow_*.rb, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
 created: 2026-04-25
-updated: 2026-07-26
+updated: 2026-07-30
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, retention, dependencies, admission, web]
 ---
 
@@ -526,29 +526,133 @@ only after Turbo accepts any confirmation.
 Reconnect freshness is an Action Cable token handshake, not a browser
 MutationObserver.
 
-## Architecture-patrol v2 state
+## Patrol occurrence, selection, and recovery state
 
-Scheduled/manual merged-PR architecture patrol uses a versioned namespace that
-does not reinterpret the legacy reporting state:
+Ordinary Patrol and Architecture Patrol expose separate product stores over the
+same occurrence protocol. Each occurrence record is the sole effect/outbox
+recovery authority for that product operation. A provisional `PatrolCapture`
+binds project, trigger, reservation, owner epoch, strict `selection_input`, and
+the shared `PatrolDecisionProjection`; it cannot contain an outcome or receipt
+ids. A final capture must retain every immutable field and adds the terminal
+outcome plus exactly the terminal receipt ids. Consequently due/not-due/disabled
+selection cannot be rewritten by a later execution result, and an outcome cannot
+be misread as the scheduling decision.
+
+Each occurrence directory also has one canonical
+`journal-state.json` (`hive-patrol-occurrence-journal-state` v1), capped at
+64 KiB, and one canonical `recovery-index.json`
+(`hive-patrol-occurrence-recovery-index` v1), capped at 512 KiB and 4,096
+active ids. These files are coordination metadata only:
+
+- scheduled ordinary attempts, module events, and Architecture Patrol jobs use
+  canonical window/generation identities with bounded high-water entries and a
+  compacted closed-through floor;
+- non-sequenced manual/direct occurrences use at most 128 exact retirement
+  digests; saturation retains the terminal occurrence and fails closed;
+- a monotonic dirty generation marks possible reserved or projection-pending
+  work before its occurrence write; a generation-matched empty repair clears
+  it so idle scheduler ticks do not reread retained terminal history;
+- `recovery-index.json` locates only exact reserved or projection-pending
+  records. Reservation publishes its id before the authoritative occurrence
+  write, retirement removes it only after the record becomes inactive, and a
+  missing, malformed, stale-generation, or dirty index receives one bounded
+  record-store repair;
+- one normalized recovery-failure cell records generation, operation,
+  occurrence/job identity, bounded UTF-8 error class/message/digest, failure
+  count, and the next 60/300/900-second eligibility boundary.
+
+The journal locks in the fixed order
+identity → journal state → inventory → occurrence record. Inventory views
+take one bounded sorted filename snapshot per full traversal; stateless cursors
+retain their high-water fingerprint validation. The dirty generation is a
+repair fence and the recovery index is a bounded locator, never a second
+recovery authority: occurrence records retain authoritative effects and
+projection outbox bytes, while neither coordination file can authorize work.
+StateStore and JobStore remain the separate product-facing owners, and
+observational EvidenceStore records are never consulted to authorize a retry.
+JobStore establishes its admitted v3 namespace before any architecture
+recovery backoff or active-index repair can write coordination state. Semantic
+family dry-run resolution instead uses a read-only JobStore reader, so a
+preview cannot create that namespace or any other project state.
+Before terminal effect outcomes cross from `EffectDelivery` into either
+product store, every nested string value passes through
+`Hive::SecretPatterns`; journal, evidence, comparison, and replay therefore use
+the same redacted receipt bytes without changing array/object shape or scalar
+types.
+
+Shadow-decision runtime state is v2-only. A native v2 record with
+`migration: null` must satisfy the strict selection/projection/outcome schema.
+The quiescence-fenced one-off converter archives each v1 source as
+non-comparable, writes a v2 diagnostic replacement, and checkpoints exact
+source/archive/replacement digests before completion. A restart adopts a
+replacement only when those bindings match; the completion stamp requires a
+fresh inventory with no remaining live v1 record.
+
+## Architecture-patrol split-generation state
+
+Only JobStore-owned authority uses v3. Manifests, semantic-family projections,
+merge reconciliation, child results, runs, and logs retain their independent
+v2 owners:
 
 ```text
-<project>/.hive-state/refactor_patrol/v2/
-├── reconciler.json               # host-bound catch-up checkpoint, schema v2
-├── reconciler-progress.json      # restart-safe page/intake cursor, schema v1
-├── manifests/<job-id>.json       # checksummed, write-once merge occurrence
-├── jobs/<job-id>.json            # authoritative aggregate
-├── families/<family-id>.json     # rebuildable semantic-family projection
-├── indexes/                      # rebuildable fingerprint/action indexes
-│   └── job-query/                # active generation + immutable memberships
-├── results/<dispatch-id>.json    # atomic daemon-child result; removed on reap
-├── runs/
-└── logs/
+<hive_state_path>/refactor_patrol/
+├── jobstore-fresh-start.json             # completed opaque reset receipt
+├── .jobstore-generation.lock             # stable cross-generation lock
+├── v2/
+│   ├── reconciler.json                   # host-bound catch-up checkpoint
+│   ├── reconciler-progress.json          # restart-safe page/intake cursor
+│   ├── manifests/<job-id>.json           # checksummed immutable merge input
+│   ├── jobs/                             # released backlog before reset
+│   ├── jobs                              # regular marker after reset
+│   ├── .jobs-v2-archive-<nonce>/         # exact opaque archived backlog
+│   ├── families/<family-id>.json
+│   ├── results/<dispatch-id>.json
+│   ├── runs/
+│   └── logs/
+└── v3/
+    ├── jobs/<job-id>.json                # sole current aggregate authority
+    ├── occurrences/records/              # effects and exact receipts
+    ├── occurrences/recovery-index.json   # bounded active-record locator
+    └── indexes/job-query/                # rebuildable ordered query index
 ```
+
+A genuinely fresh project initializes the empty v3 namespace on its first
+authoritative mutation. Read-only status avoids creating that namespace.
+Released `v2/jobs` instead blocks v3 runtime admission with
+`reset_required`; Hive has no v2 compatibility reader, converter,
+installation sweep, package hook, timer, or automatic constructor fallback.
+
+The only transition is the explicit per-project
+`hive refactor-patrol-reset PROJECT --confirm` choice. A stable profile-wide
+activation lock excludes daemon startup; the current daemon then drains under
+its normal shared effect admission, after which the command takes the Patrol
+effect lock exclusively. That lock remains held across an independent writer
+fence, atomic exchange of the public v2 jobs directory with a canonical regular
+marker, empty-v3 admission, and the transaction-bound receipt outside both
+generations. The exact directory bytes remain under
+`.jobs-v2-archive-<nonce>` and are never enumerated or imported. Every other
+v2 owner and the separate global terminal-proof catalog remain untouched. A
+restarted daemon must publish readiness for its exact PID/start generation
+before command success. See [[commands/refactor-patrol-reset]].
+
+The same command resumes an exchange that completed before its receipt was
+written. A non-empty v3 store alongside released or incomplete v2 state is a
+`conflict`, never an overwrite candidate. Malformed markers, receipts,
+archives, entry types, or writer evidence fail closed for operator repair. The
+deterministic archive path is itself generation evidence, so an archive without
+its public marker is never interpreted as a fresh project.
+`hive daemon status --json` reports `fresh`, `current`,
+`reset_required`, `reset_incomplete`, `conflict`, or an isolated
+per-project `error` without performing the reset.
 
 Read-only job listing is bounded by the `indexes/job-query/` sequence
 projection rather than a scan of every aggregate. Each authoritative new job
 reserves an immutable monotonic entry/pointer pair before its job write;
 `active.json` publishes only the contiguous prefix whose job files are durable.
+`JobStoreFiles` owns descriptor-confined access to live jobs, index sidecars,
+quarantine evidence, and locks. Its store-wide admission lock checks the
+bounded authoritative inventory before creating a per-job lock, so concurrent
+writers cannot persist an 8,193rd job or leave an over-capacity orphan lock.
 An exact retry can adopt the next fully written membership after a crash, while
 a permanent hole keeps later entries invisible until an explicit authoritative
 rebuild. Rebuild scans while holding the writer lock, prepares a complete new

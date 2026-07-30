@@ -1,6 +1,6 @@
 require "time"
 require "json"
-require "hive/atomic_file"
+require "hive/managed_directory"
 require "hive/modules/migration/shadow_comparator"
 require "hive/workflow_package/canonical_json"
 
@@ -10,6 +10,7 @@ module Hive
       class Report
         MIN_ELAPSED_SECONDS = 7 * 24 * 60 * 60
         MIN_DECISIONS = 10
+        MAX_REPORT_BYTES = 128 * 1024
 
         attr_reader :payload
 
@@ -21,18 +22,38 @@ module Hive
           end
         end
 
-        def self.build(records:, reviewer:, reviewed_at:, generated_at: reviewed_at)
-          new(records: records, reviewer: reviewer, reviewed_at: reviewed_at, generated_at: generated_at)
+        def self.build(record_source:, reviewer:, reviewed_at:,
+                       generated_at: reviewed_at)
+          new(
+            record_source: record_source,
+            reviewer: reviewer,
+            reviewed_at: reviewed_at,
+            generated_at: generated_at
+          )
         end
 
         def self.load(path)
-          bytes = File.binread(path)
+          bytes = read_bytes(path)
           payload = JSON.parse(bytes)
           unless bytes == canonical(payload) && valid_payload?(payload)
             raise Hive::ConfigError, "module migration report is malformed"
           end
           Loaded.new(payload: payload.freeze)
         rescue JSON::ParserError, EncodingError, SystemCallError
+          raise Hive::ConfigError, "module migration report is missing or unreadable"
+        end
+
+        def self.read_bytes(path)
+          expanded = File.expand_path(path)
+          directory = Hive::ManagedDirectory.new(
+            root: File.dirname(expanded),
+            label: "module migration report"
+          )
+          directory.read(
+            File.basename(expanded),
+            max_bytes: MAX_REPORT_BYTES
+          )
+        rescue Hive::ConfigError
           raise Hive::ConfigError, "module migration report is missing or unreadable"
         end
 
@@ -47,11 +68,15 @@ module Hive
           false
         end
 
-        def initialize(records:, reviewer:, reviewed_at:, generated_at:)
-          @records = Array(records)
+        def initialize(record_source:, reviewer:, reviewed_at:, generated_at:)
+          validator = ShadowComparator.new(root: Dir.pwd)
           @reviewer = reviewer.to_s.strip
           @reviewed_at = parse_time(reviewed_at)
           @generated_at = parse_time(generated_at)
+          @module_states = ShadowComparator::MODULES.to_h do |module_name|
+            [ module_name, empty_module_state ]
+          end
+          consume(record_source, validator)
           @payload = build_payload.freeze
         end
 
@@ -60,8 +85,16 @@ module Hive
         def configuration_digests = payload.fetch("modules").transform_values { |row| row["configuration_digest"] }
 
         def write(path)
-          Hive::AtomicFile.write(path, self.class.canonical(payload), mode: 0o600)
-          Hive::AtomicFile.fsync_directory(File.dirname(path))
+          expanded = File.expand_path(path)
+          directory = Hive::ManagedDirectory.new(
+            root: File.dirname(expanded),
+            label: "module migration report"
+          )
+          directory.atomic_write(
+            File.basename(expanded),
+            self.class.canonical(payload),
+            mode: 0o600
+          )
           path
         end
 
@@ -89,27 +122,80 @@ module Hive
         end
 
         def module_summary(module_name)
-          records = @records.select { |row| row["module"] == module_name }
-          comparable = records.select { |row| row["comparable"] == true }
-          times = comparable.filter_map { |row| parse_time(row["recorded_at"]) }
-          digests = comparable.filter_map { |row| row["configuration_digest"] }.uniq
-          unexplained = comparable.sum { |row| Array(row["unexplained_differences"]).length }
-          duplicates = comparable.sum { |row| Array(row["duplicate_effects"]).length }
+          state = @module_states.fetch(module_name)
           blockers = []
-          blockers << "decision_count_below_#{MIN_DECISIONS}" if comparable.length < MIN_DECISIONS
-          elapsed = times.length > 1 ? times.max - times.min : 0
+          if state.fetch(:count) < MIN_DECISIONS
+            blockers << "decision_count_below_#{MIN_DECISIONS}"
+          end
+          started_at = state.fetch(:started_at)
+          ended_at = state.fetch(:ended_at)
+          elapsed = started_at && ended_at ? ended_at - started_at : 0
           blockers << "observation_window_below_7_days" if elapsed < MIN_ELAPSED_SECONDS
-          blockers << "unexplained_differences" if unexplained.positive?
-          blockers << "duplicate_effects" if duplicates.positive?
-          blockers << "configuration_changed" unless digests.length == 1
+          blockers << "unexplained_differences" if state.fetch(:unexplained).positive?
+          blockers << "duplicate_effects" if state.fetch(:duplicates).positive?
+          blockers << "configuration_changed" if state.fetch(:configuration_changed) ||
+                                                  state.fetch(:configuration_digest).nil?
           {
-            "decision_count" => comparable.length,
-            "started_at" => times.min&.iso8601(6), "ended_at" => times.max&.iso8601(6),
+            "decision_count" => state.fetch(:count),
+            "started_at" => started_at&.iso8601(6),
+            "ended_at" => ended_at&.iso8601(6),
             "elapsed_seconds" => elapsed.to_i,
-            "configuration_digest" => digests.one? ? digests.first : nil,
-            "unexplained_difference_count" => unexplained,
-            "duplicate_effect_count" => duplicates, "blockers" => blockers
+            "configuration_digest" =>
+              state.fetch(:configuration_changed) ?
+                nil :
+                state.fetch(:configuration_digest),
+            "unexplained_difference_count" => state.fetch(:unexplained),
+            "duplicate_effect_count" => state.fetch(:duplicates),
+            "blockers" => blockers
           }
+        end
+
+        def empty_module_state
+          {
+            count: 0,
+            started_at: nil,
+            ended_at: nil,
+            configuration_digest: nil,
+            configuration_changed: false,
+            unexplained: 0,
+            duplicates: 0
+          }
+        end
+
+        def consume(record_source, validator)
+          seen = 0
+          record_source.each do |value|
+            seen += 1
+            if seen > ShadowComparator::MAX_RECORDS
+              raise Hive::ConfigError,
+                    "module shadow evidence exceeds the bounded read limit"
+            end
+            record = validator.validate_record!(value)
+            next unless record["comparable"] == true
+
+            accumulate(record)
+          end
+        rescue NoMethodError, TypeError
+          raise Hive::ConfigError, "module shadow evidence is malformed"
+        end
+
+        def accumulate(record)
+          state = @module_states.fetch(record.fetch("module"))
+          timestamp = parse_time(record.fetch("recorded_at"))
+          digest = record.fetch("configuration_digest")
+          state[:count] += 1
+          state[:started_at] = timestamp if state[:started_at].nil? ||
+                                            timestamp < state[:started_at]
+          state[:ended_at] = timestamp if state[:ended_at].nil? ||
+                                          timestamp > state[:ended_at]
+          if state[:configuration_digest] &&
+             state[:configuration_digest] != digest
+            state[:configuration_changed] = true
+          else
+            state[:configuration_digest] ||= digest
+          end
+          state[:unexplained] += record.fetch("unexplained_differences").length
+          state[:duplicates] += record.fetch("duplicate_effects").length
         end
 
         def parse_time(value)

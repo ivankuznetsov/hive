@@ -1155,10 +1155,22 @@ module Hive
       registered_project_entries(preserve_invalid: false)
     end
 
-    def registered_project_entries(preserve_invalid:)
-      Hive::Paths.ensure_migrated!
+    # Observation-only registry reader for status surfaces. When only the
+    # legacy registry exists, read it in place rather than invoking the normal
+    # one-off move into XDG config storage.
+    def registered_projects_read_only
+      registered_project_entries(
+        preserve_invalid: false,
+        migrate_legacy: false
+      )
+    end
+
+    def registered_project_entries(preserve_invalid:, migrate_legacy: true)
+      Hive::Paths.ensure_migrated! if migrate_legacy
       validate_hive_home!
-      path = global_config_path
+      path = registry_path_for_read(
+        migrate_legacy: migrate_legacy
+      )
       return [] unless File.exist?(path)
 
       data = load_global_config(path)
@@ -1181,6 +1193,7 @@ module Hive
         project = {
           "name" => entry["name"],
           "path" => abs_path,
+          "real_path" => registry_real_path(entry),
           "hive_state_path" => entry["hive_state_path"],
           "repository_identity" => entry["repository_identity"],
           "project_id" => registry_project_id(entry),
@@ -1190,6 +1203,14 @@ module Hive
         project["hive_state_path"] = project_hive_state_path(project)
         out << project
       end
+    end
+
+    def registry_path_for_read(migrate_legacy:)
+      current = global_config_path
+      return current if migrate_legacy || File.exist?(current)
+      return current if Hive::Paths.hive_home_override
+
+      Hive::Paths.legacy_registry_path || current
     end
 
     # One-time, locked registry migration. It deliberately emits no module
@@ -1206,13 +1227,21 @@ module Hive
 
         Array(data["registered_projects"]).each do |entry|
           next unless valid_registry_entry?(entry)
-          next if valid_project_id?(entry["project_id"])
 
-          project_id = registry_project_id(entry)
-          entry["project_id"] = project_id
-          entry["registration_id"] ||= "legacy:#{project_id}"
-          entry["registered_at"] ||= now.utc.iso8601(6)
-          changed = true
+          unless valid_project_id?(entry["project_id"])
+            project_id = registry_project_id(entry)
+            entry["project_id"] = project_id
+            entry["registration_id"] ||= "legacy:#{project_id}"
+            entry["registered_at"] ||= now.utc.iso8601(6)
+            changed = true
+          end
+          if entry["real_path"].nil?
+            real_path = realpath_or_nil(File.expand_path(entry.fetch("path")))
+            if real_path
+              entry["real_path"] = real_path
+              changed = true
+            end
+          end
         end
         write_global_config_atomic!(data) if changed
       end
@@ -1734,6 +1763,11 @@ module Hive
         entry["repository_identity"] = identity if identity
         real_path = realpath_or_nil(abs_path)
         entry["real_path"] = real_path if real_path
+        assert_registration_state_root_available!(
+          entry,
+          data["registered_projects"],
+          replacing: existing
+        )
         if existing
           existing_path = File.expand_path(existing.fetch("path"))
           if !replace_existing && existing_path != abs_path
@@ -1748,6 +1782,67 @@ module Hive
         end
       end
       entry
+    end
+
+    def assert_registration_state_root_available!(
+      candidate, registrations, replacing:
+    )
+      candidate_key =
+        canonical_registration_state_path(
+          candidate.fetch("hive_state_path")
+        )
+      candidate_project_id = candidate.fetch("project_id")
+      Array(registrations).each do |other|
+        next unless other.is_a?(Hash)
+        next if replacing && other.equal?(replacing)
+        next unless other["path"].is_a?(String)
+
+        other_state = other["hive_state_path"]
+        other_state = File.join(other.fetch("path"), ".hive-state") unless
+          other_state.is_a?(String) && !other_state.empty?
+        next unless
+          canonical_registration_state_path(other_state) == candidate_key
+
+        other_project_id = registry_project_id(other)
+        next if other_project_id == candidate_project_id
+
+        raise ProjectRegistrationCollision.new(
+          "project #{candidate.fetch('name').inspect} would share Hive " \
+          "state with #{other.fetch('name', 'another registration').inspect}",
+          name: candidate.fetch("name"),
+          existing_path: other.fetch("path")
+        )
+      rescue KeyError, ArgumentError
+        next
+      end
+    end
+
+    def canonical_registration_state_path(path)
+      candidate = File.expand_path(path)
+      suffix = []
+      loop do
+        begin
+          canonical = File.realpath(candidate)
+          stat = File.lstat(canonical)
+          unless stat.directory? || stat.file?
+            raise ConfigError,
+                  "cannot register a project through an unsafe Hive state path"
+          end
+          return File.join(canonical, *suffix)
+        rescue Errno::ENOENT, Errno::ENOTDIR
+          parent = File.dirname(candidate)
+          if parent == candidate
+            raise ConfigError,
+                  "cannot establish the Hive state path identity"
+          end
+          suffix.unshift(File.basename(candidate))
+          candidate = parent
+        end
+      end
+    rescue SystemCallError => error
+      raise ConfigError,
+            "cannot establish the Hive state path identity " \
+            "(#{error.class}: #{error.message})"
     end
 
     def valid_project_id?(value)

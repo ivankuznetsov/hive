@@ -1,7 +1,5 @@
 require "json"
-require "fileutils"
 require "securerandom"
-require "hive/atomic_file"
 
 module Hive
   module RefactorPatrol
@@ -21,12 +19,18 @@ module Hive
       ENTRY_KEYS = %w[schema schema_version generation sequence job_id].freeze
       GENERATION_PATTERN = /\A[a-f0-9]{32}\z/
 
-      def initialize(root:, id_pattern:, corrupt_record:, inconsistent_record:)
-        @root = File.join(root, "indexes", "job-query")
-        @jobs_dir = File.join(root, "jobs")
+      def initialize(files:, id_pattern:, corrupt_record:,
+                     inconsistent_record:, max_entries:)
+        @files = files
+        @root = File.join("indexes", "job-query")
         @id_pattern = id_pattern
         @corrupt_record = corrupt_record
         @inconsistent_record = inconsistent_record
+        @max_entries = Integer(max_entries)
+        raise ArgumentError, "job query index capacity must be positive" unless
+          @max_entries.positive?
+      rescue ArgumentError, TypeError
+        raise ArgumentError, "job query index capacity must be positive"
       end
 
       # The caller holds the per-job lock. This index lock spans reservation,
@@ -49,6 +53,18 @@ module Hive
             inconsistent!("existing job is absent from the rebuilt query index", job_path(id)) unless pointer
           end
           unless pointer
+            if state.fetch("allocated_high_water") >= @max_entries &&
+               state.fetch("high_water") <
+                 state.fetch("allocated_high_water")
+              state = rebuild_locked!(migration_job_ids.call)
+              pointer = load_pointer(id, state)
+            end
+          end
+          unless pointer
+            inconsistent!(
+              "job query index capacity is exhausted",
+              state_path
+            ) if state.fetch("allocated_high_water") >= @max_entries
             sequence = state.fetch("allocated_high_water") + 1
             write_membership!(state, sequence, id)
             state["allocated_high_water"] = sequence
@@ -56,7 +72,7 @@ module Hive
           end
 
           result = yield
-          unless File.file?(job_path(id))
+          unless @files.job_exists?(id)
             inconsistent!("job query membership was not followed by its authoritative job", job_path(id))
           end
           publish_ready_prefix!(state)
@@ -86,7 +102,7 @@ module Hive
           ((after + 1)..last).map do |sequence|
             entry = read_json(entry_path(state.fetch("generation"), sequence))
             validate_entry!(entry, sequence, state.fetch("generation"))
-            unless File.file?(job_path(entry.fetch("job_id")))
+            unless @files.job_exists?(entry.fetch("job_id"))
               inconsistent!("job query index references a missing job", job_path(entry.fetch("job_id")))
             end
             entry
@@ -112,16 +128,21 @@ module Hive
 
       def rebuild_locked!(job_ids)
         seen = {}
-        ids = Array(job_ids).filter_map do |job_id|
+        ids = []
+        Array(job_ids).each do |job_id|
           id = validate_job_id!(job_id)
           next if seen[id]
 
           seen[id] = true
-          id
+          ids << id
+          inconsistent!(
+            "job query index capacity is exhausted",
+            state_path
+          ) if ids.size > @max_entries
         end
         state = initial_state
         ids.each_with_index do |id, index|
-          unless File.file?(job_path(id))
+          unless @files.job_exists?(id)
             inconsistent!("job query index cannot reference a missing job", job_path(id))
           end
           write_membership!(state, index + 1, id)
@@ -144,7 +165,7 @@ module Hive
           sequence = state.fetch("high_water") + 1
           entry = read_json(entry_path(state.fetch("generation"), sequence))
           validate_entry!(entry, sequence, state.fetch("generation"))
-          break unless File.file?(job_path(entry.fetch("job_id")))
+          break unless @files.job_exists?(entry.fetch("job_id"))
 
           state["high_water"] = sequence
           changed = true
@@ -171,7 +192,7 @@ module Hive
 
       def load_pointer(job_id, state)
         path = pointer_path(state.fetch("generation"), job_id)
-        return nil unless File.file?(path)
+        return nil unless @files.regular?(path)
 
         payload = read_json(path)
         validate_entry!(
@@ -202,7 +223,8 @@ module Hive
         valid = entry.is_a?(Hash) && entry.keys.sort == ENTRY_KEYS.sort &&
                 entry["schema"] == ENTRY_SCHEMA && entry["schema_version"] == SCHEMA_VERSION &&
                 entry["generation"] == generation && entry["sequence"] == sequence &&
-                sequence.is_a?(Integer) && sequence.positive? &&
+                sequence.is_a?(Integer) &&
+                sequence.between?(1, @max_entries) &&
                 entry["job_id"].is_a?(String) && entry["job_id"].match?(@id_pattern) &&
                 (!expected_job_id || entry["job_id"] == expected_job_id)
         path = sequence.is_a?(Integer) ? entry_path(generation, sequence) : @root
@@ -249,15 +271,15 @@ module Hive
       end
 
       def load_state
-        return nil unless File.file?(state_path)
-
-        state = read_json(state_path)
+        state = read_json(state_path, missing: true)
+        return nil unless state
         valid = state.is_a?(Hash) && state.keys.sort == STATE_KEYS.sort &&
                 state["schema"] == STATE_SCHEMA && state["schema_version"] == SCHEMA_VERSION &&
                 state["generation"].to_s.match?(GENERATION_PATTERN) &&
                 state["high_water"].is_a?(Integer) && state["high_water"] >= 0 &&
                 state["allocated_high_water"].is_a?(Integer) &&
-                state["allocated_high_water"] >= state["high_water"]
+                state["allocated_high_water"] >= state["high_water"] &&
+                state["allocated_high_water"] <= @max_entries
         corrupt!("job query index high-water is invalid", state_path) unless valid
         state
       end
@@ -267,7 +289,7 @@ module Hive
       end
 
       def write_immutable(path, payload)
-        if File.file?(path)
+        if @files.regular?(path)
           existing = read_json(path)
           inconsistent!("job query index membership is immutable", path) unless existing == payload
           return path
@@ -276,44 +298,17 @@ module Hive
       end
 
       def write_json(path, payload)
-        ensure_directory!(File.dirname(path))
-        Hive::AtomicFile.write(path, "#{JSON.pretty_generate(payload)}\n", mode: 0o600)
-        Hive::AtomicFile.fsync_directory(File.dirname(path))
-        path
+        @files.write_json(path, payload)
       end
 
-      # mkdir_p alone does not make each newly-created directory entry durable.
-      # Flush every parent that gained a child before active.json can point at
-      # a fresh generation after a host-level crash.
-      def ensure_directory!(path)
-        missing = []
-        current = path
-        until Dir.exist?(current)
-          missing << current
-          parent = File.dirname(current)
-          break if parent == current
-
-          current = parent
-        end
-        FileUtils.mkdir_p(path)
-        missing.reverse_each do |directory|
-          Hive::AtomicFile.fsync_directory(File.dirname(directory))
-        end
-        path
-      end
-
-      def read_json(path)
-        JSON.parse(File.binread(path))
+      def read_json(path, missing: false)
+        @files.read_json(path, missing: missing)
       rescue JSON::ParserError, EncodingError, SystemCallError, IOError => e
         corrupt!("cannot read job query index (#{e.class}: #{e.message})", path)
       end
 
       def with_lock
-        ensure_directory!(@root)
-        File.open(lock_path, File::RDWR | File::CREAT, 0o600) do |lock|
-          lock.flock(File::LOCK_EX)
-          yield
-        end
+        @files.directory.with_lock(lock_path) { yield }
       end
 
       def validate_job_id!(job_id)
@@ -323,17 +318,21 @@ module Hive
       end
 
       def jobs_exist?
-        return false unless Dir.exist?(@jobs_dir)
-
-        Dir.each_child(@jobs_dir).any? { |name| name.end_with?(".json") }
+        @files.each_job_id.any?
       end
 
       def corrupt!(message, path)
-        raise @corrupt_record.new(message, path: path)
+        raise @corrupt_record.new(
+          message,
+          path: @files.absolute_path(path)
+        )
       end
 
       def inconsistent!(message, path)
-        raise @inconsistent_record.new(message, path: path)
+        raise @inconsistent_record.new(
+          message,
+          path: @files.absolute_path(path)
+        )
       end
 
       def state_path = File.join(@root, "active.json")
@@ -343,7 +342,7 @@ module Hive
       def pointers_dir(generation) = File.join(generation_dir(generation), "by-job")
       def entry_path(generation, sequence) = File.join(entries_dir(generation), format("%020d.json", sequence))
       def pointer_path(generation, job_id) = File.join(pointers_dir(generation), "#{job_id}.json")
-      def job_path(job_id) = File.join(@jobs_dir, "#{job_id}.json")
+      def job_path(job_id) = File.join("jobs", "#{job_id}.json")
     end
   end
 end

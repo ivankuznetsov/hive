@@ -5,6 +5,7 @@ require "hive/atomic_file"
 require "hive/config"
 require "hive/module_package/managed_store"
 require "hive/modules/migration/report"
+require "hive/modules/migration/shadow_decision_migration"
 require "hive/workflow_package/canonical_json"
 require "hive/workflow_package/mutation_lock"
 
@@ -30,6 +31,22 @@ module Hive
             state ? state.fetch("owners").fetch(module_name.to_s) : "legacy"
           rescue Hive::ConfigError, KeyError
             "none"
+          end
+
+          # Return the complete ownership fence in one read so effect gateways
+          # never compose an owner, epoch, and admission decision from
+          # different migration-state snapshots.
+          def ownership_snapshot(project_root, module_name, hive_state_path: nil)
+            state = read_state(project_root, hive_state_path: hive_state_path)
+            return { "owner" => "legacy", "epoch" => 1, "admission" => true } unless state
+
+            {
+              "owner" => state.fetch("owners").fetch(module_name.to_s),
+              "epoch" => state.fetch("epoch"),
+              "admission" => state.fetch("admissions").fetch(module_name.to_s)
+            }
+          rescue Hive::ConfigError, KeyError
+            { "owner" => "none", "epoch" => 0, "admission" => false }
           end
 
           def admission_allowed?(project_root, module_name, authority:, hive_state_path: nil)
@@ -118,12 +135,28 @@ module Hive
           end
 
           def state_file(project_root, hive_state_path: nil)
-            state = hive_state_path || File.join(File.expand_path(project_root), ".hive-state")
-            File.join(File.expand_path(state), "module-runtime", "migration", "patrols.json")
+            root = File.expand_path(project_root)
+            state = hive_state_path || ".hive-state"
+            File.join(
+              File.expand_path(state, root), "module-runtime", "migration", "patrols.json"
+            )
           end
 
           def report_file(project_root, hive_state_path: nil)
             File.join(File.dirname(state_file(project_root, hive_state_path: hive_state_path)), "report.json")
+          end
+
+          def shadow_decision_upgrade_required?(project_root,
+                                                hive_state_path: nil)
+            migration_dir = File.dirname(
+              state_file(project_root, hive_state_path: hive_state_path)
+            )
+            ShadowDecisionMigration.ensure_complete!(
+              root: File.join(migration_dir, "shadow")
+            )
+            false
+          rescue Hive::ConfigError
+            true
           end
 
           def validate_state!(state)
@@ -157,7 +190,9 @@ module Hive
           @project_root = File.expand_path(project_root)
           @project = project || File.basename(@project_root)
           cfg = Hive::Config.load(@project_root)
-          @hive_state_path = File.expand_path(hive_state_path || cfg.fetch("hive_state_path"))
+          @hive_state_path = File.expand_path(
+            hive_state_path || cfg.fetch("hive_state_path"), @project_root
+          )
           @store = module_store || Hive::ModulePackage::ManagedStore.new(@hive_state_path)
           @quiescence_probe = quiescence_probe
           @migration_dir = File.dirname(self.class.state_file(@project_root, hive_state_path: @hive_state_path))
@@ -166,10 +201,38 @@ module Hive
         def read = self.class.read_state(project_root, hive_state_path: hive_state_path)
 
         def adopt!(now: Time.now.utc)
+          immediate = nil
+          migration_ready = false
+          existing_state = nil
+          shadow_upgrade_required =
+            self.class.shadow_decision_upgrade_required?(
+              project_root, hive_state_path: hive_state_path
+            )
           mutate do
             state = read || initial_state(now)
-            if %w[shadowing module].include?(state.fetch("status"))
-              next outcome("already_current", state)
+            stable = %w[shadowing module].include?(state.fetch("status"))
+            legacy_stable =
+              (stable || state.fetch("status") == "rolled_back") &&
+              shadow_upgrade_required
+            if stable && !shadow_upgrade_required
+              immediate = outcome("already_current", state)
+              next
+            end
+            if legacy_stable
+              blockers = quiescence_blockers
+              fenced = state.merge(
+                "admissions" => MODULES.to_h { |name| [ name, false ] },
+                "blockers" => blockers,
+                "updated_at" => timestamp(now)
+              )
+              write(fenced)
+              if blockers.empty?
+                existing_state = state
+                migration_ready = :existing
+              else
+                immediate = outcome(state.fetch("status"), fenced, blockers)
+              end
+              next
             end
             bindings = module_bindings
             pending = state.merge(
@@ -182,19 +245,58 @@ module Hive
             write(pending)
             blockers = quiescence_blockers
             if blockers.empty?
-              active = pending.merge(
-                "status" => "shadowing",
-                "admissions" => MODULES.to_h { |name| [ name, true ] },
-                "blockers" => {}, "shadow_started_at" => pending["shadow_started_at"] || timestamp(now),
-                "updated_at" => timestamp(now)
-              )
-              write(active)
-              outcome("shadowing", active)
+              migration_ready = true
             else
               fenced = pending.merge("blockers" => blockers, "updated_at" => timestamp(now))
               write(fenced)
-              outcome("pending", fenced, blockers)
+              immediate = outcome("pending", fenced, blockers)
             end
+          end
+          return immediate if immediate
+          return upgrade_existing_shadow_state!(existing_state, now) if migration_ready == :existing
+          unless migration_ready
+            raise Hive::ConfigError,
+                  "patrol module migration admission is unavailable"
+          end
+
+          # Admission is durably closed before the one-off v1 inventory starts.
+          # The migrator takes the same exclusive migration lock, independently
+          # proves old workers quiescent, converts/checkpoints every file, and
+          # stamps only after a zero-v1 rescan. Runtime readers remain v2-only.
+          migrate_shadow_decisions!
+
+          mutate do
+            state = read || raise(
+              Hive::ConfigError,
+              "patrol module migration state disappeared during adoption"
+            )
+            if %w[shadowing module].include?(state.fetch("status"))
+              next outcome("already_current", state)
+            end
+            unless state.fetch("status") == "pending"
+              raise Hive::ConfigError,
+                    "patrol module migration changed during adoption"
+            end
+            blockers = quiescence_blockers
+            unless blockers.empty?
+              fenced = state.merge(
+                "blockers" => blockers, "updated_at" => timestamp(now)
+              )
+              write(fenced)
+              next outcome("pending", fenced, blockers)
+            end
+
+            active = state.merge(
+              "status" => "shadowing",
+              "bindings" => module_bindings,
+              "admissions" => MODULES.to_h { |name| [ name, true ] },
+              "blockers" => {},
+              "shadow_started_at" =>
+                state["shadow_started_at"] || timestamp(now),
+              "updated_at" => timestamp(now)
+            )
+            write(active)
+            outcome("shadowing", active)
           end
         end
 
@@ -341,6 +443,44 @@ module Hive
           end.to_h
         end
 
+        def migrate_shadow_decisions!
+          ShadowDecisionMigration.migrate!(
+            root: File.join(@migration_dir, "shadow"),
+            quiescence_probe: lambda do
+              blockers = quiescence_blockers
+              blockers.empty? ? :quiescent :
+                blockers.value?("live") ? :live : :ambiguous
+            end
+          )
+        end
+
+        # Older migration state can predate the v2 shadow-decision inventory.
+        # Keep its ownership mode intact, but close both admissions before the
+        # one-off conversion and restore them only after the exclusive migrator
+        # proves every record is v2.
+        def upgrade_existing_shadow_state!(previous, now)
+          migrate_shadow_decisions!
+          mutate do
+            state = read || raise(
+              Hive::ConfigError,
+              "patrol module migration state disappeared during shadow upgrade"
+            )
+            unless state.fetch("status") == previous.fetch("status") &&
+                   state.fetch("admissions").values.all? { |admission| admission == false }
+              raise Hive::ConfigError,
+                    "patrol module migration changed during shadow upgrade"
+            end
+
+            restored = state.merge(
+              "admissions" => previous.fetch("admissions"),
+              "blockers" => {},
+              "updated_at" => timestamp(now)
+            )
+            write(restored)
+            outcome("already_current", restored)
+          end
+        end
+
         def assert_report_bindings!(state, report)
           report.configuration_digests.each do |name, digest_value|
             unless state.dig("bindings", name, "configuration_digest") == digest_value
@@ -354,10 +494,11 @@ module Hive
 
           payload = report.payload
           comparator = Hive::Modules::Migration::ShadowComparator.new(
-            root: File.join(@migration_dir, "shadow")
+            root: File.join(@migration_dir, "shadow"),
+            admission_lock: ->(shared: true, &block) { block.call }
           )
           current = Hive::Modules::Migration::Report.build(
-            records: comparator.records,
+            record_source: comparator.each_record,
             reviewer: payload.fetch("reviewer"),
             reviewed_at: payload.fetch("reviewed_at"),
             generated_at: now

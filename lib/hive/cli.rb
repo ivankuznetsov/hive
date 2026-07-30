@@ -895,13 +895,16 @@ module Hive
     DESC
     option :dry_run, type: :boolean, default: false,
                      desc: "map and review, but do not fix, push, or open PRs"
+    option :occurrence_id, type: :string, hide: true
     def patrol(project)
       require "hive/commands/patrol"
-      Hive::Commands::Patrol.new(
-        project,
+      command_options = {
         json: options[:json],
         dry_run: options[:dry_run]
-      ).call
+      }
+      occurrence_id = options[:occurrence_id]
+      command_options[:occurrence_id] = occurrence_id unless occurrence_id.nil?
+      Hive::Commands::Patrol.new(project, **command_options).call
     end
 
     desc "refactor-patrol PROJECT", "Discover ranked refactor theses for a registered project"
@@ -944,6 +947,8 @@ module Hive
                      desc: "resume actions for --job-manifest (daemon/internal)"
     option :result_file, type: :string,
                          desc: "write daemon completion envelope to a fenced result file (internal)"
+    option :occurrence_id, type: :string,
+                           desc: "reuse a durable patrol occurrence (daemon/internal)"
     option :list, type: :boolean, default: false,
                   desc: "list durable architecture-patrol jobs without changing state"
     option :show, type: :string,
@@ -968,11 +973,36 @@ module Hive
         job_manifest: options[:job_manifest],
         actions: options[:actions],
         result_file: options[:result_file],
+        occurrence_id: options[:occurrence_id],
         list: options[:list],
         show: options[:show],
         limit: options[:limit],
         cursor: options[:cursor],
         full: options[:full]
+      ).call
+    end
+
+    desc(
+      "refactor-patrol-reset PROJECT",
+      "Archive obsolete Architecture Patrol jobs and start with empty v3"
+    )
+    long_desc <<~DESC
+      Retires only the registered project's released v2/jobs directory. Hive
+      atomically archives its exact opaque bytes, preserves every other v2
+      Architecture Patrol owner and the global terminal-proof catalog, and
+      activates an empty v3 JobStore. It never converts or imports the old
+      backlog. --confirm is mandatory.
+
+      A running profile daemon and its supervised process tree are stopped and
+      verified before reset, then restarted only if this command stopped them.
+      Existing non-empty v3 state is never overwritten.
+    DESC
+    option :confirm, type: :boolean, default: false,
+                     desc: "confirm that the archived v2 backlog will not be imported"
+    def refactor_patrol_reset(project)
+      require "hive/commands/refactor_patrol_reset"
+      Hive::Commands::RefactorPatrolReset.new(
+        project, confirm: options[:confirm], json: options[:json]
       ).call
     end
 

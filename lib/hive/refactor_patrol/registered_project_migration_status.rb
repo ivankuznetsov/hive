@@ -30,7 +30,7 @@ module Hive
         target_schema_version
       ].freeze
       STATUSES = %w[
-        absent current dry_run duplicate failed migrated migration_required
+        absent current dry_run failed migrated migration_required
       ].freeze
 
       def self.registry_digest(entries)

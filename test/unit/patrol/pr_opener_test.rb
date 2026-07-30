@@ -258,9 +258,9 @@ class HivePatrolPrOpenerTest < Minitest::Test
         operations << "effect:#{intent.sink}:#{options.fetch(:status)}"
         original_settle.call(intent, **options)
       end
-      original_mutate = state.method(:mutate_fingerprints)
-      state.define_singleton_method(:mutate_fingerprints) do |&mutation|
-        original_mutate.call do |fingerprints|
+      original_mutate = state.method(:mutate_fingerprints!)
+      state.define_singleton_method(:mutate_fingerprints!) do |**attributes, &mutation|
+        original_mutate.call(**attributes) do |fingerprints|
           previous = fingerprints.dig("fp1", "state")
           mutation.call(fingerprints)
           current = fingerprints.dig("fp1", "state")
@@ -288,11 +288,15 @@ class HivePatrolPrOpenerTest < Minitest::Test
           "effect:pull_request:intent",
           :create_pr,
           "effect:pull_request:committed",
+          "effect:state:intent",
           "mapping:reconciliation_pending",
+          "effect:state:committed",
           "effect:review_handoff:intent",
           :review_handoff,
           "effect:review_handoff:committed",
-          "mapping:open"
+          "effect:state:intent",
+          "mapping:open",
+          "effect:state:committed"
         ],
         operations
       )

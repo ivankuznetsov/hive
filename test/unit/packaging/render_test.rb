@@ -33,8 +33,8 @@ class PackagingRenderTest < Minitest::Test
     assert_includes out, 'depends_on "cosign"'
     assert_includes out,
                     'system bin/"hive", "refactor-patrol-migrate-installed"'
-    assert_includes out,
-                    "refactor-patrol-migrate-installed --all-users"
+    refute_match(/sudo .*refactor-patrol-migrate-installed/, out)
+    assert_includes out, "must never be run"
   end
 
   def test_renders_pkgbuild_with_version_and_sha

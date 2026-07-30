@@ -107,11 +107,34 @@ class UpdateCommandTest < Minitest::Test
       env: { "PATH" => "/bin" },
       runner: ->(_argv) { calls << :package_replace; true },
       candidate_binary_path: -> { "/bin/true" },
-      candidate_runner: ->(argv) { calls << argv; true }
+      candidate_runner: ->(argv) { calls << argv; true },
+      effective_uid: -> { 1_001 }
     ).call
 
     assert_equal [ :quiesce ], lifecycle.calls
     assert_equal [ :package_replace, [ "/bin/true", "refactor-patrol-migrate-installed" ] ], calls
+  end
+
+  def test_root_bash_update_repeats_install_wide_sweep_and_retry_activation
+    calls = []
+    Hive::Commands::Update.new(
+      channel: "bash",
+      daemon_lifecycle: FakeDaemonLifecycle.new,
+      env: { "PATH" => "/bin" },
+      runner: ->(_argv) { true },
+      candidate_binary_path: -> { "/bin/true" },
+      candidate_runner: ->(argv) { calls << argv; true },
+      effective_uid: -> { 0 }
+    ).call
+
+    assert_equal [
+      [
+        "/bin/true",
+        "refactor-patrol-migrate-installed",
+        "--all-users",
+        "--ensure-retry-service"
+      ]
+    ], calls
   end
 
   def test_update_orders_running_daemon_quiesce_package_replacement_candidate_sweep_then_restart

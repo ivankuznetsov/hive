@@ -32,6 +32,25 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
     end
   end
 
+  # Catalog ownership tests use synthetic UIDs while their temporary
+  # directories necessarily belong to the test process. Preserve production
+  # path-identity semantics without weakening the production ownership check.
+  class CurrentUserRootBindings
+    def initialize
+      @delegate = Migration::ProfileRootBindings.new
+    end
+
+    def bind(home:, environment:, uid:)
+      @delegate.bind(
+        home: home, environment: environment, uid: Process.uid
+      )
+    end
+
+    def key(binding)
+      @delegate.key(binding)
+    end
+  end
+
   FakeStat = Data.define(:dev, :ino, :uid, :gid, :mode, :size) do
     def file? = true
   end
@@ -311,7 +330,7 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
           digest: "a" * 64
         )
       end
-      catalog = Migration::Catalog.new(
+      catalog = migration_catalog(
         accounts: -> { accounts },
         inventory: inventory
       )
@@ -343,18 +362,77 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
         digest: nil
       )
     end
-    catalog = Migration::Catalog.new(
+    catalog = migration_catalog(
       inventory: inventory,
-      directory: ->(path) {
-        homes << path
-        false
-      }
+      probe: Migration::Catalog::PathProbe.new(
+        lstat: ->(path) {
+          homes << path
+          raise Errno::ENOENT, path
+        }
+      )
     )
 
     result = catalog.snapshot
 
     assert_empty result.profiles
     assert_includes homes, Etc.getpwuid(Process.uid).dir
+  end
+
+  def test_path_probe_distinguishes_missing_from_unsafe_or_unavailable
+    with_tmp_dir do |root|
+      directory = File.join(root, "directory")
+      link = File.join(root, "link")
+      fifo = File.join(root, "fifo")
+      FileUtils.mkdir_p(directory)
+      File.symlink(directory, link)
+      File.mkfifo(fifo)
+      probe = Migration::Catalog::PathProbe.new
+
+      assert_equal :present, probe.directory(directory).state
+      assert_equal :missing,
+                   probe.directory(File.join(root, "missing")).state
+      assert_equal :unavailable, probe.directory(link).state
+      assert_match(/unsafe link/, probe.directory(link).detail)
+      assert_equal :unavailable, probe.regular_file(fifo).state
+      assert_match(/unsafe fifo/, probe.regular_file(fifo).detail)
+
+      unavailable = Migration::Catalog::PathProbe.new(
+        lstat: ->(_path) { raise Errno::EACCES, "offline home" }
+      ).directory(directory)
+      assert_equal :unavailable, unavailable.state
+      assert_match(/EACCES/, unavailable.detail)
+    end
+  end
+
+  def test_bounded_nss_query_times_out_and_catalog_stays_partial
+    query = Migration::NssQuery.new(
+      timeout_sec: 0.05,
+      snapshot_script: "sleep 5"
+    )
+    error = assert_raises(Hive::ConfigError) { query.snapshot }
+    assert_match(/exceeded/, error.message)
+
+    inventory = Object.new
+    inventory.define_singleton_method(:read) do
+      Migration::Inventory::Result.new(
+        profiles: [],
+        issues: [],
+        closed: true,
+        path: "/var/lib/hive/installed-users.v1.json",
+        digest: "a" * 64
+      )
+    end
+    catalog = migration_catalog(
+      accounts: -> { raise Hive::ConfigError, "NSS offline" },
+      inventory: inventory
+    )
+
+    result = catalog.snapshot
+
+    assert_empty result.profiles
+    assert_equal "nss_catalog_unavailable", result.issues.first.kind
+    assert result.closed,
+           "inventory closure is retained but issues keep aggregate partial"
   end
 
   def test_inventory_accepts_only_stable_root_owned_exact_profiles
@@ -660,7 +738,7 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
           digest: "b" * 64
         )
       end
-      catalog = Migration::Catalog.new(
+      catalog = migration_catalog(
         accounts: -> {
           [ { name: "alice", uid: 1_001, gid: 2_001, dir: home } ]
         },
@@ -695,7 +773,7 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
           digest: "c" * 64
         )
       end
-      catalog = Migration::Catalog.new(
+      catalog = migration_catalog(
         accounts: -> {
           [
             { name: "alice", uid: 1_001, gid: 2_001, dir: alice },
@@ -720,9 +798,9 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
       alice_home = File.join(root, "alice")
       bob_home = File.join(root, "bob")
       shared = File.join(root, "shared-hive")
-      alias_path = File.join(root, "shared-hive-alias")
+      shared_alias = File.join(root, "shared-hive-alias")
       FileUtils.mkdir_p([ alice_home, bob_home, shared ])
-      File.symlink(shared, alias_path)
+      File.symlink(shared, shared_alias)
       inventory = Object.new
       inventory.define_singleton_method(:read) do
         Migration::Inventory::Result.new(
@@ -737,7 +815,7 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
               username: "bob",
               uid: 1_002,
               home: bob_home,
-              environment: { "HIVE_HOME" => alias_path }
+              environment: { "HIVE_HOME" => shared_alias }
             }
           ],
           issues: [],
@@ -746,7 +824,7 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
           digest: "e" * 64
         )
       end
-      catalog = Migration::Catalog.new(
+      catalog = migration_catalog(
         accounts: -> {
           [
             {
@@ -771,8 +849,122 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
         issue.kind == "shared_profile_root"
       end)
       assert(result.issues.all? do |issue|
-        issue.detail.include?(File.realpath(shared))
+        issue.detail.include?("assigned to multiple OS users")
       end)
+    end
+  end
+
+  def test_catalog_rejects_cross_kind_root_convergence_between_users
+    with_tmp_dir do |root|
+      alice_home = File.join(root, "alice")
+      bob_home = File.join(root, "bob")
+      shared_parent = File.join(root, "shared")
+      FileUtils.mkdir_p([
+        alice_home,
+        bob_home,
+        File.join(shared_parent, "hive")
+      ])
+      inventory = Object.new
+      inventory.define_singleton_method(:read) do
+        Migration::Inventory::Result.new(
+          profiles: [
+            {
+              username: "alice",
+              uid: 1_001,
+              home: alice_home,
+              environment: {
+                "XDG_CONFIG_HOME" => shared_parent,
+                "XDG_STATE_HOME" => File.join(alice_home, "state")
+              }
+            },
+            {
+              username: "bob",
+              uid: 1_002,
+              home: bob_home,
+              environment: {
+                "XDG_CONFIG_HOME" => File.join(bob_home, "config"),
+                "XDG_STATE_HOME" => shared_parent
+              }
+            }
+          ],
+          issues: [],
+          closed: true,
+          path: "/var/lib/hive/installed-users.v1.json",
+          digest: "e" * 64
+        )
+      end
+      catalog = migration_catalog(
+        accounts: -> {
+          [
+            {
+              name: "alice", uid: 1_001, gid: 2_001,
+              dir: alice_home
+            },
+            {
+              name: "bob", uid: 1_002, gid: 2_002,
+              dir: bob_home
+            }
+          ]
+        },
+        inventory: inventory
+      )
+
+      result = catalog.snapshot
+
+      assert_empty result.profiles
+      assert_equal %w[alice bob],
+                   result.issues.map(&:username).uniq.sort
+      assert(result.issues.all? do |issue|
+        issue.kind == "shared_profile_root"
+      end)
+    end
+  end
+
+  def test_root_binding_rejects_inode_retarget_and_missing_root_appearance
+    with_tmp_dir do |root|
+      home = File.join(root, "home")
+      hive_home = File.join(home, "hive")
+      FileUtils.mkdir_p(hive_home)
+      binder = Migration::ProfileRootBindings.new
+      bindings = binder.bind(
+        home: home,
+        environment: { "HIVE_HOME" => hive_home },
+        uid: Process.uid
+      )
+      candidate = Migration::Profile.new(
+        username: "current",
+        uid: Process.uid,
+        gid: Process.gid,
+        home: home,
+        real_home: File.realpath(home),
+        environment: { "HIVE_HOME" => hive_home },
+        source: "root-inventory",
+        supplementary_gids: Process.groups.uniq.sort,
+        root_bindings: bindings
+      )
+      File.rename(hive_home, "#{hive_home}.old")
+      FileUtils.mkdir_p(hive_home)
+
+      error = assert_raises(Hive::ConfigError) do
+        binder.verify!(candidate)
+      end
+      assert_match(/identity changed/, error.message)
+
+      missing = File.join(home, "missing-hive")
+      bindings = binder.bind(
+        home: home,
+        environment: { "HIVE_HOME" => missing },
+        uid: Process.uid
+      )
+      candidate = candidate.with(
+        environment: { "HIVE_HOME" => missing },
+        root_bindings: bindings
+      )
+      FileUtils.mkdir_p(missing)
+      error = assert_raises(Hive::ConfigError) do
+        binder.verify!(candidate)
+      end
+      assert_match(/appeared after discovery/, error.message)
     end
   end
 
@@ -794,7 +986,7 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
           digest: "f" * 64
         )
       end
-      catalog = Migration::Catalog.new(
+      catalog = migration_catalog(
         accounts: -> {
           [
             { name: "broken", uid: "not-an-integer", gid: 2_000, dir: home },
@@ -802,11 +994,13 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
           ]
         },
         inventory: inventory,
-        directory: ->(path) {
-          raise Errno::EIO, path if path == home
+        probe: Migration::Catalog::PathProbe.new(
+          lstat: ->(path) {
+            raise Errno::EIO, path if path == home
 
-          File.directory?(path)
-        }
+            File.lstat(path)
+          }
+        )
       )
 
       result = catalog.snapshot
@@ -836,15 +1030,20 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
         )
       end
       calls = 0
-      catalog = Migration::Catalog.new(
+      catalog = migration_catalog(
         accounts: -> {
           [ { name: "alice", uid: 1_001, gid: 2_001, dir: home } ]
         },
         inventory: inventory,
-        directory: lambda do |_path|
-          calls += 1
-          calls == 1
-        end
+        probe: Migration::Catalog::PathProbe.new(
+          lstat: lambda do |path|
+            return File.lstat(path) unless path == home
+
+            calls += 1
+            return File.lstat(path) if calls == 1
+            raise Errno::EACCES, path
+          end
+        )
       )
 
       result = catalog.snapshot
@@ -879,7 +1078,7 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
           digest: "b" * 64
         )
       end
-      catalog = Migration::Catalog.new(
+      catalog = migration_catalog(
         accounts: -> {
           [ { name: "alice", uid: 1_001, gid: 2_001, dir: home } ]
         },
@@ -913,7 +1112,7 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
           digest: "c" * 64
         )
       end
-      catalog = Migration::Catalog.new(
+      catalog = migration_catalog(
         accounts: -> {
           [ { name: "alice", uid: 1_001, gid: 2_001, dir: home } ]
         },
@@ -1112,8 +1311,8 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
       current_uid = nil
       current_gid = nil
       drop = Migration::IdentityDrop.new(
-        initgroups: ->(username, gid) {
-          calls << [ :initgroups, username, gid ]
+        groups_setter: ->(groups) {
+          calls << [ :groups, groups ]
         },
         gid_drop: ->(gid) {
           calls << [ :gid, gid ]
@@ -1127,11 +1326,14 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
         effective_gid: -> { current_gid },
         groups: -> { [ 2_001, 2_100 ] }
       )
-      candidate = profile("alice", 1_001, home, gid: 2_001)
+      candidate = profile(
+        "alice", 1_001, home, gid: 2_001,
+        supplementary_gids: [ 2_001, 2_100 ]
+      )
 
       assert drop.call(candidate)
       assert_equal [
-        [ :initgroups, "alice", 2_001 ],
+        [ :groups, [ 2_001, 2_100 ] ],
         [ :gid, 2_001 ],
         [ :uid, 1_001 ]
       ], calls
@@ -1227,7 +1429,7 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
   def test_identity_drop_rejects_retained_root_group_or_identity_mismatch
     with_tmp_dir do |home|
       drop = Migration::IdentityDrop.new(
-        initgroups: ->(*) { },
+        groups_setter: ->(*) { },
         gid_drop: ->(*) { },
         uid_drop: ->(*) { },
         effective_uid: -> { 1_001 },
@@ -1437,6 +1639,39 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
     end
   end
 
+  def test_executor_deadline_covers_exit_after_capture_streams_close
+    with_tmp_dir do |root|
+      home = File.join(root, "home")
+      FileUtils.mkdir_p(home)
+      candidate = profile(
+        "alice", Process.uid, home, gid: Process.gid
+      )
+      binary = write_executable(
+        root, "hive-closes-capture-then-hangs",
+        "STDOUT.close\nSTDERR.close\nsleep 5"
+      )
+      executor = Migration::Executor.new(
+        binary: binary,
+        effective_uid: -> { 0 },
+        identity_drop: IDENTITY_OK,
+        identity_validator: IDENTITY_OK,
+        timeout_sec: 0.05
+      )
+
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      error = assert_raises(Hive::ConfigError) do
+        executor.call(candidate)
+      end
+
+      assert_match(/exceeded 0.05 seconds/, error.message)
+      assert_operator(
+        Process.clock_gettime(Process::CLOCK_MONOTONIC) - started,
+        :<,
+        1
+      )
+    end
+  end
+
   def test_executor_cleanup_tolerates_disappeared_processes_and_streams
     executor = Migration::Executor.new(
       binary: File.expand_path("../../../bin/hive", __dir__),
@@ -1549,6 +1784,13 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
 
   private
 
+  def migration_catalog(**options)
+    Migration::Catalog.new(
+      root_bindings: CurrentUserRootBindings.new,
+      **options
+    )
+  end
+
   def snapshot(profiles, closed:)
     Migration::Snapshot.new(
       profiles: profiles,
@@ -1559,15 +1801,26 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
     )
   end
 
-  def profile(username, uid, home, gid: uid, environment: {})
+  def profile(username, uid, home, gid: uid, environment: {},
+              supplementary_gids: [ gid ])
+    bindings = Migration::ProfileRootBindings.new.bind(
+      home: home,
+      environment: environment,
+      uid: Process.uid
+    )
     Migration::Profile.new(
       username: username,
       uid: uid,
       gid: gid,
       home: home,
       real_home: File.realpath(home),
-      environment: environment,
-      source: environment.empty? ? "default-home" : "root-inventory"
+      environment:
+        Migration::ProfileRoots.canonical_environment(
+          environment, bindings
+        ),
+      source: environment.empty? ? "default-home" : "root-inventory",
+      supplementary_gids: supplementary_gids.sort.freeze,
+      root_bindings: bindings
     )
   end
 

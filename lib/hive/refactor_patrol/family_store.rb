@@ -268,12 +268,11 @@ module Hive
           nil
         end
         @job_store = job_store
-        @job_store_factory = lambda do |migrate:|
+        @job_store_factory = lambda do
           JobStore.new(
             @project_root,
             hive_state_path: @hive_state_path,
-            project: project,
-            migrate: migrate
+            project: project
           )
         end
       end
@@ -415,7 +414,7 @@ module Hive
       end
 
       def authoritative_entries(dry_run:)
-        job_store(migrate: !dry_run).jobs.flat_map do |aggregate|
+        job_store.jobs.flat_map do |aggregate|
           aggregate.fetch("actions").filter_map do |action|
             next unless action.fetch("kind") == "issue" && action.key?("family_id")
 
@@ -447,14 +446,8 @@ module Hive
         raise InconsistentRecord, "cannot rebuild architecture families from jobs (#{e.message})"
       end
 
-      def job_store(migrate:)
-        return @job_store if @job_store
-
-        if migrate
-          @job_store = @job_store_factory.call(migrate: true)
-        else
-          @readonly_job_store ||= @job_store_factory.call(migrate: false)
-        end
+      def job_store
+        @job_store ||= @job_store_factory.call
       end
 
       def authoritative_record(entries)

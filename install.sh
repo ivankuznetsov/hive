@@ -18,7 +18,9 @@ is signed with cosign keyless attestation against this repo's release
 workflow; verification always fails closed when cosign is unavailable.
 
 After install the \`hive\` and \`hv\` executables are symlinked into
-\${XDG_BIN_HOME:-~/.local/bin}. The installer also runs \`hive daemon install\`
+\${XDG_BIN_HOME:-~/.local/bin}; a root install defaults to
+\`/usr/local/bin\` with its managed gems under \`/usr/local/share/hive\`.
+The installer also runs \`hive daemon install\`
 to write and enable the per-user daemon autostart unit when the host supports
 it. The gem and its runtime dependencies (bubbletea, lipgloss, thor,
 telegram-bot-ruby) live under \${HIVE_PREFIX:-~/.local/share}/hive/gems so an
@@ -305,19 +307,19 @@ job_schema_migration_setup() {
   err="${tmpdir}/job-schema-migration.err"
   migration_args=(refactor-patrol-migrate-installed)
   if [[ "$(id -u)" -eq 0 ]]; then
-    migration_args+=(--all-users)
+    migration_args+=(--all-users --ensure-retry-service)
     migration_scope="all-users"
   fi
 
   if "$link_path" "${migration_args[@]}" >"$out" 2>"$err"; then
     log "registered-project JobStore migration completed (${migration_scope})"
     if [[ "$migration_scope" == "current-user" ]]; then
-      warn "shared installation coverage is not complete; an administrator must run '${link_path} refactor-patrol-migrate-installed --all-users'"
+      warn "shared installation coverage is not complete; use a root-owned system package to run the install-wide migration (never elevate this user-prefix Hive)"
     fi
     return 0
   else
     rc=$?
-    warn "registered-project JobStore migration did not complete (exit ${rc}); inspect the emitted receipt and retry with administrator authority for shared installations"
+    warn "registered-project JobStore migration did not complete (exit ${rc}); inspect the emitted receipt and use a root-owned system package for shared installations"
     if [[ -s "$err" ]]; then
       sed 's/^/hive install: migration stderr: /' "$err" >&2
     fi
@@ -414,10 +416,20 @@ installer_preflight
 version="${VERSION:-$(latest_version)}"
 [[ -n "$version" ]] || die "could not resolve a hive release version"
 
-data_base="${PREFIX:-${XDG_DATA_HOME:-${HOME}/.local/share}}"
+if [[ "$(id -u)" -eq 0 && -z "$PREFIX" ]]; then
+  data_base="${XDG_DATA_HOME:-/usr/local/share}"
+  bin_home="${XDG_BIN_HOME:-/usr/local/bin}"
+else
+  data_base="${PREFIX:-${XDG_DATA_HOME:-${HOME}/.local/share}}"
+  bin_home="${XDG_BIN_HOME:-${HOME}/.local/bin}"
+fi
+if [[ "$(id -u)" -eq 0 ]]; then
+  # Every discovered account must be able to traverse and load the candidate
+  # runtime after the coordinator drops privileges.
+  umask 022
+fi
 data_home="${data_base%/}/hive"
 gem_home="${data_home}/gems"
-bin_home="${XDG_BIN_HOME:-${HOME}/.local/bin}"
 gem_file="hive-cli-${version#v}.gem"
 release_base="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download/${version}"
 gem_url="${release_base}/${gem_file}"
@@ -622,6 +634,11 @@ staged_hv=""
 [[ -x "$hv_installed_bin" ]] || die "installed hv wrapper is not executable at ${hv_installed_bin}"
 bash -n "$installed_bin" "$hv_installed_bin"
 grep -Fq "hive-managed: install-wrapper/v1" "$installed_bin"
+
+if [[ "$(id -u)" -eq 0 ]]; then
+  chmod -R go-w,a+rX "$gem_home"
+  chmod 0755 "$installed_shim" "$installed_bin" "$hv_installed_bin"
+fi
 launcher_rollback_armed=0
 
 install_qmd

@@ -349,8 +349,8 @@ module Hive
         end
       end
 
-      def initialize(project_root, hive_state_path: nil, migrate: true,
-                     project: nil, ownership: nil, writer_fence: nil)
+      def initialize(project_root, hive_state_path: nil, project: nil,
+                     ownership: nil, writer_fence: nil)
         @project_root = File.expand_path(project_root)
         @hive_state_path = File.expand_path(hive_state_path || ".hive-state", @project_root)
         @root = self.class.root_for(@project_root, hive_state_path: @hive_state_path)
@@ -368,10 +368,8 @@ module Hive
           validator: @record_validator
         }
         @schema_options[:writer_fence] = writer_fence if writer_fence
+        assert_runtime_schema_admission!
         @schema_namespace_ready = false
-        self.class.migrate_schema!(
-          @project_root, **@schema_options
-        ) if migrate
         @claim_transitions = ClaimTransitions.new(inconsistent_record: InconsistentRecord)
         @job_indexes = JobIndexes.new(
           schema_version: SCHEMA_VERSION,
@@ -2381,6 +2379,32 @@ module Hive
         )
         @job_files.prepare!
         @schema_namespace_ready = true
+      end
+
+      # Released v2 conversion is owned exclusively by the explicit
+      # installation migration command. Runtime readers and writers never
+      # convert legacy state as a constructor side effect.
+      def assert_runtime_schema_admission!
+        return true unless self.class.schema_state_present?(
+          @project_root, hive_state_path: @hive_state_path
+        )
+
+        status = self.class.schema_admission_status(
+          @project_root,
+          hive_state_path: @hive_state_path,
+          project: @schema_options[:project]
+        ).fetch("status")
+        return true if %w[absent current].include?(status)
+
+        raise InconsistentRecord.new(
+          "released JobStore migration is required before v3 runtime admission",
+          path: @hive_state_path
+        )
+      rescue KeyError
+        raise InconsistentRecord.new(
+          "JobStore schema admission status is malformed",
+          path: @hive_state_path
+        )
       end
 
       def json_copy(value)

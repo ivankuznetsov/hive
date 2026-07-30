@@ -253,7 +253,8 @@ module Hive
       def initialize(dry_run: false, output: $stdout, runner: nil, env: ENV,
                      channel: nil, daemon_lifecycle: nil,
                      candidate_binary_path: Hive::InvokedBinary.method(:path),
-                     candidate_runner: nil)
+                     candidate_runner: nil,
+                     effective_uid: -> { Process.euid })
         @dry_run = dry_run
         @output = output
         @runner = runner || method(:run_command)
@@ -262,6 +263,7 @@ module Hive
         @daemon_lifecycle = daemon_lifecycle || DaemonLifecycle.new
         @candidate_binary_path = candidate_binary_path
         @candidate_runner = candidate_runner || method(:run_command)
+        @effective_uid = effective_uid
       end
 
       def call
@@ -284,7 +286,7 @@ module Hive
         daemon_was_running = @daemon_lifecycle.quiesce!
         begin
           invoke!(argv)
-          invoke_candidate_migration!
+          invoke_candidate_migration!(channel: channel)
         ensure
           @daemon_lifecycle.restart! if daemon_was_running
         end
@@ -334,16 +336,20 @@ module Hive
       # The candidate sweep must be a fresh post-package process. Calling the
       # command class in this updater would retain the released process image
       # and could convert JobStore state with old code.
-      def invoke_candidate_migration!
+      def invoke_candidate_migration!(channel: nil)
+        channel ||= @channel || Hive::InstallChannel.detect
         binary = @candidate_binary_path.call
         unless binary && File.file?(binary) && File.executable?(binary)
           raise Hive::UnavailableError,
                 "hive update: cannot run candidate migration; invoked Hive binary is unavailable"
         end
 
-        result = @candidate_runner.call([
-          binary, "refactor-patrol-migrate-installed"
-        ])
+        argv = [ binary, "refactor-patrol-migrate-installed" ]
+        if @effective_uid.call.zero?
+          argv << "--all-users"
+          argv << "--ensure-retry-service" if channel == "bash"
+        end
+        result = @candidate_runner.call(argv)
         return if command_succeeded?(result)
 
         raise Hive::Error, "hive update: candidate migration command failed"

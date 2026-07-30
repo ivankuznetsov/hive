@@ -3,7 +3,7 @@ title: hive migrate
 type: command
 source: lib/hive/commands/migrate.rb, lib/hive/stages.rb
 created: 2026-05-21
-updated: 2026-07-29
+updated: 2026-07-30
 tags: [command, migration, config, reviewers, stages, task-id, display-name, recovery]
 ---
 
@@ -78,17 +78,19 @@ project becomes a persisted failed/retryable row instead of being silently
 skipped. One failed user cannot block later users. AUR runs the all-user
 coordinator during package activation and enables
 `hive-job-schema-migration.timer` for hourly `--resume` retry, so completed
-profiles are not force-swept every hour. Root `install.sh` runs the all-user
-command once; non-root install.sh and Homebrew report current-user-only coverage
-and the required administrator command. First eligible use remains a safety
-fallback, never all-user completion evidence. `status`, `watch`,
+profiles are not force-swept every hour. Root `install.sh` installs the
+equivalent systemd timer or launchd LaunchDaemon before its all-user sweep;
+root bash updates ensure the same retry service. Non-root `install.sh` and
+Homebrew report current-user-only coverage and require a separately installed
+root-owned system Hive for machine-wide coverage. A user-prefix Hive must never
+be elevated. `status`, `watch`,
 `doctor`, findings inspection, dry runs, and other strict observation routes
 remain mutation-free.
 
 A newly registered or path-drifted project changes the registry digest and
-forces a new sweep without waiting for the normal hourly retry. First JobStore
-open retains the same one-off converter for otherwise dormant state, but
-normal readers accept only v3.
+forces a new sweep without waiting for the normal hourly retry. Normal CLI
+startup and every JobStore constructor accept only v3; dormant released-v2
+state is converted only by the explicit package-candidate command.
 
 ### Candidate user-profile and install-wide sweeps
 
@@ -96,14 +98,18 @@ normal readers accept only v3.
 # Current user profile
 hive refactor-patrol-migrate-installed
 
-# Every discovered/inventoried local Hive user (root only)
-sudo hive refactor-patrol-migrate-installed --all-users
+# Every discovered/inventoried local Hive user, using a root-owned system Hive
+/usr/local/bin/hive refactor-patrol-migrate-installed --all-users
 
 # Timer-style retry: skip unchanged, complete profiles until work is due
-sudo hive refactor-patrol-migrate-installed --all-users --resume
+/usr/local/bin/hive refactor-patrol-migrate-installed --all-users --resume
+
+# Install/repair the machine-owned hourly retry before sweeping
+/usr/local/bin/hive refactor-patrol-migrate-installed --all-users \
+  --ensure-retry-service
 ```
 
-The current-user form is the narrow child/fallback entrypoint. It first
+The current-user form is the narrow package-hook/child entrypoint. It first
 backfills immutable registry identities with
 `Config.ensure_project_identities!`, then runs
 `RegisteredProjectMigrationCoordinator` across the complete current registry.

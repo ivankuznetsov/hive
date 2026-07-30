@@ -18,6 +18,32 @@ class RefactorPatrolCandidateMigrationCommandTest < Minitest::Test
     end
   end
 
+  class FakeAuthority
+    attr_reader :calls
+
+    def initialize(candidate)
+      @candidate = candidate
+      @calls = 0
+    end
+
+    def authorize!
+      @calls += 1
+      @candidate
+    end
+  end
+
+  class FakeRetryService
+    attr_reader :candidates
+
+    def initialize
+      @candidates = []
+    end
+
+    def ensure!(candidate:)
+      @candidates << candidate
+    end
+  end
+
   def test_sweeps_the_current_registry_persists_and_prints_typed_results_for_custom_state_roots
     with_tmp_dir do |home|
       projects = %w[alpha beta].map do |name|
@@ -133,6 +159,44 @@ class RefactorPatrolCandidateMigrationCommandTest < Minitest::Test
     ).call
 
     assert_equal [ { force: false } ], aggregate.calls
+  end
+
+  def test_install_wide_retry_is_activated_before_the_sweep
+    candidate = Object.new
+    authority = FakeAuthority.new(candidate)
+    retry_service = FakeRetryService.new
+    aggregate = FakeMigration.new(
+      "schema" => "hive-installed-users-job-schema-migration",
+      "schema_version" => 1,
+      "status" => "complete",
+      "profiles" => []
+    )
+    command = Hive::Commands::RefactorPatrolCandidateMigration.new(
+      output: StringIO.new,
+      all_users: true,
+      all_users_migration: aggregate,
+      all_users_authority: authority,
+      ensure_retry_service: true,
+      retry_service_installer: retry_service
+    )
+
+    command.call
+
+    assert_equal 1, authority.calls
+    assert_equal [ candidate ], retry_service.candidates
+    assert_equal [ { force: true } ], aggregate.calls
+  end
+
+  def test_retry_service_flag_is_rejected_for_current_user_migration
+    command = Hive::Commands::RefactorPatrolCandidateMigration.new(
+      output: StringIO.new,
+      migration: FakeMigration.new({}),
+      ensure_retry_service: true
+    )
+
+    error = assert_raises(Hive::ConfigError) { command.call }
+
+    assert_match(/requires --all-users/, error.message)
   end
 
   private

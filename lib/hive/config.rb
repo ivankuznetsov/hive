@@ -1743,6 +1743,11 @@ module Hive
         entry["repository_identity"] = identity if identity
         real_path = realpath_or_nil(abs_path)
         entry["real_path"] = real_path if real_path
+        assert_registration_state_root_available!(
+          entry,
+          data["registered_projects"],
+          replacing: existing
+        )
         if existing
           existing_path = File.expand_path(existing.fetch("path"))
           if !replace_existing && existing_path != abs_path
@@ -1757,6 +1762,67 @@ module Hive
         end
       end
       entry
+    end
+
+    def assert_registration_state_root_available!(
+      candidate, registrations, replacing:
+    )
+      candidate_key =
+        canonical_registration_state_path(
+          candidate.fetch("hive_state_path")
+        )
+      candidate_project_id = candidate.fetch("project_id")
+      Array(registrations).each do |other|
+        next unless other.is_a?(Hash)
+        next if replacing && other.equal?(replacing)
+        next unless other["path"].is_a?(String)
+
+        other_state = other["hive_state_path"]
+        other_state = File.join(other.fetch("path"), ".hive-state") unless
+          other_state.is_a?(String) && !other_state.empty?
+        next unless
+          canonical_registration_state_path(other_state) == candidate_key
+
+        other_project_id = registry_project_id(other)
+        next if other_project_id == candidate_project_id
+
+        raise ProjectRegistrationCollision.new(
+          "project #{candidate.fetch('name').inspect} would share Hive " \
+          "state with #{other.fetch('name', 'another registration').inspect}",
+          name: candidate.fetch("name"),
+          existing_path: other.fetch("path")
+        )
+      rescue KeyError, ArgumentError
+        next
+      end
+    end
+
+    def canonical_registration_state_path(path)
+      candidate = File.expand_path(path)
+      suffix = []
+      loop do
+        begin
+          canonical = File.realpath(candidate)
+          stat = File.lstat(canonical)
+          unless stat.directory? || stat.file?
+            raise ConfigError,
+                  "cannot register a project through an unsafe Hive state path"
+          end
+          return File.join(canonical, *suffix)
+        rescue Errno::ENOENT, Errno::ENOTDIR
+          parent = File.dirname(candidate)
+          if parent == candidate
+            raise ConfigError,
+                  "cannot establish the Hive state path identity"
+          end
+          suffix.unshift(File.basename(candidate))
+          candidate = parent
+        end
+      end
+    rescue SystemCallError => error
+      raise ConfigError,
+            "cannot establish the Hive state path identity " \
+            "(#{error.class}: #{error.message})"
     end
 
     def valid_project_id?(value)

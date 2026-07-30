@@ -6,169 +6,17 @@ require "hive/refactor_patrol/registered_project_migration_status"
 
 module Hive
   module RefactorPatrol
-    # One exact user profile's JobStore generation upgrade boundary. Package
-    # activation invokes this through the privileged all-user coordinator;
-    # the ordinary CLI gate retains it only as a safety fallback.
+    # One exact user profile's explicit JobStore generation upgrade boundary.
+    # Package activation invokes this directly or through the privileged
+    # all-user coordinator. Normal CLI startup and JobStore construction never
+    # enter the converter.
     class InstalledJobSchemaMigration
       INTERNAL_ENV = "HIVE_JOB_SCHEMA_MIGRATION_INTERNAL".freeze
       ACTIVATION_LOCK = "refactor-patrol-job-v3.activation.lock".freeze
       RETRYABLE_STATUSES = %w[failed migration_required dry_run].freeze
-      OBSERVATION_COMMANDS = %w[status watch doctor findings version].freeze
-      EXEMPT_COMMANDS = %w[
-        help uninstall refactor-patrol-migrate-installed
-        refactor-patrol-schema-restore
-      ].freeze
-      EXEMPT_DAEMON_SUBCOMMANDS = %w[
-        stop status reload tail queue
-      ].freeze
-      EXEMPT_WEB_SUBCOMMANDS = %w[status].freeze
 
       attr_reader :last_payload, :last_registry_digest, :last_ran,
                   :last_daemon_was_running, :last_daemon_restarted
-
-      def self.eligible_argv?(argv, strict_no_write: false, env: ENV,
-                              commands: nil)
-        args = Array(argv).map(&:to_s)
-        return false if strict_no_write
-        return false if env[INTERNAL_ENV] == "1"
-        return false if env["HIVE_ATTEMPT_INTERNAL"] == "1"
-        return false if args.empty?
-        return false if args.any? { |arg| %w[--help -h].include?(arg) }
-
-        command = top_level_command(args)
-        return false if command.nil?
-        return false if EXEMPT_COMMANDS.include?(command)
-        return false if OBSERVATION_COMMANDS.include?(command)
-        return false if command == "update" && boolean_option?(args, "dry-run")
-
-        if command == "daemon"
-          subcommand = subcommand_after(args, "daemon")
-          return false if subcommand.nil?
-          return false if EXEMPT_DAEMON_SUBCOMMANDS.include?(subcommand)
-        end
-
-        if command == "refactor-patrol"
-          return false if boolean_option?(args, "list")
-          return false if option_present?(args, "show")
-        end
-        if command == "web"
-          subcommand = subcommand_after(args, "web")
-          return false if EXEMPT_WEB_SUBCOMMANDS.include?(subcommand)
-        end
-        valid_cli_invocation?(
-          args,
-          command: command,
-          commands: commands || command_catalog
-        )
-      end
-
-      def self.restart_daemon_after?(argv)
-        args = Array(argv).map(&:to_s)
-        top_level_command(args) != "daemon" ||
-          subcommand_after(args, "daemon") != "start"
-      end
-
-      def self.top_level_command(args)
-        Array(args).find do |arg|
-          !arg.start_with?("-") && arg != "true" && arg != "false"
-        end
-      end
-      private_class_method :top_level_command
-
-      def self.subcommand_after(args, command)
-        index = Array(args).index(command)
-        return nil unless index
-
-        Array(args).drop(index + 1).find { |arg| !arg.start_with?("-") }
-      end
-      private_class_method :subcommand_after
-
-      def self.option_present?(args, name)
-        Array(args).any? do |arg|
-          arg == "--#{name}" || arg.start_with?("--#{name}=")
-        end
-      end
-      private_class_method :option_present?
-
-      def self.boolean_option?(args, name)
-        value = nil
-        Array(args).each do |arg|
-          if %W[--no-#{name} --skip-#{name}].include?(arg)
-            value = false
-          elsif arg == "--#{name}"
-            value = true
-          elsif arg.start_with?("--#{name}=")
-            raw = arg.split("=", 2).last.to_s.downcase
-            value = !%w[false f no n 0].include?(raw)
-          end
-        end
-        value == true
-      end
-      private_class_method :boolean_option?
-
-      def self.command_catalog
-        require "hive/cli"
-        Hive::CLI.all_commands
-      end
-      private_class_method :command_catalog
-
-      def self.valid_cli_invocation?(args, command:, commands:)
-        definition = commands.values.find do |candidate|
-          candidate.usage.to_s.split.first == command
-        end
-        return false unless definition
-
-        required = definition.usage.to_s.split.drop(1).count do |token|
-          !token.start_with?("[") &&
-            token.match?(/\A[A-Z][A-Z0-9_]*(?:\.\.\.)?\z/)
-        end
-        positionals = invocation_positionals(
-          args,
-          command: command,
-          options:
-            definition.options.merge(Hive::CLI.class_options)
-        )
-        positionals && positionals.length >= required
-      rescue NoMethodError, TypeError
-        false
-      end
-      private_class_method :valid_cli_invocation?
-
-      def self.invocation_positionals(args, command:, options:)
-        command_index = Array(args).index(command)
-        return nil unless command_index
-
-        by_token = options.each_with_object({}) do |(name, option), index|
-          canonical = "--#{name.to_s.tr('_', '-')}"
-          index[canonical] = option
-          Array(option.aliases).each { |alias_name| index[alias_name] = option }
-        end
-        positionals = []
-        index = command_index + 1
-        options_enabled = true
-        while index < args.length
-          token = args.fetch(index)
-          if options_enabled && token == "--"
-            options_enabled = false
-          elsif options_enabled && token.start_with?("-")
-            option_name = token.split("=", 2).first
-            normalized = option_name.sub(/\A--(?:no|skip)-/, "--")
-            option = by_token[normalized]
-            return nil unless option
-
-            if !token.include?("=") && option.type != :boolean &&
-               !option_name.match?(/\A--(?:no|skip)-/)
-              index += 1
-              return nil if index >= args.length
-            end
-          else
-            positionals << token
-          end
-          index += 1
-        end
-        positionals
-      end
-      private_class_method :invocation_positionals
 
       def initialize(
         registry: -> {
@@ -252,13 +100,16 @@ module Hive
             @last_payload = payload
             succeeded = true
             if restart_required && restart_daemon
-              daemon_lifecycle.restart!
-              @last_daemon_restarted = true
-              payload = @status_store.write_daemon_restart_pending(
-                payload,
-                pending: false,
-                now: time
+              daemon_lifecycle.restart!(
+                ready: method(:daemon_restart_acknowledged?)
               )
+              @last_daemon_restarted = true
+              payload = @status_store.read
+              unless payload.is_a?(Hash) &&
+                     payload["daemon_restart_pending"] == false
+                raise Hive::ConfigError,
+                      "candidate daemon did not acknowledge JobStore migration readiness"
+              end
               @last_payload = payload
             end
             payload
@@ -272,6 +123,14 @@ module Hive
       end
 
       private
+
+      def daemon_restart_acknowledged?
+        payload = @status_store.read
+        payload.is_a?(Hash) &&
+          payload["daemon_restart_pending"] == false
+      rescue Hive::ConfigError, SystemCallError, IOError
+        false
+      end
 
       def build_coordinator(entries:, status_store:)
         require "hive/refactor_patrol/registered_project_migration_coordinator"
@@ -401,7 +260,7 @@ module Hive
           )
         end
 
-        def restart!
+        def restart!(ready: nil)
           binary = @binary_path.call
           unless binary && File.file?(binary) && File.executable?(binary)
             raise Hive::UnavailableError,
@@ -420,13 +279,14 @@ module Hive
 
           deadline = @clock.call + @restart_timeout_sec
           loop do
-            return true if @status_report.running_state[:running]
+            running = @status_report.running_state[:running]
+            return true if running && (!ready || ready.call)
             break if @clock.call >= deadline
 
             @sleeper.call(0.05)
           end
           raise Hive::Error,
-                "candidate daemon did not become running after JobStore migration"
+                "candidate daemon did not acknowledge readiness after JobStore migration"
         rescue Errno::ENOENT => error
           raise Hive::UnavailableError,
                 "cannot restart Hive daemon after JobStore migration " \

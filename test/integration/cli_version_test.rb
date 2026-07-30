@@ -15,11 +15,15 @@ class CliVersionTest < Minitest::Test
     assert_equal "#{Hive::VERSION}\n", out
   end
 
-  def test_first_eligible_cli_use_migrates_the_complete_registered_job_store
+  def test_normal_cli_use_leaves_v2_untouched_and_explicit_candidate_migrates_profile
     with_tmp_dir do |root|
       %w[user-a user-b].each_with_index do |user, user_index|
         home = File.join(root, user, "hive-home")
         FileUtils.mkdir_p(home)
+        released_bytes = File.binread(File.expand_path(
+          "../fixtures/refactor_patrol/released_v2_job.json",
+          __dir__
+        ))
         projects = %w[first second].map.with_index do |suffix, project_index|
           project = File.join(root, user, suffix, "project")
           state = File.join(root, user, suffix, "custom-state")
@@ -39,13 +43,7 @@ class CliVersionTest < Minitest::Test
             "job-released.json"
           )
           FileUtils.mkdir_p(File.dirname(legacy_job))
-          File.binwrite(
-            legacy_job,
-            File.binread(File.expand_path(
-              "../fixtures/refactor_patrol/released_v2_job.json",
-              __dir__
-            ))
-          )
+          File.binwrite(legacy_job, released_bytes)
           {
             "name" => "#{user}-#{suffix}",
             "path" => project,
@@ -76,6 +74,40 @@ class CliVersionTest < Minitest::Test
         assert status.success?, err
         assert_includes out, "hive: migrate found nothing to move"
         projects.each do |project|
+          legacy = File.join(
+            project.fetch("hive_state_path"),
+            "refactor_patrol", "v2", "jobs", "job-released.json"
+          )
+          current = Hive::RefactorPatrol::JobStore.root_for(
+            project.fetch("path"),
+            hive_state_path: project.fetch("hive_state_path")
+          )
+          assert_equal released_bytes, File.binread(legacy)
+          refute_path_exists File.join(current, "jobs", "job-released.json")
+        end
+        receipt = File.join(
+          home, "schema-migrations", "refactor-patrol-job-v3.json"
+        )
+        refute_path_exists receipt
+
+        explicit_out, explicit_err, explicit_status = Open3.capture3(
+          {
+            "HIVE_HOME" => home,
+            "HOME" => home,
+            "HIVE_BIN" => "/nonexistent/hive",
+            "PATH" => ENV.fetch("PATH", "")
+          },
+          RbConfig.ruby, "-Ilib", "bin/hive",
+          "refactor-patrol-migrate-installed"
+        )
+
+        assert explicit_status.success?, explicit_err
+        payload = JSON.parse(explicit_out)
+        assert_equal "hive-user-profile-job-schema-migration",
+                     payload.fetch("schema")
+        assert_equal %w[migrated migrated],
+                     payload.fetch("projects").map { |row| row.fetch("status") }
+        projects.each do |project|
           current = Hive::RefactorPatrol::JobStore.root_for(
             project.fetch("path"),
             hive_state_path: project.fetch("hive_state_path")
@@ -85,10 +117,7 @@ class CliVersionTest < Minitest::Test
           )))
           assert_equal 3, migrated.fetch("schema_version")
         end
-        assert File.file?(File.join(
-          home, "schema-migrations",
-          "refactor-patrol-job-v3.json"
-        ))
+        assert_path_exists receipt
       end
     end
   end

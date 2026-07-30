@@ -133,7 +133,6 @@ module Hive
             store = Hive::RefactorPatrol::JobStore.new(
               project_root,
               hive_state_path: hive_state_path,
-              migrate: false,
               project: entry
             )
             if store.recovery_active? ||

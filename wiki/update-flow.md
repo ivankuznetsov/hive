@@ -3,11 +3,11 @@ title: Update flow (daemon-driven version check + nudge)
 type: feature
 source: lib/hive/update_check.rb, lib/hive/update_check/state.rb, lib/hive/daemon/dispatcher.rb, lib/hive/bot/supervisor.rb, lib/hive/tui/bubble_model.rb
 created: 2026-05-27
-updated: 2026-07-29
+updated: 2026-07-30
 tags: [architecture, daemon, bot, tui, update, decision]
 ---
 
-**TLDR**: During the fast dev-release period the daemon checks the latest GitHub release on a throttled (~daily) cadence and, when the running version is behind, records a nudge (version + exact update command) that the TUI footer renders and the bot pushes once per version. Updates remain operator-invoked: `hive update` performs verified current-user daemon quiescence, package replacement, that user's exact-profile migration, and conditional restart. AUR separately performs and retries the privileged all-user sweep; Homebrew/non-root bash shared installs report the administrator command instead of treating first use as completion. The daemon never self-updates. See [[commands/update]] and [[decisions]].
+**TLDR**: During the fast dev-release period the daemon checks the latest GitHub release on a throttled (~daily) cadence and, when the running version is behind, records a nudge (version + exact update command) that the TUI footer renders and the bot pushes once per version. Updates remain operator-invoked: `hive update` performs verified daemon quiescence, package replacement, explicit candidate migration, and conditional restart. Non-root channels migrate only the invoking profile. Root updates migrate every discovered OS user's registered projects, and the root bash channel installs a durable hourly system retry; AUR supplies the equivalent package hook and timer. Homebrew and other user-prefix installs are never elevated. The daemon never self-updates, and normal JobStore startup never converts legacy schema. See [[commands/update]] and [[decisions]].
 
 ## Pieces
 

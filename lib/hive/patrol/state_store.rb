@@ -358,17 +358,78 @@ module Hive
         }
       end
 
-      # Fingerprint publication remains ordinary Patrol's product recovery
-      # state. Effect delivery metadata lives only in the occurrence journal.
-      def mutate_fingerprints
-        with_fingerprint_lock do
-          data = fingerprints
-          yield data
-          raw_write_fingerprints(data)
+      # Publication recovery is an authoritative product mutation, so callers
+      # must supply the live effect gateway and an exact reconciliation
+      # contract. Gateway admission happens before the fingerprint lock; no
+      # gateway-less fallback can regain this write authority.
+      def mutate_fingerprints!(
+        gateway:, fingerprint:, idempotency_key:, scope:, set:, deleted:,
+        capability: "filesystem_write"
+      )
+        content_digest = fingerprint_mapping_digest(
+          fingerprint, set: set, deleted: deleted
+        )
+        result = gateway.perform!(
+          sink: "state",
+          target: "fingerprints/#{fingerprint}",
+          idempotency_key: idempotency_key,
+          capability: capability,
+          scope: scope,
+          reconcile: lambda do |_intent|
+            reconcile_fingerprint_mapping(
+              fingerprint, set: set, deleted: deleted
+            )
+          end
+        ) do
+          with_fingerprint_lock do
+            data = fingerprints
+            yield data
+            raw_write_fingerprints(data)
+          end
+          { "content_digest" => content_digest }
         end
+        result
+      end
+
+      def reconcile_fingerprint_mapping(fingerprint, set:, deleted:)
+        entry = fingerprints[fingerprint.to_s]
+        return { "status" => "absent", "outcome" => {} } unless
+          entry.is_a?(Hash)
+
+        matches = set.all? do |key, value|
+          entry[key.to_s] == value
+        end && Array(deleted).all? do |key|
+          !entry.key?(key.to_s)
+        end
+        return {
+          "status" => "matched",
+          "outcome" => {
+            "content_digest" =>
+              fingerprint_mapping_digest(
+                fingerprint, set: set, deleted: deleted
+              )
+          }
+        } if matches
+
+        {
+          "status" => "ambiguous",
+          "outcome" => {}
+        }
       end
 
       private
+
+      def fingerprint_mapping_digest(fingerprint, set:, deleted:)
+        ::Digest::SHA256.hexdigest(
+          Hive::Modules::Migration::PatrolEvidence.canonical(
+            {
+              "deleted" => Array(deleted).map(&:to_s).sort,
+              "fingerprint" => fingerprint.to_s,
+              "set" => set.transform_keys(&:to_s)
+            }
+          )
+        )
+      end
 
       def effect_write(sink:, target:, value:, capability: "filesystem_write")
         return yield unless @state_effect_gateway

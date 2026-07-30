@@ -81,10 +81,7 @@ module Hive
         time = utc(now)
         entries = Array(entries || @registry.call)
         @last_registry_digest = self.class.registry_digest(entries)
-        seen = {}
-        results = entries.map do |entry|
-          migrate_entry(entry, seen, now: time)
-        end.freeze
+        results = resolve_entries(entries, now: time).freeze
         @last_status_payload = @status_store&.write(
           results,
           registry_digest: @last_registry_digest,
@@ -142,17 +139,42 @@ module Hive
 
       private
 
-      def migrate_entry(entry, seen, now:)
-        identity = entry_identity(entry)
-        state_key = self.class.path_key(identity.fetch(:hive_state_path))
-        duplicate = seen.key?(state_key)
-        seen[state_key] = true
-        return result_for(
-          identity,
-          status: :duplicate,
-          current_schema_version: nil,
-          retryable: false
-        ) if duplicate
+      def resolve_entries(entries, now:)
+        resolved = Array.new(entries.length)
+        identities = entries.each_with_index.filter_map do |entry, index|
+          identity = entry_identity(entry)
+          [ index, identity ]
+        rescue StandardError => error
+          resolved[index] = failure_result(
+            partial_identity(entry), error, now: now
+          )
+          nil
+        end
+        identities.group_by do |_index, identity|
+          identity.fetch(:state_path_key)
+        end.each_value do |members|
+          owner_keys = members.map do |_index, identity|
+            identity_key(identity)
+          end.uniq
+          if owner_keys.length > 1
+            members.each do |index, identity|
+              resolved[index] = conflicting_state_result(
+                identity, now: now
+              )
+            end
+            next
+          end
+
+          _first_index, first_identity = members.first
+          authoritative = migrate_identity(first_identity, now: now)
+          members.each do |index, identity|
+            resolved[index] = copy_result(authoritative, identity)
+          end
+        end
+        resolved
+      end
+
+      def migrate_identity(identity, now:)
         return result_for(
           identity,
           status: :dry_run,
@@ -204,17 +226,49 @@ module Hive
               "migration automatically" : nil
         )
       rescue StandardError => error
-        failed_identity = identity || partial_identity(entry)
-        failed_snapshot_id = snapshot_id_after_failure(failed_identity)
+        failure_result(identity, error, now: now)
+      end
+
+      def failure_result(identity, error, now:)
+        failed_snapshot_id = snapshot_id_after_failure(identity)
         result_for(
-          failed_identity,
+          identity,
           status: :failed,
           current_schema_version: nil,
           snapshot_id: failed_snapshot_id,
           retryable: true,
           next_retry_at: timestamp(now + @retry_interval),
-          remediation: remediation_for(error, failed_identity),
+          remediation: remediation_for(error, identity),
           error: "#{error.class}: #{error.message}"
+        )
+      end
+
+      def conflicting_state_result(identity, now:)
+        result_for(
+          identity,
+          status: :failed,
+          current_schema_version: nil,
+          retryable: true,
+          next_retry_at: timestamp(now + @retry_interval),
+          remediation:
+            "remove or re-register conflicting project identities that share " \
+            "this Hive state path; Hive retries automatically",
+          error:
+            "Hive::ConfigError: multiple registered project identities share " \
+            "one Hive state path"
+        )
+      end
+
+      def copy_result(result, identity)
+        result_for(
+          identity,
+          status: result.status,
+          current_schema_version: result.current_schema_version,
+          snapshot_id: result.snapshot_id,
+          retryable: result.retryable,
+          next_retry_at: result.next_retry_at,
+          remediation: result.remediation,
+          error: result.error
         )
       end
 
@@ -246,6 +300,7 @@ module Hive
           path: path,
           real_path: current_real_path,
           hive_state_path: hive_state_path,
+          state_path_key: strict_path_key(hive_state_path),
           entry: entry
         }.freeze
       end
@@ -303,6 +358,27 @@ module Hive
           remediation: remediation,
           error: error
         )
+      end
+
+      def strict_path_key(path)
+        candidate = File.expand_path(path)
+        suffix = []
+        loop do
+          resolved = File.realpath(candidate)
+          return File.join(resolved, *suffix)
+        rescue Errno::ENOENT, Errno::ENOTDIR
+          parent = File.dirname(candidate)
+          if parent == candidate
+            raise Hive::ConfigError,
+                  "registered project state path identity is unresolved"
+          end
+          suffix.unshift(File.basename(candidate))
+          candidate = parent
+        end
+      rescue SystemCallError => error
+        raise Hive::ConfigError,
+              "registered project state path identity is unavailable " \
+              "(#{error.class}: #{error.message})"
       end
 
       def migrate_project(identity, ownership:)

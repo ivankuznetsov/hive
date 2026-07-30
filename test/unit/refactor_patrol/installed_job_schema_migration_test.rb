@@ -1,5 +1,4 @@
 require "test_helper"
-require "hive/cli"
 require "hive/refactor_patrol/installed_job_schema_migration"
 require "hive/refactor_patrol/installed_users_job_schema_migration"
 
@@ -58,6 +57,11 @@ class HiveRefactorPatrolInstalledJobSchemaMigrationTest < Minitest::Test
       @running = running
       @restart_errors = Array(restart_errors)
       @calls = []
+      @restart_acknowledger = nil
+    end
+
+    def acknowledge_restart_with(&block)
+      @restart_acknowledger = block
     end
 
     def quiesce!
@@ -67,12 +71,17 @@ class HiveRefactorPatrolInstalledJobSchemaMigrationTest < Minitest::Test
       was_running
     end
 
-    def restart!
+    def restart!(ready: nil)
       @calls << :restart
       error = @restart_errors.shift
       raise error if error
 
       @running = true
+      @restart_acknowledger&.call
+      if ready && !ready.call
+        raise Hive::Error,
+              "candidate daemon did not acknowledge readiness after JobStore migration"
+      end
       true
     end
   end
@@ -90,30 +99,15 @@ class HiveRefactorPatrolInstalledJobSchemaMigrationTest < Minitest::Test
     end
   end
 
-  def test_cli_gate_preserves_observation_restore_and_internal_routes
-    refute Migration.eligible_argv?([])
-    refute Migration.eligible_argv?([ "status", "--json" ])
-    refute Migration.eligible_argv?([ "refactor-patrol", "hive", "--list" ])
-    refute Migration.eligible_argv?([ "refactor-patrol", "hive", "--show", "job-1" ])
-    refute Migration.eligible_argv?([ "daemon", "status", "--json" ])
-    refute Migration.eligible_argv?([ "web", "status", "--json" ])
-    refute Migration.eligible_argv?([ "connect", "--json" ])
-    refute Migration.eligible_argv?([ "patrol" ])
-    refute Migration.eligible_argv?([ "refactor-patrol", "--json" ])
-    refute Migration.eligible_argv?([ "banana" ])
-    refute Migration.eligible_argv?([ "update", "--dry-run" ])
-    refute Migration.eligible_argv?([ "run", "task" ], strict_no_write: true)
-    refute Migration.eligible_argv?(
-      [ "run", "task" ], env: { Migration::INTERNAL_ENV => "1" }
+  def test_normal_cli_startup_has_no_schema_conversion_gate
+    source = File.binread(
+      File.expand_path("../../../bin/hive", __dir__)
     )
-    refute Migration.eligible_argv?(
-      [ "run", "task" ], env: { "HIVE_ATTEMPT_INTERNAL" => "1" }
-    )
-    assert Migration.eligible_argv?([ "run", "task" ])
-    assert Migration.eligible_argv?([ "--json", "daemon", "start", "--detach" ])
-    assert Migration.eligible_argv?([ "migrate", "/shared/project" ])
-    refute Migration.restart_daemon_after?([ "daemon", "start", "--detach" ])
-    assert Migration.restart_daemon_after?([ "run", "task" ])
+
+    refute_respond_to Migration, :eligible_argv?
+    refute_respond_to Migration, :restart_daemon_after?
+    refute_includes source, "InstalledJobSchemaMigration"
+    refute_includes source, "migration held"
   end
 
   def test_current_registry_digest_skips_conversion_and_daemon_fence
@@ -339,6 +333,53 @@ class HiveRefactorPatrolInstalledJobSchemaMigrationTest < Minitest::Test
     end
   end
 
+  def test_visible_candidate_pid_does_not_clear_restart_before_daemon_ack
+    with_tmp_dir do |root|
+      entries = [ { "name" => "shared", "path" => "/srv/shared" } ]
+      digest = MigrationStatus.registry_digest(entries)
+      status_store = FakeStatusStore.new
+      lifecycle = FakeLifecycle.new(running: true)
+      coordinator = FakeCoordinator.new(
+        status_store: status_store,
+        payload: status_payload(digest: digest, projects: [])
+      )
+      migration = Migration.new(
+        registry: -> { entries },
+        identity_ensurer: -> { nil },
+        status_store: status_store,
+        coordinator_factory: ->(**) { coordinator },
+        daemon_lifecycle: lifecycle,
+        activation_directory: Hive::ManagedDirectory.new(
+          root: File.join(root, "schema-migrations"),
+          label: "test installation migration"
+        )
+      )
+
+      error = assert_raises(Hive::Error) do
+        migration.call(now: "2026-07-29T12:00:00Z")
+      end
+
+      assert_match(/did not acknowledge readiness/, error.message)
+      assert_equal true,
+                   status_store.payload.fetch("daemon_restart_pending")
+      assert_equal [ :quiesce, :restart ], lifecycle.calls
+      refute migration.last_daemon_restarted
+
+      lifecycle.acknowledge_restart_with do
+        status_store.write_daemon_restart_pending(
+          status_store.read,
+          pending: false,
+          now: Time.utc(2026, 7, 29, 12, 1)
+        )
+      end
+      payload = migration.call(now: "2026-07-29T12:01:00Z")
+
+      assert_equal false, payload.fetch("daemon_restart_pending")
+      assert_equal 1, coordinator.runs.length,
+                   "readiness recovery must not reconvert current projects"
+    end
+  end
+
   def test_daemon_lifecycle_fences_released_process_tree_and_restarts_candidate
     with_tmp_dir do |root|
       binary = File.join(root, "hive")
@@ -458,7 +499,14 @@ class HiveRefactorPatrolInstalledJobSchemaMigrationTest < Minitest::Test
           home: root,
           real_home: File.realpath(root),
           environment: { "HIVE_HOME" => installation.fetch(:home) },
-          source: "root-inventory"
+          source: "root-inventory",
+          supplementary_gids: [ 2_001 + index ],
+          root_bindings:
+            AllUsersMigration::ProfileRootBindings.new.bind(
+              home: root,
+              environment: { "HIVE_HOME" => installation.fetch(:home) },
+              uid: Process.uid
+            )
         )
       end
       executor = Object.new
@@ -524,15 +572,6 @@ class HiveRefactorPatrolInstalledJobSchemaMigrationTest < Minitest::Test
         end
       end
     end
-  end
-
-  def test_cli_gate_rejects_a_malformed_command_definition
-    definition = Struct.new(:usage, :options).new("run TASK", nil)
-
-    refute Migration.eligible_argv?(
-      [ "run", "task" ],
-      commands: { "run" => definition }
-    )
   end
 
   def test_missing_or_unreadable_status_forces_a_fresh_sweep
@@ -783,7 +822,7 @@ class HiveRefactorPatrolInstalledJobSchemaMigrationTest < Minitest::Test
       restart_timeout_sec: 1
     )
     error = assert_raises(Hive::Error) { timed_out.restart! }
-    assert_match(/did not become running/, error.message)
+    assert_match(/did not acknowledge readiness/, error.message)
     assert_equal [ 0.05 ], sleeps
 
     unavailable = Migration::DaemonLifecycle.new(
@@ -816,6 +855,14 @@ class HiveRefactorPatrolInstalledJobSchemaMigrationTest < Minitest::Test
 
   def build_migration(root:, entries:, status_store:, lifecycle:,
                       coordinator_factory:, identity_ensurer: -> { nil })
+    lifecycle.acknowledge_restart_with do
+      payload = status_store.read
+      if payload
+        status_store.write_daemon_restart_pending(
+          payload, pending: false, now: Time.utc(2026, 7, 29, 12)
+        )
+      end
+    end if lifecycle.respond_to?(:acknowledge_restart_with)
     Migration.new(
       registry: -> { entries },
       identity_ensurer: identity_ensurer,

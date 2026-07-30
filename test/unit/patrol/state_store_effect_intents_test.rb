@@ -255,6 +255,79 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
     end
   end
 
+  def test_fingerprint_mutation_requires_gateway_admission_before_lock
+    with_tmp_dir do |root|
+      store = Hive::Patrol::StateStore.new(root)
+      lock_entered = false
+      store.define_singleton_method(:with_fingerprint_lock) do |**|
+        lock_entered = true
+        raise "fingerprint lock must remain unreachable"
+      end
+      denied = Object.new
+      denied.define_singleton_method(:perform!) do |**|
+        raise Hive::Patrol::EffectGateway::Denied.new(
+          "owner changed", nil
+        )
+      end
+
+      error = assert_raises(Hive::Patrol::EffectGateway::Denied) do
+        store.mutate_fingerprints!(
+          gateway: denied,
+          fingerprint: "fp-1",
+          idempotency_key: "fp-1:publish",
+          scope: { "fingerprint" => "fp-1" },
+          set: { "state" => "open" },
+          deleted: []
+        ) { flunk("mutation must not run") }
+      end
+
+      assert_match(/owner changed/, error.message)
+      refute lock_entered
+      refute_path_exists File.join(store.root, "fingerprints.lock")
+    end
+  end
+
+  def test_fingerprint_mutation_has_an_exact_reconciliation_contract
+    with_tmp_dir do |root|
+      store = Hive::Patrol::StateStore.new(root)
+      store.ensure!
+      gateway = Object.new
+      captured = nil
+      gateway.define_singleton_method(:perform!) do |**attributes, &effect|
+        captured = attributes.fetch(:reconcile)
+        effect.call
+      end
+      expected = {
+        "state" => "open",
+        "branch" => "patrol/fp-1"
+      }
+
+      outcome = store.mutate_fingerprints!(
+        gateway: gateway,
+        fingerprint: "fp-1",
+        idempotency_key: "fp-1:publish",
+        scope: { "fingerprint" => "fp-1" },
+        set: expected,
+        deleted: [ "publication_receipt" ]
+      ) do |fingerprints|
+        fingerprints["fp-1"] = expected.dup
+      end
+
+      assert_match(/\A[0-9a-f]{64}\z/,
+                   outcome.fetch("content_digest"))
+      matched = captured.call(nil)
+      assert_equal "matched", matched.fetch("status")
+      assert_equal outcome, matched.fetch("outcome")
+
+      store.send(:with_fingerprint_lock) do
+        rows = store.fingerprints
+        rows.fetch("fp-1")["state"] = "closed"
+        store.send(:raw_write_fingerprints, rows)
+      end
+      assert_equal "ambiguous", captured.call(nil).fetch("status")
+    end
+  end
+
   def test_attempt_reconciliation_distinguishes_absent_ambiguous_and_exact_match
     with_tmp_dir do |root|
       store = Hive::Patrol::StateStore.new(root)
@@ -359,8 +432,19 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
         store.send(:effect_object, { "value" => Float::NAN })
       end
       FileUtils.mkdir_p(File.join(store.root, "fingerprints.lock"))
+      gateway = Object.new
+      gateway.define_singleton_method(:perform!) do |**_attributes, &effect|
+        effect.call
+      end
       lock_error = assert_raises(Hive::ConfigError) do
-        store.mutate_fingerprints { |_data| }
+        store.mutate_fingerprints!(
+          gateway: gateway,
+          fingerprint: "fingerprint-1",
+          idempotency_key: "mapping-1",
+          scope: {},
+          set: { "state" => "open" },
+          deleted: []
+        ) { |_data| }
       end
 
       assert_equal "patrol effect recovery state is malformed", non_object.message

@@ -1149,7 +1149,7 @@ module Hive
                 "daemon will retry the registered project automatically"
         end
         query = Hive::RefactorPatrol::JobQuery.new(
-          job_store_for(entry, project_root, migrate: false)
+          job_store_for(entry, project_root)
         )
         payload = if @list_jobs
           query.list_envelope(
@@ -1205,8 +1205,7 @@ module Hive
         nil
       end
 
-      def job_store_for(entry = nil, project_root = nil, migrate: true,
-                        **options)
+      def job_store_for(entry = nil, project_root = nil, **options)
         project_root ||= options.fetch(:project_root)
         entry ||= @project_entry || Hive::Config.find_project(@project)
         return @job_store_factory.call(project_root) if @job_store_factory
@@ -1214,8 +1213,7 @@ module Hive
         Hive::RefactorPatrol::JobStore.new(
           project_root,
           hive_state_path: entry.fetch("hive_state_path"),
-          project: entry,
-          migrate: migrate
+          project: entry
         )
       end
 

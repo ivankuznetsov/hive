@@ -1,6 +1,7 @@
 require "digest"
 require "etc"
 require "json"
+require "open3"
 require "rbconfig"
 require "set"
 require "time"
@@ -24,13 +25,19 @@ module Hive
       MAX_ERROR_BYTES = 2_048
 
       Profile = Data.define(
-        :username, :uid, :gid, :home, :real_home, :environment, :source
+        :username, :uid, :gid, :home, :real_home, :environment, :source,
+        :supplementary_gids, :root_bindings
+      )
+      RootBinding = Data.define(
+        :kind, :logical_path, :canonical_path, :existing, :dev, :ino,
+        :owner_uid, :mode, :anchor_path, :anchor_dev, :anchor_ino, :suffix
       )
       Candidate = Data.define(
         :path, :dev, :ino, :size, :mode, :uid, :gid, :mtime, :ctime,
         :sha256, :version
       )
       DiscoveryIssue = Data.define(:kind, :username, :uid, :detail)
+      NssEntry = Data.define(:name, :uid, :gid, :dir)
       Snapshot = Data.define(
         :profiles, :issues, :closed, :inventory_path, :inventory_digest
       )
@@ -61,6 +68,437 @@ module Hive
                 "hive"
               )
           }.transform_values { |path| File.expand_path(path).freeze }.freeze
+        end
+
+        def canonical_environment(environment, bindings)
+          result = environment.dup
+          by_kind = bindings.to_h { |binding| [ binding.kind, binding ] }
+          if result["HIVE_HOME"]
+            result["HIVE_HOME"] =
+              by_kind.fetch(:config_home).canonical_path
+          else
+            if result["XDG_CONFIG_HOME"]
+              result["XDG_CONFIG_HOME"] =
+                File.dirname(by_kind.fetch(:config_home).canonical_path)
+            end
+            if result["XDG_STATE_HOME"]
+              result["XDG_STATE_HOME"] =
+                File.dirname(by_kind.fetch(:state_home).canonical_path)
+            end
+          end
+          result.freeze
+        end
+      end
+
+      class ProfileRootBindings
+        def initialize(
+          lstat: File.method(:lstat),
+          realpath: File.method(:realpath)
+        )
+          @lstat = lstat
+          @realpath = realpath
+        end
+
+        def bind(home:, environment:, uid:)
+          roots = ProfileRoots.resolve(
+            Struct.new(:home, :environment).new(home, environment)
+          )
+          roots.map do |kind, path|
+            bind_root(kind, path, uid)
+          end.freeze
+        end
+
+        def verify!(profile)
+          profile.root_bindings.each do |binding|
+            verify_binding!(binding, profile.uid)
+          end
+          true
+        end
+
+        def key(binding)
+          if binding.existing
+            [ :existing, binding.dev, binding.ino ].freeze
+          else
+            [
+              :missing, binding.anchor_dev, binding.anchor_ino,
+              binding.suffix
+            ].freeze
+          end
+        end
+
+        private
+
+        def bind_root(kind, path, uid)
+          expanded = File.expand_path(path)
+          @lstat.call(expanded)
+          canonical = @realpath.call(expanded)
+          canonical_stat = @lstat.call(canonical)
+          validate_directory!(
+            canonical_stat, canonical, kind: kind, uid: uid
+          )
+          RootBinding.new(
+            kind: kind,
+            logical_path: expanded,
+            canonical_path: canonical,
+            existing: true,
+            dev: canonical_stat.dev,
+            ino: canonical_stat.ino,
+            owner_uid: canonical_stat.uid,
+            mode: canonical_stat.mode & 0o777,
+            anchor_path: nil,
+            anchor_dev: nil,
+            anchor_ino: nil,
+            suffix: nil
+          ).freeze
+        rescue Errno::ENOENT, Errno::ENOTDIR
+          bind_missing_root(kind, expanded, uid)
+        end
+
+        def bind_missing_root(kind, path, uid)
+          candidate = path
+          suffix = []
+          loop do
+            parent = File.dirname(candidate)
+            raise Hive::ConfigError,
+                  "Hive profile root has no safe existing anchor" if
+              parent == candidate
+            suffix.unshift(File.basename(candidate))
+            candidate = parent
+            begin
+              @lstat.call(candidate)
+              canonical = @realpath.call(candidate)
+              canonical_stat = @lstat.call(canonical)
+              validate_directory!(
+                canonical_stat, canonical, kind: kind, uid: uid
+              )
+              return RootBinding.new(
+                kind: kind,
+                logical_path: path,
+                canonical_path: File.join(canonical, *suffix),
+                existing: false,
+                dev: nil,
+                ino: nil,
+                owner_uid: nil,
+                mode: nil,
+                anchor_path: canonical,
+                anchor_dev: canonical_stat.dev,
+                anchor_ino: canonical_stat.ino,
+                suffix: suffix.join("/")
+              ).freeze
+            rescue Errno::ENOENT, Errno::ENOTDIR
+              next
+            end
+          end
+        end
+
+        def verify_binding!(binding, uid)
+          if binding.existing
+            stat = @lstat.call(binding.canonical_path)
+            validate_directory!(
+              stat, binding.canonical_path, kind: binding.kind, uid: uid
+            )
+            unless stat.dev == binding.dev && stat.ino == binding.ino
+              raise Hive::ConfigError,
+                    "Hive profile root identity changed after discovery"
+            end
+          else
+            begin
+              @lstat.call(binding.canonical_path)
+              raise Hive::ConfigError,
+                    "missing Hive profile root appeared after discovery"
+            rescue Errno::ENOENT, Errno::ENOTDIR
+              nil
+            end
+            anchor = @lstat.call(binding.anchor_path)
+            validate_directory!(
+              anchor, binding.anchor_path, kind: binding.kind, uid: uid
+            )
+            unless anchor.dev == binding.anchor_dev &&
+                   anchor.ino == binding.anchor_ino
+              raise Hive::ConfigError,
+                    "Hive profile root anchor changed after discovery"
+            end
+          end
+          true
+        rescue SystemCallError => error
+          raise Hive::ConfigError,
+                "cannot revalidate Hive profile root " \
+                "(#{error.class}: #{error.message})"
+        end
+
+        def validate_directory!(stat, path, kind:, uid:)
+          allowed_owner =
+            kind == :state_home ? stat.uid == uid : [ 0, uid ].include?(stat.uid)
+          readable =
+            if stat.uid == uid
+              (stat.mode & 0o500) == 0o500
+            else
+              (stat.mode & 0o005) == 0o005
+            end
+          unless stat.directory? && !stat.symlink? && allowed_owner &&
+                 readable && (stat.mode & 0o022).zero?
+            raise Hive::ConfigError,
+                  "Hive #{kind} root is not a safe owned directory: #{path}"
+          end
+        end
+      end
+
+      # NSS may be backed by a network directory service. Run every lookup in
+      # a separate process group with bounded output and one wall-clock
+      # deadline so a package hook cannot hang indefinitely inside libc.
+      class NssQuery
+        DEFAULT_TIMEOUT_SEC = 10
+        MAX_CAPTURE_BYTES = 1024 * 1024
+        MAX_ENTRIES = 65_536
+        SAFE_ENVIRONMENT = {
+          "LANG" => "C.UTF-8",
+          "LC_ALL" => "C.UTF-8",
+          "PATH" => "/usr/sbin:/usr/bin:/sbin:/bin"
+        }.freeze
+        SNAPSHOT_SCRIPT = <<~'RUBY'.freeze
+          require "etc"
+          require "json"
+
+          limit = Integer(ARGV.fetch(0))
+          accounts = []
+          Etc.passwd do |entry|
+            accounts << {
+              "name" => entry.name.to_s,
+              "uid" => Integer(entry.uid),
+              "gid" => Integer(entry.gid),
+              "dir" => entry.dir.to_s
+            }
+            abort "NSS account inventory exceeded limit" if accounts.length > limit
+          end
+          groups = []
+          Etc.group do |entry|
+            groups << {
+              "gid" => Integer(entry.gid),
+              "mem" => Array(entry.mem).map(&:to_s)
+            }
+            abort "NSS group inventory exceeded limit" if groups.length > limit
+          end
+          STDOUT.write(JSON.generate("accounts" => accounts, "groups" => groups))
+        RUBY
+        IDENTITY_SCRIPT = <<~'RUBY'.freeze
+          require "etc"
+          require "json"
+
+          username = ARGV.fetch(0)
+          uid = Integer(ARGV.fetch(1))
+          limit = Integer(ARGV.fetch(2))
+          encode = lambda do |entry|
+            {
+              "name" => entry.name.to_s,
+              "uid" => Integer(entry.uid),
+              "gid" => Integer(entry.gid),
+              "dir" => entry.dir.to_s
+            }
+          end
+          by_uid = encode.call(Etc.getpwuid(uid))
+          by_name = encode.call(Etc.getpwnam(username))
+          gids = [by_uid.fetch("gid")]
+          count = 0
+          Etc.group do |entry|
+            count += 1
+            abort "NSS group inventory exceeded limit" if count > limit
+            gids << Integer(entry.gid) if Array(entry.mem).map(&:to_s).include?(username)
+          end
+          STDOUT.write(JSON.generate(
+            "by_uid" => by_uid,
+            "by_name" => by_name,
+            "supplementary_gids" => gids.uniq.sort
+          ))
+        RUBY
+
+        Result = Data.define(:accounts, :groups)
+        Identity = Data.define(:by_uid, :by_name, :supplementary_gids)
+
+        def initialize(
+          ruby: RbConfig.ruby,
+          timeout_sec: DEFAULT_TIMEOUT_SEC,
+          monotonic_clock: lambda {
+            Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          },
+          popen3: Open3.method(:popen3),
+          process_kill: Process.method(:kill),
+          snapshot_script: SNAPSHOT_SCRIPT,
+          identity_script: IDENTITY_SCRIPT
+        )
+          @ruby = File.expand_path(ruby)
+          @timeout_sec = Float(timeout_sec)
+          raise ArgumentError, "NSS timeout must be positive" unless
+            @timeout_sec.positive?
+
+          @monotonic_clock = monotonic_clock
+          @popen3 = popen3
+          @process_kill = process_kill
+          @snapshot_script = snapshot_script
+          @identity_script = identity_script
+        end
+
+        def snapshot
+          payload = invoke(@snapshot_script, MAX_ENTRIES.to_s)
+          accounts = Array(payload.fetch("accounts")).map do |entry|
+            parse_entry(entry)
+          end.freeze
+          groups = Array(payload.fetch("groups")).map do |entry|
+            {
+              gid: Integer(entry.fetch("gid")),
+              mem: Array(entry.fetch("mem")).map(&:to_s).freeze
+            }.freeze
+          end.freeze
+          Result.new(accounts: accounts, groups: groups)
+        rescue KeyError, ArgumentError, TypeError => error
+          malformed!(error)
+        end
+
+        def accounts
+          snapshot.accounts
+        end
+
+        def groups
+          snapshot.groups
+        end
+
+        def identity(username, uid)
+          payload = invoke(
+            @identity_script, username.to_s, Integer(uid).to_s,
+            MAX_ENTRIES.to_s
+          )
+          Identity.new(
+            by_uid: parse_entry(payload.fetch("by_uid")),
+            by_name: parse_entry(payload.fetch("by_name")),
+            supplementary_gids:
+              Array(payload.fetch("supplementary_gids"))
+                .map { |gid| Integer(gid) }.uniq.sort.freeze
+          )
+        rescue KeyError, ArgumentError, TypeError => error
+          malformed!(error)
+        end
+
+        private
+
+        def invoke(script, *arguments)
+          stdin = stdout = stderr = waiter = nil
+          stdin, stdout, stderr, waiter = @popen3.call(
+            SAFE_ENVIRONMENT,
+            @ruby, "-e", script, *arguments,
+            unsetenv_others: true,
+            pgroup: true
+          )
+          stdin.close
+          outputs, status = drain_bounded(
+            waiter, stdout: stdout, stderr: stderr
+          )
+          unless status.success?
+            detail = outputs.fetch(:stderr).to_s.strip
+            detail = "lookup process exited #{status.exitstatus}" if
+              detail.empty?
+            raise Hive::ConfigError,
+                  "bounded NSS lookup failed: #{detail.byteslice(0, 512)}"
+          end
+
+          JSON.parse(outputs.fetch(:stdout))
+        rescue JSON::ParserError => error
+          malformed!(error)
+        ensure
+          [ stdin, stdout, stderr ].each do |io|
+            io.close if io && !io.closed?
+          rescue IOError
+            nil
+          end
+        end
+
+        def drain_bounded(waiter, streams)
+          deadline = @monotonic_clock.call + @timeout_sec
+          captures = streams.to_h { |name, io| [ io, name ] }
+          outputs = streams.to_h { |name, _io| [ name, +"" ] }
+          total = 0
+          status = nil
+          until status && captures.empty?
+            remaining = deadline - @monotonic_clock.call
+            if remaining <= 0
+              terminate(waiter)
+              raise Hive::ConfigError,
+                    "bounded NSS lookup exceeded #{@timeout_sec} seconds"
+            end
+            unless captures.empty?
+              ready = IO.select(
+                captures.keys, nil, nil, [ remaining, 0.05 ].min
+              )
+              Array(ready&.first).each do |io|
+                chunk = io.read_nonblock(16 * 1024, exception: false)
+                if chunk.nil?
+                  captures.delete(io)
+                  io.close
+                  next
+                end
+                next if chunk == :wait_readable
+
+                total += chunk.bytesize
+                if total > MAX_CAPTURE_BYTES
+                  terminate(waiter)
+                  raise Hive::ConfigError,
+                        "bounded NSS lookup output exceeded its limit"
+                end
+                outputs.fetch(captures.fetch(io)) << chunk
+              end
+            else
+              IO.select(nil, nil, nil, [ remaining, 0.05 ].min)
+            end
+            status = waiter.value if !status && waiter.join(0)
+          end
+          [ outputs, status ]
+        end
+
+        def terminate(waiter)
+          @process_kill.call("TERM", -waiter.pid)
+          return if waiter.join(0.1)
+
+          @process_kill.call("KILL", -waiter.pid)
+          waiter.join(0.1)
+        rescue Errno::ESRCH, Errno::ECHILD
+          nil
+        end
+
+        def parse_entry(entry)
+          NssEntry.new(
+            name: entry.fetch("name").to_s,
+            uid: Integer(entry.fetch("uid")),
+            gid: Integer(entry.fetch("gid")),
+            dir: entry.fetch("dir").to_s
+          ).freeze
+        end
+
+        def malformed!(error)
+          raise Hive::ConfigError,
+                "bounded NSS lookup returned malformed data " \
+                "(#{error.class}: #{error.message})"
+        end
+      end
+
+      class SupplementaryGroups
+        def initialize(groups: lambda {
+          NssQuery.new.groups
+        })
+          @groups = groups
+        end
+
+        def call(username, primary_gid)
+          gids = [ Integer(primary_gid) ]
+          Array(@groups.call).each do |entry|
+            members = Array(entry.respond_to?(:mem) ? entry.mem : entry[:mem])
+            next unless members.map(&:to_s).include?(username.to_s)
+
+            gid = entry.respond_to?(:gid) ? entry.gid : entry.fetch(:gid)
+            gids << Integer(gid)
+          end
+          gids.uniq.sort.freeze
+        rescue ArgumentError, TypeError, KeyError => error
+          raise Hive::ConfigError,
+                "cannot bind installed-user supplementary groups " \
+                "(#{error.class}: #{error.message})"
         end
       end
 
@@ -176,7 +614,9 @@ module Hive
       def migrate_profile(profile, executor)
         payload = executor.call(profile)
         projects = Array(payload["projects"])
-        retryable = projects.any? { |project| project["retryable"] == true }
+        retryable =
+          payload["daemon_restart_pending"] == true ||
+          projects.any? { |project| project["retryable"] == true }
         {
           "username" => profile.username,
           "uid" => profile.uid,
@@ -208,7 +648,9 @@ module Hive
           "uid" => profile.uid,
           "home" => profile.home,
           "real_home" => profile.real_home,
-          "environment" => profile.environment.sort.to_h
+          "environment" => profile.environment.sort.to_h,
+          "supplementary_gids" => profile.supplementary_gids,
+          "root_bindings" => profile.root_bindings.map(&:to_h)
         ))
       end
 
@@ -452,22 +894,66 @@ module Hive
           Dev/hive/config.yml
         ].freeze
 
+        class PathProbe
+          Result = Data.define(:state, :kind, :detail)
+
+          def initialize(lstat: File.method(:lstat))
+            @lstat = lstat
+          end
+
+          def directory(path)
+            probe(path, :directory)
+          end
+
+          def regular_file(path)
+            probe(path, :regular)
+          end
+
+          private
+
+          def probe(path, expected)
+            stat = @lstat.call(path)
+            present =
+              expected == :directory ? stat.directory? : stat.file?
+            return Result.new(
+              state: :present, kind: expected, detail: nil
+            ) if present && !stat.symlink?
+
+            Result.new(
+              state: :unavailable,
+              kind: expected,
+              detail: "unsafe #{stat.ftype} at #{path}"
+            )
+          rescue Errno::ENOENT, Errno::ENOTDIR
+            Result.new(state: :missing, kind: expected, detail: nil)
+          rescue SystemCallError, IOError => error
+            Result.new(
+              state: :unavailable,
+              kind: expected,
+              detail: "#{error.class}: #{error.message}"
+            )
+          end
+        end
+
+        class PathUnavailable < StandardError; end
+        private_constant :PathUnavailable
+
         def initialize(
           accounts: lambda {
-            entries = []
-            Etc.passwd { |entry| entries << entry }
-            entries
+            NssQuery.new.accounts
           },
           inventory: Inventory.new,
-          directory: File.method(:directory?),
-          file: File.method(:file?),
-          realpath: File.method(:realpath)
+          probe: PathProbe.new,
+          realpath: File.method(:realpath),
+          supplementary_groups: SupplementaryGroups.new,
+          root_bindings: ProfileRootBindings.new
         )
           @accounts = accounts
           @inventory = inventory
-          @directory = directory
-          @file = file
+          @probe = probe
           @realpath = realpath
+          @supplementary_groups = supplementary_groups
+          @root_bindings = root_bindings
         end
 
         def snapshot
@@ -528,17 +1014,48 @@ module Hive
             next
           end
           [ result.freeze, issues.freeze ]
+        rescue Hive::ConfigError => error
+          issues << DiscoveryIssue.new(
+            kind: "nss_catalog_unavailable",
+            username: nil,
+            uid: nil,
+            detail: error.message
+          )
+          [ {}.freeze, issues.freeze ]
         end
 
         def default_profiles(accounts, issues)
           accounts.values.filter_map do |account|
-            next unless @directory.call(account.fetch(:home))
-            next unless DEFAULT_EVIDENCE.any? do |relative|
-              @file.call(File.join(account.fetch(:home), relative))
+            home = @probe.directory(account.fetch(:home))
+            next if home.state == :missing
+            if home.state == :unavailable
+              issues << issue_for(
+                account, "default_home_unavailable", home.detail
+              )
+              next
+            end
+
+            evidence = DEFAULT_EVIDENCE.map do |relative|
+              @probe.regular_file(
+                File.join(account.fetch(:home), relative)
+              )
+            end
+            if evidence.none? { |result| result.state == :present }
+              unavailable = evidence.find do |result|
+                result.state == :unavailable
+              end
+              if unavailable
+                issues << issue_for(
+                  account, "default_home_unavailable",
+                  unavailable.detail
+                )
+              end
+              next
             end
 
             build_profile(account, environment: {}, source: "default-home")
-          rescue SystemCallError => error
+          rescue Hive::ConfigError, SystemCallError,
+                 PathUnavailable => error
             issues << issue_for(
               account, "default_home_unavailable",
               "#{error.class}: #{error.message}"
@@ -566,7 +1083,8 @@ module Hive
             environment: entry.fetch(:environment),
             source: "root-inventory"
           )
-        rescue SystemCallError => error
+        rescue Hive::ConfigError, SystemCallError,
+               PathUnavailable => error
           issues << issue_for(
             account || entry, "inventory_home_unavailable",
             "#{error.class}: #{error.message}"
@@ -576,17 +1094,32 @@ module Hive
 
         def build_profile(account, environment:, source:)
           home = account.fetch(:home)
-          raise Errno::ENOENT, home unless @directory.call(home)
+          result = @probe.directory(home)
+          unless result.state == :present
+            raise PathUnavailable,
+                  result.detail || "home is #{result.state}"
+          end
 
           real_home = @realpath.call(home)
+          groups = @supplementary_groups.call(
+            account.fetch(:username), account.fetch(:gid)
+          )
+          bindings = @root_bindings.bind(
+            home: home,
+            environment: environment,
+            uid: account.fetch(:uid)
+          )
           Profile.new(
             username: account.fetch(:username),
             uid: account.fetch(:uid),
             gid: account.fetch(:gid),
             home: home,
             real_home: real_home,
-            environment: environment.freeze,
-            source: source
+            environment:
+              ProfileRoots.canonical_environment(environment, bindings),
+            source: source,
+            supplementary_gids: groups,
+            root_bindings: bindings
           ).freeze
         end
 
@@ -605,11 +1138,11 @@ module Hive
               next
             end
             exact[key] = profile
-            canonical_profile_roots(profile).each do |kind, path|
-              roots[[ kind, path ]] << profile
+            canonical_profile_roots(profile).each do |_kind, path|
+              roots[path] << profile
             end
           end
-          roots.each do |(kind, path), members|
+          roots.each do |path, members|
             next unless members.map(&:uid).uniq.length > 1
 
             members.each do |profile|
@@ -619,7 +1152,7 @@ module Hive
                 username: profile.username,
                 uid: profile.uid,
                 detail:
-                  "#{kind} root #{path} is assigned to multiple OS users"
+                  "Hive profile root #{path} is assigned to multiple OS users"
               )
             end
           end
@@ -655,10 +1188,8 @@ module Hive
         end
 
         def canonical_profile_roots(profile)
-          ProfileRoots.resolve(profile).transform_values do |path|
-            @realpath.call(path)
-          rescue SystemCallError
-            path
+          profile.root_bindings.to_h do |binding|
+            [ binding.kind, @root_bindings.key(binding) ]
           end
         end
 
@@ -689,20 +1220,48 @@ module Hive
       # after account replacement or directory-service drift.
       class NssIdentity
         def initialize(
-          by_uid: Etc.method(:getpwuid),
-          by_name: Etc.method(:getpwnam)
+          query: NssQuery.new,
+          by_uid: nil,
+          by_name: nil,
+          supplementary_groups: nil
         )
-          @by_uid = by_uid
-          @by_name = by_name
+          if by_uid || by_name
+            unless by_uid && by_name
+              raise ArgumentError,
+                    "both NSS identity lookup seams must be supplied"
+            end
+            @query = nil
+            @by_uid = by_uid
+            @by_name = by_name
+            @supplementary_groups = supplementary_groups ||
+              SupplementaryGroups.new(groups: -> { [] })
+          else
+            @query = query
+          end
         end
 
         def call(profile)
-          uid_entry = @by_uid.call(profile.uid)
-          name_entry = @by_name.call(profile.username)
+          if @query
+            identity = @query.identity(profile.username, profile.uid)
+            uid_entry = identity.by_uid
+            name_entry = identity.by_name
+            groups = identity.supplementary_gids
+          else
+            uid_entry = @by_uid.call(profile.uid)
+            name_entry = @by_name.call(profile.username)
+            groups = @supplementary_groups.call(
+              profile.username, profile.gid
+            )
+          end
           unless exact?(uid_entry, profile) && exact?(name_entry, profile)
             raise Hive::ConfigError,
                   "installed-user NSS identity changed after discovery for " \
                   "uid #{profile.uid}"
+          end
+          unless groups == profile.supplementary_gids
+            raise Hive::ConfigError,
+                  "installed-user supplementary groups changed after " \
+                  "discovery for uid #{profile.uid}"
           end
 
           true
@@ -735,7 +1294,8 @@ module Hive
           chdir: Dir.method(:chdir),
           execer: Kernel.method(:exec),
           warning: Kernel.method(:warn),
-          exit_process: Process.method(:exit!)
+          exit_process: Process.method(:exit!),
+          root_bindings: ProfileRootBindings.new
         )
           @identity_drop = identity_drop
           @session = session
@@ -747,6 +1307,7 @@ module Hive
           @execer = execer
           @warning = warning
           @exit_process = exit_process
+          @root_bindings = root_bindings
         end
 
         def call(profile, environment, argv, readers:, writers:)
@@ -756,6 +1317,7 @@ module Hive
           writers.each_value(&:close)
           @session.call
           @identity_drop.call(profile)
+          @root_bindings.verify!(profile)
           @environment.replace(environment)
           @umask.call(0o077)
           @chdir.call(profile.home)
@@ -785,6 +1347,7 @@ module Hive
                        child_launcher: nil,
                        directory: File.method(:directory?),
                        realpath: File.method(:realpath),
+                       root_bindings: ProfileRootBindings.new,
                        process_kill: Process.method(:kill),
                        process_wait: Process.method(:wait),
                        force: true,
@@ -798,9 +1361,13 @@ module Hive
           @effective_uid = effective_uid
           @identity_validator = identity_validator
           @child_launcher = child_launcher ||
-            ChildLauncher.new(identity_drop: identity_drop)
+            ChildLauncher.new(
+              identity_drop: identity_drop,
+              root_bindings: root_bindings
+            )
           @directory = directory
           @realpath = realpath
+          @root_bindings = root_bindings
           @process_kill = process_kill
           @process_wait = process_wait
           @force = force == true
@@ -815,17 +1382,16 @@ module Hive
         def call(profile)
           CandidateIdentity.verify!(@candidate)
           begin
+            if !@runner && !@effective_uid.call.zero?
+              raise Hive::ConfigError,
+                    "install-wide JobStore migration requires root authority"
+            end
             assert_profile_current!(profile)
             environment = child_environment(profile)
             if @runner
               return validate_payload!(
                 @runner.call(profile, environment, argv), profile
               )
-            end
-
-            unless @effective_uid.call.zero?
-              raise Hive::ConfigError,
-                    "install-wide JobStore migration requires root authority"
             end
 
             stdout, stderr, status = capture_as_user(profile, environment)
@@ -860,6 +1426,7 @@ module Hive
             raise Hive::ConfigError,
                   "installed-user home changed after discovery for uid #{profile.uid}"
           end
+          @root_bindings.verify!(profile)
         rescue SystemCallError => error
           raise Hive::ConfigError,
                 "cannot revalidate installed-user home for uid " \
@@ -891,12 +1458,11 @@ module Hive
           stdout_writer.close
           stderr_writer.close
           deadline = @monotonic_clock.call + @timeout_sec
-          stdout, stderr = read_bounded(
+          stdout, stderr, status = read_and_wait_bounded(
             pid,
             { stdout: stdout_reader, stderr: stderr_reader },
             deadline: deadline
           )
-          _child, status = Process.wait2(pid)
           waited = true
           [ stdout, stderr, status ]
         ensure
@@ -906,39 +1472,53 @@ module Hive
           end
         end
 
-        def read_bounded(pid, streams, deadline:)
+        def read_and_wait_bounded(pid, streams, deadline:)
           outputs = streams.to_h { |name, _io| [ name, +"" ] }
           captures = streams.to_h { |name, io| [ io, name ] }
           total = 0
-          until captures.empty?
+          status = nil
+          until status && captures.empty?
             remaining = deadline - @monotonic_clock.call
             if remaining <= 0
               kill_child(pid)
               raise Hive::ConfigError,
                     "candidate migration exceeded #{@timeout_sec} seconds"
             end
-            ready = IO.select(captures.keys, nil, nil, [ remaining, 0.25 ].min)
-            next unless ready
+            unless captures.empty?
+              ready = IO.select(
+                captures.keys, nil, nil, [ remaining, 0.05 ].min
+              )
 
-            Array(ready&.first).each do |io|
-              chunk = io.read_nonblock(16 * 1024, exception: false)
-              if chunk.nil?
-                io.close
-                captures.delete(io)
-                next
-              end
-              next if chunk == :wait_readable
+              Array(ready&.first).each do |io|
+                chunk = io.read_nonblock(16 * 1024, exception: false)
+                if chunk.nil?
+                  io.close
+                  captures.delete(io)
+                  next
+                end
+                next if chunk == :wait_readable
 
-              total += chunk.bytesize
-              if total > MAX_CAPTURE_BYTES
-                kill_child(pid)
-                raise Hive::ConfigError,
-                      "candidate migration output exceeded the bounded capture"
+                total += chunk.bytesize
+                if total > MAX_CAPTURE_BYTES
+                  kill_child(pid)
+                  raise Hive::ConfigError,
+                        "candidate migration output exceeded the bounded capture"
+                end
+                outputs.fetch(captures.fetch(io)) << chunk
               end
-              outputs.fetch(captures.fetch(io)) << chunk
+            else
+              IO.select(nil, nil, nil, [ remaining, 0.05 ].min)
+            end
+            unless status
+              waited = Process.waitpid2(pid, Process::WNOHANG)
+              status = waited&.last
             end
           end
-          [ outputs.fetch(:stdout, ""), outputs.fetch(:stderr, "") ]
+          [
+            outputs.fetch(:stdout, ""),
+            outputs.fetch(:stderr, ""),
+            status
+          ]
         end
 
         def validate_payload!(payload, profile)
@@ -1008,14 +1588,14 @@ module Hive
 
       class IdentityDrop
         def initialize(
-          initgroups: Process.method(:initgroups),
+          groups_setter: ->(groups) { Process.groups = groups },
           gid_drop: Process::GID.method(:change_privilege),
           uid_drop: Process::UID.method(:change_privilege),
           effective_uid: -> { Process.euid },
           effective_gid: -> { Process.egid },
           groups: -> { Process.groups }
         )
-          @initgroups = initgroups
+          @groups_setter = groups_setter
           @gid_drop = gid_drop
           @uid_drop = uid_drop
           @effective_uid = effective_uid
@@ -1024,14 +1604,18 @@ module Hive
         end
 
         def call(profile)
-          @initgroups.call(profile.username, profile.gid)
+          expected_groups = profile.supplementary_gids
+          if !profile.uid.zero? && expected_groups.include?(0)
+            raise Hive::ConfigError,
+                  "candidate child identity includes root supplementary group"
+          end
+          @groups_setter.call(expected_groups)
           @gid_drop.call(profile.gid)
           @uid_drop.call(profile.uid)
-          root_group_retained =
-            !profile.gid.zero? && @groups.call.include?(0)
+          observed_groups = @groups.call.map { |gid| Integer(gid) }.uniq.sort
           unless @effective_uid.call == profile.uid &&
                  @effective_gid.call == profile.gid &&
-                 !root_group_retained
+                 observed_groups == expected_groups
             raise Hive::ConfigError,
                   "candidate child did not assume the complete identity for " \
                   "uid #{profile.uid}"
@@ -1048,7 +1632,8 @@ module Hive
           path,
           realpath: File.method(:realpath),
           opener: File.method(:open),
-          lstat: File.method(:lstat)
+          lstat: File.method(:lstat),
+          trusted_uid: nil
         )
           resolved = realpath.call(path)
           unless File.const_defined?(:NOFOLLOW)
@@ -1063,7 +1648,12 @@ module Hive
             stat = file.stat
             unless stat.file? && stat.size.positive? &&
                    (stat.mode & 0o111).positive? &&
-                   stat.size <= MAX_BYTES
+                   stat.size <= MAX_BYTES &&
+                   (trusted_uid.nil? || (
+                     stat.uid == trusted_uid &&
+                     (stat.mode & 0o022).zero? &&
+                     stat.nlink == 1
+                   ))
               raise Hive::ConfigError,
                     "install-wide migration candidate is not a bounded executable file"
             end

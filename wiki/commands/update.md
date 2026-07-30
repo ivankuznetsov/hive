@@ -3,7 +3,7 @@ title: hive update
 type: command
 source: lib/hive/commands/update.rb, lib/hive/install_channel.rb
 created: 2026-05-21
-updated: 2026-07-29
+updated: 2026-07-30
 tags: [command, install, update]
 ---
 
@@ -57,16 +57,20 @@ could begin its one-way conversion.
 
 After a successful updater invocation, Hive executes
 `<stable-invoked-hive> refactor-patrol-migrate-installed` before any daemon
-restart, even when no daemon was running. That fresh candidate process backfills
-registry identities, migrates the updater user's complete profile, persists,
-and prints its typed user-profile result. AUR additionally runs the root-only
-`--all-users` coordinator from its package hook and enables the hourly retry
-timer in `--resume` mode. Root-run `install.sh` performs the all-user sweep
-once. Homebrew and
-non-root install.sh cannot acquire administrator authority: they explicitly
-report current-user-only coverage and require
-`sudo hive refactor-patrol-migrate-installed --all-users` on a shared machine.
-First use is only a fallback. A
+restart, even when no daemon was running. A non-root update runs that fresh
+candidate for the invoking user's exact profile. A root update adds
+`--all-users`; the coordinator discovers every fixed NSS-user profile and
+root-inventoried custom profile, then migrates every project registered in each
+profile after dropping to that user's exact identity. Root bash-channel updates
+also add `--ensure-retry-service`, installing an hourly systemd system timer or
+launchd LaunchDaemon before the first sweep. AUR performs the same all-user
+boundary from its package hook and packaged hourly timer.
+
+Homebrew and non-root `install.sh` remain deliberately user-scoped. They must
+never be elevated: shared-host coverage requires a separately installed,
+root-owned system Hive runtime whose immutable candidate can perform and retry
+the all-user sweep. There is no normal-CLI or first-JobStore-open migration
+fallback. A
 failed/retryable project row is an observed completed sweep, not a process
 crash. If the candidate command fails structurally, a daemon that was running
 before the update is still restarted in `ensure`, then the candidate failure
@@ -82,7 +86,7 @@ missing-helper failures do not stop or restart a daemon. If the shutdown
 acknowledgement never arrives, Hive does not automatically restart across that
 uncertain quiescence: the error warns that the daemon may already be stopped
 and directs the operator to run `hive daemon status --json`, then (only if
-stopped) `hive daemon start --detach`. A manual candidate JobStore open has its
+stopped) `hive daemon start --detach`. An explicit candidate migration has its
 own migration writer fence, so this command lifecycle is not its only
 protection.
 

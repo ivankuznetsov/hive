@@ -16,9 +16,11 @@ area: refactor-patrol, migration, packaging, testing
   root and identity-drift refusal, isolated retryable rows, and no legacy
   receipt compatibility path.
 - Added AUR activation plus an hourly `--resume` system timer for inactive
-  users, avoiding unconditional hourly force-sweeps. Direct non-root and
-  Homebrew installs explicitly report their current-user limit and the
-  administrator all-user command; first use remains a fallback only.
+  users, avoiding unconditional hourly force-sweeps. Root-owned direct packages
+  install an equivalent systemd timer or launchd LaunchDaemon. Direct non-root
+  and Homebrew installs remain current-user-only and require a separately
+  installed root-owned system Hive for machine-wide coverage; they are never
+  elevated, and normal first use never converts legacy state.
 - Persisted exact `HIVE_HOME`/XDG roots in newly rendered user daemon units and
   suppressed unrelated LLM-wiki startup repair during the migration command.
 - Added a permanent Linux merge gate that converts released-v2 projects under

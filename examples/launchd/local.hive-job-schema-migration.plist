@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- hive-managed: job-schema-migration-retry/v1 -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>local.hive-job-schema-migration</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@HIVE_BINARY@</string>
+    <string>refactor-patrol-migrate-installed</string>
+    <string>--all-users</string>
+    <string>--resume</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>3600</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

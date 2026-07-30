@@ -110,7 +110,10 @@ module Hive
               # Preserve the exact validated worktree. Fixer reuses its
               # durable patch receipt on the next cycle, allowing handoff
               # recovery without rebuilding a different commit.
-              record_mapping(finding, patch, existing["url"], "review_handoff_failed", now)
+              record_mapping(
+                gateway, finding, patch, existing["url"],
+                "review_handoff_failed", now
+              )
               return Result.new(
                 status: :skipped,
                 pr_url: existing["url"],
@@ -118,7 +121,10 @@ module Hive
               )
             end
 
-            record_mapping(finding, patch, existing["url"], existing["state"].downcase, now)
+            record_mapping(
+              gateway, finding, patch, existing["url"],
+              existing["state"].downcase, now
+            )
             return Result.new(
               status: :skipped,
               pr_url: existing["url"],
@@ -127,7 +133,10 @@ module Hive
             )
           end
 
-          record_mapping(finding, patch, existing["url"], existing["state"].downcase, now)
+          record_mapping(
+            gateway, finding, patch, existing["url"],
+            existing["state"].downcase, now
+          )
           # The branch already has a PR; this validated worktree is now
           # dead weight. Remove it so `.patrol/` doesn't accumulate one
           # leaked checkout per cycle.
@@ -159,7 +168,9 @@ module Hive
         # The PR now exists on the remote, but it is not active until exact
         # identity reconciliation and mandatory review handoff settle. Keep
         # the validated patch receipt retryable across read-after-write lag.
-        record_mapping(finding, patch, pr_url, "reconciliation_pending", now)
+        record_mapping(
+          gateway, finding, patch, pr_url, "reconciliation_pending", now
+        )
         preserve_worktree = true
         assert_local_patch_identity!(patch)
         assert_remote_patch_identity!(patch)
@@ -176,14 +187,16 @@ module Hive
           # Preserve the exact validated worktree and patch receipt so the
           # next cycle can retry only the failed review handoff. Rebuilding
           # from a newer base would produce a different commit than the PR.
-          record_mapping(finding, patch, pr_url, "review_handoff_failed", now)
+          record_mapping(
+            gateway, finding, patch, pr_url, "review_handoff_failed", now
+          )
           return Result.new(
             status: :opened_review_handoff_failed,
             pr_url: pr_url,
             reason: "review_handoff_failed"
           )
         end
-        record_mapping(finding, patch, pr_url, "open", now)
+        record_mapping(gateway, finding, patch, pr_url, "open", now)
         preserve_worktree = false
         if !review_task_path && !review_prs_enabled?
           # The branch is pushed; the local worktree is no longer needed
@@ -451,24 +464,61 @@ module Hive
         "exit=#{value['exit_code']} timed_out=#{value['timed_out'] == true}"
       end
 
-      def record_mapping(finding, patch, pr_url, state, now)
-        @state.mutate_fingerprints do |fingerprints|
-          Fingerprint.record_seen(
-            fingerprints,
-            finding.fingerprint,
-            branch: patch.branch,
-            pr_url: pr_url,
-            state: state,
-            finding: finding,
-            now: now
-          )
-          entry = fingerprints.fetch(finding.fingerprint)
-          if state == "reconciliation_pending"
-            entry["publication_receipt"] = publication_receipt_for(patch)
-          else
-            entry.delete("publication_receipt")
+      def record_mapping(gateway, finding, patch, pr_url, state, now)
+        expected = fingerprint_mapping_fields(
+          finding, patch, pr_url, state
+        )
+        deleted =
+          state == "reconciliation_pending" ? [] : [ "publication_receipt" ]
+        perform_effect do
+          @state.mutate_fingerprints!(
+            gateway: gateway,
+            fingerprint: finding.fingerprint,
+            idempotency_key:
+              "#{finding.fingerprint}:#{patch.id}:" \
+              "fingerprint-publication:#{state}",
+            capability: "filesystem_write",
+            scope: effect_scope(finding, patch),
+            set: expected,
+            deleted: deleted
+          ) do |fingerprints|
+            Fingerprint.record_seen(
+              fingerprints,
+              finding.fingerprint,
+              branch: patch.branch,
+              pr_url: pr_url,
+              state: state,
+              finding: finding,
+              now: now
+            )
+            entry = fingerprints.fetch(finding.fingerprint)
+            if state == "reconciliation_pending"
+              entry["publication_receipt"] =
+                publication_receipt_for(patch)
+            else
+              entry.delete("publication_receipt")
+            end
           end
         end
+      end
+
+      def fingerprint_mapping_fields(finding, patch, pr_url, state)
+        fields = {
+          "branch" => patch.branch,
+          "pr_url" => pr_url,
+          "state" => state,
+          "category" => finding.category.to_s,
+          "feature_id" => finding.feature_id.to_s,
+          "title_tokens" => Fingerprint.title_tokens(finding)
+        }
+        target_sha = finding.target_sha.to_s
+        fields["target_sha"] = target_sha unless target_sha.empty?
+        root_cause = Fingerprint.semantic_tokens(finding)
+        fields["root_cause_tokens"] = root_cause unless root_cause.empty?
+        if state == "reconciliation_pending"
+          fields["publication_receipt"] = publication_receipt_for(patch)
+        end
+        fields.freeze
       end
 
       def default_config_loader

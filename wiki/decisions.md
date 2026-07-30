@@ -3,7 +3,7 @@ title: Architectural Decisions
 type: decisions
 source: code + author's local planning notes (not committed)
 created: 2026-04-25
-updated: 2026-07-26
+updated: 2026-07-30
 tags: [decisions, adr]
 ---
 
@@ -686,18 +686,22 @@ exhaustively from NSS.
 
 **Decision:** Keep one strict per-profile migration receipt and add a separate
 root-only host coordinator. It enumerates conventional NSS-home anchors and a
-root-owned exact custom-profile inventory, rejects uid/home/shared-root
-ambiguity, binds the installed candidate path/version/digest, revalidates each
-uid/name/gid/home tuple through both NSS lookup directions immediately before
-execution, then forks and drops supplementary groups, gid, and uid before the
-candidate reads a registry or project. The parent never parses user-owned Hive
+root-owned exact custom-profile inventory through a bounded NSS snapshot,
+rejects uid/home/root-binding and cross-profile state collisions, binds the
+installed root-owned candidate path/version/digest, revalidates each
+uid/name/gid/home/group tuple immediately before execution, then forks and
+drops to the exact supplementary groups, gid, and uid before the candidate
+reads a registry or project. The parent never parses user-owned Hive
 configuration. Aggregate
 evidence reports distinct OS-user and Hive-profile counts and cannot become
 `complete` without explicit inventory closure and zero retryable profiles. AUR
-installs an hourly system timer; per-user daemons retain registry-change and
-hourly project retry. Homebrew and non-root direct installs state their
-current-user limit and the administrator command. First use remains only a
-safety fallback.
+installs an hourly system timer; root-owned direct installs install an hourly
+systemd timer or launchd LaunchDaemon, and root bash updates ensure it before
+the sweep. Per-user daemons retain registry-change and hourly project retry.
+Homebrew and non-root direct installs remain current-user-only and are never
+elevated; a shared host requires a separate root-owned system runtime. Normal
+CLI startup and JobStore construction support only v3. Released-v2 conversion
+exists only in the explicit package-candidate command.
 
 **Consequences:** One failed profile or project is persisted and isolated while
 later profiles still run under their owners. Multiple `HIVE_HOME`/XDG profiles
@@ -708,6 +712,9 @@ false complete evidence. A Linux merge gate converts released-v2 projects for
 three real UIDs and rejects root-owned output in their homes. The privileged
 parent may still execute a root account's own profile as uid 0; the separation
 claim is that it never opens another user's registry before the identity drop.
+Exact duplicate registry rows migrate one canonical state root once, while
+conflicting project identities that resolve to the same state root fail before
+any row is changed.
 
 ## ADR-032: Per-stage controls overlay the current durable identity
 

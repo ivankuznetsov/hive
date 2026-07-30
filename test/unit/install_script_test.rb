@@ -89,11 +89,15 @@ class InstallScriptTest < Minitest::Test
     assert_includes script,
                     "migration_args=(refactor-patrol-migrate-installed)"
     assert_includes script,
-                    "migration_args+=(--all-users)"
+                    "migration_args+=(--all-users --ensure-retry-service)"
+    assert_includes script, "--ensure-retry-service"
+    assert_includes script, 'bin_home="${XDG_BIN_HOME:-/usr/local/bin}"'
     assert_includes script,
                     "shared installation coverage is not complete"
     assert_includes script,
-                    "retry with administrator authority for shared installations"
+                    "root-owned system package for shared installations"
+    refute_match(/administrator must run.*link_path/, script)
+    refute_match(/sudo.*refactor-patrol-migrate-installed/, script)
   end
 
   def test_installer_requires_cosign_for_release_identity_verification

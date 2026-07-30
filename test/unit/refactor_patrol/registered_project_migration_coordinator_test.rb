@@ -119,7 +119,7 @@ class RefactorPatrolRegisteredProjectMigrationCoordinatorTest <
     ))
   end
 
-  def test_realpath_alias_is_converted_once
+  def test_distinct_identity_alias_sharing_state_fails_closed
     real_path = project_path("real")
     alias_path = File.join(@root, "alias")
     File.symlink(real_path, alias_path)
@@ -139,12 +139,33 @@ class RefactorPatrolRegisteredProjectMigrationCoordinatorTest <
     )
     results = migration.run
 
-    assert_equal %i[absent duplicate], results.map(&:status)
-    assert_equal [ real_path ], calls
+    assert_equal %i[failed failed], results.map(&:status)
+    assert_empty calls
     assert_equal real_path, Coordinator.path_key(alias_path)
-    assert_equal [ "real" ], migration.eligible_projects.map {
-      |entry| entry.fetch("name")
-    }
+    assert results.last.retryable
+    assert_match(/multiple registered project identities/, results.last.error)
+    assert_match(/conflicting project identities/, results.last.remediation)
+    assert_empty migration.eligible_projects
+  end
+
+  def test_exact_duplicate_registration_is_deduplicated
+    path = project_path("exact-duplicate")
+    entry = registry_entry("same", path)
+    calls = []
+
+    migration = coordinator(
+      [ entry, entry.dup ],
+      project_migrator: lambda do |identity, ownership:|
+        assert_equal "legacy", ownership.fetch("owner")
+        calls << identity.fetch(:real_path)
+        false
+      end
+    )
+    results = migration.run
+
+    assert_equal %i[absent absent], results.map(&:status)
+    assert_equal [ path ], calls
+    assert_equal 2, migration.eligible_projects.length
   end
 
   def test_same_repository_with_distinct_custom_state_roots_migrates_both

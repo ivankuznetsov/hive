@@ -2173,6 +2173,29 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_register_project_rejects_distinct_identities_sharing_state_root
+    with_tmp_global_config do |home|
+      project = File.join(home, "project")
+      project_alias = File.join(home, "project-alias")
+      FileUtils.mkdir_p(project)
+      File.symlink(project, project_alias)
+      Hive::Config.register_project(name: "primary", path: project)
+
+      error = assert_raises(
+        Hive::Config::ProjectRegistrationCollision
+      ) do
+        Hive::Config.register_project(
+          name: "alias", path: project_alias
+        )
+      end
+
+      assert_match(/would share Hive state/, error.message)
+      assert_equal project, error.existing_path
+      assert_equal [ "primary" ],
+                   Hive::Config.registered_projects.map { |row| row["name"] }
+    end
+  end
+
   def test_register_project_preserves_malformed_registry_container_for_prune
     with_tmp_global_config do |home|
       File.write(

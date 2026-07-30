@@ -187,20 +187,46 @@ class HiveCliTest < Minitest::Test
     with_command_new_stub(Hive::Commands::RefactorPatrolCandidateMigration) do |calls|
       Hive::CLI.start([ "refactor-patrol-migrate-installed" ])
       assert_equal [], calls.first.fetch(:args)
-      assert_equal({ all_users: false, force: true },
+      assert_equal({
+                     all_users: false,
+                     ensure_retry_service: false,
+                     force: true
+                   },
                    calls.first.fetch(:kwargs))
     end
 
     with_command_new_stub(Hive::Commands::RefactorPatrolCandidateMigration) do |calls|
       Hive::CLI.start([ "refactor-patrol-migrate-installed", "--all-users" ])
       assert_equal [], calls.first.fetch(:args)
-      assert_equal({ all_users: true, force: true },
+      assert_equal({
+                     all_users: true,
+                     ensure_retry_service: false,
+                     force: true
+                   },
                    calls.first.fetch(:kwargs))
     end
 
     with_command_new_stub(Hive::Commands::RefactorPatrolCandidateMigration) do |calls|
       Hive::CLI.start([ "refactor-patrol-migrate-installed", "--resume" ])
-      assert_equal({ all_users: false, force: false },
+      assert_equal({
+                     all_users: false,
+                     ensure_retry_service: false,
+                     force: false
+                   },
+                   calls.first.fetch(:kwargs))
+    end
+
+    with_command_new_stub(Hive::Commands::RefactorPatrolCandidateMigration) do |calls|
+      Hive::CLI.start([
+        "refactor-patrol-migrate-installed",
+        "--all-users",
+        "--ensure-retry-service"
+      ])
+      assert_equal({
+                     all_users: true,
+                     ensure_retry_service: true,
+                     force: true
+                   },
                    calls.first.fetch(:kwargs))
     end
   end

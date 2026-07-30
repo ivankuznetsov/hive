@@ -65,7 +65,8 @@ class CiTestPartitionTest < Minitest::Test
         },
         {
           "name" => "all-user JobStore migration",
-          "task" => "test:all_users_job_schema_migration"
+          "task" => "test:all_users_job_schema_migration",
+          "root" => true
         },
         {
           "name" => "babysitter dry-run security matrix",
@@ -78,6 +79,16 @@ class CiTestPartitionTest < Minitest::Test
       run_step = gate_job.fetch("steps").find { |step| step["name"] == "Run merge gate" }
       assert_equal 'bundle exec rake "$HIVE_CI_GATE_TASK"', run_step.fetch("run")
       assert_equal "${{ matrix.task }}", run_step.fetch("env").fetch("HIVE_CI_GATE_TASK")
+      assert_equal "${{ matrix.root != true }}", run_step.fetch("if")
+
+      root_step = gate_job.fetch("steps").find do |step|
+        step["name"] == "Run privileged all-user merge gate"
+      end
+      assert_equal "${{ matrix.root == true }}", root_step.fetch("if")
+      assert_includes root_step.fetch("run"), "sudo"
+      assert_equal "1", root_step.fetch("env").fetch("HIVE_REQUIRE_TEST_RUNS")
+      assert_equal "1",
+                   root_step.fetch("env").fetch("HIVE_ALL_USERS_PROVISION_ACCOUNTS")
 
       assert_equal "coverage (Ruby ${{ matrix.ruby }})", workflow.fetch("jobs").fetch("test").fetch("name")
       required_gate = workflow.fetch("jobs").fetch("required-test-gate")

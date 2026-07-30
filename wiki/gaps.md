@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-07-29
+updated: 2026-07-30
 tags: [gap, todo, release-proof, agent-skills]
 ---
 
@@ -29,13 +29,17 @@ tags: [gap, todo, release-proof, agent-skills]
   interruption/resume checkpoints, corrupt and identity-drift holds,
   realpath-alias deduplication, shared-profile-root refusal, stable root
   inventory/candidate custody, persisted read-only status, hourly retry,
-  runtime admission from the latest completed sweep, and first-open fallback.
+  runtime admission from the latest completed sweep, bounded NSS discovery,
+  exact supplementary-group drops, cross-profile state-root collision refusal,
+  and v3-only normal runtime admission.
   There is not yet a checked-in artifact from an actual AUR package upgrade
   with three long-lived host accounts and running old daemons, nor a repaired
   offline/permission failure followed by the installed system timer's
-  successful retry. Homebrew and direct non-root installs intentionally have
-  no privileged automatic timer; their aggregate remains incomplete until an
-  administrator runs the documented all-user command. Arbitrary legacy
+  successful retry. The root direct-install systemd and launchd retry services
+  are unit-pinned but have not yet been live-smoked on both host managers.
+  Homebrew and direct non-root installs intentionally have no privileged
+  automatic timer; machine-wide migration requires a separately installed,
+  root-owned system Hive. Arbitrary legacy
   process-only custom roots and offline/encrypted/network homes remain
   unknowable unless the root inventory explicitly closes discovery.
 

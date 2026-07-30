@@ -24,7 +24,7 @@ class RefactorPatrolFamilyStoreTest < Minitest::Test
 
       assert_instance_of Time, store.instance_variable_get(:@clock).call
       factory = store.instance_variable_get(:@job_store_factory)
-      built = factory.call(migrate: false)
+      built = factory.call
       assert_nil built.instance_variable_get(:@project)
     end
   end

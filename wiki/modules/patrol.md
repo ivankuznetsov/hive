@@ -3,7 +3,7 @@ title: Hive::Patrol
 type: module
 source: lib/hive/patrol/
 created: 2026-05-28
-updated: 2026-07-29
+updated: 2026-07-30
 tags: [module, patrol, review, worktree, pr, codex]
 ---
 
@@ -290,14 +290,16 @@ it or any mutator cutover can be claimed.
   user registry plus root-inventoried custom profile and runs each complete
   registered-project snapshot after dropping to that uid/gid, including
   projects owned by another user and custom state roots, deduplicated by
-  verified realpath. AUR activates this boundary and retries it hourly;
-  non-privileged channels report partial/current-user coverage and the
-  administrator command. First use is only a fallback. OS permission,
+  verified state-root identity. AUR and root-owned direct packages activate
+  this boundary and retry it hourly; non-privileged channels report
+  partial/current-user coverage and require a separate root-owned system Hive
+  for host-wide coverage. OS permission,
   malformed-state, and identity-drift failures are persisted with
   remediation/retry time and held out of architecture scheduling while later
   projects still migrate. Runtime admission is an exact allowlist from the
-  latest sweep, and the same one-off converter remains at first JobStore open
-  for dormant state.
+  latest sweep. The converter is callable only through the explicit
+  package-candidate command; normal CLI startup and JobStore construction
+  reject dormant released-v2 state without modifying it.
   A fixed exact-byte v2 snapshot is verified before the first write, and its
   identity is exposed through daemon status for the fenced exact restore
   command in [[commands/migrate]].

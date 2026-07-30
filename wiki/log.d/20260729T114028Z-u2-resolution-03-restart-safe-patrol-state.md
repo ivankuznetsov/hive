@@ -38,9 +38,9 @@ tags: [patrol, architecture-patrol, migration, recovery, storage]
   array-difference arm. Platform flag selection is now a small explicit
   Linux/macOS mapping so both supported contracts can be proven on one host.
 - Made the one JobStore v2-to-v3 converter universal across installations:
-  daemon start sweeps every project in that installation's registry before
-  architecture runtime construction, regardless of the project directory's
-  owner, verifies immutable realpaths and custom state roots, deduplicates
-  aliases, persists and retries a failed project without blocking later
-  projects, and retains the same first-open path for dormant or unregistered
-  state. Runtime readers remain v3-only.
+  the explicit package-candidate sweep covers every project in a selected
+  profile before architecture runtime construction, regardless of the project
+  directory's owner, verifies immutable realpaths and custom state roots,
+  deduplicates aliases, and persists and retries a failed project without
+  blocking later projects. Runtime readers and normal CLI startup remain
+  v3-only.

@@ -3,7 +3,7 @@ title: State Model
 type: data-model
 source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/completion_time.rb, lib/hive/completed_at_backfiller.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/modules/migration/occurrence_*.rb, lib/hive/modules/migration/patrol_*.rb, lib/hive/modules/migration/shadow_*.rb, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
 created: 2026-04-25
-updated: 2026-07-29
+updated: 2026-07-30
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, retention, dependencies, admission, web]
 ---
 
@@ -652,10 +652,13 @@ retry hourly. The per-profile status lives under
 `<state_home>/schema-migrations/refactor-patrol-job-v3.json` and is surfaced by
 `hive daemon status --json`; the privileged aggregate is a separate typed
 receipt with candidate, inventory, uid, profile, and coverage identities. AUR's
-system timer retries inactive users hourly. Its counts distinguish unique OS
-uids from multiple Hive config/state profiles owned by one uid. Direct JobStore
-construction retains the same one-off conversion entrypoint for dormant state,
-while normal records and child completion payloads validate only v3.
+system timer retries inactive users hourly; root-owned `install.sh` packages
+install the equivalent hourly systemd timer or launchd LaunchDaemon. Their
+counts distinguish unique OS uids from multiple Hive config/state profiles
+owned by one uid. Conversion is available only through the explicit
+package-candidate command. Direct JobStore construction, normal CLI startup,
+records, and child completion payloads accept v3 only and reject released-v2
+state without changing it.
 
 The snapshot manifest binds project id, sorted name set, exact bytes, SHA-256,
 size, mode, and source mtime before the first replacement. A completed marker,

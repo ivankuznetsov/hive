@@ -8,9 +8,9 @@ area: update, refactor-patrol, migration
 - Added `hive refactor-patrol-migrate-installed`, a candidate-only command that
   backfills registered-project identities, sweeps the invoking user's complete
   installation registry through `RegisteredProjectMigrationCoordinator`, and
-  prints the exact typed installation status it persists. Every other
-  user-scoped installation runs the same shipped boundary on first eligible
-  use.
+  prints the exact typed installation status it persists. Package hooks and
+  updates invoke this boundary explicitly; normal CLI startup never converts
+  released-v2 JobStore state.
 - Isolated failed/retryable project rows now remain successful sweep evidence;
   only structural command failures fail the candidate process.
 - `hive update` invokes that command through the stable post-update Hive binary

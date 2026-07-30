@@ -53,19 +53,48 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     end
   end
 
+  def test_runtime_constructor_rejects_released_v2_without_mutating_it
+    with_tmp_dir do |dir|
+      _root, path = write_released_v2_job(dir, released_v2_job)
+      before = File.binread(path)
+
+      error = assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        Hive::RefactorPatrol::JobStore.new(
+          dir, project: migration_options.fetch(:project)
+        )
+      end
+
+      assert_match(/migration is required/, error.message)
+      assert_equal before, File.binread(path)
+      refute_includes(
+        Hive::RefactorPatrol::JobStore
+          .instance_method(:initialize).parameters,
+        [ :key, :migrate ]
+      )
+    end
+  end
+
   def test_one_off_schema_migration_imports_the_released_aggregate
     with_tmp_dir do |dir|
       legacy = released_v2_job
       root, path = write_released_v2_job(dir, legacy)
       source_bytes = File.binread(path)
 
-      store = Hive::RefactorPatrol::JobStore.new(
-        dir,
+      options = {
         project: {
           "name" => "demo",
           "project_id" => "project-demo"
         },
         writer_fence: NullWriterFence.new
+      }
+      assert Hive::RefactorPatrol::JobStore.migrate_schema!(
+        dir, **options
+      )
+      store = Hive::RefactorPatrol::JobStore.new(
+        dir,
+        **options
       )
       migrated = store.read_job(legacy.fetch("job_id"))
       root = store.root
@@ -117,13 +146,18 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       root, = write_released_v2_job(dir, first)
       write_released_v2_job(dir, second)
       fence = NullWriterFence.new
-      store = Hive::RefactorPatrol::JobStore.new(
-        dir,
+      options = {
         project: {
           "name" => "demo",
           "project_id" => "project-demo"
         },
         writer_fence: fence
+      }
+      assert Hive::RefactorPatrol::JobStore.migrate_schema!(
+        dir, **options
+      )
+      store = Hive::RefactorPatrol::JobStore.new(
+        dir, **options
       )
       root = store.root
       first_bytes = File.binread(
@@ -160,6 +194,9 @@ class RefactorPatrolJobStoreTest < Minitest::Test
         },
         writer_fence: NullWriterFence.new
       }
+      assert Hive::RefactorPatrol::JobStore.migrate_schema!(
+        dir, **options
+      )
       Hive::RefactorPatrol::JobStore.new(dir, **options)
       error = assert_raises(SystemCallError) do
         write_released_v2_job(
@@ -2989,10 +3026,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   end
 
   def test_canonical_action_rejects_an_empty_identity_and_ambiguous_project_registration
-    store = Hive::RefactorPatrol::JobStore.new(
-      "/tmp/example",
-      migrate: false
-    )
+    store = Hive::RefactorPatrol::JobStore.new("/tmp/example")
     assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
       store.canonical_action_id(
         repository: "acme/demo",

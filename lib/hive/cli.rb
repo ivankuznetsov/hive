@@ -455,10 +455,13 @@ module Hive
                        desc: "migrate every machine-inventoried Hive user (root only)"
     option :resume, type: :boolean, default: false,
                     desc: "run only work due by registry change or retry deadline"
+    option :ensure_retry_service, type: :boolean, default: false,
+                                  desc: "install the machine-owned hourly retry service"
     def refactor_patrol_migrate_installed
       require "hive/commands/refactor_patrol_candidate_migration"
       Hive::Commands::RefactorPatrolCandidateMigration.new(
         all_users: options[:all_users],
+        ensure_retry_service: options[:ensure_retry_service],
         force: !options[:resume]
       ).call
     end

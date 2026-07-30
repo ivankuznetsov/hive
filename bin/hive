@@ -24,11 +24,17 @@ strict_no_write_route =
   else
     false
   end
+migration_route = ARGV.include?("refactor-patrol-migrate-installed")
+skip_scheduler_reconciliation =
+  strict_no_write_route || migration_route ||
+  ENV["HIVE_JOB_SCHEMA_MIGRATION_INTERNAL"] == "1"
 
 # Repair legacy path-keyed LLM-wiki timers as soon as an upgraded Hive binary
 # is invoked, including `hive --version`. The reconciliation is idempotent and
-# touches only Hive-managed units.
-unless strict_no_write_route
+# touches only Hive-managed units. The schema-migration boundary suppresses
+# this unrelated startup mutation in both its privileged parent and
+# dropped-identity children.
+unless skip_scheduler_reconciliation
   begin
     Hive::LlmWikiBootstrap::Scheduler.reconcile_existing!
   rescue StandardError => e

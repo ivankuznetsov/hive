@@ -746,6 +746,53 @@ class HiveCommandsDaemonTest < Minitest::Test
     assert_equal "probe exploded", payload.fetch("message")
   end
 
+  def test_schema_migration_payload_reports_read_failures_without_breaking_status
+    migration_status = Object.new
+    migration_status.define_singleton_method(:read) do
+      raise IOError, "migration receipt unavailable"
+    end
+    migration_status.define_singleton_method(:user_profile) do
+      {
+        "username" => "tester",
+        "uid" => 123,
+        "home" => "/home/tester",
+        "config_home" => "/home/tester/.config",
+        "state_home" => "/home/tester/.local/state"
+      }
+    end
+    report = Hive::Daemon::StatusReport.new(
+      hive_home: @home,
+      migration_status: migration_status
+    )
+
+    payload = report.send(:schema_migration_payload)
+
+    refute payload.fetch("ok")
+    assert_includes payload.fetch("error"),
+                    "migration receipt unavailable"
+    assert_equal 123, payload.dig("user_profile", "uid")
+    assert_empty payload.fetch("projects")
+  end
+
+  def test_schema_migration_payload_uses_the_current_profile_for_legacy_readers
+    migration_status = Object.new
+    migration_status.define_singleton_method(:read) { nil }
+    report = Hive::Daemon::StatusReport.new(
+      hive_home: @home,
+      migration_status: migration_status
+    )
+
+    payload = report.send(:schema_migration_payload)
+
+    assert payload.fetch("ok")
+    assert_equal Process.uid,
+                 payload.dig("user_profile", "uid")
+    assert_equal(
+      Hive::RefactorPatrol::RegisteredProjectMigrationStatus::SCHEMA,
+      payload.fetch("schema")
+    )
+  end
+
   def test_status_text_reports_running_daemon
     command = daemon("status")
     write_pid_payload(pid: 2468)

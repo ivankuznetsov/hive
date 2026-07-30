@@ -149,6 +149,96 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
     end
   end
 
+  def test_recovery_enumeration_repairs_stale_projected_occurrence_ids
+    with_journal do |journal|
+      recovery_index = journal.instance_variable_get(:@recovery_index)
+      snapshot = recovery_index.snapshot
+      stale_id = "occ-#{"f" * 64}"
+      recovery_index.write(
+        generation: snapshot.fetch("generation"),
+        occurrence_ids:
+          snapshot.fetch("occurrence_ids") + [ stale_id ]
+      )
+
+      assert_equal(
+        [ patrol_capture.occurrence_id ],
+        journal.each_recovery_active.map { |record|
+          record.fetch("occurrence_id")
+        }
+      )
+      refute_includes(
+        recovery_index.snapshot.fetch("occurrence_ids"),
+        stale_id
+      )
+    end
+  end
+
+  def test_reservation_rejects_a_store_result_that_is_not_recovery_active
+    with_tmp_dir do |root|
+      journal = occurrence_journal(File.join(root, "occurrences"))
+      record_store = journal.instance_variable_get(:@store)
+      create_values = []
+      replacement = lambda do |_occurrence_id, create: false, &_block|
+        create_values << create
+        { "phase" => "finalized", "outbox" => [] }
+      end
+
+      error = with_replaced_singleton_method(
+        record_store,
+        :mutate,
+        replacement
+      ) do
+        assert_raises(Hive::ConfigError) do
+          journal.reserve!(patrol_capture, now: NOW)
+        end
+      end
+
+      assert_equal [ true ], create_values
+      assert_match(/reservation is not recovery active/, error.message)
+    end
+  end
+
+  def test_retirement_rejects_a_store_that_retains_recovery_active_state
+    with_journal do |journal|
+      record_store = journal.instance_variable_get(:@store)
+      terminal = Marshal.load(Marshal.dump(
+        journal.fetch(patrol_capture.occurrence_id)
+      ))
+      terminal["phase"] = "finalized"
+      terminal["outbox"] = []
+      fetches = 0
+      original_fetch = record_store.method(:fetch)
+      retained = lambda do |occurrence_id|
+        fetches += 1
+        if fetches == 1
+          terminal
+        elsif fetches == 2
+          { "phase" => "reserved" }
+        else
+          original_fetch.call(occurrence_id)
+        end
+      end
+
+      error = with_replaced_singleton_method(
+        record_store,
+        :fetch,
+        retained
+      ) do
+        with_replaced_singleton_method(
+          record_store,
+          :retire!,
+          ->(_occurrence_id) { true }
+        ) do
+          assert_raises(Hive::ConfigError) do
+            journal.send(:retire_if_terminal!, terminal)
+          end
+        end
+      end
+
+      assert_match(/remains recovery active/, error.message)
+    end
+  end
+
   def test_reservation_recovers_when_interrupted_after_dirty_checkpoint
     with_tmp_dir do |root|
       journal_root = File.join(root, "occurrences")

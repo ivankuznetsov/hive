@@ -601,7 +601,13 @@ class ModulesMigrationEffectDeliveryCollaboratorsTest < Minitest::Test
 
     result = delivery.perform!(**attributes) do
       {
-        "reason" => "found #{token}"
+        "reason" => "found #{token}",
+        "nested" => [
+          "still #{token}",
+          7,
+          true,
+          nil
+        ]
       }
     end
     replay = delivery.perform!(**attributes) do
@@ -610,12 +616,23 @@ class ModulesMigrationEffectDeliveryCollaboratorsTest < Minitest::Test
 
     redacted = "[REDACTED:github_fine_grained_pat]"
     expected = {
-      "reason" => "found #{redacted}"
+      "reason" => "found #{redacted}",
+      "nested" => [
+        "still #{redacted}",
+        7,
+        true,
+        nil
+      ]
     }
     assert_equal expected, result.outcome
     assert_equal expected, store.state.fetch("outcome")
     assert_equal result.receipt, replay.receipt
     refute_includes store.calls.to_s, token
+
+    sender = delivery.instance_variable_get(:@sender)
+    redacted_store = sender.instance_variable_get(:@delivery_store)
+    assert_respond_to redacted_store, :effect_state
+    refute_respond_to redacted_store, :unknown_delivery_operation
   end
 
   def test_recovery_reconciliation_requires_a_block_rejects_foreign_intents_and_replays_terminal_receipts

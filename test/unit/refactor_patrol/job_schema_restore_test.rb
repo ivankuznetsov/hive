@@ -331,6 +331,42 @@ class RefactorPatrolJobSchemaRestoreTest < Minitest::Test
     end
   end
 
+  def test_restore_fence_rejects_a_reused_pid_and_malformed_pid_payload
+    with_tmp_dir do |dir|
+      pid_file = File.join(dir, "daemon.pid")
+      process = FakeLiveProcess.new(4_242)
+      File.write(
+        pid_file,
+        {
+          "pid" => process.pid,
+          "process_start_time" => "recorded-start"
+        }.to_yaml
+      )
+      fence = Hive::RefactorPatrol::MigrationWriterFence.new(
+        pid_file: pid_file,
+        process: process,
+        operation: "JobStore migration"
+      )
+
+      with_replaced_singleton_method(
+        Hive::Lock,
+        :process_start_time,
+        ->(*) { "different-start" }
+      ) do
+        error = assert_raises(Hive::ConcurrentRunError) do
+          fence.assert_quiescent!
+        end
+        assert_match(/cannot verify the live Hive daemon/, error.message)
+      end
+
+      File.write(pid_file, { "pid" => "not-an-integer" }.to_yaml)
+      error = assert_raises(Hive::ConcurrentRunError) do
+        fence.assert_quiescent!
+      end
+      assert_match(/cannot verify the Hive daemon writer fence/, error.message)
+    end
+  end
+
   def test_schema_status_is_a_descriptor_safe_full_tree_read
     with_tmp_dir do |project_root|
       state = File.join(project_root, ".hive-state")
@@ -380,7 +416,376 @@ class RefactorPatrolJobSchemaRestoreTest < Minitest::Test
                  restore.send(:inventory_names, inventory)
   end
 
+  def test_restore_rejects_unsafe_candidate_and_quarantine_inventory_shapes
+    with_tmp_dir do |root|
+      target = File.join(root, "v3")
+      legacy = File.join(root, "v2")
+      restore = schema_restore(target, legacy, anchor: root)
+      unsafe = File.join(root, "unsafe-generation")
+      File.binwrite(unsafe, "not a directory")
+      assert_raises(Hive::RefactorPatrol::JobStore::CorruptRecord) do
+        restore.send(:safe_directory?, unsafe)
+      end
+
+      transition = Object.new
+      transition.define_singleton_method(:each_child) do |*, **|
+        [ "invalid" ].each
+      end
+      restore.instance_variable_set(:@transition_directory, transition)
+      assert_raises(Hive::RefactorPatrol::JobStore::CorruptRecord) do
+        restore.send(
+          :select_quarantined_candidate!,
+          "snapshot-#{"1" * 64}"
+        )
+      end
+
+      transaction = "migration-#{"2" * 32}"
+      transition.define_singleton_method(:each_child) do |*, **|
+        [ transaction ].each
+      end
+      transition.define_singleton_method(:entry_type) { |*| :regular }
+      assert_raises(Hive::RefactorPatrol::JobStore::CorruptRecord) do
+        restore.send(
+          :select_quarantined_candidate!,
+          "snapshot-#{"1" * 64}"
+        )
+      end
+
+      transition.define_singleton_method(:entry_type) { |*| :directory }
+      restore.define_singleton_method(:read_cutover_record) { |_path| {} }
+      assert_raises(Hive::RefactorPatrol::JobStore::CorruptRecord) do
+        restore.send(
+          :select_quarantined_candidate!,
+          "snapshot-#{"1" * 64}"
+        )
+      end
+    end
+  end
+
+  def test_restore_translates_quarantine_ordering_and_cutover_parse_failures
+    with_tmp_dir do |root|
+      target = File.join(root, "v3")
+      legacy = File.join(root, "v2")
+      restore = schema_restore(target, legacy, anchor: root)
+      transaction = "migration-#{"2" * 32}"
+      transition = Object.new
+      transition.define_singleton_method(:each_child) do |*, **|
+        [ transaction ].each
+      end
+      transition.define_singleton_method(:entry_type) { |*| :directory }
+      restore.instance_variable_set(:@transition_directory, transition)
+      restore.define_singleton_method(:valid_cutover_record_shape?) do |_record|
+        true
+      end
+      restore.define_singleton_method(:read_cutover_record) do |_path|
+        {
+          "snapshot_id" => "snapshot-#{"1" * 64}",
+          "transaction_id" => transaction
+        }
+      end
+      error = assert_raises(
+        Hive::RefactorPatrol::JobStore::CorruptRecord
+      ) do
+        restore.send(
+          :select_quarantined_candidate!,
+          "snapshot-#{"1" * 64}"
+        )
+      end
+      assert_match(/quarantine inventory is malformed/, error.message)
+
+      candidate = File.join(root, "candidate")
+      FileUtils.mkdir_p(candidate)
+      record_path = File.join(
+        candidate,
+        Hive::RefactorPatrol::JobStoreGenerationCutover::RECORD_NAME
+      )
+      File.binwrite(record_path, JSON.pretty_generate("record" => true))
+      assert_raises(Hive::RefactorPatrol::JobStore::CorruptRecord) do
+        schema_restore(target, legacy, anchor: root).send(
+          :read_cutover_record,
+          candidate
+        )
+      end
+      File.binwrite(record_path, "{")
+      assert_raises(Hive::RefactorPatrol::JobStore::CorruptRecord) do
+        schema_restore(target, legacy, anchor: root).send(
+          :read_cutover_record,
+          candidate
+        )
+      end
+      refute schema_restore(target, legacy, anchor: root).send(
+        :valid_cutover_record_shape?,
+        nil
+      )
+    end
+  end
+
+  def test_restore_candidate_validation_rejects_ledger_version_and_missing_fields
+    with_tmp_dir do |root|
+      restore = schema_restore(
+        File.join(root, "v3"),
+        File.join(root, "v2"),
+        anchor: root
+      )
+      restore.instance_variable_set(:@candidate_root, File.join(root, "v3"))
+      manifest = {
+        "entries" => [
+          {
+            "name" => "job-1.json",
+            "digest" => "1" * 64
+          }
+        ]
+      }
+      restore.define_singleton_method(:validate_completion_marker!) { |_| true }
+      restore.define_singleton_method(:validate_cutover_record!) { |_| true }
+      restore.define_singleton_method(:capture_candidate_jobs) do
+        [
+          {
+            name: "job-1.json",
+            data: {},
+            bytes: "{}\n",
+            version: 3
+          }
+        ]
+      end
+      restore.define_singleton_method(:conversion_records) { {} }
+      assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) { restore.send(:validate_candidate!, manifest) }
+
+      source = "{\"job_id\":\"job-1\"}"
+      snapshot = Object.new
+      snapshot.define_singleton_method(:backup_bytes) { |_entry| source }
+      restore.instance_variable_set(:@snapshot_store, snapshot)
+      restore.define_singleton_method(:conversion_records) do
+        { "job-1.json" => "{}" }
+      end
+      restore.define_singleton_method(:capture_candidate_jobs) do
+        [
+          {
+            name: "job-1.json",
+            data: {},
+            bytes: "{}\n",
+            version: 2
+          }
+        ]
+      end
+      assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) { restore.send(:validate_candidate!, manifest) }
+
+      missing_restore = schema_restore(
+        File.join(root, "missing-v3"),
+        File.join(root, "missing-v2"),
+        anchor: root
+      )
+      directory = Object.new
+      directory.define_singleton_method(:read_with_metadata) do |*, **|
+        { bytes: "{\"job_id\":\"job-1\"}" }
+      end
+      missing_restore.instance_variable_set(:@directory, directory)
+      missing_restore.define_singleton_method(:candidate_job_inventory) do
+        :inventory
+      end
+      missing_restore.define_singleton_method(:inventory_names) do |_inventory|
+        [ "job-1.json" ]
+      end
+      assert_raises(Hive::RefactorPatrol::JobStore::CorruptRecord) do
+        missing_restore.send(:capture_candidate_jobs)
+      end
+    end
+  end
+
+  def test_restore_rejects_conversion_archive_and_stage_namespace_conflicts
+    with_tmp_dir do |root|
+      restore = schema_restore(
+        File.join(root, "v3"),
+        File.join(root, "v2"),
+        anchor: root
+      )
+      candidate = Object.new
+      candidate.define_singleton_method(:each_child) do |*, **|
+        [ "invalid" ].each
+      end
+      restore.instance_variable_set(:@directory, candidate)
+      assert_raises(Hive::RefactorPatrol::JobStore::CorruptRecord) do
+        restore.send(:conversion_records)
+      end
+
+      legacy = Object.new
+      legacy.define_singleton_method(:entry_type) { |*, **| nil }
+      restore.instance_variable_set(:@legacy_directory, legacy)
+      payload = { "archive_name" => ".job-schema-v3-source-#{"1" * 32}" }
+      assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        restore.send(
+          :validate_sealed_archive!,
+          { "entries" => [] },
+          payload
+        )
+      end
+
+      legacy.define_singleton_method(:entry_type) { |*, **| :directory }
+      legacy.define_singleton_method(:each_child) { |*| [ "wrong.json" ].each }
+      assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        restore.send(
+          :validate_sealed_archive!,
+          { "entries" => [ { "name" => "job-1.json" } ] },
+          payload
+        )
+      end
+
+      legacy.define_singleton_method(:entry_type) { |*, **| :regular }
+      restore.define_singleton_method(:candidate_transaction_id) do
+        "migration-#{"2" * 32}"
+      end
+      assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        restore.send(
+          :build_restore_stage!,
+          { "entries" => [] }
+        )
+      end
+
+      legacy.define_singleton_method(:entry_type) { |*, **| :directory }
+      legacy.define_singleton_method(:each_child) { |*| [ "bad" ].each }
+      assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        restore.send(
+          :build_restore_stage!,
+          { "entries" => [ { "name" => "bad" } ] }
+        )
+      end
+    end
+  end
+
+  def test_restore_reuses_a_verified_stage_and_rejects_activation_and_quarantine_drift
+    with_tmp_dir do |root|
+      target = File.join(root, "v3")
+      restore = schema_restore(
+        target,
+        File.join(root, "v2"),
+        anchor: root
+      )
+      entry = {
+        "name" => "job-1.json",
+        "bytes" => 3,
+        "digest" => Digest::SHA256.hexdigest("v2\n"),
+        "mode" => 0o600,
+        "mtime" => Time.utc(2026, 7, 10, 12).iso8601(9)
+      }
+      legacy = Object.new
+      legacy.define_singleton_method(:entry_type) { |*, **| :directory }
+      legacy.define_singleton_method(:each_child) do |*|
+        [ "job-1.json" ].each
+      end
+      legacy.define_singleton_method(:read_with_metadata) do |*, **|
+        {
+          bytes: "v2\n",
+          mode: 0o600,
+          mtime: Time.utc(2026, 7, 10, 12)
+        }
+      end
+      restore.instance_variable_set(:@legacy_directory, legacy)
+      restore.define_singleton_method(:candidate_transaction_id) do
+        "migration-#{"2" * 32}"
+      end
+      verified = []
+      restore.define_singleton_method(:verify_v2_snapshot!) do |*arguments|
+        verified << arguments
+        true
+      end
+
+      restore.send(:build_restore_stage!, { "entries" => [ entry ] })
+      assert_equal 1, verified.size
+
+      restore.define_singleton_method(:restored_namespace_active?) { false }
+      assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        restore.send(
+          :validate_restored_namespace!,
+          { "entries" => [] }
+        )
+      end
+
+      restore.instance_variable_set(:@candidate_root, File.join(root, "other"))
+      assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        restore.send(
+          :quarantine_candidate!,
+          "snapshot-#{"1" * 64}"
+        )
+      end
+    end
+  end
+
+  def test_restore_record_parsing_filename_and_error_paths_are_explicit
+    with_tmp_dir do |root|
+      target = File.join(root, "v3")
+      restore = schema_restore(
+        target,
+        File.join(root, "v2"),
+        anchor: root
+      )
+      restore.instance_variable_set(:@candidate_root, target)
+
+      assert_raises(Hive::RefactorPatrol::JobStore::CorruptRecord) do
+        restore.send(:parse_object, "{", "jobs/job-1.json")
+      end
+      assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        restore.send(
+          :validate_filename!,
+          "job-1.json",
+          { "job_id" => "job-2" }
+        )
+      end
+
+      [ "/absolute", "relative", nil ].each do |relative|
+        error = assert_raises(
+          Hive::RefactorPatrol::JobStore::CorruptRecord
+        ) do
+          restore.send(:corrupt!, "corrupt", relative)
+        end
+        assert_match(/corrupt/, error.message)
+      end
+      [ "/absolute", "relative" ].each do |relative|
+        error = assert_raises(
+          Hive::RefactorPatrol::JobStore::InconsistentRecord
+        ) do
+          restore.send(:inconsistent!, "inconsistent", relative)
+        end
+        assert_match(/inconsistent/, error.message)
+      end
+    end
+  end
+
   private
+
+  def schema_restore(target_root, legacy_root, anchor:)
+    Hive::RefactorPatrol::JobSchemaRestore.new(
+      target_root: target_root,
+      legacy_root: legacy_root,
+      target_version: 3,
+      validator: Hive::RefactorPatrol::JobRecordValidator.new(
+        contract: Hive::RefactorPatrol::JobStore
+      ),
+      corrupt_record: Hive::RefactorPatrol::JobStore::CorruptRecord,
+      inconsistent_record:
+        Hive::RefactorPatrol::JobStore::InconsistentRecord,
+      project_id: "project-demo",
+      anchor: anchor,
+      writer_fence: NullWriterFence.new
+    )
+  end
 
   def fixture_path
     File.expand_path(

@@ -133,6 +133,20 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
     end
   end
 
+  def test_shutdown_acknowledgement_degrades_unavailable_storage_to_nil
+    with_tmp_dir do |dir|
+      reader = Hive::Daemon::OperationalSnapshot::Reader.new(
+        path: File.join(dir, "missing", "snapshot.json"),
+        expected_daemon: IDENTITY
+      )
+
+      assert_nil reader.shutdown_acknowledgement(
+        expected_daemon: IDENTITY,
+        now: T0
+      )
+    end
+  end
+
   def test_reconfigured_validity_is_measured_from_tick_completion
     with_tmp_dir do |dir|
       path = File.join(dir, "private", "operational-snapshot.json")

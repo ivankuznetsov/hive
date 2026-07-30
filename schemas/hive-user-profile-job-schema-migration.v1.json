@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/schemas/hive-user-profile-job-schema-migration.v1.json",
+  "title": "Hive user-profile JobStore schema migration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "hive_version",
+    "target_schema_version",
+    "registry_digest",
+    "updated_at",
+    "daemon_restart_pending",
+    "user_profile",
+    "projects"
+  ],
+  "properties": {
+    "schema": { "const": "hive-user-profile-job-schema-migration" },
+    "schema_version": { "const": 1 },
+    "hive_version": { "type": "string", "minLength": 1 },
+    "target_schema_version": { "const": 3 },
+    "registry_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "daemon_restart_pending": { "type": "boolean" },
+    "user_profile": { "$ref": "#/$defs/user_profile" },
+    "projects": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/project" }
+    }
+  },
+  "$defs": {
+    "user_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["username", "uid", "home", "config_home", "state_home"],
+      "properties": {
+        "username": { "type": "string", "minLength": 1 },
+        "uid": { "type": "integer", "minimum": 0 },
+        "home": { "type": "string", "pattern": "^/" },
+        "config_home": { "type": "string", "pattern": "^/" },
+        "state_home": { "type": "string", "pattern": "^/" }
+      }
+    },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "project",
+        "project_id",
+        "path",
+        "real_path",
+        "hive_state_path",
+        "status",
+        "current_schema_version",
+        "target_schema_version",
+        "snapshot_id",
+        "retryable",
+        "next_retry_at",
+        "remediation",
+        "error"
+      ],
+      "properties": {
+        "project": { "type": ["string", "null"] },
+        "project_id": { "type": ["string", "null"] },
+        "path": { "type": ["string", "null"] },
+        "real_path": { "type": ["string", "null"] },
+        "hive_state_path": { "type": ["string", "null"] },
+        "status": {
+          "enum": [
+            "absent",
+            "current",
+            "dry_run",
+            "duplicate",
+            "failed",
+            "migrated",
+            "migration_required"
+          ]
+        },
+        "current_schema_version": {
+          "type": ["integer", "null"],
+          "enum": [null, 2, 3]
+        },
+        "target_schema_version": { "const": 3 },
+        "snapshot_id": {
+          "type": ["string", "null"],
+          "pattern": "^snapshot-[0-9a-f]{64}$"
+        },
+        "retryable": { "type": "boolean" },
+        "next_retry_at": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "remediation": { "type": ["string", "null"] },
+        "error": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

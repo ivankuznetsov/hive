@@ -451,9 +451,16 @@ module Hive
       "Run the candidate-only installation JobStore migration sweep",
       hide: true
     )
+    option :all_users, type: :boolean, default: false,
+                       desc: "migrate every machine-inventoried Hive user (root only)"
+    option :resume, type: :boolean, default: false,
+                    desc: "run only work due by registry change or retry deadline"
     def refactor_patrol_migrate_installed
       require "hive/commands/refactor_patrol_candidate_migration"
-      Hive::Commands::RefactorPatrolCandidateMigration.new.call
+      Hive::Commands::RefactorPatrolCandidateMigration.new(
+        all_users: options[:all_users],
+        force: !options[:resume]
+      ).call
     end
 
     desc "wiki SUBCOMMAND", "Manage generated wiki artifacts (compile-log)"

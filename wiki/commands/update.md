@@ -58,10 +58,15 @@ could begin its one-way conversion.
 After a successful updater invocation, Hive executes
 `<stable-invoked-hive> refactor-patrol-migrate-installed` before any daemon
 restart, even when no daemon was running. That fresh candidate process backfills
-registry identities, migrates the invoking user's complete installation
-registry, persists, and prints its typed installation result. Other users of a
-shared package cross the same shipped boundary on first eligible use; their
-separate `HIVE_HOME` receipts cannot be satisfied by the updater's user. A
+registry identities, migrates the updater user's complete profile, persists,
+and prints its typed user-profile result. AUR additionally runs the root-only
+`--all-users` coordinator from its package hook and enables the hourly retry
+timer in `--resume` mode. Root-run `install.sh` performs the all-user sweep
+once. Homebrew and
+non-root install.sh cannot acquire administrator authority: they explicitly
+report current-user-only coverage and require
+`sudo hive refactor-patrol-migrate-installed --all-users` on a shared machine.
+First use is only a fallback. A
 failed/retryable project row is an observed completed sweep, not a process
 crash. If the candidate command fails structurally, a daemon that was running
 before the update is still restarted in `ensure`, then the candidate failure

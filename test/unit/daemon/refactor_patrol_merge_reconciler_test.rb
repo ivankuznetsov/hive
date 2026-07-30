@@ -122,6 +122,21 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
     end
   end
 
+  def test_unregistered_state_path_falls_back_to_the_project_local_root
+    with_tmp_dir do |dir|
+      intake = Hive::Daemon::RefactorPatrolMergeReconciler.new(
+        registry: -> { [] },
+        gh: FakeGh.new,
+        github_gateway: FakeGh.new
+      )
+
+      assert_equal(
+        File.join(File.expand_path(dir), ".hive-state"),
+        intake.send(:hive_state_path_for, dir)
+      )
+    end
+  end
+
   def test_first_enable_seeds_paginated_baseline_without_historical_jobs
     with_tmp_dir do |dir|
       gh = FakeGh.new

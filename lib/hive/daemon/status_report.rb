@@ -190,10 +190,12 @@ module Hive
             Hive::RefactorPatrol::RegisteredProjectMigrationStatus::SCHEMA,
           "schema_version" =>
             Hive::RefactorPatrol::RegisteredProjectMigrationStatus::SCHEMA_VERSION,
+          "hive_version" => Hive::VERSION,
           "target_schema_version" => 3,
           "registry_digest" => nil,
           "updated_at" => nil,
           "daemon_restart_pending" => false,
+          "user_profile" => migration_user_profile,
           "projects" => []
         } unless value
 
@@ -205,13 +207,23 @@ module Hive
             Hive::RefactorPatrol::RegisteredProjectMigrationStatus::SCHEMA,
           "schema_version" =>
             Hive::RefactorPatrol::RegisteredProjectMigrationStatus::SCHEMA_VERSION,
+          "hive_version" => Hive::VERSION,
           "target_schema_version" => 3,
           "registry_digest" => nil,
           "updated_at" => nil,
           "daemon_restart_pending" => false,
+          "user_profile" => migration_user_profile,
           "projects" => [],
           "error" => "#{error.class}: #{error.message}"
         }
+      end
+
+      def migration_user_profile
+        return @migration_status.user_profile if
+          @migration_status.respond_to?(:user_profile)
+
+        Hive::RefactorPatrol::RegisteredProjectMigrationStatus
+          .current_user_profile
       end
     end
   end

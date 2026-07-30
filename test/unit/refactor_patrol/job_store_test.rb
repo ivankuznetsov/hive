@@ -2988,6 +2988,586 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     end
   end
 
+  def test_canonical_action_rejects_an_empty_identity_and_ambiguous_project_registration
+    store = Hive::RefactorPatrol::JobStore.new(
+      "/tmp/example",
+      migrate: false
+    )
+    assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+      store.canonical_action_id(
+        repository: "acme/demo",
+        kind: "fix",
+        identity: " "
+      )
+    end
+
+    with_tmp_dir do |root|
+      duplicate = {
+        "name" => "demo",
+        "path" => root,
+        "project_id" => "project-demo"
+      }
+      with_replaced_singleton_method(
+        Hive::Config,
+        :registered_projects,
+        -> { [ duplicate, duplicate.dup ] }
+      ) do
+        error = assert_raises(ArgumentError) do
+          Hive::RefactorPatrol::JobStore.send(
+            :project_identity,
+            root,
+            nil
+          )
+        end
+        assert_match(/identity is ambiguous/, error.message)
+      end
+    end
+  end
+
+  def test_diagnostic_and_transition_helpers_reject_stale_or_malformed_history
+    with_tmp_dir do |root|
+      store = Hive::RefactorPatrol::JobStore.new(root)
+      aggregate = {
+        "occurrence_id" => "occ-#{"1" * 64}",
+        "attempts" => []
+      }
+      assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        store.send(:diagnostic_generation, aggregate, "unsupported")
+      end
+      assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        store.send(
+          :diagnostic_episode!,
+          aggregate,
+          "discovery_block",
+          2
+        )
+      end
+      assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        store.send(
+          :append_job_transition!,
+          aggregate,
+          operation: "migrate",
+          transition: {},
+          generation: 0,
+          now: T0
+        )
+      end
+      assert_raises(Hive::RefactorPatrol::JobStore::CorruptRecord) do
+        store.send(
+          :transition_record,
+          { "intent_id" => "intent-1", "operation" => "migrate" },
+          generation: 1,
+          now: T0
+        )
+      end
+    end
+  end
+
+  def test_job_transition_append_is_idempotent_and_conflicts_fail_closed
+    with_tmp_dir do |root|
+      store = Hive::RefactorPatrol::JobStore.new(root)
+      aggregate = {
+        "occurrence_id" => "occ-#{"1" * 64}",
+        "attempts" => []
+      }
+      transition = {
+        "intent_id" => "intent-#{"2" * 64}",
+        "operation" => "migrate",
+        "semantic_digest" => "3" * 64
+      }
+
+      assert store.send(
+        :append_job_transition!,
+        aggregate,
+        operation: "migrate",
+        transition: transition,
+        generation: 1,
+        now: T0
+      )
+      refute store.send(
+        :append_job_transition!,
+        aggregate,
+        operation: "migrate",
+        transition: transition,
+        generation: 1,
+        now: T0 + 1
+      )
+
+      aggregate.fetch("attempts").first["operation"] = "changed"
+      assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        store.send(
+          :append_job_transition!,
+          aggregate,
+          operation: "migrate",
+          transition: transition,
+          generation: 1,
+          now: T0
+        )
+      end
+    end
+  end
+
+  def test_transition_history_is_idempotent_conflict_checked_and_bounded
+    with_tmp_dir do |root|
+      store = Hive::RefactorPatrol::JobStore.new(root)
+      transition = {
+        "intent_id" => "intent-1",
+        "operation" => "migrate",
+        "generation" => 1
+      }
+      records = [ transition ]
+
+      assert_same transition,
+                  store.send(:append_transition!, records, transition.dup)
+      assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        store.send(
+          :append_transition!,
+          records,
+          transition.merge("operation" => "changed")
+        )
+      end
+
+      with_constant(
+        Hive::RefactorPatrol::JobStore,
+        :MAX_TRANSITIONS_PER_GENERATION,
+        1
+      ) do
+        assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+          store.send(
+            :append_transition!,
+            records,
+            transition.merge("intent_id" => "intent-2")
+          )
+        end
+      end
+      assert_equal File.join(store.root, "jobs"),
+                   store.send(:jobs_dir)
+    end
+  end
+
+  def test_schema_migration_inventory_name_and_completed_marker_guards
+    migration_class = Hive::RefactorPatrol::JobStoreSchemaMigration
+    assert_raises(Hive::ConfigError) do
+      migration_class.validate_job_inventory_names!([ 1 ])
+    end
+    assert_raises(Hive::ConfigError) do
+      migration_class.validate_job_inventory_names!([ "unknown" ])
+    end
+
+    with_tmp_dir do |root|
+      migration = schema_migration(root)
+      directory = Object.new
+      directory.define_singleton_method(:prepare!) { true }
+      directory.define_singleton_method(:with_lock) do |*, &block|
+        block.call
+      end
+      migration.instance_variable_set(:@directory, directory)
+      migration.define_singleton_method(:root_present?) { true }
+      migration.define_singleton_method(:completed_marker) do
+        { "snapshot_id" => "snapshot-#{"1" * 64}" }
+      end
+      checked = false
+      migration.define_singleton_method(:assert_no_source_records!) do
+        checked = true
+      end
+
+      refute migration.run!(transition_lock: false)
+      assert checked
+      assert_equal "snapshot-#{"1" * 64}",
+                   migration.instance_variable_get(:@snapshot_id)
+    end
+  end
+
+  def test_schema_status_receipt_and_snapshot_errors_are_typed
+    with_tmp_dir do |root|
+      migration = schema_migration(root)
+      migration.define_singleton_method(:root_present?) { true }
+      directory = Object.new
+      directory.define_singleton_method(:prepare!) { true }
+      migration.instance_variable_set(:@directory, directory)
+      migration.define_singleton_method(:completed_marker) { nil }
+      migration.define_singleton_method(:snapshot_store) do
+        Object.new.tap do |snapshot|
+          snapshot.define_singleton_method(:manifest) { nil }
+        end
+      end
+      migration.define_singleton_method(:capture_inventory) do |**|
+        [ { version: 4 } ]
+      end
+      assert_equal "unsupported", migration.status.fetch("status")
+
+      migration.define_singleton_method(:capture_inventory) do |**|
+        raise Hive::ConfigError, "unsafe inventory"
+      end
+      error = assert_raises(
+        Hive::RefactorPatrol::JobStore::CorruptRecord
+      ) { migration.status }
+      assert_match(/cannot inspect refactor patrol job schema/, error.message)
+
+      migration.define_singleton_method(:read_completion_marker) do
+        raise Hive::RefactorPatrol::JobStore::InconsistentRecord,
+              "known conflict"
+      end
+      assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) { migration.completion_receipt }
+      migration.define_singleton_method(:read_completion_marker) do
+        raise Hive::ConfigError, "unsafe receipt"
+      end
+      error = assert_raises(
+        Hive::RefactorPatrol::JobStore::CorruptRecord
+      ) { migration.completion_receipt }
+      assert_match(/cannot inspect.*completion receipt/, error.message)
+    end
+
+    missing = schema_migration(File.join(Dir.tmpdir, "missing-schema-#{Process.pid}"))
+    refute missing.snapshot_identity
+
+    with_tmp_dir do |root|
+      migration = schema_migration(root)
+      directory = Object.new
+      directory.define_singleton_method(:prepare!) { true }
+      migration.instance_variable_set(:@directory, directory)
+      snapshot = Object.new
+      snapshot.define_singleton_method(:manifest) do
+        { "snapshot_id" => "snapshot-#{"2" * 64}" }
+      end
+      migration.instance_variable_set(:@snapshot_store, snapshot)
+      assert_equal "snapshot-#{"2" * 64}", migration.snapshot_identity
+
+      snapshot.define_singleton_method(:manifest) do
+        raise Hive::RefactorPatrol::JobStore::InconsistentRecord,
+              "known snapshot conflict"
+      end
+      assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) { migration.snapshot_identity }
+      snapshot.define_singleton_method(:manifest) do
+        raise Hive::ConfigError, "unsafe snapshot"
+      end
+      error = assert_raises(
+        Hive::RefactorPatrol::JobStore::CorruptRecord
+      ) { migration.snapshot_identity }
+      assert_match(/cannot inspect.*schema snapshot/, error.message)
+    end
+  end
+
+  def test_schema_capture_and_migration_detect_version_name_and_digest_drift
+    with_tmp_dir do |root|
+      migration = schema_migration(root)
+      directory = Object.new
+      directory.define_singleton_method(:with_lock) do |*, &block|
+        block.call
+      end
+      directory.define_singleton_method(:read_with_metadata) do |*, **|
+        {
+          bytes: JSON.generate(
+            "job_id" => "job-1",
+            "schema_version" => 4
+          ),
+          mode: 0o600,
+          mtime: T0
+        }
+      end
+      migration.instance_variable_set(:@directory, directory)
+      migration.define_singleton_method(:job_inventory) { :inventory }
+      migration.define_singleton_method(:inventory_names) do |_inventory|
+        [ "job-1.json" ]
+      end
+      assert_raises(Hive::RefactorPatrol::JobStore::CorruptRecord) do
+        migration.send(:capture_inventory)
+      end
+
+      directory.define_singleton_method(:read_with_metadata) do |*, **|
+        {
+          bytes: JSON.generate("job_id" => "job-1"),
+          mode: 0o600,
+          mtime: T0
+        }
+      end
+      assert_raises(Hive::RefactorPatrol::JobStore::CorruptRecord) do
+        migration.send(:capture_inventory)
+      end
+
+      validator = Object.new
+      validator.define_singleton_method(:validate_job!) { |job, **| job }
+      migration.instance_variable_set(:@validator, validator)
+      directory.define_singleton_method(:with_lock) do |*, &block|
+        block.call
+      end
+      migration.define_singleton_method(:read_job_with_bytes) do |_name|
+        [ { "job_id" => "job-1", "schema_version" => 3 }, "{}\n" ]
+      end
+      inventory = [
+        {
+          name: "job-1.json",
+          digest: Digest::SHA256.hexdigest("{}\n")
+        }
+      ]
+      assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        migration.send(
+          :migrate_inventory!,
+          inventory,
+          { "entries" => [] }
+        )
+      end
+
+      migration.define_singleton_method(:read_job_with_bytes) do |_name|
+        [ { "job_id" => "job-1", "schema_version" => 4 }, "{}\n" ]
+      end
+      assert_raises(Hive::RefactorPatrol::JobStore::CorruptRecord) do
+        migration.send(
+          :migrate_inventory!,
+          inventory,
+          { "entries" => [ { "name" => "job-1.json" } ] }
+        )
+      end
+
+      migration.define_singleton_method(:read_job_with_bytes) do |_name|
+        [ { "job_id" => "job-1", "schema_version" => 2 }, "changed\n" ]
+      end
+      assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        migration.send(
+          :migrate_inventory!,
+          inventory,
+          { "entries" => [ { "name" => "job-1.json" } ] }
+        )
+      end
+    end
+  end
+
+  def test_schema_migration_paths_occurrence_and_intent_errors_fail_closed
+    with_tmp_dir do |root|
+      migration = schema_migration(root)
+      directory = Object.new
+      directory.define_singleton_method(:directory_metadata) do |relative, **|
+        relative == "occurrences" ? {} : nil
+      end
+      migration.instance_variable_set(:@directory, directory)
+      assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) { migration.send(:assert_migration_paths_available!) }
+
+      assert_raises(Hive::RefactorPatrol::JobStore::CorruptRecord) do
+        migration.send(:migration_capture, {}, "a" * 64)
+      end
+      assert_raises(Hive::RefactorPatrol::JobStore::CorruptRecord) do
+        migration.send(:migration_intent, Object.new, {})
+      end
+
+      journal = Object.new
+      journal.define_singleton_method(:effect_state) do |_intent|
+        { "state" => "unexpected" }
+      end
+      migration.define_singleton_method(:journal) { journal }
+      assert_raises(Hive::RefactorPatrol::JobStore::CorruptRecord) do
+        migration.send(:settle_intake!, :intent, now: T0)
+      end
+
+      journal.define_singleton_method(:effect_state) do |_intent|
+        raise Hive::ConfigError, "journal unavailable"
+      end
+      error = assert_raises(Hive::RefactorPatrol::JobStore::CorruptRecord) do
+        migration.send(:settle_intake!, :intent, now: T0)
+      end
+      assert_match(/cannot persist migration intake transition/, error.message)
+
+      capture = migration.send(
+        :migration_capture,
+        released_v2_job,
+        "a" * 64
+      )
+      receipt = Struct.new(:receipt_id).new("receipt-1")
+      assert_raises(Hive::RefactorPatrol::JobStore::CorruptRecord) do
+        migration.send(
+          :finalize_completed_import!,
+          {},
+          capture,
+          receipt,
+          now: T0
+        )
+      end
+    end
+  end
+
+  def test_schema_migration_live_writer_and_marker_validation
+    with_tmp_dir do |root|
+      migration = schema_migration(root)
+      data = {
+        "attempts" => [
+          {
+            "state" => "running",
+            "pid" => Process.pid,
+            "process_start_time" => "live-start"
+          }
+        ],
+        "actions" => []
+      }
+      with_replaced_singleton_method(
+        Hive::PidFile,
+        :alive?,
+        ->(_pid) { true }
+      ) do
+        with_replaced_singleton_method(
+          Hive::Lock,
+          :process_start_time,
+          ->(_pid) { "live-start" }
+        ) do
+          error = assert_raises(Hive::ConcurrentRunError) do
+            migration.send(
+              :assert_no_live_child_writer!,
+              data,
+              "job-1.json"
+            )
+          end
+          assert_match(/worker must stop/, error.message)
+        end
+      end
+
+      identities = migration.send(
+        :writer_identities,
+        {
+          "attempts" => [
+            {
+              "state" => "claimed",
+              "owner_pid" => 123,
+              "owner_process_start_time" => "owner-start"
+            }
+          ],
+          "actions" => []
+        }
+      )
+      assert_equal(
+        [
+          {
+            "pid" => 123,
+            "process_start_time" => "owner-start"
+          }
+        ],
+        identities
+      )
+
+      directory = Object.new
+      directory.define_singleton_method(:read) { |*, **| "{" }
+      migration.instance_variable_set(:@directory, directory)
+      assert_raises(Hive::RefactorPatrol::JobStore::CorruptRecord) do
+        migration.send(:read_completion_marker)
+      end
+    end
+  end
+
+  def test_schema_completion_inventory_and_conversion_guards
+    with_tmp_dir do |root|
+      migration = schema_migration(root)
+      migration.define_singleton_method(:capture_inventory) do |**|
+        [ { name: "job-1.json", version: 2 } ]
+      end
+      assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) { migration.send(:assert_no_source_records!) }
+
+      snapshot = Object.new
+      snapshot.define_singleton_method(:prepare!) do |*, **|
+        {
+          "entries" => [
+            { "name" => "job-1.json", "digest" => "a" * 64 }
+          ]
+        }
+      end
+      migration.define_singleton_method(:conversion_record_names) { [] }
+      assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        migration.send(:assert_completed_inventory!, snapshot)
+      end
+
+      migration.define_singleton_method(:conversion_record_names) do
+        [ "job-1.json" ]
+      end
+      assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        migration.send(:assert_completed_inventory!, snapshot)
+      end
+
+      migration.define_singleton_method(:conversion_record_names) do
+        [ "outside.json" ]
+      end
+      assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        migration.send(
+          :assert_conversion_name_subset!,
+          { "entries" => [ { "name" => "job-1.json" } ] }
+        )
+      end
+
+      directory = Object.new
+      directory.define_singleton_method(:each_child) do |*, **|
+        [ "invalid" ].each
+      end
+      invalid_ledger = schema_migration(File.join(root, "invalid-ledger"))
+      invalid_ledger.instance_variable_set(:@directory, directory)
+      assert_raises(Hive::RefactorPatrol::JobStore::CorruptRecord) do
+        invalid_ledger.send(:conversion_record_names)
+      end
+    end
+  end
+
+  def test_schema_query_filename_time_ownership_and_absence_guards
+    with_tmp_dir do |root|
+      migration = schema_migration(root)
+      index = Object.new
+      index.define_singleton_method(:rebuild!) { |&block| block.call }
+      migration.define_singleton_method(:query_index) { index }
+      assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        migration.send(
+          :rebuild_query_index!,
+          [
+            {
+              data: {
+                "job_id" => "job-1",
+                "created_at" => "not-a-time"
+              }
+            }
+          ]
+        )
+      end
+
+      assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        migration.send(
+          :validate_filename!,
+          "job-1.json",
+          { "job_id" => "job-2" }
+        )
+      end
+      assert_raises(Hive::RefactorPatrol::JobStore::CorruptRecord) do
+        migration.send(:occurred_at, {})
+      end
+    end
+
+    assert_raises(ArgumentError) do
+      Hive::RefactorPatrol::JobStoreSchemaMigration.new(
+        root: "/tmp/v3",
+        target_version: 3,
+        validator: Object.new,
+        corrupt_record: Hive::RefactorPatrol::JobStore::CorruptRecord,
+        inconsistent_record:
+          Hive::RefactorPatrol::JobStore::InconsistentRecord,
+        project: { "name" => "demo", "project_id" => "project-demo" },
+        ownership: { "owner" => "unknown", "epoch" => 0 }
+      )
+    end
+  end
+
   private
 
   def with_constant(owner, name, replacement)

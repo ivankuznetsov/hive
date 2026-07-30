@@ -299,15 +299,25 @@ daemon_autostart_setup() {
 
 job_schema_migration_setup() {
   local out err rc
+  local -a migration_args
+  local migration_scope="current-user"
   out="${tmpdir}/job-schema-migration.out"
   err="${tmpdir}/job-schema-migration.err"
+  migration_args=(refactor-patrol-migrate-installed)
+  if [[ "$(id -u)" -eq 0 ]]; then
+    migration_args+=(--all-users)
+    migration_scope="all-users"
+  fi
 
-  if "$link_path" refactor-patrol-migrate-installed >"$out" 2>"$err"; then
-    log "registered-project JobStore migration completed"
+  if "$link_path" "${migration_args[@]}" >"$out" 2>"$err"; then
+    log "registered-project JobStore migration completed (${migration_scope})"
+    if [[ "$migration_scope" == "current-user" ]]; then
+      warn "shared installation coverage is not complete; an administrator must run '${link_path} refactor-patrol-migrate-installed --all-users'"
+    fi
     return 0
   else
     rc=$?
-    warn "registered-project JobStore migration did not complete (exit ${rc}); Hive will retry on each user's next eligible invocation"
+    warn "registered-project JobStore migration did not complete (exit ${rc}); inspect the emitted receipt and retry with administrator authority for shared installations"
     if [[ -s "$err" ]]; then
       sed 's/^/hive install: migration stderr: /' "$err" >&2
     fi
@@ -430,7 +440,11 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   log "dry run: would download ${gem_url}"
   log "dry run: would verify SHA256SUMS and write ${data_home}/install-channel"
   log "dry run: would gem install --install-dir ${gem_home} ${gem_file}"
-  log "dry run: would migrate every project in the installing user's Hive registry"
+  if [[ "$(id -u)" -eq 0 ]]; then
+    log "dry run: would migrate every project for every discovered/inventoried Hive user"
+  else
+    log "dry run: would migrate only the installing user's Hive registry; shared installs require the administrator all-user command"
+  fi
   log "dry run: would run ${link_path} daemon install to enable daemon autostart"
   if qmd_install_enabled; then
     log "dry run: would npm install --global --prefix ${data_home}/qmd ${QMD_NPM_PACKAGE}"

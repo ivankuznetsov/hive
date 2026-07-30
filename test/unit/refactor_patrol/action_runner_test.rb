@@ -3233,6 +3233,194 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     end
   end
 
+  def test_initializer_falls_back_when_project_registry_is_unreadable
+    with_tmp_dir do |dir|
+      with_replaced_singleton_method(
+        Hive::Config,
+        :registered_projects,
+        -> { raise Hive::ConfigError, "registry unavailable" }
+      ) do
+        runner = build_runner(dir, store: Object.new)
+        assert_equal File.expand_path(dir),
+                     runner.instance_variable_get(:@project_root)
+      end
+    end
+  end
+
+  def test_managed_catalog_factory_binds_other_registered_project_state
+    with_tmp_dir do |dir|
+      state = File.join(dir, ".hive-state")
+      other = File.join(dir, "other")
+      other_state = File.join(other, ".custom-state")
+      FileUtils.mkdir_p([ state, other, other_state ])
+      File.binwrite(File.join(state, "config.yml"), "--- {}\n")
+      entries = [
+        {
+          "name" => "demo",
+          "path" => dir,
+          "real_path" => File.realpath(dir),
+          "hive_state_path" => state,
+          "project_id" => "project-demo"
+        },
+        {
+          "name" => "other",
+          "path" => other,
+          "real_path" => File.realpath(other),
+          "hive_state_path" => other_state,
+          "project_id" => "project-other"
+        }
+      ]
+
+      with_replaced_singleton_method(
+        Hive::Config,
+        :registered_projects,
+        -> { entries }
+      ) do
+        runner = build_runner(
+          dir,
+          store: Object.new,
+          hive_state_path: state,
+          config_loader: ->(_root) { config }
+        )
+        catalog = runner.instance_variable_get(:@canonical_action_catalog)
+        factory = catalog.instance_variable_get(:@job_store_factory)
+        other_store = factory.call(other)
+
+        assert_equal(
+          Hive::RefactorPatrol::JobStore.root_for(
+            other,
+            hive_state_path: other_state
+          ),
+          other_store.root
+        )
+      end
+    end
+  end
+
+  def test_publication_receipt_projection_covers_all_sinks_and_failures
+    with_tmp_dir do |dir|
+      runner = build_runner(dir, store: Object.new)
+
+      assert_equal(
+        { "remote_oid" => "a" * 40 },
+        runner.send(
+          :publication_effect_outcome,
+          "branch",
+          nil,
+          { "commit_sha" => "a" * 40 }
+        )
+      )
+      assert_equal(
+        { "pr_url" => "https://github.com/acme/demo/pull/1" },
+        runner.send(
+          :publication_effect_outcome,
+          "pull_request",
+          "https://github.com/acme/demo/pull/1",
+          {}
+        )
+      )
+      assert_equal(
+        { "issue_url" => "https://github.com/acme/demo/issues/1" },
+        runner.send(
+          :publication_effect_outcome,
+          "issue",
+          "https://github.com/acme/demo/issues/1",
+          {}
+        )
+      )
+      assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        runner.send(:publication_effect_outcome, "unknown", nil, {})
+      end
+
+      assert_equal(
+        "a" * 40,
+        runner.send(
+          :publication_effect_value,
+          "branch",
+          { "remote_oid" => "a" * 40 }
+        )
+      )
+      assert_equal(
+        "https://github.com/acme/demo/pull/1",
+        runner.send(
+          :publication_effect_value,
+          "pull_request",
+          { "pr_url" => "https://github.com/acme/demo/pull/1" }
+        )
+      )
+      assert_equal(
+        "https://github.com/acme/demo/issues/1",
+        runner.send(
+          :publication_effect_value,
+          "issue",
+          { "issue_url" => "https://github.com/acme/demo/issues/1" }
+        )
+      )
+      assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        runner.send(:publication_effect_value, "unknown", {})
+      end
+      malformed = assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        runner.send(:publication_effect_value, "branch", {})
+      end
+      assert_match(/receipt is malformed/, malformed.message)
+    end
+  end
+
+  def test_publication_executor_recovers_a_previously_delivered_effect
+    with_tmp_dir do |dir|
+      runner = build_runner(dir, store: Object.new)
+      payload = { "operation" => "create_issue" }
+      gateway = Object.new
+      result = Struct.new(:outcome).new(
+        { "issue_url" => "https://github.com/acme/demo/issues/7" }
+      )
+      gateway.define_singleton_method(:perform!) do |**|
+        result
+      end
+      runner.define_singleton_method(:expected_publication_payload) do |*,
+                                                                         **|
+        payload
+      end
+      runner.define_singleton_method(:effect_capture) { |*| :capture }
+      runner.define_singleton_method(:effect_descriptor) do |*, **|
+        {
+          sink: "issue",
+          target: "acme/demo",
+          idempotency_key: "issue:job-1",
+          capability: "github_issues"
+        }
+      end
+      runner.define_singleton_method(:build_effect_gateway) do |*, **|
+        gateway
+      end
+      runner.define_singleton_method(:persist_publication_phase) do |*, **|
+        true
+      end
+      runner.define_singleton_method(:effect_scope) { |*| {} }
+      token = {
+        job_id: "job-1",
+        canonical_action_id: "action-1",
+        generation: 1
+      }
+      executor = runner.send(
+        :publication_effect_executor,
+        token,
+        "issue",
+        { "job_id" => "job-1" },
+        { "canonical_action_id" => "action-1" }
+      )
+
+      value = executor.call(
+        phase: "issue_create_intent",
+        payload: payload
+      ) { flunk("recovered effect must not redeliver") }
+
+      assert_equal "https://github.com/acme/demo/issues/7", value
+    end
+  end
+
   def test_effect_gateway_claim_validator_fails_closed_on_a_stale_claim
     with_tmp_dir do |dir|
       store = Object.new

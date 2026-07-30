@@ -517,7 +517,10 @@ jobs:
           mkdir -p build
           ruby packaging/render.rb packaging/aur/PKGBUILD.template \
             "version=${PKG_VERSION}" "sha256_gem=${GEM_SHA}" > build/PKGBUILD
-          cp packaging/aur/hive.install build/hive.install
+          cp packaging/aur/hive.install \
+            packaging/aur/hive-job-schema-migration.service \
+            packaging/aur/hive-job-schema-migration.timer \
+            build/
           chown -R builder build
           # Redirect runs inside the builder shell so .SRCINFO is written
           # as builder (sudo does not apply to a root-shell redirect).
@@ -539,7 +542,10 @@ jobs:
           git config --global user.name "hive release bot"
           git config --global user.email "maintainers@users.noreply.github.com"
           git clone ssh://aur@aur.archlinux.org/hive-bin.git aur-repo
-          cp build/PKGBUILD build/.SRCINFO build/hive.install aur-repo/
+          cp build/PKGBUILD build/.SRCINFO build/hive.install \
+            build/hive-job-schema-migration.service \
+            build/hive-job-schema-migration.timer \
+            aur-repo/
           cd aur-repo
           git add -A
           # Idempotent: a re-run of an already-published tag is a clean

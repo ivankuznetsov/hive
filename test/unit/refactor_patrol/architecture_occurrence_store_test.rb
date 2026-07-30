@@ -187,6 +187,17 @@ class RefactorPatrolArchitectureOccurrenceStoreTest < Minitest::Test
                  )
   end
 
+  def test_rebuild_recovery_index_translates_journal_corruption
+    journal = Journal.new
+    journal.failure = :rebuild_recovery_index!
+
+    error = assert_raises(CorruptRecord) do
+      occurrence_store(journal: journal).rebuild_recovery_index!
+    end
+
+    assert_match(/rebuild_recovery_index! failed/, error.message)
+  end
+
   def test_job_pointer_conflicts_and_product_scope_mismatches_fail_closed
     journal = Journal.new
     store = occurrence_store(journal: journal)

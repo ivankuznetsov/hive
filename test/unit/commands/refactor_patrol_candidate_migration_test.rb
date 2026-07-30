@@ -4,6 +4,20 @@ require "hive/commands/refactor_patrol_candidate_migration"
 class RefactorPatrolCandidateMigrationCommandTest < Minitest::Test
   include HiveTestHelper
 
+  class FakeMigration
+    attr_reader :calls
+
+    def initialize(payload)
+      @payload = payload
+      @calls = []
+    end
+
+    def call(**kwargs)
+      @calls << kwargs
+      @payload
+    end
+  end
+
   def test_sweeps_the_current_registry_persists_and_prints_typed_results_for_custom_state_roots
     with_tmp_dir do |home|
       projects = %w[alpha beta].map do |name|
@@ -27,8 +41,11 @@ class RefactorPatrolCandidateMigrationCommandTest < Minitest::Test
 
       printed = JSON.parse(output.string)
       assert_equal payload, printed
-      assert_equal "hive-installation-job-schema-migration", payload.fetch("schema")
-      assert_equal 2, payload.fetch("schema_version")
+      assert_equal "hive-user-profile-job-schema-migration", payload.fetch("schema")
+      assert_equal 1, payload.fetch("schema_version")
+      assert_equal Process.uid, payload.dig("user_profile", "uid")
+      assert_equal home, payload.dig("user_profile", "config_home")
+      assert_equal home, payload.dig("user_profile", "state_home")
       assert_match(/\A[0-9a-f]{64}\z/, payload.fetch("registry_digest"))
       assert_equal 3, payload.fetch("target_schema_version")
       assert_equal %w[migrated failed], payload.fetch("projects").map { |project| project.fetch("status") }
@@ -43,9 +60,79 @@ class RefactorPatrolCandidateMigrationCommandTest < Minitest::Test
         Hive::RefactorPatrol::RegisteredProjectMigrationStatus.new.read
       end
       assert_equal payload, persisted
+      schema = JSONSchemer.schema(JSON.parse(File.binread(
+        File.expand_path(
+          "../../../schemas/hive-user-profile-job-schema-migration.v1.json",
+          __dir__
+        )
+      )))
+      assert_empty schema.validate(payload).to_a
       registered = with_env("HIVE_HOME" => home) { Hive::Config.registered_projects }
       assert registered.all? { |project| !project.fetch("project_id").to_s.empty? }
     end
+  end
+
+  def test_all_users_prints_aggregate_receipt_and_requires_complete_discovery
+    output = StringIO.new
+    current = FakeMigration.new({})
+    aggregate = FakeMigration.new(
+      "schema" => "hive-installed-users-job-schema-migration",
+      "schema_version" => 1,
+      "status" => "partial",
+      "profiles" => []
+    )
+    command = Hive::Commands::RefactorPatrolCandidateMigration.new(
+      output: output,
+      migration: current,
+      all_users: true,
+      all_users_migration: aggregate
+    )
+
+    error = assert_raises(Hive::Error) { command.call }
+
+    assert_match(/migration is partial/, error.message)
+    assert_empty current.calls
+    assert_equal [ { force: true } ], aggregate.calls
+    assert_equal "partial",
+                 JSON.parse(output.string).fetch("status")
+  end
+
+  def test_all_users_returns_a_closed_complete_receipt
+    output = StringIO.new
+    aggregate = FakeMigration.new(
+      "schema" => "hive-installed-users-job-schema-migration",
+      "schema_version" => 1,
+      "status" => "complete",
+      "profiles" => []
+    )
+    command = Hive::Commands::RefactorPatrolCandidateMigration.new(
+      output: output,
+      all_users: true,
+      all_users_migration: aggregate
+    )
+
+    payload = command.call
+
+    assert_equal "complete", payload.fetch("status")
+    assert_equal payload, JSON.parse(output.string)
+    assert_equal [ { force: true } ], aggregate.calls
+  end
+
+  def test_all_users_resume_propagates_non_forced_child_sweeps
+    aggregate = FakeMigration.new(
+      "schema" => "hive-installed-users-job-schema-migration",
+      "schema_version" => 1,
+      "status" => "complete",
+      "profiles" => []
+    )
+    Hive::Commands::RefactorPatrolCandidateMigration.new(
+      output: StringIO.new,
+      all_users: true,
+      all_users_migration: aggregate,
+      force: false
+    ).call
+
+    assert_equal [ { force: false } ], aggregate.calls
   end
 
   private

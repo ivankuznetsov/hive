@@ -1,0 +1,12 @@
+[Unit]
+Description=Hourly Hive JobStore schema migration retry
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+AccuracySec=1min
+Persistent=true
+Unit=hive-job-schema-migration.service
+
+[Install]
+WantedBy=timers.target

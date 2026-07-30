@@ -1,0 +1,14 @@
+[Unit]
+Description=Retry Hive JobStore schema migration for every inventoried user
+Documentation=https://github.com/ivankuznetsov/hive
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/hive refactor-patrol-migrate-installed --all-users --resume
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictRealtime=true
+LockPersonality=true

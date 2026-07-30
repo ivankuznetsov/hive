@@ -61,47 +61,95 @@ in each warned project to persist the correction.
 
 Architecture Patrol's installation-managed JobStore cutover is different: it
 is an automatic shipped installation migration over untracked runtime state. A
-candidate generation sweeps the installation's complete current registry
-before any Architecture Patrol runtime restart. Hive installations and
-registries are user-scoped, so the shipped binary repeats this boundary for
-every user: the package hook covers the installing user immediately, and each
-other user's first eligible Hive invocation sweeps that user's entire
-registered-project catalog. One user's completion receipt never suppresses a
-different user's sweep because each lives under that user's `HIVE_HOME`.
+candidate generation must sweep every known local Hive user's complete current
+registry before an install-wide completion claim. The privileged coordinator
+enumerates fixed registry anchors for NSS users plus exact custom roots in the
+root-owned `/var/lib/hive/installed-users.v1.json` inventory. It binds each NSS
+identity and canonical home, drops supplementary groups/gid/uid, scrubs the
+environment, then invokes the exact candidate as that user. Root never parses a
+non-root user's registry or mutates that user's project before the identity
+drop; a root account's own profile necessarily remains uid 0 inside its child.
 
-Each sweep attempts every registry row without filtering on the project
+Each user-profile sweep attempts every registry row without filtering on the project
 directory's Unix owner, including shared projects created or owned by another
-user and relative or absolute custom `hive_state_path` values. The invoking
-process still cannot exceed its operating-system permissions; an inaccessible
+user and relative or absolute custom `hive_state_path` values. The dropped
+user process cannot exceed that user's operating-system permissions; an inaccessible
 project becomes a persisted failed/retryable row instead of being silently
-skipped. Package managers running as root do not crawl arbitrary home
-directories: Homebrew and `install.sh` run the candidate command for the
-invoking user, while AUR tells every user that first use is the activation
-boundary. `status`, `watch`, `doctor`, findings inspection, dry runs, and other
-strict observation routes remain mutation-free; a daemon start or the next
-eligible mutating command performs the sweep.
+skipped. One failed user cannot block later users. AUR runs the all-user
+coordinator during package activation and enables
+`hive-job-schema-migration.timer` for hourly `--resume` retry, so completed
+profiles are not force-swept every hour. Root `install.sh` runs the all-user
+command once; non-root install.sh and Homebrew report current-user-only coverage
+and the required administrator command. First eligible use remains a safety
+fallback, never all-user completion evidence. `status`, `watch`,
+`doctor`, findings inspection, dry runs, and other strict observation routes
+remain mutation-free.
 
 A newly registered or path-drifted project changes the registry digest and
 forces a new sweep without waiting for the normal hourly retry. First JobStore
 open retains the same one-off converter for otherwise dormant state, but
 normal readers accept only v3.
 
-### Candidate installation sweep
+### Candidate user-profile and install-wide sweeps
 
 ```bash
+# Current user profile
 hive refactor-patrol-migrate-installed
+
+# Every discovered/inventoried local Hive user (root only)
+sudo hive refactor-patrol-migrate-installed --all-users
+
+# Timer-style retry: skip unchanged, complete profiles until work is due
+sudo hive refactor-patrol-migrate-installed --all-users --resume
 ```
 
-This is the narrow, candidate-only installation entrypoint used by `hive
-update` after a package replacement and before it restarts a daemon it stopped.
-It first backfills immutable registry identities with
+The current-user form is the narrow child/fallback entrypoint. It first
+backfills immutable registry identities with
 `Config.ensure_project_identities!`, then runs
 `RegisteredProjectMigrationCoordinator` across the complete current registry.
 It prints the same typed document persisted at
 `$HIVE_HOME/schema-migrations/refactor-patrol-job-v3.json` (`schema:
-"hive-installation-job-schema-migration"`, `schema_version: 2`). The document's
+"hive-user-profile-job-schema-migration"`, `schema_version: 1`). Its
+`user_profile` binds uid, username, HOME, config root, and state root; its
 registry digest binds the complete user-scoped catalog, so adding or changing a
 registration invalidates the prior completion receipt.
+
+The root-only form prints `hive-installed-users-job-schema-migration.v1`. It
+binds the exact candidate path/version/SHA-256 plus size, mode, uid, and gid
+custody, root inventory path/digest,
+distinct attempted/failed/retryable OS-user and Hive-profile counts, every
+attempted profile digest, all per-project rows, discovery issues, and
+`complete|partial|failed`. Multiple custom profiles can belong to one uid; the
+counters never mislabel those profiles as additional OS users. Missing
+inventory closure, UID/home drift,
+inaccessible profiles, or an operator-known unindexed custom root must remain
+`partial`/`failed`; they can never be reported as complete.
+
+The optional root-owned inventory has this exact form and must be a regular
+root-owned file with no group/world write bit:
+
+```json
+{
+  "schema": "hive-installed-user-inventory",
+  "schema_version": 1,
+  "discovery_closed": true,
+  "profiles": [
+    {
+      "username": "alice",
+      "uid": 1001,
+      "home": "/home/alice",
+      "environment": {
+        "HIVE_HOME": "/srv/hive/alice"
+      }
+    }
+  ]
+}
+```
+
+`discovery_closed: true` is an administrator assertion that legacy custom
+roots have been inventoried. Hive cannot infer arbitrary old process-only
+HIVE_HOME/XDG values or mount offline/encrypted/network homes, so absence of
+that assertion keeps the aggregate receipt partial.
 
 A failed or retryable project row still means the sweep itself completed: the
 document records its error, remediation, retry time, and custom

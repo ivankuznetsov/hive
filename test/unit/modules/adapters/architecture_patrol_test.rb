@@ -176,6 +176,23 @@ class ModulesAdaptersArchitecturePatrolTest < Minitest::Test
     end
   end
 
+  def test_setup_constructs_the_default_state_store_with_custom_state_root
+    with_project(owner: "module") do |project|
+      adapter = Hive::Modules::Adapters::ArchitecturePatrol.new
+
+      assert_equal 0, adapter.call(
+        project: project,
+        hook_id: "setup",
+        event: event("project.registered"),
+        configuration: configuration(shadow: false)
+      )
+      assert_path_exists File.join(
+        project.fetch("hive_state_path"),
+        "refactor_patrol"
+      )
+    end
+  end
+
   def test_retry_result_and_engine_exception_preserve_scheduler_lifecycle
     with_project(owner: "module") do |project|
       retrying = FakeScheduler.new([ candidate ], complete_status: :retry)

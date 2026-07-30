@@ -3,6 +3,8 @@ require_relative "../../test_helper"
 require "hive/refactor_patrol/job_store"
 
 class RefactorPatrolJobStoreCollaboratorsTest < Minitest::Test
+  include HiveTestHelper
+
   T0 = Time.utc(2026, 7, 12, 10, 0, 0)
 
   def test_record_validator_preserves_job_schema_and_transition_errors
@@ -295,6 +297,282 @@ class RefactorPatrolJobStoreCollaboratorsTest < Minitest::Test
       validator.validate_transition_semantic!(
         transition, semantic: {}, path: path
       )
+    end
+  end
+
+  def test_record_validator_rejects_a_well_formed_but_mismatched_semantic_digest
+    semantic = {
+      "intent_id" => "intent-#{"1" * 64}",
+      "module" => "architecture-patrol",
+      "occurrence_id" => "occ-#{"2" * 64}",
+      "owner_epoch" => 1,
+      "sink" => "branch",
+      "target" => "main",
+      "idempotency_key" => "effect-#{"3" * 64}",
+      "scope" => { "repository" => "acme/demo" }
+    }
+    transition = {
+      "semantic_digest" =>
+        Hive::RefactorPatrol::TransitionEvidence.semantic_digest(semantic)
+        .sub(/\A./, "f")
+    }
+
+    error = assert_raises(
+      Hive::RefactorPatrol::JobStore::InconsistentRecord
+    ) do
+      validator.validate_transition_semantic!(
+        transition,
+        semantic: semantic,
+        path: "/tmp/job.json"
+      )
+    end
+
+    assert_match(/semantic digest does not match/, error.message)
+  end
+
+  def test_conversion_proof_rejects_mismatch_missing_source_id_and_bad_json
+    transformer = Object.new
+    transformer.define_singleton_method(:transform) do |source, occurrence_id:,
+                                                   intake_transition_id:, **|
+      {
+        "job_id" => source.fetch("job_id"),
+        "occurrence_id" => occurrence_id,
+        "intake_transition_id" => intake_transition_id
+      }
+    end
+    proof_store = Hive::RefactorPatrol::JobSchemaConversionProof.new(
+      transformer: transformer,
+      corrupt_record: Hive::RefactorPatrol::JobStore::CorruptRecord,
+      inconsistent_record:
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+    )
+    source = { "job_id" => "job-1" }
+    occurrence_id = "occ-#{"1" * 64}"
+    intake_id = "intent-#{"2" * 64}"
+    target = transformer.transform(
+      source,
+      occurrence_id: occurrence_id,
+      intake_transition_id: intake_id
+    )
+    target_bytes = "#{JSON.pretty_generate(target)}\n"
+    snapshot_id = "snapshot-#{"3" * 64}"
+    source_digest = "4" * 64
+    proof = Hive::RefactorPatrol::JobSchemaConversionProof.build(
+      snapshot_id: snapshot_id,
+      name: "job-1.json",
+      job_id: "job-1",
+      source_digest: source_digest,
+      target_bytes: target_bytes,
+      occurrence_id: occurrence_id,
+      intake_transition_id: intake_id
+    )
+    proof_bytes =
+      Hive::WorkflowPackage::CanonicalJSON.generate(proof)
+
+    mismatch = assert_raises(
+      Hive::RefactorPatrol::JobStore::InconsistentRecord
+    ) do
+      proof_store.verify!(
+        proof_bytes: proof_bytes,
+        name: "job-1.json",
+        snapshot_id: "snapshot-#{"5" * 64}",
+        source_digest: source_digest,
+        source_data: source,
+        live_bytes: target_bytes,
+        path: "/tmp/proof.json"
+      )
+    end
+    assert_match(/does not match the selected snapshot/, mismatch.message)
+
+    missing = assert_raises(
+      Hive::RefactorPatrol::JobStore::CorruptRecord
+    ) do
+      proof_store.verify!(
+        proof_bytes: proof_bytes,
+        name: "job-1.json",
+        snapshot_id: snapshot_id,
+        source_digest: source_digest,
+        source_data: {},
+        live_bytes: target_bytes,
+        path: "/tmp/proof.json"
+      )
+    end
+    assert_match(/missing "job_id"/, missing.message)
+
+    malformed = assert_raises(
+      Hive::RefactorPatrol::JobStore::CorruptRecord
+    ) do
+      proof_store.verify!(
+        proof_bytes: "{",
+        name: "job-1.json",
+        snapshot_id: snapshot_id,
+        source_digest: source_digest,
+        source_data: source,
+        live_bytes: target_bytes,
+        path: "/tmp/proof.json"
+      )
+    end
+    assert_match(/conversion proof is malformed/, malformed.message)
+  end
+
+  def test_legacy_transformer_rejects_v3_authority_and_wraps_unexpected_validator_errors
+    validating = Object.new
+    validating.define_singleton_method(:validate_job!) { |job, **| job }
+    transformer = Hive::RefactorPatrol::LegacyJobTransformer.new(
+      target_version: 3,
+      validator: validating,
+      corrupt_record: Hive::RefactorPatrol::JobStore::CorruptRecord,
+      inconsistent_record:
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+    )
+    released = JSON.parse(File.binread(File.expand_path(
+      "../../fixtures/refactor_patrol/released_v2_job.json",
+      __dir__
+    )))
+    released.fetch("attempts").first["transitions"] = []
+
+    mixed = assert_raises(
+      Hive::RefactorPatrol::JobStore::InconsistentRecord
+    ) do
+      transformer.transform(
+        released,
+        occurrence_id: "occ-#{"1" * 64}",
+        intake_transition_id: "intent-#{"2" * 64}",
+        path: "/tmp/job.json"
+      )
+    end
+    assert_match(/mixes v3 authority fields/, mixed.message)
+
+    exploding = Object.new
+    exploding.define_singleton_method(:validate_job!) do |*, **|
+      raise KeyError, "validator key disappeared"
+    end
+    transformer = Hive::RefactorPatrol::LegacyJobTransformer.new(
+      target_version: 3,
+      validator: exploding,
+      corrupt_record: Hive::RefactorPatrol::JobStore::CorruptRecord,
+      inconsistent_record:
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+    )
+    released.fetch("attempts").first.delete("transitions")
+    malformed = assert_raises(
+      Hive::RefactorPatrol::JobStore::CorruptRecord
+    ) do
+      transformer.transform(
+        released,
+        occurrence_id: "occ-#{"1" * 64}",
+        intake_transition_id: "intent-#{"2" * 64}",
+        path: "/tmp/job.json"
+      )
+    end
+    assert_match(/released refactor patrol v2 job is malformed/, malformed.message)
+  end
+
+  def test_schema_snapshot_defensive_and_integrity_branches
+    with_tmp_dir do |root|
+      directory = Hive::ManagedDirectory.new(
+        root: root,
+        label: "test schema snapshot"
+      )
+      directory.prepare!
+      snapshot = Hive::RefactorPatrol::JobSchemaSnapshot.new(
+        directory: directory,
+        project_id: "project-demo",
+        corrupt_record: Hive::RefactorPatrol::JobStore::CorruptRecord,
+        inconsistent_record:
+          Hive::RefactorPatrol::JobStore::InconsistentRecord
+      )
+      assert_instance_of Time, snapshot.instance_variable_get(:@clock).call
+      bytes = "{\"schema_version\":2}\n"
+      entry = {
+        name: "job-1.json",
+        bytes: bytes,
+        digest: Digest::SHA256.hexdigest(bytes),
+        mode: 0o600,
+        mtime: Time.utc(2026, 7, 29).iso8601(9)
+      }
+
+      manifest = snapshot.prepare!([ entry ])
+      assert_equal manifest, snapshot.prepare!([ entry ])
+
+      introduced = entry.merge(digest: "f" * 64)
+      error = assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        snapshot.prepare!(
+          [ introduced ],
+          current_names: [ "job-1.json" ]
+        )
+      end
+      assert_match(/introduced after the snapshot/, error.message)
+
+      backup = File.join(
+        root,
+        Hive::RefactorPatrol::JobSchemaSnapshot::ROOT,
+        "jobs",
+        "job-1.json"
+      )
+      File.binwrite(backup, "{\"schema_version\":3}\n")
+      error = assert_raises(
+        Hive::RefactorPatrol::JobStore::InconsistentRecord
+      ) do
+        snapshot.backup_bytes(manifest.fetch("entries").first)
+      end
+      assert_match(/backup digest does not match/, error.message)
+
+      refute snapshot.send(:valid_mtime?, "not-a-time")
+      refute snapshot.send(:valid_created_at?, "not-a-time")
+      assert_raises(Hive::RefactorPatrol::JobStore::CorruptRecord) do
+        snapshot.send(:timestamp, "not-a-time")
+      end
+    end
+  end
+
+  def test_schema_snapshot_rejects_changed_sources_conflicting_backups_and_bad_manifests
+    with_tmp_dir do |root|
+      directory = Hive::ManagedDirectory.new(
+        root: root,
+        label: "test schema snapshot"
+      )
+      directory.prepare!
+      snapshot = Hive::RefactorPatrol::JobSchemaSnapshot.new(
+        directory: directory,
+        project_id: "project-demo",
+        corrupt_record: Hive::RefactorPatrol::JobStore::CorruptRecord,
+        inconsistent_record:
+          Hive::RefactorPatrol::JobStore::InconsistentRecord,
+        clock: -> { T0 }
+      )
+      bytes = "source\n"
+      entry = {
+        name: "job-1.json",
+        bytes: bytes,
+        digest: Digest::SHA256.hexdigest(bytes),
+        mode: 0o600,
+        mtime: T0.iso8601(9)
+      }
+      assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        snapshot.send(:write_backup!, entry.merge(digest: "0" * 64))
+      end
+
+      snapshot.send(:write_backup!, entry)
+      snapshot.send(:write_backup!, entry)
+      conflicting = entry.merge(bytes: "other\n")
+      conflicting[:digest] = Digest::SHA256.hexdigest(conflicting[:bytes])
+      assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        snapshot.send(:write_backup!, conflicting)
+      end
+
+      File.binwrite(
+        File.join(
+          root,
+          Hive::RefactorPatrol::JobSchemaSnapshot::MANIFEST
+        ),
+        "{"
+      )
+      assert_raises(Hive::RefactorPatrol::JobStore::CorruptRecord) do
+        snapshot.manifest
+      end
     end
   end
 

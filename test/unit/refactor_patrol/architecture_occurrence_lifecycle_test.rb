@@ -2,6 +2,8 @@ require "test_helper"
 require "hive/refactor_patrol/architecture_occurrence_lifecycle"
 
 class RefactorPatrolArchitectureOccurrenceLifecycleTest < Minitest::Test
+  include HiveTestHelper
+
   NOW = Time.utc(2026, 7, 29, 12)
 
   def test_recovery_wraps_a_job_occurrence_mismatch_with_its_identifiers
@@ -94,6 +96,36 @@ class RefactorPatrolArchitectureOccurrenceLifecycleTest < Minitest::Test
     end
 
     assert_equal "patrol capture is malformed", error.message
+  end
+
+  def test_recovery_job_binding_defensively_rejects_wrong_kind_and_missing_id
+    capture = Struct.new(:reservation)
+    values = [
+      [
+        capture.new({ "kind" => "ordinary", "job_id" => "job-7" }),
+        /not architecture work/
+      ],
+      [
+        capture.new({ "kind" => "architecture" }),
+        /missing "job_id"/
+      ]
+    ]
+
+    values.each do |value, message|
+      with_replaced_singleton_method(
+        Hive::Modules::Migration::PatrolCapture,
+        :from_h,
+        ->(_payload) { value }
+      ) do
+        error = assert_raises(Hive::ConfigError) do
+          lifecycle.send(
+            :recovery_job_id,
+            { "provisional_capture" => {} }
+          )
+        end
+        assert_match message, error.message
+      end
+    end
   end
 
   private

@@ -276,6 +276,33 @@ class RefactorPatrolJobQueryIndexTest < Minitest::Test
     end
   end
 
+  def test_capacity_must_be_a_positive_integer
+    [ 0, -1, nil, "invalid" ].each do |capacity|
+      error = assert_raises(ArgumentError) do
+        with_index(max_entries: capacity) { flunk("invalid index was built") }
+      end
+      assert_match(/capacity must be positive/, error.message)
+    end
+  end
+
+  def test_full_unpublished_allocation_rebuilds_before_allocating_next_job
+    with_index(max_entries: 1) do |index, root|
+      assert_raises(IOError) do
+        index.with_registration(
+          "job-abandoned",
+          existing: false,
+          migration_job_ids: -> { [] }
+        ) do
+          raise IOError, "writer stopped before the job write"
+        end
+      end
+
+      register(index, root, "job-live")
+
+      assert_equal [ "job-live" ], index.page(limit: 10).fetch("job_ids")
+    end
+  end
+
   private
 
   def with_index(max_entries: 8_192)

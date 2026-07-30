@@ -9,6 +9,8 @@ HIVE_CI_GATE_TESTS = {
   "test:packaged_web_bootstrap" => "test/integration/web_packaged_bootstrap_test.rb",
   "test:tui_reactivity_perf" => "test/integration/tui_reactivity_perf_test.rb",
   "test:setup_agents_integration" => "test/integration/setup_agents_test.rb",
+  "test:all_users_job_schema_migration" =>
+    "test/integration/refactor_patrol_all_users_migration_test.rb",
   "test:babysitter_dry_run_security_matrix" =>
     "test/unit/babysitter/dry_run_security_matrix_test.rb"
 }.freeze

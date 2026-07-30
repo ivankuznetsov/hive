@@ -1092,6 +1092,61 @@ class ModulesMigrationPatrolsTest < Minitest::Test
     end
   end
 
+  def test_existing_shadow_upgrade_stays_fenced_while_product_work_is_live
+    with_project do |project|
+      current = Hive::Modules::Migration::Patrols.new(
+        project_root: project.fetch("path"),
+        project: "demo",
+        hive_state_path: project.fetch("hive_state_path"),
+        module_store: FakeStore.new,
+        quiescence_probe: ->(*) { :quiescent }
+      )
+      assert_equal "shadowing", current.adopt!(now: NOW).status
+      write_legacy_shadow_decision(project)
+
+      blocked = Hive::Modules::Migration::Patrols.new(
+        project_root: project.fetch("path"),
+        project: "demo",
+        hive_state_path: project.fetch("hive_state_path"),
+        module_store: FakeStore.new,
+        quiescence_probe: ->(*) { :live }
+      ).adopt!(now: NOW + 1)
+
+      assert_equal "shadowing", blocked.status
+      assert_equal(
+        {
+          "patrol" => "live",
+          "architecture-patrol" => "live"
+        },
+        blocked.blockers
+      )
+      assert blocked.state.fetch("admissions").values.none?
+    end
+  end
+
+  def test_existing_shadow_upgrade_rejects_concurrent_state_change
+    with_project do |project|
+      migration = Hive::Modules::Migration::Patrols.new(
+        project_root: project.fetch("path"),
+        project: "demo",
+        hive_state_path: project.fetch("hive_state_path"),
+        module_store: FakeStore.new,
+        quiescence_probe: ->(*) { :quiescent }
+      )
+      assert_equal "shadowing", migration.adopt!(now: NOW).status
+      write_legacy_shadow_decision(project)
+      migration.define_singleton_method(:migrate_shadow_decisions!) do
+        send(:write, read.merge("status" => "rolled_back"))
+      end
+
+      error = assert_raises(Hive::ConfigError) do
+        migration.adopt!(now: NOW + 1)
+      end
+
+      assert_match(/changed during shadow upgrade/, error.message)
+    end
+  end
+
   def test_shadow_inventory_distinguishes_live_quiescence_failure
     with_project do |project|
       migration = Hive::Modules::Migration::Patrols.new(
@@ -1109,6 +1164,24 @@ class ModulesMigrationPatrolsTest < Minitest::Test
   end
 
   private
+
+  def write_legacy_shadow_decision(project)
+    shadow_root = File.join(
+      project.fetch("hive_state_path"),
+      "module-runtime",
+      "migration",
+      "shadow"
+    )
+    FileUtils.rm_rf(File.join(shadow_root, "migrations"))
+    path = File.join(shadow_root, "patrol", "#{"a" * 64}.json")
+    FileUtils.mkdir_p(File.dirname(path))
+    File.binwrite(
+      path,
+      Hive::WorkflowPackage::CanonicalJSON.generate(
+        legacy_shadow_decision
+      )
+    )
+  end
 
   def default_coordinator(project)
     supervisor = FakeSupervisor.new

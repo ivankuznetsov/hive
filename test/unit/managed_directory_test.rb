@@ -75,6 +75,93 @@ class ManagedDirectoryTest < Minitest::Test
     end
   end
 
+  def test_directory_metadata_is_missing_aware_and_translates_failures
+    with_tmp_dir do |anchor|
+      root = File.join(anchor, "state")
+      nested = File.join(root, "nested")
+      directory = Hive::ManagedDirectory.new(
+        root: root, anchor: anchor, label: "test state"
+      )
+      directory.ensure_directory("nested")
+      File.chmod(0o750, nested)
+
+      metadata = directory.directory_metadata("nested")
+      assert_equal 0o750, metadata.fetch(:mode)
+      assert_equal File.stat(nested).mtime.utc, metadata.fetch(:mtime)
+      assert_nil directory.directory_metadata("missing", missing: true)
+      assert_raises(Hive::ConfigError) do
+        directory.directory_metadata("missing")
+      end
+      assert_raises(Hive::ConfigError) do
+        directory.directory_metadata("../outside")
+      end
+
+      native = directory.instance_variable_get(:@native)
+      original_open = native.method(:open_directory)
+      with_replaced_singleton_method(
+        native,
+        :open_directory,
+        lambda do |parent, name|
+          raise Errno::EIO, name if name == "broken"
+
+          original_open.call(parent, name)
+        end
+      ) do
+        assert_raises(Hive::ConfigError) do
+          directory.directory_metadata("broken")
+        end
+      end
+
+      nested_opens = 0
+      with_replaced_singleton_method(
+        native,
+        :open_directory,
+        lambda do |parent, name|
+          if name == "nested"
+            nested_opens += 1
+            raise Errno::ENOENT, name if nested_opens == 2
+          end
+
+          original_open.call(parent, name)
+        end
+      ) do
+        assert_raises(Hive::ConfigError) do
+          directory.directory_metadata("nested")
+        end
+      end
+    end
+  end
+
+  def test_entry_type_translates_each_missing_and_unsafe_failure
+    with_tmp_dir do |root|
+      directory = Hive::ManagedDirectory.new(root: root, label: "test state")
+
+      assert_raises(Hive::ConfigError) do
+        directory.entry_type("missing-parent/record")
+      end
+      assert_raises(Hive::ConfigError) do
+        directory.entry_type("missing-record")
+      end
+      assert_raises(Hive::ConfigError) { directory.entry_type(".") }
+
+      native = directory.instance_variable_get(:@native)
+      original_open = native.method(:open_directory)
+      with_replaced_singleton_method(
+        native,
+        :open_directory,
+        lambda do |parent, name|
+          raise Errno::EIO, name if name == "broken"
+
+          original_open.call(parent, name)
+        end
+      ) do
+        assert_raises(Hive::ConfigError) do
+          directory.entry_type("broken")
+        end
+      end
+    end
+  end
+
   def test_atomically_exchanges_a_directory_with_a_regular_tombstone
     with_tmp_dir do |root|
       legacy = File.join(root, "v2")
@@ -138,6 +225,147 @@ class ManagedDirectoryTest < Minitest::Test
     end
   end
 
+  def test_atomic_exchange_translates_missing_and_filesystem_failures
+    with_tmp_dir do |root|
+      FileUtils.mkdir_p(File.join(root, "v2"))
+      directory = Hive::ManagedDirectory.new(
+        root: root, label: "schema cutover"
+      )
+
+      assert_raises(Hive::ConfigError) do
+        directory.exchange_directory_with_regular!(
+          directory_name: "v2", regular_name: ".missing-cutover"
+        )
+      end
+
+      tombstone = File.join(root, ".v2-cutover")
+      File.binwrite(tombstone, "tombstone")
+      native = directory.instance_variable_get(:@native)
+      with_replaced_singleton_method(
+        native,
+        :exchangeat,
+        ->(*) { raise Errno::EIO, "atomic exchange" }
+      ) do
+        assert_raises(Hive::ConfigError) do
+          directory.exchange_directory_with_regular!(
+            directory_name: "v2", regular_name: ".v2-cutover"
+          )
+        end
+      end
+
+      assert File.directory?(File.join(root, "v2"))
+      assert_equal "tombstone", File.binread(tombstone)
+    end
+  end
+
+  def test_quarantines_live_child_and_activates_replacement
+    with_tmp_dir do |root|
+      live = File.join(root, "current")
+      replacement = File.join(root, "replacement")
+      FileUtils.mkdir_p(live)
+      FileUtils.mkdir_p(replacement)
+      File.binwrite(File.join(live, "record"), "old")
+      File.binwrite(File.join(replacement, "record"), "new")
+      directory = Hive::ManagedDirectory.new(
+        root: root, label: "schema cutover"
+      )
+
+      quarantined = directory.quarantine_and_replace_child!(
+        live_name: "current",
+        replacement_name: "replacement",
+        quarantine_directory: "quarantine",
+        quarantine_name: "old-generation"
+      )
+
+      assert_equal File.join(root, "quarantine", "old-generation"),
+                   quarantined
+      assert_equal "new", File.binread(File.join(root, "current", "record"))
+      assert_equal "old", File.binread(File.join(quarantined, "record"))
+      refute_path_exists replacement
+    end
+  end
+
+  def test_quarantine_replacement_rejects_missing_or_occupied_entries
+    with_tmp_dir do |root|
+      replacement = File.join(root, "replacement")
+      FileUtils.mkdir_p(replacement)
+      directory = Hive::ManagedDirectory.new(
+        root: root, label: "schema cutover"
+      )
+
+      assert_raises(Hive::ConfigError) do
+        directory.quarantine_and_replace_child!(
+          live_name: "missing",
+          replacement_name: "replacement",
+          quarantine_directory: "quarantine",
+          quarantine_name: "old-generation"
+        )
+      end
+
+      live = File.join(root, "current")
+      FileUtils.mkdir_p(live)
+      FileUtils.mkdir_p(File.join(root, "quarantine"))
+      File.binwrite(
+        File.join(root, "quarantine", "old-generation"),
+        "occupied"
+      )
+      assert_raises(Hive::ConfigError) do
+        directory.quarantine_and_replace_child!(
+          live_name: "current",
+          replacement_name: "replacement",
+          quarantine_directory: "quarantine",
+          quarantine_name: "old-generation"
+        )
+      end
+    end
+  end
+
+  def test_quarantine_replacement_rolls_back_when_activation_fails
+    with_tmp_dir do |root|
+      live = File.join(root, "current")
+      replacement = File.join(root, "replacement")
+      FileUtils.mkdir_p(live)
+      FileUtils.mkdir_p(replacement)
+      File.binwrite(File.join(live, "record"), "old")
+      File.binwrite(File.join(replacement, "record"), "new")
+      directory = Hive::ManagedDirectory.new(
+        root: root, label: "schema cutover"
+      )
+      native = directory.instance_variable_get(:@native)
+      original_rename = native.method(:renameat)
+
+      with_replaced_singleton_method(
+        native,
+        :renameat,
+        lambda do |source_parent, source_name, target_parent, target_name|
+          if source_name == "replacement" && target_name == "current"
+            raise Errno::EIO, target_name
+          end
+
+          original_rename.call(
+            source_parent,
+            source_name,
+            target_parent,
+            target_name
+          )
+        end
+      ) do
+        assert_raises(Hive::ConfigError) do
+          directory.quarantine_and_replace_child!(
+            live_name: "current",
+            replacement_name: "replacement",
+            quarantine_directory: "quarantine",
+            quarantine_name: "old-generation"
+          )
+        end
+      end
+
+      assert_equal "old", File.binread(File.join(live, "record"))
+      assert_equal "new", File.binread(File.join(replacement, "record"))
+      refute_path_exists File.join(root, "quarantine", "old-generation")
+    end
+  end
+
   def test_quarantines_one_directory_without_a_replacement
     with_tmp_dir do |root|
       FileUtils.mkdir_p(File.join(root, "v3", "jobs"))
@@ -161,6 +389,13 @@ class ManagedDirectoryTest < Minitest::Test
         "current",
         File.binread(File.join(quarantined, "jobs", "one.json"))
       )
+      assert_raises(Hive::ConfigError) do
+        directory.quarantine_child!(
+          live_name: "missing",
+          quarantine_directory: "rollback-quarantine",
+          quarantine_name: "snapshot-b"
+        )
+      end
     end
   end
 
@@ -1136,6 +1371,24 @@ class ManagedDirectoryTest < Minitest::Test
         native.class.platform_flags("arm64-darwin")
       )
       assert_nil native.class.platform_flags("java")
+    end
+  end
+
+  def test_native_adapter_treats_an_optional_missing_symbol_as_unavailable
+    with_tmp_dir do |root|
+      native = Hive::ManagedDirectory.new(
+        root: root, label: "test state"
+      ).instance_variable_get(:@native)
+
+      with_replaced_singleton_method(
+        native,
+        :function,
+        ->(*) { raise Fiddle::DLError, "missing optional symbol" }
+      ) do
+        assert_nil native.send(
+          :optional_function, Fiddle::Handle::DEFAULT, "optional", []
+        )
+      end
     end
   end
 

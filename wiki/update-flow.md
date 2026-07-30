@@ -7,7 +7,7 @@ updated: 2026-07-29
 tags: [architecture, daemon, bot, tui, update, decision]
 ---
 
-**TLDR**: During the fast dev-release period the daemon checks the latest GitHub release on a throttled (~daily) cadence and, when the running version is behind, records a nudge (version + exact update command) that the TUI footer renders and the bot pushes once per version. Updates remain operator-invoked: `hive update` now performs a verified daemon quiesce, package replacement, complete invoking-user migration sweep, and conditional restart; every other user of a shared package crosses the same boundary on first eligible use. The daemon never self-updates. See [[commands/update]] and [[decisions]].
+**TLDR**: During the fast dev-release period the daemon checks the latest GitHub release on a throttled (~daily) cadence and, when the running version is behind, records a nudge (version + exact update command) that the TUI footer renders and the bot pushes once per version. Updates remain operator-invoked: `hive update` performs verified current-user daemon quiescence, package replacement, that user's exact-profile migration, and conditional restart. AUR separately performs and retries the privileged all-user sweep; Homebrew/non-root bash shared installs report the administrator command instead of treating first use as completion. The daemon never self-updates. See [[commands/update]] and [[decisions]].
 
 ## Pieces
 

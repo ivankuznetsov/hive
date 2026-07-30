@@ -300,6 +300,113 @@ class DaemonServiceInstallerTest < Minitest::Test
     end
   end
 
+  def test_linux_persists_only_config_and_state_roots_for_hourly_migration_retry
+    with_tmp_dir do |dir|
+      hive_home = File.join(dir, "custom hive")
+      state_home = File.join(dir, "state")
+      installer = Hive::Commands::Daemon::ServiceInstaller.new(
+        host_os: "linux-gnu",
+        home: dir,
+        binary_path: "/tmp/hive",
+        environment: {
+          "HIVE_HOME" => hive_home,
+          "XDG_STATE_HOME" => state_home,
+          "OPENAI_API_KEY" => "must-not-enter-service"
+        },
+        systemctl_available: false
+      )
+
+      installer.install!(autostart: false)
+      unit = File.read(
+        File.join(dir, ".config/systemd/user/hive-daemon.service")
+      )
+
+      assert_includes unit,
+                      "Environment=HIVE_HOME=#{Shellwords.escape(hive_home)}"
+      assert_includes unit,
+                      "Environment=XDG_STATE_HOME=#{Shellwords.escape(state_home)}"
+      refute_includes unit, "OPENAI_API_KEY"
+      refute_includes unit, "must-not-enter-service"
+    end
+  end
+
+  def test_macos_persists_custom_hive_root_for_daemon_retry
+    with_tmp_dir do |dir|
+      hive_home = File.join(dir, "custom&hive")
+      installer = Hive::Commands::Daemon::ServiceInstaller.new(
+        host_os: "darwin23",
+        home: dir,
+        binary_path: "/opt/hive/bin/hive",
+        environment: {
+          "HIVE_HOME" => hive_home,
+          "ANTHROPIC_API_KEY" => "must-not-enter-service"
+        },
+        runner: ->(_argv) { true }
+      )
+
+      installer.install!(autostart: false)
+      plist = File.read(
+        File.join(dir, "Library/LaunchAgents/local.hive-daemon.plist")
+      )
+
+      assert_includes plist, "<key>HIVE_HOME</key>"
+      assert_includes plist,
+                      "<string>#{CGI.escapeHTML(hive_home)}</string>"
+      refute_includes plist, "ANTHROPIC_API_KEY"
+      refute_includes plist, "must-not-enter-service"
+    end
+  end
+
+  def test_persisted_runtime_roots_reject_service_definition_control_bytes
+    with_tmp_dir do |dir|
+      installer = Hive::Commands::Daemon::ServiceInstaller.new(
+        host_os: "linux-gnu",
+        home: dir,
+        binary_path: "/tmp/hive",
+        environment: {
+          "HIVE_HOME" => "#{File.join(dir, 'custom')}\nEnvironment=BAD=1"
+        },
+        systemctl_available: false
+      )
+
+      error = assert_raises(Hive::ConfigError) do
+        installer.install!(autostart: false)
+      end
+
+      assert_match(/HIVE_HOME must be an absolute path/, error.message)
+
+      null_byte = Hive::Commands::Daemon::ServiceInstaller.new(
+        host_os: "linux-gnu",
+        home: dir,
+        binary_path: "/tmp/hive",
+        environment: { "HIVE_HOME" => "#{dir}/\0invalid" },
+        systemctl_available: false
+      )
+      error = assert_raises(Hive::ConfigError) do
+        null_byte.install!(autostart: false)
+      end
+      assert_match(/HIVE_HOME must be an absolute path/, error.message)
+    end
+  end
+
+  def test_persisted_runtime_roots_reject_relative_paths
+    with_tmp_dir do |dir|
+      installer = Hive::Commands::Daemon::ServiceInstaller.new(
+        host_os: "linux-gnu",
+        home: dir,
+        binary_path: "/tmp/hive",
+        environment: { "HIVE_HOME" => "relative/hive" },
+        systemctl_available: false
+      )
+
+      error = assert_raises(Hive::ConfigError) do
+        installer.install!(autostart: false)
+      end
+
+      assert_match(/HIVE_HOME must be an absolute path/, error.message)
+    end
+  end
+
   # ── Ruby version-manager shim detection (PR #113 follow-up) ────────────
   # The gem's bin/hive uses `#!/usr/bin/env ruby`. The unit's baked
   # PATH must include the active Ruby manager's shim dir so the

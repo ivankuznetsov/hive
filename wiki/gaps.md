@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-07-28
+updated: 2026-07-29
 tags: [gap, todo, release-proof, agent-skills]
 ---
 
@@ -19,17 +19,24 @@ tags: [gap, todo, release-proof, agent-skills]
   migration qualification claim. Longer elapsed telemetry remains useful but
   is not a substitute for that protocol.
 
-- The installation-wide JobStore v2-to-v3 startup sweep is source- and
-  focused-test-pinned, including 120 released-format jobs with many attempts,
-  interruption/resume checkpoints, multiple healthy projects, corrupt and
-  identity-drift holds, custom state roots, realpath alias deduplication,
-  persisted read-only status, hourly retry, runtime admission from the latest
-  completed sweep, and first-open fallback. Registry membership is
-  ownership-agnostic: every row is attempted even when another user created or
-  owns the project, while the installation process's real OS permissions still
-  fail closed. There is not yet an installed-upgrade artifact from a registry
-  containing genuinely cross-owner filesystem trees, including a repaired
-  permission failure followed by the hourly successful retry.
+- The installation-wide JobStore v2-to-v3 startup sweep is source-, focused-,
+  and real-UID-gate pinned. The Linux merge gate gives one candidate three
+  inactive NSS identities with default, `HIVE_HOME`, and split-XDG profiles,
+  converts one released-v2 project per uid, and proves both v3 data and
+  per-profile receipts are owned by the dropped identity. Focused coverage
+  additionally includes 120 released-format jobs with many attempts,
+  interruption/resume checkpoints, corrupt and identity-drift holds,
+  realpath-alias deduplication, shared-profile-root refusal, stable root
+  inventory/candidate custody, persisted read-only status, hourly retry,
+  runtime admission from the latest completed sweep, and first-open fallback.
+  There is not yet a checked-in artifact from an actual AUR package upgrade
+  with three long-lived host accounts and running old daemons, nor a repaired
+  offline/permission failure followed by the installed system timer's
+  successful retry. Homebrew and direct non-root installs intentionally have
+  no privileged automatic timer; their aggregate remains incomplete until an
+  administrator runs the documented all-user command. Arbitrary legacy
+  process-only custom roots and offline/encrypted/network homes remain
+  unknowable unless the root inventory explicitly closes discovery.
 
 - `agent-cli-runtime` 0.1.0 has a self-contained package, exact-artifact
   verifier, Linux/macOS install matrix, and component-scoped trusted-publishing

@@ -423,6 +423,43 @@ class RefactorPatrolRegisteredProjectMigrationCoordinatorTest <
     assert_match(/migration status is malformed/, error.message)
   end
 
+  def test_status_rejects_a_receipt_copied_from_another_user_profile
+    status_root = File.join(@root, "installation-status")
+    alice = {
+      "username" => "alice",
+      "uid" => 1_001,
+      "home" => "/home/alice",
+      "config_home" => "/home/alice/.config/hive",
+      "state_home" => "/home/alice/.local/state/hive"
+    }
+    bob = {
+      "username" => "bob",
+      "uid" => 1_002,
+      "home" => "/home/bob",
+      "config_home" => "/home/bob/.config/hive",
+      "state_home" => "/home/bob/.local/state/hive"
+    }
+    alice_store =
+      Hive::RefactorPatrol::RegisteredProjectMigrationStatus.new(
+        root: status_root,
+        user_profile: alice
+      )
+    alice_store.write(
+      [],
+      registry_digest: "a" * 64,
+      now: Time.utc(2026, 7, 29, 16, 0, 0)
+    )
+    bob_store =
+      Hive::RefactorPatrol::RegisteredProjectMigrationStatus.new(
+        root: status_root,
+        user_profile: bob
+      )
+
+    error = assert_raises(Hive::ConfigError) { bob_store.read }
+
+    assert_match(/migration status is malformed/, error.message)
+  end
+
   def test_hourly_tick_retries_a_previously_failed_project
     path = project_path("retryable")
     calls = 0
@@ -573,6 +610,151 @@ class RefactorPatrolRegisteredProjectMigrationCoordinatorTest <
                  coordinator.eligible_projects.map {
                    |entry| entry.fetch("name")
                  }
+  end
+
+  def test_status_store_preserves_pending_state_and_rejects_malformed_inputs
+    root = File.join(@root, "status-branches")
+    store = Hive::RefactorPatrol::RegisteredProjectMigrationStatus.new(
+      root: root
+    )
+    now = Time.utc(2026, 7, 29, 16)
+
+    written = store.write(
+      [],
+      registry_digest: "a" * 64,
+      now: now,
+      daemon_restart_pending: true
+    )
+    assert_equal true, written.fetch("daemon_restart_pending")
+
+    cleared = store.write_daemon_restart_pending(
+      pending: false,
+      now: now + 1
+    )
+    assert_equal false, cleared.fetch("daemon_restart_pending")
+    assert_equal cleared, store.read
+
+    empty = Hive::RefactorPatrol::RegisteredProjectMigrationStatus.new(
+      root: File.join(@root, "missing-status")
+    )
+    assert_raises(Hive::ConfigError) do
+      empty.write_daemon_restart_pending(pending: true)
+    end
+
+    File.binwrite(
+      File.join(root, store.class::FILE_NAME),
+      "{"
+    )
+    assert_raises(Hive::ConfigError) { store.read }
+    assert_nil store.safe_read
+    assert_raises(Hive::ConfigError) do
+      store.write([], registry_digest: "a" * 64, now: "not-a-time")
+    end
+  end
+
+  def test_status_validation_covers_fallback_profile_and_scalar_edges
+    fallback = nil
+    with_replaced_singleton_method(
+      Etc,
+      :getpwuid,
+      ->(_uid) { raise ArgumentError, "unknown uid" }
+    ) do
+      fallback =
+        Hive::RefactorPatrol::RegisteredProjectMigrationStatus
+        .current_user_profile
+    end
+    assert_equal Process.uid, fallback.fetch("uid")
+
+    klass = Hive::RefactorPatrol::RegisteredProjectMigrationStatus
+    first = Object.new
+    second = Object.new
+    refute_equal(
+      klass.registry_digest([ first ]),
+      klass.registry_digest([ second ])
+    )
+
+    store = klass.new(root: File.join(@root, "status-validation"))
+    refute store.send(:absolute_path?, "\0")
+    with_replaced_singleton_method(
+      File,
+      :absolute_path,
+      ->(_value) { raise ArgumentError, "invalid path" }
+    ) do
+      refute store.send(:absolute_path?, "/otherwise-valid")
+    end
+    refute store.send(:valid_timestamp?, "not-a-time")
+  end
+
+  def test_coordinator_acknowledges_restart_and_covers_failure_remediation
+    status_store = Hive::RefactorPatrol::RegisteredProjectMigrationStatus.new(
+      root: File.join(@root, "ack-status")
+    )
+    pending = status_store.write(
+      [],
+      registry_digest: "a" * 64,
+      daemon_restart_pending: true
+    )
+    coordinator = Coordinator.new(
+      registry: -> { [] },
+      status_store: status_store
+    )
+    coordinator.instance_variable_set(:@last_status_payload, pending)
+
+    acknowledged = coordinator.acknowledge_daemon_restart(
+      now: Time.utc(2026, 7, 29, 17)
+    )
+    assert_equal false, acknowledged.fetch("daemon_restart_pending")
+
+    concurrent = Hive::ConcurrentRunError.new(
+      "writer alive",
+      holder: {},
+      lock_path: "/tmp/daemon.pid"
+    )
+    assert_match(
+      /stop the older Hive daemon/,
+      coordinator.send(
+        :remediation_for,
+        concurrent,
+        { project: "demo" }
+      )
+    )
+    assert_raises(Hive::ConfigError) do
+      coordinator.tick(now: "not-a-time")
+    end
+  end
+
+  def test_invalid_ownership_and_double_snapshot_failure_are_isolated
+    path = project_path("invalid-ownership")
+    coordinator = Coordinator.new(
+      registry: -> { entries(path) },
+      ownership_loader: ->(_identity) {
+        { "owner" => "unknown", "epoch" => 0 }
+      },
+      schema_status: ->(_identity) {
+        raise Hive::ConfigError, "status unavailable"
+      },
+      schema_snapshot_id: ->(_identity) {
+        raise Hive::ConfigError, "snapshot unavailable"
+      },
+      status_store: nil
+    )
+
+    result = coordinator.run.fetch(0)
+
+    assert_equal :failed, result.status
+    assert_nil result.snapshot_id
+    assert_match(/ownership is unresolved/, result.error)
+  end
+
+  def test_path_key_falls_back_when_realpath_is_inaccessible
+    with_replaced_singleton_method(
+      File,
+      :realpath,
+      ->(_path) { raise Errno::EACCES, "denied" }
+    ) do
+      path = File.join(@root, "inaccessible", "project")
+      assert_equal File.expand_path(path), Coordinator.path_key(path)
+    end
   end
 
   private

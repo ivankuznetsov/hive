@@ -105,21 +105,24 @@
         },
         "schema_migrations": {
           "type": "object",
-          "description": "Installation-wide JobStore upgrade inventory. Failed projects are held from Architecture Patrol and retried by the daemon.",
+          "description": "This daemon user's exact config/state profile JobStore upgrade inventory. Machine-wide completion is reported by the privileged all-user migration command.",
           "required": [
             "ok",
             "schema",
             "schema_version",
+            "hive_version",
             "target_schema_version",
             "registry_digest",
             "updated_at",
             "daemon_restart_pending",
+            "user_profile",
             "projects"
           ],
           "properties": {
             "ok": { "type": "boolean" },
-            "schema": { "const": "hive-installation-job-schema-migration" },
-            "schema_version": { "const": 2 },
+            "schema": { "const": "hive-user-profile-job-schema-migration" },
+            "schema_version": { "const": 1 },
+            "hive_version": { "type": "string", "minLength": 1 },
             "target_schema_version": { "const": 3 },
             "registry_digest": {
               "type": ["string", "null"],
@@ -129,6 +132,24 @@
             "daemon_restart_pending": {
               "type": "boolean",
               "description": "True when the catalog migration completed after quiescing a daemon but restoring that daemon has not yet succeeded."
+            },
+            "user_profile": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "username",
+                "uid",
+                "home",
+                "config_home",
+                "state_home"
+              ],
+              "properties": {
+                "username": { "type": "string", "minLength": 1 },
+                "uid": { "type": "integer", "minimum": 0 },
+                "home": { "type": "string", "minLength": 1 },
+                "config_home": { "type": "string", "minLength": 1 },
+                "state_home": { "type": "string", "minLength": 1 }
+              }
             },
             "error": { "type": "string" },
             "projects": {

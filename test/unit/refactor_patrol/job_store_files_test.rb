@@ -111,6 +111,57 @@ class RefactorPatrolJobStoreFilesTest < Minitest::Test
     end
   end
 
+  def test_job_read_write_helpers_round_trip_exact_bytes
+    with_files do |files, _root, _outside|
+      bytes = "{\"job_id\":\"job-1\"}\n"
+
+      files.write_job("job-1", bytes)
+
+      assert_equal bytes, files.read_job("job-1")
+      assert files.job_exists?("job-1")
+      assert_equal [ "job-1" ], files.each_job_id.to_a
+    end
+  end
+
+  def test_inventory_rejects_unknown_and_nonregular_entries
+    with_files do |files, root, _outside|
+      FileUtils.mkdir_p(File.join(root, "jobs"))
+      File.binwrite(File.join(root, "jobs", "unknown.txt"), "x")
+
+      error = assert_raises(CorruptRecord) { files.each_job_id.to_a }
+      assert_match(/unknown entry/, error.message)
+
+      FileUtils.rm_f(File.join(root, "jobs", "unknown.txt"))
+      FileUtils.mkdir_p(File.join(root, "jobs", "job-dir.json"))
+      error = assert_raises(CorruptRecord) { files.each_job_id.to_a }
+      assert_match(/not a regular file/, error.message)
+      error = assert_raises(CorruptRecord) do
+        files.regular?("jobs/job-dir.json")
+      end
+      assert_match(/not a regular file/, error.message)
+    end
+  end
+
+  def test_inventory_translates_a_job_that_disappears_after_enumeration
+    with_files do |files, _root, _outside|
+      files.write_job("job-1", "{}\n")
+      original = files.method(:regular?)
+
+      with_replaced_singleton_method(
+        files,
+        :regular?,
+        lambda do |relative|
+          relative == "jobs/job-1.json" ? false : original.call(relative)
+        end
+      ) do
+        error = assert_raises(CorruptRecord) do
+          files.each_job_id.to_a
+        end
+        assert_match(/job is not a regular file/, error.message)
+      end
+    end
+  end
+
   private
 
   def with_constant(owner, name, replacement)

@@ -622,16 +622,19 @@ their existing v2 owners until those components intentionally migrate:
 ```
 
 The job-schema converter is a shipped upgrade boundary, not a v2 runtime
-reader. Every user-scoped Hive installation runs it over that user's complete
-registered-project inventory: package hooks activate the installing user, and
-the shipped CLI activates every other user on first eligible use. One user's
-status receipt cannot satisfy another user's installation. Within a sweep Hive
+reader. The root-only install-wide coordinator discovers fixed Hive registry
+anchors for every NSS user and supplements them with the root-owned custom-root
+inventory. It validates identity/home bindings, then drops groups/gid/uid and
+uses a scrubbed exact profile environment before invoking the candidate. Root
+never reads a non-root user's registry or mutates that user's project before
+the identity drop; a root account's own child necessarily remains uid 0.
+Within each profile Hive
 deduplicates realpath aliases and invokes the same per-project converter before
 constructing any architecture-patrol scheduler, merge reconciler, or
 module-migration coordinator. Registry membership, not the project directory's
 Unix owner, defines the sweep: shared projects owned or created by another user
-and custom state roots are attempted with the invoking process's actual OS
-permissions. Package hooks never root-scan unrelated homes.
+and custom state roots are attempted with that user's actual OS permissions.
+One user's receipt cannot satisfy another user's profile.
 
 The v2 `jobs/` directory is atomically exchanged with a regular-file tombstone
 before conversion. Its former directory becomes a sealed hidden archive, so an
@@ -641,14 +644,18 @@ inventory, restart checkpoints, conversion proofs, and completion marker.
 
 One malformed, inaccessible, or identity-drifted project produces a persisted
 failed/retryable result and a project-local architecture-patrol hold; it does
-not prevent later registered projects from migrating or unrelated workflow
-tasks from running. Runtime admission is an allowlist from the latest completed
+not prevent later registered projects or user profiles from migrating, or
+unrelated workflow tasks from running. Runtime admission is an allowlist from
+the latest completed
 sweep. A registry-digest change causes immediate rescan; otherwise failed rows
-retry hourly. The installation status lives under
+retry hourly. The per-profile status lives under
 `<state_home>/schema-migrations/refactor-patrol-job-v3.json` and is surfaced by
-`hive daemon status --json`. Direct JobStore construction retains the same
-one-off conversion entrypoint for dormant state, while normal records and child
-completion payloads validate only v3.
+`hive daemon status --json`; the privileged aggregate is a separate typed
+receipt with candidate, inventory, uid, profile, and coverage identities. AUR's
+system timer retries inactive users hourly. Its counts distinguish unique OS
+uids from multiple Hive config/state profiles owned by one uid. Direct JobStore
+construction retains the same one-off conversion entrypoint for dormant state,
+while normal records and child completion payloads validate only v3.
 
 The snapshot manifest binds project id, sorted name set, exact bytes, SHA-256,
 size, mode, and source mtime before the first replacement. A completed marker,

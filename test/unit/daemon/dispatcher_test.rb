@@ -5958,6 +5958,81 @@ end
     assert_includes fatal[1][:message], "id backfiller boom"
   end
 
+  def test_tick_logs_each_registered_project_schema_migration_result
+    migration_result = Data.define(:project, :status).new(
+      project: "demo",
+      status: :migrated
+    )
+    coordinator = Object.new
+    ticks = []
+    coordinator.define_singleton_method(:tick) do |now:|
+      ticks << now
+      [ migration_result ]
+    end
+    dispatcher, _supervisor, _controller, logger = make_dispatcher
+    dispatcher.instance_variable_set(
+      :@registered_project_migration_coordinator,
+      coordinator
+    )
+
+    dispatcher.tick(now: T0)
+
+    assert_equal [ T0 ], ticks
+    event = logger.events.find do |name, _attributes|
+      name == :refactor_patrol_schema_migration
+    end
+    refute_nil event
+    assert_equal "demo", event.fetch(1).fetch(:project)
+    assert_equal :migrated, event.fetch(1).fetch(:status)
+  end
+
+  def test_tick_isolates_registered_project_schema_migration_failures
+    coordinator = Object.new
+    coordinator.define_singleton_method(:tick) do |now:|
+      now
+      raise IOError, "migration status unavailable"
+    end
+    dispatcher, _supervisor, _controller, logger = make_dispatcher
+    dispatcher.instance_variable_set(
+      :@registered_project_migration_coordinator,
+      coordinator
+    )
+
+    dispatcher.tick(now: T0)
+
+    event = logger.events.find do |name, attributes|
+      name == :fatal &&
+        attributes.fetch(:message).include?(
+          "registered project schema migration raised"
+        )
+    end
+    refute_nil event
+    assert_includes event.fetch(1).fetch(:message),
+                    "migration status unavailable"
+  end
+
+  def test_shutdown_snapshot_failure_is_advisory
+    snapshot = FakeOperationalSnapshot.new(
+      fail_on: :shutdown,
+      error: IOError.new("shutdown snapshot unavailable")
+    )
+    dispatcher, _supervisor, _controller, logger =
+      make_dispatcher(operational_snapshot: snapshot)
+
+    dispatcher.send(
+      :publish_shutdown_acknowledgement,
+      now: T0
+    )
+
+    event = logger.events.find do |name, attributes|
+      name == :operational_snapshot_publish_failed &&
+        attributes.fetch(:phase) == "shutdown"
+    end
+    refute_nil event
+    assert_includes event.fetch(1).fetch(:error),
+                    "shutdown snapshot unavailable"
+  end
+
   private
 
   def dispatcher_recovery(phase: "admitted")

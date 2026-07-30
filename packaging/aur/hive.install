@@ -1,8 +1,28 @@
+run_install_wide_migration() {
+  if /usr/bin/hive refactor-patrol-migrate-installed --all-users; then
+    printf '%s\n' "Hive migrated every machine-inventoried user's registered projects."
+  else
+    printf '%s\n' \
+      "Hive install-wide migration is incomplete; inspect its receipt and /var/lib/hive/installed-users.v1.json." >&2
+  fi
+}
+
+enable_install_wide_retry() {
+  command -v systemctl >/dev/null 2>&1 || return 0
+  systemctl daemon-reload >/dev/null 2>&1 || return 0
+  if ! systemctl enable --now hive-job-schema-migration.timer >/dev/null 2>&1; then
+    printf '%s\n' \
+      "Could not enable hive-job-schema-migration.timer; run the all-user migration command hourly until complete." >&2
+  fi
+}
+
 post_install() {
+  run_install_wide_migration
+  enable_install_wide_retry
   cat <<'MSG'
 hive-bin installed.
 Run `hive setup` in a project to install and start the native Hive web and daemon services, bootstrap the managed web bundle, and enroll the project. Use `hive setup --no-service` to keep Hive web foreground-only.
-Hive state is user-scoped: each user's next eligible `hive` invocation migrates every project in that user's registered-project catalog. The root package hook never scans user home directories.
+The root package hook probes fixed Hive registry anchors for every NSS user and runs each migration after dropping to that user's identity. Custom HIVE_HOME/XDG roots must be listed in the root-owned /var/lib/hive/installed-users.v1.json inventory. First use is a fallback, not install-wide completion evidence.
 MSG
 }
 
@@ -11,6 +31,10 @@ post_upgrade() {
 }
 
 post_remove() {
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl disable --now hive-job-schema-migration.timer >/dev/null 2>&1 || true
+    systemctl daemon-reload >/dev/null 2>&1 || true
+  fi
   cat <<'MSG'
 hive-bin removed.
 pacman -R hive-bin alone does not touch project .hive-state directories.

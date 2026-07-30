@@ -75,4 +75,105 @@ class RefactorPatrolSchemaRestoreCommandTest < Minitest::Test
       assert_match(/canonical path/, error.message)
     end
   end
+
+  def test_default_dependencies_restore_the_registered_project_and_emit_text
+    with_tmp_dir do |root|
+      state = File.join(root, ".hive-state")
+      entry = {
+        "name" => "demo",
+        "project_id" => "project-demo",
+        "path" => root,
+        "real_path" => File.realpath(root),
+        "hive_state_path" => state
+      }
+      snapshot_id = "snapshot-#{"b" * 64}"
+      result = RestoreResult.new(
+        snapshot_id: snapshot_id,
+        restored_jobs: 3,
+        quarantine_path: File.join(state, "quarantine")
+      )
+      calls = []
+
+      output, = with_replaced_singleton_method(
+        Hive::Config,
+        :find_project,
+        ->(name) {
+          calls << [ :resolve, name ]
+          entry
+        }
+      ) do
+        with_replaced_singleton_method(
+          Hive::RefactorPatrol::JobStore,
+          :restore_schema_v2_snapshot!,
+          ->(path, **options) {
+            calls << [ :restore, path, options ]
+            result
+          }
+        ) do
+          capture_io do
+            Hive::Commands::RefactorPatrolSchemaRestore.new(
+              "demo", snapshot_id
+            ).call
+          end
+        end
+      end
+
+      assert_equal [ :resolve, "demo" ], calls.fetch(0)
+      assert_equal :restore, calls.fetch(1).fetch(0)
+      assert_equal root, calls.fetch(1).fetch(1)
+      assert_equal snapshot_id,
+                   calls.fetch(1).fetch(2).fetch(:snapshot_id)
+      assert_includes output, "demo restored_jobs=3"
+      assert_includes output, "snapshot=#{snapshot_id}"
+    end
+  end
+
+  def test_command_rejects_unknown_and_malformed_registered_projects
+    unknown = Hive::Commands::RefactorPatrolSchemaRestore.new(
+      "missing",
+      "snapshot-#{"c" * 64}",
+      project_resolver: ->(*) { nil },
+      restorer: ->(*) { flunk "unknown registration reached restore" }
+    )
+    error = assert_raises(Hive::ConfigError) { unknown.call }
+    assert_match(/unknown project "missing"/, error.message)
+
+    malformed = Hive::Commands::RefactorPatrolSchemaRestore.new(
+      "broken",
+      "snapshot-#{"d" * 64}",
+      project_resolver: ->(*) { { "name" => "broken" } },
+      restorer: ->(*) { flunk "malformed registration reached restore" }
+    )
+    error = assert_raises(Hive::ConfigError) { malformed.call }
+    assert_match(/registered project identity is unavailable/, error.message)
+    assert_match(/KeyError/, error.message)
+  end
+
+  def test_cli_route_constructs_the_restore_command
+    calls = []
+    fake = Object.new
+    fake.define_singleton_method(:call) { calls << :call }
+
+    with_replaced_singleton_method(
+      Hive::Commands::RefactorPatrolSchemaRestore,
+      :new,
+      ->(project, snapshot_id, json:) {
+        calls << [ project, snapshot_id, json ]
+        fake
+      }
+    ) do
+      Hive::CLI.start([
+        "refactor-patrol-schema-restore", "demo",
+        "snapshot-#{"e" * 64}", "--json"
+      ])
+    end
+
+    assert_equal(
+      [
+        [ "demo", "snapshot-#{"e" * 64}", true ],
+        :call
+      ],
+      calls
+    )
+  end
 end

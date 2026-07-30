@@ -6,8 +6,8 @@ require "hive/refactor_patrol/registered_project_migration_status"
 
 module Hive
   module RefactorPatrol
-    # Shipped upgrade boundary for one Hive installation. It discovers the
-    # complete registered-project inventory for that installation, verifies
+    # Shipped upgrade boundary for one exact user profile. It discovers the
+    # complete registered-project inventory for that profile, verifies
     # every immutable registration anchor, and invokes the single JobStore
     # converter under the existing Patrol mutation fence.
     class RegisteredProjectMigrationCoordinator
@@ -124,7 +124,7 @@ module Hive
       end
 
       # `hive daemon start` deliberately lets the new foreground/detached
-      # process own restoration after the installation preflight quiesces an
+      # process own restoration after the user-profile preflight quiesces an
       # older daemon. Clear that durable obligation only after the new daemon
       # has completed construction and is ready to enter its dispatch loop.
       def acknowledge_daemon_restart(now: Time.now.utc)

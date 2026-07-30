@@ -45,9 +45,9 @@ class Hive < Formula
   end
 
   def post_install
-    # Homebrew upgrades one user's installation. The candidate command fences
-    # any released daemon and sweeps that user's complete registered-project
-    # catalog; shared-package users are covered by Hive's first-use gate.
+    # Homebrew forbids formula hooks from gaining administrator authority.
+    # Sweep this account now; shared machines require the explicit privileged
+    # all-user command shown in caveats.
     system bin/"hive", "refactor-patrol-migrate-installed"
   end
 
@@ -63,9 +63,14 @@ class Hive < Formula
       path current. If you previously customized the plist, remove it and re-run
       `hive daemon install --force` to install the current template.
 
-      Hive migrates every project registered to this user during upgrade.
-      Other users of this Homebrew installation are migrated on their next
-      eligible Hive invocation; Hive never scans unrelated home directories.
+      Hive migrates every project registered to the Homebrew user during
+      upgrade. On a shared Mac, an administrator must also run:
+
+        sudo #{bin}/hive refactor-patrol-migrate-installed --all-users
+
+      Add custom HIVE_HOME/XDG profiles to the root-owned installed-user
+      inventory first. Per-user first use remains a safety fallback and is not
+      evidence that the shared installation completed its all-user migration.
     EOS
   end
 

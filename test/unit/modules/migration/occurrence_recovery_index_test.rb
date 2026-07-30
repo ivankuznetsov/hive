@@ -69,6 +69,28 @@ class ModulesMigrationOccurrenceRecoveryIndexTest < Minitest::Test
       assert_raises(Hive::ConfigError) do
         index.write(generation: -1, occurrence_ids: [])
       end
+      assert_raises(Hive::ConfigError) do
+        index.write(generation: "not-an-integer", occurrence_ids: [])
+      end
+    end
+  end
+
+  def test_snapshot_rejects_a_canonical_projection_with_an_invalid_occurrence_id
+    with_index do |index, root|
+      payload = {
+        "schema" =>
+          Hive::Modules::Migration::OccurrenceRecoveryIndex::SCHEMA,
+        "schema_version" => 1,
+        "module" => "patrol",
+        "generation" => 0,
+        "occurrence_ids" => [ "not-an-occurrence" ]
+      }
+      File.binwrite(
+        File.join(root, "recovery-index.json"),
+        Hive::WorkflowPackage::CanonicalJSON.generate(payload)
+      )
+
+      assert_nil index.snapshot
     end
   end
 

@@ -1,5 +1,6 @@
 require "json"
 require "digest"
+require "etc"
 require "time"
 require "hive/managed_directory"
 require "hive/paths"
@@ -7,17 +8,21 @@ require "hive/workflow_package/canonical_json"
 
 module Hive
   module RefactorPatrol
-    # Installation-level, agent-readable inventory for the mandatory JobStore
-    # upgrade. It is observational status only; the coordinator remains the
-    # sole caller of the one converter.
+    # One user-profile's agent-readable inventory for the mandatory JobStore
+    # upgrade. Machine-wide completion is a separate privileged aggregate;
+    # this store remains the retry authority for one exact uid/config/state
+    # profile and its registered projects.
     class RegisteredProjectMigrationStatus
-      SCHEMA = "hive-installation-job-schema-migration".freeze
-      SCHEMA_VERSION = 2
+      SCHEMA = "hive-user-profile-job-schema-migration".freeze
+      SCHEMA_VERSION = 1
       FILE_NAME = "refactor-patrol-job-v3.json".freeze
       MAX_BYTES = 2 * 1024 * 1024
       PAYLOAD_KEYS = %w[
-        daemon_restart_pending projects registry_digest schema schema_version
-        target_schema_version updated_at
+        daemon_restart_pending hive_version projects registry_digest schema
+        schema_version target_schema_version updated_at user_profile
+      ].freeze
+      USER_PROFILE_KEYS = %w[
+        config_home home state_home uid username
       ].freeze
       PROJECT_KEYS = %w[
         current_schema_version error hive_state_path next_retry_at path
@@ -57,13 +62,34 @@ module Hive
         root: File.join(
           Hive::Paths.state_home, "schema-migrations"
         ),
-        directory: nil
+        directory: nil,
+        user_profile: nil
       )
         @root = File.expand_path(root)
         @directory = directory
+        @user_profile = user_profile || self.class.current_user_profile
       end
 
-      attr_reader :root
+      attr_reader :root, :user_profile
+
+      def self.current_user_profile
+        passwd = Etc.getpwuid(Process.uid)
+        {
+          "username" => passwd.name.to_s,
+          "uid" => Process.uid,
+          "home" => File.expand_path(Hive::Paths.home),
+          "config_home" => File.expand_path(Hive::Paths.config_home),
+          "state_home" => File.expand_path(Hive::Paths.state_home)
+        }.freeze
+      rescue ArgumentError
+        {
+          "username" => ENV["USER"].to_s,
+          "uid" => Process.uid,
+          "home" => File.expand_path(Hive::Paths.home),
+          "config_home" => File.expand_path(Hive::Paths.config_home),
+          "state_home" => File.expand_path(Hive::Paths.state_home)
+        }.freeze
+      end
 
       def write(
         results,
@@ -80,10 +106,12 @@ module Hive
         payload = {
           "schema" => SCHEMA,
           "schema_version" => SCHEMA_VERSION,
+          "hive_version" => Hive::VERSION,
           "target_schema_version" => 3,
           "registry_digest" => registry_digest.to_s,
           "updated_at" => timestamp(now),
           "daemon_restart_pending" => existing_pending == true,
+          "user_profile" => @user_profile,
           "projects" => Array(results).map do |result|
             result.to_h.transform_keys(&:to_s).transform_values do |value|
               value.is_a?(Symbol) ? value.to_s : value
@@ -100,7 +128,7 @@ module Hive
       )
         current = payload || read
         raise Hive::ConfigError,
-              "installation schema migration status is missing" unless
+              "user-profile schema migration status is missing" unless
           current.is_a?(Hash)
 
         persist(
@@ -122,12 +150,12 @@ module Hive
         data = JSON.parse(bytes)
         valid = bytes == canonical(data) && valid_payload?(data)
         raise Hive::ConfigError,
-              "installation schema migration status is malformed" unless valid
+              "user-profile schema migration status is malformed" unless valid
         data
       rescue JSON::ParserError, EncodingError, ArgumentError,
              SystemCallError, IOError => error
         raise Hive::ConfigError,
-              "installation schema migration status is unreadable " \
+              "user-profile schema migration status is unreadable " \
               "(#{error.class}: #{error.message})"
       end
 
@@ -137,12 +165,34 @@ module Hive
         nil
       end
 
+      # Pure receipt validation is public so the privileged all-user
+      # coordinator can validate a dropped-identity child's JSON without
+      # opening that user's status store as root.
+      def valid_payload?(
+        data,
+        hive_version: Hive::VERSION,
+        user_profile: @user_profile
+      )
+        data.is_a?(Hash) &&
+          data.keys.sort == PAYLOAD_KEYS &&
+          data["schema"] == SCHEMA &&
+          data["schema_version"] == SCHEMA_VERSION &&
+          data["hive_version"] == hive_version &&
+          data["target_schema_version"] == 3 &&
+          data["registry_digest"].to_s.match?(/\A[0-9a-f]{64}\z/) &&
+          valid_timestamp?(data["updated_at"]) &&
+          [ true, false ].include?(data["daemon_restart_pending"]) &&
+          data["user_profile"] == user_profile &&
+          valid_user_profile?(data["user_profile"]) &&
+          valid_projects?(data["projects"])
+      end
+
       private
 
       def directory
         @directory ||= Hive::ManagedDirectory.new(
           root: @root,
-          label: "installation schema migration status"
+          label: "user-profile schema migration status"
         )
       end
 
@@ -160,10 +210,10 @@ module Hive
       def persist(payload)
         bytes = canonical(payload)
         raise Hive::ConfigError,
-              "installation schema migration status is malformed" unless
+              "user-profile schema migration status is malformed" unless
           valid_payload?(payload)
         raise Hive::ConfigError,
-              "installation schema migration status is too large" if
+              "user-profile schema migration status is too large" if
           bytes.bytesize > MAX_BYTES
 
         directory.prepare!
@@ -173,16 +223,25 @@ module Hive
         payload
       end
 
-      def valid_payload?(data)
-        data.is_a?(Hash) &&
-          data.keys.sort == PAYLOAD_KEYS &&
-          data["schema"] == SCHEMA &&
-          data["schema_version"] == SCHEMA_VERSION &&
-          data["target_schema_version"] == 3 &&
-          data["registry_digest"].to_s.match?(/\A[0-9a-f]{64}\z/) &&
-          valid_timestamp?(data["updated_at"]) &&
-          [ true, false ].include?(data["daemon_restart_pending"]) &&
-          valid_projects?(data["projects"])
+      def valid_user_profile?(profile)
+        profile.is_a?(Hash) &&
+          profile.keys.sort == USER_PROFILE_KEYS &&
+          profile["username"].is_a?(String) &&
+          !profile["username"].empty? &&
+          profile["uid"].is_a?(Integer) &&
+          profile["uid"] >= 0 &&
+          %w[home config_home state_home].all? do |key|
+            absolute_path?(profile[key])
+          end
+      end
+
+      def absolute_path?(value)
+        value.is_a?(String) &&
+          !value.empty? &&
+          value.each_byte.none? { |byte| byte < 0x20 || byte == 0x7f } &&
+          File.absolute_path(value) == value
+      rescue ArgumentError
+        false
       end
 
       def valid_projects?(projects)
@@ -226,7 +285,7 @@ module Hive
         time.utc.iso8601(6)
       rescue ArgumentError, TypeError
         raise Hive::ConfigError,
-              "installation schema migration status time is malformed"
+              "user-profile schema migration status time is malformed"
       end
     end
   end

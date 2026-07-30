@@ -90,6 +90,55 @@ class RefactorPatrolJobSchemaTombstoneTest < Minitest::Test
     end
   end
 
+  def test_rejects_malformed_json_and_incomplete_migrated_identity
+    with_tmp_dir do |root|
+      tombstone = tombstone(root)
+      File.binwrite(File.join(root, "jobs"), "{")
+
+      error = assert_raises(
+        Hive::RefactorPatrol::JobStore::CorruptRecord
+      ) { tombstone.read }
+      assert_match(/tombstone is malformed/, error.message)
+
+      error = assert_raises(
+        Hive::RefactorPatrol::JobStore::CorruptRecord
+      ) do
+        tombstone.build(
+          origin: "migrated",
+          status: "complete",
+          transaction_id: "migration-#{"a" * 32}",
+          archive_name: ".job-schema-v3-source-#{"a" * 32}"
+        )
+      end
+      assert_match(/migrated tombstone identity is malformed/, error.message)
+    end
+  end
+
+  def test_missing_fetch_key_is_reported_as_invalid_shape
+    with_tmp_dir do |root|
+      value = Class.new(Hash) do
+        def fetch(key, *)
+          raise KeyError, "missing #{key}"
+        end
+      end.new
+      valid = tombstone(root).build(
+        origin: "native",
+        status: "complete",
+        transaction_id: "native-#{"a" * 32}"
+      )
+      value.merge!(valid)
+      tombstone = tombstone(root)
+
+      error = assert_raises(
+        Hive::RefactorPatrol::JobStore::CorruptRecord
+      ) do
+        tombstone.send(:validate!, value)
+      end
+
+      assert_match(/invalid shape/, error.message)
+    end
+  end
+
   private
 
   def tombstone(root)

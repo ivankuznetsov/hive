@@ -11,6 +11,24 @@ class RefactorPatrolFamilyStoreTest < Minitest::Test
   SemanticFamily = Hive::RefactorPatrol::SemanticFamily
   T0 = Time.utc(2026, 7, 10, 12, 0, 0)
 
+  def test_default_clock_and_unreadable_registry_fallback_are_safe
+    with_tmp_dir do |dir|
+      store = nil
+      with_replaced_singleton_method(
+        Hive::Config,
+        :registered_projects,
+        -> { raise Hive::ConfigError, "registry unavailable" }
+      ) do
+        store = FamilyStore.new(dir, job_store: Object.new)
+      end
+
+      assert_instance_of Time, store.instance_variable_get(:@clock).call
+      factory = store.instance_variable_get(:@job_store_factory)
+      built = factory.call(migrate: false)
+      assert_nil built.instance_variable_get(:@project)
+    end
+  end
+
   def test_creates_a_durable_family_and_returns_resolution_evidence
     with_tmp_dir do |dir|
       store = family_store(dir)

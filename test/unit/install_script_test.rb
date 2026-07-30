@@ -87,9 +87,13 @@ class InstallScriptTest < Minitest::Test
     refute_nil daemon
     assert_operator migration, :<, daemon
     assert_includes script,
-                    '"$link_path" refactor-patrol-migrate-installed'
+                    "migration_args=(refactor-patrol-migrate-installed)"
     assert_includes script,
-                    "retry on each user's next eligible invocation"
+                    "migration_args+=(--all-users)"
+    assert_includes script,
+                    "shared installation coverage is not complete"
+    assert_includes script,
+                    "retry with administrator authority for shared installations"
   end
 
   def test_installer_requires_cosign_for_release_identity_verification

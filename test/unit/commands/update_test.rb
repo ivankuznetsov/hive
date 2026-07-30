@@ -312,6 +312,342 @@ class UpdateCommandTest < Minitest::Test
     end
   end
 
+  def test_daemon_lifecycle_default_collaborators_are_executable
+    with_tmp_dir do |dir|
+      lifecycle = Hive::Commands::Update::DaemonLifecycle.new(
+        hive_home: dir
+      )
+
+      daemon = lifecycle.instance_variable_get(:@daemon_factory).call(
+        "stop"
+      )
+      assert_instance_of Hive::Commands::Daemon, daemon
+      assert_nil lifecycle.instance_variable_get(
+        :@shutdown_evidence
+      ).call(
+        Hive::Daemon::OperationalSnapshot.daemon_identity(
+          pid: Process.pid,
+          process_start_time: "test-start"
+        ),
+        now: Time.now.utc
+      )
+      assert_equal 0,
+                   lifecycle.instance_variable_get(:@sleeper).call(0)
+    end
+  end
+
+  def test_daemon_lifecycle_rejects_missing_or_unbound_tree_evidence
+    missing = Hive::Commands::Update::DaemonLifecycle.new(
+      hive_home: "/tmp/hive-update-lifecycle",
+      status_report: FakeStatusReport.new([
+        { running: true, pid: 71 }
+      ]),
+      tree_probe: ->(_pid) { nil }
+    )
+    error = assert_raises(Hive::ConcurrentRunError) do
+      missing.quiesce!
+    end
+    assert_match(/cannot capture the running daemon/, error.message)
+
+    unbound = Hive::Commands::Update::DaemonLifecycle.new(
+      hive_home: "/tmp/hive-update-lifecycle",
+      status_report: FakeStatusReport.new([
+        { running: true, pid: 71 }
+      ]),
+      tree_probe: lambda do |pid|
+        [
+          {
+            pid: pid,
+            ppid: 1,
+            pgid: pid,
+            start_time: ""
+          }
+        ]
+      end
+    )
+    error = assert_raises(Hive::ConcurrentRunError) do
+      unbound.quiesce!
+    end
+    assert_match(/cannot bind shutdown acknowledgement/, error.message)
+  end
+
+  def test_daemon_lifecycle_wraps_malformed_running_state
+    lifecycle = Hive::Commands::Update::DaemonLifecycle.new(
+      hive_home: "/tmp/hive-update-lifecycle",
+      status_report: FakeStatusReport.new([
+        { running: true, pid: "not-an-integer" }
+      ])
+    )
+
+    error = assert_raises(Hive::ConcurrentRunError) do
+      lifecycle.quiesce!
+    end
+
+    assert_match(/cannot verify daemon quiescence/, error.message)
+    assert_match(/ArgumentError/, error.message)
+  end
+
+  def test_daemon_lifecycle_rejects_a_daemon_pid_that_remains_live
+    calls = []
+    lifecycle = Hive::Commands::Update::DaemonLifecycle.new(
+      hive_home: "/tmp/hive-update-lifecycle",
+      status_report: FakeStatusReport.new([
+        { running: true, pid: 71 }
+      ]),
+      daemon_factory: ->(_subcommand) {
+        FakeDaemonCommand.new(calls)
+      },
+      tree_probe: lambda do |pid|
+        [
+          {
+            pid: pid,
+            ppid: 1,
+            pgid: pid,
+            start_time: "daemon-start"
+          }
+        ]
+      end,
+      process_alive: ->(_pid) { true },
+      shutdown_evidence: ->(_identity, now:) {
+        acknowledged_shutdown
+      }
+    )
+
+    error = assert_raises(Hive::ConcurrentRunError) do
+      lifecycle.quiesce!
+    end
+
+    assert_match(/daemon PID remains live/, error.message)
+    assert_equal [ :stop ], calls
+  end
+
+  def test_daemon_lifecycle_ignores_malformed_child_process_groups
+    calls = []
+    lifecycle = Hive::Commands::Update::DaemonLifecycle.new(
+      hive_home: "/tmp/hive-update-lifecycle",
+      status_report: FakeStatusReport.new([
+        { running: true, pid: 71 }
+      ]),
+      daemon_factory: ->(_subcommand) {
+        FakeDaemonCommand.new(calls)
+      },
+      tree_probe: lambda do |pid|
+        [
+          {
+            pid: pid,
+            ppid: 1,
+            pgid: pid,
+            start_time: "daemon-start"
+          },
+          {
+            pid: 72,
+            ppid: pid,
+            pgid: "not-an-integer",
+            start_time: "child-start"
+          }
+        ]
+      end,
+      process_alive: ->(_pid) { false },
+      captured_process_alive: ->(_target) { false },
+      process_group_alive: ->(_pgid) {
+        flunk "malformed group must not be probed"
+      },
+      shutdown_evidence: ->(_identity, now:) {
+        acknowledged_shutdown
+      }
+    )
+
+    assert lifecycle.quiesce!
+    assert_equal [ :stop ], calls
+  end
+
+  def test_daemon_lifecycle_waits_for_a_delayed_shutdown_acknowledgement
+    calls = []
+    evidence_calls = 0
+    clock_value = 0
+    sleeps = []
+    lifecycle = Hive::Commands::Update::DaemonLifecycle.new(
+      hive_home: "/tmp/hive-update-lifecycle",
+      status_report: FakeStatusReport.new([
+        { running: true, pid: 71 }
+      ]),
+      daemon_factory: ->(_subcommand) {
+        FakeDaemonCommand.new(calls)
+      },
+      tree_probe: lambda do |pid|
+        [
+          {
+            pid: pid,
+            ppid: 1,
+            pgid: pid,
+            start_time: "daemon-start"
+          }
+        ]
+      end,
+      process_alive: ->(_pid) { false },
+      captured_process_alive: ->(_target) { false },
+      process_group_alive: ->(_pgid) { false },
+      shutdown_evidence: lambda do |_identity, now:|
+        now
+        evidence_calls += 1
+        evidence_calls == 1 ? nil : acknowledged_shutdown
+      end,
+      clock: -> {
+        value = Time.at(clock_value).utc
+        clock_value += 1
+        value
+      },
+      sleeper: ->(seconds) { sleeps << seconds },
+      shutdown_evidence_timeout_sec: 10
+    )
+
+    assert lifecycle.quiesce!
+    assert_equal 2, evidence_calls
+    assert_equal [ 0.05 ], sleeps
+  end
+
+  def test_daemon_lifecycle_rejects_malformed_shutdown_inventory
+    calls = []
+    lifecycle = Hive::Commands::Update::DaemonLifecycle.new(
+      hive_home: "/tmp/hive-update-lifecycle",
+      status_report: FakeStatusReport.new([
+        { running: true, pid: 71 }
+      ]),
+      daemon_factory: ->(_subcommand) {
+        FakeDaemonCommand.new(calls)
+      },
+      tree_probe: lambda do |pid|
+        [
+          {
+            pid: pid,
+            ppid: 1,
+            pgid: pid,
+            start_time: "daemon-start"
+          }
+        ]
+      end,
+      shutdown_evidence: ->(_identity, now:) {
+        acknowledged_shutdown([
+          {
+            "pid" => "bad",
+            "pgid" => 72,
+            "start_time" => "child-start"
+          }
+        ])
+      }
+    )
+
+    error = assert_raises(Hive::ConcurrentRunError) do
+      lifecycle.quiesce!
+    end
+
+    assert_match(/shutdown acknowledgement is malformed/, error.message)
+  end
+
+  def test_daemon_lifecycle_restart_reports_every_failure_mode
+    missing = Hive::Commands::Update::DaemonLifecycle.new(
+      binary_path: -> { nil }
+    )
+    error = assert_raises(Hive::UnavailableError) do
+      missing.restart!
+    end
+    assert_match(/binary is unavailable/, error.message)
+
+    failed = Hive::Commands::Update::DaemonLifecycle.new(
+      binary_path: -> { "/bin/true" },
+      command_runner: ->(_argv) { false }
+    )
+    error = assert_raises(Hive::Error) { failed.restart! }
+    assert_match(/start command failed/, error.message)
+
+    timed_out = Hive::Commands::Update::DaemonLifecycle.new(
+      status_report: FakeStatusReport.new([]),
+      binary_path: -> { "/bin/true" },
+      command_runner: ->(_argv) { true },
+      restart_timeout_sec: 0
+    )
+    error = assert_raises(Hive::Error) { timed_out.restart! }
+    assert_match(/did not become running/, error.message)
+
+    missing_command = Hive::Commands::Update::DaemonLifecycle.new(
+      binary_path: -> { "/bin/true" },
+      command_runner: ->(_argv) {
+        raise Errno::ENOENT, "candidate disappeared"
+      }
+    )
+    error = assert_raises(Hive::UnavailableError) do
+      missing_command.restart!
+    end
+    assert_match(/candidate disappeared/, error.message)
+  end
+
+  def test_daemon_lifecycle_default_process_helpers_cover_kernel_results
+    lifecycle = Hive::Commands::Update::DaemonLifecycle.new
+
+    alive = with_replaced_singleton_method(
+      Process,
+      :kill,
+      ->(_signal, _pid) { true }
+    ) { lifecycle.send(:process_group_alive?, 71) }
+    assert alive
+    gone = with_replaced_singleton_method(
+      Process,
+      :kill,
+      ->(_signal, _pid) { raise Errno::ESRCH, "gone" }
+    ) { lifecycle.send(:process_group_alive?, 71) }
+    refute gone
+    hidden = with_replaced_singleton_method(
+      Process,
+      :kill,
+      ->(_signal, _pid) { raise Errno::EPERM, "hidden" }
+    ) { lifecycle.send(:process_group_alive?, 71) }
+    assert hidden
+
+    assert_predicate lifecycle.send(
+      :run_command,
+      [ "/bin/true" ]
+    ), :success?
+  end
+
+  def test_updater_and_candidate_failures_are_actionable
+    with_tmp_dir do |dir|
+      brew = File.join(dir, "brew")
+      File.write(brew, "#!/bin/sh\n")
+      FileUtils.chmod(0o755, brew)
+      lifecycle = FakeDaemonLifecycle.new
+
+      error = assert_raises(Hive::Error) do
+        Hive::Commands::Update.new(
+          channel: "brew",
+          env: { "PATH" => dir },
+          daemon_lifecycle: lifecycle,
+          runner: ->(_argv) { false }
+        ).call
+      end
+      assert_match(/updater command failed/, error.message)
+    end
+
+    missing = Hive::Commands::Update.new(
+      candidate_binary_path: -> { nil }
+    )
+    error = assert_raises(Hive::UnavailableError) do
+      missing.send(:invoke_candidate_migration!)
+    end
+    assert_match(/candidate migration.*binary is unavailable/,
+                 error.message)
+
+    disappeared = Hive::Commands::Update.new(
+      candidate_binary_path: -> { "/bin/true" },
+      candidate_runner: ->(_argv) {
+        raise Errno::ENOENT, "candidate disappeared"
+      }
+    )
+    error = assert_raises(Hive::UnavailableError) do
+      disappeared.send(:invoke_candidate_migration!)
+    end
+    assert_match(/candidate disappeared/, error.message)
+  end
+
   def test_bash_channel_preserves_prefix_from_install_marker
     with_xdg_home do |dir|
       prefix = File.join(dir, "prefix")

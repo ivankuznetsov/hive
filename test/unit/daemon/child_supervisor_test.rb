@@ -200,6 +200,33 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
     assert pid < 0
   end
 
+  def test_terminate_all_proves_an_empty_supervisor_is_drained
+    supervisor = make
+
+    assert_empty supervisor.terminate_all
+    assert_equal(
+      { drained: true, child_inventory: [] },
+      supervisor.shutdown_proof
+    )
+  end
+
+  def test_terminate_all_reaps_only_dry_run_children_without_signalling
+    supervisor = make(dry_run: true)
+    pid = supervisor.spawn(
+      command_string: "hive run dry --exit-code 0",
+      project: "p1", slug: "dry", stage: "6-review"
+    )
+
+    completed = supervisor.terminate_all
+
+    assert_equal [ pid ], completed.map(&:pid)
+    assert_equal [ 0 ], completed.map(&:exit_code)
+    assert_equal(
+      { drained: true, child_inventory: [] },
+      supervisor.shutdown_proof
+    )
+  end
+
   # ── refuses non-hive commands ─────────────────────────────────────────
 
   def test_spawn_refuses_non_hive_command_string

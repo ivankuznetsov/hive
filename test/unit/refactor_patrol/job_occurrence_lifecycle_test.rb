@@ -121,6 +121,31 @@ class HiveRefactorPatrolJobOccurrenceLifecycleTest < Minitest::Test
     assert_match(/transition identity conflicts/, error.message)
   end
 
+  def test_terminal_assertion_rejects_an_unsettled_recorded_transition
+    lifecycle = build_lifecycle
+
+    error = assert_raises(StandardError) do
+      lifecycle.assert_recorded_transitions_terminal!("job-7")
+    end
+
+    assert_match(/prior recorded transitions are not terminal/, error.message)
+  end
+
+  def test_legacy_transition_without_digest_must_be_the_intake_transition
+    aggregate = aggregate_with_transition
+    aggregate.fetch("attempts").first.fetch("transitions").first
+      .delete("semantic_digest")
+    lifecycle = build_lifecycle(
+      aggregate_reader: ->(_job) { aggregate }
+    )
+
+    error = assert_raises(StandardError) do
+      lifecycle.unsettled_recorded_transitions("job-7")
+    end
+
+    assert_match(/no exact semantic digest/, error.message)
+  end
+
   private
 
   def build_lifecycle(occurrences: Occurrences.new, validator: Validator.new,

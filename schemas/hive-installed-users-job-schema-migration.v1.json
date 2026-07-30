@@ -1,0 +1,183 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/schemas/hive-installed-users-job-schema-migration.v1.json",
+  "title": "Hive install-wide JobStore schema migration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "target_schema_version",
+    "status",
+    "discovery_closed",
+    "attempted_users",
+    "failed_users",
+    "retryable_users",
+    "attempted_profiles",
+    "failed_profiles",
+    "retryable_profiles",
+    "completed_at",
+    "candidate",
+    "inventory",
+    "profiles",
+    "discovery_issues"
+  ],
+  "properties": {
+    "schema": { "const": "hive-installed-users-job-schema-migration" },
+    "schema_version": { "const": 1 },
+    "target_schema_version": { "const": 3 },
+    "status": { "enum": ["complete", "partial", "failed"] },
+    "discovery_closed": { "type": "boolean" },
+    "attempted_users": { "type": "integer", "minimum": 0 },
+    "failed_users": { "type": "integer", "minimum": 0 },
+    "retryable_users": { "type": "integer", "minimum": 0 },
+    "attempted_profiles": { "type": "integer", "minimum": 0 },
+    "failed_profiles": { "type": "integer", "minimum": 0 },
+    "retryable_profiles": { "type": "integer", "minimum": 0 },
+    "completed_at": { "type": "string", "format": "date-time" },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "size", "mode", "uid", "gid", "sha256", "version"],
+      "properties": {
+        "path": { "type": "string", "pattern": "^/" },
+        "size": { "type": "integer", "minimum": 1, "maximum": 4194304 },
+        "mode": { "type": "integer", "minimum": 0 },
+        "uid": { "type": "integer", "minimum": 0 },
+        "gid": { "type": "integer", "minimum": 0 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "version": { "type": "string", "minLength": 1 }
+      }
+    },
+    "inventory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "discovery_closed"],
+      "properties": {
+        "path": { "type": "string", "pattern": "^/" },
+        "sha256": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "discovery_closed": { "type": "boolean" }
+      }
+    },
+    "profiles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "username",
+          "uid",
+          "home",
+          "profile_digest",
+          "source",
+          "status",
+          "retryable",
+          "registry_digest",
+          "projects"
+        ],
+        "properties": {
+          "username": { "type": "string", "minLength": 1 },
+          "uid": { "type": "integer", "minimum": 0 },
+          "home": { "type": "string", "pattern": "^/" },
+          "profile_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "source": { "enum": ["default-home", "root-inventory"] },
+          "status": { "enum": ["completed", "failed"] },
+          "retryable": { "type": "boolean" },
+          "registry_digest": {
+            "type": ["string", "null"],
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "projects": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/project" }
+          },
+          "error": { "type": "string" }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": { "status": { "const": "completed" } }
+            },
+            "then": { "not": { "required": ["error"] } },
+            "else": { "required": ["error"] }
+          }
+        ],
+        "additionalProperties": false
+      }
+    },
+    "discovery_issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "username", "uid", "detail"],
+        "properties": {
+          "kind": { "type": "string", "minLength": 1 },
+          "username": { "type": ["string", "null"] },
+          "uid": { "type": ["integer", "null"], "minimum": 0 },
+          "detail": { "type": "string" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "project",
+        "project_id",
+        "path",
+        "real_path",
+        "hive_state_path",
+        "status",
+        "current_schema_version",
+        "target_schema_version",
+        "snapshot_id",
+        "retryable",
+        "next_retry_at",
+        "remediation",
+        "error"
+      ],
+      "properties": {
+        "project": { "type": ["string", "null"] },
+        "project_id": { "type": ["string", "null"] },
+        "path": { "type": ["string", "null"] },
+        "real_path": { "type": ["string", "null"] },
+        "hive_state_path": { "type": ["string", "null"] },
+        "status": {
+          "enum": [
+            "absent",
+            "current",
+            "dry_run",
+            "duplicate",
+            "failed",
+            "migrated",
+            "migration_required"
+          ]
+        },
+        "current_schema_version": {
+          "type": ["integer", "null"],
+          "enum": [null, 2, 3]
+        },
+        "target_schema_version": { "const": 3 },
+        "snapshot_id": {
+          "type": ["string", "null"],
+          "pattern": "^snapshot-[0-9a-f]{64}$"
+        },
+        "retryable": { "type": "boolean" },
+        "next_retry_at": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "remediation": { "type": ["string", "null"] },
+        "error": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

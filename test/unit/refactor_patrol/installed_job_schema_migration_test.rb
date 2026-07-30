@@ -1,10 +1,14 @@
 require "test_helper"
+require "hive/cli"
 require "hive/refactor_patrol/installed_job_schema_migration"
+require "hive/refactor_patrol/installed_users_job_schema_migration"
 
 class HiveRefactorPatrolInstalledJobSchemaMigrationTest < Minitest::Test
   include HiveTestHelper
 
   Migration = Hive::RefactorPatrol::InstalledJobSchemaMigration
+  AllUsersMigration =
+    Hive::RefactorPatrol::InstalledUsersJobSchemaMigration
   MigrationStatus =
     Hive::RefactorPatrol::RegisteredProjectMigrationStatus
 
@@ -416,7 +420,7 @@ class HiveRefactorPatrolInstalledJobSchemaMigrationTest < Minitest::Test
     refute daemon_called
   end
 
-  def test_each_users_first_use_migrates_every_real_registered_project
+  def test_one_all_user_sweep_migrates_every_users_real_registered_project
     with_tmp_dir do |root|
       installations = %w[user-a user-b].to_h do |user|
         home = File.join(root, "#{user}-hive-home")
@@ -446,17 +450,57 @@ class HiveRefactorPatrolInstalledJobSchemaMigrationTest < Minitest::Test
         [ user, { home: home, projects: projects } ]
       end
 
-      installations.each_value do |installation|
-        payload = with_env("HIVE_HOME" => installation.fetch(:home)) do
+      profiles = installations.map.with_index do |(user, installation), index|
+        AllUsersMigration::Profile.new(
+          username: user,
+          uid: 1_001 + index,
+          gid: 2_001 + index,
+          home: root,
+          real_home: File.realpath(root),
+          environment: { "HIVE_HOME" => installation.fetch(:home) },
+          source: "root-inventory"
+        )
+      end
+      executor = Object.new
+      helper = self
+      executor.define_singleton_method(:call) do |profile|
+        helper.with_env(
+          "HIVE_HOME" => profile.environment.fetch("HIVE_HOME")
+        ) do
           Migration.new(
             daemon_lifecycle: FakeLifecycle.new
           ).call(force: true, now: Time.utc(2026, 7, 29, 17))
         end
+      end
+      catalog = Object.new
+      catalog.define_singleton_method(:snapshot) do
+        AllUsersMigration::Snapshot.new(
+          profiles: profiles,
+          issues: [],
+          closed: true,
+          inventory_path: "/var/lib/hive/installed-users.v1.json",
+          inventory_digest: "a" * 64
+        )
+      end
 
+      payload = AllUsersMigration.new(
+        catalog: catalog,
+        executor: executor,
+        candidate: AllUsersMigration::CandidateIdentity.capture(
+          File.expand_path("../../../bin/hive", __dir__)
+        ),
+        effective_uid: -> { 0 }
+      ).call(now: Time.utc(2026, 7, 29, 17))
+
+      assert_equal "complete", payload.fetch("status")
+      assert_equal 2, payload.fetch("attempted_users")
+      payload.fetch("profiles").each do |user|
         assert_equal(
           %w[migrated migrated],
-          payload.fetch("projects").map { |project| project.fetch("status") }
+          user.fetch("projects").map { |project| project.fetch("status") }
         )
+      end
+      installations.each_value do |installation|
         installation.fetch(:projects).each do |project|
           current = Hive::RefactorPatrol::JobStore.root_for(
             project.fetch("path"),
@@ -480,6 +524,277 @@ class HiveRefactorPatrolInstalledJobSchemaMigrationTest < Minitest::Test
         end
       end
     end
+  end
+
+  def test_cli_gate_rejects_a_malformed_command_definition
+    definition = Struct.new(:usage, :options).new("run TASK", nil)
+
+    refute Migration.eligible_argv?(
+      [ "run", "task" ],
+      commands: { "run" => definition }
+    )
+  end
+
+  def test_missing_or_unreadable_status_forces_a_fresh_sweep
+    with_tmp_dir do |root|
+      entries = [ { "name" => "shared", "path" => "/srv/shared" } ]
+      status_store = FakeStatusStore.new
+      reads = 0
+      status_store.define_singleton_method(:read) do
+        reads += 1
+        raise Hive::ConfigError, "unreadable status" if reads == 1
+
+        nil
+      end
+      coordinator = FakeCoordinator.new(
+        status_store: status_store,
+        payload: nil
+      )
+      migration = build_migration(
+        root: root,
+        entries: entries,
+        status_store: status_store,
+        lifecycle: FakeLifecycle.new,
+        coordinator_factory: ->(**) { coordinator }
+      )
+
+      error = assert_raises(Hive::ConfigError) do
+        migration.call(now: Time.utc(2026, 7, 29, 12))
+      end
+
+      assert_match(/did not persist status/, error.message)
+      assert migration.last_ran == false
+    end
+  end
+
+  def test_due_calculation_and_time_validation_fail_safe
+    with_tmp_dir do |root|
+      status = FakeStatusStore.new
+      migration = build_migration(
+        root: root,
+        entries: [],
+        status_store: status,
+        lifecycle: FakeLifecycle.new,
+        coordinator_factory: ->(**) { flunk("invalid time ran migration") }
+      )
+      payload = status_payload(
+        digest: "a" * 64,
+        projects: [
+          project_status(
+            "bad-time",
+            "failed",
+            retryable: true,
+            next_retry_at: "not-a-time"
+          )
+        ]
+      )
+
+      assert migration.send(
+        :migration_due?,
+        payload,
+        digest: "a" * 64,
+        now: Time.utc(2026, 7, 29)
+      )
+      assert_raises(Hive::ConfigError) do
+        migration.call(now: "not-a-time")
+      end
+    end
+  end
+
+  def test_default_coordinator_binds_the_exact_registry_snapshot
+    with_tmp_dir do |root|
+      entries = [ { "name" => "demo", "path" => "/srv/demo" } ]
+      migration = Migration.new(
+        registry: -> { entries },
+        identity_ensurer: -> { nil },
+        status_store: FakeStatusStore.new,
+        daemon_lifecycle: FakeLifecycle.new,
+        activation_directory: Hive::ManagedDirectory.new(
+          root: File.join(root, "schema-migrations"),
+          label: "test installation migration"
+        )
+      )
+
+      coordinator = migration.send(
+        :build_coordinator,
+        entries: entries,
+        status_store: nil
+      )
+
+      assert_equal entries,
+                   coordinator.instance_variable_get(:@registry).call
+    end
+  end
+
+  def test_daemon_lifecycle_default_factory_and_process_helpers
+    require "hive/commands/daemon"
+    built = nil
+    with_replaced_singleton_method(
+      Hive::Commands::Daemon,
+      :new,
+      lambda do |subcommand, hive_home:|
+        built = [ subcommand, hive_home ]
+        :daemon
+      end
+    ) do
+      lifecycle = Migration::DaemonLifecycle.new(
+        hive_home: "/tmp/hive-state",
+        status_report: MutableRunningStatus.new(pid: 4_100),
+        tree_probe: ->(*) { [] },
+        tree_confirmer: ->(*) { [] },
+        captured_process_alive: ->(*) { false },
+        process_group_alive: ->(*) { false },
+        binary_path: -> { "/bin/true" },
+        command_runner: ->(*) { true }
+      )
+
+      assert_equal :daemon,
+                   lifecycle.instance_variable_get(:@daemon_factory)
+                   .call("stop")
+      assert_equal [ "stop", "/tmp/hive-state" ], built
+      lifecycle.instance_variable_get(:@sleeper).call(0)
+      status = lifecycle.send(:run_command, [ "/bin/true" ], {})
+      assert status.success?
+    end
+
+    lifecycle = Migration::DaemonLifecycle.new(
+      status_report: MutableRunningStatus.new(pid: 4_100),
+      tree_probe: ->(*) { [] },
+      tree_confirmer: ->(*) { [] },
+      captured_process_alive: ->(*) { false },
+      binary_path: -> { "/bin/true" },
+      command_runner: ->(*) { true }
+    )
+    with_replaced_singleton_method(
+      Process,
+      :kill,
+      ->(*) { 1 }
+    ) do
+      assert lifecycle.send(:default_process_group_alive?, 4_101)
+    end
+    with_replaced_singleton_method(
+      Process,
+      :kill,
+      ->(*) { raise Errno::ESRCH }
+    ) do
+      refute lifecycle.send(:default_process_group_alive?, 4_101)
+    end
+    with_replaced_singleton_method(
+      Process,
+      :kill,
+      ->(*) { raise Errno::EPERM }
+    ) do
+      assert lifecycle.send(:default_process_group_alive?, 4_101)
+    end
+  end
+
+  def test_daemon_lifecycle_reports_probe_and_process_survivor_failures
+    malformed = Migration::DaemonLifecycle.new(
+      status_report: Object.new.tap do |status|
+        status.define_singleton_method(:running_state) do
+          { running: true, pid: "not-a-pid" }
+        end
+      end
+    )
+    error = assert_raises(Hive::ConcurrentRunError) do
+      malformed.quiesce!
+    end
+    assert_match(/cannot verify released daemon quiescence/, error.message)
+
+    targets = [
+      {
+        pid: 4_200, ppid: 1, pgid: 4_200,
+        start_time: "daemon", depth: 0
+      }
+    ]
+    survivor = Migration::DaemonLifecycle.new(
+      status_report: MutableRunningStatus.new(pid: 4_200),
+      daemon_factory: ->(*) {
+        Object.new.tap { |daemon| daemon.define_singleton_method(:call) { true } }
+      },
+      tree_probe: ->(*) { targets },
+      tree_confirmer: ->(*) { targets },
+      captured_process_alive: ->(*) { true },
+      process_group_alive: ->(*) { false }
+    )
+    error = assert_raises(Hive::ConcurrentRunError) do
+      survivor.quiesce!
+    end
+    assert_match(/captured daemon process remains live/, error.message)
+
+    targets = [
+      {
+        pid: 4_300, ppid: 1, pgid: 4_300,
+        start_time: "daemon", depth: 0
+      },
+      {
+        pid: 4_301, ppid: 4_300, pgid: "bad",
+        start_time: "bad-child", depth: 1
+      },
+      {
+        pid: 4_302, ppid: 4_300, pgid: 4_302,
+        start_time: "live-child", depth: 1
+      }
+    ]
+    group_survivor = Migration::DaemonLifecycle.new(
+      status_report: MutableRunningStatus.new(pid: 4_300),
+      daemon_factory: ->(*) {
+        Object.new.tap { |daemon| daemon.define_singleton_method(:call) { true } }
+      },
+      tree_probe: ->(*) { targets },
+      tree_confirmer: ->(*) { targets },
+      captured_process_alive: ->(*) { false },
+      process_group_alive: ->(pgid) { pgid == 4_302 }
+    )
+    error = assert_raises(Hive::ConcurrentRunError) do
+      group_survivor.quiesce!
+    end
+    assert_match(/child process group remains live/, error.message)
+  end
+
+  def test_daemon_restart_rejects_missing_failed_and_timed_out_candidates
+    missing = Migration::DaemonLifecycle.new(
+      status_report: MutableRunningStatus.new(pid: 4_400),
+      binary_path: -> { "/missing/hive" }
+    )
+    assert_raises(Hive::UnavailableError) { missing.restart! }
+
+    failed = Migration::DaemonLifecycle.new(
+      status_report: MutableRunningStatus.new(pid: 4_401),
+      binary_path: -> { "/bin/true" },
+      command_runner: ->(*) { false }
+    )
+    assert_raises(Hive::Error) { failed.restart! }
+
+    status = MutableRunningStatus.new(pid: 4_402)
+    status.running = false
+    times = [
+      Time.at(0).utc,
+      Time.at(0).utc,
+      Time.at(2).utc
+    ]
+    sleeps = []
+    timed_out = Migration::DaemonLifecycle.new(
+      status_report: status,
+      binary_path: -> { "/bin/true" },
+      command_runner: ->(*) { true },
+      clock: -> { times.shift || Time.at(2).utc },
+      sleeper: ->(seconds) { sleeps << seconds },
+      restart_timeout_sec: 1
+    )
+    error = assert_raises(Hive::Error) { timed_out.restart! }
+    assert_match(/did not become running/, error.message)
+    assert_equal [ 0.05 ], sleeps
+
+    unavailable = Migration::DaemonLifecycle.new(
+      status_report: status,
+      binary_path: -> { "/bin/true" },
+      command_runner: ->(*) { raise Errno::ENOENT, "missing runner" }
+    )
+    error = assert_raises(Hive::UnavailableError) do
+      unavailable.restart!
+    end
+    assert_match(/cannot restart Hive daemon/, error.message)
   end
 
   private

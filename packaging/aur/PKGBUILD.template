@@ -36,8 +36,16 @@ makedepends=('ruby-rubygems')
 provides=('hive')
 conflicts=('hive' 'apache-hive')
 install=hive.install
-source=("https://github.com/ivankuznetsov/hive/releases/download/v${pkgver}/hive-cli-${pkgver}.gem")
-sha256sums=('<%= sha256_gem %>')
+source=(
+  "https://github.com/ivankuznetsov/hive/releases/download/v${pkgver}/hive-cli-${pkgver}.gem"
+  "hive-job-schema-migration.service"
+  "hive-job-schema-migration.timer"
+)
+sha256sums=(
+  '<%= sha256_gem %>'
+  'SKIP'
+  'SKIP'
+)
 noextract=("hive-cli-${pkgver}.gem")
 
 package() {
@@ -79,4 +87,11 @@ WRAPPER
     "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
 
   printf 'aur\n' > "${pkgdir}/usr/share/hive/install-channel"
+
+  install -Dm644 \
+    "${srcdir}/hive-job-schema-migration.service" \
+    "${pkgdir}/usr/lib/systemd/system/hive-job-schema-migration.service"
+  install -Dm644 \
+    "${srcdir}/hive-job-schema-migration.timer" \
+    "${pkgdir}/usr/lib/systemd/system/hive-job-schema-migration.timer"
 }

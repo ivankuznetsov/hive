@@ -6,13 +6,9 @@ require "hive/refactor_patrol/registered_project_migration_status"
 
 module Hive
   module RefactorPatrol
-    # Product upgrade boundary for the JobStore generation change.
-    #
-    # Hive installations are user-scoped. Each installation sweeps the
-    # complete registry visible to that user, including shared repositories
-    # and custom state roots. Package hooks run this immediately for the
-    # installing user; the CLI first-use gate repeats it for every other user
-    # of a shared package when that user next invokes Hive.
+    # One exact user profile's JobStore generation upgrade boundary. Package
+    # activation invokes this through the privileged all-user coordinator;
+    # the ordinary CLI gate retains it only as a safety fallback.
     class InstalledJobSchemaMigration
       INTERNAL_ENV = "HIVE_JOB_SCHEMA_MIGRATION_INTERNAL".freeze
       ACTIVATION_LOCK = "refactor-patrol-job-v3.activation.lock".freeze
@@ -193,13 +189,13 @@ module Hive
         @activation_directory = activation_directory ||
           Hive::ManagedDirectory.new(
             root: File.join(Hive::Paths.state_home, "schema-migrations"),
-            label: "installation JobStore schema migration"
+            label: "user-profile JobStore schema migration"
           )
         @clock = clock
         reset_observation!
       end
 
-      # Returns the persisted installation status. Individual project
+      # Returns the persisted user-profile status. Individual project
       # failures are rows in that status and do not abort later projects.
       # Structural registry, lifecycle, or status failures remain fatal.
       def call(force: false, restart_daemon: true, now: nil)
@@ -242,7 +238,7 @@ module Hive
                 coordinator.last_status_payload || @status_store.read
               unless payload
                 raise Hive::ConfigError,
-                      "installation migration did not persist status"
+                      "user-profile migration did not persist status"
               end
               @last_ran = true
             end
@@ -317,7 +313,7 @@ module Hive
         time.utc
       rescue ArgumentError, TypeError
         raise Hive::ConfigError,
-              "installation migration time is malformed"
+              "user-profile migration time is malformed"
       end
 
       def reset_observation!

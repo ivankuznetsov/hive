@@ -369,6 +369,36 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
     end
   end
 
+  def test_patch_record_validates_the_requested_identity
+    with_tmp_dir do |root|
+      store = Hive::Patrol::StateStore.new(root)
+      FileUtils.mkdir_p(File.join(store.root, "patches"))
+      record = {
+        "id" => "patch-1",
+        "fingerprint" => "fingerprint-1"
+      }
+      write_patch_record(store, "patch-1", record)
+
+      assert_equal record, store.patch_record("patch-1")
+
+      malformed = assert_raises(Hive::ConfigError) do
+        store.patch_record("../escape")
+      end
+      assert_match(/identity is malformed/, malformed.message)
+
+      write_patch_record(
+        store,
+        "wrong",
+        "id" => "different",
+        "fingerprint" => "fingerprint-2"
+      )
+      unavailable = assert_raises(Hive::ConfigError) do
+        store.patch_record("wrong")
+      end
+      assert_match(/record is unavailable/, unavailable.message)
+    end
+  end
+
   private
 
   def outbox_entry(kind, bytes)

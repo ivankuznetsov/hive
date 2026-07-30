@@ -286,11 +286,13 @@ it or any mutator cutover can be claimed.
   resumable converter validates and directly converts the released
   aggregate-only v2 shape; the unreleased binding-sidecar draft is not a
   supported input or compatibility path. Before architecture-patrol runtime is
-  constructed, every user-scoped installation sweeps its complete
-  registered-project snapshot, including projects owned by another user and
-  custom state roots, deduplicated by verified realpath. Package hooks activate
-  the invoking user and first eligible CLI use activates every other user of a
-  shared package; no root process scans unrelated homes. OS permission,
+  constructed, the privileged install-wide coordinator discovers every fixed
+  user registry plus root-inventoried custom profile and runs each complete
+  registered-project snapshot after dropping to that uid/gid, including
+  projects owned by another user and custom state roots, deduplicated by
+  verified realpath. AUR activates this boundary and retries it hourly;
+  non-privileged channels report partial/current-user coverage and the
+  administrator command. First use is only a fallback. OS permission,
   malformed-state, and identity-drift failures are persisted with
   remediation/retry time and held out of architecture scheduling while later
   projects still migrate. Runtime admission is an exact allowlist from the

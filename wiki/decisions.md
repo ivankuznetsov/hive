@@ -671,6 +671,44 @@ rejected when the Hive daemon starts, with those migration commands.
 envelope, or runtime coupling. The unrelated Hive answer digest remains. ADR-030
 and ADR-031 describe removed behavior and are superseded by this decision.
 
+## ADR-041: Shared-package JobStore migration is privileged and profile-complete
+
+**Status:** Active
+
+**Context:** A current-user startup gate could convert every project in one
+registry but could not migrate an inactive second OS user's registry during a
+shared package upgrade. Treating that first-use fallback as installation-wide
+completion left old daemons and dormant released-v2 JobStores outside the
+upgrade claim. Running the existing registry coordinator directly as root
+would instead parse user configuration and mutate project state with excessive
+authority. Legacy `HIVE_HOME` and XDG roots also cannot be inferred
+exhaustively from NSS.
+
+**Decision:** Keep one strict per-profile migration receipt and add a separate
+root-only host coordinator. It enumerates conventional NSS-home anchors and a
+root-owned exact custom-profile inventory, rejects uid/home/shared-root
+ambiguity, binds the installed candidate path/version/digest, revalidates each
+uid/name/gid/home tuple through both NSS lookup directions immediately before
+execution, then forks and drops supplementary groups, gid, and uid before the
+candidate reads a registry or project. The parent never parses user-owned Hive
+configuration. Aggregate
+evidence reports distinct OS-user and Hive-profile counts and cannot become
+`complete` without explicit inventory closure and zero retryable profiles. AUR
+installs an hourly system timer; per-user daemons retain registry-change and
+hourly project retry. Homebrew and non-root direct installs state their
+current-user limit and the administrator command. First use remains only a
+safety fallback.
+
+**Consequences:** One failed profile or project is persisted and isolated while
+later profiles still run under their owners. Multiple `HIVE_HOME`/XDG profiles
+for one uid remain distinct, while the same canonical config or state root
+assigned to different uids fails closed. Unknown process-only custom roots,
+offline homes, and non-privileged package channels produce partial rather than
+false complete evidence. A Linux merge gate converts released-v2 projects for
+three real UIDs and rejects root-owned output in their homes. The privileged
+parent may still execute a root account's own profile as uid 0; the separation
+claim is that it never opens another user's registry before the identity drop.
+
 ## ADR-032: Per-stage controls overlay the current durable identity
 
 **Status:** Active

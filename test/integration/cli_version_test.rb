@@ -123,6 +123,11 @@ class CliVersionTest < Minitest::Test
         )
       end
 
+      assert_startup_reconcile(
+        Dir.pwd, home,
+        %w[refactor-patrol-migrate-installed --resume],
+        expected: false
+      )
       assert_startup_reconcile(Dir.pwd, home, [ "--version" ], expected: true)
     end
   end

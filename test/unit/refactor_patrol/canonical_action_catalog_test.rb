@@ -261,6 +261,24 @@ class RefactorPatrolCanonicalActionCatalogTest < Minitest::Test
     end
   end
 
+  def test_default_store_factory_rejects_an_unregistered_owner
+    with_tmp_dir do |root|
+      catalog = Hive::RefactorPatrol::CanonicalActionCatalog.new(
+        state_home: File.join(root, "state"),
+        registry: -> { [] }
+      )
+      factory = catalog.instance_variable_get(:@job_store_factory)
+
+      error = assert_raises(
+        Hive::RefactorPatrol::CanonicalActionCatalog::ProofUnresolved
+      ) do
+        factory.call(File.join(root, "unregistered"))
+      end
+
+      assert_match(/unregistered canonical action owner/, error.message)
+    end
+  end
+
   def test_existing_projection_requires_a_readable_authoritative_witness
     with_tmp_dir do |root|
       project = File.join(root, "project")

@@ -14,6 +14,9 @@ class PackagingRenderTest < Minitest::Test
   HOMEBREW_ERB = File.expand_path("../../../packaging/homebrew/hive.rb.erb", __dir__).freeze
   PKGBUILD_TEMPLATE = File.expand_path("../../../packaging/aur/PKGBUILD.template", __dir__).freeze
   AUR_INSTALL = File.expand_path("../../../packaging/aur/hive.install", __dir__).freeze
+  AUR_MIGRATION_SERVICE = File.expand_path(
+    "../../../packaging/aur/hive-job-schema-migration.service", __dir__
+  ).freeze
 
   SAMPLE_SHA = "a" * 64
 
@@ -31,7 +34,7 @@ class PackagingRenderTest < Minitest::Test
     assert_includes out,
                     'system bin/"hive", "refactor-patrol-migrate-installed"'
     assert_includes out,
-                    "Other users of this Homebrew installation are migrated"
+                    "refactor-patrol-migrate-installed --all-users"
   end
 
   def test_renders_pkgbuild_with_version_and_sha
@@ -40,8 +43,10 @@ class PackagingRenderTest < Minitest::Test
       template, { "version" => "0.1.1", "sha256_gem" => SAMPLE_SHA }, PKGBUILD_TEMPLATE
     )
     assert_includes out, "pkgver=0.1.1"
-    assert_includes out, "sha256sums=('#{SAMPLE_SHA}')"
+    assert_includes out, "'#{SAMPLE_SHA}'"
     assert_includes out, "depends=('ruby' 'cosign')"
+    assert_includes out, '"hive-job-schema-migration.service"'
+    assert_includes out, '"hive-job-schema-migration.timer"'
   end
 
   def test_pkgbuild_wrapper_preserves_user_facing_binary_for_daemon_units
@@ -57,12 +62,16 @@ class PackagingRenderTest < Minitest::Test
     assert_operator out.index(export_line), :<, out.index(exec_line)
   end
 
-  def test_aur_hook_activates_each_user_on_first_use_without_root_home_scan
+  def test_aur_hook_runs_all_users_and_enables_hourly_retry
     hook = File.read(AUR_INSTALL)
 
-    assert_includes hook, "each user's next eligible `hive` invocation"
-    assert_includes hook, "every project in that user's registered-project catalog"
-    assert_includes hook, "root package hook never scans user home directories"
+    assert_includes hook,
+                    "/usr/bin/hive refactor-patrol-migrate-installed --all-users"
+    assert_includes hook,
+                    "systemctl enable --now hive-job-schema-migration.timer"
+    assert_includes File.read(AUR_MIGRATION_SERVICE),
+                    "refactor-patrol-migrate-installed --all-users --resume"
+    assert_includes hook, "First use is a fallback"
     refute_match(%r{\bfind\s+/home\b}, hook)
   end
 

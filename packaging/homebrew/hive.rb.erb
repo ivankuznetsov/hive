@@ -44,13 +44,6 @@ class Hive < Formula
     bin.install_symlink "hive" => "hv"
   end
 
-  def post_install
-    # Homebrew forbids formula hooks from gaining administrator authority.
-    # Sweep this account now. Homebrew's user-owned prefix is deliberately
-    # never elevated for an all-user migration.
-    system bin/"hive", "refactor-patrol-migrate-installed"
-  end
-
   def caveats
     <<~EOS
       Run `hive setup` inside a project to bootstrap Hive web, install and load
@@ -62,12 +55,6 @@ class Hive < Formula
       stable Homebrew bin/hive symlink, so `brew upgrade hive` keeps the daemon
       path current. If you previously customized the plist, remove it and re-run
       `hive daemon install --force` to install the current template.
-
-      Hive migrates every project registered to the Homebrew user during
-      upgrade. Homebrew installations are user-scoped and must never be run
-      through sudo. Shared-host all-user migration requires a separately
-      root-owned system package/runtime; per-user first use is not evidence of
-      machine-wide completion.
     EOS
   end
 

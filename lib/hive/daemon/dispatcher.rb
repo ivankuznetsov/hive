@@ -79,7 +79,7 @@ module Hive
                      operational_snapshot: nil, recovery_coordinator: nil,
                      module_runtime: nil,
                      module_migration_coordinator: nil,
-                     registered_project_migration_coordinator: nil)
+                     runtime_ready_callback: nil)
         @config = config
         @controller = controller
         @supervisor = supervisor
@@ -97,10 +97,9 @@ module Hive
         @lost_outcome_store = lost_outcome_store
         @lost_outcome_processor = lost_outcome_processor
         @operational_snapshot = operational_snapshot
+        @runtime_ready_callback = runtime_ready_callback
         @module_runtime = module_runtime
         @module_migration_coordinator = module_migration_coordinator
-        @registered_project_migration_coordinator =
-          registered_project_migration_coordinator
         @attempt_snapshot = nil
         @last_terminal_recovery_prune_at = nil
         @recovery_coordinator = recovery_coordinator || RecoveryCoordinator.new(
@@ -347,23 +346,6 @@ module Hive
         )
         run_refactor_patrol_merge_reconciler_tick(now: now)
 
-        begin
-          @registered_project_migration_coordinator&.tick(now: now)&.each do |migration_result|
-            @logger.event(
-              :refactor_patrol_schema_migration,
-              **migration_result.to_h
-            )
-          end
-        rescue StandardError => e
-          @logger.event(
-            :fatal,
-            message:
-              "registered project schema migration raised: " \
-              "#{e.class}: #{e.message}",
-            keeping_previous: true
-          )
-        end
-
         # Project-local module occurrences are already durable at this point.
         # Drain them only from the daemon, after attempt reconciliation and PR
         # intake, so no command-side producer can become a second dispatcher.
@@ -508,6 +490,9 @@ module Hive
         # before the first tick, so a crash-restart neither re-dispatches
         # an already-run request nor leaks claim files for dead owners.
         recover_dispatch_claims(now: Time.now)
+        publish_runtime_readiness(now: Time.now)
+        @runtime_ready_callback&.call
+        @runtime_ready_callback = nil
 
         until @shutdown
           now = Time.now
@@ -555,6 +540,21 @@ module Hive
 
       def request_shutdown!
         @shutdown = true
+      end
+
+      def publish_runtime_readiness(now:)
+        if @runtime_ready_callback && !@operational_snapshot
+          raise Hive::UnavailableError,
+                "daemon operational readiness store is unavailable"
+        end
+        return unless @operational_snapshot
+
+        @operational_snapshot.runtime_ready(now: now)
+      rescue StandardError => error
+        log_operational_snapshot_failure(
+          phase: "runtime_ready", error: error
+        )
+        raise if @runtime_ready_callback
       end
 
       def publish_shutdown_acknowledgement(now:)

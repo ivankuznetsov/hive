@@ -172,7 +172,7 @@
         "ok": { "const": false },
         "action": { "type": ["string", "null"], "enum": ["list", "show", null] },
         "error_class": { "type": "string" },
-        "error_kind": { "type": "string", "enum": ["usage", "not_found", "migration_required", "config", "error"] },
+        "error_kind": { "type": "string", "enum": ["usage", "not_found", "config", "error"] },
         "exit_code": { "type": "integer" },
         "message": { "type": "string" }
       }

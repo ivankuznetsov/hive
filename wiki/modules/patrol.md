@@ -123,8 +123,9 @@ They deliberately retain separate namespaces:
 `.hive-state/refactor_patrol/v2/` for retained architecture manifests,
 semantic families, runs, logs, and result receipts. Architecture jobs,
 occurrences, and the job-query index live only under
-`.hive-state/refactor_patrol/v3/`; released-v2 jobs are accepted only by the
-explicit package migration. `Hive::Daemon::PatrolArbiter` is the only shared
+`.hive-state/refactor_patrol/v3/`; a released-v2 jobs directory blocks runtime
+until an operator explicitly archives it and accepts an empty v3 start.
+`Hive::Daemon::PatrolArbiter` is the only shared
 orchestration seam: it alternates ready work under the project's
 `daemon.max_concurrent_patrol_scans` capacity. Enabling architecture discovery
 does not enable ordinary patrol or auto-fixing. Deduplicated GitHub issues are
@@ -286,43 +287,24 @@ it or any mutator cutover can be claimed.
   transition coordinator before reviewing. It never claims independently; its
   incremental checkpoints and heartbeats use only the exact PID/start-time and
   generation-bound token attached by the scheduler.
-- JobStore runtime and child completion accept v3 only. One fenced, bounded,
-  resumable converter validates and directly converts the released
-  aggregate-only v2 shape; the unreleased binding-sidecar draft is not a
-  supported input or compatibility path. Before architecture-patrol runtime is
-  constructed, the privileged install-wide coordinator discovers every fixed
-  user registry plus root-inventoried custom profile and runs each complete
-  registered-project snapshot after dropping to that uid/gid, including
-  projects owned by another user and custom state roots, deduplicated by
-  verified state-root identity. AUR and root-owned direct packages activate
-  this boundary and retry it hourly; non-privileged channels report
-  partial/current-user coverage and require a separate root-owned system Hive
-  for host-wide coverage. OS permission,
-  malformed-state, and identity-drift failures are persisted with
-  remediation/retry time and held out of architecture scheduling while later
-  projects still migrate. Runtime admission is an exact allowlist from the
-  latest sweep. The converter is callable only through the explicit
-  package-candidate command. Its installation-wide completion unit is the
-  whole host: every eligible OS user, every profile bound to each user, and
-  every registered project in every profile; completion is never scoped to
-  the invoking account. The user process owns the detailed project receipt;
-  the root coordinator transports at most 2 MiB of canonical receipt JSON,
-  bounds stderr separately, and persists only a fixed identity-free summary.
-  Its 4-MiB traversal checkpoint therefore cannot be inflated by one user's
-  project rows or starve users later in the host inventory. Resume also
-  reconciles the deterministic conversion occurrence before stamping
-  completion: a completed import must have an exact live finalized/all-acked
-  record or an exact retirement fence, while an incomplete import keeps its
-  reserved continuation occurrence. Normal CLI startup and JobStore
-  construction reject dormant released-v2 state without modifying it.
-  A fixed exact-byte v2 snapshot is verified before the first write, and its
-  identity is exposed through daemon status for the fenced exact restore
-  command in [[commands/migrate]].
+- JobStore runtime and child completion accept v3 only. Hive has no released-v2
+  reader, converter, install-wide coordinator, package hook, or retry timer.
+  A released `v2/jobs` directory blocks runtime until the operator runs
+  `hive refactor-patrol-reset PROJECT --confirm` for that exact registered
+  project. The command excludes daemon activation, drains the exact daemon
+  generation, then takes the existing Patrol effect lock exclusively across
+  its independent writer fence, opaque archive exchange, empty-v3 admission,
+  and receipt. It never enumerates the archive and preserves every other v2
+  owner plus the global terminal-proof catalog. A restarted daemon must publish
+  generation-bound runtime readiness. Another OS user makes the same decision
+  under their own profile; Hive never performs a privileged host sweep.
+  Existing non-empty v3 state, malformed transaction evidence, or an
+  unprovable writer fence fails closed instead of choosing which state to
+  overwrite.
 - Live v3 jobs, query sidecars, quarantine evidence, and action locks are
   accessed only through one descriptor-confined `JobStoreFiles` port. A
   store-wide admission lock enforces the 8,192-job bound before any new
-  per-job lock or query membership is created; the compact completion record
-  cross-checks both snapshot id and migrated-job count.
+  per-job lock or query membership is created.
 - Cutover and rollback quiescence include ordinary active occurrences, architecture active occurrences, and incomplete v3 jobs before advancing an ownership epoch.
 - Ordinary and architecture projection/recovery failures emit bounded project/occurrence/job diagnostics with retry count and next backoff time; durable outbox or exact-transition recovery remains pending while the scheduler backs off.
 - Closed-unmerged patrol PRs become dismissals and are skipped on future cycles.

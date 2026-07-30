@@ -118,17 +118,17 @@ module Hive
           when "architecture-patrol"
             require "hive/refactor_patrol/job_store"
             return :quiescent unless
-              Hive::RefactorPatrol::JobStore.schema_state_present?(
+              Hive::RefactorPatrol::JobStore.generation_state_present?(
                 project_root, hive_state_path: hive_state_path
               )
 
-            schema = Hive::RefactorPatrol::JobStore.schema_status(
+            generation = Hive::RefactorPatrol::JobStore.generation_status(
               project_root,
               hive_state_path: hive_state_path,
               project: entry
             )
             return :ambiguous unless
-              %w[current absent].include?(schema.fetch("status"))
+              %w[fresh current].include?(generation.fetch("status"))
 
             store = Hive::RefactorPatrol::JobStore.new(
               project_root,

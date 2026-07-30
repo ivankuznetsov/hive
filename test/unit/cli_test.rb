@@ -9,7 +9,6 @@ require "hive/commands/connect"
 require "hive/commands/disconnect"
 require "hive/commands/uninstall"
 require "hive/commands/migrate"
-require "hive/commands/refactor_patrol_candidate_migration"
 require "hive/commands/new"
 require "hive/commands/workflow"
 require "hive/commands/generate_name"
@@ -39,17 +38,6 @@ class HiveCliTest < Minitest::Test
 
   def test_prdigest_delivery_command_is_absent
     refute Hive::CLI.tasks.key?("digest")
-  end
-
-  def test_candidate_installation_migration_is_invocable_but_hidden
-    command =
-      Hive::CLI.all_commands.fetch(
-        "refactor_patrol_migrate_installed"
-      )
-    assert command.hidden?
-
-    out, _err = capture_io { Hive::CLI.start([ "help" ]) }
-    refute_includes out, "refactor-patrol-migrate-installed"
   end
 
   def test_setup_agents_help_exposes_consent_json_and_filters
@@ -182,52 +170,6 @@ class HiveCliTest < Minitest::Test
     with_command_new_stub(Hive::Commands::Migrate) do |calls|
       Hive::CLI.start([ "migrate", "/tmp/project" ])
       assert_equal [ "/tmp/project" ], calls.first.fetch(:args)
-    end
-
-    with_command_new_stub(Hive::Commands::RefactorPatrolCandidateMigration) do |calls|
-      Hive::CLI.start([ "refactor-patrol-migrate-installed" ])
-      assert_equal [], calls.first.fetch(:args)
-      assert_equal({
-                     all_users: false,
-                     ensure_retry_service: false,
-                     force: true
-                   },
-                   calls.first.fetch(:kwargs))
-    end
-
-    with_command_new_stub(Hive::Commands::RefactorPatrolCandidateMigration) do |calls|
-      Hive::CLI.start([ "refactor-patrol-migrate-installed", "--all-users" ])
-      assert_equal [], calls.first.fetch(:args)
-      assert_equal({
-                     all_users: true,
-                     ensure_retry_service: false,
-                     force: true
-                   },
-                   calls.first.fetch(:kwargs))
-    end
-
-    with_command_new_stub(Hive::Commands::RefactorPatrolCandidateMigration) do |calls|
-      Hive::CLI.start([ "refactor-patrol-migrate-installed", "--resume" ])
-      assert_equal({
-                     all_users: false,
-                     ensure_retry_service: false,
-                     force: false
-                   },
-                   calls.first.fetch(:kwargs))
-    end
-
-    with_command_new_stub(Hive::Commands::RefactorPatrolCandidateMigration) do |calls|
-      Hive::CLI.start([
-        "refactor-patrol-migrate-installed",
-        "--all-users",
-        "--ensure-retry-service"
-      ])
-      assert_equal({
-                     all_users: true,
-                     ensure_retry_service: true,
-                     force: true
-                   },
-                   calls.first.fetch(:kwargs))
     end
   end
 

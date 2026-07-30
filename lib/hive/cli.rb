@@ -446,26 +446,6 @@ module Hive
       Hive::Commands::Migrate.new(project_path).call
     end
 
-    desc(
-      "refactor-patrol-migrate-installed",
-      "Run the candidate-only installation JobStore migration sweep",
-      hide: true
-    )
-    option :all_users, type: :boolean, default: false,
-                       desc: "migrate every machine-inventoried Hive user (root only)"
-    option :resume, type: :boolean, default: false,
-                    desc: "run only work due by registry change or retry deadline"
-    option :ensure_retry_service, type: :boolean, default: false,
-                                  desc: "install the machine-owned hourly retry service"
-    def refactor_patrol_migrate_installed
-      require "hive/commands/refactor_patrol_candidate_migration"
-      Hive::Commands::RefactorPatrolCandidateMigration.new(
-        all_users: options[:all_users],
-        ensure_retry_service: options[:ensure_retry_service],
-        force: !options[:resume]
-      ).call
-    end
-
     desc "wiki SUBCOMMAND", "Manage generated wiki artifacts (compile-log)"
     long_desc <<~DESC
       Subcommands:
@@ -1003,21 +983,26 @@ module Hive
     end
 
     desc(
-      "refactor-patrol-schema-restore PROJECT SNAPSHOT_ID",
-      "Restore one exact JobStore v2 snapshot while preserving v3 state",
-      hide: true
+      "refactor-patrol-reset PROJECT",
+      "Archive obsolete Architecture Patrol jobs and start with empty v3"
     )
     long_desc <<~DESC
-      Performs an explicit offline reverse transition for the registered
-      project's JobStore. SNAPSHOT_ID must identify the exact verified v2
-      backup. Hive refuses the operation while a daemon or worker is active,
-      or when any job changed after forward migration. The complete candidate
-      v3 tree is moved to a durable quarantine; it is never deleted.
+      Retires only the registered project's released v2/jobs directory. Hive
+      atomically archives its exact opaque bytes, preserves every other v2
+      Architecture Patrol owner and the global terminal-proof catalog, and
+      activates an empty v3 JobStore. It never converts or imports the old
+      backlog. --confirm is mandatory.
+
+      A running profile daemon and its supervised process tree are stopped and
+      verified before reset, then restarted only if this command stopped them.
+      Existing non-empty v3 state is never overwritten.
     DESC
-    def refactor_patrol_schema_restore(project, snapshot_id)
-      require "hive/commands/refactor_patrol_schema_restore"
-      Hive::Commands::RefactorPatrolSchemaRestore.new(
-        project, snapshot_id, json: options[:json]
+    option :confirm, type: :boolean, default: false,
+                     desc: "confirm that the archived v2 backlog will not be imported"
+    def refactor_patrol_reset(project)
+      require "hive/commands/refactor_patrol_reset"
+      Hive::Commands::RefactorPatrolReset.new(
+        project, confirm: options[:confirm], json: options[:json]
       ).call
     end
 

@@ -147,6 +147,46 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
     end
   end
 
+  def test_runtime_readiness_is_generation_bound_retained_and_read_only
+    with_tmp_dir do |dir|
+      path = File.join(
+        dir, "private", "operational-snapshot.json"
+      )
+      _store, assembler, reader = build(path)
+      assembler.runtime_ready(now: T0)
+      ready_bytes = File.binread(path)
+
+      readiness = reader.runtime_readiness(
+        expected_daemon: IDENTITY, now: T0 + 1
+      )
+
+      assert_equal ready_bytes, File.binread(path)
+      assert_equal true, readiness.fetch("runtime_ready")
+      assert_equal "complete", readiness.fetch("phase")
+      assert_nil reader.runtime_readiness(
+        expected_daemon:
+          IDENTITY.merge("generation" => "other"),
+        now: T0 + 1
+      )
+
+      assembler.begin_tick(now: T0 + 2)
+      assert_equal "started", reader.runtime_readiness(
+        expected_daemon: IDENTITY, now: T0 + 3
+      ).fetch("phase")
+      assert_nil reader.runtime_readiness(
+        expected_daemon: IDENTITY, now: T0 + 100
+      )
+
+      assembler.shutdown(
+        admission_closed: true, drained: true,
+        child_inventory: [], now: T0 + 4
+      )
+      assert_nil reader.runtime_readiness(
+        expected_daemon: IDENTITY, now: T0 + 5
+      )
+    end
+  end
+
   def test_reconfigured_validity_is_measured_from_tick_completion
     with_tmp_dir do |dir|
       path = File.join(dir, "private", "operational-snapshot.json")

@@ -3,7 +3,7 @@ title: hive migrate
 type: command
 source: lib/hive/commands/migrate.rb, lib/hive/stages.rb
 created: 2026-05-21
-updated: 2026-07-30
+updated: 2026-07-26
 tags: [command, migration, config, reviewers, stages, task-id, display-name, recovery]
 ---
 
@@ -55,197 +55,9 @@ flow mapping must be converted manually before the comment-preserving rewrite
 can run.
 
 `hive update` replaces the installed CLI through its package channel and does
-not mutate or commit registered projects' tracked task/config state. The
-compatibility alias is what makes that binary update safe; run `hive migrate`
-in each warned project to persist the correction.
-
-Architecture Patrol's installation-managed JobStore cutover is different: it
-is an automatic shipped installation migration over untracked runtime state. A
-candidate generation must sweep every eligible OS user, every Hive profile
-bound to that identity, and every project in each profile's complete current
-registry before an install-wide completion claim. The privileged coordinator
-enumerates fixed registry anchors for all NSS users plus every exact custom root
-in the root-owned `/var/lib/hive/installed-users.v1.json` inventory. It binds
-each NSS identity and canonical home, drops supplementary groups/gid/uid,
-scrubs the environment, then invokes the exact candidate as that user. Root
-never parses a non-root user's registry or mutates that user's project before
-the identity drop; a root account's own profile necessarily remains uid 0
-inside its child.
-
-Each user-profile child attempts every registry row before that profile can be
-complete, without filtering on the project directory's Unix owner. That
-includes shared projects created or owned by another user and relative or
-absolute custom `hive_state_path` values. The dropped user process cannot
-exceed that user's operating-system permissions; an inaccessible project
-becomes a persisted failed/retryable row instead of being silently skipped.
-One failed project, profile, or user cannot block later projects or users. AUR
-runs the all-user
-coordinator during package activation and enables
-`hive-job-schema-migration.timer` for hourly `--resume` retry. Every profile is
-re-entered on that sweep, while an unchanged user-owned registry receipt keeps
-already-current projects from being remigrated. Root `install.sh` installs the
-equivalent systemd timer or launchd LaunchDaemon before its all-user sweep;
-root bash updates ensure the same retry service. Non-root `install.sh` and
-Homebrew report current-user-only coverage and require a separately installed
-root-owned system Hive for machine-wide coverage. A user-prefix Hive must never
-be elevated. `status`, `watch`,
-`doctor`, findings inspection, dry runs, and other strict observation routes
-remain mutation-free.
-
-A newly registered or path-drifted project changes the registry digest. A
-current-user candidate re-entry detects it immediately; otherwise the next
-hourly root sweep re-enters that user's profile and detects it. Normal CLI
-startup and every JobStore constructor accept only v3; dormant released-v2
-state is converted only by the explicit package-candidate command.
-
-### Candidate user-profile and install-wide sweeps
-
-```bash
-# Current user profile
-hive refactor-patrol-migrate-installed
-
-# Every discovered/inventoried local Hive user, using a root-owned system Hive
-/usr/local/bin/hive refactor-patrol-migrate-installed --all-users
-
-# Timer-style retry: re-enter every profile; each child skips unchanged work
-/usr/local/bin/hive refactor-patrol-migrate-installed --all-users --resume
-
-# Install/repair the machine-owned hourly retry before sweeping
-/usr/local/bin/hive refactor-patrol-migrate-installed --all-users \
-  --ensure-retry-service
-```
-
-The current-user form is the narrow package-hook/child entrypoint. It first
-backfills immutable registry identities with
-`Config.ensure_project_identities!`, then runs
-`RegisteredProjectMigrationCoordinator` across the complete current registry.
-It prints the same typed document persisted at
-`$HIVE_HOME/schema-migrations/refactor-patrol-job-v3.json` (`schema:
-"hive-user-profile-job-schema-migration"`, `schema_version: 1`). Its
-`user_profile` binds uid, username, HOME, config root, and state root; its
-registry digest binds the complete user-scoped catalog, so adding or changing a
-registration invalidates the prior completion receipt.
-
-The root-only form prints `hive-installed-users-job-schema-migration.v1`. It
-binds the exact candidate path/version/SHA-256 plus size, mode, uid, and gid
-custody, root inventory path/digest,
-distinct attempted/failed/retryable OS-user and Hive-profile counts, every
-attempted profile digest, fixed receipt/count summaries, discovery issues, and
-`complete|partial|failed`. It deliberately contains no username, home, project
-path, or nested project row. Full project results remain only in each
-dropped-identity child's user-owned receipt. Multiple custom profiles can
-belong to one uid; the counters never mislabel those profiles as additional OS
-users. Missing
-inventory closure, UID/home drift,
-inaccessible profiles, or an operator-known unindexed custom root must remain
-`partial`/`failed`; they can never be reported as complete.
-
-Every hourly `--resume` sweep invokes every currently discovered profile after
-dropping to that profile's identity. The child compares its live registry
-digest with its user-owned receipt, so an unchanged profile is cheap while a
-project registered later by any user is discovered on the next sweep. The
-root-owned checkpoint records only bounded round-robin traversal and prior
-evidence; a `completed` row is never semantic authority to skip a profile.
-Catalog discovery crosses the isolated root process boundary as a bounded,
-versioned, strict JSON document rather than an object-deserialization stream.
-Cross-profile equal or nested roots fail closed, and the executor revalidates
-the complete root ancestor custody chain immediately before candidate
-execution. A child receipt is canonical JSON plus one newline, with a 2-MiB
-body bound and a separate 2-KiB stderr bound. The machine checkpoint stores
-only fixed summaries and remains below 4 MiB at the 4,096-profile maximum, so
-one large registry cannot block later users. A malformed old draft checkpoint
-is discarded as non-authoritative traversal cache; there is no legacy reader.
-
-An interrupted released-v2 conversion may already have written exact v3 bytes.
-Resume re-derives its occurrence and intake intent from the immutable snapshot,
-verifies both against the conversion proof, and reconciles that exact
-occurrence before writing or trusting the completion marker. Completed jobs
-must be finalized and fully acknowledged, represented either by a retained
-terminal record or its retirement fence. Incomplete jobs keep the exact
-reserved occurrence needed for later work.
-
-The optional root-owned inventory has this exact form and must be a regular
-root-owned file with no group/world write bit:
-
-```json
-{
-  "schema": "hive-installed-user-inventory",
-  "schema_version": 1,
-  "discovery_closed": true,
-  "profiles": [
-    {
-      "username": "alice",
-      "uid": 1001,
-      "home": "/home/alice",
-      "environment": {
-        "HIVE_HOME": "/srv/hive/alice"
-      }
-    }
-  ]
-}
-```
-
-`discovery_closed: true` is an administrator assertion that legacy custom
-roots have been inventoried. Hive cannot infer arbitrary old process-only
-HIVE_HOME/XDG values or mount offline/encrypted/network homes, so absence of
-that assertion keeps the aggregate receipt partial.
-
-A failed or retryable project row still means the sweep itself completed: the
-document records its error, remediation, retry time, and custom
-`hive_state_path`, while later registered projects continue. Registry,
-identity, and status-store failures remain structural command failures. The
-project diagnostics are UTF-8 bounded and secret-redacted in the user receipt,
-then defensively validated again before the privileged parent checkpoints or
-prints them. Parent completion/retry state must agree with every nested project
-row. The
-command is deliberately not a replacement for user-directed `hive migrate`,
-which updates tracked project state.
-
-When a profile migration quiesces and restarts an existing daemon, the restart
-command receives `/dev/null` for stdin/stdout/stderr. A detached daemon
-therefore cannot retain the privileged coordinator's bounded capture pipes and
-turn an already successful migration into a false 900-second timeout.
-
-## Architecture Patrol JobStore cutover and emergency restore
-
-The released aggregate-only JobStore v2 shape is converted directly to v3. No
-binding-sidecar compatibility format is recognized. Before the first live job
-is replaced, Hive writes and verifies
-`<hive_state_path>/refactor_patrol/v3/job-schema-v2-backup/manifest.json` plus
-the exact source bytes under `job-schema-v2-backup/jobs/`. The manifest binds
-project id, sorted job names, SHA-256, byte size, original mode, and original
-mtime into `snapshot-<sha256>`. Each written v3 job is a restart checkpoint;
-the completion marker is written only after a final bounded scan finds no v2
-job. `hive daemon status --json` exposes that snapshot id and every registered
-project's current/target schema, status, retry time, remediation, and error
-under `schema_migrations`.
-
-Executable rollback alone is unsafe because the previous package reads only
-v2. Emergency state restore is therefore an explicit, fenced operator command,
-not a compatibility reader or an automatic downgrade:
-
-```bash
-hive daemon stop
-hive daemon status --json
-hive refactor-patrol-schema-restore PROJECT SNAPSHOT_ID --json
-```
-
-Do not run the restore until status proves the daemon stopped and any
-separately launched Architecture Patrol worker is also stopped. The command
-requires an exact registered-project identity and snapshot id, revalidates the
-complete v3 aggregate/conversion ledger, exact v2 backup and sealed source
-archive, refuses active claims or changed/new jobs, and stages the exact v2
-bytes with their original mode and mtime. It then atomically exchanges that
-staged directory with the v2 tombstone and moves the complete v3 generation to
-`<hive_state_path>/refactor_patrol/job-schema-restore-quarantine/<transaction-id>/`.
-It never deletes the v3 generation or chooses an unverified filesystem path.
-Interrupted and repeated restores resume from validated transaction identities.
-
-Only after that command succeeds may an old v2-only package start. On a later
-forward upgrade, stop the old daemon again and use the normal installed update
-path. The candidate seals the then-current v2 bytes under a fresh transaction,
-creates a new v3 generation, and retains the prior quarantine as audit and
-recovery evidence.
+not mutate or commit every registered project's tracked state. The compatibility
+alias is what makes that binary update safe; run `hive migrate` in each warned
+project to persist the correction.
 
 `Stages::Finalize` likewise reads legacy `budget_usd.pr` /
 `timeout_sec.pr` as fallbacks. `hive migrate` rewrites those keys to
@@ -363,9 +175,6 @@ A rerun after successful migration prints that there is nothing to move and keep
   receipt idempotency, archived final compatibility records, queue upgrades,
   empty post-cutover v1 skeleton cleanup, and live/ambiguous-state refusal.
 - Status integration scenarios prove hidden legacy tasks surface before migrate and disappear after migration.
-- `test/unit/commands/refactor_patrol_candidate_migration_test.rb` covers the
-  installation-wide candidate sweep, identity backfill, typed persisted/printed
-  status, isolated retryable failures, released-v2 jobs, and custom state roots.
 
 ## Backlinks
 

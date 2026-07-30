@@ -30,12 +30,9 @@ class InstallScriptTest < Minitest::Test
   def test_installer_temporarily_removes_and_restores_its_managed_hive_wrapper
     script = File.read(INSTALL_SCRIPT)
     removal = script.index('rm -f "$installed_bin"')
-    install = script.index(
-      'GEM_HOME="$gem_home" "$GEM_COMMAND" install'
-    )
+    install = script.index('GEM_HOME="$gem_home" gem install')
 
     refute_nil removal, "a managed wrapper must be removed before RubyGems writes its binstub"
-    refute_nil install, "the managed gem install command must remain present"
     assert_operator removal, :<, install
     assert_includes script, "hive-managed: install-wrapper/v1"
     assert_includes script, "launcher_rollback_armed=1"
@@ -79,41 +76,6 @@ class InstallScriptTest < Minitest::Test
       assert_empty Dir.glob(File.join(File.dirname(paths.fetch(:wrapper)), ".*wrapper.*"))
       assert_empty Dir.glob(File.join(File.dirname(paths.fetch(:shim)), ".hive-shim.*"))
     end
-  end
-
-  def test_installer_runs_candidate_registry_migration_before_daemon_setup
-    script = File.read(INSTALL_SCRIPT)
-    migration = script.rindex("job_schema_migration_setup")
-    daemon = script.rindex("daemon_autostart_setup")
-
-    refute_nil migration
-    refute_nil daemon
-    assert_operator migration, :<, daemon
-    assert_includes script,
-                    "migration_args=(refactor-patrol-migrate-installed)"
-    assert_includes script,
-                    "migration_args+=(--all-users --ensure-retry-service)"
-    assert_includes script, "--ensure-retry-service"
-    assert_includes script, 'data_base="/usr/local/share"'
-    assert_includes script, 'bin_home="/usr/local/bin"'
-    assert_includes script,
-                    "shared installation coverage is not complete"
-    assert_includes script,
-                    "root-owned system package for shared installations"
-    refute_match(/administrator must run.*link_path/, script)
-    refute_match(/sudo.*refactor-patrol-migrate-installed/, script)
-  end
-
-  def test_root_preflight_is_compatible_with_stock_macos_bash_and_tools
-    script = File.read(INSTALL_SCRIPT)
-    root_preflight = script.match(
-      /root_owned_immutable_path\(\) \{.*?^\}/m
-    ).to_s
-
-    refute_match(/\[\[\s+-v\b/, script)
-    refute_includes root_preflight, "readlink -f"
-    assert_includes root_preflight,
-                    "canonical_parent=\"$(CDPATH='' cd -P"
   end
 
   def test_installer_requires_cosign_for_release_identity_verification

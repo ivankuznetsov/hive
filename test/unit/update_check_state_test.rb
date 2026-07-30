@@ -153,6 +153,20 @@ class UpdateCheckStateTest < Minitest::Test
     assert File.exist?(fresh), "a fresh tmp may be a live process's in-flight write — keep it"
   end
 
+  def test_observation_only_initialization_keeps_stale_orphan_tmp
+    stale = File.join(@dir, ".update_check.json.1.1.tmp")
+    File.write(stale, "old")
+    File.utime(Time.now - 300, Time.now - 300, stale)
+
+    Hive::UpdateCheck::State.new(
+      path: @path,
+      cleanup_orphans: false
+    )
+
+    assert File.exist?(stale),
+           "an observation-only state read must not clean stale tmp files"
+  end
+
   def test_dangling_symlink_tmp_does_not_abort_sweep
     link = File.join(@dir, ".update_check.json.x.tmp")
     File.symlink(File.join(@dir, "no-such-target"), link)

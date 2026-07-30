@@ -86,7 +86,6 @@ module Hive
         architecture_patrol_closed
         architecture_patrol_blocked
         patrol_recovery_blocked
-        refactor_patrol_schema_migration
         module_migration
         fatal
       ].freeze

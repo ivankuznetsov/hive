@@ -394,7 +394,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
                       attempt_dispatcher: nil, attempt_reconciler: nil,
                       operational_snapshot: nil, module_runtime: nil,
                       module_migration_coordinator: nil,
-                      recovery_coordinator: nil)
+                      recovery_coordinator: nil,
+                      runtime_ready_callback: nil)
     config = {
       "daemon" => {
         "edit_debounce_sec" => 30,
@@ -446,7 +447,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
       operational_snapshot: operational_snapshot,
       module_runtime: module_runtime,
       module_migration_coordinator: module_migration_coordinator,
-      recovery_coordinator: recovery_coordinator
+      recovery_coordinator: recovery_coordinator,
+      runtime_ready_callback: runtime_ready_callback
     )
     # Generic dispatcher tests exercise routing, not the detached production
     # name generator. Rows intentionally omit display names in many fixtures;
@@ -1045,6 +1047,10 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
     def shutdown(**attributes)
       record(:shutdown, attributes)
+    end
+
+    def runtime_ready(**attributes)
+      record(:runtime_ready, attributes)
     end
 
     def reconfigure(**attributes)
@@ -3220,6 +3226,50 @@ def test_run_forever_reloads_ticks_and_shuts_down_cleanly
   assert events_include?(logger, :dispatcher_started)
   assert events_include?(logger, :dispatcher_stopping)
   assert_equal 0, supervisor.spawned.size
+end
+
+def test_run_forever_publishes_runtime_readiness_before_releasing_activation
+  snapshot = FakeOperationalSnapshot.new
+  callback_observation = nil
+  dispatcher, = make_dispatcher(
+    operational_snapshot: snapshot,
+    runtime_ready_callback: lambda {
+      callback_observation = snapshot.calls.map(&:first)
+    }
+  )
+  dispatcher.define_singleton_method(:install_signal_handlers!) { true }
+  dispatcher.define_singleton_method(:interruptible_sleep) { |_| }
+  dispatcher.define_singleton_method(:tick) do |now: Time.now|
+    request_shutdown!
+  end
+
+  dispatcher.run_forever
+
+  assert_equal [ :runtime_ready ], callback_observation
+  assert_equal :runtime_ready, snapshot.calls.first.fetch(0)
+end
+
+def test_run_forever_keeps_activation_fenced_when_readiness_cannot_publish
+  snapshot = FakeOperationalSnapshot.new(
+    fail_on: :runtime_ready,
+    error: IOError.new("readiness unavailable")
+  )
+  callback_called = false
+  dispatcher, _supervisor, _controller, logger = make_dispatcher(
+    operational_snapshot: snapshot,
+    runtime_ready_callback: -> { callback_called = true }
+  )
+  dispatcher.define_singleton_method(:install_signal_handlers!) { true }
+
+  error = assert_raises(IOError) { dispatcher.run_forever }
+
+  assert_equal "readiness unavailable", error.message
+  refute callback_called
+  event = logger.events.find do |name, attributes|
+    name == :operational_snapshot_publish_failed &&
+      attributes.fetch(:phase) == "runtime_ready"
+  end
+  refute_nil event
 end
 
 def test_shutdown_acknowledgement_records_closed_admission_and_child_inventory
@@ -5956,59 +6006,6 @@ end
     end
     refute_nil fatal, "a raising id backfiller must be caught and logged as :fatal"
     assert_includes fatal[1][:message], "id backfiller boom"
-  end
-
-  def test_tick_logs_each_registered_project_schema_migration_result
-    migration_result = Data.define(:project, :status).new(
-      project: "demo",
-      status: :migrated
-    )
-    coordinator = Object.new
-    ticks = []
-    coordinator.define_singleton_method(:tick) do |now:|
-      ticks << now
-      [ migration_result ]
-    end
-    dispatcher, _supervisor, _controller, logger = make_dispatcher
-    dispatcher.instance_variable_set(
-      :@registered_project_migration_coordinator,
-      coordinator
-    )
-
-    dispatcher.tick(now: T0)
-
-    assert_equal [ T0 ], ticks
-    event = logger.events.find do |name, _attributes|
-      name == :refactor_patrol_schema_migration
-    end
-    refute_nil event
-    assert_equal "demo", event.fetch(1).fetch(:project)
-    assert_equal :migrated, event.fetch(1).fetch(:status)
-  end
-
-  def test_tick_isolates_registered_project_schema_migration_failures
-    coordinator = Object.new
-    coordinator.define_singleton_method(:tick) do |now:|
-      now
-      raise IOError, "migration status unavailable"
-    end
-    dispatcher, _supervisor, _controller, logger = make_dispatcher
-    dispatcher.instance_variable_set(
-      :@registered_project_migration_coordinator,
-      coordinator
-    )
-
-    dispatcher.tick(now: T0)
-
-    event = logger.events.find do |name, attributes|
-      name == :fatal &&
-        attributes.fetch(:message).include?(
-          "registered project schema migration raised"
-        )
-    end
-    refute_nil event
-    assert_includes event.fetch(1).fetch(:message),
-                    "migration status unavailable"
   end
 
   def test_shutdown_snapshot_failure_is_advisory

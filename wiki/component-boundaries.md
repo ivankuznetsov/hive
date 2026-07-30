@@ -3,7 +3,7 @@ title: Component boundaries
 type: reference
 source: config/component-boundaries.yml, test/support/component_boundary_contract.rb
 created: 2026-07-25
-updated: 2026-07-29
+updated: 2026-07-30
 tags: [architecture, components, boundaries, monorepo]
 ---
 
@@ -92,6 +92,19 @@ streamed occurrence journal. Terminal outcomes and canonical projection bytes
 commit together; sequenced completions compact through high-water/floor state,
 and a saturated non-sequence fence retains terminal proof rather than replaying.
 EvidenceStore is never consulted to decide a retry or mutation.
+
+`JobStoreFreshStart` is the only cross-generation JobStore boundary. It has no
+v2 reader or converter: an explicitly confirmed, daemon-fenced command
+atomically exchanges only `v2/jobs` with a canonical marker, retains the exact
+opaque directory under its transaction-bound archive name, and admits an empty
+v3 store. `JobStore` is its only runtime composition root. Existing non-empty
+v3 state and malformed or incomplete transaction evidence fail closed.
+The reset first holds the stable profile activation lock and drains the exact
+daemon generation, then takes the existing Patrol effect lock exclusively.
+That effect lock, a stable JobStore generation lock, and an independent
+PID/start-time writer fence remain held across the exchange, empty-v3
+admission, and receipt publication. A restarted daemon is accepted only after
+the same generation-bound operational snapshot reports runtime readiness.
 
 The Patrol row has a non-empty construction boundary. Shared stores and
 mechanisms, both product gateways, and intake/discovery/action/claim-maintenance

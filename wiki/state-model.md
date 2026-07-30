@@ -570,9 +570,9 @@ recovery authority: occurrence records retain authoritative effects and
 projection outbox bytes, while neither coordination file can authorize work.
 StateStore and JobStore remain the separate product-facing owners, and
 observational EvidenceStore records are never consulted to authorize a retry.
-JobStore establishes its admitted native-v3 namespace before any architecture
+JobStore establishes its admitted v3 namespace before any architecture
 recovery backoff or active-index repair can write coordination state. Semantic
-family dry-run resolution instead uses a non-migrating JobStore reader, so a
+family dry-run resolution instead uses a read-only JobStore reader, so a
 preview cannot create that namespace or any other project state.
 Before terminal effect outcomes cross from `EffectDelivery` into either
 product store, every nested string value passes through
@@ -590,91 +590,58 @@ fresh inventory with no remaining live v1 record.
 
 ## Architecture-patrol split-generation state
 
-Only JobStore-owned authority moves to v3. Manifests, semantic-family
-projections, merge reconciliation, child results, runs, and logs remain under
-their existing v2 owners until those components intentionally migrate:
+Only JobStore-owned authority uses v3. Manifests, semantic-family projections,
+merge reconciliation, child results, runs, and logs retain their independent
+v2 owners:
 
 ```text
 <hive_state_path>/refactor_patrol/
+├── jobstore-fresh-start.json             # completed opaque reset receipt
+├── .jobstore-generation.lock             # stable cross-generation lock
 ├── v2/
-│   ├── reconciler.json                  # host-bound catch-up checkpoint
-│   ├── reconciler-progress.json         # restart-safe page/intake cursor
-│   ├── manifests/<job-id>.json          # checksummed immutable merge input
-│   ├── jobs                              # regular-file v3 cutover tombstone
-│   ├── .job-schema-v3-source-<nonce>/   # sealed exact released-v2 source
+│   ├── reconciler.json                   # host-bound catch-up checkpoint
+│   ├── reconciler-progress.json          # restart-safe page/intake cursor
+│   ├── manifests/<job-id>.json           # checksummed immutable merge input
+│   ├── jobs/                             # released backlog before reset
+│   ├── jobs                              # regular marker after reset
+│   ├── .jobs-v2-archive-<nonce>/         # exact opaque archived backlog
 │   ├── families/<family-id>.json
 │   ├── results/<dispatch-id>.json
 │   ├── runs/
 │   └── logs/
-├── v3/
-│   ├── jobs/<job-id>.json               # v3-only aggregate authority
-│   ├── occurrences/records/             # effects and exact receipts
-│   ├── occurrences/recovery-index.json   # bounded active-record locator
-│   ├── indexes/job-query/               # rebuildable ordered query index
-│   ├── job-schema-v2-backup/
-│   │   ├── manifest.json                # exact bytes/metadata snapshot
-│   │   └── jobs/<job-id>.json
-│   ├── job-schema-v3-conversions/       # one proof per converted aggregate
-│   ├── job-schema-v3-migration.json     # completed conversion marker
-│   └── job-schema-v3-cutover.json       # generation transaction identity
-└── job-schema-restore-quarantine/
-    └── migration-<nonce>/               # complete preserved v3 generation
+└── v3/
+    ├── jobs/<job-id>.json                # sole current aggregate authority
+    ├── occurrences/records/              # effects and exact receipts
+    ├── occurrences/recovery-index.json   # bounded active-record locator
+    └── indexes/job-query/                # rebuildable ordered query index
 ```
 
-The job-schema converter is a shipped upgrade boundary, not a v2 runtime
-reader. The root-only install-wide coordinator discovers fixed Hive registry
-anchors for every NSS user and supplements them with the root-owned custom-root
-inventory. Isolated discovery returns one bounded, versioned, exact-key JSON
-snapshot. The parent rejects equal or nested roots across profiles and the
-executor revalidates every root ancestor as root-or-profile-owned before it
-drops groups/gid/uid and uses a scrubbed exact profile environment to invoke
-the candidate. Root never reads a non-root user's registry or mutates that
-user's project before the identity drop; a root account's own child
-necessarily remains uid 0.
-Within each profile Hive
-deduplicates realpath aliases and invokes the same per-project converter before
-constructing any architecture-patrol scheduler, merge reconciler, or
-module-migration coordinator. Registry membership, not the project directory's
-Unix owner, defines the sweep: shared projects owned or created by another user
-and custom state roots are attempted with that user's actual OS permissions.
-One user's receipt cannot satisfy another user's profile.
+A genuinely fresh project initializes the empty v3 namespace on its first
+authoritative mutation. Read-only status avoids creating that namespace.
+Released `v2/jobs` instead blocks v3 runtime admission with
+`reset_required`; Hive has no v2 compatibility reader, converter,
+installation sweep, package hook, timer, or automatic constructor fallback.
 
-The v2 `jobs/` directory is atomically exchanged with a regular-file tombstone
-before conversion. Its former directory becomes a sealed hidden archive, so an
-old lexical writer cannot reach it and v3 has an independent namespace. Each
-project retains its own lock, immutable canonical-path check, exact-byte source
-inventory, restart checkpoints, conversion proofs, and completion marker.
+The only transition is the explicit per-project
+`hive refactor-patrol-reset PROJECT --confirm` choice. A stable profile-wide
+activation lock excludes daemon startup; the current daemon then drains under
+its normal shared effect admission, after which the command takes the Patrol
+effect lock exclusively. That lock remains held across an independent writer
+fence, atomic exchange of the public v2 jobs directory with a canonical regular
+marker, empty-v3 admission, and the transaction-bound receipt outside both
+generations. The exact directory bytes remain under
+`.jobs-v2-archive-<nonce>` and are never enumerated or imported. Every other
+v2 owner and the separate global terminal-proof catalog remain untouched. A
+restarted daemon must publish readiness for its exact PID/start generation
+before command success. See [[commands/refactor-patrol-reset]].
 
-One malformed, inaccessible, or identity-drifted project produces a persisted
-failed/retryable result and a project-local architecture-patrol hold; it does
-not prevent later registered projects or user profiles from migrating, or
-unrelated workflow tasks from running. Runtime admission is an allowlist from
-the latest completed
-sweep. A registry-digest change causes immediate rescan; otherwise failed rows
-retry hourly. Independently, the machine timer re-enters every discovered
-profile each hour and lets the dropped-identity child compare that live
-registry digest; the root traversal checkpoint cannot make a profile
-semantically terminal. The per-profile status lives under
-`<state_home>/schema-migrations/refactor-patrol-job-v3.json` and is surfaced by
-`hive daemon status --json`; the privileged aggregate is a separate typed
-receipt with candidate, inventory, uid, profile, and coverage identities. AUR's
-system timer retries inactive users hourly; root-owned `install.sh` packages
-install the equivalent hourly systemd timer or launchd LaunchDaemon. Their
-counts distinguish unique OS uids from multiple Hive config/state profiles
-owned by one uid. Conversion is available only through the explicit
-package-candidate command. Direct JobStore construction, normal CLI startup,
-records, and child completion payloads accept v3 only and reject released-v2
-state without changing it.
-
-The snapshot manifest binds project id, sorted name set, exact bytes, SHA-256,
-size, mode, and source mtime before the first replacement. A completed marker,
-compact cutover record, and the v2 tombstone bind the same snapshot and
-transaction identities; the marker and cutover record also bind the exact
-migrated-job count, so compact admission cannot accept count drift that a full
-audit would reject.
-Emergency restore is an explicit operator-fenced command: it revalidates every
-binding, atomically reactivates exact v2 bytes, and quarantines the entire v3
-generation. It is not a reverse-schema runtime; see [[commands/migrate]].
+The same command resumes an exchange that completed before its receipt was
+written. A non-empty v3 store alongside released or incomplete v2 state is a
+`conflict`, never an overwrite candidate. Malformed markers, receipts,
+archives, entry types, or writer evidence fail closed for operator repair.
+`hive daemon status --json` reports `fresh`, `current`,
+`reset_required`, `reset_incomplete`, `conflict`, or an isolated
+per-project `error` without performing the reset.
 
 Read-only job listing is bounded by the `indexes/job-query/` sequence
 projection rather than a scan of every aggregate. Each authoritative new job

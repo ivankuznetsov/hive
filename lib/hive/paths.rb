@@ -2,19 +2,10 @@ require "fileutils"
 
 module Hive
   module Paths
-    JOB_SCHEMA_MIGRATION_INTERNAL =
-      "HIVE_JOB_SCHEMA_MIGRATION_INTERNAL".freeze
-    JOB_SCHEMA_CONFIG_HOME =
-      "HIVE_JOB_SCHEMA_CONFIG_HOME".freeze
-    JOB_SCHEMA_STATE_HOME =
-      "HIVE_JOB_SCHEMA_STATE_HOME".freeze
-
     module_function
 
     def config_home
-      migration_root_override(JOB_SCHEMA_CONFIG_HOME) ||
-        hive_home_override ||
-        File.join(base_home("XDG_CONFIG_HOME", ".config"), "hive")
+      hive_home_override || File.join(base_home("XDG_CONFIG_HOME", ".config"), "hive")
     end
 
     def data_home
@@ -22,9 +13,7 @@ module Hive
     end
 
     def state_home
-      migration_root_override(JOB_SCHEMA_STATE_HOME) ||
-        hive_home_override ||
-        File.join(base_home("XDG_STATE_HOME", ".local/state"), "hive")
+      hive_home_override || File.join(base_home("XDG_STATE_HOME", ".local/state"), "hive")
     end
 
     def cache_home
@@ -144,18 +133,6 @@ module Hive
 
     def hive_home_override
       value = ENV["HIVE_HOME"]
-      return nil if value.nil? || value.empty?
-
-      File.expand_path(value)
-    end
-
-    # The privileged install-wide coordinator pins the exact canonical
-    # config/state roots before it drops to a user.  These variables are
-    # deliberately inert for every ordinary Hive invocation.
-    def migration_root_override(key)
-      return nil unless ENV[JOB_SCHEMA_MIGRATION_INTERNAL] == "1"
-
-      value = ENV[key]
       return nil if value.nil? || value.empty?
 
       File.expand_path(value)

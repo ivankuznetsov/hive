@@ -6,6 +6,7 @@ require "hive/config"
 require "hive/paths"
 require "hive/lock"
 require "hive/pid_file"
+require "hive/daemon/activation_lock"
 require "hive/daemon/dispatcher"
 require "hive/daemon/concurrency_controller"
 require "hive/daemon/dispatch_baselines"
@@ -30,7 +31,6 @@ require "hive/conditions/attempt_observer"
 require "hive/modules/event_publisher"
 require "hive/modules/daemon_runtime"
 require "hive/modules/migration/coordinator"
-require "hive/refactor_patrol/registered_project_migration_coordinator"
 require "hive/commands/service_installer/result_presenter"
 require "hive/recovery/migration"
 
@@ -75,7 +75,8 @@ module Hive
       def initialize(subcommand, target = nil, detach: false, dry_run: false,
                      all: false, json: false, force: false,
                      queue_args: [],
-                     hive_home: Hive::Paths.state_home)
+                     hive_home: Hive::Paths.state_home,
+                     activation_lock: nil)
         @subcommand = subcommand
         @target = target
         @detach = detach
@@ -85,6 +86,7 @@ module Hive
         @force = force
         @queue_args = Array(queue_args)
         @hive_home = hive_home
+        @activation_lock = activation_lock
       end
 
       def call
@@ -123,17 +125,12 @@ module Hive
 
       private
 
-      def registered_project_migration_coordinator
-        @registered_project_migration_coordinator ||=
-          Hive::RefactorPatrol::RegisteredProjectMigrationCoordinator.new(
-            dry_run: @dry_run
-          )
-      end
-
       def start_daemon
         warn_unsupported_json_flag if @json
         FileUtils.mkdir_p(@hive_home)
         FileUtils.mkdir_p(File.dirname(log_file))
+        activation_lock = daemon_activation_lock
+        activation_lock.acquire!
 
         # Single-instance check: if a live daemon already owns the PID
         # file, refuse with TEMPFAIL.
@@ -228,21 +225,8 @@ module Hive
         )
         status_consumer = Hive::Daemon::StatusConsumer.new
         Hive::Config.ensure_project_identities!
-        schema_migration_coordinator =
-          registered_project_migration_coordinator
-        schema_migrations = schema_migration_coordinator.run
-        schema_migrations.each do |result|
-          logger.event(
-            :refactor_patrol_schema_migration,
-            **result.to_h
-          )
-        end
-        refactor_patrol_registry = lambda do
-          schema_migration_coordinator.eligible_projects
-        end
         module_event_publisher = Hive::Modules::EventPublisher.new
         refactor_patrol_merge_reconciler = Hive::Daemon::RefactorPatrolMergeReconciler.new(
-          registry: refactor_patrol_registry,
           poll_interval_sec: daemon_cfg.fetch("pr_merge_poll_interval_sec"),
           dry_run: @dry_run, module_event_publisher: module_event_publisher
         )
@@ -256,7 +240,6 @@ module Hive
           event_publisher: module_event_publisher
         )
         refactor_patrol_scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
-          registry: refactor_patrol_registry,
           dry_run: @dry_run,
           event_publisher: module_event_publisher
         )
@@ -284,7 +267,7 @@ module Hive
         )
         module_migration_coordinator = Hive::Modules::Migration::Coordinator.new(
           supervisor: supervisor, attempt_store: attempt_store,
-          registry: refactor_patrol_registry, dry_run: @dry_run
+          dry_run: @dry_run
         )
         attempt_process_identity = Hive::Attempts::ProcessIdentity.new
         attempt_reconciler = Hive::Attempts::Reconciler.new(
@@ -329,13 +312,11 @@ module Hive
           operational_snapshot: operational_snapshot,
           module_runtime: module_runtime,
           module_migration_coordinator: module_migration_coordinator,
-          registered_project_migration_coordinator:
-            schema_migration_coordinator
+          runtime_ready_callback: -> { activation_lock.release! }
         )
 
         reexec_requested = false
         begin
-          schema_migration_coordinator.acknowledge_daemon_restart
           dispatcher.run_forever
           reexec_requested = dispatcher.reexec_requested?
         ensure
@@ -355,6 +336,7 @@ module Hive
 
         reexec_with_fresh_code!
       ensure
+        activation_lock&.release!
         if defined?(runtime_hive_bin_was_set)
           if runtime_hive_bin_was_set
             ENV["HIVE_BIN"] = original_runtime_hive_bin
@@ -362,6 +344,12 @@ module Hive
             ENV.delete("HIVE_BIN")
           end
         end
+      end
+
+      def daemon_activation_lock
+        @activation_lock ||= Hive::Daemon::ActivationLock.new(
+          hive_home: @hive_home
+        )
       end
 
       # Source-file drift detected (e.g. `git pull` bumped a schema

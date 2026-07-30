@@ -1767,70 +1767,63 @@ class RefactorPatrolCommandTest < Minitest::Test
     end
   end
 
-  def test_job_list_reports_migration_required_without_rewriting_v2
+  def test_job_list_reports_reset_required_without_reading_or_rewriting_v2
     with_refactor_patrol_project do |repo|
-      cfg = Hive::Config.load(repo)
-      manifest = with_manifest_checksum(pr_manifest)
-      store, = enroll_manifest!(
-        repo, manifest,
-        policy:
-          Hive::RefactorPatrol::Policy.capture(
-            cfg, now: Time.utc(2026, 7, 12, 9, 0, 0)
-          ),
-        now: Time.utc(2026, 7, 12, 9, 0, 0)
+      entry = Hive::Config.find_project("demo")
+      released = Hive::RefactorPatrol::JobStore.released_jobs_root_for(
+        repo, hive_state_path: entry.fetch("hive_state_path")
       )
-      aggregate = store.read_job(manifest.fetch("job_id"))
-      legacy = aggregate.reject do |key, _value|
-        %w[occurrence_id intake_transition_id].include?(key)
-      end.merge("schema_version" => 2)
-      path = File.join(
-        store.root, "jobs", "#{manifest.fetch('job_id')}.json"
-      )
-      File.binwrite(path, "#{JSON.pretty_generate(legacy)}\n")
+      FileUtils.mkdir_p(released)
+      path = File.join(released, "opaque-job.bytes")
+      File.binwrite(path, "\x00released-v2-is-not-read\xff".b)
       before = File.binread(path)
 
       out, = capture_io do
-        error = assert_raises(
-          Hive::RefactorPatrol::JobQuery::MigrationRequired
-        ) do
+        error = assert_raises(Hive::ConfigError) do
           Hive::Commands::RefactorPatrol.new(
             "demo", json: true, list: true
           ).call
         end
-        assert_equal Hive::ExitCodes::TEMPFAIL, error.exit_code
+        assert_match(/refactor-patrol-reset demo --confirm/, error.message)
       end
       payload = JSON.parse(out)
       assert_empty job_query_schemer.validate(payload).to_a
-      assert_equal "migration_required",
+      assert_equal "config",
                    payload.fetch("error_kind")
       assert_equal before, File.binread(path),
-                   "read-only list must not run the converter"
+                   "read-only list must not inspect or rewrite v2 bytes"
     end
   end
 
-  def test_migrated_released_v2_job_is_immediately_listable_and_showable
+  def test_explicit_fresh_start_archives_v2_opaquely_and_lists_empty_v3
     with_refactor_patrol_project do |repo|
       entry = Hive::Config.find_project("demo")
-      root = Hive::RefactorPatrol::JobStore.legacy_root_for(
+      released = Hive::RefactorPatrol::JobStore.released_jobs_root_for(
         repo, hive_state_path: entry.fetch("hive_state_path")
       )
-      FileUtils.mkdir_p(File.join(root, "jobs"))
-      File.binwrite(
-        File.join(root, "jobs", "job-released.json"),
-        File.binread(File.expand_path(
-          "../fixtures/refactor_patrol/released_v2_job.json",
-          __dir__
-        ))
-      )
+      FileUtils.mkdir_p(released)
+      opaque_path = File.join(released, "opaque-job.bytes")
+      opaque_bytes = "\x00not-a-job-record\xff".b
+      File.binwrite(opaque_path, opaque_bytes)
       fence = Object.new
       fence.define_singleton_method(:assert_quiescent!) { true }
 
-      assert Hive::RefactorPatrol::JobStore.migrate_schema!(
+      reset = Hive::RefactorPatrol::JobStore.reset_released_jobs!(
         repo,
         hive_state_path: entry.fetch("hive_state_path"),
         project: entry,
         writer_fence: fence
       )
+      assert_equal "current", reset.fetch("status")
+      assert_equal true, reset.fetch("changed")
+      assert_equal(
+        opaque_bytes,
+        File.binread(
+          File.join(reset.fetch("archive_path"), "opaque-job.bytes")
+        )
+      )
+      assert File.file?(released),
+             "released jobs path must become a regular marker"
 
       list_out, = capture_io do
         Hive::Commands::RefactorPatrol.new(
@@ -1839,17 +1832,8 @@ class RefactorPatrolCommandTest < Minitest::Test
       end
       list = JSON.parse(list_out)
       assert_empty job_query_schemer.validate(list).to_a
-      assert_equal [ "job-released" ],
-                   list.fetch("jobs").map { |job| job.fetch("job_id") }
-
-      show_out, = capture_io do
-        Hive::Commands::RefactorPatrol.new(
-          "demo", json: true, show: "job-released"
-        ).call
-      end
-      show = JSON.parse(show_out)
-      assert_empty job_query_schemer.validate(show).to_a
-      assert_equal "job-released", show.dig("job", "job_id")
+      assert_empty list.fetch("jobs"),
+                   "opaque v2 jobs must never be imported into v3"
     end
   end
 

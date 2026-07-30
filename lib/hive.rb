@@ -55,6 +55,10 @@ module Hive
       "hive-refactor-patrol" => 3,
       "hive-refactor-patrol-jobs" => 1,
       "hive-refactor-patrol-thesis" => 3,
+      # Explicit one-project retirement of the released Architecture Patrol
+      # v2 JobStore. The success envelope identifies the opaque archive and
+      # empty-v3 admission receipt; v2 jobs are never converted.
+      "hive-refactor-patrol-jobstore-reset" => 1,
       # Scaffold a blank per-project workflow descriptor (`hive workflow new ID
       # --json`). The error arm routes through Hive::Schemas::ErrorEnvelope so
       # its output carries the same schema/schema_version/error_kind keys as

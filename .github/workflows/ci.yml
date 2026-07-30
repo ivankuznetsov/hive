@@ -49,9 +49,6 @@ jobs:
             task: test:tui_reactivity_perf
           - name: multi-agent setup integration
             task: test:setup_agents_integration
-          - name: all-user JobStore migration
-            task: test:all_users_job_schema_migration
-            root: true
           - name: babysitter dry-run security matrix
             task: test:babysitter_dry_run_security_matrix
     steps:
@@ -61,21 +58,9 @@ jobs:
           ruby-version: "3.4"
           bundler-cache: true
       - name: Run merge gate
-        if: ${{ matrix.root != true }}
         env:
           HIVE_CI_GATE_TASK: ${{ matrix.task }}
         run: bundle exec rake "$HIVE_CI_GATE_TASK"
-      - name: Run privileged all-user merge gate
-        if: ${{ matrix.root == true }}
-        env:
-          HIVE_CI_GATE_TASK: ${{ matrix.task }}
-          HIVE_REQUIRE_TEST_RUNS: "1"
-          HIVE_ALL_USERS_PROVISION_ACCOUNTS: "1"
-        run: |
-          sudo \
-            --preserve-env=HIVE_CI_GATE_TASK,HIVE_REQUIRE_TEST_RUNS,HIVE_ALL_USERS_PROVISION_ACCOUNTS \
-            "$(command -v ruby)" "$(command -v bundle)" \
-            exec rake "$HIVE_CI_GATE_TASK"
 
   required-test-gate:
     name: rake test (Ruby 3.4)

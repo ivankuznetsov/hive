@@ -23,8 +23,6 @@ class CiTestPartitionTest < Minitest::Test
         "test:packaged_web_bootstrap" => "test/integration/web_packaged_bootstrap_test.rb",
         "test:tui_reactivity_perf" => "test/integration/tui_reactivity_perf_test.rb",
         "test:setup_agents_integration" => "test/integration/setup_agents_test.rb",
-        "test:all_users_job_schema_migration" =>
-          "test/integration/refactor_patrol_all_users_migration_test.rb",
         "test:babysitter_dry_run_security_matrix" =>
           "test/unit/babysitter/dry_run_security_matrix_test.rb"
       }, gate_tests)
@@ -64,11 +62,6 @@ class CiTestPartitionTest < Minitest::Test
           "task" => "test:setup_agents_integration"
         },
         {
-          "name" => "all-user JobStore migration",
-          "task" => "test:all_users_job_schema_migration",
-          "root" => true
-        },
-        {
           "name" => "babysitter dry-run security matrix",
           "task" => "test:babysitter_dry_run_security_matrix"
         }
@@ -79,16 +72,6 @@ class CiTestPartitionTest < Minitest::Test
       run_step = gate_job.fetch("steps").find { |step| step["name"] == "Run merge gate" }
       assert_equal 'bundle exec rake "$HIVE_CI_GATE_TASK"', run_step.fetch("run")
       assert_equal "${{ matrix.task }}", run_step.fetch("env").fetch("HIVE_CI_GATE_TASK")
-      assert_equal "${{ matrix.root != true }}", run_step.fetch("if")
-
-      root_step = gate_job.fetch("steps").find do |step|
-        step["name"] == "Run privileged all-user merge gate"
-      end
-      assert_equal "${{ matrix.root == true }}", root_step.fetch("if")
-      assert_includes root_step.fetch("run"), "sudo"
-      assert_equal "1", root_step.fetch("env").fetch("HIVE_REQUIRE_TEST_RUNS")
-      assert_equal "1",
-                   root_step.fetch("env").fetch("HIVE_ALL_USERS_PROVISION_ACCOUNTS")
 
       assert_equal "coverage (Ruby ${{ matrix.ruby }})", workflow.fetch("jobs").fetch("test").fetch("name")
       required_gate = workflow.fetch("jobs").fetch("required-test-gate")

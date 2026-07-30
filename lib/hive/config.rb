@@ -1155,10 +1155,22 @@ module Hive
       registered_project_entries(preserve_invalid: false)
     end
 
-    def registered_project_entries(preserve_invalid:)
-      Hive::Paths.ensure_migrated!
+    # Observation-only registry reader for status surfaces. When only the
+    # legacy registry exists, read it in place rather than invoking the normal
+    # one-off move into XDG config storage.
+    def registered_projects_read_only
+      registered_project_entries(
+        preserve_invalid: false,
+        migrate_legacy: false
+      )
+    end
+
+    def registered_project_entries(preserve_invalid:, migrate_legacy: true)
+      Hive::Paths.ensure_migrated! if migrate_legacy
       validate_hive_home!
-      path = global_config_path
+      path = registry_path_for_read(
+        migrate_legacy: migrate_legacy
+      )
       return [] unless File.exist?(path)
 
       data = load_global_config(path)
@@ -1191,6 +1203,14 @@ module Hive
         project["hive_state_path"] = project_hive_state_path(project)
         out << project
       end
+    end
+
+    def registry_path_for_read(migrate_legacy:)
+      current = global_config_path
+      return current if migrate_legacy || File.exist?(current)
+      return current if Hive::Paths.hive_home_override
+
+      Hive::Paths.legacy_registry_path || current
     end
 
     # One-time, locked registry migration. It deliberately emits no module

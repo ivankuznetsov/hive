@@ -117,6 +117,19 @@ class BinHiveRefactorPatrolUsageErrorTest < Minitest::Test
     end
   end
 
+  def test_reset_missing_project_uses_the_jobstore_reset_contract
+    payload = run_usage_error(
+      "refactor-patrol-reset", "--json"
+    )
+
+    assert_equal "hive-refactor-patrol-jobstore-reset",
+                 payload.fetch("schema")
+    assert_equal "usage", payload.fetch("error_kind")
+    assert reset_schema.valid?(payload),
+           reset_schema.validate(payload)
+             .map { |error| error.fetch("error") }.inspect
+  end
+
   private
 
   def run_usage_error(*argv)
@@ -148,6 +161,18 @@ class BinHiveRefactorPatrolUsageErrorTest < Minitest::Test
   def job_query_schema
     @job_query_schema ||= JSONSchemer.schema(
       JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol-jobs")))
+    )
+  end
+
+  def reset_schema
+    @reset_schema ||= JSONSchemer.schema(
+      JSON.parse(
+        File.read(
+          Hive::Schemas.schema_path(
+            "hive-refactor-patrol-jobstore-reset"
+          )
+        )
+      )
     )
   end
 end

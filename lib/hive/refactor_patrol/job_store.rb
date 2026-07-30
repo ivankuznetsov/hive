@@ -11,8 +11,7 @@ require "hive/refactor_patrol/caps"
 require "hive/refactor_patrol/job_indexes"
 require "hive/refactor_patrol/job_query_index"
 require "hive/refactor_patrol/job_record_validator"
-require "hive/refactor_patrol/job_schema_restore"
-require "hive/refactor_patrol/job_store_generation_cutover"
+require "hive/refactor_patrol/job_store_fresh_start"
 require "hive/refactor_patrol/job_store_files"
 require "hive/refactor_patrol/state_paths"
 require "hive/modules/migration/patrols"
@@ -133,86 +132,63 @@ module Hive
           )
         end
 
-        def legacy_root_for(project_root, hive_state_path: nil)
-          StatePaths.legacy_root(
+        def released_jobs_root_for(project_root, hive_state_path: nil)
+          StatePaths.released_jobs_root(
             state_path_for(project_root, hive_state_path)
           )
         end
 
-        def schema_state_present?(project_root, hive_state_path: nil)
+        def generation_state_present?(project_root, hive_state_path: nil)
+          state = state_path_for(project_root, hive_state_path)
           [
-            root_for(project_root, hive_state_path: hive_state_path),
-            legacy_root_for(project_root, hive_state_path: hive_state_path)
-          ].any? do |root|
-            File.lstat(root)
+            StatePaths.current_root(state),
+            StatePaths.released_jobs_root(state),
+            File.join(
+              StatePaths.generation_root(state),
+              JobStoreFreshStart::RECEIPT_NAME
+            )
+          ].any? do |path|
+            File.lstat(path)
             true
           rescue Errno::ENOENT
             false
           end
         end
 
-        def migrate_schema!(
+        def reset_released_jobs!(
           project_root,
           hive_state_path: nil,
           project: nil,
-          ownership: nil,
-          writer_fence:
-            Hive::RefactorPatrol::MigrationWriterFence.new,
-          validator: JobRecordValidator.new(contract: self)
+          writer_fence: Hive::RefactorPatrol::JobStoreWriterFence.new
         )
-          generation_cutover(
+          fresh_start(
             project_root,
             hive_state_path: hive_state_path,
             project: project,
-            ownership: ownership,
-            writer_fence: writer_fence,
-            validator: validator
-          ).run!
+            writer_fence: writer_fence
+          ).reset!
         end
 
-        def ensure_schema_namespace!(
+        def ensure_current_namespace!(
           project_root,
           hive_state_path: nil,
           project: nil,
-          ownership: nil,
-          writer_fence:
-            Hive::RefactorPatrol::MigrationWriterFence.new,
-          validator: JobRecordValidator.new(contract: self)
+          writer_fence: Hive::RefactorPatrol::JobStoreWriterFence.new
         )
-          generation_cutover(
+          fresh_start(
             project_root,
             hive_state_path: hive_state_path,
             project: project,
-            ownership: ownership,
-            writer_fence: writer_fence,
-            validator: validator
-          ).ensure_native_namespace!
+            writer_fence: writer_fence
+          ).ensure_current!
         end
 
-        def schema_status(project_root, hive_state_path: nil, project: nil)
-          generation_cutover(
+        def generation_status(project_root, hive_state_path: nil, project: nil)
+          fresh_start(
             project_root,
             hive_state_path: hive_state_path,
             project: project
           ).status
-        end
-
-        def schema_admission_status(project_root, hive_state_path: nil,
-                                    project: nil)
-          generation_cutover(
-            project_root,
-            hive_state_path: hive_state_path,
-            project: project
-          ).admission_status
-        end
-
-        def schema_snapshot_id(project_root, hive_state_path: nil,
-                               project: nil)
-          generation_cutover(
-            project_root,
-            hive_state_path: hive_state_path,
-            project: project
-          ).snapshot_identity
         end
 
         def canonical_action_id(repository:, kind:, identity:,
@@ -258,67 +234,21 @@ module Hive
                 "canonical action host must be an exact hostname"
         end
 
-        def restore_schema_v2_snapshot!(
-          project_root,
-          snapshot_id:,
-          hive_state_path: nil,
-          project: nil,
-          writer_fence:
-            Hive::RefactorPatrol::MigrationWriterFence.new(
-              allow_current_process: false,
-              operation: "JobStore schema restore"
-            )
-        )
-          state = File.expand_path(
-            hive_state_path || ".hive-state",
-            File.expand_path(project_root)
-          )
-          identity = project_identity(project_root, project)
-          Hive::Modules::Migration::Patrols.with_migration_lock(
-            project_root,
-            hive_state_path: state,
-            shared: false
-          ) do
-            JobSchemaRestore.new(
-              target_root: root_for(
-                project_root, hive_state_path: state
-              ),
-              legacy_root: legacy_root_for(
-                project_root, hive_state_path: state
-              ),
-              target_version: SCHEMA_VERSION,
-              validator: JobRecordValidator.new(contract: self),
-              corrupt_record: CorruptRecord,
-              inconsistent_record: InconsistentRecord,
-              project_id: identity.fetch("project_id"),
-              anchor: state,
-              writer_fence: writer_fence
-            ).restore!(snapshot_id: snapshot_id)
-          end
-        end
-
         private
 
-        def generation_cutover(
+        def fresh_start(
           project_root,
           hive_state_path: nil,
           project: nil,
-          ownership: nil,
-          writer_fence:
-            Hive::RefactorPatrol::MigrationWriterFence.new,
-          validator: JobRecordValidator.new(contract: self)
+          writer_fence: Hive::RefactorPatrol::JobStoreWriterFence.new
         )
           state = state_path_for(project_root, hive_state_path)
-          JobStoreGenerationCutover.new(
-            legacy_root: StatePaths.legacy_root(state),
-            target_root: StatePaths.current_root(state),
+          JobStoreFreshStart.new(
+            state_root: state,
+            project: project_identity(project_root, project),
             target_version: SCHEMA_VERSION,
-            validator: validator,
             corrupt_record: CorruptRecord,
             inconsistent_record: InconsistentRecord,
-            project: project_identity(project_root, project),
-            ownership: ownership,
-            anchor: state,
             writer_fence: writer_fence
           )
         end
@@ -350,7 +280,7 @@ module Hive
       end
 
       def initialize(project_root, hive_state_path: nil, project: nil,
-                     ownership: nil, writer_fence: nil)
+                     writer_fence: nil)
         @project_root = File.expand_path(project_root)
         @hive_state_path = File.expand_path(hive_state_path || ".hive-state", @project_root)
         @root = self.class.root_for(@project_root, hive_state_path: @hive_state_path)
@@ -361,15 +291,13 @@ module Hive
           corrupt_record: CorruptRecord,
           inconsistent_record: InconsistentRecord
         )
-        @schema_options = {
+        @generation_options = {
           hive_state_path: @hive_state_path,
-          project: project,
-          ownership: ownership,
-          validator: @record_validator
+          project: project
         }
-        @schema_options[:writer_fence] = writer_fence if writer_fence
-        assert_runtime_schema_admission!
-        @schema_namespace_ready = false
+        @generation_options[:writer_fence] = writer_fence if writer_fence
+        assert_runtime_generation_admission!
+        @current_namespace_ready = false
         @claim_transitions = ClaimTransitions.new(inconsistent_record: InconsistentRecord)
         @job_indexes = JobIndexes.new(
           schema_version: SCHEMA_VERSION,
@@ -397,7 +325,7 @@ module Hive
             job.is_a?(Hash) ? json_copy(job) : read_job(job)
           end,
           job_path: method(:job_path),
-          before_mutation: method(:prepare_schema_namespace!),
+          before_mutation: method(:prepare_current_namespace!),
           architecture_occurrences: -> { @architecture_occurrences }
         )
       end
@@ -458,7 +386,7 @@ module Hive
         validate_job!(aggregate)
         return aggregate if dry_run
 
-        prepare_schema_namespace!
+        prepare_current_namespace!
         job_id = aggregate.fetch("job_id")
         path = job_path(job_id)
         result = @job_files.with_job_admission(job_id) do
@@ -1470,7 +1398,7 @@ module Hive
         validate_job!(data)
         return data if dry_run
 
-        prepare_schema_namespace!
+        prepare_current_namespace!
         job_id = data.fetch("job_id")
         path = job_path(job_id)
         result = @job_files.with_job_admission(job_id) do
@@ -1542,7 +1470,7 @@ module Hive
       # Explicit writer-side repair. Rebuilding changes the index generation,
       # so existing cursors fail closed instead of silently changing pages.
       def rebuild_job_query_index!
-        prepare_schema_namespace!
+        prepare_current_namespace!
         @job_query_index.rebuild! { ordered_job_query_ids }
       rescue ArgumentError, KeyError => e
         raise InconsistentRecord, "cannot rebuild refactor patrol job query index (#{e.message})"
@@ -1560,7 +1488,7 @@ module Hive
       end
 
       def rebuild_indexes!
-        prepare_schema_namespace!
+        prepare_current_namespace!
         indexes = @job_indexes.project(each_job)
         atomic_write(fingerprint_index_path, indexes.fetch("fingerprints"))
         atomic_write(action_index_path, indexes.fetch("actions"))
@@ -1619,7 +1547,7 @@ module Hive
       end
 
       def with_action_catalog_lock
-        prepare_schema_namespace!
+        prepare_current_namespace!
         @job_files.with_action_catalog_lock { yield }
       end
 
@@ -2084,7 +2012,7 @@ module Hive
       end
 
       def mutate_job(job_id)
-        prepare_schema_namespace!
+        prepare_current_namespace!
         id = validate_id!(job_id)
         path = job_path(id)
         unless @job_files.job_exists?(id)
@@ -2363,7 +2291,7 @@ module Hive
       end
 
       def atomic_write(path, data)
-        prepare_schema_namespace!
+        prepare_current_namespace!
         @job_files.write_json(
           @job_files.relative_path(path),
           data
@@ -2371,38 +2299,38 @@ module Hive
         path
       end
 
-      def prepare_schema_namespace!
-        return true if @schema_namespace_ready
+      def prepare_current_namespace!
+        return true if @current_namespace_ready
 
-        self.class.ensure_schema_namespace!(
-          @project_root, **@schema_options
+        self.class.ensure_current_namespace!(
+          @project_root, **@generation_options
         )
         @job_files.prepare!
-        @schema_namespace_ready = true
+        @current_namespace_ready = true
       end
 
-      # Released v2 conversion is owned exclusively by the explicit
-      # installation migration command. Runtime readers and writers never
-      # convert legacy state as a constructor side effect.
-      def assert_runtime_schema_admission!
-        return true unless self.class.schema_state_present?(
+      # Runtime never reads, converts, or retires released v2 jobs. The
+      # operator must explicitly archive them before this v3-only store can be
+      # constructed.
+      def assert_runtime_generation_admission!
+        return true unless self.class.generation_state_present?(
           @project_root, hive_state_path: @hive_state_path
         )
 
-        status = self.class.schema_admission_status(
+        status = self.class.generation_status(
           @project_root,
           hive_state_path: @hive_state_path,
-          project: @schema_options[:project]
+          project: @generation_options[:project]
         ).fetch("status")
-        return true if %w[absent current].include?(status)
+        return true if %w[fresh current].include?(status)
 
         raise InconsistentRecord.new(
-          "released JobStore migration is required before v3 runtime admission",
+          "explicit fresh-start reset is required before v3 runtime admission",
           path: @hive_state_path
         )
       rescue KeyError
         raise InconsistentRecord.new(
-          "JobStore schema admission status is malformed",
+          "JobStore generation status is malformed",
           path: @hive_state_path
         )
       end

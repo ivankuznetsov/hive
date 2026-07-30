@@ -19,38 +19,17 @@ tags: [gap, todo, release-proof, agent-skills]
   migration qualification claim. Longer elapsed telemetry remains useful but
   is not a substitute for that protocol.
 
-- The installation-wide JobStore v2-to-v3 startup sweep is source-, focused-,
-  and real-UID-gate pinned. The Linux merge gate creates three temporary NSS
-  accounts on its isolated hosted VM (and uses a subordinate-id user namespace
-  locally), then gives one candidate default, `HIVE_HOME`, and split-XDG profiles,
-  converts two released-v2 projects per uid, registers a later third project
-  for another inactive user, and proves the next hourly resume converts it
-  while both v3 data and per-profile receipts remain owned by the dropped
-  identity. Focused coverage
-  additionally includes 120 released-format jobs with many attempts,
-  interruption/resume checkpoints, corrupt and identity-drift holds,
-  realpath-alias deduplication, shared-profile-root refusal, stable root
-  inventory/candidate custody, persisted read-only status, hourly retry,
-  runtime admission from the latest completed sweep, bounded NSS discovery,
-  exact supplementary-group drops, cross-profile exact/nested root collision
-  refusal, full ancestor-custody revalidation, strict bounded JSON catalog
-  transport, contradictory nested receipt refusal, redacted child diagnostics,
-  canonical 2-MiB receipt transport with independent stderr bounds, six
-  near-maximum receipts without later-profile starvation, a bounded
-  identity-free 4,096-summary checkpoint, deterministic interrupted-v3
-  occurrence reconciliation, live terminal proof after retirement-fence
-  saturation, and v3-only normal runtime admission.
-  There is not yet a checked-in artifact from an actual AUR package upgrade
-  with three long-lived host accounts and running old daemons, nor a repaired
-  offline/permission failure followed by the installed system timer's
-  successful retry. The root direct-install systemd and launchd retry services
-  are unit-pinned but have not yet been live-smoked on both host managers.
-  Homebrew and direct non-root installs intentionally have no privileged
-  automatic timer; machine-wide migration requires a separately installed,
-  root-owned system Hive. Arbitrary legacy
-  process-only custom roots and offline/encrypted/network homes remain
-  unknowable unless the root inventory explicitly closes discovery.
-
+- The explicit JobStore fresh-start reset is source- and focused-test-pinned,
+  including no-write fresh status, exact registered-project binding,
+  daemon/process-tree quiescence, independent PID/start-time writer fencing,
+  atomic opaque-directory exchange, interrupted reset resume, other-v2-owner
+  preservation, empty-v3 admission, and non-empty-v3 conflict refusal. This goal
+  deliberately does not run the command against a live project. Before release,
+  dogfood it on a disposable registered project on each supported deployment
+  filesystem and retain evidence that the daemon restarts, archive bytes remain
+  exact, status advances from `reset_required` to `current`, and no unrelated
+  v2 owner changes. The abandoned v2 jobs backlog is an explicit product
+  tradeoff, not a continuity promise or an unimplemented migration.
 - `agent-cli-runtime` 0.1.0 has a self-contained package, exact-artifact
   verifier, Linux/macOS install matrix, and component-scoped trusted-publishing
   workflow. Repository-hosted controls remain operator work: the
@@ -411,11 +390,17 @@ Patrol job, discovery, action, and final decision, live effect-time
 generation/grant checks, stable process/thread sender locks with persisted
 uncertainty but no lease/PID authority, gateway-owned retry-safe local absence,
 remote-absence refusal, store-minted byte-stable receipts, canonical outboxes,
-restart-persistent normalized recovery backoff, a bounded one-off JobStore
-v2-to-v3 migration with v3-only runtime reads, exact-digest-bound shadow-v1
-conversion, and bounded occurrence/intent evidence indices. Those fixtures
+restart-persistent normalized recovery backoff, v3-only JobStore runtime with
+an explicit opaque fresh-start reset for released v2, exact-digest-bound
+shadow-v1 conversion, and bounded occurrence/intent evidence indices. Those fixtures
 prove the repaired boundary but intentionally do not satisfy the operational
 rollout gate.
+
+No live project reset was run while building U2. The destructive boundary is
+covered only by hermetic storage, process, lock-order, crash-resume, and
+runtime-readiness tests. An operator must still explicitly confirm any real
+per-project archive/reset after reviewing `daemon status --json`; U2 does not
+perform that cutover automatically.
 
 U3 still needs to make the candidate-bound compressed evidence protocol part of
 the test harness, feed it from these finalized occurrences without consulting

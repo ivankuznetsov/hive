@@ -2064,6 +2064,43 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_registered_projects_read_only_reads_legacy_registry_in_place
+    with_tmp_dir do |root|
+      home = File.join(root, "home")
+      project = File.join(root, "project")
+      legacy = File.join(home, "Dev", "hive", "config.yml")
+      current = File.join(root, "config", "hive", "config.yml")
+      FileUtils.mkdir_p([ File.dirname(legacy), project ])
+      File.write(
+        legacy,
+        {
+          "registered_projects" => [
+            {
+              "name" => "legacy",
+              "path" => project,
+              "project_id" => "11111111-1111-4111-a111-111111111111"
+            }
+          ]
+        }.to_yaml
+      )
+
+      with_env(
+        "HOME" => home,
+        "HIVE_HOME" => nil,
+        "XDG_CONFIG_HOME" => File.join(root, "config")
+      ) do
+        projects = Hive::Config.registered_projects_read_only
+
+        assert_equal [ "legacy" ], projects.map { |entry| entry.fetch("name") }
+        assert File.file?(legacy),
+               "an observation-only registry read must preserve the legacy file"
+        refute File.exist?(current),
+               "an observation-only registry read must not migrate into XDG config"
+        refute File.exist?(File.join(File.dirname(current), ".migrated-from"))
+      end
+    end
+  end
+
   def test_registration_state_identity_fails_closed_and_skips_malformed_legacy_rows
     with_tmp_dir do |root|
       candidate = {

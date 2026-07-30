@@ -4,20 +4,17 @@ require "hive/pid_file"
 
 module Hive
   module RefactorPatrol
-    # Prevents candidate conversion while another Hive daemon generation can
-    # still write released JobStore v2 state. A daemon may migrate from inside
-    # its own verified process; every other caller must first stop it.
-    class MigrationWriterFence
+    # Refuses a fresh-start reset while the profile daemon can still own a
+    # released v2 writer. The operator command owns graceful stop/drain/restart;
+    # this final PID/start-time check is the storage boundary's independent
+    # fail-closed guard.
+    class JobStoreWriterFence
       def initialize(
         pid_file: File.join(Hive::Paths.state_home, ".daemon.pid"),
-        process: Process,
-        allow_current_process: true,
-        operation: "JobStore migration"
+        process: Process
       )
         @pid_file = pid_file
         @process = process
-        @allow_current_process = allow_current_process == true
-        @operation = operation.to_s
       end
 
       def assert_quiescent!
@@ -31,14 +28,14 @@ module Hive
         live = Hive::Lock.process_start_time(pid)
         unless recorded && live && recorded.to_s == live.to_s
           raise Hive::ConcurrentRunError.new(
-            "cannot verify the live Hive daemon before #{@operation}",
-            holder: { pid: pid }, lock_path: @pid_file
+            "cannot verify the live Hive daemon before JobStore reset",
+            holder: { pid: pid },
+            lock_path: @pid_file
           )
         end
-        return true if @allow_current_process && pid == @process.pid
 
         raise Hive::ConcurrentRunError.new(
-          "stop the running Hive daemon (pid #{pid}) before #{@operation}",
+          "stop the running Hive daemon (pid #{pid}) before JobStore reset",
           holder: {
             pid: pid,
             process_start_time: recorded
@@ -50,7 +47,8 @@ module Hive
         raise Hive::ConcurrentRunError.new(
           "cannot verify the Hive daemon writer fence " \
           "(#{error.class}: #{error.message})",
-          holder: {}, lock_path: @pid_file
+          holder: {},
+          lock_path: @pid_file
         )
       end
     end

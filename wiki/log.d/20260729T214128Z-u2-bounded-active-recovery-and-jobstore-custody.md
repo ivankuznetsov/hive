@@ -16,7 +16,4 @@ area: patrol, refactor-patrol, migration, storage
   while streaming at the bound instead of materializing arbitrary entries.
 - Established native-v3 admission before architecture recovery backoff/index
   repair writes, and made semantic-family dry-run authority reads use a
-  non-migrating JobStore so previews remain state-free.
-- Bound compact cutover admission to both the snapshot id and exact migrated-job
-  count persisted in the cutover record, so shallow admission and the full
-  migration audit fail closed on the same completion drift.
+  read-only JobStore so previews remain state-free.

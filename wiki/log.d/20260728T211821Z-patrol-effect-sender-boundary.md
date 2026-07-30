@@ -23,12 +23,11 @@ crash uncertainty, unsafe remote absence, retry-safe local reset, repeated
 denial/reconciliation at different clocks, nonterminal finalization,
 finalized-dispatch refusal, and concurrent schedule-attempt allocation.
 
-**Architecture authority:** JobStore now accepts schema v3 only and owns the
+**Architecture authority:** JobStore accepts schema v3 only and owns the
 immutable occurrence and intake-transition pointers plus append-only
-claim/action/job/diagnostic transition identities. A bounded, fenced,
-restartable one-off converter validates v2 jobs, binding sidecars, journal
-captures, and exact transition assignment before replacing each aggregate,
-removing sidecars, and stamping completion. Runtime contains no binding reader.
+claim/action/job/diagnostic transition identities. Released v2 jobs have no
+runtime reader or converter. The explicit confirmed fresh-start boundary
+archives only their exact opaque directory and admits an empty v3 namespace.
 
 Publication supersession, terminal-proof materialization, plan/link/block,
 claim-scoped receipt updates, and discovery mutations now pass through explicit

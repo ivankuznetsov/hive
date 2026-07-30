@@ -552,24 +552,35 @@ does not copy state or replay merged-PR history.
 
 ## State and JSON
 
-Legacy state remains under `.hive-state/refactor_patrol/`. It shares directory,
+On-demand state remains under `.hive-state/refactor_patrol/`. It shares directory,
 atomic JSON-write, tolerant-read, and run-artifact mechanics with ordinary
 patrol through `Hive::Patrol::BaseStateStore`, while retaining its own namespace
-and thesis schema. V2 uses a separate namespace:
+and thesis schema. Scheduled JobStore state uses a split namespace:
 
 ```text
-.hive-state/refactor_patrol/v2/
-  reconciler.json               # exact-host catch-up checkpoint, schema v2
-  reconciler-progress.json      # identity-bound page/intake cursor, schema v1
-  manifests/<job-id>.json       # write-once source occurrence
-  jobs/<job-id>.json            # v3 aggregate + immutable occurrence/transition ids
-  occurrences/records/occ-*.json # prepared/uncertain/terminal effects + outbox
-  job-schema-v3-migration.json  # completed bounded v2 -> v3 one-off migration
-  families/<family-id>.json     # rebuildable semantic-family projection
-  indexes/                      # rebuildable fingerprint/action indexes
-  results/<dispatch-id>.json    # daemon completion channel; removed on reap
-  runs/ and logs/               # agent evidence
+.hive-state/refactor_patrol/
+  jobstore-fresh-start.json      # completed opaque reset receipt, when needed
+  v2/
+    reconciler.json              # exact-host catch-up checkpoint, schema v2
+    reconciler-progress.json     # identity-bound page/intake cursor, schema v1
+    manifests/<job-id>.json      # write-once source occurrence
+    jobs/                        # obsolete backlog before explicit reset
+    jobs                         # regular reset marker after explicit reset
+    .jobs-v2-archive-<nonce>/    # exact opaque archived backlog
+    families/<family-id>.json    # rebuildable semantic-family projection
+    results/<dispatch-id>.json   # daemon completion channel; removed on reap
+    runs/ and logs/              # agent evidence
+  v3/
+    jobs/<job-id>.json           # sole aggregate authority
+    occurrences/records/occ-*.json # prepared/uncertain/terminal effects + outbox
+    indexes/                     # rebuildable job/action/query projections
 ```
+
+Hive never reads or converts the obsolete v2 jobs directory. Its presence
+blocks scheduled runtime until the operator explicitly archives it and accepts
+an empty v3 start with `hive refactor-patrol-reset PROJECT --confirm`; see
+[[commands/refactor-patrol-reset]]. Every non-JobStore v2 owner above remains
+live across that reset.
 
 Terminal remote-effect proof is repository-global rather than registration
 local:

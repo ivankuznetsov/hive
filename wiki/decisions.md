@@ -671,69 +671,48 @@ rejected when the Hive daemon starts, with those migration commands.
 envelope, or runtime coupling. The unrelated Hive answer digest remains. ADR-030
 and ADR-031 describe removed behavior and are superseded by this decision.
 
-## ADR-041: Shared-package JobStore migration is privileged and profile-complete
+## ADR-041: Released JobStore v2 is an explicit opaque fresh start
 
 **Status:** Active
 
-**Context:** A current-user startup gate could convert every project in one
-registry but could not migrate an inactive second OS user's registry during a
-shared package upgrade. Treating that first-use fallback as installation-wide
-completion left old daemons and dormant released-v2 JobStores outside the
-upgrade claim. Running the existing registry coordinator directly as root
-would instead parse user configuration and mutate project state with excessive
-authority. Legacy `HIVE_HOME` and XDG roots also cannot be inferred
-exhaustively from NSS.
+**Context:** Preserving an obsolete Architecture Patrol backlog across a
+JobStore schema change required a privileged, all-user discovery and execution
+system, conversion proofs, compatibility readers, restore machinery, package
+hooks, retry services, and multiple new recovery authorities. Hive has few
+installations, and this backlog is not core workflow task state. Silently
+ignoring or deleting v2 would still be unsafe because pending actions and remote
+publication evidence may exist.
 
-**Decision:** Keep one strict per-profile migration receipt and add a separate
-root-only host coordinator. It enumerates conventional NSS-home anchors and a
-root-owned exact custom-profile inventory through a bounded NSS snapshot,
-transports isolated discovery through a strict bounded JSON document, rejects
-uid/home/root-binding plus cross-profile equal or nested root collisions,
-binds the installed root-owned candidate path/version/digest, revalidates each
-uid/name/gid/home/group tuple immediately before execution, then forks and
-drops to the exact supplementary groups, gid, and uid before the candidate
-reads a registry or project. The parent never parses user-owned Hive
-configuration. Aggregate
-evidence reports distinct OS-user and Hive-profile counts and cannot become
-`complete` without explicit inventory closure and zero retryable profiles. AUR
-installs an hourly system timer; root-owned direct installs install an hourly
-systemd timer or launchd LaunchDaemon, and root bash updates ensure it before
-the sweep. Every machine retry re-enters every discovered profile; its
-dropped-identity child uses the live registry digest, so a root traversal
-checkpoint cannot hide a project registered later by any user. Per-user
-daemons retain registry-change and hourly project retry.
-Each dropped-identity child owns the detailed, at-most-2-MiB project receipt
-in that user's state root and emits the same canonical JSON plus one newline.
-The parent bounds stdout and stderr independently, validates the exact profile
-and candidate version, then retains only a fixed-size summary: profile and
-registry digests, receipt digest/size, project/retry/failure counts, and daemon
-restart state. The root checkpoint contains no username, home, project path,
-or nested project receipt, and its maximum 4,096 summaries remain below the
-4-MiB machine bound. An old draft traversal checkpoint is discarded as cache,
-not parsed through a compatibility path.
-Homebrew and non-root direct installs remain current-user-only and are never
-elevated; a shared host requires a separate root-owned system runtime. Normal
-CLI startup and JobStore construction support only v3. Released-v2 conversion
-exists only in the explicit package-candidate command. Resume reconstructs the
-deterministic occurrence and intake intent from the immutable v2 snapshot,
-checks them against the exact conversion proof and live v3 bytes, and refuses
-the completion marker until a completed import is finalized with every outbox
-entry acknowledged. Terminal proof is either the exact live finalized record
-or its exact retirement fence; incomplete imports retain their exact reserved
-continuation occurrence.
+**Decision:** Runtime supports only the v3 JobStore. Hive never reads or
+converts released `v2/jobs`, never sweeps other OS users, and never performs an
+install-time or constructor transition. Its presence blocks Architecture Patrol
+with `reset_required`.
 
-**Consequences:** One failed profile or project is persisted and isolated while
-later profiles still run under their owners. Multiple `HIVE_HOME`/XDG profiles
-for one uid remain distinct, while the same canonical config or state root
-assigned to different uids fails closed. Unknown process-only custom roots,
-offline homes, and non-privileged package channels produce partial rather than
-false complete evidence. A Linux merge gate converts released-v2 projects for
-three real UIDs and rejects root-owned output in their homes. The privileged
-parent may still execute a root account's own profile as uid 0; the separation
-claim is that it never opens another user's registry before the identity drop.
-Exact duplicate registry rows migrate one canonical state root once, while
-conflicting project identities that resolve to the same state root fail before
-any row is changed.
+One explicit per-project command,
+`hive refactor-patrol-reset PROJECT --confirm`, is the sole transition. It
+binds the exact registered project and holds one stable profile activation
+lock while it gracefully stops and verifies the current daemon and supervised
+process tree. After daemon drain, it holds the existing Patrol effect lock
+exclusively through an independent storage writer fence, the atomic exchange
+of only the public `v2/jobs` directory with a canonical regular marker,
+empty-v3 admission, and receipt publication. This order lets shutdown settle
+already-admitted effects without deadlocking while preventing any effect or
+daemon start from crossing the destructive boundary. The exact opaque
+directory survives under a transaction-bound hidden archive; Hive does not
+enumerate it. Every other v2 Architecture Patrol owner and the separate global
+terminal-proof catalog remain untouched. Another OS user makes the same
+explicit choice under their own profile.
+
+**Consequences:** A fresh installation starts directly with v3. A reset can
+resume after the atomic exchange but before receipt publication and is
+idempotent once current. Existing non-empty v3 state, live writers, malformed
+markers or receipts, a missing archive, or lack of atomic filesystem exchange
+fails closed for operator repair. Daemon status reports the per-project state
+without performing the reset. Hive intentionally abandons the archived v2 jobs
+backlog rather than promising continuity, but preserves its exact bytes for
+manual audit and reconciles future remote work only from current terminal proof
+and exact hosted-object evidence. A daemon restarted by the command must
+publish generation-bound runtime readiness before reset success is returned.
 
 ## ADR-032: Per-stage controls overlay the current durable identity
 

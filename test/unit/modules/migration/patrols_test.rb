@@ -717,6 +717,28 @@ class ModulesMigrationPatrolsTest < Minitest::Test
     end
   end
 
+  def test_default_coordinator_probe_fails_closed_on_unreset_v2_jobs
+    with_project do |project|
+      released = Hive::RefactorPatrol::JobStore.released_jobs_root_for(
+        project.fetch("path"),
+        hive_state_path: project.fetch("hive_state_path")
+      )
+      FileUtils.mkdir_p(released)
+      opaque = File.join(released, "opaque-job.bytes")
+      bytes = "\x00unread-v2-job\xff".b
+      File.binwrite(opaque, bytes)
+
+      result = default_coordinator(project).tick(now: NOW).fetch(0)
+
+      assert_equal :pending, result.fetch(:status)
+      assert_equal(
+        { "architecture-patrol" => "ambiguous" },
+        result.fetch(:blockers)
+      )
+      assert_equal bytes, File.binread(opaque)
+    end
+  end
+
   def test_coordinator_defaults_and_project_errors_are_bounded
     defaulted = Hive::Modules::Migration::Coordinator.new(
       supervisor: FakeSupervisor.new, attempt_store: FakeAttemptStore.new

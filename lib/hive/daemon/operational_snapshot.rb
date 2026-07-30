@@ -107,6 +107,7 @@ module Hive
           @tick_sequence = 0
           @started_at = nil
           @observations = {}
+          @runtime_ready = false
         end
 
         def reconfigure(poll_interval_sec:)
@@ -119,6 +120,22 @@ module Hive
           @observations = {}
           @store.write(base_record(phase: "started", now: now).merge("tasks" => []))
           tick_sequence
+        end
+
+        # Generation-bound acknowledgement that the daemon finished runtime
+        # construction, installed signal handlers, and reconciled inherited
+        # dispatch claims. The flag remains on later tick/shutdown records so
+        # a short-lived ready record cannot be missed by a waiting maintainer.
+        def runtime_ready(now: Time.now.utc)
+          @runtime_ready = true
+          @store.write(
+            base_record(phase: "complete", now: now).merge(
+              "reason" => nil,
+              "capacity" => {}, "queue" => {},
+              "provider_holds" => [], "recoveries" => {},
+              "tasks" => []
+            )
+          )
         end
 
         def observe(row, decision:, owner:, reason:, **details)
@@ -208,6 +225,7 @@ module Hive
             "schema" => SCHEMA,
             "schema_version" => SCHEMA_VERSION,
             "phase" => phase,
+            "runtime_ready" => @runtime_ready == true,
             "tick_sequence" => tick_sequence,
             "daemon" => @daemon_identity,
             "observed_at" => instant.iso8601(6),
@@ -495,6 +513,29 @@ module Hive
                             shutdown_inventory?(shutdown["child_inventory"])
 
           shutdown
+        rescue Errno::ENOENT, SecurityError, JSON::ParserError,
+               ArgumentError, TypeError, KeyError, SystemCallError, IOError
+          nil
+        end
+
+        # Unlike #read, readiness accepts a currently-running tick's `started`
+        # phase. `runtime_ready=true` can only be published after construction
+        # and is retained on every later record for the same daemon identity.
+        def runtime_readiness(expected_daemon: AUTO_DAEMON,
+                              now: Time.now.utc)
+          expected = expected_daemon.equal?(AUTO_DAEMON) ?
+            self.expected_daemon : expected_daemon
+          return nil if expected == :unavailable
+
+          validate_path!
+          record = JSON.parse(File.read(@path))
+          validate_record!(record)
+          return nil unless daemon_matches?(record, expected)
+          return nil unless record["runtime_ready"] == true
+          return nil if record.key?("shutdown")
+          return nil if Time.parse(record.fetch("valid_until")) < now
+
+          record
         rescue Errno::ENOENT, SecurityError, JSON::ParserError,
                ArgumentError, TypeError, KeyError, SystemCallError, IOError
           nil

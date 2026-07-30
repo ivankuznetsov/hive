@@ -1138,15 +1138,25 @@ module Hive
 
       def run_job_query
         entry, project_root, = resolve_project!
-        schema = Hive::RefactorPatrol::JobStore.schema_status(
+        generation = Hive::RefactorPatrol::JobStore.generation_status(
           project_root,
           hive_state_path: entry.fetch("hive_state_path"),
           project: entry
         )
-        if schema.fetch("status") == "migration_required"
-          raise Hive::RefactorPatrol::JobQuery::MigrationRequired,
-                "refactor patrol JobStore migration is required; the Hive " \
-                "daemon will retry the registered project automatically"
+        case generation.fetch("status")
+        when "reset_required"
+          raise Hive::ConfigError,
+                "released refactor patrol v2 jobs require an explicit " \
+                "fresh start; run `hive refactor-patrol-reset " \
+                "#{entry.fetch('name')} --confirm`"
+        when "reset_incomplete"
+          raise Hive::ConfigError,
+                "refactor patrol JobStore fresh start is incomplete; rerun " \
+                "`hive refactor-patrol-reset #{entry.fetch('name')} --confirm`"
+        when "conflict"
+          raise Hive::ConfigError,
+                "refactor patrol JobStore generations conflict; inspect " \
+                "`hive daemon status --json` before operator repair"
         end
         query = Hive::RefactorPatrol::JobQuery.new(
           job_store_for(entry, project_root)

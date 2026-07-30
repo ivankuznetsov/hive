@@ -49,8 +49,10 @@ components:
       - lib/hive/refactor_patrol/effect_errors.rb
       - lib/hive/refactor_patrol/effect_gateway.rb
       - lib/hive/refactor_patrol/job_query_index.rb
+      - lib/hive/refactor_patrol/job_store_fresh_start.rb
+      - lib/hive/refactor_patrol/job_store_generation_lock.rb
       - lib/hive/refactor_patrol/job_store_files.rb
-      - lib/hive/refactor_patrol/job_store_schema_migration.rb
+      - lib/hive/refactor_patrol/job_store_writer_fence.rb
       - lib/hive/refactor_patrol/transition_evidence.rb
       - lib/hive/refactor_patrol/transition_gateway.rb
     state_contracts:
@@ -61,24 +63,29 @@ components:
       - "EvidenceStore is an append-only bounded observational projection under module-runtime/migration/patrol-evidence and is never consulted for retry"
       - "ActionRunner and RefactorPatrolScheduler decide product work; composed action/discovery transition coordinators own durable transition identities, claim fences, and replay"
       - "JobStoreFiles is the sole descriptor-confined physical I/O port for live v3 jobs, query indexes, quarantine evidence, and action locks; JobQueryIndex owns only their bounded logical projection"
+      - "JobStoreFreshStart atomically archives only released v2/jobs as opaque bytes; runtime never reads or converts it, and an explicit confirmed reset alone admits an empty v3 namespace"
     schema_contracts:
       - "hive-patrol-capture v1 and hive-patrol-effect-receipt v1 are strict canonical observation records"
-      - "hive-refactor-patrol-job v3 is the sole runtime JobStore schema; JobStoreSchemaMigration is the bounded one-off v2 converter"
+      - "hive-refactor-patrol-job v3 is the sole runtime JobStore schema; released v2 jobs have no compatibility reader or converter"
       - "hive-patrol-occurrence-recovery-index v1 is a bounded rebuildable active-ID projection tied to the journal-state recovery generation; occurrence records remain authoritative"
     lock_contracts:
       - "Persist intent before shared migration admission; under live owner, epoch, config, module-generation, capability, and claim checks, one process-local keyed mutex plus one stable mode-0600 flock serializes each sender"
       - "Dispatch uncertainty is reconciliation-only; exact absence must settle before a retry-safe local sink may resend, while remote absence never grants resend authority"
       - "Architecture manifest reservation and the JobStore occurrence pointer serialize before the enqueue transition; command and daemon intake share the same coordinator"
       - "Every live JobStore read, write, enumeration, quarantine publication, index publication, and action/job lock resolves through one verified ManagedDirectory anchor"
+      - "The stable profile activation lock excludes daemon startup; reset drains the exact daemon generation before taking the existing Patrol effect lock exclusively, then holds that effect lock, the stable generation lock, and the independent PID/start-time writer fence across opaque v2 archive, empty-v3 admission, and receipt publication"
     component_dependencies: []
     allowed_hive_dependencies:
       - hive/atomic_file
       - hive/config
       - hive/errors
+      - hive/lock
       - hive/managed_directory
       - hive/module_package/managed_store
       - hive/modules/capability_context
       - hive/modules/migration/patrols
+      - hive/paths
+      - hive/pid_file
       - hive/refactor_patrol/job_store
       - hive/refactor_patrol/pr_manifest
       - hive/refactor_patrol/publication_attempt
@@ -112,8 +119,9 @@ components:
       - Hive::RefactorPatrol::EffectGateway
       - Hive::RefactorPatrol::JobQueryIndex
       - Hive::RefactorPatrol::JobStore
+      - Hive::RefactorPatrol::JobStoreFreshStart
       - Hive::RefactorPatrol::JobStoreFiles
-      - Hive::RefactorPatrol::JobStoreSchemaMigration
+      - Hive::RefactorPatrol::JobStoreWriterFence
       - Hive::RefactorPatrol::TransitionEvidence
       - Hive::RefactorPatrol::TransitionGateway
     forbidden_constructions:
@@ -143,8 +151,8 @@ components:
       - Hive::RefactorPatrol::EffectGateway
       - Hive::RefactorPatrol::JobQueryIndex
       - Hive::RefactorPatrol::JobStore
+      - Hive::RefactorPatrol::JobStoreFreshStart
       - Hive::RefactorPatrol::JobStoreFiles
-      - Hive::RefactorPatrol::JobStoreSchemaMigration
       - Hive::RefactorPatrol::TransitionGateway
     authorized_internal_constructions:
       - constant: Hive::Modules::Migration::EvidenceStore
@@ -210,28 +218,30 @@ components:
       - constant: Hive::RefactorPatrol::JobQueryIndex
         files:
           - lib/hive/refactor_patrol/job_store.rb
-        reason: "JobStore privately composes the bounded logical listing projection; schema migration constructs it inside the component to rebuild converted state."
+        reason: "JobStore privately composes the bounded logical listing projection."
       - constant: Hive::RefactorPatrol::JobStoreFiles
         files:
           - lib/hive/refactor_patrol/job_store.rb
-        reason: "JobStore privately composes the descriptor-confined physical storage port; schema migration constructs it inside the component over the same ManagedDirectory."
-      - constant: Hive::RefactorPatrol::JobStoreSchemaMigration
+        reason: "JobStore privately composes the descriptor-confined physical storage port."
+      - constant: Hive::RefactorPatrol::JobStoreFreshStart
         files:
-          - lib/hive/refactor_patrol/job_store_generation_cutover.rb
-        reason: "The physical generation cutover is the sole coordinator allowed to construct the one-off released-v2 converter."
+          - lib/hive/refactor_patrol/job_store.rb
+        reason: "JobStore is the sole runtime facade over the explicit opaque reset boundary."
     hive_consumers:
       - lib/hive/commands/patrol.rb
       - lib/hive/commands/refactor_patrol.rb
+      - lib/hive/commands/refactor_patrol_reset.rb
       - lib/hive/daemon/patrol_scheduler.rb
       - lib/hive/daemon/refactor_patrol_merge_reconciler.rb
       - lib/hive/daemon/refactor_patrol_scheduler.rb
+      - lib/hive/daemon/status_report.rb
       - lib/hive/modules/adapters/architecture_patrol.rb
       - lib/hive/modules/adapters/patrol.rb
       - lib/hive/patrol/pr_opener.rb
       - lib/hive/patrol/state_store.rb
       - lib/hive/refactor_patrol/action_runner.rb
       - lib/hive/refactor_patrol/job_store.rb
-    mutation_authority: "The separate ordinary and architecture gateways authorize product sinks; ordinary Patrol StateStore is the sole non-admitted projector of an already-authorized pull-request publication receipt, explicit intake, discovery, and action transition facades are the only semantic JobStore mutator call sites, and shared values, OccurrenceJournal, and EvidenceStore contain no product policy."
+    mutation_authority: "The separate ordinary and architecture gateways authorize product sinks; ordinary Patrol StateStore is the sole non-admitted projector of an already-authorized pull-request publication receipt, explicit intake, discovery, and action transition facades are the only semantic JobStore mutator call sites, the confirmed reset command alone may invoke the opaque cross-generation archive, and shared values, OccurrenceJournal, and EvidenceStore contain no product policy."
     recovery_surface: "StateStore and JobStore are the only product recovery authorities over the single OccurrenceJournal mechanic; ordinary Patrol drains typed publication entries before suppression reads and acknowledges only after an exact binding write or no-op, while EvidenceStore remains observation-only."
     wiki_page: wiki/modules/patrol.md
     focused_tests:
@@ -241,6 +251,10 @@ components:
       - test/unit/modules/migration/occurrence_recovery_index_test.rb
       - test/unit/modules/migration/patrol_evidence_test.rb
       - test/unit/daemon/refactor_patrol_scheduler_test.rb
+      - test/unit/daemon/activation_lock_test.rb
+      - test/unit/daemon/operational_snapshot_test.rb
+      - test/unit/daemon/writer_quiescence_test.rb
+      - test/unit/commands/refactor_patrol_reset_test.rb
       - test/unit/patrol/effect_gateway_test.rb
       - test/unit/patrol/fixer_test.rb
       - test/unit/patrol/pr_opener_test.rb
@@ -252,8 +266,11 @@ components:
       - test/unit/refactor_patrol/claim_maintenance_transitions_test.rb
       - test/unit/refactor_patrol/discovery_transitions_test.rb
       - test/unit/refactor_patrol/effect_gateway_test.rb
+      - test/unit/refactor_patrol/job_store_fresh_start_test.rb
       - test/unit/refactor_patrol/job_store_files_test.rb
+      - test/unit/refactor_patrol/job_store_writer_fence_test.rb
       - test/unit/refactor_patrol/transition_gateway_test.rb
+      - test/integration/refactor_patrol_command_test.rb
     migration_exceptions:
       - reason: "U3 must prove candidate-bound compressed evidence and production qualification before this internal transition boundary can be promoted."
         removal_unit: U3

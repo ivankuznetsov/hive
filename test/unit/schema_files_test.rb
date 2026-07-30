@@ -1681,7 +1681,7 @@ class SchemaFilesTest < Minitest::Test
       schema schema_version ok running pid uptime_sec pid_file log_file
       service_installed service_enabled unit_path
       installed_binary expected_binary installed_binary_version cli_version binary_drift
-      current_version update_nudge schema_migrations
+      current_version update_nudge job_store_resets
     ].sort
     assert_equal producer_required, schema_required,
                  "schema/producer required-key drift in hive-daemon-status.v1.json"
@@ -2406,6 +2406,65 @@ class SchemaFilesTest < Minitest::Test
                      "#{expected_basename}: title version suffix must match SCHEMA_VERSIONS"
       end
     end
+  end
+
+  def test_refactor_patrol_jobstore_reset_schema_accepts_reset_and_noop_success
+    schema = JSONSchemer.schema(
+      JSON.parse(
+        File.read(
+          Hive::Schemas.schema_path(
+            "hive-refactor-patrol-jobstore-reset"
+          )
+        )
+      )
+    )
+    base = {
+      "schema" => "hive-refactor-patrol-jobstore-reset",
+      "schema_version" => 1,
+      "ok" => true,
+      "project" => "demo",
+      "project_id" => "project-demo",
+      "project_root" => "/srv/demo",
+      "status" => "current",
+      "changed" => true,
+      "source_generation" => "v2",
+      "target_generation" => "v3",
+      "target_schema_version" => 3,
+      "transaction_id" => "reset-#{'a' * 32}",
+      "archive_path" => "/srv/demo/.hive-state/refactor_patrol/v2/.jobs-v2-archive-#{'a' * 32}",
+      "receipt_path" => "/srv/demo/.hive-state/refactor_patrol/jobstore-fresh-start.json"
+    }
+
+    assert_empty schema.validate(base).to_a
+    assert_empty schema.validate(
+      base.merge(
+        "status" => "fresh",
+        "changed" => false,
+        "transaction_id" => nil,
+        "archive_path" => nil,
+        "receipt_path" => nil
+      )
+    ).to_a
+    refute_empty schema.validate(
+      base.merge("status" => "reset_required")
+    ).to_a
+
+    error = {
+      "schema" => "hive-refactor-patrol-jobstore-reset",
+      "schema_version" => 1,
+      "ok" => false,
+      "error_class" => "ConcurrentRunError",
+      "error_kind" => "concurrent_run",
+      "exit_code" => Hive::ExitCodes::TEMPFAIL,
+      "message" => "reset is fenced",
+      "project" => "demo",
+      "holder" => { "pid" => 12_345 },
+      "lock_path" => "/tmp/.daemon-activation.lock"
+    }
+    assert_empty schema.validate(error).to_a
+    refute_empty schema.validate(
+      error.merge("error_kind" => "migration_required")
+    ).to_a
   end
 
   def test_internal_attempt_schema_pins_state_and_receipt_contract

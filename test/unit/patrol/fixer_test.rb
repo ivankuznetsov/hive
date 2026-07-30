@@ -2,6 +2,7 @@ require "test_helper"
 require "hive/config"
 require "hive/patrol/fixer"
 require "hive/patrol/finding"
+require "hive/patrol/state_store"
 require "hive/usage_db"
 
 class HivePatrolFixerTest < Minitest::Test
@@ -39,6 +40,25 @@ class HivePatrolFixerTest < Minitest::Test
       evidence: [ { "file" => "app.rb", "line" => 1, "snippet" => "puts" } ],
       fingerprint: "abcdef1234567890"
     )
+  end
+
+  def publication_binding_for(patch, repository:)
+    {
+      "receipt_id" => "receipt-#{'1' * 64}",
+      "intent_id" => "intent-#{'2' * 64}",
+      "occurrence_id" => "occ-#{'3' * 64}",
+      "repository" => repository,
+      "branch" => patch.branch,
+      "base_branch" => "master",
+      "patch_id" => patch.id,
+      "worktree_path" => patch.worktree_path,
+      "base_sha" => patch.base_sha,
+      "head_sha" => patch.head_sha,
+      "pr_url" => "https://example.com/pr/2",
+      "pr_state" => "OPEN",
+      "head_oid" => patch.head_sha,
+      "base_oid" => patch.base_sha
+    }
   end
 
   def write_fix_proof(output_path, status: "fixed",
@@ -671,6 +691,10 @@ class HivePatrolFixerTest < Minitest::Test
         ledger, finding.fingerprint, branch: first.branch,
         state: "review_handoff_failed", finding: finding
       )
+      ledger.fetch(finding.fingerprint)["publication_binding"] =
+        publication_binding_for(
+          first, repository: "owner/demo"
+        )
       state.send(:raw_write_fingerprints, ledger)
       second = fixer.attempt(finding)
 
@@ -683,7 +707,7 @@ class HivePatrolFixerTest < Minitest::Test
     end
   end
 
-  def test_reconciliation_retry_reuses_the_receipted_validated_patch
+  def test_reconciliation_retry_reuses_the_bound_validated_patch
     with_tmp_git_repo do |repo|
       File.write(File.join(repo, "app.rb"), "if\n")
       run!("git", "-C", repo, "add", ".")
@@ -707,12 +731,10 @@ class HivePatrolFixerTest < Minitest::Test
         pr_url: "https://example.com/pr/2",
         state: "reconciliation_pending", finding: finding
       )
-      ledger.fetch(finding.fingerprint)["publication_receipt"] = {
-        "patch_id" => first.id,
-        "worktree_path" => first.worktree_path,
-        "base_sha" => first.base_sha,
-        "head_sha" => first.head_sha
-      }
+      ledger.fetch(finding.fingerprint)["publication_binding"] =
+        publication_binding_for(
+          first, repository: "owner/demo"
+        )
       state.send(:raw_write_fingerprints, ledger)
 
       second = nil
@@ -730,7 +752,99 @@ class HivePatrolFixerTest < Minitest::Test
     end
   end
 
-  def test_review_handoff_retry_ignores_missing_and_unreadable_patch_receipts
+  def test_uncertain_publication_reuses_the_complete_intent_seed
+    with_tmp_git_repo do |repo|
+      File.write(File.join(repo, "app.rb"), "if\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "broken app", "--quiet")
+      attempts = 0
+      agent = lambda do |worktree_path:, output_path:, **|
+        attempts += 1
+        raise "fix agent must not rerun after uncertain dispatch" if
+          attempts > 1
+
+        File.write(File.join(worktree_path, "app.rb"), "puts 'fixed'\n")
+        write_regression(worktree_path)
+        write_fix_proof(output_path)
+      end
+      state = Hive::Patrol::StateStore.new(repo)
+      fixer = Hive::Patrol::Fixer.new(
+        repo, cfg: cfg(repo), state: state, agent_runner: agent
+      )
+      first = fixer.attempt(finding)
+      capture = Hive::Modules::Migration::PatrolCapture.build(
+        module_name: "patrol",
+        project: {
+          "project_id" => "fixer-test",
+          "name" => File.basename(repo),
+          "repository" => "owner/demo"
+        },
+        trigger: { "kind" => "manual", "id" => "uncertain-pr" },
+        reservation: {
+          "kind" => "ordinary", "id" => "uncertain-pr"
+        },
+        owner: "legacy",
+        owner_epoch: 1,
+        selection_input: {
+          "kind" => "operation",
+          "operation" => "validated_patch"
+        },
+        selection:
+          Hive::Modules::Migration::PatrolDecisionProjection.build(
+            module_name: "patrol", rationale: "due"
+          ),
+        outcome_class: nil,
+        outcome: nil,
+        occurred_at: Time.at(0).utc,
+        recorded_at: Time.at(0).utc
+      )
+      scope = {
+        "repository" => "owner/demo",
+        "branch" => first.branch,
+        "base_branch" => "master",
+        "finding_projection" =>
+          Hive::Modules::Migration::PatrolEvidence.canonical(
+            "category" => finding.category.to_s,
+            "feature_id" => finding.feature_id.to_s,
+            "root_cause_tokens" =>
+              Hive::Patrol::Fingerprint.semantic_tokens(finding),
+            "target_sha" => finding.target_sha.to_s,
+            "title_tokens" =>
+              Hive::Patrol::Fingerprint.title_tokens(finding)
+          ),
+        "fingerprint" => finding.fingerprint,
+        "patch_id" => first.id,
+        "worktree_path" => first.worktree_path,
+        "base_sha" => first.base_sha,
+        "head_sha" => first.head_sha
+      }
+      intent = Hive::Modules::Migration::EffectIntent.build(
+        module_name: "patrol",
+        occurrence_id: capture.occurrence_id,
+        authority: "legacy",
+        owner_epoch: 1,
+        sink: "pull_request",
+        target: "owner/demo:#{first.branch}",
+        idempotency_key: "#{finding.fingerprint}:#{first.id}:pull_request",
+        capability: "github_pull_requests",
+        scope: scope,
+        created_at: Time.at(0).utc
+      )
+      state.reserve_occurrence!(capture, now: Time.at(0).utc)
+      state.prepare_effect!(intent, now: Time.at(0).utc)
+      state.mark_dispatch_uncertain!(intent, now: Time.at(0).utc)
+
+      second = fixer.attempt(finding)
+
+      assert first.passed
+      assert second.passed
+      assert_equal first.id, second.id
+      assert_equal first.head_sha, second.head_sha
+      assert_equal 1, attempts
+    end
+  end
+
+  def test_review_handoff_retry_requires_an_immutable_publication_binding
     with_tmp_git_repo do |repo|
       state = Hive::Patrol::StateStore.new(repo)
       branch = "hive-patrol/#{finding.feature_id}-#{finding.fingerprint[0, 8]}"
@@ -745,13 +859,16 @@ class HivePatrolFixerTest < Minitest::Test
       worktree = Struct.new(:path).new(repo)
 
       assert_nil fixer.send(:reusable_publication_patch, finding, branch, worktree)
-      with_replaced_singleton_method(Dir, :glob, ->(*) { raise Errno::EACCES, "denied" }) do
+      with_replaced_singleton_method(
+        Dir, :glob,
+        ->(*) { raise "missing bindings must not scan patch history" }
+      ) do
         assert_nil fixer.send(:reusable_publication_patch, finding, branch, worktree)
       end
     end
   end
 
-  def test_review_handoff_receipt_is_not_reused_when_git_state_is_unreadable
+  def test_review_handoff_binding_is_not_reused_when_git_state_is_unreadable
     with_tmp_dir do |dir|
       fixer = Hive::Patrol::Fixer.new(dir, cfg: cfg(dir))
       record = {

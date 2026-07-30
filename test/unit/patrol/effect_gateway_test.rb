@@ -103,11 +103,15 @@ class PatrolEffectGatewayTest < Minitest::Test
 
       first = perform(gateway) do
         calls += 1
-        { "pr_url" => "https://github.com/owner/demo/pull/7" }
+        publication_outcome(
+          "https://github.com/owner/demo/pull/7"
+        )
       end
       duplicate = perform(gateway) do
         calls += 1
-        { "pr_url" => "https://github.com/owner/demo/pull/8" }
+        publication_outcome(
+          "https://github.com/owner/demo/pull/8"
+        )
       end
 
       assert_equal 1, calls
@@ -132,8 +136,8 @@ class PatrolEffectGatewayTest < Minitest::Test
         "reason" => "validator emitted #{token}"
       }
 
-      result = perform(gateway) { outcome }
-      duplicate = perform(gateway) do
+      result = perform(gateway, sink: "finding") { outcome }
+      duplicate = perform(gateway, sink: "finding") do
         flunk("terminal replay must not invoke the effect")
       end
 
@@ -142,7 +146,7 @@ class PatrolEffectGatewayTest < Minitest::Test
                    result.outcome.fetch("reason")
       assert_equal result.receipt.to_h, duplicate.receipt.to_h
       assert_equal result.outcome,
-                   effect_state(store).fetch("outcome")
+                   effect_state(store, sink: "finding").fetch("outcome")
       assert_equal result.outcome,
                    evidence.receipts.fetch(0).outcome
 
@@ -188,13 +192,14 @@ class PatrolEffectGatewayTest < Minitest::Test
         target: "owner/demo:branch",
         idempotency_key: "finding-1:pull_request",
         capability: "github_pull_requests",
-        scope: { "fingerprint" => "fingerprint-1" }
+        scope: publication_scope
       ) do
         {
           "status" => "matched",
-          "outcome" => {
-            "pr_url" => "https://github.com/owner/demo/pull/7"
-          }
+          "outcome" =>
+            publication_outcome(
+              "https://github.com/owner/demo/pull/7"
+            )
         }
       end
 
@@ -202,6 +207,44 @@ class PatrolEffectGatewayTest < Minitest::Test
       assert_equal result.receipt.to_h, evidence.receipts.first.to_h
       assert_equal "reconciled", effect_state(store).fetch("state")
       refute_includes operations, :sink
+    end
+  end
+
+  def test_terminal_pr_replay_requires_atomic_publication_without_redelivery
+    with_tmp_dir do |root|
+      operations = []
+      store, evidence = delivery(root, operations)
+      intent = effect_intent
+      store.prepare_effect!(intent, now: NOW)
+      store.mark_dispatch_uncertain!(intent, now: NOW)
+      store.instance_variable_get(:@occurrence_store).settle_effect!(
+        intent,
+        status: "committed",
+        outcome:
+          publication_outcome(
+            "https://github.com/owner/demo/pull/7"
+          ),
+        now: NOW
+      )
+      effect_calls = 0
+      gateway = gateway(
+        root, store: store, evidence: evidence,
+        operations: operations
+      )
+
+      error = assert_raises(Hive::ConfigError) do
+        perform(gateway) do
+          effect_calls += 1
+          publication_outcome(
+            "https://github.com/owner/demo/pull/8"
+          )
+        end
+      end
+
+      assert_equal "patrol outbox publication is missing",
+                   error.message
+      assert_equal 0, effect_calls
+      assert_empty evidence.receipts
     end
   end
 
@@ -326,7 +369,9 @@ class PatrolEffectGatewayTest < Minitest::Test
       idempotency_key: "finding-1:#{sink}",
       capability: sink == "state" ? "filesystem_write" :
         "github_pull_requests",
-      scope: { "fingerprint" => "fingerprint-1" },
+      scope:
+        sink == "pull_request" ?
+          publication_scope : { "fingerprint" => "fingerprint-1" },
       reconcile: reconcile,
       &effect
     )
@@ -343,10 +388,57 @@ class PatrolEffectGatewayTest < Minitest::Test
       idempotency_key: "finding-1:#{sink}",
       capability: sink == "state" ? "filesystem_write" :
         "github_pull_requests",
-      scope: { "fingerprint" => "fingerprint-1" },
+      scope:
+        sink == "pull_request" ?
+          publication_scope : { "fingerprint" => "fingerprint-1" },
       created_at: NOW
     )
     store.effect_state(intent)
+  end
+
+  def effect_intent
+    Hive::Modules::Migration::EffectIntent.build(
+      module_name: "patrol",
+      occurrence_id: capture.occurrence_id,
+      authority: "legacy",
+      owner_epoch: 1,
+      sink: "pull_request",
+      target: "owner/demo:branch",
+      idempotency_key: "finding-1:pull_request",
+      capability: "github_pull_requests",
+      scope: publication_scope,
+      created_at: NOW
+    )
+  end
+
+  def publication_scope
+    {
+      "repository" => "owner/demo",
+      "branch" => "branch",
+      "base_branch" => "main",
+      "finding_projection" =>
+        Hive::Modules::Migration::PatrolEvidence.canonical(
+          "category" => "correctness",
+          "feature_id" => "feature-1",
+          "root_cause_tokens" => [ "shared", "cause" ],
+          "target_sha" => "a" * 40,
+          "title_tokens" => [ "shared", "title" ]
+        ),
+      "fingerprint" => "fingerprint-1",
+      "patch_id" => "patch-1",
+      "worktree_path" => "/tmp/patrol-patch-1",
+      "base_sha" => "a" * 40,
+      "head_sha" => "b" * 40
+    }
+  end
+
+  def publication_outcome(url)
+    {
+      "pr_url" => url,
+      "state" => "OPEN",
+      "head_oid" => "b" * 40,
+      "base_oid" => "a" * 40
+    }
   end
 
   def capture

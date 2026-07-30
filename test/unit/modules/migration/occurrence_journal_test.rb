@@ -62,6 +62,7 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
       journal.pending_outbox(occurrence_id).each do |entry|
         journal.acknowledge_outbox!(
           occurrence_id,
+          kind: entry.fetch("kind"),
           entry_id: entry.fetch("id"),
           digest: entry.fetch("digest")
         )
@@ -339,6 +340,7 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
         assert_raises(Hive::ConfigError) do
           journal.acknowledge_outbox!(
             capture.occurrence_id,
+            kind: entry.fetch("kind"),
             entry_id: entry.fetch("id"),
             digest: entry.fetch("digest")
           )
@@ -353,6 +355,7 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
       }
       restarted.acknowledge_outbox!(
         capture.occurrence_id,
+        kind: entry.fetch("kind"),
         entry_id: entry.fetch("id"),
         digest: entry.fetch("digest")
       )
@@ -1127,6 +1130,91 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
     end
   end
 
+  def test_pull_request_settlement_atomically_appends_typed_publication
+    with_journal do |journal|
+      intent = publication_intent
+      journal.prepare_effect!(intent, now: NOW)
+      journal.mark_dispatch_uncertain!(intent, now: NOW + 1)
+      outcome = {
+        "pr_url" => "https://github.com/owner/demo/pull/17",
+        "state" => "OPEN",
+        "head_oid" => "b" * 40,
+        "base_oid" => "a" * 40
+      }
+
+      receipt = journal.settle_effect!(
+        intent,
+        status: "committed",
+        outcome: outcome,
+        projections: [ "publication" ],
+        now: NOW + 2
+      )
+
+      entries = journal.pending_outbox(intent.occurrence_id)
+      assert_equal %w[receipt publication],
+                   entries.map { |entry| entry.fetch("kind") }
+      assert_equal [ receipt.receipt_id, receipt.receipt_id ],
+                   entries.map { |entry| entry.fetch("id") }
+      assert_equal [ canonical(receipt.to_h), canonical(receipt.to_h) ],
+                   entries.map { |entry| entry.fetch("bytes") }
+
+      publication = entries.fetch(1)
+      journal.acknowledge_outbox!(
+        intent.occurrence_id,
+        kind: publication.fetch("kind"),
+        entry_id: publication.fetch("id"),
+        digest: publication.fetch("digest")
+      )
+      assert_equal [ "receipt" ],
+                   journal.pending_outbox(intent.occurrence_id).map {
+                     |entry| entry.fetch("kind")
+                   }
+
+      replay = journal.settle_effect!(
+        intent,
+        status: "committed",
+        outcome: outcome,
+        projections: [ "publication" ],
+        now: NOW + 3
+      )
+      assert_equal receipt.to_h, replay.to_h
+    end
+  end
+
+  def test_terminal_pull_request_replay_requires_its_atomic_publication
+    with_journal do |journal|
+      intent = publication_intent
+      journal.prepare_effect!(intent, now: NOW)
+      journal.mark_dispatch_uncertain!(intent, now: NOW + 1)
+      outcome = {
+        "pr_url" => "https://github.com/owner/demo/pull/17",
+        "state" => "OPEN",
+        "head_oid" => "b" * 40,
+        "base_oid" => "a" * 40
+      }
+      journal.settle_effect!(
+        intent,
+        status: "committed",
+        outcome: outcome,
+        now: NOW + 2
+      )
+
+      assert_raises(Hive::ConfigError) do
+        journal.settle_effect!(
+          intent,
+          status: "committed",
+          outcome: outcome,
+          projections: [ "publication" ],
+          now: NOW + 3
+        )
+      end
+      assert_equal [ "receipt" ],
+                   journal.pending_outbox(intent.occurrence_id).map {
+                     |entry| entry.fetch("kind")
+                   }
+    end
+  end
+
   def test_finalization_replay_uses_exact_capture_and_event_bytes
     with_journal do |journal|
       provisional = patrol_capture
@@ -1249,12 +1337,14 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
       assert_raises(Hive::ConfigError) do
         journal.acknowledge_outbox!(
           intent.occurrence_id,
+          kind: entry.fetch("kind"),
           entry_id: entry.fetch("id"),
           digest: "wrong"
         )
       end
       journal.acknowledge_outbox!(
         intent.occurrence_id,
+        kind: entry.fetch("kind"),
         entry_id: entry.fetch("id"),
         digest: entry.fetch("digest")
       )
@@ -2364,6 +2454,7 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
     journal.pending_outbox(occurrence_id).each do |entry|
       journal.acknowledge_outbox!(
         occurrence_id,
+        kind: entry.fetch("kind"),
         entry_id: entry.fetch("id"),
         digest: entry.fetch("digest")
       )
@@ -2499,6 +2590,37 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
       idempotency_key: "finding-1:pull-request:#{target}",
       capability: capability,
       scope: { "fingerprint" => "fingerprint-1" },
+      created_at: NOW
+    )
+  end
+
+  def publication_intent
+    Hive::Modules::Migration::EffectIntent.build(
+      module_name: "patrol",
+      occurrence_id: patrol_capture.occurrence_id,
+      authority: "legacy",
+      owner_epoch: 1,
+      sink: "pull_request",
+      target: "owner/demo:patrol/finding-1",
+      idempotency_key: "finding-1:patch-1:pull-request",
+      capability: "github_pull_requests",
+      scope: {
+        "repository" => "owner/demo",
+        "branch" => "patrol/finding-1",
+        "base_branch" => "main",
+        "finding_projection" => canonical(
+          "category" => "correctness",
+          "feature_id" => "feature-1",
+          "root_cause_tokens" => [ "shared", "cause" ],
+          "target_sha" => "a" * 40,
+          "title_tokens" => [ "shared", "title" ]
+        ),
+        "fingerprint" => "fingerprint-1",
+        "patch_id" => "patch-1",
+        "worktree_path" => "/tmp/patrol-patch-1",
+        "base_sha" => "a" * 40,
+        "head_sha" => "b" * 40
+      },
       created_at: NOW
     )
   end

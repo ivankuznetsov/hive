@@ -42,6 +42,10 @@ module Hive
           %w[
             base_sha branch fingerprint fingerprint_operation head_sha
             patch_id worktree_path
+          ],
+          %w[
+            base_branch base_sha branch finding_projection fingerprint
+            head_sha patch_id repository worktree_path
           ]
         ].map(&:sort).freeze
         EFFECT_OUTCOME_KEY_SETS = [

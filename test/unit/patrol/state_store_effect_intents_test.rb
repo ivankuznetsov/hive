@@ -49,9 +49,7 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
 
       store.prepare_effect!(intent, now: NOW)
       store.mark_dispatch_uncertain!(intent, now: NOW)
-      outcome = {
-        "pr_url" => "https://github.com/owner/demo/pull/7"
-      }
+      outcome = publication_outcome
       receipt = store.settle_effect!(
         intent, status: "committed", outcome: outcome, now: NOW
       )
@@ -61,10 +59,161 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
       assert_equal receipt.to_h, reloaded.effect_receipt(
         receipt.receipt_id, occurrence_id: intent.occurrence_id
       ).to_h
+      assert_equal %w[publication receipt],
+                   reloaded.send(
+                     :instance_variable_get, :@occurrence_store
+                   ).pending_outbox(intent.occurrence_id).map {
+                     |entry| entry.fetch("kind")
+                   }.sort
       refute reloaded.state.key?("effect_intents")
       assert reloaded.fingerprints.values.none? do |entry|
         entry.is_a?(Hash) && entry.key?("effect_intents")
       end
+    end
+  end
+
+  def test_publication_projection_survives_ack_crash_and_replays_as_noop
+    with_tmp_dir do |root|
+      store = Hive::Patrol::StateStore.new(root)
+      store.ensure!
+      intent = effect_intent
+      store.reserve_occurrence!(capture, now: NOW)
+      store.prepare_effect!(intent, now: NOW)
+      store.mark_dispatch_uncertain!(intent, now: NOW)
+      receipt = store.settle_effect!(
+        intent,
+        status: "committed",
+        outcome: publication_outcome,
+        now: NOW
+      )
+      occurrence_store =
+        store.instance_variable_get(:@occurrence_store)
+      original_ack = occurrence_store.method(:acknowledge_outbox!)
+      occurrence_store.define_singleton_method(
+        :acknowledge_outbox!
+      ) do |occurrence_id, **options|
+        if options.fetch(:kind) == "publication"
+          raise IOError, "crash before publication acknowledgement"
+        end
+        original_ack.call(occurrence_id, **options)
+      end
+
+      assert_raises(IOError) do
+        store.drain_publication_outbox!(intent.occurrence_id)
+      end
+      projected = store.fingerprints.fetch("fingerprint-1")
+      binding = projected.fetch("publication_binding")
+      assert_equal receipt.receipt_id, binding.fetch("receipt_id")
+      assert_equal "reconciliation_pending",
+                   projected.fetch("state")
+      assert_equal %w[shared title],
+                   projected.fetch("title_tokens")
+
+      reloaded = Hive::Patrol::StateStore.new(root)
+      writes = 0
+      original_write =
+        reloaded.method(:raw_write_fingerprints)
+      reloaded.define_singleton_method(
+        :raw_write_fingerprints
+      ) do |data|
+        writes += 1
+        original_write.call(data)
+      end
+      reloaded.drain_publication_outbox!(intent.occurrence_id)
+
+      assert_equal 0, writes
+      assert_equal projected,
+                   reloaded.fingerprints.fetch("fingerprint-1")
+      assert_equal [ "receipt" ],
+                   reloaded.instance_variable_get(:@occurrence_store)
+                           .pending_outbox(intent.occurrence_id)
+                           .map { |entry| entry.fetch("kind") }
+    end
+  end
+
+  def test_publication_projection_rejects_an_immutable_binding_conflict
+    with_tmp_dir do |root|
+      store = Hive::Patrol::StateStore.new(root)
+      store.ensure!
+      intent = effect_intent
+      store.reserve_occurrence!(capture, now: NOW)
+      store.prepare_effect!(intent, now: NOW)
+      store.mark_dispatch_uncertain!(intent, now: NOW)
+      receipt = store.settle_effect!(
+        intent,
+        status: "committed",
+        outcome: publication_outcome,
+        now: NOW
+      )
+      binding =
+        store.send(:publication_binding_from, receipt).fetch(0)
+      conflicting = JSON.parse(JSON.generate(binding))
+      conflicting["pr_url"] =
+        "https://github.com/owner/demo/pull/99"
+      store.send(:with_fingerprint_lock) do
+        store.send(
+          :raw_write_fingerprints,
+          "fingerprint-1" => {
+            "publication_binding" => conflicting
+          }
+        )
+      end
+
+      error = assert_raises(Hive::ConfigError) do
+        store.drain_publication_outbox!(intent.occurrence_id)
+      end
+
+      assert_equal "patrol publication binding conflicts",
+                   error.message
+      assert_equal conflicting,
+                   store.fingerprints.dig(
+                     "fingerprint-1", "publication_binding"
+                   )
+      assert_includes(
+        store.instance_variable_get(:@occurrence_store)
+             .pending_outbox(intent.occurrence_id)
+             .map { |entry| entry.fetch("kind") },
+        "publication"
+      )
+    end
+  end
+
+  def test_generic_recovery_drain_projects_publication_and_receipt
+    with_tmp_dir do |root|
+      store = Hive::Patrol::StateStore.new(root)
+      store.ensure!
+      intent = effect_intent
+      store.reserve_occurrence!(capture, now: NOW)
+      store.prepare_effect!(intent, now: NOW)
+      store.mark_dispatch_uncertain!(intent, now: NOW)
+      receipt = store.settle_effect!(
+        intent,
+        status: "reconciled",
+        outcome: publication_outcome,
+        now: NOW
+      )
+      evidence =
+        Hive::Modules::Migration::EvidenceStore.new(
+          root: File.join(root, "evidence")
+        )
+
+      store.drain_occurrence_outbox!(
+        intent.occurrence_id,
+        evidence_store: evidence
+      )
+
+      assert_equal [ receipt.receipt_id ],
+                   evidence.receipts.map(&:receipt_id)
+      assert_equal receipt.receipt_id,
+                   store.fingerprints.dig(
+                     "fingerprint-1",
+                     "publication_binding",
+                     "receipt_id"
+                   )
+      assert_empty(
+        store.instance_variable_get(:@occurrence_store)
+             .pending_outbox(intent.occurrence_id)
+      )
     end
   end
 
@@ -141,9 +290,7 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
       store.reserve_occurrence!(capture, now: NOW)
       store.prepare_effect!(intent, now: NOW)
       store.mark_dispatch_uncertain!(intent, now: NOW)
-      outcome = {
-        "pr_url" => "https://github.com/owner/demo/pull/7"
-      }
+      outcome = publication_outcome
       store.settle_effect!(
         intent, status: "committed", outcome: outcome, now: NOW
       )
@@ -446,7 +593,7 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
         idempotency_key: "fp-1:publish",
         scope: { "fingerprint" => "fp-1" },
         set: expected,
-        deleted: [ "publication_receipt" ]
+        deleted: [ "publication_binding" ]
       )
 
       assert_match(/\A[0-9a-f]{64}\z/,
@@ -791,8 +938,35 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
       target: "owner/demo:hive-patrol/fix",
       idempotency_key: "fingerprint-1:pr",
       capability: "github_pull_requests",
+      scope: {
+        "repository" => "owner/demo",
+        "branch" => "hive-patrol/fix",
+        "base_branch" => "main",
+        "finding_projection" =>
+          Hive::Modules::Migration::PatrolEvidence.canonical(
+            "category" => "correctness",
+            "feature_id" => "feature-1",
+            "root_cause_tokens" => [ "shared", "cause" ],
+            "target_sha" => "a" * 40,
+            "title_tokens" => [ "shared", "title" ]
+          ),
+        "fingerprint" => "fingerprint-1",
+        "patch_id" => "patch-1",
+        "worktree_path" => "/tmp/patrol-patch-1",
+        "base_sha" => "a" * 40,
+        "head_sha" => "b" * 40
+      },
       created_at: NOW
     )
+  end
+
+  def publication_outcome
+    {
+      "pr_url" => "https://github.com/owner/demo/pull/7",
+      "state" => "OPEN",
+      "head_oid" => "b" * 40,
+      "base_oid" => "a" * 40
+    }
   end
 
   def fingerprint_intent(predecessor, idempotency_key:, deleted:)

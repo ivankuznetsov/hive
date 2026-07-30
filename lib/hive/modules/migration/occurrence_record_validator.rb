@@ -19,7 +19,14 @@ module Hive
         TERMINAL_STATES = %w[
           committed reconciled denied failed
         ].freeze
-        OUTBOX_KINDS = %w[receipt capture event].freeze
+        OUTBOX_KINDS = %w[receipt publication capture event].freeze
+        PUBLICATION_SCOPE_KEYS = %w[
+          base_branch base_sha branch finding_projection fingerprint
+          head_sha patch_id repository worktree_path
+        ].freeze
+        PUBLICATION_OUTCOME_KEYS = %w[
+          base_oid head_oid pr_url state
+        ].freeze
       end
 
       # Pure canonical-record validation and value normalization for the
@@ -363,6 +370,42 @@ module Hive
               malformed!("patrol outbox receipt is malformed")
             end
             value
+          when "publication"
+            value = EffectReceipt.from_h(data)
+            intent = value.intent
+            finding_projection = JSON.parse(
+              intent.scope.fetch("finding_projection", "")
+            )
+            valid = value.receipt_id == id &&
+                    @module_name == "patrol" &&
+                    intent.module_name == "patrol" &&
+                    intent.occurrence_id == occurrence_id &&
+                    intent.sink == "pull_request" &&
+                    intent.scope.keys.sort ==
+                      PUBLICATION_SCOPE_KEYS.sort &&
+                    value.outcome.keys.sort ==
+                      PUBLICATION_OUTCOME_KEYS.sort &&
+                    %w[committed reconciled].include?(value.status) &&
+                    value.outcome["base_oid"] ==
+                      intent.scope["base_sha"] &&
+                    value.outcome["head_oid"] ==
+                      intent.scope["head_sha"] &&
+                    valid_finding_projection?(
+                      finding_projection,
+                      intent.scope["finding_projection"]
+                    ) &&
+                    value.outcome["state"].to_s.match?(
+                      /\A(?:OPEN|MERGED)\z/
+                    ) &&
+                    !value.outcome["pr_url"].to_s.empty? &&
+                    intent.target == [
+                      intent.scope["repository"],
+                      intent.scope["branch"]
+                    ].join(":")
+            unless valid
+              malformed!("patrol outbox publication is malformed")
+            end
+            value
           when "capture"
             value = PatrolCapture.from_h(data)
             unless value.capture_id == id &&
@@ -381,6 +424,32 @@ module Hive
           end
         rescue JSON::ParserError
           malformed!("patrol outbox bytes are malformed")
+        end
+
+        def valid_finding_projection?(value, bytes)
+          return false unless value.is_a?(Hash)
+
+          token_arrays =
+            %w[title_tokens root_cause_tokens].all? do |key|
+              value[key].is_a?(Array) &&
+                value[key].all? do |token|
+                  token.is_a?(String) && !token.empty?
+                end
+            end
+          value.keys.sort == %w[
+            category feature_id root_cause_tokens target_sha title_tokens
+          ] &&
+            value["category"].is_a?(String) &&
+            !value["category"].empty? &&
+            value["feature_id"].is_a?(String) &&
+            !value["feature_id"].empty? &&
+            value["target_sha"].is_a?(String) &&
+            (
+              value["target_sha"].empty? ||
+              value["target_sha"].match?(/\A[0-9a-f]{40,64}\z/i)
+            ) &&
+            token_arrays &&
+            bytes == canonical(value)
         end
 
         def validate_finalized_outbox(record, outbox)

@@ -57,6 +57,7 @@ components:
       - "StateStore and JobStore expose the only product recovery APIs over one OccurrenceJournal facade; OccurrenceRecordStore is the sole occurrence-cell lock/read/write owner"
       - "JobStore v3 owns the immutable job-to-occurrence and intake-transition identities; discovery attempts, actions, and diagnostic episodes append exact transition identities"
       - "Canonical occurrence records atomically bind prepared or uncertain delivery, terminal outcomes, and ordered projection outbox bytes; persisted sender leases and PID authority do not exist"
+      - "A committed or reconciled ordinary Patrol pull request atomically appends its exact terminal receipt bytes as a typed publication outbox entry; StateStore alone projects that entry to one immutable publication_binding before tuple acknowledgement"
       - "EvidenceStore is an append-only bounded observational projection under module-runtime/migration/patrol-evidence and is never consulted for retry"
       - "ActionRunner and RefactorPatrolScheduler decide product work; composed action/discovery transition coordinators own durable transition identities, claim fences, and replay"
       - "JobStoreFiles is the sole descriptor-confined physical I/O port for live v3 jobs, query indexes, quarantine evidence, and action locks; JobQueryIndex owns only their bounded logical projection"
@@ -230,8 +231,8 @@ components:
       - lib/hive/patrol/state_store.rb
       - lib/hive/refactor_patrol/action_runner.rb
       - lib/hive/refactor_patrol/job_store.rb
-    mutation_authority: "The separate ordinary and architecture gateways authorize product sinks; explicit intake, discovery, and action transition facades are the only semantic JobStore mutator call sites, while shared values, OccurrenceJournal, and EvidenceStore contain no product policy."
-    recovery_surface: "StateStore and JobStore are the only product recovery authorities over the single OccurrenceJournal mechanic; recovery inventories only active occurrences and exact recorded transition IDs, while EvidenceStore remains observation-only."
+    mutation_authority: "The separate ordinary and architecture gateways authorize product sinks; ordinary Patrol StateStore is the sole non-admitted projector of an already-authorized pull-request publication receipt, explicit intake, discovery, and action transition facades are the only semantic JobStore mutator call sites, and shared values, OccurrenceJournal, and EvidenceStore contain no product policy."
+    recovery_surface: "StateStore and JobStore are the only product recovery authorities over the single OccurrenceJournal mechanic; ordinary Patrol drains typed publication entries before suppression reads and acknowledges only after an exact binding write or no-op, while EvidenceStore remains observation-only."
     wiki_page: wiki/modules/patrol.md
     focused_tests:
       - test/unit/modules/migration/evidence_store_test.rb
@@ -241,6 +242,8 @@ components:
       - test/unit/modules/migration/patrol_evidence_test.rb
       - test/unit/daemon/refactor_patrol_scheduler_test.rb
       - test/unit/patrol/effect_gateway_test.rb
+      - test/unit/patrol/fixer_test.rb
+      - test/unit/patrol/pr_opener_test.rb
       - test/unit/patrol/state_store_effect_intents_test.rb
       - test/unit/refactor_patrol/action_runner_test.rb
       - test/unit/refactor_patrol/action_transitions_test.rb

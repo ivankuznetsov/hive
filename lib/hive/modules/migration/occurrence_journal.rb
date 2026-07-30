@@ -297,10 +297,11 @@ module Hive
           @effects.reset_prepared(intent, now: now)
         end
 
-        def settle_effect!(intent, status:, outcome:,
+        def settle_effect!(intent, status:, outcome:, projections: [],
                            now: Time.now.utc)
           @effects.settle(
-            intent, status: status, outcome: outcome, now: now
+            intent, status: status, outcome: outcome,
+            projections: projections, now: now
           )
         end
 
@@ -358,10 +359,16 @@ module Hive
           )
         end
 
-        def acknowledge_outbox!(occurrence_id, entry_id:, digest:)
+        def assert_effect_projection!(receipt, projection:)
+          @effects.assert_projection!(
+            receipt, projection: projection
+          )
+        end
+
+        def acknowledge_outbox!(occurrence_id, kind:, entry_id:, digest:)
           record = @store.mutate(occurrence_id) do |value|
             @outbox.acknowledge(
-              value, entry_id: entry_id, digest: digest
+              value, kind: kind, entry_id: entry_id, digest: digest
             )
           end
           retire_if_terminal!(record)

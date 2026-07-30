@@ -1139,6 +1139,7 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
           ).each do |entry|
             journal.acknowledge_outbox!(
               capture.occurrence_id,
+              kind: entry.fetch("kind"),
               entry_id: entry.fetch("id"),
               digest: entry.fetch("digest")
             )

@@ -10,6 +10,21 @@ require "hive/modules/migration/patrol_evidence"
 module Hive
   module Patrol
     class StateStore < BaseStateStore
+      PUBLICATION_SCOPE_KEYS =
+        Hive::Modules::Migration::OccurrenceContract::
+          PUBLICATION_SCOPE_KEYS
+      PUBLICATION_OUTCOME_KEYS =
+        Hive::Modules::Migration::OccurrenceContract::
+          PUBLICATION_OUTCOME_KEYS
+      PUBLICATION_BINDING_KEYS = %w[
+        base_branch base_oid base_sha branch head_oid head_sha intent_id
+        occurrence_id patch_id pr_state pr_url receipt_id repository
+        worktree_path
+      ].freeze
+      FINDING_PROJECTION_KEYS = %w[
+        category feature_id root_cause_tokens target_sha title_tokens
+      ].freeze
+
       def initialize(project_root, hive_state_path: nil)
         super(
           project_root,
@@ -174,11 +189,16 @@ module Hive
                     "patrol finalized event publisher is unavailable"
             end
             event_publisher.publish_prepared(project_entry, value)
+          when "publication"
+            project_publication_receipt!(
+              Hive::Modules::Migration::EffectReceipt.from_h(value)
+            )
           else
             raise Hive::ConfigError, "patrol outbox kind is malformed"
           end
           @occurrence_store.acknowledge_outbox!(
             occurrence_id,
+            kind: entry.fetch("kind"),
             entry_id: entry.fetch("id"),
             digest: entry.fetch("digest")
           )
@@ -186,6 +206,93 @@ module Hive
         true
       rescue JSON::ParserError
         raise Hive::ConfigError, "patrol outbox bytes are malformed"
+      end
+
+      # Publication is a product projection of an already-settled remote
+      # effect. It deliberately bypasses effect admission: no second policy
+      # decision may separate a committed PR from its durable binding.
+      def drain_publication_outbox!(occurrence_id)
+        @occurrence_store.pending_outbox(occurrence_id).each do |entry|
+          next unless entry.fetch("kind") == "publication"
+
+          value = JSON.parse(entry.fetch("bytes"))
+          project_publication_receipt!(
+            Hive::Modules::Migration::EffectReceipt.from_h(value)
+          )
+          @occurrence_store.acknowledge_outbox!(
+            occurrence_id,
+            kind: entry.fetch("kind"),
+            entry_id: entry.fetch("id"),
+            digest: entry.fetch("digest")
+          )
+        end
+        true
+      rescue JSON::ParserError
+        raise Hive::ConfigError, "patrol outbox bytes are malformed"
+      end
+
+      def recover_pending_publications!
+        occurrence_ids = []
+        each_recovery_active_occurrence do |record|
+          next unless Array(record["outbox"]).any? do |entry|
+            entry["kind"] == "publication" &&
+              entry["acknowledged"] == false
+          end
+
+          occurrence_ids << record.fetch("occurrence_id")
+        end
+        occurrence_ids.each { |id| drain_publication_outbox!(id) }
+        true
+      end
+
+      # Bounded recovery lookup for a PR whose dispatch outcome is still
+      # uncertain. Fixer uses the complete persisted intent seed to reuse the
+      # exact validated patch rather than creating a second worktree/commit.
+      def retryable_publication_seed(fingerprint:, branch:)
+        fingerprint = fingerprint.to_s
+        branch = branch.to_s
+        matches = []
+        each_recovery_active_occurrence do |record|
+          capture =
+            Hive::Modules::Migration::PatrolCapture.from_h(
+              record.fetch("provisional_capture")
+            )
+          record.fetch("effects").each_value do |cell|
+            next unless %w[prepared dispatch_uncertain].include?(
+              cell["state"]
+            )
+            semantic = cell["semantic"]
+            next unless semantic.is_a?(Hash) &&
+                        semantic["sink"] == "pull_request"
+            repository =
+              capture.project.fetch("repository", nil).to_s
+            if repository.empty?
+              raise Hive::ConfigError,
+                    "patrol publication recovery repository is malformed"
+            end
+            scope = semantic["scope"]
+            next unless scope.is_a?(Hash) &&
+                        scope.keys.sort ==
+                          PUBLICATION_SCOPE_KEYS.sort &&
+                        scope["fingerprint"] == fingerprint &&
+                        scope["branch"] == branch &&
+                        scope["repository"] == repository &&
+                        semantic["target"] ==
+                          [ repository, branch ].join(":")
+
+            publication_finding_projection(scope)
+            matches << effect_object(scope)
+          end
+        end
+        unique = matches.uniq
+        if unique.length > 1
+          raise Hive::ConfigError,
+                "multiple retryable patrol publications share a fingerprint"
+        end
+        unique.first
+      rescue KeyError
+        raise Hive::ConfigError,
+              "patrol publication recovery seed is malformed"
       end
 
       def prepare_effect!(intent, now: Time.now.utc)
@@ -213,8 +320,15 @@ module Hive
       end
 
       def settle_effect!(intent, status:, outcome:, now: Time.now.utc)
+        projections =
+          if publication_settlement?(intent, status, outcome)
+            [ "publication" ]
+          else
+            []
+          end
         @occurrence_store.settle_effect!(
-          intent, status: status, outcome: outcome, now: now
+          intent, status: status, outcome: outcome,
+          projections: projections, now: now
         )
       end
 
@@ -225,9 +339,16 @@ module Hive
       end
 
       def effect_receipt(receipt_id, occurrence_id:)
-        @occurrence_store.receipt(
+        receipt = @occurrence_store.receipt(
           receipt_id, occurrence_id: occurrence_id
         )
+        if receipt.intent.sink == "pull_request" &&
+           %w[committed reconciled].include?(receipt.status)
+          @occurrence_store.assert_effect_projection!(
+            receipt, projection: "publication"
+          )
+        end
+        receipt
       end
 
       def terminal_effect_receipt_ids(occurrence_id)
@@ -474,6 +595,7 @@ module Hive
       # eligible; competing predecessors for one fingerprint are ambiguous
       # and block.
       def recover_pending_fingerprint_effects!
+        recover_pending_publications!
         configured_effect_gateway!
         with_fingerprint_lock do
           recover_pending_fingerprint_effects_locked!
@@ -484,6 +606,171 @@ module Hive
       end
 
       private
+
+      def publication_settlement?(intent, status, outcome)
+        return false unless intent.sink == "pull_request" &&
+                            %w[committed reconciled].include?(
+                              status.to_s
+                            )
+
+        publication_binding_from(
+          Hive::Modules::Migration::EffectReceipt.build(
+            intent: intent,
+            status: status,
+            outcome: outcome,
+            recorded_at: Time.at(0).utc
+          )
+        )
+        true
+      end
+
+      def project_publication_receipt!(receipt)
+        binding, finding = publication_binding_from(receipt)
+        fingerprint = receipt.intent.scope.fetch("fingerprint")
+        with_fingerprint_lock do
+          data = fingerprints
+          current = data[fingerprint]
+          unless current.nil? || current.is_a?(Hash)
+            raise Hive::ConfigError,
+                  "patrol publication fingerprint is malformed"
+          end
+          current = JSON.parse(JSON.generate(current || {}))
+          existing = current["publication_binding"]
+          if existing
+            unless existing.is_a?(Hash) &&
+                   existing.keys.sort ==
+                     PUBLICATION_BINDING_KEYS.sort &&
+                   existing == binding
+              raise Hive::ConfigError,
+                    "patrol publication binding conflicts"
+            end
+            next false
+          end
+
+          immutable_fields = {
+            "branch" => binding.fetch("branch"),
+            "pr_url" => binding.fetch("pr_url"),
+            "category" => finding.fetch("category"),
+            "feature_id" => finding.fetch("feature_id")
+          }
+          finding.fetch("target_sha").then do |target_sha|
+            immutable_fields["target_sha"] = target_sha unless
+              target_sha.empty?
+          end
+          immutable_fields.each do |field, expected|
+            next unless current.key?(field)
+            next if current[field] == expected
+
+            raise Hive::ConfigError,
+                  "patrol publication fingerprint conflicts"
+          end
+
+          current["first_seen"] ||= receipt.recorded_at
+          current["last_seen"] = receipt.recorded_at
+          current.merge!(immutable_fields)
+          current["title_tokens"] =
+            finding.fetch("title_tokens")
+          root_cause_tokens =
+            finding.fetch("root_cause_tokens")
+          if root_cause_tokens.empty?
+            current.delete("root_cause_tokens")
+          else
+            current["root_cause_tokens"] = root_cause_tokens
+          end
+          current["state"] = "reconciliation_pending"
+          current["publication_binding"] = binding
+          data[fingerprint] = current
+          raw_write_fingerprints(data)
+          true
+        end
+        binding
+      end
+
+      def publication_binding_from(receipt)
+        intent = receipt.intent
+        scope = intent.scope
+        outcome = receipt.outcome
+        finding = publication_finding_projection(scope)
+        capture = occurrence_capture(intent.occurrence_id)
+        capture_repository =
+          capture&.project&.fetch("repository", nil).to_s
+        valid = intent.module_name == "patrol" &&
+                !capture_repository.empty? &&
+                capture_repository == scope["repository"] &&
+                intent.sink == "pull_request" &&
+                scope.keys.sort == PUBLICATION_SCOPE_KEYS.sort &&
+                outcome.keys.sort == PUBLICATION_OUTCOME_KEYS.sort &&
+                %w[committed reconciled].include?(receipt.status) &&
+                outcome["base_oid"] == scope["base_sha"] &&
+                outcome["head_oid"] == scope["head_sha"] &&
+                outcome["state"].to_s.match?(/\A(?:OPEN|MERGED)\z/) &&
+                !outcome["pr_url"].to_s.empty? &&
+                intent.target ==
+                  [ scope["repository"], scope["branch"] ].join(":")
+        unless valid
+          raise Hive::ConfigError,
+                "patrol publication receipt is malformed"
+        end
+
+        binding = {
+          "receipt_id" => receipt.receipt_id,
+          "intent_id" => intent.intent_id,
+          "occurrence_id" => intent.occurrence_id,
+          "repository" => scope.fetch("repository"),
+          "branch" => scope.fetch("branch"),
+          "base_branch" => scope.fetch("base_branch"),
+          "patch_id" => scope.fetch("patch_id"),
+          "worktree_path" => scope.fetch("worktree_path"),
+          "base_sha" => scope.fetch("base_sha"),
+          "head_sha" => scope.fetch("head_sha"),
+          "pr_url" => outcome.fetch("pr_url"),
+          "pr_state" => outcome.fetch("state"),
+          "head_oid" => outcome.fetch("head_oid"),
+          "base_oid" => outcome.fetch("base_oid")
+        }.freeze
+        [ effect_object(binding), finding ].freeze
+      rescue KeyError
+        raise Hive::ConfigError,
+              "patrol publication receipt is malformed"
+      end
+
+      def publication_finding_projection(scope)
+        encoded = scope.fetch("finding_projection")
+        value = JSON.parse(encoded)
+        token_arrays = value.is_a?(Hash) &&
+          %w[title_tokens root_cause_tokens].all? do |key|
+            value[key].is_a?(Array) &&
+              value[key].all? do |token|
+                token.is_a?(String) && !token.empty?
+              end
+          end
+        valid = value.is_a?(Hash) &&
+                value.keys.sort == FINDING_PROJECTION_KEYS.sort &&
+                value["category"].is_a?(String) &&
+                !value["category"].empty? &&
+                value["feature_id"].is_a?(String) &&
+                !value["feature_id"].empty? &&
+                value["target_sha"].is_a?(String) &&
+                (
+                  value["target_sha"].empty? ||
+                  value["target_sha"].match?(
+                    /\A[0-9a-f]{40,64}\z/i
+                  )
+                ) &&
+                token_arrays &&
+                encoded ==
+                  Hive::Modules::Migration::PatrolEvidence.canonical(
+                    value
+                  )
+        unless valid
+          raise Hive::ConfigError,
+                "patrol publication finding projection is malformed"
+        end
+        effect_object(value)
+      rescue JSON::ParserError, KeyError
+        raise Hive::ConfigError,
+              "patrol publication finding projection is malformed"
+      end
 
       def recover_pending_fingerprint_effects_locked!
         intents = []

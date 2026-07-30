@@ -234,6 +234,7 @@ module Hive
           )
           @journal.acknowledge_outbox!(
             occurrence_id,
+            kind: entry.fetch("kind"),
             entry_id: entry.fetch("id"),
             digest: entry.fetch("digest")
           )

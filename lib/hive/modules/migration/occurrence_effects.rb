@@ -76,19 +76,23 @@ module Hive
           end
         end
 
-        def settle(intent, status:, outcome:, now:)
+        def settle(intent, status:, outcome:, now:, projections: [])
           status = status.to_s
           unless TERMINAL_STATES.include?(status)
             malformed!("patrol effect terminal status is malformed")
           end
           intent = @validator.intent(intent)
           outcome = @validator.object(outcome, "patrol effect outcome")
+          projections = validate_projections(projections)
           persisted = nil
           @store.mutate(intent.occurrence_id) do |record|
             cell = effect_cell!(record, intent)
             if TERMINAL_STATES.include?(cell.fetch("state"))
               assert_terminal_equivalent!(cell, status, outcome)
               persisted = terminal_receipt(record, cell)
+              assert_terminal_projections!(
+                record, persisted, projections
+              )
               next record
             end
             unless record.fetch("phase") == "reserved" &&
@@ -99,7 +103,8 @@ module Hive
             end
             persisted = terminalize!(
               record, cell, intent,
-              status: status, outcome: outcome, now: now
+              status: status, outcome: outcome, now: now,
+              projections: projections
             )
             record
           end
@@ -125,7 +130,8 @@ module Hive
             end
             persisted = terminalize!(
               record, cell, intent,
-              status: "denied", outcome: outcome, now: now
+              status: "denied", outcome: outcome, now: now,
+              projections: []
             )
             record
           end
@@ -136,6 +142,20 @@ module Hive
           record = @store.fetch(occurrence_id)
           malformed!("patrol occurrence is missing") unless record
           @outbox.receipt(record, receipt_id)
+        end
+
+        def assert_projection!(receipt, projection:)
+          intent = @validator.intent(receipt.intent)
+          receipt = @validator.receipt(
+            receipt, intent: intent
+          )
+          unless projection.to_s == "publication"
+            malformed!("patrol effect projection is malformed")
+          end
+          record = @store.fetch(receipt.intent.occurrence_id)
+          malformed!("patrol occurrence is missing") unless record
+          @outbox.assert_publication(record, receipt)
+          true
         end
 
         def terminal_receipt_ids(occurrence_id)
@@ -185,7 +205,8 @@ module Hive
           state(intent)
         end
 
-        def terminalize!(record, cell, intent, status:, outcome:, now:)
+        def terminalize!(record, cell, intent, status:, outcome:, now:,
+                         projections:)
           receipt = EffectReceipt.build(
             intent: intent,
             status: status,
@@ -196,6 +217,8 @@ module Hive
           cell["outcome"] = outcome
           cell["terminal_receipt_id"] = receipt.receipt_id
           @outbox.append_receipt(record, cell, receipt)
+          @outbox.append_publication(record, receipt) if
+            projections.include?("publication")
           touch_cell(record, cell, now)
           terminal_receipt(record, cell)
         end
@@ -218,6 +241,20 @@ module Hive
                     cell.fetch("outcome") == outcome
 
           malformed!("patrol effect terminal outcome conflicts")
+        end
+
+        def validate_projections(value)
+          projections = Array(value).map(&:to_s)
+          unless projections.uniq == projections &&
+                 (projections - %w[publication]).empty?
+            malformed!("patrol effect projections are malformed")
+          end
+          projections.freeze
+        end
+
+        def assert_terminal_projections!(record, receipt, projections)
+          @outbox.assert_publication(record, receipt) if
+            projections.include?("publication")
         end
 
         def validate_effect_identity!(cell, intent)

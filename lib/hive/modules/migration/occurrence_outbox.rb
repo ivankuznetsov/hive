@@ -63,6 +63,30 @@ module Hive
             ids.include?(receipt.receipt_id)
         end
 
+        def append_publication(record, receipt)
+          append(
+            record,
+            kind: "publication",
+            id: receipt.receipt_id,
+            bytes: @validator.canonical(receipt.to_h)
+          )
+        end
+
+        def assert_publication(record, receipt)
+          expected = @validator.canonical(receipt.to_h)
+          entry = record.fetch("outbox").find do |candidate|
+            candidate.fetch("kind") == "publication" &&
+              candidate.fetch("id") == receipt.receipt_id
+          end
+          unless entry &&
+                 entry.fetch("bytes") == expected &&
+                 entry.fetch("digest") ==
+                   Digest::SHA256.hexdigest(expected)
+            malformed!("patrol outbox publication is missing")
+          end
+          entry
+        end
+
         def pending(record)
           record.fetch("outbox")
                 .reject { |entry| entry.fetch("acknowledged") }
@@ -71,7 +95,13 @@ module Hive
                 .freeze
         end
 
-        def acknowledge(record, entry_id:, digest:)
+        def acknowledge(record, kind:, entry_id:, digest:)
+          kind = @validator.nonempty(
+            kind, "patrol outbox kind"
+          )
+          unless OUTBOX_KINDS.include?(kind)
+            malformed!("patrol outbox kind is malformed")
+          end
           id = @validator.nonempty(
             entry_id, "patrol outbox identity"
           )
@@ -79,7 +109,8 @@ module Hive
             digest, "patrol outbox digest"
           )
           entry = record.fetch("outbox").find do |candidate|
-            candidate.fetch("id") == id
+            candidate.fetch("kind") == kind &&
+              candidate.fetch("id") == id
           end
           malformed!("patrol outbox entry is missing") unless entry
           unless entry.fetch("digest") == digest

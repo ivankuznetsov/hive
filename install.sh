@@ -274,7 +274,7 @@ root_owned_immutable_path() {
   leaf="${path##*/}"
   [[ -n "$parent" && -n "$leaf" ]] ||
     die "root system channel cannot canonicalize path ${path}"
-  canonical_parent="$(CDPATH= cd -P "$parent" && pwd -P)"
+  canonical_parent="$(CDPATH='' cd -P "$parent" && pwd -P)"
   canonical="${canonical_parent%/}/${leaf}"
   [[ "$canonical" == "$path" ]] ||
     die "root system channel refuses redirected path ${path}"

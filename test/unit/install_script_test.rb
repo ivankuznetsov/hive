@@ -113,7 +113,7 @@ class InstallScriptTest < Minitest::Test
     refute_match(/\[\[\s+-v\b/, script)
     refute_includes root_preflight, "readlink -f"
     assert_includes root_preflight,
-                    'canonical_parent="$(CDPATH= cd -P'
+                    "canonical_parent=\"$(CDPATH='' cd -P"
   end
 
   def test_installer_requires_cosign_for_release_identity_verification

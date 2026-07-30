@@ -16,10 +16,16 @@ components:
         - Hive::Modules::Migration::PatrolCapture
         - Hive::Modules::Migration::EffectIntent
         - Hive::Modules::Migration::EffectReceipt
+        - Hive::Modules::Migration::PatrolEffectIndex
+        - Hive::Modules::Migration::PatrolEvidenceReceipt
+        - Hive::Modules::Migration::PatrolEvidenceVerifier
       errors:
         - Hive::ConfigError
     owned_paths:
       - lib/hive/modules/migration/patrol_evidence.rb
+      - lib/hive/modules/migration/patrol_effect_index.rb
+      - lib/hive/modules/migration/patrol_evidence_receipt.rb
+      - lib/hive/modules/migration/patrol_evidence_verifier.rb
       - lib/hive/modules/migration/evidence_store.rb
       - lib/hive/modules/migration/effect_admission.rb
       - lib/hive/modules/migration/effect_delivery.rb
@@ -66,6 +72,7 @@ components:
       - "JobStoreFreshStart atomically archives only released v2/jobs as opaque bytes; runtime never reads or converts it, and an explicit confirmed reset alone admits an empty v3 namespace"
     schema_contracts:
       - "hive-patrol-capture v1 and hive-patrol-effect-receipt v1 are strict canonical observation records"
+      - "hive-patrol-evidence-receipt v1 binds one exact candidate, lane, scenario, decision set, run-wide effect index, fault/restart matrix, and bounded artifact set; elapsed duration is telemetry only"
       - "hive-refactor-patrol-job v3 is the sole runtime JobStore schema; released v2 jobs have no compatibility reader or converter"
       - "hive-patrol-occurrence-recovery-index v1 is a bounded rebuildable active-ID projection tied to the journal-state recovery generation; occurrence records remain authoritative"
     lock_contracts:
@@ -84,6 +91,7 @@ components:
       - hive/module_package/managed_store
       - hive/modules/capability_context
       - hive/modules/migration/patrols
+      - hive/modules/migration/shadow_comparator
       - hive/paths
       - hive/pid_file
       - hive/refactor_patrol/job_store
@@ -250,6 +258,7 @@ components:
       - test/unit/modules/migration/occurrence_journal_test.rb
       - test/unit/modules/migration/occurrence_recovery_index_test.rb
       - test/unit/modules/migration/patrol_evidence_test.rb
+      - test/unit/modules/migration/patrol_evidence_qualification_test.rb
       - test/unit/daemon/refactor_patrol_scheduler_test.rb
       - test/unit/daemon/activation_lock_test.rb
       - test/unit/daemon/operational_snapshot_test.rb

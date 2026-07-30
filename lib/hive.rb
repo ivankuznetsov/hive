@@ -85,6 +85,7 @@ module Hive
       "hive-module-migration" => 1,
       "hive-module-shadow-decision" => 2,
       "hive-module-migration-report" => 1,
+      "hive-patrol-evidence-receipt" => 1,
       # Daily digest of tasks waiting on human input (`hive answer-digest
       # --json`). The success envelope reports the send outcome plus the full
       # waiting set (count/tasks); the Thor-usage error path emits the shared

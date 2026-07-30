@@ -65,12 +65,7 @@ module Hive
 
       def initialize(
         effective_uid: -> { Process.euid },
-        binary_path: lambda {
-          clean = ENV.to_h.reject do |key, _value|
-            key == Hive::InvokedBinary::ENV_KEY
-          end
-          Hive::InvokedBinary.path(env: clean)
-        },
+        binary_path: nil,
         loaded_specs: -> { Gem.loaded_specs.values },
         loaded_features: -> { $LOADED_FEATURES.dup },
         interpreter_path: -> { RbConfig.ruby },
@@ -82,12 +77,14 @@ module Hive
         require_launcher_marker: true
       )
         @effective_uid = effective_uid
-        @binary_path = binary_path
+        @environment = environment
+        @binary_path = binary_path || lambda {
+          Hive::InvokedBinary.path(env: @environment)
+        }
         @loaded_specs = loaded_specs
         @loaded_features = loaded_features
         @interpreter_path = interpreter_path
         @program_path = program_path
-        @environment = environment
         @lstat = lstat
         @realpath = realpath
         @trusted_uid = Integer(trusted_uid)
@@ -238,12 +235,14 @@ module Hive
 
       def validate_manifest!(payload, launcher:, interpreter:, script:,
                              hive_spec:)
+        raise TypeError, "manifest root must be an object" unless
+          payload.is_a?(Hash)
+
         expected_keys = %w[
           gem_home launcher ruby schema schema_version script
         ]
         gem_home = File.expand_path(payload.fetch("gem_home"))
-        valid = payload.is_a?(Hash) &&
-          payload.keys.sort == expected_keys &&
+        valid = payload.keys.sort == expected_keys &&
           payload["schema"] == "hive-root-runtime" &&
           payload["schema_version"] == 1 &&
           File.expand_path(payload["launcher"]) == launcher.path &&

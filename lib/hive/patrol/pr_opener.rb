@@ -1,12 +1,8 @@
 require "tempfile"
 require "time"
-require "digest"
 require "hive/gh"
 require "hive/git_ops"
-require "hive/modules/migration/evidence_store"
-require "hive/modules/migration/patrols"
 require "hive/patrol/effect_gateway"
-require "hive/patrol/decision_projection"
 require "hive/patrol/fingerprint"
 require "hive/patrol/review_handoff"
 require "hive/patrol/state_store"
@@ -42,35 +38,29 @@ module Hive
         end
       end
 
-      def initialize(project_root, cfg:, state: StateStore.new(project_root), gh: Hive::Gh,
-                     review_handoff: nil, capture: nil, effect_gateway_factory: nil,
-                     evidence_store: nil, config_loader: nil,
-                     capability_checker: nil, module_execution: nil)
+      def initialize(project_root, cfg:, state:, capture:, gh: Hive::Gh,
+                     review_handoff: nil)
         @project_root = File.expand_path(project_root)
         @cfg = cfg
         @state = state
         @gh = gh
         @review_handoff = review_handoff || ReviewHandoff.new(@project_root, cfg: cfg, state: state)
         @capture = capture
-        @effect_gateway_factory = effect_gateway_factory
-        @evidence_store = evidence_store || Hive::Modules::Migration::EvidenceStore.new(
-          root: File.join(
-            @state.hive_state_path, "module-runtime", "migration",
-            "patrol-evidence"
-          )
-        )
-        @config_loader = config_loader || default_config_loader
-        @capability_checker = capability_checker || ->(**) { true }
-        @module_execution = module_execution
       end
 
       def open(finding, patch, now: Time.now)
+        @state.with_cycle_lock do
+          open_locked(finding, patch, now: now)
+        end
+      end
+
+      def open_locked(finding, patch, now:)
         preserve_worktree = false
         return Result.new(status: :skipped, reason: "validation_failed") unless patch.passed
 
         assert_local_patch_identity!(patch)
-        capture = effect_capture(finding, patch)
-        gateway = effect_gateway(capture)
+        gateway = effect_gateway
+        @state.recover_pending_fingerprint_effects!
         pending = reconciliation_pending_entry(finding, patch)
         preserve_worktree = !pending.nil?
 
@@ -213,6 +203,7 @@ module Hive
         cleanup_worktree(patch) unless preserve_worktree
         Result.new(status: :error, reason: "gh_error", detail: e.message)
       end
+      private :open_locked
 
       private
 
@@ -503,73 +494,8 @@ module Hive
         end
       end
 
-      def default_config_loader
-        return ->(root) { Hive::Config.load(root) } if @capture
-
-        # Direct library callers historically invoke PrOpener only after
-        # Patrol admission. Preserve that narrow test/embedding surface;
-        # production commands always pass a reservation capture and reload
-        # the project configuration from disk.
-        admitted = Hive::Config.deep_merge(
-          Hive::Config.deep_dup(@cfg),
-          "patrol" => { "enabled" => true }
-        )
-        ->(_root) { admitted }
-      end
-
-      def effect_capture(finding, patch)
-        return @capture if @capture
-
-        snapshot = Hive::Modules::Migration::Patrols.ownership_snapshot(
-          @project_root, "patrol",
-          hive_state_path: @state.hive_state_path
-        )
-        owner = snapshot["owner"] == "none" ? "legacy" : snapshot.fetch("owner")
-        epoch = snapshot["epoch"].to_i.positive? ? snapshot.fetch("epoch") : 1
-        identity = [
-          finding.fingerprint, patch.id, patch.branch,
-          validated_oid!(patch.head_sha, "validated patch head")
-        ].join(":")
-        selection_input =
-          Hive::Patrol::DecisionProjection.operation_input(
-            "validated_patch"
-          )
-        capture = Hive::Modules::Migration::PatrolCapture.build(
-          module_name: "patrol",
-          project: {
-            "project_id" => "local-#{::Digest::SHA256.hexdigest(@project_root)}",
-            "name" => File.basename(@project_root),
-            "repository" => nil
-          },
-          trigger: { "kind" => "direct", "id" => identity },
-          reservation: { "kind" => "ordinary", "id" => identity },
-          owner: owner,
-          owner_epoch: epoch,
-          selection_input: selection_input,
-          selection:
-            Hive::Modules::Migration::PatrolDecisionProjection.build(
-              module_name: "patrol",
-              rationale: "due"
-            ),
-          outcome_class: nil,
-          outcome: nil,
-          occurred_at: Time.at(0).utc,
-          recorded_at: Time.at(0).utc
-        )
-        @state.reserve_occurrence!(capture)
-        capture
-      end
-
-      def effect_gateway(capture)
-        @state.configure_effect_gateway!(
-          capture: capture,
-          evidence_store: @evidence_store,
-          config_loader: @config_loader,
-          capability_checker: @capability_checker,
-          module_execution: @module_execution,
-          gateway_factory: @effect_gateway_factory
-        )
-        @state.configured_effect_gateway!(capture: capture)
+      def effect_gateway
+        @state.configured_effect_gateway!(capture: @capture)
       end
 
       def perform_branch_effect!(gateway, finding, patch)

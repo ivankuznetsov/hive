@@ -695,6 +695,59 @@ class ManagedDirectoryTest < Minitest::Test
     end
   end
 
+  def test_try_with_lock_preserves_block_errors_and_normalizes_path_failures
+    with_tmp_dir do |root|
+      directory = Hive::ManagedDirectory.new(
+        root: root, label: "test state"
+      )
+
+      yielded = assert_raises(IOError) do
+        directory.try_with_lock("yield.lock") do
+          raise IOError, "caller failure"
+        end
+      end
+      assert_equal "caller failure", yielded.message
+
+      FileUtils.mkdir_p(File.join(root, "unsafe"))
+      File.symlink(File.join(root, "unsafe"), File.join(root, "linked"))
+      assert_raises(Hive::ConfigError) do
+        directory.try_with_lock("linked/state.lock") { flunk }
+      end
+
+      native = directory.instance_variable_get(:@native)
+      original_open = native.method(:open_file)
+      with_replaced_singleton_method(
+        native,
+        :open_file,
+        lambda do |parent, name, flags, mode: nil|
+          raise Hive::ConfigError, "specific lock rejection" if
+            name == "rejected.lock"
+
+          original_open.call(parent, name, flags, mode: mode)
+        end
+      ) do
+        error = assert_raises(Hive::ConfigError) do
+          directory.try_with_lock("rejected.lock") { flunk }
+        end
+        assert_equal "specific lock rejection", error.message
+      end
+
+      with_replaced_singleton_method(
+        native,
+        :open_file,
+        lambda do |parent, name, flags, mode: nil|
+          raise Errno::EIO, name if name == "broken.lock"
+
+          original_open.call(parent, name, flags, mode: mode)
+        end
+      ) do
+        assert_raises(Hive::ConfigError) do
+          directory.try_with_lock("broken.lock") { flunk }
+        end
+      end
+    end
+  end
+
   def test_read_and_lock_stay_in_the_opened_parent
     with_tmp_dir do |anchor|
       root = File.join(anchor, "state")

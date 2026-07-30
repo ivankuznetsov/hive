@@ -81,8 +81,9 @@ becomes a persisted failed/retryable row instead of being silently skipped.
 One failed project, profile, or user cannot block later projects or users. AUR
 runs the all-user
 coordinator during package activation and enables
-`hive-job-schema-migration.timer` for hourly `--resume` retry, so completed
-profiles are not force-swept every hour. Root `install.sh` installs the
+`hive-job-schema-migration.timer` for hourly `--resume` retry. Every profile is
+re-entered on that sweep, while an unchanged user-owned registry receipt keeps
+already-current projects from being remigrated. Root `install.sh` installs the
 equivalent systemd timer or launchd LaunchDaemon before its all-user sweep;
 root bash updates ensure the same retry service. Non-root `install.sh` and
 Homebrew report current-user-only coverage and require a separately installed
@@ -91,8 +92,9 @@ be elevated. `status`, `watch`,
 `doctor`, findings inspection, dry runs, and other strict observation routes
 remain mutation-free.
 
-A newly registered or path-drifted project changes the registry digest and
-forces a new sweep without waiting for the normal hourly retry. Normal CLI
+A newly registered or path-drifted project changes the registry digest. A
+current-user candidate re-entry detects it immediately; otherwise the next
+hourly root sweep re-enters that user's profile and detects it. Normal CLI
 startup and every JobStore constructor accept only v3; dormant released-v2
 state is converted only by the explicit package-candidate command.
 
@@ -105,7 +107,7 @@ hive refactor-patrol-migrate-installed
 # Every discovered/inventoried local Hive user, using a root-owned system Hive
 /usr/local/bin/hive refactor-patrol-migrate-installed --all-users
 
-# Timer-style retry: skip unchanged, complete profiles until work is due
+# Timer-style retry: re-enter every profile; each child skips unchanged work
 /usr/local/bin/hive refactor-patrol-migrate-installed --all-users --resume
 
 # Install/repair the machine-owned hourly retry before sweeping
@@ -134,6 +136,18 @@ counters never mislabel those profiles as additional OS users. Missing
 inventory closure, UID/home drift,
 inaccessible profiles, or an operator-known unindexed custom root must remain
 `partial`/`failed`; they can never be reported as complete.
+
+Every hourly `--resume` sweep invokes every currently discovered profile after
+dropping to that profile's identity. The child compares its live registry
+digest with its user-owned receipt, so an unchanged profile is cheap while a
+project registered later by any user is discovered on the next sweep. The
+root-owned checkpoint records only bounded round-robin traversal and prior
+evidence; a `completed` row is never semantic authority to skip a profile.
+Catalog discovery crosses the isolated root process boundary as a bounded,
+versioned, strict JSON document rather than an object-deserialization stream.
+Cross-profile equal or nested roots fail closed, and the executor revalidates
+the complete root ancestor custody chain immediately before candidate
+execution.
 
 The optional root-owned inventory has this exact form and must be a regular
 root-owned file with no group/world write bit:
@@ -165,6 +179,10 @@ A failed or retryable project row still means the sweep itself completed: the
 document records its error, remediation, retry time, and custom
 `hive_state_path`, while later registered projects continue. Registry,
 identity, and status-store failures remain structural command failures. The
+project diagnostics are UTF-8 bounded and secret-redacted in the user receipt,
+then defensively validated again before the privileged parent checkpoints or
+prints them. Parent completion/retry state must agree with every nested project
+row. The
 command is deliberately not a replacement for user-directed `hive migrate`,
 which updates tracked project state.
 

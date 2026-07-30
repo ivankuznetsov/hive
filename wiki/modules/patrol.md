@@ -120,9 +120,12 @@ The two systems share only the legacy JSON persistence mechanics in
 `Hive::Patrol::BaseStateStore`; their domain records and proof remain separate.
 They deliberately retain separate namespaces:
 `.hive-state/patrol/` for ordinary patrol and
-`.hive-state/refactor_patrol/v2/` for architecture manifests, jobs, semantic
-families, indexes, and result receipts. `Hive::Daemon::PatrolArbiter` is the
-only shared orchestration seam: it alternates ready work under the project's
+`.hive-state/refactor_patrol/v2/` for retained architecture manifests,
+semantic families, runs, logs, and result receipts. Architecture jobs,
+occurrences, and the job-query index live only under
+`.hive-state/refactor_patrol/v3/`; released-v2 jobs are accepted only by the
+explicit package migration. `Hive::Daemon::PatrolArbiter` is the only shared
+orchestration seam: it alternates ready work under the project's
 `daemon.max_concurrent_patrol_scans` capacity. Enabling architecture discovery
 does not enable ordinary patrol or auto-fixing. Deduplicated GitHub issues are
 its default human review surface, with an explicit

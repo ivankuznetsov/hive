@@ -51,7 +51,11 @@ class RefactorPatrolAllUsersMigrationTest < Minitest::Test
       migration = Migration.new(
         catalog: catalog,
         binary_path: -> { candidate },
-        effective_uid: -> { Process.euid }
+        effective_uid: -> { Process.euid },
+        status_store:
+          Migration::SweepProgress.new(
+            root: File.join(root, "machine-progress")
+          )
       )
 
       payload = migration.call(now: Time.utc(2026, 7, 29, 23, 45))
@@ -76,6 +80,27 @@ class RefactorPatrolAllUsersMigrationTest < Minitest::Test
       profiles.each do |profile|
         assert_profile_migrated(profile)
       end
+
+      changed_profile = profiles.fetch(1)
+      late_project = add_profile_project(changed_profile, "late")
+      resumed = migration.call(
+        now: Time.utc(2026, 7, 30, 0, 45),
+        force: false
+      )
+      assert_equal "complete", resumed.fetch("status"),
+                   JSON.pretty_generate(resumed)
+      assert_equal 3, resumed.fetch("attempted_users")
+      changed_row = resumed.fetch("profiles").find do |row|
+        row.fetch("uid") == changed_profile.dig(:account).uid
+      end
+      refute_nil changed_row
+      assert_equal 3, changed_row.fetch("projects").length
+      late_row = changed_row.fetch("projects").find do |project|
+        project.fetch("project") == late_project.fetch(:name)
+      end
+      refute_nil late_row
+      assert_equal "migrated", late_row.fetch("status")
+      assert_profile_migrated(changed_profile)
     end
   ensure
     if Process.euid.zero?
@@ -415,6 +440,36 @@ class RefactorPatrolAllUsersMigrationTest < Minitest::Test
           "hive"
         )
     }
+  end
+
+  def add_profile_project(profile, suffix)
+    account = profile.fetch(:account)
+    project = File.join(profile.fetch(:home), "projects", suffix)
+    state = File.join(project, ".architecture-state")
+    FileUtils.mkdir_p(project)
+    write_released_v2_job(
+      state, "job-#{account.name}-#{suffix}"
+    )
+    row = {
+      name: "project-#{account.name}-#{suffix}",
+      path: project,
+      state: state
+    }
+    profile.fetch(:projects) << row
+    registry = {
+      "registered_projects" => profile.fetch(:projects).map do |entry|
+        {
+          "name" => entry.fetch(:name),
+          "path" => entry.fetch(:path),
+          "real_path" => File.realpath(entry.fetch(:path)),
+          "hive_state_path" => entry.fetch(:state)
+        }
+      end
+    }
+    config_path = File.join(profile.dig(:roots, :config), "config.yml")
+    File.write(config_path, registry.to_yaml)
+    FileUtils.chown_R(account.uid, account.gid, profile.fetch(:home))
+    row
   end
 
   def write_inventory(root, custom_profiles)

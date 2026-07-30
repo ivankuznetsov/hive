@@ -1,4 +1,5 @@
 require "test_helper"
+require "timeout"
 require "hive/modules/migration/evidence_store"
 require "hive/patrol/state_store"
 
@@ -6,6 +7,38 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
   include HiveTestHelper
 
   NOW = Time.utc(2026, 7, 28, 12)
+
+  def test_cycle_lock_is_reentrant_and_serializes_store_instances
+    with_tmp_dir do |root|
+      first = Hive::Patrol::StateStore.new(root)
+      second = Hive::Patrol::StateStore.new(root)
+      entered = Queue.new
+      release = Queue.new
+      successor = Queue.new
+      first_thread = Thread.new do
+        first.with_cycle_lock do
+          first.with_cycle_lock { entered << true }
+          release.pop
+        end
+      end
+      entered.pop
+      second_thread = Thread.new do
+        second.with_cycle_lock { successor << true }
+      end
+
+      assert_raises(Timeout::Error) do
+        Timeout.timeout(0.1) { successor.pop }
+      end
+      release << true
+      assert Timeout.timeout(2) { successor.pop }
+      first_thread.join
+      second_thread.join
+    ensure
+      release << true if first_thread&.alive?
+      first_thread&.join
+      second_thread&.join
+    end
+  end
 
   def test_occurrence_journal_is_the_only_effect_recovery_authority
     with_tmp_dir do |root|
@@ -155,11 +188,13 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
       }
 
       store.update_state("last_run_at" => NOW.iso8601)
+      store.write_fingerprints("fingerprint-1" => { "state" => "open" })
       store.write_finding(finding)
       perform_attempt(store, patch)
       receipt_count = evidence.receipts.size
 
       store.update_state("last_run_at" => NOW.iso8601)
+      store.write_fingerprints("fingerprint-1" => { "state" => "open" })
       store.write_finding(finding)
       perform_attempt(store, patch)
 
@@ -171,6 +206,101 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
       assert_equal patch, store.read_json(
         File.join(store.root, "patches", "patch-1.json")
       ).except("patrol_occurrence_id")
+    end
+  end
+
+  def test_fingerprint_recovery_normalizes_malformed_enumeration
+    with_tmp_dir do |root|
+      store = configured_store(root, File.join(root, "evidence"))
+      store.define_singleton_method(
+        :each_recovery_active_occurrence
+      ) do
+        raise JSON::ParserError, "malformed recovery index"
+      end
+
+      error = assert_raises(Hive::ConfigError) do
+        store.recover_pending_fingerprint_effects!
+      end
+
+      assert_equal(
+        "patrol fingerprint recovery operation is malformed",
+        error.message
+      )
+    end
+  end
+
+  def test_fingerprint_recovery_rejects_foreign_predecessors
+    with_tmp_dir do |root|
+      store = configured_store(root, File.join(root, "evidence"))
+      foreign = capture(
+        identity: "foreign",
+        project: {
+          "project_id" => "project-2",
+          "name" => "foreign",
+          "repository" => "owner/foreign"
+        }
+      )
+      store.define_singleton_method(
+        :each_recovery_active_occurrence
+      ) do |&block|
+        block.call(
+          "provisional_capture" => foreign.to_h,
+          "effects" => {}
+        )
+      end
+
+      error = assert_raises(Hive::ConfigError) do
+        store.recover_pending_fingerprint_effects!
+      end
+
+      assert_match(/recovery project is malformed/, error.message)
+    end
+  end
+
+  def test_fingerprint_recovery_rejects_competing_and_malformed_operations
+    with_tmp_dir do |root|
+      store = configured_store(root, File.join(root, "evidence"))
+      first = capture(identity: "first")
+      second = capture(identity: "second", at: NOW + 1)
+      [ first, second ].each do |predecessor|
+        store.reserve_occurrence!(predecessor, now: NOW)
+        store.prepare_effect!(
+          fingerprint_intent(
+            predecessor,
+            idempotency_key: predecessor.reservation.fetch("id"),
+            deleted: []
+          ),
+          now: NOW
+        )
+      end
+
+      duplicate = assert_raises(Hive::ConfigError) do
+        store.recover_pending_fingerprint_effects!
+      end
+      assert_match(/multiple nonterminal fingerprint effects/,
+                   duplicate.message)
+    end
+
+    with_tmp_dir do |root|
+      store = configured_store(root, File.join(root, "evidence"))
+      predecessor = capture(identity: "malformed")
+      store.reserve_occurrence!(predecessor, now: NOW)
+      store.prepare_effect!(
+        fingerprint_intent(
+          predecessor,
+          idempotency_key: "malformed",
+          deleted: [ 7 ]
+        ),
+        now: NOW
+      )
+
+      malformed = assert_raises(Hive::ConfigError) do
+        store.recover_pending_fingerprint_effects!
+      end
+      assert_equal(
+        "patrol fingerprint recovery operation is malformed",
+        malformed.message
+      )
     end
   end
 
@@ -255,16 +385,19 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
     end
   end
 
-  def test_fingerprint_mutation_requires_gateway_admission_before_lock
+  def test_fingerprint_mutation_holds_lock_during_gateway_admission
     with_tmp_dir do |root|
       store = Hive::Patrol::StateStore.new(root)
-      lock_entered = false
-      store.define_singleton_method(:with_fingerprint_lock) do |**|
-        lock_entered = true
-        raise "fingerprint lock must remain unreachable"
+      events = []
+      store.define_singleton_method(:with_fingerprint_lock) do |**, &operation|
+        events << :lock_entered
+        operation.call
+      ensure
+        events << :lock_released
       end
       denied = Object.new
       denied.define_singleton_method(:perform!) do |**|
+        events << :gateway_admission
         raise Hive::Patrol::EffectGateway::Denied.new(
           "owner changed", nil
         )
@@ -283,7 +416,10 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
       end
 
       assert_match(/owner changed/, error.message)
-      refute lock_entered
+      assert_equal(
+        %i[lock_entered gateway_admission lock_released],
+        events
+      )
       refute_path_exists File.join(store.root, "fingerprints.lock")
     end
   end
@@ -659,10 +795,34 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
     )
   end
 
-  def capture(identity: "manual-1", at: NOW)
+  def fingerprint_intent(predecessor, idempotency_key:, deleted:)
+    operation = {
+      "deleted" => deleted,
+      "fingerprint" => "shared",
+      "replace" => false,
+      "set" => { "state" => "open" }
+    }
+    Hive::Modules::Migration::EffectIntent.build(
+      module_name: "patrol",
+      occurrence_id: predecessor.occurrence_id,
+      authority: "legacy",
+      owner_epoch: predecessor.owner_epoch,
+      sink: "state",
+      target: "fingerprints/shared",
+      idempotency_key: idempotency_key,
+      capability: "filesystem_write",
+      scope: {
+        "fingerprint" => "shared",
+        "fingerprint_operation" => JSON.generate(operation)
+      },
+      created_at: predecessor.recorded_at
+    )
+  end
+
+  def capture(identity: "manual-1", at: NOW, project: nil)
     Hive::Modules::Migration::PatrolCapture.build(
       module_name: "patrol",
-      project: {
+      project: project || {
         "project_id" => "project-1",
         "name" => "demo",
         "repository" => "owner/demo"

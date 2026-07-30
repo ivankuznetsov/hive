@@ -63,10 +63,10 @@ module Hive
         def absolute?(value)
           value.is_a?(String) &&
             !value.empty? &&
+            value.valid_encoding? &&
+            value.encoding.ascii_compatible? &&
             value.each_byte.none? { |byte| byte < 0x20 || byte == 0x7f } &&
             File.absolute_path(value) == value
-        rescue ArgumentError
-          false
         end
       end
       private_constant :PathValue
@@ -240,6 +240,7 @@ module Hive
               raise Hive::ConfigError,
                     "Hive profile root identity changed after discovery"
             end
+            validate_ancestor_custody!(binding.canonical_path, uid)
           else
             begin
               @lstat.call(binding.canonical_path)
@@ -257,6 +258,7 @@ module Hive
               raise Hive::ConfigError,
                     "Hive profile root anchor changed after discovery"
             end
+            validate_ancestor_custody!(binding.anchor_path, uid)
           end
           true
         rescue SystemCallError => error
@@ -278,6 +280,38 @@ module Hive
                  readable && (stat.mode & 0o022).zero?
             raise Hive::ConfigError,
                   "Hive #{kind} root is not a safe owned directory: #{path}"
+          end
+        end
+
+        def validate_ancestor_custody!(path, uid)
+          candidate = File.dirname(File.expand_path(path))
+          loop do
+            stat = @lstat.call(candidate)
+            sticky_public =
+              %w[/tmp /private/tmp /var/tmp].include?(candidate) &&
+              (stat.mode & 0o1000) == 0o1000
+            filesystem_root = candidate == File::SEPARATOR
+            owner_allowed =
+              [ 0, uid ].include?(stat.uid) ||
+              sticky_public || filesystem_root
+            traversable =
+              if stat.uid == uid
+                (stat.mode & 0o100) == 0o100
+              else
+                (stat.mode & 0o001) == 0o001
+              end
+            writable = (stat.mode & 0o022) != 0
+            unless stat.directory? && !stat.symlink? &&
+                   owner_allowed && traversable &&
+                   (!writable || sticky_public)
+              raise Hive::ConfigError,
+                    "Hive profile root has unsafe ancestor custody: " \
+                    "#{candidate}"
+            end
+            parent = File.dirname(candidate)
+            break if parent == candidate
+
+            candidate = parent
           end
         end
       end
@@ -639,7 +673,7 @@ module Hive
           ]
           keys = required.dup
           keys << "error" if row["status"] == "failed"
-          row.keys.sort == keys.sort &&
+          valid = row.keys.sort == keys.sort &&
             %w[completed failed].include?(row["status"]) &&
             [ true, false ].include?(row["retryable"]) &&
             row["username"].is_a?(String) &&
@@ -653,10 +687,33 @@ module Hive
               row["registry_digest"].to_s.match?(/\A[0-9a-f]{64}\z/)) &&
             RegisteredProjectMigrationStatus.valid_projects?(
               row["projects"]
-            ) &&
-            (row["status"] == "completed" || row["error"].is_a?(String))
+            )
+          return false unless valid
+
+          if row["status"] == "failed"
+            row["retryable"] == true &&
+              row["registry_digest"].nil? &&
+              row["projects"].empty? &&
+              valid_diagnostic?(row["error"])
+          else
+            row["registry_digest"].to_s.match?(/\A[0-9a-f]{64}\z/) &&
+              (
+                row["retryable"] == true ||
+                row["projects"].none? do |project|
+                  project["retryable"] == true
+                end
+              )
+          end
         rescue ArgumentError, TypeError
           false
+        end
+
+        def valid_diagnostic?(value)
+          value.is_a?(String) &&
+            !value.empty? &&
+            value.valid_encoding? &&
+            value.bytesize <= MAX_ERROR_BYTES &&
+            value == BoundedDiagnostic.call(value)
         end
 
         def timestamp?(value)
@@ -671,52 +728,49 @@ module Hive
       # Isolating the catalog in a process group keeps the root coordinator's
       # one host deadline authoritative.
       class CatalogRunner
+        WIRE_SCHEMA = "hive-installed-users-catalog".freeze
+        WIRE_SCHEMA_VERSION = 1
         MAX_CAPTURE_BYTES = 8 * 1024 * 1024
         CLEANUP_TIMEOUT_SEC = 0.25
+        MAX_PROFILES = SweepProgress::MAX_RESULTS
+        MAX_ISSUES = SweepProgress::MAX_RESULTS
+        MAX_PATH_BYTES = 4_096
+        MAX_USERNAME_BYTES = 256
+        MAX_SUPPLEMENTARY_GIDS = NssQuery::MAX_ENTRIES
+        PROFILE_SOURCES = %w[default-home root-inventory].freeze
+        ROOT_KINDS = %w[config_home state_home].freeze
+        ENVIRONMENT_KEYS = %w[
+          HIVE_HOME HIVE_JOB_SCHEMA_CONFIG_HOME HIVE_JOB_SCHEMA_STATE_HOME
+          XDG_CACHE_HOME XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME
+        ].freeze
+        ISSUE_KINDS = %w[
+          default_home_unavailable inventory_home_unavailable
+          inventory_identity_drift nss_catalog_unavailable nss_uid_ambiguous
+          profile_root_ambiguous shared_profile_root
+        ].freeze
 
         def initialize(
           monotonic_clock: lambda {
             Process.clock_gettime(Process::CLOCK_MONOTONIC)
           },
           process_kill: Process.method(:kill),
-          process_waitpid2: Process.method(:waitpid2)
+          process_waitpid2: Process.method(:waitpid2),
+          session_setter: Process.method(:setsid),
+          exit_process: Process.method(:exit!)
         )
           @monotonic_clock = monotonic_clock
           @process_kill = process_kill
           @process_waitpid2 = process_waitpid2
+          @session_setter = session_setter
+          @exit_process = exit_process
         end
 
         def call(catalog, nss_snapshot:, nss_error:, deadline:)
           reader, writer = IO.pipe
-          pid = fork do
-            reader.close
-            Process.setsid
-            payload =
-              begin
-                {
-                  "ok" => true,
-                  "snapshot" => catalog.snapshot(
-                    nss_snapshot: nss_snapshot,
-                    nss_error: nss_error
-                  )
-                }
-              rescue StandardError => error
-                {
-                  "ok" => false,
-                  "error" => "#{error.class}: #{error.message}"
-                }
-              end
-            writer.binmode
-            writer.write(Marshal.dump(payload))
-            writer.close
-            Process.exit!(0)
-          end
+          pid = fork { catalog_child(reader, writer, catalog, nss_snapshot:, nss_error:) }
           writer.close
-          waiter = Thread.new do
-            @process_waitpid2.call(pid)&.last
-          rescue Errno::ECHILD
-            nil
-          end
+          reader.binmode
+          waiter = Thread.new { wait_for_child(pid) }
           waiter.report_on_exception = false
           bytes = +"".b
           loop do
@@ -749,17 +803,9 @@ module Hive
             raise Hive::ConfigError,
                   "installed-user discovery did not terminate within budget"
           end
-          payload = Marshal.load(bytes)
-          unless payload.is_a?(Hash) && payload["ok"] == true &&
-                 payload["snapshot"].is_a?(Snapshot)
-            detail =
-              payload.is_a?(Hash) ? payload["error"] : "malformed result"
-            raise Hive::ConfigError,
-                  "installed-user discovery failed: #{detail}"
-          end
-
-          payload.fetch("snapshot")
-        rescue TypeError, ArgumentError => error
+          decode_payload(JSON.parse(bytes))
+        rescue JSON::ParserError, EncodingError, TypeError,
+               ArgumentError => error
           raise Hive::ConfigError,
                 "installed-user discovery returned malformed data " \
                 "(#{error.class}: #{error.message})"
@@ -770,6 +816,427 @@ module Hive
         end
 
         private
+
+        def catalog_child(reader, writer, catalog, nss_snapshot:, nss_error:)
+          reader.close
+          @session_setter.call
+          payload =
+            begin
+              success_payload(
+                catalog.snapshot(
+                  nss_snapshot: nss_snapshot,
+                  nss_error: nss_error
+                )
+              )
+            rescue StandardError => error
+              failure_payload(error)
+            end
+          writer.binmode
+          writer.write(JSON.generate(payload))
+          writer.close
+          @exit_process.call(0)
+        end
+
+        def wait_for_child(pid)
+          @process_waitpid2.call(pid)&.last
+        rescue Errno::ECHILD
+          nil
+        end
+
+        def success_payload(snapshot)
+          {
+            "schema" => WIRE_SCHEMA,
+            "schema_version" => WIRE_SCHEMA_VERSION,
+            "ok" => true,
+            "snapshot" => encode_snapshot(snapshot)
+          }
+        end
+
+        def failure_payload(error)
+          {
+            "schema" => WIRE_SCHEMA,
+            "schema_version" => WIRE_SCHEMA_VERSION,
+            "ok" => false,
+            "error" =>
+              BoundedDiagnostic.call("#{error.class}: #{error.message}")
+          }
+        end
+
+        def encode_snapshot(snapshot)
+          {
+            "profiles" => snapshot.profiles.map do |profile|
+              encode_profile(profile)
+            end,
+            "issues" => snapshot.issues.map do |issue|
+              {
+                "kind" => issue.kind,
+                "username" => issue.username,
+                "uid" => issue.uid,
+                "detail" => BoundedDiagnostic.call(issue.detail)
+              }
+            end,
+            "closed" => snapshot.closed,
+            "inventory_path" => snapshot.inventory_path,
+            "inventory_digest" => snapshot.inventory_digest
+          }
+        end
+
+        def encode_profile(profile)
+          {
+            "username" => profile.username,
+            "uid" => profile.uid,
+            "gid" => profile.gid,
+            "home" => profile.home,
+            "real_home" => profile.real_home,
+            "environment" => profile.environment,
+            "source" => profile.source,
+            "supplementary_gids" => profile.supplementary_gids,
+            "root_bindings" => profile.root_bindings.map do |binding|
+              binding.to_h.transform_keys(&:to_s).merge(
+                "kind" => binding.kind.to_s
+              )
+            end
+          }
+        end
+
+        def decode_payload(payload)
+          exact_hash!(
+            payload,
+            %w[ok schema schema_version] +
+              (payload.is_a?(Hash) && payload["ok"] == true ?
+                [ "snapshot" ] : [ "error" ]),
+            "envelope"
+          )
+          malformed!("unsupported wire schema") unless
+            payload["schema"] == WIRE_SCHEMA &&
+            payload["schema_version"] == WIRE_SCHEMA_VERSION
+
+          case payload["ok"]
+          when true
+            decode_snapshot(payload["snapshot"])
+          when false
+            detail = string!(
+              payload["error"], "error", max_bytes: MAX_ERROR_BYTES
+            )
+            raise Hive::ConfigError,
+                  "installed-user discovery failed: #{detail}"
+          else
+            malformed!("envelope status is invalid")
+          end
+        end
+
+        def decode_snapshot(value)
+          row = exact_hash!(
+            value,
+            %w[closed inventory_digest inventory_path issues profiles],
+            "snapshot"
+          )
+          profiles = bounded_array!(
+            row["profiles"], "profiles", MAX_PROFILES
+          ).map { |profile| decode_profile(profile) }.freeze
+          expected_order = profiles.sort_by do |profile|
+            [ profile.uid, profile.source, profile.home ]
+          end
+          malformed!("profiles are not canonical") unless
+            profiles == expected_order && profiles.uniq.length == profiles.length
+          issues = bounded_array!(
+            row["issues"], "issues", MAX_ISSUES
+          ).map { |issue| decode_issue(issue) }.freeze
+          closed = boolean!(row["closed"], "closed")
+          inventory_path = absolute_path!(
+            row["inventory_path"], "inventory_path"
+          )
+          inventory_digest = row["inventory_digest"]
+          unless inventory_digest.nil? ||
+                 (inventory_digest.is_a?(String) &&
+                  inventory_digest.match?(/\A[0-9a-f]{64}\z/))
+            malformed!("inventory_digest is invalid")
+          end
+          malformed!("closed inventory has no digest") if
+            closed && inventory_digest.nil?
+
+          Snapshot.new(
+            profiles: profiles,
+            issues: issues,
+            closed: closed,
+            inventory_path: inventory_path,
+            inventory_digest: inventory_digest&.freeze
+          ).freeze
+        end
+
+        def decode_profile(value)
+          row = exact_hash!(
+            value,
+            %w[
+              environment gid home real_home root_bindings source
+              supplementary_gids uid username
+            ],
+            "profile"
+          )
+          username = username!(
+            row["username"], "profile username",
+            max_bytes: MAX_USERNAME_BYTES
+          )
+          uid = nonnegative_integer!(row["uid"], "profile uid")
+          gid = nonnegative_integer!(row["gid"], "profile gid")
+          home = absolute_path!(row["home"], "profile home")
+          real_home = absolute_path!(row["real_home"], "profile real_home")
+          environment = decode_environment(row["environment"])
+          source = enum!(row["source"], PROFILE_SOURCES, "profile source")
+          supplementary_gids = bounded_array!(
+            row["supplementary_gids"],
+            "supplementary_gids",
+            MAX_SUPPLEMENTARY_GIDS
+          ).map do |value_gid|
+            nonnegative_integer!(value_gid, "supplementary gid")
+          end.freeze
+          unless supplementary_gids == supplementary_gids.uniq.sort &&
+                 supplementary_gids.include?(gid)
+            malformed!("supplementary_gids are not canonical")
+          end
+          root_bindings = bounded_array!(
+            row["root_bindings"], "root_bindings", ROOT_KINDS.length
+          ).map { |binding| decode_root_binding(binding, uid) }.freeze
+          unless root_bindings.map { |binding| binding.kind.to_s } == ROOT_KINDS
+            malformed!("root_bindings are not canonical")
+          end
+          roots = root_bindings.to_h do |binding|
+            [ binding.kind, binding.canonical_path ]
+          end
+          unless environment[Hive::Paths::JOB_SCHEMA_CONFIG_HOME] ==
+                 roots.fetch(:config_home) &&
+                 environment[Hive::Paths::JOB_SCHEMA_STATE_HOME] ==
+                 roots.fetch(:state_home)
+            malformed!("profile environment disagrees with root bindings")
+          end
+          if environment.key?("HIVE_HOME") &&
+             (environment["HIVE_HOME"] != roots.fetch(:config_home) ||
+              roots.fetch(:config_home) != roots.fetch(:state_home))
+            malformed!("profile HIVE_HOME disagrees with root bindings")
+          end
+
+          Profile.new(
+            username: username,
+            uid: uid,
+            gid: gid,
+            home: home,
+            real_home: real_home,
+            environment: environment,
+            source: source,
+            supplementary_gids: supplementary_gids,
+            root_bindings: root_bindings
+          ).freeze
+        end
+
+        def decode_environment(value)
+          malformed!("profile environment is invalid") unless
+            value.is_a?(Hash) &&
+            (value.keys - ENVIRONMENT_KEYS).empty? &&
+            value.key?(Hive::Paths::JOB_SCHEMA_CONFIG_HOME) &&
+            value.key?(Hive::Paths::JOB_SCHEMA_STATE_HOME)
+
+          value.each_with_object({}) do |(key, path), result|
+            result[key.freeze] =
+              absolute_path!(path, "profile environment path")
+          end.freeze
+        end
+
+        def decode_root_binding(value, profile_uid)
+          row = exact_hash!(
+            value,
+            %w[
+              anchor_dev anchor_ino anchor_path canonical_path dev existing
+              ino kind logical_path mode owner_uid suffix
+            ],
+            "root binding"
+          )
+          kind = enum!(row["kind"], ROOT_KINDS, "root binding kind").to_sym
+          logical_path = absolute_path!(
+            row["logical_path"], "root binding logical_path"
+          )
+          canonical_path = absolute_path!(
+            row["canonical_path"], "root binding canonical_path"
+          )
+          existing = boolean!(row["existing"], "root binding existing")
+          attributes =
+            if existing
+              decode_existing_binding(row, kind, profile_uid)
+            else
+              decode_missing_binding(row, canonical_path)
+            end
+
+          RootBinding.new(
+            kind: kind,
+            logical_path: logical_path,
+            canonical_path: canonical_path,
+            existing: existing,
+            **attributes
+          ).freeze
+        end
+
+        def decode_existing_binding(row, kind, profile_uid)
+          anchors_clear =
+            %w[anchor_dev anchor_ino anchor_path suffix].all? do |key|
+              row[key].nil?
+            end
+          unless anchors_clear
+            malformed!("existing root binding contains anchor fields")
+          end
+          owner_uid = nonnegative_integer!(
+            row["owner_uid"], "root binding owner_uid"
+          )
+          allowed_owner =
+            kind == :state_home ? owner_uid == profile_uid :
+              [ 0, profile_uid ].include?(owner_uid)
+          malformed!("root binding owner is invalid") unless allowed_owner
+          mode = nonnegative_integer!(row["mode"], "root binding mode")
+          malformed!("root binding mode is invalid") if
+            mode > 0o777 || (mode & 0o022) != 0
+          readable =
+            if owner_uid == profile_uid
+              (mode & 0o500) == 0o500
+            else
+              (mode & 0o005) == 0o005
+            end
+          malformed!("root binding mode is unreadable") unless readable
+
+          {
+            dev: nonnegative_integer!(row["dev"], "root binding dev"),
+            ino: nonnegative_integer!(row["ino"], "root binding ino"),
+            owner_uid: owner_uid,
+            mode: mode,
+            anchor_path: nil,
+            anchor_dev: nil,
+            anchor_ino: nil,
+            suffix: nil
+          }
+        end
+
+        def decode_missing_binding(row, canonical_path)
+          unless %w[dev ino mode owner_uid].all? { |key| row[key].nil? }
+            malformed!("missing root binding contains existing fields")
+          end
+          anchor_path = absolute_path!(
+            row["anchor_path"], "root binding anchor_path"
+          )
+          suffix = string!(
+            row["suffix"], "root binding suffix", max_bytes: MAX_PATH_BYTES
+          )
+          parts = suffix.split("/", -1)
+          invalid_part = parts.any? do |part|
+            part.empty? || part == "." || part == ".." ||
+              part.each_byte.any? { |byte| byte < 0x20 || byte == 0x7f }
+          end
+          if invalid_part
+            malformed!("root binding suffix is invalid")
+          end
+          malformed!("root binding anchor and suffix disagree") unless
+            File.join(anchor_path, *parts) == canonical_path
+
+          {
+            dev: nil,
+            ino: nil,
+            owner_uid: nil,
+            mode: nil,
+            anchor_path: anchor_path,
+            anchor_dev:
+              nonnegative_integer!(
+                row["anchor_dev"], "root binding anchor_dev"
+              ),
+            anchor_ino:
+              nonnegative_integer!(
+                row["anchor_ino"], "root binding anchor_ino"
+              ),
+            suffix: suffix
+          }
+        end
+
+        def decode_issue(value)
+          row = exact_hash!(
+            value, %w[detail kind uid username], "discovery issue"
+          )
+          kind = enum!(row["kind"], ISSUE_KINDS, "discovery issue kind")
+          username =
+            if row["username"].nil?
+              nil
+            else
+              username!(
+                row["username"], "discovery issue username",
+                max_bytes: MAX_USERNAME_BYTES
+              )
+            end
+          uid =
+            if row["uid"].nil?
+              nil
+            else
+              nonnegative_integer!(row["uid"], "discovery issue uid")
+            end
+          detail = string!(
+            row["detail"], "discovery issue detail",
+            max_bytes: MAX_ERROR_BYTES
+          )
+          DiscoveryIssue.new(
+            kind: kind,
+            username: username,
+            uid: uid,
+            detail: detail
+          ).freeze
+        end
+
+        def exact_hash!(value, keys, label)
+          malformed!("#{label} keys are invalid") unless
+            value.is_a?(Hash) && value.keys.sort == keys.sort
+          value
+        end
+
+        def bounded_array!(value, label, limit)
+          malformed!("#{label} is invalid") unless
+            value.is_a?(Array) && value.length <= limit
+          value
+        end
+
+        def string!(value, label, max_bytes:)
+          malformed!("#{label} is invalid") unless
+            value.is_a?(String) && !value.empty? &&
+            value.valid_encoding? && value.bytesize <= max_bytes
+          value.freeze
+        end
+
+        def username!(value, label, max_bytes:)
+          result = string!(value, label, max_bytes: max_bytes)
+          malformed!("#{label} is invalid") if
+            result.each_byte.any? { |byte| byte < 0x20 || byte == 0x7f }
+          result
+        end
+
+        def absolute_path!(value, label)
+          malformed!("#{label} is invalid") unless
+            value.is_a?(String) && value.bytesize <= MAX_PATH_BYTES &&
+            PathValue.absolute?(value)
+          value.freeze
+        end
+
+        def nonnegative_integer!(value, label)
+          malformed!("#{label} is invalid") unless
+            value.is_a?(Integer) && value >= 0
+          value
+        end
+
+        def boolean!(value, label)
+          malformed!("#{label} is invalid") unless
+            value == true || value == false
+          value
+        end
+
+        def enum!(value, allowed, label)
+          malformed!("#{label} is invalid") unless allowed.include?(value)
+          value.freeze
+        end
+
+        def malformed!(detail)
+          raise Hive::ConfigError,
+                "installed-user discovery returned malformed data (#{detail})"
+        end
 
         def cleanup(pid, waiter)
           return unless pid
@@ -910,23 +1377,18 @@ module Hive
         deferred = 0
         order.each_with_index do |index, offset|
           digest, profile = pairs.fetch(index)
-          existing = results[digest]
-          terminal =
-            existing.is_a?(Hash) &&
-            existing["status"] == "completed" &&
-            existing["retryable"] == false
-          unless terminal
-            if remaining_budget(deadline) <= SWEEP_CLEANUP_RESERVE_SEC
-              exhausted = true
-              deferred = order.length - offset
-              break
-            end
-            results[digest] = migrate_profile(
-              profile, executor, deadline: deadline
-            )
+          if remaining_budget(deadline) <= SWEEP_CLEANUP_RESERVE_SEC
+            exhausted = true
+            deferred = order.length - offset
+            break
           end
+          prior_result = results[digest]
+          prior_cursor = cursor
+          results[digest] = migrate_profile(
+            profile, executor, deadline: deadline
+          )
           cursor = pairs.empty? ? 0 : (index + 1) % pairs.length
-          unless terminal
+          unless results[digest] == prior_result && cursor == prior_cursor
             persist_progress(
               sweep_key: sweep_key,
               cursor: cursor,
@@ -1734,6 +2196,26 @@ module Hive
               )
             end
           end
+          containment_reported = Set.new
+          exact.to_a.combination(2) do |(left_identity, left),
+                                        (right_identity, right)|
+            next if left_identity == right_identity
+            next unless roots_overlap_by_containment?(left, right)
+
+            [ left, right ].each do |profile|
+              conflicting << profile
+              next unless containment_reported.add?(profile)
+
+              issues << DiscoveryIssue.new(
+                kind: "shared_profile_root",
+                username: profile.username,
+                uid: profile.uid,
+                detail:
+                  "one Hive profile root contains another installed-user " \
+                  "profile root"
+              )
+            end
+          end
           environment_conflicts.each do |profile|
             issues << DiscoveryIssue.new(
               kind: "profile_root_ambiguous",
@@ -1757,6 +2239,24 @@ module Hive
           profile.root_bindings.to_h do |binding|
             [ binding.kind, @root_bindings.key(binding) ]
           end
+        end
+
+        def roots_overlap_by_containment?(left, right)
+          left.root_bindings.any? do |left_binding|
+            right.root_bindings.any? do |right_binding|
+              left_path = left_binding.canonical_path
+              right_path = right_binding.canonical_path
+              strict_descendant?(left_path, right_path) ||
+                strict_descendant?(right_path, left_path)
+            end
+          end
+        end
+
+        def strict_descendant?(path, ancestor)
+          prefix =
+            ancestor == File::SEPARATOR ? ancestor :
+              "#{ancestor}#{File::SEPARATOR}"
+          path.start_with?(prefix) && path != ancestor
         end
 
         def issue_for(account, kind, detail)
@@ -2178,7 +2678,7 @@ module Hive
 
       class IdentityDrop
         def initialize(
-          groups_setter: ->(groups) { Process.groups = groups },
+          groups_setter: Process.method(:groups=),
           gid_drop: Process::GID.method(:change_privilege),
           uid_drop: Process::UID.method(:change_privilege),
           effective_uid: -> { Process.euid },

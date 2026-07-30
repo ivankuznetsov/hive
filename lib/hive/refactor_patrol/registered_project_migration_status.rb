@@ -4,6 +4,7 @@ require "etc"
 require "time"
 require "hive/managed_directory"
 require "hive/paths"
+require "hive/secret_patterns"
 require "hive/workflow_package/canonical_json"
 
 module Hive
@@ -32,6 +33,10 @@ module Hive
       STATUSES = %w[
         absent current dry_run failed migrated migration_required
       ].freeze
+      RETRYABLE_STATUSES = %w[
+        dry_run failed migration_required
+      ].freeze
+      MAX_DIAGNOSTIC_BYTES = 2_048
 
       def self.registry_digest(entries)
         payload = canonical_registry_value(Array(entries))
@@ -60,22 +65,31 @@ module Hive
 
       def self.valid_projects?(projects)
         projects.is_a?(Array) && projects.all? do |project|
+          status = project.is_a?(Hash) ? project["status"] : nil
           project.is_a?(Hash) &&
             project.keys.sort == PROJECT_KEYS &&
             %w[
-              project project_id path real_path hive_state_path remediation
-              error
+              project project_id path real_path hive_state_path
             ].all? { |key| string_or_nil?(project[key]) } &&
-            STATUSES.include?(project["status"]) &&
+            %w[remediation error].all? do |key|
+              diagnostic_or_nil?(project[key])
+            end &&
+            STATUSES.include?(status) &&
             [ nil, 2, 3 ].include?(project["current_schema_version"]) &&
             project["target_schema_version"] == 3 &&
             snapshot_id?(project["snapshot_id"]) &&
             [ true, false ].include?(project["retryable"]) &&
+            project["retryable"] == RETRYABLE_STATUSES.include?(status) &&
             (
               project["next_retry_at"].nil? ||
               valid_timestamp?(project["next_retry_at"])
             )
         end
+      end
+
+      def self.sanitize_diagnostic(value)
+        Hive::SecretPatterns.redact(value.to_s)
+          .byteslice(0, MAX_DIAGNOSTIC_BYTES).to_s.scrub("")
       end
 
       def self.valid_timestamp?(value)
@@ -275,6 +289,17 @@ module Hive
         value.nil? || value.is_a?(String)
       end
       private_class_method :string_or_nil?
+
+      def self.diagnostic_or_nil?(value)
+        value.nil? ||
+          (
+            value.is_a?(String) &&
+            value.valid_encoding? &&
+            value.bytesize <= MAX_DIAGNOSTIC_BYTES &&
+            value == sanitize_diagnostic(value)
+          )
+      end
+      private_class_method :diagnostic_or_nil?
 
       def self.snapshot_id?(value)
         value.nil? ||

@@ -674,8 +674,20 @@ class ModulesMigrationEffectDeliveryCollaboratorsTest < Minitest::Test
     result = delivery.reconcile_intent!(valid) do
       flunk("a terminal recovery receipt must not reconcile remotely")
     end
+    assert_raises(ArgumentError) do
+      delivery.recover_intent!(valid, reconcile: nil) { flunk }
+    end
+    recovered = delivery.recover_intent!(
+      valid,
+      reconcile: ->(_intent) {
+        flunk("a terminal recovery receipt must not reconcile remotely")
+      }
+    ) do
+      flunk("a terminal recovery receipt must not dispatch")
+    end
 
     assert_equal :committed, result.status
+    assert_equal :committed, recovered.status
   end
 
   def test_sender_maps_known_not_delivered_errors_to_retry_safe_prepared

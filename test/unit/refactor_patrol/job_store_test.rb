@@ -76,6 +76,35 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     end
   end
 
+  def test_runtime_admission_rejects_a_malformed_schema_status
+    store = Hive::RefactorPatrol::JobStore.allocate
+    store.instance_variable_set(:@project_root, "/projects/demo")
+    store.instance_variable_set(
+      :@hive_state_path, "/projects/demo/.hive-state"
+    )
+    store.instance_variable_set(:@schema_options, { project: nil })
+
+    error = with_replaced_singleton_method(
+      Hive::RefactorPatrol::JobStore,
+      :schema_state_present?,
+      ->(*, **) { true }
+    ) do
+      with_replaced_singleton_method(
+        Hive::RefactorPatrol::JobStore,
+        :schema_admission_status,
+        ->(*, **) { {} }
+      ) do
+        assert_raises(
+          Hive::RefactorPatrol::JobStore::InconsistentRecord
+        ) do
+          store.send(:assert_runtime_schema_admission!)
+        end
+      end
+    end
+
+    assert_match(/schema admission status is malformed/, error.message)
+  end
+
   def test_one_off_schema_migration_imports_the_released_aggregate
     with_tmp_dir do |dir|
       legacy = released_v2_job

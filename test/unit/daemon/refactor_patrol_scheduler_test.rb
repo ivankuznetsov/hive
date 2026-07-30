@@ -977,6 +977,7 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
   def test_occurrence_recovery_failure_is_identified_and_backed_off
     with_tmp_dir do |dir|
       entry = entry(dir, "demo")
+      token = "sk-#{'a' * 30}"
       capture = Hive::Modules::Migration::PatrolCapture.build(
         module_name: "architecture-patrol",
         project: {
@@ -1029,7 +1030,7 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       failing_store.define_singleton_method(:read_job) do |_job_id|
         reads += 1
         raise Hive::RefactorPatrol::JobStore::CorruptRecord,
-              "recovery failed: #{"x" * 600}"
+              "recovery failed #{token}: #{"x" * 600}"
       end
       install_recovery_protocol(failing_store)
       scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
@@ -1049,6 +1050,9 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
                    first.fetch(:recovery)
       assert_equal "CorruptRecord", first.fetch(:error_class).split("::").last
       assert_equal 512, first.fetch(:error).bytesize
+      refute_includes first.fetch(:error), token
+      assert_includes first.fetch(:error),
+                      "[REDACTED:openai_api_key]"
       assert_equal 1, first.fetch(:retry_count)
       assert_equal 60, first.fetch(:retry_in_sec)
       durable = failing_store.recovery_backoff(now: T0).fetch(

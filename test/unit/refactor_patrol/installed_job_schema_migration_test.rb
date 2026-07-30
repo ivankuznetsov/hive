@@ -380,6 +380,67 @@ class HiveRefactorPatrolInstalledJobSchemaMigrationTest < Minitest::Test
     end
   end
 
+  def test_restart_must_leave_a_persisted_candidate_acknowledgement
+    with_tmp_dir do |root|
+      entries = [ { "name" => "shared", "path" => "/srv/shared" } ]
+      digest = MigrationStatus.registry_digest(entries)
+      status_store = FakeStatusStore.new
+      coordinator = FakeCoordinator.new(
+        status_store: status_store,
+        payload: status_payload(digest: digest, projects: [])
+      )
+      lifecycle = Object.new
+      ready_callbacks = []
+      lifecycle.define_singleton_method(:quiesce!) { true }
+      lifecycle.define_singleton_method(:restart!) do |ready: nil|
+        ready_callbacks << ready
+        true
+      end
+      migration = Migration.new(
+        registry: -> { entries },
+        identity_ensurer: -> { nil },
+        status_store: status_store,
+        coordinator_factory: ->(**) { coordinator },
+        daemon_lifecycle: lifecycle,
+        activation_directory: Hive::ManagedDirectory.new(
+          root: File.join(root, "schema-migrations"),
+          label: "test installation migration"
+        )
+      )
+
+      error = assert_raises(Hive::ConfigError) do
+        migration.call(now: "2026-07-29T12:00:00Z")
+      end
+
+      assert_match(/did not acknowledge JobStore migration readiness/,
+                   error.message)
+      assert migration.last_daemon_restarted
+      assert_equal 1, ready_callbacks.length
+      assert_respond_to ready_callbacks.first, :call
+    end
+  end
+
+  def test_daemon_acknowledgement_probe_fails_closed_when_status_is_unreadable
+    with_tmp_dir do |root|
+      status_store = Object.new
+      status_store.define_singleton_method(:read) do
+        raise IOError, "status unavailable"
+      end
+      migration = Migration.new(
+        registry: -> { [] },
+        identity_ensurer: -> { nil },
+        status_store: status_store,
+        daemon_lifecycle: FakeLifecycle.new,
+        activation_directory: Hive::ManagedDirectory.new(
+          root: File.join(root, "schema-migrations"),
+          label: "test installation migration"
+        )
+      )
+
+      refute migration.send(:daemon_restart_acknowledged?)
+    end
+  end
+
   def test_daemon_lifecycle_fences_released_process_tree_and_restarts_candidate
     with_tmp_dir do |root|
       binary = File.join(root, "hive")

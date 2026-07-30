@@ -23,14 +23,18 @@ tags: [gap, todo, release-proof, agent-skills]
   and real-UID-gate pinned. The Linux merge gate creates three temporary NSS
   accounts on its isolated hosted VM (and uses a subordinate-id user namespace
   locally), then gives one candidate default, `HIVE_HOME`, and split-XDG profiles,
-  converts one released-v2 project per uid, and proves both v3 data and
-  per-profile receipts are owned by the dropped identity. Focused coverage
+  converts two released-v2 projects per uid, registers a later third project
+  for another inactive user, and proves the next hourly resume converts it
+  while both v3 data and per-profile receipts remain owned by the dropped
+  identity. Focused coverage
   additionally includes 120 released-format jobs with many attempts,
   interruption/resume checkpoints, corrupt and identity-drift holds,
   realpath-alias deduplication, shared-profile-root refusal, stable root
   inventory/candidate custody, persisted read-only status, hourly retry,
   runtime admission from the latest completed sweep, bounded NSS discovery,
-  exact supplementary-group drops, cross-profile state-root collision refusal,
+  exact supplementary-group drops, cross-profile exact/nested root collision
+  refusal, full ancestor-custody revalidation, strict bounded JSON catalog
+  transport, contradictory nested receipt refusal, redacted child diagnostics,
   and v3-only normal runtime admission.
   There is not yet a checked-in artifact from an actual AUR package upgrade
   with three long-lived host accounts and running old daemons, nor a repaired

@@ -3,6 +3,8 @@ require "hive/commands/patrol"
 require "hive/commands/refactor_patrol"
 
 class PatrolCapabilityCommandTest < Minitest::Test
+  include HiveTestHelper
+
   class RecordingContext
     attr_reader :calls
 
@@ -17,6 +19,20 @@ class PatrolCapabilityCommandTest < Minitest::Test
 
     def respond_to_missing?(*)
       true
+    end
+  end
+
+  def test_default_dismissals_factory_preserves_dry_run_state
+    with_tmp_dir do |root|
+      state = Hive::Patrol::StateStore.new(root)
+      command = Hive::Commands::Patrol.new("demo", dry_run: true)
+
+      dismissals = command.instance_variable_get(
+        :@dismissals_factory
+      ).call(root, state)
+
+      assert_instance_of Hive::Patrol::Dismissals, dismissals
+      refute dismissals.instance_variable_get(:@persist)
     end
   end
 

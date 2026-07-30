@@ -629,6 +629,7 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
   def test_projection_recovery_failure_is_visible_and_retried_with_backoff
     with_tmp_dir do |dir|
       entry = project_entry(dir)
+      token = "sk-#{'a' * 30}"
       drain_calls = 0
       store = Object.new
       store.define_singleton_method(
@@ -645,7 +646,7 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       end
       store.define_singleton_method(:drain_occurrence_outbox!) do |_occurrence_id, **_options|
         drain_calls += 1
-        raise IOError, "projection failed: #{"x" * 600}"
+        raise IOError, "projection failed #{token}: #{"x" * 600}"
       end
       install_recovery_protocol(store)
       sched = Hive::Daemon::PatrolScheduler.new(
@@ -663,6 +664,9 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       assert_equal "recovery_failed", first.fetch(:blocker)
       assert_equal "IOError", first.fetch(:error_class)
       assert_equal 512, first.fetch(:error).bytesize
+      refute_includes first.fetch(:error), token
+      assert_includes first.fetch(:error),
+                      "[REDACTED:openai_api_key]"
       assert_equal 1, first.fetch(:retry_count)
       assert_equal 60, first.fetch(:retry_in_sec)
       assert_equal (T0 + 60).utc.iso8601, first.fetch(:retry_at)

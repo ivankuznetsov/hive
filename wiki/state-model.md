@@ -624,10 +624,13 @@ their existing v2 owners until those components intentionally migrate:
 The job-schema converter is a shipped upgrade boundary, not a v2 runtime
 reader. The root-only install-wide coordinator discovers fixed Hive registry
 anchors for every NSS user and supplements them with the root-owned custom-root
-inventory. It validates identity/home bindings, then drops groups/gid/uid and
-uses a scrubbed exact profile environment before invoking the candidate. Root
-never reads a non-root user's registry or mutates that user's project before
-the identity drop; a root account's own child necessarily remains uid 0.
+inventory. Isolated discovery returns one bounded, versioned, exact-key JSON
+snapshot. The parent rejects equal or nested roots across profiles and the
+executor revalidates every root ancestor as root-or-profile-owned before it
+drops groups/gid/uid and uses a scrubbed exact profile environment to invoke
+the candidate. Root never reads a non-root user's registry or mutates that
+user's project before the identity drop; a root account's own child
+necessarily remains uid 0.
 Within each profile Hive
 deduplicates realpath aliases and invokes the same per-project converter before
 constructing any architecture-patrol scheduler, merge reconciler, or
@@ -648,7 +651,10 @@ not prevent later registered projects or user profiles from migrating, or
 unrelated workflow tasks from running. Runtime admission is an allowlist from
 the latest completed
 sweep. A registry-digest change causes immediate rescan; otherwise failed rows
-retry hourly. The per-profile status lives under
+retry hourly. Independently, the machine timer re-enters every discovered
+profile each hour and lets the dropped-identity child compare that live
+registry digest; the root traversal checkpoint cannot make a profile
+semantically terminal. The per-profile status lives under
 `<state_home>/schema-migrations/refactor-patrol-job-v3.json` and is surfaced by
 `hive daemon status --json`; the privileged aggregate is a separate typed
 receipt with candidate, inventory, uid, profile, and coverage identities. AUR's

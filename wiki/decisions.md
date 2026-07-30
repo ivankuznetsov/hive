@@ -687,8 +687,9 @@ exhaustively from NSS.
 **Decision:** Keep one strict per-profile migration receipt and add a separate
 root-only host coordinator. It enumerates conventional NSS-home anchors and a
 root-owned exact custom-profile inventory through a bounded NSS snapshot,
-rejects uid/home/root-binding and cross-profile state collisions, binds the
-installed root-owned candidate path/version/digest, revalidates each
+transports isolated discovery through a strict bounded JSON document, rejects
+uid/home/root-binding plus cross-profile equal or nested root collisions,
+binds the installed root-owned candidate path/version/digest, revalidates each
 uid/name/gid/home/group tuple immediately before execution, then forks and
 drops to the exact supplementary groups, gid, and uid before the candidate
 reads a registry or project. The parent never parses user-owned Hive
@@ -697,7 +698,10 @@ evidence reports distinct OS-user and Hive-profile counts and cannot become
 `complete` without explicit inventory closure and zero retryable profiles. AUR
 installs an hourly system timer; root-owned direct installs install an hourly
 systemd timer or launchd LaunchDaemon, and root bash updates ensure it before
-the sweep. Per-user daemons retain registry-change and hourly project retry.
+the sweep. Every machine retry re-enters every discovered profile; its
+dropped-identity child uses the live registry digest, so a root traversal
+checkpoint cannot hide a project registered later by any user. Per-user
+daemons retain registry-change and hourly project retry.
 Homebrew and non-root direct installs remain current-user-only and are never
 elevated; a shared host requires a separate root-owned system runtime. Normal
 CLI startup and JobStore construction support only v3. Released-v2 conversion

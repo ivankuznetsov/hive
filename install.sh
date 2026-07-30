@@ -75,7 +75,7 @@ root_install_guard() {
     LD_PRELOAD LD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH \
     BASH_ENV ENV CDPATH TMPDIR HIVE_REPO_OWNER HIVE_REPO_NAME \
     HIVE_QMD_NPM_PACKAGE; do
-    if [[ -v "$name" ]]; then
+    if declare -p "$name" >/dev/null 2>&1; then
       die "root installation refuses inherited ${name}; use the fixed system channel"
     fi
   done
@@ -265,10 +265,17 @@ ruby_preflight() {
 }
 
 root_owned_immutable_path() {
-  local path="$1" canonical owner mode numeric_mode
+  local path="$1" parent leaf canonical_parent canonical owner mode numeric_mode
+  [[ "$path" == /* ]] ||
+    die "root system channel requires an absolute path at ${path}"
   [[ -e "$path" && ! -L "$path" ]] ||
     die "root system channel requires a non-symlink path at ${path}"
-  canonical="$(readlink -f "$path")"
+  parent="${path%/*}"
+  leaf="${path##*/}"
+  [[ -n "$parent" && -n "$leaf" ]] ||
+    die "root system channel cannot canonicalize path ${path}"
+  canonical_parent="$(CDPATH= cd -P "$parent" && pwd -P)"
+  canonical="${canonical_parent%/}/${leaf}"
   [[ "$canonical" == "$path" ]] ||
     die "root system channel refuses redirected path ${path}"
   if [[ "$(uname -s)" == "Darwin" ]]; then

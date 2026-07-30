@@ -858,6 +858,27 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
     end
   end
 
+  def test_recovery_failure_redacts_secrets_before_state_persistence
+    with_tmp_dir do |root|
+      journal_root = File.join(root, "occurrences")
+      token = "sk-#{'a' * 30}"
+      failure = occurrence_journal(journal_root)
+                .record_recovery_failure!(
+                  operation: "projection",
+                  error: RuntimeError.new("provider rejected #{token}"),
+                  now: NOW
+                )
+
+      refute_includes failure.fetch("error_message"), token
+      assert_includes failure.fetch("error_message"),
+                      "[REDACTED:openai_api_key]"
+      state_path = File.join(journal_root, "journal-state.json")
+      persisted = File.binread(state_path)
+      refute_includes persisted, token
+      assert_includes persisted, "[REDACTED:openai_api_key]"
+    end
+  end
+
   def test_reserve_attempt_composes_locks_in_the_declared_order
     with_tmp_dir do |root|
       journal = occurrence_journal(File.join(root, "occurrences"))
@@ -2059,6 +2080,20 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
         operation: "recovery", error: unreadable, now: NOW
       )
       assert_equal "recovery failed", failure.fetch("error_message")
+
+      unencodable = "unencodable".dup
+      unencodable.define_singleton_method(:encode) do |*|
+        raise Encoding::CompatibilityError, "synthetic encoding failure"
+      end
+      assert_equal(
+        "fallback",
+        Hive::Modules::Migration::OccurrenceJournalState.send(
+          :bounded_utf8,
+          unencodable,
+          max_bytes: 64,
+          fallback: "fallback"
+        )
+      )
       assert_raises(Hive::ConfigError) do
         journal.clear_recovery_failure!(
           expected_generation: Object.new

@@ -277,7 +277,10 @@ module Hive
           retryable: true,
           next_retry_at: timestamp(now + @retry_interval),
           remediation: remediation_for(error, identity),
-          error: "#{error.class}: #{error.message}"
+          error:
+            RegisteredProjectMigrationStatus.sanitize_diagnostic(
+              "#{error.class}: #{error.message}"
+            )
         )
       end
 
@@ -393,8 +396,14 @@ module Hive
           snapshot_id: snapshot_id,
           retryable: retryable,
           next_retry_at: next_retry_at,
-          remediation: remediation,
-          error: error
+          remediation:
+            remediation &&
+              RegisteredProjectMigrationStatus.sanitize_diagnostic(
+                remediation
+              ),
+          error:
+            error &&
+              RegisteredProjectMigrationStatus.sanitize_diagnostic(error)
         )
       end
 

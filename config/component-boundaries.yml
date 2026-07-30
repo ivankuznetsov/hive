@@ -154,7 +154,6 @@ components:
           - lib/hive/daemon/refactor_patrol_scheduler.rb
           - lib/hive/modules/adapters/architecture_patrol.rb
           - lib/hive/modules/adapters/patrol.rb
-          - lib/hive/patrol/pr_opener.rb
           - lib/hive/refactor_patrol/action_runner.rb
         reason: "Product composition roots and observational adapters project the append-only evidence facade; they cannot use it as retry authority."
       - constant: Hive::Modules::Migration::OccurrenceJournal

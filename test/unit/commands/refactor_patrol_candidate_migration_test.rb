@@ -163,7 +163,8 @@ class RefactorPatrolCandidateMigrationCommandTest < Minitest::Test
 
   def test_install_wide_retry_is_activated_before_the_sweep
     candidate = Object.new
-    authority = FakeAuthority.new(candidate)
+    runtime = Struct.new(:candidate).new(candidate)
+    authority = FakeAuthority.new(runtime)
     retry_service = FakeRetryService.new
     aggregate = FakeMigration.new(
       "schema" => "hive-installed-users-job-schema-migration",
@@ -183,7 +184,7 @@ class RefactorPatrolCandidateMigrationCommandTest < Minitest::Test
     command.call
 
     assert_equal 1, authority.calls
-    assert_equal [ candidate ], retry_service.candidates
+    assert_equal [ runtime ], retry_service.candidates
     assert_equal [ { force: true } ], aggregate.calls
   end
 

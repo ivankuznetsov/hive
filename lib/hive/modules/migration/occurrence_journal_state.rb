@@ -3,6 +3,7 @@ require "json"
 require "time"
 require "hive/managed_directory"
 require "hive/modules/migration/stable_process_lock"
+require "hive/secret_patterns"
 require "hive/workflow_package/canonical_json"
 
 module Hive
@@ -30,7 +31,7 @@ module Hive
               fallback: "AnonymousError"
             )
             message = bounded_utf8(
-              error.message,
+              redacted_error_message(error),
               max_bytes: MAX_ERROR_BYTES,
               fallback: "recovery failed"
             )
@@ -45,6 +46,12 @@ module Hive
           end
 
           private
+
+          def redacted_error_message(error)
+            Hive::SecretPatterns.redact(error.message)
+          rescue StandardError
+            "recovery failed"
+          end
 
           def bounded_utf8(value, max_bytes:, fallback:)
             string = value.to_s.encode(

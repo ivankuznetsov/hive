@@ -98,6 +98,12 @@ module Hive
           project_root, hive_state_path: entry.fetch("hive_state_path")
         )
         state.ensure!
+        state.with_cycle_lock do
+          run_locked_cycle(entry, project_root, cfg, state)
+        end
+      end
+
+      def run_locked_cycle(entry, project_root, cfg, state)
         capture = patrol_capture(entry, state)
         unless @dry_run
           state.configure_effect_gateway!(
@@ -162,11 +168,7 @@ module Hive
               project_root,
               cfg: cfg,
               state: state,
-              capture: capture,
-              evidence_store: @evidence_store_factory.call(entry),
-              config_loader: @config_loader,
-              capability_checker: method(:effect_capability_allowed?),
-              module_execution: @module_execution
+              capture: capture
             )
           end
           prs_opened = 0

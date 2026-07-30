@@ -2064,6 +2064,69 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_registration_state_identity_fails_closed_and_skips_malformed_legacy_rows
+    with_tmp_dir do |root|
+      candidate = {
+        "name" => "candidate",
+        "path" => root,
+        "hive_state_path" => root,
+        "project_id" => "11111111-1111-4111-a111-111111111111"
+      }
+      malformed = {
+        "name" => "malformed",
+        "path" => "\0",
+        "project_id" => "22222222-2222-4222-a222-222222222222"
+      }
+      registrations = [ malformed ]
+
+      assert_same registrations, Hive::Config.send(
+        :assert_registration_state_root_available!,
+        candidate,
+        registrations,
+        replacing: nil
+      )
+
+      socket_path = File.join(root, "state.sock")
+      socket = UNIXServer.new(socket_path)
+      unsafe = assert_raises(Hive::ConfigError) do
+        Hive::Config.send(
+          :canonical_registration_state_path, socket_path
+        )
+      end
+      assert_match(/unsafe Hive state path/, unsafe.message)
+    ensure
+      socket&.close
+      FileUtils.rm_f(socket_path) if socket_path
+    end
+
+    missing = with_replaced_singleton_method(
+      File,
+      :realpath,
+      ->(_path) { raise Errno::ENOENT }
+    ) do
+      assert_raises(Hive::ConfigError) do
+        Hive::Config.send(
+          :canonical_registration_state_path, "/never-resolves"
+        )
+      end
+    end
+    assert_match(/cannot establish the Hive state path identity/,
+                 missing.message)
+
+    unavailable = with_replaced_singleton_method(
+      File,
+      :realpath,
+      ->(_path) { raise Errno::EACCES }
+    ) do
+      assert_raises(Hive::ConfigError) do
+        Hive::Config.send(
+          :canonical_registration_state_path, "/unavailable"
+        )
+      end
+    end
+    assert_match(/Errno::EACCES/, unavailable.message)
+  end
+
   def test_project_for_path_resolves_registered_repo_from_cwd
     with_tmp_global_config do
       with_tmp_dir do |repo|

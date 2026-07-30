@@ -1,5 +1,6 @@
 require "test_helper"
 require "json_schemer"
+require "stringio"
 require "hive/refactor_patrol/installed_users_job_schema_migration"
 
 class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
@@ -75,6 +76,28 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
 
   FakeStat = Data.define(:dev, :ino, :uid, :gid, :mode, :size) do
     def file? = true
+  end
+
+  DirectoryStat = Data.define(:uid, :mode) do
+    def directory? = true
+    def symlink? = false
+  end
+
+  class StatWithUid
+    def initialize(stat, uid:)
+      @stat = stat
+      @uid = uid
+    end
+
+    attr_reader :uid
+
+    def method_missing(name, *args, &block)
+      @stat.public_send(name, *args, &block)
+    end
+
+    def respond_to_missing?(name, include_private = false)
+      @stat.respond_to?(name, include_private) || super
+    end
   end
 
   def test_one_install_wide_call_attempts_every_discovered_user_and_isolates_failure
@@ -178,7 +201,8 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
       )
 
       assert_equal "complete", second.fetch("status")
-      assert_equal %w[alice bob carol], executor.calls.map(&:username)
+      assert_equal %w[alice bob carol alice],
+                   executor.calls.map(&:username)
       assert_equal 3, second.fetch("attempted_users")
       final_progress =
         Migration::SweepProgress.new(root: progress_root).read
@@ -189,7 +213,7 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
     end
   end
 
-  def test_hourly_resume_does_not_rewrite_terminal_profile_progress
+  def test_hourly_resume_rechecks_terminal_profile_without_rewriting_same_progress
     with_tmp_dir do |home|
       candidate = profile("alice", 1_001, home)
       executor = Executor.new do |profile|
@@ -208,7 +232,7 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
       writes_after_migration = progress.write_calls
       migration.call(now: Time.utc(2026, 7, 29, 21), force: false)
 
-      assert_equal 1, executor.calls.length
+      assert_equal 2, executor.calls.length
       assert_equal writes_after_migration, progress.write_calls
     end
   end
@@ -253,7 +277,106 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
         .fetch("projects").first.delete("real_path")
       assert_raises(Hive::ConfigError) { progress.write(malformed) }
 
+      contradictory = JSON.parse(JSON.generate(payload))
+      project = contradictory["results"].values.first
+        .fetch("projects").first
+      project.merge!(
+        "status" => "failed",
+        "current_schema_version" => nil,
+        "retryable" => true,
+        "next_retry_at" => "2026-07-29T21:00:00.000000Z",
+        "remediation" => "retry later",
+        "error" => "Hive::Error: retry later"
+      )
+      assert(
+        Hive::RefactorPatrol::RegisteredProjectMigrationStatus
+          .valid_projects?([ project ])
+      )
+      assert_raises(Hive::ConfigError) do
+        progress.write(contradictory)
+      end
+
       assert_equal payload, progress.write(payload)
+    end
+  end
+
+  def test_machine_checkpoint_rejects_unreadable_invalid_and_oversized_state
+    malformed_directory = Object.new
+    malformed_directory.define_singleton_method(:read) do |*, **|
+      "{"
+    end
+    progress = Migration::SweepProgress.new(
+      root: "/var/lib/hive/schema-migrations",
+      directory: malformed_directory
+    )
+    error = assert_raises(Hive::ConfigError) { progress.read }
+    assert_match(/checkpoint is unreadable/, error.message)
+
+    invalid_directory = Object.new
+    invalid_directory.define_singleton_method(:read) do |*, **|
+      Hive::WorkflowPackage::CanonicalJSON.generate("wrong" => true)
+    end
+    progress = Migration::SweepProgress.new(
+      root: "/var/lib/hive/schema-migrations",
+      directory: invalid_directory
+    )
+    error = assert_raises(Hive::ConfigError) { progress.read }
+    assert_match(/checkpoint is malformed/, error.message)
+
+    with_tmp_dir do |home|
+      payload = sweep_progress_payload(
+        profile("alice", Process.uid, home, gid: Process.gid)
+      )
+      directory = Object.new
+      directory.define_singleton_method(:atomic_write) do |*|
+        flunk("oversized checkpoint must not be written")
+      end
+      progress = Migration::SweepProgress.new(
+        root: "/var/lib/hive/schema-migrations",
+        directory: directory
+      )
+      with_constant(Migration::SweepProgress, :MAX_BYTES, 1) do
+        error = assert_raises(Hive::ConfigError) do
+          progress.write(payload)
+        end
+        assert_match(/checkpoint is too large/, error.message)
+      end
+    end
+  end
+
+  def test_machine_checkpoint_validates_failed_rows_paths_and_timestamps
+    with_tmp_dir do |home|
+      payload = sweep_progress_payload(
+        profile("alice", Process.uid, home, gid: Process.gid)
+      )
+      row = payload.fetch("results").values.fetch(0)
+      row.merge!(
+        "status" => "failed",
+        "retryable" => true,
+        "registry_digest" => nil,
+        "projects" => [],
+        "error" => "Hive::ConfigError: registry unavailable"
+      )
+      writes = []
+      directory = Object.new
+      directory.define_singleton_method(:atomic_write) do |*arguments, **options|
+        writes << [ arguments, options ]
+      end
+      progress = Migration::SweepProgress.new(
+        root: "/var/lib/hive/schema-migrations",
+        directory: directory
+      )
+
+      assert_equal payload, progress.write(payload)
+      assert_equal 1, writes.length
+
+      invalid_path = deep_copy(payload)
+      invalid_path.fetch("results").values.fetch(0)["home"] = "\0"
+      assert_raises(Hive::ConfigError) { progress.write(invalid_path) }
+
+      invalid_timestamp = deep_copy(payload)
+      invalid_timestamp["updated_at"] = nil
+      assert_raises(Hive::ConfigError) { progress.write(invalid_timestamp) }
     end
   end
 
@@ -298,6 +421,99 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
       assert_equal "complete", payload.fetch("status")
       assert_equal 1, snapshots
       assert_equal %w[alice bob], executor.calls.map(&:username)
+    end
+  end
+
+  def test_install_wide_sweep_keeps_nss_and_catalog_failures_partial
+    nss = Object.new
+    nss.define_singleton_method(:snapshot) do |deadline:|
+      raise "missing deadline" unless deadline
+
+      raise Hive::ConfigError,
+            "sk-ant-abcdefghijklmnopqrst directory service offline"
+    end
+    observed = nil
+    catalog_snapshot = snapshot([], closed: false)
+    runner = Object.new
+    runner.define_singleton_method(:call) do |_catalog, **attributes|
+      observed = attributes
+      catalog_snapshot
+    end
+    migration = Migration.new(
+      catalog: Object.new,
+      nss_query: nss,
+      catalog_runner: runner,
+      executor: Executor.new { flunk("no profile should execute") },
+      candidate: candidate_identity,
+      effective_uid: -> { 0 },
+      status_store: ProgressStore.new
+    )
+
+    payload = migration.call
+
+    assert_equal "partial", payload.fetch("status")
+    assert_empty observed.fetch(:nss_snapshot).accounts
+    assert_match(/directory service offline/, observed.fetch(:nss_error))
+    refute_includes observed.fetch(:nss_error),
+                    "sk-ant-abcdefghijklmnopqrst"
+
+    catalog = Object.new
+    catalog.define_singleton_method(:snapshot) do |**attributes|
+      observed = attributes
+      raise Hive::ConfigError, "catalog root unavailable"
+    end
+    nss.define_singleton_method(:snapshot) do |deadline:|
+      raise "missing deadline" unless deadline
+
+      Migration::NssQuery::Result.new(accounts: [], groups: [])
+    end
+    migration = Migration.new(
+      catalog: catalog,
+      nss_query: nss,
+      executor: Executor.new { flunk("no profile should execute") },
+      candidate: candidate_identity,
+      effective_uid: -> { 0 },
+      status_store: ProgressStore.new
+    )
+
+    payload = migration.call
+
+    assert_equal "partial", payload.fetch("status")
+    assert_instance_of Migration::NssQuery::Result,
+                       observed.fetch(:nss_snapshot)
+    assert_equal "installed_user_discovery_unavailable",
+                 payload.fetch("discovery_issues").first.fetch("kind")
+    assert_match(
+      /catalog root unavailable/,
+      payload.fetch("discovery_issues").first.fetch("detail")
+    )
+  end
+
+  def test_install_wide_sweep_forwards_one_deadline_to_each_user
+    with_tmp_dir do |home|
+      candidate = profile("alice", Process.uid, home, gid: Process.gid)
+      observed_deadline = nil
+      receipt = installation_payload("alice", profile: candidate)
+      executor = Object.new
+      executor.define_singleton_method(:call) do |_profile, deadline:|
+        observed_deadline = deadline
+        receipt
+      end
+      migration = Migration.new(
+        catalog: Catalog.new(snapshot([ candidate ], closed: true)),
+        executor: executor,
+        candidate: candidate_identity,
+        effective_uid: -> { 0 },
+        status_store: ProgressStore.new
+      )
+
+      payload = migration.call
+
+      assert_equal "complete", payload.fetch("status")
+      assert_kind_of Numeric, observed_deadline
+      assert_operator observed_deadline,
+                      :>,
+                      Process.clock_gettime(Process::CLOCK_MONOTONIC)
     end
   end
 
@@ -350,6 +566,364 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
       child_pid = Integer(File.binread(child_path))
       assert_raises(Errno::ESRCH) { Process.kill(0, child_pid) }
     end
+  end
+
+  def test_catalog_runner_round_trips_a_typed_install_wide_snapshot
+    with_tmp_dir do |root|
+      home = File.join(root, "alice")
+      FileUtils.mkdir_p(home)
+      candidate = profile(
+        "alice", Process.uid, home, gid: Process.gid
+      )
+      issue = Migration::DiscoveryIssue.new(
+        kind: "nss_catalog_unavailable",
+        username: nil,
+        uid: nil,
+        detail: "directory service unavailable"
+      )
+      original = Migration::Snapshot.new(
+        profiles: [ candidate ].freeze,
+        issues: [ issue ].freeze,
+        closed: true,
+        inventory_path: "/var/lib/hive/installed-users.v1.json",
+        inventory_digest: "d" * 64
+      ).freeze
+      catalog = Object.new
+      catalog.define_singleton_method(:snapshot) do |**_attributes|
+        original
+      end
+      runner = Migration::CatalogRunner.new
+
+      result = runner.call(
+        catalog,
+        nss_snapshot: nil,
+        nss_error: nil,
+        deadline:
+          Process.clock_gettime(Process::CLOCK_MONOTONIC) + 2
+      )
+
+      assert_equal original, result
+      assert_instance_of Migration::Snapshot, result
+      assert_instance_of Migration::Profile, result.profiles.fetch(0)
+      assert_instance_of Migration::RootBinding,
+                         result.profiles.fetch(0).root_bindings.fetch(0)
+      assert_instance_of Migration::DiscoveryIssue, result.issues.fetch(0)
+      assert_predicate result.profiles, :frozen?
+      assert_predicate result.profiles.fetch(0).environment, :frozen?
+    end
+  end
+
+  def test_catalog_runner_rejects_malformed_nested_profile_and_root_rows
+    with_tmp_dir do |root|
+      home = File.join(root, "alice")
+      FileUtils.mkdir_p(home)
+      original = Migration::Snapshot.new(
+        profiles: [
+          profile("alice", Process.uid, home, gid: Process.gid)
+        ].freeze,
+        issues: [].freeze,
+        closed: true,
+        inventory_path: "/var/lib/hive/installed-users.v1.json",
+        inventory_digest: "d" * 64
+      ).freeze
+      runner = Migration::CatalogRunner.new
+      encoded = runner.send(:success_payload, original)
+
+      malformed_profile =
+        JSON.parse(JSON.generate(encoded))
+      malformed_profile.fetch("snapshot").fetch("profiles").fetch(0)
+        .delete("uid")
+      profile_error = assert_raises(Hive::ConfigError) do
+        runner.send(:decode_payload, malformed_profile)
+      end
+      assert_match(/profile keys are invalid/, profile_error.message)
+
+      malformed_root =
+        JSON.parse(JSON.generate(encoded))
+      malformed_root.fetch("snapshot").fetch("profiles").fetch(0)
+        .fetch("root_bindings").fetch(0)["canonical_path"] = "../escape"
+      root_error = assert_raises(Hive::ConfigError) do
+        runner.send(:decode_payload, malformed_root)
+      end
+      assert_match(
+        /root binding canonical_path is invalid/, root_error.message
+      )
+    end
+  end
+
+  def test_catalog_runner_child_serializes_success_and_bounded_failure
+    events = []
+    runner = Migration::CatalogRunner.new(
+      session_setter: -> { events << :session },
+      exit_process: ->(status) { events << [ :exit, status ] }
+    )
+    original = snapshot([], closed: true)
+    catalog = Object.new
+    catalog.define_singleton_method(:snapshot) do |**_attributes|
+      original
+    end
+
+    reader = StringIO.new
+    writer = StringIO.new
+    runner.send(
+      :catalog_child,
+      reader,
+      writer,
+      catalog,
+      nss_snapshot: nil,
+      nss_error: nil
+    )
+    success = JSON.parse(writer.string)
+
+    assert success.fetch("ok")
+    assert_equal Migration::CatalogRunner::WIRE_SCHEMA,
+                 success.fetch("schema")
+    assert_equal [ :session, [ :exit, 0 ] ], events
+
+    failing = Object.new
+    failing.define_singleton_method(:snapshot) do |**_attributes|
+      raise Hive::ConfigError,
+            "sk-ant-abcdefghijklmnopqrst inventory unavailable"
+    end
+    reader = StringIO.new
+    writer = StringIO.new
+    runner.send(
+      :catalog_child,
+      reader,
+      writer,
+      failing,
+      nss_snapshot: nil,
+      nss_error: nil
+    )
+    failure = JSON.parse(writer.string)
+
+    refute failure.fetch("ok")
+    assert_match(/inventory unavailable/, failure.fetch("error"))
+    refute_includes failure.fetch("error"),
+                    "sk-ant-abcdefghijklmnopqrst"
+  end
+
+  def test_catalog_runner_enforces_wire_bounds_and_child_lifecycle
+    catalog = Object.new
+    catalog.define_singleton_method(:snapshot) do |**_attributes|
+      Migration::Snapshot.new(
+        profiles: [],
+        issues: [],
+        closed: true,
+        inventory_path: "/var/lib/hive/installed-users.v1.json",
+        inventory_digest: "d" * 64
+      )
+    end
+    deadline = lambda {
+      Process.clock_gettime(Process::CLOCK_MONOTONIC) + 0.25
+    }
+
+    with_constant(Migration::CatalogRunner, :MAX_CAPTURE_BYTES, 32) do
+      error = assert_raises(Hive::ConfigError) do
+        Migration::CatalogRunner.new.call(
+          catalog,
+          nss_snapshot: nil,
+          nss_error: nil,
+          deadline: deadline.call
+        )
+      end
+      assert_match(/output exceeded its limit/, error.message)
+    end
+
+    lingering = Migration::CatalogRunner.new(
+      exit_process: ->(_status) { sleep 5 }
+    )
+    error = assert_raises(Hive::ConfigError) do
+      lingering.call(
+        catalog,
+        nss_snapshot: nil,
+        nss_error: nil,
+        deadline: deadline.call
+      )
+    end
+    assert_match(/did not terminate within budget/, error.message)
+
+    malformed = Migration::CatalogRunner.new
+    malformed.define_singleton_method(:catalog_child) do |reader, writer, _catalog, **|
+      reader.close
+      writer.write("{")
+      writer.close
+      Process.exit!(0)
+    end
+    error = assert_raises(Hive::ConfigError) do
+      malformed.call(
+        catalog,
+        nss_snapshot: nil,
+        nss_error: nil,
+        deadline: deadline.call
+      )
+    end
+    assert_match(/returned malformed data/, error.message)
+  end
+
+  def test_catalog_runner_validates_the_complete_wire_contract
+    with_tmp_dir do |root|
+      home = File.join(root, "alice")
+      FileUtils.mkdir_p(File.join(home, ".config", "hive"))
+      FileUtils.mkdir_p(File.join(home, ".local", "state", "hive"))
+      candidate = profile(
+        "alice", Process.uid, home, gid: Process.gid
+      )
+      issue = Migration::DiscoveryIssue.new(
+        kind: "default_home_unavailable",
+        username: "alice",
+        uid: Process.uid,
+        detail: "profile evidence unavailable"
+      )
+      original = Migration::Snapshot.new(
+        profiles: [ candidate ].freeze,
+        issues: [ issue ].freeze,
+        closed: true,
+        inventory_path: "/var/lib/hive/installed-users.v1.json",
+        inventory_digest: "d" * 64
+      ).freeze
+      runner = Migration::CatalogRunner.new
+      encoded = runner.send(:success_payload, original)
+
+      assert_equal original, runner.send(:decode_payload, encoded)
+      failure = runner.send(
+        :failure_payload, Hive::ConfigError.new("catalog unavailable")
+      )
+      error = assert_raises(Hive::ConfigError) do
+        runner.send(:decode_payload, failure)
+      end
+      assert_match(/discovery failed:.*catalog unavailable/, error.message)
+
+      invalid_status = {
+        "schema" => Migration::CatalogRunner::WIRE_SCHEMA,
+        "schema_version" =>
+          Migration::CatalogRunner::WIRE_SCHEMA_VERSION,
+        "ok" => nil,
+        "error" => "invalid"
+      }
+      error = assert_raises(Hive::ConfigError) do
+        runner.send(:decode_payload, invalid_status)
+      end
+      assert_match(/envelope status is invalid/, error.message)
+
+      assert_catalog_payload_error(
+        runner, encoded, /inventory_digest is invalid/
+      ) do |payload|
+        payload.fetch("snapshot")["inventory_digest"] = "invalid"
+      end
+      assert_catalog_payload_error(
+        runner, encoded, /supplementary_gids are not canonical/
+      ) do |payload|
+        row = payload.dig("snapshot", "profiles", 0)
+        row["supplementary_gids"] = [ Process.gid, Process.gid ]
+      end
+      assert_catalog_payload_error(
+        runner, encoded, /root_bindings are not canonical/
+      ) do |payload|
+        payload.dig("snapshot", "profiles", 0)
+          .fetch("root_bindings").reverse!
+      end
+      assert_catalog_payload_error(
+        runner, encoded, /environment disagrees with root bindings/
+      ) do |payload|
+        payload.dig("snapshot", "profiles", 0)
+          .fetch("environment")[
+            Hive::Paths::JOB_SCHEMA_CONFIG_HOME
+          ] = "/wrong"
+      end
+      assert_catalog_payload_error(
+        runner, encoded, /HIVE_HOME disagrees with root bindings/
+      ) do |payload|
+        payload.dig("snapshot", "profiles", 0)
+          .fetch("environment")["HIVE_HOME"] = "/wrong"
+      end
+      assert_catalog_payload_error(
+        runner, encoded, /profile environment is invalid/
+      ) do |payload|
+        payload.dig("snapshot", "profiles", 0)
+          .fetch("environment")["UNKNOWN_ROOT"] = "/tmp"
+      end
+      assert_catalog_payload_error(
+        runner, encoded, /contains anchor fields/
+      ) do |payload|
+        payload.dig("snapshot", "profiles", 0, "root_bindings", 0)[
+          "anchor_path"
+        ] = home
+      end
+      assert_catalog_payload_error(
+        runner, encoded, /root binding owner is invalid/
+      ) do |payload|
+        payload.dig("snapshot", "profiles", 0, "root_bindings", 1)[
+          "owner_uid"
+        ] = 0
+      end
+      assert_catalog_payload_error(
+        runner, encoded, /root binding mode is unreadable/
+      ) do |payload|
+        binding =
+          payload.dig("snapshot", "profiles", 0, "root_bindings", 0)
+        binding["owner_uid"] = 0
+        binding["mode"] = 0o700
+      end
+      assert_catalog_payload_error(
+        runner, encoded, /root binding mode is invalid/
+      ) do |payload|
+        payload.dig("snapshot", "profiles", 0, "root_bindings", 0)[
+          "mode"
+        ] = 0o777
+      end
+
+      missing_home = File.join(root, "missing-roots")
+      FileUtils.mkdir_p(missing_home)
+      missing = runner.send(
+        :success_payload,
+        snapshot(
+          [ profile(
+            "bob", Process.uid, missing_home, gid: Process.gid
+          ) ],
+          closed: true
+        )
+      )
+      assert_catalog_payload_error(
+        runner, missing, /contains existing fields/
+      ) do |payload|
+        payload.dig("snapshot", "profiles", 0, "root_bindings", 0)[
+          "dev"
+        ] = 1
+      end
+      assert_catalog_payload_error(
+        runner, missing, /root binding suffix is invalid/
+      ) do |payload|
+        payload.dig("snapshot", "profiles", 0, "root_bindings", 0)[
+          "suffix"
+        ] = "../bad"
+      end
+    end
+  end
+
+  def test_catalog_runner_cleanup_handles_wait_and_signal_races
+    events = []
+    runner = Migration::CatalogRunner.new(
+      process_kill: ->(signal, pid) { events << [ signal, pid ] },
+      process_waitpid2: ->(pid, flags) { events << [ :wait, pid, flags ] }
+    )
+
+    assert_nil runner.send(:cleanup, 12_345, nil)
+    assert_equal [
+      [ "KILL", -12_345 ],
+      [ :wait, 12_345, Process::WNOHANG ]
+    ], events
+
+    gone = Migration::CatalogRunner.new(
+      process_kill: ->(*) { raise Errno::EIO, "signal failed" },
+      process_waitpid2: ->(*) { flunk("wait must not run") }
+    )
+    assert_nil gone.send(:cleanup, 12_345, nil)
+
+    missing = Migration::CatalogRunner.new(
+      process_waitpid2: ->(*) { raise Errno::ECHILD }
+    )
+    assert_nil missing.send(:wait_for_child, 12_345)
   end
 
   def test_successful_known_profiles_remain_partial_until_operator_closes_discovery
@@ -723,6 +1297,181 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
     assert_equal "nss_catalog_unavailable", result.issues.first.kind
     assert result.closed,
            "inventory closure is retained but issues keep aggregate partial"
+  end
+
+  def test_bounded_nss_query_decodes_snapshot_identity_and_groups
+    snapshot_payload = {
+      "accounts" => [ {
+        "name" => "alice",
+        "uid" => 1_001,
+        "gid" => 2_001,
+        "dir" => "/home/alice"
+      } ],
+      "groups" => [
+        { "gid" => 2_100, "mem" => [ "alice" ] }
+      ]
+    }
+    identity_payload = {
+      "by_uid" => snapshot_payload.fetch("accounts").fetch(0),
+      "by_name" => snapshot_payload.fetch("accounts").fetch(0),
+      "supplementary_gids" => [ 2_100, 2_001, 2_100 ]
+    }
+    query = Migration::NssQuery.new(
+      snapshot_script:
+        "STDOUT.write(#{JSON.generate(snapshot_payload).dump})",
+      identity_script:
+        "STDOUT.write(#{JSON.generate(identity_payload).dump})"
+    )
+
+    result = query.snapshot
+    identity = query.identity("alice", 1_001)
+
+    assert_equal [ "alice" ], result.accounts.map(&:name)
+    assert_equal [ 2_100 ], result.groups.map { |group| group.fetch(:gid) }
+    assert_equal [ "alice" ], query.accounts.map(&:name)
+    assert_equal [ 2_100 ], query.groups.map { |group| group.fetch(:gid) }
+    assert_equal "alice", identity.by_uid.name
+    assert_equal "alice", identity.by_name.name
+    assert_equal [ 2_001, 2_100 ], identity.supplementary_gids
+  end
+
+  def test_bounded_nss_query_normalizes_process_and_payload_failures
+    stderr_query = Migration::NssQuery.new(
+      snapshot_script: "warn \"directory service offline\"; exit 7"
+    )
+    error = assert_raises(Hive::ConfigError) { stderr_query.snapshot }
+    assert_match(/directory service offline/, error.message)
+
+    empty_stderr_query = Migration::NssQuery.new(
+      snapshot_script: "exit 9"
+    )
+    error = assert_raises(Hive::ConfigError) do
+      empty_stderr_query.snapshot
+    end
+    assert_match(/lookup process exited 9/, error.message)
+
+    malformed_json = Migration::NssQuery.new(
+      snapshot_script: "STDOUT.write(\"{\")"
+    )
+    error = assert_raises(Hive::ConfigError) { malformed_json.snapshot }
+    assert_match(/returned malformed data/, error.message)
+
+    missing_rows = Migration::NssQuery.new(
+      snapshot_script: "STDOUT.write(\"{}\")"
+    )
+    error = assert_raises(Hive::ConfigError) { missing_rows.snapshot }
+    assert_match(/returned malformed data/, error.message)
+
+    identity_payload = {
+      "by_uid" => {
+        "name" => "alice", "uid" => 1_001,
+        "gid" => 2_001, "dir" => "/home/alice"
+      },
+      "by_name" => {
+        "name" => "alice", "uid" => 1_001,
+        "gid" => 2_001, "dir" => "/home/alice"
+      },
+      "supplementary_gids" => [ "invalid" ]
+    }
+    malformed_identity = Migration::NssQuery.new(
+      identity_script:
+        "STDOUT.write(#{JSON.generate(identity_payload).dump})"
+    )
+    error = assert_raises(Hive::ConfigError) do
+      malformed_identity.identity("alice", 1_001)
+    end
+    assert_match(/returned malformed data/, error.message)
+  end
+
+  def test_bounded_nss_query_enforces_capture_and_kill_bounds
+    oversized = Migration::NssQuery.new(
+      snapshot_script:
+        "STDOUT.write(\"x\" * " \
+        "#{Migration::NssQuery::MAX_CAPTURE_BYTES + 1})"
+    )
+    error = assert_raises(Hive::ConfigError) { oversized.snapshot }
+    assert_match(/output exceeded its limit/, error.message)
+
+    stubborn = Migration::NssQuery.new(
+      timeout_sec: 0.05,
+      snapshot_script: "trap(\"\", \"TERM\"); sleep 5"
+    )
+    error = assert_raises(Hive::ConfigError) { stubborn.snapshot }
+    assert_match(/exceeded/, error.message)
+
+    waiter = Struct.new(:pid).new(12_345)
+    gone = Migration::NssQuery.new(
+      process_kill: ->(*) { raise Errno::ECHILD }
+    )
+    assert_nil gone.send(:terminate, waiter)
+
+    signals = []
+    joins = 0
+    stubborn_waiter = Object.new
+    stubborn_waiter.define_singleton_method(:pid) { 12_346 }
+    stubborn_waiter.define_singleton_method(:join) do |_timeout|
+      joins += 1
+      joins > 1
+    end
+    query = Migration::NssQuery.new(
+      process_kill: ->(signal, pid) { signals << [ signal, pid ] }
+    )
+
+    assert query.send(:terminate, stubborn_waiter)
+    assert_equal [
+      [ "TERM", -12_346 ],
+      [ "KILL", -12_346 ]
+    ], signals
+  end
+
+  def test_bounded_nss_query_tolerates_stream_close_races
+    stdout, stdout_writer = IO.pipe
+    stderr, stderr_writer = IO.pipe
+    stdout_writer.write("{}")
+    stdout_writer.close
+    stderr_writer.close
+    closes = 0
+    stdin = Object.new
+    stdin.define_singleton_method(:close) do
+      closes += 1
+      raise IOError, "already closed" if closes > 1
+    end
+    stdin.define_singleton_method(:closed?) { false }
+    status = Object.new
+    status.define_singleton_method(:success?) { true }
+    waiter = Object.new
+    waiter.define_singleton_method(:join) { |_timeout| true }
+    waiter.define_singleton_method(:value) { status }
+    query = Migration::NssQuery.new(
+      popen3: ->(*) { [ stdin, stdout, stderr, waiter ] }
+    )
+
+    assert_equal({}, query.send(:invoke, "ignored"))
+    assert_equal 2, closes
+  end
+
+  def test_supplementary_groups_accepts_hashes_and_records
+    group = Struct.new(:gid, :mem)
+    groups = Migration::SupplementaryGroups.new(
+      groups: -> {
+        [
+          { gid: 2_100, mem: [ "alice" ] },
+          group.new(2_200, [ "alice", "bob" ]),
+          group.new(2_100, [ "alice" ])
+        ]
+      }
+    )
+
+    assert_equal [ 2_001, 2_100, 2_200 ], groups.call("alice", 2_001)
+
+    malformed = Migration::SupplementaryGroups.new(
+      groups: -> { [ { gid: "invalid", mem: [ "alice" ] } ] }
+    )
+    error = assert_raises(Hive::ConfigError) do
+      malformed.call("alice", 2_001)
+    end
+    assert_match(/cannot bind installed-user supplementary groups/,
+                 error.message)
   end
 
   def test_inventory_accepts_only_stable_root_owned_exact_profiles
@@ -1210,6 +1959,68 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
     end
   end
 
+  def test_catalog_rejects_nested_profile_roots_across_users
+    with_tmp_dir do |root|
+      alice_home = File.join(root, "alice-home")
+      bob_home = File.join(root, "bob-home")
+      alice_root = File.join(root, "alice-root")
+      bob_nested_root = File.join(alice_root, "bob-root")
+      FileUtils.mkdir_p([
+        alice_home, bob_home, alice_root, bob_nested_root
+      ])
+      inventory = Object.new
+      inventory.define_singleton_method(:read) do
+        Migration::Inventory::Result.new(
+          profiles: [
+            {
+              username: "alice",
+              uid: 1_001,
+              home: alice_home,
+              environment: { "HIVE_HOME" => alice_root }
+            },
+            {
+              username: "bob",
+              uid: 1_002,
+              home: bob_home,
+              environment: { "HIVE_HOME" => bob_nested_root }
+            }
+          ],
+          issues: [],
+          closed: true,
+          path: "/var/lib/hive/installed-users.v1.json",
+          digest: "e" * 64
+        )
+      end
+      catalog = migration_catalog(
+        accounts: -> {
+          [
+            {
+              name: "alice", uid: 1_001, gid: 2_001,
+              dir: alice_home
+            },
+            {
+              name: "bob", uid: 1_002, gid: 2_002,
+              dir: bob_home
+            }
+          ]
+        },
+        inventory: inventory
+      )
+
+      result = catalog.snapshot
+
+      assert_empty result.profiles
+      assert_equal %w[alice bob],
+                   result.issues.map(&:username).uniq.sort
+      assert(result.issues.all? do |issue|
+        issue.kind == "shared_profile_root"
+      end)
+      assert(result.issues.all? do |issue|
+        issue.detail.include?("contains another")
+      end)
+    end
+  end
+
   def test_profile_environment_uses_the_bound_canonical_hive_home
     with_tmp_dir do |root|
       home = File.join(root, "alice")
@@ -1340,6 +2151,128 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
     end
   end
 
+  def test_root_binding_rejects_an_ancestor_owned_by_another_user
+    with_tmp_dir do |root|
+      unsafe_parent = File.join(root, "other-user")
+      hive_home = File.join(unsafe_parent, "victim-hive")
+      FileUtils.mkdir_p(hive_home)
+      other_uid = Process.uid + 1
+      lstat = lambda do |path|
+        stat = File.lstat(path)
+        File.expand_path(path) == unsafe_parent ?
+          StatWithUid.new(stat, uid: other_uid) : stat
+      end
+      binder = Migration::ProfileRootBindings.new(lstat: lstat)
+      bindings = binder.bind(
+        home: root,
+        environment: { "HIVE_HOME" => hive_home },
+        uid: Process.uid
+      )
+      candidate = Migration::Profile.new(
+        username: "victim",
+        uid: Process.uid,
+        gid: Process.gid,
+        home: root,
+        real_home: File.realpath(root),
+        environment: { "HIVE_HOME" => hive_home },
+        source: "root-inventory",
+        supplementary_gids: Process.groups.uniq.sort,
+        root_bindings: bindings
+      )
+
+      error = assert_raises(Hive::ConfigError) do
+        binder.verify!(candidate)
+      end
+
+      assert_match(/unsafe ancestor custody/, error.message)
+      assert_includes error.message, unsafe_parent
+    end
+  end
+
+  def test_missing_root_binding_rejects_anchor_retarget_and_io_failure
+    with_tmp_dir do |root|
+      home = File.join(root, "home")
+      missing = File.join(home, "custom", "hive")
+      FileUtils.mkdir_p(home)
+      binder = Migration::ProfileRootBindings.new
+      bindings = binder.bind(
+        home: home,
+        environment: { "HIVE_HOME" => missing },
+        uid: Process.uid
+      )
+      candidate = Migration::Profile.new(
+        username: "alice",
+        uid: Process.uid,
+        gid: Process.gid,
+        home: home,
+        real_home: File.realpath(home),
+        environment:
+          Migration::ProfileRoots.canonical_environment(
+            { "HIVE_HOME" => missing }, bindings
+          ),
+        source: "root-inventory",
+        supplementary_gids: Process.groups.uniq.sort,
+        root_bindings: bindings
+      )
+      File.rename(home, "#{home}.old")
+      FileUtils.mkdir_p(home)
+
+      error = assert_raises(Hive::ConfigError) do
+        binder.verify!(candidate)
+      end
+      assert_match(/anchor changed after discovery/, error.message)
+
+      failing = Migration::ProfileRootBindings.new(
+        lstat: lambda do |path|
+          raise Errno::EIO, path if
+            candidate.root_bindings.any? do |binding|
+              binding.anchor_path == path
+            end
+
+          File.lstat(path)
+        end
+      )
+      error = assert_raises(Hive::ConfigError) do
+        failing.verify!(candidate)
+      end
+      assert_match(/cannot revalidate Hive profile root/, error.message)
+    end
+  end
+
+  def test_root_binding_directory_policy_distinguishes_root_owned_config
+    binder = Migration::ProfileRootBindings.new
+    safe_root_config = DirectoryStat.new(uid: 0, mode: 0o040555)
+
+    assert_nil binder.send(
+      :validate_directory!,
+      safe_root_config,
+      "/etc/hive",
+      kind: :config_home,
+      uid: 1_001
+    )
+
+    unreadable = DirectoryStat.new(uid: 0, mode: 0o040700)
+    assert_raises(Hive::ConfigError) do
+      binder.send(
+        :validate_directory!,
+        unreadable,
+        "/etc/hive",
+        kind: :config_home,
+        uid: 1_001
+      )
+    end
+
+    assert_raises(Hive::ConfigError) do
+      binder.send(
+        :validate_directory!,
+        safe_root_config,
+        "/var/lib/hive",
+        kind: :state_home,
+        uid: 1_001
+      )
+    end
+  end
+
   def test_catalog_isolates_unavailable_homes_and_malformed_nss_rows
     with_tmp_dir do |root|
       home = File.join(root, "alice")
@@ -1422,6 +2355,139 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
 
       assert_empty result.profiles
       assert_equal "inventory_home_unavailable", result.issues.first.kind
+    end
+  end
+
+  def test_catalog_uses_one_supplied_nss_snapshot_and_preserves_its_error
+    with_tmp_dir do |home|
+      FileUtils.mkdir_p(File.join(home, ".config", "hive"))
+      FileUtils.mkdir_p(File.join(home, ".local", "state", "hive"))
+      File.write(
+        File.join(home, ".config", "hive", "config.yml"),
+        "registered_projects: []\n"
+      )
+      inventory = Object.new
+      inventory.define_singleton_method(:read) do
+        Migration::Inventory::Result.new(
+          profiles: [],
+          issues: [],
+          closed: true,
+          path: "/var/lib/hive/installed-users.v1.json",
+          digest: "e" * 64
+        )
+      end
+      account = Migration::NssEntry.new(
+        name: "alice",
+        uid: Process.uid,
+        gid: Process.gid,
+        dir: home
+      )
+      nss_snapshot = Migration::NssQuery::Result.new(
+        accounts: [ account ],
+        groups: [
+          { gid: Process.gid + 1, mem: [ "alice" ] }
+        ]
+      )
+      catalog = migration_catalog(
+        accounts: -> { flunk("fallback NSS accounts must not run") },
+        supplementary_groups: ->(*) {
+          flunk("fallback supplementary groups must not run")
+        },
+        inventory: inventory
+      )
+
+      result = catalog.snapshot(
+        nss_snapshot: nss_snapshot,
+        nss_error: "directory service inventory was incomplete"
+      )
+
+      assert_equal [ "alice" ], result.profiles.map(&:username)
+      assert_equal(
+        [ Process.gid, Process.gid + 1 ].uniq.sort,
+        result.profiles.fetch(0).supplementary_gids
+      )
+      assert_equal "nss_catalog_unavailable", result.issues.fetch(0).kind
+      assert_match(/inventory was incomplete/,
+                   result.issues.fetch(0).detail)
+    end
+  end
+
+  def test_catalog_reports_unavailable_evidence_and_root_binding_failure
+    with_tmp_dir do |home|
+      FileUtils.mkdir_p(home)
+      inventory = Object.new
+      inventory.define_singleton_method(:read) do
+        Migration::Inventory::Result.new(
+          profiles: [],
+          issues: [],
+          closed: true,
+          path: "/var/lib/hive/installed-users.v1.json",
+          digest: "e" * 64
+        )
+      end
+      result_class = Migration::Catalog::PathProbe::Result
+      evidence_calls = 0
+      probe = Object.new
+      probe.define_singleton_method(:directory) do |_path|
+        result_class.new(state: :present, kind: :directory, detail: nil)
+      end
+      probe.define_singleton_method(:regular_file) do |_path|
+        evidence_calls += 1
+        if evidence_calls == 1
+          result_class.new(
+            state: :unavailable,
+            kind: :regular,
+            detail: "automount unavailable"
+          )
+        else
+          result_class.new(
+            state: :missing, kind: :regular, detail: nil
+          )
+        end
+      end
+      account = {
+        name: "alice",
+        uid: Process.uid,
+        gid: Process.gid,
+        dir: home
+      }
+      catalog = migration_catalog(
+        accounts: -> { [ account ] },
+        inventory: inventory,
+        probe: probe
+      )
+
+      result = catalog.snapshot
+
+      assert_empty result.profiles
+      assert_equal "default_home_unavailable", result.issues.fetch(0).kind
+      assert_match(/automount unavailable/, result.issues.fetch(0).detail)
+
+      present = Object.new
+      present.define_singleton_method(:directory) do |_path|
+        result_class.new(state: :present, kind: :directory, detail: nil)
+      end
+      present.define_singleton_method(:regular_file) do |_path|
+        result_class.new(state: :present, kind: :regular, detail: nil)
+      end
+      root_bindings = Object.new
+      root_bindings.define_singleton_method(:bind) do |**|
+        raise Hive::ConfigError, "root custody changed"
+      end
+      catalog = Migration::Catalog.new(
+        accounts: -> { [ account ] },
+        inventory: inventory,
+        probe: present,
+        supplementary_groups:
+          Migration::SupplementaryGroups.new(groups: -> { [] }),
+        root_bindings: root_bindings
+      )
+
+      result = catalog.snapshot
+
+      assert_empty result.profiles
+      assert_equal "default_home_unavailable", result.issues.fetch(0).kind
+      assert_match(/root custody changed/, result.issues.fetch(0).detail)
     end
   end
 
@@ -1545,6 +2611,76 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
     end
   end
 
+  def test_nss_identity_query_is_deadline_bound_and_requires_all_seams
+    assert_raises(ArgumentError) do
+      Migration::NssIdentity.new(
+        by_uid: ->(_uid) { nil }
+      )
+    end
+
+    with_tmp_dir do |home|
+      candidate = profile(
+        "alice", Process.uid, home, gid: Process.gid,
+        supplementary_gids: [ Process.gid, Process.gid + 1 ]
+      )
+      entry = Migration::NssEntry.new(
+        name: "alice",
+        uid: Process.uid,
+        gid: Process.gid,
+        dir: home
+      )
+      observed = nil
+      query = Object.new
+      query.define_singleton_method(:identity) do |username, uid, deadline:|
+        observed = [ username, uid, deadline ]
+        Migration::NssQuery::Identity.new(
+          by_uid: entry,
+          by_name: entry,
+          supplementary_gids: [ Process.gid, Process.gid + 1 ]
+        )
+      end
+      validator = Migration::NssIdentity.new(query: query)
+
+      assert validator.call(candidate, deadline: 123.5)
+      assert_equal [ "alice", Process.uid, 123.5 ], observed
+
+      query.define_singleton_method(:identity) do |*_args, **_options|
+        Migration::NssQuery::Identity.new(
+          by_uid: entry,
+          by_name: entry,
+          supplementary_gids: [ Process.gid ]
+        )
+      end
+      error = assert_raises(Hive::ConfigError) do
+        validator.call(candidate, deadline: 124.5)
+      end
+      assert_match(/supplementary groups changed/, error.message)
+    end
+  end
+
+  def test_executor_forwards_deadline_to_identity_validation
+    with_tmp_dir do |home|
+      candidate = profile(
+        "alice", Process.uid, home, gid: Process.gid
+      )
+      receipt = installation_payload("alice", profile: candidate)
+      observed = nil
+      validator = Object.new
+      validator.define_singleton_method(:call) do |profile, deadline:|
+        observed = [ profile.username, deadline ]
+        true
+      end
+      executor = Migration::Executor.new(
+        binary: File.expand_path("../../../bin/hive", __dir__),
+        identity_validator: validator,
+        runner: ->(*) { receipt }
+      )
+
+      assert_equal receipt, executor.call(candidate, deadline: 456.5)
+      assert_equal [ "alice", 456.5 ], observed
+    end
+  end
+
   def test_executor_requires_root_before_real_child_execution
     with_tmp_dir do |home|
       executor = Migration::Executor.new(
@@ -1647,6 +2783,44 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
       end
 
       assert_match(/invalid user-profile receipt/, error.message)
+    end
+  end
+
+  def test_executor_rejects_contradictory_or_secret_bearing_project_receipts
+    with_tmp_dir do |home|
+      candidate = profile(
+        "alice", Process.uid, home, gid: Process.gid
+      )
+      token = "sk-#{'a' * 30}"
+      payloads = [
+        lambda do |profile|
+          installation_payload("alice", profile: profile).tap do |payload|
+            payload.fetch("projects").first["retryable"] = true
+          end
+        end,
+        lambda do |profile|
+          installation_payload("alice", profile: profile).tap do |payload|
+            payload.fetch("projects").first["error"] =
+              "provider failed with #{token}"
+          end
+        end
+      ]
+
+      payloads.each do |child_payload|
+        executor = Migration::Executor.new(
+          binary: File.expand_path("../../../bin/hive", __dir__),
+          identity_validator: IDENTITY_OK,
+          runner: lambda do |profile, _environment, _argv|
+            child_payload.call(profile)
+          end
+        )
+
+        error = assert_raises(Hive::ConfigError) do
+          executor.call(candidate)
+        end
+        assert_match(/invalid user-profile receipt/, error.message)
+        refute_includes error.message, token
+      end
     end
   end
 
@@ -1817,6 +2991,26 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
     end
   end
 
+  def test_identity_drop_rejects_root_group_before_mutating_identity
+    with_tmp_dir do |home|
+      drop = Migration::IdentityDrop.new(
+        groups_setter: ->(*) { flunk("groups must not change") },
+        gid_drop: ->(*) { flunk("gid must not change") },
+        uid_drop: ->(*) { flunk("uid must not change") }
+      )
+      candidate = profile(
+        "alice", 1_001, home, gid: 2_001,
+        supplementary_gids: [ 0, 2_001 ]
+      )
+
+      error = assert_raises(Hive::ConfigError) do
+        drop.call(candidate)
+      end
+
+      assert_match(/includes root supplementary group/, error.message)
+    end
+  end
+
   def test_candidate_identity_rejects_entrypoint_replacement
     with_tmp_dir do |root|
       binary = File.join(root, "hive")
@@ -1854,6 +3048,12 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
         Migration::CandidateIdentity.capture(non_executable)
       end
       assert_match(/not a bounded executable/, error.message)
+
+      trusted = Migration::CandidateIdentity.capture(
+        File.expand_path("../../../bin/hive", __dir__),
+        trusted_uid: Process.uid
+      )
+      assert_equal Process.uid, trusted.uid
     end
   end
 
@@ -2044,6 +3244,35 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
     end
   end
 
+  def test_executor_treats_lost_waitpid_as_a_bounded_failure
+    with_tmp_dir do |root|
+      home = File.join(root, "home")
+      FileUtils.mkdir_p(home)
+      candidate = profile(
+        "alice", Process.uid, home, gid: Process.gid
+      )
+      payload = installation_payload("alice", profile: candidate)
+      binary = write_executable(
+        root, "hive-lost-waitpid",
+        "STDOUT.write(#{JSON.generate(payload).dump})"
+      )
+      executor = Migration::Executor.new(
+        binary: binary,
+        effective_uid: -> { 0 },
+        identity_drop: IDENTITY_OK,
+        identity_validator: IDENTITY_OK,
+        process_waitpid2: ->(*) { raise Errno::ECHILD },
+        timeout_sec: 0.05
+      )
+
+      error = assert_raises(Hive::ConfigError) do
+        executor.call(candidate)
+      end
+
+      assert_match(/exceeded 0.05 seconds/, error.message)
+    end
+  end
+
   def test_executor_cleanup_tolerates_disappeared_processes_and_streams
     executor = Migration::Executor.new(
       binary: File.expand_path("../../../bin/hive", __dir__),
@@ -2155,6 +3384,56 @@ class HiveRefactorPatrolInstalledUsersJobSchemaMigrationTest < Minitest::Test
   end
 
   private
+
+  def assert_catalog_payload_error(runner, payload, pattern)
+    malformed = deep_copy(payload)
+    yield malformed
+    error = assert_raises(Hive::ConfigError) do
+      runner.send(:decode_payload, malformed)
+    end
+    assert_match pattern, error.message
+  end
+
+  def deep_copy(value)
+    JSON.parse(JSON.generate(value))
+  end
+
+  def with_constant(namespace, name, value)
+    original = namespace.const_get(name)
+    namespace.send(:remove_const, name)
+    namespace.const_set(name, value)
+    yield
+  ensure
+    namespace.send(:remove_const, name) if namespace.const_defined?(name, false)
+    namespace.const_set(name, original) if original
+  end
+
+  def sweep_progress_payload(candidate)
+    digest = "a" * 64
+    {
+      "schema" => Migration::SweepProgress::SCHEMA,
+      "schema_version" => Migration::SweepProgress::SCHEMA_VERSION,
+      "sweep_key" => "b" * 64,
+      "cursor" => 0,
+      "results" => {
+        digest => {
+          "username" => candidate.username,
+          "uid" => candidate.uid,
+          "home" => candidate.home,
+          "profile_digest" => digest,
+          "source" => candidate.source,
+          "status" => "completed",
+          "retryable" => false,
+          "registry_digest" => "c" * 64,
+          "projects" =>
+            installation_payload(
+              candidate.username, profile: candidate
+            ).fetch("projects")
+        }
+      },
+      "updated_at" => "2026-07-29T20:00:00.000000Z"
+    }
+  end
 
   def migration_catalog(**options)
     Migration::Catalog.new(

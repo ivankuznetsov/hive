@@ -3,6 +3,7 @@ require "hive/patrol/feature"
 require "hive/patrol/finding"
 require "hive/patrol/base_state_store"
 require "hive/patrol/effect_gateway"
+require "hive/managed_directory"
 require "hive/modules/migration/occurrence_journal"
 require "hive/modules/migration/patrol_evidence"
 
@@ -19,6 +20,27 @@ module Hive
         @occurrence_store = Hive::Modules::Migration::OccurrenceJournal.new(
           File.join(root, "occurrences"), module_name: "patrol"
         )
+        @cycle_directory = Hive::ManagedDirectory.new(
+          root: root,
+          label: "ordinary patrol cycle"
+        )
+        @cycle_lock_owner = nil
+      end
+
+      # One stable installation-local lock spans recovery, suppression reads,
+      # agent work, and every resulting effect. Nested collaborators reuse the
+      # same lock in one thread; other threads/processes wait on the flock.
+      def with_cycle_lock
+        owner = [ Process.pid, Thread.current.object_id ]
+        return yield if @cycle_lock_owner == owner
+
+        @cycle_directory.prepare!
+        @cycle_directory.with_lock("cycle.lock") do
+          @cycle_lock_owner = owner
+          yield
+        ensure
+          @cycle_lock_owner = nil
+        end
       end
 
       def configure_effect_gateway!(capture:, evidence_store:, config_loader:,
@@ -371,8 +393,8 @@ module Hive
 
       # Publication recovery is an authoritative product mutation, so callers
       # must supply the live effect gateway and an exact reconciliation
-      # contract. Gateway admission happens before the fingerprint lock; no
-      # gateway-less fallback can regain this write authority.
+      # contract. Predecessor recovery, live gateway admission, dispatch, and
+      # settlement all occur under one stable fingerprint lock.
       def mutate_fingerprints!(
         fingerprint:, idempotency_key:, scope:, set:, deleted:,
         replace: false, capability: "filesystem_write"
@@ -386,28 +408,29 @@ module Hive
           "fingerprint_operation" =>
             Hive::Modules::Migration::PatrolEvidence.canonical(operation)
         )
-        result = gateway.perform!(
-          sink: "state",
-          target: "fingerprints/#{fingerprint}",
-          idempotency_key: "#{idempotency_key}:#{content_digest}",
-          capability: capability,
-          scope: recovery_scope,
-          reconcile: lambda do |_intent|
-            reconcile_fingerprint_mapping(
-              fingerprint, set: set, deleted: deleted,
-              replace: replace
-            )
-          end
-        ) do
-          with_fingerprint_lock do
+        result = with_fingerprint_lock do
+          recover_pending_fingerprint_effects_locked!
+          gateway.perform!(
+            sink: "state",
+            target: "fingerprints/#{fingerprint}",
+            idempotency_key: "#{idempotency_key}:#{content_digest}",
+            capability: capability,
+            scope: recovery_scope,
+            reconcile: lambda do |_intent|
+              reconcile_fingerprint_mapping(
+                fingerprint, set: set, deleted: deleted,
+                replace: replace
+              )
+            end
+          ) do
             data = fingerprints
             apply_fingerprint_operation!(
               data, fingerprint, set: set, deleted: deleted,
               replace: replace
             )
             raw_write_fingerprints(data)
+            { "content_digest" => content_digest }
           end
-          { "content_digest" => content_digest }
         end
         result
       end
@@ -452,6 +475,17 @@ module Hive
       # and block.
       def recover_pending_fingerprint_effects!
         configured_effect_gateway!
+        with_fingerprint_lock do
+          recover_pending_fingerprint_effects_locked!
+        end
+      rescue KeyError, JSON::ParserError, TypeError
+        raise Hive::ConfigError,
+              "patrol fingerprint recovery operation is malformed"
+      end
+
+      private
+
+      def recover_pending_fingerprint_effects_locked!
         intents = []
         each_recovery_active_occurrence do |record|
           capture = Hive::Modules::Migration::PatrolCapture.from_h(
@@ -507,23 +541,16 @@ module Hive
               )
             end
           ) do
-            with_fingerprint_lock do
-              data = fingerprints
-              apply_fingerprint_operation!(
-                data, fingerprint, set: set, deleted: deleted,
-                replace: replace
-              )
-              raw_write_fingerprints(data)
-            end
+            data = fingerprints
+            apply_fingerprint_operation!(
+              data, fingerprint, set: set, deleted: deleted,
+              replace: replace
+            )
+            raw_write_fingerprints(data)
             { "content_digest" => digest }
           end
         end
-      rescue KeyError, JSON::ParserError, TypeError
-        raise Hive::ConfigError,
-              "patrol fingerprint recovery operation is malformed"
       end
-
-      private
 
       def effect_gateway_for(capture)
         options = @effect_gateway_options.merge(
@@ -683,20 +710,13 @@ module Hive
       end
 
       def with_fingerprint_lock(shared: false)
-        FileUtils.mkdir_p(root)
-        File.open(
-          File.join(root, "fingerprints.lock"),
-          File::RDWR | File::CREAT,
-          0o600
-        ) do |lock|
-          lock.flock(shared ? File::LOCK_SH : File::LOCK_EX)
-          yield
-        ensure
-          lock&.flock(File::LOCK_UN)
-        end
-      rescue SystemCallError, IOError => e
+        @cycle_directory.prepare!
+        @cycle_directory.with_lock(
+          "fingerprints.lock", shared: shared
+        ) { yield }
+      rescue Hive::ManagedDirectory::UnsafeError => error
         raise Hive::ConfigError,
-              "patrol fingerprint lock is unavailable: #{e.message}"
+              "patrol fingerprint lock is unavailable: #{error.message}"
       end
     end
   end

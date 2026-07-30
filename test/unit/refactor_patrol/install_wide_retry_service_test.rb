@@ -20,7 +20,10 @@ class InstallWideRetryServiceTest < Minitest::Test
         systemd_unit_directory: root,
         clean_env: clean_env,
         systemctl: systemctl,
-        runner: ->(argv) { calls << argv; true }
+        runner: lambda do |argv|
+          calls << argv
+          argv.fetch(1) != "bootout"
+        end
       )
       authorized = runtime(root)
 
@@ -98,7 +101,10 @@ class InstallWideRetryServiceTest < Minitest::Test
         launchd_unit_directory: root,
         clean_env: clean_env,
         launchctl: launchctl,
-        runner: ->(argv) { calls << argv; true }
+        runner: lambda do |argv|
+          calls << argv
+          argv.fetch(1) != "bootout"
+        end
       )
       authorized = runtime(root)
 
@@ -150,6 +156,175 @@ class InstallWideRetryServiceTest < Minitest::Test
         service.ensure!(runtime: unsafe)
       end
       assert_match(/changed after activation|unit-safe/, error.message)
+    end
+  end
+
+  def test_rejects_a_non_authorized_runtime_before_filesystem_access
+    service = Service.new(
+      host_os: "linux",
+      effective_uid: -> { Process.uid },
+      trusted_uid: Process.uid,
+      lstat: ->(_path) { flunk("malformed runtime must fail first") }
+    )
+
+    error = assert_raises(Hive::ConfigError) do
+      service.ensure!(runtime: Object.new)
+    end
+
+    assert_match(/requires an authorized runtime/, error.message)
+  end
+
+  def test_rejects_an_unsupported_platform_without_running_a_manager
+    with_tmp_dir do |root|
+      service = Service.new(
+        host_os: "freebsd",
+        effective_uid: -> { Process.uid },
+        trusted_uid: Process.uid,
+        clean_env: trusted_executable(root, "env"),
+        runner: ->(*) { flunk("unsupported platforms have no manager") }
+      )
+
+      error = assert_raises(Hive::UnavailableError) do
+        service.ensure!(runtime: runtime(root))
+      end
+
+      assert_match(/unsupported on this platform/, error.message)
+    end
+  end
+
+  def test_default_identity_and_runner_surface_manager_failure
+    with_tmp_dir do |root|
+      clean_env = trusted_executable(root, "env")
+      systemctl = trusted_executable(root, "systemctl")
+      File.binwrite(systemctl, "#!/bin/sh\nexit 1\n")
+      FileUtils.chmod(0o755, systemctl)
+      service = Service.new(
+        host_os: "linux",
+        trusted_uid: Process.euid,
+        systemd_unit_directory: root,
+        clean_env: clean_env,
+        systemctl: systemctl
+      )
+
+      error = assert_raises(Hive::UnavailableError) do
+        service.ensure!(runtime: runtime(root))
+      end
+
+      assert_match(/daemon-reload/, error.message)
+      assert_path_exists File.join(root, Service::SYSTEMD_SERVICE)
+      assert_path_exists File.join(root, Service::SYSTEMD_TIMER)
+    end
+  end
+
+  def test_existing_unit_inspection_rejects_oversize_and_unsafe_files
+    with_tmp_dir do |root|
+      File.binwrite(
+        File.join(root, Service::SYSTEMD_SERVICE),
+        "x" * (Service::MAX_UNIT_BYTES + 1)
+      )
+      service = service_for(root)
+      error = assert_raises(Hive::ConfigError) do
+        service.ensure!(runtime: runtime(root))
+      end
+      assert_match(/exceeds its size limit/, error.message)
+    end
+
+    with_tmp_dir do |root|
+      FileUtils.mkdir_p(File.join(root, Service::SYSTEMD_SERVICE))
+      service = service_for(root)
+      error = assert_raises(Hive::ConfigError) do
+        service.ensure!(runtime: runtime(root))
+      end
+      assert_match(/not a trusted regular file/, error.message)
+    end
+  end
+
+  def test_post_write_verification_rejects_changed_bytes
+    with_tmp_dir do |root|
+      service = Service.new(
+        host_os: "linux",
+        effective_uid: -> { Process.uid },
+        trusted_uid: Process.uid,
+        systemd_unit_directory: root,
+        clean_env: trusted_executable(root, "env"),
+        systemctl: trusted_executable(root, "systemctl"),
+        runner: ->(*) { flunk("manager must not run") },
+        writer: lambda do |path, bytes|
+          File.binwrite(path, "#{bytes}# tampered\n")
+          FileUtils.chmod(0o644, path)
+        end
+      )
+
+      error = assert_raises(Hive::ConfigError) do
+        service.ensure!(runtime: runtime(root))
+      end
+
+      assert_match(/changed while it was installed/, error.message)
+    end
+  end
+
+  def test_unit_directory_and_executable_io_failures_are_wrapped
+    with_tmp_dir do |root|
+      units = File.join(root, "units")
+      binaries = File.join(root, "bin")
+      FileUtils.mkdir_p([ units, binaries ])
+      FileUtils.chmod(0o777, units)
+      service = Service.new(
+        host_os: "linux",
+        effective_uid: -> { Process.uid },
+        trusted_uid: Process.uid,
+        systemd_unit_directory: units,
+        clean_env: trusted_executable(binaries, "env"),
+        systemctl: trusted_executable(binaries, "systemctl"),
+        runner: ->(*) { flunk("manager must not run") }
+      )
+      error = assert_raises(Hive::ConfigError) do
+        service.ensure!(runtime: runtime(root))
+      end
+      assert_match(/unit directory is not trusted/, error.message)
+    end
+
+    with_tmp_dir do |root|
+      units = File.join(root, "units")
+      FileUtils.mkdir_p(units)
+      original_lstat = File.method(:lstat)
+      service = Service.new(
+        host_os: "linux",
+        effective_uid: -> { Process.uid },
+        trusted_uid: Process.uid,
+        systemd_unit_directory: units,
+        clean_env: trusted_executable(root, "env"),
+        systemctl: trusted_executable(root, "systemctl"),
+        runner: ->(*) { flunk("manager must not run") },
+        lstat: lambda do |path|
+          raise Errno::EIO, "units unavailable" if path == units
+
+          original_lstat.call(path)
+        end
+      )
+      error = assert_raises(Hive::ConfigError) do
+        service.ensure!(runtime: runtime(root))
+      end
+      assert_match(/cannot validate install-wide retry unit directory/,
+                   error.message)
+    end
+
+    with_tmp_dir do |root|
+      missing = File.join(root, "missing-env")
+      service = Service.new(
+        host_os: "linux",
+        effective_uid: -> { Process.uid },
+        trusted_uid: Process.uid,
+        systemd_unit_directory: root,
+        clean_env: missing,
+        systemctl: trusted_executable(root, "systemctl"),
+        runner: ->(*) { flunk("manager must not run") }
+      )
+      error = assert_raises(Hive::ConfigError) do
+        service.ensure!(runtime: runtime(root))
+      end
+      assert_match(/cannot validate install-wide retry clean-environment launcher/,
+                   error.message)
     end
   end
 

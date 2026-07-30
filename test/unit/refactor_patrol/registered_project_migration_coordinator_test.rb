@@ -42,6 +42,33 @@ class RefactorPatrolRegisteredProjectMigrationCoordinatorTest <
     assert results.all? { |result| result.error.nil? }
   end
 
+  def test_runtime_admission_reports_current_absent_and_install_wide_holds
+    current_path = project_path("admitted-current")
+    absent_path = project_path("admitted-absent")
+    held_path = project_path("admitted-held")
+    results = Coordinator.new(
+      registry: -> {
+        entries(current_path, absent_path, held_path)
+      },
+      schema_status: lambda do |identity|
+        status = case identity.fetch(:project)
+        when "admitted-current" then "current"
+        when "admitted-absent" then "absent"
+        else "migration_required"
+        end
+        { "status" => status, "snapshot_id" => nil }
+      end,
+      status_store: nil
+    ).run
+
+    assert_equal %i[current absent migration_required],
+                 results.map(&:status)
+    assert_nil results.fetch(0).remediation
+    assert_nil results.fetch(1).remediation
+    assert_match(/install-wide JobStore migration/,
+                 results.fetch(2).remediation)
+  end
+
   def test_failure_is_isolated_and_later_projects_still_migrate
     bad_path = project_path("bad")
     good_path = project_path("good")
@@ -241,6 +268,44 @@ class RefactorPatrolRegisteredProjectMigrationCoordinatorTest <
     assert_equal File.expand_path(missing), Coordinator.path_key(missing)
   end
 
+  def test_missing_canonical_identity_and_unresolvable_state_paths_fail_closed
+    path = project_path("missing-canonical")
+    entry = registry_entry("missing-canonical", path)
+    entry["real_path"] = ""
+
+    result = Coordinator.new(
+      registry: -> { [ entry ] },
+      status_store: nil
+    ).run.fetch(0)
+
+    assert_equal :failed, result.status
+    assert_match(/canonical path is unresolved/, result.error)
+
+    coordinator = Coordinator.new(registry: -> { [] }, status_store: nil)
+    unresolved = with_replaced_singleton_method(
+      File,
+      :realpath,
+      ->(_path) { raise Errno::ENOENT }
+    ) do
+      assert_raises(Hive::ConfigError) do
+        coordinator.send(:strict_path_key, "/never-resolves")
+      end
+    end
+    assert_match(/identity is unresolved/, unresolved.message)
+
+    unavailable = with_replaced_singleton_method(
+      File,
+      :realpath,
+      ->(_path) { raise Errno::EACCES }
+    ) do
+      assert_raises(Hive::ConfigError) do
+        coordinator.send(:strict_path_key, "/unavailable")
+      end
+    end
+    assert_match(/identity is unavailable/, unavailable.message)
+    assert_match(/Errno::EACCES/, unavailable.message)
+  end
+
   def test_default_registry_enumerates_every_registered_project_with_its_custom_state_path
     home = File.join(@root, "installation-owner")
     owner_a_root = project_path("owner-a-root")
@@ -390,6 +455,37 @@ class RefactorPatrolRegisteredProjectMigrationCoordinatorTest <
     assert_equal %w[failed migrated], persisted.map { |project| project.fetch("status") }
     assert_equal true, persisted.fetch(0).fetch("retryable")
     assert_equal good_state, persisted.fetch(1).fetch("hive_state_path")
+  end
+
+  def test_project_failure_redacts_and_bounds_diagnostics_before_receipting
+    path = project_path("secret-failure")
+    status_root = File.join(@root, "secret-status")
+    status_store =
+      Hive::RefactorPatrol::RegisteredProjectMigrationStatus.new(
+        root: status_root
+      )
+    token = "sk-#{'a' * 30}"
+    coordinator = Coordinator.new(
+      registry: -> { entries(path) },
+      schema_status: ->(*) {
+        raise Hive::ConfigError,
+              "provider rejected #{token} #{"x" * 3_000}"
+      },
+      status_store: status_store
+    )
+
+    result = coordinator.run.fetch(0)
+
+    assert_equal :failed, result.status
+    refute_includes result.error, token
+    assert_includes result.error, "[REDACTED:openai_api_key]"
+    assert_operator result.error.bytesize, :<=,
+                    status_store.class::MAX_DIAGNOSTIC_BYTES
+    persisted = File.binread(
+      File.join(status_root, status_store.class::FILE_NAME)
+    )
+    refute_includes persisted, token
+    assert_includes persisted, "[REDACTED:openai_api_key]"
   end
 
   def test_status_reads_persisted_migration_results_without_rewriting_them

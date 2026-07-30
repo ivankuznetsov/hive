@@ -104,6 +104,18 @@ class InstallScriptTest < Minitest::Test
     refute_match(/sudo.*refactor-patrol-migrate-installed/, script)
   end
 
+  def test_root_preflight_is_compatible_with_stock_macos_bash_and_tools
+    script = File.read(INSTALL_SCRIPT)
+    root_preflight = script.match(
+      /root_owned_immutable_path\(\) \{.*?^\}/m
+    ).to_s
+
+    refute_match(/\[\[\s+-v\b/, script)
+    refute_includes root_preflight, "readlink -f"
+    assert_includes root_preflight,
+                    'canonical_parent="$(CDPATH= cd -P'
+  end
+
   def test_installer_requires_cosign_for_release_identity_verification
     script = File.read(INSTALL_SCRIPT)
 

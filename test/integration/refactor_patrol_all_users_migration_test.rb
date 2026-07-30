@@ -128,7 +128,7 @@ class RefactorPatrolAllUsersMigrationTest < Minitest::Test
       command = [
         "unshare",
         "--mount",
-        "--propagation", "private",
+        "--propagation", "unchanged",
         "--map-users", "0:#{uid}:1",
         "--map-users", "1:#{subuid.fetch(:start)}:#{count}",
         "--map-groups", "0:#{gid}:1",

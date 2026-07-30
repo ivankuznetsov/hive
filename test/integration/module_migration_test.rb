@@ -82,9 +82,15 @@ class ModuleMigrationIntegrationTest < Minitest::Test
         "report", project_root: project_root, json: true, stdout: output,
         yes: true, reviewer: "fixture-reviewer"
       ).call
-      refute report.fetch("eligible")
-      assert_includes report.fetch("blockers"), "patrol:decision_count_below_10"
-      assert_includes report.fetch("blockers"), "architecture-patrol:decision_count_below_10"
+      assert_equal "evidence_required", report.fetch("status")
+      assert_includes(
+        report.fetch("blockers"),
+        "deterministic:lane_evidence_missing"
+      )
+      assert_includes(
+        report.fetch("blockers"),
+        "installed:lane_evidence_missing"
+      )
       assert_schema(
         "hive-module-shadow-decision",
         comparator.each_record.first

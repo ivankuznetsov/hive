@@ -21,8 +21,9 @@ module Hive
         ].freeze
         TOP_LEVEL_KEYS = %w[
           artifacts candidate configuration_digests decisions effects faults
-          generated_at lane lane_result matrix observed receipt_id reviewer
-          reviewed_at run_id scenario_manifest_digest schema schema_version
+          generated_at lane lane_result matrix module_selections observed
+          project receipt_id reviewer reviewed_at run_id
+          scenario_manifest_digest schema schema_version
         ].freeze
         CANDIDATE_KEYS = %w[
           catalog_digest installed_digest manifest_digest sha source_digest
@@ -37,10 +38,17 @@ module Hive
         OBSERVED_KEYS = %w[
           elapsed_seconds ended_at restart_count started_at
         ].freeze
+        PROJECT_KEYS = %w[name project_id repository].freeze
+        MODULE_SELECTION_KEYS = %w[active selection_epoch].freeze
+        ACTIVE_SELECTION_KEYS = %w[
+          catalog_commit configuration_digest manifest_digest source_commit
+          version
+        ].freeze
 
         class << self
           def build(run_id:, lane:, lane_result:, candidate:,
                     configuration_digests:, scenario_manifest_digest:,
+                    project:, module_selections:,
                     decision_refs:, matrix:, faults:, restart_count:,
                     effect_index_digest:, expected_legacy_effect_keys:,
                     artifact_digests:, reviewer:, generated_at:, reviewed_at:,
@@ -58,6 +66,11 @@ module Hive
             candidate = normalize_candidate(candidate, lane, label)
             configuration_digests = normalize_configuration_digests(
               configuration_digests, label
+            )
+            project = normalize_project(project, label)
+            module_selections = normalize_module_selections(
+              module_selections,
+              label
             )
             scenario_manifest_digest = hex_digest(
               scenario_manifest_digest, label
@@ -96,6 +109,8 @@ module Hive
               }.freeze,
               "candidate" => candidate,
               "configuration_digests" => configuration_digests,
+              "project" => project,
+              "module_selections" => module_selections,
               "scenario_manifest_digest" => scenario_manifest_digest,
               "decisions" => decisions,
               "matrix" => matrix,
@@ -144,6 +159,8 @@ module Hive
               failure_reason: lane_result["reason"],
               candidate: value["candidate"],
               configuration_digests: value["configuration_digests"],
+              project: value["project"],
+              module_selections: value["module_selections"],
               scenario_manifest_digest: value["scenario_manifest_digest"],
               decision_refs: value["decisions"],
               matrix: value["matrix"],
@@ -227,6 +244,94 @@ module Hive
             PatrolEvidence::MODULES.sort.to_h do |module_name|
               [ module_name, hex_digest(value[module_name], label) ]
             end.freeze
+          end
+
+          def normalize_project(value, label)
+            value = PatrolEvidence.immutable_json(
+              value,
+              label: label
+            )
+            PatrolEvidence.exact_keys!(
+              value,
+              PROJECT_KEYS,
+              label: label
+            )
+            {
+              "project_id" => PatrolEvidence.nonempty(
+                value["project_id"],
+                label: label
+              ),
+              "name" => PatrolEvidence.nonempty(
+                value["name"],
+                label: label
+              ),
+              "repository" =>
+                value["repository"] &&
+                  PatrolEvidence.nonempty(
+                    value["repository"],
+                    label: label
+                  )
+            }.freeze
+          end
+
+          def normalize_module_selections(value, label)
+            value = PatrolEvidence.immutable_json(
+              value,
+              label: label
+            )
+            PatrolEvidence.exact_keys!(
+              value,
+              PatrolEvidence::MODULES,
+              label: label
+            )
+            PatrolEvidence::MODULES.sort.to_h do |module_name|
+              selection = value.fetch(module_name)
+              PatrolEvidence.exact_keys!(
+                selection,
+                MODULE_SELECTION_KEYS,
+                label: label
+              )
+              epoch = Integer(selection["selection_epoch"])
+              PatrolEvidence.malformed!(label) unless
+                epoch.positive?
+              active = selection.fetch("active")
+              PatrolEvidence.exact_keys!(
+                active,
+                ACTIVE_SELECTION_KEYS,
+                label: label
+              )
+              normalized_active = {
+                "version" => PatrolEvidence.nonempty(
+                  active["version"],
+                  label: label
+                ),
+                "catalog_commit" => git_sha(
+                  active["catalog_commit"],
+                  label
+                ),
+                "source_commit" => git_sha(
+                  active["source_commit"],
+                  label
+                ),
+                "manifest_digest" => hex_digest(
+                  active["manifest_digest"],
+                  label
+                ),
+                "configuration_digest" => hex_digest(
+                  active["configuration_digest"],
+                  label
+                )
+              }.freeze
+              [
+                module_name,
+                {
+                  "selection_epoch" => epoch,
+                  "active" => normalized_active
+                }.freeze
+              ]
+            end.freeze
+          rescue ArgumentError, TypeError
+            PatrolEvidence.malformed!(label)
           end
 
           def normalize_decisions(value, label)

@@ -1,6 +1,5 @@
 require "test_helper"
 require "json_schemer"
-require "hive/modules/migration/report"
 require "hive/modules/migration/shadow_comparator"
 
 class ModulesMigrationShadowComparatorTest < Minitest::Test
@@ -90,65 +89,6 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
       malformed.each do |value|
         refute schema.valid?(value), value.inspect
       end
-    end
-  end
-
-  def test_report_requires_real_window_counts_parity_no_duplicates_and_review
-    with_tmp_dir do |root|
-      captured_at = START
-      comparator = Hive::Modules::Migration::ShadowComparator.new(
-        root: root, clock: -> { captured_at }
-      )
-      10.times do |index|
-        captured_at = START + (index * 24 * 60 * 60)
-        %w[patrol architecture-patrol].each do |module_name|
-          trigger = direct_trigger("#{module_name}-#{index}")
-          decision = { "status" => "due", "reason" => "matched" }
-          capture = capture_for(module_name, trigger, decision)
-          comparator.record!(
-            module_name: module_name,
-            trigger: trigger,
-            legacy_capture: capture,
-            module_projection:
-              projection_for(module_name, trigger, "due"),
-            configuration_digest: "#{module_name == 'patrol' ? 'a' : 'b'}" * 64,
-            occurred_at: START + (index * 24 * 60 * 60),
-            legacy_effects: [
-              receipt_for(capture, "effect-#{index}", authority: "legacy")
-            ]
-          )
-        end
-      end
-      reviewed_at = START + (10 * 24 * 60 * 60)
-      report = Hive::Modules::Migration::Report.build(
-        record_source: comparator.each_record, reviewer: "operator@example.com",
-        reviewed_at: reviewed_at, generated_at: reviewed_at
-      )
-
-      assert report.eligible?, report.blockers.inspect
-      assert_equal 10, report.payload.dig("modules", "patrol", "decision_count")
-      assert_operator report.payload.dig("modules", "architecture-patrol", "elapsed_seconds"), :>=,
-                      7 * 24 * 60 * 60
-
-      captured_at = reviewed_at
-      trigger = direct_trigger("mismatch")
-      capture = capture_for("patrol", trigger, { "status" => "due" })
-      comparator.record!(
-        module_name: "patrol", trigger: trigger,
-        legacy_capture: capture,
-        module_projection: projection_for("patrol", trigger, "not_due"),
-        configuration_digest: "a" * 64, occurred_at: reviewed_at,
-        module_effects: [
-          receipt_for(capture, "unexpected-pr", authority: "shadow", status: "denied")
-        ]
-      )
-      blocked = Hive::Modules::Migration::Report.build(
-        record_source: comparator.each_record, reviewer: "operator@example.com",
-        reviewed_at: reviewed_at + 1, generated_at: reviewed_at + 1
-      )
-      refute blocked.eligible?
-      assert_includes blocked.blockers, "patrol:unexplained_differences"
-      assert_includes blocked.blockers, "patrol:duplicate_effects"
     end
   end
 
@@ -503,130 +443,6 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
     end
   end
 
-  def test_report_revalidates_raw_comparison_records
-    with_tmp_dir do |root|
-      comparator = Hive::Modules::Migration::ShadowComparator.new(root: root)
-      trigger = direct_trigger("tick-1")
-      decision = { "status" => "due" }
-      capture = capture_for("patrol", trigger, decision)
-      record = comparator.record!(
-        module_name: "patrol",
-        trigger: trigger,
-        legacy_capture: capture,
-        module_projection: projection_for("patrol", trigger, "due"),
-        configuration_digest: "a" * 64,
-        occurred_at: START
-      )
-      forged = record.merge("duplicate_effects" => [ "intent-forged" ])
-
-      assert_raises(Hive::ConfigError) do
-        Hive::Modules::Migration::Report.build(
-          record_source: [ forged ],
-          reviewer: "operator@example.com",
-          reviewed_at: START
-        )
-      end
-    end
-  end
-
-  def test_report_loading_and_time_validation_are_strict
-    with_tmp_dir do |root|
-      missing = File.join(root, "missing.json")
-      assert_raises(Hive::ConfigError) { Hive::Modules::Migration::Report.load(missing) }
-
-      malformed = File.join(root, "malformed.json")
-      File.write(malformed, Hive::Modules::Migration::Report.canonical(
-        "schema" => "hive-module-migration-report", "schema_version" => 1,
-        "eligible" => false, "modules" => nil, "blockers" => []
-      ))
-      assert_raises(Hive::ConfigError) { Hive::Modules::Migration::Report.load(malformed) }
-      invalid_json = File.join(root, "invalid-json.json")
-      File.write(invalid_json, "{bad")
-      assert_raises(Hive::ConfigError) do
-        Hive::Modules::Migration::Report.load(invalid_json)
-      end
-
-      assert_raises(Hive::ConfigError) do
-        Hive::Modules::Migration::Report.build(
-          record_source: [], reviewer: "operator", reviewed_at: "not-a-time"
-        )
-      end
-
-      report = Hive::Modules::Migration::Report.build(
-        record_source: [], reviewer: "", reviewed_at: START, generated_at: START
-      )
-      path = File.join(root, "report.json")
-      report.write(path)
-      loaded = Hive::Modules::Migration::Report.load(path)
-      refute loaded.eligible?
-      assert_includes loaded.blockers, "reviewer_signoff_missing"
-      assert_equal report.configuration_digests, loaded.configuration_digests
-
-      payload = JSON.parse(File.binread(path))
-      File.write(path, JSON.pretty_generate(payload))
-      assert_raises(Hive::ConfigError) { Hive::Modules::Migration::Report.load(path) }
-    end
-  end
-
-  def test_report_shape_guard_handles_hash_like_objects_that_break_mid_validation
-    liar = Object.new
-    liar.define_singleton_method(:is_a?) { |klass| klass == Hash || super(klass) }
-    payload = {
-      "schema" => "hive-module-migration-report", "schema_version" => 1,
-      "eligible" => false, "modules" => liar, "blockers" => []
-    }
-
-    refute Hive::Modules::Migration::Report.valid_payload?(payload)
-  end
-
-  def test_report_bounds_external_streams_and_collapses_configuration_changes
-    with_tmp_dir do |root|
-      comparator = Hive::Modules::Migration::ShadowComparator.new(root: root)
-      records = 2.times.map do |index|
-        trigger = direct_trigger("tick-#{index}")
-        decision = { "status" => "due" }
-        comparator.record!(
-          module_name: "patrol",
-          trigger: trigger,
-          legacy_capture: capture_for("patrol", trigger, decision),
-          module_projection: projection_for("patrol", trigger, "due"),
-          configuration_digest: (index.zero? ? "a" : "b") * 64,
-          occurred_at: START + index
-        )
-      end
-      report = Hive::Modules::Migration::Report.build(
-        record_source: records,
-        reviewer: "operator",
-        reviewed_at: START + 10
-      )
-      assert_nil report.payload.dig(
-        "modules", "patrol", "configuration_digest"
-      )
-      assert_includes report.blockers, "patrol:configuration_changed"
-
-      with_constant(
-        Hive::Modules::Migration::ShadowComparator,
-        :MAX_RECORDS,
-        1
-      ) do
-        assert_raises(Hive::ConfigError) do
-          Hive::Modules::Migration::Report.build(
-            record_source: records,
-            reviewer: "operator",
-            reviewed_at: START + 10
-          )
-        end
-      end
-      assert_raises(Hive::ConfigError) do
-        Hive::Modules::Migration::Report.build(
-          record_source: Object.new,
-          reviewer: "operator",
-          reviewed_at: START
-        )
-      end
-    end
-  end
-
   def test_history_pages_are_lexicographic_and_restart_portable
     with_tmp_dir do |root|
       comparator = Hive::Modules::Migration::ShadowComparator.new(root: root)
@@ -700,21 +516,6 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
       end
       assert_equal 0, reads
     end
-  end
-
-  def test_report_consumes_an_each_only_source
-    source = Object.new
-    source.define_singleton_method(:each) { |&block| block && nil }
-    source.define_singleton_method(:to_a) do
-      raise "report materialized its source"
-    end
-
-    report = Hive::Modules::Migration::Report.build(
-      record_source: source,
-      reviewer: "operator",
-      reviewed_at: START
-    )
-    refute report.eligible?
   end
 
   private

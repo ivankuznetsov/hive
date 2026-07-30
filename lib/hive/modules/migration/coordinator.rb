@@ -1,7 +1,9 @@
 require "hive/config"
 require "hive/module_package/managed_store"
+require "hive/modules/migration/migration_repository"
 require "hive/modules/migration/patrols"
 require "hive/modules/migration/report"
+require "hive/modules/migration/report_migration"
 
 module Hive
   module Modules
@@ -16,11 +18,16 @@ module Hive
 
         def initialize(supervisor:, attempt_store:, registry: -> { Hive::Config.registered_projects },
                        store_factory: ->(state) { Hive::ModulePackage::ManagedStore.new(state) },
-                       durable_work_probe: nil, dry_run: false)
+                       durable_work_probe: nil, dry_run: false,
+                       project_provider_factory: nil,
+                       run_authority_provider_factory: nil)
           @supervisor = supervisor
           @attempt_store = attempt_store
           @registry = registry
           @store_factory = store_factory
+          @project_provider_factory = project_provider_factory
+          @run_authority_provider_factory =
+            run_authority_provider_factory
           @durable_work_probe =
             durable_work_probe || method(:durable_work_quiescence)
           @dry_run = dry_run
@@ -48,27 +55,47 @@ module Hive
           return unless state.nil? || %w[
             pending shadowing cutover_pending module rollback_pending rolled_back
           ].include?(state.fetch("status"))
+          return {
+            project: entry.fetch("name"),
+            status: :dry_run
+          } if @dry_run
+
+          repository = MigrationRepository.for(
+            project_root: entry.fetch("path"),
+            hive_state_path: entry.fetch("hive_state_path")
+          )
+          migration_result = ReportMigration.new(
+            path: repository.report_path,
+            repository: repository
+          ).ensure_current!
           if state && %w[shadowing module rolled_back].include?(state.fetch("status"))
             return unless Patrols.shadow_decision_upgrade_required?(
               entry.fetch("path"),
               hive_state_path: entry.fetch("hive_state_path")
             )
           end
-          return { project: entry.fetch("name"), status: :dry_run } if @dry_run
 
           migration = Patrols.new(
-            project_root: entry.fetch("path"), project: entry.fetch("name"),
+            project_root: entry.fetch("path"), project: entry,
             hive_state_path: entry.fetch("hive_state_path"), module_store: store,
             quiescence_probe: lambda do |module_name, _root|
               quiescence(entry, module_name)
-            end
+            end,
+            project_provider:
+              @project_provider_factory&.call(entry),
+            run_authority_provider:
+              @run_authority_provider_factory&.call(entry)
           )
           outcome = case state&.fetch("status")
           when "cutover_pending"
-            report = Report.load(
-              Patrols.report_file(entry.fetch("path"), hive_state_path: entry.fetch("hive_state_path"))
-            )
-            migration.cutover!(report: report, now: now)
+            if migration_result.status == "migrated"
+              migration
+                .recover_cutover_pending_for_requalification!(
+                  now: now
+                )
+            else
+              migration.resume_cutover_pending!(now: now)
+            end
           when "rollback_pending" then migration.rollback!(now: now)
           else migration.adopt!(now: now)
           end

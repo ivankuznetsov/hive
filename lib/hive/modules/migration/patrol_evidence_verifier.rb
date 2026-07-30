@@ -22,7 +22,8 @@ module Hive
         BINDING_KEYS = %w[
           artifact_digests candidate configuration_digests
           decision_expectations expected_legacy_effect_keys lane
-          required_matrix run_id scenario_manifest_digest
+          module_selections project required_matrix run_id
+          scenario_manifest_digest
         ].freeze
 
         Verification = Data.define(
@@ -33,14 +34,15 @@ module Hive
         end
 
         class << self
-          def verify(receipt:, records:, current_bindings:)
+          def verify(receipt:, records:, current_bindings:,
+                     binding_blockers: [])
             receipt = receipt.is_a?(PatrolEvidenceReceipt) ?
               receipt :
               PatrolEvidenceReceipt.from_h(receipt)
             bindings = normalize_bindings(current_bindings)
             records = validated_records(records)
             effect_index = PatrolEffectIndex.build(records: records)
-            blockers = []
+            blockers = Array(binding_blockers).map(&:to_s)
 
             verify_lane(receipt, blockers)
             verify_current_bindings(receipt, bindings, blockers)
@@ -89,6 +91,18 @@ module Hive
               PatrolEvidence::MODULES,
               label: label
             )
+            project = value.fetch("project")
+            PatrolEvidence.exact_keys!(
+              project,
+              PatrolEvidenceReceipt::PROJECT_KEYS,
+              label: label
+            )
+            selections = value.fetch("module_selections")
+            PatrolEvidence.exact_keys!(
+              selections,
+              PatrolEvidence::MODULES,
+              label: label
+            )
             artifacts = value.fetch("artifact_digests")
             PatrolEvidence.malformed!(label) unless artifacts.is_a?(Hash)
             expectations = Array(value.fetch("decision_expectations")).map do |row|
@@ -114,7 +128,7 @@ module Hive
             )
             validate_binding_shapes!(normalized, label)
             PatrolEvidence.immutable_json(normalized, label: label)
-          rescue KeyError, NoMethodError, TypeError
+          rescue ArgumentError, KeyError, NoMethodError, TypeError
             PatrolEvidence.malformed!(label)
           end
 
@@ -136,6 +150,42 @@ module Hive
             end
             value["configuration_digests"].each_value do |digest|
               hex_digest!(digest, label)
+            end
+            project = value["project"]
+            PatrolEvidence.nonempty(
+              project["project_id"],
+              label: label
+            )
+            PatrolEvidence.nonempty(project["name"], label: label)
+            PatrolEvidence.nonempty(
+              project["repository"],
+              label: label
+            ) unless project["repository"].nil?
+            value["module_selections"].each_value do |selection|
+              PatrolEvidence.exact_keys!(
+                selection,
+                PatrolEvidenceReceipt::MODULE_SELECTION_KEYS,
+                label: label
+              )
+              epoch = Integer(selection["selection_epoch"])
+              PatrolEvidence.malformed!(label) unless epoch.positive?
+              active = selection.fetch("active")
+              PatrolEvidence.exact_keys!(
+                active,
+                PatrolEvidenceReceipt::ACTIVE_SELECTION_KEYS,
+                label: label
+              )
+              PatrolEvidence.nonempty(
+                active["version"],
+                label: label
+              )
+              git_sha!(active["catalog_commit"], label)
+              git_sha!(active["source_commit"], label)
+              hex_digest!(active["manifest_digest"], label)
+              hex_digest!(
+                active["configuration_digest"],
+                label
+              )
             end
             hex_digest!(value["scenario_manifest_digest"], label)
             value["artifact_digests"].each do |name, digest|
@@ -202,6 +252,11 @@ module Hive
             blockers << "configuration_binding_mismatch" unless
               payload["configuration_digests"] ==
                 bindings["configuration_digests"]
+            blockers << "project_binding_mismatch" unless
+              payload["project"] == bindings["project"]
+            blockers << "module_selection_binding_mismatch" unless
+              payload["module_selections"] ==
+                bindings["module_selections"]
             blockers << "scenario_manifest_binding_mismatch" unless
               payload["scenario_manifest_digest"] ==
                 bindings["scenario_manifest_digest"]
@@ -242,6 +297,7 @@ module Hive
                 reference,
                 record,
                 bindings.fetch("configuration_digests"),
+                receipt.to_h.fetch("project"),
                 blockers
               )
             end
@@ -261,7 +317,8 @@ module Hive
             end
           end
 
-          def verify_record(reference, record, configuration_digests, blockers)
+          def verify_record(reference, record, configuration_digests,
+                            project, blockers)
             decision_id = reference.fetch("decision_id")
             prefix = "decision:#{decision_id}"
             blockers << "#{prefix}:module_mismatch" unless
@@ -278,6 +335,8 @@ module Hive
             blockers << "#{prefix}:repository_mismatch" unless
               record.dig("legacy_capture", "project", "repository") ==
                 reference["repository"]
+            blockers << "#{prefix}:project_mismatch" unless
+              record.dig("legacy_capture", "project") == project
             blockers << "#{prefix}:configuration_mismatch" unless
               record["configuration_digest"] ==
                 configuration_digests.fetch(reference["module"])

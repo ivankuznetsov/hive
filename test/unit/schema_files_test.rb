@@ -33,6 +33,22 @@ require "tmpdir"
 #   3. Pin the same required-key set the producer code emits, so a producer
 #      change without a schema update fails at test time.
 class SchemaFilesTest < Minitest::Test
+  def test_module_migration_report_v1_remains_explicitly_addressable
+    path = Hive::Schemas.schema_path(
+      "hive-module-migration-report",
+      version: 1
+    )
+
+    assert File.file?(path), "v1 migration report schema missing: #{path}"
+    document = JSON.parse(File.binread(path))
+    assert_equal(
+      1,
+      document.dig(
+        "oneOf", 0, "properties", "schema_version", "const"
+      )
+    )
+  end
+
   def test_hive_decide_schema_matches_success_payload_contract
     path = Hive::Schemas.schema_path("hive-decide")
     assert File.exist?(path)

@@ -1,150 +1,239 @@
 require "test_helper"
+require "json_schemer"
+require "hive/modules/migration/migration_repository"
 require "hive/modules/migration/report"
+require_relative "../../../support/patrol_evidence_scenario"
 
 class ModulesMigrationReportTest < Minitest::Test
   include HiveTestHelper
+  include PatrolEvidenceScenario
 
-  START = Time.utc(2026, 7, 1)
-  DAY = 24 * 60 * 60
-  FIXTURE_PATH = File.expand_path(
-    "../../../fixtures/module_migration/report-v1.json",
-    __dir__
-  )
-  REPORT_FIELDS = %w[
-    blockers eligible generated_at modules reviewed_at reviewer schema
-    schema_version window
-  ].freeze
-  SUMMARY_FIELDS = %w[
-    blockers configuration_digest decision_count duplicate_effect_count
-    elapsed_seconds ended_at started_at unexplained_difference_count
-  ].freeze
+  START = PatrolEvidenceScenario::START
 
-  def test_loads_the_exact_canonical_v1_one_off_migration_input
-    bytes = File.binread(FIXTURE_PATH)
-    payload = JSON.parse(bytes)
+  def test_two_fresh_lanes_build_and_reload_a_v2_operator_ready_projection
+    report = build_report
 
-    assert_equal bytes, Hive::Modules::Migration::Report.canonical(payload)
-    assert_equal REPORT_FIELDS, payload.keys
-    assert_equal %w[architecture-patrol patrol], payload.fetch("modules").keys
-    payload.fetch("modules").each_value do |summary|
-      assert_equal SUMMARY_FIELDS, summary.keys
-    end
-    assert_equal %w[ended_at started_at], payload.fetch("window").keys
-
-    loaded = Hive::Modules::Migration::Report.load(FIXTURE_PATH)
-    assert_equal payload, loaded.payload
-    assert loaded.payload.frozen?
-    assert loaded.eligible?
-    assert_empty loaded.blockers
+    assert_equal 2, report.payload.fetch("schema_version")
+    assert_equal "evidence_ready_for_operator", report.status
+    assert_empty report.blockers
+    refute_respond_to report, :eligible?
+    refute_respond_to report, :ready_for_operator?
     assert_equal(
-      {
-        "architecture-patrol" => "b" * 64,
-        "patrol" => "a" * 64
+      PatrolEvidenceScenario::CONFIGURATION_DIGESTS,
+      report.configuration_digests
+    )
+    assert_match(
+      /\Amigration-report-[0-9a-f]{64}\z/,
+      report.payload.fetch("report_id")
+    )
+    assert_empty report_schema.validate(report.payload).to_a
+
+    with_tmp_dir do |root|
+      repository =
+        Hive::Modules::Migration::MigrationRepository.new(root: root)
+      repository.write_report(report)
+      loaded = repository.load_report(
+        live_bindings_resolver:
+          qualification_live_resolver
+      )
+      assert_equal report.payload, loaded.payload
+      assert_equal(
+        "evidence_ready_for_operator",
+        loaded.qualification.status
+      )
+      assert loaded.qualification.ready_for_operator?
+      assert_instance_of(
+        Hive::Modules::Migration::PatrolQualification,
+        loaded.qualification
+      )
+    end
+  end
+
+  def test_missing_or_blocked_installed_lane_is_evidence_required
+    missing = Hive::Modules::Migration::Report.build(
+      lane_evidence: {
+        "deterministic" =>
+          qualification_bundle(lane: "deterministic")
       },
-      loaded.configuration_digests
+      reviewer: "operator",
+      reviewed_at: START + 40,
+      live_bindings_resolver:
+        qualification_live_resolver
+    )
+    assert_equal "evidence_required", missing.status
+    assert_includes missing.blockers, "installed:lane_evidence_missing"
+
+    blocked = Hive::Modules::Migration::Report.build(
+      lane_evidence: {
+        "deterministic" =>
+          qualification_bundle(lane: "deterministic"),
+        "installed" => qualification_bundle(
+          lane: "installed",
+          lane_result: "blocked",
+          failure_reason: "credentials_missing"
+        )
+      },
+      reviewer: "operator",
+      reviewed_at: START + 40,
+      live_bindings_resolver:
+        qualification_live_resolver
+    )
+    assert_equal "evidence_required", blocked.status
+    assert_includes(
+      blocked.blockers,
+      "installed:lane_blocked:credentials_missing"
     )
   end
 
-  def test_characterizes_legacy_v1_accepting_timestamp_spread_same_class_decisions
+  def test_one_lane_can_persist_reload_and_later_complete
     with_tmp_dir do |root|
-      recorded_at = START
-      comparator = Hive::Modules::Migration::ShadowComparator.new(
-        root: root,
-        clock: -> { recorded_at }
+      inbox = File.join(root, "report-evidence", "incoming")
+      FileUtils.mkdir_p(inbox)
+      File.binwrite(
+        File.join(inbox, "deterministic.json"),
+        Hive::Modules::Migration::Report.canonical(
+          qualification_bundle(lane: "deterministic")
+        )
       )
-      10.times do |index|
-        recorded_at = START + (index * DAY)
-        Hive::Modules::Migration::ShadowComparator::MODULES.each do |module_name|
-          record_due_decision(
-            comparator,
-            module_name: module_name,
-            index: index,
-            occurred_at: recorded_at
-          )
-        end
-      end
+      repository =
+        Hive::Modules::Migration::MigrationRepository.new(root: root)
 
-      records = comparator.each_record.to_a
+      partial = Hive::Modules::Migration::Report.build(
+        lane_evidence: repository.incoming_bundles,
+        reviewer: "operator",
+        reviewed_at: START + 40,
+        live_bindings_resolver:
+          qualification_live_resolver
+      )
+      repository.write_report(partial)
+      reloaded = repository.load_report(
+        live_bindings_resolver:
+          qualification_live_resolver
+      )
+      assert_equal "evidence_required", reloaded.status
+      assert_includes reloaded.blockers, "installed:lane_evidence_missing"
+
+      File.binwrite(
+        File.join(inbox, "installed.json"),
+        Hive::Modules::Migration::Report.canonical(
+          qualification_bundle(lane: "installed")
+        )
+      )
+      complete = Hive::Modules::Migration::Report.build(
+        lane_evidence: repository.incoming_bundles,
+        reviewer: "operator",
+        reviewed_at: START + 41,
+        live_bindings_resolver:
+          qualification_live_resolver
+      )
+      repository.write_report(complete)
+
       assert_equal(
-        [ "due" ],
-        records.map { |record| record.dig("module_decision", "rationale") }.uniq
+        "evidence_ready_for_operator",
+        repository.load_report(
+          live_bindings_resolver:
+            qualification_live_resolver
+        ).status
+      )
+    end
+  end
+
+  def test_cross_lane_candidate_run_and_scenario_drift_fail_closed
+    installed = qualification_bundle(
+      lane: "installed",
+      candidate_sha: "f" * 40,
+      run_id: "foreign-run",
+      scenario_manifest_digest: "8" * 64
+    )
+    report = Hive::Modules::Migration::Report.build(
+      lane_evidence: {
+        "deterministic" =>
+          qualification_bundle(lane: "deterministic"),
+        "installed" => installed
+      },
+      reviewer: "operator",
+      reviewed_at: START + 40,
+      live_bindings_resolver:
+        qualification_live_resolver
+    )
+
+    assert_equal "evidence_required", report.status
+    assert_includes report.blockers, "candidate_binding_mismatch"
+    assert_includes report.blockers, "mixed_run_evidence"
+    assert_includes(
+      report.blockers,
+      "scenario_manifest_binding_mismatch"
+    )
+  end
+
+  def test_load_revalidates_bundle_bytes_and_projection
+    with_tmp_dir do |root|
+      repository =
+        Hive::Modules::Migration::MigrationRepository.new(root: root)
+      repository.write_report(build_report)
+      payload = JSON.parse(File.binread(repository.report_path))
+      relative = payload.dig(
+        "lanes", "deterministic", "bundle_path"
+      )
+      bundle_path = File.join(root, relative)
+      bundle = JSON.parse(File.binread(bundle_path))
+      bundle.fetch("receipt").fetch("candidate")["sha"] =
+        "f" * 40
+      File.binwrite(
+        bundle_path,
+        Hive::Modules::Migration::Report.canonical(bundle)
       )
 
-      report = Hive::Modules::Migration::Report.build(
-        record_source: records,
-        reviewer: "operator@example.com",
-        reviewed_at: START + (10 * DAY),
-        generated_at: START + (10 * DAY)
-      )
-
-      assert report.eligible?,
-             "characterization: legacy v1 counts timestamp spread without decision-class diversity"
-      report.payload.fetch("modules").each_value do |summary|
-        assert_equal 10, summary.fetch("decision_count")
-        assert_equal 9 * DAY, summary.fetch("elapsed_seconds")
+      error = assert_raises(Hive::ConfigError) do
+        repository.load_report(
+          live_bindings_resolver:
+            qualification_live_resolver
+        )
       end
+      assert_match(/digest changed/, error.message)
+    end
+  end
+
+  def test_v1_is_not_a_runtime_report
+    fixture = File.expand_path(
+      "../../../fixtures/module_migration/report-v1.json",
+      __dir__
+    )
+
+    with_tmp_dir do |root|
+      repository =
+        Hive::Modules::Migration::MigrationRepository.new(root: root)
+      repository.write_report_bytes(File.binread(fixture))
+      error = assert_raises(Hive::ConfigError) do
+        repository.load_report
+      end
+      assert_match(/malformed/, error.message)
     end
   end
 
   private
 
-  def record_due_decision(comparator, module_name:, index:, occurred_at:)
-    architecture = module_name == "architecture-patrol"
-    trigger = {
-      "kind" => "manual",
-      "id" => "#{module_name}-#{index}"
-    }
-    projection = Hive::Modules::Migration::PatrolDecisionProjection.build(
-      module_name: module_name,
-      rationale: "due",
-      job_id: architecture ? trigger.fetch("id") : nil,
-      phase: architecture ? "discovery" : nil
-    )
-    capture = Hive::Modules::Migration::PatrolCapture.build(
-      module_name: module_name,
-      project: {
-        "project_id" => "project-1",
-        "name" => "demo",
-        "repository" => "owner/demo"
+  def build_report
+    Hive::Modules::Migration::Report.build(
+      lane_evidence: {
+        "deterministic" =>
+          qualification_bundle(lane: "deterministic"),
+        "installed" =>
+          qualification_bundle(lane: "installed")
       },
-      trigger: trigger,
-      reservation:
-        architecture ?
-          {
-            "kind" => "architecture",
-            "id" => trigger.fetch("id"),
-            "job_id" => trigger.fetch("id")
-          } :
-          {
-            "kind" => "ordinary",
-            "id" => trigger.fetch("id")
-          },
-      owner: "legacy",
-      owner_epoch: 1,
-      selection_input:
-        architecture ?
-          {
-            "kind" => "candidate",
-            "job_id" => trigger.fetch("id"),
-            "phase" => "discovery"
-          } :
-          {
-            "kind" => "operation",
-            "operation" => "shadow-comparison"
-          },
-      selection: projection,
-      outcome_class: "completed",
-      outcome: { "rationale" => "due" },
-      occurred_at: occurred_at,
-      recorded_at: occurred_at
+      reviewer: "operator",
+      reviewed_at: START + 40,
+      generated_at: START + 40,
+      live_bindings_resolver:
+        qualification_live_resolver
     )
-    comparator.record!(
-      module_name: module_name,
-      trigger: trigger,
-      legacy_capture: capture,
-      module_projection: projection,
-      configuration_digest: (architecture ? "b" : "a") * 64,
-      occurred_at: occurred_at
+  end
+
+  def report_schema
+    JSONSchemer.schema(
+      Pathname(
+        Hive::Schemas.schema_path("hive-module-migration-report")
+      )
     )
   end
 end

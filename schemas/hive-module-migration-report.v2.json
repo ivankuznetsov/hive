@@ -1,0 +1,210 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hivecli.sh/schemas/hive-module-migration-report.v2.json",
+  "title": "Hive Module Migration Report v2",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+    "schema",
+    "schema_version",
+    "report_id",
+    "status",
+    "blockers",
+    "candidate",
+    "configuration_digests",
+    "scenario_manifest_digest",
+    "lanes",
+    "reviewer",
+    "reviewed_at",
+    "generated_at",
+    "migration"
+      ],
+      "properties": {
+    "schema": {"const": "hive-module-migration-report"},
+    "schema_version": {"const": 2},
+    "report_id": {
+      "type": "string",
+      "pattern": "^migration-report-[0-9a-f]{64}$"
+    },
+    "status": {
+      "enum": ["evidence_required", "evidence_ready_for_operator"]
+    },
+    "blockers": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "candidate": {
+      "anyOf": [
+        {"$ref": "#/$defs/candidate"},
+        {"type": "null"}
+      ]
+    },
+    "configuration_digests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["patrol", "architecture-patrol"],
+      "properties": {
+        "patrol": {
+          "anyOf": [
+            {"$ref": "#/$defs/digest"},
+            {"type": "null"}
+          ]
+        },
+        "architecture-patrol": {
+          "anyOf": [
+            {"$ref": "#/$defs/digest"},
+            {"type": "null"}
+          ]
+        }
+      }
+    },
+    "scenario_manifest_digest": {
+      "anyOf": [
+        {"$ref": "#/$defs/digest"},
+        {"type": "null"}
+      ]
+    },
+    "lanes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deterministic", "installed"],
+      "properties": {
+        "deterministic": {"$ref": "#/$defs/lane"},
+        "installed": {"$ref": "#/$defs/lane"}
+      }
+    },
+    "reviewer": {"type": "string"},
+    "reviewed_at": {"type": "string", "format": "date-time"},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "migration": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source_schema_version",
+            "source_digest",
+            "archive_path",
+            "status"
+          ],
+          "properties": {
+            "source_schema_version": {"const": 1},
+            "source_digest": {"$ref": "#/$defs/digest"},
+            "archive_path": {
+              "type": "string",
+              "pattern": "^archive/report-v1/[0-9a-f]{64}\\.json$"
+            },
+            "status": {"const": "archived_evidence_required"}
+          }
+        },
+        {"type": "null"}
+      ]
+    }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "error_kind",
+        "exit_code",
+        "message"
+      ],
+      "properties": {
+        "schema": {"const": "hive-module-migration-report"},
+        "schema_version": {"const": 2},
+        "ok": {"const": false},
+        "error_kind": {"type": "string"},
+        "exit_code": {"type": "integer"},
+        "message": {"type": "string"}
+      }
+    }
+  ],
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sha",
+        "catalog_digest",
+        "source_digest",
+        "manifest_digest",
+        "installed_digest"
+      ],
+      "properties": {
+        "sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "catalog_digest": {"$ref": "#/$defs/digest"},
+        "source_digest": {"$ref": "#/$defs/digest"},
+        "manifest_digest": {"$ref": "#/$defs/digest"},
+        "installed_digest": {
+          "anyOf": [
+            {"$ref": "#/$defs/digest"},
+            {"type": "null"}
+          ]
+        }
+      }
+    },
+    "lane": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "blockers",
+        "receipt_id",
+        "effect_index_digest",
+        "bundle_path",
+        "bundle_digest"
+      ],
+      "properties": {
+        "status": {
+          "enum": ["verified", "blocked", "failed", "evidence_required"]
+        },
+        "blockers": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "receipt_id": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^patrol-evidence-[0-9a-f]{64}$"
+            },
+            {"type": "null"}
+          ]
+        },
+        "effect_index_digest": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^effect-index-[0-9a-f]{64}$"
+            },
+            {"type": "null"}
+          ]
+        },
+        "bundle_path": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^report-evidence/[0-9a-f]{64}\\.json$"
+            },
+            {"type": "null"}
+          ]
+        },
+        "bundle_digest": {
+          "anyOf": [
+            {"$ref": "#/$defs/digest"},
+            {"type": "null"}
+          ]
+        }
+      }
+    }
+  }
+}

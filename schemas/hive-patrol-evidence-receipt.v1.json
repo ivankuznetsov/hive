@@ -13,6 +13,8 @@
     "lane_result",
     "candidate",
     "configuration_digests",
+    "project",
+    "module_selections",
     "scenario_manifest_digest",
     "decisions",
     "matrix",
@@ -87,6 +89,30 @@
       "properties": {
         "patrol": {"$ref": "#/$defs/digest"},
         "architecture-patrol": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project_id", "name", "repository"],
+      "properties": {
+        "project_id": {"type": "string", "minLength": 1, "maxLength": 32768},
+        "name": {"type": "string", "minLength": 1, "maxLength": 32768},
+        "repository": {
+          "anyOf": [
+            {"type": "string", "minLength": 1, "maxLength": 32768},
+            {"type": "null"}
+          ]
+        }
+      }
+    },
+    "module_selections": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["patrol", "architecture-patrol"],
+      "properties": {
+        "patrol": {"$ref": "#/$defs/module_selection"},
+        "architecture-patrol": {"$ref": "#/$defs/module_selection"}
       }
     },
     "scenario_manifest_digest": {"$ref": "#/$defs/digest"},
@@ -224,6 +250,33 @@
     }
   ],
   "$defs": {
-    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "module_selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selection_epoch", "active"],
+      "properties": {
+        "selection_epoch": {"type": "integer", "minimum": 1},
+        "active": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "version", "catalog_commit", "source_commit",
+            "manifest_digest", "configuration_digest"
+          ],
+          "properties": {
+            "version": {"type": "string", "minLength": 1, "maxLength": 32768},
+            "catalog_commit": {
+              "type": "string", "pattern": "^[0-9a-f]{40}$"
+            },
+            "source_commit": {
+              "type": "string", "pattern": "^[0-9a-f]{40}$"
+            },
+            "manifest_digest": {"$ref": "#/$defs/digest"},
+            "configuration_digest": {"$ref": "#/$defs/digest"}
+          }
+        }
+      }
+    }
   }
 }

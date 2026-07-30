@@ -7,9 +7,11 @@ require "hive/patrol/state_store"
 require "hive/refactor_patrol/job_store"
 require "hive/refactor_patrol/pr_manifest"
 require "hive/refactor_patrol/transition_gateway"
+require_relative "../../../support/patrol_evidence_scenario"
 
 class ModulesMigrationPatrolsTest < Minitest::Test
   include HiveTestHelper
+  include PatrolEvidenceScenario
 
   NOW = Time.utc(2026, 7, 22, 12)
 
@@ -31,6 +33,12 @@ class ModulesMigrationPatrolsTest < Minitest::Test
     def inspect_selection(name, include_tombstone: false) = @selections[name]
     def inspect_selections = @selections.values
     def configuration(_name, _digest) = true
+    def with_selection_snapshot(names, include_tombstones: false)
+      snapshot = names.to_h do |name|
+        [ name, Marshal.load(Marshal.dump(@selections[name])) ]
+      end
+      yield snapshot
+    end
 
     def restore_previous(name, expected_active:, now:)
       selection = @selections.fetch(name)
@@ -53,7 +61,6 @@ class ModulesMigrationPatrolsTest < Minitest::Test
     end
   end
 
-  Report = Data.define(:eligible?, :blockers, :configuration_digests)
   Scan = Data.define(:records, :invalid_records)
 
   class FakeSupervisor
@@ -101,7 +108,8 @@ class ModulesMigrationPatrolsTest < Minitest::Test
       migration = Hive::Modules::Migration::Patrols.new(
         project_root: project.fetch("path"), project: "demo",
         hive_state_path: project.fetch("hive_state_path"), module_store: store,
-        quiescence_probe: ->(_name, _root) { probe_state }
+        quiescence_probe: ->(_name, _root) { probe_state },
+        **live_authority_options
       )
 
       pending = migration.adopt!(now: NOW)
@@ -129,12 +137,7 @@ class ModulesMigrationPatrolsTest < Minitest::Test
         project.fetch("path"), hive_state_path: project.fetch("hive_state_path")
       ))
 
-      report = Report.new(
-        eligible?: true, blockers: [],
-        configuration_digests: {
-          "patrol" => "a" * 64, "architecture-patrol" => "b" * 64
-        }
-      )
+      report = ready_report(project)
       cutover = migration.cutover!(report: report, now: NOW + 120)
       assert_equal "module", cutover.status
       assert_equal 2, cutover.state.fetch("epoch")
@@ -255,14 +258,10 @@ class ModulesMigrationPatrolsTest < Minitest::Test
       migration = Hive::Modules::Migration::Patrols.new(
         project_root: project.fetch("path"), project: "demo",
         hive_state_path: project.fetch("hive_state_path"), module_store: store,
-        quiescence_probe: ->(*) { :quiescent }
+        quiescence_probe: ->(*) { :quiescent },
+        **live_authority_options
       )
-      report = Report.new(
-        eligible?: true, blockers: [],
-        configuration_digests: {
-          "patrol" => "a" * 64, "architecture-patrol" => "b" * 64
-        }
-      )
+      report = ready_report(project)
       migration.adopt!(now: NOW)
       migration.cutover!(report: report, now: NOW + 1)
       store.instance_variable_get(:@selections).fetch("patrol")["active"] = {
@@ -319,14 +318,10 @@ class ModulesMigrationPatrolsTest < Minitest::Test
       migration = Hive::Modules::Migration::Patrols.new(
         project_root: project.fetch("path"), project: "demo",
         hive_state_path: project.fetch("hive_state_path"), module_store: store,
-        quiescence_probe: ->(*) { :quiescent }
+        quiescence_probe: ->(*) { :quiescent },
+        **live_authority_options
       )
-      report = Report.new(
-        eligible?: true, blockers: [],
-        configuration_digests: {
-          "patrol" => "a" * 64, "architecture-patrol" => "b" * 64
-        }
-      )
+      report = ready_report(project)
       migration.adopt!(now: NOW)
       migration.cutover!(report: report, now: NOW + 1)
       original = store.method(:restore_previous)
@@ -348,32 +343,35 @@ class ModulesMigrationPatrolsTest < Minitest::Test
     end
   end
 
-  def test_cutover_rebuilds_current_shadow_evidence_instead_of_trusting_saved_eligible
+  def test_cutover_reloads_and_revalidates_bundle_instead_of_trusting_saved_status
     with_project do |project|
       store = FakeStore.new
       migration = Hive::Modules::Migration::Patrols.new(
         project_root: project.fetch("path"), project: "demo",
         hive_state_path: project.fetch("hive_state_path"), module_store: store,
-        quiescence_probe: ->(*) { :quiescent }
+        quiescence_probe: ->(*) { :quiescent },
+        **live_authority_options
       )
       migration.adopt!(now: NOW)
-      report = Struct.new(:payload) do
-        def eligible? = true
-        def blockers = []
-        def configuration_digests
-          { "patrol" => "a" * 64, "architecture-patrol" => "b" * 64 }
-        end
-      end.new(
-        {
-          "reviewer" => "reviewer-1",
-          "reviewed_at" => NOW.iso8601(6)
-        }
+      report = ready_report(project)
+      relative = report.payload.dig(
+        "lanes", "deterministic", "bundle_path"
       )
+      bundle_path = File.join(
+        File.dirname(
+          Hive::Modules::Migration::Patrols.report_file(
+            project.fetch("path"),
+            hive_state_path: project.fetch("hive_state_path")
+          )
+        ),
+        relative
+      )
+      File.binwrite(bundle_path, "{}")
 
       error = assert_raises(Hive::ConfigError) do
         migration.cutover!(report: report, now: NOW + 1)
       end
-      assert_match(/evidence is stale/, error.message)
+      assert_match(/digest changed/, error.message)
     end
   end
 
@@ -765,12 +763,10 @@ class ModulesMigrationPatrolsTest < Minitest::Test
       migration = Hive::Modules::Migration::Patrols.new(
         project_root: project.fetch("path"), project: "demo",
         hive_state_path: project.fetch("hive_state_path"), module_store: store,
-        quiescence_probe: ->(_name, _root) { probe }
+        quiescence_probe: ->(_name, _root) { probe },
+        **live_authority_options
       )
-      report = Report.new(
-        eligible?: true, blockers: [],
-        configuration_digests: { "patrol" => "a" * 64, "architecture-patrol" => "b" * 64 }
-      )
+      report = ready_report(project)
       migration.adopt!(now: NOW)
       probe = :live
       assert_equal "cutover_pending", migration.cutover!(report: report, now: NOW + 1).status
@@ -779,11 +775,16 @@ class ModulesMigrationPatrolsTest < Minitest::Test
       supervisor.live = false
       coordinator = Hive::Modules::Migration::Coordinator.new(
         supervisor: supervisor, attempt_store: FakeAttemptStore.new,
-        registry: -> { [ project ] }, store_factory: ->(_state) { store }
+        registry: -> { [ project ] }, store_factory: ->(_state) { store },
+        project_provider_factory: ->(_entry) {
+          -> { PROJECT_BINDING }
+        },
+        run_authority_provider_factory: ->(_entry) {
+          live_authority_options.fetch(:run_authority_provider)
+        }
       )
-      with_replaced_singleton_method(Hive::Modules::Migration::Report, :load, ->(_path) { report }) do
-        assert_equal :module, coordinator.tick(now: NOW + 2).fetch(0).fetch(:status)
-      end
+      assert_equal :module,
+                   coordinator.tick(now: NOW + 2).fetch(0).fetch(:status)
 
       rollback = Hive::Modules::Migration::Patrols.new(
         project_root: project.fetch("path"), project: "demo",
@@ -795,13 +796,283 @@ class ModulesMigrationPatrolsTest < Minitest::Test
     end
   end
 
+  def test_coordinator_returns_legacy_v1_cutover_pending_to_shadowing_requalification
+    with_project do |project|
+      store = FakeStore.new
+      migration = Hive::Modules::Migration::Patrols.new(
+        project_root: project.fetch("path"),
+        project: "demo",
+        hive_state_path: project.fetch("hive_state_path"),
+        module_store: store,
+        quiescence_probe: ->(*) { :quiescent }
+      )
+      shadowing = migration.adopt!(now: NOW)
+      migration.send(
+        :write,
+        shadowing.state.merge(
+          "status" => "cutover_pending",
+          "admissions" =>
+            Hive::Modules::Migration::Patrols::MODULES.to_h do |name|
+              [ name, false ]
+            end
+        )
+      )
+      report_path = Hive::Modules::Migration::Patrols.report_file(
+        project.fetch("path"),
+        hive_state_path: project.fetch("hive_state_path")
+      )
+      File.binwrite(
+        report_path,
+        File.binread(
+          File.expand_path(
+            "../../../fixtures/module_migration/report-v1.json",
+            __dir__
+          )
+        )
+      )
+
+      row = default_coordinator(project).tick(now: NOW + 1).fetch(0)
+
+      assert_equal :shadowing, row.fetch(:status)
+      state = Hive::Modules::Migration::Patrols.read_state(
+        project.fetch("path"),
+        hive_state_path: project.fetch("hive_state_path")
+      )
+      assert_equal "shadowing", state.fetch("status")
+      assert state.fetch("admissions").values.all?
+      assert_equal %w[legacy], state.fetch("owners").values.uniq
+    end
+  end
+
+  def test_coordinator_migrates_legacy_report_before_stable_state_early_return
+    with_project do |project|
+      migration = Hive::Modules::Migration::Patrols.new(
+        project_root: project.fetch("path"),
+        project: "demo",
+        hive_state_path: project.fetch("hive_state_path"),
+        module_store: FakeStore.new,
+        quiescence_probe: ->(*) { :quiescent }
+      )
+      assert_equal "shadowing", migration.adopt!(now: NOW).status
+      report_path = Hive::Modules::Migration::Patrols.report_file(
+        project.fetch("path"),
+        hive_state_path: project.fetch("hive_state_path")
+      )
+      File.binwrite(
+        report_path,
+        File.binread(
+          File.expand_path(
+            "../../../fixtures/module_migration/report-v1.json",
+            __dir__
+          )
+        )
+      )
+
+      assert_empty default_coordinator(project).tick(now: NOW + 1)
+
+      report = JSON.parse(File.binread(report_path))
+      assert_equal 2, report.fetch("schema_version")
+      assert_equal "evidence_required", report.fetch("status")
+      assert_equal "shadowing", migration.read.fetch("status")
+    end
+  end
+
+  def test_pending_requalification_rejects_contradictory_ownership_without_mutation
+    with_project do |project|
+      migration = Hive::Modules::Migration::Patrols.new(
+        project_root: project.fetch("path"),
+        project: "demo",
+        hive_state_path: project.fetch("hive_state_path"),
+        module_store: FakeStore.new,
+        quiescence_probe: ->(*) { :quiescent }
+      )
+      shadowing = migration.adopt!(now: NOW)
+      contradictory = shadowing.state.merge(
+        "status" => "cutover_pending",
+        "owners" => {
+          "patrol" => "module",
+          "architecture-patrol" => "legacy"
+        },
+        "admissions" =>
+          Hive::Modules::Migration::Patrols::MODULES.to_h do |name|
+            [ name, false ]
+          end
+      )
+      migration.send(:write, contradictory)
+
+      error = assert_raises(Hive::ConfigError) do
+        migration
+          .recover_cutover_pending_for_requalification!(
+            now: NOW + 1
+          )
+      end
+
+      assert_match(/ownership is contradictory/, error.message)
+      unchanged = migration.read
+      assert_equal "cutover_pending", unchanged.fetch("status")
+      assert_equal contradictory.fetch("owners"),
+                   unchanged.fetch("owners")
+      refute unchanged.fetch("admissions").values.any?
+    end
+  end
+
+  def test_unresolved_live_providers_are_named_and_cannot_cut_over
+    with_project do |project|
+      store = FakeStore.new
+      migration = Hive::Modules::Migration::Patrols.new(
+        project_root: project.fetch("path"),
+        project: "demo",
+        hive_state_path: project.fetch("hive_state_path"),
+        module_store: store,
+        quiescence_probe: ->(*) { :quiescent },
+        project_provider: -> { PROJECT_BINDING },
+        run_authority_provider: nil
+      )
+      migration.adopt!(now: NOW)
+      ready_report(project)
+      live_report = migration.load_report_for_cutover
+
+      %w[
+        deterministic:live_run_authority_unresolved
+        installed:live_run_authority_unresolved
+      ].each do |blocker|
+        assert_includes live_report.blockers, blocker
+      end
+      error = assert_raises(Hive::ConfigError) do
+        migration.cutover!(
+          report: live_report,
+          now: NOW + 1
+        )
+      end
+      assert_includes(
+        error.message,
+        "live_run_authority_unresolved"
+      )
+      state = migration.read
+      assert_equal "shadowing", state.fetch("status")
+      assert_equal %w[legacy], state.fetch("owners").values.uniq
+      assert state.fetch("admissions").values.all?
+    end
+  end
+
+  def test_live_project_identity_is_resolved_for_each_report_check_and_cutover
+    with_project do |project|
+      registered_alias =
+        File.join(project.fetch("path"), "registered-alias")
+      File.symlink(project.fetch("path"), registered_alias)
+      registered_project =
+        project.merge("path" => registered_alias)
+      registrations = [ registered_project ]
+      repository_identity = "owner/evidence"
+      store = FakeStore.new
+
+      with_replaced_singleton_method(
+        Hive::Config,
+        :registered_projects,
+        -> { registrations }
+      ) do
+        with_replaced_singleton_method(
+          Hive::RepositoryIdentity,
+          :current,
+          ->(_root) { repository_identity }
+        ) do
+          migration = Hive::Modules::Migration::Patrols.new(
+            project_root: project.fetch("path"),
+            project: "demo",
+            hive_state_path: project.fetch("hive_state_path"),
+            module_store: store,
+            quiescence_probe: ->(*) { :quiescent },
+            **run_authority_options
+          )
+          migration.adopt!(now: NOW)
+          ready_report(project)
+
+          assert migration.load_report_for_cutover
+                          .qualification.ready_for_operator?
+
+          cases = {
+            "live_project_registration_missing" =>
+              -> {
+                registrations = []
+                repository_identity = "owner/evidence"
+              },
+            "live_project_registration_ambiguous" =>
+              -> {
+                registrations = [
+                  registered_project,
+                  registered_project.merge(
+                    "project_id" => "project-2"
+                  )
+                ]
+                repository_identity = "owner/evidence"
+              },
+            "live_project_repository_identity_missing" =>
+              -> {
+                registrations = [
+                  registered_project.merge(
+                    "repository_identity" => nil
+                  )
+                ]
+                repository_identity = "owner/evidence"
+              },
+            "live_project_repository_identity_unresolved" =>
+              -> {
+                registrations = [ registered_project ]
+                repository_identity = nil
+              },
+            "live_project_repository_identity_mismatch" =>
+              -> {
+                registrations = [ registered_project ]
+                repository_identity = "owner/other"
+              }
+          }
+
+          mismatched_report = nil
+          cases.each do |blocker, mutate_authority|
+            mutate_authority.call
+            checked = migration.load_report_for_cutover
+            mismatched_report = checked if
+              blocker ==
+                "live_project_repository_identity_mismatch"
+
+            refute checked.qualification.ready_for_operator?
+            assert_includes(
+              checked.blockers,
+              "deterministic:#{blocker}"
+            )
+            assert_includes checked.blockers, "installed:#{blocker}"
+          end
+
+          registrations = [ registered_project ]
+          repository_identity = "owner/other"
+          error = assert_raises(Hive::ConfigError) do
+            migration.cutover!(
+              report: mismatched_report,
+              now: NOW + 1
+            )
+          end
+
+          assert_match(
+            /live_project_repository_identity_mismatch/,
+            error.message
+          )
+          state = migration.read
+          assert_equal "shadowing", state.fetch("status")
+          assert_equal %w[legacy], state.fetch("owners").values.uniq
+          assert state.fetch("admissions").values.all?
+        end
+      end
+    end
+  end
+
   def test_migration_state_machine_rejects_stale_evidence_and_invalid_transitions
     with_project do |project|
       store = FakeStore.new
       migration = Hive::Modules::Migration::Patrols.new(
         project_root: project.fetch("path"), project: "demo",
         hive_state_path: project.fetch("hive_state_path"), module_store: store,
-        quiescence_probe: ->(_name, _root) { :quiescent }
+        quiescence_probe: ->(_name, _root) { :quiescent },
+        **live_authority_options
       )
       first = migration.adopt!(now: NOW)
       assert_equal "shadowing", first.status
@@ -811,14 +1082,42 @@ class ModulesMigrationPatrolsTest < Minitest::Test
       error = assert_raises(Hive::ConfigError) do
         migration.cutover!(report: invalid_report, now: NOW + 2)
       end
-      assert_match(/report_invalid/, error.message)
+      assert_match(/qualification_invalid/, error.message)
 
-      stale = Report.new(
-        eligible?: true, blockers: [],
-        configuration_digests: { "patrol" => "0" * 64, "architecture-patrol" => "b" * 64 }
+      stale = ready_report(
+        project,
+        configuration_digests: {
+          "patrol" => "0" * 64,
+          "architecture-patrol" => "b" * 64
+        }
       )
       assert_raises(Hive::ConfigError) { migration.cutover!(report: stale, now: NOW + 3) }
       assert_raises(Hive::ConfigError) { migration.rollback!(now: NOW + 4) }
+    end
+  end
+
+  def test_cutover_rejects_same_configuration_after_active_source_or_selection_epoch_drift
+    with_project do |project|
+      store = FakeStore.new
+      migration = Hive::Modules::Migration::Patrols.new(
+        project_root: project.fetch("path"),
+        project: "demo",
+        hive_state_path: project.fetch("hive_state_path"),
+        module_store: store,
+        quiescence_probe: ->(*) { :quiescent },
+        **live_authority_options
+      )
+      migration.adopt!(now: NOW)
+      report = ready_report(project)
+      selection = store.instance_variable_get(:@selections).fetch("patrol")
+      selection["epoch"] += 1
+      selection.fetch("active")["source_commit"] = "f" * 40
+
+      error = assert_raises(Hive::ConfigError) do
+        migration.cutover!(report: report, now: NOW + 1)
+      end
+
+      assert_match(/active selection changed/, error.message)
     end
   end
 
@@ -828,14 +1127,10 @@ class ModulesMigrationPatrolsTest < Minitest::Test
       migration = Hive::Modules::Migration::Patrols.new(
         project_root: project.fetch("path"), project: "demo",
         hive_state_path: project.fetch("hive_state_path"), module_store: store,
-        quiescence_probe: ->(*) { :quiescent }
+        quiescence_probe: ->(*) { :quiescent },
+        **live_authority_options
       )
-      old_report = Report.new(
-        eligible?: true, blockers: [],
-        configuration_digests: {
-          "patrol" => "a" * 64, "architecture-patrol" => "b" * 64
-        }
-      )
+      old_report = ready_report(project)
       migration.adopt!(now: NOW)
       migration.cutover!(report: old_report, now: NOW + 1)
       migration.rollback!(now: NOW + 2)
@@ -864,10 +1159,7 @@ class ModulesMigrationPatrolsTest < Minitest::Test
         quiescence_probe: ->(_name, _root) { :live }
       )
       assert_equal "pending", pending.adopt!(now: NOW).status
-      report = Report.new(
-        eligible?: true, blockers: [],
-        configuration_digests: { "patrol" => "a" * 64, "architecture-patrol" => "b" * 64 }
-      )
+      report = ready_report(project)
       assert_raises(Hive::ConfigError) { pending.cutover!(report: report, now: NOW + 1) }
       assert_raises(Hive::ConfigError) { pending.rollback!(now: NOW + 1) }
     end
@@ -922,13 +1214,11 @@ class ModulesMigrationPatrolsTest < Minitest::Test
       migration = Hive::Modules::Migration::Patrols.new(
         project_root: project.fetch("path"), project: "demo",
         hive_state_path: project.fetch("hive_state_path"), module_store: store,
-        quiescence_probe: ->(_name, _root) { probe }
+        quiescence_probe: ->(_name, _root) { probe },
+        **live_authority_options
       )
       migration.adopt!(now: NOW)
-      report = Report.new(
-        eligible?: true, blockers: [],
-        configuration_digests: { "patrol" => "a" * 64, "architecture-patrol" => "b" * 64 }
-      )
+      report = ready_report(project)
 
       probe = :live
       pending = migration.cutover!(report: report, now: NOW + 1)
@@ -1331,6 +1621,73 @@ class ModulesMigrationPatrolsTest < Minitest::Test
     }.merge(overrides)
   end
 
+  def live_authority_options(configuration_digests: {
+    "patrol" => "a" * 64,
+    "architecture-patrol" => "b" * 64
+  })
+    selections = module_selection_bindings(
+      configuration_digests
+    )
+    {
+      project_provider: -> { PROJECT_BINDING },
+      run_authority_provider:
+        qualification_run_authority_provider(
+          authority_documents:
+            qualification_authority_documents(
+              configuration_digests: configuration_digests,
+              module_selections: selections
+            )
+        )
+    }
+  end
+
+  def run_authority_options
+    live_authority_options.slice(:run_authority_provider)
+  end
+
+  def ready_report(project, configuration_digests: {
+    "patrol" => "a" * 64,
+    "architecture-patrol" => "b" * 64
+  })
+    report = Hive::Modules::Migration::Report.build(
+      lane_evidence: {
+        "deterministic" => qualification_bundle(
+          lane: "deterministic",
+          configuration_digests: configuration_digests
+        ),
+        "installed" => qualification_bundle(
+          lane: "installed",
+          configuration_digests: configuration_digests
+        )
+      },
+      reviewer: "operator",
+      reviewed_at: PatrolEvidenceScenario::START + 40,
+      generated_at: PatrolEvidenceScenario::START + 40,
+      live_bindings_resolver:
+        qualification_live_resolver(
+          module_selections:
+            module_selection_bindings(
+              configuration_digests
+            )
+        )
+    )
+    repository =
+      Hive::Modules::Migration::MigrationRepository.for(
+        project_root: project.fetch("path"),
+      hive_state_path: project.fetch("hive_state_path")
+    )
+    repository.write_report(report)
+    repository.load_report(
+      live_bindings_resolver:
+        qualification_live_resolver(
+          module_selections:
+            module_selection_bindings(
+              configuration_digests
+            )
+        )
+    )
+  end
+
   def with_project
     with_tmp_dir do |root|
       state = File.join(root, ".hive-state")
@@ -1340,6 +1697,7 @@ class ModulesMigrationPatrolsTest < Minitest::Test
         {
           "name" => "demo",
           "project_id" => "project-1",
+          "repository_identity" => "owner/evidence",
           "path" => root,
           "hive_state_path" => state
         }

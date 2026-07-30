@@ -19,6 +19,8 @@ components:
         - Hive::Modules::Migration::PatrolEffectIndex
         - Hive::Modules::Migration::PatrolEvidenceReceipt
         - Hive::Modules::Migration::PatrolEvidenceVerifier
+        - Hive::Modules::Migration::PatrolQualification
+        - Hive::Modules::Migration::Report
       errors:
         - Hive::ConfigError
     owned_paths:
@@ -26,6 +28,12 @@ components:
       - lib/hive/modules/migration/patrol_effect_index.rb
       - lib/hive/modules/migration/patrol_evidence_receipt.rb
       - lib/hive/modules/migration/patrol_evidence_verifier.rb
+      - lib/hive/modules/migration/patrol_qualification.rb
+      - lib/hive/modules/migration/live_bindings_resolver.rb
+      - lib/hive/modules/migration/report.rb
+      - lib/hive/modules/migration/report_projection.rb
+      - lib/hive/modules/migration/report_migration.rb
+      - lib/hive/modules/migration/migration_repository.rb
       - lib/hive/modules/migration/evidence_store.rb
       - lib/hive/modules/migration/effect_admission.rb
       - lib/hive/modules/migration/effect_delivery.rb
@@ -67,12 +75,15 @@ components:
       - "Canonical occurrence records atomically bind prepared or uncertain delivery, terminal outcomes, and ordered projection outbox bytes; persisted sender leases and PID authority do not exist"
       - "A committed or reconciled ordinary Patrol pull request atomically appends its exact terminal receipt bytes as a typed publication outbox entry; StateStore alone projects that entry to one immutable publication_binding before tuple acknowledgement"
       - "EvidenceStore is an append-only bounded observational projection under module-runtime/migration/patrol-evidence and is never consulted for retry"
+      - "MigrationRepository is the sole descriptor-confined owner of Patrol migration state, report projections, immutable evidence bundles, v1 archives, and migration receipts"
+      - "LiveBindingsResolver supplies project, exact active module selections, candidate, scenario, and artifact authority; persisted receipt-and-record bundles never supply their own current bindings"
       - "ActionRunner and RefactorPatrolScheduler decide product work; composed action/discovery transition coordinators own durable transition identities, claim fences, and replay"
       - "JobStoreFiles is the sole descriptor-confined physical I/O port for live v3 jobs, query indexes, quarantine evidence, and action locks; JobQueryIndex owns only their bounded logical projection"
       - "JobStoreFreshStart atomically archives only released v2/jobs as opaque bytes; runtime never reads or converts it, and an explicit confirmed reset alone admits an empty v3 namespace"
     schema_contracts:
       - "hive-patrol-capture v1 and hive-patrol-effect-receipt v1 are strict canonical observation records"
-      - "hive-patrol-evidence-receipt v1 binds one exact candidate, lane, scenario, decision set, run-wide effect index, fault/restart matrix, and bounded artifact set; elapsed duration is telemetry only"
+      - "hive-patrol-evidence-receipt v1 binds one exact project, module selection set, candidate, lane, scenario, decision set, run-wide effect index, fault/restart matrix, and bounded artifact set; elapsed duration is telemetry only"
+      - "hive-module-migration-report v2 is an I/O-free projection over independently verified lane bundles; persisted status never authorizes cutover by itself"
       - "hive-refactor-patrol-job v3 is the sole runtime JobStore schema; released v2 jobs have no compatibility reader or converter"
       - "hive-patrol-occurrence-recovery-index v1 is a bounded rebuildable active-ID projection tied to the journal-state recovery generation; occurrence records remain authoritative"
     lock_contracts:
@@ -80,6 +91,8 @@ components:
       - "Dispatch uncertainty is reconciliation-only; exact absence must settle before a retry-safe local sink may resend, while remote absence never grants resend authority"
       - "Architecture manifest reservation and the JobStore occurrence pointer serialize before the enqueue transition; command and daemon intake share the same coordinator"
       - "Every live JobStore read, write, enumeration, quarantine publication, index publication, and action/job lock resolves through one verified ManagedDirectory anchor"
+      - "One descriptor-bound MigrationRepository .mutation.lock serializes state, report, bundle, archive, receipt, and cutover transactions and refuses linked or non-regular lock entries"
+      - "Cutover holds the migration lock before one shared module-store selection snapshot, validates that exact batch, and reuses it as the cutover selection set"
       - "The stable profile activation lock excludes daemon startup; reset drains the exact daemon generation before taking the existing Patrol effect lock exclusively, then holds that effect lock, the stable generation lock, and the independent PID/start-time writer fence across opaque v2 archive, empty-v3 admission, and receipt publication"
     component_dependencies: []
     allowed_hive_dependencies:
@@ -104,12 +117,16 @@ components:
       - Hive::Modules::Migration::EffectReceiptLedger
       - Hive::Modules::Migration::EffectSender
       - Hive::Modules::Migration::EvidenceStore
+      - Hive::Modules::Migration::MigrationRepository
+      - Hive::Modules::Migration::LiveBindingsResolver
       - Hive::Modules::Migration::OccurrenceEffects
       - Hive::Modules::Migration::OccurrenceJournal
       - Hive::Modules::Migration::OccurrenceOutbox
       - Hive::Modules::Migration::OccurrenceRecoveryIndex
       - Hive::Modules::Migration::OccurrenceRecordStore
       - Hive::Modules::Migration::OccurrenceRecordValidator
+      - Hive::Modules::Migration::ReportMigration
+      - Hive::Modules::Migration::ReportProjection
       - Hive::Modules::Migration::StableProcessLock
       - Hive::Patrol::EffectGateway
       - Hive::RefactorPatrol::ActionClaimTransitions
@@ -259,6 +276,9 @@ components:
       - test/unit/modules/migration/occurrence_recovery_index_test.rb
       - test/unit/modules/migration/patrol_evidence_test.rb
       - test/unit/modules/migration/patrol_evidence_qualification_test.rb
+      - test/unit/modules/migration/migration_repository_test.rb
+      - test/unit/modules/migration/report_migration_test.rb
+      - test/unit/modules/migration/report_test.rb
       - test/unit/daemon/refactor_patrol_scheduler_test.rb
       - test/unit/daemon/activation_lock_test.rb
       - test/unit/daemon/operational_snapshot_test.rb

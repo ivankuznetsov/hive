@@ -105,6 +105,8 @@ class ComponentBoundariesTest < Minitest::Test
         Hive::Modules::Migration::PatrolEffectIndex
         Hive::Modules::Migration::PatrolEvidenceReceipt
         Hive::Modules::Migration::PatrolEvidenceVerifier
+        Hive::Modules::Migration::PatrolQualification
+        Hive::Modules::Migration::Report
       ],
       patrol_effects.dig("public_contract", "values").sort
     )

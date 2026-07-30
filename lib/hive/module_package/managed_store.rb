@@ -112,6 +112,40 @@ module Hive
         end
       end
 
+      # Cutover callers need one immutable view of every participating module.
+      # Holding the shared lifecycle lock across the whole batch prevents a
+      # mixed-generation snapshot and lets the caller reuse these exact values
+      # as its eventual cutover selections.
+      def with_selection_snapshot(names, include_tombstones: false)
+        names = Array(names).map(&:to_s)
+        Hive::WorkflowPackage::MutationLock.with_lock(
+          modules_dir
+        ) do
+          names.each { |name| reconcile_unlocked!(name) }
+        end
+        Hive::WorkflowPackage::MutationLock.with_lock(
+          modules_dir,
+          shared: true
+        ) do
+          snapshot = names.to_h do |name|
+            [
+              name,
+              selected_unlocked(
+                name,
+                include_tombstone: include_tombstones
+              )
+            ]
+          end
+          snapshot.each do |name, selection|
+            validate_snapshot_generation!(name, selection)
+          end
+          yield immutable_snapshot(snapshot)
+        end
+      rescue Hive::ConcurrentRunError => e
+        raise Hive::ConfigError,
+              "module lifecycle snapshot lock is unavailable: #{e.message}"
+      end
+
       def module_names
         return [] unless File.directory?(modules_dir)
 
@@ -282,6 +316,73 @@ module Hive
       end
 
       private
+
+      def immutable_snapshot(value)
+        case value
+        when Hash
+          value.to_h do |key, item|
+            [
+              immutable_snapshot(key),
+              immutable_snapshot(item)
+            ]
+          end.freeze
+        when Array
+          value.map { |item| immutable_snapshot(item) }.freeze
+        when String
+          value.dup.freeze
+        else
+          value
+        end
+      end
+
+      def validate_snapshot_generation!(name, selection)
+        return unless selection&.fetch("installed")
+
+        active = selection.fetch("active")
+        unless active.is_a?(Hash)
+          raise Hive::ConfigError,
+                "module active generation is missing"
+        end
+        validation = Validator.validate!(
+          generation_path(name, active.fetch("source_commit")),
+          expected_name: name,
+          expected_manifest_digest:
+            active.fetch("manifest_digest"),
+          catalog_commit: active.fetch("catalog_commit")
+        )
+        descriptor = validation.descriptor
+        generation = {
+          "name" => descriptor.name,
+          "version" => descriptor.version,
+          "catalog_commit" => descriptor.catalog_commit,
+          "source_commit" =>
+            descriptor.source.fetch("revision"),
+          "manifest_digest" => validation.manifest_digest
+        }
+        expected = active.slice(
+          "version",
+          "catalog_commit",
+          "source_commit",
+          "manifest_digest"
+        ).merge("name" => name)
+        unless generation == expected
+          raise Hive::ConfigError,
+                "module active generation does not match selection"
+        end
+
+        configuration = self.configuration(
+          name,
+          active.fetch("configuration_digest")
+        )
+        return if configuration.generation == expected
+
+        raise Hive::ConfigError,
+              "module configuration generation does not match " \
+              "active selection"
+      rescue KeyError, TypeError
+        raise Hive::ConfigError,
+              "module active generation binding is malformed"
+      end
 
       def with_mutation(&block)
         Hive::WorkflowPackage::MutationLock.with_lock(modules_dir, &block)

@@ -76,6 +76,153 @@ class ModulePackageManagedStoreTest < Minitest::Test
     end
   end
 
+  def test_selection_snapshot_is_one_deeply_immutable_shared_lock_view
+    with_tmp_dir do |root|
+      package = File.join(root, "package")
+      resolution, descriptor = write_module_package(package)
+      store = Hive::ModulePackage::ManagedStore.new(
+        File.join(root, ".hive-state")
+      )
+      store.apply(
+        preview_for(resolution, descriptor),
+        package_root: package,
+        resolution: resolution
+      )
+
+      yielded = store.with_selection_snapshot(
+        %w[demo missing],
+        include_tombstones: true
+      ) do |snapshot|
+        assert snapshot.frozen?
+        assert snapshot.fetch("demo").frozen?
+        assert snapshot.dig("demo", "active").frozen?
+        assert_nil snapshot.fetch("missing")
+        snapshot
+      end
+      assert_equal(
+        store.inspect_selection("demo"),
+        yielded.fetch("demo")
+      )
+      assert_raises(FrozenError) do
+        yielded.fetch("demo").fetch("active")["version"] =
+          "changed"
+      end
+    end
+  end
+
+  def test_selection_snapshot_validates_active_generation_bytes_before_yield
+    with_tmp_dir do |root|
+      package = File.join(root, "package")
+      resolution, descriptor = write_module_package(package)
+      store = Hive::ModulePackage::ManagedStore.new(
+        File.join(root, ".hive-state")
+      )
+      store.apply(
+        preview_for(resolution, descriptor),
+        package_root: package,
+        resolution: resolution
+      )
+      payload = File.join(
+        store.generation_path("demo", resolution.source_commit),
+        "README.md"
+      )
+      File.chmod(0o644, payload)
+      File.binwrite(payload, "# tampered\n")
+      yielded = false
+
+      error = assert_raises(Hive::ConfigError) do
+        store.with_selection_snapshot([ "demo" ]) do
+          yielded = true
+        end
+      end
+
+      refute yielded
+      assert_match(/payload hash|active generation/, error.message)
+    end
+  end
+
+  def test_selection_snapshot_rejects_missing_active_generation_before_yield
+    with_tmp_dir do |root|
+      package = File.join(root, "package")
+      resolution, descriptor = write_module_package(package)
+      store = Hive::ModulePackage::ManagedStore.new(
+        File.join(root, ".hive-state")
+      )
+      store.apply(
+        preview_for(resolution, descriptor),
+        package_root: package,
+        resolution: resolution
+      )
+      generation =
+        store.generation_path("demo", resolution.source_commit)
+      FileUtils.chmod_R(0o700, generation)
+      FileUtils.rm_rf(generation)
+      yielded = false
+
+      error = assert_raises(Hive::ConfigError) do
+        store.with_selection_snapshot([ "demo" ]) do
+          yielded = true
+        end
+      end
+
+      refute yielded
+      assert_match(/manifest|active generation/, error.message)
+    end
+  end
+
+  def test_selection_snapshot_binds_configuration_generation_to_active_selection
+    with_tmp_dir do |root|
+      store = Hive::ModulePackage::ManagedStore.new(
+        File.join(root, ".hive-state")
+      )
+      first_root = File.join(root, "first")
+      first_resolution, first_descriptor =
+        write_module_package(first_root)
+      store.apply(
+        preview_for(first_resolution, first_descriptor),
+        package_root: first_root,
+        resolution: first_resolution
+      )
+      second_root = File.join(root, "second")
+      second_resolution, second_descriptor = write_module_package(
+        second_root,
+        version: "1.1.0",
+        commit: "b" * 40
+      )
+      store.apply(
+        preview_for(
+          second_resolution,
+          second_descriptor,
+          store: store
+        ),
+        package_root: second_root,
+        resolution: second_resolution
+      )
+      selection = store.selected("demo", include_tombstone: true)
+      selection.fetch("active")["configuration_digest"] =
+        selection.dig("previous", "configuration_digest")
+      selection_path =
+        File.join(store.modules_dir, "demo", "selection.json")
+      File.binwrite(
+        selection_path,
+        Hive::WorkflowPackage::CanonicalJSON.generate(selection)
+      )
+      yielded = false
+
+      error = assert_raises(Hive::ConfigError) do
+        store.with_selection_snapshot([ "demo" ]) do
+          yielded = true
+        end
+      end
+
+      refute yielded
+      assert_match(
+        /configuration generation.*active selection/,
+        error.message
+      )
+    end
+  end
+
   def test_failpoint_restores_selection_and_removes_candidate
     with_tmp_dir do |root|
       package = File.join(root, "package")

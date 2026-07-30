@@ -272,7 +272,9 @@ module Hive
     end
 
     def atomic_write(relative, content, mode: 0o600, mtime: nil,
-                     expected_digest: nil, max_existing_bytes: nil)
+                     expected_digest: nil, expected_absent: false,
+                     max_existing_bytes: nil)
+      unsafe! if expected_digest && expected_absent
       path = absolute(relative)
       parent_components, name = target_components(relative)
       temporary_name = nil
@@ -281,6 +283,7 @@ module Hive
       with_session(create_root: true) do |session|
         session.with_directory(parent_components, create: true) do |parent|
           before = session.regular_snapshot_at(parent, name)
+          unsafe! if expected_absent && before
           if expected_digest
             verify_digest_at!(
               session,

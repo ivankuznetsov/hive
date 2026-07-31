@@ -3,7 +3,7 @@ title: Dependencies
 type: dependencies
 source: Gemfile, hive.gemspec, Gemfile.lock, web/Gemfile, web/Gemfile.lock, .github/workflows, components/agent-cli-runtime/mirror, .llm-wiki/post-commit-refresh.sh
 created: 2026-04-25
-updated: 2026-07-27
+updated: 2026-07-31
 tags: [dependencies, gems, runtime]
 ---
 
@@ -95,7 +95,7 @@ execs the Rails app from a source checkout or Docker image, and
 Managed release bundles authenticate `SHA256SUMS` against the exact release
 workflow identity and expected version tag before dependency installation.
 
-Direct web runtime dependencies include Rails `~> 8.1.3` (locked 8.1.3),
+Direct web runtime dependencies include Rails `~> 8.1.3` (locked 8.1.3.1),
 propshaft, sqlite3, puma, importmap-rails, turbo-rails, stimulus-rails,
 jbuilder, solid_cache, solid_queue, solid_cable, bootsnap, thruster,
 image_processing, and `hive-cli` from the parent checkout. Redcarpet
@@ -111,6 +111,11 @@ Direct web development/test dependencies include `debug`,
 `web/Gemfile` entry, but the web lock resolves it transitively through
 Rails/Capybara and the web integration upload tests use
 `Rack::Test::UploadedFile`.
+
+Rails 8.1.3.1 is the minimum locked web release for the
+CVE-2026-66066 Active Storage/libvips security fix. Production images install
+the distribution `libvips` package, which must remain at libvips 8.13 or newer
+for the patched Active Storage safety checks.
 
 The `curses` gem was removed in U11 of plan #003 alongside the legacy curses TUI backend. `HIVE_TUI_BACKEND=curses` now raises a typed error pointing at the removal instead of routing to the deleted code.
 

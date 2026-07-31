@@ -119,9 +119,12 @@ module Hive
               next unless EventScope.matches?(event: event, selection: selection, hook: hook)
               return count unless admission_open?(admission_open)
 
-              dispatcher.dispatch(
-                module_name: selection.fetch("name"), hook_id: hook.fetch("id"), event: event
+              dispatch_result = dispatcher.dispatch(
+                module_name: selection.fetch("name"), hook_id: hook.fetch("id"),
+                event: event, admission_open: admission_open
               )
+              return count unless dispatch_result
+
               count += 1
             end
           end
@@ -263,7 +266,7 @@ module Hive
                   attempt["retry_charge"] < MAX_RETRIES
               dispatcher.retry(
                 module_name: module_name, hook_attempt: hook_attempt_from(run, selection),
-                previous_attempt: attempt
+                previous_attempt: attempt, admission_open: admission_open
               )
             else
               finalize_run(path, run, status: "failed", attempt: attempt, now: now)

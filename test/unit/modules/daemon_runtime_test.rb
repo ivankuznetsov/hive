@@ -261,6 +261,63 @@ class ModulesDaemonRuntimeTest < Minitest::Test
     end
   end
 
+  def test_shutdown_during_hook_admission_lock_stops_provider_dispatch
+    with_runtime do |runtime|
+      admission = true
+      store = runtime.fetch(:store)
+      original = store.method(:with_admission)
+      store.define_singleton_method(:with_admission) do |*args, &block|
+        original.call(*args) do |selection|
+          admission = false
+          block.call(selection)
+        end
+      end
+
+      result = with_replaced_singleton_method(
+        Hive::ModulePackage::ManagedStore, :new, ->(_path) { store }
+      ) do
+        runtime.fetch(:daemon_runtime).tick(
+          now: NOW + 1, admission_open: -> { admission }
+        ).first
+      end
+
+      assert_equal 0, result.fetch(:decisions)
+      assert_empty runtime.fetch(:attempt_store).scan.records
+      refute_path_exists File.join(
+        store.hive_state_path, "module-runtime", "daemon-event-cursor.json"
+      )
+    end
+  end
+
+  def test_shutdown_during_retry_admission_lock_stops_provider_dispatch
+    with_runtime do |runtime|
+      runtime.fetch(:module_dispatcher).dispatch(
+        module_name: "demo", hook_id: "task", event: runtime.fetch(:event)
+      )
+      first = runtime.fetch(:attempt_store).scan.records.first
+      terminalize(runtime.fetch(:attempt_store), first, outcome: "failed")
+      admission = true
+      store = runtime.fetch(:store)
+      original = store.method(:with_admission)
+      store.define_singleton_method(:with_admission) do |*args, &block|
+        original.call(*args) do |selection|
+          admission = false
+          block.call(selection)
+        end
+      end
+
+      with_replaced_singleton_method(
+        Hive::ModulePackage::ManagedStore, :new, ->(_path) { store }
+      ) do
+        runtime.fetch(:daemon_runtime).tick(
+          now: NOW + 3, admission_open: -> { admission }
+        )
+      end
+
+      assert_equal 1, runtime.fetch(:attempt_store).scan.records.size
+    end
+  end
+
   def test_terminal_success_and_exhausted_failure_finalize_run_receipts
     with_runtime do |runtime|
       runtime.fetch(:module_dispatcher).dispatch(

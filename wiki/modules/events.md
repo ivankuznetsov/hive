@@ -51,6 +51,11 @@ the already-admitted hook, and the remaining hook stays eligible. Idle ticks
 therefore do not reparse retained event or decision histories; an absent or
 crash-stale index is rebuilt from the immutable event files before use.
 
+The same predicate crosses module migration, package-admission, and hook locks
+and is rechecked immediately before new-hook and retry provider dispatch.
+Closing admission while one of those locks is held cannot launch work after
+shutdown.
+
 Legacy registry rows derive the same deterministic project UUID during
 read-time projection and daemon persistence, so events written before backfill
 do not become foreign afterward. Every successful evidence-closure terminal

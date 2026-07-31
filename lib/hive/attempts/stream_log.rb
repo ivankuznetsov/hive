@@ -16,7 +16,8 @@ module Hive
       attr_reader :path
 
       def self.read(path, after_sequence: 0)
-        return [] unless File.file?(path)
+        status = File.lstat(path)
+        return [] if status.symlink? || !status.file?
 
         File.binread(path).lines.filter_map do |line|
           next unless line.end_with?("\n")
@@ -45,12 +46,16 @@ module Hive
       def initialize(path, clock: -> { Time.now.utc })
         @path = File.expand_path(path)
         @clock = clock
-        FileUtils.mkdir_p(File.dirname(@path), mode: 0o700)
-        File.chmod(0o700, File.dirname(@path))
-        @io = File.open(@path, File::WRONLY | File::CREAT | File::APPEND, 0o600)
+        prepare_directory!
+        validate_log_file! if File.exist?(@path) || File.symlink?(@path)
+        flags = File::WRONLY | File::CREAT | File::APPEND
+        flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+        @io = File.open(@path, flags, 0o600)
         @io.chmod(0o600)
         seal_torn_tail
         @sequence = self.class.read(@path).last&.sequence.to_i
+      rescue Errno::ELOOP
+        raise IOError, "attempt log path is a symlink"
       end
 
       def append(channel, bytes)
@@ -87,6 +92,26 @@ module Hive
       def closed? = @io.closed?
 
       private
+
+      def prepare_directory!
+        directory = File.dirname(@path)
+        if File.symlink?(directory)
+          raise IOError, "attempt log directory is a symlink"
+        end
+
+        FileUtils.mkdir_p(directory, mode: 0o700) unless File.exist?(directory)
+        status = File.lstat(directory)
+        raise IOError, "attempt log directory is a symlink" if status.symlink?
+        raise IOError, "attempt log path parent is not a directory" unless status.directory?
+
+        File.chmod(0o700, directory)
+      end
+
+      def validate_log_file!
+        status = File.lstat(@path)
+        raise IOError, "attempt log path is a symlink" if status.symlink?
+        raise IOError, "attempt log path is not a regular file" unless status.file?
+      end
 
       # A crash mid-append can leave a torn final line with no trailing newline.
       # Terminate it before the first post-reopen append so the torn bytes stay

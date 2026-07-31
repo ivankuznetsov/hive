@@ -195,6 +195,138 @@ class AttemptsStoreTest < Minitest::Test
     end
   end
 
+  def test_managed_directories_refuse_symlinks_before_chmod_or_state_access
+    %w[records logs outputs generation-locks].each do |managed_name|
+      with_tmp_dir do |dir|
+        root = File.join(dir, "attempts")
+        outside = File.join(dir, "outside")
+        FileUtils.mkdir_p([ root, outside ])
+        File.chmod(0o755, outside)
+        File.symlink(outside, File.join(root, managed_name))
+
+        error = assert_raises(Hive::Attempts::StoreError) do
+          Hive::Attempts::Store.new(root: root)
+        end
+
+        assert_match(/#{Regexp.escape(managed_name)}.*symlink/, error.message)
+        assert_equal 0o755, File.stat(outside).mode & 0o777
+        assert_empty Dir.children(outside)
+      end
+    end
+
+    with_store do |store|
+      records_root = store.records_root
+      outside = File.join(File.dirname(store.root), "replacement")
+      FileUtils.mkdir_p(outside)
+      File.chmod(0o755, outside)
+      FileUtils.rmdir(records_root)
+      File.symlink(outside, records_root)
+
+      error = assert_raises(Hive::Attempts::StoreError) do
+        store.create_launching(
+          **identity.merge(attempt_id: "escaped-attempt"),
+          launch_timeout_sec: 30,
+          now: NOW
+        )
+      end
+
+      assert_match(/records.*symlink/, error.message)
+      assert_equal 0o755, File.stat(outside).mode & 0o777
+      assert_empty Dir.children(outside)
+    end
+  end
+
+  def test_configured_store_root_may_resolve_through_a_trusted_symlink
+    with_tmp_dir do |dir|
+      actual_root = File.join(dir, "actual-attempts")
+      linked_root = File.join(dir, "configured-attempts")
+      FileUtils.mkdir_p(actual_root)
+      File.symlink(actual_root, linked_root)
+
+      store = Hive::Attempts::Store.new(root: linked_root)
+      attempt = store.create_launching(
+        **identity.merge(attempt_id: "linked-root-attempt"),
+        launch_timeout_sec: 30,
+        now: NOW
+      )
+
+      assert_equal File.expand_path(linked_root), store.root
+      assert_equal attempt.to_h, store.fetch(attempt.attempt_id).to_h
+      assert File.file?(File.join(actual_root, "records", "linked-root-attempt.json"))
+    end
+  end
+
+  def test_concurrent_output_directory_creation_revalidates_the_eexist_winner
+    with_store do |store|
+      target = File.join(store.outputs_root, "race-attempt")
+      original_mkdir = Dir.method(:mkdir)
+      mutex = Mutex.new
+      condition = ConditionVariable.new
+      arrived = 0
+      barrier_mkdir = lambda do |path, mode|
+        if path == target
+          mutex.synchronize do
+            arrived += 1
+            condition.broadcast if arrived == 2
+            condition.wait(mutex) while arrived < 2
+          end
+        end
+        original_mkdir.call(path, mode)
+      end
+      results = Queue.new
+
+      with_replaced_singleton_method(Dir, :mkdir, barrier_mkdir) do
+        threads = 2.times.map do
+          Thread.new do
+            results << store.output_directory("race-attempt", create: true)
+          rescue StandardError => error
+            results << error
+          end
+        end
+        threads.each(&:join)
+      end
+
+      observed = 2.times.map { results.pop }
+      assert_equal [ target ], observed.grep(String).uniq
+      assert_empty observed.grep(Exception)
+      assert File.directory?(target)
+      refute File.symlink?(target)
+    end
+  end
+
+  def test_record_and_lock_leaf_symlinks_are_never_followed
+    with_store do |store|
+      outside_record = File.join(File.dirname(store.root), "outside-record.json")
+      File.write(outside_record, JSON.generate(
+        Hive::Attempts::Record.launching(
+          **identity.merge(attempt_id: "linked-record"),
+          launch_timeout_sec: 30,
+          now: NOW
+        ).to_h
+      ))
+      File.chmod(0o644, outside_record)
+      File.symlink(outside_record, store.record_path("linked-record"))
+
+      error = assert_raises(Hive::Attempts::StoreError) { store.fetch("linked-record") }
+      assert_match(/record.*symlink/, error.message)
+      scan = store.scan
+      assert_empty scan.records
+      assert_equal 1, scan.invalid_records.size
+      assert_match(/record.*symlink/, scan.invalid_records.first.error)
+      assert_equal 0o644, File.stat(outside_record).mode & 0o777
+
+      outside_lock = File.join(File.dirname(store.root), "outside.lock")
+      File.write(outside_lock, "sentinel")
+      File.chmod(0o644, outside_lock)
+      File.symlink(outside_lock, File.join(store.generation_locks_root, "admission.lock"))
+
+      error = assert_raises(Hive::Attempts::StoreError) { store.with_admission_lock { flunk } }
+      assert_match(/lock.*symlink/, error.message)
+      assert_equal "sentinel", File.binread(outside_lock)
+      assert_equal 0o644, File.stat(outside_lock).mode & 0o777
+    end
+  end
+
   def test_invalid_mutation_immutable_identity_and_unsafe_ids_fail_closed
     with_store do |store|
       launching = store.create_launching(**identity, launch_timeout_sec: 30, now: NOW)

@@ -112,12 +112,47 @@ class AttemptsStreamLogTest < Minitest::Test
   def test_reader_ignores_malformed_frames_and_read_errors
     with_tmp_dir do |root|
       path = File.join(root, "bad.frames")
+      assert_empty Hive::Attempts::StreamLog.read(File.join(root, "missing.frames"))
+
       File.write(path, "not-json\n")
       assert_empty Hive::Attempts::StreamLog.read(path)
 
       with_replaced_singleton_method(File, :binread, ->(_path) { raise Errno::EACCES }) do
         assert_empty Hive::Attempts::StreamLog.read(path)
       end
+    end
+  end
+
+  def test_symlinked_log_directories_and_files_fail_closed_without_external_access
+    with_tmp_dir do |root|
+      outside = File.join(root, "outside")
+      FileUtils.mkdir_p(outside)
+      File.chmod(0o755, outside)
+      File.symlink(outside, File.join(root, "logs"))
+
+      error = assert_raises(IOError) do
+        Hive::Attempts::StreamLog.new(File.join(root, "logs", "attempt.frames"))
+      end
+
+      assert_match(/directory.*symlink/, error.message)
+      assert_equal 0o755, File.stat(outside).mode & 0o777
+      assert_empty Dir.children(outside)
+    end
+
+    with_tmp_dir do |root|
+      logs = File.join(root, "logs")
+      outside = File.join(root, "outside.frames")
+      FileUtils.mkdir_p(logs)
+      File.binwrite(outside, "{\"sequence\":1,\"timestamp\":\"external\",\"channel\":\"stdout\",\"data\":\"bGVhaw==\"}\n")
+      File.chmod(0o644, outside)
+      path = File.join(logs, "attempt.frames")
+      File.symlink(outside, path)
+
+      error = assert_raises(IOError) { Hive::Attempts::StreamLog.new(path) }
+      assert_match(/path.*symlink/, error.message)
+      assert_empty Hive::Attempts::StreamLog.read(path)
+      assert_equal 0o644, File.stat(outside).mode & 0o777
+      assert_match(/bGVhaw==/, File.binread(outside))
     end
   end
 end

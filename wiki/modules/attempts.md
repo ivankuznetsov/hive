@@ -121,6 +121,18 @@ fields. The capability itself is never persisted. Large payloads remain
 owner-private referenced files with canonical relative path, byte size, and
 SHA-256.
 
+The configured store root remains the trusted anchor and may itself resolve
+through an operator-selected link. Its managed `records`, `logs`, `outputs`,
+and `generation-locks` children may not: creation and every later access
+revalidate that each child is a real directory, not a symlink, and that its
+resolved path remains below the trusted root before chmod, read, lock, or
+write. Record and lock leaves use no-follow checks; attempt stream readers
+ignore symlink leaves and writers refuse them. Concurrent creation of the same
+per-attempt output directory revalidates the winning entry before use.
+Lost-outcome and dirty-state directories receive the same containment check.
+Corrupt or replacement links therefore fail closed and never redirect attempt
+state or permission changes outside `$HIVE_HOME/attempts/v2`.
+
 Record construction/readers and store transitions all use the same
 non-mutating `Hive::StringifyKeys` transform as the task journal and projection.
 It recursively copies hashes/arrays and stringifies keys while leaving scalar

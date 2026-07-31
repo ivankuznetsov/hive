@@ -26,6 +26,11 @@ class E2ESandboxTest < Minitest::Test
       sandbox = Hive::E2E::Sandbox.bootstrap(dir)
 
       assert File.directory?(File.join(sandbox.sandbox_dir, ".hive-state"))
+      assert_equal(
+        0o700,
+        File.stat(sandbox.run_home).mode & 0o777,
+        "scenario HIVE_HOME must remain private under a permissive umask"
+      )
       config = YAML.safe_load(File.read(File.join(sandbox.run_home, "config.yml")))
       assert_equal [ "sandbox" ], config.fetch("registered_projects").map { |project| project.fetch("name") }
       project_config = YAML.safe_load(File.read(File.join(sandbox.sandbox_dir, ".hive-state", "config.yml")))

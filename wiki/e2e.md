@@ -229,7 +229,9 @@ scenario, the audit is append-only, and background plus tmux/TUI producers
 lifecycle log) stop before the locked final verification or failure evidence snapshot.
 Harness-owned `BUNDLE_GEMFILE`, `HIVE_HOME`, built-in agent fixture binaries,
 `HIVE_BIN`, and `HIVE_INVOKED_BIN` cannot be replaced by scenario or operator
-overrides.
+overrides. Each per-scenario `HIVE_HOME` is explicitly created and rehardened
+to mode `0700` before its configuration is written, independent of the host or
+CI runner umask.
 
 Claude, Codex, Pi, and Grok profiles resolve to `test/fixtures/fake-claude`.
 Its `HIVE_FAKE_CLAUDE_READY_FILE` /

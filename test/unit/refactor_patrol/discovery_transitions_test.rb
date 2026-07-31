@@ -663,6 +663,10 @@ class RefactorPatrolDiscoveryTransitionsTest < Minitest::Test
       now: now
     )
     assert_equal "architecture-patrol", capture.module_name
+    assert_equal "github.com/owner/repo",
+                 capture.project.fetch("repository")
+    assert_equal "owner/repo:42:#{"a" * 40}",
+                 capture.trigger.fetch("id")
     assert_equal :reserve_occurrence, store.calls.last.fetch(0)
 
     assert_same capture, lifecycle.reserve(
@@ -672,6 +676,21 @@ class RefactorPatrolDiscoveryTransitionsTest < Minitest::Test
       migration: migration,
       now: now
     )
+    {
+      "project_id" => "project-2",
+      "name" => "other",
+      "repository_identity" => "github.com/owner/other"
+    }.each do |key, value|
+      assert_raises(Hive::ConfigError) do
+        lifecycle.reserve(
+          store: store,
+          entry: architecture_entry.merge(key => value),
+          aggregate: aggregate,
+          migration: migration,
+          now: now
+        )
+      end
+    end
     assert_raises(ReservationError) do
       lifecycle.reserve(
         store: store,
@@ -720,7 +739,8 @@ class RefactorPatrolDiscoveryTransitionsTest < Minitest::Test
 
     store.occurrence = {
       "phase" => "finalized",
-      "occurrence_id" => capture.occurrence_id
+      "occurrence_id" => capture.occurrence_id,
+      "provisional_capture" => capture.to_h
     }
     lifecycle.publish_finalized(
       store: store,
@@ -731,6 +751,57 @@ class RefactorPatrolDiscoveryTransitionsTest < Minitest::Test
       now: now
     )
     assert_equal :drain_occurrence, store.calls.last.fetch(0)
+  end
+
+  def test_occurrence_lifecycle_rejects_project_binding_drift_before_finalization
+    store = Store.new
+    publisher = EventPublisher.new
+    lifecycle = Hive::RefactorPatrol::ArchitectureOccurrenceLifecycle.new(
+      migration_authority: :legacy,
+      dry_run: false,
+      evidence_store_factory: ->(_entry) { :evidence },
+      event_publisher: publisher,
+      module_schedule: "0 0 * * *",
+      reservation_error: ReservationError
+    )
+    aggregate = architecture_aggregate
+    capture = lifecycle.reserve(
+      store: store,
+      entry: architecture_entry,
+      aggregate: aggregate,
+      migration: { "owner" => "legacy", "epoch" => 7 },
+      now: now
+    )
+    store.occurrence = {
+      "phase" => "reserved",
+      "provisional_capture" => capture.to_h
+    }
+
+    {
+      "project_id" => "project-2",
+      "name" => "other",
+      "repository_identity" => "github.com/other/repo"
+    }.each do |key, value|
+      assert_raises(Hive::ConfigError) do
+        lifecycle.publish_finalized(
+          store: store,
+          entry: architecture_entry.merge(key => value),
+          token: {
+            job_id: "job-1",
+            occurrence_id: capture.occurrence_id,
+            migration_epoch: 7,
+            phase: :discovery
+          },
+          result: { status: :closed },
+          aggregate: aggregate.merge("complete" => true),
+          now: now
+        )
+      end
+    end
+    refute store.calls.any? { |call|
+      call.fetch(0) == :finalize_occurrence
+    }
+    assert_empty publisher.calls
   end
 
   def test_occurrence_lifecycle_recovers_reserved_job_once_and_finalizes
@@ -968,7 +1039,10 @@ class RefactorPatrolDiscoveryTransitionsTest < Minitest::Test
   end
 
   def architecture_entry
-    entry.merge("project_id" => "project-1")
+    entry.merge(
+      "project_id" => "project-1",
+      "repository_identity" => "github.com/owner/repo"
+    )
   end
 
   def architecture_aggregate
@@ -980,6 +1054,8 @@ class RefactorPatrolDiscoveryTransitionsTest < Minitest::Test
       "created_at" => now.iso8601,
       "actions" => [],
       "source" => {
+        "url" => "https://github.com/owner/repo/pull/42",
+        "registration" => "demo",
         "repository" => "owner/repo",
         "number" => 42,
         "merge_sha" => "a" * 40,

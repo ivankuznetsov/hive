@@ -5,8 +5,9 @@ module Hive
       # persistence authority; callers must resolve current bindings and
       # reconstruct it from verified evidence for every transition attempt.
       class PatrolQualification < Data.define(
-        :status, :blockers, :configuration_digests, :candidate,
-        :scenario_manifest_digest, :verifications, :report_id
+        :status, :blockers, :run_id, :configuration_digests,
+        :candidate, :scenario_manifest_digest, :verifications,
+        :report_id
       )
         def ready_for_operator?
           status == "evidence_ready_for_operator"

@@ -44,7 +44,12 @@ module Hive
           reader.close
           begin
             Process.setsid
-            fork_wrapper(record, claim_capability, writer)
+            wrapper_pid =
+              fork_wrapper(record, claim_capability, writer)
+            write_qualification_custody(
+              record,
+              wrapper_pid
+            )
           rescue StandardError => e
             writer.write(JSON.generate(
               "claimed" => false, "attempt_id" => record.attempt_id,
@@ -102,6 +107,35 @@ module Hive
         wrapper_pid
       ensure
         claim_writer&.close unless claim_writer&.closed?
+      end
+
+      def write_qualification_custody(record, wrapper_pid)
+        root = ENV["HIVE_QUALIFICATION_CUSTODY_ROOT"].to_s
+        return if root.empty?
+
+        require "hive/attempts/process_identity"
+        require "hive/modules/migration/qualification_process_custody"
+        snapshot =
+          Hive::Attempts::ProcessIdentity.new.capture(
+            wrapper_pid
+          )
+        unless snapshot
+          raise Hive::ConfigError,
+                "qualification wrapper custody is unavailable"
+        end
+        Hive::Modules::Migration::QualificationProcessCustody.write(
+          root: root,
+          attempt_id: record.attempt_id,
+          wrapper: snapshot.to_h
+        )
+      rescue StandardError
+        begin
+          Process.kill("TERM", Integer(wrapper_pid))
+        rescue Errno::ESRCH, Errno::EPERM, ArgumentError,
+               TypeError
+          nil
+        end
+        raise
       end
     end
   end

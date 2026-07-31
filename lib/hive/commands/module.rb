@@ -21,7 +21,8 @@ module Hive
       def initialize(subcommand, subject = nil, project_root: Dir.pwd, json: false, stdout: $stdout,
                      yes: false, dry_run: false, receipt: nil, settings: [], hooks: [], grants: [],
                      mappings: [], input_bindings: [], allow_escalation: false,
-                     event_name: nil, schedule: nil, occurred_at: nil, reviewer: nil)
+                     event_name: nil, schedule: nil, occurred_at: nil,
+                     reviewer: nil, run_id: nil, lane: nil)
         @subcommand = subcommand
         @subject = subject
         @project_root = project_root
@@ -40,6 +41,8 @@ module Hive
         @schedule = schedule
         @occurred_at = occurred_at
         @reviewer = reviewer
+        @run_id = run_id
+        @lane = lane
       end
 
       def call
@@ -71,11 +74,13 @@ module Hive
           raise UsageError, "module list does not accept a source or name"
         end
         if @subcommand == "migration"
-          raise UsageError, "module migration requires status, report, cutover, or rollback" if @subject.to_s.empty?
+          raise UsageError,
+                "module migration requires status, report, qualify, cutover, or rollback" if @subject.to_s.empty?
           require "hive/commands/module/migration"
           return Migration.new(
             @subject, project_root: @project_root, json: @json, stdout: @stdout,
-            yes: @yes, reviewer: @reviewer
+            yes: @yes, reviewer: @reviewer, run_id: @run_id,
+            lane: @lane
           ).call
         end
         if %w[list status].include?(@subcommand) && @subject.nil?
@@ -130,7 +135,13 @@ module Hive
         when "doctor" then "hive-module-doctor"
         when "dry-run" then "hive-module-dry-run"
         when "migration"
-          @subject == "report" ? "hive-module-migration-report" : "hive-module-migration"
+          if @subject == "report"
+            "hive-module-migration-report"
+          elsif @subject == "qualify"
+            "hive-patrol-qualification-lane-result"
+          else
+            "hive-module-migration"
+          end
         else "hive-module-lifecycle"
         end
       end

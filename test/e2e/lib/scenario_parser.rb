@@ -21,7 +21,7 @@ module Hive
         cli tui_keys tui_expect tui_refute state_assert json_assert seed_state write_file
         register_project wait_subprocess editor_action log_assert ruby_block
         start_releases_stub spawn_background stop_process
-        script_gh
+        script_gh patrol_evidence
       ].freeze
       TMUX_STEP_KINDS = %w[tui_keys tui_expect tui_refute wait_subprocess].freeze
 
@@ -65,6 +65,9 @@ module Hive
         coverage = parse_coverage(data["coverage"])
         incident_id, sibling_task_id, pending = parse_incident_metadata(data, description, tags)
         steps = parse_steps(data["steps"])
+        validate_patrol_evidence_scenario!(
+          coverage: coverage, pending: pending, steps: steps
+        )
         if steps.count { |step| step.kind == "script_gh" } > 1
           invalid!("scenario may install only one ordered script_gh interaction sequence", line_for("script_gh"))
         end
@@ -175,7 +178,29 @@ module Hive
           rescue ArgumentError => e
             invalid!(e.message, line_for(kind))
           end
+        when "patrol_evidence"
+          unknown = step.keys - %w[kind description]
+          invalid!(
+            "patrol_evidence step has unknown keys #{unknown.sort.inspect}",
+            line_for(kind)
+          ) unless unknown.empty?
         end
+      end
+
+      def validate_patrol_evidence_scenario!(coverage:, pending:, steps:)
+        return unless
+          coverage.primary == "module.patrol_compressed_evidence"
+
+        patrol_steps = steps.count do |step|
+          step.kind == "patrol_evidence"
+        end
+        return if !pending && patrol_steps == 1 &&
+                  steps.none? { |step| step.kind == "ruby_block" }
+
+        invalid!(
+          "module.patrol_compressed_evidence requires one active patrol_evidence step without ruby_block",
+          line_for("module.patrol_compressed_evidence")
+        )
       end
 
       def required_step_keys(kind)

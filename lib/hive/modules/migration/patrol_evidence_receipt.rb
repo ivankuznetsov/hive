@@ -2,6 +2,7 @@ require "json"
 require "time"
 require "hive/managed_directory"
 require "hive/modules/migration/patrol_evidence"
+require "hive/modules/migration/qualification_run_descriptor"
 
 module Hive
   module Modules
@@ -25,9 +26,8 @@ module Hive
           project receipt_id reviewer reviewed_at run_id
           scenario_manifest_digest schema schema_version
         ].freeze
-        CANDIDATE_KEYS = %w[
-          catalog_digest installed_digest manifest_digest sha source_digest
-        ].freeze
+        CANDIDATE_KEYS =
+          QualificationRunDescriptor::CANDIDATE_KEYS
         DECISION_KEYS = %w[
           control decision_class decision_id module record_digest repository
           repository_sha trigger_digest
@@ -56,6 +56,8 @@ module Hive
                     failure_reason: nil)
             label = "patrol evidence receipt"
             run_id = PatrolEvidence.nonempty(run_id, label: label)
+            PatrolEvidence.malformed!(label) unless
+              QualificationRunDescriptor::RUN_ID.match?(run_id)
             lane = PatrolEvidence.enum(lane, LANES, label: label)
             lane_result = PatrolEvidence.enum(
               lane_result, LANE_RESULTS, label: label
@@ -63,7 +65,7 @@ module Hive
             failure_reason = normalize_failure_reason(
               lane_result, failure_reason, label
             )
-            candidate = normalize_candidate(candidate, lane, label)
+            candidate = normalize_candidate(candidate, label)
             configuration_digests = normalize_configuration_digests(
               configuration_digests, label
             )
@@ -75,7 +77,11 @@ module Hive
             scenario_manifest_digest = hex_digest(
               scenario_manifest_digest, label
             )
-            decisions = normalize_decisions(decision_refs, label)
+            decisions = normalize_decisions(
+              decision_refs,
+              label,
+              empty: lane_result != "passed"
+            )
             matrix = normalize_string_set(matrix, label: label, max: 64)
             faults = normalize_string_set(faults, label: label, max: 32)
             restart_count = nonnegative_integer(restart_count, label)
@@ -214,26 +220,17 @@ module Hive
 
           private
 
-          def normalize_candidate(value, lane, label)
+          def normalize_candidate(value, label)
             value = PatrolEvidence.immutable_json(value, label: label)
             PatrolEvidence.exact_keys!(value, CANDIDATE_KEYS, label: label)
-            candidate = {
-              "sha" => git_sha(value["sha"], label),
-              "catalog_digest" => hex_digest(
-                value["catalog_digest"], label
-              ),
-              "source_digest" => hex_digest(value["source_digest"], label),
-              "manifest_digest" => hex_digest(
-                value["manifest_digest"], label
-              ),
-              "installed_digest" =>
-                value["installed_digest"] &&
-                  hex_digest(value["installed_digest"], label)
-            }.freeze
-            installed = !candidate["installed_digest"].nil?
-            PatrolEvidence.malformed!(label) unless
-              (lane == "installed") == installed
-            candidate
+            CANDIDATE_KEYS.to_h do |key|
+              [
+                key,
+                key == "commit_sha" ?
+                  git_sha(value[key], label) :
+                  hex_digest(value[key], label)
+              ]
+            end.freeze
           end
 
           def normalize_configuration_digests(value, label)
@@ -334,7 +331,7 @@ module Hive
             PatrolEvidence.malformed!(label)
           end
 
-          def normalize_decisions(value, label)
+          def normalize_decisions(value, label, empty:)
             decisions = Array(value).map do |row|
               row = PatrolEvidence.immutable_json(row, label: label)
               PatrolEvidence.exact_keys!(
@@ -366,7 +363,8 @@ module Hive
               }.freeze
             end
             PatrolEvidence.malformed!(label) if
-              decisions.empty? || decisions.length > MAX_DECISIONS
+              (!empty && decisions.empty?) ||
+                decisions.length > MAX_DECISIONS
             decisions.sort_by! { |row| row.fetch("decision_id") }
             PatrolEvidence.malformed!(label) unless
               decisions.map { |row| row.fetch("decision_id") }.uniq.length ==

@@ -211,10 +211,72 @@ class ModulesDaemonRuntimeTest < Minitest::Test
     with_runtime do |runtime|
       first = runtime.fetch(:daemon_runtime).tick(now: NOW + 1).first
       second = runtime.fetch(:daemon_runtime).tick(now: NOW + 2).first
+      decisions = Hive::Modules::DecisionJournal.new(
+        root: File.join(
+          runtime.fetch(:store).hive_state_path,
+          "module-runtime"
+        )
+      ).all
 
       assert_equal 1, first.fetch(:decisions)
       assert_equal 0, second.fetch(:decisions)
       assert_equal 1, runtime.fetch(:attempt_store).scan.records.size
+      assert_equal 1, decisions.length
+      assert_equal "launch",
+                   decisions.fetch(0).fetch("outcome")
+    end
+  end
+
+  def test_injected_dispatcher_factory_receives_exact_runtime_custody
+    calls = []
+    dispatcher = Object.new
+    dispatcher.define_singleton_method(:dispatch) do |**_attributes|
+      Object.new
+    end
+    factory = lambda do |**dependencies|
+      calls << dependencies
+      dispatcher
+    end
+
+    with_runtime(dispatcher_factory: factory) do |runtime|
+      result =
+        runtime.fetch(:daemon_runtime).tick(
+          now: NOW + 1
+        ).fetch(0)
+      dependencies = calls.fetch(0)
+
+      assert_equal 1, calls.length
+      assert_equal(
+        %i[
+          attempt_dispatcher attempt_store clock decision_journal
+          project project_id store
+        ],
+        dependencies.keys.sort
+      )
+      assert_instance_of Hive::ModulePackage::ManagedStore,
+                         dependencies.fetch(:store)
+      assert_equal runtime.fetch(:store).hive_state_path,
+                   dependencies.fetch(:store).hive_state_path
+      assert_same runtime.fetch(:attempt_store),
+                  dependencies.fetch(:attempt_store)
+      assert_same runtime.fetch(:attempt_dispatcher),
+                  dependencies.fetch(:attempt_dispatcher)
+      assert_equal "project-1",
+                   dependencies.fetch(:project_id)
+      assert_equal "demo", dependencies.fetch(:project)
+      assert_instance_of Hive::Modules::DecisionJournal,
+                         dependencies.fetch(:decision_journal)
+      assert_equal(
+        File.join(
+          runtime.fetch(:store).hive_state_path,
+          "module-runtime"
+        ),
+        dependencies.fetch(:decision_journal).root
+      )
+      assert_equal NOW + 1,
+                   dependencies.fetch(:clock).call
+      assert_equal :ok, result.fetch(:status)
+      assert_equal 1, result.fetch(:decisions)
     end
   end
 
@@ -415,7 +477,7 @@ class ModulesDaemonRuntimeTest < Minitest::Test
   private
 
   def with_runtime(schedules: [], publish_event: true, module_name: "demo",
-                   migration_owner: nil)
+                   migration_owner: nil, dispatcher_factory: nil)
     with_tmp_dir do |root|
       hooks = [
         {
@@ -461,10 +523,14 @@ class ModulesDaemonRuntimeTest < Minitest::Test
         "name" => "demo", "path" => File.join(root, "project"),
         "hive_state_path" => state, "project_id" => "project-1"
       }
-      daemon_runtime = Hive::Modules::DaemonRuntime.new(
+      daemon_options = {
         attempt_store: attempt_store, attempt_dispatcher: attempt_dispatcher,
         registry: -> { [ entry ] }, migration_owner: migration_owner
-      )
+      }
+      daemon_options[:dispatcher_factory] =
+        dispatcher_factory if dispatcher_factory
+      daemon_runtime =
+        Hive::Modules::DaemonRuntime.new(**daemon_options)
       yield(
         store: store, attempt_store: attempt_store, module_dispatcher: module_dispatcher,
         attempt_dispatcher: attempt_dispatcher, daemon_runtime: daemon_runtime,

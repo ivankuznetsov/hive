@@ -3,7 +3,7 @@ title: Hive::Patrol
 type: module
 source: lib/hive/patrol/
 created: 2026-05-28
-updated: 2026-07-30
+updated: 2026-07-31
 tags: [module, patrol, review, worktree, pr, codex]
 ---
 
@@ -39,6 +39,7 @@ tags: [module, patrol, review, worktree, pr, codex]
 | `Hive::Modules::Migration::EffectDelivery` | `lib/hive/modules/migration/effect_delivery.rb` | Product-neutral composition facade shared by the two direct-`Object` gateways. `EffectAdmission` owns live owner/config/module-generation/grant/claim policy, `EffectSender` owns stable-lock/fence/reconciliation transitions, and `EffectReceiptLedger` owns terminal replay and observational receipt projection. The occurrence store, not the sender or ledger, mints authoritative receipt bytes. Dependencies point toward the injected product store; none of these collaborators owns persistence. |
 | `Hive::Patrol::EffectGateway` | `lib/hive/patrol/effect_gateway.rb` | Thin ordinary-patrol product port over `EffectDelivery`. It preserves the ordinary `perform!` and reconcile-only adoption API while authorizing ordinary state, finding, attempt, branch, PR, and review-handoff sinks. |
 | `Hive::RefactorPatrol::EffectGateway` | `lib/hive/refactor_patrol/effect_gateway.rb` | Thin Architecture Patrol product port over `EffectDelivery`. It retains architecture claim and `NotDelivered` policy while action claim generation fences authorization but remains outside semantic remote-effect identity. |
+| `Hive::RefactorPatrol::ArchitectureProjectBinding` | `lib/hive/refactor_patrol/architecture_project_binding.rb` | Leaf boundary that builds the exact registered `{project_id, name, repository}` descriptor, validates it against immutable PR source provenance, and rejects exact descriptor drift. It depends only on URI parsing and typed errors, so occurrence persistence does not load transition, ownership, or JobStore layers. |
 | `Hive::RefactorPatrol::TransitionGateway` | `lib/hive/refactor_patrol/transition_gateway.rb` | Non-persistent product port that routes architecture `job`, `discovery`, and `action` transitions through the architecture gateway. It writes only by invoking a JobStore transition and replays JobStore after duplicate delivery. |
 | `Hive::RefactorPatrol::ArchitectureOccurrenceStore` | `lib/hive/refactor_patrol/architecture_occurrence_store.rb` | JobStore's product adapter over `OccurrenceJournal`. It resolves the exact immutable `occurrence_id` held by the v3 job aggregate and delegates all occurrence/effect state; there is no sidecar binding or fallback index. |
 | `Hive::RefactorPatrol::JobStore` | `lib/hive/refactor_patrol/job_store.rb` | Architecture Patrol's v3 aggregate and product recovery authority. Each job owns immutable occurrence/intake transition ids; claim, action, job-level, and durable diagnostic-episode records append exact transition ids and semantic digests. Construction and semantic mutation call sites are statically confined to the declared composition and transition ports. |
@@ -205,10 +206,17 @@ records disabled, not-due, or due before the child runs. Architecture Patrol
 reserves one occurrence from the strict merge manifest and threads its
 job/phase selection through enqueue, discovery claims and checkpoints, action
 claims and effects, and finalization; it does not mint a second scheduler
-occurrence. Missing, malformed, foreign, provisional, provenance-only, or
-schema-import captures remain non-comparable. Module-native cron targets are
-suppressed while legacy or shadow owns either product, preventing a second
-schedule producer.
+occurrence. Its capture project binding is the registered project's exact
+`{project_id, name, repository}` descriptor, with `repository` copied from the
+registration's `repository_identity`; the manifest registration and PR URL
+remain the immutable source and trigger provenance.
+The source-to-registry repository comparison is semantic and case-insensitive;
+capture reuse compares all three stored descriptor fields exactly. Reservation,
+replay, and finalization fail closed when those identities disagree. Missing,
+malformed, foreign,
+provisional, provenance-only, or schema-import captures remain non-comparable.
+Module-native cron targets are suppressed while legacy or shadow owns either
+product, preventing a second schedule producer.
 
 Shadow-history qualification no longer materializes the full directory or
 record set. `BoundedFileInventory` rejects excess and unexpected children
@@ -277,6 +285,11 @@ it or any mutator cutover can be claimed.
 - Ordinary schedules, module hooks, and Architecture Patrol merged-PR jobs use canonical window/generation reservations and compacted high-water/floor fences. Concurrent retries reuse one reserved attempt; only a terminal prior attempt advances the generation, stale compacted generations fail closed, and finalized occurrences reject new effect dispatch.
 - Manual/direct non-sequenced occurrences use a bounded exact retirement fence. Saturation retains the terminal occurrence instead of deleting its replay proof; it never authorizes duplicate work.
 - Architecture `job`, `discovery`, and `action` transitions pass through `TransitionGateway`; it owns no files or retry state, and JobStore remains authoritative.
+- Architecture captures bind the full `project_id`, `name`, and `repository`
+  descriptor to the exact registered project. The manifest registration and PR
+  URL still form the immutable source and trigger provenance; a missing,
+  drifted, or legacy partial project binding cannot be reserved, reused, or
+  finalized.
 - Active occurrence recovery uses the bounded `recovery-index.json` locator.
   Reservation publishes membership before its occurrence record, retirement
   removes membership only after the record is inactive, and crash recovery

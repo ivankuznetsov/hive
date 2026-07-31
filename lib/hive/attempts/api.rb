@@ -31,6 +31,10 @@ module Hive
         daemon.dispatch_request(request, interactive: interactive, now: now)
       end
 
+      def dispatch_module_hook(**attributes)
+        daemon.dispatch_module_hook(**attributes)
+      end
+
       def dispatch_successor(predecessor:, task:, project:, argv:, request_id:,
                              provider:, inherited_outputs: nil, retry_charge: nil,
                              interactive: false, now: Time.now.utc)

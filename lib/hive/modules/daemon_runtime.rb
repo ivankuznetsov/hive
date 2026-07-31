@@ -20,9 +20,12 @@ module Hive
     class DaemonRuntime
       MAX_RETRIES = 2
       RETRY_DELAY_SEC = 3600
+      DEFAULT_DISPATCHER_FACTORY =
+        ->(**dependencies) { Dispatcher.new(**dependencies) }.freeze
 
       def initialize(attempt_store:, attempt_dispatcher:, registry: -> { Hive::Config.registered_projects },
                      planner: SchedulePlanner.new, migration_owner: nil,
+                     dispatcher_factory: DEFAULT_DISPATCHER_FACTORY,
                      clock: -> { Time.now.utc })
         @attempt_store = attempt_store
         @attempt_dispatcher = attempt_dispatcher
@@ -34,6 +37,7 @@ module Hive
             hive_state_path: entry["hive_state_path"]
           )
         end
+        @dispatcher_factory = dispatcher_factory
         @clock = clock
       end
 
@@ -51,7 +55,7 @@ module Hive
         runtime_root = File.join(entry.fetch("hive_state_path"), "module-runtime")
         ledger = EventLedger.new(root: runtime_root)
         journal = DecisionJournal.new(root: runtime_root)
-        dispatcher = Dispatcher.new(
+        dispatcher = @dispatcher_factory.call(
           store: store, attempt_store: @attempt_store,
           attempt_dispatcher: @attempt_dispatcher,
           project_id: entry.fetch("project_id"), project: entry.fetch("name"),

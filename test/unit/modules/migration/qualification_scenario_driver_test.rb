@@ -1,0 +1,490 @@
+require "test_helper"
+require "hive"
+require "hive/modules/migration/qualification_scenario_driver"
+require "hive/modules/migration/qualification_scenario_actuals"
+require "hive/modules/migration/qualification_scenario_input"
+
+class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
+  include HiveTestHelper
+
+  DRIVER = Hive::Modules::Migration::QualificationScenarioDriver
+  ACTUALS =
+    Hive::Modules::Migration::QualificationScenarioActuals
+  INPUT =
+    Hive::Modules::Migration::QualificationScenarioInput
+  NOW = Time.utc(2026, 7, 31, 12, 34, 56, 123_456)
+  PROJECT = {
+    "project_id" => "11111111-1111-4111-8111-111111111111",
+    "name" => "qualification-demo",
+    "repository" => "github.com/example/qualification-demo"
+  }.freeze
+  CANDIDATE_SOURCE_ROOT =
+    File.expand_path("../../../..", __dir__).freeze
+
+  def test_drives_one_ordinary_patrol_case_through_production_artifacts
+    with_tmp_dir do |sandbox|
+      result = run_driver(sandbox)
+      row = result.observation
+
+      assert File.directory?(File.join(result.repository_root, ".git"))
+      assert_equal(
+        run!("git", "-C", result.repository_root, "rev-parse", "HEAD").strip,
+        row.fetch("repository_sha")
+      )
+      assert_match(/\A[0-9a-f]{40}\z/, row.fetch("repository_sha"))
+      assert_equal "", run!("git", "-C", result.repository_root, "remote").strip
+
+      ledger = Hive::Modules::EventLedger.new(
+        root: File.join(result.hive_state_path, "module-runtime")
+      )
+      assert_equal row.fetch("event"),
+                   ledger.fetch(row.fetch("event_id"))
+      capture = Hive::Modules::Migration::PatrolCapture.from_h(
+        row.dig("event", "payload", "legacy_mutator_capture")
+      )
+      assert_equal row.fetch("legacy_capture_id"), capture.capture_id
+      assert_equal "completed", capture.outcome_class
+      assert_equal "due", capture.selection.rationale
+      refute row.key?("decision_class")
+      assert_equal 0, capture.outcome.fetch("findings")
+      assert_equal "legacy", capture.owner
+
+      journal = Hive::Modules::DecisionJournal.new(
+        root: File.join(result.hive_state_path, "module-runtime")
+      )
+      decisions = journal.all
+      assert_includes decisions, row.fetch("decision")
+      assert decisions.reject { |decision| decision == row.fetch("decision") }
+        .all? do |decision|
+          decision.fetch("outcome") == "skip" &&
+            decision["attempt_id"].nil?
+        end
+      assert_equal "launch", row.dig("decision", "outcome")
+      assert_equal "admitted", row.dig("decision", "reason")
+
+      attempt_store = Hive::Attempts::Store.new(root: result.attempts_root)
+      scan = attempt_store.scan
+      assert_empty scan.invalid_records
+      assert_equal 1, scan.records.length
+      attempt = scan.records.fetch(0)
+      assert_match(
+        /\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/,
+        attempt.attempt_id
+      )
+      assert_equal row.fetch("attempt_id"), attempt.attempt_id
+      assert_equal "terminal", attempt.state
+      assert_equal "succeeded", attempt.outcome
+      assert attempt.module_hook?
+      assert_kind_of Hash, attempt.wrapper
+      assert_kind_of Hash, attempt.worker
+      assert Hive::Attempts::OutputReference.verify(
+        attempt.receipt.fetch("log_reference"),
+        root: result.attempts_root
+      )
+
+      comparator = Hive::Modules::Migration::ShadowComparator.new(
+        root: File.join(
+          result.hive_state_path, "module-runtime", "migration", "shadow"
+        )
+      )
+      assert_equal [ result.comparator_record ],
+                   comparator.each_record("patrol").to_a
+      assert_equal true, result.comparator_record.fetch("comparable")
+      assert_equal "legacy_mutator_capture",
+                   result.comparator_record.fetch("evidence_source")
+      assert_empty result.comparator_record.fetch("unexplained_differences")
+      assert_empty result.comparator_record.fetch("duplicate_effects")
+
+      index = result.effect_index
+      assert_equal 4, index.legacy_count
+      assert_equal 0, index.module_count
+      assert_empty index.duplicate_keys
+      targets = index.entries.map { |entry| entry.fetch("target") }
+      assert_includes targets, "dismissed"
+      assert_includes targets, "state"
+      assert_equal 1, targets.grep(%r{\Afeatures/}).length
+      assert_equal 1, targets.grep(%r{\Aruns/selection-}).length
+
+      assert_nil row.fetch("fault_checkpoint")
+      assert_equal 1, row.fetch("restart_generation")
+      assert_equal row.fetch("pre_fault_durable_state_sha256"),
+                   row.fetch("recovered_durable_state_sha256")
+      validated = ACTUALS.from_h(
+        "schema" => ACTUALS::SCHEMA,
+        "schema_version" => ACTUALS::SCHEMA_VERSION,
+        "actuals" => [ row ]
+      )
+      assert_equal row, validated.actuals.fetch(0)
+    end
+  end
+
+  def test_reproduces_semantic_identities_under_distinct_sandbox_roots
+    %w[
+      new_commit partial_failure restart same_commit timer_due timer_not_due
+      timer_reset_reload
+    ].each do |operation|
+      with_tmp_dir do |first_root|
+        with_tmp_dir do |second_root|
+          first = run_driver(
+            first_root,
+            operation: operation
+          ).observation
+          second = run_driver(
+            second_root,
+            operation: operation
+          ).observation
+
+          assert_equal semantic_observation(first),
+                       semantic_observation(second),
+                       operation
+        end
+      end
+    end
+  end
+
+  def test_drives_supported_schedule_operations_through_real_patrol_state
+    cases = {
+      "timer_not_due" => {
+        trigger: "timer",
+        timer_due: false,
+        branch_changed: nil,
+        rationale: "not_due",
+        outcome_class: "not_dispatched",
+        effects: 0,
+        restart_generation: 1
+      },
+      "same_commit" => {
+        trigger: "new_commits",
+        timer_due: nil,
+        branch_changed: false,
+        rationale: "not_due",
+        outcome_class: "not_dispatched",
+        effects: 0,
+        restart_generation: 1
+      },
+      "new_commit" => {
+        trigger: "new_commits",
+        timer_due: nil,
+        branch_changed: true,
+        rationale: "due",
+        outcome_class: "completed",
+        effects: 5,
+        restart_generation: 1
+      },
+      "timer_reset_reload" => {
+        trigger: "timer",
+        timer_due: false,
+        branch_changed: nil,
+        rationale: "not_due",
+        outcome_class: "not_dispatched",
+        effects: 0,
+        restart_generation: 2
+      },
+      "restart" => {
+        trigger: "timer",
+        timer_due: true,
+        branch_changed: nil,
+        rationale: "due",
+        outcome_class: "completed",
+        effects: 4,
+        restart_generation: 2
+      }
+    }
+
+    cases.each do |operation, expected|
+      with_tmp_dir do |sandbox|
+        result = run_driver(sandbox, operation: operation)
+        row = result.observation
+        capture = capture_for(row)
+
+        assert_equal expected.fetch(:trigger),
+                     capture.selection_input.fetch("trigger"),
+                     operation
+        assert_expected(
+          expected.fetch(:timer_due),
+          capture.selection_input.fetch("timer_due"),
+          operation
+        )
+        assert_expected(
+          expected.fetch(:branch_changed),
+          capture.selection_input.fetch("branch_changed"),
+          operation
+        )
+        assert_equal expected.fetch(:rationale),
+                     capture.selection.rationale,
+                     operation
+        assert_equal expected.fetch(:outcome_class),
+                     capture.outcome_class,
+                     operation
+        assert_equal expected.fetch(:effects),
+                     result.effect_index.legacy_count,
+                     operation
+        assert_equal expected.fetch(:restart_generation),
+                     row.fetch("restart_generation"),
+                     operation
+        assert_equal "launch", row.dig("decision", "outcome"),
+                     operation
+        assert_equal "admitted", row.dig("decision", "reason"),
+                     operation
+        refute row.key?("decision_class"), operation
+      end
+    end
+  end
+
+  def test_positive_fixture_uses_real_reviewer_and_reproducible_finding_ids
+    with_tmp_dir do |first_root|
+      with_tmp_dir do |second_root|
+        first_result = run_driver(
+          first_root,
+          operation: "ordinary_positive_fixture",
+          findings: [ positive_finding ]
+        )
+        second_result = run_driver(
+          second_root,
+          operation: "ordinary_positive_fixture",
+          findings: [ positive_finding ]
+        )
+        first = first_result.observation
+        second = second_result.observation
+        first_capture = capture_for(first)
+        second_capture = capture_for(second)
+
+        assert_equal "completed", first_capture.outcome_class
+        assert_equal "due", first_capture.selection.rationale
+        assert_equal 1, first_capture.outcome.fetch("findings")
+        assert_equal 1,
+                     first_capture.outcome.fetch("finding_ids").length
+        assert_equal first_capture.outcome.fetch("finding_ids"),
+                     second_capture.outcome.fetch("finding_ids")
+        assert_equal 5, first_result.effect_index.legacy_count
+        assert_equal semantic_observation(first),
+                     semantic_observation(second)
+      end
+    end
+  end
+
+  def test_partial_failure_uses_real_reviewer_failure_and_durable_error_log
+    with_tmp_dir do |sandbox|
+      result = run_driver(
+        sandbox,
+        operation: "partial_failure"
+      )
+      row = result.observation
+      capture = capture_for(row)
+
+      assert_equal "due", capture.selection.rationale
+      assert_equal "completed", capture.outcome_class
+      assert_equal false,
+                   capture.outcome.fetch("review_complete")
+      assert_equal 0,
+                   capture.outcome.fetch("features_reviewed")
+      assert_equal 0, capture.outcome.fetch("findings")
+      assert_equal [], capture.outcome.fetch("finding_ids")
+      assert_equal 5, result.effect_index.legacy_count
+      error_path = File.join(
+        result.hive_state_path,
+        "patrol",
+        "runs",
+        "review-error-qualification.json"
+      )
+      error = JSON.parse(File.binread(error_path))
+      assert_equal "agent_failed", error.fetch("error")
+      assert_equal "qualification reviewer partial failure",
+                   error.fetch("message")
+      refute row.key?("decision_class")
+    end
+  end
+
+  def test_rejects_operations_without_truthful_terminal_comparator_evidence
+    unsupported = %w[
+      capacity_deferral concurrent_duplicate_delivery cooldown_retry
+      launch_failure quota_deferral reconciliation_failure
+    ]
+
+    with_tmp_dir do |sandbox|
+      unsupported.each do |operation|
+        error = assert_raises(Hive::ConfigError, operation) do
+          driver(sandbox, operation: operation).call
+        end
+        assert_match(/scenario is unsupported/, error.message,
+                     operation)
+      end
+    end
+  end
+
+  def test_rejects_a_candidate_without_both_reviewed_module_packages
+    with_tmp_dir do |sandbox|
+      missing = File.join(sandbox, "candidate")
+      FileUtils.mkdir_p(missing)
+      candidate = DRIVER.new(
+        candidate_source_root: missing,
+        sandbox_root: File.join(sandbox, "run"),
+        project: PROJECT,
+        scenario_input: scenario_input
+      )
+
+      error = assert_raises(Hive::ConfigError) do
+        candidate.call
+      end
+      assert_match(/candidate module package/, error.message)
+    end
+  end
+
+  def test_rejects_an_ambient_home_without_mutating_env_or_ambient_state
+    with_tmp_dir do |ambient_home|
+      with_tmp_dir do |sandbox|
+        ambient_repository =
+          File.join(ambient_home, "ambient-repository")
+        ambient_state = File.join(ambient_home, "ambient-state")
+        FileUtils.mkdir_p([ ambient_repository, ambient_state ])
+        ambient_entry = {
+          "hive_state_path" => ambient_state,
+          "name" => PROJECT.fetch("name"),
+          "path" => ambient_repository,
+          "project_id" => PROJECT.fetch("project_id"),
+          "real_path" => File.realpath(ambient_repository),
+          "registered_at" => NOW.utc.iso8601(6),
+          "registration_id" => "ambient-registry-entry",
+          "repository" => PROJECT.fetch("repository"),
+          "repository_identity" => PROJECT.fetch("repository")
+        }
+        File.binwrite(
+          File.join(ambient_home, "config.yml"),
+          Hive::WorkflowPackage::CanonicalYAML.dump(
+            "registered_projects" => [ ambient_entry ]
+          )
+        )
+        config_before = File.binread(
+          File.join(ambient_home, "config.yml")
+        )
+
+        with_env("HIVE_HOME" => ambient_home) do
+          error = assert_raises(Hive::ConfigError) do
+            driver(sandbox).call
+          end
+          assert_match(/process home is not confined/, error.message)
+          assert_equal ambient_home, ENV.fetch("HIVE_HOME")
+        end
+
+        assert_equal config_before,
+                     File.binread(File.join(ambient_home, "config.yml"))
+        assert_empty Dir.children(ambient_state)
+        %w[attempts hive-home hive-state repository].each do |name|
+          refute_path_exists File.join(sandbox, name)
+        end
+      end
+    end
+  end
+
+  private
+
+  def run_driver(sandbox, operation: "timer_due", findings: [])
+    with_env(
+      "HIVE_HOME" => File.join(sandbox, "hive-home")
+    ) do
+      driver(
+        sandbox,
+        operation: operation,
+        findings: findings
+      ).call
+    end
+  end
+
+  def driver(sandbox, operation: "timer_due", findings: [])
+    DRIVER.new(
+      candidate_source_root: CANDIDATE_SOURCE_ROOT,
+      sandbox_root: sandbox,
+      project: PROJECT,
+      scenario_input: scenario_input(
+        operation: operation,
+        findings: findings
+      )
+    )
+  end
+
+  def scenario_input(operation: "timer_due", findings: [])
+    case_id = "ordinary-#{operation.tr('_', '-')}"
+    INPUT.load(
+      Hive::WorkflowPackage::CanonicalYAML.dump(
+        "schema" => "hive-patrol-qualification-scenario",
+        "schema_version" => 1,
+        "case_id" => case_id,
+        "module" => "patrol",
+        "operation" => operation,
+        "clock" => NOW.utc.iso8601(6),
+        "faults" => [],
+        "reviewer" => { "findings" => findings }
+      ),
+      expected_case_id: case_id
+    )
+  end
+
+  def positive_finding
+    {
+      "category" => "maintainability",
+      "severity" => "low",
+      "confidence" => "low",
+      "title" => "Qualification fixture is intentionally minimal",
+      "description" =>
+        "The qualification fixture provides a deterministic review finding.",
+      "recommendation" =>
+        "Keep this fixture confined to qualification evidence.",
+      "scope" => "local",
+      "contract" =>
+        "The fixture remains a valid Ruby source file.",
+      "impact" =>
+        "This finding proves reviewer output reached durable Patrol state.",
+      "root_cause" =>
+        "The source fixture is deliberately small enough for exact evidence.",
+      "reproduction" =>
+        "Review lib/qualification_demo.rb in the qualification sandbox.",
+      "validation" =>
+        "Run the configured test command.",
+      "validation_key" => "test",
+      "evidence" => [
+        {
+          "file" => "lib/qualification_demo.rb",
+          "line" => 2,
+          "snippet" => "def self.ready? = true",
+          "role" => "root_cause"
+        }
+      ]
+    }
+  end
+
+  def capture_for(row)
+    Hive::Modules::Migration::PatrolCapture.from_h(
+      row.dig("event", "payload", "legacy_mutator_capture")
+    )
+  end
+
+  def assert_expected(expected, actual, message)
+    if expected.nil?
+      assert_nil actual, message
+    else
+      assert_equal expected, actual, message
+    end
+  end
+
+  def semantic_observation(row)
+    row.slice(
+      *%w[
+        case_id comparator_semantic_digest decision_class event event_id
+        fault_checkpoint legacy_capture_id legacy_effect_keys module
+        module_effect_keys repository_sha restart_generation trigger_digest
+      ]
+    ).merge(
+      "decision" => row.fetch("decision").except(
+        "attempt_id", "decision_id", "evaluated_at"
+      ),
+      "attempts" => row.fetch("attempts").map do |attempt|
+        attempt.slice(
+          *%w[
+            loss outcome ownership_generation predecessor_attempt_id
+            retry_charge state subject task_generation task_input_epoch
+          ]
+        )
+      end
+    )
+  end
+end

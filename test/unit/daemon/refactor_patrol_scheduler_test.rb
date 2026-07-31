@@ -1097,7 +1097,11 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
             Hive::RefactorPatrol::TransitionGateway
             .capture_for_manifest(
               manifest: value,
-              project_id: "demo-id",
+              project: {
+                "project_id" => "demo-id",
+                "name" => "demo",
+                "repository" => "github.com/acme/demo"
+              },
               owner: "legacy",
               owner_epoch: 1,
               recorded_at: timestamp
@@ -1168,7 +1172,11 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
           Hive::RefactorPatrol::TransitionGateway
           .capture_for_manifest(
             manifest: later_manifest,
-            project_id: "demo-id",
+            project: {
+              "project_id" => "demo-id",
+              "name" => "demo",
+              "repository" => "github.com/acme/demo"
+            },
             owner: "legacy",
             owner_epoch: 1,
             recorded_at: T0 + 4
@@ -1192,7 +1200,11 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     transition_capture =
       Hive::RefactorPatrol::TransitionGateway.capture_for_manifest(
         manifest: value,
-        project_id: "demo-id",
+        project: {
+          "project_id" => "demo-id",
+          "name" => "demo",
+          "repository" => "github.com/acme/demo"
+        },
         owner: "legacy",
         owner_epoch: 1,
         recorded_at: T0
@@ -1221,7 +1233,8 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       store: store,
       entry: {
         "project_id" => "demo-id",
-        "name" => "demo"
+        "name" => "demo",
+        "repository_identity" => "github.com/acme/demo"
       },
       aggregate: {
         "job_id" => value.fetch("job_id"),
@@ -1241,6 +1254,20 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
 
     assert_equal transition_capture.to_h,
                  lifecycle_capture.to_h
+    assert_equal(
+      {
+        "project_id" => "demo-id",
+        "name" => "demo",
+        "repository" => "github.com/acme/demo"
+      },
+      lifecycle_capture.project
+    )
+    assert_equal "github.com/acme/demo",
+                 lifecycle_capture.project.fetch("repository")
+    assert_equal(
+      "acme/demo:7:merge-7",
+      lifecycle_capture.trigger.fetch("id")
+    )
     assert_equal [ lifecycle_capture, T0 ], reserved
   end
 
@@ -1682,7 +1709,8 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       "name" => name,
       "project_id" => "#{name}-id",
       "path" => dir,
-      "hive_state_path" => File.join(dir, ".hive-state")
+      "hive_state_path" => File.join(dir, ".hive-state"),
+      "repository_identity" => "github.com/acme/demo"
     }
   end
 
@@ -1710,9 +1738,20 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
   end
 
   def enqueue_manifest(store, value, **options)
+    source = value.fetch("source")
+    identity =
+      Hive::RefactorPatrol::ArchitectureProjectBinding
+      .source_identity!(source)
     capture = Hive::RefactorPatrol::TransitionGateway.capture_for_manifest(
       manifest: value,
-      project_id: "demo-id",
+      project: {
+        "project_id" => "demo-id",
+        "name" => source.fetch("registration"),
+        "repository" => [
+          identity.fetch("host"),
+          identity.fetch("repository")
+        ].join("/")
+      },
       owner: "legacy",
       owner_epoch: 1,
       recorded_at: options.fetch(:now)

@@ -5,39 +5,7 @@ require_relative "../../../support/patrol_evidence_scenario"
 class ModulesMigrationLiveBindingsResolverTest < Minitest::Test
   include PatrolEvidenceScenario
 
-  def test_persisted_bundle_has_no_live_authority_and_unwired_run_provider_blocks
-    bundle = qualification_bundle(lane: "deterministic")
-    assert_equal %w[receipt records], bundle.keys.sort
-
-    resolver =
-      Hive::Modules::Migration::LiveBindingsResolver.new(
-        project_provider: -> { PROJECT_BINDING },
-        module_selections: selection_snapshot,
-        run_authority_provider: nil
-      )
-    result = resolver.resolve(
-      receipt: bundle.fetch("receipt"),
-      records: bundle.fetch("records")
-    )
-    verification =
-      Hive::Modules::Migration::PatrolEvidenceVerifier.verify(
-        receipt: bundle.fetch("receipt"),
-        records: bundle.fetch("records"),
-        current_bindings: result.bindings,
-        binding_blockers: result.blockers
-      )
-
-    assert_equal(
-      %w[live_run_authority_unresolved],
-      result.blockers
-    )
-    refute verification.verified?
-    result.blockers.each do |blocker|
-      assert_includes verification.blockers, blocker
-    end
-  end
-
-  def test_run_authority_is_queried_only_by_run_and_lane_at_resolve_time
+  def test_run_authority_is_queried_by_selected_run_and_lane
     bundle = qualification_bundle(lane: "deterministic")
     authority = qualification_case(
       lane: "deterministic"
@@ -45,65 +13,61 @@ class ModulesMigrationLiveBindingsResolverTest < Minitest::Test
     calls = []
     provider = lambda do |run_id:, lane:|
       calls << [ run_id, lane ]
-      authority
-    end
-    resolver =
-      Hive::Modules::Migration::LiveBindingsResolver.new(
-        project_provider: -> { PROJECT_BINDING },
-        module_selections: selection_snapshot,
-        run_authority_provider: provider
+      provider_outcome(
+        status: "resolved",
+        bindings: authority
       )
+    end
+    resolver = resolver(provider: provider)
 
     2.times do
       assert verify_bundle(bundle, resolver).verified?
     end
     assert_equal(
       [
-        [ "compressed-run-1", "deterministic" ],
-        [ "compressed-run-1", "deterministic" ]
+        [ RUN_ID, "deterministic" ],
+        [ RUN_ID, "deterministic" ]
       ],
       calls
     )
   end
 
-  def test_foreign_run_authority_response_cannot_self_agree_with_receipt
+  def test_foreign_typed_authority_is_a_failed_resolution
     bundle = qualification_bundle(lane: "deterministic")
-    authority = Marshal.load(
-      Marshal.dump(
-        qualification_case(
-          lane: "deterministic"
-        ).fetch("authority")
-      )
+    authority = deep_copy(
+      qualification_case(
+        lane: "deterministic"
+      ).fetch("authority")
     )
-    authority["run_id"] = "foreign-run"
-    authority["lane"] = "installed"
-    authority.fetch("candidate")["installed_digest"] = "9" * 64
-    resolver =
-      Hive::Modules::Migration::LiveBindingsResolver.new(
-        project_provider: -> { PROJECT_BINDING },
-        module_selections: selection_snapshot,
-        run_authority_provider: ->(run_id:, lane:) {
-          assert_equal "compressed-run-1", run_id
-          assert_equal "deterministic", lane
-          authority
-        }
-      )
+    authority["run_id"] = "patrol-#{"f" * 64}"
+    resolver = resolver(
+      provider: lambda do |run_id:, lane:|
+        run_id && lane &&
+          provider_outcome(
+            status: "resolved",
+            bindings: authority
+          )
+      end
+    )
 
-    verification = verify_bundle(bundle, resolver)
+    resolution = resolve_bundle(bundle, resolver)
 
-    assert_includes verification.blockers, "run_binding_mismatch"
-    assert_includes verification.blockers, "lane_binding_mismatch"
-    refute verification.verified?
+    assert_equal "failed", resolution.status
+    assert_equal(
+      [ "live_run_authority_malformed" ],
+      resolution.issues
+    )
+    assert_nil resolution.bindings
   end
 
-  def test_live_project_and_independent_run_authority_mismatches_are_named
+  def test_live_project_and_descriptor_authority_mismatches_are_named
     bundle = qualification_bundle(lane: "deterministic")
     authority = qualification_case(
       lane: "deterministic"
     ).fetch("authority")
     authority_cases = {
       "candidate_binding_mismatch" => lambda do |document|
-        document.fetch("candidate")["sha"] = "f" * 40
+        document.fetch("candidate")["commit_sha"] = "f" * 40
       end,
       "scenario_manifest_binding_mismatch" => lambda do |document|
         document["scenario_manifest_digest"] = "8" * 64
@@ -117,10 +81,18 @@ class ModulesMigrationLiveBindingsResolverTest < Minitest::Test
                 .first["repository_sha"] = "f" * 40
       end,
       "scenario_matrix_mismatch" => lambda do |document|
-        document.fetch("required_matrix").pop
+        document["required_matrix"] =
+          document.fetch("required_matrix").drop(1)
+      end,
+      "fault_matrix_mismatch" => lambda do |document|
+        document["required_faults"] =
+          document.fetch("required_faults").drop(1)
       end,
       "legacy_effect_expectation_mismatch" => lambda do |document|
-        document.fetch("expected_legacy_effect_keys").pop
+        document["expected_legacy_effect_keys"] =
+          document.fetch(
+            "expected_legacy_effect_keys"
+          ).drop(1)
       end
     }
     cases = {
@@ -132,18 +104,19 @@ class ModulesMigrationLiveBindingsResolverTest < Minitest::Test
         )
     }
     authority_cases.each do |blocker, mutation|
-      document = Marshal.load(Marshal.dump(authority))
+      document = deep_copy(authority)
       mutation.call(document)
       cases[blocker] = qualification_live_resolver(
         authority_documents: {
-          [ "compressed-run-1", "deterministic" ] =>
-            document
+          [ RUN_ID, "deterministic" ] => document
         }
       )
     end
 
-    cases.each do |blocker, resolver|
-      verification = verify_bundle(bundle, resolver)
+    cases.each do |blocker, candidate_resolver|
+      verification = verify_bundle(
+        bundle, candidate_resolver
+      )
       assert_includes(
         verification.blockers,
         blocker,
@@ -153,50 +126,69 @@ class ModulesMigrationLiveBindingsResolverTest < Minitest::Test
     end
   end
 
-  def test_missing_malformed_and_unsafe_run_authority_are_explicit_blockers
+  def test_provider_failed_and_blocked_outcomes_are_preserved
     bundle = qualification_bundle(lane: "deterministic")
-    cases = [
-      [ "live_run_authority_unresolved", nil ],
-      [
-        "live_run_authority_unresolved",
-        ->(run_id:, lane:) { run_id && lane && nil }
-      ],
-      [
-        "live_run_authority_malformed",
-        ->(run_id:, lane:) {
-          { "run_id" => run_id, "lane" => lane }
-        }
-      ],
-      [
-        "live_run_authority_unsafe",
-        ->(run_id:, lane:) {
-          raise "unsafe #{run_id}:#{lane}"
-        }
-      ]
-    ]
-
-    cases.each do |blocker, provider|
-      resolver =
-        Hive::Modules::Migration::LiveBindingsResolver.new(
-          project_provider: -> { PROJECT_BINDING },
-          module_selections: selection_snapshot,
-          run_authority_provider: provider
-        )
-      result = resolver.resolve(
-        receipt: bundle.fetch("receipt"),
-        records: bundle.fetch("records")
+    {
+      "failed" => "qualification_input_unsafe",
+      "blocked" => "qualification_lane_missing"
+    }.each do |status, issue|
+      candidate_resolver = resolver(
+        provider: lambda do |run_id:, lane:|
+          run_id && lane &&
+            provider_outcome(
+              status: status,
+              issues: [ issue ]
+            )
+        end
+      )
+      resolution = resolve_bundle(
+        bundle, candidate_resolver
       )
       verification =
         Hive::Modules::Migration::PatrolEvidenceVerifier.verify(
           receipt: bundle.fetch("receipt"),
           records: bundle.fetch("records"),
-          current_bindings: result.bindings,
-          binding_blockers: result.blockers
+          resolution: resolution
         )
 
-      assert_includes result.blockers, blocker
-      refute verification.verified?
+      assert_equal status, resolution.status
+      assert_equal status, verification.status
+      assert_includes verification.blockers, issue
     end
+  end
+
+  def test_blocked_provider_is_consulted_before_nil_receipt_or_records
+    calls = []
+    candidate_resolver = resolver(
+      provider: lambda do |run_id:, lane:|
+        calls << [ run_id, lane ]
+        provider_outcome(
+          status: "blocked",
+          issues: [
+            "qualification_lane_blocked:" \
+            "live_lane_not_authorized"
+          ]
+        )
+      end
+    )
+
+    resolution = candidate_resolver.resolve(
+      run_id: RUN_ID,
+      lane: "installed",
+      receipt: nil,
+      records: nil
+    )
+
+    assert_equal [ [ RUN_ID, "installed" ] ], calls
+    assert_equal "blocked", resolution.status
+    assert_equal(
+      [
+        "qualification_lane_blocked:" \
+        "live_lane_not_authorized"
+      ],
+      resolution.issues
+    )
+    assert_nil resolution.bindings
   end
 
   def test_every_exact_active_selection_field_and_epoch_is_live_bound
@@ -211,9 +203,7 @@ class ModulesMigrationLiveBindingsResolverTest < Minitest::Test
     }
 
     mutations.each do |field, value|
-      selections = Marshal.load(
-        Marshal.dump(module_selection_bindings)
-      )
+      selections = deep_copy(module_selection_bindings)
       if field == "selection_epoch"
         selections.fetch("patrol")[field] = value
       else
@@ -236,16 +226,42 @@ class ModulesMigrationLiveBindingsResolverTest < Minitest::Test
 
   private
 
-  def verify_bundle(bundle, resolver)
-    result = resolver.resolve(
+  def resolver(provider:)
+    Hive::Modules::Migration::LiveBindingsResolver.new(
+      project_provider: -> { PROJECT_BINDING },
+      module_selections: selection_snapshot,
+      run_authority_provider: provider
+    )
+  end
+
+  def provider_outcome(status:, bindings: nil, issues: [])
+    Hive::Modules::Migration::
+      QualificationRunAuthorityProvider::Outcome.new(
+        status: status,
+        bindings: bindings,
+        issues: issues.freeze
+      ).freeze
+  end
+
+  def resolve_bundle(bundle, candidate_resolver)
+    candidate_resolver.resolve(
+      run_id: RUN_ID,
+      lane: bundle.dig("receipt", "lane"),
       receipt: bundle.fetch("receipt"),
       records: bundle.fetch("records")
     )
+  end
+
+  def verify_bundle(bundle, candidate_resolver)
+    resolution = resolve_bundle(bundle, candidate_resolver)
     Hive::Modules::Migration::PatrolEvidenceVerifier.verify(
       receipt: bundle.fetch("receipt"),
       records: bundle.fetch("records"),
-      current_bindings: result.bindings,
-      binding_blockers: result.blockers
+      resolution: resolution
     )
+  end
+
+  def deep_copy(value)
+    Marshal.load(Marshal.dump(value))
   end
 end

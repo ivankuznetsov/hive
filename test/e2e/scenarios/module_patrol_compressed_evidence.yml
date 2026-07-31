@@ -1,0 +1,8 @@
+name: module_patrol_compressed_evidence
+description: One immutable candidate-bound run qualifies both Patrol lanes from repository-confined production evidence.
+tags: [modules, acceptance, migration, qualification]
+coverage:
+  primary: module.patrol_compressed_evidence
+  supporting: []
+steps:
+  - kind: patrol_evidence

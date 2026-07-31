@@ -5,6 +5,7 @@ require "hive/config"
 require "hive/module_package/managed_store"
 require "hive/modules/migration/migration_repository"
 require "hive/modules/migration/live_bindings_resolver"
+require "hive/modules/migration/qualification_run_authority_provider"
 require "hive/modules/migration/report"
 require "hive/modules/migration/shadow_decision_migration"
 require "hive/workflow_package/canonical_json"
@@ -218,12 +219,16 @@ module Hive
           @project ||= File.basename(@project_root)
           @project_provider =
             project_provider || method(:resolve_live_project_binding)
-          @run_authority_provider = run_authority_provider
           @quiescence_probe = quiescence_probe
           @repository = MigrationRepository.for(
             project_root: @project_root,
             hive_state_path: @hive_state_path
           )
+          @run_authority_provider =
+            run_authority_provider ||
+              QualificationRunAuthorityProvider.new(
+                repository: @repository
+              )
           @migration_dir = @repository.root
         end
 

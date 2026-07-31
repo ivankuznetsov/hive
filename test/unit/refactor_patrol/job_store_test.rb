@@ -2896,7 +2896,11 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def architecture_capture(manifest_value = manifest)
     Hive::RefactorPatrol::TransitionGateway.capture_for_manifest(
       manifest: manifest_value,
-      project_id: "project-7",
+      project: {
+        "project_id" => "project-7",
+        "name" => "demo",
+        "repository" => "github.com/acme/demo"
+      },
       owner: "module",
       owner_epoch: 7,
       recorded_at: T0

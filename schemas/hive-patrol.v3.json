@@ -62,6 +62,11 @@
           }
         },
         "findings": { "type": "integer", "minimum": 0 },
+        "finding_ids": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
         "fix_candidates": { "type": "integer", "minimum": 0 },
         "fixes_attempted": { "type": "integer", "minimum": 0 },
         "fixes_validated": { "type": "integer", "minimum": 0 },

@@ -107,6 +107,10 @@ class RefactorPatrolArchitectureIntakeTransitionsTest < Minitest::Test
     )
     capture = store.capture
     assert_equal "architecture-patrol", capture.module_name
+    assert_equal "github.com/owner/demo",
+                 capture.project.fetch("repository")
+    assert_equal "owner/demo:7:#{"b" * 40}",
+                 capture.trigger.fetch("id")
     assert_equal capture.occurrence_id,
                  store.reservations.dig(0, 1).occurrence_id
     assert_equal "queued", result.fetch("state")
@@ -178,6 +182,23 @@ class RefactorPatrolArchitectureIntakeTransitionsTest < Minitest::Test
         required_occurrence_id: "occ-#{'f' * 64}"
       )
     end
+
+    {
+      "project_id" => "project-2",
+      "name" => "other",
+      "repository_identity" => "github.com/owner/other"
+    }.each do |key, value|
+      assert_raises(Hive::ConfigError) do
+        transitions.enqueue(
+          entry: entry.merge(key => value),
+          store: store,
+          manifest: manifest,
+          policy: {},
+          now: NOW
+        )
+      end
+    end
+    assert_equal 3, store.reservations.size
   end
 
   def test_invalid_migration_snapshot_uses_the_callers_typed_error
@@ -218,9 +239,11 @@ class RefactorPatrolArchitectureIntakeTransitionsTest < Minitest::Test
 
   def entry
     {
+      "project_id" => "project-1",
       "name" => "demo",
       "path" => "/repo",
-      "hive_state_path" => "/repo/.hive-state"
+      "hive_state_path" => "/repo/.hive-state",
+      "repository_identity" => "github.com/owner/demo"
     }
   end
 

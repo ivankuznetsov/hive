@@ -50,7 +50,7 @@ class ModulesMigrationPatrolEvidenceQualificationTest < Minitest::Test
       end
 
       tampered = Marshal.load(Marshal.dump(receipt.to_h))
-      tampered["candidate"]["sha"] = "f" * 40
+      tampered["candidate"]["commit_sha"] = "f" * 40
       error = assert_raises(Hive::ConfigError) do
         Hive::Modules::Migration::PatrolEvidenceReceipt.from_h(tampered)
       end
@@ -109,7 +109,7 @@ class ModulesMigrationPatrolEvidenceQualificationTest < Minitest::Test
       result = Hive::Modules::Migration::PatrolEvidenceVerifier.verify(
         receipt: receipt,
         records: records,
-        current_bindings: bindings
+        resolution: qualification_binding_resolution(bindings)
       )
 
       assert result.verified?
@@ -132,11 +132,12 @@ class ModulesMigrationPatrolEvidenceQualificationTest < Minitest::Test
       )
 
       stale_bindings = Marshal.load(Marshal.dump(bindings))
-      stale_bindings["candidate"]["sha"] = "f" * 40
+      stale_bindings["candidate"]["commit_sha"] = "f" * 40
       stale = Hive::Modules::Migration::PatrolEvidenceVerifier.verify(
         receipt: receipt,
         records: records,
-        current_bindings: stale_bindings
+        resolution:
+          qualification_binding_resolution(stale_bindings)
       )
       assert_includes stale.blockers, "candidate_binding_mismatch"
 
@@ -145,14 +146,15 @@ class ModulesMigrationPatrolEvidenceQualificationTest < Minitest::Test
       partial = Hive::Modules::Migration::PatrolEvidenceVerifier.verify(
         receipt: receipt,
         records: records,
-        current_bindings: partial_bindings
+        resolution:
+          qualification_binding_resolution(partial_bindings)
       )
       assert_includes partial.blockers, "scenario_matrix_mismatch"
 
       mixed = Hive::Modules::Migration::PatrolEvidenceVerifier.verify(
         receipt: receipt,
         records: records.drop(1),
-        current_bindings: bindings
+        resolution: qualification_binding_resolution(bindings)
       )
       assert_includes mixed.blockers, "decision_set_mismatch"
 
@@ -162,7 +164,7 @@ class ModulesMigrationPatrolEvidenceQualificationTest < Minitest::Test
       forged = Hive::Modules::Migration::PatrolEvidenceVerifier.verify(
         receipt: receipt,
         records: repeated,
-        current_bindings: bindings
+        resolution: qualification_binding_resolution(bindings)
       )
       assert_includes forged.blockers, "decision_set_mismatch"
       assert_includes forged.blockers, "patrol:unique_decisions_below_10"
@@ -183,11 +185,41 @@ class ModulesMigrationPatrolEvidenceQualificationTest < Minitest::Test
         result = Hive::Modules::Migration::PatrolEvidenceVerifier.verify(
           receipt: receipt,
           records: records,
-          current_bindings: bindings
+          resolution: qualification_binding_resolution(bindings)
         )
         assert_equal lane_result, result.status
         assert_includes result.blockers, "lane_#{lane_result}:provider_unavailable"
         refute result.verified?
+      end
+    end
+  end
+
+  def test_failed_receipt_can_retain_pre_decision_diagnostics
+    with_qualification do |_records, _decision_refs, effect_index, bindings|
+      receipt = build_receipt(
+        decision_refs: [],
+        effect_index: effect_index,
+        bindings: bindings,
+        lane_result: "failed",
+        failure_reason: "candidate_execution_failed"
+      )
+      schema = JSONSchemer.schema(
+        Pathname(
+          Hive::Schemas.schema_path(
+            "hive-patrol-evidence-receipt"
+          )
+        )
+      )
+
+      assert_empty receipt.decision_refs
+      assert_empty schema.validate(receipt.to_h).to_a
+
+      assert_raises(Hive::ConfigError) do
+        build_receipt(
+          decision_refs: [],
+          effect_index: effect_index,
+          bindings: bindings
+        )
       end
     end
   end

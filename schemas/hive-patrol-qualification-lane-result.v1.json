@@ -1,0 +1,214 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hivecli.sh/schemas/hive-patrol-qualification-lane-result.v1.json",
+  "title": "Hive Patrol Qualification Lane Result (v1)",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+    "schema",
+    "schema_version",
+    "run_id",
+    "lane",
+    "status",
+    "started_at",
+    "ended_at",
+    "target_sha256",
+    "exit_code",
+    "failure_reason"
+      ],
+      "properties": {
+    "schema": {
+      "const": "hive-patrol-qualification-lane-result"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^patrol-[0-9a-f]{64}$"
+    },
+    "lane": {
+      "enum": [
+        "deterministic",
+        "installed"
+      ]
+    },
+    "status": {
+      "enum": [
+        "blocked",
+        "failed",
+        "passed",
+        "timeout"
+      ]
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "ended_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "target_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "exit_code": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 255
+    },
+    "failure_reason": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        null,
+        "candidate_execution_failed",
+        "credentials_unavailable",
+        "evidence_verification_failed",
+        "installed_target_unavailable",
+        "internal_error",
+        "lane_timeout",
+        "live_lane_not_authorized",
+        "provider_failed",
+        "provider_unavailable",
+        "scenario_driver_not_configured",
+        "scenario_failed"
+      ]
+    }
+      },
+      "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "passed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "exit_code": {
+            "const": 0
+          },
+          "failure_reason": {
+            "const": null
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "blocked"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "exit_code": {
+            "const": null
+          },
+          "failure_reason": {
+            "enum": [
+              "credentials_unavailable",
+              "installed_target_unavailable",
+              "live_lane_not_authorized",
+              "provider_unavailable",
+              "scenario_driver_not_configured"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "failed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "exit_code": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 255
+          },
+          "failure_reason": {
+            "enum": [
+              "candidate_execution_failed",
+              "evidence_verification_failed",
+              "internal_error",
+              "provider_failed",
+              "scenario_failed"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "timeout"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "exit_code": {
+            "const": null
+          },
+          "failure_reason": {
+            "const": "lane_timeout"
+          }
+        }
+      }
+    }
+      ]
+    },
+    {
+      "type": "object",
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "error_kind",
+        "exit_code",
+        "message"
+      ],
+      "properties": {
+        "schema": {
+          "const": "hive-patrol-qualification-lane-result"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "ok": {
+          "const": false
+        },
+        "error_kind": {
+          "type": "string"
+        },
+        "exit_code": {
+          "type": "integer"
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    }
+  ]
+}

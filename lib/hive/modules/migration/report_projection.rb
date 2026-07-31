@@ -2,32 +2,44 @@ require "digest"
 require "time"
 require "hive/modules/migration/live_bindings_resolver"
 require "hive/modules/migration/patrol_evidence_verifier"
+require "hive/modules/migration/qualification_run_descriptor"
 
 module Hive
   module Modules
     module Migration
-      # Pure projection of lane bundles into the versioned migration report.
-      # It validates evidence and derives every status/blocker; it owns no
-      # filesystem path and performs no reads or writes.
+      # Pure projection of one explicitly selected qualification run. Lane
+      # failures and blockers remain typed all the way to the report instead
+      # of being flattened into generic evidence requirements.
       class ReportProjection
+        STATUS_RANK = {
+          "verified" => 0,
+          "evidence_required" => 1,
+          "blocked" => 2,
+          "failed" => 3
+        }.freeze
+
         def self.build(**attributes)
           new(**attributes).build
         end
 
-        def initialize(lane_evidence:, reviewer:, reviewed_at:,
+        def initialize(run_id:, lane_evidence:, reviewer:, reviewed_at:,
                        generated_at:, migration:,
                        live_bindings_resolver:)
+          @run_id = run_id.to_s
+          unless QualificationRunDescriptor::RUN_ID.match?(@run_id)
+            PatrolEvidence.malformed!(
+              "module migration report run"
+            )
+          end
+          unless live_bindings_resolver.respond_to?(:resolve)
+            raise Hive::ConfigError,
+                  "module migration report requires live bindings"
+          end
           @reviewer = reviewer.to_s.strip
           @reviewed_at = Report.send(:timestamp, reviewed_at)
           @generated_at = Report.send(:timestamp, generated_at)
           @migration = Report.send(:normalize_migration, migration)
-          @live_bindings_resolver =
-            live_bindings_resolver ||
-              LiveBindingsResolver.new(
-                project_provider: nil,
-                module_selections: nil,
-                run_authority_provider: nil
-              )
+          @live_bindings_resolver = live_bindings_resolver
           @bundles = {}
           @verifications = {}
           normalize_lane_evidence(lane_evidence)
@@ -36,20 +48,17 @@ module Hive
         def build
           blockers = []
           lane_rows = Report::REQUIRED_LANES.to_h do |lane|
-            entry = @verifications[lane]
-            unless entry
-              blockers << "#{lane}:lane_evidence_missing"
-              next [
-                lane,
-                Report.send(:missing_lane_row)
-              ]
+            entry = @verifications.fetch(lane)
+            verification = entry[:verification]
+            lane_blockers = if verification
+              verification.blockers
+            else
+              entry.fetch(:resolution).issues
             end
-            verification = entry.fetch(:verification)
-            verification.blockers.each do |blocker|
+            lane_blockers.each do |blocker|
               blockers << "#{lane}:#{blocker}"
             end
-            [
-              lane,
+            row = if verification
               {
                 "status" => verification.status,
                 "blockers" => verification.blockers,
@@ -59,11 +68,16 @@ module Hive
                 "bundle_path" => entry.fetch(:bundle_path),
                 "bundle_digest" => entry.fetch(:bundle_digest)
               }.freeze
-            ]
+            else
+              unresolved_lane_row(entry.fetch(:resolution))
+            end
+            [ lane, row ]
           end.freeze
           blockers.concat(identity_blockers)
           blockers << "reviewer_signoff_missing" if @reviewer.empty?
           latest_review = @verifications.values.filter_map do |entry|
+            next unless entry[:verification]
+
             Time.iso8601(
               entry.fetch(:verification)
                 .receipt
@@ -75,20 +89,12 @@ module Hive
             latest_review &&
               Time.iso8601(@reviewed_at) < latest_review
           blockers = blockers.uniq.sort.freeze
-          status = if blockers.empty? &&
-                      Report::REQUIRED_LANES.all? do |lane|
-                        @verifications.dig(
-                          lane, :verification
-                        )&.verified?
-                      end
-            "evidence_ready_for_operator"
-          else
-            "evidence_required"
-          end
+          status = report_status(lane_rows, blockers)
           candidate, configurations, scenario = common_bindings
           body = {
             "schema" => Report::SCHEMA,
             "schema_version" => Report::SCHEMA_VERSION,
+            "run_id" => @run_id,
             "status" => status,
             "blockers" => blockers,
             "candidate" => candidate,
@@ -104,8 +110,9 @@ module Hive
             :from_projection,
             body,
             bundles: @bundles,
-            verifications: @verifications.transform_values do |entry|
-              entry.fetch(:verification)
+            verifications: @verifications.each_with_object({}) do |(lane, entry), result|
+              verification = entry[:verification]
+              result[lane] = verification if verification
             end
           )
         end
@@ -119,9 +126,23 @@ module Hive
           PatrolEvidence.malformed!(
             "module migration report"
           ) unless unknown.empty?
-          source.each do |lane_name, value|
-            lane = lane_name.to_s
-            next if value.nil?
+          Report::REQUIRED_LANES.each do |lane|
+            value = source[lane] || source[lane.to_sym]
+            receipt, records = raw_evidence(value)
+            resolution = @live_bindings_resolver.resolve(
+              run_id: @run_id,
+              lane: lane,
+              receipt: receipt,
+              records: records
+            )
+            if value.nil? ||
+               resolution.blocked? ||
+               resolution.failed?
+              @verifications[lane] = {
+                resolution: resolution
+              }.freeze
+              next
+            end
             bundle = PatrolEvidence.immutable_json(
               value,
               label: "module migration report evidence"
@@ -131,15 +152,10 @@ module Hive
                 "module migration report evidence"
               )
             end
-            resolution = @live_bindings_resolver.resolve(
-              receipt: bundle.fetch("receipt"),
-              records: bundle.fetch("records")
-            )
             verification = PatrolEvidenceVerifier.verify(
               receipt: bundle.fetch("receipt"),
               records: bundle.fetch("records"),
-              current_bindings: resolution.bindings,
-              binding_blockers: resolution.blockers
+              resolution: resolution
             )
             unless verification.receipt.lane == lane
               PatrolEvidence.malformed!(
@@ -157,9 +173,10 @@ module Hive
             @bundles[relative] = bytes
             @verifications[lane] = {
               verification: verification,
+              resolution: resolution,
               bundle_path: relative,
               bundle_digest: digest
-            }
+            }.freeze
           end
         rescue NoMethodError, TypeError
           PatrolEvidence.malformed!(
@@ -167,37 +184,65 @@ module Hive
           )
         end
 
+        def raw_evidence(value)
+          return [ nil, nil ] if value.nil?
+          return [ value, value ] unless value.is_a?(Hash)
+
+          [
+            value["receipt"] || value[:receipt],
+            value["records"] || value[:records]
+          ]
+        end
+
+        def unresolved_lane_row(resolution)
+          if resolution.status == "evidence_required" &&
+             resolution.issues == [ "lane_evidence_missing" ]
+            return Report.send(:missing_lane_row)
+          end
+
+          {
+            "status" => resolution.status,
+            "blockers" => resolution.issues,
+            "receipt_id" => nil,
+            "effect_index_digest" => nil,
+            "bundle_path" => nil,
+            "bundle_digest" => nil
+          }.freeze
+        end
+
+        def report_status(lane_rows, blockers)
+          lane_status = lane_rows.values.map do |row|
+            row.fetch("status")
+          end.max_by do |status|
+            STATUS_RANK.fetch(status)
+          end
+          case lane_status
+          when "failed" then "failed"
+          when "blocked" then "blocked"
+          when "evidence_required" then "evidence_required"
+          else
+            blockers.empty? ?
+              "evidence_ready_for_operator" :
+              "evidence_required"
+          end
+        end
+
         def identity_blockers
           return [] unless Report::REQUIRED_LANES.all? do |lane|
             @verifications.key?(lane)
           end
+          deterministic = authority_for("deterministic")
+          installed = authority_for("installed")
+          return [] unless deterministic && installed
 
-          deterministic = @verifications
-            .fetch("deterministic")
-            .fetch(:verification)
-            .receipt
-            .to_h
-          installed = @verifications
-            .fetch("installed")
-            .fetch(:verification)
-            .receipt
-            .to_h
           blockers = []
-          common_candidate_keys =
-            PatrolEvidenceReceipt::CANDIDATE_KEYS -
-              [ "installed_digest" ]
           blockers << "candidate_binding_mismatch" unless
-            deterministic.fetch("candidate")
-              .slice(*common_candidate_keys) ==
+            deterministic.fetch("candidate") ==
               installed.fetch("candidate")
-                .slice(*common_candidate_keys)
-          blockers << "installed_candidate_digest_missing" if
-            installed.dig(
-              "candidate", "installed_digest"
-            ).nil?
           blockers << "mixed_run_evidence" unless
             deterministic.fetch("run_id") ==
-              installed.fetch("run_id")
+              installed.fetch("run_id") &&
+              deterministic.fetch("run_id") == @run_id
           blockers << "configuration_binding_mismatch" unless
             deterministic.fetch("configuration_digests") ==
               installed.fetch("configuration_digests")
@@ -213,23 +258,28 @@ module Hive
           blockers
         end
 
+        def authority_for(lane)
+          @verifications
+            .dig(lane, :resolution)
+            &.bindings
+        end
+
         def common_bindings
-          preferred =
-            @verifications["installed"] ||
-            @verifications["deterministic"]
+          authority =
+            authority_for("installed") ||
+            authority_for("deterministic")
           return [
             nil,
             Report.send(
               :normalize_optional_configurations, nil
             ),
             nil
-          ] unless preferred
+          ] unless authority
 
-          receipt = preferred.fetch(:verification).receipt.to_h
           [
-            receipt.fetch("candidate"),
-            receipt.fetch("configuration_digests"),
-            receipt.fetch("scenario_manifest_digest")
+            authority.fetch("candidate"),
+            authority.fetch("configuration_digests"),
+            authority.fetch("scenario_manifest_digest")
           ]
         end
       end

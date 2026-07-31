@@ -128,6 +128,8 @@ module Hive
           emit_spawn_background(step)
         when "stop_process"
           emit_stop_process(step)
+        when "patrol_evidence"
+          emit_patrol_evidence(step)
         else
           [ "# step #{step.position} skipped: kind=#{step.kind} (stateful)" ]
         end
@@ -356,6 +358,36 @@ module Hive
           "  kill -KILL -\"$#{var}\" 2>/dev/null || true",
           "  #{var}=",
           "fi"
+        ]
+      end
+
+      def emit_patrol_evidence(step)
+        artifacts_root = File.join(
+          @scenario_dir, "patrol-evidence"
+        )
+        ruby = [
+          "require 'patrol_qualification_runner'",
+          "result = Hive::E2E::PatrolQualificationRunner.new.call(",
+          "  project_root: ARGV.fetch(0),",
+          "  run_home: ARGV.fetch(1),",
+          "  artifacts_root: ARGV.fetch(2)",
+          ")",
+          "abort(\"patrol evidence outcome is not qualifying proof: \#{result.inspect}\") unless",
+          "  result.is_a?(Hash) &&",
+          "  Hive::E2E::PatrolQualificationRunner::HARNESS_READY_STATUSES.include?(result['status'])"
+        ].join("\n")
+        [
+          "# step #{step.position} patrol_evidence",
+          Shellwords.join([
+            RbConfig.ruby,
+            "-I#{Paths.lib_dir}",
+            "-I#{File.join(Paths.e2e_root, 'lib')}",
+            "-e",
+            ruby,
+            @sandbox_dir,
+            @run_home,
+            artifacts_root
+          ])
         ]
       end
 

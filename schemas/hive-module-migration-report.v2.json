@@ -10,6 +10,7 @@
     "schema",
     "schema_version",
     "report_id",
+    "run_id",
     "status",
     "blockers",
     "candidate",
@@ -28,8 +29,22 @@
       "type": "string",
       "pattern": "^migration-report-[0-9a-f]{64}$"
     },
+    "run_id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^patrol-[0-9a-f]{64}$"
+        },
+        {"type": "null"}
+      ]
+    },
     "status": {
-      "enum": ["evidence_required", "evidence_ready_for_operator"]
+      "enum": [
+        "failed",
+        "blocked",
+        "evidence_required",
+        "evidence_ready_for_operator"
+      ]
     },
     "blockers": {
       "type": "array",
@@ -132,23 +147,23 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "sha",
-        "catalog_digest",
-        "source_digest",
-        "manifest_digest",
-        "installed_digest"
+        "commit_sha",
+        "artifact_manifest_sha256",
+        "source_archive_sha256",
+        "candidate_gem_sha256",
+        "skills_archive_sha256",
+        "installed_tree_sha256"
       ],
       "properties": {
-        "sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-        "catalog_digest": {"$ref": "#/$defs/digest"},
-        "source_digest": {"$ref": "#/$defs/digest"},
-        "manifest_digest": {"$ref": "#/$defs/digest"},
-        "installed_digest": {
-          "anyOf": [
-            {"$ref": "#/$defs/digest"},
-            {"type": "null"}
-          ]
-        }
+        "commit_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "artifact_manifest_sha256": {"$ref": "#/$defs/digest"},
+        "source_archive_sha256": {"$ref": "#/$defs/digest"},
+        "candidate_gem_sha256": {"$ref": "#/$defs/digest"},
+        "skills_archive_sha256": {"$ref": "#/$defs/digest"},
+        "installed_tree_sha256": {"$ref": "#/$defs/digest"}
       }
     },
     "lane": {

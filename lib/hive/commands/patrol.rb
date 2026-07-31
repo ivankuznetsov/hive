@@ -1,6 +1,5 @@
 require "json"
 require "open3"
-require "securerandom"
 require "tmpdir"
 require "time"
 require "hive/config"
@@ -38,6 +37,7 @@ module Hive
                      migration_authority: :legacy,
                      evidence_store_factory: nil,
                      clock: -> { Time.now.utc },
+                     output: nil,
                      config_loader: ->(path) { Hive::Config.load(path) })
         @project = project
         @json = json
@@ -68,6 +68,7 @@ module Hive
           )
         end
         @clock = clock
+        @output = output
         @config_loader = config_loader
       end
 
@@ -111,7 +112,8 @@ module Hive
             evidence_store: @evidence_store_factory.call(entry),
             config_loader: @config_loader,
             capability_checker: method(:effect_capability_allowed?),
-            module_execution: @module_execution
+            module_execution: @module_execution,
+            clock: @clock
           )
           state.recover_pending_fingerprint_effects!
         end
@@ -133,7 +135,11 @@ module Hive
         review = review_outcome(feature_batch, reviewer)
 
         fingerprints = state.fingerprints
-        registry = Hive::Patrol::FindingRegistry.new(state: state, target_sha: target_sha)
+        registry = Hive::Patrol::FindingRegistry.new(
+          state: state,
+          target_sha: target_sha,
+          clock: @clock
+        )
         registry.reconcile!(fingerprints: fingerprints, dismissed: dismissed)
         admission = registry.admit(findings, retry_active: !@dry_run)
         findings = admission.findings
@@ -147,7 +153,7 @@ module Hive
         # admission, and portfolio scoring. The reviewer itself is a pure
         # producer and cannot accumulate untriaged duplicates.
         admission.persistable_findings.each { |finding| state.write_finding(finding) }
-        write_selection_audit(state, candidates, skipped)
+        write_selection_audit(state, capture, candidates, skipped)
 
         # `max_prs_per_cycle` caps PRs opened per scan, not fix candidates.
         # Capping candidates before fixing meant a failed validation
@@ -200,7 +206,7 @@ module Hive
         # returned malformed JSON, leaving last_scanned_sha unchanged lets
         # the next cycle re-review this commit instead of treating a
         # partial scan as a clean pass and never looking again (U5).
-        now_iso = Time.now.utc.iso8601
+        now_iso = @clock.call.utc.iso8601
         if review.fetch("review_errors").any?
           state.update_state(
             "last_run_at" => now_iso,
@@ -629,9 +635,9 @@ module Hive
         raise Hive::GitError, "git #{args.join(' ')} failed: #{detail}"
       end
 
-      def write_selection_audit(state, candidates, skipped)
-        now = Time.now.utc
-        id = "selection-#{now.strftime('%Y%m%dT%H%M%SZ')}-#{SecureRandom.hex(4)}"
+      def write_selection_audit(state, capture, candidates, skipped)
+        now = @clock.call.utc
+        id = "selection-#{capture.capture_id.delete_prefix('cap-')}"
         state.write_run_log(id, {
           "schema" => "hive-patrol-selection",
           "schema_version" => 1,
@@ -692,6 +698,7 @@ module Hive
           "review_complete" => review.fetch("review_complete"),
           "review_errors" => review.fetch("review_errors"),
           "findings" => findings.size,
+          "finding_ids" => findings.map(&:id).sort,
           "fix_candidates" => candidates.size,
           "fixes_attempted" => fixes.size,
           "fixes_validated" => fixes.count(&:passed),
@@ -706,11 +713,13 @@ module Hive
 
       def emit(payload)
         if @json
-          puts JSON.generate(payload)
+          output.puts JSON.generate(payload)
         else
-          puts "hive patrol: #{payload['project']} mapped=#{payload['features_mapped']} " \
-               "findings=#{payload['findings']} fixes=#{payload['fixes_validated']} " \
-               "prs=#{payload['prs_opened']}"
+          output.puts(
+            "hive patrol: #{payload['project']} mapped=#{payload['features_mapped']} " \
+            "findings=#{payload['findings']} fixes=#{payload['fixes_validated']} " \
+            "prs=#{payload['prs_opened']}"
+          )
         end
         payload
       end
@@ -718,7 +727,7 @@ module Hive
       def emit_error(error)
         return unless @json
 
-        puts JSON.generate(
+        output.puts JSON.generate(
           "schema" => "hive-patrol",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-patrol"),
           "ok" => false,
@@ -727,6 +736,10 @@ module Hive
           "exit_code" => error.exit_code,
           "message" => error.message
         )
+      end
+
+      def output
+        @output || $stdout
       end
     end
   end

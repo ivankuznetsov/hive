@@ -1,4 +1,5 @@
 require "time"
+require "hive/modules/migration/live_bindings_resolver"
 require "hive/modules/migration/patrol_evidence_receipt"
 require "hive/modules/migration/patrol_effect_index"
 
@@ -19,12 +20,7 @@ module Hive
           after_legacy_capture after_legacy_decision after_module_decision
           after_effect_intent during_reconciliation
         ].sort.freeze
-        BINDING_KEYS = %w[
-          artifact_digests candidate configuration_digests
-          decision_expectations expected_legacy_effect_keys lane
-          module_selections project required_matrix run_id
-          scenario_manifest_digest
-        ].freeze
+        BINDING_KEYS = LiveBindingsResolver::BINDING_KEYS
 
         Verification = Data.define(
           :status, :blockers, :receipt, :effect_index,
@@ -34,30 +30,44 @@ module Hive
         end
 
         class << self
-          def verify(receipt:, records:, current_bindings:,
-                     binding_blockers: [])
+          def verify(receipt:, records:, resolution:)
             receipt = receipt.is_a?(PatrolEvidenceReceipt) ?
               receipt :
               PatrolEvidenceReceipt.from_h(receipt)
-            bindings = normalize_bindings(current_bindings)
+            unless resolution.is_a?(LiveBindingsResolver::Result)
+              raise Hive::ConfigError,
+                    "patrol evidence binding resolution is malformed"
+            end
+            bindings = resolution.bindings &&
+              normalize_bindings(resolution.bindings)
             records = validated_records(records)
             effect_index = PatrolEffectIndex.build(records: records)
-            blockers = Array(binding_blockers).map(&:to_s)
+            blockers = Array(resolution.issues).map(&:to_s)
 
             verify_lane(receipt, blockers)
-            verify_current_bindings(receipt, bindings, blockers)
-            verify_decisions(receipt, records, bindings, blockers)
+            if bindings
+              verify_current_bindings(receipt, bindings, blockers)
+              verify_decisions(receipt, records, bindings, blockers)
+            end
             verify_controls(receipt, records, blockers)
-            verify_effects(receipt, effect_index, bindings, blockers)
+            if bindings
+              verify_effects(
+                receipt, effect_index, bindings, blockers
+              )
+            end
             verify_protocol(receipt, blockers)
             verify_review_time(receipt, records, blockers)
 
             blockers = blockers.uniq.sort.freeze
-            status = if receipt.lane_result == "blocked"
-              "blocked"
-            elsif receipt.lane_result == "failed"
+            status = if
+              receipt.lane_result == "failed" ||
+                resolution.status == "failed"
               "failed"
-            elsif blockers.empty?
+            elsif receipt.lane_result == "blocked" ||
+                  resolution.status == "blocked"
+              "blocked"
+            elsif blockers.empty? &&
+                  resolution.status == "resolved"
               "verified"
             else
               "evidence_required"
@@ -121,6 +131,8 @@ module Hive
                 expectations.sort_by { |row| row.fetch("decision_id") },
               "required_matrix" =>
                 Array(value.fetch("required_matrix")).map(&:to_s).sort,
+              "required_faults" =>
+                Array(value.fetch("required_faults")).map(&:to_s).sort,
               "expected_legacy_effect_keys" =>
                 Array(value.fetch("expected_legacy_effect_keys"))
                   .map(&:to_s)
@@ -138,15 +150,12 @@ module Hive
               value["lane"], PatrolEvidenceReceipt::LANES, label: label
             )
             candidate = value["candidate"]
-            git_sha!(candidate["sha"], label)
-            %w[
-              catalog_digest source_digest manifest_digest
-            ].each { |key| hex_digest!(candidate[key], label) }
-            installed = candidate["installed_digest"]
-            if value["lane"] == "installed"
-              hex_digest!(installed, label)
-            else
-              PatrolEvidence.malformed!(label) unless installed.nil?
+            git_sha!(candidate["commit_sha"], label)
+            (
+              PatrolEvidenceReceipt::CANDIDATE_KEYS -
+                [ "commit_sha" ]
+            ).each do |key|
+              hex_digest!(candidate[key], label)
             end
             value["configuration_digests"].each_value do |digest|
               hex_digest!(digest, label)
@@ -212,6 +221,9 @@ module Hive
             value["required_matrix"].each do |item|
               PatrolEvidence.nonempty(item, label: label)
             end
+            value["required_faults"].each do |item|
+              PatrolEvidence.nonempty(item, label: label)
+            end
             value["expected_legacy_effect_keys"].each do |key|
               PatrolEvidence.hex_id(key, "effect", label: label)
             end
@@ -264,6 +276,8 @@ module Hive
               payload["artifacts"] == bindings["artifact_digests"]
             blockers << "scenario_matrix_mismatch" unless
               receipt.matrix == bindings["required_matrix"]
+            blockers << "fault_matrix_mismatch" unless
+              receipt.faults == bindings["required_faults"]
             blockers << "legacy_effect_expectation_mismatch" unless
               receipt.expected_legacy_effect_keys ==
                 bindings["expected_legacy_effect_keys"]

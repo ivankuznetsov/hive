@@ -3,15 +3,20 @@ require "hive/modules/migration/patrol_effect_index"
 require "hive/modules/migration/patrol_evidence_receipt"
 require "hive/modules/migration/patrol_evidence_verifier"
 require "hive/modules/migration/live_bindings_resolver"
+require "hive/modules/migration/qualification_run_authority_provider"
 require "hive/modules/migration/shadow_comparator"
 
 module PatrolEvidenceScenario
   START = Time.utc(2026, 7, 30, 9, 0, 0)
   CANDIDATE_SHA = "c" * 40
-  DIGESTS = {
-    "catalog_digest" => "a" * 64,
-    "source_digest" => "b" * 64,
-    "manifest_digest" => "c" * 64
+  RUN_ID = "patrol-#{"6" * 64}".freeze
+  CANDIDATE = {
+    "commit_sha" => CANDIDATE_SHA,
+    "artifact_manifest_sha256" => "a" * 64,
+    "source_archive_sha256" => "b" * 64,
+    "candidate_gem_sha256" => "c" * 64,
+    "skills_archive_sha256" => "8" * 64,
+    "installed_tree_sha256" => "9" * 64
   }.freeze
   CONFIGURATION_DIGESTS = {
     "patrol" => "d" * 64,
@@ -20,7 +25,7 @@ module PatrolEvidenceScenario
   PROJECT_BINDING = {
     "project_id" => "project-1",
     "name" => "demo",
-    "repository" => "owner/evidence"
+    "repository" => "github.com/owner/evidence"
   }.freeze
 
   private
@@ -28,7 +33,7 @@ module PatrolEvidenceScenario
   def with_qualification(lane: "deterministic",
                          configuration_digests: CONFIGURATION_DIGESTS,
                          candidate_sha: CANDIDATE_SHA,
-                         run_id: "compressed-run-1",
+                         run_id: RUN_ID,
                          scenario_manifest_digest: "f" * 64,
                          project: PROJECT_BINDING,
                          module_selections: nil)
@@ -50,7 +55,7 @@ module PatrolEvidenceScenario
         "decision_id" => record.fetch("decision_id"),
         "module" => record.fetch("module"),
         "decision_class" => decision_class,
-        "repository" => "owner/evidence",
+        "repository" => project.fetch("repository"),
         "repository_sha" => index.even? ? "1" * 40 : "2" * 40,
         "trigger_digest" => record.fetch("trigger_digest"),
         "record_digest" => record.fetch("semantic_digest"),
@@ -75,7 +80,7 @@ module PatrolEvidenceScenario
                            failure_reason: nil,
                            configuration_digests: CONFIGURATION_DIGESTS,
                            candidate_sha: CANDIDATE_SHA,
-                           run_id: "compressed-run-1",
+                           run_id: RUN_ID,
                            scenario_manifest_digest: "f" * 64,
                            project: PROJECT_BINDING,
                            module_selections: nil)
@@ -98,7 +103,7 @@ module PatrolEvidenceScenario
                          configuration_digests:
                            CONFIGURATION_DIGESTS,
                          candidate_sha: CANDIDATE_SHA,
-                         run_id: "compressed-run-1",
+                         run_id: RUN_ID,
                          scenario_manifest_digest: "f" * 64,
                          project: PROJECT_BINDING,
                          module_selections: nil)
@@ -317,7 +322,7 @@ module PatrolEvidenceScenario
                        lane: "deterministic",
                        configuration_digests: CONFIGURATION_DIGESTS,
                        candidate_sha: CANDIDATE_SHA,
-                       run_id: "compressed-run-1",
+                       run_id: RUN_ID,
                        scenario_manifest_digest: "f" * 64,
                        project: PROJECT_BINDING,
                        module_selections: nil)
@@ -327,10 +332,8 @@ module PatrolEvidenceScenario
     {
       "run_id" => run_id,
       "lane" => lane,
-      "candidate" => DIGESTS.merge(
-        "sha" => candidate_sha,
-        "installed_digest" => lane == "installed" ? "9" * 64 : nil
-      ),
+      "candidate" =>
+        CANDIDATE.merge("commit_sha" => candidate_sha),
       "configuration_digests" => configuration_digests,
       "project" => project,
       "module_selections" => module_selections,
@@ -341,17 +344,22 @@ module PatrolEvidenceScenario
       },
       "decision_expectations" => decision_refs.map do |row|
         row.reject { |key, _value| key == "record_digest" }
-      end,
+      end.sort_by { |row| row.fetch("decision_id") },
       "required_matrix" =>
         Hive::Modules::Migration::PatrolEvidenceVerifier::REQUIRED_MATRIX,
+      "required_faults" =>
+        Hive::Modules::Migration::PatrolEvidenceVerifier::REQUIRED_FAULTS,
+      "lane_policy" => lane_policy(lane),
+      "artifact_refs" => artifact_refs(lane),
       "expected_legacy_effect_keys" => expected_legacy_effect_keys
     }
   end
 
   def run_authority_document(bindings)
     keys = %w[
-      artifact_digests candidate decision_expectations
-      expected_legacy_effect_keys lane required_matrix run_id
+      artifact_digests artifact_refs candidate decision_expectations
+      expected_legacy_effect_keys lane lane_policy module_selections
+      project required_faults required_matrix run_id
       scenario_manifest_digest
     ]
     Hive::Modules::Migration::PatrolEvidence.immutable_json(
@@ -363,7 +371,7 @@ module PatrolEvidenceScenario
   def qualification_authority_documents(
     configuration_digests: CONFIGURATION_DIGESTS,
     candidate_sha: CANDIDATE_SHA,
-    run_id: "compressed-run-1",
+    run_id: RUN_ID,
     scenario_manifest_digest: "f" * 64,
     project: PROJECT_BINDING,
     module_selections: nil
@@ -393,8 +401,64 @@ module PatrolEvidenceScenario
       qualification_authority_documents
   )
     lambda do |run_id:, lane:|
-      authority_documents[[ run_id, lane ]]
+      bindings = authority_documents[[ run_id, lane ]]
+      if bindings
+        Hive::Modules::Migration::
+          QualificationRunAuthorityProvider::Outcome.new(
+            status: "resolved",
+            bindings: bindings,
+            issues: [].freeze
+          ).freeze
+      else
+        Hive::Modules::Migration::
+          QualificationRunAuthorityProvider::Outcome.new(
+            status: "blocked",
+            bindings: nil,
+            issues:
+              [ "qualification_descriptor_missing" ].freeze
+          ).freeze
+      end
     end
+  end
+
+  def lane_policy(lane)
+    if lane == "deterministic"
+      {
+        "credential_bindings" => [],
+        "kind" => "source_archive",
+        "provider" => "fixture",
+        "repository_sha" => "2" * 40,
+        "target_ref" =>
+          "inputs/candidate/hive-source-#{CANDIDATE_SHA}.tar.gz",
+        "executable" => "bin/hive",
+        "network" => false,
+        "timeout_seconds" => 300
+      }
+    else
+      {
+        "credential_bindings" => [
+          "GITHUB_TOKEN", "OPENROUTER_API_KEY"
+        ],
+        "kind" => "installed_target",
+        "provider" => "openrouter",
+        "repository_sha" => "5" * 40,
+        "target_ref" =>
+          "inputs/installed-target/target.json",
+        "executable" => "bin/hive",
+        "network" => true,
+        "timeout_seconds" => 300
+      }
+    end
+  end
+
+  def artifact_refs(lane)
+    {
+      "result" => "lanes/#{lane}/result.json",
+      "bundle" => "lanes/#{lane}/bundle.json",
+      "artifacts" => "lanes/#{lane}/artifacts",
+      "repro_json" => "lanes/#{lane}/repro.json",
+      "repro_script" => "lanes/#{lane}/repro.sh"
+    }
   end
 
   def build_receipt(decision_refs:, effect_index:, bindings:,
@@ -498,5 +562,17 @@ module PatrolEvidenceScenario
         selection_snapshot(module_selections),
       run_authority_provider: run_authority_provider
     )
+  end
+
+  def qualification_binding_resolution(
+    bindings,
+    status: "resolved",
+    issues: []
+  )
+    Hive::Modules::Migration::LiveBindingsResolver::Result.new(
+      status: status,
+      bindings: bindings,
+      issues: issues.freeze
+    ).freeze
   end
 end

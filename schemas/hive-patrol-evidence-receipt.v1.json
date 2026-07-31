@@ -33,7 +33,10 @@
       "type": "string",
       "pattern": "^patrol-evidence-[0-9a-f]{64}$"
     },
-    "run_id": {"type": "string", "minLength": 1, "maxLength": 32768},
+    "run_id": {
+      "type": "string",
+      "pattern": "^patrol-[0-9a-f]{64}$"
+    },
     "lane": {"enum": ["deterministic", "installed"]},
     "lane_result": {
       "type": "object",
@@ -63,23 +66,23 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "sha",
-        "catalog_digest",
-        "source_digest",
-        "manifest_digest",
-        "installed_digest"
+        "commit_sha",
+        "artifact_manifest_sha256",
+        "source_archive_sha256",
+        "candidate_gem_sha256",
+        "skills_archive_sha256",
+        "installed_tree_sha256"
       ],
       "properties": {
-        "sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-        "catalog_digest": {"$ref": "#/$defs/digest"},
-        "source_digest": {"$ref": "#/$defs/digest"},
-        "manifest_digest": {"$ref": "#/$defs/digest"},
-        "installed_digest": {
-          "anyOf": [
-            {"$ref": "#/$defs/digest"},
-            {"type": "null"}
-          ]
-        }
+        "commit_sha": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "artifact_manifest_sha256": {"$ref": "#/$defs/digest"},
+        "source_archive_sha256": {"$ref": "#/$defs/digest"},
+        "candidate_gem_sha256": {"$ref": "#/$defs/digest"},
+        "skills_archive_sha256": {"$ref": "#/$defs/digest"},
+        "installed_tree_sha256": {"$ref": "#/$defs/digest"}
       }
     },
     "configuration_digests": {
@@ -118,7 +121,7 @@
     "scenario_manifest_digest": {"$ref": "#/$defs/digest"},
     "decisions": {
       "type": "array",
-      "minItems": 1,
+      "minItems": 0,
       "maxItems": 4096,
       "uniqueItems": true,
       "items": {
@@ -225,30 +228,6 @@
       }
     }
   },
-  "allOf": [
-    {
-      "if": {
-        "properties": {"lane": {"const": "installed"}},
-        "required": ["lane"]
-      },
-      "then": {
-        "properties": {
-          "candidate": {
-            "properties": {
-              "installed_digest": {"$ref": "#/$defs/digest"}
-            }
-          }
-        }
-      },
-      "else": {
-        "properties": {
-          "candidate": {
-            "properties": {"installed_digest": {"type": "null"}}
-          }
-        }
-      }
-    }
-  ],
   "$defs": {
     "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "module_selection": {
@@ -278,5 +257,25 @@
         }
       }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "lane_result": {
+            "properties": {
+              "status": {"const": "passed"}
+            },
+            "required": ["status"]
+          }
+        },
+        "required": ["lane_result"]
+      },
+      "then": {
+        "properties": {
+          "decisions": {"minItems": 1}
+        }
+      }
+    }
+  ]
 }

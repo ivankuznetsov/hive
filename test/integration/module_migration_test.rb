@@ -6,14 +6,114 @@ require "hive/module_package/preview"
 require "hive/module_package/validator"
 require "hive/commands/module"
 require "hive/commands/module/migration"
+require "hive/cli"
+require "hive/modules/migration/migration_repository"
 require "hive/modules/migration/patrols"
 require "hive/modules/migration/report"
 require "hive/modules/migration/shadow_comparator"
+require_relative "../support/qualification_run_fixture"
 
 class ModuleMigrationIntegrationTest < Minitest::Test
   include HiveTestHelper
+  include QualificationRunFixture
 
   START = Time.utc(2026, 7, 1)
+  RUN_ID = "patrol-#{"7" * 64}".freeze
+
+  def test_cli_qualify_installed_defaults_to_result_only_blocked
+    with_tmp_dir do |project_root|
+      state = File.join(project_root, ".hive-state")
+      FileUtils.mkdir_p(state)
+      File.write(
+        File.join(state, "config.yml"),
+        { "hive_state_path" => ".hive-state" }.to_yaml
+      )
+      repository =
+        Hive::Modules::Migration::MigrationRepository.for(
+          project_root: project_root,
+          hive_state_path: state
+        )
+      fixture = qualification_run_fixture
+      run_id = repository.import_qualification_run(
+        descriptor_bytes: fixture.fetch(:descriptor),
+        inputs: fixture.fetch(:inputs)
+      )
+
+      output = nil
+      error = nil
+      with_env(
+        "HIVE_PATROL_QUALIFICATION_LIVE" => nil,
+        "HIVE_PATROL_QUALIFICATION_REPOSITORY" => nil
+      ) do
+        Dir.chdir(project_root) do
+          output, error = capture_io do
+            Hive::CLI.start(
+              [
+                "module", "migration", "qualify",
+                "--run-id", run_id,
+                "--lane", "installed",
+                "--json"
+              ]
+            )
+          end
+        end
+      end
+
+      assert_empty error
+      payload = JSON.parse(output)
+      assert_equal "blocked", payload.fetch("status")
+      assert_equal "installed", payload.fetch("lane")
+      assert_equal "live_lane_not_authorized",
+                   payload.fetch("failure_reason")
+      assert_schema(
+        "hive-patrol-qualification-lane-result",
+        payload
+      )
+      assert_equal(
+        payload,
+        JSON.parse(
+          repository.qualification_lane_result(
+            run_id, "installed"
+          )
+        )
+      )
+      refute File.exist?(
+        File.join(
+          repository.root,
+          "qualification/runs",
+          run_id,
+          "lanes/installed/bundle.json"
+        )
+      )
+    end
+  end
+
+  def test_cli_qualify_invalid_lane_emits_qualification_error_schema
+    output, _error, status = with_captured_exit do
+      Hive::CLI.start(
+        [
+          "module", "migration", "qualify",
+          "--run-id", "patrol-#{"1" * 64}",
+          "--lane", "../installed",
+          "--json"
+        ]
+      )
+    end
+
+    assert_equal Hive::ExitCodes::USAGE, status
+    payload = JSON.parse(output)
+    assert_equal(
+      "hive-patrol-qualification-lane-result",
+      payload.fetch("schema")
+    )
+    assert_equal false, payload.fetch("ok")
+    assert_equal "usage", payload.fetch("error_kind")
+    assert_includes payload.fetch("message"), "--lane"
+    assert_schema(
+      "hive-patrol-qualification-lane-result",
+      payload
+    )
+  end
 
   def test_adopts_state_in_place_and_rejects_synthetic_cutover_evidence
     with_tmp_dir do |project_root|
@@ -80,16 +180,17 @@ class ModuleMigrationIntegrationTest < Minitest::Test
       output = StringIO.new
       report = Hive::Commands::Module::Migration.new(
         "report", project_root: project_root, json: true, stdout: output,
-        yes: true, reviewer: "fixture-reviewer"
+        yes: true, reviewer: "fixture-reviewer",
+        run_id: RUN_ID
       ).call
-      assert_equal "evidence_required", report.fetch("status")
+      assert_equal "blocked", report.fetch("status")
       assert_includes(
         report.fetch("blockers"),
-        "deterministic:lane_evidence_missing"
+        "deterministic:qualification_descriptor_missing"
       )
       assert_includes(
         report.fetch("blockers"),
-        "installed:lane_evidence_missing"
+        "installed:qualification_descriptor_missing"
       )
       assert_schema(
         "hive-module-shadow-decision",

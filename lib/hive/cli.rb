@@ -533,7 +533,7 @@ module Hive
         status [NAME]                     Show the shared redacted status model.
         doctor NAME                       Diagnose without repairing state.
         dry-run NAME                      Evaluate a supplied event without writes.
-        migration status|report|cutover|rollback
+        migration status|report|qualify|cutover|rollback
                                           Inspect or advance the durable patrol ownership epoch.
 
       Lifecycle mutations are preview-bound. Run with --dry-run first, review
@@ -568,6 +568,10 @@ module Hive
                          desc: "for `dry-run`: ISO 8601 occurrence time"
     option :reviewer, type: :string,
                       desc: "for `migration report`: reviewer identity recorded in the gate"
+    option :run_id, type: :string,
+                    desc: "for `migration report|qualify`: exact content-addressed qualification run"
+    option :lane, type: :string,
+                  desc: "for `migration qualify`: deterministic or installed"
     define_method(:module) do |subcommand = nil, subject = nil|
       require "hive/commands/module"
       Hive::Commands::Module.new(
@@ -577,7 +581,8 @@ module Hive
         mappings: options[:mapping], input_bindings: options[:input_binding],
         allow_escalation: options[:allow_escalation],
         event_name: options[:event], schedule: options[:schedule], occurred_at: options[:occurred_at],
-        reviewer: options[:reviewer]
+        reviewer: options[:reviewer], run_id: options[:run_id],
+        lane: options[:lane]
       ).call
     end
 

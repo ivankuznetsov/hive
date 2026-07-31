@@ -1,5 +1,6 @@
 require "hive/config"
 require "hive/gh"
+require "hive/refactor_patrol/architecture_project_binding"
 require "hive/refactor_patrol/job_store"
 require "hive/refactor_patrol/publication_attempt"
 require "uri"
@@ -42,20 +43,8 @@ module Hive
       end
 
       def self.identity_from_source(source)
-        uri = URI.parse(source.fetch("url").to_s)
-        repository = source.fetch("repository").to_s
-        number = source.fetch("number")
-        match = uri.path.match(%r{\A/([^/]+/[^/]+)/pull/([1-9]\d*)\z})
-        unless uri.is_a?(URI::HTTP) && uri.host && uri.userinfo.nil? &&
-               uri.query.nil? && uri.fragment.nil? && match &&
-               match[1].casecmp?(repository) && number.is_a?(Integer) &&
-               number.positive? && match[2].to_i == number
-          raise Hive::GhError, "source repository URL is invalid"
-        end
-
-        { "repository" => repository, "host" => uri.host }
-      rescue KeyError, URI::InvalidURIError => e
-        raise Hive::GhError, "source repository URL is invalid: #{e.message}"
+        Hive::RefactorPatrol::ArchitectureProjectBinding
+          .source_identity!(source)
       end
 
       def initialize(registry: -> { Hive::Config.registered_projects },

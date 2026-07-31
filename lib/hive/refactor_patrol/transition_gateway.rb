@@ -2,8 +2,10 @@ require "json"
 require "digest"
 require "time"
 require "hive/modules/migration/patrol_evidence"
+require "hive/refactor_patrol/architecture_project_binding"
 require "hive/refactor_patrol/decision_projection"
 require "hive/refactor_patrol/effect_gateway"
+require "hive/refactor_patrol/job_store"
 require "hive/refactor_patrol/pr_manifest"
 require "hive/workflow_package/canonical_json"
 
@@ -18,12 +20,15 @@ module Hive
       attr_reader :capture
 
       class << self
-        def capture_for_manifest(manifest:, project_id:, owner:, owner_epoch:,
+        def capture_for_manifest(manifest:, project:, owner:, owner_epoch:,
                                  recorded_at: nil)
           data = Hive::RefactorPatrol::PrManifest.validate!(
             JSON.parse(JSON.generate(manifest))
           )
           source = data.fetch("source")
+          project =
+            Hive::RefactorPatrol::ArchitectureProjectBinding
+            .validate!(project: project, source: source)
           occurred_at = Time.iso8601(source.fetch("merged_at"))
           recorded_at ||= occurred_at
           selection_input =
@@ -33,11 +38,7 @@ module Hive
             )
           Hive::Modules::Migration::PatrolCapture.build(
             module_name: "architecture-patrol",
-            project: {
-              "project_id" => project_id.to_s,
-              "name" => source.fetch("registration"),
-              "repository" => source.fetch("repository")
-            },
+            project: project,
             trigger: {
               "kind" => "pull_request.merged",
               "id" => [

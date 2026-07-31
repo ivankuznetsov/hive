@@ -1,0 +1,440 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hivecli.sh/schemas/hive-patrol-qualification-scenario-observations.v1.json",
+  "title": "Hive Patrol qualification scenario observations (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "run_id",
+    "lane",
+    "scenario_manifest_sha256",
+    "observations"
+  ],
+  "properties": {
+    "schema": {
+      "const": "hive-patrol-qualification-scenario-observations"
+    },
+    "schema_version": {"const": 1},
+    "run_id": {"$ref": "#/$defs/run_id"},
+    "lane": {"enum": ["deterministic", "installed"]},
+    "scenario_manifest_sha256": {"$ref": "#/$defs/digest"},
+    "observations": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 512,
+      "items": {"$ref": "#/$defs/observation"}
+    }
+  },
+  "$defs": {
+    "run_id": {
+      "type": "string",
+      "pattern": "^patrol-[0-9a-f]{64}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{6}Z$"
+    },
+    "effect_keys": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^effect-[0-9a-f]{64}$"
+      }
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "case_id",
+        "decision_id",
+        "module",
+        "decision_class",
+        "repository_sha",
+        "trigger_digest",
+        "comparator_semantic_digest",
+        "legacy_capture_id",
+        "event_id",
+        "attempt_id",
+        "legacy_effect_keys",
+        "module_effect_keys",
+        "fault_checkpoint",
+        "pre_fault_durable_state_sha256",
+        "recovered_durable_state_sha256",
+        "restart_generation",
+        "event",
+        "decision",
+        "attempts"
+      ],
+      "properties": {
+        "case_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+        },
+        "decision_id": {"$ref": "#/$defs/digest"},
+        "module": {"enum": ["architecture-patrol", "patrol"]},
+        "decision_class": {"type": "string", "minLength": 1},
+        "repository_sha": {"$ref": "#/$defs/sha"},
+        "trigger_digest": {"$ref": "#/$defs/digest"},
+        "comparator_semantic_digest": {"$ref": "#/$defs/digest"},
+        "legacy_capture_id": {
+          "type": "string",
+          "pattern": "^cap-[0-9a-f]{64}$"
+        },
+        "event_id": {
+          "type": "string",
+          "pattern": "^evt-[0-9a-f]{64}$"
+        },
+        "attempt_id": {"$ref": "#/$defs/uuid"},
+        "legacy_effect_keys": {
+          "$ref": "#/$defs/effect_keys"
+        },
+        "module_effect_keys": {"$ref": "#/$defs/effect_keys"},
+        "fault_checkpoint": {
+          "enum": [
+            "after_effect_intent",
+            "after_legacy_capture",
+            "after_legacy_decision",
+            "after_module_decision",
+            "during_reconciliation",
+            null
+          ]
+        },
+        "pre_fault_durable_state_sha256": {"$ref": "#/$defs/digest"},
+        "recovered_durable_state_sha256": {"$ref": "#/$defs/digest"},
+        "restart_generation": {"type": "integer", "minimum": 1},
+        "event": {"$ref": "#/$defs/event"},
+        "decision": {"$ref": "#/$defs/decision"},
+        "attempts": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {"$ref": "#/$defs/attempt"}
+        }
+      }
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "event_id",
+        "event_name",
+        "project_id",
+        "project",
+        "occurred_at",
+        "recorded_at",
+        "source",
+        "idempotency_key",
+        "payload"
+      ],
+      "properties": {
+        "schema": {"const": "hive-module-event"},
+        "schema_version": {"const": 1},
+        "event_id": {
+          "type": "string",
+          "pattern": "^evt-[0-9a-f]{64}$"
+        },
+        "event_name": {"const": "schedule"},
+        "project_id": {"type": "string", "minLength": 1},
+        "project": {"type": "string", "minLength": 1},
+        "occurred_at": {"$ref": "#/$defs/timestamp"},
+        "recorded_at": {"$ref": "#/$defs/timestamp"},
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "id"],
+          "properties": {
+            "type": {
+              "enum": [
+                "legacy_patrol_completion",
+                "legacy_architecture_patrol_completion"
+              ]
+            },
+            "id": {"type": "string", "minLength": 1}
+          }
+        },
+        "idempotency_key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "schedule",
+            "due_at",
+            "missed_windows",
+            "target_module",
+            "legacy_mutator_capture"
+          ],
+          "properties": {
+            "schedule": {"type": "string", "minLength": 1},
+            "due_at": {"$ref": "#/$defs/timestamp"},
+            "missed_windows": {"type": "integer", "minimum": 0},
+            "target_module": {
+              "enum": ["architecture-patrol", "patrol"]
+            },
+            "target_hook": {"type": "string", "minLength": 1},
+            "legacy_mutator_capture": {"type": "object"}
+          }
+        }
+      }
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "decision_id",
+        "project_id",
+        "project",
+        "module",
+        "hook",
+        "event_id",
+        "event_name",
+        "evaluated_at",
+        "outcome",
+        "reason",
+        "binding_digest",
+        "cursor_before",
+        "cursor_after",
+        "module_generation",
+        "configuration_digest",
+        "grant_digest",
+        "concurrency",
+        "attempt_id",
+        "task_id",
+        "artifacts",
+        "retry"
+      ],
+      "properties": {
+        "schema": {"const": "hive-module-decision"},
+        "schema_version": {"const": 1},
+        "decision_id": {
+          "type": "string",
+          "pattern": "^dec-[0-9a-f]{64}$"
+        },
+        "project_id": {"type": "string", "minLength": 1},
+        "project": {"type": "string", "minLength": 1},
+        "module": {"enum": ["architecture-patrol", "patrol"]},
+        "hook": {"type": "string", "minLength": 1},
+        "event_id": {
+          "type": "string",
+          "pattern": "^evt-[0-9a-f]{64}$"
+        },
+        "event_name": {"const": "schedule"},
+        "evaluated_at": {"$ref": "#/$defs/timestamp"},
+        "outcome": {"enum": ["launch", "skip"]},
+        "reason": {
+          "enum": ["admitted", "duplicate", "terminal_replay"]
+        },
+        "binding_digest": {
+          "anyOf": [
+            {"$ref": "#/$defs/digest"},
+            {"type": "null"}
+          ]
+        },
+        "cursor_before": {"type": ["string", "null"]},
+        "cursor_after": {"type": ["string", "null"]},
+        "module_generation": {
+          "anyOf": [
+            {"$ref": "#/$defs/sha"},
+            {"type": "null"}
+          ]
+        },
+        "configuration_digest": {
+          "anyOf": [
+            {"$ref": "#/$defs/digest"},
+            {"type": "null"}
+          ]
+        },
+        "grant_digest": {
+          "anyOf": [
+            {"$ref": "#/$defs/digest"},
+            {"type": "null"}
+          ]
+        },
+        "concurrency": {
+          "enum": ["allow", "drop", "replace", null]
+        },
+        "attempt_id": {"$ref": "#/$defs/uuid"},
+        "task_id": {"type": ["string", "integer", "null"]},
+        "artifacts": {"const": []},
+        "retry": {"type": "null"}
+      }
+    },
+    "attempt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attempt_id",
+        "predecessor_attempt_id",
+        "retry_charge",
+        "state",
+        "outcome",
+        "task_generation",
+        "ownership_generation",
+        "task_input_epoch",
+        "subject",
+        "receipt",
+        "receipt_sha256",
+        "loss",
+        "projection_sha256"
+      ],
+      "properties": {
+        "attempt_id": {"$ref": "#/$defs/uuid"},
+        "predecessor_attempt_id": {
+          "anyOf": [
+            {"$ref": "#/$defs/uuid"},
+            {"type": "null"}
+          ]
+        },
+        "retry_charge": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 15
+        },
+        "state": {"enum": ["lost", "terminal"]},
+        "outcome": {
+          "enum": ["succeeded", "failed", "cancelled", null]
+        },
+        "task_generation": {"$ref": "#/$defs/digest"},
+        "ownership_generation": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*:[0-9a-f]{40}$"
+        },
+        "task_input_epoch": {"type": "integer", "minimum": 1},
+        "subject": {"$ref": "#/$defs/subject"},
+        "receipt": {
+          "anyOf": [
+            {"$ref": "#/$defs/receipt"},
+            {"type": "null"}
+          ]
+        },
+        "receipt_sha256": {
+          "anyOf": [
+            {"$ref": "#/$defs/digest"},
+            {"type": "null"}
+          ]
+        },
+        "loss": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["reason", "at"],
+              "properties": {
+                "reason": {"type": "string", "minLength": 1},
+                "at": {"$ref": "#/$defs/timestamp"}
+              }
+            },
+            {"type": "null"}
+          ]
+        },
+        "projection_sha256": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "project_id",
+        "module",
+        "hook",
+        "event_id",
+        "occurrence_id",
+        "event_name",
+        "module_generation",
+        "configuration_digest",
+        "grant_digest"
+      ],
+      "properties": {
+        "kind": {"const": "module_hook"},
+        "project_id": {"type": "string", "minLength": 1},
+        "module": {"enum": ["architecture-patrol", "patrol"]},
+        "hook": {"type": "string", "minLength": 1},
+        "event_id": {
+          "type": "string",
+          "pattern": "^evt-[0-9a-f]{64}$"
+        },
+        "occurrence_id": {
+          "type": "string",
+          "pattern": "^evt-[0-9a-f]{64}$"
+        },
+        "event_name": {"const": "schedule"},
+        "module_generation": {"$ref": "#/$defs/sha"},
+        "configuration_digest": {"$ref": "#/$defs/digest"},
+        "grant_digest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attempt_id",
+        "task_generation",
+        "ownership_generation",
+        "task_input_epoch",
+        "outcome",
+        "exit_status",
+        "started_at",
+        "ended_at",
+        "final_checkpoint",
+        "output_references",
+        "log_reference"
+      ],
+      "properties": {
+        "attempt_id": {"$ref": "#/$defs/uuid"},
+        "task_generation": {"$ref": "#/$defs/digest"},
+        "ownership_generation": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*:[0-9a-f]{40}$"
+        },
+        "task_input_epoch": {"type": "integer", "minimum": 1},
+        "outcome": {"enum": ["succeeded", "failed", "cancelled"]},
+        "exit_status": {"type": "integer"},
+        "started_at": {"$ref": "#/$defs/timestamp"},
+        "ended_at": {"$ref": "#/$defs/timestamp"},
+        "final_checkpoint": {
+          "type": "object",
+          "minProperties": 1
+        },
+        "output_references": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/output_reference"}
+        },
+        "log_reference": {"$ref": "#/$defs/output_reference"}
+      }
+    },
+    "output_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "size", "sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "size": {"type": "integer", "minimum": 0},
+        "sha256": {"$ref": "#/$defs/digest"}
+      }
+    }
+  }
+}

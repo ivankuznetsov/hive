@@ -1,95 +1,257 @@
 require "hive/modules/migration/patrol_evidence_receipt"
-require "hive/modules/migration/patrol_evidence_verifier"
+require "hive/modules/migration/qualification_run_authority_provider"
+require "hive/modules/migration/qualification_run_descriptor"
 
 module Hive
   module Modules
     module Migration
-      # Resolves authority that a persisted evidence bundle cannot prove about
-      # itself. Project identity and active module selections come from live
-      # runtime state. Run evidence authority is loaded through one narrow
-      # run/lane lookup; production deliberately fails closed until that source
-      # is wired.
+      # Combines one explicitly selected immutable qualification run with
+      # current project and module-selection state. The receipt is evidence,
+      # never lookup authority: callers supply run and lane independently.
       class LiveBindingsResolver
         RUN_AUTHORITY_KEYS = %w[
-          artifact_digests candidate decision_expectations
-          expected_legacy_effect_keys lane required_matrix run_id
+          artifact_digests artifact_refs candidate decision_expectations
+          expected_legacy_effect_keys lane lane_policy module_selections
+          project required_faults required_matrix run_id
           scenario_manifest_digest
         ].freeze
+        BINDING_KEYS =
+          (RUN_AUTHORITY_KEYS + [ "configuration_digests" ]).sort.freeze
+        STATUSES = %w[
+          resolved evidence_required blocked failed
+        ].freeze
+        STATUS_RANK = {
+          "resolved" => 0,
+          "evidence_required" => 1,
+          "blocked" => 2,
+          "failed" => 3
+        }.freeze
         SHA = /\A[0-9a-f]{40}\z/
         DIGEST = /\A[0-9a-f]{64}\z/
 
-        Result = Data.define(:bindings, :blockers)
+        Result = Data.define(:status, :bindings, :issues) do
+          def resolved? = status == "resolved"
+          def blocked? = status == "blocked"
+          def failed? = status == "failed"
+        end
         ProjectResolution = Data.define(:project, :blockers)
 
         def initialize(project_provider:, module_selections:,
-                       run_authority_provider: nil)
+                       run_authority_provider:)
+          unless run_authority_provider.respond_to?(:call)
+            raise Hive::ConfigError,
+                  "patrol qualification authority provider is required"
+          end
+
           @project_provider = project_provider
           @module_selections = module_selections
           @run_authority_provider = run_authority_provider
         end
 
-        def resolve(receipt:, records:)
-          receipt = receipt.is_a?(PatrolEvidenceReceipt) ?
-            receipt :
-            PatrolEvidenceReceipt.from_h(receipt)
-          payload = receipt.to_h
-          blockers = []
-          project = live_project(blockers)
-          selections = live_selections(blockers)
-          authority = live_run_authority(
-            run_id: payload.fetch("run_id"),
-            lane: payload.fetch("lane"),
-            blockers: blockers
+        def resolve(run_id:, lane:, receipt:, records:)
+          run_id = run_id.to_s
+          lane = lane.to_s
+          unless QualificationRunDescriptor::RUN_ID.match?(run_id) &&
+                 QualificationRunDescriptor::LANES.include?(lane)
+            return result(
+              "failed", nil,
+              [ "live_run_selection_malformed" ]
+            )
+          end
+          provider = provider_outcome(run_id, lane)
+          return provider if provider.status != "resolved"
+          if receipt.nil? && records.nil?
+            return result(
+              "evidence_required", nil,
+              [ "lane_evidence_missing" ]
+            )
+          end
+          PatrolEvidenceReceipt.from_h(receipt) unless
+            receipt.is_a?(PatrolEvidenceReceipt)
+          records
+
+          authority = normalize_run_authority(
+            provider.bindings,
+            selected_run_id: run_id,
+            selected_lane: lane
           )
+          project_status, live_project, project_issues =
+            resolve_live_project
+          selection_status, live_selections, selection_issues =
+            resolve_live_selections
+          issues = project_issues + selection_issues
+          mismatch = false
+          if live_project &&
+             live_project != authority.fetch("project")
+            issues << "project_binding_mismatch"
+            mismatch = true
+          end
+          if live_selections &&
+             live_selections != authority.fetch("module_selections")
+            issues << "module_selection_binding_mismatch"
+            mismatch = true
+          end
+          statuses = [ project_status, selection_status ]
+          statuses << "evidence_required" if mismatch
+          status = highest_status(statuses)
           bindings = authority.merge(
-            "project" => project,
-            "module_selections" => selections,
             "configuration_digests" =>
-              selections.to_h do |name, selection|
+              authority.fetch("module_selections").to_h do |name, selection|
                 [
                   name,
                   selection.dig(
-                    "active",
-                    "configuration_digest"
+                    "active", "configuration_digest"
                   )
                 ]
               end
           )
-          Result.new(
-            bindings: PatrolEvidence.immutable_json(
-              bindings,
-              label: "patrol evidence live bindings"
-            ),
-            blockers: blockers.uniq.sort.freeze
-          ).freeze
+          result(status, bindings, issues)
+        rescue Hive::ConfigError, ArgumentError, KeyError,
+               NoMethodError, TypeError
+          result(
+            "failed", nil,
+            [ "live_run_authority_malformed" ]
+          )
+        rescue StandardError
+          result(
+            "failed", nil,
+            [ "live_run_authority_unsafe" ]
+          )
         end
 
         private
 
-        def live_project(blockers)
-          unless @project_provider.respond_to?(:call)
-            blockers << "live_project_binding_unresolved"
-            return unresolved_project
+        def provider_outcome(run_id, lane)
+          source = @run_authority_provider.call(
+            run_id: run_id,
+            lane: lane
+          )
+          unless source.is_a?(
+            QualificationRunAuthorityProvider::Outcome
+          )
+            return result(
+              "failed", nil,
+              [ "live_run_authority_untyped" ]
+            )
           end
+          status = source.status.to_s
+          issues = normalize_issues(source.issues)
+          case status
+          when "resolved"
+            unless source.bindings.is_a?(Hash) && issues.empty?
+              return result(
+                "failed", nil,
+                [ "live_run_authority_malformed" ]
+              )
+            end
+            result("resolved", source.bindings, [])
+          when "blocked", "failed"
+            unless source.bindings.nil? && !issues.empty?
+              return result(
+                "failed", nil,
+                [ "live_run_authority_malformed" ]
+              )
+            end
+            result(status, nil, issues)
+          else
+            result(
+              "failed", nil,
+              [ "live_run_authority_malformed" ]
+            )
+          end
+        rescue StandardError
+          result(
+            "failed", nil,
+            [ "live_run_authority_unsafe" ]
+          )
+        end
 
+        def normalize_run_authority(source, selected_run_id:,
+                                    selected_lane:)
+          label = "patrol run authority"
+          source = PatrolEvidence.immutable_json(
+            source,
+            label: label
+          )
+          PatrolEvidence.exact_keys!(
+            source, RUN_AUTHORITY_KEYS, label: label
+          )
+          unless source["run_id"] == selected_run_id &&
+                 source["lane"] == selected_lane
+            raise Hive::ConfigError,
+                  "patrol run authority selection is malformed"
+          end
+          validate_candidate!(source.fetch("candidate"), label)
+          validate_project!(source.fetch("project"), label)
+          validate_selections!(
+            source.fetch("module_selections"), label
+          )
+          digest!(
+            source.fetch("scenario_manifest_digest"), label
+          )
+          validate_artifacts!(
+            source.fetch("artifact_digests"), label
+          )
+          validate_decisions!(
+            source.fetch("decision_expectations"), label
+          )
+          validate_string_set!(
+            source.fetch("required_matrix"), label
+          )
+          validate_string_set!(
+            source.fetch("required_faults"), label
+          )
+          validate_effect_keys!(
+            source.fetch("expected_legacy_effect_keys"), label
+          )
+          validate_lane_policy!(
+            source.fetch("lane_policy"), selected_lane, label
+          )
+          validate_artifact_refs!(
+            source.fetch("artifact_refs"), selected_lane, label
+          )
+          source
+        end
+
+        def resolve_live_project
+          unless @project_provider.respond_to?(:call)
+            return [
+              "blocked", nil,
+              [ "live_project_binding_unresolved" ]
+            ]
+          end
           source = @project_provider.call
+          issues = []
           if source.is_a?(ProjectResolution)
-            blockers.concat(Array(source.blockers).map(&:to_s))
+            issues.concat(normalize_issues(source.blockers))
             source = source.project
           end
-          if source.nil?
-            blockers << "live_project_binding_unresolved" if
-              blockers.empty?
-            return unresolved_project
+          unless source
+            issues << "live_project_binding_unresolved" if
+              issues.empty?
+            return [ "blocked", nil, issues ]
           end
-
-          normalize_project(source)
-        rescue Hive::ConfigError, ArgumentError, KeyError, TypeError
-          blockers << "live_project_binding_malformed"
-          unresolved_project
+          project = begin
+            normalize_project(source)
+          rescue Hive::ConfigError
+            return [ "blocked", nil, issues ] unless
+              issues.empty?
+            raise
+          end
+          status = issues.empty? ?
+            "resolved" : "evidence_required"
+          [ status, project, issues ]
+        rescue Hive::ConfigError, ArgumentError, KeyError,
+               NoMethodError, TypeError
+          [
+            "failed", nil,
+            [ "live_project_binding_malformed" ]
+          ]
         rescue StandardError
-          blockers << "live_project_binding_unsafe"
-          unresolved_project
+          [
+            "failed", nil,
+            [ "live_project_binding_unsafe" ]
+          ]
         end
 
         def normalize_project(source)
@@ -108,182 +270,164 @@ module Hive
             source["repository_identity"] ||
               source[:repository_identity]
           end
-          if project_id.to_s.empty? || name.to_s.empty?
+          unless nonempty?(project_id) && nonempty?(name) &&
+                 nonempty?(repository)
             raise Hive::ConfigError,
                   "live project authority is malformed"
           end
-          if !repository.nil? && repository.to_s.empty?
-            raise Hive::ConfigError,
-                  "live project authority is malformed"
-          end
-
           {
             "project_id" => project_id.to_s,
             "name" => name.to_s,
-            "repository" =>
-              repository.nil? ? nil : repository.to_s
-          }
+            "repository" => repository.to_s
+          }.freeze
         end
 
-        def unresolved_project
-          {
-            "project_id" => "unresolved",
-            "name" => "unresolved",
-            "repository" => nil
-          }
-        end
-
-        def live_selections(blockers)
+        def resolve_live_selections
           unless @module_selections.is_a?(Hash)
-            blockers << "live_module_selection_bindings_unresolved"
-            return unresolved_selections
+            return [
+              "blocked", nil,
+              [ "live_module_selection_bindings_unresolved" ]
+            ]
           end
-
-          PatrolEvidence::MODULES.sort.to_h do |name|
+          issues = []
+          selections = PatrolEvidence::MODULES.sort.to_h do |name|
             source = @module_selections[name] ||
               @module_selections[name.to_sym]
-            unless source.is_a?(Hash) &&
-                   source["installed"] == true &&
+            unless source
+              issues <<
+                "live_module_selection_binding_unresolved:#{name}"
+              next [ name, nil ]
+            end
+            unless source.is_a?(Hash)
+              raise Hive::ConfigError,
+                    "live module selection is malformed"
+            end
+            unless source["installed"] == true &&
                    source["enabled"] == true &&
                    source["active"].is_a?(Hash)
-              blockers <<
+              issues <<
                 "live_module_selection_binding_unresolved:#{name}"
-              next [ name, unresolved_selection(name) ]
+              next [ name, nil ]
             end
             [
               name,
-              {
-                "selection_epoch" => source.fetch("epoch"),
-                "active" => source.fetch("active")
-              }
+              normalize_selection(
+                {
+                  "selection_epoch" => source.fetch("epoch"),
+                  "active" => source.fetch("active")
+                },
+                "live module selection"
+              )
             ]
           end
-        rescue KeyError, TypeError
-          blockers << "live_module_selection_bindings_unresolved"
-          unresolved_selections
-        end
-
-        def unresolved_selections
-          PatrolEvidence::MODULES.sort.to_h do |name|
-            [ name, unresolved_selection(name) ]
+          unless issues.empty?
+            return [ "blocked", nil, issues ]
           end
-        end
-
-        def unresolved_selection(name)
-          marker = name == "patrol" ? "0" : "1"
-          {
-            "selection_epoch" => 1,
-            "active" => {
-              "version" => "0.0.0",
-              "catalog_commit" => marker * 40,
-              "source_commit" => marker * 40,
-              "manifest_digest" => marker * 64,
-              "configuration_digest" => marker * 64
-            }
-          }
-        end
-
-        def live_run_authority(run_id:, lane:, blockers:)
-          unless @run_authority_provider.respond_to?(:call)
-            blockers << "live_run_authority_unresolved"
-            return unresolved_run_authority
-          end
-
-          source = begin
-            @run_authority_provider.call(
-              run_id: run_id,
-              lane: lane
-            )
-          rescue StandardError
-            blockers << "live_run_authority_unsafe"
-            return unresolved_run_authority
-          end
-          if source.nil?
-            blockers << "live_run_authority_unresolved"
-            return unresolved_run_authority
-          end
-
-          normalize_run_authority(source)
+          [ "resolved", selections.freeze, [] ]
         rescue Hive::ConfigError, ArgumentError, KeyError,
                NoMethodError, TypeError
-          blockers << "live_run_authority_malformed"
-          unresolved_run_authority
+          [
+            "failed", nil,
+            [ "live_module_selection_bindings_malformed" ]
+          ]
         end
 
-        def normalize_run_authority(source)
-          label = "patrol run authority"
-          source = PatrolEvidence.immutable_json(
-            source,
-            label: label
-          )
-          PatrolEvidence.exact_keys!(
-            source,
-            RUN_AUTHORITY_KEYS,
-            label: label
-          )
-          PatrolEvidence.nonempty(source["run_id"], label: label)
-          PatrolEvidence.enum(
-            source["lane"],
-            PatrolEvidenceReceipt::LANES,
-            label: label
-          )
-          validate_candidate!(source.fetch("candidate"), source["lane"])
-          digest!(
-            source.fetch("scenario_manifest_digest"),
-            label
-          )
-          validate_artifacts!(source.fetch("artifact_digests"))
-          validate_decision_expectations!(
-            source.fetch("decision_expectations")
-          )
-          validate_required_matrix!(source.fetch("required_matrix"))
-          validate_effect_keys!(
-            source.fetch("expected_legacy_effect_keys")
-          )
-          source
-        end
-
-        def validate_candidate!(candidate, lane)
-          label = "patrol run authority"
+        def validate_candidate!(candidate, label)
           PatrolEvidence.exact_keys!(
             candidate,
-            PatrolEvidenceReceipt::CANDIDATE_KEYS,
+            QualificationRunDescriptor::CANDIDATE_KEYS,
             label: label
           )
-          malformed!(label) unless SHA.match?(candidate["sha"].to_s)
-          %w[catalog_digest source_digest manifest_digest].each do |key|
+          unless SHA.match?(candidate["commit_sha"].to_s)
+            PatrolEvidence.malformed!(label)
+          end
+          (
+            QualificationRunDescriptor::CANDIDATE_KEYS -
+              [ "commit_sha" ]
+          ).each do |key|
             digest!(candidate[key], label)
           end
-          installed = candidate["installed_digest"]
-          if lane == "installed"
-            digest!(installed, label)
-          else
-            malformed!(label) unless installed.nil?
+        end
+
+        def validate_project!(project, label)
+          PatrolEvidence.exact_keys!(
+            project,
+            QualificationRunDescriptor::PROJECT_KEYS,
+            label: label
+          )
+          project.each_value do |value|
+            PatrolEvidence.nonempty(value, label: label)
           end
         end
 
-        def validate_artifacts!(artifacts)
-          label = "patrol run authority"
-          malformed!(label) unless
-            artifacts.is_a?(Hash) && !artifacts.empty?
-          artifacts.each do |name, digest|
-            PatrolEvidence.nonempty(name, label: label)
-            digest!(digest, label)
+        def validate_selections!(selections, label)
+          PatrolEvidence.exact_keys!(
+            selections,
+            PatrolEvidence::MODULES,
+            label: label
+          )
+          selections.each_value do |selection|
+            normalize_selection(selection, label)
           end
         end
 
-        def validate_decision_expectations!(expectations)
-          label = "patrol run authority"
-          malformed!(label) unless
-            expectations.is_a?(Array) && !expectations.empty?
-          expected_keys =
+        def normalize_selection(selection, label)
+          PatrolEvidence.exact_keys!(
+            selection,
+            PatrolEvidenceReceipt::MODULE_SELECTION_KEYS,
+            label: label
+          )
+          epoch = Integer(selection["selection_epoch"])
+          PatrolEvidence.malformed!(label) unless epoch.positive?
+          active = selection.fetch("active")
+          PatrolEvidence.exact_keys!(
+            active,
+            PatrolEvidenceReceipt::ACTIVE_SELECTION_KEYS,
+            label: label
+          )
+          PatrolEvidence.nonempty(
+            active["version"], label: label
+          )
+          %w[catalog_commit source_commit].each do |key|
+            PatrolEvidence.malformed!(label) unless
+              SHA.match?(active[key].to_s)
+          end
+          %w[manifest_digest configuration_digest].each do |key|
+            digest!(active[key], label)
+          end
+          {
+            "selection_epoch" => epoch,
+            "active" => active
+          }.freeze
+        rescue ArgumentError, KeyError, TypeError
+          PatrolEvidence.malformed!(label)
+        end
+
+        def validate_artifacts!(artifacts, label)
+          unless artifacts.is_a?(Hash) && !artifacts.empty?
+            PatrolEvidence.malformed!(label)
+          end
+          artifacts.each do |name, value|
+            unless name.to_s.match?(
+              /\A[a-z0-9][a-z0-9_.-]*\z/
+            )
+              PatrolEvidence.malformed!(label)
+            end
+            digest!(value, label)
+          end
+        end
+
+        def validate_decisions!(expectations, label)
+          unless expectations.is_a?(Array) &&
+                 !expectations.empty?
+            PatrolEvidence.malformed!(label)
+          end
+          keys =
             PatrolEvidenceReceipt::DECISION_KEYS -
-            [ "record_digest" ]
+              [ "record_digest" ]
           expectations.each do |row|
             PatrolEvidence.exact_keys!(
-              row,
-              expected_keys,
-              label: label
+              row, keys, label: label
             )
             digest!(row["decision_id"], label)
             PatrolEvidence.enum(
@@ -292,12 +436,14 @@ module Hive
               label: label
             )
             PatrolEvidence.nonempty(
-              row["decision_class"],
-              label: label
+              row["decision_class"], label: label
             )
-            PatrolEvidence.nonempty(row["repository"], label: label)
-            malformed!(label) unless
-              SHA.match?(row["repository_sha"].to_s)
+            PatrolEvidence.nonempty(
+              row["repository"], label: label
+            )
+            unless SHA.match?(row["repository_sha"].to_s)
+              PatrolEvidence.malformed!(label)
+            end
             digest!(row["trigger_digest"], label)
             PatrolEvidence.enum(
               row["control"],
@@ -305,58 +451,150 @@ module Hive
               label: label
             )
           end
-          malformed!(label) unless
-            expectations.map { |row| row["decision_id"] }.uniq.length ==
-              expectations.length
-        end
-
-        def validate_required_matrix!(matrix)
-          label = "patrol run authority"
-          malformed!(label) unless
-            matrix.is_a?(Array) && !matrix.empty? &&
-            matrix.uniq.length == matrix.length
-          matrix.each do |entry|
-            PatrolEvidence.nonempty(entry, label: label)
+          unless expectations ==
+                   expectations.sort_by do |row|
+                     row.fetch("decision_id")
+                   end &&
+                 expectations.map do |row|
+                   row.fetch("decision_id")
+                 end.uniq.length == expectations.length
+            PatrolEvidence.malformed!(label)
           end
         end
 
-        def validate_effect_keys!(keys)
-          label = "patrol run authority"
-          malformed!(label) unless
-            keys.is_a?(Array) && !keys.empty? &&
-            keys.uniq.length == keys.length
-          keys.each do |key|
-            PatrolEvidence.hex_id(key, "effect", label: label)
+        def validate_string_set!(values, label)
+          unless values.is_a?(Array) && !values.empty? &&
+                 values == values.sort &&
+                 values.uniq.length == values.length
+            PatrolEvidence.malformed!(label)
           end
+          values.each do |value|
+            PatrolEvidence.nonempty(value, label: label)
+          end
+        end
+
+        def validate_effect_keys!(values, label)
+          validate_string_set!(values, label)
+          values.each do |value|
+            PatrolEvidence.hex_id(
+              value, "effect", label: label
+            )
+          end
+        end
+
+        def validate_lane_policy!(policy, lane, label)
+          PatrolEvidence.exact_keys!(
+            policy,
+            QualificationRunDescriptor::LANE_KEYS,
+            label: label
+          )
+          expected_kind = lane == "deterministic" ?
+            "source_archive" : "installed_target"
+          unless policy["kind"] == expected_kind &&
+                 SHA.match?(policy["repository_sha"].to_s) &&
+                 policy["timeout_seconds"].is_a?(Integer) &&
+                 policy["timeout_seconds"].between?(1, 3_600) &&
+                 safe_relative?(policy["executable"])
+            PatrolEvidence.malformed!(label)
+          end
+          credentials = policy["credential_bindings"]
+          if lane == "deterministic"
+            unless policy["network"] == false &&
+                   policy["provider"] == "fixture" &&
+                   credentials == [] &&
+                   policy["target_ref"].to_s.start_with?(
+                     "inputs/candidate/"
+                   ) &&
+                   policy["target_ref"].to_s.end_with?(
+                     ".tar.gz"
+                   ) &&
+                   safe_relative?(policy["target_ref"])
+              PatrolEvidence.malformed!(label)
+            end
+          else
+            unless policy["network"] == true &&
+                   policy["provider"] == "openrouter" &&
+                   policy["target_ref"] ==
+                     "inputs/installed-target/target.json" &&
+                   credentials.is_a?(Array) &&
+                   !credentials.empty? &&
+                   credentials == credentials.sort &&
+                   credentials.uniq.length ==
+                     credentials.length &&
+                   credentials.all? do |name|
+                     name.to_s.match?(
+                       /\A[A-Z][A-Z0-9_]{0,127}\z/
+                     )
+                   end
+              PatrolEvidence.malformed!(label)
+            end
+          end
+        end
+
+        def validate_artifact_refs!(refs, lane, label)
+          PatrolEvidence.exact_keys!(
+            refs,
+            QualificationRunDescriptor::ARTIFACT_KEYS,
+            label: label
+          )
+          expected = {
+            "result" => "lanes/#{lane}/result.json",
+            "bundle" => "lanes/#{lane}/bundle.json",
+            "artifacts" => "lanes/#{lane}/artifacts",
+            "repro_json" => "lanes/#{lane}/repro.json",
+            "repro_script" => "lanes/#{lane}/repro.sh"
+          }
+          PatrolEvidence.malformed!(label) unless refs == expected
         end
 
         def digest!(value, label)
-          malformed!(label) unless DIGEST.match?(value.to_s)
+          PatrolEvidence.malformed!(label) unless
+            DIGEST.match?(value.to_s)
         end
 
-        def malformed!(label)
-          PatrolEvidence.malformed!(label)
+        def nonempty?(value)
+          value.is_a?(String) && !value.empty?
         end
 
-        def unresolved_run_authority
-          {
-            "run_id" => "unresolved",
-            "lane" => "deterministic",
-            "candidate" => {
-              "sha" => "0" * 40,
-              "catalog_digest" => "0" * 64,
-              "source_digest" => "0" * 64,
-              "manifest_digest" => "0" * 64,
-              "installed_digest" => nil
-            },
-            "scenario_manifest_digest" => "0" * 64,
-            "artifact_digests" => {
-              "unresolved" => "0" * 64
-            },
-            "decision_expectations" => [],
-            "required_matrix" => [],
-            "expected_legacy_effect_keys" => []
-          }
+        def safe_relative?(value)
+          value.is_a?(String) && !value.empty? &&
+            !value.start_with?("/") &&
+            !value.include?("\\") &&
+            value.split("/", -1).none? do |part|
+              part.empty? || part == "." || part == ".."
+            end
+        end
+
+        def normalize_issues(values)
+          issues = Array(values).map(&:to_s)
+          if issues.any?(&:empty?)
+            raise Hive::ConfigError,
+                  "patrol qualification issues are malformed"
+          end
+          issues.uniq.sort.freeze
+        end
+
+        def highest_status(statuses)
+          Array(statuses).compact.max_by do |status|
+            STATUS_RANK.fetch(status)
+          end || "resolved"
+        end
+
+        def result(status, bindings, issues)
+          unless STATUSES.include?(status)
+            raise Hive::ConfigError,
+                  "patrol live binding status is malformed"
+          end
+          normalized_bindings = bindings &&
+            PatrolEvidence.immutable_json(
+              bindings,
+              label: "patrol evidence live bindings"
+            )
+          Result.new(
+            status: status,
+            bindings: normalized_bindings,
+            issues: normalize_issues(issues)
+          ).freeze
         end
       end
     end

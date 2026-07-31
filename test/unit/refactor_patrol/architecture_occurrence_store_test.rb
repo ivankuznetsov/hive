@@ -1,4 +1,6 @@
 require "test_helper"
+require "open3"
+require "rbconfig"
 require "hive/refactor_patrol/architecture_occurrence_store"
 
 class RefactorPatrolArchitectureOccurrenceStoreTest < Minitest::Test
@@ -124,6 +126,27 @@ class RefactorPatrolArchitectureOccurrenceStoreTest < Minitest::Test
     def publish_prepared(entry, event)
       calls << [ entry, event ]
     end
+  end
+
+  def test_isolated_require_does_not_load_upper_architecture_layers
+    script = <<~'RUBY'
+      require "hive/refactor_patrol/architecture_occurrence_store"
+
+      forbidden = %w[
+        transition_gateway.rb repository_ownership.rb job_store.rb
+      ]
+      loaded = $LOADED_FEATURES.filter_map do |path|
+        name = File.basename(path)
+        name if forbidden.include?(name)
+      end
+      abort("loaded upper layers: #{loaded.join(', ')}") unless loaded.empty?
+    RUBY
+
+    _out, err, status = Open3.capture3(
+      RbConfig.ruby, "-Ilib", "-e", script
+    )
+
+    assert status.success?, err
   end
 
   def test_facade_reserves_job_owned_occurrence_and_delegates_effect_protocol
@@ -543,7 +566,7 @@ class RefactorPatrolArchitectureOccurrenceStoreTest < Minitest::Test
       project: project || {
         "project_id" => "project-1",
         "name" => source.fetch("registration"),
-        "repository" => source.fetch("repository")
+        "repository" => "github.com/#{source.fetch('repository')}"
       },
       trigger: {
         "kind" => "pull_request.merged",
@@ -612,10 +635,7 @@ class RefactorPatrolArchitectureOccurrenceStoreTest < Minitest::Test
   def job
     {
       "occurrence_id" => capture.occurrence_id,
-      "source" => {
-        "registration" => "demo",
-        "repository" => "owner/demo"
-      },
+      "source" => manifest.fetch("source"),
       "actions" => []
     }
   end

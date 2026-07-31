@@ -1,5 +1,6 @@
 require "json"
 require "hive/modules/migration/occurrence_journal"
+require "hive/refactor_patrol/architecture_project_binding"
 require "hive/refactor_patrol/pr_manifest"
 require "hive/workflow_package/canonical_json"
 
@@ -32,8 +33,7 @@ module Hive
         source = data.fetch("source")
         valid = capture.reservation["job_id"] == data.fetch("job_id") &&
                 capture.reservation["id"] == data.fetch("job_id") &&
-                capture.project["name"] == source.fetch("registration") &&
-                capture.project["repository"] == source.fetch("repository") &&
+                project_matches_source?(capture, source) &&
                 capture.trigger["manifest_digest"] ==
                   data.fetch("manifest_checksum") &&
                 capture.trigger["merge_sha"] == source.fetch("merge_sha")
@@ -52,10 +52,9 @@ module Hive
         aggregate = @job_reader.call(id)
         valid = capture.reservation["job_id"] == id &&
                 capture.reservation["id"] == id &&
-                capture.project["name"] ==
-                  aggregate.dig("source", "registration") &&
-                capture.project["repository"] ==
-                  aggregate.dig("source", "repository")
+                project_matches_source?(
+                  capture, aggregate.fetch("source")
+                )
         raise @inconsistent_record,
               "architecture patrol occurrence does not match its job" unless valid
 
@@ -245,6 +244,14 @@ module Hive
       end
 
       private
+
+      def project_matches_source?(capture, source)
+        Hive::RefactorPatrol::ArchitectureProjectBinding
+          .validate!(project: capture.project, source: source)
+        true
+      rescue Hive::ConfigError
+        false
+      end
 
       def architecture_intent!(value)
         intent =

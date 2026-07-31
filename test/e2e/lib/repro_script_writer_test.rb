@@ -430,4 +430,33 @@ class E2EReproScriptWriterTest < Minitest::Test
       end
     end
   end
+
+  def test_patrol_evidence_replay_is_executable_and_confined_to_the_preserved_run
+    Dir.mktmpdir("scenario") do |scenario_dir|
+      Dir.mktmpdir("sandbox") do |sandbox|
+        Dir.mktmpdir("home") do |run_home|
+          step = make_step(
+            "patrol_evidence",
+            args: {}
+          )
+          path = Hive::E2E::ReproScriptWriter.new(
+            scenario_dir: scenario_dir, sandbox_dir: sandbox,
+            run_home: run_home, steps: [ step ], failed_index: 1
+          ).write
+
+          body = File.read(path)
+          assert_includes body, "patrol_qualification_runner"
+          refute_includes body, "compressed-run-1"
+          assert_includes body, sandbox
+          assert_includes body, run_home
+          assert_includes body,
+                          File.join(scenario_dir, "patrol-evidence")
+          refute_includes body, "skipped: kind=patrol_evidence"
+          out = `bash -n #{Shellwords.escape(path)} 2>&1`
+          assert $CHILD_STATUS.success?,
+                 "patrol evidence repro must be valid bash: #{out}"
+        end
+      end
+    end
+  end
 end

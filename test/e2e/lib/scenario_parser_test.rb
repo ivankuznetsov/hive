@@ -296,4 +296,92 @@ class E2EScenarioParserTest < Minitest::Test
       assert_includes error.message, "only one ordered script_gh"
     end
   end
+
+  def test_patrol_evidence_has_no_scenario_control_inputs
+    Dir.mktmpdir("scenario") do |dir|
+      path = File.join(dir, "patrol.yml")
+      File.write(path, <<~YAML)
+        name: patrol_evidence
+        coverage:
+          primary: module.patrol_compressed_evidence
+          supporting: []
+        steps:
+          - kind: patrol_evidence
+      YAML
+
+      scenario = Hive::E2E::ScenarioParser.parse(path)
+
+      assert_equal "patrol_evidence", scenario.steps.first.kind
+      assert_empty scenario.steps.first.args
+    end
+  end
+
+  def test_patrol_evidence_rejects_aliases_and_operator_controlled_inputs
+    invalid_steps = [
+      [ "unknown keys", "kind: patrol_evidence\n    run_id: compressed-run-1" ],
+      [ "unknown keys", "kind: patrol_evidence\n    run_nonce: retry-1" ],
+      [ "unknown keys", "kind: patrol_evidence\n    run_id: run-1\n    repository: /tmp/foreign" ],
+      [ "unknown keys", "kind: patrol_evidence\n    run_id: run-1\n    lane: installed" ],
+      [ "unknown keys", "kind: patrol_evidence\n    run_id: run-1\n    expect_status: skipped" ]
+    ]
+
+    invalid_steps.each_with_index do |(message, step), index|
+      Dir.mktmpdir("scenario") do |dir|
+        path = File.join(dir, "patrol-#{index}.yml")
+        File.write(path, <<~YAML)
+          name: patrol_evidence_#{index}
+          coverage:
+            primary: module.patrol_compressed_evidence
+            supporting: []
+          steps:
+            - #{step}
+        YAML
+
+        error = assert_raises(Hive::E2E::ScenarioParser::InvalidScenario) do
+          Hive::E2E::ScenarioParser.parse(path)
+        end
+        assert_includes error.message, message
+      end
+    end
+  end
+
+  def test_patrol_compressed_evidence_cannot_be_pending_or_use_ruby_block
+    documents = [
+      <<~YAML,
+        name: pending_patrol_evidence
+        description: Qualification cannot be skipped.
+        tags: [incident-regression]
+        incident_id: pending-patrol-evidence
+        sibling_task_id: "#1"
+        pending: true
+        coverage:
+          primary: module.patrol_compressed_evidence
+          supporting: []
+        steps:
+          - kind: patrol_evidence
+      YAML
+      <<~YAML
+        name: ruby_patrol_evidence
+        coverage:
+          primary: module.patrol_compressed_evidence
+          supporting: []
+        steps:
+          - kind: ruby_block
+            block: puts "unsupported"
+      YAML
+    ]
+
+    documents.each_with_index do |yaml, index|
+      Dir.mktmpdir("scenario") do |dir|
+        path = File.join(dir, "patrol-#{index}.yml")
+        File.write(path, yaml)
+
+        error = assert_raises(Hive::E2E::ScenarioParser::InvalidScenario) do
+          Hive::E2E::ScenarioParser.parse(path)
+        end
+        assert_includes error.message,
+                        "module.patrol_compressed_evidence requires one active patrol_evidence step"
+      end
+    end
+  end
 end

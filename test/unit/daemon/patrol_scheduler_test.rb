@@ -740,6 +740,7 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
         "features_reviewed" => 3,
         "review_complete" => false,
         "findings" => 2,
+        "finding_ids" => %w[finding-a finding-b],
         "fixes_attempted" => 1,
         "prs_opened" => 1,
         "last_scanned_sha" => "a" * 40,

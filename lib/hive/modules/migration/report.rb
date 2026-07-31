@@ -1,6 +1,7 @@
 require "time"
 require "hive/modules/migration/patrol_evidence_verifier"
 require "hive/modules/migration/patrol_qualification"
+require "hive/modules/migration/qualification_run_descriptor"
 require "hive/modules/migration/report_projection"
 require "hive/workflow_package/canonical_json"
 
@@ -14,15 +15,15 @@ module Hive
         SCHEMA = "hive-module-migration-report".freeze
         SCHEMA_VERSION = 2
         STATUSES = %w[
-          evidence_required evidence_ready_for_operator
+          failed blocked evidence_required evidence_ready_for_operator
         ].freeze
         REQUIRED_LANES = %w[deterministic installed].freeze
         MAX_REPORT_BYTES = 512 * 1024
         MAX_BUNDLE_BYTES = 16 * 1024 * 1024
         TOP_LEVEL_KEYS = %w[
           blockers candidate configuration_digests generated_at lanes
-          migration report_id reviewed_at reviewer scenario_manifest_digest
-          schema schema_version status
+          migration report_id reviewed_at reviewer run_id
+          scenario_manifest_digest schema schema_version status
         ].freeze
         LANE_KEYS = %w[
           blockers bundle_digest bundle_path effect_index_digest receipt_id
@@ -39,10 +40,11 @@ module Hive
         attr_reader :payload, :qualification
 
         class << self
-          def build(lane_evidence:, reviewer:, reviewed_at:,
+          def build(run_id:, lane_evidence:, reviewer:, reviewed_at:,
                     generated_at: reviewed_at, migration: nil,
                     live_bindings_resolver: nil)
             ReportProjection.build(
+              run_id: run_id,
               lane_evidence: lane_evidence,
               reviewer: reviewer,
               reviewed_at: reviewed_at,
@@ -54,6 +56,7 @@ module Hive
 
           def evidence_required(blockers:, reviewer:, reviewed_at:,
                                 generated_at: reviewed_at,
+                                run_id: nil,
                                 configuration_digests: nil,
                                 candidate: nil,
                                 scenario_manifest_digest: nil,
@@ -70,6 +73,7 @@ module Hive
             body = {
               "schema" => SCHEMA,
               "schema_version" => SCHEMA_VERSION,
+              "run_id" => normalize_optional_run_id(run_id),
               "status" => "evidence_required",
               "blockers" => blockers,
               "candidate" => candidate,
@@ -97,6 +101,7 @@ module Hive
               value["schema"] == SCHEMA &&
               value["schema_version"] == SCHEMA_VERSION &&
               STATUSES.include?(value["status"]) &&
+              valid_run_binding?(value) &&
               value["report_id"].to_s.match?(
                 /\Amigration-report-[0-9a-f]{64}\z/
               ) &&
@@ -182,6 +187,7 @@ module Hive
             PatrolQualification.build(
               status: payload.fetch("status"),
               blockers: payload.fetch("blockers"),
+              run_id: payload.fetch("run_id"),
               configuration_digests:
                 payload.fetch("configuration_digests"),
               candidate: payload.fetch("candidate"),
@@ -226,6 +232,16 @@ module Hive
             )
           end
 
+          def normalize_optional_run_id(value)
+            return nil if value.nil?
+            string = value.to_s
+            PatrolEvidence.malformed!(
+              "module migration report"
+            ) unless
+              QualificationRunDescriptor::RUN_ID.match?(string)
+            string.freeze
+          end
+
           def normalize_migration(value)
             return nil if value.nil?
             value = PatrolEvidence.immutable_json(
@@ -254,7 +270,7 @@ module Hive
 
           def missing_lane_row
             {
-              "status" => "evidence_required",
+              "status" => "blocked",
               "blockers" => [ "lane_evidence_missing" ].freeze,
               "receipt_id" => nil,
               "effect_index_digest" => nil,
@@ -294,12 +310,30 @@ module Hive
             return optional if value.nil?
             value.is_a?(Hash) &&
               value.keys.sort == PatrolEvidenceReceipt::CANDIDATE_KEYS &&
-              value["sha"].to_s.match?(/\A[0-9a-f]{40}\z/) &&
-              %w[
-                catalog_digest source_digest manifest_digest
-              ].all? { |key| hex_digest?(value[key]) } &&
-              (value["installed_digest"].nil? ||
-               hex_digest?(value["installed_digest"]))
+              value["commit_sha"].to_s.match?(
+                /\A[0-9a-f]{40}\z/
+              ) &&
+              (
+                PatrolEvidenceReceipt::CANDIDATE_KEYS -
+                  [ "commit_sha" ]
+              ).all? do |key|
+                hex_digest?(value[key])
+              end
+          end
+
+          def valid_run_binding?(value)
+            run_id = value["run_id"]
+            return QualificationRunDescriptor::RUN_ID.match?(
+              run_id.to_s
+            ) unless run_id.nil?
+
+            value["status"] == "evidence_required" &&
+              value["lanes"].is_a?(Hash) &&
+              value["lanes"].values.all? do |row|
+                row.is_a?(Hash) &&
+                  row["bundle_path"].nil? &&
+                  row["bundle_digest"].nil?
+              end
           end
 
           def valid_configurations?(value, optional:)

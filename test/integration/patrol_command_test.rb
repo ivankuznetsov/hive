@@ -1,6 +1,7 @@
 require "test_helper"
 require "json"
 require "json_schemer"
+require "stringio"
 require "yaml"
 require "hive/commands/patrol"
 require "hive/config"
@@ -112,6 +113,7 @@ class PatrolCommandTest < Minitest::Test
       assert_equal true, payload.fetch("review_complete")
       assert_empty payload.fetch("review_errors")
       assert_equal 1, payload.fetch("findings")
+      assert_equal [ finding.id ], payload.fetch("finding_ids")
       assert_equal 1, payload.fetch("fix_candidates")
       assert_equal 1, payload.fetch("fixes_attempted")
       assert_equal 1, payload.fetch("fixes_validated")
@@ -134,6 +136,63 @@ class PatrolCommandTest < Minitest::Test
       assert_equal "hive-patrol-selection", selection.fetch("schema")
       assert_equal [ finding.id ], selection.fetch("ranked_candidates").map { |item| item.fetch("finding_id") }
       assert_operator selection.dig("ranked_candidates", 0, "alpha_score"), :>=, 70
+    end
+  end
+
+  def test_injected_clock_controls_state_and_deterministic_selection_audit
+    now = Time.utc(2026, 7, 31, 12, 34, 56, 123_456)
+
+    with_patrol_project do |repo|
+      capture = manual_capture_for(repo, now)
+      finding = sample_finding
+      finding.severity = "low"
+      _out, err, status = with_captured_exit do
+        command_for(
+          mapper: FakeMapper.new([ sample_feature ]),
+          reviewer: FakeReviewer.new([ finding ]),
+          clock: -> { now },
+          capture: capture
+        ).call
+      end
+
+      assert_equal "", err
+      assert_equal Hive::ExitCodes::SUCCESS, status
+
+      state = JSON.parse(File.read(File.join(repo, ".hive-state", "patrol", "state.json")))
+      assert_equal now.iso8601, state.fetch("last_run_at")
+
+      expected_path = File.join(
+        repo, ".hive-state", "patrol", "runs",
+        "selection-#{capture.capture_id.delete_prefix('cap-')}.json"
+      )
+      assert File.file?(expected_path), "expected deterministic selection audit #{expected_path}"
+
+      selection = JSON.parse(File.read(expected_path))
+      assert_equal now.iso8601, selection.fetch("created_at")
+
+      finding_path = File.join(
+        repo, ".hive-state", "patrol", "findings",
+        "#{finding.id}.json"
+      )
+      persisted_finding = JSON.parse(File.binread(finding_path))
+      assert_equal now.iso8601,
+                   persisted_finding.fetch("lifecycle_updated_at")
+    end
+  end
+
+  def test_injected_output_sink_preserves_the_public_json_payload
+    with_patrol_project do
+      output = StringIO.new
+      captured, err, status = with_captured_exit do
+        command_for(output: output).call
+      end
+
+      assert_equal Hive::ExitCodes::SUCCESS, status
+      assert_equal "", captured
+      assert_equal "", err
+      payload = JSON.parse(output.string)
+      assert_equal true, payload.fetch("ok")
+      assert_equal "demo", payload.fetch("project")
     end
   end
 
@@ -1418,7 +1477,8 @@ class PatrolCommandTest < Minitest::Test
   def command_for(project: "demo", json: true, dry_run: false, mapper: FakeMapper.new([]),
                   reviewer: FakeReviewer.new([]), mapper_factory: nil, reviewer_factory: nil,
                   fixer: FakeFixer.new(nil),
-                  pr_opener: FakePrOpener.new(Hive::Patrol::PrOpener::Result.new(status: :skipped)))
+                  pr_opener: FakePrOpener.new(Hive::Patrol::PrOpener::Result.new(status: :skipped)),
+                  clock: -> { Time.now.utc }, capture: nil, output: nil)
     Hive::Commands::Patrol.new(
       project,
       json: json,
@@ -1427,7 +1487,41 @@ class PatrolCommandTest < Minitest::Test
       reviewer_factory: reviewer_factory || ->(_root, _cfg, _state) { reviewer },
       fixer_factory: ->(_root, _cfg, _state) { fixer },
       pr_opener_factory: ->(_root, _cfg, _state) { pr_opener },
-      dismissals_factory: ->(_root, _state) { FakeDismissals.new }
+      dismissals_factory: ->(_root, _state) { FakeDismissals.new },
+      clock: clock,
+      capture: capture,
+      output: output
+    )
+  end
+
+  def manual_capture_for(repo, now)
+    entry = Hive::Config.find_project("demo")
+    snapshot = Hive::Modules::Migration::Patrols.ownership_snapshot(
+      repo, "patrol", hive_state_path: entry.fetch("hive_state_path")
+    )
+    identity = [
+      "manual", entry.fetch("project_id"), now.utc.iso8601(6)
+    ].join(":")
+
+    Hive::Modules::Migration::PatrolCapture.build(
+      module_name: "patrol",
+      project: {
+        "project_id" => entry.fetch("project_id"),
+        "name" => entry.fetch("name"),
+        "repository" => entry["repository_identity"]
+      },
+      trigger: { "kind" => "manual", "id" => identity },
+      reservation: { "kind" => "ordinary", "id" => identity },
+      owner: snapshot.fetch("owner"),
+      owner_epoch: snapshot.fetch("epoch"),
+      selection_input: Hive::Patrol::DecisionProjection.operation_input("manual"),
+      selection: Hive::Modules::Migration::PatrolDecisionProjection.build(
+        module_name: "patrol", rationale: "due"
+      ),
+      outcome_class: nil,
+      outcome: nil,
+      occurred_at: now,
+      recorded_at: now
     )
   end
 

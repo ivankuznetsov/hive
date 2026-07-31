@@ -195,6 +195,24 @@ class ModulesMigrationPatrolsTest < Minitest::Test
     end
   end
 
+  def test_absent_state_root_preserves_the_legacy_owner
+    with_tmp_dir do |project_root|
+      state_root = File.join(project_root, "nested", ".hive-state")
+
+      assert_equal(
+        "legacy",
+        Hive::Modules::Migration::Patrols.owner_for(
+          project_root,
+          "patrol",
+          hive_state_path: state_root
+        )
+      )
+      assert File.directory?(
+        File.join(state_root, "module-runtime", "migration")
+      )
+    end
+  end
+
   def test_diagnostic_reviewed_configuration_and_admission_lock_reflect_durable_state
     with_project do |project|
       root = project.fetch("path")
@@ -916,7 +934,7 @@ class ModulesMigrationPatrolsTest < Minitest::Test
     end
   end
 
-  def test_unresolved_live_providers_are_named_and_cannot_cut_over
+  def test_blocked_run_authority_is_named_and_cannot_cut_over
     with_project do |project|
       store = FakeStore.new
       migration = Hive::Modules::Migration::Patrols.new(
@@ -926,15 +944,18 @@ class ModulesMigrationPatrolsTest < Minitest::Test
         module_store: store,
         quiescence_probe: ->(*) { :quiescent },
         project_provider: -> { PROJECT_BINDING },
-        run_authority_provider: nil
+        run_authority_provider:
+          qualification_run_authority_provider(
+            authority_documents: {}
+          )
       )
       migration.adopt!(now: NOW)
       ready_report(project)
       live_report = migration.load_report_for_cutover
 
       %w[
-        deterministic:live_run_authority_unresolved
-        installed:live_run_authority_unresolved
+        deterministic:qualification_descriptor_missing
+        installed:qualification_descriptor_missing
       ].each do |blocker|
         assert_includes live_report.blockers, blocker
       end
@@ -946,7 +967,7 @@ class ModulesMigrationPatrolsTest < Minitest::Test
       end
       assert_includes(
         error.message,
-        "live_run_authority_unresolved"
+        "qualification_descriptor_missing"
       )
       state = migration.read
       assert_equal "shadowing", state.fetch("status")
@@ -961,9 +982,12 @@ class ModulesMigrationPatrolsTest < Minitest::Test
         File.join(project.fetch("path"), "registered-alias")
       File.symlink(project.fetch("path"), registered_alias)
       registered_project =
-        project.merge("path" => registered_alias)
+        project.merge(
+          "path" => registered_alias,
+          "repository_identity" => "github.com/owner/evidence"
+        )
       registrations = [ registered_project ]
-      repository_identity = "owner/evidence"
+      repository_identity = "github.com/owner/evidence"
       store = FakeStore.new
 
       with_replaced_singleton_method(
@@ -994,7 +1018,7 @@ class ModulesMigrationPatrolsTest < Minitest::Test
             "live_project_registration_missing" =>
               -> {
                 registrations = []
-                repository_identity = "owner/evidence"
+                repository_identity = "github.com/owner/evidence"
               },
             "live_project_registration_ambiguous" =>
               -> {
@@ -1004,7 +1028,7 @@ class ModulesMigrationPatrolsTest < Minitest::Test
                     "project_id" => "project-2"
                   )
                 ]
-                repository_identity = "owner/evidence"
+                repository_identity = "github.com/owner/evidence"
               },
             "live_project_repository_identity_missing" =>
               -> {
@@ -1013,7 +1037,7 @@ class ModulesMigrationPatrolsTest < Minitest::Test
                     "repository_identity" => nil
                   )
                 ]
-                repository_identity = "owner/evidence"
+                repository_identity = "github.com/owner/evidence"
               },
             "live_project_repository_identity_unresolved" =>
               -> {
@@ -1023,7 +1047,7 @@ class ModulesMigrationPatrolsTest < Minitest::Test
             "live_project_repository_identity_mismatch" =>
               -> {
                 registrations = [ registered_project ]
-                repository_identity = "owner/other"
+                repository_identity = "github.com/owner/other"
               }
           }
 
@@ -1044,7 +1068,7 @@ class ModulesMigrationPatrolsTest < Minitest::Test
           end
 
           registrations = [ registered_project ]
-          repository_identity = "owner/other"
+          repository_identity = "github.com/owner/other"
           error = assert_raises(Hive::ConfigError) do
             migration.cutover!(
               report: mismatched_report,
@@ -1573,7 +1597,11 @@ class ModulesMigrationPatrolsTest < Minitest::Test
   def architecture_capture(manifest)
     Hive::RefactorPatrol::TransitionGateway.capture_for_manifest(
       manifest: manifest,
-      project_id: "project-1",
+      project: {
+        "project_id" => "project-1",
+        "name" => "demo",
+        "repository" => "github.com/acme/demo"
+      },
       owner: "legacy",
       owner_epoch: 1,
       recorded_at: NOW
@@ -1650,6 +1678,7 @@ class ModulesMigrationPatrolsTest < Minitest::Test
     "architecture-patrol" => "b" * 64
   })
     report = Hive::Modules::Migration::Report.build(
+      run_id: PatrolEvidenceScenario::RUN_ID,
       lane_evidence: {
         "deterministic" => qualification_bundle(
           lane: "deterministic",

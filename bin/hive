@@ -3,6 +3,24 @@
 $LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
 
 require "hive"
+
+# Private candidate-side Patrol qualification route. Keep it ahead of the
+# LLM-wiki bootstrap, scheduler reconciliation, attempt context, and Thor:
+# qualification must touch only its owner-private workspace.
+if ARGV.first == "__patrol-qualification-scenario"
+  require "hive/commands/patrol_qualification_scenario"
+  begin
+    exit(
+      Hive::Commands::PatrolQualificationScenario
+        .from_argv(ARGV.drop(1))
+        .call
+    )
+  rescue Hive::Error => e
+    warn "hive: #{e.message}"
+    exit e.exit_code
+  end
+end
+
 require "hive/llm_wiki_bootstrap"
 
 # The workflow creator owns two strict observation routes. They must stay

@@ -1,0 +1,506 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hivecli.sh/schemas/hive-patrol-qualification-run.v1.json",
+  "title": "Hive Patrol Qualification Run (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "run_id",
+    "descriptor_sha256",
+    "prepared_at",
+    "project",
+    "module_selections",
+    "candidate",
+    "scenarios",
+    "expectations",
+    "lanes",
+    "artifact_refs"
+  ],
+  "properties": {
+    "schema": {
+      "const": "hive-patrol-qualification-run"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "run_id": {
+      "$ref": "#/$defs/run_id"
+    },
+    "descriptor_sha256": {
+      "$ref": "#/$defs/digest"
+    },
+    "prepared_at": {
+      "$ref": "#/$defs/timestamp"
+    },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "project_id",
+        "name",
+        "repository"
+      ],
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "repository": {
+          "type": "string",
+          "pattern": "^github\\.com/[a-z0-9][a-z0-9._-]{0,99}/[a-z0-9][a-z0-9._-]{0,99}$"
+        }
+      }
+    },
+    "module_selections": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "architecture-patrol",
+        "patrol"
+      ],
+      "properties": {
+        "architecture-patrol": {
+          "$ref": "#/$defs/module_selection"
+        },
+        "patrol": {
+          "$ref": "#/$defs/module_selection"
+        }
+      }
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "commit_sha",
+        "artifact_manifest_sha256",
+        "source_archive_sha256",
+        "candidate_gem_sha256",
+        "skills_archive_sha256",
+        "installed_tree_sha256"
+      ],
+      "properties": {
+        "commit_sha": {
+          "$ref": "#/$defs/sha"
+        },
+        "artifact_manifest_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "source_archive_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "candidate_gem_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "skills_archive_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "installed_tree_sha256": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "scenarios": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "manifest_ref",
+        "manifest_sha256",
+        "cases"
+      ],
+      "properties": {
+        "manifest_ref": {
+          "type": "string",
+          "pattern": "^inputs/scenarios/(?!.*(?:^|/)\\.\\.?/)[^\\\\]+\\.json$"
+        },
+        "manifest_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "cases": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/scenario_case"
+          }
+        }
+      }
+    },
+    "expectations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decision_expectations",
+        "expected_legacy_effect_keys",
+        "required_matrix",
+        "required_faults"
+      ],
+      "properties": {
+        "decision_expectations": {
+          "$ref": "#/$defs/decision_expectations"
+        },
+        "expected_legacy_effect_keys": {
+          "$ref": "#/$defs/effect_keys"
+        },
+        "required_matrix": {
+          "$ref": "#/$defs/nonempty_unique_strings"
+        },
+        "required_faults": {
+          "$ref": "#/$defs/faults"
+        }
+      }
+    },
+    "lanes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deterministic",
+        "installed"
+      ],
+      "properties": {
+        "deterministic": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/lane"
+            },
+            {
+              "properties": {
+                "credential_bindings": {
+                  "const": []
+                },
+                "kind": {
+                  "const": "source_archive"
+                },
+                "provider": {
+                  "const": "fixture"
+                },
+                "target_ref": {
+                  "type": "string",
+                  "pattern": "^inputs/candidate/(?!.*(?:^|/)\\.\\.?/)[^\\\\]+\\.tar\\.gz$"
+                },
+                "network": {
+                  "const": false
+                }
+              }
+            }
+          ]
+        },
+        "installed": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/lane"
+            },
+            {
+              "properties": {
+                "credential_bindings": {
+                  "const": [
+                    "GITHUB_TOKEN",
+                    "OPENROUTER_API_KEY"
+                  ]
+                },
+                "kind": {
+                  "const": "installed_target"
+                },
+                "provider": {
+                  "const": "openrouter"
+                },
+                "target_ref": {
+                  "const": "inputs/installed-target/target.json"
+                },
+                "network": {
+                  "const": true
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "artifact_refs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deterministic",
+        "installed"
+      ],
+      "properties": {
+        "deterministic": {
+          "const": {
+            "result": "lanes/deterministic/result.json",
+            "bundle": "lanes/deterministic/bundle.json",
+            "artifacts": "lanes/deterministic/artifacts",
+            "repro_json": "lanes/deterministic/repro.json",
+            "repro_script": "lanes/deterministic/repro.sh"
+          }
+        },
+        "installed": {
+          "const": {
+            "result": "lanes/installed/result.json",
+            "bundle": "lanes/installed/bundle.json",
+            "artifacts": "lanes/installed/artifacts",
+            "repro_json": "lanes/installed/repro.json",
+            "repro_script": "lanes/installed/repro.sh"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "run_id": {
+      "type": "string",
+      "pattern": "^patrol-[0-9a-f]{64}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{6}Z$"
+    },
+    "relative_executable": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?/)(?!.*\\\\).+$"
+    },
+    "module_selection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "selection_epoch",
+        "active"
+      ],
+      "properties": {
+        "selection_epoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "active": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "version",
+            "catalog_commit",
+            "source_commit",
+            "manifest_digest",
+            "configuration_digest"
+          ],
+          "properties": {
+            "version": {
+              "type": "string",
+              "minLength": 1
+            },
+            "catalog_commit": {
+              "$ref": "#/$defs/sha"
+            },
+            "source_commit": {
+              "$ref": "#/$defs/sha"
+            },
+            "manifest_digest": {
+              "$ref": "#/$defs/digest"
+            },
+            "configuration_digest": {
+              "$ref": "#/$defs/digest"
+            }
+          }
+        }
+      }
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decision_id",
+        "module",
+        "decision_class",
+        "repository",
+        "repository_sha",
+        "trigger_digest",
+        "control"
+      ],
+      "properties": {
+        "decision_id": {
+          "$ref": "#/$defs/digest"
+        },
+        "module": {
+          "enum": [
+            "architecture-patrol",
+            "patrol"
+          ]
+        },
+        "decision_class": {
+          "type": "string",
+          "minLength": 1
+        },
+        "repository": {
+          "type": "string",
+          "pattern": "^github\\.com/[a-z0-9][a-z0-9._-]{0,99}/[a-z0-9][a-z0-9._-]{0,99}$"
+        },
+        "repository_sha": {
+          "$ref": "#/$defs/sha"
+        },
+        "trigger_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "control": {
+          "enum": [
+            "architecture_positive_thesis",
+            "clean_negative",
+            "ordinary_positive_finding",
+            "none"
+          ]
+        }
+      }
+    },
+    "decision_expectations": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/decision"
+      }
+    },
+    "effect_keys": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^effect-[0-9a-f]{64}$"
+      }
+    },
+    "optional_effect_keys": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^effect-[0-9a-f]{64}$"
+      }
+    },
+    "nonempty_unique_strings": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "faults": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "after_effect_intent",
+          "after_legacy_capture",
+          "after_legacy_decision",
+          "after_module_decision",
+          "during_reconciliation"
+        ]
+      }
+    },
+    "optional_faults": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "after_effect_intent",
+          "after_legacy_capture",
+          "after_legacy_decision",
+          "after_module_decision",
+          "during_reconciliation"
+        ]
+      }
+    },
+    "scenario_case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "case_id",
+        "scenario_ref",
+        "scenario_sha256",
+        "decision_expectations",
+        "expected_legacy_effect_keys",
+        "matrix",
+        "faults"
+      ],
+      "properties": {
+        "case_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+        },
+        "scenario_ref": {
+          "type": "string",
+          "pattern": "^inputs/scenarios/(?!.*(?:^|/)\\.\\.?/)[^\\\\]+\\.yml$"
+        },
+        "scenario_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "decision_expectations": {
+          "$ref": "#/$defs/decision_expectations"
+        },
+        "expected_legacy_effect_keys": {
+          "$ref": "#/$defs/optional_effect_keys"
+        },
+        "matrix": {
+          "$ref": "#/$defs/nonempty_unique_strings"
+        },
+        "faults": {
+          "$ref": "#/$defs/optional_faults"
+        }
+      }
+    },
+    "lane": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "credential_bindings",
+        "kind",
+        "provider",
+        "repository_sha",
+        "target_ref",
+        "executable",
+        "network",
+        "timeout_seconds"
+      ],
+      "properties": {
+        "credential_bindings": {
+          "type": "array"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "repository_sha": {
+          "$ref": "#/$defs/sha"
+        },
+        "target_ref": {
+          "type": "string"
+        },
+        "executable": {
+          "$ref": "#/$defs/relative_executable"
+        },
+        "network": {
+          "type": "boolean"
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600
+        }
+      }
+    }
+  }
+}

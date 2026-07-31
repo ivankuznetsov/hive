@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/attempts/detached_launcher"
+require "hive/modules/migration/qualification_process_custody"
 
 class AttemptsDetachedLauncherTest < Minitest::Test
   include HiveTestHelper
@@ -11,8 +12,11 @@ class AttemptsDetachedLauncherTest < Minitest::Test
 
     with_tmp_dir do |root|
       store = Hive::Attempts::Store.new(root: root)
+      custody_root = File.join(root, "qualification-custody")
+      FileUtils.mkdir_p(custody_root, mode: 0o700)
       attempt = store.create_launching(
-        attempt_id: "attempt-detached", request_id: "request-1", predecessor_attempt_id: nil,
+        attempt_id: "11111111-1111-4111-8111-111111111111",
+        request_id: "request-1", predecessor_attempt_id: nil,
         task_id: "42", project: "demo", task_slug: "task", intended_stage: "4-execute",
         task_generation: "generation-1", progress_token: "progress", provider: "codex",
         worker_argv: [ "/bin/sh", "-c", "printf detached" ],
@@ -26,13 +30,27 @@ class AttemptsDetachedLauncherTest < Minitest::Test
         first_heartbeat_timeout_sec: 1, ready_timeout_sec: 2
       )
 
-      handoff = launcher.launch(attempt, claim_capability: CLAIM_CAPABILITY)
+      handoff = with_env(
+        "HIVE_QUALIFICATION_CUSTODY_ROOT" => custody_root
+      ) do
+        launcher.launch(
+          attempt,
+          claim_capability: CLAIM_CAPABILITY
+        )
+      end
       assert_equal true, handoff.fetch("claimed")
 
       terminal = wait_for_terminal(store, attempt.attempt_id)
       assert_equal "succeeded", terminal.outcome
       refute_equal caller_sid, terminal.wrapper.fetch("session_id")
       assert_equal terminal.wrapper.fetch("session_id"), terminal.wrapper.fetch("process_group_id")
+      custody =
+        Hive::Modules::Migration::
+          QualificationProcessCustody.read_all(
+            root: custody_root
+          ).fetch(attempt.attempt_id)
+      assert_equal terminal.wrapper,
+                   custody.fetch("wrapper")
     end
   end
 

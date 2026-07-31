@@ -65,6 +65,45 @@ class RefactorPatrolTransitionGatewayTest < Minitest::Test
     )
   end
 
+  def test_manifest_capture_uses_the_canonical_project_repository_identity
+    capture =
+      Hive::RefactorPatrol::TransitionGateway.capture_for_manifest(
+        manifest: manifest,
+        project: project,
+        owner: "legacy",
+        owner_epoch: 1,
+        recorded_at: Time.utc(2026, 7, 31, 12)
+      )
+
+    assert_equal(
+      "github.com/owner/demo",
+      capture.project.fetch("repository")
+    )
+    assert_equal(
+      "owner/demo:7:#{"b" * 40}",
+      capture.trigger.fetch("id")
+    )
+  end
+
+  def test_manifest_capture_rejects_a_mismatched_project_repository_identity
+    error = assert_raises(Hive::ConfigError) do
+      Hive::RefactorPatrol::TransitionGateway.capture_for_manifest(
+        manifest: manifest,
+        project: project.merge(
+          "repository" => "github.com/other/demo"
+        ),
+        owner: "legacy",
+        owner_epoch: 1
+      )
+    end
+
+    assert_equal(
+      "architecture patrol project binding does not match " \
+      "manifest source",
+      error.message
+    )
+  end
+
   def test_public_transition_paths_accept_zero_arity_and_replay_rejections
     effect_gateway = Gateway.new
     subject = gateway(gateway_factory: ->(**) { effect_gateway })
@@ -98,6 +137,35 @@ class RefactorPatrolTransitionGatewayTest < Minitest::Test
   end
 
   private
+
+  def project
+    {
+      "project_id" => "project-1",
+      "name" => "demo",
+      "repository" => "github.com/owner/demo"
+    }
+  end
+
+  def manifest
+    Hive::RefactorPatrol::PrManifest.build(
+      source: {
+        "url" => "https://github.com/owner/demo/pull/7",
+        "number" => 7,
+        "repository" => "owner/demo",
+        "registration" => "demo",
+        "base_branch" => "main",
+        "base_sha" => "a" * 40,
+        "merge_sha" => "b" * 40,
+        "merged_at" => Time.utc(2026, 7, 31, 12).iso8601
+      },
+      files: [
+        {
+          "path" => "lib/demo.rb",
+          "status" => "modified"
+        }
+      ]
+    )
+  end
 
   def gateway(**options)
     Hive::RefactorPatrol::TransitionGateway.new(

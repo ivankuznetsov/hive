@@ -65,6 +65,30 @@ class AttemptsAPITest < Minitest::Test
     assert_equal Time.at(1).utc, call.last.fetch(:now)
   end
 
+  def test_dispatch_module_hook_delegates_daemon_admission
+    daemon = Object.new
+    call = nil
+    daemon.define_singleton_method(:dispatch_module_hook) do |**attributes|
+      call = attributes
+      :accepted
+    end
+    api = Hive::Attempts::API.new(foreground: Object.new, daemon: daemon)
+    attributes = {
+      project_root: "/projects/demo",
+      argv: %w[hive __module-hook],
+      generation: "generation-1",
+      subject: { "kind" => "module_hook" },
+      request_id: "request-1",
+      provider: "codex",
+      now: Time.at(2).utc
+    }
+
+    result = api.dispatch_module_hook(**attributes)
+
+    assert_equal :accepted, result
+    assert_equal attributes, call
+  end
+
   def test_dispatch_successor_delegates_recovery_admission
     daemon = Object.new
     call = nil

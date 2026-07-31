@@ -71,11 +71,22 @@ class RefactorPatrolArchitectureOccurrenceLifecycleTest < Minitest::Test
 
     error = assert_raises(Hive::ConfigError) do
       lifecycle.reserve(
-        store: store, entry: { "project_id" => "project-1", "name" => "demo" },
+        store: store,
+        entry: {
+          "project_id" => "project-1",
+          "name" => "demo",
+          "repository_identity" => "github.com/owner/demo"
+        },
         aggregate: {
           "job_id" => "job-7", "created_at" => "not-a-time",
-          "source" => { "repository" => "owner/demo", "number" => 7,
-                        "merge_sha" => "a" * 40, "manifest_checksum" => "b" * 64 }
+          "source" => {
+            "url" => "https://github.com/owner/demo/pull/7",
+            "registration" => "demo",
+            "repository" => "owner/demo",
+            "number" => 7,
+            "merge_sha" => "a" * 40,
+            "manifest_checksum" => "b" * 64
+          }
         }, migration: { "owner" => "legacy", "epoch" => 1 }, now: NOW
       )
     end

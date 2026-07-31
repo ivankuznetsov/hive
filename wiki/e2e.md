@@ -3,7 +3,7 @@ title: Agentic E2E Suite
 type: reference
 source: test/e2e/, bin/hive-e2e, schemas/hive-e2e-{coverage,selection}.v1.json, Rakefile
 created: 2026-04-29
-updated: 2026-07-27
+updated: 2026-07-31
 tags: [test, e2e, tui, incidents, modules, artifacts]
 ---
 
@@ -60,6 +60,20 @@ digest, profile, required coverage IDs, concrete scenarios,
 pending/advisory/planned IDs, and replay command. `coverage` is read-only
 discovery; `run --coverage` and `run --profile` create the normal run directory
 and are the only modes that add `selection.json`.
+
+## Patrol compressed-evidence qualification
+
+The `module_patrol_compressed_evidence` scenario prepares one exact-HEAD,
+clean-checkout candidate plus its offline installed runtime, imports that
+immutable input set into the production qualification repository, and runs the
+deterministic and installed lanes from the imported bytes. The temporary
+candidate workspace is removed immediately after a successful import, before
+either lane or artifact publication can start. Cleanup holds no-follow
+descriptors for every directory, changes permissions only through those
+verified descriptors, rejects identity/owner/device/link/type or realpath
+drift, uses non-forced removal, and requires the exact workspace root to be
+absent afterward. Preparation and cleanup failures remain distinct in the
+reported cause chain.
 
 ## Binary contract
 
@@ -154,6 +168,7 @@ Supported step kinds:
 - `editor_action`, `log_assert`: narrower fixture helpers for editor/log flows.
 - `script_gh`: install an ordered sequence of exact GitHub argv, optional cwd/repository expectations, response JSON/stdout, stderr, and exit status.
 - `start_releases_stub`, `spawn_background`, `stop_process`: start controlled release responses and attached, harness-owned process groups for daemon-style scenarios.
+- `patrol_evidence`: build, import, execute, and capture the immutable Patrol compressed-evidence qualification run.
 
 Template variables include `{sandbox}`, `{run_home}`, `{project}`, `{slug}`, `{run_id}`, and `{task_dir:<stage>}`.
 

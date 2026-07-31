@@ -1,5 +1,6 @@
 require "hive/config"
 require "hive/modules/migration/patrol_evidence"
+require "hive/refactor_patrol/architecture_project_binding"
 require "hive/refactor_patrol/decision_projection"
 
 module Hive
@@ -30,13 +31,21 @@ module Hive
       end
 
       def reserve(store:, entry:, aggregate:, migration:, now:)
+        source = aggregate.fetch("source")
+        project =
+          Hive::RefactorPatrol::ArchitectureProjectBinding
+          .from_entry!(entry: entry, source: source)
         existing = store.occurrence_capture(aggregate.fetch("job_id"))
         if existing
+          Hive::RefactorPatrol::ArchitectureProjectBinding
+            .assert_same!(
+              expected: project,
+              observed: existing.project
+            )
           assert_same_owner!(existing, migration)
           return existing
         end
 
-        source = aggregate.fetch("source")
         occurred_at = canonical_time(
           source["merged_at"] || aggregate.fetch("created_at")
         )
@@ -47,11 +56,7 @@ module Hive
           )
         capture = Hive::Modules::Migration::PatrolCapture.build(
           module_name: "architecture-patrol",
-          project: {
-            "project_id" => entry.fetch("project_id"),
-            "name" => entry.fetch("name"),
-            "repository" => source.fetch("repository")
-          },
+          project: project,
           trigger: {
             "kind" => "pull_request.merged",
             "id" => [
@@ -100,14 +105,25 @@ module Hive
 
         occurrence = store.occurrence_for_job(token.fetch(:job_id))
         return unless occurrence
+        provisional = Hive::Modules::Migration::PatrolCapture.from_h(
+          occurrence.fetch("provisional_capture")
+        )
+        project =
+          Hive::RefactorPatrol::ArchitectureProjectBinding
+          .from_entry!(
+            entry: entry,
+            source: aggregate.fetch("source")
+          )
+        Hive::RefactorPatrol::ArchitectureProjectBinding
+          .assert_same!(
+            expected: project,
+            observed: provisional.project
+          )
         if occurrence.fetch("phase") == "finalized"
           drain(store, entry, occurrence.fetch("occurrence_id"))
           return
         end
 
-        provisional = Hive::Modules::Migration::PatrolCapture.from_h(
-          occurrence.fetch("provisional_capture")
-        )
         capture = final_capture(
           store,
           provisional,

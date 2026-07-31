@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hivecli.sh/schemas/hive-patrol-qualification-scenario-request.v1.json",
+  "title": "Hive Patrol qualification scenario request (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "case_id",
+    "scenario_sha256",
+    "scenario_ref",
+    "package_root_ref",
+    "sandbox_root_ref",
+    "output_ref",
+    "project"
+  ],
+  "properties": {
+    "schema": {
+      "const": "hive-patrol-qualification-scenario-request"
+    },
+    "schema_version": {"const": 1},
+    "case_id": {"$ref": "#/$defs/safe_id"},
+    "scenario_sha256": {"$ref": "#/$defs/digest"},
+    "scenario_ref": {
+      "type": "string",
+      "pattern": "^inputs/scenarios/[a-z0-9][a-z0-9._/-]{0,1000}\\.yml$"
+    },
+    "package_root_ref": {"const": "targets/source"},
+    "sandbox_root_ref": {
+      "type": "string",
+      "pattern": "^cases/[a-z0-9][a-z0-9._-]{0,127}/sandbox$"
+    },
+    "output_ref": {
+      "type": "string",
+      "pattern": "^cases/[a-z0-9][a-z0-9._-]{0,127}/output/scenario-actuals\\.json$"
+    },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project_id", "name", "repository"],
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "repository": {
+          "type": "string",
+          "pattern": "^github\\.com/[a-z0-9][a-z0-9._-]{0,99}/[a-z0-9][a-z0-9._-]{0,99}$"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "safe_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

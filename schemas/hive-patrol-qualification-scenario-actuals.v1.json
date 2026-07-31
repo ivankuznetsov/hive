@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hivecli.sh/schemas/hive-patrol-qualification-scenario-actuals.v1.json",
+  "title": "Hive Patrol qualification candidate actuals (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "actuals"],
+  "properties": {
+    "schema": {
+      "const": "hive-patrol-qualification-scenario-actuals"
+    },
+    "schema_version": {"const": 1},
+    "actuals": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 512,
+      "items": {"$ref": "#/$defs/actual"}
+    }
+  },
+  "$defs": {
+    "safe_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "effect_keys": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^effect-[0-9a-f]{64}$"
+      }
+    },
+    "actual": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "case_id",
+        "decision_id",
+        "module",
+        "repository_sha",
+        "trigger_digest",
+        "comparator_semantic_digest",
+        "legacy_capture_id",
+        "event_id",
+        "attempt_id",
+        "legacy_effect_keys",
+        "module_effect_keys",
+        "fault_checkpoint",
+        "pre_fault_durable_state_sha256",
+        "recovered_durable_state_sha256",
+        "restart_generation",
+        "event",
+        "decision",
+        "attempts"
+      ],
+      "properties": {
+        "case_id": {"$ref": "#/$defs/safe_id"},
+        "decision_id": {"$ref": "#/$defs/digest"},
+        "module": {"enum": ["architecture-patrol", "patrol"]},
+        "repository_sha": {"$ref": "#/$defs/sha"},
+        "trigger_digest": {"$ref": "#/$defs/digest"},
+        "comparator_semantic_digest": {"$ref": "#/$defs/digest"},
+        "legacy_capture_id": {
+          "type": "string",
+          "pattern": "^cap-[0-9a-f]{64}$"
+        },
+        "event_id": {
+          "type": "string",
+          "pattern": "^evt-[0-9a-f]{64}$"
+        },
+        "attempt_id": {"$ref": "#/$defs/uuid"},
+        "legacy_effect_keys": {"$ref": "#/$defs/effect_keys"},
+        "module_effect_keys": {"$ref": "#/$defs/effect_keys"},
+        "fault_checkpoint": {
+          "enum": [
+            "after_effect_intent",
+            "after_legacy_capture",
+            "after_legacy_decision",
+            "after_module_decision",
+            "during_reconciliation",
+            null
+          ]
+        },
+        "pre_fault_durable_state_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "recovered_durable_state_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "restart_generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "event": {"type": "object"},
+        "decision": {"type": "object"},
+        "attempts": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {"type": "object"}
+        }
+      }
+    }
+  }
+}

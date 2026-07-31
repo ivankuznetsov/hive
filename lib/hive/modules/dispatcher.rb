@@ -23,12 +23,14 @@ module Hive
     # and the immutable decision receipt.
     class Dispatcher
       UNSET_SELECTION = Object.new.freeze
+      NOOP_CHECKPOINT = ->(_name, _decision) { }.freeze
 
       def initialize(store:, attempt_store:, attempt_dispatcher:, project_id:, project:,
                      evaluator: TriggerEvaluator.new, decision_journal: nil,
                      secret_availability: ->(name) { ENV.key?(name.to_s) },
                      capacity_probe: ->(**) { false },
-                     clock: -> { Time.now.utc })
+                     clock: -> { Time.now.utc },
+                     checkpoint: NOOP_CHECKPOINT)
         @store = store
         @attempt_store = attempt_store
         @attempt_dispatcher = attempt_dispatcher
@@ -41,6 +43,7 @@ module Hive
         @secret_availability = secret_availability
         @capacity_probe = capacity_probe
         @clock = clock
+        @checkpoint = checkpoint
       end
 
       def dispatch(module_name:, hook_id:, event:, dry_run: false)
@@ -306,11 +309,13 @@ module Hive
       end
 
       def persist_decision(context, event, evaluation, attempt_id: nil)
-        @decision_journal.append(
+        decision = @decision_journal.append(
           decision_attributes(context, event, evaluation).merge(
             "attempt_id" => attempt_id, "evaluated_at" => @clock.call
           )
         )
+        @checkpoint.call(:after_module_decision, decision)
+        decision
       end
 
       def projected_decision(context, event, evaluation)

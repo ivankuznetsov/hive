@@ -60,7 +60,8 @@ module Hive
 
       def configure_effect_gateway!(capture:, evidence_store:, config_loader:,
                                     capability_checker:, module_execution: nil,
-                                    gateway_factory: nil)
+                                    gateway_factory: nil,
+                                    clock: -> { Time.now.utc })
         @effect_capture = capture
         reserve_occurrence!(capture)
         @effect_gateway_options = {
@@ -70,7 +71,8 @@ module Hive
           delivery_store: self,
           config_loader: config_loader,
           capability_checker: capability_checker,
-          module_execution: module_execution
+          module_execution: module_execution,
+          clock: clock
         }.freeze
         @effect_gateway_factory = gateway_factory
         @state_effect_gateway = effect_gateway_for(capture)

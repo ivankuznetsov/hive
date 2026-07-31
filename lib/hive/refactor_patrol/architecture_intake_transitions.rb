@@ -1,6 +1,7 @@
 require "digest"
 require "hive/modules/migration/evidence_store"
 require "hive/modules/migration/patrols"
+require "hive/refactor_patrol/architecture_project_binding"
 require "hive/refactor_patrol/job_store"
 require "hive/refactor_patrol/transition_gateway"
 
@@ -62,15 +63,28 @@ module Hive
 
       def capture_for(entry, store, manifest, migration:, now:)
         job_id = manifest.fetch("job_id")
+        project =
+          Hive::RefactorPatrol::ArchitectureProjectBinding
+          .from_entry!(
+            entry: entry,
+            source: manifest.fetch("source")
+          )
         capture = existing_capture(store, job_id)
-        capture ||= TransitionGateway.capture_for_manifest(
-          manifest: manifest,
-          project_id: entry["project_id"] ||
-            "local-#{Digest::SHA256.hexdigest(entry.fetch("path"))}",
-          owner: migration.fetch("owner"),
-          owner_epoch: migration.fetch("epoch"),
-          recorded_at: now
-        )
+        if capture
+          Hive::RefactorPatrol::ArchitectureProjectBinding
+            .assert_same!(
+              expected: project,
+              observed: capture.project
+            )
+        else
+          capture = TransitionGateway.capture_for_manifest(
+            manifest: manifest,
+            project: project,
+            owner: migration.fetch("owner"),
+            owner_epoch: migration.fetch("epoch"),
+            recorded_at: now
+          )
+        end
         store.reserve_manifest_occurrence!(
           manifest, capture: capture, now: now
         )

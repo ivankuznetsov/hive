@@ -14,6 +14,7 @@ require_relative "gh_stub"
 require_relative "json_validator"
 require_relative "paths"
 require_relative "path_safety"
+require_relative "patrol_qualification_runner"
 require_relative "repro_script_writer"
 require_relative "sandbox"
 require_relative "sandbox_env"
@@ -322,6 +323,44 @@ module Hive
 
       def step_script_gh(step)
         @gh_stub.install(expand(step.args.fetch("interactions")))
+      end
+
+      def step_patrol_evidence(step)
+        root = PathSafety.contained_path!(
+          @scenario_dir,
+          File.join(@scenario_dir, "patrol-evidence"),
+          "patrol_evidence artifacts root"
+        )
+        runner = @patrol_evidence_runner ||
+          PatrolQualificationRunner.new
+        result = runner.call(
+          project_root: @ctx.sandbox_dir,
+          run_home: @ctx.run_home,
+          artifacts_root: root
+        )
+        run_id = result["run_id"] if result.is_a?(Hash)
+        artifacts_dir =
+          result["artifacts_dir"] if result.is_a?(Hash)
+        expected_artifacts = if
+          PatrolQualificationRunner::RUN_ID.match?(run_id.to_s)
+          File.join(root, run_id)
+        end
+        unless result.is_a?(Hash) &&
+               artifacts_dir == expected_artifacts &&
+               PathSafety.contained?(root, artifacts_dir) &&
+               PatrolQualificationRunner::HARNESS_READY_STATUSES.include?(
+                 result["status"]
+               ) &&
+               File.file?(File.join(artifacts_dir, "result.json"))
+          status = result.is_a?(Hash) ?
+            result["status"].to_s : "malformed"
+          raise StepFailure.new(
+            step,
+            "patrol evidence outcome #{status.inspect} is not qualifying proof"
+          )
+        end
+      rescue ArgumentError => e
+        raise StepFailure.new(step, e.message)
       end
 
       def step_spawn_background(step)

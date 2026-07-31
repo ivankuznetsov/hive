@@ -6,6 +6,143 @@ require_relative "runner"
 require_relative "step_executor"
 
 class E2EStepExecutorTest < Minitest::Test
+  def test_patrol_evidence_is_confined_and_preserves_success_artifacts
+    Dir.mktmpdir("e2e-patrol-evidence") do |root|
+      sandbox_dir = File.join(root, "sandbox")
+      run_home = File.join(root, "home")
+      scenario_dir = File.join(root, "run", "scenarios", "patrol")
+      FileUtils.mkdir_p([ sandbox_dir, run_home, scenario_dir ])
+      sandbox = Struct.new(:sandbox_dir, :run_home).new(sandbox_dir, run_home)
+      step = Hive::E2E::Step.new(
+        kind: "patrol_evidence",
+        args: {},
+        description: "",
+        position: 1
+      )
+      scenario = Hive::E2E::Scenario.new(
+        name: "patrol", description: "", tags: [], setup: {},
+        steps: [ step ], path: "inline"
+      )
+      calls = []
+      qualification_run_id = "patrol-#{"1" * 64}"
+      runner = Object.new
+      runner.define_singleton_method(:call) do |project_root:, run_home:, artifacts_root:|
+        artifacts_dir = File.join(
+          artifacts_root, qualification_run_id
+        )
+        calls << {
+          project_root: project_root, run_home: run_home,
+          artifacts_root: artifacts_root
+        }
+        FileUtils.mkdir_p(artifacts_dir)
+        File.write(
+          File.join(artifacts_dir, "result.json"),
+          JSON.generate("run_id" => qualification_run_id,
+                        "status" => "deterministic_evidence_ready")
+        )
+        {
+          "run_id" => qualification_run_id,
+          "status" => "deterministic_evidence_ready",
+          "artifacts_dir" => artifacts_dir
+        }
+      end
+      executor = Hive::E2E::StepExecutor.new(
+        scenario: scenario, sandbox: sandbox,
+        scenario_dir: scenario_dir, run_id: "outer-run"
+      )
+      executor.instance_variable_set(:@patrol_evidence_runner, runner)
+
+      result = executor.execute
+
+      assert_equal "passed", result.status
+      assert_equal 1, calls.size
+      call = calls.first
+      assert_equal File.expand_path(sandbox_dir),
+                   File.expand_path(call.fetch(:project_root))
+      assert_equal File.expand_path(run_home),
+                   File.expand_path(call.fetch(:run_home))
+      assert Hive::E2E::PathSafety.contained?(
+        scenario_dir, call.fetch(:artifacts_root)
+      )
+      assert_equal(
+        File.join(scenario_dir, "patrol-evidence"),
+        call.fetch(:artifacts_root)
+      )
+      assert File.file?(
+        File.join(
+          call.fetch(:artifacts_root), qualification_run_id,
+          "result.json"
+        )
+      )
+    end
+  end
+
+  def test_patrol_evidence_rejects_non_proof_outcomes_and_keeps_failure_replay
+    %w[pending skipped unsupported blocked failed evidence_required].each do |status|
+      with_runner do |scenarios_dir, runs_dir|
+        write_scenario(scenarios_dir, "patrol_#{status}", <<~YAML)
+          name: patrol_#{status}
+          steps:
+            - kind: patrol_evidence
+        YAML
+        runner = Hive::E2E::Runner.new(
+          scenarios_dir: scenarios_dir, runs_dir: runs_dir
+        )
+        executor_class = Hive::E2E::StepExecutor
+        original_new = executor_class.method(:new)
+        fake = Object.new
+        qualification_run_id = "patrol-#{"2" * 64}"
+        fake.define_singleton_method(:call) do |project_root:, run_home:, artifacts_root:|
+          artifacts_dir = File.join(
+            artifacts_root, qualification_run_id
+          )
+          FileUtils.mkdir_p(artifacts_dir)
+          File.write(
+            File.join(artifacts_dir, "result.json"),
+            JSON.generate(
+              "run_id" => qualification_run_id,
+              "status" => status
+            )
+          )
+          {
+            "run_id" => qualification_run_id,
+            "status" => status,
+            "artifacts_dir" => artifacts_dir
+          }
+        end
+        executor_class.define_singleton_method(:new) do |**kwargs|
+          original_new.call(**kwargs).tap do |executor|
+            executor.instance_variable_set(:@patrol_evidence_runner, fake)
+          end
+        end
+        begin
+          runner.run_all
+        ensure
+          executor_class.define_singleton_method(:new, original_new)
+        end
+
+        report = report_for(runs_dir)
+        row = report.fetch("scenarios").first
+        assert_equal "failed", row.fetch("status"), status
+        assert_equal "patrol_evidence", row.fetch("failed_step_kind")
+        assert_match(/not qualifying proof/, row.fetch("error_summary"))
+        scenario_artifacts = File.join(
+          Dir[File.join(runs_dir, "*")].first,
+          row.fetch("artifacts_dir")
+        )
+        assert File.file?(
+          File.join(
+            scenario_artifacts, "patrol-evidence",
+            qualification_run_id, "result.json"
+          )
+        )
+        repro = File.read(File.join(scenario_artifacts, "repro.sh"))
+        assert_includes repro, "patrol_qualification_runner"
+        refute_includes repro, "skipped: kind=patrol_evidence"
+      end
+    end
+  end
+
   def test_tmux_is_quiesced_before_final_github_verification
     Dir.mktmpdir("e2e-executor") do |root|
       sandbox_dir = File.join(root, "sandbox")

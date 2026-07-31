@@ -104,6 +104,61 @@ class ModulesDispatcherTest < Minitest::Test
     end
   end
 
+  def test_checkpoint_observes_the_durable_decision_after_attempt_admission
+    runtime_at_checkpoint = nil
+    observed = []
+    checkpoint = lambda do |name, decision|
+      observed << {
+        name: name,
+        decision: decision,
+        journal:
+          Hive::Modules::DecisionJournal.new(
+            root: runtime_at_checkpoint.fetch(:journal).root
+          ).all,
+        attempts:
+          runtime_at_checkpoint.fetch(:attempt_store).scan.records
+      }
+    end
+
+    with_runtime(checkpoint: checkpoint) do |runtime|
+      runtime_at_checkpoint = runtime
+      result = runtime.fetch(:dispatcher).dispatch(
+        module_name: "demo",
+        hook_id: "task",
+        event: runtime.fetch(:event)
+      )
+      snapshot = observed.fetch(0)
+
+      assert_equal 1, observed.length
+      assert_equal :after_module_decision,
+                   snapshot.fetch(:name)
+      assert_same result.decision, snapshot.fetch(:decision)
+      assert_predicate snapshot.fetch(:decision), :frozen?
+      assert_equal [ result.decision ],
+                   snapshot.fetch(:journal)
+      assert_equal 1, snapshot.fetch(:attempts).length
+      assert_equal result.decision.fetch("attempt_id"),
+                   snapshot.fetch(:attempts).fetch(0).attempt_id
+    end
+  end
+
+  def test_checkpoint_ignores_dry_run_projections
+    observed = []
+    with_runtime(
+      checkpoint:
+        ->(name, decision) { observed << [ name, decision ] }
+    ) do |runtime|
+      runtime.fetch(:dispatcher).dispatch(
+        module_name: "demo",
+        hook_id: "task",
+        event: runtime.fetch(:event),
+        dry_run: true
+      )
+
+      assert_empty observed
+    end
+  end
+
   def test_terminal_attempt_recovery_stays_eligible_for_finalization
     with_runtime do |runtime|
       dispatcher = runtime.fetch(:dispatcher)
@@ -444,7 +499,8 @@ class ModulesDispatcherTest < Minitest::Test
 
   private
 
-  def with_runtime(attempt_dispatcher: nil, secret_required: false)
+  def with_runtime(attempt_dispatcher: nil, secret_required: false,
+                   checkpoint: nil)
     with_tmp_dir do |root|
       hooks = [
         {
@@ -483,10 +539,12 @@ class ModulesDispatcherTest < Minitest::Test
         root: File.join(root, ".hive-state", "module-runtime"),
         id_generator: -> { journal_counter += 1; "decision-#{journal_counter}" }
       )
-      dispatcher = Hive::Modules::Dispatcher.new(
+      dispatcher_options = {
         store: store, attempt_store: attempt_store, attempt_dispatcher: attempt_dispatcher,
         project_id: "project-1", project: "demo", decision_journal: journal, clock: -> { NOW }
-      )
+      }
+      dispatcher_options[:checkpoint] = checkpoint if checkpoint
+      dispatcher = Hive::Modules::Dispatcher.new(**dispatcher_options)
       runtime = {
         root: root, store: store, attempt_store: attempt_store, launcher: launcher,
         attempt_dispatcher: attempt_dispatcher, ledger: ledger, journal: journal,

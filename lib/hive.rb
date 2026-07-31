@@ -86,6 +86,11 @@ module Hive
       "hive-module-shadow-decision" => 2,
       "hive-module-migration-report" => 2,
       "hive-patrol-evidence-receipt" => 1,
+      "hive-patrol-qualification-run" => 1,
+      "hive-patrol-qualification-lane-result" => 1,
+      "hive-patrol-qualification-scenario-request" => 1,
+      "hive-patrol-qualification-scenario-actuals" => 1,
+      "hive-patrol-qualification-scenario-observations" => 1,
       # Daily digest of tasks waiting on human input (`hive answer-digest
       # --json`). The success envelope reports the send outcome plus the full
       # waiting set (count/tasks); the Thor-usage error path emits the shared

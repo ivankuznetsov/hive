@@ -93,6 +93,39 @@ class DaemonAttemptLossHealerTest < Minitest::Test
     end
   end
 
+  def test_shutdown_after_first_successor_stops_later_attempt_loss_admission
+    with_task do |task|
+      with_tmp_dir do |root|
+        store = Hive::Attempts::Store.new(root: root)
+        lost_attempts = [
+          lost_attempt(store, retry_charge: 0, task_folder: task.folder),
+          lost_attempt(store, retry_charge: 1, task_folder: task.folder)
+        ]
+        outcomes = Hive::Attempts::LostOutcomeStore.new(store: store)
+        admission_open = true
+        dispatcher = FakeDispatcher.new
+        dispatcher.define_singleton_method(:dispatch_successor) do |**attributes|
+          result = super(**attributes)
+          admission_open = false
+          result
+        end
+        service = healer(
+          store, outcomes, FakeProcessor.new(outcomes, task.folder),
+          dispatcher, FakeLogger.new,
+          admission_open: -> { admission_open }
+        )
+
+        service.heal_attempt_losses(lost_attempts, now: RETRY_AT)
+
+        assert_equal 1, dispatcher.calls.size,
+                     "shutdown after one lost-attempt successor must suppress later successors"
+        assert_equal "successor_dispatched", outcomes.fetch(lost_attempts.first.attempt_id).fetch("status")
+        refute_equal "successor_dispatched", outcomes.fetch(lost_attempts.last.attempt_id)&.fetch("status"),
+                     "a successor that never received admission must remain retryable"
+      end
+    end
+  end
+
   def test_retry_charge_is_lineage_evidence_not_an_exhaustion_budget
     with_task do |task|
       with_tmp_dir do |root|
@@ -326,7 +359,8 @@ class DaemonAttemptLossHealerTest < Minitest::Test
 
   def healer(store, outcomes, processor, dispatcher, logger,
              auto_retry_enabled: true,
-             project_auto_retry_enabled: ->(_project) { true })
+             project_auto_retry_enabled: ->(_project) { true },
+             admission_open: -> { true })
     Hive::Daemon::StaleAgentHealer.new(
       controller: FakeController.new,
       logger: logger,
@@ -335,7 +369,8 @@ class DaemonAttemptLossHealerTest < Minitest::Test
       lost_outcome_store: outcomes,
       lost_outcome_processor: processor,
       auto_retry_enabled: auto_retry_enabled,
-      project_auto_retry_enabled: project_auto_retry_enabled
+      project_auto_retry_enabled: project_auto_retry_enabled,
+      admission_open: admission_open
     )
   end
 

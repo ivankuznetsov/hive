@@ -466,6 +466,17 @@ configured caps. Rows with no live Claude PID and no live task lock do
 not consume capacity; if they are stale `AGENT_WORKING` rows, the healer
 will rewrite them on the same tick or a later retry.
 
+TERM and INT close daemon admission as soon as the dispatcher observes the
+shutdown flag. One `admission_open?` predicate is rechecked after durable
+attempt reconciliation and other blocking work, between lost-attempt
+successors, queued requests, patrol/digest candidates, task rows, and
+display-name backfills, and immediately before the durable-attempt or
+`ChildSupervisor` launch boundary. A request preclaim or scheduler reservation
+made before the signal is released if the final check closes admission. Work
+accepted before the signal enters the normal `ChildSupervisor`
+termination-and-drain path, but no later candidate from the same tick may
+start while shutdown is pending.
+
 `3-plan`/`needs_input` is the policy exception to the generic
 edit-resume debounce. A generated plan in `WAITING` is an approval
 pause, not a Q&A file waiting for typed answers. For daemon-enabled

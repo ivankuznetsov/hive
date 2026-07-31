@@ -144,7 +144,8 @@ module Hive
           lost_outcome_processor: @lost_outcome_processor,
           auto_retry_enabled: auto_retry_enabled?,
           project_auto_retry_enabled: ->(project) { project_enabled?(project) },
-          recovery_coordinator: @recovery_coordinator
+          recovery_coordinator: @recovery_coordinator,
+          admission_open: -> { admission_open? }
         )
         # Additive self-heal for tasks whose one-shot name generation at
         # `hive new` never landed (agent/codex outage). Re-spawns
@@ -152,7 +153,8 @@ module Hive
         # markers or dispatch.
         @display_name_backfiller = DisplayNameBackfiller.new(
           logger: @logger,
-          dry_run: @dry_run
+          dry_run: @dry_run,
+          admission_open: -> { admission_open? }
         )
         # Additive self-heal for tasks created outside `hive new` (hand-made
         # folder, `mv`-ed in) whose meta.yml has no id. Assigns the next
@@ -227,6 +229,8 @@ module Hive
       # handling, no sleep. Public so tests can drive a single tick
       # deterministically.
       def tick(now: Time.now)
+        return unless admission_open?
+
         @last_tick_at = now
         publish_operational_snapshot(:begin_tick, phase: "started", now: now)
         # PR-40 follow-up #2: clear the per-tick enable cache so a
@@ -254,6 +258,7 @@ module Hive
                                    action: "attempt_reconciliation_failed")
           return
         end
+        return unless admission_open?
 
         begin
           @stale_agent_healer.heal_attempt_losses(@attempt_snapshot&.lost_attempts || [], now: now)
@@ -263,6 +268,7 @@ module Hive
                         message: "attempt loss healer raised: #{e.class}: #{e.message}",
                         keeping_previous: true)
         end
+        return unless admission_open?
 
         # 1. Reap completed children, update controller, log decisions
         reap_completed(now: now)
@@ -277,6 +283,7 @@ module Hive
         # surfaces as a normal ChildExit on a later reap, which then
         # frees the slot via the controller.
         enforce_child_timeouts(now: now)
+        return unless admission_open?
 
         # 1d. Bound the dispatch-result notice dir (ADV-1 #6).
         prune_dispatch_results(now: now)
@@ -293,6 +300,8 @@ module Hive
 
         # 2. Fetch status
         result = @status_consumer.fetch
+        return unless admission_open?
+
         unless result.ok
           @logger.event(:status_failure, error: result.error)
           publish_operational_snapshot(
@@ -371,6 +380,7 @@ module Hive
             keeping_previous: true
           )
         end
+        return unless admission_open?
 
         # Heal AGENT_WORKING markers whose backing agent isn't alive
         # BEFORE per-row dispatch — a healed row classifies as :error on
@@ -392,6 +402,7 @@ module Hive
                         message: "stale_agent_healer raised: #{e.class}: #{e.message}",
                         keeping_previous: true)
         end
+        return unless admission_open?
 
         # Self-heal tasks left showing their raw slug because name
         # generation never landed at `hive new`. Purely additive and
@@ -443,13 +454,29 @@ module Hive
           @logger.event(:architecture_patrol_blocked, **event.reject { |key, _value| key == :status })
         end
         Array(patrol_candidates).each do |patrol_dispatch|
+          unless admission_open?
+            unless @patrol_arbiter
+              close_patrol_admission(
+                project: patrol_dispatch[:project],
+                architecture: patrol_dispatch[:patrol_kind]&.to_sym == :architecture,
+                reserved: patrol_dispatch,
+                now: now
+              )
+            end
+            next
+          end
+
           dispatch_patrol_with_gates(patrol_dispatch, now: now)
         end
 
         # 4. Per-row dispatch, later pipeline stages first (see
         # dispatch_priority_order) so work nearest completion drains
         # ahead of newer earlier-stage work when slots are scarce.
-        dispatch_priority_order(result.rows).each { |row| handle_row(row, now: now) }
+        dispatch_priority_order(result.rows).each do |row|
+          break unless admission_open?
+
+          handle_row(row, now: now)
+        end
 
         # 5. Bound the persisted dispatch-baseline file to the live task set.
         # Only reached on a SUCCESSFUL status fetch (the `unless result.ok`
@@ -580,6 +607,14 @@ module Hive
       end
 
       private
+
+      # One process-lifetime admission predicate for every daemon-owned
+      # provider/process launch. Signal handlers only flip @shutdown; callers
+      # recheck this predicate after blocking work, between candidates, and at
+      # the final launch boundary.
+      def admission_open?
+        @shutdown != true
+      end
 
       # Throttled (~daily) probe of the latest published release. On the
       # brew/AUR/bash channels it records a nudge (version + exact update
@@ -843,8 +878,16 @@ module Hive
       # re-logs.
       def run_digest_scheduler_tick(scheduler, label, now:)
         return unless scheduler
+        return unless admission_open?
 
-        scheduler.tick(now: now)&.each { |digest_dispatch| dispatch_digest(digest_dispatch, now: now) }
+        scheduler.tick(now: now)&.each do |digest_dispatch|
+          unless admission_open?
+            scheduler.cancel(date: digest_dispatch[:slug])
+            next
+          end
+
+          dispatch_digest(digest_dispatch, now: now)
+        end
         @digest_scheduler_fatal_signatures.delete(label)
       rescue StandardError => e
         log_digest_scheduler_fatal(label, e)
@@ -1072,6 +1115,8 @@ module Hive
       end
 
       def handle_row(row, now:)
+        return unless admission_open?
+
         unless project_enabled?(row.project)
           observe_operational_disposition(
             row, decision: :project_disabled, owner: "operator",
@@ -1311,6 +1356,8 @@ module Hive
       end
 
       def dispatch_or_block(row, now:, trigger: "advance")
+        return :shutdown unless admission_open?
+
         # The task folder may have vanished between status snapshot and
         # dispatch (concurrent `hive drop` or `hive forget`). A nil
         # folder is a separate signal — a malformed snapshot row —
@@ -1354,6 +1401,7 @@ module Hive
                                   stage: row.stage, reason: gate.to_s)
           return gate
         end
+        return :shutdown unless admission_open?
 
         # Plan-approval rows need a command rewrite + marker flip BEFORE
         # dispatch because TaskAction emits `hive plan ...` for the
@@ -1401,6 +1449,7 @@ module Hive
       end
 
       def dispatch_outcome(result)
+        return :shutdown if result == :shutdown
         return :dispatched unless result.is_a?(Hive::Attempts::DispatchResult)
 
         case result.status
@@ -1459,6 +1508,8 @@ module Hive
           [ "operator", "task folder disappeared before dispatch" ]
         when :plan_approval_invalid
           [ "hive", "plan approval could not be prepared safely" ]
+        when :shutdown
+          [ "scheduler", "daemon admission is closed for shutdown" ]
         else
           [ "unknown", "dispatch outcome is not recognized" ]
         end
@@ -1682,6 +1733,15 @@ module Hive
       end
 
       def dispatch_patrol_with_gates(patrol_dispatch, now:)
+        unless admission_open?
+          return close_patrol_admission(
+            project: patrol_dispatch[:project],
+            architecture: patrol_dispatch[:patrol_kind]&.to_sym == :architecture,
+            reserved: @patrol_arbiter ? nil : patrol_dispatch,
+            now: now
+          )
+        end
+
         entry = patrol_dispatch[:migration_entry] || patrol_dispatch[:entry]
         return dispatch_patrol_with_admission(patrol_dispatch, now: now) unless entry
 
@@ -1700,11 +1760,15 @@ module Hive
             )
             return
           end
+          return unless admission_open?
+
           dispatch_patrol_with_admission(patrol_dispatch, now: now)
         end
       end
 
       def dispatch_patrol_with_admission(patrol_dispatch, now:)
+        return unless admission_open?
+
         project = patrol_dispatch[:project]
         slug = patrol_dispatch[:slug] || Hive::Daemon::PatrolScheduler::PATROL_SLUG
         architecture = patrol_dispatch[:patrol_kind]&.to_sym == :architecture
@@ -1752,6 +1816,9 @@ module Hive
           @patrol_scheduler&.cancel(project: project) unless architecture
           return
         end
+        return close_patrol_admission(
+          project: project, architecture: architecture, now: now
+        ) unless admission_open?
 
         reserved = if @patrol_arbiter
           architecture ? @refactor_patrol_scheduler.reserve(patrol_dispatch, now: now) :
@@ -1760,6 +1827,11 @@ module Hive
           patrol_dispatch
         end
         return unless reserved
+        unless admission_open?
+          return close_patrol_admission(
+            project: project, architecture: architecture, reserved: reserved, now: now
+          )
+        end
         slug = reserved[:slug] || slug
         pid = dispatch_command(
           reserved[:command],
@@ -1771,6 +1843,11 @@ module Hive
           kind: :patrol_scan,
           dispatch_token: reserved[:dispatch_token]
         )
+        if pid == :shutdown
+          return close_patrol_admission(
+            project: project, architecture: architecture, reserved: reserved, now: now
+          )
+        end
         if architecture
           unless @dry_run
             identity = @supervisor.process_identity(pid)
@@ -1844,12 +1921,27 @@ module Hive
                               project: project, slug: slug)
       end
 
+      def close_patrol_admission(project:, architecture:, now:, reserved: nil)
+        if architecture
+          @refactor_patrol_scheduler&.cancel(
+            reserved, reason: "shutdown", now: now
+          ) if reserved
+        else
+          @patrol_scheduler&.cancel(project: project)
+        end
+        :shutdown
+      end
+
       def dispatch_digest(digest_dispatch, now:)
         date = digest_dispatch[:slug]
         project = digest_dispatch[:project]
         stage = digest_dispatch[:stage]
         action = global_digest_action(stage)
         scheduler = global_digest_scheduler(stage)
+        unless admission_open?
+          scheduler&.cancel(date: date)
+          return :shutdown
+        end
 
         # Gate the global digest through the controller so it (a) never
         # holds a task slot or pushes the daemon past max_concurrent_runs,
@@ -1866,8 +1958,12 @@ module Hive
           scheduler&.cancel(date: date)
           return
         end
+        unless admission_open?
+          scheduler&.cancel(date: date)
+          return :shutdown
+        end
 
-        dispatch_command(
+        result = dispatch_command(
           digest_dispatch[:command],
           project: project,
           slug: date,
@@ -1878,6 +1974,8 @@ module Hive
           trigger: action,
           kind: :digest
         )
+        scheduler&.cancel(date: date) if result == :shutdown
+        result
       rescue StandardError => e
         # If dispatch_command already spawned + recorded the child before
         # raising, `reap_completed` will call `complete` on its exit. Calling
@@ -1981,6 +2079,8 @@ module Hive
         # `record_dispatch`, so this is naturally exclusive across
         # iterations of this loop too.
         pending.each do |req|
+          break unless admission_open?
+
           log_dispatch_request_once(
             :dispatch_request_observed,
             request_id: req.request_id, project: req.project,
@@ -2042,6 +2142,8 @@ module Hive
       # checks AND the actual spawn. Returns nil; side effects via
       # @controller, @logger, and the queue's remove() call.
       def process_dispatch_request_iteration(req, now:, rows:)
+        return unless admission_open?
+
         unless Hive::Daemon::DispatchRequestQueue.valid_argv?(req.argv)
           reject_request(req, reason: "invalid_argv")
           return
@@ -2181,6 +2283,8 @@ module Hive
       # without it the request was enqueued and then silently dropped as
       # unknown_project, so the repair never ran (R10/AE3).
       def process_global_maintenance_request(req, now:)
+        return unless admission_open?
+
         unless Hive::Daemon::DispatchRequestQueue::GLOBAL_MAINTENANCE_ARGVS.include?(req.argv)
           reject_request(req, reason: "disallowed_global_request")
           return
@@ -2209,9 +2313,17 @@ module Hive
       # `recover_dispatch_claims` cleans up at next start instead of
       # re-running the work. The claimed file is unlinked on reap.
       def dispatch_request!(req, now:)
+        return :shutdown unless admission_open?
+
         command = Shellwords.join(req.argv)
         state_file_path = resolve_request_state_file_path(req)
         preclaim_dispatch_request(req, now: now)
+        unless admission_open?
+          Hive::Daemon::DispatchRequestQueue.release_claim(
+            req.request_id, state_home: dispatch_request_state_home
+          )
+          return :shutdown
+        end
         if @attempt_dispatcher && durable_task_request?(req)
           result = Hive::Daemon::DispatchRequestQueue.dispatch(
             req, dispatcher: @attempt_dispatcher, interactive: false, now: now
@@ -2274,6 +2386,12 @@ module Hive
           trigger: req.trigger.to_s.empty? ? "dispatch_request" : req.trigger,
           request_id: req.request_id
         )
+        if pid == :shutdown
+          Hive::Daemon::DispatchRequestQueue.release_claim(
+            req.request_id, state_home: dispatch_request_state_home
+          )
+          return :shutdown
+        end
         update_dispatch_request_claim(req, pid: pid, now: now)
         @logger.event(:dispatch_request_dispatched,
                       request_id: req.request_id, pid: pid,
@@ -2705,6 +2823,8 @@ module Hive
       def dispatch_command(command, project:, slug:, stage:, state_file_mtime:,
                            state_file_path:, now:, trigger: "advance",
                            request_id: nil, kind: :task, dispatch_token: nil)
+        return :shutdown unless admission_open?
+
         if kind == :task && @attempt_dispatcher && !@dry_run
           return dispatch_durable_command(
             command, project: project, slug: slug, stage: stage,
@@ -2725,6 +2845,8 @@ module Hive
           request_id: request_id
         }
         spawn_args[:dispatch_token] = dispatch_token if dispatch_token
+        return :shutdown unless admission_open?
+
         pid = @supervisor.spawn(**spawn_args)
         @controller.record_dispatch(
           pid: pid, project: project, slug: slug, stage: stage,
@@ -2739,6 +2861,8 @@ module Hive
       end
 
       def dispatch_durable_command(command, project:, slug:, stage:, now:, trigger:, request_id:)
+        return :shutdown unless admission_open?
+
         argv = Shellwords.split(command)
         request = Hive::Daemon::DispatchRequestQueue::Request.new(
           request_id: request_id || Hive::Daemon::DispatchRequestQueue.generate_request_id,
@@ -2756,6 +2880,8 @@ module Hive
           schema_version: Hive::Daemon::DispatchRequestQueue::SCHEMA_VERSION,
           path: nil
         )
+        return :shutdown unless admission_open?
+
         result = @attempt_dispatcher.dispatch_request(request, interactive: false, now: now)
         log_attempt_admission(result)
         if result.status == :accepted
@@ -2955,7 +3081,8 @@ module Hive
           lost_outcome_processor: @lost_outcome_processor,
           auto_retry_enabled: daemon_cfg.fetch("auto_retry", {}).fetch("enabled", true) == true,
           project_auto_retry_enabled: ->(project) { project_enabled?(project) },
-          recovery_coordinator: @recovery_coordinator
+          recovery_coordinator: @recovery_coordinator,
+          admission_open: -> { admission_open? }
         )
 
         @daemon_cfg = daemon_cfg
@@ -3017,7 +3144,8 @@ module Hive
         # within one tick; today it carries only the dry_run flag.
         @display_name_backfiller = DisplayNameBackfiller.new(
           logger: @logger,
-          dry_run: @dry_run
+          dry_run: @dry_run,
+          admission_open: -> { admission_open? }
         )
         @task_id_backfiller = TaskIdBackfiller.new(
           logger: @logger,

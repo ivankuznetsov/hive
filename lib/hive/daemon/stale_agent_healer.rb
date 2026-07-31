@@ -89,7 +89,8 @@ module Hive
                      lost_outcome_store: nil, lost_outcome_processor: nil,
                      auto_retry_enabled: true,
                      project_auto_retry_enabled: ->(_project) { true },
-                     recovery_coordinator: nil)
+                     recovery_coordinator: nil,
+                     admission_open: -> { true })
         @controller = controller
         @logger = logger
         @grace_sec = grace_sec
@@ -100,12 +101,14 @@ module Hive
         @auto_retry_enabled = auto_retry_enabled == true
         @project_auto_retry_enabled = project_auto_retry_enabled
         @recovery_coordinator = recovery_coordinator
+        @admission_open = admission_open
       end
 
       # Lease-backed loss is processed independently of legacy marker rows.
       # The durable retry charge and predecessor link survive daemon restart,
       # while the outcome sidecar makes repeated ticks idempotent.
       def heal_attempt_losses(attempts, now: Time.now.utc)
+        return unless admission_open?
         return unless @auto_retry_enabled
         return unless @attempt_store && @attempt_dispatcher &&
                       @lost_outcome_store && @lost_outcome_processor
@@ -119,6 +122,7 @@ module Hive
         end
 
         attempts.each do |attempt|
+          break unless admission_open?
           next unless @project_auto_retry_enabled.call(attempt["project"])
 
           outcome = @lost_outcome_processor.process(attempt, now: now)
@@ -155,6 +159,8 @@ module Hive
             last_retry_at: now.utc.iso8601(6),
             diagnostic: nil
           )
+          break unless admission_open?
+
           result = @attempt_dispatcher.dispatch_successor(
             predecessor: attempt,
             task: task,
@@ -216,7 +222,10 @@ module Hive
       # via `row.action == "error"`. The on-disk marker is unchanged
       # until *we* rewrite it, so it's the authoritative signal here.
       def heal(rows, now: Time.now, legacy_layout_projects: {}, auto_retry_projects: nil)
+        return unless admission_open?
+
         rows.each do |row|
+          break unless admission_open?
           next if legacy_layout_projects.include?(row.project)
           next if @controller.running_task?(project: row.project, slug: row.slug)
 
@@ -270,6 +279,12 @@ module Hive
       end
 
       private
+
+      def admission_open?
+        @admission_open.call == true
+      rescue StandardError
+        false
+      end
 
       def attempt_loss_retry_due?(attempt, outcome, now:)
         limited_at = parse_retry_time(outcome["last_retry_at"]) ||
@@ -372,6 +387,8 @@ module Hive
       end
 
       def coordinate_recovery(row, now:)
+        return unless admission_open?
+
         receipt = @recovery_coordinator.request(
           row: row, requestor: "healer", now: now
         )

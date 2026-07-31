@@ -78,9 +78,10 @@ class HiveDaemonDisplayNameBackfillerTest < Minitest::Test
     )
   end
 
-  def backfiller(spawn:, dry_run: false, max_per_tick: 2)
+  def backfiller(spawn:, dry_run: false, max_per_tick: 2, admission_open: -> { true })
     Hive::Daemon::DisplayNameBackfiller.new(
-      logger: @logger, dry_run: dry_run, spawn: spawn, max_per_tick: max_per_tick
+      logger: @logger, dry_run: dry_run, spawn: spawn, max_per_tick: max_per_tick,
+      admission_open: admission_open
     )
   end
 
@@ -126,6 +127,29 @@ class HiveDaemonDisplayNameBackfillerTest < Minitest::Test
 
     assert_equal 2, spawn.calls.size, "max_per_tick must bound spawns to 2"
     assert_equal 2, backfill_events.size
+  end
+
+  def test_shutdown_after_first_spawn_stops_later_name_generation
+    folders = Array.new(2) { make_task_folder(display_name: nil) }
+    admission_open = true
+    calls = []
+    spawn = lambda do |folder|
+      calls << folder
+      admission_open = false
+      Process.pid
+    end
+
+    backfiller(
+      spawn: spawn,
+      max_per_tick: 2,
+      admission_open: -> { admission_open }
+    ).backfill(
+      folders.each_with_index.map { |folder, index| make_row(folder, slug: "s#{index}") },
+      now: NOW
+    )
+
+    assert_equal [ folders.first ], calls
+    assert_equal 1, backfill_events.size
   end
 
   def test_does_not_respawn_inflight_folder

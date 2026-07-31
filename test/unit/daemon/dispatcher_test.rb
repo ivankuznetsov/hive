@@ -1883,6 +1883,54 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert logger.events.any? { |name, attrs| name == :blocked && attrs[:action] == "answer_digest" }
   end
 
+  def test_answer_digest_admission_rechecks_shutdown_after_capacity_gate
+    dispatcher, supervisor, controller, _logger, _watcher, _patrol, scheduler = make_dispatcher(
+      rows: [], with_answer_digest_scheduler: true
+    )
+    digest = {
+      project: "answer_digest",
+      slug: "2026-06-13",
+      stage: "answer_digest",
+      command: "hive answer-digest --date 2026-06-13 --json",
+      state_file_mtime: nil,
+      state_file_path: nil
+    }
+    controller.define_singleton_method(:can_dispatch_digest?) do |**_kwargs|
+      dispatcher.request_shutdown!
+      :ok
+    end
+
+    dispatcher.send(:dispatch_digest, digest, now: T0)
+
+    assert_empty supervisor.spawned,
+                 "a signal during digest capacity evaluation must suppress the spawn"
+    assert_equal [ "2026-06-13" ], scheduler.cancelled,
+                 "a shutdown-blocked digest must release its scheduler claim"
+  end
+
+  def test_answer_digest_releases_candidate_when_shutdown_arrives_inside_scheduler_tick
+    dispatcher, supervisor, _controller, _logger, _watcher, _patrol, scheduler = make_dispatcher(
+      rows: [], with_answer_digest_scheduler: true
+    )
+    digest = {
+      project: "answer_digest",
+      slug: "2026-06-13",
+      stage: "answer_digest",
+      command: "hive answer-digest --date 2026-06-13 --json",
+      state_file_mtime: nil,
+      state_file_path: nil
+    }
+    scheduler.define_singleton_method(:tick) do |now:|
+      dispatcher.request_shutdown!
+      [ digest ]
+    end
+
+    dispatcher.tick(now: T0)
+
+    assert_empty supervisor.spawned
+    assert_equal [ "2026-06-13" ], scheduler.cancelled
+  end
+
   def test_answer_digest_scheduler_completes_on_answer_digest_child_exit
     dispatcher, sup, = make_dispatcher(rows: [], with_answer_digest_scheduler: true)
     answer_digest = dispatcher.instance_variable_get(:@answer_digest_scheduler)
@@ -2476,6 +2524,51 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal 1, sup.spawned.size,
                  "a patrol scan runs on its own budget and is not blocked by a full task cap"
     assert_equal "hive patrol p1 --json", sup.spawned.first[:command]
+  end
+
+  def test_patrol_admission_rechecks_shutdown_after_capacity_gate
+    dispatcher, supervisor, controller, _logger, _watcher, patrol = make_dispatcher(
+      rows: [], with_patrol_scheduler: true
+    )
+    candidate = {
+      project: "p1", slug: "patrol", stage: "patrol",
+      command: "hive patrol p1 --json",
+      state_file_mtime: nil, state_file_path: nil, hive_state_path: "/tmp/state"
+    }
+    controller.define_singleton_method(:can_dispatch_patrol_scan?) do |**_kwargs|
+      dispatcher.request_shutdown!
+      :ok
+    end
+
+    dispatcher.send(:dispatch_patrol_with_gates, candidate, now: T0)
+
+    assert_empty supervisor.spawned,
+                 "a signal during patrol capacity evaluation must suppress the spawn"
+    assert_equal [ "p1" ], patrol.cancelled,
+                 "a shutdown-blocked patrol must release its scheduler claim"
+  end
+
+  def test_patrol_releases_all_reserved_candidates_when_shutdown_arrives_inside_scheduler_tick
+    dispatcher, supervisor, _controller, _logger, _watcher, patrol = make_dispatcher(
+      rows: [], with_patrol_scheduler: true
+    )
+    candidates = %w[p1 p2].map do |project|
+      {
+        project: project, slug: "patrol", stage: "patrol",
+        command: "hive patrol #{project} --json",
+        state_file_mtime: nil, state_file_path: nil, hive_state_path: "/tmp/state"
+      }
+    end
+    patrol.define_singleton_method(:tick) do |now:|
+      candidates.each { |candidate| reserve(candidate, now: now) }
+      dispatcher.request_shutdown!
+      candidates
+    end
+
+    dispatcher.tick(now: T0)
+
+    assert_empty supervisor.spawned
+    assert_equal %w[p1 p2], patrol.cancelled
   end
 
   def test_patrol_scan_blocked_when_its_own_budget_is_full
@@ -3436,6 +3529,132 @@ def test_run_forever_skips_escalated_tick_when_shutdown_requested_mid_probe
                "shutdown mid-probe must suppress the escalated full tick"
 end
 
+def test_tick_stops_admission_when_shutdown_arrives_during_status_fetch
+  rows = [ row(action: "ready_to_plan", command: "hive plan s1 --from 2-brainstorm") ]
+  dispatcher, supervisor, = make_dispatcher(rows: rows)
+  status = dispatcher.instance_variable_get(:@status_consumer)
+  original_fetch = status.method(:fetch)
+  status.define_singleton_method(:fetch) do
+    result = original_fetch.call
+    dispatcher.request_shutdown!
+    result
+  end
+
+  dispatcher.tick(now: T0)
+
+  assert_empty supervisor.spawned,
+               "a shutdown request observed during status fetch must close admission"
+end
+
+def test_tick_stops_admission_after_shutdown_during_first_row_spawn
+  rows = [
+    row(slug: "s1", action: "ready_to_plan", command: "hive plan s1 --from 2-brainstorm"),
+    row(slug: "s2", action: "ready_to_plan", command: "hive plan s2 --from 2-brainstorm")
+  ]
+  dispatcher, supervisor, = make_dispatcher(rows: rows)
+  original_spawn = supervisor.method(:spawn)
+  supervisor.define_singleton_method(:spawn) do |**kwargs|
+    pid = original_spawn.call(**kwargs)
+    dispatcher.request_shutdown!
+    pid
+  end
+
+  dispatcher.tick(now: T0)
+
+  assert_equal 1, supervisor.spawned.size,
+               "shutdown during one admission must suppress later rows in the same tick"
+end
+
+def test_tick_stops_later_durable_rows_when_shutdown_arrives_inside_attempt_dispatcher
+  rows = [
+    row(slug: "s1", action: "ready_to_plan", command: "hive plan s1 --from 2-brainstorm"),
+    row(slug: "s2", action: "ready_to_plan", command: "hive plan s2 --from 2-brainstorm")
+  ]
+  calls = []
+  attempt = Struct.new(:attempt_id, :task_generation, :state).new(
+    "attempt-1", "generation-1", "launching"
+  )
+  result = Hive::Attempts::DispatchResult.new(
+    status: :accepted, attempt: attempt, receipt: nil,
+    attach_descriptor: nil, reason: nil
+  )
+  dispatcher_ref = nil
+  attempt_dispatcher = Object.new
+  attempt_dispatcher.define_singleton_method(:dispatch_request) do |request, **options|
+    calls << [ request, options ]
+    dispatcher_ref.request_shutdown!
+    result
+  end
+  dispatcher, = make_dispatcher(rows: rows, attempt_dispatcher: attempt_dispatcher)
+  dispatcher_ref = dispatcher
+
+  dispatcher.tick(now: T0)
+
+  assert_equal 1, calls.size,
+               "shutdown inside the durable attempt boundary must suppress later rows"
+end
+
+def test_shutdown_during_attempt_reconciliation_stops_loss_healing_admission
+  capacity = Hive::Attempts::CapacitySnapshot.new(
+    global_count: 0, per_project: {}, per_task: {}, daily_counts: {},
+    reserved_attempt_ids: [], invalid_count: 0
+  )
+  snapshot = Hive::Attempts::ReconciliationSnapshot.new(
+    capacity: capacity, attempts: [], lost_attempts: [],
+    newly_lost_attempts: [], terminal_attempts: [], invalid_records: []
+  )
+  dispatcher_ref = nil
+  reconciler = Object.new
+  reconciler.define_singleton_method(:reconcile) do |now:|
+    dispatcher_ref.request_shutdown!
+    snapshot
+  end
+  dispatcher, = make_dispatcher(rows: [], attempt_reconciler: reconciler)
+  dispatcher_ref = dispatcher
+  loss_healer_called = false
+  dispatcher.instance_variable_get(:@stale_agent_healer)
+            .define_singleton_method(:heal_attempt_losses) do |*_args, **_kwargs|
+    loss_healer_called = true
+  end
+
+  dispatcher.tick(now: T0)
+
+  refute loss_healer_called,
+         "shutdown during reconciliation must stop before lost-attempt successor admission"
+end
+
+def test_row_admission_rechecks_shutdown_after_capacity_gate
+  task_row = row(
+    action: "ready_to_plan",
+    command: "hive plan s1 --from 2-brainstorm"
+  )
+  dispatcher, supervisor, controller, = make_dispatcher(rows: [ task_row ])
+  controller.define_singleton_method(:can_dispatch?) do |**_kwargs|
+    dispatcher.request_shutdown!
+    :ok
+  end
+
+  dispatcher.send(:handle_row, task_row, now: T0)
+
+  assert_empty supervisor.spawned,
+               "a signal during row capacity evaluation must close the final spawn boundary"
+end
+
+def test_dispatch_command_has_a_final_shutdown_admission_gate
+  dispatcher, supervisor, = make_dispatcher(rows: [])
+  dispatcher.request_shutdown!
+
+  result = dispatcher.send(
+    :dispatch_command,
+    "hive run s1",
+    project: "p1", slug: "s1", stage: "4-execute",
+    state_file_mtime: nil, state_file_path: nil, now: T0
+  )
+
+  assert_equal :shutdown, result
+  assert_empty supervisor.spawned
+end
+
 def test_fast_probe_does_not_fetch_status_when_idle_and_mtimes_unchanged
   folder = make_existing_row_folder(project: "p1", stage: "2-brainstorm", slug: "s1")
   state_file = File.join(folder, "brainstorm.md")
@@ -4294,6 +4513,64 @@ end
       assert_equal "attempt-1", claim["attempt_id"]
       assert_equal "generation-1", claim["task_generation"]
     end
+  end
+
+  def test_durable_request_releases_preclaim_when_shutdown_arrives_before_dispatch
+    Dir.mktmpdir("hive-dispatch-shutdown") do |state_home|
+      calls = []
+      attempt_dispatcher = Object.new
+      attempt_dispatcher.define_singleton_method(:dispatch_request) do |request, **options|
+        calls << [ request, options ]
+        raise "durable dispatch must not be reached after shutdown"
+      end
+      dispatcher, = make_dispatcher(
+        rows: [],
+        dispatch_request_state_home: state_home,
+        attempt_dispatcher: attempt_dispatcher
+      )
+      Q.write_request!(
+        project: "p1", slug: "demo-task", argv: %w[hive run demo-task],
+        request_id: "request-shutdown", state_home: state_home, now: T0
+      )
+      request = Q.pending(state_home: state_home).first
+      original_preclaim = dispatcher.method(:preclaim_dispatch_request)
+      dispatcher.define_singleton_method(:preclaim_dispatch_request) do |req, now:|
+        claim = original_preclaim.call(req, now: now)
+        request_shutdown!
+        claim
+      end
+
+      result = dispatcher.send(:dispatch_request!, request, now: T0)
+
+      assert_equal :shutdown, result
+      assert_empty calls
+      assert_equal [ "request-shutdown" ], Q.pending(state_home: state_home).map(&:request_id)
+      assert_empty Q.claimed(state_home: state_home)
+    end
+  end
+
+  def test_durable_command_bypass_honors_final_shutdown_admission_gate
+    calls = []
+    attempt_dispatcher = Object.new
+    attempt_dispatcher.define_singleton_method(:dispatch_request) do |request, **options|
+      calls << [ request, options ]
+      raise "durable attempt admission must stay closed"
+    end
+    dispatcher, supervisor, = make_dispatcher(
+      rows: [], attempt_dispatcher: attempt_dispatcher
+    )
+    dispatcher.request_shutdown!
+
+    result = dispatcher.send(
+      :dispatch_command,
+      "hive run demo-task",
+      project: "p1", slug: "demo-task", stage: "4-execute",
+      state_file_mtime: nil, state_file_path: nil, now: T0
+    )
+
+    assert_equal :shutdown, result
+    assert_empty calls
+    assert_empty supervisor.spawned
   end
 
   def test_recovery_attempt_dispatch_marks_each_admission_result_and_logs_its_event

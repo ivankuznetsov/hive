@@ -11,7 +11,6 @@ require "hive/agent_profiles/codex"
 require "hive/agent_profiles/pi"
 require "hive/claude_launcher"
 require "hive/agent_skills"
-require "hive/agent_skills/inspector"
 require "hive/web/environment"
 
 module Hive
@@ -24,6 +23,8 @@ module Hive
       EXIT_SUCCESS = 0
       EXIT_MISSING_SKILL = 65
       EXIT_CONFIG_ERROR = 78
+      MANAGED_HEALTH_PRECEDENCE =
+        %w[conflicting incompatible unavailable stale missing healthy].freeze
 
       # Exposes the row set after `#call` has run. Lets in-process
       # callers (e.g., `Hive::Commands::Init`'s preflight) read the
@@ -359,7 +360,7 @@ module Hive
       end
 
       def envelope(legacy_rows, managed_rows)
-        health_counts = Hive::AgentSkills::Inspector::HEALTH_PRECEDENCE.to_h do |health|
+        health_counts = MANAGED_HEALTH_PRECEDENCE.to_h do |health|
           [ health, managed_rows.count { |row| row[:health] == health } ]
         end
         {

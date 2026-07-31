@@ -62,10 +62,11 @@ real stage execution. It honors `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, and
 resolution rules. A native inventory claim is insufficient when the runtime
 resolver cannot load the declared probe.
 
-The Doctor command loads the inspector contract eagerly. Direct Ruby callers
-may therefore inject a compatible inspector and request the v2 JSON summary
-without relying on a previous command or test to have loaded
-`Hive::AgentSkills::Inspector`.
+The Doctor command owns the ordered summary keys and reaches the inspector
+through the supported `Hive::AgentSkills.hive_inspector` facade. Direct Ruby
+callers may therefore inject a compatible inspector and request the v2 JSON
+summary without relying on a previous command or test to have loaded an
+internal skillpack class.
 
 In `native`, `inventory_source: "filesystem"`, `commands: []`, and a null
 `cli_version` make that evidence boundary explicit. Setup uses live native

@@ -127,8 +127,10 @@ and `generation-locks` children may not: creation and every later access
 revalidate that each child is a real directory, not a symlink, and that its
 resolved path remains below the trusted root before chmod, read, lock, or
 write. Record and lock leaves use no-follow checks; attempt stream readers
-ignore symlink leaves and writers refuse them. Concurrent creation of the same
-per-attempt output directory revalidates the winning entry before use.
+ignore symlink leaves and writers refuse them. A stream read also treats a
+non-directory or symlink-loop parent as unavailable instead of raising through
+status or TUI replay. Concurrent creation of the same per-attempt output
+directory revalidates the winning entry before use.
 Lost-outcome and dirty-state directories receive the same containment check.
 Corrupt or replacement links therefore fail closed and never redirect attempt
 state or permission changes outside `$HIVE_HOME/attempts/v2`.

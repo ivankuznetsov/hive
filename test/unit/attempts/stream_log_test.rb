@@ -123,6 +123,23 @@ class AttemptsStreamLogTest < Minitest::Test
     end
   end
 
+  def test_reader_ignores_non_directory_and_symlink_loop_parents
+    with_tmp_dir do |root|
+      not_directory = File.join(root, "not-directory")
+      File.write(not_directory, "operator data\n")
+
+      assert_empty Hive::Attempts::StreamLog.read(
+        File.join(not_directory, "attempt.frames")
+      )
+
+      loop_path = File.join(root, "loop")
+      File.symlink("loop", loop_path)
+      assert_empty Hive::Attempts::StreamLog.read(
+        File.join(loop_path, "attempt.frames")
+      )
+    end
+  end
+
   def test_symlinked_log_directories_and_files_fail_closed_without_external_access
     with_tmp_dir do |root|
       outside = File.join(root, "outside")

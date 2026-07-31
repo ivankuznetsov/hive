@@ -39,7 +39,7 @@ module Hive
             nil
           end
         end.sort_by(&:sequence)
-      rescue Errno::ENOENT, Errno::EACCES, IOError
+      rescue SystemCallError, IOError
         []
       end
 

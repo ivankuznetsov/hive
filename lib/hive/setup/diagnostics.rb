@@ -6,6 +6,7 @@ require "timeout"
 require "hive"
 require "hive/paths"
 require "hive/agent_profiles"
+require "hive/setup/qmd_probe"
 
 module Hive
   module Setup
@@ -60,6 +61,7 @@ module Hive
 
       def initialize(runner: nil, env: ENV.to_h, path: nil, ruby_version: RUBY_VERSION)
         @runner = runner || method(:default_run)
+        @qmd_runner = runner || Hive::Setup::QmdProbe.method(:capture3_bounded)
         @env = env
         @path = path || env.fetch("PATH", "")
         @ruby_version = ruby_version
@@ -117,7 +119,18 @@ module Hive
         path = which("qmd") || managed_qmd
         return bootstrappable("qmd", "qmd can be installed by hive setup") unless path && File.executable?(path)
 
-        ok("qmd", path)
+        out, err, status = Hive::Setup::QmdProbe.call(path, runner: @qmd_runner)
+        return ok("qmd", [ path, out.to_s.strip ].reject(&:empty?).join(" ")) if status.success?
+
+        detail = Hive::Setup::QmdProbe.diagnostic(err, out, fallback: "qmd failed to start")
+        managed = managed_qmd_candidate?(path)
+        Result.new(
+          name: "qmd",
+          status: "missing",
+          detail: "qmd at #{path} failed to start: #{detail}",
+          fix_command: managed ? nil : "Repair or remove #{path}, then run hive setup again",
+          bootstrappable: managed
+        )
       end
 
       def check_web_bundle
@@ -248,6 +261,12 @@ module Hive
 
       def managed_qmd
         File.join(Hive::Paths.data_home, "qmd", "bin", "qmd")
+      end
+
+      def managed_qmd_candidate?(path)
+        File.realpath(path) == File.realpath(managed_qmd)
+      rescue SystemCallError
+        File.expand_path(path) == File.expand_path(managed_qmd)
       end
 
       def which(name)

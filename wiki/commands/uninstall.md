@@ -29,7 +29,12 @@ hive uninstall --force-purge-state
    - Hive Web identity lookup uses an explicit inert installer config, so a malformed global `web:` section cannot abort identity-only deregistration or prevent later cleanup.
    - Each thin installer delegates no-follow inspection, exact-state revalidation, manager disable, unlink, and Linux daemon-reload to `Hive::UserService`. Uninstall retains foreground-stop and multi-service/global cleanup ordering plus warning presentation.
 4. Remove XDG config/cache and versioned data payload directories, unless `HIVE_HOME` collapses config/data/state/cache onto one path.
-5. Remove user symlinks `hive` and `hv` under `${XDG_BIN_HOME:-~/.local/bin}` when they are symlinks.
+5. Remove user symlinks `hive` and `hv` under
+   `${XDG_BIN_HOME:-~/.local/bin}` only when each exact target is a
+   current-user regular wrapper under the active XDG data home or the prefix
+   recorded by `install-prefix`, and its data home has a stable current-user
+   `bash` install-channel marker. An unrelated launcher, a same-shaped
+   `hive/gems/bin/` tree, or a lookalike with a symlinked marker is preserved.
 6. Preserve or remove state according to `--purge` / `--force-purge-state`.
 
 Service unit removal refuses to unlink symlinks, so a pre-planted launchd/systemd path cannot trick uninstall into deleting an arbitrary user-writable target.
@@ -42,7 +47,7 @@ When `HIVE_HOME` is set, `Hive::Paths.hive_home_collapsed?` is true. In that sha
 
 ## Tests
 
-- `test/unit/commands/uninstall_test.rb` covers daemon/bot/web service removal, malformed-web-config isolation, Linux/macOS manager-failure continuation, state-preserving defaults, `--purge`, `--force-purge-state`, symlink refusal, collapsed `HIVE_HOME`, user symlink cleanup, and daemon pid termination.
+- `test/unit/commands/uninstall_test.rb` covers daemon/bot/web service removal, malformed-web-config isolation, Linux/macOS manager-failure continuation, state-preserving defaults, `--purge`, `--force-purge-state`, symlink refusal, collapsed `HIVE_HOME`, exact managed user-symlink cleanup with unowned-link preservation, and daemon pid termination.
 - `test/unit/paths_test.rb` covers XDG path resolution and legacy registry migration helpers used by install/uninstall surfaces.
 
 ## Backlinks

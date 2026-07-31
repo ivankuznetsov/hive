@@ -139,6 +139,47 @@ class SetupDiagnosticsTest < Minitest::Test
     end
   end
 
+  def test_qmd_present_but_unstartable_is_bootstrappable
+    Dir.mktmpdir("hive-diag") do |dir|
+      with_env("HIVE_HOME" => File.join(dir, "hive-home")) do
+        qmd = File.join(Hive::Paths.data_home, "qmd", "bin", "qmd")
+        FileUtils.mkdir_p(File.dirname(qmd))
+        File.write(qmd, "#!/bin/sh\n")
+        FileUtils.chmod(0o755, qmd)
+        secret = [ "sk", "A" * 24 ].join("-")
+        runner = lambda do |argv|
+          assert_equal [ qmd, "--version" ], argv
+          [ "", "NODE_MODULE_VERSION mismatch #{secret}\e[31m#{'x' * 1_500}", Status.new(false) ]
+        end
+        diag = Hive::Setup::Diagnostics.new(path: "", runner: runner, ruby_version: "3.4.1")
+
+        row = diag.check_qmd
+
+        assert_equal "missing", row.status
+        assert row.bootstrappable
+        assert_match(/failed to start/, row.detail)
+        assert_match(/NODE_MODULE_VERSION mismatch/, row.detail)
+        assert_includes row.detail, "[REDACTED:openai_api_key]"
+        refute_includes row.detail, secret
+        assert_operator row.detail.length, :<, 1_200
+      end
+    end
+  end
+
+  def test_qmd_unstartable_outside_the_managed_install_fails_hard
+    Dir.mktmpdir("hive-diag") do |dir|
+      qmd = executable(dir, "qmd")
+      runner = ->(_argv) { [ "", "operator qmd failed", Status.new(false) ] }
+      diag = Hive::Setup::Diagnostics.new(path: dir, runner: runner, ruby_version: "3.4.1")
+
+      row = diag.check_qmd
+
+      assert_equal "missing", row.status
+      refute row.bootstrappable
+      assert_match(/Repair or remove/, row.fix_command)
+    end
+  end
+
   def test_web_bundle_present_and_current_reports_ok_not_bootstrappable
     diag = Hive::Setup::Diagnostics.new(ruby_version: "3.4.1")
     with_replaced_singleton_method(Hive::Web::AppBundle, :present?, -> { true }) do

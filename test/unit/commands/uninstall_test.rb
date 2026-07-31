@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/commands/uninstall"
+require "hive/user_service"
 
 class UninstallCommandTest < Minitest::Test
   include HiveTestHelper
@@ -100,9 +101,14 @@ class UninstallCommandTest < Minitest::Test
     with_xdg_home do
       bin = Hive::Paths.bin_home
       FileUtils.mkdir_p(bin)
-      target = File.join(bin, "hive-real")
-      File.write(target, "bin\n")
-      %w[hive hv].each { |name| File.symlink(target, File.join(bin, name)) }
+      managed_bin = File.join(Hive::Paths.data_home, "gems", "bin")
+      FileUtils.mkdir_p(managed_bin)
+      File.write(File.join(Hive::Paths.data_home, "install-channel"), "bash\n")
+      %w[hive hv].each do |name|
+        target = File.join(managed_bin, name)
+        File.write(target, "bin\n")
+        File.symlink(target, File.join(bin, name))
+      end
 
       Hive::Commands::Uninstall.new(output: StringIO.new).send(:remove_user_symlinks)
 
@@ -115,7 +121,10 @@ class UninstallCommandTest < Minitest::Test
     with_xdg_home do
       bin = Hive::Paths.bin_home
       FileUtils.mkdir_p(bin)
-      target = File.join(bin, "hive-real")
+      managed_bin = File.join(Hive::Paths.data_home, "gems", "bin")
+      FileUtils.mkdir_p(managed_bin)
+      File.write(File.join(Hive::Paths.data_home, "install-channel"), "bash\n")
+      target = File.join(managed_bin, "hive")
       link = File.join(bin, "hive")
       File.write(target, "bin\n")
       File.symlink(target, link)
@@ -125,6 +134,103 @@ class UninstallCommandTest < Minitest::Test
       end
 
       assert File.symlink?(link)
+    end
+  end
+
+  def test_remove_user_symlinks_preserves_unowned_links
+    with_xdg_home do
+      bin = Hive::Paths.bin_home
+      FileUtils.mkdir_p(bin)
+      target = File.join(bin, "operator-hive")
+      File.write(target, "operator\n")
+      %w[hive hv].each { |name| File.symlink(target, File.join(bin, name)) }
+
+      Hive::Commands::Uninstall.new(output: StringIO.new).send(:remove_user_symlinks)
+
+      assert File.symlink?(File.join(bin, "hive"))
+      assert File.symlink?(File.join(bin, "hv"))
+      assert_equal "operator\n", File.read(target)
+    end
+  end
+
+  def test_remove_user_symlinks_preserves_a_same_shape_lookalike_install
+    with_xdg_home do |dir|
+      bin = Hive::Paths.bin_home
+      FileUtils.mkdir_p(bin)
+      lookalike_home = File.join(dir, "operator", "hive")
+      target = File.join(lookalike_home, "gems", "bin", "hive")
+      FileUtils.mkdir_p(File.dirname(target))
+      File.write(target, "operator\n")
+      File.write(File.join(lookalike_home, "install-channel"), "bash\n")
+      link = File.join(bin, "hive")
+      File.symlink(target, link)
+
+      Hive::Commands::Uninstall.new(output: StringIO.new).send(:remove_user_symlinks)
+
+      assert File.symlink?(link)
+      assert_equal "operator\n", File.read(target)
+    end
+  end
+
+  def test_remove_user_symlinks_removes_a_recorded_prefix_install
+    with_xdg_home do |dir|
+      bin = Hive::Paths.bin_home
+      FileUtils.mkdir_p(bin)
+      prefix = File.join(dir, "prefix")
+      prefixed_data_home = File.join(prefix, "hive")
+      target = File.join(prefixed_data_home, "gems", "bin", "hive")
+      FileUtils.mkdir_p(File.dirname(target))
+      FileUtils.mkdir_p(Hive::Paths.data_home)
+      File.write(target, "managed\n")
+      File.write(File.join(prefixed_data_home, "install-channel"), "bash\n")
+      File.write(File.join(Hive::Paths.data_home, "install-prefix"), "#{prefix}\n")
+      link = File.join(bin, "hive")
+      File.symlink(target, link)
+
+      Hive::Commands::Uninstall.new(output: StringIO.new).send(:remove_user_symlinks)
+
+      refute File.symlink?(link)
+    end
+  end
+
+  def test_remove_user_symlinks_treats_a_malformed_prefix_as_unowned
+    with_xdg_home do |dir|
+      bin = Hive::Paths.bin_home
+      FileUtils.mkdir_p(bin)
+      FileUtils.mkdir_p(Hive::Paths.data_home)
+      File.write(File.join(Hive::Paths.data_home, "install-prefix"), "/tmp/bad\0prefix\n")
+      lookalike_home = File.join(dir, "operator", "hive")
+      target = File.join(lookalike_home, "gems", "bin", "hive")
+      FileUtils.mkdir_p(File.dirname(target))
+      File.write(target, "operator\n")
+      File.write(File.join(lookalike_home, "install-channel"), "bash\n")
+      link = File.join(bin, "hive")
+      File.symlink(target, link)
+
+      Hive::Commands::Uninstall.new(output: StringIO.new).send(:remove_user_symlinks)
+
+      assert File.symlink?(link)
+      assert_equal "operator\n", File.read(target)
+    end
+  end
+
+  def test_remove_user_symlinks_rejects_a_symlinked_channel_marker
+    with_xdg_home do |dir|
+      bin = Hive::Paths.bin_home
+      managed_bin = File.join(Hive::Paths.data_home, "gems", "bin")
+      FileUtils.mkdir_p(bin)
+      FileUtils.mkdir_p(managed_bin)
+      target = File.join(managed_bin, "hive")
+      File.write(target, "bin\n")
+      File.symlink(target, File.join(bin, "hive"))
+      external_marker = File.join(dir, "operator-marker")
+      File.write(external_marker, "bash\n")
+      File.symlink(external_marker, File.join(Hive::Paths.data_home, "install-channel"))
+
+      Hive::Commands::Uninstall.new(output: StringIO.new).send(:remove_user_symlinks)
+
+      assert File.symlink?(File.join(bin, "hive"))
+      assert_equal "bash\n", File.read(external_marker)
     end
   end
 

@@ -43,7 +43,15 @@ Without `--no-bootstrap`, setup provisions in this order:
    setup never asks twice.
 2. Install QMD through `npm install --global --prefix <data_home>/qmd
    @tobilu/qmd` when diagnostics report it missing and npm is available.
-   Failed npm stderr is captured in the `qmd` phase `message`.
+   Diagnostics run the discovered QMD's bounded `--version` probe rather than
+   trusting its executable bit. A broken Hive-managed QMD is bootstrappable;
+   a broken operator-owned QMD earlier on `PATH` is a hard diagnostic failure
+   with repair guidance because installing another binary would leave the
+   broken one active. After npm succeeds, setup also requires the managed
+   executable to exist and pass a 10-second `--version` probe; timeout
+   terminates the probe process group. Failed npm or startup detail is
+   secret-redacted, control-safe, bounded, and captured in the `qmd` phase
+   `message`.
 3. Install or refresh the managed Rails web bundle through
    `Hive::Web::AppBundle.ensure!`.
 4. Run `hive daemon install` semantics through

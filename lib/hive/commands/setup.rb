@@ -5,6 +5,7 @@ require "hive/config"
 require "hive/invoked_binary"
 require "hive/paths"
 require "hive/setup/diagnostics"
+require "hive/setup/qmd_probe"
 require "hive/web/app_bundle"
 require "hive/commands/setup_agents"
 require "hive/web/environment"
@@ -150,8 +151,24 @@ module Hive
           # automation to act on.
           _out, err, status = Open3.capture3("npm", "install", "--global", "--prefix", prefix, "@tobilu/qmd")
           data = { "prefix" => prefix }
-          data["message"] = err.strip unless status.success?
-          [ status.success?, data ]
+          unless status.success?
+            data["message"] = err.strip
+            next [ false, data ]
+          end
+
+          qmd = File.join(prefix, "bin", "qmd")
+          unless File.executable?(qmd)
+            data["message"] = "npm install succeeded but no executable was found at #{qmd}"
+            next [ false, data ]
+          end
+
+          qmd_out, qmd_err, qmd_status = Hive::Setup::QmdProbe.call(qmd)
+          unless qmd_status.success?
+            detail = Hive::Setup::QmdProbe.diagnostic(qmd_err, qmd_out)
+            data["message"] = "qmd was installed but failed to start" \
+                              "#{detail.empty? ? "" : ": #{detail}"}"
+          end
+          [ qmd_status.success?, data ]
         end
       end
 

@@ -112,7 +112,11 @@ Apache Hive collision: the Homebrew formula installs an `hv` symlink. The bash
 installer always writes a working `${data_home}/gems/bin/hv` wrapper that
 delegates to its GEM_HOME-aware `hive` wrapper, and exposes it under the user
 bin directory when another `hive` is already earlier on PATH or when it is
-refreshing an existing owned symlink. The in-tree `bin/hv` fallback probes only
+refreshing an existing owned symlink. User-bin publication replaces only the
+exact absolute symlink from the same managed payload. An unrelated `hive` or
+`hv` file/symlink is preserved; Hive uses the unoccupied fallback name when
+possible and otherwise leaves both managed wrappers available under
+`${data_home}/gems/bin`. The in-tree `bin/hv` fallback probes only
 `HIVE_BIN_OVERRIDE`,
 `${XDG_BIN_HOME:-$HOME/.local/bin}/hive`, `${HOMEBREW_PREFIX:-/opt/homebrew}/bin/hive`,
 and `/usr/local/bin/hive`; it intentionally does not fall through to

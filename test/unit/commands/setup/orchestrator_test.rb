@@ -4,6 +4,7 @@ require "json_schemer"
 require "hive/commands/setup"
 require "hive/setup/diagnostics"
 require "hive/web/app_bundle"
+require "hive/agent_skills/provisioner"
 require "hive/config"
 require "hive/invoked_binary"
 require "hive/commands/init"
@@ -655,17 +656,28 @@ class SetupOrchestratorTest < Minitest::Test
     ok_status = Object.new
     ok_status.define_singleton_method(:success?) { true }
 
-    captured = nil
+    qmd = File.join(Hive::Paths.data_home, "qmd", "bin", "qmd")
+    FileUtils.mkdir_p(File.dirname(qmd))
+    File.write(qmd, "#!/bin/sh\n")
+    FileUtils.chmod(0o755, qmd)
+    npm_call = nil
+    probe_call = nil
     with_replaced_singleton_method(Open3, :capture3, lambda { |*argv|
-      captured = argv
+      npm_call = argv
       [ "", "", ok_status ]
     }) do
-      setup.send(:bootstrap_qmd_if_missing, diagnostics)
+      with_replaced_singleton_method(Hive::Setup::QmdProbe, :call, lambda { |path, **_kwargs|
+        probe_call = path
+        [ "qmd 2.0.0", "", ok_status ]
+      }) do
+        setup.send(:bootstrap_qmd_if_missing, diagnostics)
+      end
     end
 
-    assert_equal %w[npm install --global --prefix], captured[0..3],
+    assert_equal %w[npm install --global --prefix], npm_call[0..3],
                  "must invoke the global npm install for the qmd package"
-    assert_equal "@tobilu/qmd", captured.last
+    assert_equal "@tobilu/qmd", npm_call.last
+    assert_equal qmd, probe_call
     phase = setup.instance_variable_get(:@phases).last
     assert_equal "qmd", phase["name"]
     assert_equal true, phase["ok"]
@@ -687,6 +699,65 @@ class SetupOrchestratorTest < Minitest::Test
     phase = setup.instance_variable_get(:@phases).last
     assert_equal false, phase["ok"]
     assert_equal "EACCES: permission denied", phase["message"], "stripped npm stderr must be the phase message"
+  end
+
+  def test_qmd_bootstrap_fails_when_the_installed_binary_cannot_start
+    setup = Hive::Commands::Setup.new(json: true, output: StringIO.new)
+    diagnostics = diag(qmd_missing_bootstrappable)
+    ok_status = Object.new
+    ok_status.define_singleton_method(:success?) { true }
+    fail_status = Object.new
+    fail_status.define_singleton_method(:success?) { false }
+    qmd = File.join(Hive::Paths.data_home, "qmd", "bin", "qmd")
+    FileUtils.mkdir_p(File.dirname(qmd))
+    File.write(qmd, "#!/bin/sh\n")
+    FileUtils.chmod(0o755, qmd)
+    secret = [ "sk", "B" * 24 ].join("-")
+    probe_argv = nil
+
+    with_replaced_singleton_method(Open3, :capture3, ->(*_argv) { [ "", "", ok_status ] }) do
+      with_replaced_singleton_method(Hive::Setup::QmdProbe, :call, lambda { |path, **_kwargs|
+        probe_argv = path
+        [ "", "NODE_MODULE_VERSION mismatch #{secret}\u0000#{'y' * 1_500}", fail_status ]
+      }) do
+        setup.send(:bootstrap_qmd_if_missing, diagnostics)
+      end
+    end
+
+    assert_equal qmd, probe_argv
+    phase = setup.instance_variable_get(:@phases).last
+    assert_equal false, phase["ok"]
+    assert_match(/failed to start/, phase["message"])
+    assert_match(/NODE_MODULE_VERSION mismatch/, phase["message"])
+    assert_includes phase["message"], "[REDACTED:openai_api_key]"
+    refute_includes phase["message"], secret
+    assert_operator phase["message"].length, :<, 1_100
+  end
+
+  def test_qmd_bootstrap_records_a_bounded_probe_timeout_as_phase_failure
+    setup = Hive::Commands::Setup.new(json: true, output: StringIO.new)
+    diagnostics = diag(qmd_missing_bootstrappable)
+    ok_status = Object.new
+    ok_status.define_singleton_method(:success?) { true }
+    qmd = File.join(Hive::Paths.data_home, "qmd", "bin", "qmd")
+    FileUtils.mkdir_p(File.dirname(qmd))
+    File.write(qmd, "#!/bin/sh\n")
+    FileUtils.chmod(0o755, qmd)
+    probe_call = nil
+
+    with_replaced_singleton_method(Open3, :capture3, ->(*_argv) { [ "", "", ok_status ] }) do
+      with_replaced_singleton_method(Hive::Setup::QmdProbe, :call, lambda { |path, **_kwargs|
+        probe_call = path
+        raise Hive::Error, "hive setup: qmd startup probe timed out after 10s"
+      }) do
+        setup.send(:bootstrap_qmd_if_missing, diagnostics)
+      end
+    end
+
+    assert_equal qmd, probe_call
+    phase = setup.instance_variable_get(:@phases).last
+    assert_equal false, phase["ok"]
+    assert_match(/qmd startup probe timed out after 10s/, phase["message"])
   end
 
   def test_qmd_bootstrap_skipped_when_not_bootstrappable

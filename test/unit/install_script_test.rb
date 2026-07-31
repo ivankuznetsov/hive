@@ -78,6 +78,43 @@ class InstallScriptTest < Minitest::Test
     end
   end
 
+  def test_installer_preserves_an_unowned_user_hive_launcher_and_uses_hv_fallback
+    Dir.mktmpdir("hive-installer-unowned-launcher") do |dir|
+      bin = File.join(dir, "bin")
+      FileUtils.mkdir_p(bin)
+      launcher = File.join(bin, "hive")
+      unowned = "#!/bin/sh\nprintf 'operator hive\\n'\n"
+      write_file_with_mode(launcher, unowned, 0o755)
+
+      _out, err, status = run_installer(dir, "none")
+
+      assert status.success?, err
+      assert_equal unowned, File.binread(launcher)
+      assert_equal 0o755, File.stat(launcher).mode & 0o777
+      assert File.symlink?(File.join(bin, "hv"))
+      assert_includes err, "leaving it unchanged"
+    end
+  end
+
+  def test_installer_preserves_unowned_hive_and_hv_launchers
+    Dir.mktmpdir("hive-installer-two-unowned-launchers") do |dir|
+      bin = File.join(dir, "bin")
+      FileUtils.mkdir_p(bin)
+      sentinels = %w[hive hv].to_h do |name|
+        path = File.join(bin, name)
+        content = "#!/bin/sh\nprintf 'operator #{name}\\n'\n"
+        write_file_with_mode(path, content, 0o755)
+        [ path, content ]
+      end
+
+      _out, err, status = run_installer(dir, "none")
+
+      assert status.success?, err
+      sentinels.each { |path, content| assert_equal content, File.binread(path) }
+      assert_includes err, "Hive launchers remain available under"
+    end
+  end
+
   def test_installer_requires_cosign_for_release_identity_verification
     script = File.read(INSTALL_SCRIPT)
 

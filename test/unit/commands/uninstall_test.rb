@@ -173,6 +173,86 @@ class UninstallCommandTest < Minitest::Test
     end
   end
 
+  def test_remove_user_symlinks_preserves_a_replacement_that_arrives_after_quarantine
+    with_xdg_home do
+      bin = Hive::Paths.bin_home
+      FileUtils.mkdir_p(bin)
+      managed_bin = File.join(Hive::Paths.data_home, "gems", "bin")
+      FileUtils.mkdir_p(managed_bin)
+      File.write(File.join(Hive::Paths.data_home, "install-channel"), "bash\n")
+      managed = File.join(managed_bin, "hive")
+      operator = File.join(bin, "operator-hive")
+      link = File.join(bin, "hive")
+      File.write(managed, "managed\n")
+      File.write(operator, "operator\n")
+      File.symlink(managed, link)
+      original_rename = File.method(:rename)
+      original_readlink = File.method(:readlink)
+      moved = false
+      output = StringIO.new
+
+      replacement_race = lambda do |source, destination|
+        original_rename.call(source, destination)
+        unless moved
+          moved = true
+          File.symlink(operator, source)
+        end
+      end
+      swapped_quarantine = lambda do |path|
+        if moved && File.basename(path).start_with?(".hive-uninstall-hive-")
+          File.unlink(path)
+          File.symlink(operator, path)
+        end
+        original_readlink.call(path)
+      end
+
+      with_replaced_singleton_method(File, :rename, replacement_race) do
+        with_replaced_singleton_method(File, :readlink, swapped_quarantine) do
+          Hive::Commands::Uninstall.new(output: output).send(:remove_user_symlinks)
+        end
+      end
+
+      assert_equal operator, File.readlink(link)
+      assert_match(/changed during uninstall; preserved it at/, output.string)
+      assert_equal 1, Dir.glob(File.join(bin, ".hive-uninstall-*" )).length
+    end
+  end
+
+  def test_managed_launcher_check_fails_closed_when_link_disappears_during_inspection
+    with_xdg_home do
+      bin = Hive::Paths.bin_home
+      managed_bin = File.join(Hive::Paths.data_home, "gems", "bin")
+      FileUtils.mkdir_p([ bin, managed_bin ])
+      File.write(File.join(Hive::Paths.data_home, "install-channel"), "bash\n")
+      target = File.join(managed_bin, "hive")
+      link = File.join(bin, "hive")
+      File.write(target, "managed\n")
+      File.symlink(target, link)
+
+      with_replaced_singleton_method(File, :readlink, ->(_path) { raise Errno::ENOENT }) do
+        refute Hive::Commands::Uninstall.new(output: StringIO.new).send(:managed_bash_launcher_link?, link, "hive")
+      end
+    end
+  end
+
+  def test_restore_replaced_launcher_keeps_quarantine_when_restore_fails
+    with_xdg_home do
+      bin = Hive::Paths.bin_home
+      FileUtils.mkdir_p(bin)
+      quarantine = File.join(bin, ".hive-uninstall-hive-test")
+      link = File.join(bin, "hive")
+      File.write(quarantine, "operator\n")
+      output = StringIO.new
+
+      with_replaced_singleton_method(File, :rename, ->(*_paths) { raise Errno::EPERM, "operation not permitted" }) do
+        Hive::Commands::Uninstall.new(output: output).send(:restore_replaced_launcher, quarantine, link)
+      end
+
+      assert File.exist?(quarantine)
+      assert_match(/could not restore changed launcher/, output.string)
+    end
+  end
+
   def test_remove_user_symlinks_preserves_unowned_links
     with_xdg_home do
       bin = Hive::Paths.bin_home

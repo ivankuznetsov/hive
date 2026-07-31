@@ -42,4 +42,22 @@ class SetupQmdProbeTest < Minitest::Test
 
     assert_equal "hive setup: qmd startup probe timed out after 0.05s", error.message
   end
+
+  def test_bounded_runner_kills_a_probe_that_ignores_term
+    pid_file = File.join(Dir.mktmpdir, "qmd-probe.pid")
+    script = "File.write(ARGV.fetch(0), Process.pid.to_s); trap('TERM') {}; sleep 30"
+
+    error = assert_raises(Hive::Error) do
+      Hive::Setup::QmdProbe.capture3_bounded(
+        [ RbConfig.ruby, "-e", script, pid_file ],
+        timeout_sec: 0.2
+      )
+    end
+
+    pid = Integer(File.read(pid_file))
+    assert_equal "hive setup: qmd startup probe timed out after 0.2s", error.message
+    assert_raises(Errno::ESRCH) { Process.kill(0, pid) }
+  ensure
+    FileUtils.rm_rf(File.dirname(pid_file)) if pid_file
+  end
 end

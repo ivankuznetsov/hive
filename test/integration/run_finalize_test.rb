@@ -857,6 +857,49 @@ class RunFinalizeTest < Minitest::Test
     end
   end
 
+  def test_finalize_validates_pr_reference_before_remote_effects
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        task_dir, worktree_path, pr_md = setup_finalize_task(dir)
+        task = Hive::Task.new(task_dir)
+
+        result = Hive::Stages::Finalize.validate_pr_reference!(
+          task, worktree_path, "not-a-pr", {}
+        )
+        assert_equal({ commit: "finalize_pr_url_invalid", status: :error }, result.last)
+        assert_equal "finalize_pr_url_invalid", Hive::Markers.current(pr_md).attrs.fetch("reason")
+
+        metadata = Hive::Gh::PrMetadata.new(
+          number: 9,
+          url: "https://github.com/acme/other/pull/9",
+          base_ref_name: "main",
+          head_ref_oid: "a" * 40,
+          is_cross_repository: false,
+          state: "OPEN"
+        )
+        with_stubbed_singleton_method(Hive::Gh, :pr_metadata, ->(*, **) { metadata }) do
+          result = Hive::Stages::Finalize.validate_pr_reference!(
+            task, worktree_path, "https://github.com/acme/app/pull/9", {}
+          )
+          assert_equal({ commit: "finalize_pr_identity_mismatch", status: :error }, result.last)
+          assert_equal "finalize_pr_identity_mismatch", Hive::Markers.current(pr_md).attrs.fetch("reason")
+        end
+
+        with_stubbed_singleton_method(
+          Hive::Gh, :pr_metadata, ->(*, **) { raise Hive::GhError, "metadata offline" }
+        ) do
+          result = Hive::Stages::Finalize.validate_pr_reference!(
+            task, worktree_path, "https://github.com/acme/app/pull/9", {}
+          )
+          assert_equal({ commit: "finalize_pr_identity_refresh_failed", status: :error }, result.last)
+          marker = Hive::Markers.current(pr_md)
+          assert_equal "finalize_pr_identity_refresh_failed", marker.attrs.fetch("reason")
+          assert_equal "metadata offline", marker.attrs.fetch("detail")
+        end
+      end
+    end
+  end
+
   def test_finalize_mark_pr_ready_error_paths
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

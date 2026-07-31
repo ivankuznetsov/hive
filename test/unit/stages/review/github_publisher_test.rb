@@ -123,6 +123,56 @@ class ReviewGithubPublisherTest < Minitest::Test
     end
   end
 
+  def test_publish_skips_an_invalid_pr_url_before_any_remote_effect
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      body = File.join(task.reviews_dir, "codex-01.md")
+      File.write(body, "- [ ] finding\n")
+      File.write(File.join(task.folder, "pr.md"), "---\npr_url: not-a-pr\n---\n")
+
+      assert_equal :invalid_pr,
+                   Hive::Stages::Review::GithubPublisher.publish!(
+                     task, pass: 1, reviewer_name: "codex", body_path: body, cfg: cfg
+                   )
+      refute File.exist?(File.join(@log_dir, "fake-gh-argv.log"))
+    end
+  end
+
+  def test_validated_pr_url_requires_an_exact_persisted_head
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+
+      with_replaced_singleton_method(
+        Hive::Worktree, :canonical_root, ->(_root) { "/owned" }
+      ) do
+        with_replaced_singleton_method(
+          Hive::Worktree, :read_owned_pointer,
+          ->(*_args, **_kwargs) { { "path" => "/owned/task", "branch" => task.slug } }
+        ) do
+          assert_nil Hive::Stages::Review::GithubPublisher.validated_pr_url(task, cfg)
+        end
+      end
+    end
+  end
+
+  def test_validated_pr_url_fails_closed_when_repository_identity_cannot_be_read
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(File.join(task.folder, "pr.md"), <<~MD)
+        ---
+        pr_url: https://github.com/acme/app/pull/42
+        head_oid: #{"a" * 40}
+        ---
+      MD
+
+      with_replaced_singleton_method(
+        Hive::Worktree, :canonical_root, ->(_root) { raise Hive::GhError, "identity offline" }
+      ) do
+        assert_nil Hive::Stages::Review::GithubPublisher.validated_pr_url(task, cfg)
+      end
+    end
+  end
+
   def test_validated_pr_url_binds_task_branch_and_persisted_head
     with_tmp_dir do |dir|
       task = make_task(dir)

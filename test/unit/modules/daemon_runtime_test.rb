@@ -177,7 +177,8 @@ class ModulesDaemonRuntimeTest < Minitest::Test
         store: runtime.fetch(:store),
         ledger: ledger,
         entry: runtime.fetch(:entry),
-        now: NOW + 180
+        now: NOW + 180,
+        admission_open: -> { true }
       )
 
       assert_equal 0, count
@@ -199,7 +200,8 @@ class ModulesDaemonRuntimeTest < Minitest::Test
         store: runtime.fetch(:store),
         ledger: ledger,
         entry: runtime.fetch(:entry),
-        now: NOW + 180
+        now: NOW + 180,
+        admission_open: -> { true }
       )
 
       assert_equal 1, count
@@ -215,6 +217,47 @@ class ModulesDaemonRuntimeTest < Minitest::Test
       assert_equal 1, first.fetch(:decisions)
       assert_equal 0, second.fetch(:decisions)
       assert_equal 1, runtime.fetch(:attempt_store).scan.records.size
+    end
+  end
+
+  def test_shutdown_closes_later_hook_admission_without_advancing_the_event_cursor
+    hooks = %w[first second].map do |id|
+      {
+        "id" => id,
+        "target" => { "kind" => "entrypoint", "id" => "demo.run" },
+        "default_enabled" => true, "schedules" => [],
+        "events" => [ "task.completed" ], "concurrency" => "drop"
+      }
+    end
+    with_runtime(hooks: hooks) do |runtime|
+      attempt_store = runtime.fetch(:attempt_store)
+      admission_open = -> { attempt_store.scan.records.empty? }
+
+      interrupted = runtime.fetch(:daemon_runtime).tick(
+        now: NOW + 1, admission_open: admission_open
+      ).first
+
+      assert_equal 1, interrupted.fetch(:decisions)
+      assert_equal 1, attempt_store.scan.records.size
+      cursor = File.join(
+        runtime.fetch(:store).hive_state_path,
+        "module-runtime", "daemon-event-cursor.json"
+      )
+      refute_path_exists cursor,
+                         "a partially drained event must remain replayable"
+
+      replayed = runtime.fetch(:daemon_runtime).tick(
+        now: NOW + 2, admission_open: -> { true }
+      ).first
+
+      assert_equal 2, replayed.fetch(:decisions),
+                   "the first hook replays idempotently and the second remains eligible"
+      assert_equal 2, attempt_store.scan.records.size,
+                   "replay must not duplicate the already-admitted hook attempt"
+      assert_equal 1, JSON.parse(File.binread(cursor)).fetch("cursor")
+      assert_equal 0, runtime.fetch(:daemon_runtime).tick(
+        now: NOW + 3, admission_open: -> { true }
+      ).first.fetch(:decisions)
     end
   end
 
@@ -304,7 +347,8 @@ class ModulesDaemonRuntimeTest < Minitest::Test
         :promote_setup_outboxes, store, [ selection ],
         ledger: Object.new,
         entry: { "project_id" => "project-1", "name" => "demo" },
-        now: NOW
+        now: NOW,
+        admission_open: -> { true }
       )
     end
     assert_match(/another project/, error.message)
@@ -415,9 +459,9 @@ class ModulesDaemonRuntimeTest < Minitest::Test
   private
 
   def with_runtime(schedules: [], publish_event: true, module_name: "demo",
-                   migration_owner: nil)
+                   migration_owner: nil, hooks: nil)
     with_tmp_dir do |root|
-      hooks = [
+      hooks ||= [
         {
           "id" => "task", "target" => { "kind" => "entrypoint", "id" => "demo.run" },
           "default_enabled" => true, "schedules" => schedules,
@@ -433,7 +477,8 @@ class ModulesDaemonRuntimeTest < Minitest::Test
       preview = Hive::ModulePackage::Preview.build(
         operation: "install", descriptor: descriptor, generation: resolution,
         current: nil, current_configuration: nil,
-        settings: { "mode" => "safe", "api_token" => nil }, hooks: { "task" => true },
+        settings: { "mode" => "safe", "api_token" => nil },
+        hooks: hooks.to_h { |hook| [ hook.fetch("id"), true ] },
         grants: exact_grants(descriptor), now: NOW - 60
       )
       store.apply(preview, package_root: package, resolution: resolution, now: NOW - 60)

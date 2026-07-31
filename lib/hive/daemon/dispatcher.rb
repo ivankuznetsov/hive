@@ -370,7 +370,9 @@ module Hive
         end
 
         begin
-          @module_runtime&.tick(now: now)&.each do |module_result|
+          @module_runtime&.tick(
+            now: now, admission_open: -> { admission_open? }
+          )&.each do |module_result|
             next if module_result.fetch(:status) == :idle
             @logger.event(:module_runtime, **module_result)
           end

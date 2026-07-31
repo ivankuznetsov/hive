@@ -366,7 +366,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
   end
 
   class FakeModuleTick
-    attr_reader :ticks
+    attr_reader :ticks, :admission_open
 
     def initialize(results: [], error: nil)
       @results = results
@@ -374,8 +374,9 @@ class HiveDaemonDispatcherTest < Minitest::Test
       @ticks = []
     end
 
-    def tick(now:)
+    def tick(now:, admission_open: nil)
       @ticks << now
+      @admission_open = admission_open
       raise @error if @error
 
       @results
@@ -579,6 +580,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
     assert_equal [ T0 ], migration.ticks
     assert_equal [ T0 ], runtime.ticks
+    assert runtime.admission_open.call,
+           "module runtime must share the daemon shutdown admission predicate"
     assert logger.events.any? { |name, attrs| name == :module_migration && attrs[:project] == "p1" }
     module_events = logger.events.select { |name, _attrs| name == :module_runtime }
     assert_equal [ "p1" ], module_events.map { |_name, attrs| attrs.fetch(:project) }

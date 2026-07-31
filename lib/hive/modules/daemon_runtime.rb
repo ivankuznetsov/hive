@@ -37,13 +37,23 @@ module Hive
         @clock = clock
       end
 
-      def tick(now: @clock.call)
-        Array(@registry.call).map { |entry| tick_project(entry, now: now) }
+      def tick(now: @clock.call, admission_open: -> { true })
+        return [] unless admission_open?(admission_open)
+
+        Array(@registry.call).each_with_object([]) do |entry, results|
+          break results unless admission_open?(admission_open)
+
+          results << tick_project(
+            entry, now: now, admission_open: admission_open
+          )
+        end
       end
 
       private
 
-      def tick_project(entry, now:)
+      def tick_project(entry, now:, admission_open:)
+        return result(entry, :idle, 0, 0) unless admission_open?(admission_open)
+
         store = Hive::ModulePackage::ManagedStore.new(entry.fetch("hive_state_path"))
         selections = store.selections(include_tombstones: true)
         return result(entry, :idle, 0, 0) if selections.empty?
@@ -57,36 +67,57 @@ module Hive
           project_id: entry.fetch("project_id"), project: entry.fetch("name"),
           decision_journal: journal, clock: -> { now }
         )
-        reconcile_runs(store, selections, dispatcher: dispatcher, now: now)
-        promote_setup_outboxes(store, selections, ledger: ledger, entry: entry, now: now)
+        reconcile_runs(
+          store, selections, dispatcher: dispatcher, now: now,
+          admission_open: admission_open
+        )
+        return result(entry, :idle, 0, 0) unless admission_open?(admission_open)
+
+        promote_setup_outboxes(
+          store, selections, ledger: ledger, entry: entry, now: now,
+          admission_open: admission_open
+        )
+        return result(entry, :idle, 0, 0) unless admission_open?(admission_open)
+
         installed_selections = selections.select { |selection| selection.fetch("installed") }
         return result(entry, :idle, 0, 0) if installed_selections.empty?
 
         schedules = dispatch_schedules(
           installed_selections, store: store, ledger: ledger,
-          entry: entry, now: now
+          entry: entry, now: now, admission_open: admission_open
         )
+        return result(entry, :ok, 0, schedules) unless admission_open?(admission_open)
+
         decisions = drain_events(
           installed_selections, store: store, ledger: ledger,
-          dispatcher: dispatcher
+          dispatcher: dispatcher, admission_open: admission_open
         )
         result(entry, :ok, decisions, schedules)
       rescue Hive::Error, SystemCallError, IOError, JSON::ParserError => e
         result(entry, :blocked, 0, 0, reason: "#{e.class}: #{e.message}")
       end
 
-      def drain_events(selections, store:, ledger:, dispatcher:)
+      def drain_events(selections, store:, ledger:, dispatcher:, admission_open:)
         count = 0
+        return count unless admission_open?(admission_open)
+
         cursor_path = File.join(ledger.root, "daemon-event-cursor.json")
         cursor = read_event_cursor(cursor_path)
+        return count unless admission_open?(admission_open)
+
         page = ledger.events_after(cursor)
         page.events.each_with_index do |event, index|
+          return count unless admission_open?(admission_open)
+
           selections.each do |selection|
+            return count unless admission_open?(admission_open)
+
             configuration = store.configuration(
               selection.fetch("name"), selection.dig("active", "configuration_digest")
             )
             configuration.contract.fetch("hooks").each do |hook|
               next unless EventScope.matches?(event: event, selection: selection, hook: hook)
+              return count unless admission_open?(admission_open)
 
               dispatcher.dispatch(
                 module_name: selection.fetch("name"), hook_id: hook.fetch("id"), event: event
@@ -94,13 +125,17 @@ module Hive
               count += 1
             end
           end
+          return count unless admission_open?(admission_open)
+
           write_event_cursor(cursor_path, cursor + index + 1)
         end
         count
       end
 
-      def promote_setup_outboxes(store, selections, ledger:, entry:, now:)
+      def promote_setup_outboxes(store, selections, ledger:, entry:, now:, admission_open:)
         selections.each do |selection|
+          return unless admission_open?(admission_open)
+
           store.promote_setup_outbox(selection.fetch("name")) do |intent|
             unless intent.fetch("project_id") == entry.fetch("project_id").to_s &&
                    intent.fetch("project") == entry.fetch("name").to_s
@@ -130,8 +165,12 @@ module Hive
         end
       end
 
-      def dispatch_schedules(selections, store:, ledger:, entry:, now:)
+      def dispatch_schedules(selections, store:, ledger:, entry:, now:, admission_open:)
+        return 0 unless admission_open?(admission_open)
+
         schedules = selections.flat_map do |selection|
+          next [] unless admission_open?(admission_open)
+
           module_name = selection.fetch("name")
           next [] unless schedule_owner?(entry, module_name)
 
@@ -144,11 +183,14 @@ module Hive
             end
           end
         end.uniq
-        schedules.count do |module_name, schedule, high_water_at|
+        count = 0
+        schedules.each do |module_name, schedule, high_water_at|
+          return count unless admission_open?(admission_open)
+
           previous = ledger.latest_schedule(schedule, target_module: module_name)
           baseline = previous || high_water_at
           occurrence = @planner.due(schedule: schedule, after: baseline, now: now)
-          next false unless occurrence
+          next unless occurrence
 
           instant = occurrence.due_at.utc.iso8601(6)
           ledger.record(
@@ -163,8 +205,9 @@ module Hive
             },
             recorded_at: now
           )
-          true
+          count += 1
         end
+        count
       end
 
       def schedule_owner?(entry, module_name)
@@ -197,10 +240,14 @@ module Hive
         )
       end
 
-      def reconcile_runs(store, selections, dispatcher:, now:)
+      def reconcile_runs(store, selections, dispatcher:, now:, admission_open:)
         selections.each do |selection|
+          return unless admission_open?(admission_open)
+
           module_name = selection.fetch("name")
           Dir.glob(File.join(store.runtime_path(module_name), "runs", "*.json")).sort.each do |path|
+            return unless admission_open?(admission_open)
+
             run = JSON.parse(File.binread(path))
             next unless %w[admitting running retrying].include?(run["status"])
             next if retry_deferred?(run, now)
@@ -223,6 +270,12 @@ module Hive
             end
           end
         end
+      end
+
+      def admission_open?(predicate)
+        predicate.call == true
+      rescue StandardError
+        false
       end
 
       def retry_deferred?(run, now)

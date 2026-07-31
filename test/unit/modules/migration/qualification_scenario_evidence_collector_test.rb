@@ -2,6 +2,7 @@ require "test_helper"
 require "hive/modules/migration/qualification_scenario_driver"
 require "hive/modules/migration/qualification_scenario_evidence_collector"
 require "hive/modules/migration/qualification_scenario_input"
+require "hive/modules/migration/qualification_target_inventory"
 
 class QualificationScenarioEvidenceCollectorTest < Minitest::Test
   include HiveTestHelper
@@ -62,6 +63,40 @@ class QualificationScenarioEvidenceCollectorTest < Minitest::Test
       assert evidence.frozen?
       assert evidence.to_h.frozen?
       assert evidence.receipts.all?(&:frozen?)
+    end
+  end
+
+  def test_collection_does_not_mutate_candidate_bytes_or_metadata
+    with_tmp_dir do |sandbox|
+      result = run_driver(sandbox)
+      events = File.join(
+        result.hive_state_path,
+        "module-runtime",
+        "events"
+      )
+      File.chmod(0o750, events)
+      inventory =
+        Hive::Modules::Migration::QualificationTargetInventory.new
+      before = inventory.call(sandbox)
+
+      collect(result)
+
+      after = inventory.call(sandbox)
+      assert_equal before.digest, after.digest
+      assert_equal before.entries, after.entries
+      assert_equal 0o750, File.stat(events).mode & 0o777
+    end
+  end
+
+  def test_accepts_dot_and_underscore_from_the_shared_case_id_contract
+    with_tmp_dir do |sandbox|
+      result = run_driver(sandbox)
+      candidate = mutable(result.observation)
+      candidate["case_id"] = "case.one_case"
+
+      evidence = collect(result, candidate_row: candidate)
+
+      assert_equal "case.one_case", evidence.case_id
     end
   end
 

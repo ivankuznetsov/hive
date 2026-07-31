@@ -18,7 +18,9 @@ tags: [gap, todo, release-proof, agent-skills]
   product stores, detached module dispatch, Attempts, and host-reconstructed
   terminal evidence. Host-supervised process generations now cover every
   process-exit fault with exact checkpoint validation, bounded state snapshots,
-  custody teardown, and chained receipts. It still needs the
+  custody teardown, chained receipts, and bounded post-spawn failure evidence.
+  Host reconstruction is non-mutating and terminal lane publication is now an
+  interruption-safe atomic tree install. It still needs the
   secretless/networkless installed-provider broker and exact installed-gem
   execution target, and the protected-main literal scenario catalog/controller
   proof before any migration qualification or cutover claim. Longer elapsed
@@ -965,7 +967,12 @@ the host independently reconstructs terminal event, decision, attempt, capture,
 effect, comparator, retirement, and repository evidence. The lane controller
 now also owns the process generations, checkpoint acceptance, before/after
 snapshots, production-state predicates, custody teardown, and chained receipts.
-Candidate Actuals cannot supply or override those recovery claims.
+Candidate Actuals cannot supply or override those recovery claims. Bounded
+post-spawn failures are retained without exception text or secret-bearing
+process details, while pre-spawn failures remain configuration errors. Pure
+host observation and an atomic all-files-or-no-files lane install now prevent
+qualification itself from mutating evidence or stranding partial terminal
+state.
 
 Architecture Patrol has clean-negative and positive legacy lifecycle controls,
 full candidate routing, detached Attempts, and host reconstruction. The

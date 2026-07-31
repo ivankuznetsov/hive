@@ -9,6 +9,25 @@ class ModulesMigrationRepositoryTest < Minitest::Test
   include HiveTestHelper
   include QualificationRunFixture
 
+  class InterruptingRepository <
+      Hive::Modules::Migration::MigrationRepository
+    def initialize(fail_after: nil, fail_before_install: false, **)
+      super(**)
+      @fail_after = fail_after
+      @fail_before_install = fail_before_install
+    end
+
+    private
+
+    def after_qualification_lane_stage_write(relative:, index:)
+      raise "injected after #{relative}" if index == @fail_after
+    end
+
+    def before_qualification_lane_install
+      raise "injected before install" if @fail_before_install
+    end
+  end
+
   def test_qualification_run_import_is_immutable_and_confined
     with_tmp_dir do |root|
       fixture = qualification_run_fixture
@@ -128,6 +147,27 @@ class ModulesMigrationRepositoryTest < Minitest::Test
                    )
       assert_equal lane.fetch(:result_bytes),
                    loaded.fetch("result.json")
+      lane_root = File.join(
+        root,
+        "qualification",
+        "runs",
+        run_id,
+        "lanes",
+        "deterministic"
+      )
+      extra = File.join(lane_root, "unexpected.json")
+      File.binwrite(extra, "{}")
+      File.chmod(0o600, extra)
+      assert_raises(Hive::ConfigError) do
+        repository.publish_qualification_lane(**lane)
+      end
+      File.unlink(extra)
+      repro = File.join(lane_root, "repro.sh")
+      File.chmod(0o600, repro)
+      assert_raises(Hive::ConfigError) do
+        repository.publish_qualification_lane(**lane)
+      end
+      File.chmod(0o700, repro)
       assert_raises(Hive::ConfigError) do
         repository.publish_qualification_lane(
           **lane.merge(result_bytes: "different")
@@ -363,6 +403,73 @@ class ModulesMigrationRepositoryTest < Minitest::Test
       assert_nil repository.qualification_lane_result(
         run_id, "deterministic", missing: true
       )
+      refute_path_exists File.join(
+        root,
+        "qualification",
+        "runs",
+        run_id,
+        "lanes",
+        ".deterministic.pending"
+      )
+    end
+  end
+
+  def test_interrupted_lane_staging_is_replaceable_by_new_evidence
+    (1..5).to_a.push(:before_install).each do |fault|
+      with_tmp_dir do |root|
+        fixture = qualification_run_fixture
+        run_id = fixture.dig(:payload, "run_id")
+        repository = InterruptingRepository.new(
+          root: root,
+          fail_after: fault.is_a?(Integer) ? fault : nil,
+          fail_before_install: fault == :before_install
+        )
+        repository.import_qualification_run(
+          descriptor_bytes: fixture.fetch(:descriptor),
+          inputs: fixture.fetch(:inputs)
+        )
+        first = qualification_lane_payload(
+          fixture,
+          marker: "first"
+        )
+
+        assert_raises(RuntimeError) do
+          repository.publish_qualification_lane(**first)
+        end
+        normal =
+          Hive::Modules::Migration::MigrationRepository.new(
+            root: root
+          )
+        assert_nil normal.qualification_lane_result(
+          run_id,
+          "deterministic",
+          missing: true
+        )
+
+        replacement = qualification_lane_payload(
+          fixture,
+          marker: "replacement"
+        )
+        normal.publish_qualification_lane(**replacement)
+
+        loaded = normal.qualification_lane(
+          run_id,
+          "deterministic"
+        )
+        assert_equal(
+          "replacement\n",
+          loaded.fetch("artifacts/stdout.txt"),
+          fault
+        )
+        refute_path_exists File.join(
+          root,
+          "qualification",
+          "runs",
+          run_id,
+          "lanes",
+          ".deterministic.pending"
+        )
+      end
     end
   end
 
@@ -584,6 +691,41 @@ class ModulesMigrationRepositoryTest < Minitest::Test
   end
 
   private
+
+  def qualification_lane_payload(fixture, marker:)
+    run_id = fixture.dig(:payload, "run_id")
+    offset = marker == "first" ? 1 : 2
+    result =
+      Hive::Modules::Migration::QualificationLaneResult.build(
+        run_id: run_id,
+        lane: "deterministic",
+        status: "passed",
+        started_at: "2026-07-30T09:00:00.000000Z",
+        ended_at:
+          format(
+            "2026-07-30T09:00:%02d.000000Z",
+            offset
+          ),
+        target_sha256:
+          fixture.dig(
+            :payload,
+            "candidate",
+            "source_archive_sha256"
+          ),
+        exit_code: 0
+      )
+    {
+      run_id: run_id,
+      lane: "deterministic",
+      result_bytes:
+        Hive::Modules::Migration::QualificationLaneResult
+          .canonical(result.to_h),
+      bundle_bytes: canonical("marker" => marker),
+      artifacts: { "stdout.txt" => "#{marker}\n" },
+      repro_json: canonical("marker" => marker),
+      repro_script: "#!/usr/bin/env bash\n# #{marker}\n"
+    }
+  end
 
   def deep_copy_inputs(inputs)
     inputs.to_h do |path, entry|

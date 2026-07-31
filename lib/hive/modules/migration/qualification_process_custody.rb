@@ -1,6 +1,7 @@
 require "json"
 require "hive/errors"
 require "hive/managed_directory"
+require "hive/modules/migration/bounded_directory_entries"
 require "hive/workflow_package/canonical_json"
 
 module Hive
@@ -58,10 +59,8 @@ module Hive
 
         def read_all(root:)
           directory = directory(root)
-          children = directory.each_child.to_a.sort
-          malformed! if
-            children.length > MAX_RECORDS ||
-              children.any? do |name|
+          children = bounded_names(directory.root)
+          malformed! if children.any? do |name|
                 !name.end_with?(".json") ||
                   !ATTEMPT_ID.match?(
                     name.delete_suffix(".json")
@@ -118,6 +117,16 @@ module Hive
           malformed!
         end
         private_class_method :load_snapshot
+
+        def bounded_names(root)
+          BoundedDirectoryEntries.names(
+            root,
+            limit: MAX_RECORDS
+          )
+        rescue Hive::ConfigError
+          malformed!
+        end
+        private_class_method :bounded_names
 
         def validate(value)
           malformed! unless

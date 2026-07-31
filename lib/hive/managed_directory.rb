@@ -10,6 +10,7 @@ module Hive
   class ManagedDirectory
     class UnsafeError < Hive::ConfigError; end
     class ExchangeUnavailable < Hive::ConfigError; end
+    class InstallUnavailable < Hive::ConfigError; end
 
     private_constant :NativeAt
 
@@ -172,6 +173,68 @@ module Hive
            Errno::EOPNOTSUPP, Errno::ENOTSUP => error
       raise ExchangeUnavailable,
             "#{@label} requires atomic filesystem exchange " \
+            "(#{error.class}: #{error.message})"
+    rescue Hive::ConfigError
+      raise
+    rescue SystemCallError, IOError, ArgumentError, TypeError
+      unsafe!
+    end
+
+    # Atomically installs a prepared directory at an absent sibling name.
+    # There is deliberately no ordinary-rename fallback: only a kernel
+    # no-replace operation closes the destination race.
+    def install_directory_if_absent!(
+      source_relative:, destination_relative:
+    )
+      source_parent, source_name =
+        target_components(source_relative)
+      destination_parent, destination_name =
+        target_components(destination_relative)
+      unsafe! unless source_parent == destination_parent &&
+                     source_name != destination_name
+      with_session(create_root: false) do |session|
+        session.with_directory(
+          source_parent,
+          create: false
+        ) do |parent|
+          source_identity = directory_identity_at(
+            parent.directory,
+            source_name
+          )
+          unsafe! unless source_identity
+          verify_entry_absent!(
+            parent.directory,
+            destination_name
+          )
+          session.verify_binding!(parent)
+          unsafe! unless source_identity ==
+            directory_identity_at(parent.directory, source_name)
+
+          @native.rename_noreplaceat(
+            parent.directory,
+            source_name,
+            destination_name
+          )
+
+          unsafe! unless
+            directory_identity_at(
+              parent.directory,
+              source_name
+            ).nil? &&
+              source_identity ==
+                directory_identity_at(
+                  parent.directory,
+                  destination_name
+                )
+          @native.fsync_directory(parent.directory)
+          session.verify_binding!(parent)
+        end
+      end
+      absolute(destination_relative)
+    rescue NativeAt::Unavailable, Errno::ENOSYS, Errno::EINVAL,
+           Errno::EOPNOTSUPP, Errno::ENOTSUP => error
+      raise InstallUnavailable,
+            "#{@label} requires atomic no-replace directory install " \
             "(#{error.class}: #{error.message})"
     rescue Hive::ConfigError
       raise
@@ -802,6 +865,17 @@ module Hive
       identity(stat)
     rescue Errno::ENOENT
       nil
+    ensure
+      directory&.close
+    end
+
+    def verify_entry_absent!(parent, name)
+      directory = @native.open_directory(parent, name)
+      unsafe!
+    rescue Errno::ENOENT
+      nil
+    rescue Errno::ENOTDIR, Errno::ELOOP
+      unsafe!
     ensure
       directory&.close
     end

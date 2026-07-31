@@ -56,6 +56,31 @@ class ModulesMigrationQualificationProcessCustodyTest <
     end
   end
 
+  def test_rejects_the_first_record_beyond_the_streaming_limit
+    with_tmp_dir do |root|
+      File.chmod(0o700, root)
+      (CUSTODY::MAX_RECORDS + 1).times do |index|
+        path = File.join(
+          root,
+          format(
+            "00000000-0000-4000-8000-%012x.json",
+            index
+          )
+        )
+        File.binwrite(path, "{}")
+        File.chmod(0o600, path)
+      end
+
+      error = assert_raises(Hive::ConfigError) do
+        CUSTODY.read_all(root: root)
+      end
+      assert_equal(
+        "patrol qualification process custody is unsafe",
+        error.message
+      )
+    end
+  end
+
   private
 
   def wrapper

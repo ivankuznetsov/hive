@@ -7,6 +7,7 @@ require "hive/modules/decision_journal"
 require "hive/modules/event_ledger"
 require "hive/modules/hook_attempt"
 require "hive/modules/migration/patrol_evidence"
+require "hive/modules/migration/qualification_event_validator"
 require "hive/modules/migration/qualification_run_descriptor"
 require "hive/workflow_package/canonical_json"
 
@@ -230,68 +231,10 @@ module Hive
           end
 
           def event!(value, module_name:)
-            exact!(value, EVENT_KEYS)
-            bounded!(value, MAX_EVENT_BYTES)
-            malformed! unless
-              value["schema"] == EventLedger::SCHEMA &&
-              value["schema_version"] == EventLedger::SCHEMA_VERSION &&
-              value["event_name"] == "schedule" &&
-              EVENT_ID.match?(value["event_id"].to_s) &&
-              nonempty?(value["project_id"]) &&
-              nonempty?(value["project"]) &&
-              exact_timestamp?(value["occurred_at"]) &&
-              exact_timestamp?(value["recorded_at"]) &&
-              nonempty?(value["idempotency_key"]) &&
-              value["idempotency_key"].bytesize <= 512
-            exact!(value["source"], SOURCE_KEYS)
-            payload = value["payload"]
-            payload_keys = %w[
-              due_at legacy_mutator_capture missed_windows schedule
-              target_module
-            ]
-            payload_keys << "target_hook" if
-              module_name == "architecture-patrol"
-            exact!(payload, payload_keys)
-            malformed! unless
-              payload["target_module"] == module_name &&
-              nonempty?(payload["schedule"]) &&
-              exact_timestamp?(payload["due_at"]) &&
-              payload["missed_windows"].is_a?(Integer) &&
-              payload["missed_windows"] >= 0
-            malformed! if
-              module_name == "architecture-patrol" &&
-              !nonempty?(payload["target_hook"])
-            capture = PatrolCapture.from_h(
-              payload.fetch("legacy_mutator_capture")
-            )
-            source_type = module_name == "patrol" ?
-              "legacy_patrol_completion" :
-              "legacy_architecture_patrol_completion"
-            idempotency_prefix = module_name == "patrol" ?
-              "patrol-finalized:" :
-              "architecture-patrol-finalized:"
-            malformed! unless
-              capture.module_name == module_name &&
-              capture.project.fetch("project_id") ==
-                value["project_id"] &&
-              capture.project.fetch("name") == value["project"] &&
-              value["source"] == {
-                "type" => source_type,
-                "id" => capture.occurrence_id
-              } &&
-              value["idempotency_key"] ==
-                "#{idempotency_prefix}#{capture.occurrence_id}" &&
-              value["occurred_at"] == capture.occurred_at &&
-              payload["due_at"] == capture.occurred_at
-            expected_id = "evt-#{Digest::SHA256.hexdigest(
-              [
-                value["project_id"],
-                value["event_name"],
-                value["idempotency_key"]
-              ].join("\0")
-            )}"
-            malformed! unless value["event_id"] == expected_id
-            capture
+            QualificationEventValidator.new.call(
+              value,
+              module_name: module_name
+            ).capture
           rescue Hive::ConfigError
             malformed!
           end

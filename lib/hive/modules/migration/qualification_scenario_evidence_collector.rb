@@ -6,8 +6,10 @@ require "hive/attempts/store"
 require "hive/modules/decision_journal"
 require "hive/modules/event_ledger"
 require "hive/modules/migration/evidence_store"
-require "hive/modules/migration/occurrence_journal"
+require "hive/modules/migration/bounded_directory_entries"
+require "hive/modules/migration/occurrence_record_validator"
 require "hive/modules/migration/patrol_effect_index"
+require "hive/modules/migration/qualification_run_descriptor"
 require "hive/modules/migration/qualification_scenario_actuals"
 require "hive/modules/migration/shadow_comparator"
 require "hive/refactor_patrol/architecture_project_binding"
@@ -32,8 +34,9 @@ module Hive
             %w[actions scheduled-discovery].freeze,
           "patrol" => %w[scheduled-scan].freeze
         }.freeze
-        CASE_ID = /\A[a-z0-9][a-z0-9-]{0,127}\z/
+        CASE_ID = QualificationRunDescriptor::SAFE_ID
         MAX_RAW_BYTES = 4 * 1024 * 1024
+        MAX_DIRECTORY_ENTRIES = 8_192
         TERMINAL_EFFECT_STATES = %w[
           committed denied failed reconciled
         ].freeze
@@ -253,6 +256,8 @@ module Hive
           prefix = "#{File.realpath(root)}#{File::SEPARATOR}"
           malformed! unless stat.directory? &&
                             !stat.symlink? &&
+                            stat.uid == Process.euid &&
+                            (stat.mode & 0o022).zero? &&
                             File.realpath(path).start_with?(prefix)
 
           path.freeze
@@ -273,12 +278,17 @@ module Hive
           raw_index = canonical_object(
             File.join(events_root, "index.json")
           )
-          events = Hive::Modules::EventLedger.new(
-            root: module_runtime
-          ).all
-          malformed! unless events.length == 1
-
-          event = events.fetch(0)
+          event_name = names.find do |name|
+            name.start_with?("evt-")
+          end
+          event_id = File.basename(event_name, ".json")
+          event_bytes = canonical_bytes(
+            File.join(events_root, event_name)
+          )
+          event = Hive::Modules::EventLedger.parse_snapshot(
+            event_bytes,
+            expected_id: event_id
+          )
           schedule_key = [
             event.dig("payload", "target_module"),
             event.dig("payload", "schedule")
@@ -534,7 +544,13 @@ module Hive
         def load_comparator(root, capture:, module_name:)
           validate_shadow_inventory!(root)
           records =
-            ShadowComparator.new(root: root).each_record.to_a
+            ShadowComparator.new(
+              root: root,
+              admission_lock: lambda do |shared: true, &block|
+                malformed! unless shared == true && block
+                block.call
+              end
+            ).each_record.to_a
           malformed! unless records.length == 1
 
           record = records.fetch(0)
@@ -558,9 +574,16 @@ module Hive
           ].each do |relative|
             required_directory(root, relative)
           end
-          store = EvidenceStore.new(root: root)
-          captures = store.captures
-          receipts = store.receipts
+          captures = load_evidence_records(
+            File.join(root, "captures"),
+            pattern: /\Acap-[0-9a-f]{64}\.json\z/,
+            type: PatrolCapture
+          )
+          receipts = load_evidence_records(
+            File.join(root, "receipts"),
+            pattern: /\Areceipt-[0-9a-f]{64}\.json\z/,
+            type: EffectReceipt
+          )
           malformed! unless captures.length == 1 &&
                             captures.fetch(0).to_h == capture.to_h
 
@@ -589,31 +612,28 @@ module Hive
                 receipt.fetch("receipt_id")
               end == comparator_receipts
           validate_evidence_indexes!(
-            root, store: store, capture: capture, receipts: receipts
+            root, capture: capture, receipts: receipts
           )
           immutable_json(
             receipts.sort_by(&:receipt_id).map(&:to_h)
           )
         end
 
-        def validate_evidence_indexes!(root, store:, capture:, receipts:)
-          occurrence_page = store.receipts_for_occurrence(
-            capture.occurrence_id,
-            limit: EvidenceStore::MAX_PAGE_SIZE
-          )
-          malformed! unless occurrence_page.next_cursor.nil? &&
-                            occurrence_page.records
-                              .map(&:receipt_id).sort ==
-                              receipts.map(&:receipt_id).sort
-          receipts.each do |receipt|
-            page = store.receipts_for_intent(
-              receipt.intent.intent_id,
-              limit: EvidenceStore::MAX_PAGE_SIZE
-            )
-            malformed! unless page.next_cursor.nil? &&
-                              page.records.map(&:receipt_id) ==
-                                [ receipt.receipt_id ]
-          end
+        def load_evidence_records(root, pattern:, type:)
+          exact_names!(root, pattern).map do |name|
+            value, bytes = json_file(File.join(root, name))
+            record = type.from_h(value)
+            identity =
+              type == PatrolCapture ?
+                record.capture_id : record.receipt_id
+            malformed! unless
+              name == "#{identity}.json" &&
+                bytes == canonical(record.to_h)
+            record
+          end.freeze
+        end
+
+        def validate_evidence_indexes!(root, capture:, receipts:)
           occurrence_names = exact_names!(
             File.join(root, "indexes", "occurrences"),
             /\Aocc-[0-9a-f]{64}\.json\z/
@@ -634,18 +654,71 @@ module Hive
                               receipts.map do |receipt|
                                 "#{receipt.intent.intent_id}.json"
                               end.sort
+          if receipts.empty?
+            return
+          end
+
+          validate_evidence_index!(
+            File.join(
+              root,
+              "indexes",
+              "occurrences",
+              "#{capture.occurrence_id}.json"
+            ),
+            kind: "occurrence",
+            identity: capture.occurrence_id,
+            receipt_ids: receipts.map(&:receipt_id).sort
+          )
+          receipts.each do |receipt|
+            validate_evidence_index!(
+              File.join(
+                root,
+                "indexes",
+                "intents",
+                "#{receipt.intent.intent_id}.json"
+              ),
+              kind: "intent",
+              identity: receipt.intent.intent_id,
+              receipt_ids: [ receipt.receipt_id ]
+            )
+          end
+        end
+
+        def validate_evidence_index!(
+          path, kind:, identity:, receipt_ids:
+        )
+          value = canonical_object(path)
+          malformed! unless
+            value.keys.sort == %w[
+              identity kind receipt_ids schema schema_version
+            ] &&
+              value.fetch("schema") ==
+                EvidenceStore::INDEX_SCHEMA &&
+              value.fetch("schema_version") == 1 &&
+              value.fetch("kind") == kind &&
+              value.fetch("identity") == identity &&
+              value.fetch("receipt_ids") == receipt_ids
         end
 
         def load_terminal_effects(
           root, capture:, receipts:, module_name:
         )
-          validate_occurrence_inventory!(root)
+          occurrence_names = validate_occurrence_inventory!(root)
           recovery_index =
             validate_recovery_index!(root, module_name)
-          journal = OccurrenceJournal.new(
-            root, module_name: module_name
+          validator = OccurrenceRecordValidator.new(
+            module_name: module_name
           )
-          records = journal.each_record.to_a
+          records = occurrence_names.filter_map do |name|
+            next unless name.start_with?("occ-")
+
+            value = canonical_object(File.join(root, name))
+            validator.validate!(
+              value,
+              expected_id: File.basename(name, ".json")
+            )
+            immutable_json(value)
+          end
           malformed! unless records.length <= 1
 
           journal_state = nil
@@ -654,7 +727,6 @@ module Hive
               journal_state = validate_retirement_state!(
                 root, capture, module_name
               )
-              malformed! unless journal.terminalized?(capture)
               "retired_fence"
             else
               validate_live_occurrence!(
@@ -1050,14 +1122,16 @@ module Hive
         end
 
         def validate_shadow_inventory!(root)
-          entries = Dir.children(root).sort
+          entries = BoundedDirectoryEntries.names(
+            root,
+            limit: MAX_DIRECTORY_ENTRIES
+          )
           malformed! unless entries.all? do |name|
             path = File.join(root, name)
             case name
             when "patrol", "architecture-patrol"
               stat = File.lstat(path)
-              stat.directory? &&
-                !stat.symlink? &&
+              safe_directory?(stat) &&
                 begin
                   exact_names!(
                     path, /\A[0-9a-f]{64}\.json\z/
@@ -1066,8 +1140,7 @@ module Hive
                 end
             when "migrations"
               stat = File.lstat(path)
-              stat.directory? &&
-                !stat.symlink? &&
+              safe_directory?(stat) &&
                 exact_names!(
                   path,
                   /\Ashadow-decision-v2(?:-checkpoint)?\.json\z/
@@ -1082,28 +1155,34 @@ module Hive
         end
 
         def validate_occurrence_inventory!(root)
-          json_names = Dir.children(root)
-                          .select { |name| name.end_with?(".json") }
-                          .sort
+          json_names =
+            BoundedDirectoryEntries.names(
+              root,
+              limit: MAX_DIRECTORY_ENTRIES
+            ).select { |name| name.end_with?(".json") }
           valid = json_names.all? do |name|
             /\A(?:journal-state|recovery-index|occ-[0-9a-f]{64})\.json\z/
               .match?(name) &&
               begin
                 stat = File.lstat(File.join(root, name))
-                stat.file? && !stat.symlink?
+                safe_regular?(stat)
               end
           end
           malformed! unless valid &&
                             json_names.include?("journal-state.json") &&
                             json_names.include?("recovery-index.json")
+          json_names.freeze
         end
 
         def exact_names!(root, pattern)
-          entries = Dir.children(root).sort
+          entries = BoundedDirectoryEntries.names(
+            root,
+            limit: MAX_DIRECTORY_ENTRIES
+          )
           malformed! unless entries.all? do |name|
             path = File.join(root, name)
             stat = File.lstat(path)
-            stat.file? && !stat.symlink? && pattern.match?(name)
+            safe_regular?(stat) && pattern.match?(name)
           end
 
           entries.freeze
@@ -1116,21 +1195,62 @@ module Hive
           value
         end
 
+        def canonical_bytes(path)
+          value, bytes = json_file(path)
+          malformed! unless bytes == canonical(value)
+
+          bytes
+        end
+
         def json_object(path)
           json_file(path).fetch(0)
         end
 
         def json_file(path)
-          stat = File.lstat(path)
-          malformed! unless stat.file? &&
-                            !stat.symlink? &&
-                            stat.size <= MAX_RAW_BYTES
-
-          bytes = File.binread(path)
+          before = File.lstat(path)
+          malformed! unless
+            safe_regular?(before) &&
+              before.size <= MAX_RAW_BYTES
+          flags = File::RDONLY
+          flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+          opened = File.open(path, flags)
+          malformed! unless same_file?(before, opened.stat)
+          bytes = opened.read(MAX_RAW_BYTES + 1)
+          bytes = "".b if bytes.nil? && before.size.zero?
+          malformed! unless
+            bytes &&
+              bytes.bytesize == before.size &&
+              same_file?(before, opened.stat) &&
+              same_file?(before, File.lstat(path))
           value = JSON.parse(bytes)
           malformed! unless value.is_a?(Hash)
 
-          [ value, bytes ].freeze
+          [ value, bytes.freeze ].freeze
+        ensure
+          opened&.close
+        end
+
+        def safe_directory?(stat)
+          stat.directory? &&
+            !stat.symlink? &&
+            stat.uid == Process.euid &&
+            (stat.mode & 0o022).zero?
+        end
+
+        def safe_regular?(stat)
+          stat.file? &&
+            !stat.symlink? &&
+            stat.nlink == 1 &&
+            stat.uid == Process.euid &&
+            (stat.mode & 0o022).zero?
+        end
+
+        def same_file?(left, right)
+          %i[
+            dev ino mode nlink uid gid size mtime ctime
+          ].all? do |field|
+            left.public_send(field) == right.public_send(field)
+          end
         end
 
         def immutable_json(value)

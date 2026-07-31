@@ -1,6 +1,7 @@
 require "digest"
 require "json"
 require "hive/errors"
+require "hive/modules/migration/bounded_directory_entries"
 require "hive/workflow_package/canonical_json"
 
 module Hive
@@ -87,7 +88,10 @@ module Hive
               "type" => "directory",
               "mode" => stat.mode & 0o777
             }.freeze unless relative.empty?
-            children = Dir.children(absolute).sort
+            children = bounded_names(
+              absolute,
+              limit: @max_entries - entries.length
+            )
             children.each do |name|
               validate_name!(name)
               child =
@@ -110,16 +114,7 @@ module Hive
           totals[:files] += 1
           totals[:bytes] += size
           malformed! if totals.fetch(:bytes) > @max_total_bytes
-          bytes = File.binread(absolute, @max_file_bytes + 1)
-          malformed! unless bytes.bytesize == size
-          post = File.lstat(absolute)
-          malformed! unless
-            post.dev == stat.dev &&
-              post.ino == stat.ino &&
-              post.mode == stat.mode &&
-              post.uid == stat.uid &&
-              post.nlink == stat.nlink &&
-              post.size == stat.size
+          bytes = read_file(absolute, stat)
           entries[relative] = {
             "path" => relative,
             "type" => "file",
@@ -169,6 +164,38 @@ module Hive
               !value.include?("/") &&
               !value.include?("\\") &&
               !value.include?("\0")
+        end
+
+        def bounded_names(path, limit:)
+          BoundedDirectoryEntries.names(path, limit: limit)
+        rescue Hive::ConfigError
+          malformed!
+        end
+
+        def read_file(path, before)
+          flags = File::RDONLY
+          flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+          opened = File.open(path, flags)
+          malformed! unless same_file?(before, opened.stat)
+          bytes = opened.read(@max_file_bytes + 1)
+          bytes = "".b if bytes.nil? && before.size.zero?
+          malformed! unless
+            bytes &&
+              bytes.bytesize == before.size &&
+              same_file?(before, opened.stat) &&
+              same_file?(before, File.lstat(path))
+
+          bytes.freeze
+        ensure
+          opened&.close
+        end
+
+        def same_file?(left, right)
+          %i[
+            dev ino mode nlink uid gid size mtime ctime
+          ].all? do |field|
+            left.public_send(field) == right.public_send(field)
+          end
         end
 
         def positive_integer(value)

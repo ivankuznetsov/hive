@@ -10,8 +10,10 @@ class QualificationLaneRunnerTest < Minitest::Test
   include QualificationRunFixture
 
   NOW = Time.utc(2026, 7, 31, 10, 0, 0)
+  PROCESS =
+    Hive::Modules::Migration::QualificationScenarioProcess
   PROCESS_RESULT =
-    Hive::Modules::Migration::QualificationScenarioProcess::Result
+    PROCESS::Result
 
   MaterializedSource = Data.define(:root)
   MaterializedInstalled =
@@ -55,10 +57,15 @@ class QualificationLaneRunnerTest < Minitest::Test
   end
 
   class ScenarioProcess
-    def initialize(actual:, record:, unexpected_exit: false)
+    def initialize(
+      actual:, record:, unexpected_exit: false,
+      post_spawn_failure_generation: nil
+    )
       @actual = actual
       @record = record
       @unexpected_exit = unexpected_exit
+      @post_spawn_failure_generation =
+        post_spawn_failure_generation
     end
 
     def call(workspace:, argv:, **)
@@ -86,6 +93,12 @@ class QualificationLaneRunnerTest < Minitest::Test
       )
       File.binwrite(marker, "{}")
       File.chmod(0o600, marker)
+      if request.generation ==
+         @post_spawn_failure_generation
+        raise PROCESS::PostSpawnFailure.new(
+          evidence: failure_evidence
+        )
+      end
       if @unexpected_exit
         return process_result(
           status: "failed",
@@ -142,6 +155,31 @@ class QualificationLaneRunnerTest < Minitest::Test
     end
 
     private
+
+    def failure_evidence
+      PROCESS::FailureEvidence.build(
+        phase: "capture",
+        reason: "capture_unconfirmed",
+        process_state: "exited",
+        exit_status: 0,
+        signal: nil,
+        timed_out: false,
+        stdout: nil,
+        stderr: nil,
+        duration_seconds: 0.2,
+        network_isolated: true,
+        executable_sha256: "1" * 64,
+        ruby_sha256: "2" * 64,
+        sandbox_profile_sha256: "3" * 64,
+        source_inventory_sha256: "4" * 64,
+        installed_inventory_sha256: "5" * 64,
+        cleanup: {
+          "status" => "passed",
+          "live_processes" => 0,
+          "kill_authority" => "host_pid_namespace"
+        }
+      )
+    end
 
     def process_result(status:, exit_status:, attempt_count:)
       empty_stream = {
@@ -559,9 +597,65 @@ class QualificationLaneRunnerTest < Minitest::Test
                    )
       assert_equal 1,
                    processes.fetch(0).fetch("exit_status")
+      assert_equal "result",
+                   processes.fetch(0).fetch("kind")
       assert_nil processes.fetch(0).fetch(
         "generation_receipt_sha256"
       )
+    end
+  end
+
+  def test_post_spawn_failure_retains_bounded_process_evidence
+    with_qualification_repository do |repository, fixture, run_id|
+      observation =
+        qualification_scenario_observations(
+          fixture,
+          lane: "deterministic"
+        ).fetch("observations").fetch(0)
+      actual = candidate_actual(observation)
+      result = runner(
+        repository,
+        source_materializer: SourceMaterializer.new,
+        installed_materializer: InstalledMaterializer.new,
+        scenario_process: ScenarioProcess.new(
+          actual: actual,
+          record: fixture.fetch(:observation_record),
+          post_spawn_failure_generation: 1
+        ),
+        recovery_evidence:
+          RecoveryEvidence.new(
+            fields: recovery_fields(observation)
+          ),
+        verifier: AcceptingVerifier
+      ).call(
+        run_id: run_id,
+        lane: "deterministic"
+      )
+
+      assert_equal "failed", result.status
+      assert_equal "candidate_execution_failed",
+                   result.failure_reason
+      assert_equal Hive::ExitCodes::SOFTWARE,
+                   result.exit_code
+      lane = repository.qualification_lane(
+        run_id,
+        "deterministic"
+      )
+      processes = JSON.parse(
+        lane.fetch("artifacts/process-results.json")
+      ).fetch("processes")
+      assert_equal 1, processes.length
+      row = processes.fetch(0)
+      assert_equal "post_spawn_failure",
+                   row.fetch("kind")
+      assert_equal "patrol-case", row.fetch("case_id")
+      assert_equal 1, row.fetch("generation")
+      assert_equal "after_legacy_capture",
+                   row.fetch("planned_checkpoint")
+      assert_nil row.fetch("generation_receipt_sha256")
+      assert_equal "capture_unconfirmed",
+                   row.dig("failure", "reason")
+      assert_nil row.dig("failure", "stdout")
     end
   end
 

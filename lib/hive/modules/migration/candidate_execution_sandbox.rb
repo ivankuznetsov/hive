@@ -15,6 +15,9 @@ module Hive
       # receive no provider or GitHub secrets; live access belongs to a
       # future host-owned broker, never to candidate code.
       class CandidateExecutionSandbox
+        class TargetChanged < Hive::ConfigError; end
+        class CleanupFailed < Hive::ConfigError; end
+
         BWRAP = "/usr/bin/bwrap".freeze
         VIRTUAL_ROOT = "/qualification".freeze
         SOURCE_MOUNTS = %w[
@@ -109,7 +112,7 @@ module Hive
               before_source.digest == after_source.digest &&
                 before_installed.digest ==
                   after_installed.digest
-              raise Hive::ConfigError,
+              raise TargetChanged,
                     "patrol qualification candidate target changed"
             end
           end
@@ -645,7 +648,7 @@ module Hive
 
           FileUtils.remove_entry_secure(path)
         rescue SystemCallError, ArgumentError
-          raise Hive::ConfigError,
+          raise CleanupFailed,
                 "patrol qualification sandbox cleanup failed"
         end
 

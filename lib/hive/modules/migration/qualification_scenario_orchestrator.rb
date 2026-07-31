@@ -1,6 +1,7 @@
 require "digest"
 require "hive/errors"
 require "hive/modules/migration/qualification_checkpoint_evidence"
+require "hive/modules/migration/qualification_run_descriptor"
 require "hive/modules/migration/qualification_scenario_process"
 require "hive/workflow_package/canonical_json"
 
@@ -24,7 +25,7 @@ module Hive
         SCHEMA_VERSION = 1
         CHECKPOINT_EXIT = 76
         MAX_TIMEOUT_SECONDS = 3_600
-        CASE_ID = /\A[a-z0-9][a-z0-9-]{0,127}\z/
+        CASE_ID = QualificationRunDescriptor::SAFE_ID
         DIGEST = /\A[0-9a-f]{64}\z/
         TWO_GENERATION_CHECKPOINTS = %w[
           after_effect_intent
@@ -206,11 +207,23 @@ module Hive
             )
             malformed! if previous_state &&
                           previous_state != before_snapshot.sha256
-            process = @process.call(
-              **arguments,
-              timeout_seconds:
-                remaining_timeout(started, timeout)
-            )
+            process =
+              begin
+                @process.call(
+                  **arguments,
+                  timeout_seconds:
+                    remaining_timeout(started, timeout)
+                )
+              rescue QualificationScenarioProcess::
+                       PostSpawnFailure => error
+                record_process.call(
+                  case_id: case_id,
+                  generation: generation,
+                  planned_checkpoint: checkpoint,
+                  process: error.evidence
+                )
+                raise
+              end
             record_process.call(
               case_id: case_id,
               generation: generation,
@@ -290,6 +303,8 @@ module Hive
             recovery_plan: recovery_plan,
             generations: generations.freeze
           )
+        rescue QualificationScenarioProcess::PostSpawnFailure
+          raise
         rescue Hive::ConfigError => error
           raise error if error.message == ERROR
 

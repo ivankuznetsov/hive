@@ -1,11 +1,13 @@
 require "json"
 require "hive/attempts/store"
 require "hive/errors"
+require "hive/modules/migration/bounded_directory_entries"
 require "hive/modules/decision_journal"
 require "hive/modules/event_ledger"
 require "hive/modules/migration/occurrence_record_validator"
 require "hive/modules/migration/patrol_evidence"
 require "hive/modules/migration/qualification_checkpoint_evidence"
+require "hive/modules/migration/qualification_event_validator"
 require "hive/modules/migration/qualification_scenario_input"
 require "hive/workflow_package/canonical_json"
 
@@ -233,16 +235,20 @@ module Hive
             malformed! unless
               bytes ==
                 Hive::WorkflowPackage::CanonicalJSON.generate(value) &&
-                value.is_a?(Hash) &&
-                value.fetch("schema") ==
-                  Hive::Modules::EventLedger::SCHEMA &&
-                value.fetch("schema_version") ==
-                  Hive::Modules::EventLedger::SCHEMA_VERSION &&
-                value.fetch("event_id") == expected_id &&
-                EVENT_ID.match?(expected_id) &&
-                value.dig("payload", "target_module") == "patrol"
-            value.freeze
+                EVENT_ID.match?(expected_id)
+            validation = QualificationEventValidator.new.call(
+              value,
+              module_name: "patrol"
+            )
+            malformed! unless
+              validation.event.fetch("event_id") == expected_id
+
+            validation.event
           end.freeze
+        rescue Hive::ConfigError => error
+          raise error if error.message == ERROR
+
+          malformed!
         end
 
         def decision_records(module_runtime)
@@ -325,7 +331,10 @@ module Hive
         def json_records(root, pattern)
           return [].freeze unless File.directory?(root)
 
-          names = Dir.children(root).select do |name|
+          names = BoundedDirectoryEntries.names(
+            root,
+            limit: QualificationCheckpointEvidence::MAX_ENTRIES
+          ).select do |name|
             pattern.match?(name)
           end.sort
           names.map do |name|

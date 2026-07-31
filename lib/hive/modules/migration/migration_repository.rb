@@ -1,4 +1,5 @@
 require "digest"
+require "fileutils"
 require "json"
 require "hive/managed_directory"
 require "hive/modules/migration/qualification_lane_result"
@@ -32,6 +33,8 @@ module Hive
         MAX_QUALIFICATION_DIAGNOSTICS = 256
         MAX_QUALIFICATION_REPRO_BYTES = 1024 * 1024
         MAX_QUALIFICATION_ARTIFACT_BYTES = 16 * 1024 * 1024
+        MAX_QUALIFICATION_TREE_ENTRIES =
+          (MAX_QUALIFICATION_FILES * 2) + 32
         EXPECTED_MISSING = :missing
 
         attr_reader :root
@@ -280,60 +283,29 @@ module Hive
             raise Hive::ConfigError,
                   "patrol qualification blocked diagnostics are not terminal results"
           end
+          bundle_bytes = bounded_qualification_bytes!(
+            bundle_bytes, MAX_BUNDLE_BYTES
+          )
+          repro_json = bounded_qualification_bytes!(
+            repro_json, MAX_QUALIFICATION_REPRO_BYTES
+          )
+          repro_script = bounded_qualification_bytes!(
+            repro_script, MAX_QUALIFICATION_REPRO_BYTES
+          )
+          entries = qualification_lane_entries(
+            result_bytes: result_bytes,
+            bundle_bytes: bundle_bytes,
+            artifacts: artifacts,
+            repro_json: repro_json,
+            repro_script: repro_script
+          )
           with_lock do
-            immutable_qualification_write(
-              qualification_path(run_id, refs.fetch("bundle")),
-              bounded_qualification_bytes!(
-                bundle_bytes, MAX_BUNDLE_BYTES
-              ),
-              mode: 0o600,
-              max_bytes: MAX_BUNDLE_BYTES,
-              conflict:
-                "patrol qualification lane conflicts with existing bytes"
-            )
-            artifacts.each do |relative, bytes|
-              immutable_qualification_write(
-                qualification_path(
-                  run_id,
-                  "#{refs.fetch('artifacts')}/#{relative}"
-                ),
-                bytes,
-                mode: 0o600,
-                max_bytes: MAX_QUALIFICATION_ARTIFACT_BYTES,
-                conflict:
-                  "patrol qualification lane conflicts with existing bytes"
-              )
-            end
-            immutable_qualification_write(
-              qualification_path(
-                run_id, refs.fetch("repro_json")
-              ),
-              bounded_qualification_bytes!(
-                repro_json, MAX_QUALIFICATION_REPRO_BYTES
-              ),
-              mode: 0o600,
-              max_bytes: MAX_QUALIFICATION_REPRO_BYTES,
-              conflict:
-                "patrol qualification lane conflicts with existing bytes"
-            )
-            immutable_qualification_write(
-              qualification_path(
-                run_id, refs.fetch("repro_script")
-              ),
-              bounded_qualification_bytes!(
-                repro_script, MAX_QUALIFICATION_REPRO_BYTES
-              ),
-              mode: 0o700,
-              max_bytes: MAX_QUALIFICATION_REPRO_BYTES,
-              conflict:
-                "patrol qualification lane conflicts with existing bytes"
-            )
-            # Result is the completion sentinel and is therefore published
-            # after every other immutable lane artifact.
-            publish_qualification_lane_result(
+            publish_qualification_tree(
               run_id: run_id,
               lane: lane,
-              result_bytes: result_bytes
+              refs: refs,
+              entries: entries,
+              exact: true
             )
           end
           refs
@@ -361,13 +333,17 @@ module Hive
                   "patrol qualification blocked diagnostics are not terminal results"
           end
           with_lock do
-            immutable_qualification_write(
-              qualification_path(run_id, refs.fetch("result")),
-              result_bytes,
-              mode: 0o600,
-              max_bytes: MAX_QUALIFICATION_RESULT_BYTES,
-              conflict:
-                "patrol qualification lane result conflicts with existing bytes"
+            publish_qualification_tree(
+              run_id: run_id,
+              lane: lane,
+              refs: refs,
+              entries: {
+                "result.json" => {
+                  bytes: result_bytes,
+                  mode: 0o600
+                }.freeze
+              }.freeze,
+              exact: false
             )
           end
           refs.fetch("result")
@@ -387,9 +363,7 @@ module Hive
             raise Hive::ConfigError,
                   "patrol qualification descriptor is missing"
           end
-          refs = QualificationRunDescriptor
-            .load(descriptor_bytes)
-            .artifact_refs(lane)
+          QualificationRunDescriptor.load(descriptor_bytes)
           result_bytes = qualification_result_bytes(
             result_bytes, run_id: run_id, lane: lane
           )
@@ -400,8 +374,8 @@ module Hive
           end
           digest = Digest::SHA256.hexdigest(result_bytes)
           relative = File.join(
-            File.dirname(refs.fetch("result")),
-            "diagnostics",
+            "lane-diagnostics",
+            lane,
             "#{digest}.json"
           )
           with_lock do
@@ -424,13 +398,8 @@ module Hive
             qualification_descriptor(run_id, missing: true)
           return [].freeze unless descriptor_bytes
 
-          refs = QualificationRunDescriptor
-            .load(descriptor_bytes)
-            .artifact_refs(lane)
-          root = File.join(
-            File.dirname(refs.fetch("result")),
-            "diagnostics"
-          )
+          QualificationRunDescriptor.load(descriptor_bytes)
+          root = File.join("lane-diagnostics", lane)
           names = with_lock(shared: true) do
             @directory.each_child(
               qualification_path(run_id, root),
@@ -844,6 +813,230 @@ module Hive
                   "patrol qualification lane result authority changed"
           end
           bytes
+        end
+
+        def qualification_lane_entries(
+          result_bytes:, bundle_bytes:, artifacts:,
+          repro_json:, repro_script:
+        )
+          entries = {
+            "bundle.json" => {
+              bytes: bundle_bytes,
+              mode: 0o600
+            }.freeze,
+            "repro.json" => {
+              bytes: repro_json,
+              mode: 0o600
+            }.freeze,
+            "repro.sh" => {
+              bytes: repro_script,
+              mode: 0o700
+            }.freeze,
+            "result.json" => {
+              bytes: result_bytes,
+              mode: 0o600
+            }.freeze
+          }
+          artifacts.each do |relative, bytes|
+            entries["artifacts/#{relative}"] = {
+              bytes: bytes,
+              mode: 0o600
+            }.freeze
+          end
+          entries.sort.to_h.freeze
+        end
+
+        def publish_qualification_tree(
+          run_id:, lane:, refs:, entries:, exact:
+        )
+          lane_root = File.dirname(refs.fetch("result"))
+          target = qualification_path(run_id, lane_root)
+          target_type = @directory.entry_type(
+            target,
+            missing: true
+          )
+          if target_type
+            unless target_type == :directory
+              raise Hive::ConfigError,
+                    "patrol qualification lane conflicts with existing bytes"
+            end
+            verify_qualification_tree!(
+              target,
+              entries,
+              exact: exact
+            )
+            return lane_root
+          end
+
+          pending_root = File.join(
+            File.dirname(lane_root),
+            ".#{lane}.pending"
+          )
+          pending = qualification_path(run_id, pending_root)
+          clear_pending_qualification_tree!(pending)
+          @directory.ensure_directory(pending)
+          entries.each_with_index do |(relative, entry), index|
+            @directory.atomic_write(
+              "#{pending}/#{relative}",
+              entry.fetch(:bytes),
+              mode: entry.fetch(:mode),
+              expected_absent: true
+            )
+            after_qualification_lane_stage_write(
+              relative: relative,
+              index: index + 1
+            )
+          end
+          verify_qualification_tree!(
+            pending,
+            entries,
+            exact: true
+          )
+          before_qualification_lane_install
+          @directory.install_directory_if_absent!(
+            source_relative: pending,
+            destination_relative: target
+          )
+          verify_qualification_tree!(
+            target,
+            entries,
+            exact: exact
+          )
+          lane_root
+        rescue Hive::ConfigError => error
+          expected = [
+            "patrol qualification lane conflicts with existing bytes",
+            "patrol qualification pending lane is unsafe"
+          ]
+          raise error if expected.include?(error.message)
+
+          raise Hive::ConfigError,
+                "patrol qualification lane conflicts with existing bytes"
+        end
+
+        def clear_pending_qualification_tree!(relative)
+          type = @directory.entry_type(relative, missing: true)
+          return unless type
+          unless type == :directory
+            raise Hive::ConfigError,
+                  "patrol qualification pending lane is unsafe"
+          end
+
+          path = File.join(root, relative)
+          stat = File.lstat(path)
+          parent = File.dirname(path)
+          unless
+            stat.directory? &&
+              !stat.symlink? &&
+              stat.uid == Process.euid &&
+              (stat.mode & 0o777) == 0o700 &&
+              File.realpath(path) == path &&
+              File.realpath(parent) == parent
+            raise Hive::ConfigError,
+                  "patrol qualification pending lane is unsafe"
+          end
+          FileUtils.remove_entry_secure(path)
+          unless @directory.entry_type(relative, missing: true).nil?
+            raise Hive::ConfigError,
+                  "patrol qualification pending lane is unsafe"
+          end
+        rescue Hive::ConfigError
+          raise
+        rescue SystemCallError, ArgumentError
+          raise Hive::ConfigError,
+                "patrol qualification pending lane is unsafe"
+        end
+
+        def verify_qualification_tree!(root_relative, expected, exact:)
+          root_metadata = @directory.directory_metadata(root_relative)
+          unless root_metadata.fetch(:mode) == 0o700
+            raise Hive::ConfigError,
+                  "patrol qualification lane conflicts with existing bytes"
+          end
+          actual = qualification_tree_files(root_relative)
+          if exact && actual.keys.sort != expected.keys.sort
+            raise Hive::ConfigError,
+                  "patrol qualification lane conflicts with existing bytes"
+          end
+          expected.each do |relative, entry|
+            snapshot = actual.fetch(relative) do
+              raise Hive::ConfigError,
+                    "patrol qualification lane conflicts with existing bytes"
+            end
+            unless
+              snapshot.fetch(:bytes) == entry.fetch(:bytes) &&
+                snapshot.fetch(:mode) == entry.fetch(:mode)
+              raise Hive::ConfigError,
+                    "patrol qualification lane conflicts with existing bytes"
+            end
+          end
+          true
+        end
+
+        def qualification_tree_files(
+          root_relative,
+          relative = "",
+          depth: 0,
+          count: { value: 0 },
+          files: {}
+        )
+          if depth > MAX_QUALIFICATION_DEPTH
+            raise Hive::ConfigError,
+                  "patrol qualification lane conflicts with existing bytes"
+          end
+          current = relative.empty? ?
+            root_relative : "#{root_relative}/#{relative}"
+          bounded_qualification_children(current, count).sort.each do |name|
+            child_relative =
+              relative.empty? ? name : "#{relative}/#{name}"
+            child = "#{root_relative}/#{child_relative}"
+            case @directory.entry_type(child)
+            when :directory
+              metadata = @directory.directory_metadata(child)
+              unless metadata.fetch(:mode) == 0o700
+                raise Hive::ConfigError,
+                      "patrol qualification lane conflicts with existing bytes"
+              end
+              qualification_tree_files(
+                root_relative,
+                child_relative,
+                depth: depth + 1,
+                count: count,
+                files: files
+              )
+            when :regular
+              files[child_relative] =
+                @directory.read_with_metadata(
+                  child,
+                  max_bytes: MAX_QUALIFICATION_ARTIFACT_BYTES
+                )
+            end
+          end
+          depth.zero? ? files.freeze : files
+        end
+
+        def bounded_qualification_children(relative, count)
+          names = []
+          @directory.each_child(relative) do |name|
+            count[:value] += 1
+            if
+              count.fetch(:value) >
+                MAX_QUALIFICATION_TREE_ENTRIES
+              raise Hive::ConfigError,
+                    "patrol qualification lane conflicts with existing bytes"
+            end
+            names << name
+          end
+          names.freeze
+        end
+
+        # Test-only fault-injection seams around the transaction boundary.
+        def after_qualification_lane_stage_write(relative:, index:)
+          nil
+        end
+
+        def before_qualification_lane_install
+          nil
         end
 
         def immutable_qualification_write(

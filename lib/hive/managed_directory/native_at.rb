@@ -19,6 +19,9 @@ module Hive
 
       PLATFORM_FLAGS = platform_flags(RUBY_PLATFORM)
       EXCHANGE_FLAG = 0x00000002
+      NOREPLACE_FLAG =
+        RUBY_PLATFORM.include?("darwin") ?
+          0x00000004 : 0x00000001
 
       def initialize
         raise Unavailable, "unsupported platform" unless PLATFORM_FLAGS
@@ -137,6 +140,31 @@ module Hive
           second_name,
           EXCHANGE_FLAG,
           operation: "atomic exchange"
+        )
+        nil
+      end
+
+      # Atomically installs one sibling name only when the destination remains
+      # absent. Linux renameat2 and Darwin renameatx_np expose this guarantee
+      # with platform-specific flags but the same libc signature.
+      def rename_noreplaceat(
+        directory, source_name, destination_name
+      )
+        component!(source_name)
+        component!(destination_name)
+        unless @exchangeat
+          raise Unavailable,
+                "atomic no-replace rename capability is unavailable"
+        end
+
+        call(
+          @exchangeat,
+          directory.fileno,
+          source_name,
+          directory.fileno,
+          destination_name,
+          NOREPLACE_FLAG,
+          operation: "atomic no-replace rename"
         )
         nil
       end

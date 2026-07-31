@@ -12,8 +12,10 @@ class QualificationScenarioOrchestratorTest < Minitest::Test
     Hive::Modules::Migration::QualificationCheckpointEvidence
   ORCHESTRATOR =
     Hive::Modules::Migration::QualificationScenarioOrchestrator
+  PROCESS =
+    Hive::Modules::Migration::QualificationScenarioProcess
   PROCESS_RESULT =
-    Hive::Modules::Migration::QualificationScenarioProcess::Result
+    PROCESS::Result
   EMPTY_DIGEST = Digest::SHA256.hexdigest("")
 
   class CandidateProcess
@@ -83,6 +85,25 @@ class QualificationScenarioOrchestratorTest < Minitest::Test
     end
   end
 
+  class PostSpawnCandidateProcess < CandidateProcess
+    def initialize(
+      state_root:, failure:, failure_generation:
+    )
+      super(state_root: state_root)
+      @failure = failure
+      @failure_generation = failure_generation
+    end
+
+    def call(**arguments)
+      if calls.length + 1 == @failure_generation
+        calls << arguments
+        raise @failure
+      end
+
+      super
+    end
+  end
+
   def test_runs_one_terminal_generation_without_a_fault
     with_harness do |context|
       result = run_orchestrator(context, recovery_plan: nil)
@@ -99,6 +120,18 @@ class QualificationScenarioOrchestratorTest < Minitest::Test
       assert result.to_h.frozen?
       assert result.generations.all?(&:frozen?)
       assert result.receipts.all?(&:frozen?)
+    end
+  end
+
+  def test_accepts_dot_and_underscore_from_the_shared_case_id_contract
+    with_harness do |context|
+      result = run_orchestrator(
+        context,
+        recovery_plan: nil,
+        case_id: "case.one_case"
+      )
+
+      assert_equal "case.one_case", result.case_id
     end
   end
 
@@ -305,17 +338,61 @@ class QualificationScenarioOrchestratorTest < Minitest::Test
     end
   end
 
+  def test_records_and_preserves_a_post_spawn_generation_failure
+    evidence = failure_evidence
+    failure = PROCESS::PostSpawnFailure.new(
+      evidence: evidence
+    )
+    records = []
+    with_harness(
+      process_builder: lambda do |state|
+        PostSpawnCandidateProcess.new(
+          state_root: state,
+          failure: failure,
+          failure_generation: 2
+        )
+      end
+    ) do |context|
+      error = assert_raises(PROCESS::PostSpawnFailure) do
+        run_orchestrator(
+          context,
+          recovery_plan: "after_legacy_capture",
+          record_process: lambda do |**row|
+            records << row
+          end
+        )
+      end
+
+      assert_same failure, error
+      assert_equal 2, records.length
+      assert_instance_of PROCESS_RESULT,
+                         records.fetch(0).fetch(:process)
+      assert_same failure.evidence,
+                  records.fetch(1).fetch(:process)
+      assert_equal 2,
+                   records.fetch(1).fetch(:generation)
+      assert_nil records.fetch(1).fetch(
+        :planned_checkpoint
+      )
+    end
+  end
+
   private
 
-  def with_harness(overrides: {})
+  def with_harness(overrides: {}, process_builder: nil)
     with_tmp_dir do |directory|
       sandbox = File.join(directory, "sandbox")
       state = File.join(sandbox, "state")
       FileUtils.mkdir_p(state, mode: 0o700)
-      process = CandidateProcess.new(
-        state_root: state,
-        overrides: overrides
-      )
+      process =
+        if process_builder
+          process_builder.call(state)
+        else
+          CandidateProcess.new(
+            state_root: state,
+            overrides: overrides
+          )
+        end
       evidence = CHECKPOINTS.new
       prepare = lambda do |generation:, stop_after:|
         {
@@ -348,7 +425,9 @@ class QualificationScenarioOrchestratorTest < Minitest::Test
     context,
     recovery_plan:,
     prepare: nil,
-    verify: nil
+    verify: nil,
+    case_id: "case-one",
+    record_process: ->(**) { }
   )
     evidence = context.fetch(:evidence)
     verifier = verify || lambda do |checkpoint:, generation:,
@@ -366,14 +445,40 @@ class QualificationScenarioOrchestratorTest < Minitest::Test
       process: context.fetch(:process),
       checkpoint_evidence: evidence
     ).call(
-      case_id: "case-one",
+      case_id: case_id,
       recovery_plan: recovery_plan,
       sandbox_root: context.fetch(:sandbox),
       state_roots: context.fetch(:roots),
       timeout_seconds: 30,
       prepare_generation: prepare || context.fetch(:prepare),
       verify_checkpoint: verifier,
-      final_output_sha256: ->(**) { "a" * 64 }
+      final_output_sha256: ->(**) { "a" * 64 },
+      record_process: record_process
+    )
+  end
+
+  def failure_evidence
+    PROCESS::FailureEvidence.build(
+      phase: "capture",
+      reason: "capture_unconfirmed",
+      process_state: "exited",
+      exit_status: 0,
+      signal: nil,
+      timed_out: false,
+      stdout: nil,
+      stderr: nil,
+      duration_seconds: 0.2,
+      network_isolated: true,
+      executable_sha256: "1" * 64,
+      ruby_sha256: "2" * 64,
+      sandbox_profile_sha256: "3" * 64,
+      source_inventory_sha256: "4" * 64,
+      installed_inventory_sha256: "5" * 64,
+      cleanup: {
+        "status" => "passed",
+        "live_processes" => 0,
+        "kill_authority" => "host_pid_namespace"
+      }
     )
   end
 

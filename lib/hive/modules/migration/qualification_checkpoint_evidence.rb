@@ -1,5 +1,6 @@
 require "digest"
 require "hive/errors"
+require "hive/modules/migration/bounded_directory_entries"
 require "hive/workflow_package/canonical_json"
 
 module Hive
@@ -272,10 +273,10 @@ module Hive
             }.freeze,
             counters
           )
-          children =
-            Dir.open(path) do |directory|
-              directory.each_child.to_a.sort
-            end
+          children = bounded_names(
+            path,
+            limit: MAX_ENTRIES - counters.fetch(:entries)
+          )
           children.each do |name|
             malformed! if name.bytesize > MAX_PATH_BYTES
             child = File.join(path, name)
@@ -344,6 +345,12 @@ module Hive
           )
         ensure
           opened&.close
+        end
+
+        def bounded_names(path, limit:)
+          BoundedDirectoryEntries.names(path, limit: limit)
+        rescue Hive::ConfigError
+          malformed!
         end
 
         def add_entry!(entries, entry, counters)

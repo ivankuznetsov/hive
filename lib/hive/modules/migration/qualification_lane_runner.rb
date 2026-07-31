@@ -232,6 +232,19 @@ module Hive
                 failure: failure,
                 process_rows: process_rows
               )
+            rescue QualificationScenarioProcess::
+                     PostSpawnFailure
+              completed = build_failed_capture(
+                authority: authority,
+                lane: lane,
+                started_at: started_at,
+                failure: LaneFailure.new(
+                  status: "failed",
+                  reason: "candidate_execution_failed",
+                  exit_code: Hive::ExitCodes::SOFTWARE
+                ),
+                process_rows: process_rows
+              )
             rescue Hive::ConfigError, KeyError, NoMethodError,
                    TypeError
               completed = build_failed_capture(
@@ -904,6 +917,7 @@ module Hive
 
         def process_projection(case_id, generation)
           generation.receipt.process.merge(
+            "kind" => "result",
             "case_id" => case_id,
             "generation" => generation.generation,
             "planned_checkpoint" =>
@@ -922,9 +936,23 @@ module Hive
           planned_checkpoint:,
           process:
         )
+          if process.is_a?(
+            QualificationScenarioProcess::FailureEvidence
+          )
+            return {
+              "kind" => "post_spawn_failure",
+              "case_id" => case_id,
+              "generation" => generation,
+              "planned_checkpoint" => planned_checkpoint,
+              "generation_receipt_sha256" => nil,
+              "failure" => process.to_h
+            }.freeze
+          end
+
           QualificationScenarioOrchestrator::PROCESS_KEYS.to_h do |key|
             [ key, process.public_send(key) ]
           end.merge(
+            "kind" => "result",
             "case_id" => case_id,
             "generation" => generation,
             "planned_checkpoint" => planned_checkpoint,

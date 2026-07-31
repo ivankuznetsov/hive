@@ -195,6 +195,80 @@ class ManagedDirectoryTest < Minitest::Test
     end
   end
 
+  def test_atomically_installs_a_directory_only_at_an_absent_sibling
+    with_tmp_dir do |root|
+      source = File.join(root, "lanes", ".installed.pending")
+      FileUtils.mkdir_p(source)
+      File.binwrite(File.join(source, "result.json"), "complete")
+      directory = Hive::ManagedDirectory.new(
+        root: root,
+        label: "qualification publication"
+      )
+      source_identity =
+        File.stat(source).then { |stat| [ stat.dev, stat.ino ] }
+
+      installed = directory.install_directory_if_absent!(
+        source_relative: "lanes/.installed.pending",
+        destination_relative: "lanes/installed"
+      )
+
+      assert_equal File.join(root, "lanes", "installed"),
+                   installed
+      refute_path_exists source
+      assert_equal "complete",
+                   File.binread(
+                     File.join(installed, "result.json")
+                   )
+      assert_equal(
+        source_identity,
+        File.stat(installed).then { |stat| [ stat.dev, stat.ino ] }
+      )
+    end
+  end
+
+  def test_directory_install_refuses_existing_and_raced_destinations
+    with_tmp_dir do |root|
+      source = File.join(root, "lanes", ".installed.pending")
+      destination = File.join(root, "lanes", "installed")
+      FileUtils.mkdir_p(source)
+      FileUtils.mkdir_p(destination)
+      directory = Hive::ManagedDirectory.new(
+        root: root,
+        label: "qualification publication"
+      )
+
+      assert_raises(Hive::ConfigError) do
+        directory.install_directory_if_absent!(
+          source_relative: "lanes/.installed.pending",
+          destination_relative: "lanes/installed"
+        )
+      end
+      assert File.directory?(source)
+      assert File.directory?(destination)
+
+      FileUtils.rm_rf(destination)
+      native = directory.instance_variable_get(:@native)
+      original = native.method(:rename_noreplaceat)
+      with_replaced_singleton_method(
+        native,
+        :rename_noreplaceat,
+        lambda do |parent, from, to|
+          FileUtils.mkdir_p(destination)
+          original.call(parent, from, to)
+        end
+      ) do
+        assert_raises(Hive::ConfigError) do
+          directory.install_directory_if_absent!(
+            source_relative: "lanes/.installed.pending",
+            destination_relative: "lanes/installed"
+          )
+        end
+      end
+      assert File.directory?(source)
+      assert File.directory?(destination)
+    end
+  end
+
   def test_atomic_exchange_fails_closed_without_platform_support
     with_tmp_dir do |root|
       FileUtils.mkdir_p(File.join(root, "v2"))

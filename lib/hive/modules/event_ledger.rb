@@ -29,6 +29,17 @@ module Hive
 
       attr_reader :root, :events_root
 
+      # Pure parser for a pre-existing event snapshot. Qualification uses this
+      # after the candidate namespace has terminated so verification cannot
+      # chmod the ledger, create a lock, or rebuild an index.
+      def self.parse_snapshot(bytes, expected_id:)
+        allocate.__send__(
+          :parse,
+          bytes,
+          expected_id: expected_id
+        )
+      end
+
       def initialize(root:)
         @root = File.expand_path(root)
         @events_root = File.join(@root, "events")

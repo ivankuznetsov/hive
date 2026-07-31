@@ -298,6 +298,24 @@ predecessor receipt, and final output. Candidate Actuals omit `fault_checkpoint`
 both durable-state digests, `recovery_trace`, and `restart_generation`; the
 host oracle adds them only after the receipt chain verifies. Failed generations
 retain their bounded process evidence even when the chain cannot complete.
+Post-spawn controller failures use a separate 8 KiB, digest-bound value with
+closed phase/reason vocabularies, process/stream/target identity, and honest
+cleanup status; it never records exception prose, PIDs, paths, environment,
+credentials, or output content. The orchestrator records that value before
+rethrowing the typed failure, and a failed lane publishes it without inventing
+a generation receipt. Pre-spawn configuration failures remain ordinary
+configuration errors.
+
+Host reconstruction is observational. It streams directory entries through a
+cap before sorting, reads target files through stable no-follow descriptors,
+parses event-ledger snapshots without constructing stores, and verifies
+occurrence/evidence records without acquiring mutating locks or repairing
+indices. Terminal lane publication first validates every byte, stages the
+complete fixed inventory in one private pending directory, verifies exact
+bytes/modes, and installs that directory with a no-replace atomic rename.
+Diagnostics live outside the terminal lane. An interrupted pending tree can be
+removed only after exact owner/mode/path validation, so retry cannot leave a
+partially visible terminal lane or conflict with newly generated evidence.
 
 Both candidate lanes run without network access or candidate-visible
 credentials. Retryable installed-lane authorization, credential, and provider

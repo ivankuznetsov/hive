@@ -327,6 +327,98 @@ class AttemptsStoreTest < Minitest::Test
     end
   end
 
+  def test_custody_guards_fail_closed_for_replaced_paths_and_filesystem_errors
+    with_store do |store|
+      output_file = File.join(store.outputs_root, "not-a-directory")
+      File.write(output_file, "operator data")
+      error = assert_raises(Hive::Attempts::StoreError) do
+        store.output_directory("not-a-directory")
+      end
+      assert_match(/not a directory/, error.message)
+
+      outputs_root = store.outputs_root
+      original_lstat = File.method(:lstat)
+      with_replaced_singleton_method(File, :lstat, lambda { |path|
+        raise Errno::EACCES, path if path == File.join(outputs_root, "unreadable")
+
+        original_lstat.call(path)
+      }) do
+        error = assert_raises(Hive::Attempts::StoreError) do
+          store.output_directory("unreadable")
+        end
+        assert_match(/unavailable/, error.message)
+      end
+
+      records_root = store.records_root
+      FileUtils.rmdir(records_root)
+      File.write(records_root, "operator data")
+      error = assert_raises(Hive::Attempts::StoreError) { store.records_root }
+      assert_match(/records.*not a directory/, error.message)
+
+      FileUtils.rm_f(records_root)
+      error = assert_raises(Hive::Attempts::StoreError) { store.records_root }
+      assert_match(/records.*missing/, error.message)
+
+      logs_root = store.logs_root
+      with_replaced_singleton_method(File, :lstat, lambda { |path|
+        raise Errno::EACCES, path if path == logs_root
+
+        original_lstat.call(path)
+      }) do
+        error = assert_raises(Hive::Attempts::StoreError) { store.logs_root }
+        assert_match(/logs.*unavailable/, error.message)
+      end
+    end
+
+    with_tmp_dir do |root|
+      FileUtils.remove_entry(root)
+      File.write(root, "not a store directory")
+      store = Hive::Attempts::Store.new(root: root, create_directories: false)
+      error = assert_raises(Hive::Attempts::StoreError) { store.root }
+      assert_match(/root path is not a directory/, error.message)
+    end
+  end
+
+  def test_custody_helpers_reject_escaped_roots_and_replaced_locks
+    with_store do |store|
+      outside = File.join(File.dirname(store.root), "outside")
+      FileUtils.mkdir_p(outside)
+      error = assert_raises(Hive::Attempts::StoreError) do
+        store.send(
+          :validate_descendant!, outside, root: store.outputs_root,
+          error: "attempt output directory escapes the outputs root"
+        )
+      end
+      assert_match(/escapes the outputs root/, error.message)
+
+      records_root = store.records_root
+      root = store.root
+      FileUtils.remove_entry(root)
+      File.write(root, "replaced root")
+      error = assert_raises(Hive::Attempts::StoreError) do
+        store.send(:validate_root_custody!, records_root, label: "records")
+      end
+      assert_match(/root path is not a directory/, error.message)
+    end
+
+    with_store do |store|
+      lock_path = File.join(store.generation_locks_root, "admission.lock")
+      original_lstat = File.method(:lstat)
+      replaced = false
+      with_replaced_singleton_method(File, :lstat, lambda { |path|
+        if path == lock_path && !replaced
+          replaced = true
+          FileUtils.rm_f(path)
+          Dir.mkdir(path)
+        end
+        original_lstat.call(path)
+      }) do
+        error = assert_raises(Hive::Attempts::StoreError) { store.with_admission_lock { flunk } }
+        assert_match(/lock is not a regular file/, error.message)
+      end
+    end
+  end
+
   def test_invalid_mutation_immutable_identity_and_unsafe_ids_fail_closed
     with_store do |store|
       launching = store.create_launching(**identity, launch_timeout_sec: 30, now: NOW)

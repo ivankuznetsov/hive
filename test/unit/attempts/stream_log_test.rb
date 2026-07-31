@@ -140,6 +140,21 @@ class AttemptsStreamLogTest < Minitest::Test
     end
   end
 
+  def test_open_race_that_surfaces_eloop_is_reported_as_a_symlink
+    with_tmp_dir do |root|
+      path = File.join(root, "logs", "attempt.frames")
+      original_open = File.method(:open)
+      with_replaced_singleton_method(File, :open, lambda { |candidate, *args, **kwargs, &block|
+        raise Errno::ELOOP, candidate if candidate == path
+
+        original_open.call(candidate, *args, **kwargs, &block)
+      }) do
+        error = assert_raises(IOError) { Hive::Attempts::StreamLog.new(path) }
+        assert_match(/path is a symlink/, error.message)
+      end
+    end
+  end
+
   def test_symlinked_log_directories_and_files_fail_closed_without_external_access
     with_tmp_dir do |root|
       outside = File.join(root, "outside")

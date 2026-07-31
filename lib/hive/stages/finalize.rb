@@ -120,6 +120,11 @@ module Hive
         validation = validate_complete_marker(task, marker, pr_url)
         return validation if validation
 
+        identity_result = refresh_pr_identity!(
+          task, worktree_path, pr_url, cfg
+        )
+        return identity_result if identity_result
+
         # Scan-before-ready: the runner OWNS the `gh pr ready` call so
         # the secret scan can gate it. The agent prompt now explicitly
         # forbids the agent from running `gh pr ready` (templates/

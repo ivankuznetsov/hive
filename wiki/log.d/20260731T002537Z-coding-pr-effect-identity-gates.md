@@ -19,6 +19,8 @@ The coding workflow no longer lets an agent-authored or subsequently tampered
   scans or lifecycle reads, preserves the existing local-state/push gate for
   review commits, and then requires exact local/remote head parity before
   body or ready-state mutation.
+- Finalize repeats that exact head proof after the body-refresh agent and
+  before the post-agent scan or ready mutation, closing agent-interval drift.
 
 Focused regressions cover forged cross-repository URLs, absent controller
 observations, branch/head drift, and ordering before URL-bound effects.

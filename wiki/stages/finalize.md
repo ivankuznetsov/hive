@@ -58,11 +58,14 @@ not repeat accepted work.
    instructs the agent to update the PR body, write `summary.md`, append
    `<!-- COMPLETE pr_url=... is_draft=false -->` to `pr.md`, and leave the
    ready-state mutation to the controller.
-7. Secret-scan `pr.md` and the PR body again after the authored update. On a
+7. Re-check the marker/frontmatter URL binding and refresh exact local/remote
+   PR head identity again after the agent. Head or URL drift fails before the
+   post-agent remote scan or ready mutation.
+8. Secret-scan `pr.md` and the PR body again after the authored update. On a
    hit, best-effort reverts to draft with `gh pr ready --undo` and writes
    `ERROR reason=secret_in_pr_body`.
-8. Re-check the marker/frontmatter URL binding, call `gh pr ready` only after
-   the scan is clean, and ensure `summary.md` exists, rendering
+9. Call `gh pr ready` only after identity and the scan are clean, and ensure
+   `summary.md` exists, rendering
    `templates/finalize_summary.md.erb` as a fallback.
 
 ## Marker → commit action

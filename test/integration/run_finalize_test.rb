@@ -1030,6 +1030,91 @@ class RunFinalizeTest < Minitest::Test
     end
   end
 
+  def test_finalize_revalidates_pr_identity_after_the_agent_before_readying
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        task_dir, _worktree_path, pr_md = setup_finalize_task(dir)
+        task = Hive::Task.new(task_dir)
+        pr_url = "https://github.com/acme/app/pull/9"
+        ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = pr_md
+        ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = <<~MD
+          ---
+          pr_url: #{pr_url}
+          pr_number: 9
+          ---
+
+          ## Summary
+          final
+
+          <!-- COMPLETE pr_url=#{pr_url} is_draft=false -->
+        MD
+        clean = Hive::Gh::ScanResult.new(
+          hits: [], fetch_failed: false, fetch_error: nil
+        )
+        scans = 0
+        refreshes = 0
+        drift = { commit: "finalize_pr_head_mismatch", status: :error }
+
+        with_stubbed_singleton_method(
+          Hive::Stages::Finalize,
+          :validate_pr_reference!,
+          ->(*_args) { [ pr_url, nil ] }
+        ) do
+          with_stubbed_singleton_method(
+            Hive::Gh,
+            :scan_pr_for_secrets,
+            lambda { |**_kwargs|
+              scans += 1
+              clean
+            }
+          ) do
+            with_stubbed_singleton_method(
+              Hive::Stages::Finalize,
+              :pr_already_merged?,
+              ->(*_args) { false }
+            ) do
+              with_stubbed_singleton_method(
+                Hive::Gh, :ensure_authenticated!, ->(*_args) { }
+              ) do
+                with_stubbed_singleton_method(
+                  Hive::Stages::Finalize, :verify_state!, ->(*_args) { nil }
+                ) do
+                  with_stubbed_singleton_method(
+                    Hive::Stages::Finalize,
+                    :refresh_pr_identity!,
+                    lambda do |*_args|
+                      refreshes += 1
+                      refreshes == 1 ? nil : drift
+                    end
+                  ) do
+                    with_stubbed_singleton_method(
+                      Hive::Stages::Finalize,
+                      :spawn_finalize_agent,
+                      lambda do |spawned_task, *_args|
+                        File.write(
+                          spawned_task.state_file,
+                          ENV.fetch("HIVE_FAKE_CLAUDE_WRITE_CONTENT")
+                        )
+                      end
+                    ) do
+                      result = Hive::Stages::Finalize.run!(task, {})
+
+                      assert_equal drift, result
+                      assert_equal 2, refreshes
+                      assert_equal 1, scans,
+                                   "post-agent identity drift must stop the second scan"
+                      refute_match(/arg=ready/, gh_argv_log)
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
   def test_pr_already_merged_classifies_state_and_falls_through_on_error
     with_stubbed_singleton_method(Hive::Gh, :pr_state, ->(*_a, **_k) { "MERGED" }) do
       assert Hive::Stages::Finalize.pr_already_merged?("https://github.com/acme/app/pull/9", {})

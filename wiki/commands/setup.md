@@ -49,9 +49,10 @@ Without `--no-bootstrap`, setup provisions in this order:
    with repair guidance because installing another binary would leave the
    broken one active. After npm succeeds, setup also requires the managed
    executable to exist and pass a 10-second `--version` probe; timeout
-   terminates the probe process group. Failed npm or startup detail is
-   secret-redacted, control-safe, bounded, and captured in the `qmd` phase
-   `message`.
+   terminates the probe process group. Probe timeouts and spawn failures become
+   typed repair diagnostics rather than aborting the diagnostic or JSON setup
+   envelope. Failed npm or startup detail is secret-redacted, control-safe,
+   bounded, and captured in the `qmd` phase `message`.
 3. Install or refresh the managed Rails web bundle through
    `Hive::Web::AppBundle.ensure!`.
 4. Run `hive daemon install` semantics through

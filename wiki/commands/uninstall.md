@@ -35,6 +35,9 @@ hive uninstall --force-purge-state
    recorded by `install-prefix`, and its data home has a stable current-user
    `bash` install-channel marker. An unrelated launcher, a same-shaped
    `hive/gems/bin/` tree, or a lookalike with a symlinked marker is preserved.
+   Removal first renames the candidate to a unique same-directory quarantine,
+   revalidates the moved entry, and deletes only that exact managed link. A
+   concurrent replacement is restored or retained with an explicit warning.
 6. Preserve or remove state according to `--purge` / `--force-purge-state`.
 
 Service unit removal refuses to unlink symlinks, so a pre-planted launchd/systemd path cannot trick uninstall into deleting an arbitrary user-writable target.

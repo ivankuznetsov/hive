@@ -605,14 +605,13 @@ publish_managed_link() {
   local path="$1" target="$2" name="$3" current_target
 
   if [[ ! -e "$path" && ! -L "$path" ]]; then
-    ln -s "$target" "$path"
+    ln -s "$target" "$path" || return 1
     return 0
   fi
 
   if [[ -L "$path" ]]; then
     current_target="$(readlink "$path" 2>/dev/null || true)"
     if [[ "$current_target" == "$target" ]]; then
-      ln -sfn "$target" "$path"
       return 0
     fi
   fi

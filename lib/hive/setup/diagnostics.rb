@@ -122,7 +122,15 @@ module Hive
         out, err, status = Hive::Setup::QmdProbe.call(path, runner: @qmd_runner)
         return ok("qmd", [ path, out.to_s.strip ].reject(&:empty?).join(" ")) if status.success?
 
-        detail = Hive::Setup::QmdProbe.diagnostic(err, out, fallback: "qmd failed to start")
+        qmd_failure(path, err, out)
+      rescue Hive::Error, SystemCallError, IOError => e
+        qmd_failure(path, e.message)
+      end
+
+      def qmd_failure(path, *diagnostics)
+        detail = Hive::Setup::QmdProbe.diagnostic(
+          *diagnostics, fallback: "qmd failed to start"
+        )
         managed = managed_qmd_candidate?(path)
         Result.new(
           name: "qmd",

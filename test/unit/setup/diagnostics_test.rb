@@ -180,6 +180,40 @@ class SetupDiagnosticsTest < Minitest::Test
     end
   end
 
+  def test_qmd_timeout_is_reported_without_aborting_diagnostics
+    Dir.mktmpdir("hive-diag") do |dir|
+      qmd = executable(dir, "qmd")
+      runner = lambda do |_argv|
+        raise Hive::Error, "hive setup: qmd startup probe timed out after 10s"
+      end
+      diag = Hive::Setup::Diagnostics.new(
+        path: dir, runner: runner, ruby_version: "3.4.1"
+      )
+
+      row = diag.check_qmd
+
+      assert_equal "missing", row.status
+      refute row.bootstrappable
+      assert_match(/timed out after 10s/, row.detail)
+      assert_match(/Repair or remove #{Regexp.escape(qmd)}/, row.fix_command)
+    end
+  end
+
+  def test_qmd_spawn_failure_is_reported_without_aborting_diagnostics
+    Dir.mktmpdir("hive-diag") do |dir|
+      executable(dir, "qmd")
+      runner = ->(_argv) { raise Errno::EACCES, "qmd-secret" }
+      diag = Hive::Setup::Diagnostics.new(
+        path: dir, runner: runner, ruby_version: "3.4.1"
+      )
+
+      row = diag.check_qmd
+
+      assert_equal "missing", row.status
+      assert_match(/Permission denied/, row.detail)
+    end
+  end
+
   def test_web_bundle_present_and_current_reports_ok_not_bootstrappable
     diag = Hive::Setup::Diagnostics.new(ruby_version: "3.4.1")
     with_replaced_singleton_method(Hive::Web::AppBundle, :present?, -> { true }) do

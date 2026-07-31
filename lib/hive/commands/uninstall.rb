@@ -1,5 +1,6 @@
 require "fileutils"
 require "rbconfig"
+require "securerandom"
 require "yaml"
 require "hive/config"
 require "hive/paths"
@@ -162,10 +163,30 @@ module Hive
           link = File.join(bin_home, name)
           next unless managed_bash_launcher_link?(link, name)
 
-          File.unlink(link)
+          quarantine = File.join(
+            bin_home,
+            ".hive-uninstall-#{name}-#{Process.pid}-#{SecureRandom.hex(6)}"
+          )
+          File.rename(link, quarantine)
+          if managed_bash_launcher_link?(quarantine, name)
+            File.unlink(quarantine)
+          else
+            restore_replaced_launcher(quarantine, link)
+          end
         rescue Errno::ENOENT
           next
         end
+      end
+
+      def restore_replaced_launcher(quarantine, link)
+        if !File.exist?(link) && !File.symlink?(link)
+          File.rename(quarantine, link)
+          @output.puts "hive: warning: launcher changed during uninstall; restored #{link}"
+        else
+          @output.puts "hive: warning: launcher changed during uninstall; preserved it at #{quarantine}"
+        end
+      rescue SystemCallError => e
+        @output.puts "hive: warning: could not restore changed launcher #{link}: #{e.message}; preserved it at #{quarantine}"
       end
 
       # `install.sh` publishes absolute user-bin symlinks to wrappers under an

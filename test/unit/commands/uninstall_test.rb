@@ -129,11 +129,47 @@ class UninstallCommandTest < Minitest::Test
       File.write(target, "bin\n")
       File.symlink(target, link)
 
-      with_replaced_singleton_method(File, :unlink, ->(_path) { raise Errno::ENOENT }) do
+      with_replaced_singleton_method(File, :rename, ->(*_paths) { raise Errno::ENOENT }) do
         Hive::Commands::Uninstall.new(output: StringIO.new).send(:remove_user_symlinks)
       end
 
       assert File.symlink?(link)
+    end
+  end
+
+  def test_remove_user_symlinks_restores_a_concurrent_replacement
+    with_xdg_home do
+      bin = Hive::Paths.bin_home
+      FileUtils.mkdir_p(bin)
+      managed_bin = File.join(Hive::Paths.data_home, "gems", "bin")
+      FileUtils.mkdir_p(managed_bin)
+      File.write(File.join(Hive::Paths.data_home, "install-channel"), "bash\n")
+      managed = File.join(managed_bin, "hive")
+      operator = File.join(bin, "operator-hive")
+      link = File.join(bin, "hive")
+      File.write(managed, "managed\n")
+      File.write(operator, "operator\n")
+      File.symlink(managed, link)
+      original_rename = File.method(:rename)
+      calls = 0
+      replacement_race = lambda do |source, destination|
+        calls += 1
+        if calls == 1
+          File.unlink(source)
+          File.symlink(operator, source)
+        end
+        original_rename.call(source, destination)
+      end
+      output = StringIO.new
+
+      with_replaced_singleton_method(File, :rename, replacement_race) do
+        Hive::Commands::Uninstall.new(output: output).send(:remove_user_symlinks)
+      end
+
+      assert File.symlink?(link)
+      assert_equal operator, File.readlink(link)
+      assert_match(/changed during uninstall; restored/, output.string)
+      assert_empty Dir.glob(File.join(bin, ".hive-uninstall-*"))
     end
   end
 

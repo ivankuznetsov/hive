@@ -115,6 +115,34 @@ class InstallScriptTest < Minitest::Test
     end
   end
 
+  def test_reinstall_does_not_replace_an_existing_managed_user_link
+    Dir.mktmpdir("hive-installer-managed-link") do |dir|
+      _out, err, status = run_installer(dir, "none")
+      assert status.success?, err
+      link = File.join(dir, "bin", "hive")
+      before = File.lstat(link)
+
+      _out, err, status = run_installer(dir, "none")
+
+      assert status.success?, err
+      assert_equal before.ino, File.lstat(link).ino
+      assert File.symlink?(link)
+    end
+  end
+
+  def test_link_publication_race_preserves_replacement_and_uses_hv
+    Dir.mktmpdir("hive-installer-link-race") do |dir|
+      _out, err, status = run_installer(dir, "link_race")
+      hive = File.join(dir, "bin", "hive")
+      hv = File.join(dir, "bin", "hv")
+
+      assert status.success?, err
+      refute File.symlink?(hive)
+      assert_equal "operator race\n", File.binread(hive)
+      assert File.symlink?(hv)
+    end
+  end
+
   def test_installer_requires_cosign_for_release_identity_verification
     script = File.read(INSTALL_SCRIPT)
 
@@ -244,6 +272,17 @@ class InstallScriptTest < Minitest::Test
         exit 75
       fi
       exec /usr/bin/chmod "$@"
+    SH
+    write_executable(File.join(fake_bin, "ln"), <<~'SH')
+      #!/bin/bash
+      destination="${@: -1}"
+      if [[ "$HIVE_INSTALL_TEST_FAILURE" == "link_race" &&
+            "$destination" == */bin/hive ]]; then
+        printf 'operator race\n' > "$destination"
+        /usr/bin/chmod 755 "$destination"
+        exit 76
+      fi
+      exec /usr/bin/ln "$@"
     SH
     fake_bin
   end

@@ -11,6 +11,7 @@ require "hive/agent_profiles/codex"
 require "hive/agent_profiles/pi"
 require "hive/claude_launcher"
 require "hive/agent_skills"
+require "hive/agent_skills/inspector"
 require "hive/web/environment"
 
 module Hive

@@ -218,6 +218,22 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_kind_of Bubbletea::QuitCommand, cmd
   end
 
+  def test_ctrl_c_keystroke_dispatches_terminate_from_every_mode
+    %i[
+      grid log_tail filter help new_idea_project new_idea idea_preview
+      red_status_detail implementation_identity_detail token_stats archive
+    ].each do |mode|
+      @model = Hive::Tui::BubbleModel.new(
+        hive_model: Hive::Tui::Model.initial.with(mode: mode),
+        dispatch: @dispatch
+      )
+
+      _, cmd = @model.update(key_message(Bubbletea::KeyMessage::KEY_CTRL_C))
+
+      assert_kind_of Bubbletea::QuitCommand, cmd, "Ctrl-C must terminate from #{mode}"
+    end
+  end
+
   def test_question_mark_opens_help
     km = Bubbletea::KeyMessage.new(key_type: 0, runes: [ "?".ord ])
     @model.update(km)

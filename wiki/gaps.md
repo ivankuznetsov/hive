@@ -13,14 +13,15 @@ tags: [gap, todo, release-proof, agent-skills]
 
 - Patrol capture/effect boundaries are source- and focused-test-pinned, but
   they are not yet compressed-campaign or live-cutover evidence. The permanent
-  U3 harness now has a real `after_module_decision` process-exit boundary
-  through scheduler, event, module admission, detached Attempts, and persisted
-  worker identity. It must still run the fresh-process reconciliation and
-  recovered-completion half of that case, exercise the remaining intent and
-  outcome boundaries, prove shadow attempted-effect denial, and verify
-  run-level duplicate detection before any migration qualification claim.
-  Longer elapsed telemetry remains useful but is not a substitute for that
-  protocol.
+  U3 harness now drives all five ordinary recovery faults and both
+  Architecture Patrol clean/positive controls through production schedulers,
+  product stores, detached module dispatch, Attempts, and host-reconstructed
+  terminal evidence. It still needs host-supervised multi-generation custody
+  for each process-exit fault, the secretless/networkless installed-provider
+  broker and exact installed-gem execution target, and the protected-main
+  literal scenario catalog/controller proof before any migration qualification
+  or cutover claim. Longer elapsed telemetry remains useful but is not a
+  substitute for that protocol.
 
 - The explicit JobStore fresh-start reset is source- and focused-test-pinned,
   including no-write fresh status, exact registered-project binding,

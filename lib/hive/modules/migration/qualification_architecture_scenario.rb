@@ -9,6 +9,7 @@ require "hive/daemon/refactor_patrol_scheduler"
 require "hive/errors"
 require "hive/modules/adapters/architecture_patrol"
 require "hive/modules/event_ledger"
+require "hive/modules/event_publisher"
 require "hive/modules/migration/patrol_evidence"
 require "hive/modules/migration/shadow_comparator"
 require "hive/refactor_patrol/action_runner"
@@ -270,7 +271,11 @@ module Hive
             job_store_factory: ->(_root) { store },
             repository_ownership: repository_ownership,
             owner: scheduler_owner,
-            migration_authority: :legacy
+            migration_authority: :legacy,
+            event_publisher:
+              Hive::Modules::EventPublisher.new(
+                clock: @clock
+              )
           )
         end
 

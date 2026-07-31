@@ -359,6 +359,12 @@ class QualificationArchitectureScenarioTest < Minitest::Test
                  fresh_store.read_job(result.job_id)
     assert_equal result.occurrence.fetch("occurrence_id"),
                  result.aggregate.fetch("occurrence_id")
+    assert_equal NOW.iso8601(6),
+                 result.event.fetch("recorded_at")
+    assert_equal result.occurrence.fetch("recorded_at"),
+                 result.event.fetch("recorded_at")
+    assert_equal result.occurrence.fetch("occurred_at"),
+                 result.event.fetch("occurred_at")
     assert_nil fresh_store.occurrence_for_job(result.job_id),
                "fully published terminal occurrences retire from the live journal"
   end

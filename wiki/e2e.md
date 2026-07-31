@@ -75,6 +75,15 @@ drift, uses non-forced removal, and requires the exact workspace root to be
 absent afterward. Preparation and cleanup failures remain distinct in the
 reported cause chain.
 
+Each successful candidate case is followed by mandatory host-side
+reconstruction before its oracle result is accepted. Ordinary cases bind the
+raw event, decision, Attempts, evidence, comparator, retirement, and repository
+stores. Architecture cases also bind the derived manifest identity, complete
+v3 aggregate, all transition receipts, action outcomes, deterministic event
+envelope, and exact retirement generation. Candidate-reported process counts,
+fault checkpoints, and timed state digests remain unverified until the host
+controller supervises separate process generations.
+
 Coverage keeps diagnostic progress separate from qualification authority.
 `module.patrol_compressed_evidence_diagnostic` is advisory and explicitly
 runnable: it accepts either local same-candidate `evidence_required` evidence
@@ -84,7 +93,10 @@ unauthorized. The required release ID,
 `evidence_ready_for_operator` with no blockers, an authenticated independent
 `trusted_remote` control on protected main, and passed deterministic and
 installed lanes. Release-profile selection records the advisory ID but does
-not run it or count it as required proof.
+not run it or count it as required proof. The installed lane remains a
+retryable diagnostic until a host-owned provider broker can use the descriptor's
+OpenRouter binding without exposing the credential or network to candidate
+code.
 
 ## Binary contract
 

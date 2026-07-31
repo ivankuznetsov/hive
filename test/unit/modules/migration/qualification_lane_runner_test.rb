@@ -249,7 +249,6 @@ class QualificationLaneRunnerTest < Minitest::Test
       result = runner(
         repository,
         environment: {
-          "GITHUB_TOKEN" => "repository-token",
           "OPENROUTER_API_KEY" => "provider-token"
         }
       ).call(

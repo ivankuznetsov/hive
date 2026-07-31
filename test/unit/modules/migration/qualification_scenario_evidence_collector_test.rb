@@ -121,6 +121,157 @@ class QualificationScenarioEvidenceCollectorTest < Minitest::Test
     end
   end
 
+  def test_collects_architecture_job_manifest_and_retirement_evidence
+    with_tmp_dir do |sandbox|
+      result = run_driver(
+        sandbox,
+        module_name: "architecture-patrol",
+        operation: "architecture_positive_fixture",
+        findings: [ architecture_thesis ]
+      )
+      evidence = collect(result)
+      product = evidence.product_state
+
+      assert_equal "architecture-patrol", evidence.module_name
+      assert_equal "architecture_patrol_v3_job",
+                   product.fetch("type")
+      assert_equal evidence.capture.dig("outcome", "job_id"),
+                   product.fetch("job_id")
+      assert product.dig("job", "complete")
+      assert_equal "complete", product.dig("job", "state")
+      assert_equal 1, product.dig("job", "actions").length
+      assert_equal product.fetch("job_id"),
+                   product.dig("manifest", "job_id")
+      assert_equal result.observation.fetch("repository_sha"),
+                   product.dig("manifest", "source", "merge_sha")
+      assert_equal(
+        evidence.receipts.map do |receipt|
+          receipt.fetch("intent").fetch("intent_id")
+        end.sort,
+        product.fetch("transition_intent_ids")
+      )
+      assert product.fetch("occurrence_retired")
+      assert_equal "retired_fence",
+                   evidence.terminal_effects.fetch(
+                     "occurrence_proof"
+                   )
+      assert_equal(
+        %w[actions],
+        evidence.bindings
+          .fetch("candidate_decision_ids")
+          .map do |decision_id|
+            evidence.decisions
+              .find do |decision|
+                decision.fetch("decision_id") == decision_id
+              end
+              .fetch("hook")
+          end
+      )
+    end
+  end
+
+  def test_rejects_tampered_architecture_job_and_manifest
+    with_tmp_dir do |sandbox|
+      result = run_driver(
+        File.join(sandbox, "source"),
+        module_name: "architecture-patrol",
+        operation: "architecture_positive_fixture",
+        findings: [ architecture_thesis ]
+      )
+
+      assert_copy_rejected(sandbox, result, "tampered-job") do |copy|
+        path = Dir.glob(
+          File.join(
+            copy, "hive-state", "refactor_patrol",
+            "v3", "jobs", "*.json"
+          )
+        ).fetch(0)
+        job = JSON.parse(File.binread(path))
+        job["complete"] = false
+        File.binwrite(path, canonical(job))
+      end
+      assert_copy_rejected(
+        sandbox, result, "tampered-manifest"
+      ) do |copy|
+        path = Dir.glob(
+          File.join(
+            copy, "hive-state", "refactor_patrol",
+            "v2", "manifests", "*.json"
+          )
+        ).fetch(0)
+        manifest = JSON.parse(File.binread(path))
+        manifest["manifest_checksum"] = "f" * 64
+        File.binwrite(path, JSON.pretty_generate(manifest))
+      end
+      assert_copy_rejected(
+        sandbox, result, "tampered-event-envelope"
+      ) do |copy|
+        events = File.join(
+          copy, "hive-state", "module-runtime", "events"
+        )
+        event_path =
+          Dir.glob(File.join(events, "evt-*.json")).fetch(0)
+        event = JSON.parse(File.binread(event_path))
+        event.fetch("payload")["schedule"] = "*/11 * * * *"
+        File.binwrite(event_path, canonical(event))
+        index_path = File.join(events, "index.json")
+        index = JSON.parse(File.binread(index_path))
+        index["latest_schedules"] = {
+          "architecture-patrol\0*/11 * * * *" =>
+            event.fetch("occurred_at")
+        }
+        File.binwrite(index_path, canonical(index))
+      end
+      assert_copy_rejected(
+        sandbox, result, "tampered-retirement-generation"
+      ) do |copy|
+        records = File.join(
+          copy, "hive-state", "refactor_patrol",
+          "v3", "occurrences", "records"
+        )
+        state_path = File.join(
+          records, "journal-state.json"
+        )
+        state = JSON.parse(File.binread(state_path))
+        state["recovery_inventory_generation"] = 3
+        File.binwrite(state_path, canonical(state))
+        index_path = File.join(
+          records, "recovery-index.json"
+        )
+        index = JSON.parse(File.binread(index_path))
+        index["generation"] = 3
+        File.binwrite(index_path, canonical(index))
+      end
+    end
+  end
+
+  def test_collects_architecture_clean_negative_product_state
+    with_tmp_dir do |sandbox|
+      result = run_driver(
+        sandbox,
+        module_name: "architecture-patrol",
+        operation: "architecture_positive_fixture"
+      )
+      evidence = collect(result)
+
+      assert_equal "architecture-patrol", evidence.module_name
+      assert_equal "scheduled-discovery",
+                   evidence.event.dig(
+                     "payload", "target_hook"
+                   )
+      assert_equal "no_theses",
+                   evidence.product_state.dig(
+                     "job", "zero_reason"
+                   )
+      assert_empty evidence.product_state.dig(
+        "job", "actions"
+      )
+      assert evidence.product_state.fetch(
+        "occurrence_retired"
+      )
+    end
+  end
+
   def test_rejects_candidate_digest_without_matching_raw_evidence
     with_tmp_dir do |sandbox|
       result = run_driver(sandbox)
@@ -306,7 +457,13 @@ class QualificationScenarioEvidenceCollectorTest < Minitest::Test
     Hive::WorkflowPackage::CanonicalJSON.generate(value)
   end
 
-  def run_driver(sandbox, operation: "timer_due", faults: [])
+  def run_driver(
+    sandbox,
+    module_name: "patrol",
+    operation: "timer_due",
+    findings: [],
+    faults: []
+  )
     with_env(
       "HIVE_HOME" => File.join(sandbox, "hive-home")
     ) do
@@ -315,25 +472,84 @@ class QualificationScenarioEvidenceCollectorTest < Minitest::Test
         sandbox_root: sandbox,
         project: PROJECT,
         scenario_input:
-          scenario_input(operation: operation, faults: faults)
+          scenario_input(
+            module_name: module_name,
+            operation: operation,
+            findings: findings,
+            faults: faults
+          )
       ).call
     end
   end
 
-  def scenario_input(operation: "timer_due", faults: [])
-    case_id = "ordinary-#{operation.tr('_', '-')}"
+  def scenario_input(
+    module_name: "patrol",
+    operation: "timer_due",
+    findings: [],
+    faults: []
+  )
+    prefix =
+      module_name == "patrol" ?
+        "ordinary" : "architecture"
+    case_id = "#{prefix}-#{operation.tr('_', '-')}"
     INPUT.load(
       Hive::WorkflowPackage::CanonicalYAML.dump(
         "schema" => "hive-patrol-qualification-scenario",
         "schema_version" => 1,
         "case_id" => case_id,
-        "module" => "patrol",
+        "module" => module_name,
         "operation" => operation,
         "clock" => NOW.utc.iso8601(6),
         "faults" => faults,
-        "reviewer" => { "findings" => [] }
+        "reviewer" => { "findings" => findings }
       ),
       expected_case_id: case_id
     )
+  end
+
+  def architecture_thesis
+    {
+      "feature" => "Checkout",
+      "problem" =>
+        "Checkout mixes validation and payment orchestration",
+      "cost" =>
+        "Frequent changes touch the same file and its callers",
+      "evidence" => [
+        {
+          "file" => "lib/checkout.rb",
+          "line" => 12,
+          "snippet" => "def charge_and_validate",
+          "claim" =>
+            "validation and payment orchestration share one method"
+        }
+      ],
+      "proposed_refactor" =>
+        "Extract payment orchestration behind a checkout boundary",
+      "expected_leverage" => {
+        "drivers" => [
+          {
+            "signal" => "churn",
+            "relief" => 1,
+            "mechanism" =>
+              "isolate payment edits from validation code"
+          }
+        ]
+      },
+      "confidence" => "medium",
+      "risk" => {
+        "caps" => { "single_feature" => true },
+        "public_api_impact" => false,
+        "public_api_details" => [],
+        "cross_feature_impact" => false,
+        "cross_feature_details" => [],
+        "flags" => []
+      },
+      "required_validation" => {
+        "commands" => [ "test" ],
+        "characterization_first" => false,
+        "notes" => "Run checkout tests"
+      },
+      "follow_up_approval_state" => "pending"
+    }
   end
 end

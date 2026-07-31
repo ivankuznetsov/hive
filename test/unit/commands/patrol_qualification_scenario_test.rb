@@ -3,6 +3,7 @@ require "digest"
 require "hive/commands/patrol_qualification_scenario"
 require "hive/modules/migration/qualification_scenario_actuals"
 require "hive/modules/migration/qualification_scenario_request"
+require "hive/workflow_package/canonical_yaml"
 
 class CommandsPatrolQualificationScenarioTest < Minitest::Test
   include HiveTestHelper
@@ -97,6 +98,56 @@ class CommandsPatrolQualificationScenarioTest < Minitest::Test
     end
   end
 
+  def test_executes_architecture_control_through_private_command
+    case_id = "architecture-positive"
+    with_workspace(
+      case_id: case_id,
+      scenario_file: "architecture.yml",
+      scenario: architecture_scenario_bytes(case_id)
+    ) do |root, _request_path, request_ref|
+      with_env(
+        "HIVE_HOME" =>
+          File.join(
+            root,
+            "cases",
+            case_id,
+            "sandbox",
+            "hive-home"
+          )
+      ) do
+        assert_equal(
+          0,
+          COMMAND.from_argv(
+            [
+              "--workspace", root,
+              "--request", request_ref
+            ]
+          ).call
+        )
+      end
+
+      output =
+        File.join(
+          root,
+          "cases",
+          case_id,
+          "output",
+          "scenario-actuals.json"
+        )
+      actual = ACTUALS.load(File.binread(output)).actuals.fetch(0)
+      assert_equal case_id, actual.fetch("case_id")
+      assert_equal "architecture-patrol", actual.fetch("module")
+      assert_equal "actions",
+                   actual.dig("event", "payload", "target_hook")
+      assert_equal(
+        [ "succeeded" ],
+        actual.fetch("attempts").map do |attempt|
+          attempt.fetch("outcome")
+        end
+      )
+    end
+  end
+
   def test_rejects_non_private_request_and_unknown_argv
     with_workspace do |root, request_path, request_ref|
       File.chmod(0o644, request_path)
@@ -117,12 +168,15 @@ class CommandsPatrolQualificationScenarioTest < Minitest::Test
 
   private
 
-  def with_workspace
+  def with_workspace(
+    case_id: "ordinary-due-clean",
+    scenario_file: "ordinary.yml",
+    scenario: scenario_bytes
+  )
     with_tmp_dir do |root|
       File.chmod(0o700, root)
-      scenario = scenario_bytes
       scenario_path =
-        File.join(root, "inputs", "scenarios", "ordinary.yml")
+        File.join(root, "inputs", "scenarios", scenario_file)
       FileUtils.mkdir_p(File.dirname(scenario_path), mode: 0o700)
       File.binwrite(scenario_path, scenario)
       File.chmod(0o600, scenario_path)
@@ -145,15 +199,16 @@ class CommandsPatrolQualificationScenarioTest < Minitest::Test
       request = {
         "schema" => REQUEST::SCHEMA,
         "schema_version" => REQUEST::SCHEMA_VERSION,
-        "case_id" => "ordinary-due-clean",
+        "case_id" => case_id,
         "scenario_sha256" =>
           Digest::SHA256.hexdigest(scenario),
-        "scenario_ref" => "inputs/scenarios/ordinary.yml",
+        "scenario_ref" =>
+          "inputs/scenarios/#{scenario_file}",
         "package_root_ref" => "targets/source",
         "sandbox_root_ref" =>
-          "cases/ordinary-due-clean/sandbox",
+          "cases/#{case_id}/sandbox",
         "output_ref" =>
-          "cases/ordinary-due-clean/output/scenario-actuals.json",
+          "cases/#{case_id}/output/scenario-actuals.json",
         "project" => {
           "project_id" =>
             "11111111-1111-4111-8111-111111111111",
@@ -162,7 +217,7 @@ class CommandsPatrolQualificationScenarioTest < Minitest::Test
             "github.com/example/qualification-demo"
         }
       }
-      request_ref = "requests/ordinary-due-clean.json"
+      request_ref = "requests/#{case_id}.json"
       request_path = File.join(root, request_ref)
       FileUtils.mkdir_p(File.dirname(request_path), mode: 0o700)
       File.binwrite(
@@ -187,5 +242,66 @@ class CommandsPatrolQualificationScenarioTest < Minitest::Test
         findings:
           []
     YAML
+  end
+
+  def architecture_scenario_bytes(case_id)
+    Hive::WorkflowPackage::CanonicalYAML.dump(
+      "schema" => "hive-patrol-qualification-scenario",
+      "schema_version" => 1,
+      "case_id" => case_id,
+      "module" => "architecture-patrol",
+      "operation" => "architecture_positive_fixture",
+      "clock" => "2026-07-31T12:34:56.123456Z",
+      "faults" => [],
+      "reviewer" => {
+        "findings" => [ architecture_thesis ]
+      }
+    )
+  end
+
+  def architecture_thesis
+    {
+      "feature" => "Checkout",
+      "problem" =>
+        "Checkout mixes validation and payment orchestration",
+      "cost" =>
+        "Frequent changes touch the same file and its callers",
+      "evidence" => [
+        {
+          "file" => "lib/checkout.rb",
+          "line" => 12,
+          "snippet" => "def charge_and_validate",
+          "claim" =>
+            "validation and payment orchestration share one method"
+        }
+      ],
+      "proposed_refactor" =>
+        "Extract payment orchestration behind a checkout boundary",
+      "expected_leverage" => {
+        "drivers" => [
+          {
+            "signal" => "churn",
+            "relief" => 1,
+            "mechanism" =>
+              "isolate payment edits from validation code"
+          }
+        ]
+      },
+      "confidence" => "medium",
+      "risk" => {
+        "caps" => { "single_feature" => true },
+        "public_api_impact" => false,
+        "public_api_details" => [],
+        "cross_feature_impact" => false,
+        "cross_feature_details" => [],
+        "flags" => []
+      },
+      "required_validation" => {
+        "commands" => [ "test" ],
+        "characterization_first" => false,
+        "notes" => "Run checkout tests"
+      },
+      "follow_up_approval_state" => "pending"
+    }
   end
 end

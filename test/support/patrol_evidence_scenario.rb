@@ -463,16 +463,14 @@ module PatrolEvidenceScenario
       }
     else
       {
-        "credential_bindings" => [
-          "GITHUB_TOKEN", "OPENROUTER_API_KEY"
-        ],
+        "credential_bindings" => [ "OPENROUTER_API_KEY" ],
         "kind" => "installed_target",
         "provider" => "openrouter",
         "repository_sha" => "5" * 40,
         "target_ref" =>
           "inputs/installed-target/target.json",
         "executable" => "bin/hive",
-        "network" => true,
+        "network" => false,
         "timeout_seconds" => 300
       }
     end

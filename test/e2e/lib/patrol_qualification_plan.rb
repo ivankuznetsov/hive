@@ -552,7 +552,7 @@ module Hive
             "target_ref" =>
               "inputs/installed-target/target.json",
             "executable" => "bin/hive",
-            "network" => true,
+            "network" => false,
             "timeout_seconds" =>
               installed.fetch("timeout_seconds")
           }

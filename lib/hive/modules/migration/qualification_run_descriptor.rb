@@ -61,7 +61,7 @@ module Hive
           after_module_decision during_reconciliation
         ].freeze
         INSTALLED_CREDENTIAL_BINDINGS = %w[
-          GITHUB_TOKEN OPENROUTER_API_KEY
+          OPENROUTER_API_KEY
         ].freeze
         RUN_ID = /\Apatrol-[0-9a-f]{64}\z/
         SHA = /\A[0-9a-f]{40}\z/

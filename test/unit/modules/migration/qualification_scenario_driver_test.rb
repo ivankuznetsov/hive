@@ -361,19 +361,110 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
     end
   end
 
-  def test_rejects_operations_without_truthful_terminal_comparator_evidence
-    unsupported = %w[
-      architecture_positive_fixture
-    ]
-
+  def test_drives_architecture_positive_control_through_detached_module_hook
     with_tmp_dir do |sandbox|
-      unsupported.each do |operation|
-        error = assert_raises(Hive::ConfigError, operation) do
-          driver(sandbox, operation: operation).call
+      result = run_driver(
+        sandbox,
+        module_name: "architecture-patrol",
+        operation: "architecture_positive_fixture",
+        findings: [ architecture_thesis ]
+      )
+      row = result.observation
+      capture = capture_for(row)
+
+      assert_equal "architecture-patrol", row.fetch("module")
+      assert_equal "complete", capture.outcome_class
+      assert capture.outcome.fetch("complete")
+      assert_equal 1, capture.outcome.fetch("action_count")
+      assert_equal 1,
+                   capture.outcome
+                     .fetch("action_outcomes")
+                     .length
+      assert_equal "actions",
+                   row.dig("event", "payload", "target_hook")
+      assert_equal(
+        [ "admitted" ],
+        row.fetch("decisions").map do |decision|
+          decision.fetch("reason")
         end
-        assert_match(/scenario is unsupported/, error.message,
-                     operation)
+      )
+      assert_equal(
+        [ "actions" ],
+        row.fetch("decisions").map do |decision|
+          decision.fetch("hook")
+        end
+      )
+      assert_equal(
+        [ "succeeded" ],
+        row.fetch("attempts").map do |attempt|
+          attempt.fetch("outcome")
+        end
+      )
+      assert result.comparator_record.fetch("comparable")
+      assert_empty result.comparator_record.fetch(
+        "unexplained_differences"
+      )
+      assert_empty result.comparator_record.fetch(
+        "duplicate_effects"
+      )
+      assert_empty result.comparator_record.fetch(
+        "module_effects"
+      )
+      assert_operator result.effect_index.legacy_count, :>, 0
+      assert_equal 0, result.effect_index.module_count
+    end
+  end
+
+  def test_drives_architecture_clean_control_through_discovery_hook
+    with_tmp_dir do |sandbox|
+      result = run_driver(
+        sandbox,
+        module_name: "architecture-patrol",
+        operation: "architecture_positive_fixture"
+      )
+      row = result.observation
+      capture = capture_for(row)
+
+      assert_equal "architecture-patrol", row.fetch("module")
+      assert_equal "complete", capture.outcome_class
+      assert capture.outcome.fetch("complete")
+      assert_equal "no_theses",
+                   capture.outcome.fetch("zero_reason")
+      assert_equal 0, capture.outcome.fetch("action_count")
+      assert_empty capture.outcome.fetch("action_outcomes")
+      assert_equal "scheduled-discovery",
+                   row.dig("event", "payload", "target_hook")
+      assert_equal(
+        [ "scheduled-discovery" ],
+        row.fetch("decisions").map do |decision|
+          decision.fetch("hook")
+        end
+      )
+      assert_equal(
+        [ "succeeded" ],
+        row.fetch("attempts").map do |attempt|
+          attempt.fetch("outcome")
+        end
+      )
+      assert result.comparator_record.fetch("comparable")
+      assert_empty result.comparator_record.fetch(
+        "unexplained_differences"
+      )
+    end
+  end
+
+  def test_rejects_architecture_faults_until_their_real_boundaries_exist
+    with_tmp_dir do |sandbox|
+      error = assert_raises(Hive::ConfigError) do
+        driver(
+          sandbox,
+          module_name: "architecture-patrol",
+          operation: "architecture_positive_fixture",
+          findings: [ architecture_thesis ],
+          faults: [ "after_legacy_capture" ]
+        ).call
       end
+      assert_match(/scenario is unsupported/, error.message)
     end
   end
 
@@ -721,6 +812,7 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
 
   def run_driver(
     sandbox,
+    module_name: "patrol",
     operation: "timer_due",
     findings: [],
     faults: []
@@ -730,6 +822,7 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
     ) do
       driver(
         sandbox,
+        module_name: module_name,
         operation: operation,
         findings: findings,
         faults: faults
@@ -739,6 +832,7 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
 
   def driver(
     sandbox,
+    module_name: "patrol",
     operation: "timer_due",
     findings: [],
     faults: []
@@ -748,6 +842,7 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
       sandbox_root: sandbox,
       project: PROJECT,
       scenario_input: scenario_input(
+        module_name: module_name,
         operation: operation,
         findings: findings,
         faults: faults
@@ -756,17 +851,21 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
   end
 
   def scenario_input(
+    module_name: "patrol",
     operation: "timer_due",
     findings: [],
     faults: []
   )
-    case_id = "ordinary-#{operation.tr('_', '-')}"
+    prefix =
+      module_name == "patrol" ?
+        "ordinary" : "architecture"
+    case_id = "#{prefix}-#{operation.tr('_', '-')}"
     INPUT.load(
       Hive::WorkflowPackage::CanonicalYAML.dump(
         "schema" => "hive-patrol-qualification-scenario",
         "schema_version" => 1,
         "case_id" => case_id,
-        "module" => "patrol",
+        "module" => module_name,
         "operation" => operation,
         "clock" => NOW.utc.iso8601(6),
         "faults" => faults,
@@ -806,6 +905,52 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
           "role" => "root_cause"
         }
       ]
+    }
+  end
+
+  def architecture_thesis
+    {
+      "feature" => "Checkout",
+      "problem" =>
+        "Checkout mixes validation and payment orchestration",
+      "cost" =>
+        "Frequent changes touch the same file and its callers",
+      "evidence" => [
+        {
+          "file" => "lib/checkout.rb",
+          "line" => 12,
+          "snippet" => "def charge_and_validate",
+          "claim" =>
+            "validation and payment orchestration share one method"
+        }
+      ],
+      "proposed_refactor" =>
+        "Extract payment orchestration behind a checkout boundary",
+      "expected_leverage" => {
+        "drivers" => [
+          {
+            "signal" => "churn",
+            "relief" => 1,
+            "mechanism" =>
+              "isolate payment edits from validation code"
+          }
+        ]
+      },
+      "confidence" => "medium",
+      "risk" => {
+        "caps" => { "single_feature" => true },
+        "public_api_impact" => false,
+        "public_api_details" => [],
+        "cross_feature_impact" => false,
+        "cross_feature_details" => [],
+        "flags" => []
+      },
+      "required_validation" => {
+        "commands" => [ "test" ],
+        "characterization_first" => false,
+        "notes" => "Run checkout tests"
+      },
+      "follow_up_approval_state" => "pending"
     }
   end
 

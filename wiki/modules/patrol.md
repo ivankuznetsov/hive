@@ -267,22 +267,28 @@ replay. Recovery failures persist one bounded UTF-8 diagnostic cell with
 60/300/900-second retry backoff; successful generation-matched recovery clears
 it after restart.
 
-The candidate-side ordinary qualification driver exercises the production
-scheduler, occurrence journal, event publisher, module dispatcher, Attempts
-lineage, retry cooldown, effect sender, reconciliation, and comparator paths.
-Its deterministic matrix includes concurrent duplicate delivery, launch
-failure, one-hour retry, reconciliation conflict, and interruption after
-legacy capture, legacy decision, effect intent, module decision, and during
-reconciliation. Status 76 remains qualification-private and is not part of
-Hive's public exit-code contract.
+The candidate-side qualification driver exercises the production ordinary and
+Architecture Patrol schedulers, occurrence journal, event publisher, product
+stores, module dispatcher, Attempts lineage, retry cooldown, effect sender,
+reconciliation, and comparator paths. The ordinary deterministic matrix
+includes concurrent duplicate delivery, launch failure, one-hour retry,
+reconciliation conflict, and interruption after legacy capture, legacy
+decision, effect intent, module decision, and during reconciliation. The
+Architecture Patrol controls cover both a clean no-theses completion and a
+positive terminal no-diff action through the real v3 JobStore and detached
+module hook. Status 76 remains qualification-private and is not part of Hive's
+public exit-code contract.
 
 Candidate output is not the authority for that proof. After every successful
 case process, the trusted lane controller reconstructs the event, decisions,
 attempt lineage and output receipt, legacy capture and effect receipts,
 comparator row, occurrence retirement fence, and repository HEAD directly
-from the raw stores. A mismatch fails the lane before the oracle runs, and the
-host reconstruction is retained as a per-case artifact. Terminal stores cannot
-prove which OS process exited at a fault boundary, how many independently
+from the raw stores. Architecture cases additionally bind the derived v2
+manifest identity, v3 job aggregate, every aggregate transition intent and
+receipt, terminal action outcomes, exact retirement generation, and complete
+schedule event envelope. A mismatch fails the lane before the oracle runs, and
+the host reconstruction is retained as a per-case artifact. Terminal stores
+cannot prove which OS process exited at a fault boundary, how many independently
 supervised generations ran, or when pre/post-fault snapshots were taken.
 Candidate `recovery_trace`, restart count, checkpoint, and state digests
 therefore remain explicitly unverified until the lane controller owns
@@ -297,13 +303,14 @@ same run. Required E2E release coverage accepts only a blocker-free
 control and passed deterministic and installed lanes; local and
 deterministic-only states have a separate advisory coverage identity.
 
-Architecture Patrol now has a bounded collaborator for real intake, v3 job
-state, discovery/action commands, occurrence finalization, event publication,
-adapter projection, and shadow comparison. Its clean-negative and positive
-thesis controls are characterized, but full candidate routing, independently
-supervised restart/fault evidence, the installed provider broker, and the
-literal protected-control scenario catalog remain open U3 qualification work.
-None of these diagnostics authorizes mutator cutover.
+Architecture Patrol's bounded collaborator now reaches real intake, v3 job
+state, discovery/action commands, deterministic event publication, occurrence
+finalization, the private candidate command, detached module routing, Attempts,
+adapter projection, shadow comparison, and independent host reconstruction.
+Independently supervised restart/fault evidence, the installed provider broker
+and exact installed-gem target, and the literal protected-control scenario
+catalog remain open U3 qualification work. None of these diagnostics authorizes
+mutator cutover.
 
 ## Safety invariants
 

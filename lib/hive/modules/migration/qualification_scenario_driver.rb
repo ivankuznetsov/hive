@@ -95,6 +95,38 @@ module Hive
         end
         private_constant :QualificationAgent
 
+        class QualificationArchitectureReviewer
+          def initialize(theses:)
+            @theses = theses
+          end
+
+          def call(output_path:, **)
+            FileUtils.mkdir_p(File.dirname(output_path))
+            File.binwrite(
+              output_path,
+              Hive::WorkflowPackage::CanonicalJSON.generate(
+                "theses" => @theses
+              )
+            )
+            {}.freeze
+          end
+        end
+        private_constant :QualificationArchitectureReviewer
+
+        class QualificationArchitectureFixer
+          def attempt(**options)
+            Hive::RefactorPatrol::Fixer::Result.new(
+              outcome: "no_diff",
+              terminal: true,
+              analysis_sha: options.fetch(:analysis_sha),
+              details: {
+                "reason" => "qualification_no_diff"
+              }.freeze
+            ).freeze
+          end
+        end
+        private_constant :QualificationArchitectureFixer
+
         class QualificationTokenBudget
           def initialize(delegate:, operation:)
             @delegate = delegate
@@ -271,18 +303,30 @@ module Hive
             hive_state_path,
             store
           )
-          prepare_scenario!(
-            repository_root,
-            hive_state_path
-          )
-          event, capture = run_legacy_patrol_with_recovery!(
-            registry_entry,
-            repository_root,
-            hive_state_path
-          )
-          unless %w[completed not_dispatched].include?(
-                   capture.outcome_class
-                 ) &&
+          event, capture =
+            if architecture_scenario?
+              run_legacy_architecture_patrol!(
+                registry_entry,
+                repository_root,
+                hive_state_path,
+                store
+              )
+            else
+              prepare_scenario!(
+                repository_root,
+                hive_state_path
+              )
+              run_legacy_patrol_with_recovery!(
+                registry_entry,
+                repository_root,
+                hive_state_path
+              )
+            end
+          expected_outcomes =
+            architecture_scenario? ?
+              [ "complete" ] :
+              %w[completed not_dispatched]
+          unless expected_outcomes.include?(capture.outcome_class) &&
                  capture.owner == "legacy" &&
                  event.dig(
                    "payload",
@@ -341,12 +385,71 @@ module Hive
           require "hive/modules/dispatcher"
           require "hive/modules/migration/patrol_effect_index"
           require "hive/modules/migration/patrols"
+          require "hive/modules/migration/qualification_architecture_scenario"
           require "hive/modules/migration/qualification_faulting_state_store"
           require "hive/modules/migration/qualification_scenario_observations"
           require "hive/modules/migration/shadow_comparator"
           require "hive/patrol/reviewer"
           require "hive/patrol/state_store"
+          require "hive/refactor_patrol/fixer"
+          require "hive/refactor_patrol/pr_manifest"
           require "hive/workflow_package/canonical_yaml"
+        end
+
+        def run_legacy_architecture_patrol!(
+          registry_entry,
+          repository_root,
+          hive_state_path,
+          store
+        )
+          manifest =
+            prepare_architecture_scenario!(repository_root)
+          result =
+            Hive::Modules::Migration::
+              QualificationArchitectureScenario.new(
+                project: registry_entry,
+                manifest: manifest,
+                configuration:
+                  active_module_configuration(
+                    store,
+                    "architecture-patrol"
+                  ),
+                review_agent_runner:
+                  QualificationArchitectureReviewer.new(
+                    theses:
+                      @scenario_input.reviewer_findings
+                  ),
+                fixer: QualificationArchitectureFixer.new,
+                repository_identity_resolver:
+                  method(:architecture_repository_identity),
+                clock: @clock,
+                canonical_state_home:
+                  File.join(
+                    hive_state_path,
+                    "module-runtime",
+                    "qualification"
+                  )
+              ).call
+          capture =
+            Hive::Modules::Migration::PatrolCapture.from_h(
+              result.occurrence
+            )
+          unless
+            result.event.dig(
+              "payload",
+              "legacy_mutator_capture"
+            ) == capture.to_h &&
+              capture.module_name ==
+                "architecture-patrol" &&
+              capture.outcome.fetch("complete") == true
+            raise Hive::ConfigError,
+                  "qualification legacy architecture patrol capture is malformed"
+          end
+
+          [ result.event, capture ].freeze
+        rescue KeyError
+          raise Hive::ConfigError,
+                "qualification legacy architecture patrol did not complete cleanly"
         end
 
         def run_legacy_patrol_with_recovery!(
@@ -969,6 +1072,10 @@ module Hive
 
         def run_module_shadow!(store:, event:, registry_entry:,
                                hive_state_path:)
+          module_name = @scenario_input.module_name
+          hook_id =
+            event.dig("payload", "target_hook") ||
+            "scheduled-scan"
           worker_release_reader = nil
           worker_release_writer = nil
           if qualification_fault?("after_module_decision")
@@ -1026,6 +1133,8 @@ module Hive
             dispatch_concurrent_duplicates!(
               store: store,
               event: event,
+              module_name: module_name,
+              hook_id: hook_id,
               registry_entry: registry_entry,
               attempt_store: attempt_store,
               attempts_api: attempts_api,
@@ -1054,8 +1163,8 @@ module Hive
           end
           decisions = journal.all
           event_decisions = decisions.select do |decision|
-            decision["module"] == "patrol" &&
-              decision["hook"] == "scheduled-scan" &&
+            decision["module"] == module_name &&
+              decision["hook"] == hook_id &&
               decision["event_id"] == event.fetch("event_id")
           end.sort_by do |decision|
             [
@@ -1098,7 +1207,7 @@ module Hive
             await_terminal_lineage(
               attempt_store,
               event_id: event.fetch("event_id"),
-              module_name: "patrol"
+              module_name: module_name
             )
           trace_runtime!(
             "module_terminal",
@@ -1132,7 +1241,11 @@ module Hive
             hive_state_path: hive_state_path
           )
           runs = Dir.glob(
-            File.join(store.runtime_path("patrol"), "runs", "*.json")
+            File.join(
+              store.runtime_path(module_name),
+              "runs",
+              "*.json"
+            )
           ).map do |path|
             JSON.parse(File.binread(path))
           end
@@ -1226,8 +1339,8 @@ module Hive
         end
 
         def dispatch_concurrent_duplicates!(
-          store:, event:, registry_entry:, attempt_store:,
-          attempts_api:, checkpoint:
+          store:, event:, module_name:, hook_id:, registry_entry:,
+          attempt_store:, attempts_api:, checkpoint:
         )
           ready = Queue.new
           release = Queue.new
@@ -1242,8 +1355,8 @@ module Hive
                 registry_entry: registry_entry,
                 checkpoint: checkpoint
               ).dispatch(
-                module_name: "patrol",
-                hook_id: "scheduled-scan",
+                module_name: module_name,
+                hook_id: hook_id,
                 event: event
               )
             end
@@ -1603,7 +1716,10 @@ module Hive
               "shadow"
             )
           )
-          records = comparator.each_record("patrol").to_a
+          records =
+            comparator
+            .each_record(@scenario_input.module_name)
+            .to_a
           unless records.length == 1
             raise Hive::ConfigError,
                   "qualification comparator evidence is unavailable"
@@ -2044,9 +2160,16 @@ module Hive
 
         def qualification_hooks(name, descriptor)
           descriptor.hooks.to_h do |hook|
-            enabled =
+            enabled = if architecture_scenario?
+              target_hook =
+                @scenario_input.reviewer_findings.empty? ?
+                  "scheduled-discovery" : "actions"
+              name == "architecture-patrol" &&
+                hook.fetch("id") == target_hook
+            else
               name == "patrol" &&
-              hook.fetch("id") == "scheduled-scan"
+                hook.fetch("id") == "scheduled-scan"
+            end
             [ hook.fetch("id"), enabled ]
           end
         end
@@ -2068,7 +2191,7 @@ module Hive
           ownership =
             Hive::Modules::Migration::Patrols.ownership_snapshot(
               repository_root,
-              "patrol",
+              @scenario_input.module_name,
               hive_state_path: hive_state_path
             )
           unless outcome.status == "shadowing" &&
@@ -2120,6 +2243,118 @@ module Hive
         rescue KeyError
           raise Hive::ConfigError,
                 "qualification patrol state is malformed"
+        end
+
+        def prepare_architecture_scenario!(repository_root)
+          base_sha =
+            git!(repository_root, "rev-parse", "HEAD").strip
+          write_fixture(
+            File.join(
+              repository_root,
+              "lib",
+              "checkout.rb"
+            ),
+            <<~RUBY
+              module Checkout
+                class Processor
+                  def initialize(gateway)
+                    @gateway = gateway
+                  end
+
+                  def ready?
+                    true
+                  end
+
+                  # Payment and validation currently share one boundary.
+                  def charge_and_validate
+                    return false unless ready?
+
+                    @gateway.charge
+                  end
+                end
+              end
+            RUBY
+          )
+          git!(
+            repository_root,
+            "add",
+            "--",
+            "lib/checkout.rb"
+          )
+          git!(
+            repository_root,
+            "-c", "user.name=Hive Qualification",
+            "-c", "user.email=qualification@hive.invalid",
+            "commit", "--quiet", "--no-gpg-sign",
+            "--message=Add checkout boundary",
+            env: {
+              "GIT_AUTHOR_DATE" =>
+                (@clock.call + 1).utc.iso8601(6),
+              "GIT_COMMITTER_DATE" =>
+                (@clock.call + 1).utc.iso8601(6)
+            }
+          )
+          merge_sha =
+            git!(repository_root, "rev-parse", "HEAD").strip
+          host, owner, repository =
+            @project.fetch("repository").split("/", 3)
+          unless host == "github.com" &&
+                 owner && repository
+            raise Hive::ConfigError,
+                  "qualification architecture repository identity is malformed"
+          end
+          Hive::RefactorPatrol::PrManifest.build(
+            source: {
+              "url" =>
+                "https://#{host}/#{owner}/#{repository}/pull/7",
+              "number" => 7,
+              "repository" => "#{owner}/#{repository}",
+              "registration" => @project.fetch("name"),
+              "base_branch" => "main",
+              "base_sha" => base_sha,
+              "merge_sha" => merge_sha,
+              "merged_at" => @clock.call.utc.iso8601(6)
+            },
+            files: [
+              {
+                "path" => "lib/checkout.rb",
+                "status" => "added"
+              }
+            ]
+          )
+        end
+
+        def active_module_configuration(store, name)
+          selection = store.selected(name)
+          unless
+            selection &&
+              selection.fetch("installed") &&
+              selection.fetch("enabled")
+            raise Hive::ConfigError,
+                  "qualification module configuration is unavailable"
+          end
+          active = selection.fetch("active")
+          store.configuration(
+            name,
+            active.fetch("configuration_digest")
+          )
+        rescue KeyError
+          raise Hive::ConfigError,
+                "qualification module configuration is unavailable"
+        end
+
+        def architecture_repository_identity(_entry, _config)
+          host, owner, repository =
+            @project.fetch("repository").split("/", 3)
+          unless host == "github.com" &&
+                 owner && repository
+            raise Hive::ConfigError,
+                  "qualification architecture repository identity is malformed"
+          end
+          {
+            "host" => host,
+            "repository" => "#{owner}/#{repository}"
+          }.freeze
         end
 
         def commit_qualification_change!(repository_root)
@@ -2202,6 +2437,9 @@ module Hive
         end
 
         def project_config
+          return architecture_project_config if
+            architecture_scenario?
+
           {
             "default_branch" => "main",
             "hive_state_path" => "../hive-state",
@@ -2222,6 +2460,32 @@ module Hive
             },
             "refactor_patrol" => { "enabled" => false }
           }
+        end
+
+        def architecture_project_config
+          {
+            "default_branch" => "main",
+            "hive_state_path" => "../hive-state",
+            "daemon" => { "enabled" => true },
+            "execute" => {
+              "agent" => "codex",
+              "model" => "gpt-5.6-sol",
+              "effort" => "high"
+            },
+            "patrol" => { "enabled" => false },
+            "refactor_patrol" => {
+              "enabled" => true,
+              "min_leverage_score" => 0.0,
+              "auto_fix" => {
+                "enabled" => true,
+                "agent" => "codex",
+                "model" => "gpt-5.6-sol",
+                "effort" => "high"
+              },
+              "issue_filing" => { "enabled" => false },
+              "commands" => { "test" => "true" }
+            }
+          }.freeze
         end
 
         def write_fixture(path, bytes)
@@ -2319,7 +2583,7 @@ module Hive
         end
 
         def validate_scenario!
-          unless
+          ordinary =
             @scenario_input.module_name == "patrol" &&
               SUPPORTED_OPERATIONS.include?(
                 @scenario_input.operation
@@ -2329,9 +2593,20 @@ module Hive
                   SUPPORTED_FAULTS
               ).empty? &&
               @scenario_input.faults.length <= 1
+          architecture =
+            architecture_scenario? &&
+              @scenario_input.operation ==
+                "architecture_positive_fixture" &&
+              @scenario_input.faults.empty?
+          unless ordinary || architecture
             raise Hive::ConfigError,
                   "qualification scenario is unsupported"
           end
+        end
+
+        def architecture_scenario?
+          @scenario_input.module_name ==
+            "architecture-patrol"
         end
 
         def validate_scenario_input(value)

@@ -260,7 +260,6 @@
               "properties": {
                 "credential_bindings": {
                   "const": [
-                    "GITHUB_TOKEN",
                     "OPENROUTER_API_KEY"
                   ]
                 },

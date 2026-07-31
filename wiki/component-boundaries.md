@@ -3,7 +3,7 @@ title: Component boundaries
 type: reference
 source: config/component-boundaries.yml, test/support/component_boundary_contract.rb
 created: 2026-07-25
-updated: 2026-07-30
+updated: 2026-07-31
 tags: [architecture, components, boundaries, monorepo]
 ---
 
@@ -127,10 +127,14 @@ action-runner composition roots. A separate static source contract allows
 JobStore semantic mutators only inside those transition ports. This enforces
 dependency direction; it is not runtime isolation.
 
-The row remains `candidate` because U3 still has to prove the compressed
-candidate-bound evidence protocol against the repaired production stream and
-complete qualification. That exception is not permission for another recovery
-store, compatibility effect map, or cutover claim.
+The row remains `candidate` even though U3 now drives ordinary Patrol and
+Architecture Patrol through their real schedulers, product state, detached
+module hooks, Attempts, and host-reconstructed terminal evidence. The remaining
+qualification work is external process-generation custody for the five fault
+boundaries, a host-owned installed-provider broker and exact installed target,
+plus the protected-main controller/catalog proof. That exception is not
+permission for another recovery store, compatibility effect map, or cutover
+claim.
 
 `Hive::Attempts::API` is the guarded reference admission slice. Its public
 result contracts, focused clean-load proof, and exact internal construction

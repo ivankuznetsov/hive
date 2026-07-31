@@ -190,9 +190,7 @@ module QualificationRunFixture
           "timeout_seconds" => 300
         },
         "installed" => {
-          "credential_bindings" => [
-            "GITHUB_TOKEN", "OPENROUTER_API_KEY"
-          ],
+          "credential_bindings" => [ "OPENROUTER_API_KEY" ],
           "kind" => "installed_target",
           "provider" => "openrouter",
           "repository_sha" => "5" * 40,

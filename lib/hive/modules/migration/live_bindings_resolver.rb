@@ -532,7 +532,7 @@ module Hive
               PatrolEvidence.malformed!(label)
             end
           else
-            unless policy["network"] == true &&
+            unless policy["network"] == false &&
                    policy["provider"] == "openrouter" &&
                    policy["target_ref"] ==
                      "inputs/installed-target/target.json" &&

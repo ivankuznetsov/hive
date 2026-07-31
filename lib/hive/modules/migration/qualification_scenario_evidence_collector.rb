@@ -10,6 +10,9 @@ require "hive/modules/migration/occurrence_journal"
 require "hive/modules/migration/patrol_effect_index"
 require "hive/modules/migration/qualification_scenario_actuals"
 require "hive/modules/migration/shadow_comparator"
+require "hive/refactor_patrol/architecture_project_binding"
+require "hive/refactor_patrol/job_store"
+require "hive/refactor_patrol/pr_manifest"
 require "hive/workflow_package/canonical_json"
 
 module Hive
@@ -24,18 +27,29 @@ module Hive
       class QualificationScenarioEvidenceCollector
         ERROR =
           "patrol qualification host evidence is malformed".freeze
-        MODULE_NAME = "patrol".freeze
-        HOOK_ID = "scheduled-scan".freeze
+        PRIMARY_HOOKS = {
+          "architecture-patrol" =>
+            %w[actions scheduled-discovery].freeze,
+          "patrol" => %w[scheduled-scan].freeze
+        }.freeze
         CASE_ID = /\A[a-z0-9][a-z0-9-]{0,127}\z/
         MAX_RAW_BYTES = 4 * 1024 * 1024
         TERMINAL_EFFECT_STATES = %w[
           committed denied failed reconciled
         ].freeze
-        PASSIVE_DECISION_BINDINGS = [
+        ARCHITECTURE_SCHEDULE = "*/10 * * * *".freeze
+        JOURNAL_STATE_KEYS = %w[
+          module recovery_failure recovery_generation
+          recovery_inventory_dirty recovery_inventory_generation
+          retired_occurrence_digests schema schema_version
+          sequence_closed_through sequence_high_waters
+        ].freeze
+        ALL_DECISION_BINDINGS = [
           %w[architecture-patrol actions],
           %w[architecture-patrol merged-pr-discovery],
           %w[architecture-patrol scheduled-discovery],
           %w[architecture-patrol setup],
+          %w[patrol scheduled-scan],
           %w[patrol setup],
           %w[patrol task-completed]
         ].map(&:freeze).freeze
@@ -55,7 +69,8 @@ module Hive
         Projection = Data.define(
           :case_id, :module_name, :event, :decisions, :attempts,
           :comparator_record, :capture, :receipts, :bindings,
-          :effect_index, :terminal_effects, :unverified_claims
+          :effect_index, :terminal_effects, :product_state,
+          :unverified_claims
         ) do
           SCHEMA =
             "hive-patrol-qualification-host-evidence".freeze
@@ -76,6 +91,7 @@ module Hive
               "bindings" => bindings,
               "effect_index" => effect_index,
               "terminal_effects" => terminal_effects,
+              "product_state" => product_state,
               "unverified_claims" => unverified_claims
             }.freeze
           end
@@ -85,34 +101,52 @@ module Hive
           case_id = validated_case_id(case_id)
           root = validated_root(sandbox_root)
           row = validated_candidate_row(candidate_row, case_id)
-          paths = evidence_paths(root)
+          module_name = row.fetch("module")
+          paths = evidence_paths(root, module_name)
           event = load_event(paths.fetch(:module_runtime))
-          capture = capture_for(event)
+          hook_id = primary_hook(event, module_name)
+          capture = capture_for(event, module_name)
           candidate_decisions, decisions = load_decisions(
             paths.fetch(:module_runtime),
             event: event,
-            candidate: row
+            candidate: row,
+            module_name: module_name,
+            hook_id: hook_id
           )
           attempts, attempt_projections = load_attempts(
             paths.fetch(:attempts),
             event: event,
-            decisions: candidate_decisions
+            decisions: candidate_decisions,
+            module_name: module_name,
+            hook_id: hook_id
           )
           comparator, effect_index = load_comparator(
             paths.fetch(:shadow),
-            capture: capture
+            capture: capture,
+            module_name: module_name
           )
           receipts = load_evidence(
             paths.fetch(:evidence),
             capture: capture,
-            comparator: comparator
+            comparator: comparator,
+            module_name: module_name
           )
           terminal_effects = load_terminal_effects(
             paths.fetch(:occurrences),
             capture: capture,
-            receipts: receipts
+            receipts: receipts,
+            module_name: module_name
           )
           repository_sha = repository_sha(paths.fetch(:repository))
+          product_state = load_product_state(
+            paths,
+            capture: capture,
+            event: event,
+            module_name: module_name,
+            hook_id: hook_id,
+            repository_sha: repository_sha,
+            receipts: receipts
+          )
           bind_candidate!(
             row,
             event: event,
@@ -121,7 +155,8 @@ module Hive
             comparator: comparator,
             capture: capture,
             effect_index: effect_index,
-            repository_sha: repository_sha
+            repository_sha: repository_sha,
+            module_name: module_name
           )
           build_projection(
             case_id: case_id,
@@ -134,9 +169,12 @@ module Hive
             receipts: receipts,
             effect_index: effect_index,
             terminal_effects: terminal_effects,
-            repository_sha: repository_sha
+            repository_sha: repository_sha,
+            module_name: module_name,
+            product_state: product_state
           )
-        rescue Hive::Error, JSON::ParserError, KeyError, IndexError,
+        rescue Hive::Error, Hive::RefactorPatrol::JobStore::Error,
+               JSON::ParserError, KeyError, IndexError,
                ArgumentError, TypeError, NoMethodError, EncodingError,
                SystemCallError
           malformed!
@@ -174,7 +212,7 @@ module Hive
           actuals.fetch(0)
         end
 
-        def evidence_paths(root)
+        def evidence_paths(root, module_name)
           paths = {
             repository: required_directory(root, "repository"),
             hive_state: required_directory(root, "hive-state"),
@@ -193,9 +231,20 @@ module Hive
             occurrences:
               required_directory(
                 paths.fetch(:hive_state),
-                "patrol/occurrences"
+                occurrence_path(module_name)
               )
           ).freeze
+        end
+
+        def occurrence_path(module_name)
+          case module_name
+          when "patrol"
+            "patrol/occurrences"
+          when "architecture-patrol"
+            "refactor_patrol/v3/occurrences/records"
+          else
+            malformed!
+          end
         end
 
         def required_directory(root, relative)
@@ -245,7 +294,17 @@ module Hive
           event
         end
 
-        def capture_for(event)
+        def primary_hook(event, module_name)
+          hook_id =
+            event.dig("payload", "target_hook") ||
+            "scheduled-scan"
+          malformed! unless
+            PRIMARY_HOOKS.fetch(module_name).include?(hook_id)
+
+          hook_id.freeze
+        end
+
+        def capture_for(event, module_name)
           capture = PatrolCapture.from_h(
             event.dig(
               "payload",
@@ -253,19 +312,55 @@ module Hive
             )
           )
           project = capture.project
+          source_type =
+            module_name == "patrol" ?
+              "legacy_patrol_completion" :
+              "legacy_architecture_patrol_completion"
+          idempotency_prefix =
+            module_name == "patrol" ?
+              "patrol-finalized:" :
+              "architecture-patrol-finalized:"
           valid =
-            capture.module_name == MODULE_NAME &&
+            capture.module_name == module_name &&
             event.fetch("event_name") == "schedule" &&
             event.fetch("project_id") ==
               project.fetch("project_id") &&
             event.fetch("project") == project.fetch("name") &&
-            event.dig("payload", "target_module") == MODULE_NAME
+            event.dig("payload", "target_module") == module_name &&
+            event.fetch("source") == {
+              "type" => source_type,
+              "id" => capture.occurrence_id
+            } &&
+            event.fetch("idempotency_key") ==
+              "#{idempotency_prefix}#{capture.occurrence_id}"
+          payload = event.fetch("payload")
+          payload_keys = %w[
+            due_at legacy_mutator_capture missed_windows schedule
+            target_module
+          ]
+          payload_keys << "target_hook" if
+            module_name == "architecture-patrol"
+          valid &&=
+            payload.keys.sort == payload_keys.sort &&
+            event.fetch("occurred_at") ==
+              capture.occurred_at &&
+            event.fetch("recorded_at") ==
+              capture.recorded_at &&
+            payload.fetch("due_at") ==
+              capture.occurred_at &&
+            payload.fetch("missed_windows") == 0
+          valid &&=
+            payload.fetch("schedule") ==
+              ARCHITECTURE_SCHEDULE if
+                module_name == "architecture-patrol"
           malformed! unless valid
 
           capture
         end
 
-        def load_decisions(module_runtime, event:, candidate:)
+        def load_decisions(
+          module_runtime, event:, candidate:, module_name:, hook_id:
+        )
           root = required_directory(module_runtime, "decisions")
           names = exact_names!(
             root, /\Adec-[0-9a-f]{64}\.json\z/
@@ -286,8 +381,8 @@ module Hive
           end
 
           relevant = decisions.select do |decision|
-            decision["module"] == MODULE_NAME &&
-              decision["hook"] == HOOK_ID
+            decision["module"] == module_name &&
+              decision["hook"] == hook_id
           end.sort_by do |decision|
             [
               admitted?(decision) ? 0 : 1,
@@ -299,10 +394,14 @@ module Hive
           bindings = passive.map do |decision|
             [ decision.fetch("module"), decision.fetch("hook") ]
           end.sort
+          passive_bindings =
+            ALL_DECISION_BINDINGS.reject do |binding|
+              binding == [ module_name, hook_id ]
+            end.sort
           malformed! unless
             !relevant.empty? &&
               candidate.fetch("decisions") == relevant &&
-              bindings.uniq == PASSIVE_DECISION_BINDINGS &&
+              bindings.uniq == passive_bindings &&
               passive.all? do |decision|
                 decision.fetch("outcome") == "skip" &&
                   decision.fetch("reason") == "hook_disabled" &&
@@ -316,7 +415,9 @@ module Hive
             decision["reason"] == "admitted"
         end
 
-        def load_attempts(root, event:, decisions:)
+        def load_attempts(
+          root, event:, decisions:, module_name:, hook_id:
+        )
           records_root = required_directory(root, "records")
           names = exact_names!(
             records_root,
@@ -342,8 +443,8 @@ module Hive
                 event.fetch("project_id") &&
               subject["event_id"] ==
                 event.fetch("event_id") &&
-              subject["module"] == MODULE_NAME &&
-              subject["hook"] == HOOK_ID
+              subject["module"] == module_name &&
+              subject["hook"] == hook_id
           end
           lineage = attempt_lineage(records, root: root)
           first_id = lineage.fetch(0).attempt_id
@@ -430,7 +531,7 @@ module Hive
           immutable_json(value)
         end
 
-        def load_comparator(root, capture:)
+        def load_comparator(root, capture:, module_name:)
           validate_shadow_inventory!(root)
           records =
             ShadowComparator.new(root: root).each_record.to_a
@@ -439,7 +540,7 @@ module Hive
           record = records.fetch(0)
           index = PatrolEffectIndex.build(records: records)
           malformed! unless
-            record.fetch("module") == MODULE_NAME &&
+            record.fetch("module") == module_name &&
               record.fetch("comparable") == true &&
               record.fetch("evidence_source") ==
                 "legacy_mutator_capture" &&
@@ -451,7 +552,7 @@ module Hive
           [ record, index ].freeze
         end
 
-        def load_evidence(root, capture:, comparator:)
+        def load_evidence(root, capture:, comparator:, module_name:)
           %w[
             captures receipts indexes/occurrences indexes/intents
           ].each do |relative|
@@ -476,7 +577,7 @@ module Hive
               intent_ids.uniq == intent_ids &&
               receipts.all? do |receipt|
                 intent = receipt.intent
-                intent.module_name == MODULE_NAME &&
+                intent.module_name == module_name &&
                   intent.authority == "legacy" &&
                   intent.occurrence_id ==
                     capture.occurrence_id &&
@@ -535,18 +636,24 @@ module Hive
                               end.sort
         end
 
-        def load_terminal_effects(root, capture:, receipts:)
+        def load_terminal_effects(
+          root, capture:, receipts:, module_name:
+        )
           validate_occurrence_inventory!(root)
-          validate_recovery_index!(root)
+          recovery_index =
+            validate_recovery_index!(root, module_name)
           journal = OccurrenceJournal.new(
-            root, module_name: MODULE_NAME
+            root, module_name: module_name
           )
           records = journal.each_record.to_a
           malformed! unless records.length <= 1
 
+          journal_state = nil
           proof =
             if records.empty?
-              validate_retirement_state!(root, capture)
+              journal_state = validate_retirement_state!(
+                root, capture, module_name
+              )
               malformed! unless journal.terminalized?(capture)
               "retired_fence"
             else
@@ -564,7 +671,9 @@ module Hive
             "pending_effect_count" => 0,
             "pending_outbox_count" => 0,
             "duplicate_intent_ids" => [],
-            "duplicate_receipt_ids" => []
+            "duplicate_receipt_ids" => [],
+            "journal_state" => journal_state,
+            "recovery_index" => recovery_index
           )
         end
 
@@ -595,7 +704,7 @@ module Hive
           malformed! unless valid
         end
 
-        def validate_recovery_index!(root)
+        def validate_recovery_index!(root, module_name)
           index = canonical_object(
             File.join(root, "recovery-index.json")
           )
@@ -606,21 +715,33 @@ module Hive
               index["schema"] ==
                 "hive-patrol-occurrence-recovery-index" &&
               index["schema_version"] == 1 &&
-              index["module"] == MODULE_NAME &&
+              index["module"] == module_name &&
               index["occurrence_ids"] == []
+          if module_name == "architecture-patrol"
+            malformed! unless index["generation"] == 2
+          end
+          index
         end
 
-        def validate_retirement_state!(root, capture)
+        def validate_retirement_state!(root, capture, module_name)
           state = canonical_object(
             File.join(root, "journal-state.json")
           )
           malformed! unless
+            state.keys.sort == JOURNAL_STATE_KEYS.sort &&
             state["schema"] ==
               "hive-patrol-occurrence-journal-state" &&
               state["schema_version"] == 1 &&
-              state["module"] == MODULE_NAME &&
+              state["module"] == module_name &&
               state["recovery_failure"].nil? &&
               state["recovery_inventory_dirty"] == false
+          if module_name == "architecture-patrol"
+            malformed! unless
+              state["recovery_generation"] == 0 &&
+                state["recovery_inventory_generation"] == 2 &&
+                state["sequence_closed_through"].nil? &&
+                state["retired_occurrence_digests"].empty?
+          end
           reservation = capture.reservation
           if reservation.key?("attempt_generation")
             entries = state.fetch("sequence_high_waters")
@@ -649,8 +770,186 @@ module Hive
                     Digest::SHA256.hexdigest(
                       capture.occurrence_id
                     )
-                  ]
+              ]
           end
+          state
+        end
+
+        def load_product_state(
+          paths, capture:, event:, module_name:, hook_id:,
+          repository_sha:, receipts:
+        )
+          return ordinary_product_state(capture) if
+            module_name == "patrol"
+
+          architecture_product_state(
+            paths,
+            capture: capture,
+            event: event,
+            hook_id: hook_id,
+            repository_sha: repository_sha,
+            receipts: receipts
+          )
+        end
+
+        def ordinary_product_state(capture)
+          immutable_json(
+            "type" => "ordinary_patrol_occurrence",
+            "occurrence_id" => capture.occurrence_id,
+            "retired" => true
+          )
+        end
+
+        def architecture_product_state(
+          paths, capture:, event:, hook_id:, repository_sha:,
+          receipts:
+        )
+          outcome = capture.outcome
+          job_id = outcome.fetch("job_id")
+          project = architecture_project(
+            paths,
+            capture: capture
+          )
+          store = Hive::RefactorPatrol::JobStore.new(
+            paths.fetch(:repository),
+            hive_state_path: paths.fetch(:hive_state),
+            project: project
+          )
+          jobs = store.jobs
+          malformed! unless jobs.length == 1 &&
+                            jobs.fetch(0).fetch("job_id") == job_id
+
+          aggregate = jobs.fetch(0)
+          manifest = architecture_manifest(
+            paths.fetch(:hive_state),
+            job_id: job_id,
+            registration: capture.project.fetch("name")
+          )
+          source = manifest.fetch("source")
+          aggregate_source = source.merge(
+            "changed_paths" => manifest.fetch("changed_paths"),
+            "manifest_checksum" =>
+              manifest.fetch("manifest_checksum")
+          )
+          actions = aggregate.fetch("actions")
+          transition_intent_ids =
+            architecture_transition_intent_ids(aggregate)
+          receipt_intent_ids = receipts.map do |receipt|
+            receipt.fetch("intent").fetch("intent_id")
+          end.sort
+          action_outcomes = actions.to_h do |action|
+            [
+              action.fetch("canonical_action_id"),
+              action.fetch("outcome")
+            ]
+          end
+          expected_hook =
+            actions.empty? ? "scheduled-discovery" : "actions"
+          valid =
+            aggregate.fetch("source") == aggregate_source &&
+            aggregate.fetch("analysis_sha") ==
+              source.fetch("merge_sha") &&
+            aggregate.fetch("occurrence_id") ==
+              capture.occurrence_id &&
+            aggregate.fetch("state") == outcome.fetch("state") &&
+            aggregate.fetch("complete") == true &&
+            aggregate.fetch("review_errors").empty? &&
+            outcome.fetch("complete") == true &&
+            aggregate.fetch("zero_reason") ==
+              outcome.fetch("zero_reason") &&
+            outcome.fetch("action_count") == actions.length &&
+            outcome.fetch("action_outcomes") == action_outcomes &&
+            outcome.fetch("completion_status") == "closed" &&
+            capture.reservation.fetch("kind") ==
+              "architecture" &&
+            capture.reservation.fetch("id") == job_id &&
+            capture.reservation.fetch("job_id") == job_id &&
+            capture.trigger.fetch("manifest_digest") ==
+              manifest.fetch("manifest_checksum") &&
+            capture.trigger.fetch("merge_sha") ==
+              source.fetch("merge_sha") &&
+            source.fetch("merge_sha") == repository_sha &&
+            hook_id == expected_hook &&
+            event.dig("payload", "target_hook") == expected_hook &&
+            transition_intent_ids == receipt_intent_ids &&
+            store.occurrence_for_job(job_id).nil?
+          malformed! unless valid
+
+          Hive::RefactorPatrol::ArchitectureProjectBinding.validate!(
+            project: capture.project,
+            source: source
+          )
+          immutable_json(
+            "type" => "architecture_patrol_v3_job",
+            "job_id" => job_id,
+            "job" => aggregate,
+            "job_sha256" =>
+              Digest::SHA256.hexdigest(canonical(aggregate)),
+            "manifest" => manifest,
+            "manifest_sha256" =>
+              Digest::SHA256.hexdigest(canonical(manifest)),
+            "transition_intent_ids" =>
+              transition_intent_ids,
+            "occurrence_retired" => true
+          )
+        end
+
+        def architecture_transition_intent_ids(aggregate)
+          transitions = [
+            aggregate.fetch("intake_transition_id")
+          ]
+          aggregate.fetch("attempts").each do |attempt|
+            Array(attempt.fetch("transitions")).each do |transition|
+              transitions << transition.fetch("intent_id")
+            end
+          end
+          aggregate.fetch("actions").each do |action|
+            action.fetch("transitions").each do |transition|
+              transitions << transition.fetch("intent_id")
+            end
+          end
+          malformed! unless transitions.uniq.length ==
+                            transitions.length
+
+          transitions.sort.freeze
+        end
+
+        def architecture_project(paths, capture:)
+          {
+            "name" => capture.project.fetch("name"),
+            "project_id" =>
+              capture.project.fetch("project_id"),
+            "path" => paths.fetch(:repository),
+            "hive_state_path" => paths.fetch(:hive_state),
+            "repository_identity" =>
+              capture.project.fetch("repository")
+          }.freeze
+        end
+
+        def architecture_manifest(
+          hive_state, job_id:, registration:
+        )
+          root = required_directory(
+            hive_state, "refactor_patrol/v2/manifests"
+          )
+          names = exact_names!(
+            root,
+            /\A[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\.json\z/
+          )
+          malformed! unless names == [ "#{job_id}.json" ]
+
+          value = json_object(File.join(root, names.fetch(0)))
+          Hive::RefactorPatrol::PrManifest.validate!(
+            value,
+            expected_job_id: job_id,
+            registration: registration
+          )
+          malformed! unless
+            Hive::RefactorPatrol::PrManifest.build(
+              source: value.fetch("source"),
+              files: value.fetch("files")
+            ) == value
+          value
         end
 
         def repository_sha(root)
@@ -666,10 +965,11 @@ module Hive
 
         def bind_candidate!(
           candidate, event:, decisions:, attempt_projections:,
-          comparator:, capture:, effect_index:, repository_sha:
+          comparator:, capture:, effect_index:, repository_sha:,
+          module_name:
         )
           expected = {
-            "module" => MODULE_NAME,
+            "module" => module_name,
             "event_id" => event.fetch("event_id"),
             "event" => event,
             "decision_id" =>
@@ -700,7 +1000,8 @@ module Hive
         def build_projection(
           case_id:, event:, decisions:, attempts:, comparator:,
           capture:, receipts:, effect_index:, terminal_effects:,
-          repository_sha:, candidate_decisions:
+          repository_sha:, candidate_decisions:, module_name:,
+          product_state:
         )
           bindings = immutable_json(
             "event_id" => event.fetch("event_id"),
@@ -732,7 +1033,7 @@ module Hive
           )
           Projection.new(
             case_id: case_id,
-            module_name: MODULE_NAME,
+            module_name: module_name,
             event: immutable_json(event),
             decisions: immutable_json(decisions),
             attempts: attempts,
@@ -742,6 +1043,7 @@ module Hive
             bindings: bindings,
             effect_index: immutable_json(effect_index.to_h),
             terminal_effects: terminal_effects,
+            product_state: product_state,
             unverified_claims:
               immutable_json(UNVERIFIED_CLAIMS)
           ).freeze
@@ -808,6 +1110,17 @@ module Hive
         end
 
         def canonical_object(path)
+          value, bytes = json_file(path)
+          malformed! unless bytes == canonical(value)
+
+          value
+        end
+
+        def json_object(path)
+          json_file(path).fetch(0)
+        end
+
+        def json_file(path)
           stat = File.lstat(path)
           malformed! unless stat.file? &&
                             !stat.symlink? &&
@@ -815,10 +1128,9 @@ module Hive
 
           bytes = File.binread(path)
           value = JSON.parse(bytes)
-          malformed! unless value.is_a?(Hash) &&
-                            bytes == canonical(value)
+          malformed! unless value.is_a?(Hash)
 
-          value
+          [ value, bytes ].freeze
         end
 
         def immutable_json(value)

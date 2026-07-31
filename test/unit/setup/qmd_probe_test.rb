@@ -50,12 +50,12 @@ class SetupQmdProbeTest < Minitest::Test
     error = assert_raises(Hive::Error) do
       Hive::Setup::QmdProbe.capture3_bounded(
         [ RbConfig.ruby, "-e", script, pid_file ],
-        timeout_sec: 0.2
+        timeout_sec: 2.0
       )
     end
 
     pid = Integer(File.read(pid_file))
-    assert_equal "hive setup: qmd startup probe timed out after 0.2s", error.message
+    assert_equal "hive setup: qmd startup probe timed out after 2.0s", error.message
     assert_raises(Errno::ESRCH) { Process.kill(0, pid) }
   ensure
     FileUtils.rm_rf(File.dirname(pid_file)) if pid_file

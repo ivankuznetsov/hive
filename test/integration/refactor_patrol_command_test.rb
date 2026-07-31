@@ -1972,7 +1972,11 @@ class RefactorPatrolCommandTest < Minitest::Test
           }
         )
         File.write(File.join(repo, ".hive-state", "config.yml"), cfg.to_yaml)
-        Hive::Config.register_project(name: "demo", path: repo)
+        Hive::Config.register_project(
+          name: "demo",
+          path: repo,
+          repository_identity: "github.com/acme/demo"
+        )
         yield repo
       end
     end
@@ -2179,7 +2183,12 @@ class RefactorPatrolCommandTest < Minitest::Test
         config_loader: ->(path) { Hive::Config.load(path) }
       )
     aggregate = transitions.enqueue(
-      entry: { "path" => repo, "name" => "demo" },
+      entry: {
+        "path" => repo,
+        "name" => "demo",
+        "project_id" => "project-demo",
+        "repository_identity" => "github.com/acme/demo"
+      },
       store: store,
       manifest: manifest,
       policy: policy,

@@ -54,10 +54,23 @@ class ComponentBoundariesTest < Minitest::Test
                  attempts.fetch("forbidden_constructions").sort
     assert_equal(
       {
+        "Hive::Attempts::ConfiguredDispatcher" => [
+          "lib/hive/modules/migration/qualification_scenario_driver.rb"
+        ],
+        "Hive::Attempts::DetachedLauncher" => [
+          "lib/hive/modules/migration/qualification_scenario_driver.rb"
+        ],
         "Hive::Attempts::LostOutcomeProcessor" => [ "lib/hive/commands/daemon.rb" ],
         "Hive::Attempts::LostOutcomeStore" => [ "lib/hive/commands/daemon.rb" ],
-        "Hive::Attempts::ProcessIdentity" => [ "lib/hive/commands/daemon.rb" ],
-        "Hive::Attempts::Reconciler" => [ "lib/hive/commands/daemon.rb" ],
+        "Hive::Attempts::ProcessIdentity" => [
+          "lib/hive/commands/daemon.rb",
+          "lib/hive/modules/migration/qualification_provider_broker.rb",
+          "lib/hive/modules/migration/qualification_scenario_process.rb"
+        ],
+        "Hive::Attempts::Reconciler" => [
+          "lib/hive/commands/daemon.rb",
+          "lib/hive/modules/migration/qualification_scenario_driver.rb"
+        ],
         "Hive::Attempts::Store" => [
           "lib/hive/commands/attempt_supervise.rb",
           "lib/hive/commands/daemon.rb",
@@ -65,6 +78,10 @@ class ComponentBoundariesTest < Minitest::Test
           "lib/hive/conditions/execute_boundary.rb",
           "lib/hive/implementation_identity/store.rb",
           "lib/hive/modules/inspector.rb",
+          "lib/hive/modules/migration/qualification_checkpoint_verifier.rb",
+          "lib/hive/modules/migration/qualification_scenario_driver.rb",
+          "lib/hive/modules/migration/qualification_scenario_evidence_collector.rb",
+          "lib/hive/modules/migration/qualification_scenario_process.rb",
           "lib/hive/task_closure.rb",
           "lib/hive/task_projection/store.rb"
         ],

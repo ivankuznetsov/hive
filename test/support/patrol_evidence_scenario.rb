@@ -454,6 +454,7 @@ module PatrolEvidenceScenario
         "credential_bindings" => [],
         "kind" => "source_archive",
         "provider" => "fixture",
+        "model" => "qualification-fixture",
         "repository_sha" => "2" * 40,
         "target_ref" =>
           "inputs/candidate/hive-source-#{CANDIDATE_SHA}.tar.gz",
@@ -466,6 +467,7 @@ module PatrolEvidenceScenario
         "credential_bindings" => [ "OPENROUTER_API_KEY" ],
         "kind" => "installed_target",
         "provider" => "openrouter",
+        "model" => "openai/gpt-5.6-terra",
         "repository_sha" => "5" * 40,
         "target_ref" =>
           "inputs/installed-target/target.json",

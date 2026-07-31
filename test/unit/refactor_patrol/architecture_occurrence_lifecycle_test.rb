@@ -185,7 +185,11 @@ class RefactorPatrolArchitectureOccurrenceLifecycleTest < Minitest::Test
     }
     capture = Hive::Modules::Migration::PatrolCapture.build(
       module_name: "architecture-patrol",
-      project: { "project_id" => "project-1", "name" => "demo", "repository" => "owner/demo" },
+      project: {
+        "project_id" => "project-1",
+        "name" => "demo",
+        "repository" => "github.com/owner/demo"
+      },
       trigger: {
         "kind" => "pull_request.merged",
         "id" => "owner/demo:7:#{'a' * 40}",

@@ -32,6 +32,15 @@ class GemspecTest < Minitest::Test
     assert_includes spec.files, "config/agent-skills.yml"
   end
 
+  def test_gem_package_includes_native_patrol_packages
+    spec = Gem::Specification.load(GEMSPEC_PATH)
+
+    %w[architecture-patrol patrol].each do |name|
+      assert_includes spec.files, "modules/#{name}/manifest.yml"
+      assert_includes spec.files, "modules/#{name}/README.md"
+    end
+  end
+
   def test_gem_package_includes_every_canonical_hive_skill_asset
     spec = Gem::Specification.load(GEMSPEC_PATH)
     root = File.expand_path("../..", __dir__)

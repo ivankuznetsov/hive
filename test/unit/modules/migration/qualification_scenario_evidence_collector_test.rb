@@ -511,33 +511,35 @@ class QualificationScenarioEvidenceCollectorTest < Minitest::Test
       else
         [ nil ]
       end
-    with_env(
-      "HIVE_HOME" => File.join(sandbox, "hive-home")
-    ) do
-      generation_plan.each_with_index do |stop_after, offset|
-        generation = offset + 1
-        if stop_after
-          run_stopping_generation!(
+    with_usage_db_path(File.join(sandbox, "usage.db")) do
+      with_env(
+        "HIVE_HOME" => File.join(sandbox, "hive-home")
+      ) do
+        generation_plan.each_with_index do |stop_after, offset|
+          generation = offset + 1
+          if stop_after
+            run_stopping_generation!(
+              sandbox,
+              generation: generation,
+              stop_after: stop_after,
+              module_name: module_name,
+              operation: operation,
+              findings: findings,
+              faults: faults
+            )
+            next
+          end
+
+          return driver(
             sandbox,
             generation: generation,
-            stop_after: stop_after,
+            stop_after: nil,
             module_name: module_name,
             operation: operation,
             findings: findings,
             faults: faults
-          )
-          next
+          ).call
         end
-
-        return driver(
-          sandbox,
-          generation: generation,
-          stop_after: nil,
-          module_name: module_name,
-          operation: operation,
-          findings: findings,
-          faults: faults
-        ).call
       end
     end
     raise "qualification generation plan did not finish"

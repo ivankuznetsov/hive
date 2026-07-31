@@ -20,11 +20,12 @@ tags: [gap, todo, release-proof, agent-skills]
   process-exit fault with exact checkpoint validation, bounded state snapshots,
   custody teardown, chained receipts, and bounded post-spawn failure evidence.
   Host reconstruction is non-mutating and terminal lane publication is now an
-  interruption-safe atomic tree install. It still needs the
-  secretless/networkless installed-provider broker and exact installed-gem
-  execution target, and the protected-main literal scenario catalog/controller
-  proof before any migration qualification or cutover claim. Longer elapsed
-  telemetry remains useful but is not a substitute for that protocol.
+  interruption-safe atomic tree install. The secretless/networkless
+  installed-provider broker and exact installed-gem target are implemented. It
+  still needs an authenticated installed-lane receipt and the protected-main
+  literal scenario catalog/controller proof before any migration qualification
+  or cutover claim. Longer elapsed telemetry remains useful but is not a
+  substitute for that protocol.
 
 - The explicit JobStore fresh-start reset is source- and focused-test-pinned,
   including no-write fresh status, exact registered-project binding,
@@ -976,10 +977,17 @@ state.
 
 Architecture Patrol has clean-negative and positive legacy lifecycle controls,
 full candidate routing, detached Attempts, and host reconstruction. The
-installed lane still lacks the host-owned fixed-provider broker and exact
-installed-gem target needed to use live credentials without exposing network
-or secrets to candidate code. Finally, the independent protected-main
-controller and literal scenario catalog cannot certify PR #910's own head; the
-first trusted proof must evaluate a later candidate after the controller exists
-on protected main. Keep required release coverage blocked until both conditions
-are satisfied.
+installed lane now has a fixed-endpoint/model host broker, a generation-scoped
+Unix-socket capability, exact typed provider diagnostics, secret-free
+transcripts bound into process receipts, and an installed-gem-only candidate
+source mount. A real Bubblewrap test proves that the packaged provider client
+can reach that socket while the source checkout, host network, API key, and
+model identity remain unavailable.
+
+This is implementation proof, not live evidence. No authenticated installed
+lane has yet retained a complete exact-candidate receipt, and the independent
+protected-main controller and literal scenario catalog cannot certify PR
+#910's own head. The first trusted proof must evaluate a later candidate after
+the controller exists on protected main. Keep required release coverage
+blocked until both the authenticated installed run and later-candidate
+protected control exist.

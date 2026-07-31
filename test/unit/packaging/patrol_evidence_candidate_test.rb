@@ -67,9 +67,17 @@ class PatrolEvidenceCandidateTest < Minitest::Test
       stdout, stderr, status = Open3.capture3(
         {
           "GEM_HOME" => materialized.root,
-          "GEM_PATH" => materialized.root
+          "GEM_PATH" => materialized.root,
+          "PATH" => [
+            File.dirname(RbConfig.ruby), "/usr/bin", "/bin"
+          ].join(File::PATH_SEPARATOR),
+          "BUNDLE_DISABLE_SHARED_GEMS" => "true",
+          "BUNDLE_FROZEN" => "true",
+          "LANG" => "C.UTF-8",
+          "LC_ALL" => "C.UTF-8"
         },
-        materialized.executable
+        materialized.executable,
+        unsetenv_others: true
       )
       assert status.success?, stderr
       assert_equal "fixture hive\n", stdout

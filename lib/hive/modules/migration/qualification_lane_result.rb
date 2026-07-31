@@ -23,7 +23,9 @@ module Hive
         STATUSES = %w[blocked failed passed timeout].freeze
         BLOCKED_REASONS = %w[
           credentials_unavailable installed_target_unavailable
-          live_lane_not_authorized provider_unavailable
+          live_lane_not_authorized provider_authentication_failed
+          provider_credit_exhausted provider_rate_limited provider_timeout
+          provider_transport_failed provider_unavailable
           scenario_driver_not_configured
         ].freeze
         FAILED_REASONS = %w[

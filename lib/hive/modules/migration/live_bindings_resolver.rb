@@ -521,6 +521,9 @@ module Hive
           if lane == "deterministic"
             unless policy["network"] == false &&
                    policy["provider"] == "fixture" &&
+                   policy["model"] ==
+                     QualificationRunDescriptor::
+                       DETERMINISTIC_MODEL &&
                    credentials == [] &&
                    policy["target_ref"].to_s.start_with?(
                      "inputs/candidate/"
@@ -534,6 +537,9 @@ module Hive
           else
             unless policy["network"] == false &&
                    policy["provider"] == "openrouter" &&
+                   policy["model"] ==
+                     QualificationRunDescriptor::
+                       INSTALLED_MODEL &&
                    policy["target_ref"] ==
                      "inputs/installed-target/target.json" &&
                    credentials.is_a?(Array) &&

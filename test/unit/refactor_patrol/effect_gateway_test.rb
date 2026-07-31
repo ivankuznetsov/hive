@@ -250,7 +250,7 @@ class RefactorPatrolEffectGatewayTest < Minitest::Test
       project: {
         "project_id" => "project-1",
         "name" => "demo",
-        "repository" => "owner/demo"
+        "repository" => "github.com/owner/demo"
       },
       trigger: {
         "kind" => "pull_request.merged",

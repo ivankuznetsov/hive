@@ -27,6 +27,32 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
   CANDIDATE_SOURCE_ROOT =
     File.expand_path("../../../..", __dir__).freeze
 
+  class RecordingProviderClient
+    attr_reader :calls
+
+    def initialize(outputs)
+      @outputs = outputs
+      @calls = []
+    end
+
+    def call(kind:, prompt:, context_refs:, output_ref:)
+      @calls << {
+        kind: kind,
+        prompt: prompt,
+        context_refs: context_refs,
+        output_ref: output_ref
+      }.freeze
+      FileUtils.mkdir_p(File.dirname(output_ref))
+      File.binwrite(
+        output_ref,
+        Hive::WorkflowPackage::CanonicalJSON.generate(
+          @outputs.fetch(kind)
+        )
+      )
+      true
+    end
+  end
+
   def test_drives_one_ordinary_patrol_case_through_production_artifacts
     with_tmp_dir do |sandbox|
       result = run_driver(sandbox)
@@ -448,6 +474,58 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
     end
   end
 
+  def test_routes_live_review_content_only_through_the_provider_client
+    ordinary = RecordingProviderClient.new(
+      "ordinary_findings" => {
+        "findings" => [ positive_finding ]
+      }
+    )
+    with_tmp_dir do |sandbox|
+      result = run_driver(
+        sandbox,
+        operation: "ordinary_positive_fixture",
+        findings: [ positive_finding ],
+        provider_client: ordinary
+      )
+
+      assert_equal "completed",
+                   capture_for(result.observation).outcome_class
+      assert_equal 1,
+                   capture_for(result.observation)
+                     .outcome.fetch("findings")
+    end
+    assert_equal [ "ordinary_findings" ],
+                 ordinary.calls.map { |row| row.fetch(:kind) }
+    assert ordinary.calls.fetch(0).fetch(:prompt).bytesize.positive?
+    assert_empty ordinary.calls.fetch(0).fetch(:context_refs)
+
+    architecture = RecordingProviderClient.new(
+      "architecture_theses" => {
+        "theses" => [ architecture_thesis ]
+      }
+    )
+    with_tmp_dir do |sandbox|
+      result = run_driver(
+        sandbox,
+        module_name: "architecture-patrol",
+        operation: "architecture_positive_fixture",
+        findings: [ architecture_thesis ],
+        provider_client: architecture
+      )
+
+      assert_equal "complete",
+                   capture_for(result.observation).outcome_class
+      assert_equal 1,
+                   capture_for(result.observation)
+                     .outcome.fetch("action_count")
+    end
+    assert_equal [ "architecture_theses" ],
+                 architecture.calls.map { |row| row.fetch(:kind) }
+    assert architecture.calls.fetch(0)
+      .fetch(:prompt).bytesize.positive?
+    assert_empty architecture.calls.fetch(0).fetch(:context_refs)
+  end
+
   def test_rejects_architecture_faults_until_their_real_boundaries_exist
     with_tmp_dir do |sandbox|
       error = assert_raises(Hive::ConfigError) do
@@ -725,7 +803,8 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
     module_name: "patrol",
     operation: "timer_due",
     findings: [],
-    faults: []
+    faults: [],
+    provider_client: nil
   )
     generation_plan =
       if faults.one?
@@ -735,33 +814,37 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
       else
         [ nil ]
       end
-    with_env(
-      "HIVE_HOME" => File.join(sandbox, "hive-home")
-    ) do
-      generation_plan.each_with_index do |stop_after, index|
-        generation = index + 1
-        if stop_after
-          run_stopping_generation!(
+    with_usage_db_path(File.join(sandbox, "usage.db")) do
+      with_env(
+        "HIVE_HOME" => File.join(sandbox, "hive-home")
+      ) do
+        generation_plan.each_with_index do |stop_after, index|
+          generation = index + 1
+          if stop_after
+            run_stopping_generation!(
+              sandbox,
+              generation: generation,
+              stop_after: stop_after,
+              module_name: module_name,
+              operation: operation,
+              findings: findings,
+              faults: faults,
+              provider_client: provider_client
+            )
+            next
+          end
+
+          return driver(
             sandbox,
             generation: generation,
-            stop_after: stop_after,
+            stop_after: nil,
             module_name: module_name,
             operation: operation,
             findings: findings,
-            faults: faults
-          )
-          next
+            faults: faults,
+            provider_client: provider_client
+          ).call
         end
-
-        return driver(
-          sandbox,
-          generation: generation,
-          stop_after: nil,
-          module_name: module_name,
-          operation: operation,
-          findings: findings,
-          faults: faults
-        ).call
       end
     end
     raise "qualification generation plan did not finish"
@@ -774,12 +857,14 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
     findings: [],
     faults: [],
     generation: 1,
-    stop_after: nil
+    stop_after: nil,
+    provider_client: nil
   )
     DRIVER.new(
       candidate_source_root: CANDIDATE_SOURCE_ROOT,
       sandbox_root: sandbox,
       project: PROJECT,
+      provider_client: provider_client,
       generation: generation,
       stop_after: stop_after,
       scenario_input: scenario_input(
@@ -947,7 +1032,8 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
     module_name:,
     operation:,
     findings:,
-    faults:
+    faults:,
+    provider_client:
   )
     pid = fork do
       driver(
@@ -957,7 +1043,8 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
         module_name: module_name,
         operation: operation,
         findings: findings,
-        faults: faults
+        faults: faults,
+        provider_client: provider_client
       ).call
       Process.exit!(71)
     rescue StandardError

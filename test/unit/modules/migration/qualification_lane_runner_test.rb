@@ -14,10 +14,16 @@ class QualificationLaneRunnerTest < Minitest::Test
     Hive::Modules::Migration::QualificationScenarioProcess
   PROCESS_RESULT =
     PROCESS::Result
+  PROVIDER_BROKER =
+    Hive::Modules::Migration::QualificationProviderBroker
+  PROVIDER_PROTOCOL =
+    Hive::Modules::Migration::QualificationProviderProtocol
+  PROVIDER_TRANSPORT =
+    Hive::Modules::Migration::QualificationOpenRouterTransport
 
   MaterializedSource = Data.define(:root)
   MaterializedInstalled =
-    Data.define(:root, :executable, :tree_sha256)
+    Data.define(:root, :executable, :package_root, :tree_sha256)
   Verification = Data.define(:status) do
     def verified? = status == "verified"
   end
@@ -48,9 +54,13 @@ class QualificationLaneRunnerTest < Minitest::Test
       )
       File.binwrite(executable, files.fetch(ref).fetch(:bytes))
       File.chmod(0o700, executable)
+      package_root =
+        File.join(destination, "gems", "hive-cli-test")
+      FileUtils.mkdir_p(package_root, mode: 0o700)
       MaterializedInstalled.new(
         root: destination,
         executable: executable,
+        package_root: package_root,
         tree_sha256: expected_tree_sha256
       ).freeze
     end
@@ -68,7 +78,9 @@ class QualificationLaneRunnerTest < Minitest::Test
         post_spawn_failure_generation
     end
 
-    def call(workspace:, argv:, **)
+    def call(workspace:, argv:, provider_binding: nil, **)
+      @provider_transcript =
+        provider_binding&.broker&.transcript
       request_ref = argv.fetch(-1)
       request =
         Hive::Modules::Migration::
@@ -210,8 +222,103 @@ class QualificationLaneRunnerTest < Minitest::Test
         sandbox_profile_sha256: "3" * 64,
         source_inventory_sha256: "4" * 64,
         installed_inventory_sha256: "5" * 64,
+        provider_call_count:
+          @provider_transcript&.fetch("call_count") || 0,
+        provider_evidence_sha256:
+          @provider_transcript&.fetch(
+            "transcript_sha256"
+          ),
+        provider_failure:
+          @provider_transcript&.fetch("failure"),
         teardown: teardown
       ).freeze
+    end
+  end
+
+  class ProviderTransport
+    attr_reader :calls
+
+    def initialize
+      @calls = []
+    end
+
+    def call(prompt:, kind:, timeout_seconds:)
+      @calls << {
+        prompt: prompt,
+        kind: kind,
+        timeout_seconds: timeout_seconds
+      }
+      PROVIDER_TRANSPORT::Result.new(
+        content: '{"findings":[]}',
+        input_tokens: 11,
+        output_tokens: 3
+      ).freeze
+    end
+  end
+
+  TranscriptBroker = Data.define(:transcript)
+
+  class ProviderScenarioProcess < ScenarioProcess
+    def call(workspace:, argv:, provider_binding:, **arguments)
+      request =
+        Hive::Modules::Migration::
+          QualificationScenarioRequest.load(
+            File.binread(
+              File.join(workspace, argv.fetch(-1))
+            )
+          )
+      broker = provider_binding.broker
+      broker.arm!(
+        Hive::Attempts::ProcessIdentity.new.capture(Process.pid)
+      )
+      unless request.stop_after
+        begin
+          provider_request =
+            PROVIDER_PROTOCOL.build_request(
+              session: provider_binding.session,
+              case_id: provider_binding.case_id,
+              generation: provider_binding.generation,
+              scenario_request_sha256:
+                provider_binding.scenario_request_sha256,
+              kind: "ordinary_findings",
+              prompt: "review installed candidate",
+              context_refs: [],
+              output_ref:
+                "sandbox/repository/.hive-state/" \
+                  "provider/generation-#{request.generation}/" \
+                  "findings.json"
+            )
+          socket = UNIXSocket.new(
+            File.join(
+              provider_binding.host_root,
+              PROVIDER_BROKER::SOCKET_NAME
+            )
+          )
+          PROVIDER_PROTOCOL.write_frame(
+            socket,
+            PROVIDER_PROTOCOL.canonical(
+              provider_request.to_h
+            )
+          )
+          socket.shutdown(Socket::SHUT_WR)
+          response =
+            PROVIDER_PROTOCOL.load_response(
+              PROVIDER_PROTOCOL.read_frame(socket),
+              expected_request_id:
+                provider_request.request_id
+            )
+          raise "provider failed" unless response.ok?
+        ensure
+          socket&.close unless socket&.closed?
+        end
+      end
+      broker.seal!
+      super(
+        workspace: workspace,
+        argv: argv,
+        provider_binding: provider_binding,
+        **arguments
+      )
     end
   end
 
@@ -332,7 +439,7 @@ class QualificationLaneRunnerTest < Minitest::Test
     end
   end
 
-  def test_installed_live_lane_reports_credentials_and_provider_separately
+  def test_installed_live_lane_reports_credentials_and_retryable_provider_failure_separately
     with_qualification_repository do |repository, _fixture, run_id|
       result = runner(
         repository,
@@ -343,12 +450,13 @@ class QualificationLaneRunnerTest < Minitest::Test
         live_authorized: true
       )
 
-      assert_equal "blocked", result.status
+      assert_equal "blocked", result.status, result.to_h.inspect
       assert_equal "credentials_unavailable",
                    result.failure_reason
     end
 
     with_qualification_repository do |repository, _fixture, run_id|
+      provider_factory_calls = []
       unavailable = runner(
         repository,
         environment: {}
@@ -361,22 +469,35 @@ class QualificationLaneRunnerTest < Minitest::Test
         repository,
         environment: {
           "OPENROUTER_API_KEY" => "provider-token"
-        }
+        },
+        source_materializer: SourceMaterializer.new,
+        installed_materializer: InstalledMaterializer.new,
+        provider_broker_factory: lambda do |**arguments|
+          provider_factory_calls << arguments
+          raise Hive::Modules::Migration::
+            QualificationScenarioOrchestrator::
+              ProviderFailure.new(
+                reason: "provider_rate_limited",
+                retryable: true
+              )
+        end
       ).call(
         run_id: run_id,
         lane: "installed",
         live_authorized: true
       )
 
-      assert_equal "blocked", result.status
-      assert_equal "provider_unavailable",
+      assert_equal 1, provider_factory_calls.length,
+                   result.to_h.inspect
+      assert_equal "blocked", result.status, result.to_h.inspect
+      assert_equal "provider_rate_limited",
                    result.failure_reason
       assert_nil repository.qualification_lane_result(
         run_id, "installed", missing: true
       )
       assert_equal(
         %w[
-          live_lane_not_authorized provider_unavailable
+          live_lane_not_authorized provider_rate_limited
         ],
         repository.qualification_lane_diagnostics(
           run_id,
@@ -395,10 +516,110 @@ class QualificationLaneRunnerTest < Minitest::Test
           )
       assert_equal "blocked", authority.status
       assert_equal(
-        [ "qualification_lane_blocked:provider_unavailable" ],
+        [ "qualification_lane_blocked:provider_rate_limited" ],
         authority.issues
       )
     end
+  end
+
+  def test_installed_lane_binds_host_provider_transcripts_into_generation_receipts
+    with_qualification_repository do |repository, fixture, run_id|
+      observation =
+        qualification_scenario_observations(
+          fixture,
+          lane: "installed"
+        ).fetch("observations").fetch(0)
+      actual = candidate_actual(observation)
+      transport = ProviderTransport.new
+      result = runner(
+        repository,
+        environment: {
+          "OPENROUTER_API_KEY" => "provider-token"
+        },
+        source_materializer: SourceMaterializer.new,
+        installed_materializer: InstalledMaterializer.new,
+        scenario_process: ProviderScenarioProcess.new(
+          actual: actual,
+          record: fixture.fetch(:observation_record)
+        ),
+        recovery_evidence:
+          RecoveryEvidence.new(
+            fields: recovery_fields(observation)
+          ),
+        verifier: AcceptingVerifier,
+        provider_broker_factory: lambda do |**arguments|
+          PROVIDER_BROKER.new(
+            **arguments,
+            transport: transport
+          )
+        end
+      ).call(
+        run_id: run_id,
+        lane: "installed",
+        live_authorized: true
+      )
+
+      assert_equal "passed", result.status, result.to_h.inspect
+      assert_equal 1, transport.calls.length
+      lane = repository.qualification_lane(
+        run_id,
+        "installed"
+      )
+      transcript_names = lane.keys.grep(
+        %r{\Aartifacts/provider-transcripts/}
+      ).sort
+      assert_equal(
+        [
+          "artifacts/provider-transcripts/patrol-case/generation-1.json",
+          "artifacts/provider-transcripts/patrol-case/generation-2.json"
+        ],
+        transcript_names
+      )
+      transcripts = transcript_names.map do |name|
+        JSON.parse(lane.fetch(name))
+      end
+      assert_equal [ 0, 1 ],
+                   transcripts.map { |row| row.fetch("call_count") }
+      process = JSON.parse(
+        lane.fetch(
+          "artifacts/process-generations/patrol-case.json"
+        )
+      )
+      process.fetch("generations").each_with_index do |generation, index|
+        assert_equal(
+          transcripts.fetch(index).fetch(
+            "transcript_sha256"
+          ),
+          generation.dig(
+            "receipt", "process",
+            "provider_evidence_sha256"
+          )
+        )
+      end
+      serialized = lane.values.join
+      refute_includes serialized, "provider-token"
+      refute_includes serialized, "review installed candidate"
+    end
+  end
+
+  def test_provider_artifacts_reject_duplicate_generation_identity
+    transcript = {
+      "case_id" => "patrol-case",
+      "generation" => 1
+    }.freeze
+    broker = TranscriptBroker.new(transcript).freeze
+
+    error = assert_raises(Hive::ConfigError) do
+      runner(Object.new).send(
+        :provider_artifacts,
+        [ broker, broker ]
+      )
+    end
+
+    assert_equal(
+      "patrol qualification provider evidence is duplicated",
+      error.message
+    )
   end
 
   def test_deterministic_lane_executes_candidate_and_publishes_full_capture

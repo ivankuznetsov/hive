@@ -81,23 +81,23 @@ class ModulesMigrationCandidateExecutionSandboxTest <
     end
   end
 
-  def test_rejects_shared_network_and_raw_candidate_credentials
+  def test_rejects_shared_network_and_nonbroker_provider_capabilities
     with_workspace do |context|
       network = assert_raises(Hive::ConfigError) do
         sandbox(context, network: true) { flunk }
       end
-      credentials = assert_raises(Hive::ConfigError) do
+      provider = assert_raises(Hive::ConfigError) do
         sandbox(
           context,
           network: false,
-          credentials: {
+          provider_binding: {
             "OPENROUTER_API_KEY" => "must-not-enter-candidate"
           }
         ) { flunk }
       end
 
       assert_match(/network policy/, network.message)
-      assert_match(/credentials/, credentials.message)
+      assert_match(/provider capability/, provider.message)
     end
   end
 
@@ -195,18 +195,21 @@ class ModulesMigrationCandidateExecutionSandboxTest <
     end
   end
 
-  def sandbox(context, network:, credentials: {}, &block)
+  def sandbox(
+    context, network:, provider_binding: nil, &block
+  )
     SANDBOX.new.call(
       executable: context.fetch(:executable),
       argv: context.fetch(:argv),
       workspace: context.fetch(:workspace),
       source_root: context.fetch(:source),
       installed_root: context.fetch(:installed),
+      candidate_root: context.fetch(:source),
       case_root: context.fetch(:case),
       request_ref: "requests/case-one.json",
       scenario_ref: "inputs/scenarios/case-one.yml",
       network: network,
-      credentials: credentials,
+      provider_binding: provider_binding,
       hive_home:
         File.join(
           context.fetch(:case),

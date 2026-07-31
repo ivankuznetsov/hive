@@ -7,6 +7,7 @@ require "stringio"
 require_relative "../../errors"
 require_relative "qualification_scenario_actuals"
 require_relative "qualification_scenario_input"
+require_relative "qualification_provider_client"
 
 module Hive
   module Modules
@@ -128,6 +129,70 @@ module Hive
           end
         end
         private_constant :QualificationArchitectureReviewer
+
+        class QualificationProviderAgent
+          def initialize(
+            client:, prompt:, output_path:, operation:
+          )
+            @client = client
+            @prompt = prompt
+            @output_path = output_path
+            @operation = operation
+          end
+
+          def run!
+            if @operation == "partial_failure"
+              return {
+                status: :error,
+                error_message:
+                  "qualification reviewer partial failure"
+              }
+            end
+            @client.call(
+              kind: "ordinary_findings",
+              prompt: @prompt,
+              context_refs: [],
+              output_ref: @output_path
+            )
+            provider_result
+          end
+
+          private
+
+          def provider_result
+            {
+              status: :ok,
+              model: "qualification-provider",
+              usage: {
+                input: 0,
+                output: 0,
+                cached: 0,
+                model: "qualification-provider"
+              }
+            }.freeze
+          end
+        end
+        private_constant :QualificationProviderAgent
+
+        class QualificationProviderArchitectureReviewer
+          def initialize(client:)
+            @client = client
+          end
+
+          def call(prompt:, output_path:, **)
+            @client.call(
+              kind: "architecture_theses",
+              prompt: prompt,
+              context_refs: [],
+              output_ref: output_path
+            )
+            {
+              status: :ok,
+              model: "qualification-provider"
+            }.freeze
+          end
+        end
+        private_constant :QualificationProviderArchitectureReviewer
 
         class QualificationArchitectureFixer
           def attempt(**options)
@@ -287,14 +352,19 @@ module Hive
         end
         private_constant :QualificationEvidenceStore
 
-        def initialize(candidate_source_root:, sandbox_root:, project:,
-                       scenario_input:, generation: 1, stop_after: nil)
+        def initialize(
+          candidate_source_root:, sandbox_root:, project:,
+          scenario_input:, generation: 1, stop_after: nil,
+          provider_client:
+            QualificationProviderClient.from_environment
+        )
           @candidate_source_root =
             canonical_root(candidate_source_root, "candidate source")
           @sandbox_root =
             canonical_path(sandbox_root, "sandbox")
           @project = validate_project(project)
           @scenario_input = validate_scenario_input(scenario_input)
+          @provider_client = provider_client
           @generation = Integer(generation)
           @stop_after = stop_after&.to_s
           @now = @scenario_input.clock
@@ -436,10 +506,7 @@ module Hive
                     "architecture-patrol"
                   ),
                 review_agent_runner:
-                  QualificationArchitectureReviewer.new(
-                    theses:
-                      @scenario_input.reviewer_findings
-                  ),
+                  qualification_architecture_reviewer,
                 fixer: QualificationArchitectureFixer.new,
                 repository_identity_resolver:
                   method(:architecture_repository_identity),
@@ -937,6 +1004,7 @@ module Hive
               hive_state_path: hive_state_path
             )
           end
+          wait_for_fault_workers!
           attempt_store = Hive::Attempts::Store.new(
             root: qualification_attempts_root
           )
@@ -2461,6 +2529,15 @@ module Hive
         end
 
         def qualification_agent(**attributes)
+          if @provider_client
+            return QualificationProviderAgent.new(
+              client: @provider_client,
+              prompt: attributes.fetch(:prompt),
+              output_path:
+                attributes.fetch(:expected_output),
+              operation: @scenario_input.operation
+            )
+          end
           QualificationAgent.new(
             output_path: attributes.fetch(:expected_output),
             operation: @scenario_input.operation,
@@ -2469,6 +2546,16 @@ module Hive
         rescue KeyError
           raise Hive::ConfigError,
                 "qualification reviewer fixture failed"
+        end
+
+        def qualification_architecture_reviewer
+          return QualificationProviderArchitectureReviewer.new(
+            client: @provider_client
+          ) if @provider_client
+
+          QualificationArchitectureReviewer.new(
+            theses: @scenario_input.reviewer_findings
+          )
         end
 
         def qualification_token_budget(root, cfg)

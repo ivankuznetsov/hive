@@ -3753,7 +3753,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       project: {
         "project_id" => "project-1",
         "name" => registration,
-        "repository" => "acme/polyglot"
+        "repository" => "github.com/acme/polyglot"
       },
       trigger: {
         "kind" => "pull_request.merged",

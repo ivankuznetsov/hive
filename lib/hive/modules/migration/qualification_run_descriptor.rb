@@ -46,7 +46,7 @@ module Hive
           trigger_digest
         ].freeze
         LANE_KEYS = %w[
-          credential_bindings executable kind network provider
+          credential_bindings executable kind model network provider
           repository_sha target_ref timeout_seconds
         ].freeze
         ARTIFACT_KEYS = %w[
@@ -63,6 +63,8 @@ module Hive
         INSTALLED_CREDENTIAL_BINDINGS = %w[
           OPENROUTER_API_KEY
         ].freeze
+        DETERMINISTIC_MODEL = "qualification-fixture".freeze
+        INSTALLED_MODEL = "openai/gpt-5.6-terra".freeze
         RUN_ID = /\Apatrol-[0-9a-f]{64}\z/
         SHA = /\A[0-9a-f]{40}\z/
         DIGEST = /\A[0-9a-f]{64}\z/
@@ -286,6 +288,7 @@ module Hive
                 malformed! unless
                   policy["network"] == false &&
                   policy["provider"] == "fixture" &&
+                  policy["model"] == DETERMINISTIC_MODEL &&
                   SHA.match?(policy["repository_sha"].to_s) &&
                   policy["credential_bindings"] == []
                 ref!(
@@ -299,6 +302,7 @@ module Hive
                     "inputs/installed-target/target.json" &&
                   policy["network"] == false &&
                   policy["provider"] == "openrouter" &&
+                  policy["model"] == INSTALLED_MODEL &&
                   SHA.match?(policy["repository_sha"].to_s)
                 credentials = policy["credential_bindings"]
                 malformed! unless

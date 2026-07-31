@@ -13,7 +13,9 @@ require "hive/modules/migration/qualification_run_descriptor"
 require "hive/modules/migration/qualification_scenario_actuals"
 require "hive/modules/migration/shadow_comparator"
 require "hive/refactor_patrol/architecture_project_binding"
+require "hive/refactor_patrol/job_record_validator"
 require "hive/refactor_patrol/job_store"
+require "hive/refactor_patrol/job_store_files"
 require "hive/refactor_patrol/pr_manifest"
 require "hive/workflow_package/canonical_json"
 
@@ -148,7 +150,8 @@ module Hive
             module_name: module_name,
             hook_id: hook_id,
             repository_sha: repository_sha,
-            receipts: receipts
+            receipts: receipts,
+            terminal_effects: terminal_effects
           )
           bind_candidate!(
             row,
@@ -849,7 +852,7 @@ module Hive
 
         def load_product_state(
           paths, capture:, event:, module_name:, hook_id:,
-          repository_sha:, receipts:
+          repository_sha:, receipts:, terminal_effects:
         )
           return ordinary_product_state(capture) if
             module_name == "patrol"
@@ -860,7 +863,8 @@ module Hive
             event: event,
             hook_id: hook_id,
             repository_sha: repository_sha,
-            receipts: receipts
+            receipts: receipts,
+            terminal_effects: terminal_effects
           )
         end
 
@@ -874,24 +878,14 @@ module Hive
 
         def architecture_product_state(
           paths, capture:, event:, hook_id:, repository_sha:,
-          receipts:
+          receipts:, terminal_effects:
         )
           outcome = capture.outcome
           job_id = outcome.fetch("job_id")
-          project = architecture_project(
-            paths,
-            capture: capture
+          aggregate = architecture_job_aggregate(
+            paths.fetch(:hive_state),
+            job_id: job_id
           )
-          store = Hive::RefactorPatrol::JobStore.new(
-            paths.fetch(:repository),
-            hive_state_path: paths.fetch(:hive_state),
-            project: project
-          )
-          jobs = store.jobs
-          malformed! unless jobs.length == 1 &&
-                            jobs.fetch(0).fetch("job_id") == job_id
-
-          aggregate = jobs.fetch(0)
           manifest = architecture_manifest(
             paths.fetch(:hive_state),
             job_id: job_id,
@@ -944,7 +938,8 @@ module Hive
             hook_id == expected_hook &&
             event.dig("payload", "target_hook") == expected_hook &&
             transition_intent_ids == receipt_intent_ids &&
-            store.occurrence_for_job(job_id).nil?
+            terminal_effects.fetch("occurrence_proof") ==
+              "retired_fence"
           malformed! unless valid
 
           Hive::RefactorPatrol::ArchitectureProjectBinding.validate!(
@@ -986,16 +981,42 @@ module Hive
           transitions.sort.freeze
         end
 
-        def architecture_project(paths, capture:)
-          {
-            "name" => capture.project.fetch("name"),
-            "project_id" =>
-              capture.project.fetch("project_id"),
-            "path" => paths.fetch(:repository),
-            "hive_state_path" => paths.fetch(:hive_state),
-            "repository_identity" =>
-              capture.project.fetch("repository")
-          }.freeze
+        def architecture_job_aggregate(hive_state, job_id:)
+          root = required_directory(
+            hive_state, "refactor_patrol/v3/jobs"
+          )
+          names = BoundedDirectoryEntries.names(
+            root,
+            limit: MAX_DIRECTORY_ENTRIES
+          )
+          malformed! unless names.all? do |name|
+            path = File.join(root, name)
+            safe_regular?(File.lstat(path)) &&
+              (
+                Hive::RefactorPatrol::JobStoreFiles::JOB_JSON.match?(
+                  name
+                ) ||
+                  Hive::RefactorPatrol::JobStoreFiles::JOB_LOCK.match?(
+                    name
+                  ) ||
+                  name == "jobs-admission.lock"
+              )
+          end
+          job_names = names.select do |name|
+            Hive::RefactorPatrol::JobStoreFiles::JOB_JSON.match?(
+              name
+            )
+          end
+          malformed! unless job_names == [ "#{job_id}.json" ]
+
+          path = File.join(root, job_names.fetch(0))
+          aggregate = json_object(path)
+          Hive::RefactorPatrol::JobRecordValidator.new(
+            contract: Hive::RefactorPatrol::JobStore
+          ).validate_job!(aggregate, path: path)
+          malformed! unless aggregate.fetch("job_id") == job_id
+
+          aggregate
         end
 
         def architecture_manifest(

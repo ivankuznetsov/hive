@@ -173,11 +173,15 @@ class ModuleMigrationCommandTest < Minitest::Test
       )
       assert_equal(
         payload,
-        Hive::Modules::Migration::QualificationLaneResult.load(
-          repository.qualification_lane_result(
+        repository
+          .qualification_lane_diagnostics(
             run_id, "installed"
           )
-        ).to_h
+          .fetch(0)
+          .to_h
+      )
+      assert_nil repository.qualification_lane_result(
+        run_id, "installed", missing: true
       )
       refute File.exist?(
         File.join(
@@ -196,7 +200,7 @@ class ModuleMigrationCommandTest < Minitest::Test
         "HIVE_PATROL_QUALIFICATION_LIVE" => "1",
         "HIVE_PATROL_QUALIFICATION_REPOSITORY" =>
           "github.com/owner/evidence",
-        "GITHUB_TOKEN" => "repository-token",
+        "GITHUB_TOKEN" => "must-not-be-read",
         "OPENROUTER_API_KEY" => "provider-token"
       )
       qualify = command(
@@ -227,14 +231,13 @@ class ModuleMigrationCommandTest < Minitest::Test
 
       payload = qualify.call
 
-      assert_equal "blocked", payload.fetch("status")
-      assert_equal "provider_unavailable",
+      assert_equal "failed", payload.fetch("status")
+      assert_equal "evidence_verification_failed",
                    payload.fetch("failure_reason")
       assert_equal(
         %w[
           HIVE_PATROL_QUALIFICATION_LIVE
           HIVE_PATROL_QUALIFICATION_REPOSITORY
-          GITHUB_TOKEN
           OPENROUTER_API_KEY
         ],
         environment.reads

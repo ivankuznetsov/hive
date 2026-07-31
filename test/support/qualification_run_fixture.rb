@@ -72,7 +72,8 @@ module QualificationRunFixture
         bytes: "#!/usr/bin/env ruby\nputs '{}'\n".b,
         mode: 0o700
       },
-      "inputs/installed-target/lib/hive.rb" => {
+      "inputs/installed-target/gems/" \
+        "hive-cli-0.7.0/lib/hive.rb" => {
         bytes: "module Hive; end\n".b,
         mode: 0o600
       }
@@ -229,6 +230,7 @@ module QualificationRunFixture
           "credential_bindings" => [],
           "kind" => "source_archive",
           "provider" => "fixture",
+          "model" => "qualification-fixture",
           "repository_sha" => "2" * 40,
           "target_ref" => "inputs/candidate/#{source_name}",
           "executable" => "bin/hive",
@@ -239,6 +241,7 @@ module QualificationRunFixture
           "credential_bindings" => [ "OPENROUTER_API_KEY" ],
           "kind" => "installed_target",
           "provider" => "openrouter",
+          "model" => "openai/gpt-5.6-terra",
           "repository_sha" => "5" * 40,
           "target_ref" => "inputs/installed-target/target.json",
           "executable" => "bin/hive",

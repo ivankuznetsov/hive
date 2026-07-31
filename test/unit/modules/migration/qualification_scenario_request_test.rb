@@ -20,7 +20,7 @@ class ModulesMigrationQualificationScenarioRequestTest < Minitest::Test
     )
     assert_empty schema.validate(request.to_h).to_a
     with_tmp_dir do |root|
-      assert_equal File.join(root, "targets", "source"),
+      assert_equal File.join(root, "targets", "candidate"),
                    request.resolve(root, request.package_root_ref)
       assert_equal(
         File.join(
@@ -115,7 +115,7 @@ class ModulesMigrationQualificationScenarioRequestTest < Minitest::Test
       "stop_after" => nil,
       "scenario_sha256" => "c" * 64,
       "scenario_ref" => "inputs/scenarios/scenario.yml",
-      "package_root_ref" => "targets/source",
+      "package_root_ref" => "targets/candidate",
       "sandbox_root_ref" =>
         "cases/ordinary-due-clean/sandbox",
       "output_ref" =>

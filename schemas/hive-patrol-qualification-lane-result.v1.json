@@ -79,7 +79,12 @@
         "internal_error",
         "lane_timeout",
         "live_lane_not_authorized",
+        "provider_authentication_failed",
+        "provider_credit_exhausted",
         "provider_failed",
+        "provider_rate_limited",
+        "provider_timeout",
+        "provider_transport_failed",
         "provider_unavailable",
         "scenario_driver_not_configured",
         "scenario_failed"
@@ -124,6 +129,11 @@
               "credentials_unavailable",
               "installed_target_unavailable",
               "live_lane_not_authorized",
+              "provider_authentication_failed",
+              "provider_credit_exhausted",
+              "provider_rate_limited",
+              "provider_timeout",
+              "provider_transport_failed",
               "provider_unavailable",
               "scenario_driver_not_configured"
             ]

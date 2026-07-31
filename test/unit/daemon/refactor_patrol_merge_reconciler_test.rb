@@ -1254,7 +1254,8 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
       "name" => name,
       "path" => dir,
       "hive_state_path" => File.join(dir, ".hive-state"),
-      "project_id" => "project-#{name}"
+      "project_id" => "project-#{name}",
+      "repository_identity" => "github.com/acme/demo"
     }
   end
 

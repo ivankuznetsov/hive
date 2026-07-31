@@ -1,6 +1,8 @@
 require "digest"
 require "hive/errors"
 require "hive/modules/migration/qualification_checkpoint_evidence"
+require "hive/modules/migration/qualification_provider_broker"
+require "hive/modules/migration/qualification_provider_protocol"
 require "hive/modules/migration/qualification_run_descriptor"
 require "hive/modules/migration/qualification_scenario_process"
 require "hive/workflow_package/canonical_json"
@@ -58,14 +60,16 @@ module Hive
           ].freeze
         }.freeze
         PROCESS_ARGUMENT_KEYS = %i[
-          argv case_root credentials executable hive_home installed_root
-          network request_ref scenario_ref source_root workspace
+          argv candidate_root case_root executable hive_home installed_root
+          network provider_binding request_ref scenario_ref source_root
+          workspace
         ].freeze
         PROCESS_KEYS = %w[
           attempt_count custody_count duration_seconds executable_sha256
           exit_status installed_inventory_sha256 network_isolated
-          ruby_sha256 sandbox_profile_sha256 signal source_inventory_sha256
-          status stderr stdout teardown timed_out
+          provider_call_count provider_evidence_sha256 provider_failure
+          ruby_sha256 sandbox_profile_sha256 signal
+          source_inventory_sha256 status stderr stdout teardown timed_out
         ].freeze
         STREAM_KEYS = %w[bytes sha256 truncated].freeze
         TEARDOWN_KEYS = %w[
@@ -90,6 +94,16 @@ module Hive
           ruby_sha256 sandbox_profile_sha256 source_inventory_sha256
         ].freeze
         private_constant :CHECKPOINT_EXIT, :PLANS
+
+        class ProviderFailure < Hive::ConfigError
+          attr_reader :reason, :retryable
+
+          def initialize(reason:, retryable:)
+            @reason = reason.to_s.freeze
+            @retryable = retryable == true
+            super("patrol qualification provider failed")
+          end
+        end
 
         Receipt = Data.define(:payload) do
           def self.from_h(value)
@@ -232,6 +246,15 @@ module Hive
             )
             process_projection =
               validated_process(process, checkpoint: checkpoint)
+            if process_projection.fetch("provider_failure")
+              provider = process_projection.fetch(
+                "provider_failure"
+              )
+              raise ProviderFailure.new(
+                reason: provider.fetch("reason"),
+                retryable: provider.fetch("retryable")
+              )
+            end
             identity = process_projection.slice(
               *PROCESS_IDENTITY_KEYS
             )
@@ -303,7 +326,8 @@ module Hive
             recovery_plan: recovery_plan,
             generations: generations.freeze
           )
-        rescue QualificationScenarioProcess::PostSpawnFailure
+        rescue QualificationScenarioProcess::PostSpawnFailure,
+               ProviderFailure
           raise
         rescue Hive::ConfigError => error
           raise error if error.message == ERROR
@@ -520,6 +544,7 @@ module Hive
               nonnegative_integer?(
                 value.fetch("custody_count")
               )
+          validate_provider_projection!(value)
           duration = value.fetch("duration_seconds")
           malformed! unless duration.is_a?(Numeric) &&
                             duration.finite? &&
@@ -542,6 +567,13 @@ module Hive
         end
 
         def validate_process_outcome!(value, checkpoint:)
+          if value.fetch("provider_failure")
+            malformed! unless
+              value.fetch("status") == "failed" &&
+                value.fetch("exit_status").is_a?(Integer) &&
+                value.fetch("exit_status").between?(1, 255)
+            return
+          end
           if checkpoint
             malformed! unless
               value.fetch("status") == "failed" &&
@@ -551,6 +583,49 @@ module Hive
               value.fetch("status") == "passed" &&
                 value.fetch("exit_status") == 0
           end
+        end
+
+        def validate_provider_projection!(value)
+          count = value.fetch("provider_call_count")
+          digest = value.fetch("provider_evidence_sha256")
+          failure = value.fetch("provider_failure")
+          malformed! unless
+            count.is_a?(Integer) &&
+              count.between?(0, 1)
+          if digest.nil?
+            malformed! unless count.zero? && failure.nil?
+            return
+          end
+          malformed! unless DIGEST.match?(digest.to_s)
+          return if failure.nil?
+
+          exact_keys!(
+            failure,
+            QualificationProviderBroker::FAILURE_KEYS
+          )
+          request_id = failure.fetch("request_id")
+          request_sha = failure.fetch("request_sha256")
+          malformed! unless
+            QualificationProviderBroker::FAILURE_PHASES.include?(
+              failure.fetch("phase")
+            ) &&
+              QualificationProviderProtocol::ERROR_REASONS.include?(
+              failure.fetch("reason")
+            ) &&
+              [ true, false ].include?(
+                failure.fetch("retryable")
+              ) &&
+              (
+                request_id.nil? ||
+                  QualificationProviderProtocol::REQUEST_ID.match?(
+                    request_id.to_s
+                  )
+              ) &&
+              (
+                request_sha.nil? ||
+                  DIGEST.match?(request_sha.to_s)
+              ) &&
+              request_id.nil? == request_sha.nil?
         end
 
         def build_result(case_id:, recovery_plan:, generations:)

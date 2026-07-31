@@ -71,6 +71,9 @@ class QualificationScenarioOrchestratorTest < Minitest::Test
         sandbox_profile_sha256: "3" * 64,
         source_inventory_sha256: "4" * 64,
         installed_inventory_sha256: "5" * 64,
+        provider_call_count: 0,
+        provider_evidence_sha256: nil,
+        provider_failure: nil,
         teardown: teardown
       }.merge(overrides.reject { |key, _| key == :teardown })
       PROCESS_RESULT.new(**values).freeze
@@ -377,6 +380,46 @@ class QualificationScenarioOrchestratorTest < Minitest::Test
     end
   end
 
+  def test_records_provider_failure_before_returning_its_typed_retry_state
+    failure = {
+      "request_id" => "provider-#{"7" * 64}",
+      "request_sha256" => "8" * 64,
+      "phase" => "provider",
+      "reason" => "provider_rate_limited",
+      "retryable" => true
+    }.freeze
+    records = []
+    overrides = {
+      1 => {
+        status: "failed",
+        exit_status: 1,
+        provider_call_count: 0,
+        provider_evidence_sha256: "6" * 64,
+        provider_failure: failure
+      }
+    }
+    with_harness(overrides: overrides) do |context|
+      error = assert_raises(ORCHESTRATOR::ProviderFailure) do
+        run_orchestrator(
+          context,
+          recovery_plan: nil,
+          record_process: lambda do |**row|
+            records << row
+          end
+        )
+      end
+
+      assert_equal "provider_rate_limited", error.reason
+      assert_equal true, error.retryable
+      assert_equal 1, records.length
+      assert_equal failure,
+                   records.fetch(0)
+                     .fetch(:process)
+                     .provider_failure
+      refute records.fetch(0).key?(:receipt)
+    end
+  end
+
   private
 
   def with_harness(overrides: {}, process_builder: nil)
@@ -489,11 +532,12 @@ class QualificationScenarioOrchestratorTest < Minitest::Test
       workspace: File.join(sandbox, "workspace"),
       source_root: File.join(sandbox, "source"),
       installed_root: File.join(sandbox, "installed"),
+      candidate_root: File.join(sandbox, "source"),
       case_root: sandbox,
       request_ref: "/qualification/request.json",
       scenario_ref: "/qualification/scenario.json",
       network: false,
-      credentials: [],
+      provider_binding: nil,
       hive_home: File.join(sandbox, "hive-home")
     }
   end

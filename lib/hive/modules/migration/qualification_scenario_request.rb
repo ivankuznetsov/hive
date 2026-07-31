@@ -93,7 +93,7 @@ module Hive
                   .start_with?("inputs/scenarios/") &&
                 refs.fetch("scenario_ref").end_with?(".yml") &&
                 refs.fetch("package_root_ref") ==
-                  "targets/source" &&
+                  "targets/candidate" &&
                 refs.fetch("sandbox_root_ref") ==
                   "cases/#{value.fetch('case_id')}/sandbox" &&
                 refs.fetch("output_ref") ==

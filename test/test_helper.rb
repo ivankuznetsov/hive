@@ -216,6 +216,15 @@ module HiveTestHelper
     end
   end
 
+  def with_usage_db_path(path)
+    require "hive/usage_db"
+    previous = Hive::UsageDb.instance_variable_get(:@path)
+    Hive::UsageDb.path = File.expand_path(path)
+    yield
+  ensure
+    Hive::UsageDb.path = previous
+  end
+
   # Tests run real `git` inside the tmpdir; pack-objects renames internal
   # state like `bitmap-ref-tips_*` between scan and unlink, so `Dir.mktmpdir`'s
   # built-in cleanup (which uses `FileUtils.remove_entry`) intermittently

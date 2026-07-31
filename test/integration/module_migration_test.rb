@@ -71,11 +71,12 @@ class ModuleMigrationIntegrationTest < Minitest::Test
       )
       assert_equal(
         payload,
-        JSON.parse(
-          repository.qualification_lane_result(
-            run_id, "installed"
-          )
-        )
+        repository.qualification_lane_diagnostics(
+          run_id, "installed"
+        ).fetch(0).to_h
+      )
+      assert_nil repository.qualification_lane_result(
+        run_id, "installed", missing: true
       )
       refute File.exist?(
         File.join(

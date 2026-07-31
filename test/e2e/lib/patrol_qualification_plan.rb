@@ -531,6 +531,10 @@ module Hive
             "credential_bindings" => [],
             "kind" => "source_archive",
             "provider" => "fixture",
+            "model" =>
+              Hive::Modules::Migration::
+                QualificationRunDescriptor::
+                  DETERMINISTIC_MODEL,
             "repository_sha" =>
               deterministic.fetch("repository_sha"),
             "target_ref" =>
@@ -547,6 +551,10 @@ module Hive
                   INSTALLED_CREDENTIAL_BINDINGS,
             "kind" => "installed_target",
             "provider" => "openrouter",
+            "model" =>
+              Hive::Modules::Migration::
+                QualificationRunDescriptor::
+                  INSTALLED_MODEL,
             "repository_sha" =>
               installed.fetch("repository_sha"),
             "target_ref" =>

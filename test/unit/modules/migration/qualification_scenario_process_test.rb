@@ -2,6 +2,7 @@ require "test_helper"
 require "json"
 require "rbconfig"
 require "hive/modules/migration/qualification_scenario_process"
+require "hive/modules/migration/qualification_provider_broker"
 
 class ModulesMigrationQualificationScenarioProcessTest <
     Minitest::Test
@@ -9,6 +10,26 @@ class ModulesMigrationQualificationScenarioProcessTest <
 
   PROCESS =
     Hive::Modules::Migration::QualificationScenarioProcess
+  BROKER =
+    Hive::Modules::Migration::QualificationProviderBroker
+  TRANSPORT =
+    Hive::Modules::Migration::QualificationOpenRouterTransport
+  SOURCE_ROOT = File.expand_path("../../../..", __dir__).freeze
+
+  ProviderTransport = Data.define(:calls) do
+    def call(prompt:, kind:, timeout_seconds:)
+      calls << {
+        prompt: prompt,
+        kind: kind,
+        timeout_seconds: timeout_seconds
+      }
+      TRANSPORT::Result.new(
+        content: '{"findings":[]}',
+        input_tokens: 17,
+        output_tokens: 4
+      ).freeze
+    end
+  end
 
   class SidecarSignalGuard
     def initialize
@@ -34,6 +55,22 @@ class ModulesMigrationQualificationScenarioProcessTest <
 
     def status(_identity)
       raise "missing identity reached ordinary signal authority"
+    end
+  end
+
+  class RecordingIdentity
+    attr_reader :snapshot
+
+    def initialize
+      @delegate = Hive::Attempts::ProcessIdentity.new
+    end
+
+    def capture(pid)
+      @snapshot = @delegate.capture(pid)
+    end
+
+    def status(identity)
+      @delegate.status(identity)
     end
   end
 
@@ -108,6 +145,123 @@ class ModulesMigrationQualificationScenarioProcessTest <
         "/qualification/targets/installed",
         data.fetch("gem_home")
       )
+    end
+  end
+
+  def test_installed_candidate_reaches_only_the_broker_and_packaged_source
+    with_process_workspace do |context|
+      transport = ProviderTransport.new([])
+      broker = BROKER.new(
+        workspace: context.fetch(:workspace),
+        run_id: "patrol-#{"a" * 64}",
+        lane: "installed",
+        case_id: "case-one",
+        generation: 1,
+        scenario_request_sha256: "b" * 64,
+        deadline:
+          Process.clock_gettime(Process::CLOCK_MONOTONIC) + 5,
+        api_key: "provider-token",
+        transport: transport
+      )
+      binding = broker.binding
+      installed_executable = File.join(
+        context.fetch(:installed),
+        "bin",
+        "hive"
+      )
+      probe = File.join(context.fetch(:case), "provider-probe.json")
+      write_executable(
+        installed_executable,
+        <<~RUBY
+          require "json"
+          require "socket"
+          $LOAD_PATH.unshift(
+            "/qualification/targets/candidate/lib"
+          )
+          require "hive/modules/migration/qualification_provider_client"
+          blocked = begin
+            Socket.tcp("1.1.1.1", 53, connect_timeout: 0.2).close
+            false
+          rescue SystemCallError, IOError
+            true
+          end
+          client =
+            Hive::Modules::Migration::
+              QualificationProviderClient.from_environment
+          response = client.call(
+            kind: "ordinary_findings",
+            prompt: "review installed boundary",
+            context_refs: [],
+            output_ref:
+              "/qualification/cases/case-one/" \
+                "sandbox/repository/.hive-state/" \
+                "provider/findings.json"
+          )
+          output = File.join(
+            "/qualification/cases/case-one",
+            response.output_ref
+          )
+          raise "provider response failed" unless File.file?(output)
+          File.binwrite(
+            ARGV.fetch(0),
+            JSON.generate(
+              "network_blocked" => blocked,
+              "source_visible" =>
+                File.exist?("/qualification/targets/source"),
+              "source_sentinel_visible" =>
+                File.exist?(
+                  "/qualification/targets/candidate/lib/source-only.rb"
+                ),
+              "installed_sentinel_visible" =>
+                File.exist?(
+                  "/qualification/targets/candidate/lib/installed-only.rb"
+                ),
+              "credential_present" =>
+                ENV.keys.any? do |name|
+                  name.include?("OPENROUTER") ||
+                    name.end_with?("API_KEY")
+                end,
+              "model_present" =>
+                ENV.keys.any? { |name| name.include?("MODEL") },
+              "provider_output" => JSON.parse(File.binread(output))
+            )
+          )
+        RUBY
+      )
+
+      result = call_process(
+        context,
+        executable: installed_executable,
+        candidate_root: context.fetch(:installed_package),
+        provider_binding: binding,
+        argv: [
+          "/qualification/cases/case-one/provider-probe.json"
+        ],
+        network: false
+      )
+
+      assert_equal "passed", result.status, result.inspect
+      assert_equal 1, result.provider_call_count
+      assert_match(
+        /\A[0-9a-f]{64}\z/,
+        result.provider_evidence_sha256
+      )
+      assert_nil result.provider_failure
+      assert_equal 1, transport.calls.length
+      refute File.exist?(binding.host_root)
+      data = JSON.parse(File.binread(probe))
+      assert_equal true, data.fetch("network_blocked")
+      assert_equal false, data.fetch("source_visible")
+      assert_equal false, data.fetch("source_sentinel_visible")
+      assert_equal true, data.fetch("installed_sentinel_visible")
+      assert_equal false, data.fetch("credential_present")
+      assert_equal false, data.fetch("model_present")
+      assert_equal(
+        { "findings" => [] },
+        data.fetch("provider_output")
+      )
+    ensure
+      broker&.seal! unless broker&.sealed?
     end
   end
 
@@ -189,6 +343,7 @@ class ModulesMigrationQualificationScenarioProcessTest <
 
   def test_timeout_terminates_the_foreground_group
     with_process_workspace do |context|
+      identity = RecordingIdentity.new
       pid_path =
         File.join(context.fetch(:case), "child.pid")
       write_executable(
@@ -207,6 +362,7 @@ class ModulesMigrationQualificationScenarioProcessTest <
 
       result = call_process(
         context,
+        process: PROCESS.new(process_identity: identity),
         argv: [
           "/qualification/cases/case-one/child.pid"
         ],
@@ -216,7 +372,15 @@ class ModulesMigrationQualificationScenarioProcessTest <
 
       assert_equal "failed", result.status
       assert_equal true, result.timed_out
-      assert_operator Integer(File.binread(pid_path)), :positive?
+      child_pid = Integer(File.binread(pid_path))
+      assert_operator child_pid, :positive?
+      refute_nil identity.snapshot
+      assert_raises(Errno::ESRCH) do
+        Process.kill(
+          0,
+          -identity.snapshot.process_group_id
+        )
+      end
       assert_equal(
         "host_pid_namespace",
         result.teardown.fetch("kill_authority")
@@ -377,6 +541,8 @@ class ModulesMigrationQualificationScenarioProcessTest <
       source = File.join(workspace, "targets", "source")
       installed =
         File.join(workspace, "targets", "installed")
+      installed_package =
+        File.join(installed, "gems", "hive-cli-test")
       case_root =
         File.join(workspace, "cases", "case-one")
       request =
@@ -397,6 +563,13 @@ class ModulesMigrationQualificationScenarioProcessTest <
         File.join(source, "modules", "architecture-patrol"),
         File.join(installed, "bin"),
         File.join(installed, "rubygems-bin"),
+        File.join(installed_package, "lib"),
+        File.join(installed_package, "modules", "patrol"),
+        File.join(
+          installed_package,
+          "modules",
+          "architecture-patrol"
+        ),
         case_root,
         File.dirname(request),
         File.dirname(scenario)
@@ -411,14 +584,53 @@ class ModulesMigrationQualificationScenarioProcessTest <
       ].each { |path| File.chmod(0o700, path) }
       File.binwrite(request, "{}")
       File.binwrite(scenario, "case: one\n")
+      File.binwrite(
+        File.join(source, "lib", "source-only.rb"),
+        "SOURCE_ONLY = true\n"
+      )
+      File.binwrite(
+        File.join(
+          installed_package,
+          "lib",
+          "installed-only.rb"
+        ),
+        "INSTALLED_ONLY = true\n"
+      )
+      %w[
+        hive/errors.rb
+        hive/modules/migration/qualification_provider_client.rb
+        hive/modules/migration/qualification_provider_protocol.rb
+        hive/workflow_package/canonical_json.rb
+      ].each do |relative|
+        destination = File.join(
+          installed_package,
+          "lib",
+          relative
+        )
+        FileUtils.mkdir_p(File.dirname(destination), mode: 0o700)
+        FileUtils.copy_file(
+          File.join(SOURCE_ROOT, "lib", relative),
+          destination
+        )
+        File.chmod(0o600, destination)
+      end
       [ request, scenario ].each do |path|
         File.chmod(0o600, path)
       end
+      [
+        File.join(source, "lib", "source-only.rb"),
+        File.join(
+          installed_package,
+          "lib",
+          "installed-only.rb"
+        )
+      ].each { |path| File.chmod(0o600, path) }
       executable = File.join(source, "bin", "hive")
       yield(
         workspace: workspace,
         source: source,
         installed: installed,
+        installed_package: installed_package,
         case: case_root,
         executable: executable
       )
@@ -428,22 +640,26 @@ class ModulesMigrationQualificationScenarioProcessTest <
   def call_process(
     context,
     process: PROCESS.new,
+    executable: context.fetch(:executable),
+    candidate_root: context.fetch(:source),
+    provider_binding: nil,
     argv:,
     timeout_seconds: 5,
     network:
   )
     process.call(
-      executable: context.fetch(:executable),
+      executable: executable,
       argv: argv,
       workspace: context.fetch(:workspace),
       source_root: context.fetch(:source),
       installed_root: context.fetch(:installed),
+      candidate_root: candidate_root,
       case_root: context.fetch(:case),
       request_ref: "requests/case-one.json",
       scenario_ref: "inputs/scenarios/case-one.yml",
       timeout_seconds: timeout_seconds,
       network: network,
-      credentials: {},
+      provider_binding: provider_binding,
       hive_home: File.join(
         context.fetch(:case),
         "sandbox",

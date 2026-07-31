@@ -277,7 +277,11 @@ decision, effect intent, module decision, and during reconciliation. The
 Architecture Patrol controls cover both a clean no-theses completion and a
 positive terminal no-diff action through the real v3 JobStore and detached
 module hook. Status 76 remains qualification-private and is not part of Hive's
-public exit-code contract.
+public exit-code contract. Direct driver tests bind `Hive::UsageDb` to each
+scenario sandbox instead of inheriting a prior suite's process-global test
+override. Recovery after the module-decision fault also waits for the gated
+wrapper and worker identities to disappear before requiring the reconciler to
+classify exactly one attempt as newly lost.
 
 Candidate output is not the authority for that proof. After every successful
 case process, the trusted lane controller reconstructs the event, decisions,
@@ -318,8 +322,15 @@ removed only after exact owner/mode/path validation, so retry cannot leave a
 partially visible terminal lane or conflict with newly generated evidence.
 
 Both candidate lanes run without network access or candidate-visible
-credentials. Retryable installed-lane authorization, credential, and provider
-unavailability is retained as append-only diagnostic evidence rather than an
+credentials. The installed lane mounts the installed gem package as its only
+candidate source tree and reaches a fixed OpenRouter model and endpoint only
+through a generation-scoped host-owned Unix socket. The host binds each call
+to the exact run, lane, case, generation, scenario request, launcher process
+tree, one-call budget, and canonical output, then stores only secret-free
+digests and bounded token counts in the generation transcript. The candidate
+cannot observe the API key, provider model, source checkout, or host network.
+Retryable installed-lane authorization, credential, and exact typed provider
+failures are retained as append-only diagnostic evidence rather than an
 immutable completion sentinel, so a later authorized attempt can continue the
 same run. Required E2E release coverage accepts only a blocker-free
 `evidence_ready_for_operator` report backed by an independent protected-main
@@ -330,9 +341,12 @@ Architecture Patrol's bounded collaborator now reaches real intake, v3 job
 state, discovery/action commands, deterministic event publication, occurrence
 finalization, the private candidate command, detached module routing, Attempts,
 adapter projection, shadow comparison, and independent host reconstruction.
-The installed provider broker and exact installed-gem target, and the literal
-protected-control scenario catalog remain open U3 qualification work. None of
-these diagnostics authorizes mutator cutover.
+The broker and exact installed-gem target are implemented, but no authenticated
+installed/live run has yet produced a retained exact-candidate receipt. The
+literal protected-control scenario catalog also remains open: PR #910 cannot
+certify its own head, so the first trusted proof must evaluate a later
+candidate from protected main. None of these diagnostics authorizes mutator
+cutover.
 
 ## Safety invariants
 

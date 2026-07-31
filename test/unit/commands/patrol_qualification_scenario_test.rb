@@ -189,7 +189,7 @@ class CommandsPatrolQualificationScenarioTest < Minitest::Test
       File.binwrite(scenario_path, scenario)
       File.chmod(0o600, scenario_path)
       FileUtils.mkdir_p(
-        File.join(root, "targets", "source", "modules"),
+        File.join(root, "targets", "candidate", "modules"),
         mode: 0o700
       )
       %w[architecture-patrol patrol].each do |name|
@@ -198,7 +198,7 @@ class CommandsPatrolQualificationScenarioTest < Minitest::Test
           File.join(
             root,
             "targets",
-            "source",
+            "candidate",
             "modules",
             name
           )
@@ -214,7 +214,7 @@ class CommandsPatrolQualificationScenarioTest < Minitest::Test
           Digest::SHA256.hexdigest(scenario),
         "scenario_ref" =>
           "inputs/scenarios/#{scenario_file}",
-        "package_root_ref" => "targets/source",
+        "package_root_ref" => "targets/candidate",
         "sandbox_root_ref" =>
           "cases/#{case_id}/sandbox",
         "output_ref" =>

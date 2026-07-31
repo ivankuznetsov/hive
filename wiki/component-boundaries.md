@@ -123,16 +123,25 @@ reset, not an effect-journal import, is the only released-JobStore transition.
 The Patrol row has a non-empty construction boundary. Shared stores and
 mechanisms, both product gateways, and intake/discovery/action/claim-maintenance
 coordinators are forbidden outside their exact command, scheduler, state, and
-action-runner composition roots. A separate static source contract allows
+action-runner composition roots. One explicit qualification-only composition
+root may construct `JobStore` and `ArchitectureIntakeTransitions` inside the
+isolated candidate state tree so the permanent harness exercises the production
+ports rather than a parallel fake. A separate static source contract allows
 JobStore semantic mutators only inside those transition ports. This enforces
-dependency direction; it is not runtime isolation.
+dependency direction; it is not runtime isolation. Host-side qualification
+observers instead enumerate bounded raw records and may apply the pure record
+validators, but they never construct either Patrol product store. The isolated
+ordinary candidate driver may construct the append-only `EvidenceStore` needed
+to exercise the production scheduler path and inject a process-exit checkpoint;
+that store does not grant retry or product-transition authority.
 
 The row remains `candidate` even though U3 now drives ordinary Patrol and
 Architecture Patrol through their real schedulers, product state, detached
-module hooks, Attempts, and host-reconstructed terminal evidence. The remaining
-qualification work is a host-owned installed-provider broker and exact
-installed target plus the protected-main controller/catalog proof. The lane
-controller now owns the ordinary five-fault process generations: it binds an
+module hooks, Attempts, and host-reconstructed terminal evidence. The
+host-owned installed-provider broker and exact installed target are now
+implemented; the remaining qualification work is an authenticated installed
+run plus the protected-main controller/catalog proof. The lane controller now
+owns the ordinary five-fault process generations: it binds an
 immutable request and output path per generation, accepts private status 76
 only at the planned checkpoint, requires stable executable/sandbox identity,
 snapshots the same repository/state/Attempts roots before and after each
@@ -150,6 +159,14 @@ Attempts intentionally remains the guarded reference instead of claiming that
 its full lifecycle is a supported component boundary: the slice does not
 publish raw storage, reconciliation, supervision, capacity, loss-policy,
 cancellation, export, or generic lifecycle operations.
+
+The permanent Patrol qualification boundary is an explicit consumer of those
+private lifecycle pieces. Inside the isolated candidate, it composes the real
+store, configured dispatcher, launcher, and reconciler to prove handoff and
+recovery. On the host side, the process supervisor and provider broker reuse
+PID-reuse-safe process identity, while evidence observers open the store with
+directory creation disabled and scan only. None of these construction sites
+widens the public Attempts API.
 
 The `Agent ABI` is boundary-ready below orchestration. `AgentRuntime` exposes
 immutable request, compiled invocation, capability/probe evidence, and

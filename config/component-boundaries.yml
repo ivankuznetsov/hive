@@ -188,12 +188,18 @@ components:
           - lib/hive/daemon/refactor_patrol_scheduler.rb
           - lib/hive/modules/adapters/architecture_patrol.rb
           - lib/hive/modules/adapters/patrol.rb
+          - lib/hive/modules/migration/qualification_scenario_driver.rb
           - lib/hive/refactor_patrol/action_runner.rb
-        reason: "Product composition roots and observational adapters project the append-only evidence facade; they cannot use it as retry authority."
+        reason: "Product composition roots, observational adapters, and the isolated qualification candidate driver project the append-only evidence facade; they cannot use it as retry authority."
       - constant: Hive::Modules::Migration::OccurrenceJournal
         files:
           - lib/hive/patrol/state_store.rb
         reason: "Ordinary Patrol StateStore is the sole product facade over the shared occurrence journal."
+      - constant: Hive::Modules::Migration::OccurrenceRecordValidator
+        files:
+          - lib/hive/modules/migration/qualification_checkpoint_verifier.rb
+          - lib/hive/modules/migration/qualification_scenario_evidence_collector.rb
+        reason: "Qualification host observers may apply the pure canonical-record validator to raw candidate evidence; they cannot construct a store or acquire mutation authority."
       - constant: Hive::Patrol::EffectGateway
         files:
           - lib/hive/patrol/state_store.rb
@@ -206,7 +212,8 @@ components:
         files:
           - lib/hive/commands/refactor_patrol.rb
           - lib/hive/daemon/refactor_patrol_merge_reconciler.rb
-        reason: "Manual and daemon merge intake share the one architecture intake facade."
+          - lib/hive/modules/migration/qualification_architecture_scenario.rb
+        reason: "Manual and daemon merge intake share the one architecture intake facade; the qualification-only sandbox composes it to exercise that exact production boundary without becoming product recovery authority."
       - constant: Hive::RefactorPatrol::ArchitectureOccurrenceLifecycle
         files:
           - lib/hive/daemon/refactor_patrol_scheduler.rb
@@ -235,11 +242,12 @@ components:
           - lib/hive/daemon/refactor_patrol_merge_reconciler.rb
           - lib/hive/daemon/refactor_patrol_scheduler.rb
           - lib/hive/modules/migration/coordinator.rb
+          - lib/hive/modules/migration/qualification_architecture_scenario.rb
           - lib/hive/refactor_patrol/action_runner.rb
           - lib/hive/refactor_patrol/canonical_action_catalog.rb
           - lib/hive/refactor_patrol/family_store.rb
           - lib/hive/refactor_patrol/repository_ownership.rb
-        reason: "Explicit command, scheduler, migration, action, catalog, family, and ownership composition roots construct the public architecture aggregate facade; lexical aliases are enforced too."
+        reason: "Explicit command, scheduler, migration, qualification-sandbox, action, catalog, family, and ownership composition roots construct the public architecture aggregate facade; lexical aliases are enforced too."
       - constant: Hive::RefactorPatrol::JobQueryIndex
         files:
           - lib/hive/refactor_patrol/job_store.rb
@@ -266,7 +274,7 @@ components:
       - lib/hive/patrol/state_store.rb
       - lib/hive/refactor_patrol/action_runner.rb
       - lib/hive/refactor_patrol/job_store.rb
-    mutation_authority: "The separate ordinary and architecture gateways authorize product sinks; ordinary Patrol StateStore is the sole non-admitted projector of an already-authorized pull-request publication receipt, explicit intake, discovery, and action transition facades are the only semantic JobStore mutator call sites, the confirmed reset command alone may invoke the opaque cross-generation archive, and shared values, OccurrenceJournal, and EvidenceStore contain no product policy."
+    mutation_authority: "The separate ordinary and architecture gateways authorize product sinks; ordinary Patrol StateStore is the sole non-admitted projector of an already-authorized pull-request publication receipt, explicit intake, discovery, and action transition facades are the only semantic JobStore mutator call sites, one qualification-only sandbox composes those production ports under an isolated candidate state root, the confirmed reset command alone may invoke the opaque cross-generation archive, and shared values, OccurrenceJournal, and EvidenceStore contain no product policy."
     recovery_surface: "StateStore and JobStore are the only product recovery authorities over the single OccurrenceJournal mechanic; ordinary Patrol drains typed publication entries before suppression reads and acknowledges only after an exact binding write or no-op, while EvidenceStore remains observation-only."
     wiki_page: wiki/modules/patrol.md
     focused_tests:
@@ -365,6 +373,14 @@ components:
       - Hive::Attempts::LostOutcomeStore
       - Hive::Attempts::LostOutcomeProcessor
     authorized_internal_constructions:
+      - constant: Hive::Attempts::ConfiguredDispatcher
+        files:
+          - lib/hive/modules/migration/qualification_scenario_driver.rb
+        reason: "The isolated qualification candidate composes the production detached Attempts path to prove bounded handoff, retry, and terminal evidence."
+      - constant: Hive::Attempts::DetachedLauncher
+        files:
+          - lib/hive/modules/migration/qualification_scenario_driver.rb
+        reason: "The isolated qualification candidate wraps the production launcher only to inject a planned handoff failure; launcher custody remains unchanged."
       - constant: Hive::Attempts::Store
         files:
           - lib/hive/commands/attempt_supervise.rb
@@ -373,9 +389,13 @@ components:
           - lib/hive/conditions/execute_boundary.rb
           - lib/hive/implementation_identity/store.rb
           - lib/hive/modules/inspector.rb
+          - lib/hive/modules/migration/qualification_checkpoint_verifier.rb
+          - lib/hive/modules/migration/qualification_scenario_driver.rb
+          - lib/hive/modules/migration/qualification_scenario_evidence_collector.rb
+          - lib/hive/modules/migration/qualification_scenario_process.rb
           - lib/hive/task_closure.rb
           - lib/hive/task_projection/store.rb
-        reason: "Existing Hive composition, read-only consumers and previews, execution-boundary checks, and closure verification share the canonical durable store; they are not alternate admission producers."
+        reason: "Existing Hive composition, read-only consumers and previews, execution-boundary checks, closure verification, and the isolated qualification candidate and host observers share the canonical durable store; host observers use scan only and are not alternate admission producers."
       - constant: Hive::Attempts::Supervisor
         files:
           - lib/hive/commands/attempt_supervise.rb
@@ -383,11 +403,14 @@ components:
       - constant: Hive::Attempts::Reconciler
         files:
           - lib/hive/commands/daemon.rb
-        reason: "The daemon composition root injects reconciliation into its scheduler without exposing lifecycle operations through the admission facade."
+          - lib/hive/modules/migration/qualification_scenario_driver.rb
+        reason: "The daemon and isolated qualification candidate composition roots inject reconciliation into their schedulers without exposing lifecycle operations through the admission facade."
       - constant: Hive::Attempts::ProcessIdentity
         files:
           - lib/hive/commands/daemon.rb
-        reason: "The daemon composition root shares one process-identity verifier across reconciliation and loss handling."
+          - lib/hive/modules/migration/qualification_provider_broker.rb
+          - lib/hive/modules/migration/qualification_scenario_process.rb
+        reason: "The daemon and qualification host supervisors share one PID-reuse-safe process-identity verifier across reconciliation, loss handling, candidate custody, and broker peer ancestry."
       - constant: Hive::Attempts::LostOutcomeStore
         files:
           - lib/hive/commands/daemon.rb

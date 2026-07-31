@@ -34,8 +34,24 @@ class ModulesMigrationQualificationInstalledTargetTest <
                    File.stat(result.executable).mode & 0o777
       assert_equal 0o600,
                    File.stat(
-                     File.join(root, "installed", "lib", "hive.rb")
+                     File.join(
+                       root,
+                       "installed",
+                       "gems",
+                       "hive-cli-0.7.0",
+                       "lib",
+                       "hive.rb"
+                     )
                    ).mode & 0o777
+      assert_equal(
+        File.join(
+          root,
+          "installed",
+          "gems",
+          "hive-cli-0.7.0"
+        ),
+        result.package_root
+      )
       assert_equal "candidate", result.manifest.fetch("role")
     end
   end
@@ -51,8 +67,16 @@ class ModulesMigrationQualificationInstalledTargetTest <
       end,
       lambda do |files|
         files.fetch(
-          "inputs/installed-target/lib/hive.rb"
+          "inputs/installed-target/gems/" \
+            "hive-cli-0.7.0/lib/hive.rb"
         )[:mode] = 0o700
+      end,
+      lambda do |files|
+        files.fetch(
+          "inputs/installed-target/target.json"
+        )[:bytes] = target_manifest.merge(
+          "version" => "../../escape"
+        ).then { |value| canonical(value) }
       end,
       lambda do |files|
         files[
@@ -90,7 +114,8 @@ class ModulesMigrationQualificationInstalledTargetTest <
         bytes: "#!/usr/bin/env ruby\n".b,
         mode: 0o700
       },
-      "inputs/installed-target/lib/hive.rb" => {
+      "inputs/installed-target/gems/" \
+        "hive-cli-0.7.0/lib/hive.rb" => {
         bytes: "module Hive; end\n".b,
         mode: 0o600
       },

@@ -27,7 +27,8 @@ module Hive
           :duration_seconds, :executable_sha256,
           :ruby_sha256, :attempt_count, :custody_count,
           :sandbox_profile_sha256, :source_inventory_sha256,
-          :installed_inventory_sha256, :teardown
+          :installed_inventory_sha256, :provider_call_count,
+          :provider_evidence_sha256, :provider_failure, :teardown
         )
 
         class ExecutionState
@@ -87,8 +88,10 @@ module Hive
 
         def call(
           executable:, argv:, workspace:, source_root:,
-          installed_root:, case_root:, request_ref:, scenario_ref:,
-          timeout_seconds:, network:, credentials:, hive_home:
+          installed_root:, candidate_root:, case_root:,
+          request_ref:, scenario_ref:,
+          timeout_seconds:, network:, hive_home:,
+          provider_binding: nil
         )
           timeout = Float(timeout_seconds)
           unless timeout.positive? && timeout <= 3_600
@@ -104,6 +107,7 @@ module Hive
           launch = nil
           process = nil
           process_error = nil
+          provider_transcript = nil
           begin
             @sandbox.call(
               executable: executable,
@@ -111,11 +115,12 @@ module Hive
               workspace: workspace,
               source_root: source_root,
               installed_root: installed_root,
+              candidate_root: candidate_root,
               case_root: case_root,
               request_ref: request_ref,
               scenario_ref: scenario_ref,
               network: network,
-              credentials: credentials,
+              provider_binding: provider_binding,
               hive_home: hive_home
             ) do |prepared|
               launch = prepared
@@ -126,11 +131,15 @@ module Hive
                   environment: prepared.environment,
                   cwd: prepared.host_cwd,
                   timeout: timeout,
-                  state: state
+                  state: state,
+                  provider_broker: prepared.provider_broker
                 )
               rescue StandardError => error
                 process_error = error
                 raise
+              ensure
+                provider_transcript =
+                  prepared.provider_broker&.seal!
               end
               state.phase = "sandbox_finalize"
             end
@@ -169,6 +178,10 @@ module Hive
           passed =
             process.fetch(:status).success? &&
               !process.fetch(:timed_out) &&
+              (
+                provider_transcript.nil? ||
+                  provider_transcript.fetch("failure").nil?
+              ) &&
               teardown.fetch("status") == "passed"
           state.phase = "result_finalize"
           Result.new(
@@ -190,6 +203,14 @@ module Hive
               launch.source_inventory.digest,
             installed_inventory_sha256:
               launch.installed_inventory.digest,
+            provider_call_count:
+              provider_transcript&.fetch("call_count") || 0,
+            provider_evidence_sha256:
+              provider_transcript&.fetch(
+                "transcript_sha256"
+              ),
+            provider_failure:
+              provider_transcript&.fetch("failure"),
             teardown: teardown
           ).freeze
         rescue Errno::ENOENT, Errno::EACCES, Errno::ELOOP,
@@ -220,7 +241,10 @@ module Hive
 
         private
 
-        def execute(command, environment:, cwd:, timeout:, state:)
+        def execute(
+          command, environment:, cwd:, timeout:, state:,
+          provider_broker:
+        )
           stdin = stdout = stderr = waiter = nil
           out_reader = err_reader = nil
           stdin, stdout, stderr, waiter = Open3.popen3(
@@ -237,6 +261,12 @@ module Hive
           err_reader = capture_stream(stderr)
           root_identity =
             await_process_identity(waiter.pid)
+          unless
+            root_identity.process_group_id == waiter.pid
+            raise IdentityChanged,
+                  "patrol qualification process identity changed"
+          end
+          provider_broker&.arm!(root_identity)
           state.phase = "wait"
           status = waiter.join(timeout)&.value
           unless status

@@ -13,6 +13,7 @@ require "hive/modules/migration/patrol_evidence_verifier"
 require "hive/modules/migration/qualification_installed_target"
 require "hive/modules/migration/qualification_checkpoint_verifier"
 require "hive/modules/migration/qualification_lane_result"
+require "hive/modules/migration/qualification_provider_broker"
 require "hive/modules/migration/qualification_run_descriptor"
 require "hive/modules/migration/qualification_scenario_actuals"
 require "hive/modules/migration/qualification_scenario_evidence_collector"
@@ -52,7 +53,8 @@ module Hive
           :scenarios
         )
         Materialized = Data.define(
-          :source_root, :installed_root, :executable
+          :source_root, :installed_root, :candidate_root,
+          :executable
         )
 
         class LaneFailure < StandardError
@@ -66,6 +68,16 @@ module Hive
           end
         end
         private_constant :LaneFailure
+
+        class RetryableProviderFailure < StandardError
+          attr_reader :reason
+
+          def initialize(reason)
+            @reason = reason.to_s.freeze
+            super("patrol qualification provider is retryable")
+          end
+        end
+        private_constant :RetryableProviderFailure
 
         def initialize(
           repository:,
@@ -88,7 +100,10 @@ module Hive
           recovery_evidence:
             QualificationScenarioRecoveryEvidence.new,
           oracle: QualificationScenarioOracle.new,
-          verifier: PatrolEvidenceVerifier
+          verifier: PatrolEvidenceVerifier,
+          provider_broker_factory: lambda { |**arguments|
+            QualificationProviderBroker.new(**arguments)
+          }
         )
           @repository = repository
           @clock = clock
@@ -108,6 +123,8 @@ module Hive
           @recovery_evidence = recovery_evidence
           @oracle = oracle
           @verifier = verifier
+          @provider_broker_factory =
+            provider_broker_factory
         end
 
         def call(run_id:, lane:, live_authorized: false)
@@ -129,7 +146,7 @@ module Hive
               reason: "live_lane_not_authorized"
             ) unless live_authorized
 
-            credentials = live_credentials(
+            provider_credential = live_credential(
               descriptor.lane_policy(lane)
             )
             return publish_blocked(
@@ -137,24 +154,23 @@ module Hive
               lane: lane,
               started_at: started_at,
               reason: "credentials_unavailable"
-            ) unless credentials
-
-            # A live lane must use the declared provider and model policy.
-            # Until that contract exists, never replay deterministic fixture
-            # output under a live/installed label.
-            return publish_blocked(
-              authority,
-              lane: lane,
-              started_at: started_at,
-              reason: "provider_unavailable"
-            )
+            ) unless provider_credential
+          else
+            provider_credential = nil
           end
 
           execute_lane(
             authority,
             lane: lane,
             started_at: started_at,
-            credentials: {}
+            provider_credential: provider_credential
+          )
+        rescue RetryableProviderFailure => error
+          publish_blocked(
+            authority,
+            lane: lane,
+            started_at: started_at,
+            reason: error.reason
           )
         rescue LaneFailure => error
           publish_failure(
@@ -167,7 +183,9 @@ module Hive
 
         private
 
-        def execute_lane(authority, lane:, started_at:, credentials:)
+        def execute_lane(
+          authority, lane:, started_at:, provider_credential:
+        )
           descriptor = authority.descriptor
           policy = descriptor.lane_policy(lane)
           deadline =
@@ -177,6 +195,7 @@ module Hive
           host_evidence = []
           process_generations = []
           recovery_evidence = []
+          provider_brokers = []
           Dir.mktmpdir("hive-patrol-qualification-") do |workspace|
             File.chmod(0o700, workspace)
             begin
@@ -196,12 +215,20 @@ module Hive
                 authority: authority,
                 lane: lane,
                 policy: policy,
-                credentials: credentials,
+                provider_credential: provider_credential,
                 deadline: deadline,
                 process_rows: process_rows,
                 host_evidence: host_evidence,
                 process_generations: process_generations,
-                recovery_evidence: recovery_evidence
+                recovery_evidence: recovery_evidence,
+                provider_brokers: provider_brokers
+              )
+              seal_provider_brokers!(provider_brokers)
+              validate_provider_evidence!(
+                authority,
+                lane: lane,
+                process_generations: process_generations,
+                provider_brokers: provider_brokers
               )
               observations = @oracle.call(
                 descriptor: descriptor,
@@ -222,18 +249,41 @@ module Hive
                 process_rows: process_rows,
                 host_evidence: host_evidence,
                 process_generations: process_generations,
-                recovery_evidence: recovery_evidence
+                recovery_evidence: recovery_evidence,
+                provider_brokers: provider_brokers
+              )
+            rescue QualificationScenarioOrchestrator::
+                     ProviderFailure => failure
+              seal_provider_brokers!(provider_brokers)
+              raise RetryableProviderFailure.new(
+                failure.reason
+              ) if failure.retryable
+
+              completed = build_failed_capture(
+                authority: authority,
+                lane: lane,
+                started_at: started_at,
+                failure: LaneFailure.new(
+                  status: "failed",
+                  reason: "provider_failed",
+                  exit_code: Hive::ExitCodes::SOFTWARE
+                ),
+                process_rows: process_rows,
+                provider_brokers: provider_brokers
               )
             rescue LaneFailure => failure
+              seal_provider_brokers!(provider_brokers)
               completed = build_failed_capture(
                 authority: authority,
                 lane: lane,
                 started_at: started_at,
                 failure: failure,
-                process_rows: process_rows
+                process_rows: process_rows,
+                provider_brokers: provider_brokers
               )
             rescue QualificationScenarioProcess::
                      PostSpawnFailure
+              seal_provider_brokers!(provider_brokers)
               completed = build_failed_capture(
                 authority: authority,
                 lane: lane,
@@ -243,10 +293,12 @@ module Hive
                   reason: "candidate_execution_failed",
                   exit_code: Hive::ExitCodes::SOFTWARE
                 ),
-                process_rows: process_rows
+                process_rows: process_rows,
+                provider_brokers: provider_brokers
               )
             rescue Hive::ConfigError, KeyError, NoMethodError,
                    TypeError
+              seal_provider_brokers!(provider_brokers)
               completed = build_failed_capture(
                 authority: authority,
                 lane: lane,
@@ -256,9 +308,11 @@ module Hive
                   reason: "evidence_verification_failed",
                   exit_code: 1
                 ),
-                process_rows: process_rows
+                process_rows: process_rows,
+                provider_brokers: provider_brokers
               )
             rescue StandardError
+              seal_provider_brokers!(provider_brokers)
               completed = build_failed_capture(
                 authority: authority,
                 lane: lane,
@@ -268,8 +322,11 @@ module Hive
                   reason: "internal_error",
                   exit_code: 1
                 ),
-                process_rows: process_rows
+                process_rows: process_rows,
+                provider_brokers: provider_brokers
               )
+            ensure
+              seal_provider_brokers!(provider_brokers)
             end
           end
           publish_completed(
@@ -337,6 +394,9 @@ module Hive
           Materialized.new(
             source_root: source.root,
             installed_root: installed.root,
+            candidate_root:
+              lane == "deterministic" ?
+                source.root : installed.package_root,
             executable: executable
           ).freeze
         end
@@ -373,8 +433,9 @@ module Hive
 
         def execute_scenarios(
           workspace:, directory:, materialized:, authority:,
-          lane:, policy:, credentials:, deadline:, process_rows:,
-          host_evidence:, process_generations:, recovery_evidence:
+          lane:, policy:, provider_credential:, deadline:,
+          process_rows:, host_evidence:, process_generations:,
+          recovery_evidence:, provider_brokers:
         )
           actuals = []
           authority.scenarios.each do |row|
@@ -441,11 +502,27 @@ module Hive
                     workspace: workspace,
                     source_root: materialized.source_root,
                     installed_root: materialized.installed_root,
+                    candidate_root:
+                      materialized.candidate_root,
                     case_root: case_root,
                     request_ref: request.fetch(:ref),
                     scenario_ref: row.fetch(:scenario_ref),
                     network: policy.fetch("network"),
-                    credentials: credentials,
+                    provider_binding:
+                      build_provider_binding(
+                        workspace: workspace,
+                        descriptor: authority.descriptor,
+                        lane: lane,
+                        case_id: row.fetch(:case_id),
+                        generation: generation,
+                        request_sha256:
+                          request.fetch(:sha256),
+                        provider_credential:
+                          provider_credential,
+                        deadline: deadline,
+                        provider_brokers:
+                          provider_brokers
+                      ),
                     hive_home: hive_home
                   }
                 }.freeze
@@ -533,6 +610,203 @@ module Hive
           actuals.freeze
         end
 
+        def build_provider_binding(
+          workspace:, descriptor:, lane:, case_id:, generation:,
+          request_sha256:, provider_credential:, deadline:,
+          provider_brokers:
+        )
+          return nil if lane == "deterministic"
+          unless
+            lane == "installed" &&
+              provider_credential.is_a?(String) &&
+              !provider_credential.empty?
+            raise Hive::ConfigError,
+                  "patrol qualification provider is unavailable"
+          end
+          broker = @provider_broker_factory.call(
+            workspace: workspace,
+            run_id: descriptor.run_id,
+            lane: lane,
+            case_id: case_id,
+            generation: generation,
+            scenario_request_sha256: request_sha256,
+            deadline: deadline,
+            api_key: provider_credential,
+            model:
+              descriptor
+                .lane_policy(lane)
+                .fetch("model")
+          )
+          unless
+            broker.respond_to?(:binding) &&
+              broker.respond_to?(:seal!) &&
+              broker.respond_to?(:sealed?) &&
+              broker.respond_to?(:transcript)
+            raise Hive::ConfigError,
+                  "patrol qualification provider is unavailable"
+          end
+          provider_brokers << broker
+          broker.binding
+        end
+
+        def seal_provider_brokers!(brokers)
+          brokers.each do |broker|
+            broker.seal! unless broker.sealed?
+          end
+          true
+        end
+
+        def validate_provider_evidence!(
+          authority, lane:, process_generations:,
+          provider_brokers:
+        )
+          if lane == "deterministic"
+            unless
+              provider_brokers.empty? &&
+                process_generations.all? do |result|
+                  result.generations.all? do |generation|
+                    process = generation.receipt.process
+                    process.fetch("provider_call_count").zero? &&
+                      process.fetch(
+                        "provider_evidence_sha256"
+                      ).nil? &&
+                      process.fetch("provider_failure").nil?
+                  end
+                end
+              raise Hive::ConfigError,
+                    "deterministic qualification used a provider"
+            end
+            return true
+          end
+
+          transcripts = provider_brokers.to_h do |broker|
+            value = broker.transcript
+            key = [
+              value.fetch("case_id"),
+              value.fetch("generation")
+            ]
+            if value.fetch("run_id") !=
+                 authority.descriptor.run_id ||
+               value.fetch("lane") != lane ||
+               value.fetch("model") !=
+                 authority.descriptor
+                   .lane_policy(lane)
+                   .fetch("model")
+              raise Hive::ConfigError,
+                    "patrol qualification provider evidence changed"
+            end
+            [ key, value ]
+          end
+          expected_count =
+            process_generations.sum(&:generation_count)
+          unless
+            transcripts.length == provider_brokers.length &&
+              transcripts.length == expected_count
+            raise Hive::ConfigError,
+                  "patrol qualification provider evidence is incomplete"
+          end
+          process_generations.each do |result|
+            result.generations.each do |generation|
+              process = generation.receipt.process
+              transcript = transcripts.fetch(
+                [ result.case_id, generation.generation ]
+              )
+              unless
+                transcript.fetch("failure").nil? &&
+                  transcript.fetch("transcript_sha256") ==
+                    process.fetch(
+                      "provider_evidence_sha256"
+                    ) &&
+                  transcript.fetch("call_count") ==
+                    process.fetch("provider_call_count") &&
+                  transcript.fetch(
+                    "scenario_request_sha256"
+                  ) ==
+                    generation.receipt.to_h.fetch(
+                      "request_sha256"
+                    )
+                raise Hive::ConfigError,
+                      "patrol qualification provider evidence changed"
+              end
+              expected_kind =
+                provider_kind(
+                  authority,
+                  case_id: result.case_id
+                )
+              unless
+                transcript.fetch("calls").all? do |call|
+                  call.fetch("kind") == expected_kind
+                end
+                raise Hive::ConfigError,
+                      "patrol qualification provider kind changed"
+              end
+            end
+          end
+          required_provider_cases(authority).each do |case_id|
+            result = process_generations.find do |candidate|
+              candidate.case_id == case_id
+            end
+            final = transcripts.fetch(
+              [ case_id, result.generation_count ]
+            )
+            unless final.fetch("call_count") == 1
+              raise Hive::ConfigError,
+                    "patrol qualification provider call is missing"
+            end
+          end
+          true
+        rescue KeyError, NoMethodError
+          raise Hive::ConfigError,
+                "patrol qualification provider evidence is incomplete"
+        end
+
+        def provider_kind(authority, case_id:)
+          row =
+            authority.descriptor.scenarios.fetch("cases").find do |item|
+              item.fetch("case_id") == case_id
+            end
+          modules = row.fetch("decision_expectations").map do |decision|
+            decision.fetch("module")
+          end.uniq
+          unless modules.length == 1
+            raise Hive::ConfigError,
+                  "patrol qualification provider plan is malformed"
+          end
+          modules.fetch(0) == "patrol" ?
+            "ordinary_findings" : "architecture_theses"
+        end
+
+        def required_provider_cases(authority)
+          controls = %w[
+            architecture_positive_thesis clean_negative
+            ordinary_positive_finding
+          ]
+          authority.descriptor.scenarios.fetch("cases").filter_map do |row|
+            values = row.fetch("decision_expectations").map do |decision|
+              decision.fetch("control")
+            end
+            row.fetch("case_id") unless
+              (values & controls).empty?
+          end.freeze
+        end
+
+        def provider_artifacts(provider_brokers)
+          artifacts = {}
+          provider_brokers.each do |broker|
+            transcript = broker.transcript
+            ref =
+              "provider-transcripts/" \
+                "#{transcript.fetch('case_id')}/" \
+                "generation-#{transcript.fetch('generation')}.json"
+            if artifacts.key?(ref)
+              raise Hive::ConfigError,
+                    "patrol qualification provider evidence is duplicated"
+            end
+            artifacts[ref] = canonical(transcript)
+          end
+          artifacts.freeze
+        end
+
         def write_request(
           directory, descriptor, row, generation:, stop_after:
         )
@@ -547,7 +821,7 @@ module Hive
             "stop_after" => stop_after,
             "scenario_sha256" => row.fetch(:scenario_sha256),
             "scenario_ref" => row.fetch(:scenario_ref),
-            "package_root_ref" => "targets/source",
+            "package_root_ref" => "targets/candidate",
             "sandbox_root_ref" =>
               "cases/#{case_id}/sandbox",
             "output_ref" => output_ref,
@@ -605,7 +879,8 @@ module Hive
         def build_completed_capture(
           authority:, lane:, started_at:, observations:,
           records:, process_rows:, host_evidence:,
-          process_generations:, recovery_evidence:
+          process_generations:, recovery_evidence:,
+          provider_brokers:
         )
           descriptor = authority.descriptor
           ended_at = [ utc_time(@clock.call), started_at ].max
@@ -670,6 +945,8 @@ module Hive
                 canonical(projection.to_h)
               ]
             end
+          ).merge(
+            provider_artifacts(provider_brokers)
           ).freeze
           artifact_digests = artifact_digests(
             result: result,
@@ -757,7 +1034,8 @@ module Hive
         end
 
         def build_failed_capture(
-          authority:, lane:, started_at:, failure:, process_rows:
+          authority:, lane:, started_at:, failure:, process_rows:,
+          provider_brokers: []
         )
           descriptor = authority.descriptor
           ended_at = [ utc_time(@clock.call), started_at ].max
@@ -799,7 +1077,9 @@ module Hive
               ),
             "scenario-manifest.json" =>
               authority.scenario_manifest_bytes
-          }.freeze
+          }.merge(
+            provider_artifacts(provider_brokers)
+          ).freeze
           digests = artifact_digests(
             result: result,
             artifacts: artifacts,
@@ -1242,13 +1522,15 @@ module Hive
           value.hexdigest
         end
 
-        def live_credentials(policy)
-          policy.fetch("credential_bindings").to_h do |name|
-            secret = @environment[name].to_s
-            return nil if secret.empty?
+        def live_credential(policy)
+          bindings = policy.fetch("credential_bindings")
+          return nil unless
+            bindings ==
+              QualificationRunDescriptor::
+                INSTALLED_CREDENTIAL_BINDINGS
 
-            [ name, secret ]
-          end.freeze
+          secret = @environment[bindings.fetch(0)].to_s
+          secret.empty? ? nil : secret
         rescue KeyError, NoMethodError, TypeError
           nil
         end

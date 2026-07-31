@@ -22,9 +22,11 @@ module Hive
           executable gem_sha256 role schema schema_version skills version
         ].freeze
         SKILL_KEYS = %w[archive_sha256 import_root].freeze
+        VERSION = /\A[0-9]+(?:\.[0-9A-Za-z]+)*\z/
 
         Result = Data.define(
-          :root, :executable, :tree_sha256, :manifest
+          :root, :executable, :package_root, :tree_sha256,
+          :manifest
         )
 
         def materialize(
@@ -66,9 +68,16 @@ module Hive
             root,
             manifest.fetch("executable")
           )
+          package_root = File.join(
+            root,
+            "gems",
+            "hive-cli-#{manifest.fetch('version')}"
+          )
+          validate_package_root!(package_root, root)
           Result.new(
             root: root.freeze,
             executable: executable.freeze,
+            package_root: package_root.freeze,
             tree_sha256: digest.freeze,
             manifest: manifest
           ).freeze
@@ -145,7 +154,8 @@ module Hive
               value["schema_version"] == 1 &&
               value["role"] == "candidate" &&
               value["version"].is_a?(String) &&
-              !value["version"].empty? &&
+              value["version"].bytesize <= 128 &&
+              VERSION.match?(value["version"]) &&
               value["gem_sha256"] ==
                 expected_gem_sha256.to_s &&
               value["executable"] ==
@@ -197,6 +207,19 @@ module Hive
         def ensure_parent!(directory, relative)
           parent = File.dirname(relative)
           directory.ensure_directory(parent) unless parent == "."
+        end
+
+        def validate_package_root!(path, root)
+          stat = File.lstat(path)
+          malformed! unless
+            path.start_with?("#{root}/") &&
+              stat.directory? &&
+              !stat.symlink? &&
+              stat.uid == Process.euid &&
+              (stat.mode & 0o077).zero? &&
+              File.realpath(path) == path
+        rescue SystemCallError
+          malformed!
         end
 
         def safe_relative(value)

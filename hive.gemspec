@@ -37,6 +37,7 @@ Gem::Specification.new do |spec|
     "config/agent-skills.yml",
     "config/honeycomb-security-lint/*.yml",
     "config/honeycomb-security-lint/**/*",
+    "modules/**/*",
     "skills/**/*",
     "lib/**/*.rb",
     "lib/hive/scripts/**/*.sh",

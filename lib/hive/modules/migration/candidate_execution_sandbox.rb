@@ -4,6 +4,9 @@ require "pathname"
 require "rbconfig"
 require "tmpdir"
 require "hive/errors"
+require "hive/modules/migration/qualification_provider_broker"
+require "hive/modules/migration/qualification_provider_protocol"
+require "hive/modules/migration/qualification_run_descriptor"
 require "hive/modules/migration/qualification_target_inventory"
 require "hive/workflow_package/canonical_json"
 
@@ -12,15 +15,15 @@ module Hive
     module Migration
       # Builds the only filesystem/process capability set granted to a
       # qualification candidate. Both lanes remain network-isolated and
-      # receive no provider or GitHub secrets; live access belongs to a
-      # future host-owned broker, never to candidate code.
+      # receive no provider or GitHub secrets. An installed generation may
+      # receive only one host-owned Unix-socket capability.
       class CandidateExecutionSandbox
         class TargetChanged < Hive::ConfigError; end
         class CleanupFailed < Hive::ConfigError; end
 
         BWRAP = "/usr/bin/bwrap".freeze
         VIRTUAL_ROOT = "/qualification".freeze
-        SOURCE_MOUNTS = %w[
+        CANDIDATE_MOUNTS = %w[
           bin/hive config lib modules/architecture-patrol modules/patrol
           schemas templates
         ].freeze
@@ -35,7 +38,7 @@ module Hive
           :command, :environment, :host_cwd, :hive_home,
           :attempts_root, :custody_root, :network_isolated,
           :profile_sha256, :source_inventory,
-          :installed_inventory
+          :installed_inventory, :provider_broker
         )
 
         def initialize(
@@ -48,8 +51,9 @@ module Hive
 
         def call(
           executable:, argv:, workspace:, source_root:,
-          installed_root:, case_root:, request_ref:, scenario_ref:,
-          network:, credentials:, hive_home:
+          installed_root:, candidate_root:, case_root:,
+          request_ref:, scenario_ref:,
+          network:, hive_home:, provider_binding: nil
         )
           raise ArgumentError, "block required" unless block_given?
 
@@ -57,6 +61,7 @@ module Hive
             workspace: workspace,
             source_root: source_root,
             installed_root: installed_root,
+            candidate_root: candidate_root,
             case_root: case_root,
             hive_home: hive_home
           )
@@ -67,13 +72,14 @@ module Hive
           )
           target = validate_executable(
             executable,
-            source_root: roots.fetch(:source),
+            source_root: roots.fetch(:candidate),
             installed_root: roots.fetch(:installed)
           )
           arguments = validate_argv(argv, roots.fetch(:workspace))
           network = validate_network(network)
-          credentials = validate_credentials(
-            credentials,
+          provider = validate_provider(
+            provider_binding,
+            roots: roots,
             network: network
           )
           validate_bwrap!
@@ -85,9 +91,9 @@ module Hive
           scaffold = build_scaffold(
             case_id: roots.fetch(:case_id),
             refs: refs,
-            source_root: roots.fetch(:source),
-            source_mounts:
-              source_mounts(target, roots.fetch(:source))
+            candidate_root: roots.fetch(:candidate),
+            candidate_mounts:
+              candidate_mounts(roots.fetch(:candidate))
           )
           launch = build_launch(
             roots: roots,
@@ -95,7 +101,7 @@ module Hive
             target: target,
             argv: arguments,
             network: network,
-            credentials: credentials,
+            provider: provider,
             runtime: runtime,
             scaffold: scaffold,
             source_inventory: before_source,
@@ -122,19 +128,18 @@ module Hive
         private
 
         def build_launch(
-          roots:, refs:, target:, argv:, network:, credentials:,
+          roots:, refs:, target:, argv:, network:, provider:,
           runtime:, scaffold:, source_inventory:,
           installed_inventory:
         )
           virtual_case =
             "#{VIRTUAL_ROOT}/cases/#{roots.fetch(:case_id)}"
-          virtual_source = "#{VIRTUAL_ROOT}/targets/source"
           virtual_installed =
             "#{VIRTUAL_ROOT}/targets/installed"
           virtual_executable =
             virtual_target_path(
               target,
-              source_root: roots.fetch(:source),
+              candidate_root: roots.fetch(:candidate),
               installed_root: roots.fetch(:installed)
             )
           virtual_runtime = "#{virtual_case}/runtime"
@@ -175,7 +180,7 @@ module Hive
             "HIVE_SKIP_LLM_WIKI_POST_COMMIT" => "1",
             "HIVE_QUALIFICATION_CUSTODY_ROOT" =>
               "#{virtual_runtime}/custody"
-          }.merge(credentials).freeze
+          }.merge(provider_environment(provider)).freeze
           virtual_argv = argv.map do |item|
             item == roots.fetch(:workspace) ?
               VIRTUAL_ROOT : item
@@ -183,8 +188,9 @@ module Hive
           profile = profile_digest(
             source_inventory: source_inventory,
             installed_inventory: installed_inventory,
-            source_mounts:
-              source_mounts(target, roots.fetch(:source))
+            candidate_mounts:
+              candidate_mounts(roots.fetch(:candidate)),
+            provider: !provider.nil?
           )
           command = bwrap_command(
             scaffold: scaffold,
@@ -193,7 +199,8 @@ module Hive
             target: target,
             virtual_executable: virtual_executable,
             virtual_argv: virtual_argv,
-            network: network
+            network: network,
+            provider: provider
           )
           Launch.new(
             command: command,
@@ -209,13 +216,14 @@ module Hive
             network_isolated: !network,
             profile_sha256: profile,
             source_inventory: source_inventory,
-            installed_inventory: installed_inventory
+            installed_inventory: installed_inventory,
+            provider_broker: provider&.broker
           ).freeze
         end
 
         def bwrap_command(
           scaffold:, roots:, refs:, target:,
-          virtual_executable:, virtual_argv:, network:
+          virtual_executable:, virtual_argv:, network:, provider:
         )
           command = [
             @bwrap,
@@ -239,12 +247,22 @@ module Hive
           command.concat(
             [ "--ro-bind", scaffold, VIRTUAL_ROOT ]
           )
-          source_mounts(target, roots.fetch(:source)).each do |ref|
+          candidate_mounts(
+            roots.fetch(:candidate)
+          ).each do |ref|
             command.concat(
               [
                 "--ro-bind",
-                File.join(roots.fetch(:source), ref),
-                "#{VIRTUAL_ROOT}/targets/source/#{ref}"
+                File.join(roots.fetch(:candidate), ref),
+                "#{VIRTUAL_ROOT}/targets/candidate/#{ref}"
+              ]
+            )
+          end
+          if provider
+            command.concat(
+              [
+                "--ro-bind", provider.host_root,
+                "#{VIRTUAL_ROOT}/provider"
               ]
             )
           end
@@ -283,26 +301,26 @@ module Hive
           (roots + files).uniq.freeze
         end
 
-        def source_mounts(target, source_root)
-          relative =
-            relative_path(target, source_root)
-          (SOURCE_MOUNTS + [ relative ]).uniq.select do |ref|
-            path = File.join(source_root, ref)
+        def candidate_mounts(candidate_root)
+          CANDIDATE_MOUNTS.select do |ref|
+            path = File.join(candidate_root, ref)
             File.exist?(path) && !File.symlink?(path)
           end.sort.freeze
         end
 
         def profile_digest(
           source_inventory:, installed_inventory:,
-          source_mounts:
+          candidate_mounts:, provider:
         )
           payload = {
             "schema" =>
               "hive-qualification-candidate-sandbox-profile",
             "schema_version" => 1,
             "network" => "isolated",
+            "provider_capability" =>
+              provider ? "generation_socket" : "none",
             "mounts" => {
-              "source" => source_mounts,
+              "candidate" => candidate_mounts,
               "installed" => "read_only",
               "request" => "current_read_only",
               "scenario" => "current_read_only",
@@ -324,21 +342,22 @@ module Hive
         end
 
         def build_scaffold(
-          case_id:, refs:, source_root:, source_mounts:
+          case_id:, refs:, candidate_root:, candidate_mounts:
         )
           root = Dir.mktmpdir("hive-qualification-view-")
           File.chmod(0o700, root)
           directories = [
-            "targets/source",
+            "targets/candidate",
             "targets/installed",
             "cases/#{case_id}",
+            "provider",
             File.dirname(refs.fetch(:request)),
             File.dirname(refs.fetch(:scenario))
           ]
-          source_mounts.each do |ref|
+          candidate_mounts.each do |ref|
             destination =
-              File.join(root, "targets/source", ref)
-            host = File.join(source_root, ref)
+              File.join(root, "targets/candidate", ref)
+            host = File.join(candidate_root, ref)
             directories <<
               (File.directory?(host) ?
                 destination : File.dirname(destination))
@@ -355,11 +374,11 @@ module Hive
             refs.fetch(:request),
             refs.fetch(:scenario)
           ]
-          source_mounts.each do |ref|
-            host = File.join(source_root, ref)
+          candidate_mounts.each do |ref|
+            host = File.join(candidate_root, ref)
             next if File.directory?(host)
 
-            file_destinations << "targets/source/#{ref}"
+            file_destinations << "targets/candidate/#{ref}"
           end
           file_destinations.uniq.each do |relative|
             path = File.join(root, relative)
@@ -415,7 +434,7 @@ module Hive
 
         def validate_roots(
           workspace:, source_root:, installed_root:,
-          case_root:, hive_home:
+          candidate_root:, case_root:, hive_home:
         )
           workspace = directory(workspace, "workspace")
           source = child_directory(
@@ -423,6 +442,11 @@ module Hive
           )
           installed = child_directory(
             installed_root, workspace, "installed target"
+          )
+          candidate = candidate_directory(
+            candidate_root,
+            source: source,
+            installed: installed
           )
           case_path = child_directory(
             case_root, workspace, "case"
@@ -446,6 +470,7 @@ module Hive
             workspace: workspace,
             source: source,
             installed: installed,
+            candidate: candidate,
             case: case_path,
             case_id: case_id.freeze,
             hive_home: home.freeze
@@ -530,14 +555,66 @@ module Hive
           false
         end
 
-        def validate_credentials(value, network:)
+        def validate_provider(value, roots:, network:)
+          return nil if value.nil?
           unless
-            value.is_a?(Hash) &&
-              value.empty? &&
-              network == false
-            malformed!("credentials")
+            network == false &&
+              value.is_a?(
+                Hive::Modules::Migration::
+                  QualificationProviderBroker::Binding
+              ) &&
+              value.virtual_socket ==
+                Hive::Modules::Migration::
+                  QualificationProviderBroker::VIRTUAL_SOCKET &&
+              value.case_id == roots.fetch(:case_id) &&
+              QualificationRunDescriptor::DIGEST.match?(
+                value.scenario_request_sha256.to_s
+              ) &&
+              QualificationProviderProtocol::SESSION.match?(
+                value.session.to_s
+              ) &&
+              value.generation.is_a?(Integer) &&
+              value.generation.between?(1, 3) &&
+              value.broker.respond_to?(:arm!) &&
+              value.broker.respond_to?(:seal!)
+            malformed!("provider capability")
           end
-          {}.freeze
+          root = directory(
+            value.host_root,
+            "provider capability"
+          )
+          socket = File.join(
+            root,
+            QualificationProviderBroker::SOCKET_NAME
+          )
+          stat = File.lstat(socket)
+          unless
+            stat.socket? &&
+              !stat.symlink? &&
+              stat.uid == Process.euid &&
+              (stat.mode & 0o777) == 0o600
+            malformed!("provider capability")
+          end
+          value
+        rescue NameError, SystemCallError
+          malformed!("provider capability")
+        end
+
+        def provider_environment(provider)
+          return {}.freeze unless provider
+
+          {
+            "HIVE_QUALIFICATION_PROVIDER_SOCKET" =>
+              provider.virtual_socket,
+            "HIVE_QUALIFICATION_PROVIDER_SESSION" =>
+              provider.session,
+            "HIVE_QUALIFICATION_CASE_ID" =>
+              provider.case_id,
+            "HIVE_QUALIFICATION_GENERATION" =>
+              provider.generation.to_s,
+            "HIVE_QUALIFICATION_REQUEST_SHA256" =>
+              provider.scenario_request_sha256
+          }.freeze
         end
 
         def validate_bwrap!
@@ -585,6 +662,15 @@ module Hive
           path
         end
 
+        def candidate_directory(value, source:, installed:)
+          path = directory(value, "candidate package")
+          allowed =
+            path == source ||
+              path.start_with?("#{installed}/")
+          malformed!("candidate package") unless allowed
+          path
+        end
+
         def safe_ref(value, prefix:, suffix:)
           text = value.to_s
           path = Pathname.new(text)
@@ -610,11 +696,13 @@ module Hive
         end
 
         def virtual_target_path(
-          path, source_root:, installed_root:
+          path, candidate_root:, installed_root:
         )
-          if path.start_with?("#{source_root}/")
-            "#{VIRTUAL_ROOT}/targets/source/" \
-              "#{relative_path(path, source_root)}"
+          if
+            path == candidate_root ||
+              path.start_with?("#{candidate_root}/")
+            "#{VIRTUAL_ROOT}/targets/candidate/" \
+              "#{relative_path(path, candidate_root)}"
           else
             "#{VIRTUAL_ROOT}/targets/installed/" \
               "#{relative_path(path, installed_root)}"

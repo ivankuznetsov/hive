@@ -65,36 +65,42 @@ class QualificationScenarioEvidenceCollectorTest < Minitest::Test
     end
   end
 
-  def test_marks_process_generation_and_fault_claims_unverified
+  def test_rejects_candidate_process_claims_and_marks_terminal_store_limits
     with_tmp_dir do |sandbox|
       result = run_driver(sandbox)
       honest = collect(result)
-      candidate = mutable(result.observation)
-      candidate["fault_checkpoint"] = "during_reconciliation"
-      candidate["restart_generation"] = 99
-      candidate["pre_fault_durable_state_sha256"] = "f" * 64
-      candidate["recovered_durable_state_sha256"] = "e" * 64
-      claimed = collect(result, candidate_row: candidate)
 
       # Terminal stores can prove a recovered terminal lineage. They cannot
-      # count externally supervised OS process generations or identify where
-      # a previous generation exited; the future LaneRunner orchestration
-      # must supply those facts independently.
-      assert_equal honest.to_h, claimed.to_h
+      # count externally supervised OS process generations or identify a
+      # previous exit point. LaneRunner supplies those facts independently,
+      # while candidate Actuals reject the fields altogether.
+      {
+        "fault_checkpoint" => "during_reconciliation",
+        "restart_generation" => 99,
+        "pre_fault_durable_state_sha256" => "f" * 64,
+        "recovered_durable_state_sha256" => "e" * 64,
+        "recovery_trace" => []
+      }.each do |key, value|
+        candidate = mutable(result.observation)
+        candidate[key] = value
+        assert_rejected do
+          collect(result, candidate_row: candidate)
+        end
+      end
       assert_equal(
         %w[
           fault_checkpoint pre_fault_durable_state_sha256
           recovered_durable_state_sha256 recovery_trace
           restart_generation
         ],
-        claimed.unverified_claims.keys.sort
+        honest.unverified_claims.keys.sort
       )
       %w[
         fault_checkpoint pre_fault_durable_state_sha256
         recovered_durable_state_sha256 recovery_trace
         restart_generation
       ].each do |key|
-        refute claimed.to_h.key?(key)
+        refute honest.to_h.key?(key)
       end
     end
   end
@@ -464,21 +470,103 @@ class QualificationScenarioEvidenceCollectorTest < Minitest::Test
     findings: [],
     faults: []
   )
+    generation_plan =
+      if faults.one?
+        DRIVER::GENERATION_PLANS.fetch(faults.fetch(0))
+      else
+        [ nil ]
+      end
     with_env(
       "HIVE_HOME" => File.join(sandbox, "hive-home")
     ) do
-      DRIVER.new(
-        candidate_source_root: CANDIDATE_SOURCE_ROOT,
-        sandbox_root: sandbox,
-        project: PROJECT,
-        scenario_input:
-          scenario_input(
+      generation_plan.each_with_index do |stop_after, offset|
+        generation = offset + 1
+        if stop_after
+          run_stopping_generation!(
+            sandbox,
+            generation: generation,
+            stop_after: stop_after,
             module_name: module_name,
             operation: operation,
             findings: findings,
             faults: faults
           )
+          next
+        end
+
+        return driver(
+          sandbox,
+          generation: generation,
+          stop_after: nil,
+          module_name: module_name,
+          operation: operation,
+          findings: findings,
+          faults: faults
+        ).call
+      end
+    end
+    raise "qualification generation plan did not finish"
+  end
+
+  def driver(
+    sandbox,
+    generation:,
+    stop_after:,
+    module_name:,
+    operation:,
+    findings:,
+    faults:
+  )
+    DRIVER.new(
+      candidate_source_root: CANDIDATE_SOURCE_ROOT,
+      sandbox_root: sandbox,
+      project: PROJECT,
+      generation: generation,
+      stop_after: stop_after,
+      scenario_input:
+        scenario_input(
+          module_name: module_name,
+          operation: operation,
+          findings: findings,
+          faults: faults
+        )
+    )
+  end
+
+  def run_stopping_generation!(
+    sandbox,
+    generation:,
+    stop_after:,
+    module_name:,
+    operation:,
+    findings:,
+    faults:
+  )
+    pid = fork do
+      driver(
+        sandbox,
+        generation: generation,
+        stop_after: stop_after,
+        module_name: module_name,
+        operation: operation,
+        findings: findings,
+        faults: faults
       ).call
+      Process.exit!(71)
+    rescue StandardError
+      Process.exit!(70)
+    end
+    _pid, status = Process.wait2(pid)
+    assert status.exited?, stop_after
+    assert_equal 76, status.exitstatus, stop_after
+  ensure
+    if pid
+      begin
+        Process.kill("KILL", pid)
+        Process.wait(pid)
+      rescue Errno::ESRCH, Errno::ECHILD
+        nil
+      end
     end
   end
 

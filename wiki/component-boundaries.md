@@ -130,11 +130,16 @@ dependency direction; it is not runtime isolation.
 The row remains `candidate` even though U3 now drives ordinary Patrol and
 Architecture Patrol through their real schedulers, product state, detached
 module hooks, Attempts, and host-reconstructed terminal evidence. The remaining
-qualification work is external process-generation custody for the five fault
-boundaries, a host-owned installed-provider broker and exact installed target,
-plus the protected-main controller/catalog proof. That exception is not
-permission for another recovery store, compatibility effect map, or cutover
-claim.
+qualification work is a host-owned installed-provider broker and exact
+installed target plus the protected-main controller/catalog proof. The lane
+controller now owns the ordinary five-fault process generations: it binds an
+immutable request and output path per generation, accepts private status 76
+only at the planned checkpoint, requires stable executable/sandbox identity,
+snapshots the same repository/state/Attempts roots before and after each
+process, verifies production records without advancing them, and chains the
+result into host receipts. Candidate Actuals contain none of the five recovery
+claims. This exception is not permission for another recovery store,
+compatibility effect map, or cutover claim.
 
 `Hive::Attempts::API` is the guarded reference admission slice. Its public
 result contracts, focused clean-load proof, and exact internal construction

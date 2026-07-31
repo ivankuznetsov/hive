@@ -28,7 +28,9 @@ class ModulesMigrationQualificationScenarioOracleTest <
     observations = ORACLE.new.call(
       descriptor: descriptor,
       lane: "deterministic",
-      actuals: [ actuals ]
+      actuals: [ actuals ],
+      recovery_evidence:
+        qualification_host_recovery(expected)
     )
 
     assert_equal expected, observations.to_h
@@ -55,7 +57,9 @@ class ModulesMigrationQualificationScenarioOracleTest <
       ORACLE.new.call(
         descriptor: descriptor,
         lane: "deterministic",
-        actuals: [ actuals_from(unknown) ]
+        actuals: [ actuals_from(unknown) ],
+        recovery_evidence:
+          qualification_host_recovery(unknown)
       )
     end
 
@@ -63,7 +67,9 @@ class ModulesMigrationQualificationScenarioOracleTest <
       ORACLE.new.call(
         descriptor: descriptor,
         lane: "deterministic",
-        actuals: []
+        actuals: [],
+        recovery_evidence:
+          qualification_host_recovery(expected)
       )
     end
   end
@@ -76,19 +82,55 @@ class ModulesMigrationQualificationScenarioOracleTest <
         fixture,
         lane: "deterministic"
       )
-    forged = JSON.parse(JSON.generate(expected))
-    forged.dig(
-      "observations",
-      0,
-      "recovery_trace",
-      0
-    )["phase"] = "module_finalize"
+    recovery = qualification_host_recovery(expected)
+    fields = JSON.parse(JSON.generate(recovery.fetch(0).fields))
+    fields.fetch("recovery_trace").fetch(0)["phase"] =
+      "module_finalize"
+    forged = [
+      Hive::Modules::Migration::
+        QualificationScenarioRecoveryEvidence::Projection.new(
+          case_id: recovery.fetch(0).case_id,
+          process_result_sha256:
+            recovery.fetch(0).process_result_sha256,
+          fields: fields.freeze
+        ).freeze
+    ]
 
     assert_raises(Hive::ConfigError) do
       ORACLE.new.call(
         descriptor: descriptor,
         lane: "deterministic",
-        actuals: [ actuals_from(forged) ]
+        actuals: [ actuals_from(expected) ],
+        recovery_evidence: forged
+      )
+    end
+  end
+
+  def test_rejects_missing_or_extra_host_recovery_cases
+    fixture = qualification_run_fixture
+    descriptor = DESCRIPTOR.load(fixture.fetch(:descriptor))
+    expected =
+      qualification_scenario_observations(
+        fixture,
+        lane: "deterministic"
+      )
+    actuals = [ actuals_from(expected) ]
+    recovery = qualification_host_recovery(expected)
+
+    assert_raises(Hive::ConfigError) do
+      ORACLE.new.call(
+        descriptor: descriptor,
+        lane: "deterministic",
+        actuals: actuals,
+        recovery_evidence: []
+      )
+    end
+    assert_raises(Hive::ConfigError) do
+      ORACLE.new.call(
+        descriptor: descriptor,
+        lane: "deterministic",
+        actuals: actuals,
+        recovery_evidence: recovery + recovery
       )
     end
   end
@@ -157,15 +199,6 @@ class ModulesMigrationQualificationScenarioOracleTest <
   private
 
   def actuals_from(observations)
-    rows = observations.fetch("observations").map do |row|
-      JSON.parse(JSON.generate(row)).tap do |copy|
-        copy.delete("decision_class")
-      end
-    end
-    ACTUALS.from_h(
-      "schema" => ACTUALS::SCHEMA,
-      "schema_version" => ACTUALS::SCHEMA_VERSION,
-      "actuals" => rows
-    )
+    qualification_candidate_actuals(observations)
   end
 end

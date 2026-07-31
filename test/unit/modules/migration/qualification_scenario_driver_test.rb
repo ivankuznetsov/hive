@@ -1,5 +1,7 @@
 require "test_helper"
 require "hive"
+require "hive/modules/migration/qualification_checkpoint_evidence"
+require "hive/modules/migration/qualification_checkpoint_verifier"
 require "hive/modules/migration/qualification_scenario_driver"
 require "hive/modules/migration/qualification_scenario_actuals"
 require "hive/modules/migration/qualification_scenario_input"
@@ -8,6 +10,10 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
   include HiveTestHelper
 
   DRIVER = Hive::Modules::Migration::QualificationScenarioDriver
+  CHECKPOINTS =
+    Hive::Modules::Migration::QualificationCheckpointEvidence
+  CHECKPOINT_VERIFIER =
+    Hive::Modules::Migration::QualificationCheckpointVerifier
   ACTUALS =
     Hive::Modules::Migration::QualificationScenarioActuals
   INPUT =
@@ -107,10 +113,7 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
       assert_equal 1, targets.grep(%r{\Afeatures/}).length
       assert_equal 1, targets.grep(%r{\Aruns/selection-}).length
 
-      assert_nil row.fetch("fault_checkpoint")
-      assert_equal 1, row.fetch("restart_generation")
-      assert_equal row.fetch("pre_fault_durable_state_sha256"),
-                   row.fetch("recovered_durable_state_sha256")
+      assert_oracle_owned_fields_absent(row)
       validated = ACTUALS.from_h(
         "schema" => ACTUALS::SCHEMA,
         "schema_version" => ACTUALS::SCHEMA_VERSION,
@@ -152,8 +155,7 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
         branch_changed: nil,
         rationale: "not_due",
         outcome_class: "not_dispatched",
-        effects: 0,
-        restart_generation: 1
+        effects: 0
       },
       "same_commit" => {
         trigger: "new_commits",
@@ -161,8 +163,7 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
         branch_changed: false,
         rationale: "not_due",
         outcome_class: "not_dispatched",
-        effects: 0,
-        restart_generation: 1
+        effects: 0
       },
       "new_commit" => {
         trigger: "new_commits",
@@ -170,8 +171,7 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
         branch_changed: true,
         rationale: "due",
         outcome_class: "completed",
-        effects: 5,
-        restart_generation: 1
+        effects: 5
       },
       "timer_reset_reload" => {
         trigger: "timer",
@@ -179,8 +179,7 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
         branch_changed: nil,
         rationale: "not_due",
         outcome_class: "not_dispatched",
-        effects: 0,
-        restart_generation: 2
+        effects: 0
       },
       "restart" => {
         trigger: "timer",
@@ -188,8 +187,7 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
         branch_changed: nil,
         rationale: "due",
         outcome_class: "completed",
-        effects: 4,
-        restart_generation: 2
+        effects: 4
       }
     }
 
@@ -221,16 +219,13 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
         assert_equal expected.fetch(:effects),
                      result.effect_index.legacy_count,
                      operation
-        assert_equal expected.fetch(:restart_generation),
-                     row.fetch("restart_generation"),
-                     operation
         assert_equal "launch",
                      row.dig("decisions", 0, "outcome"),
                      operation
         assert_equal "admitted",
                      row.dig("decisions", 0, "reason"),
                      operation
-        refute row.key?("decision_class"), operation
+        assert_oracle_owned_fields_absent(row, operation)
       end
     end
   end
@@ -485,12 +480,7 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
       assert_equal 1, row.fetch("attempts").length
       assert_equal "succeeded",
                    row.dig("attempts", 0, "outcome")
-      assert_equal 2, row.fetch("restart_generation")
-      assert_includes(
-        row.fetch("recovery_trace")
-          .map { |trace| trace.fetch("phase") },
-        "duplicate_delivery"
-      )
+      assert_oracle_owned_fields_absent(row)
       assert_empty result.comparator_record.fetch(
         "duplicate_effects"
       )
@@ -523,28 +513,7 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
                          attempt.fetch("retry_charge")
                        },
                      operation
-        trace = row.fetch("recovery_trace")
-        assert_equal(
-          %w[
-            module_dispatch retry_cooldown retry_dispatch
-            module_terminal module_finalize
-          ],
-          trace.map { |entry| entry.fetch("phase") },
-          operation
-        )
-        initial = Time.iso8601(trace.fetch(0).fetch("at"))
-        deferred = Time.iso8601(trace.fetch(1).fetch("at"))
-        retried = Time.iso8601(trace.fetch(2).fetch("at"))
-        assert_equal 3_599, deferred - initial, operation
-        assert_equal 1, retried - deferred, operation
-        assert_equal 1,
-                     trace.fetch(1).fetch("attempt_count"),
-                     operation
-        assert_equal 2,
-                     trace.fetch(2).fetch("attempt_count"),
-                     operation
-        assert_equal 2, row.fetch("restart_generation"),
-                     operation
+        assert_oracle_owned_fields_absent(row, operation)
       end
     end
   end
@@ -553,21 +522,12 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
     skip "POSIX fork unavailable" unless Process.respond_to?(:fork)
 
     with_tmp_dir do |sandbox|
-      result = with_env(
-        "HIVE_HOME" =>
-          File.join(sandbox, "hive-home")
-      ) do
-        driver(
-          sandbox,
-          faults: [ "after_module_decision" ]
-        ).call
-      end
+      result = run_driver(
+        sandbox,
+        faults: [ "after_module_decision" ]
+      )
       row = result.observation
-      assert_equal "after_module_decision",
-                   row.fetch("fault_checkpoint")
-      assert_equal 2, row.fetch("restart_generation")
-      refute_equal row.fetch("pre_fault_durable_state_sha256"),
-                   row.fetch("recovered_durable_state_sha256")
+      assert_oracle_owned_fields_absent(row)
       assert_equal %w[lost terminal],
                    row.fetch("attempts").map { |attempt|
                      attempt.fetch("state")
@@ -593,32 +553,14 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
   def test_legacy_capture_and_decision_faults_recover_from_fresh_schedulers
     skip "POSIX fork unavailable" unless Process.respond_to?(:fork)
 
-    {
-      "after_legacy_capture" =>
-        %w[legacy_capture legacy_recovery],
-      "after_legacy_decision" =>
-        %w[legacy_decision legacy_projection]
-    }.each do |fault, required_phases|
+    %w[
+      after_legacy_capture after_legacy_decision
+    ].each do |fault|
       with_tmp_dir do |sandbox|
         result = run_driver(sandbox, faults: [ fault ])
         row = result.observation
 
-        assert_equal fault, row.fetch("fault_checkpoint"),
-                     fault
-        assert_equal 2, row.fetch("restart_generation"),
-                     fault
-        refute_equal(
-          row.fetch("pre_fault_durable_state_sha256"),
-          row.fetch("recovered_durable_state_sha256"),
-          fault
-        )
-        assert_equal(
-          required_phases,
-          row.fetch("recovery_trace")
-            .first(required_phases.length)
-            .map { |entry| entry.fetch("phase") },
-          fault
-        )
+        assert_oracle_owned_fields_absent(row, fault)
         assert_equal "completed",
                      capture_for(row).outcome_class,
                      fault
@@ -642,36 +584,14 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
     skip "POSIX fork unavailable" unless Process.respond_to?(:fork)
 
     {
-      "after_effect_intent" => {
-        restart_generation: 2,
-        phases: %w[effect_intent effect_recovery],
-        receipt_status: "committed"
-      },
-      "during_reconciliation" => {
-        restart_generation: 3,
-        phases: %w[
-          effect_dispatch_uncertain effect_reconciliation
-          effect_recovery
-        ],
-        receipt_status: "reconciled"
-      }
-    }.each do |fault, expected|
+      "after_effect_intent" => "committed",
+      "during_reconciliation" => "reconciled"
+    }.each do |fault, expected_receipt_status|
       with_tmp_dir do |sandbox|
         result = run_driver(sandbox, faults: [ fault ])
         row = result.observation
 
-        assert_equal fault, row.fetch("fault_checkpoint"),
-                     fault
-        assert_equal expected.fetch(:restart_generation),
-                     row.fetch("restart_generation"),
-                     fault
-        assert_equal(
-          expected.fetch(:phases),
-          row.fetch("recovery_trace")
-            .first(expected.fetch(:phases).length)
-            .map { |entry| entry.fetch("phase") },
-          fault
-        )
+        assert_oracle_owned_fields_absent(row, fault)
         receipt = result.comparator_record
                         .fetch("legacy_effects")
                         .find do |candidate|
@@ -679,7 +599,7 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
             "fingerprints/qualification-recovery"
         end
         refute_nil receipt, fault
-        assert_equal expected.fetch(:receipt_status),
+        assert_equal expected_receipt_status,
                      receipt.fetch("status"),
                      fault
         assert_equal 5, result.effect_index.legacy_count,
@@ -702,17 +622,7 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
       )
       row = result.observation
 
-      assert_nil row.fetch("fault_checkpoint")
-      assert_equal 3, row.fetch("restart_generation")
-      assert_equal(
-        %w[
-          effect_dispatch_uncertain reconciliation_failure
-          effect_recovery
-        ],
-        row.fetch("recovery_trace")
-          .first(3)
-          .map { |entry| entry.fetch("phase") }
-      )
+      assert_oracle_owned_fields_absent(row)
       receipt = result.comparator_record
                       .fetch("legacy_effects")
                       .find do |candidate|
@@ -817,17 +727,44 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
     findings: [],
     faults: []
   )
+    generation_plan =
+      if faults.one?
+        DRIVER::GENERATION_PLANS.fetch(faults.fetch(0))
+      elsif operation == "reconciliation_failure"
+        DRIVER::GENERATION_PLANS.fetch(operation)
+      else
+        [ nil ]
+      end
     with_env(
       "HIVE_HOME" => File.join(sandbox, "hive-home")
     ) do
-      driver(
-        sandbox,
-        module_name: module_name,
-        operation: operation,
-        findings: findings,
-        faults: faults
-      ).call
+      generation_plan.each_with_index do |stop_after, index|
+        generation = index + 1
+        if stop_after
+          run_stopping_generation!(
+            sandbox,
+            generation: generation,
+            stop_after: stop_after,
+            module_name: module_name,
+            operation: operation,
+            findings: findings,
+            faults: faults
+          )
+          next
+        end
+
+        return driver(
+          sandbox,
+          generation: generation,
+          stop_after: nil,
+          module_name: module_name,
+          operation: operation,
+          findings: findings,
+          faults: faults
+        ).call
+      end
     end
+    raise "qualification generation plan did not finish"
   end
 
   def driver(
@@ -835,12 +772,16 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
     module_name: "patrol",
     operation: "timer_due",
     findings: [],
-    faults: []
+    faults: [],
+    generation: 1,
+    stop_after: nil
   )
     DRIVER.new(
       candidate_source_root: CANDIDATE_SOURCE_ROOT,
       sandbox_root: sandbox,
       project: PROJECT,
+      generation: generation,
+      stop_after: stop_after,
       scenario_input: scenario_input(
         module_name: module_name,
         operation: operation,
@@ -978,9 +919,9 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
   def semantic_observation(row)
     row.slice(
       *%w[
-        case_id comparator_semantic_digest decision_class event event_id
-        fault_checkpoint legacy_capture_id legacy_effect_keys module
-        module_effect_keys repository_sha restart_generation trigger_digest
+        case_id comparator_semantic_digest event event_id legacy_capture_id
+        legacy_effect_keys module module_effect_keys repository_sha
+        trigger_digest
       ]
     ).merge(
       "decisions" => row.fetch("decisions").map do |decision|
@@ -997,5 +938,78 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
         )
       end
     )
+  end
+
+  def run_stopping_generation!(
+    sandbox,
+    generation:,
+    stop_after:,
+    module_name:,
+    operation:,
+    findings:,
+    faults:
+  )
+    pid = fork do
+      driver(
+        sandbox,
+        generation: generation,
+        stop_after: stop_after,
+        module_name: module_name,
+        operation: operation,
+        findings: findings,
+        faults: faults
+      ).call
+      Process.exit!(71)
+    rescue StandardError
+      Process.exit!(70)
+    end
+    _pid, status = Process.wait2(pid)
+    assert status.exited?, stop_after
+    assert_equal 76, status.exitstatus, stop_after
+    snapshot = CHECKPOINTS.new.capture(
+      sandbox_root: sandbox,
+      roots: {
+        "hive_home" => File.join(sandbox, "hive-home"),
+        "hive_state" => File.join(sandbox, "hive-state"),
+        "repository" => File.join(sandbox, "repository")
+      }
+    )
+    verifier = CHECKPOINT_VERIFIER.new
+    evidence = verifier.call(
+      case_id:
+        scenario_input(
+          module_name: module_name,
+          operation: operation,
+          findings: findings,
+          faults: faults
+        ).case_id,
+      generation: generation,
+      checkpoint: stop_after,
+      snapshot: snapshot,
+      sandbox_root: sandbox,
+      scenario_input: scenario_input(
+        module_name: module_name,
+        operation: operation,
+        findings: findings,
+        faults: faults
+      )
+    )
+    assert_equal stop_after, evidence.checkpoint
+    assert_equal snapshot.sha256, evidence.state_sha256
+  ensure
+    if pid
+      begin
+        Process.kill("KILL", pid)
+        Process.wait(pid)
+      rescue Errno::ESRCH, Errno::ECHILD
+        nil
+      end
+    end
+  end
+
+  def assert_oracle_owned_fields_absent(row, message = nil)
+    ACTUALS::ORACLE_KEYS.each do |key|
+      refute row.key?(key), message || key
+    end
   end
 end

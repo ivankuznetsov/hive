@@ -55,9 +55,10 @@ class QualificationLaneRunnerTest < Minitest::Test
   end
 
   class ScenarioProcess
-    def initialize(actual:, record:)
+    def initialize(actual:, record:, unexpected_exit: false)
       @actual = actual
       @record = record
+      @unexpected_exit = unexpected_exit
     end
 
     def call(workspace:, argv:, **)
@@ -71,6 +72,33 @@ class QualificationLaneRunnerTest < Minitest::Test
         root: workspace,
         label: "test qualification process"
       )
+      sandbox = File.join(workspace, request.sandbox_root_ref)
+      %w[hive-home hive-state repository].each do |name|
+        FileUtils.mkdir_p(
+          File.join(sandbox, name),
+          mode: 0o700
+        )
+      end
+      marker = File.join(
+        sandbox,
+        "hive-state",
+        "generation-#{request.generation}.json"
+      )
+      File.binwrite(marker, "{}")
+      File.chmod(0o600, marker)
+      if @unexpected_exit
+        return process_result(
+          status: "failed",
+          exit_status: 1,
+          attempt_count: 0
+        )
+      end
+      return process_result(
+        status: "failed",
+        exit_status: 76,
+        attempt_count: 0
+      ) if request.stop_after
+
       directory.atomic_write(
         request.output_ref,
         Hive::Modules::Migration::
@@ -106,6 +134,16 @@ class QualificationLaneRunnerTest < Minitest::Test
         mode: 0o600,
         expected_absent: true
       )
+      process_result(
+        status: "passed",
+        exit_status: 0,
+        attempt_count: 2
+      )
+    end
+
+    private
+
+    def process_result(status:, exit_status:, attempt_count:)
       empty_stream = {
         "bytes" => 0,
         "sha256" => Digest::SHA256.hexdigest(""),
@@ -113,14 +151,14 @@ class QualificationLaneRunnerTest < Minitest::Test
       }.freeze
       teardown = {
         "status" => "passed",
-        "attempt_count" => 2,
-        "custody_count" => 2,
+        "attempt_count" => attempt_count,
+        "custody_count" => attempt_count,
         "live_processes" => 0,
         "kill_authority" => "host_pid_namespace"
       }.freeze
       PROCESS_RESULT.new(
-        status: "passed",
-        exit_status: 0,
+        status: status,
+        exit_status: exit_status,
         signal: nil,
         timed_out: false,
         network_isolated: true,
@@ -129,8 +167,8 @@ class QualificationLaneRunnerTest < Minitest::Test
         duration_seconds: 0.1,
         executable_sha256: "1" * 64,
         ruby_sha256: "2" * 64,
-        attempt_count: 2,
-        custody_count: 2,
+        attempt_count: attempt_count,
+        custody_count: attempt_count,
         sandbox_profile_sha256: "3" * 64,
         source_inventory_sha256: "4" * 64,
         installed_inventory_sha256: "5" * 64,
@@ -172,6 +210,41 @@ class QualificationLaneRunnerTest < Minitest::Test
     def call(**)
       raise Hive::ConfigError,
             "patrol qualification host evidence is malformed"
+    end
+  end
+
+  class CheckpointVerifier
+    def initialize
+      @evidence =
+        Hive::Modules::Migration::
+          QualificationCheckpointEvidence.new
+    end
+
+    def call(checkpoint:, snapshot:, generation:, **)
+      @evidence.bind(
+        checkpoint: checkpoint,
+        snapshot: snapshot,
+        facts: {
+          "attempt_count" => 0,
+          "decision_count" => 0,
+          "generation" => generation
+        }
+      )
+    end
+  end
+
+  class RecoveryEvidence
+    def initialize(fields:)
+      @fields = fields
+    end
+
+    def call(result:, scenario_input:, **)
+      Hive::Modules::Migration::
+        QualificationScenarioRecoveryEvidence::Projection.new(
+          case_id: scenario_input.case_id,
+          process_result_sha256: result.sha256,
+          fields: @fields
+        ).freeze
     end
   end
 
@@ -297,9 +370,7 @@ class QualificationLaneRunnerTest < Minitest::Test
           fixture,
           lane: "deterministic"
         ).fetch("observations").fetch(0)
-      actual = observation.reject do |key, _value|
-        key == "decision_class"
-      end
+      actual = candidate_actual(observation)
       result = runner(
         repository,
         source_materializer: SourceMaterializer.new,
@@ -309,6 +380,10 @@ class QualificationLaneRunnerTest < Minitest::Test
           actual: actual,
           record: fixture.fetch(:observation_record)
         ),
+        recovery_evidence:
+          RecoveryEvidence.new(
+            fields: recovery_fields(observation)
+          ),
         verifier: AcceptingVerifier
       ).call(
         run_id: run_id,
@@ -324,6 +399,8 @@ class QualificationLaneRunnerTest < Minitest::Test
       assert_equal(
         [
           "artifacts/host-evidence/#{actual.fetch('case_id')}.json",
+          "artifacts/host-recovery/#{actual.fetch('case_id')}.json",
+          "artifacts/process-generations/#{actual.fetch('case_id')}.json",
           "artifacts/process-results.json",
           "artifacts/scenario-observations.json",
           "bundle.json",
@@ -353,9 +430,7 @@ class QualificationLaneRunnerTest < Minitest::Test
           fixture,
           lane: "deterministic"
         ).fetch("observations").fetch(0)
-      actual = observation.reject do |key, _value|
-        key == "decision_class"
-      end
+      actual = candidate_actual(observation)
       result = runner(
         repository,
         source_materializer: SourceMaterializer.new,
@@ -365,6 +440,10 @@ class QualificationLaneRunnerTest < Minitest::Test
           actual: actual,
           record: fixture.fetch(:observation_record)
         ),
+        recovery_evidence:
+          RecoveryEvidence.new(
+            fields: recovery_fields(observation)
+          ),
         evidence_collector: RejectingEvidenceCollector.new,
         verifier: AcceptingVerifier
       ).call(
@@ -432,6 +511,60 @@ class QualificationLaneRunnerTest < Minitest::Test
     end
   end
 
+  def test_failed_generation_retains_its_process_result
+    with_qualification_repository do |repository, fixture, run_id|
+      observation =
+        qualification_scenario_observations(
+          fixture,
+          lane: "deterministic"
+        ).fetch("observations").fetch(0)
+      actual = candidate_actual(observation)
+      result = runner(
+        repository,
+        source_materializer: SourceMaterializer.new,
+        installed_materializer: InstalledMaterializer.new,
+        scenario_process: ScenarioProcess.new(
+          actual: actual,
+          record: fixture.fetch(:observation_record),
+          unexpected_exit: true
+        ),
+        recovery_evidence:
+          RecoveryEvidence.new(
+            fields: recovery_fields(observation)
+          ),
+        verifier: AcceptingVerifier
+      ).call(
+        run_id: run_id,
+        lane: "deterministic"
+      )
+
+      assert_equal "failed", result.status
+      assert_equal "evidence_verification_failed",
+                   result.failure_reason
+      lane = repository.qualification_lane(
+        run_id,
+        "deterministic"
+      )
+      processes = JSON.parse(
+        lane.fetch("artifacts/process-results.json")
+      ).fetch("processes")
+      assert_equal 1, processes.length
+      assert_equal "patrol-case",
+                   processes.fetch(0).fetch("case_id")
+      assert_equal 1,
+                   processes.fetch(0).fetch("generation")
+      assert_equal "after_legacy_capture",
+                   processes.fetch(0).fetch(
+                     "planned_checkpoint"
+                   )
+      assert_equal 1,
+                   processes.fetch(0).fetch("exit_status")
+      assert_nil processes.fetch(0).fetch(
+        "generation_receipt_sha256"
+      )
+    end
+  end
+
   def test_successful_process_that_crosses_lane_wall_deadline_is_a_timeout
     with_qualification_repository do |repository, fixture, run_id|
       observation =
@@ -439,9 +572,7 @@ class QualificationLaneRunnerTest < Minitest::Test
           fixture,
           lane: "deterministic"
         ).fetch("observations").fetch(0)
-      actual = observation.reject do |key, _value|
-        key == "decision_class"
-      end
+      actual = candidate_actual(observation)
       times = [
         NOW,
         NOW + 301,
@@ -458,6 +589,11 @@ class QualificationLaneRunnerTest < Minitest::Test
             actual: actual,
             record: fixture.fetch(:observation_record)
           ),
+          recovery_evidence:
+            RecoveryEvidence.new(
+              fields: recovery_fields(observation)
+            ),
+          checkpoint_verifier: CheckpointVerifier.new,
           evidence_collector: EvidenceCollector.new,
           verifier: AcceptingVerifier
         ).call(
@@ -508,13 +644,29 @@ class QualificationLaneRunnerTest < Minitest::Test
 
   def runner(repository, **options)
     options = {
-      evidence_collector: EvidenceCollector.new
+      evidence_collector: EvidenceCollector.new,
+      checkpoint_verifier: CheckpointVerifier.new
     }.merge(options)
     Hive::Modules::Migration::QualificationLaneRunner.new(
       repository: repository,
       clock: -> { NOW },
       **options
     )
+  end
+
+  def candidate_actual(observation)
+    observation.reject do |key, _value|
+      Hive::Modules::Migration::
+        QualificationScenarioActuals::ORACLE_KEYS.include?(key)
+    end
+  end
+
+  def recovery_fields(observation)
+    Hive::Modules::Migration::
+      QualificationScenarioObservations::
+        HOST_RECOVERY_KEYS.to_h do |key|
+          [ key, observation.fetch(key) ]
+        end.freeze
   end
 
   def with_qualification_repository

@@ -12,6 +12,8 @@ class ModulesMigrationQualificationScenarioRequestTest < Minitest::Test
     request = REQUEST.load(canonical(valid_request))
 
     assert_equal "ordinary-due-clean", request.case_id
+    assert_equal 2, request.generation
+    assert_nil request.stop_after
     assert_equal(
       "github.com/example/qualification-demo",
       request.project.fetch("repository")
@@ -25,6 +27,8 @@ class ModulesMigrationQualificationScenarioRequestTest < Minitest::Test
           root,
           "cases",
           "ordinary-due-clean",
+          "generations",
+          "2",
           "output",
           "scenario-actuals.json"
         ),
@@ -61,6 +65,45 @@ class ModulesMigrationQualificationScenarioRequestTest < Minitest::Test
     end
   end
 
+  def test_rejects_invalid_generations_and_mismatched_output_refs
+    [ 0, 4, "2", nil ].each do |generation|
+      request = valid_request.merge("generation" => generation)
+      assert_raises(Hive::ConfigError, generation.inspect) do
+        REQUEST.load(canonical(request))
+      end
+    end
+
+    request = valid_request.merge(
+      "output_ref" =>
+        "cases/ordinary-due-clean/generations/1/output/" \
+        "scenario-actuals.json"
+    )
+    assert_raises(Hive::ConfigError) do
+      REQUEST.load(canonical(request))
+    end
+  end
+
+  def test_rejects_unknown_stop_after
+    request = valid_request.merge("stop_after" => "after-anything")
+
+    assert_raises(Hive::ConfigError) do
+      REQUEST.load(canonical(request))
+    end
+  end
+
+  def test_accepts_only_the_closed_checkpoint_vocabulary
+    REQUEST::STOP_AFTER.each do |checkpoint|
+      request = REQUEST.load(
+        canonical(
+          valid_request.merge("stop_after" => checkpoint)
+        )
+      )
+
+      assert_equal checkpoint, request.stop_after
+      assert_empty schema.validate(request.to_h).to_a
+    end
+  end
+
   private
 
   def valid_request
@@ -68,13 +111,16 @@ class ModulesMigrationQualificationScenarioRequestTest < Minitest::Test
       "schema" => "hive-patrol-qualification-scenario-request",
       "schema_version" => 1,
       "case_id" => "ordinary-due-clean",
+      "generation" => 2,
+      "stop_after" => nil,
       "scenario_sha256" => "c" * 64,
       "scenario_ref" => "inputs/scenarios/scenario.yml",
       "package_root_ref" => "targets/source",
       "sandbox_root_ref" =>
         "cases/ordinary-due-clean/sandbox",
       "output_ref" =>
-        "cases/ordinary-due-clean/output/scenario-actuals.json",
+        "cases/ordinary-due-clean/generations/2/output/" \
+        "scenario-actuals.json",
       "project" => {
         "project_id" => "11111111-1111-4111-8111-111111111111",
         "name" => "qualification-demo",

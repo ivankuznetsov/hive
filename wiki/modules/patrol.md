@@ -287,12 +287,17 @@ from the raw stores. Architecture cases additionally bind the derived v2
 manifest identity, v3 job aggregate, every aggregate transition intent and
 receipt, terminal action outcomes, exact retirement generation, and complete
 schedule event envelope. A mismatch fails the lane before the oracle runs, and
-the host reconstruction is retained as a per-case artifact. Terminal stores
-cannot prove which OS process exited at a fault boundary, how many independently
-supervised generations ran, or when pre/post-fault snapshots were taken.
-Candidate `recovery_trace`, restart count, checkpoint, and state digests
-therefore remain explicitly unverified until the lane controller owns
-multi-generation execution.
+the host reconstruction is retained as a per-case artifact. The lane controller
+also owns the missing process evidence: it launches one full process per
+generation over one sandbox and `HIVE_HOME`, accepts private status 76 only at
+the host-planned checkpoint, requires the same executable and sandbox
+identities, captures bounded before/after snapshots of repository, Hive state,
+and Attempts, and validates the raw production boundary without advancing it.
+Generation receipts bind request, process, snapshot, checkpoint evidence,
+predecessor receipt, and final output. Candidate Actuals omit `fault_checkpoint`,
+both durable-state digests, `recovery_trace`, and `restart_generation`; the
+host oracle adds them only after the receipt chain verifies. Failed generations
+retain their bounded process evidence even when the chain cannot complete.
 
 Both candidate lanes run without network access or candidate-visible
 credentials. Retryable installed-lane authorization, credential, and provider
@@ -307,10 +312,9 @@ Architecture Patrol's bounded collaborator now reaches real intake, v3 job
 state, discovery/action commands, deterministic event publication, occurrence
 finalization, the private candidate command, detached module routing, Attempts,
 adapter projection, shadow comparison, and independent host reconstruction.
-Independently supervised restart/fault evidence, the installed provider broker
-and exact installed-gem target, and the literal protected-control scenario
-catalog remain open U3 qualification work. None of these diagnostics authorizes
-mutator cutover.
+The installed provider broker and exact installed-gem target, and the literal
+protected-control scenario catalog remain open U3 qualification work. None of
+these diagnostics authorizes mutator cutover.
 
 ## Safety invariants
 

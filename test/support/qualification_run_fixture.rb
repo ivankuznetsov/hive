@@ -6,8 +6,11 @@ require "hive/modules/decision_journal"
 require "hive/modules/event_ledger"
 require "hive/modules/event_publisher"
 require "hive/modules/hook_attempt"
+require "hive/modules/migration/qualification_scenario_actuals"
 require "hive/modules/migration/qualification_scenario_observations"
+require "hive/modules/migration/qualification_scenario_recovery_evidence"
 require "hive/workflow_package/canonical_json"
+require "hive/workflow_package/canonical_yaml"
 require_relative "patrol_evidence_scenario"
 
 module QualificationRunFixture
@@ -15,12 +18,55 @@ module QualificationRunFixture
 
   COMMIT_SHA = "c" * 40
 
+  def qualification_candidate_actuals(observations)
+    model =
+      Hive::Modules::Migration::QualificationScenarioActuals
+    rows = observations.fetch("observations").map do |row|
+      JSON.parse(JSON.generate(row)).tap do |copy|
+        model::ORACLE_KEYS.each { |key| copy.delete(key) }
+      end
+    end
+    model.from_h(
+      "schema" => model::SCHEMA,
+      "schema_version" => model::SCHEMA_VERSION,
+      "actuals" => rows
+    )
+  end
+
+  def qualification_host_recovery(observations)
+    model =
+      Hive::Modules::Migration::
+        QualificationScenarioRecoveryEvidence
+    observations.fetch("observations").map do |row|
+      fields =
+        Hive::Modules::Migration::
+          QualificationScenarioObservations::
+            HOST_RECOVERY_KEYS.to_h do |key|
+              [ key, JSON.parse(JSON.generate(row.fetch(key))) ]
+            end.freeze
+      model::Projection.new(
+        case_id: row.fetch("case_id").dup.freeze,
+        process_result_sha256: ("a" * 64).freeze,
+        fields: fields
+      ).freeze
+    end.freeze
+  end
+
   def qualification_run_fixture
     source = "source archive\n".b
     gem = "candidate gem\n".b
     skills = "skills archive\n".b
     web = "web archive\n".b
-    scenario = "name: patrol-case\nsteps: []\n".b
+    scenario = Hive::WorkflowPackage::CanonicalYAML.dump(
+      "schema" => "hive-patrol-qualification-scenario",
+      "schema_version" => 1,
+      "case_id" => "patrol-case",
+      "module" => "patrol",
+      "operation" => "ordinary_positive_fixture",
+      "clock" => "2026-07-31T12:34:56.123456Z",
+      "faults" => [ "after_legacy_capture" ],
+      "reviewer" => { "findings" => [] }
+    ).b
     installed_files = {
       "inputs/installed-target/bin/hive" => {
         bytes: "#!/usr/bin/env ruby\nputs '{}'\n".b,

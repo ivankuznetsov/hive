@@ -20,10 +20,10 @@ module Hive
     module Migration
       # Trusted host-side reconstruction of one completed candidate case.
       #
-      # Terminal stores cannot reveal which previous process checkpoint was
-      # interrupted or how many externally supervised generations executed.
-      # Those claims remain explicitly unverified until LaneRunner supplies
-      # independent process-generation custody.
+      # This projection deliberately marks process-generation claims
+      # unverified: terminal stores cannot reveal which prior process stopped
+      # or count externally supervised generations. LaneRunner resolves those
+      # claims separately from host-owned checkpoint snapshots and receipts.
       class QualificationScenarioEvidenceCollector
         ERROR =
           "patrol qualification host evidence is malformed".freeze
@@ -59,7 +59,7 @@ module Hive
           "restart_generation" =>
             "terminal state does not count supervised process generations",
           "recovery_trace" =>
-            "candidate trace is not independent process custody",
+            "terminal stores do not contain process-generation custody",
           "pre_fault_durable_state_sha256" =>
             "candidate digest is not an externally timed pre-fault snapshot",
           "recovered_durable_state_sha256" =>

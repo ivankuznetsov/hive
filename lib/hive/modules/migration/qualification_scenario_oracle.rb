@@ -3,6 +3,7 @@ require "hive/modules/daemon_runtime"
 require "hive/modules/migration/qualification_run_descriptor"
 require "hive/modules/migration/qualification_scenario_actuals"
 require "hive/modules/migration/qualification_scenario_observations"
+require "hive/modules/migration/qualification_scenario_recovery_evidence"
 
 module Hive
   module Modules
@@ -12,7 +13,9 @@ module Hive
       # control against raw capture evidence, then attaches qualification
       # identity and decision classification.
       class QualificationScenarioOracle
-        def call(descriptor:, lane:, actuals:)
+        def call(
+          descriptor:, lane:, actuals:, recovery_evidence:
+        )
           unless
             descriptor.is_a?(QualificationRunDescriptor) &&
               QualificationRunDescriptor::LANES.include?(
@@ -22,10 +25,20 @@ module Hive
               !actuals.empty? &&
               actuals.all? do |value|
                 value.is_a?(QualificationScenarioActuals)
+              end &&
+              recovery_evidence.is_a?(Array) &&
+              recovery_evidence.all? do |value|
+                value.is_a?(
+                  QualificationScenarioRecoveryEvidence::Projection
+                )
               end
             malformed!
           end
           expected = expected_decisions(descriptor)
+          recovery = recovery_by_case(
+            descriptor,
+            recovery_evidence
+          )
           rows = actuals.flat_map(&:actuals)
           actual_keys = rows.map do |row|
             [
@@ -44,11 +57,14 @@ module Hive
             expectation = expected.fetch(key)
             verify_identity!(row, expectation)
             verify_control!(row, expectation)
-            verify_recovery_trace!(row, expectation)
-            row.merge(
+            observation = row.merge(
               "decision_class" =>
                 expectation.fetch("decision_class")
+            ).merge(
+              recovery.fetch(row.fetch("case_id")).fields
             )
+            verify_recovery_trace!(observation, expectation)
+            observation
           end.sort_by do |row|
             [
               row.fetch("case_id"),
@@ -71,6 +87,25 @@ module Hive
         end
 
         private
+
+        def recovery_by_case(descriptor, values)
+          expected = descriptor.scenarios.fetch("cases").map do |row|
+            row.fetch("case_id")
+          end.sort
+          actual = values.map(&:case_id)
+          malformed! unless
+            actual.uniq.length == actual.length &&
+              actual.sort == expected
+          values.to_h do |value|
+            fields = value.fields
+            malformed! unless
+              fields.is_a?(Hash) &&
+                fields.keys.sort ==
+                  QualificationScenarioObservations::
+                    HOST_RECOVERY_KEYS.sort
+            [ value.case_id, value ]
+          end.freeze
+        end
 
         def expected_decisions(descriptor)
           descriptor.scenarios.fetch("cases").flat_map do |row|

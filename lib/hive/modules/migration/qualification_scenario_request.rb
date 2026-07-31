@@ -17,9 +17,16 @@ module Hive
         MAX_BYTES = 64 * 1024
         MAX_REF_BYTES = 1024
         MAX_REF_DEPTH = 16
+        MAX_GENERATION = 3
+        STOP_AFTER = %w[
+          after_effect_intent after_legacy_capture after_legacy_decision
+          after_module_decision before_effect_settlement
+          during_reconciliation reconciliation_failure
+        ].freeze
         KEYS = %w[
-          case_id output_ref package_root_ref project sandbox_root_ref
-          scenario_ref scenario_sha256 schema schema_version
+          case_id generation output_ref package_root_ref project
+          sandbox_root_ref scenario_ref scenario_sha256 schema
+          schema_version stop_after
         ].freeze
 
         attr_reader :payload
@@ -52,6 +59,12 @@ module Hive
                 ) &&
                 QualificationRunDescriptor::DIGEST.match?(
                   value["scenario_sha256"].to_s
+                ) &&
+                value["generation"].is_a?(Integer) &&
+                value["generation"].between?(1, MAX_GENERATION) &&
+                (
+                  value["stop_after"].nil? ||
+                    STOP_AFTER.include?(value["stop_after"])
                 )
             project = value["project"]
             exact!(
@@ -84,7 +97,8 @@ module Hive
                 refs.fetch("sandbox_root_ref") ==
                   "cases/#{value.fetch('case_id')}/sandbox" &&
                 refs.fetch("output_ref") ==
-                  "cases/#{value.fetch('case_id')}/output/" \
+                  "cases/#{value.fetch('case_id')}/generations/" \
+                  "#{value.fetch('generation')}/output/" \
                   "scenario-actuals.json"
             immutable(value.merge(refs))
           rescue ArgumentError, KeyError, NoMethodError, TypeError
@@ -145,6 +159,8 @@ module Hive
 
         def to_h = payload
         def case_id = payload.fetch("case_id")
+        def generation = payload.fetch("generation")
+        def stop_after = payload.fetch("stop_after")
         def scenario_sha256 = payload.fetch("scenario_sha256")
         def scenario_ref = payload.fetch("scenario_ref")
         def package_root_ref = payload.fetch("package_root_ref")

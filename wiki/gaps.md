@@ -16,12 +16,13 @@ tags: [gap, todo, release-proof, agent-skills]
   U3 harness now drives all five ordinary recovery faults and both
   Architecture Patrol clean/positive controls through production schedulers,
   product stores, detached module dispatch, Attempts, and host-reconstructed
-  terminal evidence. It still needs host-supervised multi-generation custody
-  for each process-exit fault, the secretless/networkless installed-provider
-  broker and exact installed-gem execution target, and the protected-main
-  literal scenario catalog/controller proof before any migration qualification
-  or cutover claim. Longer elapsed telemetry remains useful but is not a
-  substitute for that protocol.
+  terminal evidence. Host-supervised process generations now cover every
+  process-exit fault with exact checkpoint validation, bounded state snapshots,
+  custody teardown, and chained receipts. It still needs the
+  secretless/networkless installed-provider broker and exact installed-gem
+  execution target, and the protected-main literal scenario catalog/controller
+  proof before any migration qualification or cutover claim. Longer elapsed
+  telemetry remains useful but is not a substitute for that protocol.
 
 - The explicit JobStore fresh-start reset is source- and focused-test-pinned,
   including no-write fresh status, exact registered-project binding,
@@ -406,15 +407,15 @@ runtime-readiness tests. An operator must still explicitly confirm any real
 per-project archive/reset after reviewing `daemon status --json`; U2 does not
 perform that cutover automatically.
 
-U3 now has a candidate-bound ordinary-driver interruption primitive after the
-durable module decision and worker-identity checkpoint. It still needs to make
-the complete compressed evidence protocol part of the test harness, reconcile
-that stranded attempt in a fresh process, feed the result from finalized
-occurrences without consulting EvidenceStore for recovery, cover the other
-required fault boundaries and Architecture Patrol lane, and produce the
-elapsed production qualification set. Until that proof exists, Patrol Effect
-Evidence remains a catalog `candidate`; neither module mutator cutover nor
-boundary promotion is complete.
+U3 now keeps the complete ordinary fault protocol in the permanent harness.
+Fresh candidate processes share only the case sandbox and `HIVE_HOME`; the
+host owns their generation plan, exact status-76 acceptance, raw checkpoint
+verification, bounded snapshots, custody teardown, and receipt chain. Recovery
+continues from finalized occurrences without consulting EvidenceStore for a
+mutation decision, and Architecture Patrol has both clean and positive host
+controls. Patrol Effect Evidence remains a catalog `candidate` until the
+installed lane and protected-main proof close; neither module mutator cutover
+nor boundary promotion is complete.
 The local storage contract now covers portable bounded repair/history cursors,
 streamed occurrence/report inventories, descriptor-relative component custody,
 managed-component and lock symlink refusal, public oversized-record failure,
@@ -957,20 +958,21 @@ version and latest-stable row are both 0.6.9, so `candidate_not_newer` must keep
 the candidate blocked. No version choice, tag, publication, deployment, or
 release was authorized.
 
-## Compressed Patrol qualification still needs independent process and live-lane proof (2026-07-31)
+## Compressed Patrol qualification still needs live-lane and protected-control proof (2026-07-31)
 
-The ordinary candidate driver now reaches all five required fault checkpoints,
-and the host independently reconstructs terminal event, decision, attempt,
-capture, effect, comparator, retirement, and repository evidence. Terminal
-stores still cannot establish the exact prior process exit point, externally
-supervised generation count, or timed pre/post-fault state snapshots. The lane
-controller must own those generations before restart or fault claims qualify.
+The ordinary candidate driver reaches all five required fault checkpoints, and
+the host independently reconstructs terminal event, decision, attempt, capture,
+effect, comparator, retirement, and repository evidence. The lane controller
+now also owns the process generations, checkpoint acceptance, before/after
+snapshots, production-state predicates, custody teardown, and chained receipts.
+Candidate Actuals cannot supply or override those recovery claims.
 
 Architecture Patrol has clean-negative and positive legacy lifecycle controls,
-but not yet full candidate routing and the complete restart/fault matrix. The
-installed lane also still lacks the host-owned fixed-provider broker needed to
-use live credentials without exposing network or secrets to candidate code.
-Finally, the independent protected-main controller and literal scenario catalog
-cannot certify PR #910's own head; the first trusted proof must evaluate a later
-candidate after the controller exists on protected main. Keep required release
-coverage blocked until all of these conditions are satisfied.
+full candidate routing, detached Attempts, and host reconstruction. The
+installed lane still lacks the host-owned fixed-provider broker and exact
+installed-gem target needed to use live credentials without exposing network
+or secrets to candidate code. Finally, the independent protected-main
+controller and literal scenario catalog cannot certify PR #910's own head; the
+first trusted proof must evaluate a later candidate after the controller exists
+on protected main. Keep required release coverage blocked until both conditions
+are satisfied.

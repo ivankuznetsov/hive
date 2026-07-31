@@ -44,7 +44,8 @@ module Hive
         request = load_request(directory)
         unless
           @request_ref ==
-            "requests/#{request.case_id}.json"
+            "requests/#{request.case_id}/" \
+            "generation-#{request.generation}.json"
           raise Hive::ConfigError,
                 "patrol qualification scenario request is unsafe"
         end
@@ -59,20 +60,16 @@ module Hive
           workspace,
           request.sandbox_root_ref
         )
-        unless directory.entry_type(
-          request.sandbox_root_ref,
-          missing: true
-        ).nil?
-          raise Hive::ConfigError,
-                "patrol qualification scenario sandbox is not empty"
-        end
+        validate_sandbox_state!(directory, request)
         result =
           Hive::Modules::Migration::
             QualificationScenarioDriver.new(
               candidate_source_root: package_root,
               sandbox_root: sandbox_root,
               project: request.project,
-              scenario_input: scenario
+              scenario_input: scenario,
+              generation: request.generation,
+              stop_after: request.stop_after
             ).call
         actuals =
           Hive::Modules::Migration::
@@ -147,7 +144,7 @@ module Hive
         value = @request_ref
         unless
           value.match?(
-            %r{\Arequests/[a-z0-9][a-z0-9._-]{0,127}\.json\z}
+            %r{\Arequests/[a-z0-9][a-z0-9._-]{0,127}/generation-[1-3]\.json\z}
           )
           raise Hive::ConfigError,
                 "patrol qualification scenario request is unsafe"
@@ -187,6 +184,19 @@ module Hive
 
         raise Hive::ConfigError,
               "patrol qualification scenario output already exists"
+      end
+
+      def validate_sandbox_state!(directory, request)
+        type = directory.entry_type(
+          request.sandbox_root_ref,
+          missing: true
+        )
+        return if request.generation == 1 &&
+          [ nil, :directory ].include?(type)
+        return if request.generation > 1 && type == :directory
+
+        raise Hive::ConfigError,
+              "patrol qualification scenario sandbox state is unsafe"
       end
 
       def validate_owned_directory!(path)

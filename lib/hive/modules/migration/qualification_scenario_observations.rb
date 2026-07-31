@@ -13,14 +13,13 @@ require "hive/workflow_package/canonical_json"
 module Hive
   module Modules
     module Migration
-      # Canonical driver-produced links from a qualification scenario to the
+      # Canonical host-bound links from a qualification scenario to the
       # production EventLedger, DecisionJournal, Attempts, comparator, capture,
-      # and effect identities it actually observed. The top-level decision_id
-      # is the comparator/descriptor decision identity; decision.decision_id is
-      # the distinct DecisionJournal identity. Fault, durable-state, and
-      # restart-generation values remain driver observations; callers must
-      # additionally bind each row to descriptor cases and immutable
-      # comparator/effect records.
+      # and effect identities independently reconstructed by the host. The
+      # top-level decision_id is the comparator/descriptor decision identity;
+      # decision.decision_id is the distinct DecisionJournal identity. Fault,
+      # durable-state, recovery-trace, and process-generation values come only
+      # from trusted host supervision.
       class QualificationScenarioObservations
         SCHEMA =
           "hive-patrol-qualification-scenario-observations".freeze
@@ -43,6 +42,11 @@ module Hive
           legacy_capture_id legacy_effect_keys module module_effect_keys
           pre_fault_durable_state_sha256 recovered_durable_state_sha256
           recovery_trace repository_sha restart_generation trigger_digest
+        ].freeze
+        HOST_RECOVERY_KEYS = %w[
+          fault_checkpoint pre_fault_durable_state_sha256
+          recovered_durable_state_sha256 recovery_trace
+          restart_generation
         ].freeze
         EVENT_KEYS = %w[
           event_id event_name idempotency_key occurred_at payload project

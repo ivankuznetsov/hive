@@ -1,6 +1,5 @@
 require "digest"
 require "fileutils"
-require "find"
 require "open3"
 require "pathname"
 require "shellwords"
@@ -39,6 +38,26 @@ module Hive
           after_effect_intent after_legacy_capture after_legacy_decision
           after_module_decision during_reconciliation
         ].freeze
+        GENERATION_PLANS = {
+          "after_effect_intent" =>
+            [ "after_effect_intent", nil ].freeze,
+          "after_legacy_capture" =>
+            [ "after_legacy_capture", nil ].freeze,
+          "after_legacy_decision" =>
+            [ "after_legacy_decision", nil ].freeze,
+          "after_module_decision" =>
+            [ "after_module_decision", nil ].freeze,
+          "during_reconciliation" => [
+            "before_effect_settlement",
+            "during_reconciliation",
+            nil
+          ].freeze,
+          "reconciliation_failure" => [
+            "before_effect_settlement",
+            "reconciliation_failure",
+            nil
+          ].freeze
+        }.freeze
         RECOVERY_FINGERPRINT = "qualification-recovery".freeze
         RECOVERY_FINGERPRINT_VALUE = {
           "state" => "qualification-recovered"
@@ -50,9 +69,6 @@ module Hive
         INSTALL_LEAD_TIME_SEC = 3_600
         ATTEMPT_WAIT_TIMEOUT_SEC = 15
         ATTEMPT_WAIT_INTERVAL_SEC = 0.01
-        MAX_DURABLE_FILES = 4_096
-        MAX_DURABLE_FILE_BYTES = 4 * 1024 * 1024
-        MAX_DURABLE_BYTES = 32 * 1024 * 1024
 
         Result = Data.define(
           :observation, :repository_root, :hive_state_path,
@@ -272,17 +288,20 @@ module Hive
         private_constant :QualificationEvidenceStore
 
         def initialize(candidate_source_root:, sandbox_root:, project:,
-                       scenario_input:)
+                       scenario_input:, generation: 1, stop_after: nil)
           @candidate_source_root =
             canonical_root(candidate_source_root, "candidate source")
           @sandbox_root =
             canonical_path(sandbox_root, "sandbox")
           @project = validate_project(project)
           @scenario_input = validate_scenario_input(scenario_input)
+          @generation = Integer(generation)
+          @stop_after = stop_after&.to_s
           @now = @scenario_input.clock
           @clock = -> { @now }
-          @recovery_trace = []
-          @restart_generation = 1
+        rescue ArgumentError, TypeError
+          raise Hive::ConfigError,
+                "qualification scenario generation is malformed"
         end
 
         def call
@@ -291,18 +310,29 @@ module Hive
           validate_sandbox!
           validate_process_home!
           load_runtime!
-          repository_root, hive_state_path = build_sandbox!
-          registry_entry =
-            build_registry!(repository_root, hive_state_path)
-          store = install_candidate_packages!(
-            package_roots,
-            hive_state_path
-          )
-          establish_legacy_ownership!(
-            repository_root,
-            hive_state_path,
-            store
-          )
+          repository_root, hive_state_path, registry_entry, store =
+            if @generation == 1
+              repository_root, hive_state_path = build_sandbox!
+              registry_entry =
+                build_registry!(repository_root, hive_state_path)
+              store = install_candidate_packages!(
+                package_roots,
+                hive_state_path
+              )
+              establish_legacy_ownership!(
+                repository_root,
+                hive_state_path,
+                store
+              )
+              [
+                repository_root,
+                hive_state_path,
+                registry_entry,
+                store
+              ]
+            else
+              load_sandbox!(package_roots)
+            end
           event, capture =
             if architecture_scenario?
               run_legacy_architecture_patrol!(
@@ -315,7 +345,7 @@ module Hive
               prepare_scenario!(
                 repository_root,
                 hive_state_path
-              )
+              ) if @generation == 1
               run_legacy_patrol_with_recovery!(
                 registry_entry,
                 repository_root,
@@ -342,14 +372,6 @@ module Hive
             hive_state_path: hive_state_path,
             store: store
           )
-          restart_generation = [
-            @restart_generation,
-            (
-              RELOADED_OPERATIONS.include?(
-                @scenario_input.operation
-              ) ? 2 : 1
-            )
-          ].max
           assemble_result!(
             case_id: @scenario_input.case_id,
             event: event,
@@ -358,8 +380,7 @@ module Hive
             terminal: terminal,
             attempt_records: attempt_records,
             repository_root: repository_root,
-            hive_state_path: hive_state_path,
-            restart_generation: restart_generation
+            hive_state_path: hive_state_path
           )
         end
 
@@ -457,33 +478,37 @@ module Hive
           repository_root,
           hive_state_path
         )
-          if qualification_fault?("after_legacy_capture")
+          if scenario_fault?("after_legacy_capture")
             return recover_after_legacy_capture!(
               registry_entry,
               repository_root,
               hive_state_path
             )
           end
-          if qualification_fault?("after_legacy_decision")
+          if scenario_fault?("after_legacy_decision")
             return recover_after_legacy_decision!(
               registry_entry,
               repository_root,
               hive_state_path
             )
           end
-          if qualification_fault?("after_effect_intent")
+          if scenario_fault?("after_effect_intent")
             return recover_after_effect_intent!(
               registry_entry,
               repository_root,
               hive_state_path
             )
           end
-          if qualification_fault?("during_reconciliation")
+          if scenario_fault?("during_reconciliation")
             return recover_during_reconciliation!(
               registry_entry,
               repository_root,
               hive_state_path
             )
+          end
+          if scenario_fault?("after_module_decision")
+            return load_legacy_result!(hive_state_path) if
+              @generation > 1
           end
           if @scenario_input.operation == "reconciliation_failure"
             return recover_reconciliation_failure!(
@@ -506,7 +531,7 @@ module Hive
           hive_state_path
         )
           config_loader = ->(root) { Hive::Config.load(root) }
-          run_fault_actor!("after_legacy_capture") do
+          if qualification_fault?("after_legacy_capture")
             dispatches =
               patrol_scheduler(
                 registry_entry,
@@ -519,13 +544,6 @@ module Hive
 
             Process.exit!(FAULT_EXIT_STATUS)
           end
-          record_pre_fault_state!(hive_state_path)
-          trace_runtime!(
-            "legacy_capture",
-            "reserved",
-            hive_state_path: hive_state_path,
-            attempt_store: qualification_attempt_store
-          )
 
           scheduler = patrol_scheduler(
             registry_entry,
@@ -544,12 +562,6 @@ module Hive
             hive_state_path,
             config_loader
           )
-          trace_runtime!(
-            "legacy_recovery",
-            "completed",
-            hive_state_path: hive_state_path,
-            attempt_store: qualification_attempt_store
-          )
           load_legacy_result!(hive_state_path)
         end
 
@@ -559,7 +571,7 @@ module Hive
           hive_state_path
         )
           config_loader = ->(root) { Hive::Config.load(root) }
-          run_fault_actor!("after_legacy_decision") do
+          if qualification_fault?("after_legacy_decision")
             checkpoint = lambda do |phase, _identity|
               next unless phase == :after_legacy_decision
 
@@ -578,13 +590,6 @@ module Hive
               evidence_store_factory: evidence_store_factory
             )
           end
-          record_pre_fault_state!(hive_state_path)
-          trace_runtime!(
-            "legacy_decision",
-            "projection_pending",
-            hive_state_path: hive_state_path,
-            attempt_store: qualification_attempt_store
-          )
 
           scheduler = patrol_scheduler(
             registry_entry,
@@ -596,12 +601,6 @@ module Hive
             raise Hive::ConfigError,
                   "qualification legacy decision recovery redispatched work"
           end
-          trace_runtime!(
-            "legacy_projection",
-            "completed",
-            hive_state_path: hive_state_path,
-            attempt_store: qualification_attempt_store
-          )
           load_legacy_result!(hive_state_path)
         end
 
@@ -610,7 +609,7 @@ module Hive
           repository_root,
           hive_state_path
         )
-          run_fault_actor!("after_effect_intent") do
+          if qualification_fault?("after_effect_intent")
             prime_recovery_effect!(
               registry_entry,
               repository_root,
@@ -621,25 +620,11 @@ module Hive
                     AFTER_EFFECT_INTENT
             )
           end
-          record_pre_fault_state!(hive_state_path)
-          trace_runtime!(
-            "effect_intent",
-            "prepared",
-            hive_state_path: hive_state_path,
-            attempt_store: qualification_attempt_store
-          )
-          result = recover_reserved_patrol!(
+          recover_reserved_patrol!(
             registry_entry,
             repository_root,
             hive_state_path
           )
-          trace_runtime!(
-            "effect_recovery",
-            "committed",
-            hive_state_path: hive_state_path,
-            attempt_store: qualification_attempt_store
-          )
-          result
         end
 
         def recover_during_reconciliation!(
@@ -651,10 +636,7 @@ module Hive
             Hive::Modules::Migration::
               QualificationFaultingStateStore::
                 BEFORE_EFFECT_SETTLEMENT
-          run_fault_actor!(
-            "during_reconciliation",
-            mark_fault: false
-          ) do
+          if qualification_fault?("before_effect_settlement")
             prime_recovery_effect!(
               registry_entry,
               repository_root,
@@ -662,19 +644,12 @@ module Hive
               exit_phase: before_settlement
             )
           end
-          record_pre_fault_state!(hive_state_path)
-          trace_runtime!(
-            "effect_dispatch_uncertain",
-            "written",
-            hive_state_path: hive_state_path,
-            attempt_store: qualification_attempt_store
-          )
 
           reconciliation_phase =
             Hive::Modules::Migration::
               QualificationFaultingStateStore::
                 DURING_RECONCILIATION
-          run_fault_actor!("during_reconciliation") do
+          if qualification_fault?("during_reconciliation")
             recover_reserved_patrol!(
               registry_entry,
               repository_root,
@@ -685,24 +660,11 @@ module Hive
                 )
             )
           end
-          trace_runtime!(
-            "effect_reconciliation",
-            "interrupted",
-            hive_state_path: hive_state_path,
-            attempt_store: qualification_attempt_store
-          )
-          result = recover_reserved_patrol!(
+          recover_reserved_patrol!(
             registry_entry,
             repository_root,
             hive_state_path
           )
-          trace_runtime!(
-            "effect_recovery",
-            "reconciled",
-            hive_state_path: hive_state_path,
-            attempt_store: qualification_attempt_store
-          )
-          result
         end
 
         def recover_reconciliation_failure!(
@@ -714,10 +676,7 @@ module Hive
             Hive::Modules::Migration::
               QualificationFaultingStateStore::
                 BEFORE_EFFECT_SETTLEMENT
-          run_fault_actor!(
-            "reconciliation_failure",
-            mark_fault: false
-          ) do
+          if qualification_fault?("before_effect_settlement")
             prime_recovery_effect!(
               registry_entry,
               repository_root,
@@ -725,62 +684,44 @@ module Hive
               exit_phase: before_settlement
             )
           end
-          record_pre_fault_state!(hive_state_path)
-          trace_runtime!(
-            "effect_dispatch_uncertain",
-            "written",
-            hive_state_path: hive_state_path,
-            attempt_store: qualification_attempt_store
-          )
-          rewrite_recovery_fingerprint!(
-            repository_root,
-            hive_state_path,
-            "state" => "qualification-conflict"
-          )
 
-          error = begin
-            recover_reserved_patrol!(
-              registry_entry,
+          if qualification_fault?("reconciliation_failure")
+            rewrite_recovery_fingerprint!(
               repository_root,
-              hive_state_path
+              hive_state_path,
+              "state" => "qualification-conflict"
             )
-            nil
-          rescue Hive::Error => failure
-            failure
-          end
-          unless
-            error &&
-              error.message.include?(
-                "requires exact reconciliation"
+            error = begin
+              recover_reserved_patrol!(
+                registry_entry,
+                repository_root,
+                hive_state_path
               )
-            raise Hive::ConfigError,
-                  "qualification ambiguous reconciliation did not block"
+              nil
+            rescue Hive::Error => failure
+              failure
+            end
+            unless
+              error &&
+                error.message.include?(
+                  "requires exact reconciliation"
+                )
+              raise Hive::ConfigError,
+                    "qualification ambiguous reconciliation did not block"
+            end
+            Process.exit!(FAULT_EXIT_STATUS)
           end
-          trace_runtime!(
-            "reconciliation_failure",
-            "ambiguous",
-            hive_state_path: hive_state_path,
-            attempt_store: qualification_attempt_store
-          )
 
           rewrite_recovery_fingerprint!(
             repository_root,
             hive_state_path,
             RECOVERY_FINGERPRINT_VALUE
-          )
-          @restart_generation += 1
-          result = recover_reserved_patrol!(
+          ) if @generation > 1
+          recover_reserved_patrol!(
             registry_entry,
             repository_root,
             hive_state_path
           )
-          trace_runtime!(
-            "effect_recovery",
-            "reconciled",
-            hive_state_path: hive_state_path,
-            attempt_store: qualification_attempt_store
-          )
-          result
         end
 
         def prime_recovery_effect!(
@@ -938,56 +879,10 @@ module Hive
           true
         end
 
-        def run_fault_actor!(fault_name, mark_fault: true)
-          unless Process.respond_to?(:fork)
-            raise Hive::ConfigError,
-                  "qualification fault supervisor is unavailable"
-          end
-
-          actor_pid = fork do
-            yield
-            Process.exit!(71)
-          rescue StandardError
-            Process.exit!(70)
-          end
-          _pid, status = Process.wait2(actor_pid)
-          unless status.exited? &&
-                 status.exitstatus == FAULT_EXIT_STATUS
-            raise Hive::ConfigError,
-                  "qualification fault actor did not stop at its checkpoint"
-          end
-          @restart_generation += 1
-          if mark_fault
-            @consumed_faults ||= {}
-            @consumed_faults[fault_name] = true
-          end
-          true
-        rescue Errno::ECHILD
-          raise Hive::ConfigError,
-                "qualification fault actor custody was lost"
-        ensure
-          if actor_pid
-            begin
-              Process.kill("KILL", actor_pid)
-              Process.wait(actor_pid)
-            rescue Errno::ESRCH, Errno::ECHILD
-              nil
-            end
-          end
-        end
-
         def qualification_attempt_store
           Hive::Attempts::Store.new(
             root: qualification_attempts_root
           )
-        end
-
-        def record_pre_fault_state!(hive_state_path)
-          @pre_fault_durable_state_sha256 ||=
-            runtime_state_digest(
-              hive_state_path: hive_state_path,
-              attempt_store: qualification_attempt_store
-            )
         end
 
         def qualification_evidence_store(entry)
@@ -1032,21 +927,19 @@ module Hive
             registry_entry: registry_entry,
             hive_state_path: hive_state_path
           ) unless
-            qualification_fault?("after_module_decision")
+            scenario_fault?("after_module_decision")
 
-          run_fault_actor!("after_module_decision") do
-            run_module_shadow!(
+          if qualification_fault?("after_module_decision")
+            return run_module_shadow!(
               store: store,
               event: event,
               registry_entry: registry_entry,
               hive_state_path: hive_state_path
             )
           end
-          wait_for_fault_workers!
           attempt_store = Hive::Attempts::Store.new(
             root: qualification_attempts_root
           )
-          record_pre_fault_state!(hive_state_path)
           reconciliation =
             Hive::Attempts::Reconciler.new(
               store: attempt_store
@@ -1055,12 +948,6 @@ module Hive
             raise Hive::ConfigError,
                   "qualification fault attempt was not recovered as lost"
           end
-          trace_runtime!(
-            "module_decision",
-            "recovered_lost",
-            hive_state_path: hive_state_path,
-            attempt_store: attempt_store
-          )
 
           run_module_shadow!(
             store: store,
@@ -1121,12 +1008,6 @@ module Hive
           first_tick = runtime.tick(now: @clock.call).fetch(0)
           first_tick_decision_count =
             journal.all.length - decision_count_before
-          trace_runtime!(
-            "module_dispatch",
-            first_tick.fetch(:status).to_s,
-            hive_state_path: hive_state_path,
-            attempt_store: attempt_store
-          )
           if
             @scenario_input.operation ==
               "concurrent_duplicate_delivery"
@@ -1140,12 +1021,6 @@ module Hive
               attempts_api: attempts_api,
               checkpoint: checkpoint
             )
-            trace_runtime!(
-              "duplicate_delivery",
-              "duplicate",
-              hive_state_path: hive_state_path,
-              attempt_store: attempt_store
-            )
           end
           if HANDOFF_FAILURE_OPERATIONS.include?(
             @scenario_input.operation
@@ -1157,8 +1032,7 @@ module Hive
                 registry_entry: registry_entry,
                 attempt_store: attempt_store,
                 attempts_api: attempts_api,
-                checkpoint: checkpoint,
-                hive_state_path: hive_state_path
+                checkpoint: checkpoint
               )
           end
           decisions = journal.all
@@ -1209,12 +1083,6 @@ module Hive
               event_id: event.fetch("event_id"),
               module_name: module_name
             )
-          trace_runtime!(
-            "module_terminal",
-            terminal.outcome,
-            hive_state_path: hive_state_path,
-            attempt_store: attempt_store
-          )
           unless attempt_records.fetch(0).attempt_id ==
                    decision.fetch("attempt_id") &&
                  terminal.state == "terminal" &&
@@ -1258,13 +1126,6 @@ module Hive
             raise Hive::ConfigError,
                   "qualification module event replay was not idempotent"
           end
-          trace_runtime!(
-            "module_finalize",
-            runs.fetch(0).fetch("status"),
-            hive_state_path: hive_state_path,
-            attempt_store: attempt_store
-          )
-
           [ event_decisions, terminal, attempt_records ].freeze
         rescue IndexError
           raise Hive::ConfigError,
@@ -1378,7 +1239,7 @@ module Hive
 
         def recover_launch_handoff!(
           runtime:, store:, registry_entry:, attempt_store:,
-          attempts_api:, checkpoint:, hive_state_path:
+          attempts_api:, checkpoint:
         )
           first_attempts = attempt_store.scan.records
           unless
@@ -1401,13 +1262,6 @@ module Hive
             raise Hive::ConfigError,
                   "qualification launch retry ignored its cooldown"
           end
-          trace_runtime!(
-            "retry_cooldown",
-            "deferred",
-            hive_state_path: hive_state_path,
-            attempt_store: attempt_store
-          )
-
           @now += 1
           fresh = module_runtime(
             store: store,
@@ -1423,12 +1277,6 @@ module Hive
             raise Hive::ConfigError,
                   "qualification launch retry was not dispatched"
           end
-          trace_runtime!(
-            "retry_dispatch",
-            "running",
-            hive_state_path: hive_state_path,
-            attempt_store: attempt_store
-          )
           fresh
         end
 
@@ -1458,8 +1306,11 @@ module Hive
         end
 
         def qualification_fault?(name)
-          @scenario_input.faults.include?(name) &&
-            !(@consumed_faults || {}).fetch(name, false)
+          @stop_after == name
+        end
+
+        def scenario_fault?(name)
+          @scenario_input.faults == [ name ]
         end
 
         def wait_for_fault_workers!
@@ -1581,107 +1432,6 @@ module Hive
                 "qualification attempt lineage is incomplete"
         end
 
-        def runtime_state_digest(hive_state_path:, attempt_store:)
-          journal = Hive::Modules::DecisionJournal.new(
-            root: File.join(hive_state_path, "module-runtime")
-          )
-          Digest::SHA256.hexdigest(
-            canonical(
-              "runtime" =>
-                qualification_runtime_snapshot(
-                  attempt_store: attempt_store,
-                  journal: journal,
-                  hive_state_path: hive_state_path
-                ),
-              "durable_files" =>
-                qualification_durable_files(
-                  hive_state_path: hive_state_path,
-                  attempts_root: attempt_store.root
-                )
-            )
-          ).freeze
-        end
-
-        def qualification_durable_files(
-          hive_state_path:,
-          attempts_root:
-        )
-          inventory = {}
-          total_bytes = 0
-          file_count = 0
-          {
-            "hive-state" => hive_state_path,
-            "attempts" => attempts_root
-          }.each do |label, root|
-            next unless File.exist?(root)
-
-            root = File.expand_path(root)
-            Find.find(root) do |path|
-              next if path == root
-
-              stat = File.lstat(path)
-              if stat.directory?
-                next
-              end
-              unless
-                stat.file? &&
-                  !stat.symlink? &&
-                  stat.nlink == 1 &&
-                  File.realpath(path).start_with?(
-                    "#{root}#{File::SEPARATOR}"
-                  )
-                raise Hive::ConfigError,
-                      "qualification durable state is unsafe"
-              end
-              file_count += 1
-              if file_count > MAX_DURABLE_FILES ||
-                 stat.size > MAX_DURABLE_FILE_BYTES
-                raise Hive::ConfigError,
-                      "qualification durable state exceeds its bound"
-              end
-              total_bytes += stat.size
-              if total_bytes > MAX_DURABLE_BYTES
-                raise Hive::ConfigError,
-                      "qualification durable state exceeds its bound"
-              end
-              relative = path.delete_prefix(
-                "#{root}#{File::SEPARATOR}"
-              )
-              inventory["#{label}/#{relative}"] =
-                Digest::SHA256.file(path).hexdigest
-            end
-          end
-          inventory.sort.to_h.freeze
-        rescue Errno::EACCES, Errno::ENOENT, Errno::ENOTDIR,
-               Errno::ELOOP, IOError, SystemCallError
-          raise Hive::ConfigError,
-                "qualification durable state is unavailable"
-        end
-
-        def trace_runtime!(
-          phase,
-          state,
-          hive_state_path:,
-          attempt_store:
-        )
-          journal = Hive::Modules::DecisionJournal.new(
-            root: File.join(hive_state_path, "module-runtime")
-          )
-          @recovery_trace << {
-            "at" => @clock.call.utc.iso8601(6),
-            "attempt_count" =>
-              attempt_store.scan.records.length,
-            "decision_count" => journal.all.length,
-            "phase" => phase.to_s,
-            "state" => state.to_s,
-            "state_sha256" =>
-              runtime_state_digest(
-                hive_state_path: hive_state_path,
-                attempt_store: attempt_store
-              )
-          }.freeze
-        end
-
         def qualification_runtime_snapshot(
           attempt_store:, journal:, hive_state_path:
         )
@@ -1707,7 +1457,7 @@ module Hive
 
         def assemble_result!(case_id:, event:, capture:, decisions:,
                              terminal:, attempt_records:, repository_root:,
-                             hive_state_path:, restart_generation:)
+                             hive_state_path:)
           comparator = Hive::Modules::Migration::ShadowComparator.new(
             root: File.join(
               hive_state_path,
@@ -1753,36 +1503,6 @@ module Hive
             attempt_records.map do |record|
               attempt_projection(record)
             end.freeze
-          recovered_durable_state_sha256 =
-            if @pre_fault_durable_state_sha256
-              runtime_state_digest(
-                hive_state_path: hive_state_path,
-                attempt_store:
-                  Hive::Attempts::Store.new(
-                    root: qualification_attempts_root
-                  )
-              )
-            else
-              durable_state_digest(
-                event: event,
-                decisions: decisions,
-                attempts: attempts,
-                comparator_record: comparator_record,
-                effect_index: effect_index
-              )
-            end
-          pre_fault_durable_state_sha256 =
-            @pre_fault_durable_state_sha256 ||
-            recovered_durable_state_sha256
-          consumed_faults =
-            (@consumed_faults || {}).select do |_name, consumed|
-              consumed
-            end.keys.sort
-          unless consumed_faults.length <= 1
-            raise Hive::ConfigError,
-                  "qualification fault evidence is ambiguous"
-          end
-          fault_checkpoint = consumed_faults.fetch(0, nil)
           observation = {
             "case_id" => case_id,
             "decision_id" =>
@@ -1803,13 +1523,6 @@ module Hive
                 .map { |entry| entry.fetch("effect_key") }
                 .sort
                 .freeze,
-            "fault_checkpoint" => fault_checkpoint,
-            "pre_fault_durable_state_sha256" =>
-              pre_fault_durable_state_sha256,
-            "recovered_durable_state_sha256" =>
-              recovered_durable_state_sha256,
-            "recovery_trace" => @recovery_trace.freeze,
-            "restart_generation" => restart_generation,
             "event" => event,
             "decisions" => decisions,
             "attempts" => attempts
@@ -2061,7 +1774,21 @@ module Hive
         end
 
         def build_registry!(repository_root, hive_state_path)
-          entry = {
+          entry = registry_entry(repository_root, hive_state_path)
+          registry_path =
+            File.join(@sandbox_root, "hive-home", "config.yml")
+          FileUtils.mkdir_p(File.dirname(registry_path), mode: 0o700)
+          write_fixture(
+            registry_path,
+            Hive::WorkflowPackage::CanonicalYAML.dump(
+              "registered_projects" => [ entry ]
+            )
+          )
+          validate_registry!(registry_path, entry)
+        end
+
+        def registry_entry(repository_root, hive_state_path)
+          {
             "hive_state_path" => hive_state_path,
             "name" => @project.fetch("name"),
             "path" => repository_root,
@@ -2072,16 +1799,19 @@ module Hive
               "qualification:#{@project.fetch('project_id')}",
             "repository" => @project.fetch("repository"),
             "repository_identity" => @project.fetch("repository")
-          }
-          registry_path =
-            File.join(@sandbox_root, "hive-home", "config.yml")
-          FileUtils.mkdir_p(File.dirname(registry_path), mode: 0o700)
-          write_fixture(
-            registry_path,
-            Hive::WorkflowPackage::CanonicalYAML.dump(
-              "registered_projects" => [ entry ]
-            )
-          )
+          }.freeze
+        end
+
+        def validate_registry!(registry_path, entry)
+          stat = File.lstat(registry_path)
+          unless
+            stat.file? &&
+              !stat.symlink? &&
+              stat.uid == Process.euid &&
+              (stat.mode & 0o777) == 0o600
+            raise Hive::ConfigError,
+                  "qualification project registry is malformed"
+          end
           loaded = Hive::Config.load_global_config(registry_path)
           registered =
             Array(loaded["registered_projects"]).fetch(0)
@@ -2091,9 +1821,73 @@ module Hive
                   "qualification project registry is malformed"
           end
           registered.freeze
-        rescue IndexError, KeyError, TypeError
+        rescue Errno::ENOENT, Errno::EACCES, Errno::ENOTDIR,
+               Errno::ELOOP, IndexError, KeyError, TypeError
           raise Hive::ConfigError,
                 "qualification project registry is malformed"
+        end
+
+        def load_sandbox!(package_roots)
+          repository_root = File.join(@sandbox_root, "repository")
+          hive_state_path = File.join(@sandbox_root, "hive-state")
+          hive_home = File.join(@sandbox_root, "hive-home")
+          [
+            repository_root,
+            hive_state_path,
+            hive_home
+          ].each { |path| validate_owned_directory!(path) }
+          unless
+            git!(repository_root, "rev-parse", "--is-inside-work-tree")
+              .strip == "true"
+            raise Hive::ConfigError,
+                  "qualification scenario sandbox is malformed"
+          end
+          registry = validate_registry!(
+            File.join(hive_home, "config.yml"),
+            registry_entry(repository_root, hive_state_path)
+          )
+          store = Hive::ModulePackage::ManagedStore.new(
+            hive_state_path
+          )
+          package_roots.each do |name, root|
+            selection = store.selected(name)
+            active = selection&.fetch("active")
+            unless
+              selection&.fetch("installed") &&
+                selection.fetch("enabled") &&
+                active&.fetch("source_commit") ==
+                  package_revision(root)
+              raise Hive::ConfigError,
+                    "qualification module configuration is unavailable"
+            end
+            store.configuration(
+              name,
+              active.fetch("configuration_digest")
+            )
+          end
+          ownership =
+            Hive::Modules::Migration::Patrols.ownership_snapshot(
+              repository_root,
+              @scenario_input.module_name,
+              hive_state_path: hive_state_path
+            )
+          unless ownership == {
+            "owner" => "legacy",
+            "epoch" => 1,
+            "admission" => true
+          }
+            raise Hive::ConfigError,
+                  "qualification patrol ownership is unavailable"
+          end
+          [
+            repository_root.freeze,
+            hive_state_path.freeze,
+            registry,
+            store
+          ].freeze
+        rescue KeyError, TypeError
+          raise Hive::ConfigError,
+                "qualification scenario sandbox is malformed"
         end
 
         def install_candidate_packages!(package_roots, hive_state_path)
@@ -2530,6 +2324,8 @@ module Hive
             raise Hive::ConfigError,
                   "qualification scenario sandbox path is unsafe"
           end
+          return validate_existing_sandbox! if @generation > 1
+
           if File.exist?(@sandbox_root) ||
              File.symlink?(@sandbox_root)
             stat = File.lstat(@sandbox_root)
@@ -2553,6 +2349,34 @@ module Hive
         rescue Errno::EACCES, Errno::ENOTDIR, Errno::ELOOP
           raise Hive::ConfigError,
                 "qualification scenario sandbox path is unsafe"
+        end
+
+        def validate_existing_sandbox!
+          validate_owned_directory!(@sandbox_root)
+          %w[hive-home hive-state repository].each do |name|
+            validate_owned_directory!(
+              File.join(@sandbox_root, name)
+            )
+          end
+          true
+        end
+
+        def validate_owned_directory!(path)
+          stat = File.lstat(path)
+          unless
+            stat.directory? &&
+              !stat.symlink? &&
+              stat.uid == Process.euid &&
+              (stat.mode & 0o777) == 0o700 &&
+              File.realpath(path) == path
+            raise Hive::ConfigError,
+                  "qualification scenario sandbox is malformed"
+          end
+          true
+        rescue Errno::ENOENT, Errno::EACCES, Errno::ENOTDIR,
+               Errno::ELOOP
+          raise Hive::ConfigError,
+                "qualification scenario sandbox is malformed"
         end
 
         def validate_process_home!
@@ -2601,6 +2425,23 @@ module Hive
           unless ordinary || architecture
             raise Hive::ConfigError,
                   "qualification scenario is unsupported"
+          end
+          fault = @scenario_input.faults.fetch(0, nil)
+          recovery_plan =
+            fault ||
+              (
+                @scenario_input.operation ==
+                  "reconciliation_failure" ?
+                    @scenario_input.operation : nil
+              )
+          plan =
+            recovery_plan ?
+              GENERATION_PLANS.fetch(recovery_plan) : [ nil ]
+          unless
+            @generation.between?(1, plan.length) &&
+              @stop_after == plan.fetch(@generation - 1)
+            raise Hive::ConfigError,
+                  "qualification scenario generation is malformed"
           end
         end
 

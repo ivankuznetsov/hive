@@ -19,7 +19,9 @@ class ModulesMigrationQualificationScenarioActualsTest <
     assert_equal payload, loaded.to_h
     assert_equal 1, loaded.actuals.length
     row = loaded.actuals.fetch(0)
-    refute row.key?("decision_class")
+    MODEL::ORACLE_KEYS.each do |key|
+      refute row.key?(key), key
+    end
     refute loaded.to_h.key?("run_id")
     refute loaded.to_h.key?("lane")
     refute loaded.to_h.key?("scenario_manifest_sha256")
@@ -40,6 +42,23 @@ class ModulesMigrationQualificationScenarioActualsTest <
       end
 
       assert_raises(Hive::ConfigError, field) do
+        MODEL.from_h(value)
+      end
+    end
+  end
+
+  def test_rejects_host_recovery_authority_from_candidate
+    observation =
+      qualification_scenario_observations(
+        qualification_run_fixture,
+        lane: "deterministic"
+      ).fetch("observations").fetch(0)
+    MODEL::ORACLE_KEYS.each do |key|
+      next if key == "decision_class"
+
+      value = valid_payload
+      value.fetch("actuals").fetch(0)[key] = observation.fetch(key)
+      assert_raises(Hive::ConfigError, key) do
         MODEL.from_h(value)
       end
     end
@@ -72,7 +91,7 @@ class ModulesMigrationQualificationScenarioActualsTest <
       "schema_version" => MODEL::SCHEMA_VERSION,
       "actuals" => [
         JSON.parse(JSON.generate(observation)).tap do |row|
-          row.delete("decision_class")
+          MODEL::ORACLE_KEYS.each { |key| row.delete(key) }
         end
       ]
     }

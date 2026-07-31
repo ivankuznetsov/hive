@@ -56,11 +56,6 @@
         "event_id",
         "legacy_effect_keys",
         "module_effect_keys",
-        "fault_checkpoint",
-        "pre_fault_durable_state_sha256",
-        "recovered_durable_state_sha256",
-        "recovery_trace",
-        "restart_generation",
         "event",
         "decisions",
         "attempts"
@@ -82,63 +77,6 @@
         },
         "legacy_effect_keys": {"$ref": "#/$defs/effect_keys"},
         "module_effect_keys": {"$ref": "#/$defs/effect_keys"},
-        "fault_checkpoint": {
-          "enum": [
-            "after_effect_intent",
-            "after_legacy_capture",
-            "after_legacy_decision",
-            "after_module_decision",
-            "during_reconciliation",
-            null
-          ]
-        },
-        "pre_fault_durable_state_sha256": {
-          "$ref": "#/$defs/digest"
-        },
-        "recovered_durable_state_sha256": {
-          "$ref": "#/$defs/digest"
-        },
-        "recovery_trace": {
-          "type": "array",
-          "minItems": 1,
-          "maxItems": 32,
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "at",
-              "attempt_count",
-              "decision_count",
-              "phase",
-              "state",
-              "state_sha256"
-            ],
-            "properties": {
-              "at": {"type": "string", "format": "date-time"},
-              "attempt_count": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "decision_count": {
-                "type": "integer",
-                "minimum": 0
-              },
-              "phase": {
-                "type": "string",
-                "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
-              },
-              "state": {
-                "type": "string",
-                "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
-              },
-              "state_sha256": {"$ref": "#/$defs/digest"}
-            }
-          }
-        },
-        "restart_generation": {
-          "type": "integer",
-          "minimum": 1
-        },
         "event": {"type": "object"},
         "decisions": {
           "type": "array",

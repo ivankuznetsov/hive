@@ -43,6 +43,8 @@ class CommandsPatrolQualificationScenarioTest < Minitest::Test
           root,
           "cases",
           "ordinary-due-clean",
+          "generations",
+          "1",
           "output",
           "scenario-actuals.json"
         )
@@ -54,7 +56,9 @@ class CommandsPatrolQualificationScenarioTest < Minitest::Test
         actuals.actuals.fetch(0).fetch("case_id")
       )
       refute actuals.to_h.key?("run_id")
-      refute actuals.actuals.fetch(0).key?("decision_class")
+      ACTUALS::ORACLE_KEYS.each do |key|
+        refute actuals.actuals.fetch(0).key?(key), key
+      end
     end
   end
 
@@ -90,6 +94,8 @@ class CommandsPatrolQualificationScenarioTest < Minitest::Test
           root,
           "cases",
           "ordinary-due-clean",
+          "generations",
+          "1",
           "output",
           "scenario-actuals.json"
         )
@@ -131,6 +137,8 @@ class CommandsPatrolQualificationScenarioTest < Minitest::Test
           root,
           "cases",
           case_id,
+          "generations",
+          "1",
           "output",
           "scenario-actuals.json"
         )
@@ -200,6 +208,8 @@ class CommandsPatrolQualificationScenarioTest < Minitest::Test
         "schema" => REQUEST::SCHEMA,
         "schema_version" => REQUEST::SCHEMA_VERSION,
         "case_id" => case_id,
+        "generation" => 1,
+        "stop_after" => nil,
         "scenario_sha256" =>
           Digest::SHA256.hexdigest(scenario),
         "scenario_ref" =>
@@ -208,7 +218,8 @@ class CommandsPatrolQualificationScenarioTest < Minitest::Test
         "sandbox_root_ref" =>
           "cases/#{case_id}/sandbox",
         "output_ref" =>
-          "cases/#{case_id}/output/scenario-actuals.json",
+          "cases/#{case_id}/generations/1/output/" \
+          "scenario-actuals.json",
         "project" => {
           "project_id" =>
             "11111111-1111-4111-8111-111111111111",
@@ -217,7 +228,7 @@ class CommandsPatrolQualificationScenarioTest < Minitest::Test
             "github.com/example/qualification-demo"
         }
       }
-      request_ref = "requests/#{case_id}.json"
+      request_ref = "requests/#{case_id}/generation-1.json"
       request_path = File.join(root, request_ref)
       FileUtils.mkdir_p(File.dirname(request_path), mode: 0o700)
       File.binwrite(

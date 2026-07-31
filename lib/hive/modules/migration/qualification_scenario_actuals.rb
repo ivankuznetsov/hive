@@ -8,9 +8,10 @@ module Hive
     module Migration
       # Canonical candidate-process output for qualification scenarios.
       #
-      # Actuals intentionally exclude descriptor identity and decision labels.
-      # The trusted host binds them to a run/lane/manifest and classifies each
-      # decision only after candidate execution.
+      # Actuals intentionally exclude descriptor identity, decision labels,
+      # fault checkpoints, durable-state snapshots, recovery traces, and
+      # process generations. The trusted host binds all of those facts only
+      # after candidate execution.
       class QualificationScenarioActuals
         SCHEMA =
           "hive-patrol-qualification-scenario-actuals".freeze
@@ -20,11 +21,31 @@ module Hive
         MAX_ACTUALS =
           QualificationScenarioObservations::MAX_OBSERVATIONS
         TOP_LEVEL_KEYS = %w[actuals schema schema_version].freeze
+        ORACLE_KEYS = (
+          [ "decision_class" ] +
+            QualificationScenarioObservations::HOST_RECOVERY_KEYS
+        ).freeze
         ACTUAL_KEYS =
           (
             QualificationScenarioObservations::OBSERVATION_KEYS -
-            [ "decision_class" ]
+            ORACLE_KEYS
           ).freeze
+        VALIDATION_RECOVERY = {
+          "fault_checkpoint" => nil,
+          "pre_fault_durable_state_sha256" => ("0" * 64).freeze,
+          "recovered_durable_state_sha256" => ("0" * 64).freeze,
+          "recovery_trace" => [
+            {
+              "at" => "2000-01-01T00:00:00.000000Z".freeze,
+              "attempt_count" => 0,
+              "decision_count" => 0,
+              "phase" => "candidate-validation".freeze,
+              "state" => "observed".freeze,
+              "state_sha256" => ("0" * 64).freeze
+            }.freeze
+          ].freeze,
+          "restart_generation" => 1
+        }.freeze
         VALIDATION_RUN_ID = "patrol-#{"0" * 64}".freeze
         VALIDATION_LANE = "deterministic".freeze
         VALIDATION_MANIFEST_SHA256 = ("0" * 64).freeze
@@ -79,11 +100,11 @@ module Hive
                     row.merge(
                       "decision_class" =>
                         "candidate-actual-unclassified"
-                    )
+                    ).merge(VALIDATION_RECOVERY)
                   end
               ).observations.map do |row|
                 row.reject do |key, _child|
-                  key == "decision_class"
+                  ORACLE_KEYS.include?(key)
                 end.freeze
               end.freeze
             immutable(value.merge("actuals" => validated))

@@ -80,9 +80,16 @@ reconstruction before its oracle result is accepted. Ordinary cases bind the
 raw event, decision, Attempts, evidence, comparator, retirement, and repository
 stores. Architecture cases also bind the derived manifest identity, complete
 v3 aggregate, all transition receipts, action outcomes, deterministic event
-envelope, and exact retirement generation. Candidate-reported process counts,
-fault checkpoints, and timed state digests remain unverified until the host
-controller supervises separate process generations.
+envelope, and exact retirement generation. For ordinary faults, the controller
+supervises one full candidate process per planned generation over the same
+sandbox and `HIVE_HOME`. It accepts private status 76 only for the exact
+generation checkpoint, requires stable process-target identity and state
+continuity, captures bounded before/after snapshots, validates the raw
+production boundary without mutating it, and chains generation receipts into
+host-only recovery evidence. Candidate Actuals cannot supply the checkpoint,
+state digests, trace, or generation count. An unexpected generation result is
+retained in the failed lane's process artifact even when no receipt can be
+issued.
 
 Coverage keeps diagnostic progress separate from qualification authority.
 `module.patrol_compressed_evidence_diagnostic` is advisory and explicitly

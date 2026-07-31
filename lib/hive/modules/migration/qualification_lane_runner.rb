@@ -11,14 +11,18 @@ require "hive/modules/migration/patrol_effect_index"
 require "hive/modules/migration/patrol_evidence_receipt"
 require "hive/modules/migration/patrol_evidence_verifier"
 require "hive/modules/migration/qualification_installed_target"
+require "hive/modules/migration/qualification_checkpoint_verifier"
 require "hive/modules/migration/qualification_lane_result"
 require "hive/modules/migration/qualification_run_descriptor"
 require "hive/modules/migration/qualification_scenario_actuals"
 require "hive/modules/migration/qualification_scenario_evidence_collector"
 require "hive/modules/migration/qualification_scenario_observations"
 require "hive/modules/migration/qualification_scenario_oracle"
+require "hive/modules/migration/qualification_scenario_orchestrator"
 require "hive/modules/migration/qualification_scenario_process"
 require "hive/modules/migration/qualification_scenario_request"
+require "hive/modules/migration/qualification_scenario_recovery_evidence"
+require "hive/modules/migration/qualification_scenario_input"
 require "hive/modules/migration/qualification_source_materializer"
 require "hive/modules/migration/shadow_comparator"
 require "hive/workflow_package/canonical_json"
@@ -76,8 +80,13 @@ module Hive
             QualificationInstalledTarget.new,
           scenario_process:
             QualificationScenarioProcess.new,
+          scenario_orchestrator: nil,
           evidence_collector:
             QualificationScenarioEvidenceCollector.new,
+          checkpoint_verifier:
+            QualificationCheckpointVerifier.new,
+          recovery_evidence:
+            QualificationScenarioRecoveryEvidence.new,
           oracle: QualificationScenarioOracle.new,
           verifier: PatrolEvidenceVerifier
         )
@@ -88,7 +97,15 @@ module Hive
           @source_materializer = source_materializer
           @installed_materializer = installed_materializer
           @scenario_process = scenario_process
+          @scenario_orchestrator =
+            scenario_orchestrator ||
+              QualificationScenarioOrchestrator.new(
+                process: scenario_process,
+                monotonic: monotonic
+              )
           @evidence_collector = evidence_collector
+          @checkpoint_verifier = checkpoint_verifier
+          @recovery_evidence = recovery_evidence
           @oracle = oracle
           @verifier = verifier
         end
@@ -158,6 +175,8 @@ module Hive
           completed = nil
           process_rows = []
           host_evidence = []
+          process_generations = []
+          recovery_evidence = []
           Dir.mktmpdir("hive-patrol-qualification-") do |workspace|
             File.chmod(0o700, workspace)
             begin
@@ -180,12 +199,15 @@ module Hive
                 credentials: credentials,
                 deadline: deadline,
                 process_rows: process_rows,
-                host_evidence: host_evidence
+                host_evidence: host_evidence,
+                process_generations: process_generations,
+                recovery_evidence: recovery_evidence
               )
               observations = @oracle.call(
                 descriptor: descriptor,
                 lane: lane,
-                actuals: actuals
+                actuals: actuals,
+                recovery_evidence: recovery_evidence
               )
               records = load_comparator_records(
                 workspace,
@@ -198,7 +220,9 @@ module Hive
                 observations: observations,
                 records: records,
                 process_rows: process_rows,
-                host_evidence: host_evidence
+                host_evidence: host_evidence,
+                process_generations: process_generations,
+                recovery_evidence: recovery_evidence
               )
             rescue LaneFailure => failure
               completed = build_failed_capture(
@@ -326,6 +350,9 @@ module Hive
             directory.ensure_directory(
               "cases/#{row.fetch(:case_id)}"
             )
+            directory.ensure_directory(
+              "cases/#{row.fetch(:case_id)}/sandbox"
+            )
           end
           directory.ensure_directory("requests")
           directory
@@ -334,7 +361,7 @@ module Hive
         def execute_scenarios(
           workspace:, directory:, materialized:, authority:,
           lane:, policy:, credentials:, deadline:, process_rows:,
-          host_evidence:
+          host_evidence:, process_generations:, recovery_evidence:
         )
           actuals = []
           authority.scenarios.each do |row|
@@ -345,63 +372,125 @@ module Hive
                 reason: "lane_timeout"
               )
             end
-            request_ref = write_request(
-              directory,
-              authority.descriptor,
-              row
+            scenario = QualificationScenarioInput.load(
+              row.fetch(:bytes),
+              expected_case_id: row.fetch(:case_id)
             )
             case_root = File.join(
               workspace,
               "cases",
               row.fetch(:case_id)
             )
+            sandbox_root = File.join(case_root, "sandbox")
             hive_home = File.join(
-              case_root,
-              "sandbox",
+              sandbox_root,
               "hive-home"
             )
-            process = @scenario_process.call(
-              executable: materialized.executable,
-              argv: [
-                "__patrol-qualification-scenario",
-                "--workspace", workspace,
-                "--request", request_ref
-              ],
-              workspace: workspace,
-              source_root: materialized.source_root,
-              installed_root: materialized.installed_root,
-              case_root: case_root,
-              request_ref: request_ref,
-              scenario_ref: row.fetch(:scenario_ref),
+            result = @scenario_orchestrator.call(
+              case_id: row.fetch(:case_id),
+              recovery_plan:
+                scenario.faults.fetch(0, nil) ||
+                  (
+                    scenario.operation == "reconciliation_failure" ?
+                      scenario.operation : nil
+                  ),
+              sandbox_root: sandbox_root,
+              state_roots: lambda {
+                {
+                  "hive_home" => hive_home,
+                  "hive_state" =>
+                    File.join(sandbox_root, "hive-state"),
+                  "repository" =>
+                    File.join(sandbox_root, "repository")
+                }
+              },
               timeout_seconds: [
                 remaining,
                 policy.fetch("timeout_seconds")
               ].min,
-              network: policy.fetch("network"),
-              credentials: credentials,
-              hive_home: hive_home
+              prepare_generation: lambda do |generation:, stop_after:|
+                request = write_request(
+                  directory,
+                  authority.descriptor,
+                  row,
+                  generation: generation,
+                  stop_after: stop_after
+                )
+                {
+                  request_sha256: request.fetch(:sha256),
+                  process_arguments: {
+                    executable: materialized.executable,
+                    argv: [
+                      "__patrol-qualification-scenario",
+                      "--workspace", workspace,
+                      "--request", request.fetch(:ref)
+                    ],
+                    workspace: workspace,
+                    source_root: materialized.source_root,
+                    installed_root: materialized.installed_root,
+                    case_root: case_root,
+                    request_ref: request.fetch(:ref),
+                    scenario_ref: row.fetch(:scenario_ref),
+                    network: policy.fetch("network"),
+                    credentials: credentials,
+                    hive_home: hive_home
+                  }
+                }.freeze
+              end,
+              verify_checkpoint: lambda do |generation:, checkpoint:,
+                                               after_snapshot:, **|
+                @checkpoint_verifier.call(
+                  case_id: row.fetch(:case_id),
+                  generation: generation,
+                  checkpoint: checkpoint,
+                  snapshot: after_snapshot,
+                  sandbox_root: sandbox_root,
+                  scenario_input: scenario
+                )
+              end,
+              final_output_sha256: lambda do |generation:, **|
+                output_ref = scenario_output_ref(
+                  row.fetch(:case_id),
+                  generation
+                )
+                Digest::SHA256.hexdigest(
+                  directory.read(
+                    output_ref,
+                    max_bytes:
+                      QualificationScenarioActuals::MAX_BYTES
+                  )
+                )
+              end,
+              record_process: lambda do |case_id:, generation:,
+                                            planned_checkpoint:,
+                                            process:|
+                process_rows << raw_process_projection(
+                  case_id,
+                  generation: generation,
+                  planned_checkpoint: planned_checkpoint,
+                  process: process
+                )
+              end
             )
-            process_rows << process_projection(
-              row.fetch(:case_id),
-              process
+            process_rows.slice!(
+              -result.generation_count,
+              result.generation_count
             )
-            if process.timed_out
-              raise LaneFailure.new(
-                status: "timeout",
-                reason: "lane_timeout"
-              )
-            end
-            unless process.status == "passed" &&
-                   process.exit_status == 0
-              raise LaneFailure.new(
-                status: "failed",
-                reason: "candidate_execution_failed",
-                exit_code: normalized_exit(process.exit_status)
-              )
-            end
+            process_rows.concat(
+              result.generations.map do |generation|
+                process_projection(
+                  row.fetch(:case_id),
+                  generation
+                )
+              end
+            )
+            process_generations << result
+            final_generation = result.generation_count
             output_ref =
-              "cases/#{row.fetch(:case_id)}/output/" \
-              "scenario-actuals.json"
+              scenario_output_ref(
+                row.fetch(:case_id),
+                final_generation
+              )
             actual =
               QualificationScenarioActuals.load(
                 directory.read(
@@ -414,43 +503,67 @@ module Hive
               raise Hive::ConfigError,
                     "patrol qualification candidate actuals are ambiguous"
             end
-            host_evidence << @evidence_collector.call(
+            terminal = @evidence_collector.call(
               case_id: row.fetch(:case_id),
-              sandbox_root:
-                File.join(case_root, "sandbox"),
+              sandbox_root: sandbox_root,
               candidate_row: actual.actuals.fetch(0)
+            )
+            host_evidence << terminal
+            recovery_evidence << @recovery_evidence.call(
+              result: result,
+              scenario_input: scenario,
+              candidate_row: actual.actuals.fetch(0),
+              terminal_evidence: terminal
             )
             actuals << actual
           end
           actuals.freeze
         end
 
-        def write_request(directory, descriptor, row)
+        def write_request(
+          directory, descriptor, row, generation:, stop_after:
+        )
           case_id = row.fetch(:case_id)
+          output_ref = scenario_output_ref(case_id, generation)
           value = {
             "schema" => QualificationScenarioRequest::SCHEMA,
             "schema_version" =>
               QualificationScenarioRequest::SCHEMA_VERSION,
             "case_id" => case_id,
+            "generation" => generation,
+            "stop_after" => stop_after,
             "scenario_sha256" => row.fetch(:scenario_sha256),
             "scenario_ref" => row.fetch(:scenario_ref),
             "package_root_ref" => "targets/source",
             "sandbox_root_ref" =>
               "cases/#{case_id}/sandbox",
-            "output_ref" =>
-              "cases/#{case_id}/output/scenario-actuals.json",
+            "output_ref" => output_ref,
             "project" => descriptor.project
           }
           bytes = QualificationScenarioRequest.canonical(value)
           QualificationScenarioRequest.load(bytes)
-          ref = "requests/#{case_id}.json"
+          directory.ensure_directory("requests/#{case_id}")
+          directory.ensure_directory(
+            "cases/#{case_id}/generations/#{generation}/output"
+          )
+          ref =
+            "requests/#{case_id}/generation-#{generation}.json"
           directory.atomic_write(
             ref,
             bytes,
             mode: 0o600,
             expected_absent: true
           )
-          ref.freeze
+          {
+            ref: ref.freeze,
+            output_ref: output_ref,
+            sha256: Digest::SHA256.hexdigest(bytes).freeze
+          }.freeze
+        end
+
+        def scenario_output_ref(case_id, generation)
+          "cases/#{case_id}/generations/#{generation}/output/" \
+            "scenario-actuals.json"
         end
 
         def load_comparator_records(workspace, scenarios)
@@ -478,7 +591,8 @@ module Hive
 
         def build_completed_capture(
           authority:, lane:, started_at:, observations:,
-          records:, process_rows:, host_evidence:
+          records:, process_rows:, host_evidence:,
+          process_generations:, recovery_evidence:
         )
           descriptor = authority.descriptor
           ended_at = [ utc_time(@clock.call), started_at ].max
@@ -525,6 +639,21 @@ module Hive
             host_evidence.to_h do |projection|
               [
                 "host-evidence/#{projection.case_id}.json",
+                canonical(projection.to_h)
+              ]
+            end
+          ).freeze
+          artifacts = artifacts.merge(
+            process_generations.to_h do |result|
+              [
+                "process-generations/#{result.case_id}.json",
+                canonical(result.to_h)
+              ]
+            end
+          ).merge(
+            recovery_evidence.to_h do |projection|
+              [
+                "host-recovery/#{projection.case_id}.json",
                 canonical(projection.to_h)
               ]
             end
@@ -773,30 +902,34 @@ module Hive
           end.freeze
         end
 
-        def process_projection(case_id, process)
-          {
+        def process_projection(case_id, generation)
+          generation.receipt.process.merge(
             "case_id" => case_id,
-            "status" => process.status,
-            "exit_status" => process.exit_status,
-            "signal" => process.signal,
-            "timed_out" => process.timed_out,
-            "network_isolated" => process.network_isolated,
-            "stdout" => process.stdout,
-            "stderr" => process.stderr,
-            "duration_seconds" => process.duration_seconds,
-            "executable_sha256" =>
-              process.executable_sha256,
-            "ruby_sha256" => process.ruby_sha256,
-            "attempt_count" => process.attempt_count,
-            "custody_count" => process.custody_count,
-            "sandbox_profile_sha256" =>
-              process.sandbox_profile_sha256,
-            "source_inventory_sha256" =>
-              process.source_inventory_sha256,
-            "installed_inventory_sha256" =>
-              process.installed_inventory_sha256,
-            "teardown" => process.teardown
-          }.freeze
+            "generation" => generation.generation,
+            "planned_checkpoint" =>
+              generation.planned_checkpoint,
+            "generation_receipt_sha256" =>
+              generation.receipt.sha256
+          ).freeze
+        rescue NoMethodError, KeyError
+          raise Hive::ConfigError,
+                "patrol qualification process result is malformed"
+        end
+
+        def raw_process_projection(
+          case_id,
+          generation:,
+          planned_checkpoint:,
+          process:
+        )
+          QualificationScenarioOrchestrator::PROCESS_KEYS.to_h do |key|
+            [ key, process.public_send(key) ]
+          end.merge(
+            "case_id" => case_id,
+            "generation" => generation,
+            "planned_checkpoint" => planned_checkpoint,
+            "generation_receipt_sha256" => nil
+          ).freeze
         rescue NoMethodError
           raise Hive::ConfigError,
                 "patrol qualification process result is malformed"

@@ -8,6 +8,8 @@
     "schema",
     "schema_version",
     "case_id",
+    "generation",
+    "stop_after",
     "scenario_sha256",
     "scenario_ref",
     "package_root_ref",
@@ -21,6 +23,23 @@
     },
     "schema_version": {"const": 1},
     "case_id": {"$ref": "#/$defs/safe_id"},
+    "generation": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 3
+    },
+    "stop_after": {
+      "enum": [
+        "after_effect_intent",
+        "after_legacy_capture",
+        "after_legacy_decision",
+        "after_module_decision",
+        "before_effect_settlement",
+        "during_reconciliation",
+        "reconciliation_failure",
+        null
+      ]
+    },
     "scenario_sha256": {"$ref": "#/$defs/digest"},
     "scenario_ref": {
       "type": "string",
@@ -33,7 +52,7 @@
     },
     "output_ref": {
       "type": "string",
-      "pattern": "^cases/[a-z0-9][a-z0-9._-]{0,127}/output/scenario-actuals\\.json$"
+      "pattern": "^cases/[a-z0-9][a-z0-9._-]{0,127}/generations/[1-3]/output/scenario-actuals\\.json$"
     },
     "project": {
       "type": "object",

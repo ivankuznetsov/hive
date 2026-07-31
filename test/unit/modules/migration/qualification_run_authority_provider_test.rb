@@ -897,14 +897,14 @@ class ModulesMigrationQualificationRunAuthorityProviderTest <
   def test_passed_result_binds_attempts_to_descriptor_selection
     mutations = {
       "source_commit" => lambda do |row|
-        row.dig("decision")["module_generation"] = "b" * 40
+        row.dig("decisions", 0)["module_generation"] = "b" * 40
         row.fetch("attempts").each do |attempt|
           attempt.dig("subject")["module_generation"] = "b" * 40
         end
         reseal_attempt_lineage!(row)
       end,
       "configuration_digest" => lambda do |row|
-        row.dig("decision")["configuration_digest"] = "e" * 64
+        row.dig("decisions", 0)["configuration_digest"] = "e" * 64
         row.fetch("attempts").each do |attempt|
           attempt.dig("subject")["configuration_digest"] = "e" * 64
         end

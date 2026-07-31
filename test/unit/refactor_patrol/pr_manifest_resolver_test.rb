@@ -56,6 +56,37 @@ class RefactorPatrolPrManifestResolverTest < Minitest::Test
     end
   end
 
+  def test_publishes_under_the_registered_external_state_root
+    with_tmp_dir do |dir|
+      external_state = File.join(dir, "registered-state")
+      resolver = Hive::RefactorPatrol::PrManifestResolver.new(
+        project_root: dir,
+        hive_state_path: external_state,
+        registration: "demo",
+        default_branch: "main",
+        cfg: {},
+        gh: FakeGh.new(details)
+      )
+
+      manifest = resolver.resolve("7")
+
+      assert_equal(
+        File.join(
+          external_state,
+          "refactor_patrol",
+          "v2",
+          "manifests",
+          "#{manifest.fetch('job_id')}.json"
+        ),
+        resolver.manifest_path(manifest.fetch("job_id"))
+      )
+      assert_path_exists resolver.manifest_path(
+        manifest.fetch("job_id")
+      )
+      refute_path_exists File.join(dir, ".hive-state")
+    end
+  end
+
   def test_forwards_the_reconciler_deadline_slice_to_github_metadata_resolution
     with_tmp_dir do |dir|
       gh = FakeGh.new(details)
@@ -240,6 +271,7 @@ class RefactorPatrolPrManifestResolverTest < Minitest::Test
       registration: "demo",
       default_branch: "main",
       cfg: {},
+      hive_state_path: File.join(dir, ".hive-state"),
       gh: gh,
       dry_run: dry_run
     )

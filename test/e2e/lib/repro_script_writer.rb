@@ -372,9 +372,9 @@ module Hive
           "  run_home: ARGV.fetch(1),",
           "  artifacts_root: ARGV.fetch(2)",
           ")",
-          "abort(\"patrol evidence outcome is not qualifying proof: \#{result.inspect}\") unless",
+          "abort(\"patrol evidence outcome is not a complete result: \#{result.inspect}\") unless",
           "  result.is_a?(Hash) &&",
-          "  Hive::E2E::PatrolQualificationRunner::HARNESS_READY_STATUSES.include?(result['status'])"
+          "  Hive::E2E::PatrolQualificationRunner.harness_complete?(result)"
         ].join("\n")
         [
           "# step #{step.position} patrol_evidence",

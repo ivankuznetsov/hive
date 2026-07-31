@@ -53,14 +53,15 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
         root: File.join(result.hive_state_path, "module-runtime")
       )
       decisions = journal.all
-      assert_includes decisions, row.fetch("decision")
-      assert decisions.reject { |decision| decision == row.fetch("decision") }
+      primary_decision = row.fetch("decisions").fetch(0)
+      assert_includes decisions, primary_decision
+      assert decisions.reject { |decision| decision == primary_decision }
         .all? do |decision|
           decision.fetch("outcome") == "skip" &&
             decision["attempt_id"].nil?
         end
-      assert_equal "launch", row.dig("decision", "outcome")
-      assert_equal "admitted", row.dig("decision", "reason")
+      assert_equal "launch", primary_decision.fetch("outcome")
+      assert_equal "admitted", primary_decision.fetch("reason")
 
       attempt_store = Hive::Attempts::Store.new(root: result.attempts_root)
       scan = attempt_store.scan
@@ -71,7 +72,8 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
         /\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/,
         attempt.attempt_id
       )
-      assert_equal row.fetch("attempt_id"), attempt.attempt_id
+      assert_equal primary_decision.fetch("attempt_id"),
+                   attempt.attempt_id
       assert_equal "terminal", attempt.state
       assert_equal "succeeded", attempt.outcome
       assert attempt.module_hook?
@@ -222,9 +224,11 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
         assert_equal expected.fetch(:restart_generation),
                      row.fetch("restart_generation"),
                      operation
-        assert_equal "launch", row.dig("decision", "outcome"),
+        assert_equal "launch",
+                     row.dig("decisions", 0, "outcome"),
                      operation
-        assert_equal "admitted", row.dig("decision", "reason"),
+        assert_equal "admitted",
+                     row.dig("decisions", 0, "reason"),
                      operation
         refute row.key?("decision_class"), operation
       end
@@ -295,10 +299,72 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
     end
   end
 
+  def test_clean_fixture_reviews_real_content_without_a_finding
+    with_tmp_dir do |sandbox|
+      result = run_driver(
+        sandbox,
+        operation: "ordinary_clean_fixture"
+      )
+      capture = capture_for(result.observation)
+
+      assert_equal "due", capture.selection.rationale
+      assert_equal "completed", capture.outcome_class
+      assert_equal true,
+                   capture.outcome.fetch("review_complete")
+      assert_equal 1,
+                   capture.outcome.fetch(
+                     "features_review_attempted"
+                   )
+      assert_equal 1,
+                   capture.outcome.fetch("features_reviewed")
+      assert_equal 0, capture.outcome.fetch("findings")
+      assert_empty capture.outcome.fetch("finding_ids")
+    end
+  end
+
+  def test_capacity_and_daily_quota_deferrals_use_real_token_budget
+    {
+      "capacity_deferral" => "cycle_agent_spawn_limit",
+      "quota_deferral" => "daily_agent_spawn_limit"
+    }.each do |operation, reason|
+      with_tmp_dir do |sandbox|
+        result = run_driver(sandbox, operation: operation)
+        capture = capture_for(result.observation)
+
+        assert_equal "due", capture.selection.rationale,
+                     operation
+        assert_equal "completed", capture.outcome_class,
+                     operation
+        assert_equal false,
+                     capture.outcome.fetch(
+                       "review_complete"
+                     ),
+                     operation
+        assert_equal 1,
+                     capture.outcome.fetch(
+                       "features_review_attempted"
+                     ),
+                     operation
+        assert_equal 0,
+                     capture.outcome.fetch(
+                       "features_reviewed"
+                     ),
+                     operation
+        assert_equal reason,
+                     capture.outcome.fetch(
+                       "review_exhaustion_reason"
+                     ),
+                     operation
+        assert_equal 0, capture.outcome.fetch("findings"),
+                     operation
+      end
+    end
+  end
+
   def test_rejects_operations_without_truthful_terminal_comparator_evidence
     unsupported = %w[
-      capacity_deferral concurrent_duplicate_delivery cooldown_retry
-      launch_failure quota_deferral reconciliation_failure
+      concurrent_duplicate_delivery cooldown_retry launch_failure
+      reconciliation_failure
     ]
 
     with_tmp_dir do |sandbox|
@@ -312,91 +378,44 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
     end
   end
 
-  def test_after_module_decision_fault_exits_with_a_checkpointed_nonterminal_attempt
+  def test_after_module_decision_fault_recovers_through_the_real_retry_lineage
     skip "POSIX fork unavailable" unless Process.respond_to?(:fork)
 
     with_tmp_dir do |sandbox|
-      candidate_pid = fork do
-        begin
-          with_env(
-            "HIVE_HOME" =>
-              File.join(sandbox, "hive-home")
-          ) do
-            driver(
-              sandbox,
-              faults: [ "after_module_decision" ]
-            ).call
-          end
-        rescue StandardError => error
-          warn "#{error.class}: #{error.message}"
-          exit! 70
-        end
-        exit! 71
-      end
-
-      _pid, status =
-        Timeout.timeout(10) do
-          Process.wait2(candidate_pid)
-        end
-      candidate_pid = nil
-      assert_predicate status, :exited?
-      assert_equal 76, status.exitstatus
-
-      attempts_root =
-        File.join(
+      result = with_env(
+        "HIVE_HOME" =>
+          File.join(sandbox, "hive-home")
+      ) do
+        driver(
           sandbox,
-          "hive-home",
-          "attempts",
-          "v2"
-        )
-      store = Hive::Attempts::Store.new(
-        root: attempts_root,
-        create_directories: false
+          faults: [ "after_module_decision" ]
+        ).call
+      end
+      row = result.observation
+      assert_equal "after_module_decision",
+                   row.fetch("fault_checkpoint")
+      assert_equal 2, row.fetch("restart_generation")
+      refute_equal row.fetch("pre_fault_durable_state_sha256"),
+                   row.fetch("recovered_durable_state_sha256")
+      assert_equal %w[lost terminal],
+                   row.fetch("attempts").map { |attempt|
+                     attempt.fetch("state")
+                   }
+      assert_equal [ 0, 1 ],
+                   row.fetch("attempts").map { |attempt|
+                     attempt.fetch("retry_charge")
+                   }
+      assert_equal "succeeded",
+                   row.fetch("attempts").last.fetch("outcome")
+      assert_equal [ "admitted", "duplicate" ],
+                   row.fetch("decisions").map { |decision|
+                     decision.fetch("reason")
+                   }
+      assert_nil row.fetch("decisions").last.fetch("attempt_id")
+      assert_empty result.comparator_record.fetch(
+        "duplicate_effects"
       )
-      record =
-        Timeout.timeout(5) do
-          loop do
-            candidate =
-              store.scan.records.fetch(0, nil)
-            break candidate if candidate&.worker
-
-            sleep 0.01
-          end
-        end
-      Timeout.timeout(5) do
-        sleep 0.01 while
-          process_alive?(record.wrapper.fetch("pid")) ||
-            process_alive?(record.worker.fetch("pid"))
-      end
-      stranded = store.fetch(record.attempt_id)
-      assert_equal "running", stranded.state
-      refute stranded.final?
-      assert_nil stranded.receipt
-      assert_kind_of Hash, stranded.wrapper
-      assert_kind_of Hash, stranded.worker
-
-      journal = Hive::Modules::DecisionJournal.new(
-        root:
-          File.join(
-            sandbox,
-            "hive-state",
-            "module-runtime"
-          )
-      )
-      admitted = journal.all.count do |decision|
-        decision["outcome"] == "launch" &&
-          decision["reason"] == "admitted"
-      end
-      assert_equal 1, admitted
-    ensure
-      begin
-        if candidate_pid
-          Process.kill("KILL", candidate_pid)
-          Process.wait(candidate_pid)
-        end
-      rescue Errno::ESRCH, Errno::ECHILD
-        nil
-      end
+      assert_empty result.effect_index.duplicate_keys
     end
   end
 
@@ -585,9 +604,11 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
         module_effect_keys repository_sha restart_generation trigger_digest
       ]
     ).merge(
-      "decision" => row.fetch("decision").except(
-        "attempt_id", "decision_id", "evaluated_at"
-      ),
+      "decisions" => row.fetch("decisions").map do |decision|
+        decision.except(
+          "attempt_id", "decision_id", "evaluated_at"
+        )
+      end,
       "attempts" => row.fetch("attempts").map do |attempt|
         attempt.slice(
           *%w[

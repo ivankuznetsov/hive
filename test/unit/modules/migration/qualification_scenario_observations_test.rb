@@ -21,11 +21,11 @@ class ModulesMigrationQualificationScenarioObservationsTest <
     assert_equal %w[lost terminal],
                  row.fetch("attempts").map { |attempt| attempt["state"] }
     assert_equal(
-      row.fetch("attempt_id"),
-      row.dig("decision", "attempt_id")
+      row.dig("attempts", 0, "attempt_id"),
+      row.dig("decisions", 0, "attempt_id")
     )
     refute_equal row.fetch("decision_id"),
-                 row.dig("decision", "decision_id")
+                 row.dig("decisions", 0, "decision_id")
     assert_predicate loaded.payload, :frozen?
     assert_predicate row.fetch("attempts"), :frozen?
   end
@@ -38,7 +38,9 @@ class ModulesMigrationQualificationScenarioObservationsTest <
         value.dig("observations", 0, "event")["unknown"] = true
       end,
       lambda do |value|
-        value.dig("observations", 0, "decision")["unknown"] = true
+        value.dig(
+          "observations", 0, "decisions", 0
+        )["unknown"] = true
       end,
       lambda do |value|
         value.dig("observations", 0, "attempts", 0)["unknown"] = true
@@ -119,13 +121,67 @@ class ModulesMigrationQualificationScenarioObservationsTest <
     assert_empty schema.validate(observations.to_h).to_a
   end
 
+  def test_allows_an_ordered_duplicate_decision_without_an_attempt
+    payload = valid_payload
+    row = payload.dig("observations", 0)
+    duplicate = deep_copy(row.dig("decisions", 0))
+    duplicate["decision_id"] = "dec-#{"f" * 64}"
+    duplicate["outcome"] = "skip"
+    duplicate["reason"] = "duplicate"
+    duplicate["attempt_id"] = nil
+    duplicate["evaluated_at"] =
+      (Time.iso8601(duplicate.fetch("evaluated_at")) + 1)
+        .iso8601(6)
+    row.fetch("decisions") << duplicate
+
+    observations = MODEL.from_h(payload)
+
+    assert_equal [ "admitted", "duplicate" ],
+                 observations.observations
+                   .fetch(0)
+                   .fetch("decisions")
+                   .map { |decision| decision.fetch("reason") }
+  end
+
+  def test_allows_a_failed_terminal_predecessor_before_success
+    payload = valid_payload
+    first, successor =
+      payload.dig("observations", 0, "attempts")
+    receipt = deep_copy(successor.fetch("receipt"))
+    receipt["attempt_id"] = first.fetch("attempt_id")
+    receipt["task_generation"] =
+      first.fetch("task_generation")
+    receipt["ownership_generation"] =
+      first.fetch("ownership_generation")
+    receipt["task_input_epoch"] =
+      first.fetch("task_input_epoch")
+    receipt["outcome"] = "failed"
+    receipt["exit_status"] = 1
+    first["state"] = "terminal"
+    first["outcome"] = "failed"
+    first["loss"] = nil
+    first["receipt"] = receipt
+    reseal_projections_only!(
+      payload.dig("observations", 0)
+    )
+
+    observations = MODEL.from_h(payload)
+
+    assert_equal %w[failed succeeded],
+                 observations.observations
+                   .fetch(0)
+                   .fetch("attempts")
+                   .map { |attempt| attempt.fetch("outcome") }
+  end
+
   def test_rejects_broken_event_decision_and_attempt_links
     mutations = [
       lambda do |row|
         row["event_id"] = "evt-#{"f" * 64}"
       end,
       lambda do |row|
-        row.dig("decision")["event_id"] = "evt-#{"f" * 64}"
+        row.dig("decisions", 0)["event_id"] =
+          "evt-#{"f" * 64}"
       end,
       lambda do |row|
         row.dig("attempts", 0, "subject")[

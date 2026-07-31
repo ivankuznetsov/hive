@@ -146,6 +146,27 @@ module QualificationRunFixture
         "skills_archive_sha256" => sha(skills),
         "installed_tree_sha256" => installed_digest
       },
+      "control" => {
+        "repository" => "github.com/owner/hive",
+        "ref" => "refs/heads/main",
+        "commit_sha" => "1" * 40,
+        "tree_sha" => "2" * 40,
+        "trust_scope" => "trusted_remote",
+        "catalog" => {
+          "ref" =>
+            "test/e2e/fixtures/patrol_qualification/catalog.json",
+          "sha256" => "3" * 64
+        },
+        "harness_manifest_sha256" => "4" * 64,
+        "provenance" => {
+          "workflow_path" =>
+            ".github/workflows/patrol-qualification.yml",
+          "workflow_sha" => "1" * 40,
+          "run_id" => 123,
+          "run_attempt" => 1,
+          "action_lock_sha256" => "5" * 64
+        }
+      },
       "scenarios" => {
         "manifest_ref" => "inputs/scenarios/manifest.json",
         "manifest_sha256" => sha(scenario_manifest),
@@ -336,7 +357,6 @@ module QualificationRunFixture
             record.fetch("semantic_digest"),
           "legacy_capture_id" => capture.capture_id,
           "event_id" => event.fetch("event_id"),
-          "attempt_id" => initial_attempt_id,
           "legacy_effect_keys" => effect_index.legacy_keys,
           "module_effect_keys" => [],
           "fault_checkpoint" => "after_legacy_capture",
@@ -344,7 +364,7 @@ module QualificationRunFixture
           "recovered_durable_state_sha256" => "7" * 64,
           "restart_generation" => 1,
           "event" => event,
-          "decision" => decision,
+          "decisions" => [ decision ],
           "attempts" => attempts
         }
       ]

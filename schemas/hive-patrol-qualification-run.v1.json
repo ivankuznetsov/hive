@@ -13,6 +13,7 @@
     "project",
     "module_selections",
     "candidate",
+    "control",
     "scenarios",
     "expectations",
     "lanes",
@@ -102,6 +103,67 @@
         },
         "installed_tree_sha256": {
           "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "control": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "ref",
+        "commit_sha",
+        "tree_sha",
+        "trust_scope",
+        "catalog",
+        "harness_manifest_sha256",
+        "provenance"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "pattern": "^github\\.com/[a-z0-9][a-z0-9._-]{0,99}/[a-z0-9][a-z0-9._-]{0,99}$"
+        },
+        "ref": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^refs/[a-zA-Z0-9][a-zA-Z0-9._/-]{0,4090}$"
+        },
+        "commit_sha": {
+          "$ref": "#/$defs/sha"
+        },
+        "tree_sha": {
+          "$ref": "#/$defs/sha"
+        },
+        "trust_scope": {
+          "enum": [
+            "local",
+            "trusted_remote"
+          ]
+        },
+        "catalog": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "ref",
+            "sha256"
+          ],
+          "properties": {
+            "ref": {
+              "$ref": "#/$defs/relative_path"
+            },
+            "sha256": {
+              "$ref": "#/$defs/digest"
+            }
+          }
+        },
+        "harness_manifest_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "provenance": {
+          "$ref": "#/$defs/control_provenance"
         }
       }
     },
@@ -271,6 +333,64 @@
       "type": "string",
       "minLength": 1,
       "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?/)(?!.*\\\\).+$"
+    },
+    "relative_path": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.?/)(?!.*\\\\).+$"
+    },
+    "control_provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workflow_path",
+        "workflow_sha",
+        "run_id",
+        "run_attempt",
+        "action_lock_sha256"
+      ],
+      "properties": {
+        "workflow_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workflow_sha": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "run_id": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "run_attempt": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "action_lock_sha256": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
     },
     "module_selection": {
       "type": "object",

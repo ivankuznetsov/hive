@@ -68,6 +68,67 @@ class ModulesMigrationQualificationScenarioOracleTest <
     end
   end
 
+  def test_clean_negative_requires_a_completed_reviewed_ordinary_scan
+    oracle = ORACLE.new
+    reviewed_clean = {
+      "review_complete" => true,
+      "features_reviewed" => 1,
+      "findings" => 0,
+      "finding_ids" => []
+    }
+
+    assert oracle.send(
+      :clean_negative?,
+      "patrol",
+      rationale: "due",
+      outcome: reviewed_clean
+    )
+    refute oracle.send(
+      :clean_negative?,
+      "patrol",
+      rationale: "not_due",
+      outcome: reviewed_clean
+    )
+    refute oracle.send(
+      :clean_negative?,
+      "patrol",
+      rationale: "due",
+      outcome: reviewed_clean.merge(
+        "features_reviewed" => 0
+      )
+    )
+  end
+
+  def test_clean_negative_requires_a_completed_no_theses_architecture_scan
+    oracle = ORACLE.new
+    reviewed_clean = {
+      "complete" => true,
+      "action_count" => 0,
+      "zero_reason" => "no_theses"
+    }
+
+    assert oracle.send(
+      :clean_negative?,
+      "architecture-patrol",
+      rationale: "due",
+      outcome: reviewed_clean
+    )
+    refute oracle.send(
+      :clean_negative?,
+      "architecture-patrol",
+      rationale: "not_due",
+      outcome: reviewed_clean
+    )
+    refute oracle.send(
+      :clean_negative?,
+      "architecture-patrol",
+      rationale: "due",
+      outcome: reviewed_clean.merge(
+        "zero_reason" => "not_due"
+      )
+    )
+  end
+
   private
 
   def actuals_from(observations)

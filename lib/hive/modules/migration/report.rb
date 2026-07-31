@@ -21,8 +21,8 @@ module Hive
         MAX_REPORT_BYTES = 512 * 1024
         MAX_BUNDLE_BYTES = 16 * 1024 * 1024
         TOP_LEVEL_KEYS = %w[
-          blockers candidate configuration_digests generated_at lanes
-          migration report_id reviewed_at reviewer run_id
+          blockers candidate configuration_digests control generated_at
+          lanes migration report_id reviewed_at reviewer run_id
           scenario_manifest_digest schema schema_version status
         ].freeze
         LANE_KEYS = %w[
@@ -59,6 +59,7 @@ module Hive
                                 run_id: nil,
                                 configuration_digests: nil,
                                 candidate: nil,
+                                control: nil,
                                 scenario_manifest_digest: nil,
                                 migration: nil)
             reviewer = reviewer.to_s.strip
@@ -67,6 +68,7 @@ module Hive
               configuration_digests
             )
             candidate = normalize_optional_candidate(candidate)
+            control = normalize_optional_control(control)
             scenario_manifest_digest = optional_digest(
               scenario_manifest_digest
             )
@@ -77,6 +79,7 @@ module Hive
               "status" => "evidence_required",
               "blockers" => blockers,
               "candidate" => candidate,
+              "control" => control,
               "configuration_digests" => configuration_digests,
               "scenario_manifest_digest" => scenario_manifest_digest,
               "lanes" => REQUIRED_LANES.to_h do |lane|
@@ -107,6 +110,7 @@ module Hive
               ) &&
               valid_string_array?(value["blockers"]) &&
               valid_candidate?(value["candidate"], optional: true) &&
+              valid_control?(value["control"], optional: true) &&
               valid_configurations?(
                 value["configuration_digests"], optional: true
               ) &&
@@ -191,6 +195,7 @@ module Hive
               configuration_digests:
                 payload.fetch("configuration_digests"),
               candidate: payload.fetch("candidate"),
+              control: payload.fetch("control"),
               scenario_manifest_digest:
                 payload.fetch("scenario_manifest_digest"),
               verifications: verifications.freeze,
@@ -230,6 +235,14 @@ module Hive
               value,
               label: "module migration report"
             )
+          end
+
+          def normalize_optional_control(value)
+            return nil if value.nil?
+
+            TrustedQualificationControl.normalize(value)
+          rescue Hive::ConfigError
+            PatrolEvidence.malformed!("module migration report")
           end
 
           def normalize_optional_run_id(value)
@@ -319,6 +332,15 @@ module Hive
               ).all? do |key|
                 hex_digest?(value[key])
               end
+          end
+
+          def valid_control?(value, optional:)
+            return optional if value.nil?
+
+            TrustedQualificationControl.normalize(value)
+            true
+          rescue Hive::ConfigError
+            false
           end
 
           def valid_run_binding?(value)

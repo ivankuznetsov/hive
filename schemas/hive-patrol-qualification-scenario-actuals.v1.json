@@ -54,7 +54,6 @@
         "comparator_semantic_digest",
         "legacy_capture_id",
         "event_id",
-        "attempt_id",
         "legacy_effect_keys",
         "module_effect_keys",
         "fault_checkpoint",
@@ -62,7 +61,7 @@
         "recovered_durable_state_sha256",
         "restart_generation",
         "event",
-        "decision",
+        "decisions",
         "attempts"
       ],
       "properties": {
@@ -80,7 +79,6 @@
           "type": "string",
           "pattern": "^evt-[0-9a-f]{64}$"
         },
-        "attempt_id": {"$ref": "#/$defs/uuid"},
         "legacy_effect_keys": {"$ref": "#/$defs/effect_keys"},
         "module_effect_keys": {"$ref": "#/$defs/effect_keys"},
         "fault_checkpoint": {
@@ -104,7 +102,12 @@
           "minimum": 1
         },
         "event": {"type": "object"},
-        "decision": {"type": "object"},
+        "decisions": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {"type": "object"}
+        },
         "attempts": {
           "type": "array",
           "minItems": 1,

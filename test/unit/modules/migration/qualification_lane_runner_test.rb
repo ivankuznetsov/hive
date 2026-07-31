@@ -115,7 +115,8 @@ class QualificationLaneRunnerTest < Minitest::Test
         "status" => "passed",
         "attempt_count" => 2,
         "custody_count" => 2,
-        "live_processes" => 0
+        "live_processes" => 0,
+        "kill_authority" => "host_pid_namespace"
       }.freeze
       PROCESS_RESULT.new(
         status: "passed",
@@ -130,6 +131,9 @@ class QualificationLaneRunnerTest < Minitest::Test
         ruby_sha256: "2" * 64,
         attempt_count: 2,
         custody_count: 2,
+        sandbox_profile_sha256: "3" * 64,
+        source_inventory_sha256: "4" * 64,
+        installed_inventory_sha256: "5" * 64,
         teardown: teardown
       ).freeze
     end

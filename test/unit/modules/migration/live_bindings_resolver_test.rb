@@ -69,6 +69,9 @@ class ModulesMigrationLiveBindingsResolverTest < Minitest::Test
       "candidate_binding_mismatch" => lambda do |document|
         document.fetch("candidate")["commit_sha"] = "f" * 40
       end,
+      "control_binding_mismatch" => lambda do |document|
+        document.fetch("control")["tree_sha"] = "f" * 40
+      end,
       "scenario_manifest_binding_mismatch" => lambda do |document|
         document["scenario_manifest_digest"] = "8" * 64
       end,
@@ -154,6 +157,46 @@ class ModulesMigrationLiveBindingsResolverTest < Minitest::Test
       assert_equal status, resolution.status
       assert_equal status, verification.status
       assert_includes verification.blockers, issue
+    end
+  end
+
+  def test_local_or_same_candidate_control_is_evidence_required
+    bundle = qualification_bundle(lane: "deterministic")
+    authority = qualification_case(
+      lane: "deterministic"
+    ).fetch("authority")
+    mutations = {
+      "qualification_control_untrusted" => lambda do |document|
+        document.fetch("control")["trust_scope"] = "local"
+        document.fetch("control")["ref"] = nil
+        document.fetch("control")["provenance"].transform_values! do
+          nil
+        end
+      end,
+      "qualification_control_not_independent" => lambda do |document|
+        document.fetch("control")["commit_sha"] =
+          document.dig("candidate", "commit_sha")
+        document.fetch("control")
+          .fetch("provenance")["workflow_sha"] =
+          document.dig("candidate", "commit_sha")
+      end
+    }
+
+    mutations.each do |issue, mutation|
+      document = deep_copy(authority)
+      mutation.call(document)
+      resolution = resolve_bundle(
+        bundle,
+        qualification_live_resolver(
+          authority_documents: {
+            [ RUN_ID, "deterministic" ] => document
+          }
+        )
+      )
+
+      assert_equal "evidence_required", resolution.status
+      assert_includes resolution.issues, issue
+      refute_nil resolution.bindings
     end
   end
 

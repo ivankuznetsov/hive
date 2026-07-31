@@ -10,11 +10,25 @@ class ModulesMigrationQualificationScenarioProcessTest <
   PROCESS =
     Hive::Modules::Migration::QualificationScenarioProcess
 
+  class SidecarSignalGuard
+    def initialize
+      @delegate = Hive::Attempts::ProcessIdentity.new
+    end
+
+    def capture(pid)
+      @delegate.capture(pid)
+    end
+
+    def status(_identity)
+      raise "candidate sidecar identity reached host signal authority"
+    end
+  end
+
   def test_executes_exact_target_in_closed_networkless_environment
-    with_process_workspace do |workspace, installed, executable|
-      probe = File.join(workspace, "probe.json")
+    with_process_workspace do |context|
+      probe = File.join(context.fetch(:case), "probe.json")
       write_executable(
-        executable,
+        context.fetch(:executable),
         <<~RUBY
           require "json"
           require "socket"
@@ -38,49 +52,67 @@ class ModulesMigrationQualificationScenarioProcessTest <
       )
 
       with_env("QUALIFICATION_AMBIENT_SECRET" => "must-not-leak") do
-        result = PROCESS.new.call(
-          executable: executable,
-          argv: [ probe ],
-          workspace: workspace,
-          installed_root: installed,
-          timeout_seconds: 5,
-          network: false,
-          credentials: {}
+        result = call_process(
+          context,
+          argv: [
+            "/qualification/cases/case-one/probe.json"
+          ],
+          network: false
         )
 
         assert_equal "passed", result.status
         assert_equal 0, result.exit_status
         assert_equal true, result.network_isolated
+        assert_match(
+          /\A[0-9a-f]{64}\z/,
+          result.sandbox_profile_sha256
+        )
+        assert_match(
+          /\A[0-9a-f]{64}\z/,
+          result.source_inventory_sha256
+        )
+        assert_match(
+          /\A[0-9a-f]{64}\z/,
+          result.installed_inventory_sha256
+        )
+        assert_equal(
+          "host_pid_namespace",
+          result.teardown.fetch("kill_authority")
+        )
       end
       data = JSON.parse(File.binread(probe))
       assert_equal false, data.fetch("secret_present")
       assert_equal true, data.fetch("network_blocked")
-      assert_equal File.join(workspace, "runtime", "home"),
-                   data.fetch("home")
-      assert_equal File.join(workspace, "sandbox", "hive-home"),
-                   data.fetch("hive_home")
-      assert_equal installed, data.fetch("gem_home")
+      assert_equal(
+        "/qualification/cases/case-one/runtime/home",
+        data.fetch("home")
+      )
+      assert_equal(
+        "/qualification/cases/case-one/sandbox/hive-home",
+        data.fetch("hive_home")
+      )
+      assert_equal(
+        "/qualification/targets/installed",
+        data.fetch("gem_home")
+      )
     end
   end
 
   def test_bounds_streams_and_returns_only_digests
-    with_process_workspace do |workspace, installed, executable|
+    with_process_workspace do |context|
       write_executable(
-        executable,
+        context.fetch(:executable),
         <<~RUBY
           STDOUT.write("o" * 100_000)
           STDERR.write("e" * 100_000)
         RUBY
       )
 
-      result = PROCESS.new(output_limit: 1_024).call(
-        executable: executable,
+      result = call_process(
+        context,
+        process: PROCESS.new(output_limit: 1_024),
         argv: [],
-        workspace: workspace,
-        installed_root: installed,
-        timeout_seconds: 5,
-        network: true,
-        credentials: {}
+        network: true
       )
 
       assert_equal 100_000, result.stdout.fetch("bytes")
@@ -96,16 +128,10 @@ class ModulesMigrationQualificationScenarioProcessTest <
   end
 
   def test_confines_hive_home_and_runtime_to_one_scenario
-    with_process_workspace do |workspace, installed, executable|
-      case_root = File.join(workspace, "cases", "case-one")
-      FileUtils.mkdir_p(case_root, mode: 0o700)
-      File.chmod(0o700, File.join(workspace, "cases"))
-      File.chmod(0o700, case_root)
-      hive_home =
-        File.join(case_root, "sandbox", "hive-home")
-      probe = File.join(workspace, "probe.json")
+    with_process_workspace do |context|
+      probe = File.join(context.fetch(:case), "probe.json")
       write_executable(
-        executable,
+        context.fetch(:executable),
         <<~RUBY
           require "json"
           File.binwrite(
@@ -120,33 +146,40 @@ class ModulesMigrationQualificationScenarioProcessTest <
         RUBY
       )
 
-      result = PROCESS.new.call(
-        executable: executable,
-        argv: [ probe ],
-        workspace: workspace,
-        installed_root: installed,
-        timeout_seconds: 5,
-        network: true,
-        credentials: {},
-        hive_home: hive_home
+      result = call_process(
+        context,
+        argv: [
+          "/qualification/cases/case-one/probe.json"
+        ],
+        network: true
       )
 
       assert_equal "passed", result.status
       data = JSON.parse(File.binread(probe))
-      assert_equal hive_home, data.fetch("hive_home")
-      assert_equal File.join(case_root, "runtime", "home"),
-                   data.fetch("home")
-      assert_equal File.join(case_root, "runtime", "custody"),
-                   data.fetch("custody")
-      refute File.exist?(File.join(workspace, "runtime"))
+      assert_equal(
+        "/qualification/cases/case-one/sandbox/hive-home",
+        data.fetch("hive_home")
+      )
+      assert_equal(
+        "/qualification/cases/case-one/runtime/home",
+        data.fetch("home")
+      )
+      assert_equal(
+        "/qualification/cases/case-one/runtime/custody",
+        data.fetch("custody")
+      )
+      refute File.exist?(
+        File.join(context.fetch(:workspace), "runtime")
+      )
     end
   end
 
   def test_timeout_terminates_the_foreground_group
-    with_process_workspace do |workspace, installed, executable|
-      pid_path = File.join(workspace, "child.pid")
+    with_process_workspace do |context|
+      pid_path =
+        File.join(context.fetch(:case), "child.pid")
       write_executable(
-        executable,
+        context.fetch(:executable),
         <<~RUBY
           child = spawn(
             RbConfig.ruby,
@@ -159,33 +192,33 @@ class ModulesMigrationQualificationScenarioProcessTest <
         RUBY
       )
 
-      result = PROCESS.new.call(
-        executable: executable,
-        argv: [ pid_path ],
-        workspace: workspace,
-        installed_root: installed,
+      result = call_process(
+        context,
+        argv: [
+          "/qualification/cases/case-one/child.pid"
+        ],
         timeout_seconds: 0.2,
-        network: true,
-        credentials: {}
+        network: true
       )
 
       assert_equal "failed", result.status
       assert_equal true, result.timed_out
-      child_pid = Integer(File.binread(pid_path))
-      refute process_alive?(child_pid)
+      assert_operator Integer(File.binread(pid_path)), :positive?
+      assert_equal(
+        "host_pid_namespace",
+        result.teardown.fetch("kill_authority")
+      )
     end
   end
 
-  def test_unbound_detached_custody_fails_closed_without_leaking_process
-    with_process_workspace do |workspace, installed, executable|
-      pid_path = File.join(workspace, "detached.pid")
-      library = File.expand_path("../../../../lib", __dir__)
+  def test_unbound_detached_custody_fails_closed_without_host_signalling
+    with_process_workspace do |context|
+      pid_path =
+        File.join(context.fetch(:case), "detached.pid")
       write_executable(
-        executable,
+        context.fetch(:executable),
         <<~RUBY
-          \$LOAD_PATH.unshift(#{library.inspect})
           require "json"
-          require "hive/lock"
           child = fork do
             STDIN.reopen(File::NULL)
             STDOUT.reopen(File::NULL, "w")
@@ -193,28 +226,13 @@ class ModulesMigrationQualificationScenarioProcessTest <
             Process.setsid
             sleep 30
           end
-          identity = nil
-          100.times do
-            begin
-              start = Hive::Lock.process_start_time(child)
-              session = Process.getsid(child)
-              group = Process.getpgid(child)
-              if !start.to_s.empty? && session == child &&
-                 group == child
-                identity = {
-                  "pid" => child,
-                  "process_group_id" => group,
-                  "session_id" => session,
-                  "start_fingerprint" => start.to_s
-                }
-              end
-            rescue Errno::ESRCH
-              nil
-            end
-            break if identity
-            sleep 0.01
-          end
-          raise "identity unavailable" unless identity
+          sleep 0.05
+          identity = {
+            "pid" => child,
+            "process_group_id" => Process.getpgid(child),
+            "session_id" => Process.getsid(child),
+            "start_fingerprint" => "candidate-namespace"
+          }
           attempt_id =
             "11111111-1111-4111-8111-111111111111"
           custody = {
@@ -238,20 +256,20 @@ class ModulesMigrationQualificationScenarioProcessTest <
       )
 
       error = assert_raises(Hive::ConfigError) do
-        PROCESS.new.call(
-          executable: executable,
-          argv: [ pid_path ],
-          workspace: workspace,
-          installed_root: installed,
-          timeout_seconds: 5,
-          network: true,
-          credentials: {}
+        call_process(
+          context,
+          process: PROCESS.new(
+            process_identity: SidecarSignalGuard.new
+          ),
+          argv: [
+            "/qualification/cases/case-one/detached.pid"
+          ],
+          network: true
         )
       end
 
       assert_match(/custody is unbound/, error.message)
-      detached_pid = Integer(File.binread(pid_path))
-      refute process_alive?(detached_pid)
+      assert_operator Integer(File.binread(pid_path)), :positive?
     end
   end
 
@@ -261,16 +279,82 @@ class ModulesMigrationQualificationScenarioProcessTest <
     with_tmp_dir do |root|
       File.chmod(0o700, root)
       workspace = File.join(root, "workspace")
-      installed = File.join(workspace, "installed")
-      executable =
-        File.join(workspace, "candidate", "bin", "hive")
-      FileUtils.mkdir_p(
-        File.dirname(executable),
-        mode: 0o700
+      source = File.join(workspace, "targets", "source")
+      installed =
+        File.join(workspace, "targets", "installed")
+      case_root =
+        File.join(workspace, "cases", "case-one")
+      request =
+        File.join(workspace, "requests", "case-one.json")
+      scenario = File.join(
+        workspace,
+        "inputs",
+        "scenarios",
+        "case-one.yml"
       )
-      FileUtils.mkdir_p(installed, mode: 0o700)
-      yield workspace, installed, executable
+      [
+        File.join(source, "bin"),
+        File.join(source, "lib"),
+        File.join(source, "config"),
+        File.join(source, "schemas"),
+        File.join(source, "templates"),
+        File.join(source, "modules", "patrol"),
+        File.join(source, "modules", "architecture-patrol"),
+        File.join(installed, "bin"),
+        File.join(installed, "rubygems-bin"),
+        case_root,
+        File.dirname(request),
+        File.dirname(scenario)
+      ].each do |path|
+        FileUtils.mkdir_p(path, mode: 0o700)
+      end
+      [
+        workspace,
+        source,
+        installed,
+        case_root
+      ].each { |path| File.chmod(0o700, path) }
+      File.binwrite(request, "{}")
+      File.binwrite(scenario, "case: one\n")
+      [ request, scenario ].each do |path|
+        File.chmod(0o600, path)
+      end
+      executable = File.join(source, "bin", "hive")
+      yield(
+        workspace: workspace,
+        source: source,
+        installed: installed,
+        case: case_root,
+        executable: executable
+      )
     end
+  end
+
+  def call_process(
+    context,
+    process: PROCESS.new,
+    argv:,
+    timeout_seconds: 5,
+    network:
+  )
+    process.call(
+      executable: context.fetch(:executable),
+      argv: argv,
+      workspace: context.fetch(:workspace),
+      source_root: context.fetch(:source),
+      installed_root: context.fetch(:installed),
+      case_root: context.fetch(:case),
+      request_ref: "requests/case-one.json",
+      scenario_ref: "inputs/scenarios/case-one.yml",
+      timeout_seconds: timeout_seconds,
+      network: network,
+      credentials: {},
+      hive_home: File.join(
+        context.fetch(:case),
+        "sandbox",
+        "hive-home"
+      )
+    )
   end
 
   def write_executable(path, body)
@@ -279,12 +363,5 @@ class ModulesMigrationQualificationScenarioProcessTest <
       "#!#{RbConfig.ruby}\n#{body}"
     )
     File.chmod(0o700, path)
-  end
-
-  def process_alive?(pid)
-    Process.kill(0, pid)
-    true
-  rescue Errno::ESRCH
-    false
   end
 end

@@ -358,6 +358,7 @@ module Hive
           registration: entry.fetch("name"),
           default_branch: default_branch(cfg),
           cfg: cfg,
+          hive_state_path: entry.fetch("hive_state_path"),
           github_gateway: github_gateway,
           dry_run: dry_run
         )

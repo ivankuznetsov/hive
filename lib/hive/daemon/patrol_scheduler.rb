@@ -589,8 +589,9 @@ module Hive
         }
         if envelope.is_a?(Hash)
           %w[
-            features_mapped features_reviewed review_complete findings
-            finding_ids fixes_attempted prs_opened last_scanned_sha
+            features_mapped features_review_attempted features_reviewed
+            review_complete review_exhaustion_reason findings finding_ids
+            fixes_attempted prs_opened last_scanned_sha
           ].each do |key|
             outcome[key] = envelope[key] if envelope.key?(key)
           end

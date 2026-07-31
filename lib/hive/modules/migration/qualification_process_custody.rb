@@ -6,9 +6,9 @@ require "hive/workflow_package/canonical_json"
 module Hive
   module Modules
     module Migration
-      # Cleanup-only custody sidecars for detached qualification wrappers.
-      # These identities are never qualification evidence; the trusted host
-      # rechecks them against the live process before sending any signal.
+      # Diagnostic-only custody sidecars for qualification wrappers. These
+      # candidate-authored identities are never evidence or host signal
+      # authority; the host-owned PID namespace provides teardown custody.
       module QualificationProcessCustody
         module_function
 

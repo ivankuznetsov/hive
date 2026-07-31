@@ -47,12 +47,16 @@ module Hive
       # if the commit reviewed cleanly (U5 fail-loud).
       attr_reader :review_errors
 
-      def initialize(project_root, cfg:, state: StateStore.new(project_root), agent_runner: nil,
+      def initialize(project_root, cfg:,
+                     state: StateStore.new(project_root),
+                     agent_runner: nil, agent_factory: nil,
                      token_budget: nil)
         @project_root = File.expand_path(project_root)
         @cfg = cfg
         @state = state
         @agent_runner = agent_runner || method(:run_agent)
+        @agent_factory =
+          agent_factory || ->(**options) { Hive::Agent.new(**options) }
         @token_budget = token_budget || TokenBudget.new(@project_root, cfg: cfg)
         @review_errors = []
         @source_reader = Hive::Patrol::SourceReader.new(@project_root)
@@ -327,7 +331,7 @@ module Hive
         started_at = Time.now.utc
         result = nil
         begin
-          result = Hive::Agent.new(
+          result = @agent_factory.call(
             task: task,
             prompt: prompt,
             add_dirs: [ @project_root ],

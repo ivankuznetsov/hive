@@ -342,10 +342,13 @@ module Hive
               authority.descriptor,
               row
             )
-            hive_home = File.join(
+            case_root = File.join(
               workspace,
               "cases",
-              row.fetch(:case_id),
+              row.fetch(:case_id)
+            )
+            hive_home = File.join(
+              case_root,
               "sandbox",
               "hive-home"
             )
@@ -357,7 +360,11 @@ module Hive
                 "--request", request_ref
               ],
               workspace: workspace,
+              source_root: materialized.source_root,
               installed_root: materialized.installed_root,
+              case_root: case_root,
+              request_ref: request_ref,
+              scenario_ref: row.fetch(:scenario_ref),
               timeout_seconds: [
                 remaining,
                 policy.fetch("timeout_seconds")
@@ -521,6 +528,7 @@ module Hive
             lane: lane,
             lane_result: "passed",
             candidate: descriptor.candidate,
+            control: descriptor.control,
             configuration_digests:
               configuration_digests(descriptor),
             project: descriptor.project,
@@ -635,6 +643,7 @@ module Hive
             lane_result: "failed",
             failure_reason: failure.reason,
             candidate: descriptor.candidate,
+            control: descriptor.control,
             configuration_digests:
               configuration_digests(descriptor),
             project: descriptor.project,
@@ -752,6 +761,12 @@ module Hive
             "ruby_sha256" => process.ruby_sha256,
             "attempt_count" => process.attempt_count,
             "custody_count" => process.custody_count,
+            "sandbox_profile_sha256" =>
+              process.sandbox_profile_sha256,
+            "source_inventory_sha256" =>
+              process.source_inventory_sha256,
+            "installed_inventory_sha256" =>
+              process.installed_inventory_sha256,
             "teardown" => process.teardown
           }.freeze
         rescue NoMethodError

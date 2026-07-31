@@ -2,6 +2,7 @@ require "digest"
 require "json"
 require "time"
 require "hive/errors"
+require "hive/modules/migration/trusted_qualification_control"
 require "hive/workflow_package/canonical_json"
 
 module Hive
@@ -17,9 +18,9 @@ module Hive
         LANES = %w[deterministic installed].freeze
         MODULES = %w[architecture-patrol patrol].freeze
         TOP_LEVEL_KEYS = %w[
-          artifact_refs candidate descriptor_sha256 expectations lanes
-          module_selections prepared_at project run_id scenarios schema
-          schema_version
+          artifact_refs candidate control descriptor_sha256 expectations
+          lanes module_selections prepared_at project run_id scenarios
+          schema schema_version
         ].freeze
         CANDIDATE_KEYS = %w[
           artifact_manifest_sha256 candidate_gem_sha256 commit_sha
@@ -104,6 +105,9 @@ module Hive
               validate_project(value.fetch("project"))
             validate_selections(value.fetch("module_selections"))
             validate_candidate(value.fetch("candidate"))
+            TrustedQualificationControl.normalize(
+              value.fetch("control")
+            )
             validate_scenarios(
               value.fetch("scenarios"),
               value.fetch("expectations"),
@@ -406,6 +410,7 @@ module Hive
 
         def run_id = payload.fetch("run_id")
         def candidate = payload.fetch("candidate")
+        def control = payload.fetch("control")
         def project = payload.fetch("project")
         def module_selections = payload.fetch("module_selections")
         def scenarios = payload.fetch("scenarios")
@@ -433,6 +438,7 @@ module Hive
             "project" => project,
             "module_selections" => module_selections,
             "candidate" => candidate,
+            "control" => control,
             "scenario_manifest_digest" =>
               scenarios.fetch("manifest_sha256"),
             "decision_expectations" =>

@@ -115,15 +115,33 @@ module Hive
               outcome["action_count"].to_i.positive? &&
               !outcome["job_id"].to_s.empty?
           when "clean_negative"
-            rationale == "not_due" &&
-              outcome["findings"].to_i.zero? &&
-              outcome["action_count"].to_i.zero?
+            clean_negative?(
+              row.fetch("module"),
+              rationale: rationale,
+              outcome: outcome
+            )
           when "none"
             true
           else
             false
           end
           malformed! unless valid
+        end
+
+        def clean_negative?(module_name, rationale:, outcome:)
+          return (
+            rationale == "due" &&
+              outcome["review_complete"] == true &&
+              outcome["features_reviewed"].to_i.positive? &&
+              outcome["findings"].to_i.zero? &&
+              Array(outcome["finding_ids"]).empty?
+          ) if module_name == "patrol"
+
+          module_name == "architecture-patrol" &&
+            rationale == "due" &&
+            outcome["complete"] == true &&
+            outcome["action_count"].to_i.zero? &&
+            outcome["zero_reason"] == "no_theses"
         end
 
         def malformed!

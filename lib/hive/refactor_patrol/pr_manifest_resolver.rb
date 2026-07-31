@@ -20,8 +20,10 @@ module Hive
       attr_reader :root
 
       def initialize(project_root:, registration:, default_branch:, cfg:,
-                     gh: Hive::Gh, github_gateway: nil, dry_run: false)
+                     hive_state_path:, gh: Hive::Gh, github_gateway: nil,
+                     dry_run: false)
         @project_root = File.expand_path(project_root)
+        @hive_state_path = File.expand_path(hive_state_path)
         @registration = registration.to_s
         @default_branch = default_branch.to_s
         @cfg = cfg
@@ -31,7 +33,12 @@ module Hive
           required: %i[merged_pr_details]
         )
         @dry_run = dry_run
-        @root = File.join(@project_root, ".hive-state", "refactor_patrol", "v2", "manifests")
+        @root = File.join(
+          @hive_state_path,
+          "refactor_patrol",
+          "v2",
+          "manifests"
+        )
       end
 
       def resolve(pr, timeout_sec: nil)

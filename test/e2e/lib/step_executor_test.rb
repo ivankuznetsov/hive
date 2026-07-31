@@ -25,6 +25,7 @@ class E2EStepExecutorTest < Minitest::Test
       )
       calls = []
       qualification_run_id = "patrol-#{"1" * 64}"
+      harness_writer = method(:write_harness_result)
       runner = Object.new
       runner.define_singleton_method(:call) do |project_root:, run_home:, artifacts_root:|
         artifacts_dir = File.join(
@@ -35,10 +36,10 @@ class E2EStepExecutorTest < Minitest::Test
           artifacts_root: artifacts_root
         }
         FileUtils.mkdir_p(artifacts_dir)
-        File.write(
-          File.join(artifacts_dir, "result.json"),
-          JSON.generate("run_id" => qualification_run_id,
-                        "status" => "deterministic_evidence_ready")
+        harness_writer.call(
+          artifacts_dir,
+          run_id: qualification_run_id,
+          status: "deterministic_evidence_ready"
         )
         {
           "run_id" => qualification_run_id,
@@ -97,13 +98,16 @@ class E2EStepExecutorTest < Minitest::Test
             artifacts_root, qualification_run_id
           )
           FileUtils.mkdir_p(artifacts_dir)
-          File.write(
-            File.join(artifacts_dir, "result.json"),
-            JSON.generate(
+          path =
+            File.join(artifacts_dir, "result.json")
+          File.binwrite(
+            path,
+            Hive::WorkflowPackage::CanonicalJSON.generate(
               "run_id" => qualification_run_id,
               "status" => status
             )
           )
+          File.chmod(0o600, path)
           {
             "run_id" => qualification_run_id,
             "status" => status,
@@ -125,7 +129,7 @@ class E2EStepExecutorTest < Minitest::Test
         row = report.fetch("scenarios").first
         assert_equal "failed", row.fetch("status"), status
         assert_equal "patrol_evidence", row.fetch("failed_step_kind")
-        assert_match(/not qualifying proof/, row.fetch("error_summary"))
+        assert_match(/not a complete result/, row.fetch("error_summary"))
         scenario_artifacts = File.join(
           Dir[File.join(runs_dir, "*")].first,
           row.fetch("artifacts_dir")
@@ -213,6 +217,66 @@ class E2EStepExecutorTest < Minitest::Test
   def report_for(runs_dir)
     run_dir = Dir[File.join(runs_dir, "*")].max_by { |d| File.mtime(d) }
     JSON.parse(File.read(File.join(run_dir, "report.json")))
+  end
+
+  def write_harness_result(artifacts_dir, run_id:, status:)
+    candidate_sha = "c" * 40
+    deterministic =
+      Hive::Modules::Migration::QualificationLaneResult.build(
+        run_id: run_id,
+        lane: "deterministic",
+        status: "passed",
+        started_at: Time.utc(2026, 7, 31),
+        ended_at: Time.utc(2026, 7, 31),
+        target_sha256: "d" * 64,
+        exit_code: 0
+      )
+    installed =
+      Hive::Modules::Migration::QualificationLaneResult.build(
+        run_id: run_id,
+        lane: "installed",
+        status: "blocked",
+        started_at: Time.utc(2026, 7, 31),
+        ended_at: Time.utc(2026, 7, 31),
+        target_sha256: "e" * 64,
+        failure_reason: "live_lane_not_authorized"
+      )
+    control = {
+      "repository" => "github.com/example/hive",
+      "ref" => "refs/heads/main",
+      "commit_sha" => "1" * 40,
+      "tree_sha" => "2" * 40,
+      "trust_scope" => "trusted_remote",
+      "catalog" => {
+        "ref" =>
+          "test/e2e/fixtures/patrol_qualification/catalog.json",
+        "sha256" => "3" * 64
+      },
+      "harness_manifest_sha256" => "4" * 64,
+      "provenance" => {
+        "workflow_path" =>
+          ".github/workflows/patrol-qualification.yml",
+        "workflow_sha" => "1" * 40,
+        "run_id" => 123,
+        "run_attempt" => 1,
+        "action_lock_sha256" => "5" * 64
+      }
+    }
+    bytes = Hive::WorkflowPackage::CanonicalJSON.generate(
+      "schema" =>
+        Hive::E2E::PatrolQualificationRunner::RESULT_SCHEMA,
+      "schema_version" => 1,
+      "run_id" => run_id,
+      "candidate_sha" => candidate_sha,
+      "control" => control,
+      "status" => status,
+      "blockers" => [],
+      "deterministic" => deterministic.to_h,
+      "installed" => installed.to_h
+    )
+    path = File.join(artifacts_dir, "result.json")
+    File.binwrite(path, bytes)
+    File.chmod(0o600, path)
   end
 
   def test_cli_step_happy_path

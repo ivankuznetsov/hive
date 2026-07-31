@@ -4,6 +4,7 @@ require "fileutils"
 require "open3"
 require "tmpdir"
 require "hive/modules/migration/qualification_run_descriptor"
+require "hive/modules/migration/trusted_qualification_control"
 require "hive/workflow_package/canonical_json"
 require_relative "patrol_qualification_plan"
 
@@ -18,18 +19,30 @@ class E2EPatrolQualificationPlanTest < Minitest::Test
       @files = files
     end
 
-    def read(repo_root:, candidate_sha:, ref:)
-      raise "unexpected root" unless repo_root == "/fixture/repo"
-      raise "unexpected SHA" unless candidate_sha == "c" * 40
+    def read(control:, ref:)
+      raise "unexpected root" unless
+        control.checkout_root == "/fixture/repo"
+      raise "unexpected control SHA" unless
+        control.payload.fetch("commit_sha") == "1" * 40
 
       @files.fetch(ref)
     end
   end
 
+  module HarnessVerifier
+    module_function
+
+    def verify!(control:)
+      raise "control omitted" unless control
+      true
+    end
+  end
+
   def test_compiles_committed_expectations_without_exposing_them_to_candidate
-    result = plan.call(
+    files = committed_files
+    result = plan(files).call(
       candidate: candidate,
-      repo_root: "/fixture/repo"
+      control: control(files)
     )
 
     descriptor =
@@ -40,6 +53,7 @@ class E2EPatrolQualificationPlanTest < Minitest::Test
     assert_equal result.run_id, descriptor.run_id
     assert_equal NOW.iso8601(6),
                  descriptor.payload.fetch("prepared_at")
+    assert_equal control(files).payload, descriptor.control
     assert_equal(
       "d" * 64,
       descriptor.expectations
@@ -72,7 +86,7 @@ class E2EPatrolQualificationPlanTest < Minitest::Test
     error = assert_raises(Hive::ConfigError) do
       plan(files).call(
         candidate: candidate,
-        repo_root: "/fixture/repo"
+        control: control(files)
       )
     end
 
@@ -89,7 +103,7 @@ class E2EPatrolQualificationPlanTest < Minitest::Test
     assert_raises(Hive::ConfigError) do
       plan(files).call(
         candidate: candidate,
-        repo_root: "/fixture/repo"
+        control: control(files)
       )
     end
   end
@@ -107,22 +121,38 @@ class E2EPatrolQualificationPlanTest < Minitest::Test
       run_git(repo, "add", ".")
       run_git(repo, "commit", "-m", "fixture")
       sha = run_git(repo, "rev-parse", "HEAD").strip
+      tree = run_git(
+        repo, "rev-parse", "#{sha}^{tree}"
+      ).strip
       File.binwrite(path, "dirty")
       reader =
         Hive::E2E::PatrolQualificationPlan::CommittedReader.new
+      committed_control =
+        Hive::Modules::Migration::
+          TrustedQualificationControl.build(
+            repository: "github.com/example/hive",
+            ref: nil,
+            commit_sha: sha,
+            tree_sha: tree,
+            trust_scope: "local",
+            catalog_ref: "evidence/catalog.json",
+            catalog_sha256:
+              Digest::SHA256.hexdigest("committed"),
+            harness_manifest_sha256: "4" * 64,
+            provenance: local_provenance,
+            checkout_root: repo
+          )
 
       assert_equal(
         "committed",
         reader.read(
-          repo_root: repo,
-          candidate_sha: sha,
+          control: committed_control,
           ref: "evidence/catalog.json"
         )
       )
       error = assert_raises(Hive::ConfigError) do
         reader.read(
-          repo_root: repo,
-          candidate_sha: sha,
+          control: committed_control,
           ref: "evidence/linked.yml"
         )
       end
@@ -135,8 +165,40 @@ class E2EPatrolQualificationPlanTest < Minitest::Test
   def plan(files = committed_files)
     Hive::E2E::PatrolQualificationPlan.new(
       clock: -> { NOW },
-      committed_reader: CommittedReader.new(files)
+      committed_reader: CommittedReader.new(files),
+      harness_verifier: HarnessVerifier
     )
+  end
+
+  def control(files = committed_files)
+    catalog_bytes = files.fetch(
+      Hive::E2E::PatrolQualificationPlan::DEFAULT_CATALOG_REF
+    )
+    Hive::Modules::Migration::
+      TrustedQualificationControl.build(
+        repository: "github.com/example/hive",
+        ref: nil,
+        commit_sha: "1" * 40,
+        tree_sha: "2" * 40,
+        trust_scope: "local",
+        catalog_ref:
+          Hive::E2E::PatrolQualificationPlan::DEFAULT_CATALOG_REF,
+        catalog_sha256:
+          Digest::SHA256.hexdigest(catalog_bytes),
+        harness_manifest_sha256: "4" * 64,
+        provenance: local_provenance,
+        checkout_root: "/fixture/repo"
+      )
+  end
+
+  def local_provenance
+    {
+      "workflow_path" => nil,
+      "workflow_sha" => nil,
+      "run_id" => nil,
+      "run_attempt" => nil,
+      "action_lock_sha256" => nil
+    }
   end
 
   def committed_files

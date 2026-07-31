@@ -24,7 +24,8 @@ module Hive
         OPERATIONS = %w[
           architecture_positive_fixture capacity_deferral
           concurrent_duplicate_delivery cooldown_retry launch_failure
-          new_commit ordinary_positive_fixture partial_failure
+          new_commit ordinary_clean_fixture ordinary_positive_fixture
+          partial_failure
           quota_deferral reconciliation_failure restart same_commit
           timer_due timer_not_due timer_reset_reload
         ].freeze

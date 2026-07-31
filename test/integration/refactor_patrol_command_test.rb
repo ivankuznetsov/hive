@@ -1371,6 +1371,8 @@ class RefactorPatrolCommandTest < Minitest::Test
       assert_equal repo, captured.fetch(:project_root)
       assert_equal "demo", captured.fetch(:registration)
       assert_equal "master", captured.fetch(:default_branch)
+      assert_equal entry.fetch("hive_state_path"),
+                   captured.fetch(:hive_state_path)
       assert_equal true, captured.fetch(:dry_run)
     end
   end

@@ -32,6 +32,8 @@ module Hive
                      mapper_factory: nil, reviewer_factory: nil,
                      fixer_factory: nil, pr_opener_factory: nil,
                      dismissals_factory: nil, project_entry: nil,
+                     state_store_factory: nil,
+                     token_budget_factory: nil,
                      capability_context: nil, module_execution: nil,
                      occurrence_id: nil, capture: nil,
                      migration_authority: :legacy,
@@ -53,6 +55,17 @@ module Hive
             root, state: state, persist: !@dry_run
           )
         end
+        @state_store_factory =
+          state_store_factory || lambda do |root, entry|
+            Hive::Patrol::StateStore.new(
+              root,
+              hive_state_path: entry.fetch("hive_state_path")
+            )
+          end
+        @token_budget_factory =
+          token_budget_factory || lambda do |root, cfg|
+            Hive::Patrol::TokenBudget.new(root, cfg: cfg)
+          end
         @project_entry = project_entry
         @capability_context = capability_context
         @module_execution = module_execution
@@ -95,9 +108,7 @@ module Hive
         require_module_observation_capabilities!
         require_module_mutation_capabilities! unless @dry_run
         ensure_validation_configured!(cfg) unless @dry_run
-        state = Hive::Patrol::StateStore.new(
-          project_root, hive_state_path: entry.fetch("hive_state_path")
-        )
+        state = @state_store_factory.call(project_root, entry)
         state.ensure!
         state.with_cycle_lock do
           run_locked_cycle(entry, project_root, cfg, state)
@@ -117,7 +128,7 @@ module Hive
           )
           state.recover_pending_fingerprint_effects!
         end
-        token_budget = Hive::Patrol::TokenBudget.new(project_root, cfg: cfg)
+        token_budget = @token_budget_factory.call(project_root, cfg)
         dismissed = @dismissals_factory.call(project_root, state).reconcile
         target_sha = sweep_target_sha(project_root, cfg, state)
         features, feature_batch, reviewer, findings = with_scan_checkout(project_root, target_sha) do |scan_root|
@@ -379,7 +390,13 @@ module Hive
             "findings" => payload.fetch("findings"),
             "fixes_attempted" => payload.fetch("fixes_attempted"),
             "prs_opened" => payload.fetch("prs_opened"),
-            "review_complete" => payload.fetch("review_complete")
+            "review_complete" => payload.fetch("review_complete"),
+            "features_review_attempted" =>
+              payload.fetch("features_review_attempted"),
+            "features_reviewed" =>
+              payload.fetch("features_reviewed"),
+            "review_exhaustion_reason" =>
+              payload["review_exhaustion_reason"]
           },
           effect_ids: state.terminal_effect_receipt_ids(
             provisional.occurrence_id
@@ -408,8 +425,19 @@ module Hive
           "features_review_attempted" => attempted,
           "features_reviewed" => succeeded,
           "review_complete" => errors.empty? && feature_batch.complete,
-          "review_errors" => errors
+          "review_errors" => errors,
+          "review_exhaustion_reason" =>
+            normalized_review_exhaustion(errors)
         }
+      end
+
+      def normalized_review_exhaustion(errors)
+        reasons = Array(errors).filter_map do |error|
+          next unless error.is_a?(Hash)
+
+          error.dig("details", "resource_exhaustion", "reason")
+        end.map(&:to_s).reject(&:empty?).uniq
+        reasons.one? ? reasons.fetch(0) : nil
       end
 
       # Reviewer calls consume the same cycle and daily launch envelope as
@@ -696,6 +724,8 @@ module Hive
           "features_review_attempted" => review.fetch("features_review_attempted"),
           "features_reviewed" => review.fetch("features_reviewed"),
           "review_complete" => review.fetch("review_complete"),
+          "review_exhaustion_reason" =>
+            review.fetch("review_exhaustion_reason"),
           "review_errors" => review.fetch("review_errors"),
           "findings" => findings.size,
           "finding_ids" => findings.map(&:id).sort,

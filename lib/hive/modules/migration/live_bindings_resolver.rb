@@ -1,5 +1,4 @@
 require "hive/modules/migration/patrol_evidence_receipt"
-require "hive/modules/migration/qualification_run_authority_provider"
 require "hive/modules/migration/qualification_run_descriptor"
 
 module Hive
@@ -10,9 +9,9 @@ module Hive
       # never lookup authority: callers supply run and lane independently.
       class LiveBindingsResolver
         RUN_AUTHORITY_KEYS = %w[
-          artifact_digests artifact_refs candidate decision_expectations
-          expected_legacy_effect_keys lane lane_policy module_selections
-          project required_faults required_matrix run_id
+          artifact_digests artifact_refs candidate control
+          decision_expectations expected_legacy_effect_keys lane lane_policy
+          module_selections project required_faults required_matrix run_id
           scenario_manifest_digest
         ].freeze
         BINDING_KEYS =
@@ -80,6 +79,9 @@ module Hive
           selection_status, live_selections, selection_issues =
             resolve_live_selections
           issues = project_issues + selection_issues
+          control_issues =
+            control_qualification_issues(authority)
+          issues.concat(control_issues)
           mismatch = false
           if live_project &&
              live_project != authority.fetch("project")
@@ -93,6 +95,8 @@ module Hive
           end
           statuses = [ project_status, selection_status ]
           statuses << "evidence_required" if mismatch
+          statuses << "evidence_required" unless
+            control_issues.empty?
           status = highest_status(statuses)
           bindings = authority.merge(
             "configuration_digests" =>
@@ -182,6 +186,10 @@ module Hive
                   "patrol run authority selection is malformed"
           end
           validate_candidate!(source.fetch("candidate"), label)
+          Hive::Modules::Migration::
+            TrustedQualificationControl.normalize(
+              source.fetch("control")
+            )
           validate_project!(source.fetch("project"), label)
           validate_selections!(
             source.fetch("module_selections"), label
@@ -211,6 +219,18 @@ module Hive
             source.fetch("artifact_refs"), selected_lane, label
           )
           source
+        end
+
+        def control_qualification_issues(authority)
+          control = authority.fetch("control")
+          candidate = authority.fetch("candidate")
+          issues = []
+          issues << "qualification_control_untrusted" unless
+            control.fetch("trust_scope") == "trusted_remote"
+          issues << "qualification_control_not_independent" if
+            control.fetch("commit_sha") ==
+              candidate.fetch("commit_sha")
+          issues.freeze
         end
 
         def resolve_live_project

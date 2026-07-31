@@ -6,7 +6,7 @@ module Hive
       # reconstruct it from verified evidence for every transition attempt.
       class PatrolQualification < Data.define(
         :status, :blockers, :run_id, :configuration_digests,
-        :candidate, :scenario_manifest_digest, :verifications,
+        :candidate, :control, :scenario_manifest_digest, :verifications,
         :report_id
       )
         def ready_for_operator?

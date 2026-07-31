@@ -584,6 +584,7 @@ module Hive
             registration: registration,
             default_branch: project_cfg["default_branch"] || Hive::GitOps.new(root).default_branch,
             cfg: project_cfg,
+            hive_state_path: entry.fetch("hive_state_path"),
             dry_run: @dry_run
           )
         end

@@ -8,10 +8,12 @@ require "hive/modules/migration/migration_repository"
 require "hive/modules/migration/qualification_lane_result"
 require "hive/modules/migration/qualification_lane_runner"
 require "hive/modules/migration/qualification_run_descriptor"
+require "hive/modules/migration/trusted_qualification_control"
 require "hive/workflow_package/canonical_json"
 require_relative "../../../packaging/patrol_evidence/candidate"
 require_relative "path_safety"
 require_relative "paths"
+require_relative "patrol_qualification_control_provider"
 require_relative "patrol_qualification_plan"
 
 module Hive
@@ -27,8 +29,13 @@ module Hive
         deterministic_evidence_ready
         evidence_ready_for_operator
       ].freeze
+      LOCAL_COMPLETE_BLOCKERS = %w[
+        qualification_control_untrusted
+        qualification_control_not_independent
+      ].freeze
       RESULT_SCHEMA =
         "hive-patrol-qualification-harness-result".freeze
+      RESULT_MAX_BYTES = 64 * 1024
       CleanupEntry = Data.define(
         :path, :device, :inode, :directory, :handle, :children
       )
@@ -50,10 +57,117 @@ module Hive
         end
       end
 
+      class << self
+        def harness_complete?(result)
+          return false unless
+            result.is_a?(Hash) &&
+              result.keys.sort ==
+                %w[artifacts_dir run_id status]
+          path = File.join(
+            result.fetch("artifacts_dir"),
+            "result.json"
+          )
+          stat = File.lstat(path)
+          return false unless
+            stat.file? &&
+              !stat.symlink? &&
+              stat.nlink == 1 &&
+              stat.uid == Process.euid &&
+              stat.size <= RESULT_MAX_BYTES &&
+              (stat.mode & 0o777) == 0o600
+          bytes = File.binread(path)
+          value = JSON.parse(bytes)
+          return false unless
+            bytes == canonical(value) &&
+              value.keys.sort == %w[
+                blockers candidate_sha control deterministic
+                installed run_id schema schema_version status
+              ] &&
+              value.fetch("schema") == RESULT_SCHEMA &&
+              value.fetch("schema_version") == 1 &&
+              value.fetch("run_id") == result.fetch("run_id") &&
+              value.fetch("status") == result.fetch("status") &&
+              RUN_ID.match?(value.fetch("run_id").to_s) &&
+              value.fetch("candidate_sha").is_a?(String) &&
+              value.fetch("candidate_sha").match?(
+                /\A[0-9a-f]{40}\z/
+              ) &&
+              value.fetch("blockers").is_a?(Array)
+          control =
+            Hive::Modules::Migration::
+              TrustedQualificationControl.normalize(
+                value.fetch("control")
+              )
+          deterministic = lane(value, "deterministic")
+          installed = lane(value, "installed")
+          complete_outcome?(
+            value,
+            control: control,
+            deterministic: deterministic,
+            installed: installed
+          )
+        rescue Hive::ConfigError, JSON::ParserError,
+               EncodingError, KeyError, NoMethodError,
+               TypeError, SystemCallError
+          false
+        end
+
+        private
+
+        def canonical(value)
+          Hive::WorkflowPackage::CanonicalJSON.generate(value)
+        end
+
+        def lane(value, name)
+          result =
+            Hive::Modules::Migration::
+              QualificationLaneResult.load(
+                canonical(value.fetch(name))
+              )
+          raise Hive::ConfigError, "lane changed" unless
+            result.lane == name &&
+              result.run_id == value.fetch("run_id")
+          result
+        end
+
+        def complete_outcome?(
+          value, control:, deterministic:, installed:
+        )
+          status = value.fetch("status")
+          blockers = value.fetch("blockers")
+          candidate_sha = value.fetch("candidate_sha")
+          if status == "evidence_required"
+            return (
+              control.fetch("trust_scope") == "local" &&
+                control.fetch("ref").nil? &&
+                control.fetch("commit_sha") == candidate_sha &&
+                blockers == LOCAL_COMPLETE_BLOCKERS &&
+                deterministic.passed? &&
+                installed.blocked? &&
+                installed.failure_reason ==
+                  "live_lane_not_authorized"
+            )
+          end
+          return false unless
+            HARNESS_READY_STATUSES.include?(status) &&
+              blockers.empty? &&
+              control.fetch("trust_scope") == "trusted_remote" &&
+              control.fetch("commit_sha") != candidate_sha &&
+              deterministic.passed?
+          return installed.passed? if
+            status == "evidence_ready_for_operator"
+
+          installed.blocked? &&
+            installed.failure_reason ==
+              "live_lane_not_authorized"
+        end
+      end
+
       def initialize(
         repo_root: Paths.repo_root,
         candidate_preparer_factory: nil,
         plan: PatrolQualificationPlan.new,
+        control_provider: nil,
         repository_factory: nil,
         lane_runner_factory: nil,
         workspace_remover: nil
@@ -68,6 +182,13 @@ module Hive
             )
           end
         @plan = plan
+        @control_provider =
+          control_provider ||
+          lambda do |candidate_sha:|
+            PatrolQualificationControlProvider.new(
+              repo_root: @repo_root
+            ).call(candidate_sha: candidate_sha)
+          end
         @repository_factory =
           repository_factory || method(:repository_for)
         @lane_runner_factory =
@@ -102,9 +223,20 @@ module Hive
           workspace = workspace_path
           candidate =
             @candidate_preparer_factory.call(workspace).call
+          control = @control_provider.call(
+            candidate_sha: candidate.candidate_sha
+          )
+          unless
+            control.is_a?(
+              Hive::Modules::Migration::
+                TrustedQualificationControl
+            )
+            raise Hive::ConfigError,
+                  "patrol qualification trusted control is unavailable"
+          end
           prepared = @plan.call(
             candidate: candidate,
-            repo_root: @repo_root
+            control: control
           )
           repository = @repository_factory.call(project)
           run_id = repository.import_qualification_run(
@@ -129,9 +261,14 @@ module Hive
             lane: "installed",
             live_authorized: false
           )
+          control_blockers =
+            control.qualification_issues(
+              candidate.candidate_sha
+            )
           status = aggregate_status(
             deterministic,
-            installed
+            installed,
+            control_blockers: control_blockers
           )
           run_dir = publish_capture(
             artifacts: artifacts,
@@ -140,6 +277,8 @@ module Hive
             candidate: candidate,
             deterministic: deterministic,
             installed: installed,
+            control: control.payload,
+            blockers: control_blockers,
             status: status
           )
           result = {
@@ -184,7 +323,9 @@ module Hive
               "patrol qualification project state is unavailable"
       end
 
-      def aggregate_status(deterministic, installed)
+      def aggregate_status(
+        deterministic, installed, control_blockers:
+      )
         unless lane_result?(
           deterministic,
           lane: "deterministic"
@@ -193,6 +334,18 @@ module Hive
                 "patrol qualification lane outcome is malformed"
         end
         return "failed" unless deterministic.passed?
+        if
+          !control_blockers.empty? &&
+            (
+              installed.passed? ||
+                (
+                  installed.blocked? &&
+                    installed.failure_reason ==
+                      "live_lane_not_authorized"
+                )
+            )
+          return "evidence_required"
+        end
         return "evidence_ready_for_operator" if
           installed.passed?
         if
@@ -214,7 +367,7 @@ module Hive
 
       def publish_capture(
         artifacts:, repository:, prepared:, candidate:,
-        deterministic:, installed:, status:
+        deterministic:, installed:, control:, blockers:, status:
       )
         run_dir = File.join(artifacts, prepared.run_id)
         if File.exist?(run_dir) || File.symlink?(run_dir)
@@ -266,7 +419,9 @@ module Hive
           "schema_version" => 1,
           "run_id" => prepared.run_id,
           "candidate_sha" => candidate.candidate_sha,
+          "control" => control,
           "status" => status,
+          "blockers" => blockers,
           "deterministic" => deterministic.to_h,
           "installed" => installed.to_h
         )

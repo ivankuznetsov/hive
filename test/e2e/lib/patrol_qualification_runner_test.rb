@@ -64,9 +64,9 @@ class E2EPatrolQualificationRunnerTest < Minitest::Test
       @fixture = fixture
     end
 
-    def call(candidate:, repo_root:)
+    def call(candidate:, control:)
       raise "candidate omitted" unless candidate
-      raise "repo omitted" unless repo_root
+      raise "control omitted" unless control
 
       Hive::E2E::PatrolQualificationPlan::Result.new(
         run_id: @fixture.dig(:payload, "run_id"),
@@ -199,6 +199,8 @@ class E2EPatrolQualificationRunnerTest < Minitest::Test
                    result.fetch("status")
       assert_equal context.fetch(:run_id),
                    result.fetch("run_id")
+      assert Hive::E2E::PatrolQualificationRunner
+        .harness_complete?(result)
       run_dir = result.fetch("artifacts_dir")
       assert_equal(
         File.join(
@@ -236,6 +238,32 @@ class E2EPatrolQualificationRunnerTest < Minitest::Test
           ".candidate-preparation"
         )
       )
+    end
+  end
+
+  def test_local_control_remains_nonqualifying_after_deterministic_pass
+    with_runner(control_trust_scope: "local") do |context|
+      result = context.fetch(:runner).call(
+        project_root: context.fetch(:project),
+        run_home: context.fetch(:run_home),
+        artifacts_root: context.fetch(:artifacts)
+      )
+
+      assert_equal "evidence_required", result.fetch("status")
+      aggregate = JSON.parse(
+        File.binread(
+          File.join(result.fetch("artifacts_dir"), "result.json")
+        )
+      )
+      assert_equal(
+        %w[
+          qualification_control_untrusted
+          qualification_control_not_independent
+        ],
+        aggregate.fetch("blockers")
+      )
+      assert Hive::E2E::PatrolQualificationRunner
+        .harness_complete?(result)
     end
   end
 
@@ -581,7 +609,8 @@ class E2EPatrolQualificationRunnerTest < Minitest::Test
     deterministic_status: "passed",
     return_mismatch: false,
     candidate_preparer_factory: nil,
-    workspace_remover: nil
+    workspace_remover: nil,
+    control_trust_scope: "trusted_remote"
   )
     Dir.mktmpdir("patrol-runner") do |root|
       File.chmod(0o700, root)
@@ -594,11 +623,33 @@ class E2EPatrolQualificationRunnerTest < Minitest::Test
         mode: 0o700
       )
       fixture = qualification_run_fixture
+      if control_trust_scope == "local"
+        payload = fixture.fetch(:payload)
+        payload.fetch("control")["trust_scope"] = "local"
+        payload.fetch("control")["ref"] = nil
+        payload.fetch("control")["commit_sha"] =
+          payload.dig("candidate", "commit_sha")
+        payload.fetch("control")["provenance"] = {
+          "workflow_path" => nil,
+          "workflow_sha" => nil,
+          "run_id" => nil,
+          "run_attempt" => nil,
+          "action_lock_sha256" => nil
+        }
+        seal_qualification_payload!(payload)
+        fixture[:descriptor] = canonical(payload)
+      end
       repository =
         Hive::Modules::Migration::MigrationRepository.new(
           root: repository_root
         )
       candidate = candidate_from(fixture)
+      control =
+        Hive::Modules::Migration::
+          TrustedQualificationControl.from_h(
+            fixture.fetch(:payload).fetch("control"),
+            checkout_root: root
+          )
       candidate_preparer_factory ||=
         lambda do |workspace|
           Preparer.new(candidate, workspace)
@@ -608,6 +659,7 @@ class E2EPatrolQualificationRunnerTest < Minitest::Test
         candidate_preparer_factory:
           candidate_preparer_factory,
         plan: Plan.new(fixture),
+        control_provider: ->(**) { control },
         repository_factory: ->(_project) { repository },
         workspace_remover: workspace_remover,
         lane_runner_factory:

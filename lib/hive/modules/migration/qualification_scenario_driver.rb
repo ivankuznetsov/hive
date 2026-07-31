@@ -20,8 +20,9 @@ module Hive
           modules/patrol
         ].freeze
         SUPPORTED_OPERATIONS = %w[
-          new_commit ordinary_positive_fixture partial_failure restart
-          same_commit timer_due timer_not_due timer_reset_reload
+          capacity_deferral new_commit ordinary_clean_fixture
+          ordinary_positive_fixture partial_failure quota_deferral
+          restart same_commit timer_due timer_not_due timer_reset_reload
         ].freeze
         NEW_COMMIT_OPERATIONS = %w[new_commit same_commit].freeze
         RELOADED_OPERATIONS = %w[restart timer_reset_reload].freeze
@@ -39,6 +40,108 @@ module Hive
           :attempts_root, :comparator_record, :effect_index
         )
 
+        class QualificationAgent
+          def initialize(output_path:, operation:, findings:)
+            @output_path = output_path
+            @operation = operation
+            @findings = findings
+          end
+
+          def run!
+            if @operation == "partial_failure"
+              return {
+                status: :error,
+                error_message:
+                  "qualification reviewer partial failure"
+              }
+            end
+
+            File.binwrite(
+              @output_path,
+              Hive::WorkflowPackage::CanonicalJSON.generate(
+                "findings" => @findings
+              )
+            )
+            {
+              status: :ok,
+              model: "qualification-fixture",
+              usage: {
+                input: 1,
+                output: 1,
+                cached: 0,
+                model: "qualification-fixture"
+              }
+            }
+          end
+        end
+        private_constant :QualificationAgent
+
+        class QualificationTokenBudget
+          def initialize(delegate:, operation:)
+            @delegate = delegate
+            @operation = operation
+            @cycle_exhausted = false
+          end
+
+          def remaining_launches(...)
+            available = @delegate.remaining_launches(...)
+            return available unless
+              %w[
+                capacity_deferral quota_deferral
+              ].include?(@operation)
+
+            [ available, 1 ].max
+          end
+
+          def acquire(stage:, minimum_tokens:)
+            exhaust_cycle!(stage) if
+              @operation == "capacity_deferral" &&
+                !@cycle_exhausted
+            @delegate.acquire(
+              stage: stage,
+              minimum_tokens: minimum_tokens
+            )
+          end
+
+          def method_missing(name, ...)
+            return super unless @delegate.respond_to?(name)
+
+            @delegate.public_send(name, ...)
+          end
+
+          def respond_to_missing?(name, include_private = false)
+            @delegate.respond_to?(name, include_private) || super
+          end
+
+          private
+
+          def exhaust_cycle!(stage)
+            @cycle_exhausted = true
+            return unless
+              @delegate.acquire(
+                stage: stage,
+                minimum_tokens: 0
+              )
+
+            @delegate.record!(
+              result: {
+                status: :ok,
+                model: "qualification-fixture",
+                usage: {
+                  input: 0,
+                  output: 0,
+                  cached: 0,
+                  model: "qualification-fixture"
+                }
+              },
+              profile: "qualification-fixture",
+              stage: stage,
+              started_at: Time.now.utc
+            )
+          end
+        end
+        private_constant :QualificationTokenBudget
+
         def initialize(candidate_source_root:, sandbox_root:, project:,
                        scenario_input:)
           @candidate_source_root =
@@ -48,7 +151,6 @@ module Hive
           @project = validate_project(project)
           @scenario_input = validate_scenario_input(scenario_input)
           @clock = -> { @scenario_input.clock }
-          @reviewer_agent_runner = method(:run_reviewer_fixture)
         end
 
         def call
@@ -89,22 +191,32 @@ module Hive
             raise Hive::ConfigError,
                   "qualification legacy patrol capture is malformed"
           end
-          decision, terminal = run_module_shadow!(
+          decisions, terminal, attempt_records =
+            run_module_shadow_with_recovery!(
             event: event,
             registry_entry: registry_entry,
             hive_state_path: hive_state_path,
             store: store
           )
           restart_generation =
-            RELOADED_OPERATIONS.include?(
-              @scenario_input.operation
-            ) ? 2 : 1
+            if
+              RELOADED_OPERATIONS.include?(
+                @scenario_input.operation
+              ) ||
+                (@consumed_faults || {}).any? do |_name, consumed|
+                  consumed
+                end
+              2
+            else
+              1
+            end
           assemble_result!(
             case_id: @scenario_input.case_id,
             event: event,
             capture: capture,
-            decision: decision,
+            decisions: decisions,
             terminal: terminal,
+            attempt_records: attempt_records,
             repository_root: repository_root,
             hive_state_path: hive_state_path,
             restart_generation: restart_generation
@@ -116,6 +228,7 @@ module Hive
         def load_runtime!
           require "hive/attempts/api"
           require "hive/attempts/output_reference"
+          require "hive/attempts/reconciler"
           require "hive/attempts/store"
           require "hive/commands/patrol"
           require "hive/config"
@@ -137,6 +250,77 @@ module Hive
           require "hive/patrol/reviewer"
           require "hive/patrol/state_store"
           require "hive/workflow_package/canonical_yaml"
+        end
+
+        def run_module_shadow_with_recovery!(
+          store:, event:, registry_entry:, hive_state_path:
+        )
+          return run_module_shadow!(
+            store: store,
+            event: event,
+            registry_entry: registry_entry,
+            hive_state_path: hive_state_path
+          ) unless
+            qualification_fault?("after_module_decision")
+          unless Process.respond_to?(:fork)
+            raise Hive::ConfigError,
+                  "qualification fault supervisor is unavailable"
+          end
+
+          actor_pid = fork do
+            run_module_shadow!(
+              store: store,
+              event: event,
+              registry_entry: registry_entry,
+              hive_state_path: hive_state_path
+            )
+            Process.exit!(71)
+          rescue StandardError
+            Process.exit!(70)
+          end
+          _pid, status = Process.wait2(actor_pid)
+          unless status.exited? && status.exitstatus == FAULT_EXIT_STATUS
+            raise Hive::ConfigError,
+                  "qualification fault actor did not stop at its checkpoint"
+          end
+          wait_for_fault_workers!
+          attempt_store = Hive::Attempts::Store.new(
+            root: qualification_attempts_root
+          )
+          @pre_fault_durable_state_sha256 =
+            runtime_state_digest(
+              hive_state_path: hive_state_path,
+              attempt_store: attempt_store
+            )
+          @consumed_faults ||= {}
+          @consumed_faults["after_module_decision"] = true
+          reconciliation =
+            Hive::Attempts::Reconciler.new(
+              store: attempt_store
+            ).reconcile(now: @clock.call)
+          unless reconciliation.newly_lost_attempts.length == 1
+            raise Hive::ConfigError,
+                  "qualification fault attempt was not recovered as lost"
+          end
+
+          run_module_shadow!(
+            store: store,
+            event: event,
+            registry_entry: registry_entry,
+            hive_state_path: hive_state_path
+          )
+        rescue Errno::ECHILD
+          raise Hive::ConfigError,
+                "qualification fault actor custody was lost"
+        ensure
+          if actor_pid
+            begin
+              Process.kill("KILL", actor_pid)
+              Process.wait(actor_pid)
+            rescue Errno::ESRCH, Errno::ECHILD
+              nil
+            end
+          end
         end
 
         def run_module_shadow!(store:, event:, registry_entry:,
@@ -181,34 +365,51 @@ module Hive
           journal = Hive::Modules::DecisionJournal.new(
             root: File.join(hive_state_path, "module-runtime")
           )
+          decision_count_before = journal.all.length
           first_tick = runtime.tick(now: @clock.call).fetch(0)
           decisions = journal.all
-          launches = decisions.select do |decision|
+          event_decisions = decisions.select do |decision|
             decision["module"] == "patrol" &&
               decision["hook"] == "scheduled-scan" &&
-              decision["event_id"] == event.fetch("event_id") &&
-              decision["outcome"] == "launch" &&
+              decision["event_id"] == event.fetch("event_id")
+          end.sort_by do |decision|
+            [
+              (
+                decision["outcome"] == "launch" &&
+                decision["reason"] == "admitted"
+              ) ? 0 : 1,
+              decision.fetch("evaluated_at"),
+              decision.fetch("decision_id")
+            ]
+          end
+          launches = event_decisions.select do |decision|
+            decision["outcome"] == "launch" &&
               decision["reason"] == "admitted"
           end
           decision = launches.fetch(0)
-          extras = decisions.reject { |row| row.equal?(decision) }
+          extras = event_decisions.reject do |row|
+            row.equal?(decision)
+          end
           unless first_tick.fetch(:status) == :ok &&
-                 first_tick.fetch(:decisions) == decisions.length &&
+                 first_tick.fetch(:decisions) ==
+                   decisions.length - decision_count_before &&
                  launches.length == 1 &&
                  !decision["attempt_id"].to_s.empty? &&
                  extras.all? do |row|
-                   row["outcome"] == "skip" &&
-                     row["attempt_id"].nil?
+                   row["outcome"] == "skip"
                  end
             raise Hive::ConfigError,
                   "qualification module event drain is malformed"
           end
 
-          terminal = await_terminal_attempt(
-            attempt_store,
-            decision.fetch("attempt_id")
-          )
-          unless terminal.attempt_id == decision.fetch("attempt_id") &&
+          terminal, attempt_records =
+            await_terminal_lineage(
+              attempt_store,
+              event_id: event.fetch("event_id"),
+              module_name: "patrol"
+            )
+          unless attempt_records.fetch(0).attempt_id ==
+                   decision.fetch("attempt_id") &&
                  terminal.state == "terminal" &&
                  terminal.outcome == "succeeded" &&
                  terminal.module_hook? &&
@@ -247,7 +448,7 @@ module Hive
                   "qualification module event replay was not idempotent"
           end
 
-          [ decision, terminal ].freeze
+          [ event_decisions, terminal, attempt_records ].freeze
         rescue IndexError
           raise Hive::ConfigError,
                 "qualification module hook did not succeed"
@@ -286,16 +487,86 @@ module Hive
         end
 
         def qualification_fault?(name)
-          @scenario_input.faults.include?(name)
+          @scenario_input.faults.include?(name) &&
+            !(@consumed_faults || {}).fetch(name, false)
         end
 
-        def await_terminal_attempt(attempt_store, attempt_id)
+        def wait_for_fault_workers!
           deadline =
             Process.clock_gettime(Process::CLOCK_MONOTONIC) +
             ATTEMPT_WAIT_TIMEOUT_SEC
           loop do
-            attempt = attempt_store.fetch(attempt_id)
-            return attempt if attempt&.final?
+            store = Hive::Attempts::Store.new(
+              root: qualification_attempts_root,
+              create_directories: false
+            )
+            records = store.scan.records
+            pids = records.flat_map do |record|
+              [
+                record.wrapper && record.wrapper["pid"],
+                record.worker && record.worker["pid"]
+              ]
+            end.compact
+            return if
+              !pids.empty? &&
+                pids.none? { |pid| process_alive?(pid) }
+
+            if Process.clock_gettime(
+              Process::CLOCK_MONOTONIC
+            ) >= deadline
+              raise Hive::ConfigError,
+                    "qualification fault workers did not terminate"
+            end
+            sleep ATTEMPT_WAIT_INTERVAL_SEC
+          end
+        end
+
+        def process_alive?(pid)
+          Process.kill(0, Integer(pid))
+          true
+        rescue Errno::ESRCH
+          false
+        rescue ArgumentError, TypeError
+          true
+        end
+
+        def await_terminal_lineage(
+          attempt_store,
+          event_id:,
+          module_name:
+        )
+          deadline =
+            Process.clock_gettime(Process::CLOCK_MONOTONIC) +
+            ATTEMPT_WAIT_TIMEOUT_SEC
+          loop do
+            records =
+              attempt_store.scan.records.select do |record|
+                subject = record.subject
+                record.module_hook? &&
+                  subject["project_id"] ==
+                    @project.fetch("project_id") &&
+                  subject["module"] == module_name &&
+                  subject["event_id"] == event_id
+              end
+            successful =
+              records.select do |record|
+                record.state == "terminal" &&
+                  record.outcome == "succeeded"
+              end
+            unless successful.empty?
+              terminal = successful.max_by do |record|
+                record["retry_charge"]
+              end
+              lineage =
+                attempt_lineage(records, terminal)
+              if lineage.length != records.length ||
+                 successful.length != 1
+                raise Hive::ConfigError,
+                      "qualification attempt lineage is ambiguous"
+              end
+
+              return [ terminal, lineage.freeze ].freeze
+            end
 
             remaining =
               deadline -
@@ -306,6 +577,52 @@ module Hive
             end
             sleep [ ATTEMPT_WAIT_INTERVAL_SEC, remaining ].min
           end
+        end
+
+        def attempt_lineage(records, terminal)
+          by_id = records.to_h do |record|
+            [ record.attempt_id, record ]
+          end
+          lineage = []
+          current = terminal
+          while current
+            lineage << current
+            predecessor_id =
+              current["predecessor_attempt_id"]
+            current =
+              predecessor_id && by_id.fetch(predecessor_id)
+          end
+          lineage.reverse!
+          unless lineage.fetch(0)["predecessor_attempt_id"].nil? &&
+                 lineage.fetch(0)["retry_charge"].zero? &&
+                 lineage.each_cons(2).all? do |previous, successor|
+                   successor["predecessor_attempt_id"] ==
+                     previous.attempt_id &&
+                     successor["retry_charge"] ==
+                       previous["retry_charge"] + 1
+                 end
+            raise Hive::ConfigError,
+                  "qualification attempt lineage is malformed"
+          end
+          lineage
+        rescue KeyError
+          raise Hive::ConfigError,
+                "qualification attempt lineage is incomplete"
+        end
+
+        def runtime_state_digest(hive_state_path:, attempt_store:)
+          journal = Hive::Modules::DecisionJournal.new(
+            root: File.join(hive_state_path, "module-runtime")
+          )
+          Digest::SHA256.hexdigest(
+            canonical(
+              qualification_runtime_snapshot(
+                attempt_store: attempt_store,
+                journal: journal,
+                hive_state_path: hive_state_path
+              )
+            )
+          ).freeze
         end
 
         def qualification_runtime_snapshot(
@@ -331,8 +648,8 @@ module Hive
           }.freeze
         end
 
-        def assemble_result!(case_id:, event:, capture:, decision:,
-                             terminal:, repository_root:,
+        def assemble_result!(case_id:, event:, capture:, decisions:,
+                             terminal:, attempt_records:, repository_root:,
                              hive_state_path:, restart_generation:)
           comparator = Hive::Modules::Migration::ShadowComparator.new(
             root: File.join(
@@ -372,14 +689,40 @@ module Hive
                   "qualification comparator evidence is malformed"
           end
 
-          attempts = [ attempt_projection(terminal) ].freeze
-          durable_state_sha256 = durable_state_digest(
-            event: event,
-            decision: decision,
-            attempts: attempts,
-            comparator_record: comparator_record,
-            effect_index: effect_index
-          )
+          attempts =
+            attempt_records.map do |record|
+              attempt_projection(record)
+            end.freeze
+          recovered_durable_state_sha256 =
+            if (@consumed_faults || {}).any? do |_name, consumed|
+              consumed
+            end
+              runtime_state_digest(
+                hive_state_path: hive_state_path,
+                attempt_store:
+                  Hive::Attempts::Store.new(
+                    root: qualification_attempts_root
+                  )
+              )
+            else
+              durable_state_digest(
+                event: event,
+                decisions: decisions,
+                attempts: attempts,
+                comparator_record: comparator_record,
+                effect_index: effect_index
+              )
+            end
+          pre_fault_durable_state_sha256 =
+            @pre_fault_durable_state_sha256 ||
+            recovered_durable_state_sha256
+          fault_checkpoint =
+            if (@consumed_faults || {}).fetch(
+              "after_module_decision",
+              false
+            )
+              "after_module_decision"
+            end
           observation = {
             "case_id" => case_id,
             "decision_id" =>
@@ -393,7 +736,6 @@ module Hive
               comparator_record.fetch("semantic_digest"),
             "legacy_capture_id" => capture.capture_id,
             "event_id" => event.fetch("event_id"),
-            "attempt_id" => terminal.attempt_id,
             "legacy_effect_keys" => effect_index.legacy_keys,
             "module_effect_keys" =>
               effect_index.entries
@@ -401,14 +743,14 @@ module Hive
                 .map { |entry| entry.fetch("effect_key") }
                 .sort
                 .freeze,
-            "fault_checkpoint" => nil,
+            "fault_checkpoint" => fault_checkpoint,
             "pre_fault_durable_state_sha256" =>
-              durable_state_sha256,
+              pre_fault_durable_state_sha256,
             "recovered_durable_state_sha256" =>
-              durable_state_sha256,
+              recovered_durable_state_sha256,
             "restart_generation" => restart_generation,
             "event" => event,
-            "decision" => decision,
+            "decisions" => decisions,
             "attempts" => attempts
           }
           validated =
@@ -450,7 +792,8 @@ module Hive
             "loss"
           )
           value["receipt_sha256"] =
-            Digest::SHA256.hexdigest(canonical(value.fetch("receipt")))
+            value["receipt"] &&
+            Digest::SHA256.hexdigest(canonical(value["receipt"]))
           value["projection_sha256"] =
             Digest::SHA256.hexdigest(canonical(value))
           value.freeze
@@ -459,12 +802,15 @@ module Hive
         # Semantic digest of the selected durable records for this no-fault
         # slice. Fault scenarios must instead snapshot their actual durable
         # boundaries before injection and after recovery.
-        def durable_state_digest(event:, decision:, attempts:,
+        def durable_state_digest(event:, decisions:, attempts:,
                                  comparator_record:, effect_index:)
           Digest::SHA256.hexdigest(
             canonical(
               "event_id" => event.fetch("event_id"),
-              "decision_id" => decision.fetch("decision_id"),
+              "decision_ids" =>
+                decisions.map do |decision|
+                  decision.fetch("decision_id")
+                end,
               "attempt_projections" =>
                 attempts.map do |attempt|
                   attempt.fetch("projection_sha256")
@@ -598,9 +944,14 @@ module Hive
                 root,
                 cfg: cfg,
                 state: command_state,
-                agent_runner: @reviewer_agent_runner
+                token_budget:
+                  qualification_token_budget(root, cfg),
+                agent_factory:
+                  method(:qualification_agent)
               )
             end,
+            token_budget_factory:
+              method(:qualification_token_budget),
             clock: @clock,
             output: StringIO.new,
             config_loader: config_loader
@@ -913,6 +1264,12 @@ module Hive
                   @scenario_input.operation
                 ) ? "new_commits" : "timer",
               "poll_interval_sec" => 600,
+              "max_agent_spawns_per_cycle" =>
+                @scenario_input.operation ==
+                  "capacity_deferral" ? 1 : 3,
+              "max_agent_spawns_per_day" =>
+                @scenario_input.operation ==
+                  "quota_deferral" ? 1 : 8,
               "commands" => { "test" => "true" }
             },
             "refactor_patrol" => { "enabled" => false }
@@ -1038,26 +1395,53 @@ module Hive
           value
         end
 
-        def run_reviewer_fixture(**attributes)
-          if @scenario_input.operation == "partial_failure"
-            return {
-              status: :error,
-              error_message:
-                "qualification reviewer partial failure"
-            }
-          end
-
-          File.binwrite(
-            attributes.fetch(:output_path),
-            Hive::WorkflowPackage::CanonicalJSON.generate(
-              "findings" =>
-                @scenario_input.reviewer_findings
-            )
+        def qualification_agent(**attributes)
+          QualificationAgent.new(
+            output_path: attributes.fetch(:expected_output),
+            operation: @scenario_input.operation,
+            findings: @scenario_input.reviewer_findings
           )
-          { status: :ok }
-        rescue KeyError, SystemCallError, IOError
+        rescue KeyError
           raise Hive::ConfigError,
                 "qualification reviewer fixture failed"
+        end
+
+        def qualification_token_budget(root, cfg)
+          seed_daily_quota!(root) if
+            @scenario_input.operation == "quota_deferral"
+          QualificationTokenBudget.new(
+            delegate:
+              Hive::Patrol::TokenBudget.new(
+                root,
+                cfg: cfg,
+                clock: @clock
+              ),
+            operation: @scenario_input.operation
+          )
+        end
+
+        def seed_daily_quota!(root)
+          @quota_seeded_roots ||= {}
+          project_slug = File.basename(root)
+          return if @quota_seeded_roots[project_slug]
+
+          @quota_seeded_roots[project_slug] = true
+          recorded = Hive::UsageDb.record!(
+            agent: "qualification-fixture",
+            model: "qualification-fixture",
+            project_slug: project_slug,
+            task_slug: "patrol-review",
+            stage: "patrol-review-unmetered",
+            started_at: @clock.call,
+            ended_at: @clock.call,
+            input: 0,
+            output: 0,
+            cached: 0
+          )
+          unless recorded
+            raise Hive::ConfigError,
+                  "qualification daily quota fixture is unavailable"
+          end
         end
 
         def validate_project(value)

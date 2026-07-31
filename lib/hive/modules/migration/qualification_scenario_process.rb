@@ -1,10 +1,10 @@
 require "digest"
-require "fileutils"
 require "open3"
 require "rbconfig"
 require "hive/attempts/process_identity"
 require "hive/attempts/store"
 require "hive/errors"
+require "hive/modules/migration/candidate_execution_sandbox"
 require "hive/modules/migration/qualification_process_custody"
 
 module Hive
@@ -13,28 +13,26 @@ module Hive
       # Trusted host controller for one exact candidate scenario process.
       # Candidate output is never interpreted here; this owner provides a
       # closed environment, physical network isolation for deterministic runs,
-      # bounded stream evidence, timeout handling, and attempt-aware teardown.
+      # bounded stream evidence, timeout handling, and PID-namespace teardown.
       class QualificationScenarioProcess
         OUTPUT_LIMIT = 64 * 1024
         READ_JOIN_TIMEOUT_SEC = 1
         TERM_GRACE_SEC = 2
         KILL_GRACE_SEC = 0.2
         POLL_INTERVAL_SEC = 0.02
-        BWRAP = "/usr/bin/bwrap".freeze
-        CREDENTIALS = %w[
-          GITHUB_TOKEN OPENROUTER_API_KEY
-        ].freeze
 
         Result = Data.define(
           :status, :exit_status, :signal, :timed_out,
           :network_isolated, :stdout, :stderr,
           :duration_seconds, :executable_sha256,
           :ruby_sha256, :attempt_count, :custody_count,
-          :teardown
+          :sandbox_profile_sha256, :source_inventory_sha256,
+          :installed_inventory_sha256, :teardown
         )
 
         def initialize(
           output_limit: OUTPUT_LIMIT,
+          sandbox: CandidateExecutionSandbox.new,
           process_identity:
             Hive::Attempts::ProcessIdentity.new,
           monotonic: lambda {
@@ -46,6 +44,7 @@ module Hive
             raise Hive::ConfigError,
                   "patrol qualification output limit is malformed"
           end
+          @sandbox = sandbox
           @process_identity = process_identity
           @monotonic = monotonic
         rescue ArgumentError, TypeError
@@ -54,72 +53,53 @@ module Hive
         end
 
         def call(
-          executable:, argv:, workspace:, installed_root:,
-          timeout_seconds:, network:, credentials:, hive_home: nil
+          executable:, argv:, workspace:, source_root:,
+          installed_root:, case_root:, request_ref:, scenario_ref:,
+          timeout_seconds:, network:, credentials:, hive_home:
         )
-          root = validate_directory(
-            workspace,
-            label: "workspace"
-          )
-          installed = validate_directory(
-            installed_root,
-            label: "installed target",
-            within: root
-          )
-          target = validate_executable(executable, root)
-          arguments = validate_argv(argv)
           timeout = Float(timeout_seconds)
           unless timeout.positive? && timeout <= 3_600
             raise Hive::ConfigError,
                   "patrol qualification timeout is malformed"
           end
-          network = validate_network(network)
-          credentials = validate_credentials(
-            credentials,
-            network: network
-          )
-          hive_home, scenario_root =
-            validate_hive_home(hive_home, root)
-          runtime = prepare_runtime(scenario_root)
-          environment = closed_environment(
-            root: root,
-            installed: installed,
-            executable: target,
-            runtime: runtime,
-            hive_home: hive_home,
-            credentials: credentials
-          )
-          command = execution_command(
-            executable: target,
-            argv: arguments,
-            workspace: root,
-            network: network
-          )
           executable_sha256 =
-            Digest::SHA256.file(target).hexdigest
+            Digest::SHA256.file(executable).hexdigest
           ruby_sha256 =
             Digest::SHA256.file(RbConfig.ruby).hexdigest
           started = @monotonic.call
-          process = execute(
-            command,
-            environment: environment,
-            cwd: root,
-            timeout: timeout
-          )
+          launch = nil
+          process = nil
+          @sandbox.call(
+            executable: executable,
+            argv: argv,
+            workspace: workspace,
+            source_root: source_root,
+            installed_root: installed_root,
+            case_root: case_root,
+            request_ref: request_ref,
+            scenario_ref: scenario_ref,
+            network: network,
+            credentials: credentials,
+            hive_home: hive_home
+          ) do |prepared|
+            launch = prepared
+            process = execute(
+              prepared.command,
+              environment: prepared.environment,
+              cwd: prepared.host_cwd,
+              timeout: timeout
+            )
+          end
           duration = @monotonic.call - started
           unless
-            Digest::SHA256.file(target).hexdigest ==
+            Digest::SHA256.file(executable).hexdigest ==
               executable_sha256
             raise Hive::ConfigError,
                   "patrol qualification executable changed during execution"
           end
           teardown = teardown_attempts!(
-            attempts_root: File.join(
-              hive_home,
-              "attempts",
-              "v2"
-            ),
-            custody_root: runtime.fetch(:custody),
+            attempts_root: launch.attempts_root,
+            custody_root: launch.custody_root,
             require_terminal:
               process.fetch(:status).success? &&
                 !process.fetch(:timed_out)
@@ -133,7 +113,7 @@ module Hive
             exit_status: process.fetch(:status).exitstatus,
             signal: process.fetch(:status).termsig,
             timed_out: process.fetch(:timed_out),
-            network_isolated: !network,
+            network_isolated: launch.network_isolated,
             stdout: process.fetch(:stdout),
             stderr: process.fetch(:stderr),
             duration_seconds: duration,
@@ -141,6 +121,12 @@ module Hive
             ruby_sha256: ruby_sha256.freeze,
             attempt_count: teardown.fetch("attempt_count"),
             custody_count: teardown.fetch("custody_count"),
+            sandbox_profile_sha256:
+              launch.profile_sha256,
+            source_inventory_sha256:
+              launch.source_inventory.digest,
+            installed_inventory_sha256:
+              launch.installed_inventory.digest,
             teardown: teardown
           ).freeze
         rescue Errno::ENOENT, Errno::EACCES, Errno::ELOOP,
@@ -280,13 +266,7 @@ module Hive
               raise Hive::ConfigError,
                     "patrol qualification wrapper custody changed"
             end
-            terminate_identity!(
-              sidecar.fetch("wrapper")
-            )
           end
-          records = store ? store.scan.records : []
-          records_by_id =
-            records.to_h { |record| [ record.attempt_id, record ] }
           unbound =
             custody.keys - records_by_id.keys
           unless unbound.empty?
@@ -299,14 +279,6 @@ module Hive
               raise Hive::ConfigError,
                     "patrol qualification wrapper custody is missing"
             end
-            verify_absent!(
-              sidecar.fetch("wrapper"),
-              label: "wrapper"
-            )
-            cleanup_worker!(
-              wrapper: sidecar.fetch("wrapper"),
-              worker: record.worker
-            )
             if require_terminal && !record.final?
               raise Hive::ConfigError,
                     "patrol qualification attempt did not terminate"
@@ -316,7 +288,8 @@ module Hive
             "status" => "passed",
             "attempt_count" => records.length,
             "custody_count" => custody.length,
-            "live_processes" => 0
+            "live_processes" => 0,
+            "kill_authority" => "host_pid_namespace"
           }.freeze
         end
 
@@ -339,63 +312,6 @@ module Hive
           )
         end
 
-        def terminate_identity!(identity)
-          state = @process_identity.status(identity)
-          return if state == :missing
-          unless state == :matching
-            raise Hive::ConfigError,
-                  "patrol qualification process custody changed"
-          end
-          pid = identity.fetch("pid")
-          Process.kill("TERM", pid)
-          wait_for_identity(identity, TERM_GRACE_SEC)
-          if @process_identity.status(identity) == :matching
-            Process.kill("KILL", pid)
-            wait_for_identity(identity, KILL_GRACE_SEC)
-          end
-          verify_absent!(identity, label: "wrapper")
-        rescue Errno::ESRCH
-          nil
-        end
-
-        def cleanup_worker!(wrapper:, worker:)
-          return if worker.nil?
-
-          state = @process_identity.status(worker)
-          return if state == :missing
-          unless state == :matching
-            raise Hive::ConfigError,
-                  "patrol qualification worker custody changed"
-          end
-          outcome =
-            @process_identity.terminate_orphan_group(
-              wrapper: wrapper,
-              worker: worker,
-              grace_sec: TERM_GRACE_SEC
-            )
-          unless %i[absent terminated].include?(outcome)
-            raise Hive::ConfigError,
-                  "patrol qualification worker did not terminate"
-          end
-          verify_absent!(worker, label: "worker")
-        end
-
-        def verify_absent!(identity, label:)
-          return if @process_identity.status(identity) == :missing
-
-          raise Hive::ConfigError,
-                "patrol qualification #{label} process remains live"
-        end
-
-        def wait_for_identity(identity, timeout)
-          deadline = @monotonic.call + timeout
-          while
-            @process_identity.status(identity) == :matching &&
-              @monotonic.call < deadline
-            sleep POLL_INTERVAL_SEC
-          end
-        end
-
         def await_process_identity(pid)
           deadline = @monotonic.call + 1
           loop do
@@ -407,233 +323,6 @@ module Hive
           end
           raise Hive::ConfigError,
                 "patrol qualification process identity is unavailable"
-        end
-
-        def closed_environment(
-          root:, installed:, executable:, runtime:, hive_home:,
-          credentials:
-        )
-          ruby_bin = File.dirname(RbConfig.ruby)
-          {
-            "HOME" => runtime.fetch(:home),
-            "HIVE_HOME" => hive_home,
-            "XDG_CONFIG_HOME" =>
-              File.join(runtime.fetch(:xdg), "config"),
-            "XDG_CACHE_HOME" =>
-              File.join(runtime.fetch(:xdg), "cache"),
-            "XDG_DATA_HOME" =>
-              File.join(runtime.fetch(:xdg), "data"),
-            "XDG_STATE_HOME" =>
-              File.join(runtime.fetch(:xdg), "state"),
-            "TMPDIR" => runtime.fetch(:tmp),
-            "LANG" => "C.UTF-8",
-            "LC_ALL" => "C.UTF-8",
-            "TZ" => "UTC",
-            "PATH" => [
-              File.join(installed, "bin"),
-              File.join(installed, "rubygems-bin"),
-              ruby_bin,
-              "/usr/bin",
-              "/bin"
-            ].uniq.join(File::PATH_SEPARATOR),
-            "GEM_HOME" => installed,
-            "GEM_PATH" => installed,
-            "BUNDLE_DISABLE_SHARED_GEMS" => "true",
-            "BUNDLE_FROZEN" => "true",
-            "GIT_CONFIG_NOSYSTEM" => "1",
-            "GIT_CONFIG_GLOBAL" => "/dev/null",
-            "GIT_TERMINAL_PROMPT" => "0",
-            "HIVE_BIN" => executable,
-            "HIVE_INVOKED_BIN" => executable,
-            "HIVE_SKIP_LLM_WIKI_SCHEDULER" => "1",
-            "HIVE_SKIP_LLM_WIKI_SYSTEMCTL" => "1",
-            "HIVE_SKIP_LLM_WIKI_POST_COMMIT" => "1",
-            "HIVE_QUALIFICATION_CUSTODY_ROOT" =>
-              runtime.fetch(:custody)
-          }.merge(credentials).freeze
-        end
-
-        def prepare_runtime(root)
-          runtime = File.join(root, "runtime")
-          values = {
-            root: runtime,
-            home: File.join(runtime, "home"),
-            xdg: File.join(runtime, "xdg"),
-            tmp: File.join(runtime, "tmp"),
-            custody: File.join(runtime, "custody")
-          }
-          [
-            values.fetch(:root),
-            values.fetch(:home),
-            values.fetch(:xdg),
-            File.join(values.fetch(:xdg), "config"),
-            File.join(values.fetch(:xdg), "cache"),
-            File.join(values.fetch(:xdg), "data"),
-            File.join(values.fetch(:xdg), "state"),
-            values.fetch(:tmp),
-            values.fetch(:custody)
-          ].each do |path|
-            FileUtils.mkdir_p(path, mode: 0o700)
-            File.chmod(0o700, path)
-          end
-          values.freeze
-        end
-
-        def execution_command(
-          executable:, argv:, workspace:, network:
-        )
-          return [ executable, *argv ].freeze if network
-
-          stat = File.lstat(BWRAP)
-          unless stat.file? && !stat.symlink? &&
-                 (stat.mode & 0o111).positive?
-            raise Hive::ConfigError,
-                  "patrol qualification network isolation is unavailable"
-          end
-          [
-            BWRAP,
-            "--die-with-parent",
-            "--unshare-net",
-            "--ro-bind", "/", "/",
-            "--bind", workspace, workspace,
-            "--dev", "/dev",
-            "--proc", "/proc",
-            "--chdir", workspace,
-            "--",
-            executable,
-            *argv
-          ].freeze
-        end
-
-        def validate_directory(value, label:, within: nil)
-          path = value.to_s
-          unless
-            !path.empty? &&
-              !path.include?("\0") &&
-              path == File.expand_path(path)
-            raise Hive::ConfigError,
-                  "patrol qualification #{label} is unsafe"
-          end
-          stat = File.lstat(path)
-          unless
-            stat.directory? &&
-              !stat.symlink? &&
-              stat.uid == Process.euid &&
-              (stat.mode & 0o077).zero? &&
-              File.realpath(path) == path &&
-              (
-                within.nil? ||
-                  path.start_with?(
-                    "#{within}#{File::SEPARATOR}"
-                  )
-              )
-            raise Hive::ConfigError,
-                  "patrol qualification #{label} is unsafe"
-          end
-          path.freeze
-        end
-
-        def validate_executable(value, workspace)
-          path = value.to_s
-          unless
-            !path.empty? &&
-              path == File.expand_path(path) &&
-              path.start_with?(
-                "#{workspace}#{File::SEPARATOR}"
-              )
-            raise Hive::ConfigError,
-                  "patrol qualification executable is unsafe"
-          end
-          stat = File.lstat(path)
-          unless
-            stat.file? &&
-              !stat.symlink? &&
-              stat.nlink == 1 &&
-              stat.uid == Process.euid &&
-              (stat.mode & 0o111).positive? &&
-              File.realpath(path) == path
-            raise Hive::ConfigError,
-                  "patrol qualification executable is unsafe"
-          end
-          path.freeze
-        end
-
-        def validate_hive_home(value, workspace)
-          path =
-            value.nil? ?
-              File.join(workspace, "sandbox", "hive-home") :
-              value.to_s
-          sandbox = File.dirname(path)
-          scenario_root = File.dirname(sandbox)
-          unless
-            !path.empty? &&
-              !path.include?("\0") &&
-              path == File.expand_path(path) &&
-              path.start_with?(
-                "#{workspace}#{File::SEPARATOR}"
-              ) &&
-              File.basename(path) == "hive-home" &&
-              File.basename(sandbox) == "sandbox" &&
-              (
-                scenario_root == workspace ||
-                  scenario_root.start_with?(
-                    "#{workspace}#{File::SEPARATOR}"
-                  )
-              )
-            raise Hive::ConfigError,
-                  "patrol qualification HIVE_HOME is unsafe"
-          end
-          validate_directory(
-            scenario_root,
-            label: "scenario root",
-            within: scenario_root == workspace ? nil : workspace
-          )
-          [ path.freeze, scenario_root.freeze ].freeze
-        end
-
-        def validate_argv(value)
-          unless value.is_a?(Array) &&
-                 value.length <= 32 &&
-                 value.all? do |item|
-                   item.is_a?(String) &&
-                     !item.empty? &&
-                     item.bytesize <= 4_096 &&
-                     !item.include?("\0")
-                 end
-            raise Hive::ConfigError,
-                  "patrol qualification argv is malformed"
-          end
-          value.map { |item| item.dup.freeze }.freeze
-        end
-
-        def validate_network(value)
-          unless value == true || value == false
-            raise Hive::ConfigError,
-                  "patrol qualification network policy is malformed"
-          end
-          value
-        end
-
-        def validate_credentials(value, network:)
-          unless
-            value.is_a?(Hash) &&
-              value.keys.all? do |key|
-                key.is_a?(String) &&
-                  CREDENTIALS.include?(key)
-              end &&
-              value.values.all? do |secret|
-                secret.is_a?(String) &&
-                  !secret.empty? &&
-                  secret.bytesize <= 16 * 1024 &&
-                  !secret.include?("\0")
-              end &&
-              (network || value.empty?)
-            raise Hive::ConfigError,
-                  "patrol qualification credentials are malformed"
-          end
-          value.to_h do |key, secret|
-            [ key.dup.freeze, secret.dup.freeze ]
-          end.freeze
         end
       end
     end

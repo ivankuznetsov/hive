@@ -5,7 +5,9 @@ require "pathname"
 require "time"
 require "hive/errors"
 require "hive/modules/migration/qualification_run_descriptor"
+require "hive/modules/migration/qualification_harness_manifest"
 require "hive/modules/migration/qualification_scenario_input"
+require "hive/modules/migration/trusted_qualification_control"
 require "hive/workflow_package/canonical_json"
 
 module Hive
@@ -43,17 +45,28 @@ module Hive
       )
 
       class CommittedReader
-        def read(repo_root:, candidate_sha:, ref:)
-          root = File.expand_path(repo_root)
+        def read(control:, ref:)
           unless
-            candidate_sha.to_s.match?(/\A[0-9a-f]{40}\z/) &&
+            control.is_a?(
+              Hive::Modules::Migration::
+                TrustedQualificationControl
+            )
+            raise Hive::ConfigError,
+                  "patrol qualification committed input is malformed"
+          end
+          root = control.checkout_root
+          commit_sha =
+            control.payload.fetch("commit_sha")
+          unless
+            commit_sha.match?(/\A[0-9a-f]{40}\z/) &&
               safe_ref?(ref)
             raise Hive::ConfigError,
                   "patrol qualification committed input is malformed"
           end
+          verify_control_identity!(control)
           mode_output, mode_error, mode_status =
             Open3.capture3(
-              "git", "ls-tree", candidate_sha, "--", ref,
+              "git", "ls-tree", commit_sha, "--", ref,
               chdir: root
             )
           mode, type, object, path =
@@ -74,7 +87,7 @@ module Hive
           end
           output, error, status =
             Open3.capture3(
-              "git", "show", "#{candidate_sha}:#{ref}",
+              "git", "show", "#{commit_sha}:#{ref}",
               chdir: root
             )
           unless status.success?
@@ -91,6 +104,38 @@ module Hive
         end
 
         private
+
+        def verify_control_identity!(control)
+          payload = control.payload
+          root = control.checkout_root
+          commit_sha = payload.fetch("commit_sha")
+          tree, tree_error, tree_status =
+            Open3.capture3(
+              "git", "rev-parse", "#{commit_sha}^{tree}",
+              chdir: root
+            )
+          ancestor_ok = true
+          if control.trusted_remote?
+            ancestor_ok =
+              Open3.capture3(
+                "git", "merge-base", "--is-ancestor",
+                commit_sha, payload.fetch("ref"),
+                chdir: root
+              ).fetch(2).success?
+          end
+          unless
+            tree_status.success? &&
+              tree.strip == payload.fetch("tree_sha") &&
+              ancestor_ok
+            detail =
+              tree_error.strip.empty? ?
+                "identity mismatch" :
+                tree_error.strip
+            raise Hive::ConfigError,
+                  "patrol qualification committed input is unavailable: " \
+                  "#{detail}"
+          end
+        end
 
         def safe_ref?(value)
           return false unless value.is_a?(String)
@@ -111,20 +156,31 @@ module Hive
 
       def initialize(
         clock: -> { Time.now.utc },
-        committed_reader: CommittedReader.new
+        committed_reader: CommittedReader.new,
+        harness_verifier:
+          Hive::Modules::Migration::QualificationHarnessManifest
       )
         @clock = clock
         @committed_reader = committed_reader
+        @harness_verifier = harness_verifier
       end
 
       def call(
-        candidate:, repo_root:,
-        catalog_ref: DEFAULT_CATALOG_REF
+        candidate:, control:
       )
+        unless
+          control.is_a?(
+            Hive::Modules::Migration::
+              TrustedQualificationControl
+          )
+          malformed!
+        end
+        @harness_verifier.verify!(control: control)
+        catalog_ref =
+          control.payload.dig("catalog", "ref")
         catalog_root, catalog =
           load_catalog(
-            repo_root: repo_root,
-            candidate_sha: candidate.candidate_sha,
+            control: control,
             catalog_ref: catalog_ref
           )
         candidate_manifest =
@@ -134,8 +190,7 @@ module Hive
           )
         scenarios, scenario_inputs =
           load_scenarios(
-            repo_root: repo_root,
-            candidate_sha: candidate.candidate_sha,
+            control: control,
             catalog_root: catalog_root,
             cases: catalog.fetch("cases")
           )
@@ -146,6 +201,7 @@ module Hive
         )
         payload = descriptor_payload(
           candidate: candidate,
+          control: control,
           candidate_manifest: candidate_manifest,
           catalog: catalog,
           scenarios: scenarios,
@@ -176,16 +232,20 @@ module Hive
 
       private
 
-      def load_catalog(repo_root:, candidate_sha:, catalog_ref:)
+      def load_catalog(control:, catalog_ref:)
         unless safe_repository_ref?(catalog_ref)
           malformed!
         end
         bytes = @committed_reader.read(
-          repo_root: repo_root,
-          candidate_sha: candidate_sha,
+          control: control,
           ref: catalog_ref
         )
         malformed! if bytes.bytesize > MAX_CATALOG_BYTES
+        unless
+          Digest::SHA256.hexdigest(bytes) ==
+            control.payload.dig("catalog", "sha256")
+          malformed!
+        end
         catalog = canonical_json(bytes, "catalog")
         exact!(catalog, CATALOG_KEYS)
         unless
@@ -299,7 +359,7 @@ module Hive
       end
 
       def load_scenarios(
-        repo_root:, candidate_sha:, catalog_root:, cases:
+        control:, catalog_root:, cases:
       )
         rows = []
         inputs = {}
@@ -308,8 +368,7 @@ module Hive
           ref = File.join(catalog_root, file)
           malformed! unless safe_repository_ref?(ref)
           bytes = @committed_reader.read(
-            repo_root: repo_root,
-            candidate_sha: candidate_sha,
+            control: control,
             ref: ref
           )
           scenario =
@@ -357,7 +416,7 @@ module Hive
       end
 
       def descriptor_payload(
-        candidate:, candidate_manifest:, catalog:,
+        candidate:, control:, candidate_manifest:, catalog:,
         scenarios:, scenario_manifest:
       )
         source_name = artifact_name(
@@ -424,6 +483,7 @@ module Hive
                 "installed_tree_sha256"
               )
           },
+          "control" => control.payload,
           "scenarios" => {
             "manifest_ref" =>
               "inputs/scenarios/manifest.json",

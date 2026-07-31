@@ -51,7 +51,7 @@ class ModulesMigrationQualificationScenarioActualsTest <
     end
 
     value = valid_payload
-    value.dig("actuals", 0, "decision")["event_id"] =
+    value.dig("actuals", 0, "decisions", 0)["event_id"] =
       "evt-#{"f" * 64}"
     assert_raises(Hive::ConfigError) do
       MODEL.from_h(value)

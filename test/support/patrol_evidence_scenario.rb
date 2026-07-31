@@ -18,6 +18,27 @@ module PatrolEvidenceScenario
     "skills_archive_sha256" => "8" * 64,
     "installed_tree_sha256" => "9" * 64
   }.freeze
+  CONTROL = {
+    "repository" => "github.com/owner/hive",
+    "ref" => "refs/heads/main",
+    "commit_sha" => "1" * 40,
+    "tree_sha" => "2" * 40,
+    "trust_scope" => "trusted_remote",
+    "catalog" => {
+      "ref" =>
+        "test/e2e/fixtures/patrol_qualification/catalog.json",
+      "sha256" => "3" * 64
+    },
+    "harness_manifest_sha256" => "4" * 64,
+    "provenance" => {
+      "workflow_path" =>
+        ".github/workflows/patrol-qualification.yml",
+      "workflow_sha" => "1" * 40,
+      "run_id" => 123,
+      "run_attempt" => 1,
+      "action_lock_sha256" => "5" * 64
+    }
+  }.freeze
   CONFIGURATION_DIGESTS = {
     "patrol" => "d" * 64,
     "architecture-patrol" => "e" * 64
@@ -177,7 +198,7 @@ module PatrolEvidenceScenario
                  project: PROJECT_BINDING)
     trigger = { "kind" => "manual", "id" => "#{module_name}-#{index}" }
     rationale = %w[
-      clean_negative not_due capacity_deferral quota_deferral cooldown_retry
+      not_due capacity_deferral quota_deferral cooldown_retry
     ].include?(decision_class) ? "not_due" : "due"
     projection = projection_for(module_name, trigger, rationale)
     capture = capture_for(
@@ -246,7 +267,10 @@ module PatrolEvidenceScenario
         "rationale" => projection.rationale,
         "action_count" => positive ? 1 : 0,
         "job_id" => projection.job_id,
-        "complete" => true
+        "complete" => true,
+        "zero_reason" =>
+          decision_class == "clean_negative" ?
+            "no_theses" : nil
       }
     else
       {
@@ -254,7 +278,9 @@ module PatrolEvidenceScenario
         "findings" => positive ? 1 : 0,
         "finding_ids" =>
           positive ? [ "finding-#{trigger.fetch('id')}" ] : [],
-        "ok" => true
+        "ok" => true,
+        "review_complete" => true,
+        "features_reviewed" => 1
       }
     end
     Hive::Modules::Migration::PatrolCapture.build(
@@ -334,6 +360,7 @@ module PatrolEvidenceScenario
       "lane" => lane,
       "candidate" =>
         CANDIDATE.merge("commit_sha" => candidate_sha),
+      "control" => CONTROL,
       "configuration_digests" => configuration_digests,
       "project" => project,
       "module_selections" => module_selections,
@@ -357,9 +384,9 @@ module PatrolEvidenceScenario
 
   def run_authority_document(bindings)
     keys = %w[
-      artifact_digests artifact_refs candidate decision_expectations
-      expected_legacy_effect_keys lane lane_policy module_selections
-      project required_faults required_matrix run_id
+      artifact_digests artifact_refs candidate control
+      decision_expectations expected_legacy_effect_keys lane lane_policy
+      module_selections project required_faults required_matrix run_id
       scenario_manifest_digest
     ]
     Hive::Modules::Migration::PatrolEvidence.immutable_json(
@@ -471,6 +498,7 @@ module PatrolEvidenceScenario
       lane_result: lane_result,
       failure_reason: failure_reason,
       candidate: bindings.fetch("candidate"),
+      control: bindings.fetch("control"),
       configuration_digests: bindings.fetch("configuration_digests"),
       project: bindings.fetch("project"),
       module_selections: bindings.fetch("module_selections"),

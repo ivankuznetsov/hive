@@ -90,7 +90,8 @@ module Hive
               Time.iso8601(@reviewed_at) < latest_review
           blockers = blockers.uniq.sort.freeze
           status = report_status(lane_rows, blockers)
-          candidate, configurations, scenario = common_bindings
+          candidate, control, configurations, scenario =
+            common_bindings
           body = {
             "schema" => Report::SCHEMA,
             "schema_version" => Report::SCHEMA_VERSION,
@@ -98,6 +99,7 @@ module Hive
             "status" => status,
             "blockers" => blockers,
             "candidate" => candidate,
+            "control" => control,
             "configuration_digests" => configurations,
             "scenario_manifest_digest" => scenario,
             "lanes" => lane_rows,
@@ -239,6 +241,9 @@ module Hive
           blockers << "candidate_binding_mismatch" unless
             deterministic.fetch("candidate") ==
               installed.fetch("candidate")
+          blockers << "control_binding_mismatch" unless
+            deterministic.fetch("control") ==
+              installed.fetch("control")
           blockers << "mixed_run_evidence" unless
             deterministic.fetch("run_id") ==
               installed.fetch("run_id") &&
@@ -270,6 +275,7 @@ module Hive
             authority_for("deterministic")
           return [
             nil,
+            nil,
             Report.send(
               :normalize_optional_configurations, nil
             ),
@@ -278,6 +284,7 @@ module Hive
 
           [
             authority.fetch("candidate"),
+            authority.fetch("control"),
             authority.fetch("configuration_digests"),
             authority.fetch("scenario_manifest_digest")
           ]

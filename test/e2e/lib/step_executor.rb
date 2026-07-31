@@ -348,15 +348,12 @@ module Hive
         unless result.is_a?(Hash) &&
                artifacts_dir == expected_artifacts &&
                PathSafety.contained?(root, artifacts_dir) &&
-               PatrolQualificationRunner::HARNESS_READY_STATUSES.include?(
-                 result["status"]
-               ) &&
-               File.file?(File.join(artifacts_dir, "result.json"))
+               PatrolQualificationRunner.harness_complete?(result)
           status = result.is_a?(Hash) ?
             result["status"].to_s : "malformed"
           raise StepFailure.new(
             step,
-            "patrol evidence outcome #{status.inspect} is not qualifying proof"
+            "patrol evidence outcome #{status.inspect} is not a complete result"
           )
         end
       rescue ArgumentError => e

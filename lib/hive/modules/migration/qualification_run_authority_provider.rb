@@ -842,12 +842,14 @@ module Hive
             active.fetch("configuration_digest")
           expected_ownership =
             "#{epoch}:#{source_commit}"
-          decision = row.fetch("decision")
+          decisions = row.fetch("decisions")
           attempts = row.fetch("attempts")
           valid =
-            decision["module_generation"] == source_commit &&
-            decision["configuration_digest"] ==
-              configuration_digest &&
+            decisions.all? do |decision|
+              decision["module_generation"] == source_commit &&
+                decision["configuration_digest"] ==
+                  configuration_digest
+            end &&
             attempts.all? do |attempt|
               subject = attempt.fetch("subject")
               subject["module_generation"] == source_commit &&

@@ -45,6 +45,20 @@
         "features_review_attempted": { "type": "integer", "minimum": 0 },
         "features_reviewed": { "type": "integer", "minimum": 0 },
         "review_complete": { "type": "boolean" },
+        "review_exhaustion_reason": {
+          "enum": [
+            "agent_in_flight",
+            "budget_lock_unavailable",
+            "cycle_agent_spawn_limit",
+            "cycle_token_limit",
+            "daily_agent_spawn_limit",
+            "daily_token_headroom",
+            "daily_token_limit",
+            "insufficient_launch_headroom",
+            "usage_store_unavailable",
+            null
+          ]
+        },
         "review_errors": {
           "type": "array",
           "items": {

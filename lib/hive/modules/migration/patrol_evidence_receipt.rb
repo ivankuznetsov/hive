@@ -21,9 +21,9 @@ module Hive
           clean_negative
         ].freeze
         TOP_LEVEL_KEYS = %w[
-          artifacts candidate configuration_digests decisions effects faults
-          generated_at lane lane_result matrix module_selections observed
-          project receipt_id reviewer reviewed_at run_id
+          artifacts candidate configuration_digests control decisions effects
+          faults generated_at lane lane_result matrix module_selections
+          observed project receipt_id reviewer reviewed_at run_id
           scenario_manifest_digest schema schema_version
         ].freeze
         CANDIDATE_KEYS =
@@ -46,7 +46,7 @@ module Hive
         ].freeze
 
         class << self
-          def build(run_id:, lane:, lane_result:, candidate:,
+          def build(run_id:, lane:, lane_result:, candidate:, control:,
                     configuration_digests:, scenario_manifest_digest:,
                     project:, module_selections:,
                     decision_refs:, matrix:, faults:, restart_count:,
@@ -66,6 +66,8 @@ module Hive
               lane_result, failure_reason, label
             )
             candidate = normalize_candidate(candidate, label)
+            control =
+              TrustedQualificationControl.normalize(control)
             configuration_digests = normalize_configuration_digests(
               configuration_digests, label
             )
@@ -114,6 +116,7 @@ module Hive
                 "reason" => failure_reason
               }.freeze,
               "candidate" => candidate,
+              "control" => control,
               "configuration_digests" => configuration_digests,
               "project" => project,
               "module_selections" => module_selections,
@@ -164,6 +167,7 @@ module Hive
               lane_result: lane_result["status"],
               failure_reason: lane_result["reason"],
               candidate: value["candidate"],
+              control: value["control"],
               configuration_digests: value["configuration_digests"],
               project: value["project"],
               module_selections: value["module_selections"],

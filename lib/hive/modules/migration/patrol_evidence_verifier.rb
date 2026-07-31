@@ -93,6 +93,9 @@ module Hive
               PatrolEvidenceReceipt::CANDIDATE_KEYS,
               label: label
             )
+            TrustedQualificationControl.normalize(
+              value.fetch("control")
+            )
             configuration_digests = value.fetch(
               "configuration_digests"
             )
@@ -261,6 +264,8 @@ module Hive
               payload["lane"] == bindings["lane"]
             blockers << "candidate_binding_mismatch" unless
               payload["candidate"] == bindings["candidate"]
+            blockers << "control_binding_mismatch" unless
+              payload["control"] == bindings["control"]
             blockers << "configuration_binding_mismatch" unless
               payload["configuration_digests"] ==
                 bindings["configuration_digests"]
@@ -392,13 +397,23 @@ module Hive
             negatives = Array(controls["clean_negative"])
             negative_ok = negatives.any? do |reference|
               record = records_by_id[reference["decision_id"]]
-              next false unless record &&
-                                record.dig("module_decision", "rationale") ==
-                                  "not_due"
+              next false unless record
 
               capture = record.fetch("legacy_capture")
-              capture.dig("outcome", "findings").to_i.zero? &&
-                capture.dig("outcome", "action_count").to_i.zero?
+              outcome = capture.fetch("outcome")
+              if reference["module"] == "patrol"
+                record.dig("module_decision", "rationale") == "due" &&
+                  outcome["review_complete"] == true &&
+                  outcome["features_reviewed"].to_i.positive? &&
+                  outcome["findings"].to_i.zero? &&
+                  Array(outcome["finding_ids"]).empty?
+              else
+                reference["module"] == "architecture-patrol" &&
+                  record.dig("module_decision", "rationale") == "due" &&
+                  outcome["complete"] == true &&
+                  outcome["action_count"].to_i.zero? &&
+                  outcome["zero_reason"] == "no_theses"
+              end
             end
             blockers << "clean_negative_control_failed" unless negative_ok
           end

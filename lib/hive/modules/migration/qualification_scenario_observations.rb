@@ -29,6 +29,7 @@ module Hive
         MAX_OBSERVATIONS = 512
         MAX_EVENT_BYTES = 128 * 1024
         MAX_DECISION_BYTES = 64 * 1024
+        MAX_DECISIONS_PER_OBSERVATION = 16
         MAX_ATTEMPT_BYTES = 128 * 1024
         MAX_ATTEMPTS_PER_OBSERVATION = 16
         TOP_LEVEL_KEYS = %w[
@@ -36,7 +37,7 @@ module Hive
           schema_version
         ].freeze
         OBSERVATION_KEYS = %w[
-          attempt_id attempts case_id comparator_semantic_digest decision
+          attempts case_id comparator_semantic_digest decisions
           decision_class decision_id event event_id fault_checkpoint
           legacy_capture_id legacy_effect_keys module module_effect_keys
           pre_fault_durable_state_sha256 recovered_durable_state_sha256
@@ -151,7 +152,6 @@ module Hive
               ) &&
               CAPTURE_ID.match?(value["legacy_capture_id"].to_s) &&
               EVENT_ID.match?(value["event_id"].to_s) &&
-              UUID.match?(value["attempt_id"].to_s) &&
               DIGEST.match?(
                 value["pre_fault_durable_state_sha256"].to_s
               ) &&
@@ -176,17 +176,15 @@ module Hive
             malformed! unless
               value["event_id"] == value.dig("event", "event_id") &&
               value["legacy_capture_id"] == capture.capture_id
-            decision!(
-              value.fetch("decision"),
+            decisions = decisions!(
+              value.fetch("decisions"),
               event: value.fetch("event"),
-              module_name: value.fetch("module"),
-              attempt_id: value.fetch("attempt_id")
+              module_name: value.fetch("module")
             )
             attempts!(
               value.fetch("attempts"),
               event: value.fetch("event"),
-              decision: value.fetch("decision"),
-              primary_attempt_id: value.fetch("attempt_id")
+              decisions: decisions
             )
             immutable(value)
           end
@@ -258,7 +256,31 @@ module Hive
             malformed!
           end
 
-          def decision!(value, event:, module_name:, attempt_id:)
+          def decisions!(value, event:, module_name:)
+            malformed! unless
+              value.is_a?(Array) &&
+                !value.empty? &&
+                value.length <= MAX_DECISIONS_PER_OBSERVATION
+            rows = value.map do |decision|
+              decision!(
+                decision,
+                event: event,
+                module_name: module_name
+              )
+            end
+            malformed! unless
+              rows.map { |row| row.fetch("decision_id") }.uniq.length ==
+                rows.length &&
+                rows.map { |row| row.fetch("evaluated_at") } ==
+                  rows.map { |row| row.fetch("evaluated_at") }.sort &&
+                rows.count do |row|
+                  row["outcome"] == "launch" &&
+                    row["reason"] == "admitted"
+                end == 1
+            rows.freeze
+          end
+
+          def decision!(value, event:, module_name:)
             exact!(value, DECISION_KEYS)
             bounded!(value, MAX_DECISION_BYTES)
             malformed! unless
@@ -274,8 +296,6 @@ module Hive
               exact_timestamp?(value["evaluated_at"]) &&
               DecisionJournal::OUTCOMES.include?(value["outcome"]) &&
               DecisionJournal::REASONS.include?(value["reason"]) &&
-              value["attempt_id"] == attempt_id &&
-              UUID.match?(value["attempt_id"].to_s) &&
               value["task_id"].nil? &&
               value["artifacts"] == [] &&
               value["retry"].nil?
@@ -292,40 +312,65 @@ module Hive
             malformed! unless
               value["concurrency"].nil? ||
               %w[allow drop replace].include?(value["concurrency"])
-            valid_link = value["outcome"] == "launch" &&
-              value["reason"] == "admitted"
-            valid_link ||= value["outcome"] == "skip" &&
-              %w[duplicate terminal_replay].include?(value["reason"])
-            malformed! unless valid_link
+            attempt_id = value["attempt_id"]
+            linked_reason = %w[
+              admitted launch_handoff_failed terminal_replay
+            ].include?(value["reason"])
+            duplicate = value["reason"] == "duplicate"
+            malformed! unless
+              (
+                linked_reason == !attempt_id.nil? ||
+                (
+                  duplicate &&
+                  (
+                    attempt_id.nil? ||
+                    UUID.match?(attempt_id.to_s)
+                  )
+                )
+              ) &&
+                (
+                  attempt_id.nil? ||
+                  UUID.match?(attempt_id.to_s)
+                ) &&
+                (
+                  value["outcome"] == "skip" ||
+                  (
+                    value["outcome"] == "launch" &&
+                    value["reason"] == "admitted"
+                  )
+                )
             expected_hook =
               event.dig("payload", "target_hook") ||
               "scheduled-scan"
             malformed! unless value["hook"] == expected_hook
+            immutable(value)
           end
 
-          def attempts!(value, event:, decision:,
-                        primary_attempt_id:)
+          def attempts!(value, event:, decisions:)
             malformed! unless value.is_a?(Array) &&
                               !value.empty? &&
                               value.length <=
                                 MAX_ATTEMPTS_PER_OBSERVATION
+            primary_decision = decisions.find do |decision|
+              decision["outcome"] == "launch" &&
+                decision["reason"] == "admitted"
+            end
             rows = value.map do |attempt|
               attempt!(
                 attempt,
                 event: event,
-                decision: decision
+                decision: primary_decision
               )
             end
             malformed! unless
-              rows.first["attempt_id"] == primary_attempt_id &&
+              primary_decision &&
+              rows.first["attempt_id"] ==
+                primary_decision["attempt_id"] &&
               rows.first["predecessor_attempt_id"].nil? &&
               rows.first["retry_charge"] == 0
             malformed! unless
               rows.map { |row| row["attempt_id"] }.uniq.length ==
-                rows.length &&
-              rows[0...-1].all? do |row|
-                row["state"] == "lost"
-              end
+                rows.length
             rows.each_cons(2) do |previous, current|
               malformed! unless
                 current["predecessor_attempt_id"] ==
@@ -333,7 +378,16 @@ module Hive
                 current["retry_charge"] ==
                   previous["retry_charge"] + 1
             end
-            malformed! unless rows.last["state"] == "terminal"
+            malformed! unless
+              rows[0...-1].all? do |row|
+                row["state"] == "lost" ||
+                  (
+                    row["state"] == "terminal" &&
+                    row["outcome"] != "succeeded"
+                  )
+              end &&
+                rows.last["state"] == "terminal" &&
+                rows.last["outcome"] == "succeeded"
             base_generation =
               Hive::Modules::HookAttempt.run_id_for(
                 rows.first.fetch("subject")

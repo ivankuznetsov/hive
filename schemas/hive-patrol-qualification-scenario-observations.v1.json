@@ -70,7 +70,6 @@
         "comparator_semantic_digest",
         "legacy_capture_id",
         "event_id",
-        "attempt_id",
         "legacy_effect_keys",
         "module_effect_keys",
         "fault_checkpoint",
@@ -78,7 +77,7 @@
         "recovered_durable_state_sha256",
         "restart_generation",
         "event",
-        "decision",
+        "decisions",
         "attempts"
       ],
       "properties": {
@@ -100,7 +99,6 @@
           "type": "string",
           "pattern": "^evt-[0-9a-f]{64}$"
         },
-        "attempt_id": {"$ref": "#/$defs/uuid"},
         "legacy_effect_keys": {
           "$ref": "#/$defs/effect_keys"
         },
@@ -119,7 +117,12 @@
         "recovered_durable_state_sha256": {"$ref": "#/$defs/digest"},
         "restart_generation": {"type": "integer", "minimum": 1},
         "event": {"$ref": "#/$defs/event"},
-        "decision": {"$ref": "#/$defs/decision"},
+        "decisions": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {"$ref": "#/$defs/decision"}
+        },
         "attempts": {
           "type": "array",
           "minItems": 1,
@@ -245,7 +248,23 @@
         "evaluated_at": {"$ref": "#/$defs/timestamp"},
         "outcome": {"enum": ["launch", "skip"]},
         "reason": {
-          "enum": ["admitted", "duplicate", "terminal_replay"]
+          "enum": [
+            "admitted",
+            "activation_fenced",
+            "capacity_blocked",
+            "concurrency_blocked",
+            "cursor_stale",
+            "disabled",
+            "duplicate",
+            "hook_disabled",
+            "invalid_binding",
+            "launch_handoff_failed",
+            "no_match",
+            "not_installed",
+            "permission_blocked",
+            "terminal_replay",
+            "uninstalled"
+          ]
         },
         "binding_digest": {
           "anyOf": [
@@ -276,7 +295,12 @@
         "concurrency": {
           "enum": ["allow", "drop", "replace", null]
         },
-        "attempt_id": {"$ref": "#/$defs/uuid"},
+        "attempt_id": {
+          "anyOf": [
+            {"$ref": "#/$defs/uuid"},
+            {"type": "null"}
+          ]
+        },
         "task_id": {"type": ["string", "integer", "null"]},
         "artifacts": {"const": []},
         "retry": {"type": "null"}

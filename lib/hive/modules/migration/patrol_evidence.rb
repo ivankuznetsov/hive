@@ -65,9 +65,10 @@ module Hive
           %w[transition_status]
         ].map(&:sort).freeze
         PATROL_OUTCOME_KEYS = %w[
-          exit_code features_mapped features_reviewed finding_ids findings
-          fixes_attempted last_scanned_sha ok prs_opened rationale
-          review_complete
+          exit_code features_mapped features_review_attempted
+          features_reviewed finding_ids findings fixes_attempted
+          last_scanned_sha ok prs_opened rationale review_complete
+          review_exhaustion_reason
         ].freeze
         ARCHITECTURE_OUTCOME_KEYS = %w[
           action_count action_outcomes complete completion_status job_id
@@ -290,7 +291,8 @@ module Hive
               malformed!(label) unless [ true, false ].include?(value)
             when "exit_code"
               malformed!(label) unless value.nil? || value.is_a?(Integer)
-            when "features_mapped", "features_reviewed", "findings",
+            when "features_mapped", "features_review_attempted",
+                 "features_reviewed", "findings",
                  "fixes_attempted", "prs_opened", "action_count"
               malformed!(label) unless value.is_a?(Integer) &&
                                        value >= 0

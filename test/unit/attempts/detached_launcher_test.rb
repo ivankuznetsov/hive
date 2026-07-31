@@ -134,10 +134,59 @@ class AttemptsDetachedLauncherTest < Minitest::Test
     refute_includes args, "ok"
     claim_fd = args.first.fetch("HIVE_ATTEMPT_CLAIM_FD")
     assert Integer(claim_fd).positive?
+    refute args.first.key?("HIVE_ATTEMPT_WORKER_RELEASE_FD")
     assert_equal true, kwargs.fetch(:close_others)
   ensure
     reader&.close unless reader&.closed?
     writer&.close unless writer&.closed?
+  end
+
+  def test_wrapper_exec_maps_only_the_optional_worker_release_reader
+    release_reader, release_writer = IO.pipe
+    launcher = Hive::Attempts::DetachedLauncher.new(
+      store: Struct.new(:root).new("/attempts"),
+      worker_release_io: release_reader
+    )
+    record = Struct.new(:attempt_id).new("attempt-command")
+    executed = nil
+    launcher.define_singleton_method(:fork) do |&block|
+      block.call
+      999
+    end
+    launcher.define_singleton_method(:exec) do |*args, **kwargs|
+      executed = [ args, kwargs ]
+    end
+    ready_reader, ready_writer = IO.pipe
+
+    assert_equal(
+      999,
+      launcher.send(
+        :fork_wrapper,
+        record,
+        CLAIM_CAPABILITY,
+        ready_writer
+      )
+    )
+    args, kwargs = executed
+    release_fd =
+      Integer(
+        args.first.fetch(
+          "HIVE_ATTEMPT_WORKER_RELEASE_FD"
+        )
+      )
+    assert_equal release_reader.fileno, release_fd
+    assert_equal release_fd, kwargs.fetch(release_fd)
+    refute kwargs.key?(release_writer.fileno)
+    assert_equal true, kwargs.fetch(:close_others)
+  ensure
+    [
+      ready_reader,
+      ready_writer,
+      release_reader,
+      release_writer
+    ].compact.each do |io|
+      io.close unless io.closed?
+    end
   end
 
   private

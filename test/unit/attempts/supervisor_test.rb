@@ -109,6 +109,153 @@ class AttemptsSupervisorTest < Minitest::Test
     end
   end
 
+  def test_without_worker_release_gate_signals_ready_before_worker_checkpoint
+    worker_argv = [ "hive", "run", "durable-task" ]
+    with_attempt(worker_argv: worker_argv) do |store, attempt|
+      ready_r, ready_w = IO.pipe
+      ready_before_checkpoint = nil
+      checkpoint = store.method(:checkpoint)
+      store.define_singleton_method(:checkpoint) do |*args, **kwargs|
+        ready_before_checkpoint =
+          !IO.select([ ready_r ], nil, nil, 0).nil?
+        checkpoint.call(*args, **kwargs)
+      end
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY),
+        ready_io: ready_w, heartbeat_sec: 0.01, stale_sec: 1,
+        first_heartbeat_timeout_sec: 1
+      )
+      supervisor.define_singleton_method(:resolved_worker_argv) do |_record|
+        [ RbConfig.ruby, "-e", "exit 0" ]
+      end
+
+      assert_equal 0, Timeout.timeout(2) { supervisor.run }
+      assert_equal true, ready_before_checkpoint
+      assert_equal true, JSON.parse(ready_r.gets).fetch("claimed")
+    ensure
+      ready_r&.close unless ready_r&.closed?
+      ready_w&.close unless ready_w&.closed?
+    end
+  end
+
+  def test_worker_release_gate_signals_after_checkpoint_and_releases_on_one
+    worker_argv = [ "hive", "run", "durable-task" ]
+    with_attempt(worker_argv: worker_argv) do |store, attempt|
+      sentinel = File.join(store.root, "worker-released")
+      ready_r, ready_w = IO.pipe
+      release_r, release_w = IO.pipe
+      worker = <<~RUBY
+        gate = IO.for_fd(
+          Integer(ENV.fetch("HIVE_ATTEMPT_GATE_FD")),
+          "r"
+        )
+        abort "gate not released" unless gate.read(1) == "1"
+        File.binwrite(#{sentinel.inspect}, "released")
+      RUBY
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY),
+        ready_io: ready_w, worker_release_io: release_r,
+        heartbeat_sec: 0.01, stale_sec: 1,
+        first_heartbeat_timeout_sec: 1
+      )
+      supervisor.define_singleton_method(:resolved_worker_argv) do |_record|
+        [ RbConfig.ruby, "-e", worker ]
+      end
+      runner = Thread.new { supervisor.run }
+      runner.report_on_exception = false
+
+      readiness =
+        Timeout.timeout(2) { JSON.parse(ready_r.gets) }
+      running = store.fetch(attempt.attempt_id)
+      assert_equal true, readiness.fetch("claimed")
+      assert_equal "running", running.state
+      assert_kind_of Hash, running.worker
+      refute_path_exists sentinel
+
+      release_w.write("1")
+      release_w.close
+      assert_equal 0, Timeout.timeout(2) { runner.value }
+      assert_equal "released", File.binread(sentinel)
+      assert_equal "succeeded",
+                   store.fetch(attempt.attempt_id).outcome
+    ensure
+      runner&.kill if runner&.alive?
+      [ ready_r, ready_w, release_r, release_w ].compact.each do |io|
+        io.close unless io.closed?
+      end
+    end
+  end
+
+  def test_worker_release_gate_eof_and_wrong_byte_are_nonterminal_tempfail
+    {
+      eof: nil,
+      wrong_byte: "x",
+      closed_reader: :closed_reader
+    }.each do |name, release|
+      worker_argv = [ "hive", "run", "durable-task" ]
+      with_attempt(worker_argv: worker_argv) do |store, attempt|
+        sentinel = File.join(store.root, "worker-released")
+        ready_r, ready_w = IO.pipe
+        release_r, release_w = IO.pipe
+        release_r.close if release == :closed_reader
+        worker = <<~RUBY
+          gate = IO.for_fd(
+            Integer(ENV.fetch("HIVE_ATTEMPT_GATE_FD")),
+            "r"
+          )
+          abort "gate not released" unless gate.read(1) == "1"
+          File.binwrite(#{sentinel.inspect}, "released")
+        RUBY
+        supervisor = Hive::Attempts::Supervisor.new(
+          store: store, attempt_id: attempt.attempt_id,
+          claim_io: StringIO.new(CLAIM_CAPABILITY),
+          ready_io: ready_w, worker_release_io: release_r,
+          heartbeat_sec: 0.01, stale_sec: 1,
+          first_heartbeat_timeout_sec: 1, kill_grace_sec: 0.1
+        )
+        supervisor.define_singleton_method(:resolved_worker_argv) do |_record|
+          [ RbConfig.ruby, "-e", worker ]
+        end
+        terminated = false
+        terminate_worker_group =
+          supervisor.method(:terminate_worker_group)
+        supervisor.define_singleton_method(:terminate_worker_group) do
+          terminated = true
+          terminate_worker_group.call
+        end
+        runner = Thread.new { supervisor.run }
+        runner.report_on_exception = false
+
+        readiness =
+          Timeout.timeout(2) { JSON.parse(ready_r.gets) }
+        running = store.fetch(attempt.attempt_id)
+        assert_equal true, readiness.fetch("claimed"), name
+        assert_kind_of Hash, running.worker, name
+        refute_path_exists sentinel, name
+
+        release_w.write(release) if release.is_a?(String)
+        release_w.close
+        assert_equal Hive::ExitCodes::TEMPFAIL,
+                     Timeout.timeout(2) { runner.value },
+                     name
+        stranded = store.fetch(attempt.attempt_id)
+        assert_equal true, terminated, name
+        assert_equal "running", stranded.state, name
+        refute stranded.final?, name
+        assert_nil stranded.receipt, name
+        refute process_alive?(running.worker.fetch("pid")), name
+        refute_path_exists sentinel, name
+      ensure
+        runner&.kill if runner&.alive?
+        [ ready_r, ready_w, release_r, release_w ].compact.each do |io|
+          io.close unless io.closed?
+        end
+      end
+    end
+  end
+
   def test_timeout_and_heartbeat_continue_while_descendant_holds_output_pipe
     worker_argv = [
       "/bin/sh", "-c",
@@ -327,5 +474,12 @@ class AttemptsSupervisorTest < Minitest::Test
       )
       yield store, attempt
     end
+  end
+
+  def process_alive?(pid)
+    Process.kill(0, pid)
+    true
+  rescue Errno::ESRCH
+    false
   end
 end

@@ -38,4 +38,52 @@ class AttemptsCommandSuperviseTest < Minitest::Test
       assert_nil command.send(:claim_io_from_env)
     end
   end
+
+  def test_worker_release_descriptor_is_opened_for_reading
+    command = Hive::Commands::AttemptSupervise.new(
+      attempt_id: "attempt", store_root: "/tmp",
+      heartbeat_sec: 1, stale_sec: 2,
+      first_heartbeat_timeout_sec: 2,
+      timeout_sec: nil, kill_grace_sec: 1
+    )
+    reader, writer = IO.pipe
+    inherited = reader.dup
+    reader.close
+
+    with_env(
+      "HIVE_ATTEMPT_WORKER_RELEASE_FD" =>
+        inherited.fileno.to_s
+    ) do
+      release_io =
+        command.send(:worker_release_io_from_env)
+      inherited.autoclose = false
+      writer.write("1")
+      assert_equal "1", release_io.read(1)
+      release_io.close
+      inherited = nil
+    end
+  ensure
+    [ reader, writer, inherited ].compact.each do |io|
+      io.close unless io.closed?
+    end
+  end
+
+  def test_present_invalid_worker_release_descriptor_fails_closed
+    command = Hive::Commands::AttemptSupervise.new(
+      attempt_id: "attempt", store_root: "/tmp",
+      heartbeat_sec: 1, stale_sec: 2,
+      first_heartbeat_timeout_sec: 2,
+      timeout_sec: nil, kill_grace_sec: 1
+    )
+
+    with_env(
+      "HIVE_ATTEMPT_WORKER_RELEASE_FD" => "-1"
+    ) do
+      error =
+        assert_raises(Hive::Attempts::StoreError) do
+          command.send(:worker_release_io_from_env)
+        end
+      assert_includes error.message, "invalid"
+    end
+  end
 end

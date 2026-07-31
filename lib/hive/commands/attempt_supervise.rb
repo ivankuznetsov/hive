@@ -59,6 +59,8 @@ module Hive
           attempt_id: @attempt_id,
           claim_io: claim_io_from_env,
           ready_io: ready_io,
+          worker_release_io:
+            worker_release_io_from_env,
           heartbeat_sec: @heartbeat_sec,
           stale_sec: @stale_sec,
           first_heartbeat_timeout_sec: @first_heartbeat_timeout_sec,
@@ -76,6 +78,21 @@ module Hive
 
       def claim_io_from_env
         inherited_io("HIVE_ATTEMPT_CLAIM_FD")
+      end
+
+      def worker_release_io_from_env
+        key = "HIVE_ATTEMPT_WORKER_RELEASE_FD"
+        value = ENV[key]
+        return nil if value.to_s.empty?
+
+        IO.for_fd(
+          Integer(value),
+          "r",
+          autoclose: true
+        )
+      rescue ArgumentError, RangeError, SystemCallError
+        raise Hive::Attempts::StoreError,
+              "worker release gate descriptor is invalid"
       end
 
       def inherited_io(key)

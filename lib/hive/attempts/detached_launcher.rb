@@ -17,7 +17,8 @@ module Hive
                      first_heartbeat_timeout_sec: 30, timeout_sec: nil,
                      kill_grace_sec: 1, ready_timeout_sec: 5,
                      capability: -> { self.class.supported? },
-                     hive_executable: File.expand_path("../../../bin/hive", __dir__))
+                     hive_executable: File.expand_path("../../../bin/hive", __dir__),
+                     worker_release_io: nil)
         @store = store
         @heartbeat_sec = heartbeat_sec
         @stale_sec = stale_sec
@@ -27,6 +28,7 @@ module Hive
         @ready_timeout_sec = ready_timeout_sec
         @capability = capability
         @hive_executable = hive_executable
+        @worker_release_io = worker_release_io
       end
 
       def preflight!
@@ -71,6 +73,8 @@ module Hive
       ensure
         reader&.close unless reader&.closed?
         writer&.close unless writer&.closed?
+        @worker_release_io&.close unless
+          @worker_release_io&.closed?
       end
 
       private
@@ -82,6 +86,8 @@ module Hive
         wrapper_pid = fork do
           writer.close_on_exec = false
           claim_reader.close_on_exec = false
+          @worker_release_io.close_on_exec = false if
+            @worker_release_io
           command = [
             RbConfig.ruby, @hive_executable, "__attempt-supervise", record.attempt_id,
             "--store-root", @store.root,
@@ -95,12 +101,23 @@ module Hive
             "HIVE_ATTEMPT_READY_FD" => writer.fileno.to_s,
             "HIVE_ATTEMPT_CLAIM_FD" => claim_reader.fileno.to_s
           )
-          exec(
-            env, *command,
+          options = {
             writer.fileno => writer.fileno,
             claim_reader.fileno => claim_reader.fileno,
-            in: File::NULL, out: File::NULL, err: File::NULL,
+            in: File::NULL,
+            out: File::NULL,
+            err: File::NULL,
             close_others: true
+          }
+          if @worker_release_io
+            release_fd = @worker_release_io.fileno
+            env["HIVE_ATTEMPT_WORKER_RELEASE_FD"] =
+              release_fd.to_s
+            options[release_fd] = release_fd
+          end
+          exec(
+            env, *command,
+            **options
           )
         end
         claim_reader.close unless claim_reader.closed?

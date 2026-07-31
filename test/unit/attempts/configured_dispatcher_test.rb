@@ -173,4 +173,87 @@ class AttemptsConfiguredDispatcherTest < Minitest::Test
     assert_equal %w[hive module-hook], call.fetch(:argv)
     assert_equal "request-1", call.fetch(:request_id)
   end
+
+  def test_optional_worker_release_io_reaches_the_detached_launcher
+    worker_release_io, worker_release_writer = IO.pipe
+    launcher_options = nil
+    launcher_class = Class.new
+    launcher_class.define_singleton_method(:new) do |**options|
+      launcher_options = options
+      :launcher
+    end
+    downstream = Object.new
+    downstream.define_singleton_method(:dispatch_module_hook) do |**_attributes|
+      :accepted
+    end
+    dispatcher_class = Class.new
+    dispatcher_class.define_singleton_method(:new) do |**_options|
+      downstream
+    end
+    adapter = Hive::Attempts::ConfiguredDispatcher.new(
+      store: :store,
+      worker_release_io: worker_release_io,
+      config_loader:
+        ->(_root) { Hive::Config.merge_defaults({}) },
+      daemon_config_loader:
+        -> { Hive::Config::DEFAULTS.fetch("daemon") },
+      launcher_class: launcher_class,
+      dispatcher_class: dispatcher_class
+    )
+
+    assert_equal :accepted,
+                 adapter.dispatch_module_hook(
+                   project_root: "/projects/demo",
+                   argv: %w[hive __module-hook]
+                 )
+    assert_same worker_release_io,
+                launcher_options.fetch(:worker_release_io)
+
+    error =
+      assert_raises(Hive::Attempts::StoreError) do
+        adapter.dispatch_module_hook(
+          project_root: "/projects/demo",
+          argv: %w[hive __module-hook]
+        )
+      end
+    assert_includes error.message, "already been consumed"
+  ensure
+    [ worker_release_io, worker_release_writer ].compact.each do |io|
+      io.close unless io.closed?
+    end
+  end
+
+  def test_closed_worker_release_io_is_rejected_before_launcher_construction
+    worker_release_io, worker_release_writer = IO.pipe
+    worker_release_io.close
+    launcher_called = false
+    launcher_class = Class.new
+    launcher_class.define_singleton_method(:new) do |**_options|
+      launcher_called = true
+      :launcher
+    end
+    adapter = Hive::Attempts::ConfiguredDispatcher.new(
+      store: :store,
+      worker_release_io: worker_release_io,
+      config_loader:
+        ->(_root) { Hive::Config.merge_defaults({}) },
+      daemon_config_loader:
+        -> { Hive::Config::DEFAULTS.fetch("daemon") },
+      launcher_class: launcher_class
+    )
+
+    error =
+      assert_raises(Hive::Attempts::StoreError) do
+        adapter.dispatch_module_hook(
+          project_root: "/projects/demo",
+          argv: %w[hive __module-hook]
+        )
+      end
+    assert_includes error.message, "unavailable"
+    assert_equal false, launcher_called
+  ensure
+    [ worker_release_io, worker_release_writer ].compact.each do |io|
+      io.close unless io.closed?
+    end
+  end
 end

@@ -25,6 +25,9 @@ module Hive
         ].freeze
         NEW_COMMIT_OPERATIONS = %w[new_commit same_commit].freeze
         RELOADED_OPERATIONS = %w[restart timer_reset_reload].freeze
+        SUPPORTED_FAULTS = %w[after_module_decision].freeze
+        FAULT_EXIT_STATUS = 76
+        private_constant :FAULT_EXIT_STATUS
         PROJECT_KEYS = %w[name project_id repository].freeze
         MAX_PATH_BYTES = 4_096
         INSTALL_LEAD_TIME_SEC = 3_600
@@ -138,15 +141,41 @@ module Hive
 
         def run_module_shadow!(store:, event:, registry_entry:,
                                hive_state_path:)
+          worker_release_reader = nil
+          worker_release_writer = nil
+          if qualification_fault?("after_module_decision")
+            worker_release_reader,
+              worker_release_writer = IO.pipe
+          end
           attempts_root = qualification_attempts_root
           attempt_store = Hive::Attempts::Store.new(root: attempts_root)
+          attempts_daemon =
+            Hive::Attempts::ConfiguredDispatcher.new(
+              store: attempt_store,
+              worker_release_io: worker_release_reader
+            )
           attempts_api = Hive::Attempts::API.new(
-            store: attempt_store
+            store: attempt_store,
+            daemon: attempts_daemon
           )
+          checkpoint = lambda do |name, decision|
+            qualification_checkpoint!(
+              name,
+              decision,
+              worker_release_writer:
+                worker_release_writer
+            )
+          end
           runtime = Hive::Modules::DaemonRuntime.new(
             attempt_store: attempt_store,
             attempt_dispatcher: attempts_api,
             registry: -> { [ registry_entry ] },
+            dispatcher_factory: lambda do |**dependencies|
+              Hive::Modules::Dispatcher.new(
+                **dependencies,
+                checkpoint: checkpoint
+              )
+            end,
             clock: @clock
           )
           journal = Hive::Modules::DecisionJournal.new(
@@ -222,6 +251,42 @@ module Hive
         rescue IndexError
           raise Hive::ConfigError,
                 "qualification module hook did not succeed"
+        ensure
+          [
+            worker_release_reader,
+            worker_release_writer
+          ].compact.each do |io|
+            io.close unless io.closed?
+          end
+        end
+
+        def qualification_checkpoint!(
+          name,
+          decision,
+          worker_release_writer:
+        )
+          return unless
+            qualification_fault?(
+              "after_module_decision"
+            ) &&
+              name == :after_module_decision &&
+              decision["module"] ==
+                @scenario_input.module_name &&
+              decision["outcome"] == "launch" &&
+              decision["reason"] == "admitted" &&
+              !decision["attempt_id"].to_s.empty?
+          unless
+            worker_release_writer &&
+              !worker_release_writer.closed?
+            raise Hive::ConfigError,
+                  "qualification worker release gate is unavailable"
+          end
+
+          Process.exit!(FAULT_EXIT_STATUS)
+        end
+
+        def qualification_fault?(name)
+          @scenario_input.faults.include?(name)
         end
 
         def await_terminal_attempt(attempt_store, attempt_id)
@@ -954,7 +1019,10 @@ module Hive
               SUPPORTED_OPERATIONS.include?(
                 @scenario_input.operation
               ) &&
-              @scenario_input.faults.empty?
+              (
+                @scenario_input.faults -
+                  SUPPORTED_FAULTS
+              ).empty?
             raise Hive::ConfigError,
                   "qualification scenario is unsupported"
           end

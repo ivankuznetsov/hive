@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-07-30
+updated: 2026-07-31
 tags: [gap, todo, release-proof, agent-skills]
 ---
 
@@ -13,11 +13,14 @@ tags: [gap, todo, release-proof, agent-skills]
 
 - Patrol capture/effect boundaries are source- and focused-test-pinned, but
   they are not yet compressed-campaign or live-cutover evidence. The permanent
-  U3 harness must still exercise real scheduler/event/adapter/store paths,
-  restarts around intent and outcome boundaries, shadow attempted-effect
-  denial, exact reconciliation, and run-level duplicate detection before any
-  migration qualification claim. Longer elapsed telemetry remains useful but
-  is not a substitute for that protocol.
+  U3 harness now has a real `after_module_decision` process-exit boundary
+  through scheduler, event, module admission, detached Attempts, and persisted
+  worker identity. It must still run the fresh-process reconciliation and
+  recovered-completion half of that case, exercise the remaining intent and
+  outcome boundaries, prove shadow attempted-effect denial, and verify
+  run-level duplicate detection before any migration qualification claim.
+  Longer elapsed telemetry remains useful but is not a substitute for that
+  protocol.
 
 - The explicit JobStore fresh-start reset is source- and focused-test-pinned,
   including no-write fresh status, exact registered-project binding,
@@ -402,11 +405,15 @@ runtime-readiness tests. An operator must still explicitly confirm any real
 per-project archive/reset after reviewing `daemon status --json`; U2 does not
 perform that cutover automatically.
 
-U3 still needs to make the candidate-bound compressed evidence protocol part of
-the test harness, feed it from these finalized occurrences without consulting
-EvidenceStore for recovery, and produce the elapsed production qualification
-set. Until that proof exists, Patrol Effect Evidence remains a catalog
-`candidate`; neither module mutator cutover nor boundary promotion is complete.
+U3 now has a candidate-bound ordinary-driver interruption primitive after the
+durable module decision and worker-identity checkpoint. It still needs to make
+the complete compressed evidence protocol part of the test harness, reconcile
+that stranded attempt in a fresh process, feed the result from finalized
+occurrences without consulting EvidenceStore for recovery, cover the other
+required fault boundaries and Architecture Patrol lane, and produce the
+elapsed production qualification set. Until that proof exists, Patrol Effect
+Evidence remains a catalog `candidate`; neither module mutator cutover nor
+boundary promotion is complete.
 The local storage contract now covers portable bounded repair/history cursors,
 streamed occurrence/report inventories, descriptor-relative component custody,
 managed-component and lock symlink refusal, public oversized-record failure,

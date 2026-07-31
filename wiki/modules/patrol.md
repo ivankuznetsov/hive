@@ -267,6 +267,20 @@ replay. Recovery failures persist one bounded UTF-8 diagnostic cell with
 60/300/900-second retry backoff; successful generation-matched recovery clears
 it after restart.
 
+The candidate-side ordinary qualification driver now has a private
+`after_module_decision` interruption boundary. It injects a one-shot Attempts
+worker-release reader before module-hook admission and retains the only writer.
+The module dispatcher invokes the driver only after the admitted decision is
+durably appended; by then the detached supervisor has also persisted the
+blocked worker identity and returned its claimed handoff. The driver then calls
+`Process.exit!(76)`, so process exit closes the sole writer without releasing
+the worker. The supervisor treats that EOF as a temporary store failure,
+terminates the worker, and leaves a nonterminal running attempt for the next
+process to reconcile. Status 76 is qualification-private and is not part of
+Hive's public exit-code contract. This slice establishes the real interruption
+point only; restarted reconciliation, recovered completion, and the remaining
+fault matrix are still required U3 evidence.
+
 This boundary remains an internal `candidate`. U3 must still bind the repaired
 production decision/effect stream into the compressed candidate evidence
 protocol and satisfy production qualification before the catalog can promote

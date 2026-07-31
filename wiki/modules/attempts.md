@@ -3,7 +3,7 @@ title: Durable task attempts
 type: module
 source: lib/hive/attempts/
 created: 2026-07-16
-updated: 2026-07-27
+updated: 2026-07-31
 tags: [attempts, ownership, leases, daemon, recovery]
 ---
 
@@ -214,6 +214,22 @@ the admission bypass. The attempt transport cannot supply a dedicated store
 override, and production exposes neither public context construction nor a
 `Context.with` override. The authenticated context remains only in the worker
 process. An attached client records whether any stdout frame was replayed.
+
+An internal, optional one-shot release pipe can interpose on that existing
+Hive-worker gate for deterministic restart qualification. With no release pipe,
+the incumbent handoff is unchanged: the wrapper reports `claimed` after its
+first heartbeat and before spawning or checkpointing the worker. With one
+present, `ConfiguredDispatcher` transfers its reader to exactly one
+`DetachedLauncher`; the private wrapper transport maps only that reader, and
+the short-lived launcher is reaped before handoff returns. The supervisor then
+spawns the blocked worker, durably checkpoints its complete process identity,
+reports `claimed`, and waits for the single byte `1` before releasing
+`Context`. EOF, a closed pipe, or any other byte raises `StoreError`, terminates
+the worker group, returns `TEMPFAIL`, and deliberately leaves the running
+attempt nonterminal for a fresh `Reconciler`. A set-but-invalid inherited
+descriptor and any attempt to reuse the configured reader fail closed; the
+transport has no public CLI option.
+
 `Hive::Attempts::CommandDispatch` applies that result identically for `hive
 run` and workflow verbs: a non-zero terminal result with no worker stdout is
 routed through the owning command's normal versioned JSON error envelope

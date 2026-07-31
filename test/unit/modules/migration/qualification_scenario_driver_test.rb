@@ -312,6 +312,94 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
     end
   end
 
+  def test_after_module_decision_fault_exits_with_a_checkpointed_nonterminal_attempt
+    skip "POSIX fork unavailable" unless Process.respond_to?(:fork)
+
+    with_tmp_dir do |sandbox|
+      candidate_pid = fork do
+        begin
+          with_env(
+            "HIVE_HOME" =>
+              File.join(sandbox, "hive-home")
+          ) do
+            driver(
+              sandbox,
+              faults: [ "after_module_decision" ]
+            ).call
+          end
+        rescue StandardError => error
+          warn "#{error.class}: #{error.message}"
+          exit! 70
+        end
+        exit! 71
+      end
+
+      _pid, status =
+        Timeout.timeout(10) do
+          Process.wait2(candidate_pid)
+        end
+      candidate_pid = nil
+      assert_predicate status, :exited?
+      assert_equal 76, status.exitstatus
+
+      attempts_root =
+        File.join(
+          sandbox,
+          "hive-home",
+          "attempts",
+          "v2"
+        )
+      store = Hive::Attempts::Store.new(
+        root: attempts_root,
+        create_directories: false
+      )
+      record =
+        Timeout.timeout(5) do
+          loop do
+            candidate =
+              store.scan.records.fetch(0, nil)
+            break candidate if candidate&.worker
+
+            sleep 0.01
+          end
+        end
+      Timeout.timeout(5) do
+        sleep 0.01 while
+          process_alive?(record.wrapper.fetch("pid")) ||
+            process_alive?(record.worker.fetch("pid"))
+      end
+      stranded = store.fetch(record.attempt_id)
+      assert_equal "running", stranded.state
+      refute stranded.final?
+      assert_nil stranded.receipt
+      assert_kind_of Hash, stranded.wrapper
+      assert_kind_of Hash, stranded.worker
+
+      journal = Hive::Modules::DecisionJournal.new(
+        root:
+          File.join(
+            sandbox,
+            "hive-state",
+            "module-runtime"
+          )
+      )
+      admitted = journal.all.count do |decision|
+        decision["outcome"] == "launch" &&
+          decision["reason"] == "admitted"
+      end
+      assert_equal 1, admitted
+    ensure
+      begin
+        if candidate_pid
+          Process.kill("KILL", candidate_pid)
+          Process.wait(candidate_pid)
+        end
+      rescue Errno::ESRCH, Errno::ECHILD
+        nil
+      end
+    end
+  end
+
   def test_rejects_a_candidate_without_both_reviewed_module_packages
     with_tmp_dir do |sandbox|
       missing = File.join(sandbox, "candidate")
@@ -378,31 +466,47 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
 
   private
 
-  def run_driver(sandbox, operation: "timer_due", findings: [])
+  def run_driver(
+    sandbox,
+    operation: "timer_due",
+    findings: [],
+    faults: []
+  )
     with_env(
       "HIVE_HOME" => File.join(sandbox, "hive-home")
     ) do
       driver(
         sandbox,
         operation: operation,
-        findings: findings
+        findings: findings,
+        faults: faults
       ).call
     end
   end
 
-  def driver(sandbox, operation: "timer_due", findings: [])
+  def driver(
+    sandbox,
+    operation: "timer_due",
+    findings: [],
+    faults: []
+  )
     DRIVER.new(
       candidate_source_root: CANDIDATE_SOURCE_ROOT,
       sandbox_root: sandbox,
       project: PROJECT,
       scenario_input: scenario_input(
         operation: operation,
-        findings: findings
+        findings: findings,
+        faults: faults
       )
     )
   end
 
-  def scenario_input(operation: "timer_due", findings: [])
+  def scenario_input(
+    operation: "timer_due",
+    findings: [],
+    faults: []
+  )
     case_id = "ordinary-#{operation.tr('_', '-')}"
     INPUT.load(
       Hive::WorkflowPackage::CanonicalYAML.dump(
@@ -412,7 +516,7 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
         "module" => "patrol",
         "operation" => operation,
         "clock" => NOW.utc.iso8601(6),
-        "faults" => [],
+        "faults" => faults,
         "reviewer" => { "findings" => findings }
       ),
       expected_case_id: case_id
@@ -464,6 +568,13 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
     else
       assert_equal expected, actual, message
     end
+  end
+
+  def process_alive?(pid)
+    Process.kill(0, pid)
+    true
+  rescue Errno::ESRCH
+    false
   end
 
   def semantic_observation(row)

@@ -13,8 +13,10 @@ module Hive
     # commits the only valid terminal receipt.
     class Supervisor
       READ_CHUNK = 16 * 1024
+      WORKER_RELEASE_TOKEN = "1".freeze
 
       def initialize(store:, attempt_id:, claim_io:, ready_io: nil,
+                     worker_release_io: nil,
                      heartbeat_sec: 5, stale_sec: 30,
                      first_heartbeat_timeout_sec: 30, timeout_sec: nil,
                      kill_grace_sec: 1, clock: -> { Time.now.utc },
@@ -24,6 +26,7 @@ module Hive
         @attempt_id = attempt_id
         @claim_io = claim_io
         @ready_io = ready_io
+        @worker_release_io = worker_release_io
         @heartbeat_sec = heartbeat_sec
         @stale_sec = stale_sec
         @first_heartbeat_timeout_sec = first_heartbeat_timeout_sec
@@ -53,7 +56,11 @@ module Hive
           first_heartbeat_timeout_sec: @first_heartbeat_timeout_sec, now: now
         )
         record = @store.first_heartbeat(record, stale_sec: @stale_sec, now: @clock.call)
-        signal_ready("claimed" => true, "attempt_id" => record.attempt_id, "pid" => Process.pid)
+        if @worker_release_io && !hive_worker?(record)
+          raise StoreError,
+                "worker release gate requires a Hive worker"
+        end
+        signal_claimed_ready(record) unless @worker_release_io
         install_signal_handlers! if @install_signal_handlers
 
         exit_status, outcome, record = run_worker(record, log)
@@ -93,6 +100,8 @@ module Hive
         signal_ready("claimed" => false, "attempt_id" => @attempt_id, "error" => "wrapper_exited")
         @ready_io&.close unless @ready_io&.closed?
         @claim_io&.close unless @claim_io&.closed?
+        @worker_release_io&.close unless
+          @worker_release_io&.closed?
         log&.close unless log&.closed?
       end
 
@@ -135,8 +144,12 @@ module Hive
           record, checkpoint: record.checkpoint,
           worker: worker_identity, now: @clock.call
         )
+        if @worker_release_io
+          signal_claimed_ready(record)
+          await_worker_release!
+        end
         if gate_w
-          gate_w.write("1")
+          gate_w.write(WORKER_RELEASE_TOKEN)
           gate_w.close
         end
 
@@ -353,6 +366,25 @@ module Hive
         @ready_sent = true
       rescue IOError, Errno::EPIPE
         @ready_sent = true
+      end
+
+      def signal_claimed_ready(record)
+        signal_ready(
+          "claimed" => true,
+          "attempt_id" => record.attempt_id,
+          "pid" => Process.pid
+        )
+      end
+
+      def await_worker_release!
+        token = @worker_release_io.read(1)
+        return if token == WORKER_RELEASE_TOKEN
+
+        raise StoreError,
+              "worker release gate closed without release token"
+      rescue IOError, SystemCallError
+        raise StoreError,
+              "worker release gate is unavailable"
       end
 
       def fail_before_start(reason)

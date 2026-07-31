@@ -640,7 +640,12 @@ writing a daemon request. `Task#run!` compares the submitted action and stage
 with the freshly loaded row, refuses stale forms, and wraps queue-writer
 `ArgumentError`s (for example the queue's stricter slug grammar) as typed 422s
 instead of surfacing an opaque 500. Idea creation likewise enters
-`Project#add_idea!`, and `POST /daemon/repair` is the conventional create action
+`Project#add_idea!`. `Hive::Commands::New#call!` deliberately leaves
+`SystemCallError`/`IOError` raising for in-process adapters, so the Rails
+resource normalizes those failures to a path-redacted typed 422 while retaining
+the original exception as its cause for diagnostics. Other exceptions still
+follow the ordinary programmer-error 500 path rather than being mislabeled as
+operator failures. `POST /daemon/repair` is the conventional create action
 on `DaemonRepairsController`, backed by `Daemon#repair!`. CSRF is Rails-default (per-form
 tokens). Outside verified local-loopback access every route except `/health`, `/up`, `/login`,
 `/logout`, `/auth/github*`, and the dev/test-only `/dev_login` is behind the

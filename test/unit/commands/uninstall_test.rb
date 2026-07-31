@@ -214,7 +214,7 @@ class UninstallCommandTest < Minitest::Test
 
       assert_equal operator, File.readlink(link)
       assert_match(/changed during uninstall; preserved it at/, output.string)
-      assert_equal 1, Dir.glob(File.join(bin, ".hive-uninstall-*" )).length
+      assert_equal 1, Dir.glob(File.join(bin, ".hive-uninstall-*")).length
     end
   end
 

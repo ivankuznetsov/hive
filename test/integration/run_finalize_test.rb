@@ -681,7 +681,14 @@ class RunFinalizeTest < Minitest::Test
         MD
         ENV["HIVE_FAKE_GH_VIEW_EXIT"] = "1"
 
-        _out, _err, status = with_captured_exit { Hive::Commands::Run.new(task_dir).call }
+        _out = _err = status = nil
+        with_stubbed_singleton_method(
+          Hive::Stages::Finalize,
+          :validate_pr_reference!,
+          ->(_task, _worktree, url, _cfg) { [ url, nil ] }
+        ) do
+          _out, _err, status = with_captured_exit { Hive::Commands::Run.new(task_dir).call }
+        end
 
         assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
         marker = Hive::Markers.current(pr_md)
@@ -965,6 +972,60 @@ class RunFinalizeTest < Minitest::Test
         refute_match(/arg=ready/, gh_argv_log, "merged short-circuit must not run `gh pr ready`")
         refute File.exist?(File.join(task_dir, "summary.md")),
                "merged short-circuit skips the body-refresh agent, so no summary.md"
+      end
+    end
+  end
+
+  def test_finalize_validates_pr_identity_before_any_url_bound_remote_read
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        task_dir, worktree_path, _pr_md = setup_finalize_task(dir)
+        task = Hive::Task.new(task_dir)
+        calls = []
+        invalid = {
+          commit: "finalize_pr_identity_refresh_failed",
+          status: :error
+        }
+        clean = Hive::Gh::ScanResult.new(
+          hits: [], fetch_failed: false, fetch_error: nil
+        )
+
+        with_stubbed_singleton_method(
+          Hive::Stages::Finalize,
+          :validate_pr_reference!,
+          ->(*_args) { calls << :identity; [ nil, invalid ] }
+        ) do
+          with_stubbed_singleton_method(
+            Hive::Gh,
+            :scan_pr_for_secrets,
+            ->(**_kwargs) { calls << :scan; clean }
+          ) do
+            with_stubbed_singleton_method(
+              Hive::Stages::Finalize,
+              :pr_already_merged?,
+              ->(*_args) { calls << :merged_state; false }
+            ) do
+              with_stubbed_singleton_method(
+                Hive::Gh, :ensure_authenticated!, ->(*_args) { }
+              ) do
+                with_stubbed_singleton_method(
+                  Hive::Stages::Finalize,
+                  :verify_state!,
+                  ->(*_args) { nil }
+                ) do
+                  result = Hive::Stages::Finalize.run!(task, {})
+
+                  assert_equal invalid, result
+                  assert_equal(
+                    [ :identity ],
+                    calls,
+                    "unvalidated pr_url must not reach secret scan or lifecycle lookup"
+                  )
+                end
+              end
+            end
+          end
+        end
       end
     end
   end

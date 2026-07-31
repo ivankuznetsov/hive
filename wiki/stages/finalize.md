@@ -3,7 +3,7 @@ title: 8-finalize stage
 type: stage
 source: lib/hive/stages/finalize.rb, lib/hive/task_closure.rb, templates/finalize_prompt.md.erb, templates/finalize_summary.md.erb
 created: 2026-05-13
-updated: 2026-07-25
+updated: 2026-07-31
 tags: [stage, finalize, pr, github, clean-exit, closure]
 ---
 
@@ -38,24 +38,32 @@ not repeat accepted work.
 
 ## Steps performed (`Stages::Finalize.run!`)
 
-1. Read `pr_url` from `pr.md`.
-2. Secret-scan the local source and current remote PR body before auth, agent,
+1. Read `pr_url` from `pr.md`, parse its canonical host/repository/number, and
+   resolve that number through the task worktree's repository context. A
+   mismatched URL or cross-repository observation fails before the URL reaches
+   a remote scan, lifecycle read, edit, or ready action.
+2. Secret-scan the local source and current remote PR body before agent,
    ready-state, or branch mutation. Fetch failure writes
    `ERROR reason=secret_scan_fetch_failed`; a hit best-effort redacts the
    remote body and writes `ERROR reason=secret_in_pr_body`.
 3. Ask `Hive::Gh.pr_state(pr_url)` whether the PR is already `MERGED`. If yes, append `<!-- COMPLETE pr_url=... is_draft=false merged=true -->` and return `finalize_already_merged` without spawning the finalize agent, running `gh pr ready`, or requiring a healthy local branch.
-4. Verify git status and upstream state.
+4. Verify git status and upstream state, publishing legitimate review/fix
+   commits through the existing push gate. Then refresh the PR metadata and
+   require its remote head to equal the exact local `HEAD` before any
+   controller-owned mutation.
 5. Render `templates/finalize_prompt.md.erb` with plan, review files, task folder, worktree path, and PR URL.
 6. Spawn the finalize agent in the worktree. Controller-owned task files are
    captured before spawn; any changed bytes are restored atomically before
    `ERROR reason=finalize_tampered restored=true|false` is written. The prompt
    instructs the agent to update the PR body, write `summary.md`, append
-   `<!-- COMPLETE pr_url=... is_draft=false -->` to `pr.md`, and call
-   `gh pr ready` last.
+   `<!-- COMPLETE pr_url=... is_draft=false -->` to `pr.md`, and leave the
+   ready-state mutation to the controller.
 7. Secret-scan `pr.md` and the PR body again after the authored update. On a
    hit, best-effort reverts to draft with `gh pr ready --undo` and writes
    `ERROR reason=secret_in_pr_body`.
-8. Ensure `summary.md` exists, rendering `templates/finalize_summary.md.erb` as a fallback.
+8. Re-check the marker/frontmatter URL binding, call `gh pr ready` only after
+   the scan is clean, and ensure `summary.md` exists, rendering
+   `templates/finalize_summary.md.erb` as a fallback.
 
 ## Marker → commit action
 

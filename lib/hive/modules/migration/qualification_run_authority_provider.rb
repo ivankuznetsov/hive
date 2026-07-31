@@ -72,6 +72,9 @@ module Hive
           unless repository.respond_to?(:qualification_descriptor) &&
                  repository.respond_to?(:qualification_input) &&
                  repository.respond_to?(:qualification_lane_result) &&
+                 repository.respond_to?(
+                   :qualification_lane_diagnostics
+                 ) &&
                  repository.respond_to?(:qualification_lane)
             raise Hive::ConfigError,
                   "patrol qualification repository is malformed"
@@ -180,6 +183,23 @@ module Hive
             run_id, lane, missing: true
           )
           unless bytes
+            diagnostics =
+              @repository.qualification_lane_diagnostics(
+                run_id,
+                lane
+              )
+            latest = diagnostics.max_by do |result|
+              [
+                result.ended_at,
+                result.started_at,
+                result.failure_reason.to_s
+              ]
+            end
+            if latest
+              raise BlockedEvidence,
+                    "qualification_lane_blocked:" \
+                    "#{latest.failure_reason}"
+            end
             raise BlockedEvidence,
                   "qualification_lane_missing"
           end

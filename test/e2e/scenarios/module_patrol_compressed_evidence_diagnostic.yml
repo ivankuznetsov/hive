@@ -1,0 +1,8 @@
+name: module_patrol_compressed_evidence_diagnostic
+description: Retain local and deterministic Patrol qualification evidence as an advisory diagnostic.
+tags: [modules, acceptance, migration, qualification, advisory]
+coverage:
+  primary: module.patrol_compressed_evidence_diagnostic
+  supporting: []
+steps:
+  - kind: patrol_evidence

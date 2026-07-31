@@ -479,13 +479,21 @@ class ModulesMigrationQualificationRunAuthorityProviderTest <
     end
   end
 
-  def test_blocked_result_needs_no_patrol_capture
+  def test_blocked_diagnostic_needs_no_patrol_capture
     with_qualification_repository do |repository, fixture, run_id|
-      publish_result(
-        repository, fixture, "installed",
-        "status" => "blocked",
-        "exit_code" => nil,
-        "failure_reason" => "live_lane_not_authorized"
+      repository.publish_qualification_lane_diagnostic(
+        run_id: run_id,
+        lane: "installed",
+        result_bytes: canonical(
+          qualification_result(
+            fixture,
+            "installed",
+            "status" => "blocked",
+            "exit_code" => nil,
+            "failure_reason" =>
+              "live_lane_not_authorized"
+          )
+        )
       )
 
       outcome = provider(repository).call(

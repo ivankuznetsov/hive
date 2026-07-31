@@ -955,3 +955,21 @@ or historical package lane ran during this implementation. The current source
 version and latest-stable row are both 0.6.9, so `candidate_not_newer` must keep
 the candidate blocked. No version choice, tag, publication, deployment, or
 release was authorized.
+
+## Compressed Patrol qualification still needs independent process and live-lane proof (2026-07-31)
+
+The ordinary candidate driver now reaches all five required fault checkpoints,
+and the host independently reconstructs terminal event, decision, attempt,
+capture, effect, comparator, retirement, and repository evidence. Terminal
+stores still cannot establish the exact prior process exit point, externally
+supervised generation count, or timed pre/post-fault state snapshots. The lane
+controller must own those generations before restart or fault claims qualify.
+
+Architecture Patrol has clean-negative and positive legacy lifecycle controls,
+but not yet full candidate routing and the complete restart/fault matrix. The
+installed lane also still lacks the host-owned fixed-provider broker needed to
+use live credentials without exposing network or secrets to candidate code.
+Finally, the independent protected-main controller and literal scenario catalog
+cannot certify PR #910's own head; the first trusted proof must evaluate a later
+candidate after the controller exists on protected main. Keep required release
+coverage blocked until all of these conditions are satisfied.

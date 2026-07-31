@@ -21,7 +21,11 @@ class E2EStepExecutorTest < Minitest::Test
       )
       scenario = Hive::E2E::Scenario.new(
         name: "patrol", description: "", tags: [], setup: {},
-        steps: [ step ], path: "inline"
+        steps: [ step ], path: "inline",
+        coverage: Hive::E2E::Coverage.new(
+          primary: "module.patrol_compressed_evidence",
+          supporting: []
+        ).freeze
       )
       calls = []
       qualification_run_id = "patrol-#{"1" * 64}"
@@ -39,11 +43,11 @@ class E2EStepExecutorTest < Minitest::Test
         harness_writer.call(
           artifacts_dir,
           run_id: qualification_run_id,
-          status: "deterministic_evidence_ready"
+          status: "evidence_ready_for_operator"
         )
         {
           "run_id" => qualification_run_id,
-          "status" => "deterministic_evidence_ready",
+          "status" => "evidence_ready_for_operator",
           "artifacts_dir" => artifacts_dir
         }
       end
@@ -75,6 +79,36 @@ class E2EStepExecutorTest < Minitest::Test
           "result.json"
         )
       )
+    end
+  end
+
+  def test_required_patrol_evidence_rejects_diagnostic_outcomes
+    %w[
+      deterministic_evidence_ready
+      evidence_required
+    ].each do |status|
+      result = execute_patrol_evidence(
+        status: status,
+        coverage_id: "module.patrol_compressed_evidence"
+      )
+
+      assert_equal "failed", result.status, status
+      assert_match(/not a complete result/, result.error_summary)
+    end
+  end
+
+  def test_advisory_patrol_evidence_accepts_diagnostic_outcomes
+    %w[
+      deterministic_evidence_ready
+      evidence_required
+    ].each do |status|
+      result = execute_patrol_evidence(
+        status: status,
+        coverage_id:
+          "module.patrol_compressed_evidence_diagnostic"
+      )
+
+      assert_equal "passed", result.status, status
     end
   end
 
@@ -231,22 +265,29 @@ class E2EStepExecutorTest < Minitest::Test
         target_sha256: "d" * 64,
         exit_code: 0
       )
+    installed_status =
+      status == "evidence_ready_for_operator" ?
+        "passed" : "blocked"
     installed =
       Hive::Modules::Migration::QualificationLaneResult.build(
         run_id: run_id,
         lane: "installed",
-        status: "blocked",
+        status: installed_status,
         started_at: Time.utc(2026, 7, 31),
         ended_at: Time.utc(2026, 7, 31),
         target_sha256: "e" * 64,
-        failure_reason: "live_lane_not_authorized"
+        exit_code: installed_status == "passed" ? 0 : nil,
+        failure_reason:
+          installed_status == "blocked" ?
+            "live_lane_not_authorized" : nil
       )
+    local = status == "evidence_required"
     control = {
       "repository" => "github.com/example/hive",
-      "ref" => "refs/heads/main",
-      "commit_sha" => "1" * 40,
+      "ref" => local ? nil : "refs/heads/main",
+      "commit_sha" => local ? candidate_sha : "1" * 40,
       "tree_sha" => "2" * 40,
-      "trust_scope" => "trusted_remote",
+      "trust_scope" => local ? "local" : "trusted_remote",
       "catalog" => {
         "ref" =>
           "test/e2e/fixtures/patrol_qualification/catalog.json",
@@ -255,11 +296,12 @@ class E2EStepExecutorTest < Minitest::Test
       "harness_manifest_sha256" => "4" * 64,
       "provenance" => {
         "workflow_path" =>
-          ".github/workflows/patrol-qualification.yml",
-        "workflow_sha" => "1" * 40,
-        "run_id" => 123,
-        "run_attempt" => 1,
-        "action_lock_sha256" => "5" * 64
+          local ?
+            nil : ".github/workflows/patrol-qualification.yml",
+        "workflow_sha" => local ? nil : "1" * 40,
+        "run_id" => local ? nil : 123,
+        "run_attempt" => local ? nil : 1,
+        "action_lock_sha256" => local ? nil : "5" * 64
       }
     }
     bytes = Hive::WorkflowPackage::CanonicalJSON.generate(
@@ -270,13 +312,82 @@ class E2EStepExecutorTest < Minitest::Test
       "candidate_sha" => candidate_sha,
       "control" => control,
       "status" => status,
-      "blockers" => [],
+      "blockers" => local ?
+        %w[
+          qualification_control_untrusted
+          qualification_control_not_independent
+        ] : [],
       "deterministic" => deterministic.to_h,
       "installed" => installed.to_h
     )
     path = File.join(artifacts_dir, "result.json")
     File.binwrite(path, bytes)
     File.chmod(0o600, path)
+  end
+
+  def execute_patrol_evidence(status:, coverage_id:)
+    Dir.mktmpdir("e2e-patrol-evidence-boundary") do |root|
+      sandbox_dir = File.join(root, "sandbox")
+      run_home = File.join(root, "home")
+      scenario_dir =
+        File.join(root, "run", "scenarios", "patrol")
+      FileUtils.mkdir_p(
+        [ sandbox_dir, run_home, scenario_dir ]
+      )
+      sandbox =
+        Struct.new(:sandbox_dir, :run_home)
+          .new(sandbox_dir, run_home)
+      step = Hive::E2E::Step.new(
+        kind: "patrol_evidence",
+        args: {},
+        description: "",
+        position: 1
+      )
+      scenario = Hive::E2E::Scenario.new(
+        name: "patrol",
+        description: "",
+        tags: [],
+        setup: {},
+        steps: [ step ],
+        path: "inline",
+        coverage: Hive::E2E::Coverage.new(
+          primary: coverage_id,
+          supporting: []
+        ).freeze
+      )
+      qualification_run_id = "patrol-#{"6" * 64}"
+      writer = method(:write_harness_result)
+      fake = Object.new
+      fake.define_singleton_method(:call) do |project_root:,
+                                                run_home:,
+                                                artifacts_root:|
+        artifacts_dir =
+          File.join(artifacts_root, qualification_run_id)
+        FileUtils.mkdir_p(artifacts_dir)
+        writer.call(
+          artifacts_dir,
+          run_id: qualification_run_id,
+          status: status
+        )
+        {
+          "run_id" => qualification_run_id,
+          "status" => status,
+          "artifacts_dir" => artifacts_dir
+        }
+      end
+      executor = Hive::E2E::StepExecutor.new(
+        scenario: scenario,
+        sandbox: sandbox,
+        scenario_dir: scenario_dir,
+        run_id: "outer-run"
+      )
+      executor.instance_variable_set(
+        :@patrol_evidence_runner,
+        fake
+      )
+
+      executor.execute
+    end
   end
 
   def test_cli_step_happy_path

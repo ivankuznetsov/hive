@@ -24,6 +24,10 @@ module Hive
         script_gh patrol_evidence
       ].freeze
       TMUX_STEP_KINDS = %w[tui_keys tui_expect tui_refute wait_subprocess].freeze
+      PATROL_EVIDENCE_COVERAGE_IDS = %w[
+        module.patrol_compressed_evidence
+        module.patrol_compressed_evidence_diagnostic
+      ].freeze
 
       REQUIRED_KEYS = {
         "cli" => %w[args],
@@ -189,7 +193,7 @@ module Hive
 
       def validate_patrol_evidence_scenario!(coverage:, pending:, steps:)
         return unless
-          coverage.primary == "module.patrol_compressed_evidence"
+          PATROL_EVIDENCE_COVERAGE_IDS.include?(coverage.primary)
 
         patrol_steps = steps.count do |step|
           step.kind == "patrol_evidence"
@@ -198,8 +202,8 @@ module Hive
                   steps.none? { |step| step.kind == "ruby_block" }
 
         invalid!(
-          "module.patrol_compressed_evidence requires one active patrol_evidence step without ruby_block",
-          line_for("module.patrol_compressed_evidence")
+          "#{coverage.primary} requires one active patrol_evidence step without ruby_block",
+          line_for(coverage.primary)
         )
       end
 

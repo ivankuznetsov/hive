@@ -246,6 +246,7 @@ module Hive
           "rationale" => "complete",
           "job_id" => aggregate.fetch("job_id"),
           "state" => aggregate.fetch("state"),
+          "complete" => aggregate.fetch("complete"),
           "zero_reason" => aggregate.fetch("zero_reason"),
           "action_count" => actions.size,
           "action_outcomes" => actions.to_h do |action|

@@ -75,6 +75,17 @@ drift, uses non-forced removal, and requires the exact workspace root to be
 absent afterward. Preparation and cleanup failures remain distinct in the
 reported cause chain.
 
+Coverage keeps diagnostic progress separate from qualification authority.
+`module.patrol_compressed_evidence_diagnostic` is advisory and explicitly
+runnable: it accepts either local same-candidate `evidence_required` evidence
+or independent deterministic-only evidence while the installed lane remains
+unauthorized. The required release ID,
+`module.patrol_compressed_evidence`, accepts only
+`evidence_ready_for_operator` with no blockers, an authenticated independent
+`trusted_remote` control on protected main, and passed deterministic and
+installed lanes. Release-profile selection records the advisory ID but does
+not run it or count it as required proof.
+
 ## Binary contract
 
 `bin/hive-e2e` mirrors the main Hive CLI's sysexits-shaped contract for the e2e harness:

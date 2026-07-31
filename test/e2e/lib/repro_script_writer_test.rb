@@ -441,11 +441,16 @@ class E2EReproScriptWriterTest < Minitest::Test
           )
           path = Hive::E2E::ReproScriptWriter.new(
             scenario_dir: scenario_dir, sandbox_dir: sandbox,
-            run_home: run_home, steps: [ step ], failed_index: 1
+            run_home: run_home, steps: [ step ], failed_index: 1,
+            coverage_id:
+              "module.patrol_compressed_evidence_diagnostic"
           ).write
 
           body = File.read(path)
           assert_includes body, "patrol_qualification_runner"
+          assert_includes body, "coverage_complete\\?"
+          assert_includes body,
+                          "module.patrol_compressed_evidence_diagnostic"
           refute_includes body, "compressed-run-1"
           assert_includes body, sandbox
           assert_includes body, run_home

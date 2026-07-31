@@ -156,7 +156,7 @@ class ModulesMigrationRepositoryTest < Minitest::Test
     end
   end
 
-  def test_qualification_lane_result_is_a_standalone_immutable_sentinel
+  def test_terminal_qualification_lane_result_is_a_standalone_immutable_sentinel
     with_tmp_dir do |root|
       fixture = qualification_run_fixture
       run_id = fixture.dig(:payload, "run_id")
@@ -170,14 +170,15 @@ class ModulesMigrationRepositoryTest < Minitest::Test
         Hive::Modules::Migration::QualificationLaneResult.build(
           run_id: run_id,
           lane: "installed",
-          status: "blocked",
+          status: "failed",
           started_at: "2026-07-30T09:00:00.000000Z",
           ended_at: "2026-07-30T09:00:01.000000Z",
           target_sha256:
             fixture.dig(
               :payload, "candidate", "installed_tree_sha256"
             ),
-          failure_reason: "live_lane_not_authorized"
+          exit_code: 1,
+          failure_reason: "provider_failed"
         )
       bytes =
         Hive::Modules::Migration::QualificationLaneResult.canonical(
@@ -208,9 +209,79 @@ class ModulesMigrationRepositoryTest < Minitest::Test
           result_bytes:
             Hive::Modules::Migration::QualificationLaneResult.canonical(
               result.to_h.merge(
-                "failure_reason" => "provider_unavailable"
+                "failure_reason" => "scenario_failed"
               )
             )
+        )
+      end
+    end
+  end
+
+  def test_blocked_qualification_diagnostics_are_append_only_and_retryable
+    with_tmp_dir do |root|
+      fixture = qualification_run_fixture
+      run_id = fixture.dig(:payload, "run_id")
+      repository =
+        Hive::Modules::Migration::MigrationRepository.new(root: root)
+      repository.import_qualification_run(
+        descriptor_bytes: fixture.fetch(:descriptor),
+        inputs: fixture.fetch(:inputs)
+      )
+      attributes = {
+        run_id: run_id,
+        lane: "installed",
+        status: "blocked",
+        started_at: "2026-07-30T09:00:00.000000Z",
+        ended_at: "2026-07-30T09:00:01.000000Z",
+        target_sha256:
+          fixture.dig(
+            :payload, "candidate", "installed_tree_sha256"
+          )
+      }
+      unauthorized =
+        Hive::Modules::Migration::QualificationLaneResult.build(
+          **attributes,
+          failure_reason: "live_lane_not_authorized"
+        )
+      provider =
+        Hive::Modules::Migration::QualificationLaneResult.build(
+          **attributes,
+          failure_reason: "provider_unavailable"
+        )
+      [ unauthorized, unauthorized, provider ].each do |result|
+        repository.publish_qualification_lane_diagnostic(
+          run_id: run_id,
+          lane: "installed",
+          result_bytes:
+            Hive::Modules::Migration::
+              QualificationLaneResult.canonical(
+                result.to_h
+              )
+        )
+      end
+
+      assert_nil repository.qualification_lane_result(
+        run_id, "installed", missing: true
+      )
+      assert_equal(
+        %w[
+          live_lane_not_authorized provider_unavailable
+        ],
+        repository.qualification_lane_diagnostics(
+          run_id,
+          "installed"
+        ).map(&:failure_reason).sort
+      )
+      blocked_bytes =
+        Hive::Modules::Migration::
+          QualificationLaneResult.canonical(
+            unauthorized.to_h
+          )
+      assert_raises(Hive::ConfigError) do
+        repository.publish_qualification_lane_result(
+          run_id: run_id,
+          lane: "installed",
+          result_bytes: blocked_bytes
         )
       end
     end

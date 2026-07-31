@@ -14,51 +14,45 @@ class ModulesMigrationCandidateExecutionSandboxTest <
 
   def test_both_lanes_use_one_closed_mount_profile
     with_workspace do |context|
-      commands = {}
-      [ false, true ].each do |network|
-        sandbox(context, network: network) do |launch|
-          commands[network] = launch.command
-          assert_equal !network, launch.network_isolated
-          assert_match(/\A[0-9a-f]{64}\z/, launch.profile_sha256)
-          assert_equal "/", launch.host_cwd
-          assert_equal(
-            "/qualification/cases/case-one/sandbox/hive-home",
-            launch.environment.fetch("HIVE_HOME")
-          )
-          refute launch.environment.key?(
-            "QUALIFICATION_AMBIENT_SECRET"
-          )
-        end
+      command = nil
+      sandbox(context, network: false) do |launch|
+        command = launch.command
+        assert_equal true, launch.network_isolated
+        assert_match(/\A[0-9a-f]{64}\z/, launch.profile_sha256)
+        assert_equal "/", launch.host_cwd
+        assert_equal(
+          "/qualification/cases/case-one/sandbox/hive-home",
+          launch.environment.fetch("HIVE_HOME")
+        )
+        refute launch.environment.key?(
+          "QUALIFICATION_AMBIENT_SECRET"
+        )
       end
 
-      isolated = commands.fetch(false)
-      shared = commands.fetch(true)
-      assert_includes isolated, "--unshare-all"
-      assert_includes isolated, "--disable-userns"
-      refute_includes isolated, "--share-net"
-      assert_includes shared, "--share-net"
-      refute_equal isolated, shared
-      refute command_pair?(isolated, "--ro-bind", "/", "/")
+      assert_includes command, "--unshare-all"
+      assert_includes command, "--disable-userns"
+      refute_includes command, "--share-net"
+      refute command_pair?(command, "--ro-bind", "/", "/")
       refute command_pair?(
-        isolated,
+        command,
         "--bind",
         context.fetch(:workspace),
         "/qualification"
       )
       refute command_pair?(
-        isolated,
+        command,
         "--ro-bind",
         context.fetch(:workspace),
         "/qualification"
       )
-      refute_includes isolated.join("\0"), context.fetch(:control)
-      refute_includes isolated.join("\0"), "other-case"
+      refute_includes command.join("\0"), context.fetch(:control)
+      refute_includes command.join("\0"), "other-case"
       assert_includes(
-        isolated,
+        command,
         "/qualification/inputs/scenarios/case-one.yml"
       )
       assert_includes(
-        isolated,
+        command,
         "/qualification/cases/case-one"
       )
     end
@@ -87,46 +81,23 @@ class ModulesMigrationCandidateExecutionSandboxTest <
     end
   end
 
-  def test_network_toggle_is_the_only_connectivity_difference
+  def test_rejects_shared_network_and_raw_candidate_credentials
     with_workspace do |context|
-      server = TCPServer.new("127.0.0.1", 0)
-      port = server.addr.fetch(1)
-      context[:argv] = [ port.to_s ]
-
-      isolated = run_sandbox(context, network: false)
-      assert isolated.fetch(:status).success?,
-             isolated.fetch(:stderr)
-      assert_equal(
-        false,
-        JSON.parse(
-          File.binread(
-            File.join(context.fetch(:case), "network.json")
-          )
-        ).fetch("connected")
-      )
-      File.unlink(
-        File.join(context.fetch(:case), "network.json")
-      )
-
-      accepted = Thread.new do
-        socket = server.accept
-        socket.close
+      network = assert_raises(Hive::ConfigError) do
+        sandbox(context, network: true) { flunk }
       end
-      shared = run_sandbox(context, network: true)
-      assert shared.fetch(:status).success?, shared.fetch(:stderr)
-      assert accepted.join(2), "shared network did not connect"
-      assert_equal(
-        true,
-        JSON.parse(
-          File.binread(
-            File.join(context.fetch(:case), "network.json")
-          )
-        ).fetch("connected")
-      )
-    ensure
-      server&.close
-      accepted&.kill
-      accepted&.join
+      credentials = assert_raises(Hive::ConfigError) do
+        sandbox(
+          context,
+          network: false,
+          credentials: {
+            "OPENROUTER_API_KEY" => "must-not-enter-candidate"
+          }
+        ) { flunk }
+      end
+
+      assert_match(/network policy/, network.message)
+      assert_match(/credentials/, credentials.message)
     end
   end
 
@@ -224,7 +195,7 @@ class ModulesMigrationCandidateExecutionSandboxTest <
     end
   end
 
-  def sandbox(context, network:, &block)
+  def sandbox(context, network:, credentials: {}, &block)
     SANDBOX.new.call(
       executable: context.fetch(:executable),
       argv: context.fetch(:argv),
@@ -235,7 +206,7 @@ class ModulesMigrationCandidateExecutionSandboxTest <
       request_ref: "requests/case-one.json",
       scenario_ref: "inputs/scenarios/case-one.yml",
       network: network,
-      credentials: {},
+      credentials: credentials,
       hive_home:
         File.join(
           context.fetch(:case),

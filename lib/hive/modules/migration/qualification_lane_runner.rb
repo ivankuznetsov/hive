@@ -14,6 +14,7 @@ require "hive/modules/migration/qualification_installed_target"
 require "hive/modules/migration/qualification_lane_result"
 require "hive/modules/migration/qualification_run_descriptor"
 require "hive/modules/migration/qualification_scenario_actuals"
+require "hive/modules/migration/qualification_scenario_evidence_collector"
 require "hive/modules/migration/qualification_scenario_observations"
 require "hive/modules/migration/qualification_scenario_oracle"
 require "hive/modules/migration/qualification_scenario_process"
@@ -75,6 +76,8 @@ module Hive
             QualificationInstalledTarget.new,
           scenario_process:
             QualificationScenarioProcess.new,
+          evidence_collector:
+            QualificationScenarioEvidenceCollector.new,
           oracle: QualificationScenarioOracle.new,
           verifier: PatrolEvidenceVerifier
         )
@@ -85,6 +88,7 @@ module Hive
           @source_materializer = source_materializer
           @installed_materializer = installed_materializer
           @scenario_process = scenario_process
+          @evidence_collector = evidence_collector
           @oracle = oracle
           @verifier = verifier
         end
@@ -153,6 +157,7 @@ module Hive
             @monotonic.call + policy.fetch("timeout_seconds")
           completed = nil
           process_rows = []
+          host_evidence = []
           Dir.mktmpdir("hive-patrol-qualification-") do |workspace|
             File.chmod(0o700, workspace)
             begin
@@ -174,7 +179,8 @@ module Hive
                 policy: policy,
                 credentials: credentials,
                 deadline: deadline,
-                process_rows: process_rows
+                process_rows: process_rows,
+                host_evidence: host_evidence
               )
               observations = @oracle.call(
                 descriptor: descriptor,
@@ -191,7 +197,8 @@ module Hive
                 started_at: started_at,
                 observations: observations,
                 records: records,
-                process_rows: process_rows
+                process_rows: process_rows,
+                host_evidence: host_evidence
               )
             rescue LaneFailure => failure
               completed = build_failed_capture(
@@ -326,7 +333,8 @@ module Hive
 
         def execute_scenarios(
           workspace:, directory:, materialized:, authority:,
-          lane:, policy:, credentials:, deadline:, process_rows:
+          lane:, policy:, credentials:, deadline:, process_rows:,
+          host_evidence:
         )
           actuals = []
           authority.scenarios.each do |row|
@@ -394,13 +402,25 @@ module Hive
             output_ref =
               "cases/#{row.fetch(:case_id)}/output/" \
               "scenario-actuals.json"
-            actuals << QualificationScenarioActuals.load(
-              directory.read(
-                output_ref,
-                max_bytes:
-                  QualificationScenarioActuals::MAX_BYTES
+            actual =
+              QualificationScenarioActuals.load(
+                directory.read(
+                  output_ref,
+                  max_bytes:
+                    QualificationScenarioActuals::MAX_BYTES
+                )
               )
+            unless actual.actuals.length == 1
+              raise Hive::ConfigError,
+                    "patrol qualification candidate actuals are ambiguous"
+            end
+            host_evidence << @evidence_collector.call(
+              case_id: row.fetch(:case_id),
+              sandbox_root:
+                File.join(case_root, "sandbox"),
+              candidate_row: actual.actuals.fetch(0)
             )
+            actuals << actual
           end
           actuals.freeze
         end
@@ -458,7 +478,7 @@ module Hive
 
         def build_completed_capture(
           authority:, lane:, started_at:, observations:,
-          records:, process_rows:
+          records:, process_rows:, host_evidence:
         )
           descriptor = authority.descriptor
           ended_at = [ utc_time(@clock.call), started_at ].max
@@ -501,6 +521,14 @@ module Hive
                 observations.to_h
               )
           }.freeze
+          artifacts = artifacts.merge(
+            host_evidence.to_h do |projection|
+              [
+                "host-evidence/#{projection.case_id}.json",
+                canonical(projection.to_h)
+              ]
+            end
+          ).freeze
           artifact_digests = artifact_digests(
             result: result,
             artifacts: artifacts,
@@ -833,7 +861,13 @@ module Hive
             target_sha256: authority.target_sha256,
             failure_reason: reason
           )
-          publish_result(result)
+          @repository.publish_qualification_lane_diagnostic(
+            run_id: result.run_id,
+            lane: result.lane,
+            result_bytes:
+              QualificationLaneResult.canonical(result.to_h)
+          )
+          result
         end
 
         def publish_failure(

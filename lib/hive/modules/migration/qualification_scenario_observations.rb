@@ -32,6 +32,7 @@ module Hive
         MAX_DECISIONS_PER_OBSERVATION = 16
         MAX_ATTEMPT_BYTES = 128 * 1024
         MAX_ATTEMPTS_PER_OBSERVATION = 16
+        MAX_RECOVERY_TRACE_ENTRIES = 32
         TOP_LEVEL_KEYS = %w[
           lane observations run_id scenario_manifest_sha256 schema
           schema_version
@@ -41,7 +42,7 @@ module Hive
           decision_class decision_id event event_id fault_checkpoint
           legacy_capture_id legacy_effect_keys module module_effect_keys
           pre_fault_durable_state_sha256 recovered_durable_state_sha256
-          repository_sha restart_generation trigger_digest
+          recovery_trace repository_sha restart_generation trigger_digest
         ].freeze
         EVENT_KEYS = %w[
           event_id event_name idempotency_key occurred_at payload project
@@ -69,6 +70,9 @@ module Hive
           task_generation task_input_epoch
         ].freeze
         LOSS_KEYS = %w[at reason].freeze
+        RECOVERY_TRACE_KEYS = %w[
+          at attempt_count decision_count phase state state_sha256
+        ].freeze
         SOURCE_KEYS = %w[id type].freeze
         UUID = /\A[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/
         DECISION_ID = /\Adec-[0-9a-f]{64}\z/
@@ -186,7 +190,39 @@ module Hive
               event: value.fetch("event"),
               decisions: decisions
             )
+            recovery_trace!(value.fetch("recovery_trace"))
             immutable(value)
+          end
+
+          def recovery_trace!(value)
+            malformed! unless
+              value.is_a?(Array) &&
+                !value.empty? &&
+                value.length <= MAX_RECOVERY_TRACE_ENTRIES
+            rows = value.map do |row|
+              exact!(row, RECOVERY_TRACE_KEYS)
+              malformed! unless
+                exact_timestamp?(row["at"]) &&
+                  safe_trace_token?(row["phase"]) &&
+                  safe_trace_token?(row["state"]) &&
+                  DIGEST.match?(row["state_sha256"].to_s) &&
+                  nonnegative_integer?(row["attempt_count"]) &&
+                  nonnegative_integer?(row["decision_count"])
+              row
+            end
+            malformed! unless
+              rows.map { |row| row.fetch("at") } ==
+                rows.map { |row| row.fetch("at") }.sort
+            rows.freeze
+          end
+
+          def safe_trace_token?(value)
+            value.is_a?(String) &&
+              QualificationRunDescriptor::SAFE_ID.match?(value)
+          end
+
+          def nonnegative_integer?(value)
+            value.is_a?(Integer) && value >= 0
           end
 
           def event!(value, module_name:)
@@ -273,11 +309,21 @@ module Hive
                 rows.length &&
                 rows.map { |row| row.fetch("evaluated_at") } ==
                   rows.map { |row| row.fetch("evaluated_at") }.sort &&
-                rows.count do |row|
-                  row["outcome"] == "launch" &&
-                    row["reason"] == "admitted"
-                end == 1
+                primary_decisions(rows).length == 1
             rows.freeze
+          end
+
+          def primary_decisions(rows)
+            rows.select do |row|
+              (
+                row["outcome"] == "launch" &&
+                row["reason"] == "admitted"
+              ) ||
+                (
+                  row["outcome"] == "skip" &&
+                  row["reason"] == "launch_handoff_failed"
+                )
+            end
           end
 
           def decision!(value, event:, module_name:)
@@ -351,10 +397,8 @@ module Hive
                               !value.empty? &&
                               value.length <=
                                 MAX_ATTEMPTS_PER_OBSERVATION
-            primary_decision = decisions.find do |decision|
-              decision["outcome"] == "launch" &&
-                decision["reason"] == "admitted"
-            end
+            primary_decision =
+              primary_decisions(decisions).fetch(0)
             rows = value.map do |attempt|
               attempt!(
                 attempt,
@@ -363,7 +407,6 @@ module Hive
               )
             end
             malformed! unless
-              primary_decision &&
               rows.first["attempt_id"] ==
                 primary_decision["attempt_id"] &&
               rows.first["predecessor_attempt_id"].nil? &&
@@ -408,6 +451,8 @@ module Hive
               malformed! unless
                 row["task_generation"] == expected_generation
             end
+          rescue IndexError
+            malformed!
           end
 
           def attempt!(value, event:, decision:)

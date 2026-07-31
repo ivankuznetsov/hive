@@ -13,13 +13,15 @@ module Hive
     class ReproScriptWriter
       LIVE_TMUX_KINDS = ScenarioParser::TMUX_STEP_KINDS
 
-      def initialize(scenario_dir:, sandbox_dir:, run_home:, steps:, failed_index:, scenario_name: nil, expander_context: nil)
+      def initialize(scenario_dir:, sandbox_dir:, run_home:, steps:, failed_index:,
+                     scenario_name: nil, coverage_id: nil, expander_context: nil)
         @scenario_dir = scenario_dir
         @sandbox_dir = sandbox_dir
         @run_home = run_home
         @steps = steps
         @failed_index = failed_index
         @scenario_name = scenario_name
+        @coverage_id = coverage_id
         @expander_context = expander_context || {
           sandbox_dir: sandbox_dir,
           run_home: run_home,
@@ -374,7 +376,9 @@ module Hive
           ")",
           "abort(\"patrol evidence outcome is not a complete result: \#{result.inspect}\") unless",
           "  result.is_a?(Hash) &&",
-          "  Hive::E2E::PatrolQualificationRunner.harness_complete?(result)"
+          "  Hive::E2E::PatrolQualificationRunner.coverage_complete?(",
+          "    result, coverage_id: #{@coverage_id.to_s.inspect}",
+          "  )"
         ].join("\n")
         [
           "# step #{step.position} patrol_evidence",

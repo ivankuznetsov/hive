@@ -68,6 +68,31 @@ class ModulesMigrationQualificationScenarioOracleTest <
     end
   end
 
+  def test_rejects_a_forged_fault_recovery_trace
+    fixture = qualification_run_fixture
+    descriptor = DESCRIPTOR.load(fixture.fetch(:descriptor))
+    expected =
+      qualification_scenario_observations(
+        fixture,
+        lane: "deterministic"
+      )
+    forged = JSON.parse(JSON.generate(expected))
+    forged.dig(
+      "observations",
+      0,
+      "recovery_trace",
+      0
+    )["phase"] = "module_finalize"
+
+    assert_raises(Hive::ConfigError) do
+      ORACLE.new.call(
+        descriptor: descriptor,
+        lane: "deterministic",
+        actuals: [ actuals_from(forged) ]
+      )
+    end
+  end
+
   def test_clean_negative_requires_a_completed_reviewed_ordinary_scan
     oracle = ORACLE.new
     reviewed_clean = {

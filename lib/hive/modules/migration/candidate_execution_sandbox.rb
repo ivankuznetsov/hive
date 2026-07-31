@@ -11,8 +11,9 @@ module Hive
   module Modules
     module Migration
       # Builds the only filesystem/process capability set granted to a
-      # qualification candidate. Both lanes use the same bubblewrap profile;
-      # the installed lane differs only by retaining the network namespace.
+      # qualification candidate. Both lanes remain network-isolated and
+      # receive no provider or GitHub secrets; live access belongs to a
+      # future host-owned broker, never to candidate code.
       class CandidateExecutionSandbox
         BWRAP = "/usr/bin/bwrap".freeze
         VIRTUAL_ROOT = "/qualification".freeze
@@ -25,9 +26,6 @@ module Hive
         ].freeze
         SYSTEM_RUNTIME_FILES = %w[
           /etc/group /etc/ld.so.cache /etc/nsswitch.conf /etc/passwd
-        ].freeze
-        NETWORK_RUNTIME_FILES = %w[
-          /etc/gai.conf /etc/hosts /etc/resolv.conf
         ].freeze
 
         Launch = Data.define(
@@ -180,7 +178,6 @@ module Hive
               VIRTUAL_ROOT : item
           end.freeze
           profile = profile_digest(
-            network: network,
             source_inventory: source_inventory,
             installed_inventory: installed_inventory,
             source_mounts:
@@ -227,8 +224,7 @@ module Hive
             "--assert-userns-disabled",
             "--cap-drop", "ALL"
           ]
-          command << "--share-net" if network
-          runtime_mounts(network: network).each do |source|
+          runtime_mounts.each do |source|
             command.concat(
               [ "--ro-bind", source, source ]
             )
@@ -270,7 +266,7 @@ module Hive
           command.freeze
         end
 
-        def runtime_mounts(network:)
+        def runtime_mounts
           roots = SYSTEM_RUNTIME_ROOTS.filter_map do |path|
             path if File.exist?(path)
           end
@@ -278,12 +274,9 @@ module Hive
             ruby_prefix == root ||
               ruby_prefix.start_with?("#{root}/")
           end
-          files =
-            (
-              SYSTEM_RUNTIME_FILES +
-                (network ? NETWORK_RUNTIME_FILES : [])
-            )
-              .select { |path| File.file?(path) }
+          files = SYSTEM_RUNTIME_FILES.select do |path|
+            File.file?(path)
+          end
           (roots + files).uniq.freeze
         end
 
@@ -297,14 +290,14 @@ module Hive
         end
 
         def profile_digest(
-          network:, source_inventory:, installed_inventory:,
+          source_inventory:, installed_inventory:,
           source_mounts:
         )
           payload = {
             "schema" =>
               "hive-qualification-candidate-sandbox-profile",
             "schema_version" => 1,
-            "network" => network ? "shared" : "isolated",
+            "network" => "isolated",
             "mounts" => {
               "source" => source_mounts,
               "installed" => "read_only",
@@ -529,28 +522,19 @@ module Hive
         end
 
         def validate_network(value)
-          malformed!("network policy") unless
-            value == true || value == false
-          value
+          malformed!("network policy") unless value == false
+
+          false
         end
 
         def validate_credentials(value, network:)
           unless
             value.is_a?(Hash) &&
-              value.keys.all? do |key|
-                %w[GITHUB_TOKEN OPENROUTER_API_KEY].include?(key)
-              end &&
-              value.values.all? do |secret|
-                secret.is_a?(String) &&
-                  !secret.empty? &&
-                  !secret.include?("\0")
-              end &&
-              (network || value.empty?)
+              value.empty? &&
+              network == false
             malformed!("credentials")
           end
-          value.to_h do |key, secret|
-            [ key.dup.freeze, secret.dup.freeze ]
-          end.freeze
+          {}.freeze
         end
 
         def validate_bwrap!

@@ -7,10 +7,11 @@ require "hive/workflow_package/canonical_json"
 module Hive
   module Modules
     module Migration
-      # Closed, canonical completion sentinel for one qualification lane.
-      # Failure reasons are typed codes, never subprocess/provider prose; raw
-      # diagnostics belong only in separately retained, secret-scanned
-      # artifacts.
+      # Canonical outcome envelope for one qualification lane attempt.
+      # Passed/failed/timeout values may become the immutable completion
+      # sentinel; blocked values live only in the append-only diagnostic
+      # ledger and never prevent a later authorized attempt. Failure reasons
+      # are typed codes, never subprocess/provider prose.
       class QualificationLaneResult
         SCHEMA = "hive-patrol-qualification-lane-result".freeze
         SCHEMA_VERSION = 1

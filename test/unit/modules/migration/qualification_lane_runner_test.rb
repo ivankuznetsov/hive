@@ -145,7 +145,37 @@ class QualificationLaneRunnerTest < Minitest::Test
     end
   end
 
-  def test_installed_without_live_authorization_publishes_only_one_typed_result
+  HostEvidence = Data.define(:case_id, :payload) do
+    def to_h = payload
+  end
+
+  class EvidenceCollector
+    def call(case_id:, candidate_row:, **)
+      HostEvidence.new(
+        case_id: case_id.freeze,
+        payload: {
+          "schema" => "test-patrol-qualification-host-evidence",
+          "schema_version" => 1,
+          "case_id" => case_id,
+          "candidate_sha256" =>
+            Digest::SHA256.hexdigest(
+              Hive::WorkflowPackage::CanonicalJSON.generate(
+                candidate_row
+              )
+            )
+        }.freeze
+      ).freeze
+    end
+  end
+
+  class RejectingEvidenceCollector
+    def call(**)
+      raise Hive::ConfigError,
+            "patrol qualification host evidence is malformed"
+    end
+  end
+
+  def test_installed_without_live_authorization_retains_a_retryable_diagnostic
     with_qualification_repository do |repository, fixture, run_id|
       runner = runner(repository)
 
@@ -171,14 +201,14 @@ class QualificationLaneRunnerTest < Minitest::Test
       )
       assert_equal first.to_h, second.to_h
       assert_equal(
-        first.to_h,
-        Hive::Modules::Migration::QualificationLaneResult
-          .load(
-            repository.qualification_lane_result(
-              run_id, "installed"
-            )
-          )
-          .to_h
+        [ first.to_h ],
+        repository.qualification_lane_diagnostics(
+          run_id,
+          "installed"
+        ).map(&:to_h)
+      )
+      assert_nil repository.qualification_lane_result(
+        run_id, "installed", missing: true
       )
       refute File.exist?(
         File.join(
@@ -208,6 +238,14 @@ class QualificationLaneRunnerTest < Minitest::Test
     end
 
     with_qualification_repository do |repository, _fixture, run_id|
+      unavailable = runner(
+        repository,
+        environment: {}
+      ).call(
+        run_id: run_id,
+        lane: "installed",
+        live_authorized: false
+      )
       result = runner(
         repository,
         environment: {
@@ -223,6 +261,33 @@ class QualificationLaneRunnerTest < Minitest::Test
       assert_equal "blocked", result.status
       assert_equal "provider_unavailable",
                    result.failure_reason
+      assert_nil repository.qualification_lane_result(
+        run_id, "installed", missing: true
+      )
+      assert_equal(
+        %w[
+          live_lane_not_authorized provider_unavailable
+        ],
+        repository.qualification_lane_diagnostics(
+          run_id,
+          "installed"
+        ).map(&:failure_reason).sort
+      )
+      refute_equal unavailable.failure_reason,
+                   result.failure_reason
+      authority =
+        Hive::Modules::Migration::
+          QualificationRunAuthorityProvider.new(
+            repository: repository
+          ).call(
+            run_id: run_id,
+            lane: "installed"
+          )
+      assert_equal "blocked", authority.status
+      assert_equal(
+        [ "qualification_lane_blocked:provider_unavailable" ],
+        authority.issues
+      )
     end
   end
 
@@ -258,10 +323,14 @@ class QualificationLaneRunnerTest < Minitest::Test
         "deterministic"
       )
       assert_equal(
-        %w[
-          artifacts/process-results.json
-          artifacts/scenario-observations.json
-          bundle.json repro.json repro.sh result.json
+        [
+          "artifacts/host-evidence/#{actual.fetch('case_id')}.json",
+          "artifacts/process-results.json",
+          "artifacts/scenario-observations.json",
+          "bundle.json",
+          "repro.json",
+          "repro.sh",
+          "result.json"
         ],
         lane.keys.sort
       )
@@ -274,6 +343,47 @@ class QualificationLaneRunnerTest < Minitest::Test
             run_id: run_id,
             lane: "deterministic"
           ).status
+      )
+    end
+  end
+
+  def test_candidate_actuals_cannot_bypass_host_evidence_reconstruction
+    with_qualification_repository do |repository, fixture, run_id|
+      observation =
+        qualification_scenario_observations(
+          fixture,
+          lane: "deterministic"
+        ).fetch("observations").fetch(0)
+      actual = observation.reject do |key, _value|
+        key == "decision_class"
+      end
+      result = runner(
+        repository,
+        source_materializer: SourceMaterializer.new,
+        installed_materializer:
+          InstalledMaterializer.new,
+        scenario_process: ScenarioProcess.new(
+          actual: actual,
+          record: fixture.fetch(:observation_record)
+        ),
+        evidence_collector: RejectingEvidenceCollector.new,
+        verifier: AcceptingVerifier
+      ).call(
+        run_id: run_id,
+        lane: "deterministic"
+      )
+
+      assert_equal "failed", result.status
+      assert_equal "evidence_verification_failed",
+                   result.failure_reason
+      lane = repository.qualification_lane(
+        run_id,
+        "deterministic"
+      )
+      refute(
+        lane.keys.any? do |key|
+          key.start_with?("artifacts/host-evidence/")
+        end
       )
     end
   end
@@ -349,6 +459,7 @@ class QualificationLaneRunnerTest < Minitest::Test
             actual: actual,
             record: fixture.fetch(:observation_record)
           ),
+          evidence_collector: EvidenceCollector.new,
           verifier: AcceptingVerifier
         ).call(
           run_id: run_id,
@@ -397,6 +508,9 @@ class QualificationLaneRunnerTest < Minitest::Test
   private
 
   def runner(repository, **options)
+    options = {
+      evidence_collector: EvidenceCollector.new
+    }.merge(options)
     Hive::Modules::Migration::QualificationLaneRunner.new(
       repository: repository,
       clock: -> { NOW },

@@ -274,7 +274,7 @@
                   "const": "inputs/installed-target/target.json"
                 },
                 "network": {
-                  "const": true
+                  "const": false
                 }
               }
             }

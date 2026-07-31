@@ -1,4 +1,5 @@
 require "hive/errors"
+require "hive/modules/daemon_runtime"
 require "hive/modules/migration/qualification_run_descriptor"
 require "hive/modules/migration/qualification_scenario_actuals"
 require "hive/modules/migration/qualification_scenario_observations"
@@ -43,6 +44,7 @@ module Hive
             expectation = expected.fetch(key)
             verify_identity!(row, expectation)
             verify_control!(row, expectation)
+            verify_recovery_trace!(row, expectation)
             row.merge(
               "decision_class" =>
                 expectation.fetch("decision_class")
@@ -78,7 +80,9 @@ module Hive
                   row.fetch("case_id"),
                   decision.fetch("decision_id")
                 ],
-                decision
+                decision.merge(
+                  "_faults" => row.fetch("faults")
+                )
               ]
             end
           end.to_h
@@ -142,6 +146,89 @@ module Hive
             outcome["complete"] == true &&
             outcome["action_count"].to_i.zero? &&
             outcome["zero_reason"] == "no_theses"
+        end
+
+        def verify_recovery_trace!(row, expectation)
+          trace = row.fetch("recovery_trace")
+          phases = trace.map { |entry| entry.fetch("phase") }
+          decision_class =
+            expectation.fetch("decision_class")
+          valid = case decision_class
+          when "concurrent_duplicate_delivery"
+            phases.include?("duplicate_delivery") &&
+              row.fetch("attempts").length == 1
+          when "cooldown_retry", "launch_failure"
+            trace_matches_launch_retry?(trace, phases)
+          when "reconciliation_failure"
+            phases.first(3) == %w[
+              effect_dispatch_uncertain reconciliation_failure
+              effect_recovery
+            ] &&
+              row.fetch("restart_generation") >= 3
+          else
+            true
+          end
+          faults = expectation.fetch("_faults")
+          valid &&=
+            faults.empty? ?
+              row["fault_checkpoint"].nil? :
+              faults == [ row["fault_checkpoint"] ] &&
+                trace_matches_fault?(
+                  faults.fetch(0),
+                  phases,
+                  row
+                )
+          malformed! unless valid
+        end
+
+        def trace_matches_fault?(fault, phases, row)
+          required = {
+            "after_effect_intent" =>
+              %w[effect_intent effect_recovery],
+            "after_legacy_capture" =>
+              %w[legacy_capture legacy_recovery],
+            "after_legacy_decision" =>
+              %w[legacy_decision legacy_projection],
+            "after_module_decision" =>
+              %w[module_decision],
+            "during_reconciliation" =>
+              %w[
+                effect_dispatch_uncertain effect_reconciliation
+                effect_recovery
+              ]
+          }.fetch(fault, [])
+          required_generation =
+            fault == "during_reconciliation" ? 3 : 2
+          !required.empty? &&
+            phases.first(required.length) == required &&
+            row.fetch("restart_generation") >=
+              required_generation
+        rescue KeyError
+          false
+        end
+
+        def trace_matches_launch_retry?(trace, phases)
+          return false unless phases == %w[
+            module_dispatch retry_cooldown retry_dispatch
+            module_terminal module_finalize
+          ]
+
+          started_at = Time.iso8601(
+            trace.fetch(0).fetch("at")
+          )
+          deferred_at = Time.iso8601(
+            trace.fetch(1).fetch("at")
+          )
+          retried_at = Time.iso8601(
+            trace.fetch(2).fetch("at")
+          )
+          deferred_at - started_at ==
+            Hive::Modules::DaemonRuntime::RETRY_DELAY_SEC - 1 &&
+            retried_at - deferred_at == 1 &&
+            trace.fetch(1).fetch("attempt_count") == 1 &&
+            trace.fetch(2).fetch("attempt_count") == 2
+        rescue ArgumentError, KeyError
+          false
         end
 
         def malformed!

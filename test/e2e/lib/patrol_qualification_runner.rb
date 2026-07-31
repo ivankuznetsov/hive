@@ -25,10 +25,10 @@ module Hive
     class PatrolQualificationRunner
       RUN_ID =
         Hive::Modules::Migration::QualificationRunDescriptor::RUN_ID
-      HARNESS_READY_STATUSES = %w[
-        deterministic_evidence_ready
-        evidence_ready_for_operator
-      ].freeze
+      REQUIRED_COVERAGE_ID =
+        "module.patrol_compressed_evidence".freeze
+      DIAGNOSTIC_COVERAGE_ID =
+        "module.patrol_compressed_evidence_diagnostic".freeze
       LOCAL_COMPLETE_BLOCKERS = %w[
         qualification_control_untrusted
         qualification_control_not_independent
@@ -58,7 +58,28 @@ module Hive
       end
 
       class << self
+        def coverage_complete?(result, coverage_id:)
+          case coverage_id.to_s
+          when REQUIRED_COVERAGE_ID
+            harness_complete?(result)
+          when DIAGNOSTIC_COVERAGE_ID
+            diagnostic_complete?(result)
+          else
+            false
+          end
+        end
+
         def harness_complete?(result)
+          complete?(result, allow_diagnostic: false)
+        end
+
+        def diagnostic_complete?(result)
+          complete?(result, allow_diagnostic: true)
+        end
+
+        private
+
+        def complete?(result, allow_diagnostic:)
           return false unless
             result.is_a?(Hash) &&
               result.keys.sort ==
@@ -100,19 +121,25 @@ module Hive
               )
           deterministic = lane(value, "deterministic")
           installed = lane(value, "installed")
-          complete_outcome?(
+          qualifying_outcome?(
             value,
             control: control,
             deterministic: deterministic,
             installed: installed
+          ) || (
+            allow_diagnostic &&
+              diagnostic_outcome?(
+                value,
+                control: control,
+                deterministic: deterministic,
+                installed: installed
+              )
           )
         rescue Hive::ConfigError, JSON::ParserError,
                EncodingError, KeyError, NoMethodError,
                TypeError, SystemCallError
           false
         end
-
-        private
 
         def canonical(value)
           Hive::WorkflowPackage::CanonicalJSON.generate(value)
@@ -130,12 +157,24 @@ module Hive
           result
         end
 
-        def complete_outcome?(
+        def qualifying_outcome?(
           value, control:, deterministic:, installed:
         )
+          candidate_sha = value.fetch("candidate_sha")
+          value.fetch("status") ==
+            "evidence_ready_for_operator" &&
+            value.fetch("blockers").empty? &&
+            independent_control?(control, candidate_sha) &&
+            deterministic.passed? &&
+            installed.passed?
+        end
+
+        def diagnostic_outcome?(
+          value, control:, deterministic:, installed:
+        )
+          candidate_sha = value.fetch("candidate_sha")
           status = value.fetch("status")
           blockers = value.fetch("blockers")
-          candidate_sha = value.fetch("candidate_sha")
           if status == "evidence_required"
             return (
               control.fetch("trust_scope") == "local" &&
@@ -143,20 +182,26 @@ module Hive
                 control.fetch("commit_sha") == candidate_sha &&
                 blockers == LOCAL_COMPLETE_BLOCKERS &&
                 deterministic.passed? &&
-                installed.blocked? &&
-                installed.failure_reason ==
-                  "live_lane_not_authorized"
+                live_not_authorized?(installed)
             )
           end
-          return false unless
-            HARNESS_READY_STATUSES.include?(status) &&
-              blockers.empty? &&
-              control.fetch("trust_scope") == "trusted_remote" &&
-              control.fetch("commit_sha") != candidate_sha &&
-              deterministic.passed?
-          return installed.passed? if
-            status == "evidence_ready_for_operator"
 
+          status == "deterministic_evidence_ready" &&
+            blockers.empty? &&
+            independent_control?(control, candidate_sha) &&
+            deterministic.passed? &&
+            live_not_authorized?(installed)
+        end
+
+        def independent_control?(control, candidate_sha)
+          control.fetch("trust_scope") == "trusted_remote" &&
+            control.fetch("ref") ==
+              Hive::Modules::Migration::
+                TrustedQualificationControl::TRUSTED_REF &&
+            control.fetch("commit_sha") != candidate_sha
+        end
+
+        def live_not_authorized?(installed)
           installed.blocked? &&
             installed.failure_reason ==
               "live_lane_not_authorized"
@@ -459,6 +504,26 @@ module Hive
       end
 
       def captured_lane(repository, run_id:, lane:, result:)
+        if result.blocked?
+          matching =
+            repository.qualification_lane_diagnostics(
+              run_id, lane
+            ).select do |diagnostic|
+              diagnostic.to_h == result.to_h
+            end
+          unless matching.one?
+            raise Hive::ConfigError,
+                  "patrol qualification lane result changed"
+          end
+          return {
+            "result.json" =>
+              Hive::Modules::Migration::
+                QualificationLaneResult.canonical(
+                  matching.first.to_h
+                )
+          }.freeze
+        end
+
         result_bytes = repository.qualification_lane_result(
           run_id, lane
         )
@@ -468,8 +533,6 @@ module Hive
           raise Hive::ConfigError,
                 "patrol qualification lane result changed"
         end
-        return { "result.json" => result_bytes }.freeze if
-          result.blocked?
 
         begin
           repository.qualification_lane(run_id, lane)

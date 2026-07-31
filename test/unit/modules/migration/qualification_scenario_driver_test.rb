@@ -363,8 +363,7 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
 
   def test_rejects_operations_without_truthful_terminal_comparator_evidence
     unsupported = %w[
-      concurrent_duplicate_delivery cooldown_retry launch_failure
-      reconciliation_failure
+      architecture_positive_fixture
     ]
 
     with_tmp_dir do |sandbox|
@@ -374,6 +373,87 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
         end
         assert_match(/scenario is unsupported/, error.message,
                      operation)
+      end
+    end
+  end
+
+  def test_concurrent_duplicate_delivery_keeps_one_attempt_and_explainable_skips
+    with_tmp_dir do |sandbox|
+      result =
+        run_driver(
+          sandbox,
+          operation: "concurrent_duplicate_delivery"
+        )
+      row = result.observation
+
+      assert_equal(
+        [ "admitted", "duplicate", "duplicate" ],
+        row.fetch("decisions")
+          .map { |decision| decision.fetch("reason") }
+      )
+      assert_equal 1, row.fetch("attempts").length
+      assert_equal "succeeded",
+                   row.dig("attempts", 0, "outcome")
+      assert_equal 2, row.fetch("restart_generation")
+      assert_includes(
+        row.fetch("recovery_trace")
+          .map { |trace| trace.fetch("phase") },
+        "duplicate_delivery"
+      )
+      assert_empty result.comparator_record.fetch(
+        "duplicate_effects"
+      )
+      assert_empty result.effect_index.duplicate_keys
+    end
+  end
+
+  def test_launch_failure_and_cooldown_retry_use_the_real_one_hour_retry_path
+    %w[launch_failure cooldown_retry].each do |operation|
+      with_tmp_dir do |sandbox|
+        row =
+          run_driver(
+            sandbox,
+            operation: operation
+          ).observation
+
+        assert_equal(
+          [ "launch_handoff_failed" ],
+          row.fetch("decisions")
+            .map { |decision| decision.fetch("reason") },
+          operation
+        )
+        assert_equal %w[lost terminal],
+                     row.fetch("attempts")
+                       .map { |attempt| attempt.fetch("state") },
+                     operation
+        assert_equal [ 0, 1 ],
+                     row.fetch("attempts")
+                       .map { |attempt|
+                         attempt.fetch("retry_charge")
+                       },
+                     operation
+        trace = row.fetch("recovery_trace")
+        assert_equal(
+          %w[
+            module_dispatch retry_cooldown retry_dispatch
+            module_terminal module_finalize
+          ],
+          trace.map { |entry| entry.fetch("phase") },
+          operation
+        )
+        initial = Time.iso8601(trace.fetch(0).fetch("at"))
+        deferred = Time.iso8601(trace.fetch(1).fetch("at"))
+        retried = Time.iso8601(trace.fetch(2).fetch("at"))
+        assert_equal 3_599, deferred - initial, operation
+        assert_equal 1, retried - deferred, operation
+        assert_equal 1,
+                     trace.fetch(1).fetch("attempt_count"),
+                     operation
+        assert_equal 2,
+                     trace.fetch(2).fetch("attempt_count"),
+                     operation
+        assert_equal 2, row.fetch("restart_generation"),
+                     operation
       end
     end
   end
@@ -416,6 +496,160 @@ class ModulesMigrationQualificationScenarioDriverTest < Minitest::Test
         "duplicate_effects"
       )
       assert_empty result.effect_index.duplicate_keys
+    end
+  end
+
+  def test_legacy_capture_and_decision_faults_recover_from_fresh_schedulers
+    skip "POSIX fork unavailable" unless Process.respond_to?(:fork)
+
+    {
+      "after_legacy_capture" =>
+        %w[legacy_capture legacy_recovery],
+      "after_legacy_decision" =>
+        %w[legacy_decision legacy_projection]
+    }.each do |fault, required_phases|
+      with_tmp_dir do |sandbox|
+        result = run_driver(sandbox, faults: [ fault ])
+        row = result.observation
+
+        assert_equal fault, row.fetch("fault_checkpoint"),
+                     fault
+        assert_equal 2, row.fetch("restart_generation"),
+                     fault
+        refute_equal(
+          row.fetch("pre_fault_durable_state_sha256"),
+          row.fetch("recovered_durable_state_sha256"),
+          fault
+        )
+        assert_equal(
+          required_phases,
+          row.fetch("recovery_trace")
+            .first(required_phases.length)
+            .map { |entry| entry.fetch("phase") },
+          fault
+        )
+        assert_equal "completed",
+                     capture_for(row).outcome_class,
+                     fault
+        assert_equal 1,
+                     Hive::Modules::EventLedger.new(
+                       root: File.join(
+                         result.hive_state_path,
+                         "module-runtime"
+                       )
+                     ).all.length,
+                     fault
+        assert_empty result.comparator_record.fetch(
+          "duplicate_effects"
+        )
+        assert_empty result.effect_index.duplicate_keys
+      end
+    end
+  end
+
+  def test_effect_intent_and_reconciliation_faults_recover_exactly_once
+    skip "POSIX fork unavailable" unless Process.respond_to?(:fork)
+
+    {
+      "after_effect_intent" => {
+        restart_generation: 2,
+        phases: %w[effect_intent effect_recovery],
+        receipt_status: "committed"
+      },
+      "during_reconciliation" => {
+        restart_generation: 3,
+        phases: %w[
+          effect_dispatch_uncertain effect_reconciliation
+          effect_recovery
+        ],
+        receipt_status: "reconciled"
+      }
+    }.each do |fault, expected|
+      with_tmp_dir do |sandbox|
+        result = run_driver(sandbox, faults: [ fault ])
+        row = result.observation
+
+        assert_equal fault, row.fetch("fault_checkpoint"),
+                     fault
+        assert_equal expected.fetch(:restart_generation),
+                     row.fetch("restart_generation"),
+                     fault
+        assert_equal(
+          expected.fetch(:phases),
+          row.fetch("recovery_trace")
+            .first(expected.fetch(:phases).length)
+            .map { |entry| entry.fetch("phase") },
+          fault
+        )
+        receipt = result.comparator_record
+                        .fetch("legacy_effects")
+                        .find do |candidate|
+          candidate.dig("intent", "target") ==
+            "fingerprints/qualification-recovery"
+        end
+        refute_nil receipt, fault
+        assert_equal expected.fetch(:receipt_status),
+                     receipt.fetch("status"),
+                     fault
+        assert_equal 5, result.effect_index.legacy_count,
+                     fault
+        assert_empty result.comparator_record.fetch(
+          "duplicate_effects"
+        )
+        assert_empty result.effect_index.duplicate_keys
+      end
+    end
+  end
+
+  def test_reconciliation_failure_blocks_ambiguity_then_recovers_exact_identity
+    skip "POSIX fork unavailable" unless Process.respond_to?(:fork)
+
+    with_tmp_dir do |sandbox|
+      result = run_driver(
+        sandbox,
+        operation: "reconciliation_failure"
+      )
+      row = result.observation
+
+      assert_nil row.fetch("fault_checkpoint")
+      assert_equal 3, row.fetch("restart_generation")
+      assert_equal(
+        %w[
+          effect_dispatch_uncertain reconciliation_failure
+          effect_recovery
+        ],
+        row.fetch("recovery_trace")
+          .first(3)
+          .map { |entry| entry.fetch("phase") }
+      )
+      receipt = result.comparator_record
+                      .fetch("legacy_effects")
+                      .find do |candidate|
+        candidate.dig("intent", "target") ==
+          "fingerprints/qualification-recovery"
+      end
+      refute_nil receipt
+      assert_equal "reconciled", receipt.fetch("status")
+      assert_equal 5, result.effect_index.legacy_count
+      assert_empty result.comparator_record.fetch(
+        "duplicate_effects"
+      )
+      assert_empty result.effect_index.duplicate_keys
+    end
+  end
+
+  def test_rejects_multiple_faults_in_one_candidate_case
+    with_tmp_dir do |sandbox|
+      error = assert_raises(Hive::ConfigError) do
+        driver(
+          sandbox,
+          faults: %w[
+            after_legacy_capture after_module_decision
+          ]
+        ).call
+      end
+
+      assert_match(/scenario is unsupported/, error.message)
     end
   end
 

@@ -297,7 +297,7 @@ module Hive
                 malformed! unless
                   policy["target_ref"] ==
                     "inputs/installed-target/target.json" &&
-                  policy["network"] == true &&
+                  policy["network"] == false &&
                   policy["provider"] == "openrouter" &&
                   SHA.match?(policy["repository_sha"].to_s)
                 credentials = policy["credential_bindings"]

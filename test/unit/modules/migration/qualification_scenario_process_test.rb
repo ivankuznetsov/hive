@@ -112,7 +112,7 @@ class ModulesMigrationQualificationScenarioProcessTest <
         context,
         process: PROCESS.new(output_limit: 1_024),
         argv: [],
-        network: true
+        network: false
       )
 
       assert_equal 100_000, result.stdout.fetch("bytes")
@@ -151,7 +151,7 @@ class ModulesMigrationQualificationScenarioProcessTest <
         argv: [
           "/qualification/cases/case-one/probe.json"
         ],
-        network: true
+        network: false
       )
 
       assert_equal "passed", result.status
@@ -198,7 +198,7 @@ class ModulesMigrationQualificationScenarioProcessTest <
           "/qualification/cases/case-one/child.pid"
         ],
         timeout_seconds: 0.2,
-        network: true
+        network: false
       )
 
       assert_equal "failed", result.status
@@ -264,7 +264,7 @@ class ModulesMigrationQualificationScenarioProcessTest <
           argv: [
             "/qualification/cases/case-one/detached.pid"
           ],
-          network: true
+          network: false
         )
       end
 

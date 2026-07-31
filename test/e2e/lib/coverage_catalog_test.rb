@@ -63,15 +63,21 @@ class E2ECoverageCatalogTest < Minitest::Test
   end
 
   def test_checked_in_catalog_maps_every_scenario_once_and_release_profile_is_runnable
-    assert_equal 25, catalog.entries.size
+    assert_equal 26, catalog.entries.size
     assert_equal scenarios.map(&:name).sort, catalog.primary_scenarios.map(&:name).sort
 
     selection = catalog.select_profile("release")
     assert_equal 21, selection.fetch("coverage_ids").size
     assert_equal 21, selection.fetch("scenarios").size
+    assert_equal(
+      [ "module.patrol_compressed_evidence_diagnostic" ],
+      selection.fetch("advisory")
+    )
     assert_equal 4, selection.fetch("planned").size
     assert_includes selection.fetch("coverage_ids"),
                     "module.patrol_compressed_evidence"
+    refute_includes selection.fetch("coverage_ids"),
+                    "module.patrol_compressed_evidence_diagnostic"
   end
 
   def test_validation_is_idempotent
@@ -105,6 +111,23 @@ class E2ECoverageCatalogTest < Minitest::Test
                     "attempt.terminal_replay"
     assert_includes catalog.search("codex").map { |match| match.fetch("id") },
                     "recovery.provider_limit"
+  end
+
+  def test_local_patrol_diagnostic_is_advisory_and_explicitly_runnable
+    match = catalog.search(
+      "module.patrol_compressed_evidence_diagnostic"
+    ).first
+
+    assert_equal "advisory", match.fetch("maturity")
+    assert_equal(
+      "bin/hive-e2e run --coverage " \
+        "module.patrol_compressed_evidence_diagnostic",
+      match.fetch("runnable_command")
+    )
+    assert_equal(
+      "module_patrol_compressed_evidence_diagnostic",
+      match.dig("primary_scenario", "name")
+    )
   end
 
   def test_active_primary_has_one_safe_command_while_supporting_and_pending_are_discovery_only

@@ -139,6 +139,34 @@ class RefactorPatrolArchitectureOccurrenceLifecycleTest < Minitest::Test
     end
   end
 
+  def test_final_capture_reports_the_aggregate_completion_state
+    provisional = Hive::Modules::Migration::PatrolCapture.from_h(
+      reserved_occurrence("job-7").fetch("provisional_capture")
+    )
+    store = Object.new
+    store.define_singleton_method(:terminal_effect_receipt_ids) do |_occurrence_id|
+      []
+    end
+
+    capture = lifecycle.send(
+      :final_capture,
+      store,
+      provisional,
+      token: {},
+      result: { status: :closed },
+      aggregate: {
+        "job_id" => "job-7",
+        "state" => "complete",
+        "complete" => true,
+        "zero_reason" => "no_theses",
+        "actions" => []
+      },
+      now: NOW
+    )
+
+    assert_equal true, capture.outcome.fetch("complete")
+  end
+
   private
 
   def lifecycle

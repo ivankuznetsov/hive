@@ -267,24 +267,43 @@ replay. Recovery failures persist one bounded UTF-8 diagnostic cell with
 60/300/900-second retry backoff; successful generation-matched recovery clears
 it after restart.
 
-The candidate-side ordinary qualification driver now has a private
-`after_module_decision` interruption boundary. It injects a one-shot Attempts
-worker-release reader before module-hook admission and retains the only writer.
-The module dispatcher invokes the driver only after the admitted decision is
-durably appended; by then the detached supervisor has also persisted the
-blocked worker identity and returned its claimed handoff. The driver then calls
-`Process.exit!(76)`, so process exit closes the sole writer without releasing
-the worker. The supervisor treats that EOF as a temporary store failure,
-terminates the worker, and leaves a nonterminal running attempt for the next
-process to reconcile. Status 76 is qualification-private and is not part of
-Hive's public exit-code contract. This slice establishes the real interruption
-point only; restarted reconciliation, recovered completion, and the remaining
-fault matrix are still required U3 evidence.
+The candidate-side ordinary qualification driver exercises the production
+scheduler, occurrence journal, event publisher, module dispatcher, Attempts
+lineage, retry cooldown, effect sender, reconciliation, and comparator paths.
+Its deterministic matrix includes concurrent duplicate delivery, launch
+failure, one-hour retry, reconciliation conflict, and interruption after
+legacy capture, legacy decision, effect intent, module decision, and during
+reconciliation. Status 76 remains qualification-private and is not part of
+Hive's public exit-code contract.
 
-This boundary remains an internal `candidate`. U3 must still bind the repaired
-production decision/effect stream into the compressed candidate evidence
-protocol and satisfy production qualification before the catalog can promote
-it or any mutator cutover can be claimed.
+Candidate output is not the authority for that proof. After every successful
+case process, the trusted lane controller reconstructs the event, decisions,
+attempt lineage and output receipt, legacy capture and effect receipts,
+comparator row, occurrence retirement fence, and repository HEAD directly
+from the raw stores. A mismatch fails the lane before the oracle runs, and the
+host reconstruction is retained as a per-case artifact. Terminal stores cannot
+prove which OS process exited at a fault boundary, how many independently
+supervised generations ran, or when pre/post-fault snapshots were taken.
+Candidate `recovery_trace`, restart count, checkpoint, and state digests
+therefore remain explicitly unverified until the lane controller owns
+multi-generation execution.
+
+Both candidate lanes run without network access or candidate-visible
+credentials. Retryable installed-lane authorization, credential, and provider
+unavailability is retained as append-only diagnostic evidence rather than an
+immutable completion sentinel, so a later authorized attempt can continue the
+same run. Required E2E release coverage accepts only a blocker-free
+`evidence_ready_for_operator` report backed by an independent protected-main
+control and passed deterministic and installed lanes; local and
+deterministic-only states have a separate advisory coverage identity.
+
+Architecture Patrol now has a bounded collaborator for real intake, v3 job
+state, discovery/action commands, occurrence finalization, event publication,
+adapter projection, and shadow comparison. Its clean-negative and positive
+thesis controls are characterized, but full candidate routing, independently
+supervised restart/fault evidence, the installed provider broker, and the
+literal protected-control scenario catalog remain open U3 qualification work.
+None of these diagnostics authorizes mutator cutover.
 
 ## Safety invariants
 

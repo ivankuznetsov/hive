@@ -29,6 +29,7 @@ module Hive
         MAX_QUALIFICATION_FILES = 4_096
         MAX_QUALIFICATION_DEPTH = 32
         MAX_QUALIFICATION_RESULT_BYTES = 512 * 1024
+        MAX_QUALIFICATION_DIAGNOSTICS = 256
         MAX_QUALIFICATION_REPRO_BYTES = 1024 * 1024
         MAX_QUALIFICATION_ARTIFACT_BYTES = 16 * 1024 * 1024
         EXPECTED_MISSING = :missing
@@ -275,6 +276,10 @@ module Hive
           result_bytes = qualification_result_bytes(
             result_bytes, run_id: run_id, lane: lane
           )
+          if QualificationLaneResult.load(result_bytes).blocked?
+            raise Hive::ConfigError,
+                  "patrol qualification blocked diagnostics are not terminal results"
+          end
           with_lock do
             immutable_qualification_write(
               qualification_path(run_id, refs.fetch("bundle")),
@@ -351,6 +356,10 @@ module Hive
           result_bytes = qualification_result_bytes(
             result_bytes, run_id: run_id, lane: lane
           )
+          if QualificationLaneResult.load(result_bytes).blocked?
+            raise Hive::ConfigError,
+                  "patrol qualification blocked diagnostics are not terminal results"
+          end
           with_lock do
             immutable_qualification_write(
               qualification_path(run_id, refs.fetch("result")),
@@ -362,6 +371,107 @@ module Hive
             )
           end
           refs.fetch("result")
+        end
+
+        # Blocked live-lane checks are retryable diagnostics, not completion
+        # sentinels. Retain them append-only by content identity so a later
+        # authorized attempt can still publish the one immutable result.
+        def publish_qualification_lane_diagnostic(
+          run_id:, lane:, result_bytes:
+        )
+          run_id = qualification_run_id(run_id)
+          lane = qualification_lane_name(lane)
+          descriptor_bytes =
+            qualification_descriptor(run_id, missing: true)
+          unless descriptor_bytes
+            raise Hive::ConfigError,
+                  "patrol qualification descriptor is missing"
+          end
+          refs = QualificationRunDescriptor
+            .load(descriptor_bytes)
+            .artifact_refs(lane)
+          result_bytes = qualification_result_bytes(
+            result_bytes, run_id: run_id, lane: lane
+          )
+          result = QualificationLaneResult.load(result_bytes)
+          unless result.status == "blocked"
+            raise Hive::ConfigError,
+                  "patrol qualification lane diagnostic is malformed"
+          end
+          digest = Digest::SHA256.hexdigest(result_bytes)
+          relative = File.join(
+            File.dirname(refs.fetch("result")),
+            "diagnostics",
+            "#{digest}.json"
+          )
+          with_lock do
+            immutable_qualification_write(
+              qualification_path(run_id, relative),
+              result_bytes,
+              mode: 0o600,
+              max_bytes: MAX_QUALIFICATION_RESULT_BYTES,
+              conflict:
+                "patrol qualification lane diagnostic conflicts with existing bytes"
+            )
+          end
+          relative.freeze
+        end
+
+        def qualification_lane_diagnostics(run_id, lane)
+          run_id = qualification_run_id(run_id)
+          lane = qualification_lane_name(lane)
+          descriptor_bytes =
+            qualification_descriptor(run_id, missing: true)
+          return [].freeze unless descriptor_bytes
+
+          refs = QualificationRunDescriptor
+            .load(descriptor_bytes)
+            .artifact_refs(lane)
+          root = File.join(
+            File.dirname(refs.fetch("result")),
+            "diagnostics"
+          )
+          names = with_lock(shared: true) do
+            @directory.each_child(
+              qualification_path(run_id, root),
+              missing: true
+            )&.to_a || []
+          end
+          unless
+            names.length <= MAX_QUALIFICATION_DIAGNOSTICS &&
+              names.all? do |name|
+                name.match?(/\A[0-9a-f]{64}\.json\z/)
+              end
+            raise Hive::ConfigError,
+                  "patrol qualification lane diagnostics are malformed"
+          end
+          names.sort.map do |name|
+            bytes = qualification_run_file(
+              run_id,
+              "#{root}/#{name}",
+              max_bytes: MAX_QUALIFICATION_RESULT_BYTES
+            )
+            unless
+              Digest::SHA256.hexdigest(bytes) ==
+                name.delete_suffix(".json")
+              raise Hive::ConfigError,
+                    "patrol qualification lane diagnostics are malformed"
+            end
+            result = QualificationLaneResult.load(bytes)
+            unless
+              result.run_id == run_id &&
+                result.lane == lane &&
+                result.status == "blocked"
+              raise Hive::ConfigError,
+                    "patrol qualification lane diagnostics are malformed"
+            end
+            result
+          end.freeze
+        rescue Hive::ConfigError
+          raise
+        rescue StandardError
+          raise Hive::ConfigError,
+                "patrol qualification lane diagnostics are malformed"
         end
 
         def qualification_lane_result(run_id, lane, missing: false)

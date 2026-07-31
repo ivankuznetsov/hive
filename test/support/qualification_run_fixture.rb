@@ -198,7 +198,7 @@ module QualificationRunFixture
           "repository_sha" => "5" * 40,
           "target_ref" => "inputs/installed-target/target.json",
           "executable" => "bin/hive",
-          "network" => true,
+          "network" => false,
           "timeout_seconds" => 300
         }
       },
@@ -362,7 +362,39 @@ module QualificationRunFixture
           "fault_checkpoint" => "after_legacy_capture",
           "pre_fault_durable_state_sha256" => "6" * 64,
           "recovered_durable_state_sha256" => "7" * 64,
-          "restart_generation" => 1,
+          "recovery_trace" => [
+            {
+              "at" =>
+                (PatrolEvidenceScenario::START + 1)
+                  .iso8601(6),
+              "attempt_count" => 0,
+              "decision_count" => 0,
+              "phase" => "legacy_capture",
+              "state" => "reserved",
+              "state_sha256" => "8" * 64
+            },
+            {
+              "at" =>
+                (PatrolEvidenceScenario::START + 2)
+                  .iso8601(6),
+              "attempt_count" => 0,
+              "decision_count" => 0,
+              "phase" => "legacy_recovery",
+              "state" => "completed",
+              "state_sha256" => "9" * 64
+            },
+            {
+              "at" =>
+                (PatrolEvidenceScenario::START + 3)
+                  .iso8601(6),
+              "attempt_count" => 2,
+              "decision_count" => 1,
+              "phase" => "module_finalize",
+              "state" => "succeeded",
+              "state_sha256" => "8" * 64
+            }
+          ],
+          "restart_generation" => 2,
           "event" => event,
           "decisions" => [ decision ],
           "attempts" => attempts

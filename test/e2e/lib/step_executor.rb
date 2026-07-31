@@ -164,6 +164,7 @@ module Hive
                                       run_home: @ctx.run_home, steps: @scenario.steps,
                                       failed_index: failed_step&.position || @step_results.size + 1,
                                       scenario_name: @scenario.name,
+                                      coverage_id: @scenario.coverage.primary,
                                       expander_context: repro_expander_context).write
         ArtifactCapture.new(scenario_dir: @scenario_dir, sandbox_dir: @ctx.sandbox_dir, run_home: @ctx.run_home,
                             tui_log_dir: @tmux_lifecycle.tui_log_dir)
@@ -348,7 +349,10 @@ module Hive
         unless result.is_a?(Hash) &&
                artifacts_dir == expected_artifacts &&
                PathSafety.contained?(root, artifacts_dir) &&
-               PatrolQualificationRunner.harness_complete?(result)
+               PatrolQualificationRunner.coverage_complete?(
+                 result,
+                 coverage_id: @scenario.coverage.primary
+               )
           status = result.is_a?(Hash) ?
             result["status"].to_s : "malformed"
           raise StepFailure.new(

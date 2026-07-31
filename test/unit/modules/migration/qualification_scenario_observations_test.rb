@@ -174,6 +174,26 @@ class ModulesMigrationQualificationScenarioObservationsTest <
                    .map { |attempt| attempt.fetch("outcome") }
   end
 
+  def test_allows_a_launch_handoff_failure_as_the_primary_attempt_decision
+    payload = valid_payload
+    decision =
+      payload.dig("observations", 0, "decisions", 0)
+    decision["outcome"] = "skip"
+    decision["reason"] = "launch_handoff_failed"
+
+    observations = MODEL.from_h(payload)
+
+    assert_equal "launch_handoff_failed",
+                 observations.observations
+                   .fetch(0)
+                   .dig("decisions", 0, "reason")
+    assert_equal %w[lost terminal],
+                 observations.observations
+                   .fetch(0)
+                   .fetch("attempts")
+                   .map { |attempt| attempt.fetch("state") }
+  end
+
   def test_rejects_broken_event_decision_and_attempt_links
     mutations = [
       lambda do |row|

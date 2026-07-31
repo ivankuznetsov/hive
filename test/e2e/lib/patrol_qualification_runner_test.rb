@@ -81,10 +81,11 @@ class E2EPatrolQualificationRunnerTest < Minitest::Test
 
     def initialize(
       repository, deterministic_status: "passed",
-      return_mismatch: false
+      installed_status: "blocked", return_mismatch: false
     )
       @repository = repository
       @deterministic_status = deterministic_status
+      @installed_status = installed_status
       @return_mismatch = return_mismatch
     end
 
@@ -105,12 +106,34 @@ class E2EPatrolQualificationRunnerTest < Minitest::Test
             "installed_tree_sha256"
           )
       if lane == "installed"
+        if @installed_status == "passed"
+          result = build(
+            run_id, lane, target,
+            status: "passed"
+          )
+          @repository.publish_qualification_lane(
+            run_id: run_id,
+            lane: lane,
+            result_bytes: lane_bytes(result),
+            bundle_bytes: canonical("records" => []),
+            artifacts: {
+              "process-results.json" =>
+                canonical("processes" => [])
+            },
+            repro_json:
+              canonical("run_id" => run_id, "lane" => lane),
+            repro_script:
+              "#!/usr/bin/env bash\nexit 0\n"
+          )
+          return result
+        end
+
         result = build(
           run_id, lane, target,
           status: "blocked",
           reason: "live_lane_not_authorized"
         )
-        @repository.publish_qualification_lane_result(
+        @repository.publish_qualification_lane_diagnostic(
           run_id: run_id,
           lane: lane,
           result_bytes: lane_bytes(result)
@@ -187,7 +210,7 @@ class E2EPatrolQualificationRunnerTest < Minitest::Test
     end
   end
 
-  def test_runs_both_lanes_and_publishes_deterministic_ready_last
+  def test_deterministic_only_run_is_diagnostic_not_qualifying
     with_runner do |context|
       result = context.fetch(:runner).call(
         project_root: context.fetch(:project),
@@ -199,8 +222,10 @@ class E2EPatrolQualificationRunnerTest < Minitest::Test
                    result.fetch("status")
       assert_equal context.fetch(:run_id),
                    result.fetch("run_id")
-      assert Hive::E2E::PatrolQualificationRunner
+      refute Hive::E2E::PatrolQualificationRunner
         .harness_complete?(result)
+      assert Hive::E2E::PatrolQualificationRunner
+        .diagnostic_complete?(result)
       run_dir = result.fetch("artifacts_dir")
       assert_equal(
         File.join(
@@ -241,7 +266,7 @@ class E2EPatrolQualificationRunnerTest < Minitest::Test
     end
   end
 
-  def test_local_control_remains_nonqualifying_after_deterministic_pass
+  def test_local_control_remains_advisory_after_deterministic_pass
     with_runner(control_trust_scope: "local") do |context|
       result = context.fetch(:runner).call(
         project_root: context.fetch(:project),
@@ -262,8 +287,27 @@ class E2EPatrolQualificationRunnerTest < Minitest::Test
         ],
         aggregate.fetch("blockers")
       )
+      refute Hive::E2E::PatrolQualificationRunner
+        .harness_complete?(result)
+      assert Hive::E2E::PatrolQualificationRunner
+        .diagnostic_complete?(result)
+    end
+  end
+
+  def test_both_passed_lanes_with_independent_control_are_qualifying
+    with_runner(installed_status: "passed") do |context|
+      result = context.fetch(:runner).call(
+        project_root: context.fetch(:project),
+        run_home: context.fetch(:run_home),
+        artifacts_root: context.fetch(:artifacts)
+      )
+
+      assert_equal "evidence_ready_for_operator",
+                   result.fetch("status")
       assert Hive::E2E::PatrolQualificationRunner
         .harness_complete?(result)
+      assert Hive::E2E::PatrolQualificationRunner
+        .diagnostic_complete?(result)
     end
   end
 
@@ -607,6 +651,7 @@ class E2EPatrolQualificationRunnerTest < Minitest::Test
 
   def with_runner(
     deterministic_status: "passed",
+    installed_status: "blocked",
     return_mismatch: false,
     candidate_preparer_factory: nil,
     workspace_remover: nil,
@@ -667,6 +712,7 @@ class E2EPatrolQualificationRunnerTest < Minitest::Test
             LaneRunner.new(
               actual_repository,
               deterministic_status: deterministic_status,
+              installed_status: installed_status,
               return_mismatch: return_mismatch
             )
           end

@@ -87,6 +87,18 @@ class SetupDiagnosticsTest < Minitest::Test
     end
   end
 
+  def test_managed_qmd_candidate_recognizes_the_configured_path_before_installation
+    Dir.mktmpdir("hive-diag") do |dir|
+      with_env("HIVE_HOME" => File.join(dir, "hive-home")) do
+        diagnostics = Hive::Setup::Diagnostics.new(path: "", ruby_version: "3.4.1")
+        managed_qmd = File.join(Hive::Paths.data_home, "qmd", "bin", "qmd")
+
+        refute File.exist?(managed_qmd)
+        assert diagnostics.send(:managed_qmd_candidate?, managed_qmd)
+      end
+    end
+  end
+
   def test_agent_authenticated_via_on_disk_token_without_env_var
     Dir.mktmpdir("hive-diag") do |dir|
       %w[git tmux gh claude codex node npm sqlite3].each { |name| executable(dir, name) }

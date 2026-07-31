@@ -94,6 +94,8 @@ execs the Rails app from a source checkout or Docker image, and
 `test/unit/gemspec_test.rb` pins that the gem does not package `web/`.
 Managed release bundles authenticate `SHA256SUMS` against the exact release
 workflow identity and expected version tag before dependency installation.
+The Hivebox `ruby:3.4-slim` build installs the `libffi-dev` system package
+because the explicit `fiddle` runtime gem compiles against libffi headers.
 
 Direct web runtime dependencies include Rails `~> 8.1.3` (locked 8.1.3),
 propshaft, sqlite3, puma, importmap-rails, turbo-rails, stimulus-rails,

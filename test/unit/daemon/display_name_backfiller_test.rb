@@ -152,6 +152,19 @@ class HiveDaemonDisplayNameBackfillerTest < Minitest::Test
     assert_equal 1, backfill_events.size
   end
 
+  def test_admission_predicate_errors_fail_closed_without_spawning
+    folder = make_task_folder(display_name: nil)
+    spawn = FakeSpawn.new
+
+    backfiller(
+      spawn: spawn,
+      admission_open: -> { raise IOError, "shutdown state unavailable" }
+    ).backfill([ make_row(folder) ], now: NOW)
+
+    assert_empty spawn.calls
+    assert_empty backfill_events
+  end
+
   def test_does_not_respawn_inflight_folder
     folder = make_task_folder(display_name: nil)
     spawn = FakeSpawn.new

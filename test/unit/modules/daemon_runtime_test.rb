@@ -261,6 +261,18 @@ class ModulesDaemonRuntimeTest < Minitest::Test
     end
   end
 
+  def test_admission_predicate_errors_fail_closed_before_project_access
+    with_runtime do |runtime|
+      results = runtime.fetch(:daemon_runtime).tick(
+        now: NOW + 1,
+        admission_open: -> { raise IOError, "shutdown state unavailable" }
+      )
+
+      assert_empty results
+      assert_empty runtime.fetch(:attempt_store).scan.records
+    end
+  end
+
   def test_shutdown_during_hook_admission_lock_stops_provider_dispatch
     with_runtime do |runtime|
       admission = true

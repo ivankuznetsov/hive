@@ -1934,6 +1934,27 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal [ "2026-06-13" ], scheduler.cancelled
   end
 
+  def test_answer_digest_releases_candidate_when_admission_is_already_closed
+    dispatcher, supervisor, _controller, _logger, _watcher, _patrol, scheduler = make_dispatcher(
+      rows: [], with_answer_digest_scheduler: true
+    )
+    digest = {
+      project: "answer_digest",
+      slug: "2026-06-13",
+      stage: "answer_digest",
+      command: "hive answer-digest --date 2026-06-13 --json",
+      state_file_mtime: nil,
+      state_file_path: nil
+    }
+    dispatcher.request_shutdown!
+
+    result = dispatcher.send(:dispatch_digest, digest, now: T0)
+
+    assert_equal :shutdown, result
+    assert_empty supervisor.spawned
+    assert_equal [ "2026-06-13" ], scheduler.cancelled
+  end
+
   def test_answer_digest_scheduler_completes_on_answer_digest_child_exit
     dispatcher, sup, = make_dispatcher(rows: [], with_answer_digest_scheduler: true)
     answer_digest = dispatcher.instance_variable_get(:@answer_digest_scheduler)
@@ -2549,6 +2570,72 @@ class HiveDaemonDispatcherTest < Minitest::Test
                  "a signal during patrol capacity evaluation must suppress the spawn"
     assert_equal [ "p1" ], patrol.cancelled,
                  "a shutdown-blocked patrol must release its scheduler claim"
+  end
+
+  def test_patrol_admission_releases_an_unreserved_candidate_after_early_shutdown
+    candidate = {
+      project: "p1", patrol_kind: :ordinary, slug: "patrol", stage: "patrol",
+      command: "hive patrol p1 --json",
+      state_file_mtime: nil, state_file_path: nil, hive_state_path: "/tmp/state"
+    }
+    dispatcher, supervisor, _controller, _logger, _watcher, patrol = make_dispatcher(
+      rows: [], with_patrol_scheduler: true,
+      patrol_arbiter: FakePatrolArbiter.new([ candidate ])
+    )
+    dispatcher.request_shutdown!
+
+    result = dispatcher.send(:dispatch_patrol_with_gates, candidate, now: T0)
+
+    assert_equal :shutdown, result
+    assert_empty supervisor.spawned
+    assert_equal [ "p1" ], patrol.cancelled
+    assert_empty patrol.reserved
+  end
+
+  def test_architecture_patrol_shutdown_after_reservation_cancels_the_claim
+    candidate = {
+      project: "p1", patrol_kind: :architecture, job_id: "job-7",
+      pr_number: 7, pr_url: "https://github.com/acme/demo/pull/7",
+      slug: "refactor-patrol-job-7", stage: "refactor-patrol",
+      state_file_mtime: nil, state_file_path: nil, hive_state_path: "/tmp/state"
+    }
+    architecture = FakeRefactorPatrolScheduler.new
+    dispatcher, supervisor, = make_dispatcher(
+      rows: [], refactor_patrol_scheduler: architecture,
+      patrol_arbiter: FakePatrolArbiter.new([ candidate ])
+    )
+    original_reserve = architecture.method(:reserve)
+    architecture.define_singleton_method(:reserve) do |dispatch, now:|
+      reserved = original_reserve.call(dispatch, now: now)
+      dispatcher.request_shutdown!
+      reserved
+    end
+
+    result = dispatcher.send(:dispatch_patrol_with_admission, candidate, now: T0)
+
+    assert_equal :shutdown, result
+    assert_empty supervisor.spawned
+    cancellation = architecture.cancelled.fetch(0)
+    assert_equal "shutdown", cancellation.fetch(:reason)
+    assert_equal "job-7", cancellation.dig(:dispatch, :job_id)
+  end
+
+  def test_patrol_final_spawn_gate_releases_the_reserved_candidate
+    candidate = {
+      project: "p1", patrol_kind: :ordinary, slug: "patrol", stage: "patrol",
+      command: "hive patrol p1 --json",
+      state_file_mtime: nil, state_file_path: nil, hive_state_path: "/tmp/state"
+    }
+    dispatcher, supervisor, _controller, _logger, _watcher, patrol = make_dispatcher(
+      rows: [], with_patrol_scheduler: true
+    )
+    dispatcher.define_singleton_method(:dispatch_command) { |*_, **_| :shutdown }
+
+    result = dispatcher.send(:dispatch_patrol_with_admission, candidate, now: T0)
+
+    assert_equal :shutdown, result
+    assert_empty supervisor.spawned
+    assert_equal [ "p1" ], patrol.cancelled
   end
 
   def test_patrol_releases_all_reserved_candidates_when_shutdown_arrives_inside_scheduler_tick
@@ -3274,6 +3361,18 @@ class HiveDaemonDispatcherTest < Minitest::Test
     gate = rebuilt.instance_variable_get(:@project_auto_retry_enabled)
     assert_equal true, gate.call("enabled-project"),
                  "the rebuilt healer must retain the live per-project gate"
+    healer_admission = rebuilt.instance_variable_get(:@admission_open)
+    backfiller = dispatcher.instance_variable_get(:@display_name_backfiller)
+    backfiller_admission = backfiller.instance_variable_get(:@admission_open)
+    assert healer_admission.call
+    assert backfiller_admission.call
+
+    dispatcher.request_shutdown!
+
+    refute healer_admission.call,
+           "the reloaded healer must share the daemon's live shutdown gate"
+    refute backfiller_admission.call,
+           "the reloaded name backfiller must share the daemon's live shutdown gate"
   end
 
   def test_reload_config_applies_auto_retry_kill_switch_to_universal_healer
@@ -4548,6 +4647,28 @@ end
       assert_equal :shutdown, result
       assert_empty calls
       assert_equal [ "request-shutdown" ], Q.pending(state_home: state_home).map(&:request_id)
+      assert_empty Q.claimed(state_home: state_home)
+    end
+  end
+
+  def test_nondurable_request_releases_preclaim_when_final_spawn_gate_closes
+    Dir.mktmpdir("hive-dispatch-final-gate") do |state_home|
+      dispatcher, supervisor, = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      Q.write_request!(
+        project: "p1", slug: "demo-task", argv: %w[hive run demo-task],
+        request_id: "request-final-gate", state_home: state_home, now: T0
+      )
+      request = Q.pending(state_home: state_home).first
+      dispatcher.define_singleton_method(:dispatch_command) { |*_, **_| :shutdown }
+
+      result = dispatcher.send(:dispatch_request!, request, now: T0)
+
+      assert_equal :shutdown, result
+      assert_empty supervisor.spawned
+      assert_equal [ "request-final-gate" ],
+                   Q.pending(state_home: state_home).map(&:request_id)
       assert_empty Q.claimed(state_home: state_home)
     end
   end

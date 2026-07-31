@@ -126,6 +126,22 @@ class DaemonAttemptLossHealerTest < Minitest::Test
     end
   end
 
+  def test_admission_predicate_errors_fail_closed_without_a_successor
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Store.new(root: root)
+      outcomes = Hive::Attempts::LostOutcomeStore.new(store: store)
+      dispatcher = FakeDispatcher.new
+      service = healer(
+        store, outcomes, FakeProcessor.new(outcomes, root),
+        dispatcher, FakeLogger.new,
+        admission_open: -> { raise IOError, "shutdown state unavailable" }
+      )
+
+      assert_nil service.heal_attempt_losses([], now: RETRY_AT)
+      assert_empty dispatcher.calls
+    end
+  end
+
   def test_retry_charge_is_lineage_evidence_not_an_exhaustion_budget
     with_task do |task|
       with_tmp_dir do |root|

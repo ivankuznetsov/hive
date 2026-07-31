@@ -133,10 +133,6 @@
       "note": "False positive. HiveManagedWebArchive passes discrete argv elements to Open3.capture3. candidate_sha is a validated full hexadecimal Git OID, timestamp is revalidated as decimal Git commit metadata before use in --mtime, and the web treeish is one argv element; no shell interprets the destination, treeish, or repository path."
     },
     {
-      "fingerprint": "82365cb654f0943c9d99cfa4a878348fd0654f07c6a8549be823304d895e21a7",
-      "note": "False positive. HiveManagedWebArchive passes discrete argv elements to Open3.capture3. candidate_sha is a validated full hexadecimal Git OID, the web treeish is one argv element, and no shell interprets the destination, treeish, or repository path."
-    },
-    {
       "fingerprint": "7c0b709f17cea7775163bea17a82f0b55c3ff8ae0064a84c1369ff51f52c3014",
       "note": "False positive. Artifacts invokes the candidate's committed incumbent builder through Open3.capture3 argv form. RbConfig.ruby and the builder path are fixed local executables, candidate_sha is a validated full hexadecimal Git OID, and every path is a separate argv element rather than shell input."
     },

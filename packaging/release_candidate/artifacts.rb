@@ -24,6 +24,7 @@ module HiveReleaseCandidate
       packaging/live_agent_skills/workflow_creator_contract.rb
       packaging/live_agent_skills/workflow_creator_evidence.rb
       packaging/live_agent_skills/workflow_creator_execution_contract.rb
+      packaging/live_agent_skills/workflow_creator_vocabulary.rb
     ].freeze
 
     attr_reader :repo_root, :candidate_sha, :candidate_dir

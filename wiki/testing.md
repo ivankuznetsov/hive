@@ -127,8 +127,9 @@ bundle exec ruby -Itest -Ilib test/unit/component_boundaries_test.rb
 
 Ready components cannot depend on candidates. Forbidden-construction rules
 also apply to guarded candidates, and the helper can run a named focused
-clean-load proof for a candidate such as Attempts or Workflow Creator Proof
-without representing the whole component graph as ready.
+clean-load proof for a candidate such as Attempts without representing the
+whole component graph as ready. Repository-relative packaging requires are
+owned and checked by the same dependency graph as `lib/` requires.
 
 The helper uses Ruby syntax rather than comments or string examples for literal
 `require`, `require_relative`, and `Constant.new` checks. It remains an
@@ -621,14 +622,25 @@ private same-filesystem temporary outside the exact bundle root, file-`fsync`s
 it, publishes it with `linkat` or `renameat` against a pinned bundle-directory
 descriptor, verifies the published inode and bytes, and strictly `fsync`s the
 held destination and staging directories. A substituted public parent fails
-binding verification without redirecting publication, while a hard-killed
-writer can leave only an out-of-bundle orphan that cannot poison the exact
-four-file inventory or a later retry. Unsupported directory durability fails
-closed. A post-publication directory-`fsync` failure still leaves one complete,
-retryable receipt, never partial bytes. A passing primary is closure-validated before publication and
+binding verification without redirecting publication. A hard kill before
+publication can leave only an out-of-bundle orphan. A hard kill after the
+initializer link can leave the exact target and one staging name bound to the
+same owner-private inode; a retry recovers only that unique two-link topology,
+unlinks the staging name, verifies one-link target bytes, and syncs both held
+directories. Any ambiguous topology fails closed. Unsupported directory
+durability also fails closed. A post-publication directory-`fsync` failure
+still leaves one complete, retryable receipt, never partial bytes. A passing
+primary is closure-validated before publication and
 must be the canonical primary inside its bundle root. A passing receipt
 additionally requires an exact four-file retained bundle: the creator row,
 candidate and OpenClaw installed manifests, and an execution/cleanup receipt.
+The sole local success writer requires the bundle root to be mode `0700` and
+all four opened regular files to be mode `0600`. Attestor and Verifier do not
+reassert those source modes after GitHub artifact transfer because the hosted
+transport normalizes file and directory modes; they continue to enforce owner,
+type, no-follow, link count, identity, size, digest, canonical bytes, and exact
+inventory. U1 deliberately does not introduce an archive solely to preserve
+transported mode bits.
 The fixed bundle records bind canonical bytes, digest, integer size, and bounded
 installed inventory. Each installed manifest additionally names exact
 `executable`, `interpreter_or_launcher`, `package`, and `lock` records; the
@@ -647,10 +659,12 @@ Attestor and Verifier. The four-file retained bundle also has an independently
 tested aggregate byte cap in addition to its per-file bounds.
 Malformed JSON diagnostics never interpolate producer bytes, and focused
 primary admission covers hard links as well as symlinks and oversized files.
-The execution receipt schema now fixes U14's run correlation, gateway identity,
-two package/archive admissions, nine ordered command receipts, bounded capture,
-per-process teardown, outer-process labels, aggregate containment/teardown,
-cleanup identities, and secret scan. It must agree with the creator row's
+The execution receipt schema now fixes U14's execution-plan identity, run
+correlation, gateway identity, two package/archive admissions, nine ordered
+command receipts, bounded capture, per-process teardown, the exact outer
+model-loop role, semantic supervised-process-tree containment, the exact owned
+proof-workspace cleanup set, aggregate containment/teardown, cleanup identities,
+and secret scan. It must agree with the creator row's
 instruction, external-action, containment, teardown, and cleanup claims; each
 primary summary is bound to the execution-receipt digest. Attestation copies those exact
 bytes, and verification replays the same contract after runner-local install
@@ -665,7 +679,9 @@ may be assigned to OpenClaw; tools, gateway, and candidate receive none, and no
 credential value is retained. Producer, Attestor, and Verifier parity tests
 apply the same missing, extra, wrong-type, classification, provider, transport,
 and credential mutations, while the command matrix also rejects a dynamically
-targeted task command.
+targeted task command. The shared vocabulary sits below the execution and
+creator validators, so the execution receipt validator has no dependency back
+into either creator validator.
 
 This is intentionally a non-claiming intermediate state. The current smoke
 adapter can upload a schema-valid failure with

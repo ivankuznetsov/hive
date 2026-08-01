@@ -42,10 +42,11 @@ class WorkflowCreatorEvidenceTest < Minitest::Test
         before_rename: ->(*) { raise IOError, "interrupted" }
       )
 
-      assert_raises(IOError) do
+      error = assert_raises(HiveLiveAgentProof::Error) do
         interrupted.replace_nonpassing!(replacement)
       end
 
+      assert_instance_of IOError, error.cause
       assert_equal previous, File.binread(path)
       assert_empty Dir.glob(File.join(dir, ".*.tmp"))
     end
@@ -57,6 +58,7 @@ class WorkflowCreatorEvidenceTest < Minitest::Test
       parked = File.join(dir, "bundle.parked")
       outside = File.join(dir, "outside")
       FileUtils.mkdir_p([ parent, outside ])
+      FileUtils.chmod(0o700, parent)
       path = File.join(parent, "openclaw-workflow-creator.json")
       store = HiveLiveAgentProof::WorkflowCreatorEvidence.new(path: path)
       store.initialize!(candidate_sha: SHA)
@@ -100,10 +102,11 @@ class WorkflowCreatorEvidenceTest < Minitest::Test
         end
       )
 
-      assert_raises(IOError) do
+      error = assert_raises(HiveLiveAgentProof::Error) do
         interrupted.replace_nonpassing!(failed_document("proof_failed"))
       end
 
+      assert_instance_of IOError, error.cause
       assert_equal previous, File.binread(path)
       assert_empty Dir.glob(File.join(dir, ".*.tmp"))
     end
@@ -120,10 +123,11 @@ class WorkflowCreatorEvidenceTest < Minitest::Test
         renamer: ->(*) { raise Errno::EACCES, "locked" }
       )
 
-      assert_raises(Errno::EACCES) do
+      error = assert_raises(HiveLiveAgentProof::Error) do
         failed.replace_nonpassing!(failed_document("proof_failed"))
       end
 
+      assert_instance_of Errno::EACCES, error.cause
       assert_equal previous, File.binread(path)
       assert_empty Dir.glob(File.join(dir, ".*.tmp"))
     end
@@ -170,10 +174,11 @@ class WorkflowCreatorEvidenceTest < Minitest::Test
         directory_sync: ->(*) { raise IOError, "directory fsync failed" }
       )
 
-      assert_raises(IOError) do
+      error = assert_raises(HiveLiveAgentProof::Error) do
         store.replace_nonpassing!(replacement)
       end
 
+      assert_instance_of IOError, error.cause
       assert_equal replacement, JSON.parse(File.read(path))
       assert_empty Dir.glob(File.join(dir, ".*.tmp"))
       recovered = failed_document("retry_completed")
@@ -223,6 +228,111 @@ class WorkflowCreatorEvidenceTest < Minitest::Test
       assert_equal "workflow-creator evidence already exists", error.message
       assert_equal winner, File.binread(path)
       assert_empty Dir.glob(File.join(dir, ".*.tmp"))
+    end
+  end
+
+  def test_retry_recovers_a_hard_kill_between_initial_link_and_unlink
+    with_tmp_dir do |dir|
+      path = File.join(dir, "bundle", "openclaw-workflow-creator.json")
+      reader, writer = IO.pipe
+      pid = fork do
+        reader.close
+        writer.sync = true
+        store = HiveLiveAgentProof::WorkflowCreatorEvidence.new(
+          path: path,
+          after_link: lambda do |*|
+            writer.write("1")
+            Process.kill("STOP", Process.pid)
+          end
+        )
+        store.initialize!(candidate_sha: SHA)
+        exit! 0
+      rescue StandardError
+        exit! 1
+      end
+      writer.close
+
+      assert_equal "1", reader.read(1)
+      Process.kill("KILL", pid)
+      _waited, status = Process.wait2(pid)
+      assert status.signaled?
+      assert_equal 2, File.stat(path).nlink
+
+      stored = HiveLiveAgentProof::WorkflowCreatorEvidence.new(path: path)
+                                                        .initialize!(
+                                                          candidate_sha: SHA
+                                                        )
+
+      assert_equal stored, JSON.parse(File.read(path))
+      assert_equal 1, File.stat(path).nlink
+      assert_empty Dir.children(dir).grep(/\.tmp\./)
+    ensure
+      reader&.close
+      writer&.close unless writer&.closed?
+      if pid
+        begin
+          Process.kill("KILL", pid)
+        rescue Errno::ESRCH
+          nil
+        end
+        begin
+          Process.wait(pid)
+        rescue Errno::ECHILD
+          nil
+        end
+      end
+    end
+  end
+
+  def test_non_ascii_failure_receipt_round_trips_as_exact_bytes
+    with_tmp_dir do |dir|
+      path = File.join(dir, "openclaw-workflow-creator.json")
+      store = HiveLiveAgentProof::WorkflowCreatorEvidence.new(path: path)
+      store.initialize!(candidate_sha: SHA)
+      replacement = HiveLiveAgentProof::WorkflowCreatorContract.failure(
+        candidate_sha: SHA,
+        phase: "proof",
+        reason: "proof_failed",
+        detail: "café — 東京"
+      )
+
+      assert_equal replacement, store.replace_nonpassing!(replacement)
+      assert_equal replacement, JSON.parse(File.binread(path))
+    end
+  end
+
+  def test_failure_detail_truncates_at_valid_utf8_boundaries
+    [ "é", "🧭" ].each do |character|
+      detail = ("x" * 999) + character
+      document = HiveLiveAgentProof::WorkflowCreatorContract.failure(
+        candidate_sha: SHA,
+        phase: "proof",
+        reason: "proof_failed",
+        detail: detail
+      )
+
+      assert_operator document.fetch("detail").bytesize, :<=, 1_000
+      assert_predicate document.fetch("detail"), :valid_encoding?
+      HiveLiveAgentProof::WorkflowCreatorContract.validate_nonpassing!(document)
+    end
+  end
+
+  def test_preexisting_permissive_evidence_directory_is_rejected
+    with_tmp_dir do |dir|
+      bundle = File.join(dir, "bundle")
+      FileUtils.mkdir_p(bundle)
+      FileUtils.chmod(0o755, bundle)
+      path = File.join(bundle, "openclaw-workflow-creator.json")
+
+      error = assert_raises(HiveLiveAgentProof::Error) do
+        HiveLiveAgentProof::WorkflowCreatorEvidence.new(path: path)
+                                                   .initialize!(
+                                                     candidate_sha: SHA
+                                                   )
+      end
+
+      assert_includes error.message, "evidence directory is unsafe"
+      refute_path_exists path
     end
   end
 
@@ -359,6 +469,7 @@ class WorkflowCreatorEvidenceTest < Minitest::Test
         packaging/live_agent_skills/workflow_creator_contract.rb
         packaging/live_agent_skills/workflow_creator_evidence.rb
         packaging/live_agent_skills/workflow_creator_execution_contract.rb
+        packaging/live_agent_skills/workflow_creator_vocabulary.rb
       ],
       HiveReleaseCandidate::Artifacts::LIVE_AGENT_BUILDER_INPUTS
     )
@@ -381,6 +492,31 @@ class WorkflowCreatorEvidenceTest < Minitest::Test
 
     assert status.success?, stderr
     assert_equal "failed\n", stdout
+  end
+
+  def test_execution_contract_loads_without_back_edge_to_creator_validators
+    root = File.expand_path("../../..", __dir__)
+    source = File.read(
+      File.join(
+        root,
+        "packaging/live_agent_skills/workflow_creator_execution_contract.rb"
+      )
+    )
+    refute_match(/WorkflowCreatorContract/, source)
+    refute_match(/WorkflowCreatorBundle/, source)
+
+    script = <<~RUBY
+      require "./packaging/live_agent_skills/workflow_creator_execution_contract"
+      abort "creator contract loaded" if defined?(HiveLiveAgentProof::WorkflowCreatorContract)
+      abort "bundle validator loaded" if defined?(HiveLiveAgentProof::WorkflowCreatorBundle)
+      puts HiveLiveAgentProof::WORKFLOW_CREATOR_EXECUTION_PLAN
+    RUBY
+    stdout, stderr, status = Open3.capture3(
+      RbConfig.ruby, "-I.", "-e", script, chdir: root
+    )
+
+    assert status.success?, stderr
+    assert_equal "hive-live-workflow-creator-execution-plan/v1\n", stdout
   end
 
   def test_completion_log_keeps_the_gaps_backlink

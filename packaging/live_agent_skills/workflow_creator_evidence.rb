@@ -5,12 +5,13 @@ require_relative "workflow_creator_atomic_file"
 module HiveLiveAgentProof
   class WorkflowCreatorEvidence
     def initialize(path:, renamer: nil, linker: nil, writer: nil,
-                   before_rename: nil, directory_sync: nil)
+                   before_rename: nil, after_link: nil, directory_sync: nil)
       @path = File.expand_path(path)
       @renamer = renamer || ->(_source, _destination) { }
       @linker = linker || ->(_source, _destination) { }
       @writer = writer || ->(file, bytes) { file.write(bytes) }
       @before_rename = before_rename || ->(_source, _destination) { }
+      @after_link = after_link || ->(_source, _destination) { }
       @directory_sync = directory_sync || method(:fsync_directory)
     end
 
@@ -71,6 +72,7 @@ module HiveLiveAgentProof
         path: @path,
         writer: @writer,
         before_publish: @before_rename,
+        after_link: @after_link,
         rename_gate: @renamer,
         link_gate: @linker,
         directory_sync: @directory_sync,
@@ -79,6 +81,13 @@ module HiveLiveAgentProof
     rescue WorkflowCreatorAtomicFile::Unsafe,
            WorkflowCreatorAtomicFile::Unavailable => e
       raise Error, "workflow-creator evidence #{e.message}"
+    rescue Errno::EEXIST
+      raise
+    rescue SystemCallError, IOError => e
+      raise Error.new(
+        "workflow-creator evidence storage operation failed " \
+        "(#{e.class.name})"
+      ), cause: e
     end
 
     def fsync_directory(directory, _path = nil)

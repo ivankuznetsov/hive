@@ -148,14 +148,16 @@ module HiveLiveAgentProof
       end
     end
 
-    def initialize(path:, writer:, before_publish:, rename_gate:, link_gate:,
-                   directory_sync:, expected_parent_identity: nil, native: nil)
+    def initialize(path:, writer:, before_publish:, after_link:, rename_gate:,
+                   link_gate:, directory_sync:, expected_parent_identity: nil,
+                   native: nil)
       @path = File.expand_path(path)
       @parent_path = File.dirname(@path)
       @staging_path = File.dirname(@parent_path)
       @target_name = File.basename(@path)
       @writer = writer
       @before_publish = before_publish
+      @after_link = after_link
       @rename_gate = rename_gate
       @link_gate = link_gate
       @directory_sync = directory_sync
@@ -169,6 +171,7 @@ module HiveLiveAgentProof
       target_identity = directory_identity(target)
       staging_identity = directory_identity(staging)
       validate_target!(target_identity)
+      validate_staging!(staging_identity)
       validate_expected_target!(target_identity)
       unless target_identity.fetch(:dev) == staging_identity.fetch(:dev)
         raise Unsafe, "staging and evidence directories are on different filesystems"
@@ -186,16 +189,27 @@ module HiveLiveAgentProof
         @native.renameat(staging, temporary_name, target, @target_name)
         temporary_name = nil
       else
-        @native.linkat(staging, temporary_name, target, @target_name)
+        begin
+          @native.linkat(staging, temporary_name, target, @target_name)
+        rescue Errno::EEXIST
+          recovered = recover_linked_initialization!(
+            target,
+            staging,
+            target_identity,
+            staging_identity,
+            bytes
+          )
+          return @path if recovered
+
+          raise
+        end
+        @after_link.call(source_label, @path)
         @native.unlinkat(staging, temporary_name)
         temporary_name = nil
       end
 
       verify_entry!(target, @target_name, temporary_identity, bytes)
-      @directory_sync.call(target, @parent_path)
-      unless same_identity?(target_identity, staging_identity)
-        @directory_sync.call(staging, @staging_path)
-      end
+      sync_directories!(target, staging, target_identity, staging_identity)
       verify_binding!(target_identity)
       @path
     ensure
@@ -214,6 +228,7 @@ module HiveLiveAgentProof
         mode: 0o600
       )
       begin
+        file.binmode
         before = inode_identity(file.stat)
         validate_file!(file.stat, expected_links: 1)
         @writer.call(file, bytes)
@@ -233,9 +248,11 @@ module HiveLiveAgentProof
     def verify_entry!(directory, name, expected_identity, bytes)
       file = @native.open_file(directory, name, File::RDONLY)
       begin
+        file.binmode
         stat = file.stat
         validate_file!(stat, expected_links: 1)
-        unless file_identity(stat) == expected_identity && file.read(bytes.bytesize + 1) == bytes
+        unless file_identity(stat) == expected_identity &&
+               file.read(bytes.bytesize + 1) == bytes.b
           raise Unsafe, "published evidence bytes or identity changed"
         end
       ensure
@@ -249,6 +266,7 @@ module HiveLiveAgentProof
         dev: stat.dev,
         ino: stat.ino,
         uid: stat.uid,
+        mode: stat.mode & 0o7777,
         directory: stat.directory?,
         symlink: stat.symlink?
       }
@@ -261,9 +279,19 @@ module HiveLiveAgentProof
 
     def validate_target!(identity)
       return if identity.fetch(:directory) && !identity.fetch(:symlink) &&
-                identity.fetch(:uid) == Process.uid
+                identity.fetch(:uid) == Process.uid &&
+                identity.fetch(:mode) == 0o700
 
       raise Unsafe, "evidence directory is unsafe"
+    end
+
+    def validate_staging!(identity)
+      private_directory = (identity.fetch(:mode) & 0o022).zero?
+      sticky_directory = (identity.fetch(:mode) & 0o1000).positive?
+      return if identity.fetch(:directory) && !identity.fetch(:symlink) &&
+                (private_directory || sticky_directory)
+
+      raise Unsafe, "staging directory is unsafe"
     end
 
     def validate_expected_target!(identity)
@@ -275,8 +303,7 @@ module HiveLiveAgentProof
     end
 
     def validate_file!(stat, expected_links:)
-      return if stat.file? && !stat.symlink? && stat.uid == Process.uid &&
-                stat.nlink == expected_links && (stat.mode & 0o777) == 0o600
+      return if safe_file?(stat, expected_links: expected_links)
 
       raise Unsafe, "evidence file is unsafe"
     end
@@ -287,6 +314,7 @@ module HiveLiveAgentProof
         dev: stat.dev,
         ino: stat.ino,
         uid: stat.uid,
+        mode: stat.mode & 0o7777,
         directory: stat.directory?,
         symlink: stat.symlink?
       }
@@ -304,9 +332,67 @@ module HiveLiveAgentProof
       left.values_at(:dev, :ino) == right.values_at(:dev, :ino)
     end
 
+    def sync_directories!(target, staging, target_identity, staging_identity)
+      @directory_sync.call(target, @parent_path)
+      unless same_identity?(target_identity, staging_identity)
+        @directory_sync.call(staging, @staging_path)
+      end
+    end
+
+    def recover_linked_initialization!(target, staging, target_identity,
+                                       staging_identity, bytes)
+      target_file = @native.open_file(target, @target_name, File::RDONLY)
+      target_file.binmode
+      target_stat = target_file.stat
+      return false unless safe_file?(target_stat, expected_links: 2)
+
+      expected = file_identity(target_stat)
+      return false unless target_file.read(bytes.bytesize + 1) == bytes.b
+
+      matching = staging.children.filter_map do |name|
+        next unless name.start_with?(temporary_prefix)
+
+        matching_link_name(staging, name, expected, bytes)
+      end
+      unless matching.length == 1
+        raise Unsafe, "linked initial evidence cannot be recovered"
+      end
+
+      @native.unlinkat(staging, matching.fetch(0))
+      verify_entry!(target, @target_name, expected, bytes)
+      sync_directories!(target, staging, target_identity, staging_identity)
+      verify_binding!(target_identity)
+      true
+    rescue Errno::ENOENT
+      false
+    ensure
+      target_file&.close
+    end
+
+    def matching_link_name(directory, name, expected, bytes)
+      file = @native.open_file(directory, name, File::RDONLY)
+      file.binmode
+      stat = file.stat
+      return unless safe_file?(stat, expected_links: 2)
+      return unless file_identity(stat) == expected
+      return unless file.read(bytes.bytesize + 1) == bytes.b
+
+      name
+    ensure
+      file&.close
+    end
+
+    def safe_file?(stat, expected_links:)
+      stat.file? && !stat.symlink? && stat.uid == Process.uid &&
+        stat.nlink == expected_links && (stat.mode & 0o777) == 0o600
+    end
+
     def temporary_name
-      ".#{File.basename(@parent_path)}.#{@target_name}.tmp." \
-        "#{Process.pid}.#{SecureRandom.hex(8)}"
+      "#{temporary_prefix}#{Process.pid}.#{SecureRandom.hex(8)}"
+    end
+
+    def temporary_prefix
+      ".#{File.basename(@parent_path)}.#{@target_name}.tmp."
     end
 
     def remove_temporary(directory, name)

@@ -15,15 +15,21 @@ tags: [gap, todo, release-proof, agent-skills]
   schema-v1 failure receipt, authored/executed instruction binding, retained
   bundle validation, descriptor-relative atomic publication, exact
   executable/interpreter-or-launcher/package/lock identities, candidate gateway
-  identity, and release-builder closure. U1 also fixes the typed vocabulary for
-  U14 command/capture/archive/process/teardown/cleanup receipts and U15 provider,
-  dependency, HTTPS transport, and credential-environment provenance. It
+  identity, key-order-independent closure records, and release-builder closure.
+  The writer recovers the unique post-link initialization topology, checks
+  local `0700`/`0600` ownership modes, and preserves exact UTF-8 bytes. U1 also
+  fixes the lower, one-way typed vocabulary for U14's exact execution plan,
+  command/capture/archive/process/containment/teardown/cleanup receipts and U15
+  provider, dependency, HTTPS transport, and credential-environment provenance. It
   deliberately cannot
   produce a passing protected-main creator Check yet: U14 must still produce
   the real candidate/OpenClaw installed manifests plus an independently bound
   execution/containment/teardown receipt through that contract, and U15 must
   still run the
   authenticated exact-head OpenClaw model loop without a transition reader.
+  Hosted artifact transfer normalizes Unix modes, so retained Attestor/Verifier
+  checks intentionally bind content and filesystem identity rather than claiming
+  transport-preserved source modes.
   Keep missing/partial/unknown custody non-passing; fixture bundles prove the
   contract, not the live installation or provider boundary. U15 must also
   retain proof that the producer used the exact selected credential for its

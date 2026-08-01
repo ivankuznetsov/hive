@@ -19,7 +19,7 @@ the first and primary consumer.
 |-----------|-------|---------------------|-------------------|
 | Patrol Effect Evidence | `candidate` (U3 qualification pending) | `require "hive/modules/migration/patrol_evidence"` → `Hive::Modules::Migration::PatrolEvidence` | [[modules/patrol]] |
 | Attempts admission / future RunReceipt | `candidate` (guarded reference) | `require "hive/attempts/api"` → `Hive::Attempts::API` | [[modules/attempts]] |
-| Workflow Creator Proof | `candidate` (U14/U15 custody and live orchestration pending) | `require "./packaging/live_agent_skills/workflow_creator"` → `HiveLiveAgentProof::WorkflowCreatorContract` | [[testing]] |
+| Workflow Creator Proof | `boundary-ready` (U1 contract complete; U14/U15 execution/live claims pending) | `require "./packaging/live_agent_skills/workflow_creator"` → `HiveLiveAgentProof::WorkflowCreatorContract` | [[testing]] |
 | UserService | `boundary-ready` | `require "hive/user_service"` → `Hive::UserService` | [[modules/user_service]] |
 | Agent ABI | `boundary-ready`; standalone package candidate | `require "hive/agent_runtime"` → `Hive::AgentRuntime` | [[modules/agent_cli_runtime]], [[modules/agent_profile]] |
 | Agent Artifact Firewall | `boundary-ready` | `require "hive/artifact_firewall"` → `Hive::ArtifactFirewall` | [[modules/protected_files]] |
@@ -35,9 +35,8 @@ has earned a gem, version, repository, or release.
 
 ## Final graph audit
 
-The U1 boundary refresh on 2026-08-01 retains nine components: six are
-`boundary-ready`; Attempts, Patrol Effect Evidence, and Workflow Creator Proof
-remain `candidate`.
+The U1 boundary refresh on 2026-08-01 retains nine components: seven are
+`boundary-ready`; Attempts and Patrol Effect Evidence remain `candidate`.
 Patrol retains one bounded U3 exception for compressed evidence qualification
 and cutover proof. Every retained entry point has a focused clean-process load
 proof, every catalog-owned path and focused test resolves inside this
@@ -51,7 +50,7 @@ flowchart LR
   skillpack[Skillpack] --> agent_abi[Agent ABI]
   patrol_effects[Patrol Effect Evidence - candidate]
   attempts[Attempts admission - candidate]
-  workflow_creator[Workflow Creator Proof - candidate]
+  workflow_creator[Workflow Creator Proof]
   user_service[UserService]
   artifact_firewall[Agent Artifact Firewall]
   git_gate[Safe Agent Git Gate]
@@ -63,11 +62,12 @@ Hive primitives. The source audit found no retained experimental facade outside
 the catalog: each promoted facade is owned by a catalog row and used by Hive,
 while Attempts and Patrol Effect Evidence are deliberately retained as guarded
 candidates rather than being promoted ahead of their remaining lifecycle or
-qualification proof. Workflow Creator Proof is likewise guarded until U14 and
-U15 provide installed execution custody and authenticated live orchestration.
+qualification proof. Workflow Creator Proof is boundary-ready as a non-claiming
+U1 contract; U14 and U15 must still provide installed execution custody and
+authenticated live orchestration before the overall proof can pass.
 
 This is an internal architecture verdict, not a packaging verdict. None of the
-six ready components currently has the named non-Hive adopter and independent
+seven ready components currently has the named non-Hive adopter and independent
 package proof required by the standalone-gem plan.
 
 `Patrol Effect Evidence` owns the immutable cross-product capture, selection,
@@ -149,18 +149,23 @@ cancellation, export, or generic lifecycle operations.
 `HiveLiveAgentProof::WorkflowCreatorContract` is exposed by the dedicated
 `workflow_creator` packaging entry point for the guarded Workflow Creator Proof
 component; generic `proof.rb` consumes that entry point and the creator contract
-has no back-edge into the generic builder. `WorkflowCreatorContract` owns the schema-v1 creator
-document and classifications, `WorkflowCreatorBundle` independently validates
-the retained four-file bundle and exact installed closure roles,
-`WorkflowCreatorExecutionContract` owns only the U14/U15 receipt vocabulary and
+has no back-edge into the generic builder. A lower
+`workflow_creator_vocabulary` leaf owns the prompt, command, file, receipt,
+process-role, containment, and cleanup constants shared by the validators;
+`WorkflowCreatorExecutionContract` clean-loads without loading either
+`WorkflowCreatorContract` or `WorkflowCreatorBundle`.
+`WorkflowCreatorContract` owns the schema-v1 creator document and
+classifications, `WorkflowCreatorBundle` independently validates the retained
+four-file bundle and exact installed closure roles,
+`WorkflowCreatorExecutionContract` owns only the U14/U15 receipt validation and
 cross-bindings, and `WorkflowCreatorEvidence` alone initializes or atomically
 replaces the primary receipt through a descriptor-relative publisher. Candidate
 and OpenClaw installed identities bind a key-order-independent canonical closure
 digest plus exact executable, interpreter-or-launcher, package, and lock records
 that must also appear in the bounded inventory; the candidate additionally binds
-the audit gateway. Declared packaging and smoke construction surfaces are
-scanned, with one explicit temporary authorization for the U1 non-claiming smoke
-producer. The component cannot
+the audit gateway. The complete `packaging/` tree and the temporary smoke
+adapter are construction-scanned, with one explicit temporary authorization
+for the U1 non-claiming producer. The component cannot
 select credentials, execute a process, or translate unavailable U14 custody
 into success; those remain U14/U15 responsibilities documented in [[testing]].
 

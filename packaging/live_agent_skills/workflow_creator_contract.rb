@@ -2,51 +2,10 @@ require "digest"
 require "fileutils"
 require "json"
 require_relative "proof_primitives"
+require_relative "workflow_creator_vocabulary"
 require_relative "workflow_creator_execution_contract"
 
 module HiveLiveAgentProof
-  WORKFLOW_CREATOR_REQUEST =
-    "Create a three-stage editorial workflow that researches, drafts, and requires approval before publishing.".freeze
-  WORKFLOW_CREATOR_PROMPT = <<~PROMPT.freeze
-    /hive
-    #{WORKFLOW_CREATOR_REQUEST}
-    Use the installed Hive workflow-creator capability in this initialized project.
-    This is creation-only: validate the result, report the defaults, and do not create or run a task.
-  PROMPT
-  WORKFLOW_CREATOR_TASK_REQUEST = "Research and draft the launch announcement for approval.".freeze
-  WORKFLOW_CREATOR_TASK_KEY = "workflow-creator-proof:editorial:live-proof".freeze
-  WORKFLOW_CREATOR_TASK_SLUG = "editorial-live-proof".freeze
-  WORKFLOW_CREATOR_TASK_PROMPT = <<~PROMPT.freeze
-    /hive
-    Use the validated editorial workflow to create and run one task for:
-    "#{WORKFLOW_CREATOR_TASK_REQUEST}"
-    Use idempotency key #{WORKFLOW_CREATOR_TASK_KEY}. In this exact order: create the task,
-    run its first stage once, repeat the same creation command once to prove the retry is a no-op,
-    then query operational status. Do not publish or perform any other external action.
-  PROMPT
-  WORKFLOW_CREATOR_TASK_NEW_ARGV = [
-    "new", "workflow-creator-proof", "--workflow", "editorial",
-    "--idempotency-key", WORKFLOW_CREATOR_TASK_KEY, "--json", WORKFLOW_CREATOR_TASK_REQUEST
-  ].freeze
-  WORKFLOW_CREATOR_COMMANDS = [
-    [ "version" ],
-    [ "workflow", "list", "--json" ],
-    [ "workflow", "new", "editorial", "--json" ],
-    [ "workflow", "validate", "editorial", "--json" ],
-    [ "workflow", "commit", "editorial" ],
-    WORKFLOW_CREATOR_TASK_NEW_ARGV,
-    [ "run", WORKFLOW_CREATOR_TASK_SLUG ],
-    WORKFLOW_CREATOR_TASK_NEW_ARGV,
-    [ "status", "--operational", "--json" ]
-  ].freeze
-  WORKFLOW_CREATOR_FILES = [
-    ".hive-state/workflows/editorial.yml",
-    ".hive-state/workflows/editorial/draft.md",
-    ".hive-state/workflows/editorial/research.md"
-  ].freeze
-  WORKFLOW_CREATOR_EXECUTED_INSTRUCTION =
-    ".hive-state/workflows/editorial/research.md".freeze
-
   class WorkflowCreatorContract
     EVIDENCE_SCHEMA = "hive-live-workflow-creator-evidence".freeze
     FAILURE_KEYS = %w[
@@ -68,7 +27,7 @@ module HiveLiveAgentProof
     ].freeze
     LIVE_CLASSIFICATION = [ "authenticated_openclaw", "executed" ].freeze
     ARTIFACT_SCHEMA = "hive-live-agent-candidate-artifacts".freeze
-    SCANNER = "hive-live-agent-proof/v1".freeze
+    SCANNER = WORKFLOW_CREATOR_SCANNER
     DETAIL_LIMIT = 1_000
 
     class << self
@@ -113,13 +72,7 @@ module HiveLiveAgentProof
       def failure(candidate_sha:, phase:, reason:, detail: nil,
                   execution_kind: "unavailable", model_loop: "not_started",
                   exact_secrets: [])
-        bounded_detail =
-          unless detail.nil?
-            sanitize(
-              detail.to_s.scrub,
-              exact_secrets: exact_secrets
-            ).byteslice(0, DETAIL_LIMIT).to_s.scrub
-          end
+        bounded_detail = bounded_detail(detail, exact_secrets: exact_secrets)
         document = {
           "schema" => EVIDENCE_SCHEMA,
           "schema_version" => SCHEMA_VERSION,
@@ -175,7 +128,8 @@ module HiveLiveAgentProof
           row: row,
           manifest: manifest,
           candidate_sha: candidate_sha,
-          exact_secrets: exact_secrets
+          exact_secrets: exact_secrets,
+          owner_private: true
         )
       rescue KeyError, TypeError, NoMethodError, ArgumentError => e
         raise Error, "workflow-creator contract is invalid: #{e.message}"
@@ -241,6 +195,23 @@ module HiveLiveAgentProof
       def normalized_failure_candidate(candidate_sha)
         value = candidate_sha.to_s.downcase
         SAFE_SHA.match?(value) ? value : "unresolved"
+      end
+
+      def bounded_detail(detail, exact_secrets:)
+        return if detail.nil?
+
+        normalized = detail.to_s.encode(
+          Encoding::UTF_8,
+          invalid: :replace,
+          undef: :replace,
+          replace: "\uFFFD"
+        )
+        sanitized = sanitize(normalized, exact_secrets: exact_secrets)
+        return sanitized if sanitized.bytesize <= DETAIL_LIMIT
+
+        sanitized.byteslice(0, DETAIL_LIMIT)
+                 .force_encoding(Encoding::UTF_8)
+                 .scrub("")
       end
 
       def validate_identity!(row, manifest, candidate_sha)
@@ -409,8 +380,7 @@ module HiveLiveAgentProof
     ENTRY_KEYS = %w[kind path sha256 size].freeze
     INSTALLED_MANIFEST_SCHEMA =
       "hive-live-workflow-creator-installed-manifest".freeze
-    EXECUTION_RECEIPT_SCHEMA =
-      "hive-live-workflow-creator-execution-receipt".freeze
+    EXECUTION_RECEIPT_SCHEMA = WORKFLOW_CREATOR_EXECUTION_RECEIPT_SCHEMA
     MAX_FILE_BYTES = 1_048_576
     MAX_TOTAL_BYTES = 2_097_152
     MAX_INVENTORY_ENTRIES = 512
@@ -461,11 +431,14 @@ module HiveLiveAgentProof
           record = required_members.fetch(key)
           [ key, FILE_RECORD_KEYS.to_h { |field| [ field, record.fetch(field) ] } ]
         end
+        ordered_inventory = inventory.map do |record|
+          FILE_RECORD_KEYS.to_h { |field| [ field, record.fetch(field) ] }
+        end
         Digest::SHA256.hexdigest(
           WorkflowCreatorContract.canonical_json(
             {
               "required_members" => ordered_members,
-              "inventory" => inventory
+              "inventory" => ordered_inventory
             }
           )
         )
@@ -501,11 +474,11 @@ module HiveLiveAgentProof
       end
 
       def validate_supporting!(directory:, row:, manifest:, candidate_sha:,
-                               exact_secrets: [])
+                               exact_secrets: [], owner_private: false)
         root = File.expand_path(directory)
-        root_stat = validate_root!(root)
+        root_stat = validate_root!(root, owner_private: owner_private)
         validate_bundle_inventory!(root)
-        assert_regular!(root, PRIMARY_NAME)
+        assert_regular!(root, PRIMARY_NAME, owner_private: owner_private)
         primary = WorkflowCreatorContract.canonical_json(row)
         if primary.bytesize > MAX_FILE_BYTES
           raise Error, "workflow-creator evidence bundle entry is oversized: #{PRIMARY_NAME}"
@@ -525,7 +498,7 @@ module HiveLiveAgentProof
                  /\A[0-9a-f]{64}\z/.match?(record["sha256"].to_s)
             raise Error, "workflow-creator evidence-bundle records are invalid"
           end
-          bytes = read_regular!(root, path)
+          bytes = read_regular!(root, path, owner_private: owner_private)
           unless bytes.bytesize == record["size"] &&
                  Digest::SHA256.hexdigest(bytes) == record["sha256"]
             raise Error, "workflow-creator evidence-bundle digest or size mismatch"
@@ -580,9 +553,11 @@ module HiveLiveAgentProof
 
       private
 
-      def validate_root!(root)
+      def validate_root!(root, owner_private: false)
         stat = File.lstat(root)
-        unless stat.directory? && !stat.symlink? && stat.uid == Process.uid
+        valid = stat.directory? && !stat.symlink? && stat.uid == Process.uid
+        valid &&= (stat.mode & 0o777) == 0o700 if owner_private
+        unless valid
           raise Error, "workflow-creator evidence bundle is not a regular directory"
         end
         stat
@@ -601,26 +576,29 @@ module HiveLiveAgentProof
         end
       end
 
-      def assert_regular!(root, name)
+      def assert_regular!(root, name, owner_private: false)
         path = File.join(root, name)
         stat = File.lstat(path)
-        unless stat.file? && !stat.symlink? && stat.nlink == 1 &&
-               stat.uid == Process.uid && stat.size <= MAX_FILE_BYTES
+        valid = stat.file? && !stat.symlink? && stat.nlink == 1 &&
+                stat.uid == Process.uid && stat.size <= MAX_FILE_BYTES
+        valid &&= (stat.mode & 0o777) == 0o600 if owner_private
+        unless valid
           raise Error, "workflow-creator evidence bundle entry is unsafe or oversized: #{name}"
         end
         stat
       end
 
-      def read_regular!(root, name)
+      def read_regular!(root, name, owner_private: false)
         path = File.join(root, name)
-        stat = assert_regular!(root, name)
+        stat = assert_regular!(root, name, owner_private: owner_private)
         flags = File::RDONLY
         flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
         File.open(path, flags) do |file|
           opened = file.stat
           unless opened.dev == stat.dev && opened.ino == stat.ino &&
                  opened.file? && opened.nlink == 1 &&
-                 opened.uid == Process.uid
+                 opened.uid == Process.uid &&
+                 (!owner_private || (opened.mode & 0o777) == 0o600)
             raise Error, "workflow-creator evidence bundle entry changed while opening: #{name}"
           end
           bytes = file.read(MAX_FILE_BYTES + 1) || "".b

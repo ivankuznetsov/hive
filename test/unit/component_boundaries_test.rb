@@ -147,7 +147,7 @@ class ComponentBoundariesTest < Minitest::Test
     )
 
     workflow_creator = contract.component("workflow-creator-proof")
-    assert_equal "candidate", workflow_creator.fetch("state")
+    assert_equal "boundary-ready", workflow_creator.fetch("state")
     assert_equal "./packaging/live_agent_skills/workflow_creator",
                  workflow_creator.dig("entrypoint", "require")
     assert_equal "HiveLiveAgentProof::WorkflowCreatorContract",
@@ -168,6 +168,7 @@ class ComponentBoundariesTest < Minitest::Test
         packaging/live_agent_skills/workflow_creator_contract.rb
         packaging/live_agent_skills/workflow_creator_evidence.rb
         packaging/live_agent_skills/workflow_creator_execution_contract.rb
+        packaging/live_agent_skills/workflow_creator_vocabulary.rb
       ],
       workflow_creator.fetch("owned_paths").sort
     )
@@ -193,6 +194,10 @@ class ComponentBoundariesTest < Minitest::Test
     assert_empty workflow_creator.fetch("component_dependencies")
     assert_empty workflow_creator.fetch("allowed_hive_dependencies")
     assert_empty workflow_creator.fetch("migration_exceptions")
+    assert_equal(
+      [ "packaging", "test/smoke/live_hive_workflow_creator_smoke_test.rb" ],
+      workflow_creator.fetch("construction_scan_paths")
+    )
     assert_equal 1, workflow_creator.fetch("state_contracts").length
     assert_match(/sole writer/, workflow_creator.fetch("state_contracts").first)
     assert_equal 1, workflow_creator.fetch("schema_contracts").length
@@ -202,7 +207,7 @@ class ComponentBoundariesTest < Minitest::Test
     assert_match(/cannot select credentials/, workflow_creator.fetch("mutation_authority"))
     assert_match(/interrupted writes preserve/, workflow_creator.fetch("recovery_surface"))
 
-    ready_components = [ user_service ]
+    ready_components = [ user_service, workflow_creator ]
 
     clean_load = contract.validate_clean_load!("attempts")
     assert_equal "Hive::Attempts::API", clean_load.fetch("constant")
@@ -305,7 +310,7 @@ class ComponentBoundariesTest < Minitest::Test
     remaining_candidates = contract.components.reject do |component|
       ready_components.include?(component)
     end
-    assert_equal %w[attempts patrol-effects workflow-creator-proof],
+    assert_equal %w[attempts patrol-effects],
                  remaining_candidates.map { |entry| entry.fetch("id") }.sort
     assert remaining_candidates.all? { |component| component.fetch("state") == "candidate" }
 
@@ -317,6 +322,7 @@ class ComponentBoundariesTest < Minitest::Test
       skillpack
       user-service
       work-ledger
+      workflow-creator-proof
     ], ready_loads.keys.sort
     agent_abi_load = ready_loads.fetch("agent-abi")
     assert_equal "Hive::AgentRuntime", agent_abi_load.fetch("constant")
@@ -385,6 +391,58 @@ class ComponentBoundariesTest < Minitest::Test
     end
 
     assert_match(/outside the declared construction scan surface/, error.message)
+  end
+
+  def test_packaging_require_resolves_to_its_declared_component_owner
+    support = fixture_component(
+      id: "packaging-support",
+      state: "boundary-ready",
+      entrypoint_file: "packaging/support.rb",
+      entrypoint_require: "./packaging/support",
+      entrypoint_constant: "Support::API",
+      owned_paths: [ "packaging/support.rb" ]
+    )
+    with_contract_fixture(
+      entrypoint_file: "packaging/example.rb",
+      entrypoint_require: "./packaging/example",
+      entrypoint_source: <<~RUBY,
+        require_relative "support"
+        #{example_api_source}
+      RUBY
+      extra_components: [ support ],
+      extra_files: {
+        "packaging/support.rb" => "module Support; class API; end; end\n"
+      }
+    ) do |contract|
+      error = assert_raises(ComponentBoundaryContract::ValidationError) do
+        contract.validate_static_boundaries!
+      end
+
+      assert_match(/requires undeclared component "packaging-support"/, error.message)
+      assert_match(%r{packaging/example\.rb}, error.message)
+    end
+  end
+
+  def test_complete_packaging_scan_rejects_an_undeclared_writer
+    with_contract_fixture(
+      entrypoint_source: <<~RUBY,
+        module Example
+          class API; end
+          class Internal; end
+        end
+      RUBY
+      construction_scan_paths: [ "packaging" ],
+      extra_files: {
+        "packaging/unlisted_writer.rb" => "Example::Internal.new\n"
+      }
+    ) do |contract|
+      error = assert_raises(ComponentBoundaryContract::ValidationError) do
+        contract.validate_static_boundaries!
+      end
+
+      assert_match(/packaging\/unlisted_writer\.rb/, error.message)
+      assert_match(/Example::Internal/, error.message)
+    end
   end
 
   def test_final_graph_and_wiki_inventory_agree_with_the_catalog
@@ -1222,7 +1280,7 @@ class ComponentBoundariesTest < Minitest::Test
                             entrypoint_require: "example", owned_paths: nil,
                             component_dependencies: [], allowed_hive_dependencies: [],
                             migration_exceptions: [], authorized_internal_constructions: [],
-                            internal_collaborators: nil,
+                            internal_collaborators: nil, construction_scan_paths: nil,
                             extra_components: [], extra_files: {})
     Dir.mktmpdir do |root|
       write_fixture(root, entrypoint_file, entrypoint_source)
@@ -1245,7 +1303,8 @@ class ComponentBoundariesTest < Minitest::Test
             allowed_hive_dependencies: allowed_hive_dependencies,
             migration_exceptions: migration_exceptions,
             authorized_internal_constructions: authorized_internal_constructions,
-            internal_collaborators: internal_collaborators
+            internal_collaborators: internal_collaborators,
+            construction_scan_paths: construction_scan_paths
           ),
           *extra_components
         ]
@@ -1258,10 +1317,10 @@ class ComponentBoundariesTest < Minitest::Test
   def fixture_component(id:, state:, entrypoint_file:, entrypoint_require:, entrypoint_constant:,
                         owned_paths:, component_dependencies: [], allowed_hive_dependencies: [],
                         migration_exceptions: [], authorized_internal_constructions: [],
-                        internal_collaborators: nil)
+                        internal_collaborators: nil, construction_scan_paths: nil)
     namespace = entrypoint_constant.split("::").first
     internal_collaborators ||= [ "#{namespace}::Internal" ]
-    {
+    component = {
       "id" => id,
       "name" => id.split("-").map(&:capitalize).join(" "),
       "state" => state,
@@ -1290,6 +1349,8 @@ class ComponentBoundariesTest < Minitest::Test
       "focused_tests" => [ "test/example_test.rb" ],
       "migration_exceptions" => migration_exceptions
     }
+    component["construction_scan_paths"] = construction_scan_paths if construction_scan_paths
+    component
   end
 
   def write_fixture(root, relative, content)

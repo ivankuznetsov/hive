@@ -367,7 +367,16 @@ class ComponentBoundaryContract
       prefixes = #{FORBIDDEN_REQUIRE_PREFIXES.inspect}
       unrelated = #{unrelated_owned_features.inspect}
       loaded = $LOADED_FEATURES.filter_map do |feature|
-        relative = feature.sub(%r{\\A#{Regexp.escape(File.join(@root, "lib"))}/?}, "")
+        lib_prefix = #{File.join(@root, "lib", "").dump}
+        root_prefix = #{File.join(@root, "").dump}
+        relative =
+          if feature.start_with?(lib_prefix)
+            feature.delete_prefix(lib_prefix)
+          elsif feature.start_with?(root_prefix)
+            "./\#{feature.delete_prefix(root_prefix)}"
+          else
+            feature
+          end
         next unless prefixes.any? { |prefix| relative == "\#{prefix}.rb" || relative.start_with?("\#{prefix}/") } ||
                     unrelated.include?(relative)
         relative
@@ -443,9 +452,12 @@ class ComponentBoundaryContract
   end
 
   def require_path_for(relative)
-    return unless relative.start_with?("lib/") && relative.end_with?(".rb")
+    return unless relative.end_with?(".rb")
+    if relative.start_with?("lib/")
+      return relative.delete_prefix("lib/").delete_suffix(".rb")
+    end
 
-    relative.delete_prefix("lib/").delete_suffix(".rb")
+    "./#{relative.delete_suffix('.rb')}"
   end
 
   def forbidden_require?(required)
@@ -629,9 +641,11 @@ class ComponentBoundaryContract
 
     def relative_require_path(required)
       relative = Pathname.new(File.join(File.dirname(@path), required)).cleanpath.to_s
-      return unless relative.start_with?("lib/")
+      if relative.start_with?("lib/")
+        return relative.delete_prefix("lib/").delete_suffix(".rb")
+      end
 
-      relative.delete_prefix("lib/").delete_suffix(".rb")
+      "./#{relative.delete_suffix('.rb')}"
     end
 
     def constant_path(node)

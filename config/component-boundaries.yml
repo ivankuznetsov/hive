@@ -277,7 +277,7 @@ components:
 
   - id: workflow-creator-proof
     name: Workflow Creator Proof
-    state: candidate
+    state: boundary-ready
     entrypoint:
       file: packaging/live_agent_skills/workflow_creator.rb
       require: ./packaging/live_agent_skills/workflow_creator
@@ -296,12 +296,13 @@ components:
       - packaging/live_agent_skills/workflow_creator_contract.rb
       - packaging/live_agent_skills/workflow_creator_evidence.rb
       - packaging/live_agent_skills/workflow_creator_execution_contract.rb
+      - packaging/live_agent_skills/workflow_creator_vocabulary.rb
     state_contracts:
       - "WorkflowCreatorEvidence is the sole writer of the caller-selected primary creator receipt; WorkflowCreatorContract and WorkflowCreatorBundle validate typed creator and retained bundle bytes without choosing execution or provider policy"
     schema_contracts:
       - "hive-live-workflow-creator-evidence schema v1 plus canonical installed manifests, ordered command/capture/process custody, dependency/provider/transport provenance, and digest-bound execution summaries; U14 and U15 populate the contract without redefining it"
     lock_contracts:
-      - "Private same-filesystem staging outside the exact bundle root, descriptor-relative linkat-or-renameat publication, inode/byte verification, strict destination/staging directory fsync, and public-parent rebinding checks preserve the prior accepted receipt or fail closed"
+      - "Private same-filesystem staging outside the exact mode-0700 bundle root, descriptor-relative linkat-or-renameat publication, recovery of the exact post-link initialization topology, inode/byte verification, strict destination/staging directory fsync, and public-parent rebinding checks preserve the prior accepted receipt or fail closed"
     component_dependencies: []
     allowed_hive_dependencies: []
     internal_collaborators:
@@ -311,8 +312,7 @@ components:
     forbidden_constructions:
       - HiveLiveAgentProof::WorkflowCreatorEvidence
     construction_scan_paths:
-      - packaging/live_agent_skills
-      - packaging/release_candidate/artifacts.rb
+      - packaging
       - test/smoke/live_hive_workflow_creator_smoke_test.rb
     authorized_internal_constructions:
       - constant: HiveLiveAgentProof::WorkflowCreatorEvidence
@@ -324,7 +324,7 @@ components:
       - packaging/release_candidate/artifacts.rb
       - test/smoke/live_hive_workflow_creator_smoke_test.rb
     mutation_authority: "WorkflowCreatorEvidence alone initializes and atomically replaces the primary creator receipt at a caller-selected path; it cannot select credentials, launch processes, or turn unavailable U14 custody into success."
-    recovery_surface: "A schema-valid non-passing receipt precedes work; interrupted writes preserve the prior bytes, hard-kill orphans stay outside the exact bundle inventory, and successful replacement is reported only after pinned-directory durability and binding verification."
+    recovery_surface: "A schema-valid non-passing receipt precedes work; interrupted writes preserve the prior bytes, a post-link initialization crash is recovered only from the exact matching two-link topology, other hard-kill orphans stay outside the exact bundle inventory, and successful replacement is reported only after pinned-directory durability and binding verification."
     wiki_page: wiki/testing.md
     focused_tests:
       - test/unit/packaging/live_agent_proof_test.rb

@@ -1,4 +1,5 @@
 require_relative "proof_primitives"
+require_relative "workflow_creator_vocabulary"
 
 module HiveLiveAgentProof
   # Pure schema and cross-binding validation for evidence that U14 and U15
@@ -6,7 +7,7 @@ module HiveLiveAgentProof
   # behavior; it only prevents those units from redefining the retained proof.
   class WorkflowCreatorExecutionContract
     RECEIPT_KEYS = %w[
-      schema schema_version candidate_sha result classification run
+      schema schema_version candidate_sha result execution_plan classification run
       installed_manifests gateway archive_admissions commands outer_processes
       executed_instruction external_actions containment teardown cleanup secret_scan
     ].freeze
@@ -106,10 +107,11 @@ module HiveLiveAgentProof
           )
         end
         valid =
-          receipt["schema"] == WorkflowCreatorBundle::EXECUTION_RECEIPT_SCHEMA &&
+          receipt["schema"] == WORKFLOW_CREATOR_EXECUTION_RECEIPT_SCHEMA &&
           receipt["schema_version"] == SCHEMA_VERSION &&
           receipt["candidate_sha"] == candidate_sha &&
           receipt["result"] == "passed" &&
+          receipt["execution_plan"] == WORKFLOW_CREATOR_EXECUTION_PLAN &&
           receipt.dig("classification", "outer") == OUTER_CLASSIFICATION &&
           receipt.dig("classification", "outer") == {
             "execution_kind" => row["execution_kind"],
@@ -172,13 +174,16 @@ module HiveLiveAgentProof
         end
 
         outer = receipt["outer_processes"]
-        unless outer.is_a?(Array) && !outer.empty? && outer.length <= 16
+        unless outer.is_a?(Array) &&
+               outer.length == WORKFLOW_CREATOR_OUTER_PROCESS_ROLES.length
           fail_contract!("execution receipt outer processes are invalid")
         end
-        outer_labels = outer.map do |process|
+        outer_labels = outer.each_with_index.map do |process, index|
           exact_hash!(process, OUTER_PROCESS_KEYS, "outer process receipt")
           validate_completed_process!(process, label_key: "label")
-          unless label?(process["role"]) && digest?(process["argv_sha256"])
+          unless process["role"] ==
+                 WORKFLOW_CREATOR_OUTER_PROCESS_ROLES.fetch(index) &&
+                 digest?(process["argv_sha256"])
             fail_contract!("execution receipt outer process identity is invalid")
           end
           process.fetch("label")
@@ -217,7 +222,7 @@ module HiveLiveAgentProof
           boolean.include?(capture["stderr_truncated"]) &&
           capture["secret_scan"] == {
             "status" => "passed",
-            "scanner" => WorkflowCreatorContract::SCANNER
+            "scanner" => WORKFLOW_CREATOR_SCANNER
           }
         fail_contract!("execution receipt process capture is invalid") unless valid
       end
@@ -246,7 +251,7 @@ module HiveLiveAgentProof
         validate_cleanup!(receipt["cleanup"])
         exact_hash!(receipt["secret_scan"], SECRET_SCAN_KEYS, "receipt secret scan")
         unless receipt["secret_scan"] == {
-          "status" => "passed", "scanner" => WorkflowCreatorContract::SCANNER
+          "status" => "passed", "scanner" => WORKFLOW_CREATOR_SCANNER
         }
           fail_contract!("execution receipt secret scan is invalid")
         end
@@ -271,10 +276,14 @@ module HiveLiveAgentProof
         exact_hash!(containment, CONTAINMENT_KEYS, "execution containment")
         valid =
           containment["status"] == "passed" &&
-          label?(containment["mechanism"]) &&
+          WORKFLOW_CREATOR_CONTAINMENT_MECHANISMS.include?(
+            containment["mechanism"]
+          ) &&
           containment["established_before_launch"] == true &&
           containment["owner_correlation_id"] == correlation_id &&
-          label?(containment["root_loss_behavior"])
+          WORKFLOW_CREATOR_ROOT_LOSS_BEHAVIORS.include?(
+            containment["root_loss_behavior"]
+          )
         fail_contract!("execution receipt containment is invalid") unless valid
       end
 
@@ -293,7 +302,7 @@ module HiveLiveAgentProof
         exact_hash!(cleanup, CLEANUP_KEYS, "execution cleanup")
         targets = cleanup["targets"]
         unless cleanup["status"] == "passed" && targets.is_a?(Array) &&
-               !targets.empty? && targets.length <= 64
+               targets.length == WORKFLOW_CREATOR_CLEANUP_TARGET_LABELS.length
           fail_contract!("execution receipt cleanup is invalid")
         end
         labels = targets.map do |target|
@@ -308,7 +317,7 @@ module HiveLiveAgentProof
           fail_contract!("execution receipt cleanup target is invalid") unless valid
           target.fetch("label")
         end
-        unless labels.uniq.length == labels.length
+        unless labels == WORKFLOW_CREATOR_CLEANUP_TARGET_LABELS
           fail_contract!("execution receipt cleanup labels are invalid")
         end
       end

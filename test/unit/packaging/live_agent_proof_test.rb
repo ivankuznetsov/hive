@@ -335,6 +335,7 @@ class LiveAgentProofTest < Minitest::Test
       FileUtils.mkdir_p(root)
       name = HiveLiveAgentProof::WorkflowCreatorBundle::PRIMARY_NAME
       path = write_file(File.join(root, name), "primary bytes")
+      FileUtils.chmod(0o600, path)
       missing_entry_error = assert_raises(HiveLiveAgentProof::Error) do
         HiveLiveAgentProof::WorkflowCreatorBundle.send(
           :read_regular!, root, "missing.json"
@@ -469,6 +470,59 @@ class LiveAgentProofTest < Minitest::Test
           )
         end
       end
+    end
+  end
+
+  def test_success_producer_requires_owner_private_bundle_modes
+    with_tmp_dir do |dir|
+      artifacts = prepare_artifacts(dir)
+      manifest = JSON.parse(
+        File.read(File.join(artifacts, "artifact-manifest.json"))
+      )
+      {
+        "root" => lambda do |creator|
+          FileUtils.chmod(0o755, creator)
+        end,
+        "sidecar" => lambda do |creator|
+          FileUtils.chmod(
+            0o644,
+            File.join(creator, "candidate-installed-manifest.json")
+          )
+        end
+      }.each do |name, mutate|
+        creator = prepare_creator_evidence(File.join(dir, name), artifacts)
+        primary = File.join(creator, "openclaw-workflow-creator.json")
+        row = JSON.parse(File.read(primary))
+        mutate.call(creator)
+
+        error = assert_raises(HiveLiveAgentProof::Error, name) do
+          HiveLiveAgentProof::WorkflowCreatorEvidence.new(path: primary)
+                                                     .replace_success!(
+                                                       row,
+                                                       manifest: manifest,
+                                                       bundle_dir: creator,
+                                                       candidate_sha: SHA
+                                                     )
+        end
+        assert_match(/regular directory|unsafe or oversized/, error.message)
+      end
+    end
+  end
+
+  def test_retained_proof_accepts_hosted_artifact_mode_normalization
+    with_tmp_dir do |dir|
+      artifacts = prepare_artifacts(dir)
+      evidence = prepare_evidence(dir, artifacts)
+      creator = prepare_creator_evidence(dir, artifacts)
+      FileUtils.chmod(0o755, creator)
+      HiveLiveAgentProof::WorkflowCreatorBundle::FILENAMES.each do |name|
+        FileUtils.chmod(0o644, File.join(creator, name))
+      end
+
+      proof = File.join(dir, "proof")
+      result = attest(artifacts, evidence, creator, proof)
+
+      assert verifier(proof, result.fetch("sha256")).call
     end
   end
 
@@ -917,6 +971,7 @@ class LiveAgentProofTest < Minitest::Test
   def test_execution_receipt_rejects_incomplete_or_contradictory_u14_u15_proof
     mutations = {
       "extra-root-field" => ->(receipt) { receipt["unexpected"] = true },
+      "missing-execution-plan" => ->(receipt) { receipt.delete("execution_plan") },
       "missing-classification" => ->(receipt) { receipt.delete("classification") },
       "reordered-commands" => ->(receipt) { receipt["commands"].reverse! },
       "duplicate-command-label" => lambda do |receipt|
@@ -932,6 +987,9 @@ class LiveAgentProofTest < Minitest::Test
         receipt["commands"][0].delete("teardown")
       end,
       "missing-outer-process" => ->(receipt) { receipt["outer_processes"] = [] },
+      "outer-role-substitution" => lambda do |receipt|
+        receipt["outer_processes"][0]["role"] = "helper-process"
+      end,
       "gateway-substitution" => ->(receipt) { receipt["gateway"]["sha256"] = "0" * 64 },
       "archive-failure" => lambda do |receipt|
         receipt["archive_admissions"][0]["status"] = "failed"
@@ -944,6 +1002,17 @@ class LiveAgentProofTest < Minitest::Test
       end,
       "remaining-descendant" => lambda do |receipt|
         receipt["teardown"]["remaining_descendants"] = 1
+      end,
+      "weaker-containment" => lambda do |receipt|
+        receipt["containment"]["mechanism"] = "process-group"
+      end,
+      "missing-cleanup-target" => lambda do |receipt|
+        receipt["cleanup"]["targets"] = []
+      end,
+      "extra-cleanup-target" => lambda do |receipt|
+        extra = receipt["cleanup"]["targets"][0].dup
+        extra["label"] = "unplanned-target"
+        receipt["cleanup"]["targets"] << extra
       end,
       "cleanup-identity-drift" => lambda do |receipt|
         receipt["cleanup"]["targets"][0]["identity_matched"] = false
@@ -1449,7 +1518,8 @@ class LiveAgentProofTest < Minitest::Test
   def prepare_creator_evidence(dir, artifacts)
     evidence = File.join(dir, "creator-evidence")
     FileUtils.rm_rf(evidence)
-    FileUtils.mkdir_p(evidence)
+    FileUtils.mkdir_p(evidence, mode: 0o700)
+    FileUtils.chmod(0o700, evidence)
     manifest = JSON.parse(File.read(File.join(artifacts, "artifact-manifest.json")))
     created_files = HiveLiveAgentProof::WORKFLOW_CREATOR_FILES.map do |path|
       { "path" => path, "sha256" => "c" * 64, "size" => 10 }
@@ -1620,6 +1690,7 @@ class LiveAgentProofTest < Minitest::Test
       "schema_version" => 1,
       "candidate_sha" => SHA,
       "result" => "passed",
+      "execution_plan" => HiveLiveAgentProof::WORKFLOW_CREATOR_EXECUTION_PLAN,
       "classification" => {
         "outer" => {
           "execution_kind" => "authenticated_openclaw",
@@ -1662,7 +1733,7 @@ class LiveAgentProofTest < Minitest::Test
       "external_actions" => [],
       "containment" => {
         "status" => "passed",
-        "mechanism" => "linux-child-subreaper",
+        "mechanism" => "supervised-process-tree",
         "established_before_launch" => true,
         "owner_correlation_id" => "creator-run-01",
         "root_loss_behavior" => "fail-closed"
@@ -1780,6 +1851,9 @@ class LiveAgentProofTest < Minitest::Test
       }
     }
     HiveLiveAgentProof.write_json(File.join(evidence, "openclaw-workflow-creator.json"), row)
+    HiveLiveAgentProof::WorkflowCreatorBundle::FILENAMES.each do |name|
+      FileUtils.chmod(0o600, File.join(evidence, name))
+    end
     evidence
   end
 
@@ -1811,14 +1885,23 @@ class LiveAgentProofTest < Minitest::Test
     reversed = members.to_a.reverse.to_h
     inventory = members.values.sort_by { |record| record.fetch("path") }
 
-    assert_equal(
+    canonical =
       HiveLiveAgentProof::WorkflowCreatorBundle.installed_closure_sha256(
         required_members: members,
         inventory: inventory
-      ),
+      )
+    assert_equal(
+      canonical,
       HiveLiveAgentProof::WorkflowCreatorBundle.installed_closure_sha256(
         required_members: reversed,
         inventory: inventory
+      )
+    )
+    assert_equal(
+      canonical,
+      HiveLiveAgentProof::WorkflowCreatorBundle.installed_closure_sha256(
+        required_members: members,
+        inventory: inventory.map { |record| record.to_a.reverse.to_h }
       )
     )
   end

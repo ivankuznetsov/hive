@@ -1,4 +1,5 @@
 require_relative "proof_primitives"
+require_relative "workflow_creator_vocabulary"
 require_relative "workflow_creator_execution_contract"
 require_relative "workflow_creator_contract"
 require_relative "workflow_creator_atomic_file"

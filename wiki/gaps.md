@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-07-30
+updated: 2026-08-01
 tags: [gap, todo, release-proof, agent-skills]
 ---
 
@@ -13,11 +13,16 @@ tags: [gap, todo, release-proof, agent-skills]
 
 - The workflow-creator proof now has a single strict contract, crash-safe
   schema-v1 failure receipt, authored/executed instruction binding, retained
-  bundle validation, exact executable/interpreter-or-launcher/package/lock
-  member identities, and release-builder closure. It deliberately cannot
+  bundle validation, descriptor-relative atomic publication, exact
+  executable/interpreter-or-launcher/package/lock identities, candidate gateway
+  identity, and release-builder closure. U1 also fixes the typed vocabulary for
+  U14 command/capture/archive/process/teardown/cleanup receipts and U15 provider,
+  dependency, HTTPS transport, and credential-environment provenance. It
+  deliberately cannot
   produce a passing protected-main creator Check yet: U14 must still produce
   the real candidate/OpenClaw installed manifests plus an independently bound
-  execution/containment/teardown receipt, and U15 must still run the
+  execution/containment/teardown receipt through that contract, and U15 must
+  still run the
   authenticated exact-head OpenClaw model loop without a transition reader.
   Keep missing/partial/unknown custody non-passing; fixture bundles prove the
   contract, not the live installation or provider boundary. U15 must also

@@ -1,3 +1,9 @@
+require "digest"
+require "fileutils"
+require "json"
+require_relative "proof_primitives"
+require_relative "workflow_creator_execution_contract"
+
 module HiveLiveAgentProof
   WORKFLOW_CREATOR_REQUEST =
     "Create a three-stage editorial workflow that researches, drafts, and requires approval before publishing.".freeze
@@ -52,7 +58,7 @@ module HiveLiveAgentProof
       task_prompt_sha256 skill native_activation hive_commands created_files
       validation creation_only_task_count task_count task external_actions
       secret_scan cleanup execution_kind model_loop executed_instruction
-      evidence_bundle containment teardown
+      evidence_bundle containment teardown provider transport credential_boundary
     ].freeze
     FAILURE_PART = /\A[a-z][a-z0-9_]{0,63}\z/.freeze
     CLASSIFICATIONS = [
@@ -349,13 +355,20 @@ module HiveLiveAgentProof
 
       def validate_execution_claims!(row)
         %w[cleanup containment teardown].each do |field|
-          exact_hash!(row[field], %w[status], "workflow-creator #{field}")
+          exact_hash!(
+            row[field],
+            %w[receipt_sha256 status],
+            "workflow-creator #{field}"
+          )
         end
         valid =
           row["external_actions"] == [] &&
-          row["cleanup"] == { "status" => "passed" } &&
-          row["containment"] == { "status" => "passed" } &&
-          row["teardown"] == { "status" => "passed" }
+          %w[cleanup containment teardown].all? do |field|
+            row.dig(field, "status") == "passed" &&
+              /\A[0-9a-f]{64}\z/.match?(
+                row.dig(field, "receipt_sha256").to_s
+              )
+          end
         fail_contract!("workflow-creator execution claims are not passing") unless valid
       end
 
@@ -406,13 +419,19 @@ module HiveLiveAgentProof
     REQUIRED_MEMBER_KEYS = %w[
       executable interpreter_or_launcher lock package
     ].freeze
+    CANDIDATE_REQUIRED_MEMBER_KEYS = %w[
+      audit_gateway executable interpreter_or_launcher lock package
+    ].freeze
     FILE_RECORD_KEYS = %w[path sha256 size].freeze
 
     class Snapshot
-      def initialize(bytes:)
+      attr_reader :root_identity
+
+      def initialize(bytes:, root_identity:)
         @bytes = bytes.to_h do |name, content|
           [ name, content.dup.force_encoding(Encoding::BINARY).freeze ]
         end.freeze
+        @root_identity = root_identity.freeze
       end
 
       def copy_to!(destination)
@@ -433,10 +452,19 @@ module HiveLiveAgentProof
 
     class << self
       def installed_closure_sha256(required_members:, inventory:)
+        member_keys = required_members.keys.sort
+        unless [ REQUIRED_MEMBER_KEYS, CANDIDATE_REQUIRED_MEMBER_KEYS ]
+               .include?(member_keys)
+          raise Error, "workflow-creator installed required members are invalid"
+        end
+        ordered_members = member_keys.to_h do |key|
+          record = required_members.fetch(key)
+          [ key, FILE_RECORD_KEYS.to_h { |field| [ field, record.fetch(field) ] } ]
+        end
         Digest::SHA256.hexdigest(
           WorkflowCreatorContract.canonical_json(
             {
-              "required_members" => required_members,
+              "required_members" => ordered_members,
               "inventory" => inventory
             }
           )
@@ -475,7 +503,7 @@ module HiveLiveAgentProof
       def validate_supporting!(directory:, row:, manifest:, candidate_sha:,
                                exact_secrets: [])
         root = File.expand_path(directory)
-        validate_root!(root)
+        root_stat = validate_root!(root)
         validate_bundle_inventory!(root)
         assert_regular!(root, PRIMARY_NAME)
         primary = WorkflowCreatorContract.canonical_json(row)
@@ -523,7 +551,11 @@ module HiveLiveAgentProof
         validate_execution_receipt!(
           documents.fetch("execution-receipt.json"),
           row: row,
-          candidate_sha: candidate_sha
+          candidate_sha: candidate_sha,
+          candidate_installation:
+            documents.fetch("candidate-installed-manifest.json"),
+          openclaw_installation:
+            documents.fetch("openclaw-installed-manifest.json")
         )
         bytes_by_name.each do |_name, bytes|
           findings = HiveLiveAgentProof.secret_findings(
@@ -534,7 +566,14 @@ module HiveLiveAgentProof
             raise Error, "workflow-creator evidence bundle contains secret-shaped material"
           end
         end
-        Snapshot.new(bytes: bytes_by_name)
+        Snapshot.new(
+          bytes: bytes_by_name,
+          root_identity: {
+            dev: root_stat.dev,
+            ino: root_stat.ino,
+            uid: root_stat.uid
+          }
+        )
       rescue SystemCallError => e
         raise Error, "cannot validate workflow-creator evidence bundle: #{e.message}"
       end
@@ -546,6 +585,7 @@ module HiveLiveAgentProof
         unless stat.directory? && !stat.symlink? && stat.uid == Process.uid
           raise Error, "workflow-creator evidence bundle is not a regular directory"
         end
+        stat
       end
 
       def validate_bundle_inventory!(root)
@@ -620,7 +660,7 @@ module HiveLiveAgentProof
         end
         inventory = validate_inventory!(document["inventory"])
         required_members = validate_required_members!(
-          document["required_members"], inventory
+          document["required_members"], inventory, kind: kind
         )
         closure_sha256 = installed_closure_sha256(
           required_members: required_members,
@@ -635,7 +675,8 @@ module HiveLiveAgentProof
           )
         else
           validate_openclaw_identity!(
-            document["identity"], required_members, closure_sha256
+            document["identity"], required_members, closure_sha256,
+            candidate_sha
           )
         end
       end
@@ -669,12 +710,12 @@ module HiveLiveAgentProof
       end
 
       def validate_openclaw_identity!(identity, required_members,
-                                      closure_sha256)
+                                      closure_sha256, candidate_sha)
         exact_hash!(
           identity,
           %w[
             kind name version integrity lock_sha256 lock_size package_sha256
-            package_size closure_sha256 package_count
+            package_size closure_sha256 package_count provenance
           ],
           "OpenClaw installation identity"
         )
@@ -692,7 +733,9 @@ module HiveLiveAgentProof
           identity["package_size"] == package["size"] &&
           identity["closure_sha256"] == closure_sha256 &&
           identity["package_count"].is_a?(Integer) &&
-          identity["package_count"].between?(1, 4096)
+          identity["package_count"].between?(1, 4096) &&
+          identity.dig("provenance", "approval", "candidate_sha") ==
+            candidate_sha
         raise Error, "workflow-creator OpenClaw installation identity is invalid" unless valid
       end
 
@@ -717,16 +760,18 @@ module HiveLiveAgentProof
         inventory
       end
 
-      def validate_required_members!(required_members, inventory)
+      def validate_required_members!(required_members, inventory, kind:)
+        expected_keys = kind == "candidate" ?
+          CANDIDATE_REQUIRED_MEMBER_KEYS : REQUIRED_MEMBER_KEYS
         unless required_members.is_a?(Hash) &&
-               required_members.keys.sort == REQUIRED_MEMBER_KEYS
+               required_members.keys.sort == expected_keys
           raise Error,
                 "workflow-creator installed required members are invalid"
         end
         records = required_members.values
         unless records.all? { |record| valid_inventory_record?(record) } &&
                records.map { |record| record["path"] }.uniq.length ==
-                 REQUIRED_MEMBER_KEYS.length &&
+                 expected_keys.length &&
                records.all? { |record| inventory.include?(record) }
           raise Error,
                 "workflow-creator installed required members are not bound to inventory"
@@ -743,31 +788,16 @@ module HiveLiveAgentProof
           record["size"].between?(0, MAX_INSTALLED_FILE_BYTES)
       end
 
-      def validate_execution_receipt!(receipt, row:, candidate_sha:)
-        exact_hash!(
-          receipt,
-          %w[
-            schema schema_version candidate_sha result execution_kind model_loop
-            installed_manifests hive_commands executed_instruction
-            external_actions containment teardown cleanup
-          ],
-          "execution receipt"
+      def validate_execution_receipt!(receipt, row:, candidate_sha:,
+                                      candidate_installation:,
+                                      openclaw_installation:)
+        WorkflowCreatorExecutionContract.validate!(
+          receipt: receipt,
+          row: row,
+          candidate_sha: candidate_sha,
+          candidate_installation: candidate_installation,
+          openclaw_installation: openclaw_installation
         )
-        valid =
-          receipt["schema"] == EXECUTION_RECEIPT_SCHEMA &&
-          receipt["schema_version"] == SCHEMA_VERSION &&
-          receipt["candidate_sha"] == candidate_sha &&
-          receipt["result"] == "passed" &&
-          receipt["execution_kind"] == "deterministic_fixture" &&
-          receipt["model_loop"] == "not_exercised" &&
-          receipt["installed_manifests"] == row["evidence_bundle"].first(2) &&
-          receipt["hive_commands"] == row["hive_commands"] &&
-          receipt["executed_instruction"] == row["executed_instruction"] &&
-          receipt["external_actions"] == row["external_actions"] &&
-          receipt["containment"] == row["containment"] &&
-          receipt["teardown"] == row["teardown"] &&
-          receipt["cleanup"] == row["cleanup"]
-        raise Error, "workflow-creator execution receipt is inconsistent" unless valid
       end
 
       def exact_hash!(value, keys, label)

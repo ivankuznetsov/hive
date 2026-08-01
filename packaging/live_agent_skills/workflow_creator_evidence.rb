@@ -1,13 +1,14 @@
 require "fileutils"
-require "tempfile"
+require_relative "workflow_creator_contract"
+require_relative "workflow_creator_atomic_file"
 
 module HiveLiveAgentProof
   class WorkflowCreatorEvidence
     def initialize(path:, renamer: nil, linker: nil, writer: nil,
                    before_rename: nil, directory_sync: nil)
       @path = File.expand_path(path)
-      @renamer = renamer || ->(source, destination) { File.rename(source, destination) }
-      @linker = linker || ->(source, destination) { File.link(source, destination) }
+      @renamer = renamer || ->(_source, _destination) { }
+      @linker = linker || ->(_source, _destination) { }
       @writer = writer || ->(file, bytes) { file.write(bytes) }
       @before_rename = before_rename || ->(_source, _destination) { }
       @directory_sync = directory_sync || method(:fsync_directory)
@@ -47,54 +48,45 @@ module HiveLiveAgentProof
       unless @path == expected_path
         raise Error, "workflow-creator evidence path does not match bundle root"
       end
-      WorkflowCreatorContract.validate_success_supporting!(
+      snapshot = WorkflowCreatorContract.validate_success_supporting!(
         row: sanitized,
         manifest: manifest,
         candidate_sha: candidate_sha,
         bundle_dir: bundle_dir,
         exact_secrets: exact_secrets
       )
-      atomic_write(WorkflowCreatorContract.canonical_json(sanitized))
+      atomic_write(
+        WorkflowCreatorContract.canonical_json(sanitized),
+        expected_parent_identity: snapshot.root_identity
+      )
       sanitized
     end
 
     private
 
-    def atomic_write(bytes, replace: true)
+    def atomic_write(bytes, replace: true, expected_parent_identity: nil)
       parent = File.dirname(@path)
       FileUtils.mkdir_p(parent, mode: 0o700)
-      temporary = nil
-      Tempfile.create(
-        [ ".#{File.basename(@path)}-", ".tmp" ],
-        parent,
-        mode: File::RDWR,
-        perm: 0o600
-      ) do |file|
-        temporary = file.path
-        file.binmode
-        @writer.call(file, bytes)
-        file.flush
-        file.fsync
-        file.close
-        @before_rename.call(temporary, @path)
-        if replace
-          @renamer.call(temporary, @path)
-        else
-          @linker.call(temporary, @path)
-          FileUtils.rm_f(temporary)
-        end
-        temporary = nil
-      end
-      @directory_sync.call(parent)
-      @path
-    ensure
-      FileUtils.rm_f(temporary) if temporary
+      WorkflowCreatorAtomicFile.new(
+        path: @path,
+        writer: @writer,
+        before_publish: @before_rename,
+        rename_gate: @renamer,
+        link_gate: @linker,
+        directory_sync: @directory_sync,
+        expected_parent_identity: expected_parent_identity
+      ).write(bytes, replace: replace)
+    rescue WorkflowCreatorAtomicFile::Unsafe,
+           WorkflowCreatorAtomicFile::Unavailable => e
+      raise Error, "workflow-creator evidence #{e.message}"
     end
 
-    def fsync_directory(path)
-      File.open(path, File::RDONLY) { |directory| directory.fsync }
-    rescue NotImplementedError, Errno::EINVAL, Errno::ENOTSUP, Errno::EBADF
-      nil
+    def fsync_directory(directory, _path = nil)
+      if directory.respond_to?(:fileno)
+        IO.for_fd(directory.fileno, autoclose: false).fsync
+      else
+        File.open(directory, File::RDONLY) { |opened| opened.fsync }
+      end
     end
   end
 end

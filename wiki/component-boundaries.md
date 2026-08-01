@@ -19,7 +19,7 @@ the first and primary consumer.
 |-----------|-------|---------------------|-------------------|
 | Patrol Effect Evidence | `candidate` (U3 qualification pending) | `require "hive/modules/migration/patrol_evidence"` → `Hive::Modules::Migration::PatrolEvidence` | [[modules/patrol]] |
 | Attempts admission / future RunReceipt | `candidate` (guarded reference) | `require "hive/attempts/api"` → `Hive::Attempts::API` | [[modules/attempts]] |
-| Workflow Creator Proof | `candidate` (U14/U15 custody and live orchestration pending) | `require "./packaging/live_agent_skills/proof"` → `HiveLiveAgentProof` | [[testing]] |
+| Workflow Creator Proof | `candidate` (U14/U15 custody and live orchestration pending) | `require "./packaging/live_agent_skills/workflow_creator"` → `HiveLiveAgentProof::WorkflowCreatorContract` | [[testing]] |
 | UserService | `boundary-ready` | `require "hive/user_service"` → `Hive::UserService` | [[modules/user_service]] |
 | Agent ABI | `boundary-ready`; standalone package candidate | `require "hive/agent_runtime"` → `Hive::AgentRuntime` | [[modules/agent_cli_runtime]], [[modules/agent_profile]] |
 | Agent Artifact Firewall | `boundary-ready` | `require "hive/artifact_firewall"` → `Hive::ArtifactFirewall` | [[modules/protected_files]] |
@@ -146,14 +146,21 @@ its full lifecycle is a supported component boundary: the slice does not
 publish raw storage, reconciliation, supervision, capacity, loss-policy,
 cancellation, export, or generic lifecycle operations.
 
-`HiveLiveAgentProof` is the packaging entry point for the guarded Workflow
-Creator Proof component. `WorkflowCreatorContract` owns the schema-v1 creator
+`HiveLiveAgentProof::WorkflowCreatorContract` is exposed by the dedicated
+`workflow_creator` packaging entry point for the guarded Workflow Creator Proof
+component; generic `proof.rb` consumes that entry point and the creator contract
+has no back-edge into the generic builder. `WorkflowCreatorContract` owns the schema-v1 creator
 document and classifications, `WorkflowCreatorBundle` independently validates
-the retained four-file bundle and exact installed closure roles, and
-`WorkflowCreatorEvidence` alone initializes or atomically replaces the primary
-receipt. Candidate and OpenClaw installed identities bind a canonical closure
-digest plus exact executable, interpreter-or-launcher, package, and lock
-records that must also appear in the bounded inventory. The component cannot
+the retained four-file bundle and exact installed closure roles,
+`WorkflowCreatorExecutionContract` owns only the U14/U15 receipt vocabulary and
+cross-bindings, and `WorkflowCreatorEvidence` alone initializes or atomically
+replaces the primary receipt through a descriptor-relative publisher. Candidate
+and OpenClaw installed identities bind a key-order-independent canonical closure
+digest plus exact executable, interpreter-or-launcher, package, and lock records
+that must also appear in the bounded inventory; the candidate additionally binds
+the audit gateway. Declared packaging and smoke construction surfaces are
+scanned, with one explicit temporary authorization for the U1 non-claiming smoke
+producer. The component cannot
 select credentials, execute a process, or translate unavailable U14 custody
 into success; those remain U14/U15 responsibilities documented in [[testing]].
 

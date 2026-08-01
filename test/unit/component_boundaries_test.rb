@@ -148,9 +148,9 @@ class ComponentBoundariesTest < Minitest::Test
 
     workflow_creator = contract.component("workflow-creator-proof")
     assert_equal "candidate", workflow_creator.fetch("state")
-    assert_equal "./packaging/live_agent_skills/proof",
+    assert_equal "./packaging/live_agent_skills/workflow_creator",
                  workflow_creator.dig("entrypoint", "require")
-    assert_equal "HiveLiveAgentProof",
+    assert_equal "HiveLiveAgentProof::WorkflowCreatorContract",
                  workflow_creator.dig("entrypoint", "constant")
     assert_equal(
       %w[
@@ -162,14 +162,33 @@ class ComponentBoundariesTest < Minitest::Test
     )
     assert_equal(
       %w[
+        packaging/live_agent_skills/proof_primitives.rb
+        packaging/live_agent_skills/workflow_creator.rb
+        packaging/live_agent_skills/workflow_creator_atomic_file.rb
         packaging/live_agent_skills/workflow_creator_contract.rb
         packaging/live_agent_skills/workflow_creator_evidence.rb
+        packaging/live_agent_skills/workflow_creator_execution_contract.rb
       ],
       workflow_creator.fetch("owned_paths").sort
     )
     assert_equal(
       [ "HiveLiveAgentProof::WorkflowCreatorEvidence" ],
       workflow_creator.fetch("forbidden_constructions")
+    )
+    assert_equal(
+      {
+        "HiveLiveAgentProof::WorkflowCreatorEvidence" => [
+          "test/smoke/live_hive_workflow_creator_smoke_test.rb"
+        ]
+      },
+      workflow_creator.fetch("authorized_internal_constructions").to_h do |site|
+        [ site.fetch("constant"), site.fetch("files") ]
+      end
+    )
+    assert_equal(
+      "Temporary U1 non-claiming producer; U15 removes this adapter.",
+      workflow_creator.fetch("authorized_internal_constructions")
+                      .first.fetch("reason")
     )
     assert_empty workflow_creator.fetch("component_dependencies")
     assert_empty workflow_creator.fetch("allowed_hive_dependencies")
@@ -179,7 +198,7 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal 1, workflow_creator.fetch("schema_contracts").length
     assert_match(/schema v1/, workflow_creator.fetch("schema_contracts").first)
     assert_equal 1, workflow_creator.fetch("lock_contracts").length
-    assert_match(/atomic link-or-rename/, workflow_creator.fetch("lock_contracts").first)
+    assert_match(/descriptor-relative/, workflow_creator.fetch("lock_contracts").first)
     assert_match(/cannot select credentials/, workflow_creator.fetch("mutation_authority"))
     assert_match(/interrupted writes preserve/, workflow_creator.fetch("recovery_surface"))
 
@@ -331,10 +350,41 @@ class ComponentBoundariesTest < Minitest::Test
     workflow_creator_load = contract.validate_clean_load!(
       "workflow-creator-proof"
     )
-    assert_equal "HiveLiveAgentProof",
+    assert_equal "HiveLiveAgentProof::WorkflowCreatorContract",
                  workflow_creator_load.fetch("constant")
     assert_empty workflow_creator_load.fetch("forbidden_loaded_features")
     assert_empty workflow_creator_load.fetch("forbidden_constants")
+  end
+
+  def test_declared_consumers_cannot_construct_workflow_creator_writer_without_authorization
+    document = Marshal.load(Marshal.dump(@document))
+    component = document.fetch("components").find do |entry|
+      entry.fetch("id") == "workflow-creator-proof"
+    end
+    component["authorized_internal_constructions"] = []
+
+    error = assert_raises(ComponentBoundaryContract::ValidationError) do
+      ComponentBoundaryContract.new(document, root: ROOT).validate!
+    end
+
+    assert_match(/workflow-creator-proof\.forbidden_constructions/, error.message)
+    assert_match(/live_hive_workflow_creator_smoke_test\.rb/, error.message)
+  end
+
+  def test_construction_authorization_must_stay_inside_declared_scan_surface
+    document = Marshal.load(Marshal.dump(@document))
+    component = document.fetch("components").find do |entry|
+      entry.fetch("id") == "workflow-creator-proof"
+    end
+    component.fetch("authorized_internal_constructions").first["files"] = [
+      "test/unit/packaging/workflow_creator_evidence_test.rb"
+    ]
+
+    error = assert_raises(ComponentBoundaryContract::ValidationError) do
+      ComponentBoundaryContract.new(document, root: ROOT).validate!
+    end
+
+    assert_match(/outside the declared construction scan surface/, error.message)
   end
 
   def test_final_graph_and_wiki_inventory_agree_with_the_catalog

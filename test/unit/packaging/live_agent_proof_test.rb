@@ -600,6 +600,14 @@ class LiveAgentProofTest < Minitest::Test
         "openclaw-lock-identity",
         "openclaw-installed-manifest.json",
         ->(installed) { installed.fetch("identity")["lock_size"] += 1 }
+      ],
+      [
+        "openclaw-provenance-policy",
+        "openclaw-installed-manifest.json",
+        lambda do |installed|
+          installed.dig("identity", "provenance", "approval")["policy_sha256"] =
+            "0" * 64
+        end
       ]
     ]
 
@@ -621,7 +629,7 @@ class LiveAgentProofTest < Minitest::Test
           )
         end
         assert_match(
-          /required members|closure identity|installed-manifest identity|installation (?:is not|identity is invalid)/,
+          /required members|closure identity|dependency provenance|installed-manifest identity|installation (?:is not|identity is invalid)/,
           error.message
         )
       end
@@ -880,8 +888,8 @@ class LiveAgentProofTest < Minitest::Test
       "unknown" => ->(receipt) { receipt["containment"]["status"] = "unknown" },
       "unbound" => ->(receipt) { receipt["installed_manifests"] = [] },
       "conflated" => lambda do |receipt|
-        receipt["execution_kind"] = "authenticated_openclaw"
-        receipt["model_loop"] = "executed"
+        receipt["classification"]["nested_stage"] =
+          receipt["classification"]["outer"].dup
       end
     }
 
@@ -901,6 +909,195 @@ class LiveAgentProofTest < Minitest::Test
             artifacts, evidence, creator,
             File.join(dir, "proof-receipt-#{name}")
           )
+        end
+      end
+    end
+  end
+
+  def test_execution_receipt_rejects_incomplete_or_contradictory_u14_u15_proof
+    mutations = {
+      "extra-root-field" => ->(receipt) { receipt["unexpected"] = true },
+      "missing-classification" => ->(receipt) { receipt.delete("classification") },
+      "reordered-commands" => ->(receipt) { receipt["commands"].reverse! },
+      "duplicate-command-label" => lambda do |receipt|
+        receipt["commands"][1]["attempt_label"] =
+          receipt["commands"][0]["attempt_label"]
+      end,
+      "failed-command" => ->(receipt) { receipt["commands"][0]["exit_code"] = 1 },
+      "signaled-command" => ->(receipt) { receipt["commands"][0]["signal"] = "TERM" },
+      "capture-overflow" => lambda do |receipt|
+        receipt["commands"][0]["capture"]["stdout_bytes"] = 65_537
+      end,
+      "missing-process-teardown" => lambda do |receipt|
+        receipt["commands"][0].delete("teardown")
+      end,
+      "missing-outer-process" => ->(receipt) { receipt["outer_processes"] = [] },
+      "gateway-substitution" => ->(receipt) { receipt["gateway"]["sha256"] = "0" * 64 },
+      "archive-failure" => lambda do |receipt|
+        receipt["archive_admissions"][0]["status"] = "failed"
+      end,
+      "archive-substitution" => lambda do |receipt|
+        receipt["archive_admissions"][0]["artifact_sha256"] = "0" * 64
+      end,
+      "missing-teardown-label" => lambda do |receipt|
+        receipt["teardown"]["receipt_labels"].pop
+      end,
+      "remaining-descendant" => lambda do |receipt|
+        receipt["teardown"]["remaining_descendants"] = 1
+      end,
+      "cleanup-identity-drift" => lambda do |receipt|
+        receipt["cleanup"]["targets"][0]["identity_matched"] = false
+      end,
+      "outer-nested-conflation" => lambda do |receipt|
+        receipt["classification"]["nested_stage"] =
+          receipt["classification"]["outer"].dup
+      end
+    }
+
+    with_tmp_dir do |dir|
+      artifacts = prepare_artifacts(dir)
+      manifest = JSON.parse(
+        File.read(File.join(artifacts, "artifact-manifest.json"))
+      )
+      mutations.each do |name, mutate|
+        creator = prepare_creator_evidence(File.join(dir, name), artifacts)
+        receipt_path = File.join(creator, "execution-receipt.json")
+        receipt = JSON.parse(File.read(receipt_path))
+        mutate.call(receipt)
+        HiveLiveAgentProof.write_json(receipt_path, receipt)
+        refresh_creator_bundle_record!(creator, "execution-receipt.json")
+        row = JSON.parse(
+          File.read(File.join(creator, "openclaw-workflow-creator.json"))
+        )
+
+        assert_raises(HiveLiveAgentProof::Error, name) do
+          HiveLiveAgentProof::WorkflowCreatorContract.validate_success!(
+            row: row,
+            manifest: manifest,
+            candidate_sha: SHA,
+            bundle_dir: creator
+          )
+        end
+      end
+    end
+  end
+
+  def test_provider_transport_and_credential_provenance_fail_closed
+    mutations = {
+      "provider-prefix" => lambda do |row|
+        row["provider"]["model"] = "other/model"
+      end,
+      "credential-downstream" => lambda do |row|
+        row["credential_boundary"]["tools"] = [ "OPENROUTER_API_KEY" ]
+      end,
+      "insecure-origin" => lambda do |row|
+        row["transport"]["endpoint_origin"] = "http://openrouter.ai"
+      end,
+      "unbound-proxy" => lambda do |row|
+        row["transport"]["proxy"] = { "mode" => "pinned", "sha256" => nil }
+      end,
+      "secret-shaped-model" => lambda do |row|
+        secret = "sk-proj-abcdefghijklmnopqrstuvwxyz"
+        row["provider"]["name"] = secret
+        row["provider"]["model"] = "#{secret}/model"
+      end
+    }
+
+    with_tmp_dir do |dir|
+      artifacts = prepare_artifacts(dir)
+      evidence = prepare_evidence(dir, artifacts)
+      mutations.each do |name, mutate|
+        errors = creator_contract_errors(
+          artifacts: artifacts,
+          evidence: evidence,
+          root: File.join(dir, name),
+          mutate: mutate
+        )
+        assert_equal 3, errors.length
+        unless name == "secret-shaped-model"
+          assert_equal 1, errors.map(&:message).uniq.length, name
+        end
+      end
+    end
+  end
+
+  def test_hard_killed_writer_does_not_poison_exact_bundle_or_retry
+    with_tmp_dir do |dir|
+      artifacts = prepare_artifacts(dir)
+      evidence = prepare_evidence(dir, artifacts)
+      creator = prepare_creator_evidence(dir, artifacts)
+      manifest = JSON.parse(
+        File.read(File.join(artifacts, "artifact-manifest.json"))
+      )
+      primary = File.join(creator, "openclaw-workflow-creator.json")
+      row = JSON.parse(File.read(primary))
+      prior = File.binread(primary)
+      reader, writer = IO.pipe
+      pid = fork do
+        reader.close
+        writer.sync = true
+        store = HiveLiveAgentProof::WorkflowCreatorEvidence.new(
+          path: primary,
+          before_rename: lambda do |*|
+            writer.write("1")
+            Process.kill("STOP", Process.pid)
+          end
+        )
+        store.replace_success!(
+          row,
+          manifest: manifest,
+          bundle_dir: creator,
+          candidate_sha: SHA
+        )
+        exit! 0
+      rescue StandardError
+        exit! 1
+      end
+      writer.close
+
+      assert_equal "1", reader.read(1)
+      Process.kill("KILL", pid)
+      _waited, status = Process.wait2(pid)
+      assert status.signaled?
+      assert_equal prior, File.binread(primary)
+      assert_equal(
+        HiveLiveAgentProof::WorkflowCreatorBundle::FILENAMES.sort,
+        Dir.children(creator).sort
+      )
+      refute_empty(
+        Dir.children(dir).grep(
+          /\A\.creator-evidence\.openclaw-workflow-creator\.json\.tmp\./
+        )
+      )
+
+      attest(
+        artifacts, evidence, creator,
+        File.join(dir, "proof-after-kill")
+      )
+      HiveLiveAgentProof::WorkflowCreatorEvidence.new(path: primary)
+                                                   .replace_success!(
+                                                     row,
+                                                     manifest: manifest,
+                                                     bundle_dir: creator,
+                                                     candidate_sha: SHA
+                                                   )
+      attest(
+        artifacts, evidence, creator,
+        File.join(dir, "proof-after-retry")
+      )
+    ensure
+      reader&.close
+      writer&.close unless writer&.closed?
+      if pid
+        begin
+          Process.kill("KILL", pid)
+        rescue Errno::ESRCH
+          nil
+        end
+        begin
+          Process.wait(pid)
+        rescue Errno::ECHILD
+          nil
         end
       end
     end
@@ -1265,6 +1462,9 @@ class LiveAgentProofTest < Minitest::Test
     end
     candidate_inventory = [
       inventory_record("bin/hive", sha256: "d" * 64, size: 100),
+      inventory_record(
+        "bin/hive-audit-gateway", sha256: "7" * 64, size: 110
+      ),
       inventory_record("bin/ruby", sha256: "a" * 64, size: 90),
       inventory_record("locks/Gemfile.lock", sha256: "b" * 64, size: 120),
       inventory_record(
@@ -1274,10 +1474,11 @@ class LiveAgentProofTest < Minitest::Test
       )
     ]
     candidate_members = {
+      "audit_gateway" => candidate_inventory.fetch(1),
       "executable" => candidate_inventory.fetch(0),
-      "interpreter_or_launcher" => candidate_inventory.fetch(1),
-      "lock" => candidate_inventory.fetch(2),
-      "package" => candidate_inventory.fetch(3)
+      "interpreter_or_launcher" => candidate_inventory.fetch(2),
+      "lock" => candidate_inventory.fetch(3),
+      "package" => candidate_inventory.fetch(4)
     }
     candidate_installation = {
       "schema" => HiveLiveAgentProof::WorkflowCreatorBundle::INSTALLED_MANIFEST_SCHEMA,
@@ -1334,7 +1535,17 @@ class LiveAgentProofTest < Minitest::Test
             required_members: openclaw_members,
             inventory: openclaw_inventory
           ),
-        "package_count" => 12
+        "package_count" => 12,
+        "provenance" => {
+          "registry_origin" => "https://registry.npmjs.org",
+          "integrity_tree_sha256" => "6" * 64,
+          "lifecycle_policy_sha256" => "5" * 64,
+          "approval" => {
+            "candidate_sha" => SHA,
+            "lock_sha256" => "e" * 64,
+            "policy_sha256" => "5" * 64
+          }
+        }
       },
       "required_members" => openclaw_members,
       "inventory" => openclaw_inventory
@@ -1355,20 +1566,132 @@ class LiveAgentProofTest < Minitest::Test
         evidence, "openclaw_installation", "openclaw-installed-manifest.json"
       )
     ]
+    capture = lambda do |digest|
+      {
+        "limit_bytes" => 65_536,
+        "stdout_bytes" => 16,
+        "stderr_bytes" => 0,
+        "stdout_sha256" => digest * 64,
+        "stderr_sha256" => Digest::SHA256.hexdigest(""),
+        "stdout_truncated" => false,
+        "stderr_truncated" => false,
+        "secret_scan" => {
+          "status" => "passed",
+          "scanner" => HiveLiveAgentProof::WorkflowCreatorContract::SCANNER
+        }
+      }
+    end
+    process_teardown = {
+      "status" => "passed",
+      "term_sent" => false,
+      "kill_sent" => false,
+      "reaped" => true,
+      "descendants" => "none",
+      "owner_complete" => true
+    }
+    commands = HiveLiveAgentProof::WORKFLOW_CREATOR_COMMANDS.each_with_index.map do |argv, index|
+      {
+        "position" => index + 1,
+        "attempt_label" => format("command-%02d", index + 1),
+        "argv" => argv,
+        "exit_code" => 0,
+        "signal" => nil,
+        "completed" => true,
+        "capture" => capture.call((index + 1).to_s),
+        "teardown" => process_teardown.dup
+      }
+    end
+    outer_processes = [
+      {
+        "label" => "outer-openclaw",
+        "role" => "openclaw-model-loop",
+        "argv_sha256" => "4" * 64,
+        "exit_code" => 0,
+        "signal" => nil,
+        "completed" => true,
+        "capture" => capture.call("a"),
+        "teardown" => process_teardown.dup
+      }
+    ]
+    process_labels = commands.map { |command| command.fetch("attempt_label") } +
+                     outer_processes.map { |process| process.fetch("label") }
     execution_receipt = {
       "schema" => HiveLiveAgentProof::WorkflowCreatorBundle::EXECUTION_RECEIPT_SCHEMA,
       "schema_version" => 1,
       "candidate_sha" => SHA,
       "result" => "passed",
-      "execution_kind" => "deterministic_fixture",
-      "model_loop" => "not_exercised",
+      "classification" => {
+        "outer" => {
+          "execution_kind" => "authenticated_openclaw",
+          "model_loop" => "executed"
+        },
+        "nested_stage" => {
+          "execution_kind" => "deterministic_fixture",
+          "model_loop" => "not_exercised"
+        }
+      },
+      "run" => {
+        "correlation_id" => "creator-run-01",
+        "expected_labels" => process_labels
+      },
       "installed_manifests" => bundle,
-      "hive_commands" => HiveLiveAgentProof::WORKFLOW_CREATOR_COMMANDS,
+      "gateway" => candidate_members.fetch("audit_gateway"),
+      "archive_admissions" => [
+        {
+          "label" => "candidate_package",
+          "artifact_sha256" => candidate_members.dig("package", "sha256"),
+          "artifact_size" => candidate_members.dig("package", "size"),
+          "policy_sha256" => "8" * 64,
+          "entry_count" => 32,
+          "uncompressed_bytes" => 65_536,
+          "status" => "passed"
+        },
+        {
+          "label" => "openclaw_package",
+          "artifact_sha256" => openclaw_members.dig("package", "sha256"),
+          "artifact_size" => openclaw_members.dig("package", "size"),
+          "policy_sha256" => "9" * 64,
+          "entry_count" => 64,
+          "uncompressed_bytes" => 131_072,
+          "status" => "passed"
+        }
+      ],
+      "commands" => commands,
+      "outer_processes" => outer_processes,
       "executed_instruction" => executed_instruction,
       "external_actions" => [],
-      "containment" => { "status" => "passed" },
-      "teardown" => { "status" => "passed" },
-      "cleanup" => { "status" => "passed" }
+      "containment" => {
+        "status" => "passed",
+        "mechanism" => "linux-child-subreaper",
+        "established_before_launch" => true,
+        "owner_correlation_id" => "creator-run-01",
+        "root_loss_behavior" => "fail-closed"
+      },
+      "teardown" => {
+        "status" => "passed",
+        "expected_labels" => process_labels,
+        "receipt_labels" => process_labels,
+        "outer_root_reaped" => true,
+        "remaining_descendants" => 0
+      },
+      "cleanup" => {
+        "status" => "passed",
+        "targets" => [
+          {
+            "label" => "proof-workspace",
+            "path_sha256" => "3" * 64,
+            "device" => 1,
+            "inode" => 2,
+            "created_by_run" => true,
+            "identity_matched" => true,
+            "removed" => true
+          }
+        ]
+      },
+      "secret_scan" => {
+        "status" => "passed",
+        "scanner" => HiveLiveAgentProof::WorkflowCreatorContract::SCANNER
+      }
     }
     HiveLiveAgentProof.write_json(
       File.join(evidence, "execution-receipt.json"),
@@ -1377,6 +1700,7 @@ class LiveAgentProofTest < Minitest::Test
     bundle << creator_bundle_record(
       evidence, "execution_receipt", "execution-receipt.json"
     )
+    execution_receipt_sha256 = bundle.fetch(2).fetch("sha256")
     row = {
       "schema" => "hive-live-workflow-creator-evidence",
       "schema_version" => 1,
@@ -1422,13 +1746,38 @@ class LiveAgentProofTest < Minitest::Test
         "status" => "passed",
         "scanner" => HiveLiveAgentProof::WorkflowCreatorContract::SCANNER
       },
-      "cleanup" => { "status" => "passed" },
+      "provider" => {
+        "name" => "openrouter",
+        "model" => "openrouter/openai/gpt-5.6-terra",
+        "credential_environment" => "OPENROUTER_API_KEY"
+      },
+      "transport" => {
+        "endpoint_origin" => "https://openrouter.ai",
+        "proxy" => { "mode" => "none", "sha256" => nil },
+        "ca" => { "mode" => "system", "sha256" => nil }
+      },
+      "credential_boundary" => {
+        "openclaw" => [ "OPENROUTER_API_KEY" ],
+        "tools" => [],
+        "gateway" => [],
+        "candidate" => []
+      },
+      "cleanup" => {
+        "status" => "passed",
+        "receipt_sha256" => execution_receipt_sha256
+      },
       "execution_kind" => "authenticated_openclaw",
       "model_loop" => "executed",
       "executed_instruction" => executed_instruction,
       "evidence_bundle" => bundle,
-      "containment" => { "status" => "passed" },
-      "teardown" => { "status" => "passed" }
+      "containment" => {
+        "status" => "passed",
+        "receipt_sha256" => execution_receipt_sha256
+      },
+      "teardown" => {
+        "status" => "passed",
+        "receipt_sha256" => execution_receipt_sha256
+      }
     }
     HiveLiveAgentProof.write_json(File.join(evidence, "openclaw-workflow-creator.json"), row)
     evidence
@@ -1451,6 +1800,30 @@ class LiveAgentProofTest < Minitest::Test
       "size" => size
     }
   end
+
+  public
+
+  def test_installed_closure_identity_is_independent_of_member_key_order
+    members = HiveLiveAgentProof::WorkflowCreatorBundle::REQUIRED_MEMBER_KEYS
+              .each_with_index.to_h do |key, index|
+      [ key, inventory_record("installed/#{key}", size: index + 1) ]
+    end
+    reversed = members.to_a.reverse.to_h
+    inventory = members.values.sort_by { |record| record.fetch("path") }
+
+    assert_equal(
+      HiveLiveAgentProof::WorkflowCreatorBundle.installed_closure_sha256(
+        required_members: members,
+        inventory: inventory
+      ),
+      HiveLiveAgentProof::WorkflowCreatorBundle.installed_closure_sha256(
+        required_members: reversed,
+        inventory: inventory
+      )
+    )
+  end
+
+  private
 
   def large_inventory
     padding = "x" * 1_900
@@ -1477,6 +1850,11 @@ class LiveAgentProofTest < Minitest::Test
     path = File.join(root, name)
     record["sha256"] = Digest::SHA256.file(path).hexdigest
     record["size"] = File.size(path)
+    if name == "execution-receipt.json"
+      %w[containment teardown cleanup].each do |field|
+        row.fetch(field)["receipt_sha256"] = record.fetch("sha256")
+      end
+    end
     HiveLiveAgentProof.write_json(primary, row)
   end
 

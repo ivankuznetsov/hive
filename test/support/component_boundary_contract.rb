@@ -52,6 +52,7 @@ class ComponentBoundaryContract
     migration_exceptions
   ].freeze
   PATH_FIELDS = %w[owned_paths hive_consumers focused_tests].freeze
+  OPTIONAL_PATH_FIELDS = %w[construction_scan_paths].freeze
   FORBIDDEN_REQUIRE_PREFIXES = %w[
     hive/cli
     hive/commands
@@ -174,6 +175,12 @@ class ComponentBoundaryContract
     PATH_FIELDS.each do |field|
       row.fetch(field).each { |value| repo_path!(value, "#{component_path}.#{field}") }
     end
+    OPTIONAL_PATH_FIELDS.each do |field|
+      next unless row.key?(field)
+
+      values = string_array!(row.fetch(field), "#{component_path}.#{field}")
+      values.each { |value| repo_path!(value, "#{component_path}.#{field}") }
+    end
     repo_path!(row.fetch("wiki_page"), "#{component_path}.wiki_page")
     validate_migration_exceptions!(row, component_path)
     validate_authorized_internal_constructions!(row, component_path)
@@ -206,6 +213,7 @@ class ComponentBoundaryContract
 
     seen_constants = Set.new
     owned_files = ruby_files(row.fetch("owned_paths"))
+    scanned_files = construction_files(row)
 
     sites.each_with_index do |entry, index|
       path = "#{component_path}.authorized_internal_constructions[#{index}]"
@@ -230,6 +238,10 @@ class ComponentBoundaryContract
         if owned_files.include?(relative)
           invalid!("#{path}.files[#{file_index}]",
                    "component-owned files do not need construction authorization")
+        end
+        unless scanned_files.include?(relative)
+          invalid!("#{path}.files[#{file_index}]",
+                   "#{relative} is outside the declared construction scan surface")
         end
         unless ruby_syntax(relative).constructions.include?(constant)
           invalid!("#{path}.files[#{file_index}]",
@@ -328,7 +340,7 @@ class ComponentBoundaryContract
       site.fetch("files").each { |relative| pairs << [ relative, site.fetch("constant") ] }
     end
     owned_files = ruby_files(entry.fetch("owned_paths"))
-    (production_ruby_files - owned_files).each do |relative|
+    (construction_files(entry) - owned_files).each do |relative|
       constructions = ruby_syntax(relative).constructions
       invalid_constants = (constructions & forbidden).reject do |constant|
         authorized.include?([ relative, constant ])
@@ -411,6 +423,11 @@ class ComponentBoundaryContract
 
   def production_ruby_files
     @production_ruby_files ||= ruby_files([ "lib" ])
+  end
+
+  def construction_files(entry)
+    (production_ruby_files +
+      ruby_files(entry.fetch("construction_scan_paths", []))).uniq
   end
 
   def ruby_files(paths)

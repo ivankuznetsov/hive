@@ -279,9 +279,9 @@ components:
     name: Workflow Creator Proof
     state: candidate
     entrypoint:
-      file: packaging/live_agent_skills/proof.rb
-      require: ./packaging/live_agent_skills/proof
-      constant: HiveLiveAgentProof
+      file: packaging/live_agent_skills/workflow_creator.rb
+      require: ./packaging/live_agent_skills/workflow_creator
+      constant: HiveLiveAgentProof::WorkflowCreatorContract
     public_contract:
       values:
         - HiveLiveAgentProof::WorkflowCreatorContract
@@ -290,28 +290,41 @@ components:
       errors:
         - HiveLiveAgentProof::Error
     owned_paths:
+      - packaging/live_agent_skills/proof_primitives.rb
+      - packaging/live_agent_skills/workflow_creator.rb
+      - packaging/live_agent_skills/workflow_creator_atomic_file.rb
       - packaging/live_agent_skills/workflow_creator_contract.rb
       - packaging/live_agent_skills/workflow_creator_evidence.rb
+      - packaging/live_agent_skills/workflow_creator_execution_contract.rb
     state_contracts:
       - "WorkflowCreatorEvidence is the sole writer of the caller-selected primary creator receipt; WorkflowCreatorContract and WorkflowCreatorBundle validate typed creator and retained bundle bytes without choosing execution or provider policy"
     schema_contracts:
-      - "hive-live-workflow-creator-evidence schema v1 plus canonical installed-manifest and execution-receipt bundle members; U14 and U15 populate the contract without redefining it"
+      - "hive-live-workflow-creator-evidence schema v1 plus canonical installed manifests, ordered command/capture/process custody, dependency/provider/transport provenance, and digest-bound execution summaries; U14 and U15 populate the contract without redefining it"
     lock_contracts:
-      - "Private sibling temporary file, file fsync, atomic link-or-rename, and parent-directory fsync preserve the prior accepted receipt across interrupted replacement"
+      - "Private same-filesystem staging outside the exact bundle root, descriptor-relative linkat-or-renameat publication, inode/byte verification, strict destination/staging directory fsync, and public-parent rebinding checks preserve the prior accepted receipt or fail closed"
     component_dependencies: []
     allowed_hive_dependencies: []
     internal_collaborators:
       - HiveLiveAgentProof::WorkflowCreatorBundle
       - HiveLiveAgentProof::WorkflowCreatorEvidence
+      - HiveLiveAgentProof::WorkflowCreatorExecutionContract
     forbidden_constructions:
       - HiveLiveAgentProof::WorkflowCreatorEvidence
-    authorized_internal_constructions: []
+    construction_scan_paths:
+      - packaging/live_agent_skills
+      - packaging/release_candidate/artifacts.rb
+      - test/smoke/live_hive_workflow_creator_smoke_test.rb
+    authorized_internal_constructions:
+      - constant: HiveLiveAgentProof::WorkflowCreatorEvidence
+        files:
+          - test/smoke/live_hive_workflow_creator_smoke_test.rb
+        reason: "Temporary U1 non-claiming producer; U15 removes this adapter."
     hive_consumers:
       - packaging/live_agent_skills/proof.rb
       - packaging/release_candidate/artifacts.rb
       - test/smoke/live_hive_workflow_creator_smoke_test.rb
     mutation_authority: "WorkflowCreatorEvidence alone initializes and atomically replaces the primary creator receipt at a caller-selected path; it cannot select credentials, launch processes, or turn unavailable U14 custody into success."
-    recovery_surface: "A schema-valid non-passing receipt precedes work; interrupted writes preserve the prior bytes, and successful replacement is visible only after the parent directory is synced."
+    recovery_surface: "A schema-valid non-passing receipt precedes work; interrupted writes preserve the prior bytes, hard-kill orphans stay outside the exact bundle inventory, and successful replacement is reported only after pinned-directory durability and binding verification."
     wiki_page: wiki/testing.md
     focused_tests:
       - test/unit/packaging/live_agent_proof_test.rb

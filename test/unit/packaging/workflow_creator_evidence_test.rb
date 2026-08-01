@@ -1,5 +1,7 @@
 require "test_helper"
 require "json"
+require "open3"
+require "rbconfig"
 require_relative "../../../packaging/live_agent_skills/proof"
 require_relative "../../../packaging/release_candidate/artifacts"
 
@@ -46,6 +48,41 @@ class WorkflowCreatorEvidenceTest < Minitest::Test
 
       assert_equal previous, File.binread(path)
       assert_empty Dir.glob(File.join(dir, ".*.tmp"))
+    end
+  end
+
+  def test_parent_substitution_cannot_publish_unvalidated_bytes
+    with_tmp_dir do |dir|
+      parent = File.join(dir, "bundle")
+      parked = File.join(dir, "bundle.parked")
+      outside = File.join(dir, "outside")
+      FileUtils.mkdir_p([ parent, outside ])
+      path = File.join(parent, "openclaw-workflow-creator.json")
+      store = HiveLiveAgentProof::WorkflowCreatorEvidence.new(path: path)
+      store.initialize!(candidate_sha: SHA)
+      previous = File.binread(path)
+      sentinel = "attacker destination sentinel\n"
+      outside_path = File.join(outside, File.basename(path))
+      File.binwrite(outside_path, sentinel)
+      substituted = HiveLiveAgentProof::WorkflowCreatorEvidence.new(
+        path: path,
+        before_rename: lambda do |source, _destination|
+          File.rename(parent, parked)
+          File.symlink(outside, parent)
+          File.binwrite(File.join(outside, File.basename(source)), "attacker bytes\n")
+        end
+      )
+
+      error = assert_raises(HiveLiveAgentProof::Error) do
+        substituted.replace_nonpassing!(failed_document("proof_failed"))
+      end
+
+      assert_includes error.message, "directory changed"
+      assert_equal sentinel, File.binread(outside_path)
+      assert_equal previous, File.binread(File.join(parked, File.basename(path)))
+    ensure
+      File.unlink(parent) if File.symlink?(parent)
+      File.rename(parked, parent) if File.directory?(parked)
     end
   end
 
@@ -100,11 +137,10 @@ class WorkflowCreatorEvidenceTest < Minitest::Test
       events = []
       store = HiveLiveAgentProof::WorkflowCreatorEvidence.new(
         path: path,
-        renamer: lambda do |source, destination|
+        renamer: lambda do |_source, _destination|
           events << :rename
-          File.rename(source, destination)
         end,
-        directory_sync: lambda do |parent|
+        directory_sync: lambda do |_directory, parent|
           events << [ :directory_fsync, parent ]
           0
         end
@@ -113,7 +149,11 @@ class WorkflowCreatorEvidenceTest < Minitest::Test
       store.replace_nonpassing!(failed_document("proof_failed"))
 
       assert_equal(
-        [ :rename, [ :directory_fsync, dir ] ],
+        [
+          :rename,
+          [ :directory_fsync, dir ],
+          [ :directory_fsync, File.dirname(dir) ]
+        ],
         events
       )
     end
@@ -143,19 +183,36 @@ class WorkflowCreatorEvidenceTest < Minitest::Test
     end
   end
 
+  def test_unsupported_directory_fsync_fails_closed
+    with_tmp_dir do |dir|
+      store = HiveLiveAgentProof::WorkflowCreatorEvidence.new(
+        path: File.join(dir, "openclaw-workflow-creator.json")
+      )
+
+      with_replaced_singleton_method(
+        File,
+        :open,
+        ->(*) { raise Errno::EINVAL, "unsupported fsync" }
+      ) do
+        assert_raises(Errno::EINVAL) do
+          store.send(:fsync_directory, dir)
+        end
+      end
+    end
+  end
+
   def test_initializer_cannot_clobber_a_receipt_won_by_a_concurrent_writer
     with_tmp_dir do |dir|
       path = File.join(dir, "openclaw-workflow-creator.json")
       winner = "concurrent receipt\n"
       store = HiveLiveAgentProof::WorkflowCreatorEvidence.new(
         path: path,
-        linker: lambda do |source, destination|
+        linker: lambda do |_source, destination|
           File.open(
             destination,
             File::WRONLY | File::CREAT | File::EXCL,
             0o600
           ) { |file| file.write(winner) }
-          File.link(source, destination)
         end
       )
 
@@ -296,11 +353,34 @@ class WorkflowCreatorEvidenceTest < Minitest::Test
       %w[
         packaging/live_agent_skills/proof.rb
         packaging/live_agent_skills/build.rb
+        packaging/live_agent_skills/proof_primitives.rb
+        packaging/live_agent_skills/workflow_creator.rb
+        packaging/live_agent_skills/workflow_creator_atomic_file.rb
         packaging/live_agent_skills/workflow_creator_contract.rb
         packaging/live_agent_skills/workflow_creator_evidence.rb
+        packaging/live_agent_skills/workflow_creator_execution_contract.rb
       ],
       HiveReleaseCandidate::Artifacts::LIVE_AGENT_BUILDER_INPUTS
     )
+  end
+
+  def test_creator_entrypoint_loads_without_generic_proof
+    root = File.expand_path("../../..", __dir__)
+    script = <<~RUBY
+      require "./packaging/live_agent_skills/workflow_creator"
+      document = HiveLiveAgentProof::WorkflowCreatorContract.initial(
+        candidate_sha: #{SHA.inspect}
+      )
+      abort "generic proof loaded" if $LOADED_FEATURES.any? { |path| path.end_with?("/proof.rb") }
+      puts document.fetch("result")
+    RUBY
+
+    stdout, stderr, status = Open3.capture3(
+      RbConfig.ruby, "-I.", "-e", script, chdir: root
+    )
+
+    assert status.success?, stderr
+    assert_equal "failed\n", stdout
   end
 
   def test_completion_log_keeps_the_gaps_backlink

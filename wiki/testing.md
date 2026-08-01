@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release-candidate,release}.yml, packaging/{live_agent_skills,release_candidate}/, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-07-30
+updated: 2026-08-01
 tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, release-proof]
 ---
 
@@ -616,20 +616,25 @@ The protected `live-agent-skills.yml` workflow can additionally:
 
 The workflow-creator branch of that proof now has one packaging-owned schema-v1
 contract. Its producer first atomically persists an owner-private, non-passing
-receipt with a no-clobber same-directory link; replacement uses a sibling
-temporary file, file `fsync`, rename, and parent-directory `fsync`, so a
-concurrent initializer cannot overwrite a winner and a failed write or rename
-cannot truncate the last valid receipt. A directory-`fsync` failure after rename
-reports the durability failure but leaves one complete, retryable receipt, never
-partial bytes. A passing primary is closure-validated before publication and
+receipt with a no-clobber descriptor-relative link. Replacement stages a
+private same-filesystem temporary outside the exact bundle root, file-`fsync`s
+it, publishes it with `linkat` or `renameat` against a pinned bundle-directory
+descriptor, verifies the published inode and bytes, and strictly `fsync`s the
+held destination and staging directories. A substituted public parent fails
+binding verification without redirecting publication, while a hard-killed
+writer can leave only an out-of-bundle orphan that cannot poison the exact
+four-file inventory or a later retry. Unsupported directory durability fails
+closed. A post-publication directory-`fsync` failure still leaves one complete,
+retryable receipt, never partial bytes. A passing primary is closure-validated before publication and
 must be the canonical primary inside its bundle root. A passing receipt
 additionally requires an exact four-file retained bundle: the creator row,
 candidate and OpenClaw installed manifests, and an execution/cleanup receipt.
 The fixed bundle records bind canonical bytes, digest, integer size, and bounded
 installed inventory. Each installed manifest additionally names exact
-`executable`, `interpreter_or_launcher`, `package`, and `lock` records; all four
-must be distinct inventory members, and their canonical closure digest is part
-of the claimed installation identity. Candidate package digest/size and
+`executable`, `interpreter_or_launcher`, `package`, and `lock` records; the
+candidate closure also names the exact `audit_gateway`. Every role must be a
+distinct inventory member, and its key-order-independent canonical closure
+digest is part of the claimed installation identity. Candidate package digest/size and
 OpenClaw package and lock digest/size fields cross-bind those required members.
 Dot, NUL, unsafe, missing-role, unlisted-role, duplicate-role, identity-drift,
 over-count, per-file oversized, and aggregate-oversized values fail closed.
@@ -642,16 +647,25 @@ Attestor and Verifier. The four-file retained bundle also has an independently
 tested aggregate byte cap in addition to its per-file bounds.
 Malformed JSON diagnostics never interpolate producer bytes, and focused
 primary admission covers hard links as well as symlinks and oversized files.
-The execution receipt must agree with the creator row's command, effect, instruction,
-containment, teardown, and cleanup claims. Attestation copies those exact
+The execution receipt schema now fixes U14's run correlation, gateway identity,
+two package/archive admissions, nine ordered command receipts, bounded capture,
+per-process teardown, outer-process labels, aggregate containment/teardown,
+cleanup identities, and secret scan. It must agree with the creator row's
+instruction, external-action, containment, teardown, and cleanup claims; each
+primary summary is bound to the execution-receipt digest. Attestation copies those exact
 bytes, and verification replays the same contract after runner-local install
-roots have disappeared. Classification stays explicit across the boundary: the
-creator row can pass only as `authenticated_openclaw` with an executed model
-loop, while the retained execution receipt is
-`deterministic_fixture`/`not_exercised`; swapping or conflating those roles is
-rejected. Producer, Attestor, and Verifier parity tests apply the same missing,
-extra, wrong-type, and classification mutations, while the command matrix also
-rejects a dynamically targeted task command.
+roots have disappeared. Classification stays explicit across the boundary:
+the receipt's outer run must match the creator row's
+`authenticated_openclaw`/`executed` classification, while its nested-stage
+classification is exactly `deterministic_fixture`/`not_exercised`; swapping or
+conflating those roles is rejected. The creator row also carries U1-owned,
+schema-only provider, HTTPS transport, OpenClaw dependency-provenance, and
+credential-environment boundaries. Only the selected provider variable name
+may be assigned to OpenClaw; tools, gateway, and candidate receive none, and no
+credential value is retained. Producer, Attestor, and Verifier parity tests
+apply the same missing, extra, wrong-type, classification, provider, transport,
+and credential mutations, while the command matrix also rejects a dynamically
+targeted task command.
 
 This is intentionally a non-claiming intermediate state. The current smoke
 adapter can upload a schema-valid failure with

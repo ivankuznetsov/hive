@@ -18,8 +18,12 @@ module HiveReleaseCandidate
     LIVE_AGENT_BUILDER_INPUTS = %w[
       packaging/live_agent_skills/proof.rb
       packaging/live_agent_skills/build.rb
+      packaging/live_agent_skills/proof_primitives.rb
+      packaging/live_agent_skills/workflow_creator.rb
+      packaging/live_agent_skills/workflow_creator_atomic_file.rb
       packaging/live_agent_skills/workflow_creator_contract.rb
       packaging/live_agent_skills/workflow_creator_evidence.rb
+      packaging/live_agent_skills/workflow_creator_execution_contract.rb
     ].freeze
 
     attr_reader :repo_root, :candidate_sha, :candidate_dir

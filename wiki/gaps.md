@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-07-30
+updated: 2026-08-01
 tags: [gap, todo, release-proof, agent-skills]
 ---
 
@@ -807,20 +807,26 @@ read-through alias has not been selected. Remove it only after warned projects
 have had a migration window and release notes make the strict boundary
 explicit; no version or publication decision is implied by the source change.
 
-## Workflow-creator protected OpenClaw proof awaits a credentialed run (2026-07-24)
+## Workflow-creator protected proof awaits the composed U1b/U14/U15 path (2026-08-01)
 
-The natural-language workflow creator is covered hermetically through AE1–AE5,
-including real descriptor loading, human approve/reject decisions, minimal-init
-preview, collision refusal, and state-wide task idempotency. The protected
-OpenClaw workflow and fail-closed attestor are source/unit tested, but this
-implementation session had no release-gate OpenAI credential and therefore did
-not produce a trusted live attestation. Keep this gap open until the dedicated
-`live-workflow-creator` job succeeds for an exact protected-main candidate and
-the resulting Check Run binds the prompt, candidate skill digest, ordered Hive
-commands, exact editorial graph, zero task count, secret scan, and cleanup.
-The same proof must also attest one explicitly authorized task, one first-stage
-run, a no-op retry with the same idempotency key, and matching operational
-status.
+The natural-language workflow creator remains covered hermetically through
+AE1–AE5, including real descriptor loading, human approve/reject decisions,
+minimal-init preview, collision refusal, and state-wide task idempotency. U1a
+now gives Attestor and Verifier one strict, mutation-free, four-file creator
+contract and rejects the former single-file row without a fallback. The
+current protected OpenClaw smoke and workflow intentionally remain unchanged
+in U1a and therefore cannot yet supply a valid bundle or claim success; this is
+an explicit non-claiming gap, not a passing skip or a credential-only blocker.
+
+Keep this gap open until U1b publishes the creator bundle safely, U14 produces
+the installed-closure and deterministic execution receipt, and U15 composes
+the authenticated OpenClaw model loop on an exact protected-main candidate.
+The resulting Check Run must bind both prompt digests, candidate skill and
+installed package identities, ordered Hive commands, authored/executed
+instruction bytes, exact editorial graph, zero creation-only task count, one
+authorized task and first-stage run, a no-op retry under the same idempotency
+key, matching operational status, containment, teardown, cleanup, and secret
+scan. Provider credential or quota availability remains a separate U15 gate.
 
 ## WorkLedger is an internal boundary, not a published format (2026-07-26)
 

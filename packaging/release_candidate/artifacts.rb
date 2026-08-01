@@ -15,6 +15,15 @@ module HiveReleaseCandidate
   class Artifacts
     MANIFEST_SCHEMA = "hive-release-candidate-artifacts"
     KINDS = %w[gem source skills web].freeze
+    LIVE_AGENT_BUILDER_INPUTS = %w[
+      packaging/live_agent_skills/proof.rb
+      packaging/live_agent_skills/proof_primitives.rb
+      packaging/live_agent_skills/workflow_creator.rb
+      packaging/live_agent_skills/workflow_creator_contract.rb
+      packaging/live_agent_skills/workflow_creator_bundle.rb
+      packaging/live_agent_skills/workflow_creator_execution_contract.rb
+      packaging/live_agent_skills/build.rb
+    ].freeze
 
     attr_reader :repo_root, :candidate_sha, :candidate_dir
 
@@ -235,15 +244,13 @@ module HiveReleaseCandidate
     end
 
     def builder_revision(export)
-      paths = [
-        File.join(export, "packaging", "live_agent_skills", "proof.rb"),
-        File.join(export, "packaging", "live_agent_skills", "build.rb"),
-        File.expand_path("../managed_web_archive.rb", __dir__)
-      ]
+      inputs = LIVE_AGENT_BUILDER_INPUTS.map { |path| [ path, File.join(export, path) ] }
+      inputs << [ "packaging/managed_web_archive.rb",
+                  File.expand_path("../managed_web_archive.rb", __dir__) ]
       digest = Digest::SHA256.new
-      paths.each do |path|
+      inputs.each do |label, path|
         raise Error, "candidate builder input is missing: #{path}" unless File.file?(path) && !File.symlink?(path)
-        digest << File.basename(path) << "\0" << File.binread(path) << "\0"
+        digest << label << "\0" << File.binread(path) << "\0"
       end
       digest.hexdigest
     end
@@ -252,16 +259,17 @@ module HiveReleaseCandidate
       source_name, = files.find { |_name, record| record["kind"] == "source" }
       raise Error, "candidate source artifact is missing" unless source_name
 
-      wanted = %w[
-        packaging/live_agent_skills/proof.rb
-        packaging/live_agent_skills/build.rb
-      ]
+      wanted = LIVE_AGENT_BUILDER_INPUTS
       contents = {}
       Zlib::GzipReader.open(File.join(directory, source_name)) do |gzip|
         Gem::Package::TarReader.new(gzip) do |tar|
           tar.each do |entry|
             name = entry.full_name.sub(%r{\A\./}, "")
-            contents[name] = entry.read if entry.file? && wanted.include?(name)
+            next unless entry.file? && wanted.include?(name)
+
+            raise Error, "candidate source duplicates builder input #{name}" if contents.key?(name)
+
+            contents[name] = entry.read
           end
         end
       end
@@ -272,13 +280,13 @@ module HiveReleaseCandidate
 
       digest = Digest::SHA256.new
       wanted.each do |name|
-        digest << File.basename(name) << "\0" << contents.fetch(name) << "\0"
+        digest << name << "\0" << contents.fetch(name) << "\0"
       end
       managed = File.expand_path("../managed_web_archive.rb", __dir__)
       unless File.file?(managed) && !File.symlink?(managed)
         raise Error, "managed web builder input is missing"
       end
-      digest << File.basename(managed) << "\0" << File.binread(managed) << "\0"
+      digest << "packaging/managed_web_archive.rb\0" << File.binread(managed) << "\0"
       digest.hexdigest
     rescue Zlib::GzipFile::Error, Gem::Package::TarInvalidError, EOFError => e
       raise Error, "cannot verify candidate source builder inputs: #{e.message}"

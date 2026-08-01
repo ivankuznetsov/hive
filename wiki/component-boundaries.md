@@ -3,7 +3,7 @@ title: Component boundaries
 type: reference
 source: config/component-boundaries.yml, test/support/component_boundary_contract.rb
 created: 2026-07-25
-updated: 2026-07-30
+updated: 2026-08-01
 tags: [architecture, components, boundaries, monorepo]
 ---
 
@@ -17,6 +17,7 @@ the first and primary consumer.
 
 | Component | State | Current entry point | Narrative context |
 |-----------|-------|---------------------|-------------------|
+| Workflow Creator Proof Contract | `candidate` (U1a validator-only) | `require "packaging/live_agent_skills/workflow_creator"` → `HiveLiveAgentProof::WorkflowCreatorBundle` | [[component-boundaries]], [[testing]], [[release-candidate]] |
 | Patrol Effect Evidence | `candidate` (U3 qualification pending) | `require "hive/modules/migration/patrol_evidence"` → `Hive::Modules::Migration::PatrolEvidence` | [[modules/patrol]] |
 | Attempts admission / future RunReceipt | `candidate` (guarded reference) | `require "hive/attempts/api"` → `Hive::Attempts::API` | [[modules/attempts]] |
 | UserService | `boundary-ready` | `require "hive/user_service"` → `Hive::UserService` | [[modules/user_service]] |
@@ -32,10 +33,21 @@ means the entry point, allowed dependency direction, consumer construction
 rules, and clean-process load are enforced. It does not mean that a component
 has earned a gem, version, repository, or release.
 
+`Workflow Creator Proof Contract` is deliberately validator-only in U1a. Its
+five source files contain one deep-frozen vocabulary, exact creator-document
+validation, read-only four-file custody, a declarative execution-summary
+validator, and shared pure primitives. No owned type writes, links, renames,
+locks, syncs, recovers, cleans, spawns, installs, or handles credentials.
+Attestor remains the incumbent proof-output writer; U1b owns publication and
+recovery, U14 owns deterministic execution custody, and U15 owns the provider
+and live OpenClaw sequence. The catalog keeps this boundary `candidate` until
+those units compose it; the absence of a legacy single-file reader is explicit.
+
 ## Final graph audit
 
-The final U2 resolution on 2026-07-29 retains eight components: six are
-`boundary-ready`; Attempts and Patrol Effect Evidence remain `candidate`.
+The U1a catalog update on 2026-08-01 retains nine components: six are
+`boundary-ready`; Attempts, Patrol Effect Evidence, and Workflow Creator Proof
+Contract remain `candidate`.
 Patrol retains one bounded U3 exception for compressed evidence qualification
 and cutover proof. Every retained entry point has a focused clean-process load
 proof, every catalog-owned path and focused test resolves inside this
@@ -49,6 +61,7 @@ flowchart LR
   skillpack[Skillpack] --> agent_abi[Agent ABI]
   patrol_effects[Patrol Effect Evidence - candidate]
   attempts[Attempts admission - candidate]
+  creator_proof[Workflow Creator Proof Contract - candidate]
   user_service[UserService]
   artifact_firewall[Agent Artifact Firewall]
   git_gate[Safe Agent Git Gate]

@@ -4,6 +4,50 @@ schema_version: 1
 # its test-only contract enforce declared source boundaries; they are not a
 # runtime security sandbox and cannot prevent reflection or monkeypatching.
 components:
+  - id: workflow-creator-proof
+    name: Workflow Creator Proof Contract
+    state: candidate
+    entrypoint:
+      file: packaging/live_agent_skills/workflow_creator.rb
+      require: packaging/live_agent_skills/workflow_creator
+      constant: HiveLiveAgentProof::WorkflowCreatorBundle
+    public_contract:
+      values:
+        - HiveLiveAgentProof::WorkflowCreatorBundle::Snapshot
+      errors:
+        - HiveLiveAgentProof::Error
+    owned_paths:
+      - packaging/live_agent_skills/proof_primitives.rb
+      - packaging/live_agent_skills/workflow_creator.rb
+      - packaging/live_agent_skills/workflow_creator_contract.rb
+      - packaging/live_agent_skills/workflow_creator_bundle.rb
+      - packaging/live_agent_skills/workflow_creator_execution_contract.rb
+    state_contracts:
+      - "The contract reads one exact four-file owner-private source bundle and revalidates the retained bytes without reading runner-local installation roots"
+      - "Attestor and Verifier consume one strict creator schema; the existing proof assembly remains the only writer in U1a"
+    schema_contracts:
+      - "Schema-v1 creator evidence binds exact vocabulary, created and executed instructions, installed closure manifests, and one execution receipt digest"
+      - "Missing, extra, reordered, wrong-type, noncanonical, secret-shaped, or cross-identity data fails closed"
+    lock_contracts:
+      - "U1a owns no locks or mutation; creator-specific publication, recovery, and durability remain reserved for U1b"
+    component_dependencies: []
+    allowed_hive_dependencies: []
+    internal_collaborators:
+      - HiveLiveAgentProof::WorkflowCreatorContract
+      - HiveLiveAgentProof::WorkflowCreatorExecutionContract
+    forbidden_constructions: []
+    authorized_internal_constructions: []
+    hive_consumers:
+      - packaging/live_agent_skills/proof.rb
+    mutation_authority: "No U1a type mutates state; Attestor alone copies already-validated bytes through its incumbent output assembly."
+    recovery_surface: "None in U1a; the old single-file producer is rejected and U1b owns all creator publication and recovery."
+    wiki_page: wiki/component-boundaries.md
+    focused_tests:
+      - test/unit/packaging/live_agent_proof_test.rb
+      - test/unit/packaging/release_candidate_artifacts_test.rb
+      - test/unit/component_boundaries_test.rb
+    migration_exceptions: []
+
   - id: patrol-effects
     name: Patrol Effect Evidence
     state: candidate

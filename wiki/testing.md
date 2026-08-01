@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release-candidate,release}.yml, packaging/{live_agent_skills,release_candidate}/, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-07-30
+updated: 2026-08-01
 tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, release-proof]
 ---
 
@@ -44,6 +44,25 @@ then one created-and-run slug plus a no-op retry with the same idempotency key,
 operational status, no external actions, secret scanning, and cleanup. Missing
 provider credentials make this live gate explicitly unavailable; they never
 turn a skipped test into release evidence.
+
+U1a makes the attestation boundary stricter before that live producer is
+rebuilt. Creator input is now exactly four canonical JSON files:
+`openclaw-workflow-creator.json`, `candidate-installed-manifest.json`,
+`openclaw-installed-manifest.json`, and `execution-receipt.json`. The source
+directory and files must be current-user-owned and private; installed closure
+members, authored/executed instruction identity, ordered command/prompt
+digests, classification, and the execution/containment/teardown/cleanup summary
+all cross-bind. Attestor retains the exact validated bytes and Verifier checks
+them without consulting deleted installation roots. Extra fields, wrong types,
+noncanonical bytes, inventory drift, release-package substitution, and
+secret-shaped material fail closed through the same validator. The contract
+also owns the bounded, strictly checked non-passing schema that U1b will
+publish before U15 preflight; its diagnostic detail is UTF-8-normalized,
+redacted, and capped at 1,000 bytes. There is no
+single-file compatibility reader. The unchanged advisory smoke/workflow still
+produces the older single file, so it cannot currently make a creator claim;
+U1b, U14, and U15 own publication, deterministic execution custody, and live
+orchestration in that order.
 
 ## Local feedback loop
 

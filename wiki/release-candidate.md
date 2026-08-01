@@ -3,7 +3,7 @@ title: Release Candidate Evidence
 type: reference
 source: bin/hive-release-candidate, packaging/release_candidate/, packaging/managed_web_archive.rb, .github/workflows/{release-candidate,release}.yml
 created: 2026-07-27
-updated: 2026-07-27
+updated: 2026-08-01
 tags: [release, candidate, evidence, packaging, safety]
 ---
 
@@ -36,6 +36,13 @@ SHA-256, unmanifested or substituted files are rejected, input manifests are
 immutable, attempt directories are append-only, indexes use atomic replacement,
 and INT/TERM interruption records a partial attempt before returning a
 retryable exit.
+
+The candidate `builder_revision` binds the live-agent proof builder, its build
+wrapper, and all five U1a creator-contract sources, in addition to the managed
+web archive builder. Verification recomputes that identity from the committed
+source archive rather than the worktree. A creator vocabulary, schema, bundle,
+execution-summary, or primitive change therefore invalidates an artifact whose
+manifest still names the older builder closure.
 
 ## CLI side effects and evidence
 

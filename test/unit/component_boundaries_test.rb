@@ -22,6 +22,7 @@ class ComponentBoundariesTest < Minitest::Test
       skillpack
       user-service
       work-ledger
+      workflow-creator-proof
     ], contract.components.map { |component| component.fetch("id") }.sort
 
     attempts = contract.component("attempts")
@@ -245,10 +246,56 @@ class ComponentBoundariesTest < Minitest::Test
     ready_components.push(
       agent_abi, artifact_firewall, skillpack, git_gate, work_ledger
     )
+    creator_proof = contract.component("workflow-creator-proof")
+    assert_equal "candidate", creator_proof.fetch("state")
+    assert_equal "packaging/live_agent_skills/workflow_creator.rb",
+                 creator_proof.dig("entrypoint", "file")
+    assert_equal "HiveLiveAgentProof::WorkflowCreatorBundle",
+                 creator_proof.dig("entrypoint", "constant")
+    creator_paths = %w[
+      packaging/live_agent_skills/proof_primitives.rb
+      packaging/live_agent_skills/workflow_creator.rb
+      packaging/live_agent_skills/workflow_creator_contract.rb
+      packaging/live_agent_skills/workflow_creator_bundle.rb
+      packaging/live_agent_skills/workflow_creator_execution_contract.rb
+    ]
+    assert_equal creator_paths, creator_proof.fetch("owned_paths")
+    assert_empty creator_proof.fetch("component_dependencies")
+    assert_empty creator_proof.fetch("allowed_hive_dependencies")
+    assert_empty creator_proof.fetch("migration_exceptions")
+    assert_match(/No U1a type mutates state/, creator_proof.fetch("mutation_authority"))
+    creator_sources = creator_paths.to_h do |relative|
+      [ File.basename(relative), File.read(File.join(ROOT, relative)) ]
+    end
+    creator_sources.each do |name, source|
+      refute_match(
+        /\b(?:FileUtils\.|File\.(?:write|binwrite|rename|link|symlink)\s*\(|Open3\.|Process\.spawn|Kernel\.system)/,
+        source,
+        "#{name} must remain mutation- and process-free"
+      )
+      refute_match(/File::(?:WRONLY|RDWR|CREAT|TRUNC|APPEND|EXCL)/, source, name)
+      refute_match(/workflow_creator_(?:evidence|atomic_file)/, source, name)
+    end
+    expected_requires = {
+      "proof_primitives.rb" => [],
+      "workflow_creator.rb" => %w[
+        proof_primitives workflow_creator_contract
+        workflow_creator_execution_contract workflow_creator_bundle
+      ],
+      "workflow_creator_contract.rb" => %w[proof_primitives],
+      "workflow_creator_bundle.rb" => %w[proof_primitives],
+      "workflow_creator_execution_contract.rb" => %w[proof_primitives]
+    }
+    creator_sources.each do |name, source|
+      assert_equal expected_requires.fetch(name),
+                   source.scan(/require_relative "([^"]+)"/).flatten,
+                   name
+    end
+
     remaining_candidates = contract.components.reject do |component|
       ready_components.include?(component)
     end
-    assert_equal %w[attempts patrol-effects],
+    assert_equal %w[attempts patrol-effects workflow-creator-proof],
                  remaining_candidates.map { |entry| entry.fetch("id") }.sort
     assert remaining_candidates.all? { |component| component.fetch("state") == "candidate" }
 
@@ -290,6 +337,48 @@ class ComponentBoundariesTest < Minitest::Test
                  patrol_effects_load.fetch("constant")
     assert_empty patrol_effects_load.fetch("forbidden_loaded_features")
     assert_empty patrol_effects_load.fetch("forbidden_constants")
+  end
+
+  def test_workflow_creator_contract_stays_within_the_u1a_admission_budget
+    caps = {
+      "packaging/live_agent_skills/proof_primitives.rb" => [ 80, nil, nil ],
+      "packaging/live_agent_skills/workflow_creator.rb" => [ 110, nil, nil ],
+      "packaging/live_agent_skills/workflow_creator_contract.rb" => [ 220, 10, 12 ],
+      "packaging/live_agent_skills/workflow_creator_bundle.rb" => [ 220, 10, 12 ],
+      "packaging/live_agent_skills/workflow_creator_execution_contract.rb" => [ 180, 8, 10 ]
+    }
+    script = <<~'RUBY'
+      require "coverage"
+      require "json"
+      Coverage.start(branches: true)
+      require File.join(Dir.pwd, "packaging/live_agent_skills/workflow_creator")
+      result = Coverage.result
+      puts JSON.generate(ARGV.to_h do |relative|
+        [ relative, result.fetch(File.join(Dir.pwd, relative)).fetch(:branches).length ]
+      end)
+    RUBY
+    out, err, status = Open3.capture3(
+      RbConfig.ruby, "-e", script, *caps.keys, chdir: ROOT
+    )
+    assert status.success?, err
+    branch_counts = JSON.parse(out)
+    totals = { "lines" => 0, "methods" => 0, "branches" => 0 }
+
+    caps.each do |relative, (line_cap, method_cap, branch_cap)|
+      source = File.read(File.join(ROOT, relative))
+      lines = source.lines.length
+      methods = source.lines.count { |line| line.match?(/^\s*def /) }
+      branches = branch_counts.fetch(relative)
+      assert_operator lines, :<=, line_cap, relative
+      assert_operator methods, :<=, method_cap, relative if method_cap
+      assert_operator branches, :<=, branch_cap, relative if branch_cap
+      totals["lines"] += lines
+      totals["methods"] += methods
+      totals["branches"] += branches
+    end
+    assert_operator totals.fetch("lines"), :<=, 810
+    assert_operator totals.fetch("methods"), :<=, 28
+    assert_operator totals.fetch("branches"), :<=, 34
   end
 
   def test_final_graph_and_wiki_inventory_agree_with_the_catalog

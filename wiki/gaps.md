@@ -20,8 +20,9 @@ tags: [gap, todo, release-proof, agent-skills]
   unique post-link two-link topology, checks local `0700`/`0600` ownership
   modes, and preserves exact UTF-8 bytes through retained verification. U1 also
   fixes the lower, one-way typed vocabulary for U14's exact execution plan,
-  command/capture/archive/process/containment/teardown/cleanup receipts and U15
-  provider, dependency, HTTPS transport, and credential-environment provenance. It
+  command/capture/archive/process/containment/teardown/cleanup receipts, two
+  prompt-bound outer roles with distinct argv identities, and U15 provider,
+  dependency, HTTPS transport, and credential-environment provenance. It
   deliberately cannot
   produce a passing protected-main creator Check yet: U14 must still produce
   the real candidate/OpenClaw installed manifests plus an independently bound

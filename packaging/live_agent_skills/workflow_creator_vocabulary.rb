@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "digest"
 require_relative "proof_primitives"
 
 module HiveLiveAgentProof
@@ -56,6 +57,10 @@ module HiveLiveAgentProof
     "workflow-creation-model-loop",
     "authorized-work-model-loop"
   ].freeze
+  WORKFLOW_CREATOR_OUTER_PROMPT_SHA256 = [
+    WORKFLOW_CREATOR_PROMPT,
+    WORKFLOW_CREATOR_TASK_PROMPT
+  ].map { |prompt| Digest::SHA256.hexdigest(prompt).freeze }.freeze
   WORKFLOW_CREATOR_CLEANUP_TARGET_LABELS = [ "proof-workspace" ].freeze
   WORKFLOW_CREATOR_CONTAINMENT_MECHANISMS =
     [ "supervised-process-tree" ].freeze

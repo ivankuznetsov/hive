@@ -159,7 +159,10 @@ classifications, `WorkflowCreatorBundle` independently validates the retained
 four-file bundle and exact installed closure roles,
 `WorkflowCreatorExecutionContract` owns only the U14/U15 receipt validation and
 cross-bindings, and `WorkflowCreatorEvidence` alone initializes or atomically
-replaces the primary receipt through a descriptor-relative publisher. Candidate
+replaces the primary receipt through the private
+`WorkflowCreatorAtomicFile` descriptor-relative publisher. The raw publisher is
+construction-fenced to that sole typed writer across the complete packaging
+scan. Candidate
 and OpenClaw installed identities bind a key-order-independent canonical closure
 digest plus exact executable, interpreter-or-launcher, package, and lock records
 that must also appear in the bounded inventory; the candidate additionally binds
@@ -309,7 +312,9 @@ tooling. U1 establishes this catalog and promotion guard; for every
 3. for every row that declares forbidden constructions, scans production Ruby
    outside the component's owned paths and rejects literal `Constant.new`
    construction of listed internals except exact file/constant pairs recorded
-   as current composition or compatibility sites; stale or newly listed-file
+   as current composition or compatibility sites; when a constant has an
+   explicitly authorized owned construction site, that constant is fenced
+   across the component's owned files too; stale or newly listed-file
    authorizations fail validation; and
 4. loads each ready entry point—and any explicitly requested candidate entry
    point—in a fresh Ruby process, verifies the documented

@@ -212,7 +212,6 @@ class ComponentBoundaryContract
     return if sites.empty?
 
     seen_constants = Set.new
-    owned_files = ruby_files(row.fetch("owned_paths"))
     scanned_files = construction_files(row)
 
     sites.each_with_index do |entry, index|
@@ -235,10 +234,6 @@ class ComponentBoundaryContract
       invalid!("#{path}.files", "must not contain duplicates") unless files.uniq == files
       files.each_with_index do |relative, file_index|
         repo_path!(relative, "#{path}.files[#{file_index}]")
-        if owned_files.include?(relative)
-          invalid!("#{path}.files[#{file_index}]",
-                   "component-owned files do not need construction authorization")
-        end
         unless scanned_files.include?(relative)
           invalid!("#{path}.files[#{file_index}]",
                    "#{relative} is outside the declared construction scan surface")
@@ -340,10 +335,16 @@ class ComponentBoundaryContract
       site.fetch("files").each { |relative| pairs << [ relative, site.fetch("constant") ] }
     end
     owned_files = ruby_files(entry.fetch("owned_paths"))
-    (construction_files(entry) - owned_files).each do |relative|
+    fenced_owned_constants = authorized.filter_map do |relative, constant|
+      constant if owned_files.include?(relative)
+    end.to_set
+    construction_files(entry).each do |relative|
       constructions = ruby_syntax(relative).constructions
       invalid_constants = (constructions & forbidden).reject do |constant|
-        authorized.include?([ relative, constant ])
+        owned_implicitly_allowed =
+          owned_files.include?(relative) &&
+          !fenced_owned_constants.include?(constant)
+        owned_implicitly_allowed || authorized.include?([ relative, constant ])
       end
       next if invalid_constants.empty?
 

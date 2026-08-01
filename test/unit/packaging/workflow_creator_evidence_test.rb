@@ -2,6 +2,7 @@ require "test_helper"
 require "json"
 require "open3"
 require "rbconfig"
+require "timeout"
 require_relative "../../../packaging/live_agent_skills/proof"
 require_relative "../../../packaging/release_candidate/artifacts"
 
@@ -254,6 +255,45 @@ class WorkflowCreatorEvidenceTest < Minitest::Test
     end
   end
 
+  def test_concurrent_identical_initializers_both_report_success
+    with_tmp_dir do |dir|
+      path = File.join(dir, "bundle", "openclaw-workflow-creator.json")
+      linked = Queue.new
+      resume_first = Queue.new
+      first_result = Queue.new
+      first = Thread.new do
+        store = HiveLiveAgentProof::WorkflowCreatorEvidence.new(
+          path: path,
+          after_link: lambda do |*|
+            linked << true
+            resume_first.pop
+          end
+        )
+        first_result << [ :ok, store.initialize!(candidate_sha: SHA) ]
+      rescue StandardError => e
+        first_result << [ :error, e ]
+      end
+
+      Timeout.timeout(2) { linked.pop }
+      second = HiveLiveAgentProof::WorkflowCreatorEvidence.new(path: path)
+                                                          .initialize!(
+                                                            candidate_sha: SHA
+                                                          )
+      resume_first << true
+      status, first_value = Timeout.timeout(2) { first_result.pop }
+      first.join
+
+      assert_equal :ok, status, first_value.inspect
+      assert_equal second, first_value
+      assert_equal second, JSON.parse(File.read(path))
+      assert_equal 1, File.stat(path).nlink
+      assert_empty Dir.children(dir).grep(/\.tmp\./)
+    ensure
+      resume_first << true if first&.alive?
+      first&.join(1)
+    end
+  end
+
   def test_non_target_eexist_is_normalized_for_all_writer_operations
     with_tmp_dir do |dir|
       blocked_parent = File.join(dir, "not-a-directory")
@@ -274,7 +314,7 @@ class WorkflowCreatorEvidenceTest < Minitest::Test
     end
   end
 
-  def test_retry_recovers_a_hard_kill_between_initial_link_and_unlink
+  def test_retry_recovers_post_link_kill_with_a_fifo_candidate
     with_tmp_dir do |dir|
       path = File.join(dir, "bundle", "openclaw-workflow-creator.json")
       reader, writer = IO.pipe
@@ -300,16 +340,26 @@ class WorkflowCreatorEvidenceTest < Minitest::Test
       _waited, status = Process.wait2(pid)
       assert status.signaled?
       assert_equal 2, File.stat(path).nlink
+      skip "mkfifo is unavailable" unless File.respond_to?(:mkfifo)
+      fifo_path = File.join(
+        dir,
+        ".bundle.openclaw-workflow-creator.json.tmp.blocking-fifo"
+      )
+      File.mkfifo(fifo_path, 0o600)
 
-      stored = HiveLiveAgentProof::WorkflowCreatorEvidence.new(path: path)
-                                                        .initialize!(
-                                                          candidate_sha: SHA
-                                                        )
+      stored = Timeout.timeout(2) do
+        HiveLiveAgentProof::WorkflowCreatorEvidence.new(path: path)
+                                                     .initialize!(
+                                                       candidate_sha: SHA
+                                                     )
+      end
+      FileUtils.rm_f(fifo_path)
 
       assert_equal stored, JSON.parse(File.read(path))
       assert_equal 1, File.stat(path).nlink
       assert_empty Dir.children(dir).grep(/\.tmp\./)
     ensure
+      FileUtils.rm_f(fifo_path) if fifo_path
       reader&.close
       writer&.close unless writer&.closed?
       if pid
@@ -617,13 +667,22 @@ class WorkflowCreatorEvidenceTest < Minitest::Test
 
   def test_workflow_creator_vocabulary_is_deeply_immutable
     commands = HiveLiveAgentProof::WORKFLOW_CREATOR_COMMANDS
+    prompts = HiveLiveAgentProof::WORKFLOW_CREATOR_OUTER_PROMPT_SHA256
 
     assert_predicate commands, :frozen?
     assert commands.all?(&:frozen?)
     assert commands.flatten.all?(&:frozen?)
+    assert_predicate prompts, :frozen?
+    assert prompts.all?(&:frozen?)
     assert_same commands.fetch(5), commands.fetch(7)
     assert_raises(FrozenError) { commands.first << "mutated" }
     assert_raises(FrozenError) { commands.first.first.replace("mutated") }
+  end
+
+  def test_atomic_publisher_is_a_private_creator_collaborator
+    assert_raises(NameError) do
+      HiveLiveAgentProof::WorkflowCreatorAtomicFile
+    end
   end
 
   def test_completion_log_keeps_the_gaps_backlink

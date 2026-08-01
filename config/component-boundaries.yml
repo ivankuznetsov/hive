@@ -306,10 +306,12 @@ components:
     component_dependencies: []
     allowed_hive_dependencies: []
     internal_collaborators:
+      - HiveLiveAgentProof::WorkflowCreatorAtomicFile
       - HiveLiveAgentProof::WorkflowCreatorBundle
       - HiveLiveAgentProof::WorkflowCreatorEvidence
       - HiveLiveAgentProof::WorkflowCreatorExecutionContract
     forbidden_constructions:
+      - HiveLiveAgentProof::WorkflowCreatorAtomicFile
       - HiveLiveAgentProof::WorkflowCreatorEvidence
     construction_scan_paths:
       - packaging
@@ -319,6 +321,10 @@ components:
         files:
           - test/smoke/live_hive_workflow_creator_smoke_test.rb
         reason: "Temporary U1 non-claiming producer; U15 removes this adapter."
+      - constant: HiveLiveAgentProof::WorkflowCreatorAtomicFile
+        files:
+          - packaging/live_agent_skills/workflow_creator_evidence.rb
+        reason: "WorkflowCreatorEvidence is the sole typed receipt writer and owns the raw publication collaborator."
     hive_consumers:
       - packaging/live_agent_skills/proof.rb
       - packaging/release_candidate/artifacts.rb

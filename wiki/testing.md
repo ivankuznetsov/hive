@@ -129,7 +129,10 @@ Ready components cannot depend on candidates. Forbidden-construction rules
 also apply to guarded candidates, and the helper can run a named focused
 clean-load proof for a candidate such as Attempts without representing the
 whole component graph as ready. Repository-relative packaging requires are
-owned and checked by the same dependency graph as `lib/` requires.
+owned and checked by the same dependency graph as `lib/` requires. A component
+may opt a forbidden collaborator into an exact owned-file construction fence by
+listing that owned file as its authorization; other legacy internal constants
+remain implicitly constructible inside their owner until deliberately fenced.
 
 The helper uses Ruby syntax rather than comments or string examples for literal
 `require`, `require_relative`, and `Constant.new` checks. It remains an
@@ -636,7 +639,13 @@ directory durability also fails closed. A post-publication directory-`fsync`
 failure still leaves one complete, idempotently retryable receipt, never
 partial bytes. Only an exact target-link collision maps to the typed
 already-exists path; other `EEXIST`, native, and I/O failures normalize to the
-component error surface. A passing primary is closure-validated before
+component error surface. When an identical concurrent retry repairs the
+two-link topology first, the original writer accepts its now-missing staging
+name only after re-verifying the exact target inode, one-link bytes, held
+directory syncs, and public binding. Recovery opens prefix-matching candidates
+nonblocking before rejecting non-regular entries, so a FIFO cannot stall the
+proof. The raw publisher is a private collaborator construction-fenced to
+`WorkflowCreatorEvidence`. A passing primary is closure-validated before
 publication and
 must be the canonical primary inside its bundle root. A passing receipt
 additionally requires an exact four-file retained bundle: the creator row,
@@ -674,7 +683,9 @@ command receipts, bounded capture, per-process teardown, the exact outer
 workflow-creation and authorized-work model-loop roles, semantic
 supervised-process-tree containment, the exact owned proof-workspace cleanup
 set, aggregate containment/teardown, cleanup identities, and secret scan. It
-must agree with the creator row's
+also binds each role to the corresponding U1 prompt digest and requires distinct
+outer argv digests, so one process receipt cannot be duplicated under both
+roles. It must agree with the creator row's
 instruction, external-action, containment, teardown, and cleanup claims; each
 primary summary is bound to the execution-receipt digest. Attestation copies those exact
 bytes, and verification replays the same contract after runner-local install

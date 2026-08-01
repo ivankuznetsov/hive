@@ -210,7 +210,15 @@ module HiveLiveAgentProof
           raise AlreadyExists, "initial evidence target already exists"
         end
         @after_link.call(source_label, @path)
-        @native.unlinkat(staging, temporary_name)
+        begin
+          @native.unlinkat(staging, temporary_name)
+        rescue Errno::ENOENT
+          temporary_name = nil
+          verify_entry!(target, @target_name, temporary_identity, bytes)
+          sync_directories!(target, staging, target_identity, staging_identity)
+          verify_binding!(target_identity)
+          return @path
+        end
         temporary_name = nil
         @after_unlink.call(source_label, @path)
       end
@@ -383,7 +391,11 @@ module HiveLiveAgentProof
     end
 
     def matching_link_name(directory, name, expected, bytes)
-      file = @native.open_file(directory, name, File::RDONLY)
+      file = @native.open_file(
+        directory,
+        name,
+        File::RDONLY | File::NONBLOCK
+      )
       file.binmode
       stat = file.stat
       return unless safe_file?(stat, expected_links: 2)
@@ -414,4 +426,6 @@ module HiveLiveAgentProof
       nil
     end
   end
+
+  private_constant :WorkflowCreatorAtomicFile
 end

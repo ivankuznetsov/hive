@@ -1049,6 +1049,13 @@ class LiveAgentProofTest < Minitest::Test
       "outer-role-substitution" => lambda do |receipt|
         receipt["outer_processes"][0]["role"] = "helper-process"
       end,
+      "outer-prompt-substitution" => lambda do |receipt|
+        receipt["outer_processes"][0]["prompt_sha256"] = "0" * 64
+      end,
+      "duplicate-outer-argv" => lambda do |receipt|
+        receipt["outer_processes"][1]["argv_sha256"] =
+          receipt["outer_processes"][0]["argv_sha256"]
+      end,
       "gateway-substitution" => ->(receipt) { receipt["gateway"]["sha256"] = "0" * 64 },
       "archive-failure" => lambda do |receipt|
         receipt["archive_admissions"][0]["status"] = "failed"
@@ -1737,6 +1744,8 @@ class LiveAgentProofTest < Minitest::Test
         "label" => format("outer-model-loop-%02d", index + 1),
         "role" => role,
         "argv_sha256" => %w[4 5].fetch(index) * 64,
+        "prompt_sha256" =>
+          HiveLiveAgentProof::WORKFLOW_CREATOR_OUTER_PROMPT_SHA256.fetch(index),
         "exit_code" => 0,
         "signal" => nil,
         "completed" => true,

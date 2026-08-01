@@ -22,7 +22,8 @@ module HiveLiveAgentProof
       position attempt_label argv exit_code signal completed capture teardown
     ].freeze
     OUTER_PROCESS_KEYS = %w[
-      label role argv_sha256 exit_code signal completed capture teardown
+      label role argv_sha256 prompt_sha256 exit_code signal completed capture
+      teardown
     ].freeze
     CAPTURE_KEYS = %w[
       limit_bytes stdout_bytes stderr_bytes stdout_sha256 stderr_sha256
@@ -178,15 +179,22 @@ module HiveLiveAgentProof
                outer.length == WORKFLOW_CREATOR_OUTER_PROCESS_ROLES.length
           fail_contract!("execution receipt outer processes are invalid")
         end
+        outer_argv_sha256 = []
         outer_labels = outer.each_with_index.map do |process, index|
           exact_hash!(process, OUTER_PROCESS_KEYS, "outer process receipt")
           validate_completed_process!(process, label_key: "label")
           unless process["role"] ==
                  WORKFLOW_CREATOR_OUTER_PROCESS_ROLES.fetch(index) &&
-                 digest?(process["argv_sha256"])
+                 digest?(process["argv_sha256"]) &&
+                 process["prompt_sha256"] ==
+                   WORKFLOW_CREATOR_OUTER_PROMPT_SHA256.fetch(index)
             fail_contract!("execution receipt outer process identity is invalid")
           end
+          outer_argv_sha256 << process.fetch("argv_sha256")
           process.fetch("label")
+        end
+        unless outer_argv_sha256.uniq.length == outer_argv_sha256.length
+          fail_contract!("execution receipt outer process identity is invalid")
         end
         labels = command_labels + outer_labels
         unless labels.uniq.length == labels.length

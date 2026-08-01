@@ -173,11 +173,17 @@ class ComponentBoundariesTest < Minitest::Test
       workflow_creator.fetch("owned_paths").sort
     )
     assert_equal(
-      [ "HiveLiveAgentProof::WorkflowCreatorEvidence" ],
+      %w[
+        HiveLiveAgentProof::WorkflowCreatorAtomicFile
+        HiveLiveAgentProof::WorkflowCreatorEvidence
+      ],
       workflow_creator.fetch("forbidden_constructions")
     )
     assert_equal(
       {
+        "HiveLiveAgentProof::WorkflowCreatorAtomicFile" => [
+          "packaging/live_agent_skills/workflow_creator_evidence.rb"
+        ],
         "HiveLiveAgentProof::WorkflowCreatorEvidence" => [
           "test/smoke/live_hive_workflow_creator_smoke_test.rb"
         ]
@@ -186,6 +192,8 @@ class ComponentBoundariesTest < Minitest::Test
         [ site.fetch("constant"), site.fetch("files") ]
       end
     )
+    assert_includes workflow_creator.fetch("internal_collaborators"),
+                    "HiveLiveAgentProof::WorkflowCreatorAtomicFile"
     assert_equal(
       "Temporary U1 non-claiming producer; U15 removes this adapter.",
       workflow_creator.fetch("authorized_internal_constructions")
@@ -1131,6 +1139,40 @@ class ComponentBoundariesTest < Minitest::Test
     end
   end
 
+  def test_named_owned_construction_site_fences_other_component_files
+    with_contract_fixture(
+      entrypoint_source: <<~RUBY,
+        module Example
+          class API; end
+          class Internal; end
+        end
+      RUBY
+      owned_paths: %w[
+        lib/example.rb
+        lib/owned_builder.rb
+        lib/unlisted_owned_builder.rb
+      ],
+      authorized_internal_constructions: [
+        {
+          "constant" => "Example::Internal",
+          "files" => [ "lib/owned_builder.rb" ],
+          "reason" => "Sole component composition root"
+        }
+      ],
+      extra_files: {
+        "lib/owned_builder.rb" => "Example::Internal.new\n",
+        "lib/unlisted_owned_builder.rb" => "Example::Internal.new\n"
+      }
+    ) do |contract|
+      error = assert_raises(ComponentBoundaryContract::ValidationError) do
+        contract.validate_static_boundaries!
+      end
+
+      assert_match(/lib\/unlisted_owned_builder\.rb/, error.message)
+      assert_match(/Example::Internal/, error.message)
+    end
+  end
+
   def test_named_internal_construction_site_must_remain_in_use
     with_contract_fixture(
       entrypoint_source: <<~RUBY,
@@ -1184,11 +1226,6 @@ class ComponentBoundariesTest < Minitest::Test
         mutate: ->(site, _sites) { site["files"] << site.fetch("files").first },
         field: /authorized_internal_constructions\[0\]\.files/,
         message: /must not contain duplicates/
-      },
-      "component-owned file" => {
-        mutate: ->(site, _sites) { site["files"] = [ "lib/owned_builder.rb" ] },
-        field: /authorized_internal_constructions\[0\]\.files\[0\]/,
-        message: /component-owned files do not need construction authorization/
       },
       "blank reason" => {
         mutate: ->(site, _sites) { site["reason"] = " " },

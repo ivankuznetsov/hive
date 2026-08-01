@@ -426,12 +426,11 @@ class ReleaseCandidateReleaseSelectorTest < Minitest::Test
     entries = {
       "lib/hive/version.rb" => "module Hive\n  VERSION = \"#{version}\"\nend\n",
       "packaging/release_candidate/baselines.yml" =>
-        File.binread(File.join(ROOT, "packaging/release_candidate/baselines.yml")),
-      "packaging/live_agent_skills/proof.rb" =>
-        File.binread(File.join(ROOT, "packaging/live_agent_skills/proof.rb")),
-      "packaging/live_agent_skills/build.rb" =>
-        File.binread(File.join(ROOT, "packaging/live_agent_skills/build.rb"))
+        File.binread(File.join(ROOT, "packaging/release_candidate/baselines.yml"))
     }
+    HiveReleaseCandidate::Artifacts::LIVE_AGENT_BUILDER_INPUTS.each do |relative|
+      entries[relative] = File.binread(File.join(ROOT, relative))
+    end
     Zlib::GzipWriter.open(path) do |gzip|
       Gem::Package::TarWriter.new(gzip) do |tar|
         entries.each do |name, content|
@@ -443,14 +442,11 @@ class ReleaseCandidateReleaseSelectorTest < Minitest::Test
 
   def builder_revision
     digest = Digest::SHA256.new
-    %w[
-      packaging/live_agent_skills/proof.rb
-      packaging/live_agent_skills/build.rb
-      packaging/managed_web_archive.rb
-    ].each do |path|
-      digest << File.basename(path) << "\0" <<
-        File.binread(File.join(ROOT, path)) << "\0"
+    HiveReleaseCandidate::Artifacts::LIVE_AGENT_BUILDER_INPUTS.each do |path|
+      digest << path << "\0" << File.binread(File.join(ROOT, path)) << "\0"
     end
+    managed = "packaging/managed_web_archive.rb"
+    digest << managed << "\0" << File.binread(File.join(ROOT, managed)) << "\0"
     digest.hexdigest
   end
 end

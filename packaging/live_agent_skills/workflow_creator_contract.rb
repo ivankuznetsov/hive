@@ -466,7 +466,7 @@ module HiveLiveAgentProof
           exact_secrets: exact_secrets
         )
         primary = read_regular!(File.expand_path(directory), PRIMARY_NAME)
-        if primary != WorkflowCreatorContract.canonical_json(row)
+        if primary.b != WorkflowCreatorContract.canonical_json(row).b
           raise Error,
                 "workflow-creator primary evidence bytes do not match attestation"
         end
@@ -594,6 +594,7 @@ module HiveLiveAgentProof
         flags = File::RDONLY
         flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
         File.open(path, flags) do |file|
+          file.binmode
           opened = file.stat
           unless opened.dev == stat.dev && opened.ino == stat.ino &&
                  opened.file? && opened.nlink == 1 &&
@@ -613,7 +614,7 @@ module HiveLiveAgentProof
 
       def parse_canonical!(bytes, name)
         document = JSON.parse(bytes)
-        unless bytes == WorkflowCreatorContract.canonical_json(document)
+        unless bytes.b == WorkflowCreatorContract.canonical_json(document).b
           raise Error, "workflow-creator evidence bundle entry is not canonical JSON: #{name}"
         end
         document

@@ -138,6 +138,59 @@ class LiveAgentProofTest < Minitest::Test
     end
   end
 
+  def test_unicode_primary_and_installed_paths_survive_full_proof_chain
+    with_tmp_dir do |dir|
+      artifacts = prepare_artifacts(dir)
+      evidence = prepare_evidence(dir, artifacts)
+      creator = prepare_creator_evidence(dir, artifacts)
+      openclaw_path = File.join(
+        creator, "openclaw-installed-manifest.json"
+      )
+      installation = JSON.parse(File.read(openclaw_path))
+      inventory_record = installation.fetch("inventory").find do |record|
+        record.fetch("path") == "bin/openclaw"
+      end
+      required_record = installation.dig("required_members", "executable")
+      unicode_path = "bin/openclaw-café"
+      inventory_record["path"] = unicode_path
+      required_record["path"] = unicode_path
+      installation.fetch("identity")["closure_sha256"] =
+        HiveLiveAgentProof::WorkflowCreatorBundle.installed_closure_sha256(
+          required_members: installation.fetch("required_members"),
+          inventory: installation.fetch("inventory")
+        )
+      HiveLiveAgentProof.write_json(openclaw_path, installation)
+      refresh_installed_manifest_chain!(
+        creator, "openclaw-installed-manifest.json"
+      )
+
+      primary = File.join(creator, "openclaw-workflow-creator.json")
+      success = JSON.parse(File.read(primary))
+      success.fetch("provider")["model"] = "openrouter/café"
+      FileUtils.rm_f(primary)
+      producer = HiveLiveAgentProof::WorkflowCreatorEvidence.new(path: primary)
+      producer.initialize!(candidate_sha: SHA)
+      producer.replace_success!(
+        success,
+        manifest: JSON.parse(
+          File.read(File.join(artifacts, "artifact-manifest.json"))
+        ),
+        bundle_dir: creator,
+        candidate_sha: SHA
+      )
+
+      proof = File.join(dir, "proof")
+      result = attest(artifacts, evidence, creator, proof)
+      verified = verifier(proof, result.fetch("sha256")).call
+
+      assert_equal "openrouter/café",
+                   result.dig(
+                     "attestation", "workflow_creator", "provider", "model"
+                   )
+      assert_match(/hive-cli-1\.2\.3\.gem\z/, verified.fetch("gem"))
+    end
+  end
+
   def test_attestor_and_verifier_share_authored_execution_cross_binding
     with_tmp_dir do |dir|
       artifacts = prepare_artifacts(dir)
@@ -987,6 +1040,12 @@ class LiveAgentProofTest < Minitest::Test
         receipt["commands"][0].delete("teardown")
       end,
       "missing-outer-process" => ->(receipt) { receipt["outer_processes"] = [] },
+      "missing-workflow-creation-loop" => lambda do |receipt|
+        receipt["outer_processes"].delete_at(0)
+      end,
+      "missing-task-execution-loop" => lambda do |receipt|
+        receipt["outer_processes"].delete_at(1)
+      end,
       "outer-role-substitution" => lambda do |receipt|
         receipt["outer_processes"][0]["role"] = "helper-process"
       end,
@@ -1671,18 +1730,20 @@ class LiveAgentProofTest < Minitest::Test
         "teardown" => process_teardown.dup
       }
     end
-    outer_processes = [
+    outer_processes =
+      HiveLiveAgentProof::WORKFLOW_CREATOR_OUTER_PROCESS_ROLES
+                        .each_with_index.map do |role, index|
       {
-        "label" => "outer-openclaw",
-        "role" => "openclaw-model-loop",
-        "argv_sha256" => "4" * 64,
+        "label" => format("outer-model-loop-%02d", index + 1),
+        "role" => role,
+        "argv_sha256" => %w[4 5].fetch(index) * 64,
         "exit_code" => 0,
         "signal" => nil,
         "completed" => true,
-        "capture" => capture.call("a"),
+        "capture" => capture.call(%w[a b].fetch(index)),
         "teardown" => process_teardown.dup
       }
-    ]
+    end
     process_labels = commands.map { |command| command.fetch("attempt_label") } +
                      outer_processes.map { |process| process.fetch("label") }
     execution_receipt = {
@@ -2045,6 +2106,7 @@ class LiveAgentProofTest < Minitest::Test
 
   def fake_open_file(stat:, bytes:)
     file = Object.new
+    file.define_singleton_method(:binmode) { file }
     file.define_singleton_method(:stat) { stat }
     file.define_singleton_method(:read) { |_limit| bytes }
     file

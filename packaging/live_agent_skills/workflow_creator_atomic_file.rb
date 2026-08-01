@@ -6,6 +6,7 @@ module HiveLiveAgentProof
   # Temporary entries live beside the bundle directory, never inside it, so a
   # hard-killed writer cannot poison the bundle's exact four-file inventory.
   class WorkflowCreatorAtomicFile
+    class AlreadyExists < StandardError; end
     class Unsafe < StandardError; end
     class Unavailable < StandardError; end
 
@@ -148,9 +149,9 @@ module HiveLiveAgentProof
       end
     end
 
-    def initialize(path:, writer:, before_publish:, after_link:, rename_gate:,
-                   link_gate:, directory_sync:, expected_parent_identity: nil,
-                   native: nil)
+    def initialize(path:, writer:, before_publish:, after_link:, after_unlink:,
+                   rename_gate:, link_gate:, directory_sync:,
+                   expected_parent_identity: nil, native: nil)
       @path = File.expand_path(path)
       @parent_path = File.dirname(@path)
       @staging_path = File.dirname(@parent_path)
@@ -158,6 +159,7 @@ module HiveLiveAgentProof
       @writer = writer
       @before_publish = before_publish
       @after_link = after_link
+      @after_unlink = after_unlink
       @rename_gate = rename_gate
       @link_gate = link_gate
       @directory_sync = directory_sync
@@ -192,20 +194,25 @@ module HiveLiveAgentProof
         begin
           @native.linkat(staging, temporary_name, target, @target_name)
         rescue Errno::EEXIST
-          recovered = recover_linked_initialization!(
+          recovered = recover_initialization!(
             target,
             staging,
             target_identity,
             staging_identity,
+            temporary_name,
             bytes
           )
-          return @path if recovered
+          if recovered
+            temporary_name = nil
+            return @path
+          end
 
-          raise
+          raise AlreadyExists, "initial evidence target already exists"
         end
         @after_link.call(source_label, @path)
         @native.unlinkat(staging, temporary_name)
         temporary_name = nil
+        @after_unlink.call(source_label, @path)
       end
 
       verify_entry!(target, @target_name, temporary_identity, bytes)
@@ -339,26 +346,32 @@ module HiveLiveAgentProof
       end
     end
 
-    def recover_linked_initialization!(target, staging, target_identity,
-                                       staging_identity, bytes)
+    def recover_initialization!(target, staging, target_identity,
+                                staging_identity, current_name, bytes)
       target_file = @native.open_file(target, @target_name, File::RDONLY)
       target_file.binmode
       target_stat = target_file.stat
-      return false unless safe_file?(target_stat, expected_links: 2)
+      valid_links = [ 1, 2 ].find do |links|
+        safe_file?(target_stat, expected_links: links)
+      end
+      return false unless valid_links
 
       expected = file_identity(target_stat)
       return false unless target_file.read(bytes.bytesize + 1) == bytes.b
 
-      matching = staging.children.filter_map do |name|
-        next unless name.start_with?(temporary_prefix)
+      if valid_links == 2
+        matching = staging.children.filter_map do |name|
+          next unless name.start_with?(temporary_prefix)
 
-        matching_link_name(staging, name, expected, bytes)
-      end
-      unless matching.length == 1
-        raise Unsafe, "linked initial evidence cannot be recovered"
+          matching_link_name(staging, name, expected, bytes)
+        end
+        unless matching.length == 1
+          raise Unsafe, "linked initial evidence cannot be recovered"
+        end
+        @native.unlinkat(staging, matching.fetch(0))
       end
 
-      @native.unlinkat(staging, matching.fetch(0))
+      @native.unlinkat(staging, current_name)
       verify_entry!(target, @target_name, expected, bytes)
       sync_directories!(target, staging, target_identity, staging_identity)
       verify_binding!(target_identity)

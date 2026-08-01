@@ -302,7 +302,7 @@ components:
     schema_contracts:
       - "hive-live-workflow-creator-evidence schema v1 plus canonical installed manifests, ordered command/capture/process custody, dependency/provider/transport provenance, and digest-bound execution summaries; U14 and U15 populate the contract without redefining it"
     lock_contracts:
-      - "Private same-filesystem staging outside the exact mode-0700 bundle root, descriptor-relative linkat-or-renameat publication, recovery of the exact post-link initialization topology, inode/byte verification, strict destination/staging directory fsync, and public-parent rebinding checks preserve the prior accepted receipt or fail closed"
+      - "Private same-filesystem staging outside the exact mode-0700 bundle root, descriptor-relative linkat-or-renameat publication, idempotent recovery of exact one-link completion or the unique matching two-link initialization topology, inode/byte verification, strict destination/staging directory fsync after temporary cleanup, and public-parent rebinding checks preserve the prior accepted receipt or fail closed"
     component_dependencies: []
     allowed_hive_dependencies: []
     internal_collaborators:
@@ -324,7 +324,7 @@ components:
       - packaging/release_candidate/artifacts.rb
       - test/smoke/live_hive_workflow_creator_smoke_test.rb
     mutation_authority: "WorkflowCreatorEvidence alone initializes and atomically replaces the primary creator receipt at a caller-selected path; it cannot select credentials, launch processes, or turn unavailable U14 custody into success."
-    recovery_surface: "A schema-valid non-passing receipt precedes work; interrupted writes preserve the prior bytes, a post-link initialization crash is recovered only from the exact matching two-link topology, other hard-kill orphans stay outside the exact bundle inventory, and successful replacement is reported only after pinned-directory durability and binding verification."
+    recovery_surface: "A schema-valid non-passing receipt precedes work; interrupted writes preserve the prior bytes, initialization retries accept only exact byte-identical one-link completion or the unique matching two-link topology, other hard-kill orphans stay outside the exact bundle inventory, and successful replacement is reported only after pinned-directory durability and binding verification."
     wiki_page: wiki/testing.md
     focused_tests:
       - test/unit/packaging/live_agent_proof_test.rb

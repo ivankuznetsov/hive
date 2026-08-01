@@ -1,3 +1,5 @@
+# frozen_string_literal: true
+
 require_relative "proof_primitives"
 
 module HiveLiveAgentProof
@@ -37,7 +39,7 @@ module HiveLiveAgentProof
     [ "run", WORKFLOW_CREATOR_TASK_SLUG ],
     WORKFLOW_CREATOR_TASK_NEW_ARGV,
     [ "status", "--operational", "--json" ]
-  ].freeze
+  ].each(&:freeze).freeze
   WORKFLOW_CREATOR_FILES = [
     ".hive-state/workflows/editorial.yml",
     ".hive-state/workflows/editorial/draft.md",
@@ -50,7 +52,10 @@ module HiveLiveAgentProof
     "hive-live-workflow-creator-execution-receipt".freeze
   WORKFLOW_CREATOR_EXECUTION_PLAN =
     "hive-live-workflow-creator-execution-plan/v1".freeze
-  WORKFLOW_CREATOR_OUTER_PROCESS_ROLES = [ "openclaw-model-loop" ].freeze
+  WORKFLOW_CREATOR_OUTER_PROCESS_ROLES = [
+    "workflow-creation-model-loop",
+    "authorized-work-model-loop"
+  ].freeze
   WORKFLOW_CREATOR_CLEANUP_TARGET_LABELS = [ "proof-workspace" ].freeze
   WORKFLOW_CREATOR_CONTAINMENT_MECHANISMS =
     [ "supervised-process-tree" ].freeze

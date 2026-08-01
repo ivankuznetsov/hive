@@ -626,11 +626,18 @@ binding verification without redirecting publication. A hard kill before
 publication can leave only an out-of-bundle orphan. A hard kill after the
 initializer link can leave the exact target and one staging name bound to the
 same owner-private inode; a retry recovers only that unique two-link topology,
-unlinks the staging name, verifies one-link target bytes, and syncs both held
-directories. Any ambiguous topology fails closed. Unsupported directory
-durability also fails closed. A post-publication directory-`fsync` failure
-still leaves one complete, retryable receipt, never partial bytes. A passing
-primary is closure-validated before publication and
+unlinks both the old staging name and its new retry temporary, verifies the
+one-link target bytes, and then syncs both held directories. A kill or
+directory-sync failure after the first unlink leaves an exact one-link target;
+the retry treats only an owner-private, byte-identical target as completed,
+removes its retry temporary before the final sync, and verifies the public
+binding. Any unrelated or ambiguous topology fails closed. Unsupported
+directory durability also fails closed. A post-publication directory-`fsync`
+failure still leaves one complete, idempotently retryable receipt, never
+partial bytes. Only an exact target-link collision maps to the typed
+already-exists path; other `EEXIST`, native, and I/O failures normalize to the
+component error surface. A passing primary is closure-validated before
+publication and
 must be the canonical primary inside its bundle root. A passing receipt
 additionally requires an exact four-file retained bundle: the creator row,
 candidate and OpenClaw installed manifests, and an execution/cleanup receipt.
@@ -655,16 +662,19 @@ through the same owner, regular-file, no-follow, link-count, and byte-bound
 reader used for the retained sidecars before parsing any producer bytes.
 Canonicalization errors, including invalid UTF-8 accepted by the JSON parser
 but rejected by the generator, normalize to the proof error surface for both
-Attestor and Verifier. The four-file retained bundle also has an independently
-tested aggregate byte cap in addition to its per-file bounds.
+Attestor and Verifier. Descriptor reads and canonical comparisons are binary,
+so valid Unicode primary fields and installed-manifest paths remain exact from
+producer through Attestor and Verifier. The four-file retained bundle also has
+an independently tested aggregate byte cap in addition to its per-file bounds.
 Malformed JSON diagnostics never interpolate producer bytes, and focused
 primary admission covers hard links as well as symlinks and oversized files.
 The execution receipt schema now fixes U14's execution-plan identity, run
 correlation, gateway identity, two package/archive admissions, nine ordered
 command receipts, bounded capture, per-process teardown, the exact outer
-model-loop role, semantic supervised-process-tree containment, the exact owned
-proof-workspace cleanup set, aggregate containment/teardown, cleanup identities,
-and secret scan. It must agree with the creator row's
+workflow-creation and authorized-work model-loop roles, semantic
+supervised-process-tree containment, the exact owned proof-workspace cleanup
+set, aggregate containment/teardown, cleanup identities, and secret scan. It
+must agree with the creator row's
 instruction, external-action, containment, teardown, and cleanup claims; each
 primary summary is bound to the execution-receipt digest. Attestation copies those exact
 bytes, and verification replays the same contract after runner-local install
@@ -681,7 +691,9 @@ apply the same missing, extra, wrong-type, classification, provider, transport,
 and credential mutations, while the command matrix also rejects a dynamically
 targeted task command. The shared vocabulary sits below the execution and
 creator validators, so the execution receipt validator has no dependency back
-into either creator validator.
+into either creator validator. Its nested arrays and strings are recursively
+immutable, preventing a future producer from redefining the exact command or
+process contract in memory.
 
 This is intentionally a non-claiming intermediate state. The current smoke
 adapter can upload a schema-valid failure with

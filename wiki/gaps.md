@@ -16,8 +16,9 @@ tags: [gap, todo, release-proof, agent-skills]
   bundle validation, descriptor-relative atomic publication, exact
   executable/interpreter-or-launcher/package/lock identities, candidate gateway
   identity, key-order-independent closure records, and release-builder closure.
-  The writer recovers the unique post-link initialization topology, checks
-  local `0700`/`0600` ownership modes, and preserves exact UTF-8 bytes. U1 also
+  The writer idempotently recognizes exact one-link completion or recovers the
+  unique post-link two-link topology, checks local `0700`/`0600` ownership
+  modes, and preserves exact UTF-8 bytes through retained verification. U1 also
   fixes the lower, one-way typed vocabulary for U14's exact execution plan,
   command/capture/archive/process/containment/teardown/cleanup receipts and U15
   provider, dependency, HTTPS transport, and credential-environment provenance. It
@@ -25,8 +26,8 @@ tags: [gap, todo, release-proof, agent-skills]
   produce a passing protected-main creator Check yet: U14 must still produce
   the real candidate/OpenClaw installed manifests plus an independently bound
   execution/containment/teardown receipt through that contract, and U15 must
-  still run the
-  authenticated exact-head OpenClaw model loop without a transition reader.
+  still run the two ordered authenticated exact-head OpenClaw model loops
+  without a transition reader.
   Hosted artifact transfer normalizes Unix modes, so retained Attestor/Verifier
   checks intentionally bind content and filesystem identity rather than claiming
   transport-preserved source modes.

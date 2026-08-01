@@ -127,8 +127,8 @@ bundle exec ruby -Itest -Ilib test/unit/component_boundaries_test.rb
 
 Ready components cannot depend on candidates. Forbidden-construction rules
 also apply to guarded candidates, and the helper can run a named focused
-clean-load proof for a candidate such as Attempts without representing the
-whole component graph as ready.
+clean-load proof for a candidate such as Attempts or Workflow Creator Proof
+without representing the whole component graph as ready.
 
 The helper uses Ruby syntax rather than comments or string examples for literal
 `require`, `require_relative`, and `Constant.new` checks. It remains an
@@ -626,8 +626,14 @@ must be the canonical primary inside its bundle root. A passing receipt
 additionally requires an exact four-file retained bundle: the creator row,
 candidate and OpenClaw installed manifests, and an execution/cleanup receipt.
 The fixed bundle records bind canonical bytes, digest, integer size, and bounded
-installed inventory; dot, NUL, unsafe, over-count, per-file oversized, and
-aggregate-oversized inventory values fail closed. Attestation admits the primary
+installed inventory. Each installed manifest additionally names exact
+`executable`, `interpreter_or_launcher`, `package`, and `lock` records; all four
+must be distinct inventory members, and their canonical closure digest is part
+of the claimed installation identity. Candidate package digest/size and
+OpenClaw package and lock digest/size fields cross-bind those required members.
+Dot, NUL, unsafe, missing-role, unlisted-role, duplicate-role, identity-drift,
+over-count, per-file oversized, and aggregate-oversized values fail closed.
+Attestation admits the primary
 through the same owner, regular-file, no-follow, link-count, and byte-bound
 reader used for the retained sidecars before parsing any producer bytes.
 Canonicalization errors, including invalid UTF-8 accepted by the JSON parser
@@ -643,7 +649,9 @@ roots have disappeared. Classification stays explicit across the boundary: the
 creator row can pass only as `authenticated_openclaw` with an executed model
 loop, while the retained execution receipt is
 `deterministic_fixture`/`not_exercised`; swapping or conflating those roles is
-rejected.
+rejected. Producer, Attestor, and Verifier parity tests apply the same missing,
+extra, wrong-type, and classification mutations, while the command matrix also
+rejects a dynamically targeted task command.
 
 This is intentionally a non-claiming intermediate state. The current smoke
 adapter can upload a schema-valid failure with

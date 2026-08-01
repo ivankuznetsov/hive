@@ -3,11 +3,12 @@ require "tempfile"
 
 module HiveLiveAgentProof
   class WorkflowCreatorEvidence
-    def initialize(path:, renamer: nil, linker: nil, before_rename: nil,
-                   directory_sync: nil)
+    def initialize(path:, renamer: nil, linker: nil, writer: nil,
+                   before_rename: nil, directory_sync: nil)
       @path = File.expand_path(path)
       @renamer = renamer || ->(source, destination) { File.rename(source, destination) }
       @linker = linker || ->(source, destination) { File.link(source, destination) }
+      @writer = writer || ->(file, bytes) { file.write(bytes) }
       @before_rename = before_rename || ->(_source, _destination) { }
       @directory_sync = directory_sync || method(:fsync_directory)
     end
@@ -71,7 +72,7 @@ module HiveLiveAgentProof
       ) do |file|
         temporary = file.path
         file.binmode
-        file.write(bytes)
+        @writer.call(file, bytes)
         file.flush
         file.fsync
         file.close

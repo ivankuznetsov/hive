@@ -403,6 +403,10 @@ module HiveLiveAgentProof
     MAX_INVENTORY_ENTRIES = 512
     MAX_INSTALLED_FILE_BYTES = 268_435_456
     MAX_INSTALLED_TOTAL_BYTES = 1_073_741_824
+    REQUIRED_MEMBER_KEYS = %w[
+      executable interpreter_or_launcher lock package
+    ].freeze
+    FILE_RECORD_KEYS = %w[path sha256 size].freeze
 
     class Snapshot
       def initialize(bytes:)
@@ -428,6 +432,17 @@ module HiveLiveAgentProof
     end
 
     class << self
+      def installed_closure_sha256(required_members:, inventory:)
+        Digest::SHA256.hexdigest(
+          WorkflowCreatorContract.canonical_json(
+            {
+              "required_members" => required_members,
+              "inventory" => inventory
+            }
+          )
+        )
+      end
+
       def load_primary!(directory)
         root = File.expand_path(directory)
         validate_root!(root)
@@ -591,7 +606,10 @@ module HiveLiveAgentProof
       def validate_installation!(document, kind:, candidate_sha:, artifact_manifest:)
         exact_hash!(
           document,
-          %w[schema schema_version installation candidate_sha identity inventory],
+          %w[
+            schema schema_version installation candidate_sha identity
+            required_members inventory
+          ],
           "installed manifest"
         )
         unless document["schema"] == INSTALLED_MANIFEST_SCHEMA &&
@@ -600,23 +618,41 @@ module HiveLiveAgentProof
                document["candidate_sha"] == candidate_sha
           raise Error, "workflow-creator installed-manifest identity is invalid"
         end
-        validate_inventory!(document["inventory"])
+        inventory = validate_inventory!(document["inventory"])
+        required_members = validate_required_members!(
+          document["required_members"], inventory
+        )
+        closure_sha256 = installed_closure_sha256(
+          required_members: required_members,
+          inventory: inventory
+        )
         if kind == "candidate"
-          validate_candidate_identity!(document["identity"], artifact_manifest)
+          validate_candidate_identity!(
+            document["identity"],
+            artifact_manifest,
+            required_members,
+            closure_sha256
+          )
         else
-          validate_openclaw_identity!(document["identity"])
+          validate_openclaw_identity!(
+            document["identity"], required_members, closure_sha256
+          )
         end
       end
 
-      def validate_candidate_identity!(identity, manifest)
+      def validate_candidate_identity!(identity, manifest, required_members,
+                                       closure_sha256)
         exact_hash!(
           identity,
-          %w[kind name version artifact_sha256 artifact_size],
+          %w[
+            kind name version artifact_sha256 artifact_size closure_sha256
+          ],
           "candidate installation identity"
         )
         gem_name, gem_record = manifest.fetch("files").find do |name, _record|
           name.match?(/\Ahive-cli-[0-9].*\.gem\z/)
         end
+        package = required_members.fetch("package")
         valid =
           gem_name &&
           identity == {
@@ -624,23 +660,37 @@ module HiveLiveAgentProof
             "name" => "hive-cli",
             "version" => manifest["hive_version"],
             "artifact_sha256" => gem_record["sha256"],
-            "artifact_size" => gem_record["size"]
-          }
+            "artifact_size" => gem_record["size"],
+            "closure_sha256" => closure_sha256
+          } &&
+          package.values_at("sha256", "size") ==
+            gem_record.values_at("sha256", "size")
         raise Error, "workflow-creator candidate installation is not artifact-bound" unless valid
       end
 
-      def validate_openclaw_identity!(identity)
+      def validate_openclaw_identity!(identity, required_members,
+                                      closure_sha256)
         exact_hash!(
           identity,
-          %w[kind name version integrity lock_sha256 package_count],
+          %w[
+            kind name version integrity lock_sha256 lock_size package_sha256
+            package_size closure_sha256 package_count
+          ],
           "OpenClaw installation identity"
         )
+        package = required_members.fetch("package")
+        lock = required_members.fetch("lock")
         valid =
           identity["kind"] == "openclaw_npm" &&
           identity["name"] == "openclaw" &&
           bounded_string?(identity["version"], 128) &&
           bounded_string?(identity["integrity"], 512) &&
           /\A[0-9a-f]{64}\z/.match?(identity["lock_sha256"].to_s) &&
+          identity["lock_sha256"] == lock["sha256"] &&
+          identity["lock_size"] == lock["size"] &&
+          identity["package_sha256"] == package["sha256"] &&
+          identity["package_size"] == package["size"] &&
+          identity["closure_sha256"] == closure_sha256 &&
           identity["package_count"].is_a?(Integer) &&
           identity["package_count"].between?(1, 4096)
         raise Error, "workflow-creator OpenClaw installation identity is invalid" unless valid
@@ -652,12 +702,7 @@ module HiveLiveAgentProof
           raise Error, "workflow-creator installed inventory is invalid"
         end
         paths = inventory.map do |record|
-          unless record.is_a?(Hash) &&
-                 record.keys.sort == %w[path sha256 size] &&
-                 HiveLiveAgentProof.safe_relative_path?(record["path"]) &&
-                 /\A[0-9a-f]{64}\z/.match?(record["sha256"].to_s) &&
-                 record["size"].is_a?(Integer) &&
-                 record["size"].between?(0, MAX_INSTALLED_FILE_BYTES)
+          unless valid_inventory_record?(record)
             raise Error, "workflow-creator installed inventory is invalid"
           end
           record["path"]
@@ -669,6 +714,33 @@ module HiveLiveAgentProof
         if total > MAX_INSTALLED_TOTAL_BYTES
           raise Error, "workflow-creator installed inventory is oversized"
         end
+        inventory
+      end
+
+      def validate_required_members!(required_members, inventory)
+        unless required_members.is_a?(Hash) &&
+               required_members.keys.sort == REQUIRED_MEMBER_KEYS
+          raise Error,
+                "workflow-creator installed required members are invalid"
+        end
+        records = required_members.values
+        unless records.all? { |record| valid_inventory_record?(record) } &&
+               records.map { |record| record["path"] }.uniq.length ==
+                 REQUIRED_MEMBER_KEYS.length &&
+               records.all? { |record| inventory.include?(record) }
+          raise Error,
+                "workflow-creator installed required members are not bound to inventory"
+        end
+        required_members
+      end
+
+      def valid_inventory_record?(record)
+        record.is_a?(Hash) &&
+          record.keys.sort == FILE_RECORD_KEYS &&
+          HiveLiveAgentProof.safe_relative_path?(record["path"]) &&
+          /\A[0-9a-f]{64}\z/.match?(record["sha256"].to_s) &&
+          record["size"].is_a?(Integer) &&
+          record["size"].between?(0, MAX_INSTALLED_FILE_BYTES)
       end
 
       def validate_execution_receipt!(receipt, row:, candidate_sha:)

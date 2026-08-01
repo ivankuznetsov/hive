@@ -13,7 +13,8 @@ tags: [gap, todo, release-proof, agent-skills]
 
 - The workflow-creator proof now has a single strict contract, crash-safe
   schema-v1 failure receipt, authored/executed instruction binding, retained
-  bundle validation, and release-builder closure. It deliberately cannot
+  bundle validation, exact executable/interpreter-or-launcher/package/lock
+  member identities, and release-builder closure. It deliberately cannot
   produce a passing protected-main creator Check yet: U14 must still produce
   the real candidate/OpenClaw installed manifests plus an independently bound
   execution/containment/teardown receipt, and U15 must still run the

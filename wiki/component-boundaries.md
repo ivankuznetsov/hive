@@ -3,7 +3,7 @@ title: Component boundaries
 type: reference
 source: config/component-boundaries.yml, test/support/component_boundary_contract.rb
 created: 2026-07-25
-updated: 2026-07-30
+updated: 2026-08-01
 tags: [architecture, components, boundaries, monorepo]
 ---
 
@@ -19,6 +19,7 @@ the first and primary consumer.
 |-----------|-------|---------------------|-------------------|
 | Patrol Effect Evidence | `candidate` (U3 qualification pending) | `require "hive/modules/migration/patrol_evidence"` → `Hive::Modules::Migration::PatrolEvidence` | [[modules/patrol]] |
 | Attempts admission / future RunReceipt | `candidate` (guarded reference) | `require "hive/attempts/api"` → `Hive::Attempts::API` | [[modules/attempts]] |
+| Workflow Creator Proof | `candidate` (U14/U15 custody and live orchestration pending) | `require "./packaging/live_agent_skills/proof"` → `HiveLiveAgentProof` | [[testing]] |
 | UserService | `boundary-ready` | `require "hive/user_service"` → `Hive::UserService` | [[modules/user_service]] |
 | Agent ABI | `boundary-ready`; standalone package candidate | `require "hive/agent_runtime"` → `Hive::AgentRuntime` | [[modules/agent_cli_runtime]], [[modules/agent_profile]] |
 | Agent Artifact Firewall | `boundary-ready` | `require "hive/artifact_firewall"` → `Hive::ArtifactFirewall` | [[modules/protected_files]] |
@@ -34,8 +35,9 @@ has earned a gem, version, repository, or release.
 
 ## Final graph audit
 
-The final U2 resolution on 2026-07-29 retains eight components: six are
-`boundary-ready`; Attempts and Patrol Effect Evidence remain `candidate`.
+The U1 boundary refresh on 2026-08-01 retains nine components: six are
+`boundary-ready`; Attempts, Patrol Effect Evidence, and Workflow Creator Proof
+remain `candidate`.
 Patrol retains one bounded U3 exception for compressed evidence qualification
 and cutover proof. Every retained entry point has a focused clean-process load
 proof, every catalog-owned path and focused test resolves inside this
@@ -49,6 +51,7 @@ flowchart LR
   skillpack[Skillpack] --> agent_abi[Agent ABI]
   patrol_effects[Patrol Effect Evidence - candidate]
   attempts[Attempts admission - candidate]
+  workflow_creator[Workflow Creator Proof - candidate]
   user_service[UserService]
   artifact_firewall[Agent Artifact Firewall]
   git_gate[Safe Agent Git Gate]
@@ -60,7 +63,8 @@ Hive primitives. The source audit found no retained experimental facade outside
 the catalog: each promoted facade is owned by a catalog row and used by Hive,
 while Attempts and Patrol Effect Evidence are deliberately retained as guarded
 candidates rather than being promoted ahead of their remaining lifecycle or
-qualification proof.
+qualification proof. Workflow Creator Proof is likewise guarded until U14 and
+U15 provide installed execution custody and authenticated live orchestration.
 
 This is an internal architecture verdict, not a packaging verdict. None of the
 six ready components currently has the named non-Hive adopter and independent
@@ -141,6 +145,17 @@ Attempts intentionally remains the guarded reference instead of claiming that
 its full lifecycle is a supported component boundary: the slice does not
 publish raw storage, reconciliation, supervision, capacity, loss-policy,
 cancellation, export, or generic lifecycle operations.
+
+`HiveLiveAgentProof` is the packaging entry point for the guarded Workflow
+Creator Proof component. `WorkflowCreatorContract` owns the schema-v1 creator
+document and classifications, `WorkflowCreatorBundle` independently validates
+the retained four-file bundle and exact installed closure roles, and
+`WorkflowCreatorEvidence` alone initializes or atomically replaces the primary
+receipt. Candidate and OpenClaw installed identities bind a canonical closure
+digest plus exact executable, interpreter-or-launcher, package, and lock
+records that must also appear in the bounded inventory. The component cannot
+select credentials, execute a process, or translate unavailable U14 custody
+into success; those remain U14/U15 responsibilities documented in [[testing]].
 
 The `Agent ABI` is boundary-ready below orchestration. `AgentRuntime` exposes
 immutable request, compiled invocation, capability/probe evidence, and

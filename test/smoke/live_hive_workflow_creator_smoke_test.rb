@@ -21,6 +21,37 @@ class LiveHiveWorkflowCreatorSmokeTest < Minitest::Test
     HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy
   ].freeze
 
+  def test_preflight_failure_persists_an_uploadable_terminal_receipt
+    with_tmp_dir do |dir|
+      evidence_path = File.join(
+        dir, "creator-evidence", "openclaw-workflow-creator.json"
+      )
+      error = with_env(
+        "HIVE_LIVE_AGENT_SKILLS" => "1",
+        "HIVE_CANDIDATE_SHA" => "a" * 40,
+        "HIVE_PROOF_ARTIFACTS" => dir,
+        "HIVE_CREATOR_EVIDENCE_PATH" => evidence_path,
+        "OPENAI_API_KEY" => nil,
+        "HIVE_RELEASE_GATE" => nil,
+        "PATH" => ""
+      ) do
+        assert_raises(Minitest::Skip) do
+          test_openclaw_creates_and_validates_editorial_workflow_without_a_task
+        end
+      end
+
+      assert_includes error.message, "OPENAI_API_KEY is unavailable"
+      terminal = JSON.parse(File.read(evidence_path))
+      assert_equal(
+        [ "failed", "preflight", "proof_failed", "unavailable", "not_started" ],
+        terminal.values_at(
+          "result", "phase", "reason", "execution_kind", "model_loop"
+        )
+      )
+      HiveLiveAgentProof::WorkflowCreatorContract.validate_nonpassing!(terminal)
+    end
+  end
+
   def test_openclaw_creates_and_validates_editorial_workflow_without_a_task
     availability!(ENV["HIVE_LIVE_AGENT_SKILLS"] == "1",
                   "set HIVE_LIVE_AGENT_SKILLS=1 to run authenticated workflow-creator proof")

@@ -22,6 +22,7 @@ class ComponentBoundariesTest < Minitest::Test
       skillpack
       user-service
       work-ledger
+      workflow-creator-proof
     ], contract.components.map { |component| component.fetch("id") }.sort
 
     attempts = contract.component("attempts")
@@ -145,6 +146,43 @@ class ComponentBoundariesTest < Minitest::Test
       "the deleted compatibility store must not survive in the component contract"
     )
 
+    workflow_creator = contract.component("workflow-creator-proof")
+    assert_equal "candidate", workflow_creator.fetch("state")
+    assert_equal "./packaging/live_agent_skills/proof",
+                 workflow_creator.dig("entrypoint", "require")
+    assert_equal "HiveLiveAgentProof",
+                 workflow_creator.dig("entrypoint", "constant")
+    assert_equal(
+      %w[
+        HiveLiveAgentProof::WorkflowCreatorBundle
+        HiveLiveAgentProof::WorkflowCreatorContract
+        HiveLiveAgentProof::WorkflowCreatorEvidence
+      ],
+      workflow_creator.dig("public_contract", "values").sort
+    )
+    assert_equal(
+      %w[
+        packaging/live_agent_skills/workflow_creator_contract.rb
+        packaging/live_agent_skills/workflow_creator_evidence.rb
+      ],
+      workflow_creator.fetch("owned_paths").sort
+    )
+    assert_equal(
+      [ "HiveLiveAgentProof::WorkflowCreatorEvidence" ],
+      workflow_creator.fetch("forbidden_constructions")
+    )
+    assert_empty workflow_creator.fetch("component_dependencies")
+    assert_empty workflow_creator.fetch("allowed_hive_dependencies")
+    assert_empty workflow_creator.fetch("migration_exceptions")
+    assert_equal 1, workflow_creator.fetch("state_contracts").length
+    assert_match(/sole writer/, workflow_creator.fetch("state_contracts").first)
+    assert_equal 1, workflow_creator.fetch("schema_contracts").length
+    assert_match(/schema v1/, workflow_creator.fetch("schema_contracts").first)
+    assert_equal 1, workflow_creator.fetch("lock_contracts").length
+    assert_match(/atomic link-or-rename/, workflow_creator.fetch("lock_contracts").first)
+    assert_match(/cannot select credentials/, workflow_creator.fetch("mutation_authority"))
+    assert_match(/interrupted writes preserve/, workflow_creator.fetch("recovery_surface"))
+
     ready_components = [ user_service ]
 
     clean_load = contract.validate_clean_load!("attempts")
@@ -248,7 +286,7 @@ class ComponentBoundariesTest < Minitest::Test
     remaining_candidates = contract.components.reject do |component|
       ready_components.include?(component)
     end
-    assert_equal %w[attempts patrol-effects],
+    assert_equal %w[attempts patrol-effects workflow-creator-proof],
                  remaining_candidates.map { |entry| entry.fetch("id") }.sort
     assert remaining_candidates.all? { |component| component.fetch("state") == "candidate" }
 
@@ -290,6 +328,13 @@ class ComponentBoundariesTest < Minitest::Test
                  patrol_effects_load.fetch("constant")
     assert_empty patrol_effects_load.fetch("forbidden_loaded_features")
     assert_empty patrol_effects_load.fetch("forbidden_constants")
+    workflow_creator_load = contract.validate_clean_load!(
+      "workflow-creator-proof"
+    )
+    assert_equal "HiveLiveAgentProof",
+                 workflow_creator_load.fetch("constant")
+    assert_empty workflow_creator_load.fetch("forbidden_loaded_features")
+    assert_empty workflow_creator_load.fetch("forbidden_constants")
   end
 
   def test_final_graph_and_wiki_inventory_agree_with_the_catalog

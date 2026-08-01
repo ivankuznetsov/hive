@@ -19,13 +19,14 @@ Updated: 2026-07-30
 Folder-as-agent workflow engine: a Ruby 3.4 / Thor CLI control plane where descriptor-backed workflows move task folders through filesystem stages, stage agents compile provider-neutral invocations through `Hive::AgentRuntime` and configurable AgentProfile adapters (`claude` default, `codex`, `pi`, `grok`), and `mv` between directories remains the approval primitive. The built-in `coding` workflow drives the nine-stage PR pipeline (`1-inbox` → `2-brainstorm` → `3-plan` → `4-execute` → `5-open-pr` → `6-review` → `7-artifacts` → `8-finalize` → `9-done`), while the built-in `content` and `bench` workflows and project-authored workflows share the same generic runner/status/action machinery. Agent operation is centered on the additive operational status contract, coherent daemon scheduler snapshots, bounded semantic `hive watch`, tokenized routine `hive act`, and stable-ID semantic E2E profiles; the legacy full JSON graph remains compatible. Hive packages one canonical operating skill projected to OpenClaw `/hive`, Claude `/hive`, Codex `$hive`, and Pi `/skill:hive`, with read-only `hive doctor`, consent-safe setup, deterministic trusted pre-release proof, and optional four-agent live diagnostics.
 
 Reusable mechanisms remain in this monorepo behind the canonical
-[[component-boundaries]] catalog. The final internal graph has six
+[[component-boundaries]] catalog. The internal graph has six
 `boundary-ready` facades—UserService, Agent ABI, Agent Artifact Firewall,
-Skillpack, Safe Agent Git Gate, and WorkLedger—and one guarded `candidate`,
-Attempts admission. Skillpack's downward dependency on the Agent ABI is the
-only component-to-component edge; no migration exceptions remain. Hive is the
-first and primary consumer, and internal readiness does not imply a gem,
-version, repository, or release.
+Skillpack, Safe Agent Git Gate, and WorkLedger—and three guarded candidates:
+Attempts admission, Patrol Effect Evidence, and Workflow Creator Proof.
+Skillpack's downward dependency on the Agent ABI is the only
+component-to-component edge; Patrol retains its bounded U3 migration
+exception. Hive is the first and primary consumer, and internal readiness does
+not imply a gem, version, repository, or release.
 
 Agent spawns that own controller artifacts use the boundary-ready
 `Hive::ArtifactFirewall` for same-user protected-anchor custody, required

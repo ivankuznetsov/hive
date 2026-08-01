@@ -275,6 +275,51 @@ components:
       - reason: "U3 must prove candidate-bound compressed evidence and production qualification before this internal transition boundary can be promoted."
         removal_unit: U3
 
+  - id: workflow-creator-proof
+    name: Workflow Creator Proof
+    state: candidate
+    entrypoint:
+      file: packaging/live_agent_skills/proof.rb
+      require: ./packaging/live_agent_skills/proof
+      constant: HiveLiveAgentProof
+    public_contract:
+      values:
+        - HiveLiveAgentProof::WorkflowCreatorContract
+        - HiveLiveAgentProof::WorkflowCreatorBundle
+        - HiveLiveAgentProof::WorkflowCreatorEvidence
+      errors:
+        - HiveLiveAgentProof::Error
+    owned_paths:
+      - packaging/live_agent_skills/workflow_creator_contract.rb
+      - packaging/live_agent_skills/workflow_creator_evidence.rb
+    state_contracts:
+      - "WorkflowCreatorEvidence is the sole writer of the caller-selected primary creator receipt; WorkflowCreatorContract and WorkflowCreatorBundle validate typed creator and retained bundle bytes without choosing execution or provider policy"
+    schema_contracts:
+      - "hive-live-workflow-creator-evidence schema v1 plus canonical installed-manifest and execution-receipt bundle members; U14 and U15 populate the contract without redefining it"
+    lock_contracts:
+      - "Private sibling temporary file, file fsync, atomic link-or-rename, and parent-directory fsync preserve the prior accepted receipt across interrupted replacement"
+    component_dependencies: []
+    allowed_hive_dependencies: []
+    internal_collaborators:
+      - HiveLiveAgentProof::WorkflowCreatorBundle
+      - HiveLiveAgentProof::WorkflowCreatorEvidence
+    forbidden_constructions:
+      - HiveLiveAgentProof::WorkflowCreatorEvidence
+    authorized_internal_constructions: []
+    hive_consumers:
+      - packaging/live_agent_skills/proof.rb
+      - packaging/release_candidate/artifacts.rb
+      - test/smoke/live_hive_workflow_creator_smoke_test.rb
+    mutation_authority: "WorkflowCreatorEvidence alone initializes and atomically replaces the primary creator receipt at a caller-selected path; it cannot select credentials, launch processes, or turn unavailable U14 custody into success."
+    recovery_surface: "A schema-valid non-passing receipt precedes work; interrupted writes preserve the prior bytes, and successful replacement is visible only after the parent directory is synced."
+    wiki_page: wiki/testing.md
+    focused_tests:
+      - test/unit/packaging/live_agent_proof_test.rb
+      - test/unit/packaging/workflow_creator_evidence_test.rb
+      - test/smoke/live_hive_workflow_creator_smoke_test.rb
+      - test/unit/component_boundaries_test.rb
+    migration_exceptions: []
+
   - id: attempts
     name: Attempts admission / future RunReceipt
     state: candidate

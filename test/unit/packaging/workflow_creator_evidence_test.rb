@@ -49,6 +49,29 @@ class WorkflowCreatorEvidenceTest < Minitest::Test
     end
   end
 
+  def test_interruption_during_temporary_write_preserves_previous_receipt
+    with_tmp_dir do |dir|
+      path = File.join(dir, "openclaw-workflow-creator.json")
+      HiveLiveAgentProof::WorkflowCreatorEvidence.new(path: path)
+                                                   .initialize!(candidate_sha: SHA)
+      previous = File.binread(path)
+      interrupted = HiveLiveAgentProof::WorkflowCreatorEvidence.new(
+        path: path,
+        writer: lambda do |file, bytes|
+          file.write(bytes.byteslice(0, bytes.bytesize / 2))
+          raise IOError, "interrupted during write"
+        end
+      )
+
+      assert_raises(IOError) do
+        interrupted.replace_nonpassing!(failed_document("proof_failed"))
+      end
+
+      assert_equal previous, File.binread(path)
+      assert_empty Dir.glob(File.join(dir, ".*.tmp"))
+    end
+  end
+
   def test_rename_failure_preserves_previous_receipt_and_cleans_temporary
     with_tmp_dir do |dir|
       path = File.join(dir, "openclaw-workflow-creator.json")
@@ -215,6 +238,36 @@ class WorkflowCreatorEvidenceTest < Minitest::Test
         "result", "phase", "reason", "execution_kind", "model_loop"
       )
     )
+  end
+
+  def test_terminal_failure_rejects_non_boolean_or_impossible_progress
+    invalid = [
+      [ "yes", false ],
+      [ false, nil ],
+      [ true, false ]
+    ]
+
+    invalid.each do |proof_succeeded, model_loop_executed|
+      error = assert_raises(HiveLiveAgentProof::Error) do
+        HiveLiveAgentProof::WorkflowCreatorContract.terminal_failure(
+          candidate_sha: SHA,
+          proof_succeeded: proof_succeeded,
+          model_loop_executed: model_loop_executed
+        )
+      end
+      assert_equal "workflow-creator terminal state is invalid", error.message
+    end
+  end
+
+  def test_failure_normalizes_an_unresolved_candidate_identity
+    document = HiveLiveAgentProof::WorkflowCreatorContract.failure(
+      candidate_sha: "not-a-sha",
+      phase: "preflight",
+      reason: "not_started"
+    )
+
+    assert_equal "unresolved", document.fetch("candidate_sha")
+    HiveLiveAgentProof::WorkflowCreatorContract.validate_nonpassing!(document)
   end
 
   def test_nonpassing_contract_rejects_contradictory_classification

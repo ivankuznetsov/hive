@@ -6,7 +6,7 @@ Donor PR: https://github.com/ivankuznetsov/hive/pull/910
 
 Frozen donor head: `7d14ebb72801706f3029c1ca437d9f2f43825efe`
 
-Admission state: `awaiting_A1_approval_and_clean_successor_review`
+Admission state: `awaiting_checkpoint_readback_A1_and_exact_head_review`
 
 This ledger contains every finding or finding-shaped observation recovered from
 PR #910 exactly once. Donor resolution claims are historical evidence only;
@@ -91,17 +91,24 @@ This is not a 37th owned observation.
 
 ## Admission gates
 
-Production mutation remains forbidden until:
+The accepted plan at SHA-256
+`6f69fce6f660997ca341fe9a2f2eaa3b00c0d432cabbe58b3341930e4622a0`
+already permits this finite donor transition through F6, R39, R41, and the U3a
+admission wording without weakening R6 for newly observed successor findings.
 
-1. R39, R41, F6, and the U3a admission wording explicitly permit the finite
-   PR #910 donor-observation transition without relaxing R6 for successors.
+The seven ID-less observations remain locator-identified prevention
+obligations: four owned by U3b and three by U3c. If an independent successor
+review re-observes one on an exact head, that live finding receives a fresh
+successor-scoped ID and all R6 metadata. Historical metadata is never invented.
+
+Production mutation remains forbidden until all of these exact-current-head
+actions complete:
+
+1. The tracked ledger digest, numeric readback, and projected U3a
+   file/dependency/responsibility map are published and read back.
 2. A1 approves the complete `15/7/11/3/0` ownership map.
 3. An independent clean exact-head review evaluates U3a's 15 assigned
-   invariants.
-4. Every future U3b/U3c ID-less observation is either re-observed and assigned a
-   new successor-scoped ID or retained as an exact-head prevention obligation.
-5. The tracked ledger digest and numeric readback are published and read back
-   in the U3a admission checkpoint.
+   invariants and accepts the bounded admission map.
 
 No donor resolution SHA is successor proof. No absent subsystem is
 `rejected-invalid`. No historical ID, SHA, severity, or lens may be invented.

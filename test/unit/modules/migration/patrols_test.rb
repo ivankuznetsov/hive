@@ -377,6 +377,50 @@ class ModulesMigrationPatrolsTest < Minitest::Test
     end
   end
 
+  def test_cutover_accepts_independently_rebuilt_current_shadow_evidence
+    with_project do |project|
+      store = FakeStore.new
+      migration = Hive::Modules::Migration::Patrols.new(
+        project_root: project.fetch("path"), project: "demo",
+        hive_state_path: project.fetch("hive_state_path"), module_store: store,
+        quiescence_probe: ->(*) { :quiescent }
+      )
+      migration.adopt!(now: NOW)
+      payload = {
+        "reviewer" => "reviewer-1",
+        "reviewed_at" => NOW.iso8601(6)
+      }
+      report = Struct.new(:payload) do
+        def eligible? = true
+        def blockers = []
+        def configuration_digests
+          { "patrol" => "a" * 64, "architecture-patrol" => "b" * 64 }
+        end
+      end.new(payload)
+      rebuilt = Report.new(
+        eligible?: true, blockers: [],
+        configuration_digests: report.configuration_digests
+      )
+      build_arguments = nil
+      builder = lambda do |**arguments|
+        build_arguments = arguments
+        rebuilt
+      end
+
+      outcome = with_replaced_singleton_method(
+        Hive::Modules::Migration::Report, :build, builder
+      ) do
+        migration.cutover!(report: report, now: NOW + 1)
+      end
+
+      assert_equal "module", outcome.status
+      assert_equal payload.fetch("reviewer"), build_arguments.fetch(:reviewer)
+      assert_equal payload.fetch("reviewed_at"), build_arguments.fetch(:reviewed_at)
+      assert_equal NOW + 1, build_arguments.fetch(:generated_at)
+      assert_respond_to build_arguments.fetch(:record_source), :each
+    end
+  end
+
   def test_legacy_schedulers_stop_before_config_or_claim_work_when_epoch_denies_admission
     entry = { "name" => "demo", "path" => "/project", "hive_state_path" => "/state" }
     denied = ->(_entry, _module_name, _authority) { false }

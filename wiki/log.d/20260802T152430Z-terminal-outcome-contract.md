@@ -8,3 +8,8 @@
 - Kept blocked tasks active, visibly labelled, explicitly retryable, and
   operator-owned while excluding semantic terminal errors from daemon
   automatic retry.
+- Hardened marker reads and writes against FIFO hangs, unbounded tails,
+  symlink following, and predictable temporary-path redirection while
+  preserving binary artifact bytes.
+- Normalized semantic outcomes before stage-exit events and inside the terminal
+  rollback boundary, and rejected incompatible managed-worktree descriptors.

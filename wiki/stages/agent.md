@@ -25,6 +25,9 @@ resumes the exact-origin worktree, launches the configured stage mapping once
 with that worktree as `cwd`, and uses exit-code-only completion. The agent may
 write repository changes plus task-root `fix-report.md`; it cannot author the
 terminal Hive outcome.
+Because that report starts with `Decision:` and has a separate controller
+receipt protocol, `terminal_outcomes` cannot be combined with `workspace` or
+`handoff`; descriptor validation rejects the combination before execution.
 
 ## Runtime Contract
 
@@ -93,8 +96,10 @@ terminal Hive outcome.
    `ERROR reason=terminal_outcome_blocked outcome=<value>`. Missing, malformed,
    unknown, unreadable, non-regular, overlong, or invalid-UTF-8 results become
    `ERROR reason=terminal_outcome_invalid outcome=<bounded-detail>`. The error
-   commit is transactional with the terminal snapshot, and never stamps
-   `completed_at`. Descriptors without this opt-in keep the legacy marker path.
+   commit and stage-exit event are transactional with the terminal snapshot,
+   and never stamp `completed_at`. A missing `COMPLETE` marker is invalid even
+   when the first-line outcome is declared. Descriptors without this opt-in
+   keep the legacy marker path.
 
 An error envelope does not by itself prove that the spawn wrote no marker.
 `Hive::Agent` writes specific state-file errors for provider limits, timeouts,

@@ -65,6 +65,8 @@ Per-project descriptors live under `<hive_state_path>/workflows/*.yml`, defaulti
   required, non-empty, unique, disjoint lowercase safe slugs of at most 40
   characters. The stage must declare `deliverable`, and `deliverable` must
   equal `state_file`; council and intermediate stages cannot use this field.
+  The field is also incompatible with `workspace` or `handoff`, whose managed
+  worktree path uses a separate `Decision:` report and controller receipt.
   `hive workflow validate --json` exposes the normalized object on every stage
   (`null` when absent). See [[stages/agent]] for runtime normalization.
 - `workspace: worktree` plus `handoff: draft_pr` is one closed terminal-agent

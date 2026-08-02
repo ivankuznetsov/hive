@@ -8,6 +8,9 @@ material decisions. A verb phrase in the request is not automatically a stage.
 - Keep ordinary transformations sequential. Do not infer speculative branches.
 - Give each agent stage one focused instruction: inputs, required output,
   completion criteria, and explicit non-goals.
+- Use `terminal_outcomes` only when a final direct agent must distinguish a
+  successful deliverable from a durable domain block. Keep it off managed
+  worktree/handoff stages, which use their own `Decision:` receipt contract.
 - Prefer project agent/model inheritance. Specialize only when the request
   materially requires a capability the inherited choice cannot supply.
 - Use safe lowercase-hyphen stage names and distinct state files.

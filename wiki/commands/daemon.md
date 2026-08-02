@@ -3,7 +3,7 @@ title: hive daemon
 type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
-updated: 2026-07-30
+updated: 2026-08-02
 tags: [command, daemon, automation, json]
 ---
 
@@ -17,9 +17,10 @@ auto-archives safely delivered coding tasks from any PR-bearing stage 5–8
 after bounded GitHub verification and required architecture intake. It
 stops at human-input gates (`_WAITING` markers for Q&A / triage), temporary
 retry-safety blocks, and 8-finalize while the PR is still open on GitHub.
-Every persisted `ERROR` / `REVIEW_ERROR` is eligible for the universal
-marker-age retry; `RecoveryCoordinator` durably admits only the exact safe
-generation before normal policy dispatch. Separately, it ingests merged PRs and
+Every persisted `ERROR` / `REVIEW_ERROR` except the exact operator-owned
+`terminal_outcome_blocked` and `terminal_outcome_invalid` reasons is eligible
+for the universal marker-age retry; `RecoveryCoordinator` durably admits only
+the exact safe generation before normal policy dispatch. Separately, it ingests merged PRs and
 fairly schedules ordinary patrol alongside language-neutral architecture
 discovery/action resumes.
 

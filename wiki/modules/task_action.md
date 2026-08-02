@@ -121,8 +121,9 @@ Runtime liveness can short-circuit per-stage dispatch before marker lookup:
   Its diagnostic retains the guarded `workflow.retry` recommendation and says
   explicitly that retry reruns only the current terminal stage. A blocker
   propagated from an already completed upstream stage requires a fresh task.
-  Every `reason=terminal_outcome_*` error is operator-owned and excluded from
-  daemon automatic retry; invalid outcome contracts remain visible as `Error`.
+  The exact `terminal_outcome_blocked` and `terminal_outcome_invalid` reasons
+  are operator-owned and excluded from daemon automatic retry; invalid outcome
+  contracts remain visible as `Error`.
 
 `:execute_stale` maps to `RECOVER_EXECUTE` and emits `hive findings <slug>` rather than a workflow verb. Legacy `:execute_waiting findings_count>0` uses the same recovery surface so old state folders do not fall through to generic edit guidance. Running `hive develop <slug>` on either shape would refuse or loop on a non-terminal marker; pointing the user at `findings` opens the recovery loop instead.
 

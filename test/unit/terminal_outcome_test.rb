@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/terminal_outcome"
+require "timeout"
 
 class TerminalOutcomeTest < Minitest::Test
   include HiveTestHelper
@@ -16,6 +17,19 @@ class TerminalOutcomeTest < Minitest::Test
       File.binwrite(path, body)
       return Hive::TerminalOutcome.classify(path, outcomes)
     end
+  end
+
+  def terminal_task(path)
+    workflow = Hive::Workflow.new(
+      id: :repair,
+      stages: [
+        Hive::Workflow::Stage.new(
+          name: "repair", index: 1, state_file: File.basename(path), kind: :agent,
+          deliverable: File.basename(path), terminal_outcomes: outcomes
+        )
+      ]
+    )
+    Struct.new(:workflow, :stage_name, :state_file).new(workflow, "repair", path)
   end
 
   def test_classifies_declared_complete_and_blocked_first_lines
@@ -40,10 +54,12 @@ class TerminalOutcomeTest < Minitest::Test
 
   def test_invalid_utf8_overlong_symlink_directory_and_missing_fail_closed
     invalid_utf8 = classify("Outcome: \xFF\n<!-- COMPLETE -->\n".b)
-    overlong = classify("Outcome: #{'a' * 513}\n<!-- COMPLETE -->\n")
+    overlong_outcome = classify("Outcome: #{'a' * 41}\n<!-- COMPLETE -->\n")
+    overlong_line = classify("Outcome: #{'a' * 513}\n<!-- COMPLETE -->\n")
 
     assert_equal [ :invalid, "invalid-utf8" ], [ invalid_utf8.kind, invalid_utf8.outcome ]
-    assert_equal [ :invalid, "overlong" ], [ overlong.kind, overlong.outcome ]
+    assert_equal [ :invalid, "overlong" ], [ overlong_outcome.kind, overlong_outcome.outcome ]
+    assert_equal [ :invalid, "overlong" ], [ overlong_line.kind, overlong_line.outcome ]
 
     with_tmp_dir do |dir|
       target = File.join(dir, "target.md")
@@ -64,7 +80,7 @@ class TerminalOutcomeTest < Minitest::Test
       path = File.join(dir, "repair-certificate.md")
       File.mkfifo(path, 0o600)
 
-      result = Hive::TerminalOutcome.classify(path, outcomes)
+      result = Timeout.timeout(1) { Hive::TerminalOutcome.classify(path, outcomes) }
 
       assert_equal [ :invalid, "non-regular" ], [ result.kind, result.outcome ]
     end
@@ -133,16 +149,7 @@ class TerminalOutcomeTest < Minitest::Test
     with_tmp_dir do |dir|
       path = File.join(dir, "repair-certificate.md")
       File.binwrite(path, "Outcome: \xFF\n<!-- COMPLETE -->\n".b)
-      workflow = Hive::Workflow.new(
-        id: :repair,
-        stages: [
-          Hive::Workflow::Stage.new(
-            name: "repair", index: 1, state_file: File.basename(path), kind: :agent,
-            deliverable: File.basename(path), terminal_outcomes: outcomes
-          )
-        ]
-      )
-      task = Struct.new(:workflow, :stage_name, :state_file).new(workflow, "repair", path)
+      task = terminal_task(path)
 
       normalization = Hive::TerminalOutcome.normalize(
         task, { commit: "complete", status: :complete }
@@ -160,6 +167,66 @@ class TerminalOutcomeTest < Minitest::Test
       )
       assert_equal :none, Hive::Markers.current(path).name
       assert_includes File.binread(path), "\xFF".b
+    end
+  end
+
+  def test_normalization_replaces_non_regular_state_without_touching_its_target
+    with_tmp_dir do |dir|
+      target = File.join(dir, "outside.md")
+      path = File.join(dir, "repair-certificate.md")
+      File.write(target, "outside stays intact\n")
+      File.symlink(target, path)
+      task = terminal_task(path)
+
+      normalization = Timeout.timeout(1) do
+        Hive::TerminalOutcome.normalize(task, { commit: "complete", status: :complete })
+      end
+
+      assert normalization.changed
+      assert_equal "outside stays intact\n", File.read(target)
+      refute File.symlink?(path)
+      assert File.file?(path)
+      marker = Hive::Markers.current(path)
+      assert_equal :error, marker.name
+      assert_equal "terminal_outcome_invalid", marker.attrs.fetch("reason")
+      assert_equal "non-regular", marker.attrs.fetch("outcome")
+    end
+  end
+
+  def test_normalization_replaces_fifo_without_blocking
+    skip "File::NONBLOCK is unavailable" unless File.const_defined?(:NONBLOCK)
+
+    with_tmp_dir do |dir|
+      path = File.join(dir, "repair-certificate.md")
+      File.mkfifo(path, 0o600)
+      task = terminal_task(path)
+
+      normalization = Timeout.timeout(1) do
+        Hive::TerminalOutcome.normalize(task, { commit: "complete", status: :complete })
+      end
+
+      assert normalization.changed
+      assert File.file?(path)
+      marker = Hive::Markers.current(path)
+      assert_equal "terminal_outcome_invalid", marker.attrs.fetch("reason")
+      assert_equal "non-regular", marker.attrs.fetch("outcome")
+    end
+  end
+
+  def test_normalization_requires_the_complete_marker_for_a_declared_outcome
+    with_tmp_dir do |dir|
+      path = File.join(dir, "repair-certificate.md")
+      File.write(path, "Outcome: verified\nproof without marker\n")
+      task = terminal_task(path)
+
+      normalization = Hive::TerminalOutcome.normalize(
+        task, { commit: "complete", status: :complete }
+      )
+
+      assert normalization.changed
+      marker = Hive::Markers.current(path)
+      assert_equal "terminal_outcome_invalid", marker.attrs.fetch("reason")
+      assert_equal "missing-complete-marker", marker.attrs.fetch("outcome")
     end
   end
 end

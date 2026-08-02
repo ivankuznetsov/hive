@@ -177,6 +177,13 @@ class WorkflowTest < Minitest::Test
           name: "repair", index: 1, state_file: "state.md", kind: :agent,
           deliverable: "repair.md", terminal_outcomes: outcomes
         )
+      ],
+      [
+        Hive::Workflow::Stage.new(
+          name: "repair", index: 1, state_file: "fix-report.md", kind: :agent,
+          deliverable: "fix-report.md", workspace: :worktree, handoff: :draft_pr,
+          terminal_outcomes: outcomes
+        )
       ]
     ]
 

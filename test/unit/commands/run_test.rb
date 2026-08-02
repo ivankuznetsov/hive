@@ -419,6 +419,53 @@ class CommandsRunTest < Minitest::Test
       assert_equal "error", commits.fetch(0).fetch(:action)
       refute Hive::TaskMeta.read(folder).key?(:completed_at)
       assert_includes File.read(state_file), "provider unavailable"
+      events = File.readlines(File.join(folder, "events.jsonl"), chomp: true).map { |line| JSON.parse(line) }
+      assert events.any? { |event| event["event_type"] == "error" && event["message"].include?("terminal_outcome_blocked") }
+      exits = events.select { |event| event["event_type"] == "stage_exit" }
+      assert_equal [ "status=error reason=terminal_outcome_blocked" ], exits.map { |event| event["message"] }
+      refute events.any? { |event| event["message"] == "status=complete" }
+    end
+  end
+
+  def test_terminal_outcome_write_failure_restores_pre_run_snapshot
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "1-repair", "some-slug")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "repair-certificate.md")
+      File.write(state_file, "# Before\n")
+      Hive::TaskMeta.write(folder, id: 1, slug: "some-slug", display_name: nil)
+      current = task(
+        folder: folder, state_file: state_file,
+        hive_state_path: File.join(dir, ".hive-state"),
+        stage_name: "repair", stage_index: 1, workflow: semantic_terminal_workflow
+      )
+      current.project_root = dir
+      runner = lambda do |_task, _config|
+        File.write(state_file, "Outcome: blocked\n<!-- COMPLETE -->\n")
+        File.write(File.join(folder, "generated.txt"), "partial\n")
+        { commit: "complete", status: :complete }
+      end
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:run_git!) { |*| nil }
+      original_set = Hive::Markers.method(:set)
+      failing_set = lambda do |*args, **kwargs|
+        if args[0] == state_file && args[1].to_s == "error"
+          raise IOError, "marker write failed"
+        end
+
+        original_set.call(*args, **kwargs)
+      end
+
+      error = with_replaced_singleton_method(Hive::Markers, :set, failing_set) do
+        with_terminal_run(current, runner: runner, git_ops: fake_ops) do |run, _reported|
+          assert_raises(Hive::Error) { run.send(:do_call) }
+        end
+      end
+
+      assert_includes error.message, "terminal task state rolled back"
+      assert_equal "# Before\n", File.read(state_file)
+      refute File.exist?(File.join(folder, "generated.txt"))
+      refute File.exist?(File.join(folder, "events.jsonl"))
     end
   end
 
@@ -778,6 +825,30 @@ class CommandsRunTest < Minitest::Test
     # Other :error reasons keep the generic NO_OP shape.
     assert_equal Hive::Schemas::NextActionKind::NO_OP, other_error.fetch("kind")
     assert_equal({ "reason" => "git_status_failed", "marker_id" => "abc123" }, other_error.fetch("error"))
+  end
+
+  def test_semantic_terminal_errors_explain_guarded_retry_discovery
+    run = command
+    t = task
+
+    %w[terminal_outcome_blocked terminal_outcome_invalid].each do |reason|
+      attrs = { "reason" => reason, "outcome" => "blocked", "marker_id" => "semantic-1" }
+      action = run.send(:json_next_action, t, marker(:error, attrs))
+
+      assert_equal Hive::Schemas::NextActionKind::NO_OP, action.fetch("kind")
+      assert_equal reason, action.fetch("reason")
+      assert_equal attrs, action.fetch("error")
+      assert_includes action.fetch("instructions"), "status --operational --json"
+      assert_includes action.fetch("instructions"), "workflow.retry"
+
+      _out, err = capture_io do
+        assert_raises(Hive::TaskInErrorState) do
+          run.send(:report_text, t, {}, marker(:error, attrs))
+        end
+      end
+      assert_includes err, "reason: #{reason}"
+      assert_includes err, "guarded workflow.retry"
+    end
   end
 
   def test_report_text_covers_manual_and_stale_guidance

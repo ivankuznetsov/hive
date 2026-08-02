@@ -576,7 +576,18 @@ class WorkflowsDescriptorParserTest < Minitest::Test
       [ -> { valid_stage.call.tap { |stage| stage["terminal_outcomes"]["complete"] = [ "a" * 41 ] } }, "at most 40" ],
       [ -> { valid_stage.call.tap { |stage| stage["kind"] = "terminal"; stage.delete("skill") } }, "agent stage" ],
       [ -> { valid_stage.call.tap { |stage| stage.delete("deliverable") } }, "deliverable" ],
-      [ -> { valid_stage.call.tap { |stage| stage["deliverable"] = "other.md" } }, "must equal state_file" ]
+      [ -> { valid_stage.call.tap { |stage| stage["deliverable"] = "other.md" } }, "must equal state_file" ],
+      [
+        -> do
+          valid_stage.call.tap do |stage|
+            stage["state_file"] = "fix-report.md"
+            stage["deliverable"] = "fix-report.md"
+            stage["workspace"] = "worktree"
+            stage["handoff"] = "draft_pr"
+          end
+        end,
+        "incompatible with workspace or handoff"
+      ]
     ]
 
     cases.each do |stage_builder, message|

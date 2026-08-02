@@ -264,10 +264,14 @@ module Hive
         raise ArgumentError,
               "workflow #{id.inspect} stage #{stage.name.inspect} terminal_outcomes requires an explicit deliverable"
       end
-      return if stage.deliverable == stage.state_file
+      unless stage.deliverable == stage.state_file
+        raise ArgumentError,
+              "workflow #{id.inspect} stage #{stage.name.inspect} terminal_outcomes requires deliverable to equal state_file"
+      end
+      return unless stage.workspace || stage.handoff
 
       raise ArgumentError,
-            "workflow #{id.inspect} stage #{stage.name.inspect} terminal_outcomes requires deliverable to equal state_file"
+            "workflow #{id.inspect} stage #{stage.name.inspect} terminal_outcomes is incompatible with workspace or handoff"
     end
 
     def validate_human_stage!(stage)

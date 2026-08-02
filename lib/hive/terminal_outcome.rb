@@ -41,15 +41,25 @@ module Hive
       return Normalization.new(result: result, changed: false) unless outcomes
       return Normalization.new(result: result, changed: false) unless stage.equal?(task.workflow.stages.last)
       return Normalization.new(result: result, changed: false) unless stage.kind == :agent
-      return Normalization.new(result: result, changed: false) unless Hive::Markers.current(task.state_file).name == :complete
+
+      marker = Hive::Markers.current(task.state_file)
+      return Normalization.new(result: result, changed: false) unless [ :complete, :none ].include?(marker.name)
 
       classification = classify(task.state_file, outcomes)
-      return Normalization.new(result: result, changed: false) if classification.kind == :complete
+      if marker.name == :complete && classification.kind == :complete
+        return Normalization.new(result: result, changed: false)
+      end
 
-      reason = classification.kind == :blocked ? BLOCKED_REASON : INVALID_REASON
+      blocked = marker.name == :complete && classification.kind == :blocked
+      reason = blocked ? BLOCKED_REASON : INVALID_REASON
+      outcome = if marker.name == :none && classification.kind != :invalid
+                  "missing-complete-marker"
+                else
+                  classification.outcome
+                end
       Hive::Markers.set(
         task.state_file, :error,
-        reason: reason, outcome: classification.outcome
+        reason: reason, outcome: outcome
       )
       normalized = result.is_a?(Hash) ? result.merge(commit: "error", status: :error) :
                    { commit: "error", status: :error }

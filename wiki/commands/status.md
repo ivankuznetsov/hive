@@ -60,8 +60,9 @@ Disabling either the project daemon or global automatic retry restores the
 operator-owned `needs_repair` classification.
 
 Semantic terminal errors are the deliberate exception to automatic error
-retry. Any `ERROR reason=terminal_outcome_*` remains operator-owned
-`needs_repair` even when the daemon and automatic retry are enabled. The
+retry. `ERROR reason=terminal_outcome_blocked` and
+`ERROR reason=terminal_outcome_invalid` remain operator-owned `needs_repair`
+even when the daemon and automatic retry are enabled. The
 blocked form keeps action key `error`, presents label `Blocked`, and the TUI
 renders its sanitized declared outcome. Status still publishes the guarded
 `workflow.retry` action, but its diagnostic explains that the action reruns

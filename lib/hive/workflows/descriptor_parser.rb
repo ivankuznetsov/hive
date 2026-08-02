@@ -159,10 +159,15 @@ module Hive
               "stage #{stage.name.inspect} terminal_outcomes requires an explicit deliverable"
             )
           end
-          next if stage.deliverable == stage.state_file
+          unless stage.deliverable == stage.state_file
+            raise descriptor_error(
+              "stage #{stage.name.inspect} terminal_outcomes deliverable must equal state_file"
+            )
+          end
+          next unless stage.workspace || stage.handoff
 
           raise descriptor_error(
-            "stage #{stage.name.inspect} terminal_outcomes deliverable must equal state_file"
+            "stage #{stage.name.inspect} terminal_outcomes is incompatible with workspace or handoff"
           )
         end
       end

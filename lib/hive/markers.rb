@@ -1,4 +1,5 @@
 require "securerandom"
+require "tempfile"
 require "hive/attempts/context"
 require "hive/recovery"
 
@@ -37,6 +38,7 @@ module Hive
     INTERNAL_ATTR_KEYS = %w[
       marker_id attempt_id task_generation ownership_generation task_input_epoch
     ].freeze
+    MAX_MARKER_SCAN_BYTES = 1024 * 1024
 
     State = Struct.new(:name, :attrs, :raw, keyword_init: true) do
       def none?
@@ -47,9 +49,12 @@ module Hive
     module_function
 
     def current(state_file_path)
-      return State.new(name: :none, attrs: {}, raw: nil) unless File.exist?(state_file_path)
+      content = read_regular_body(
+        state_file_path, max_bytes: MAX_MARKER_SCAN_BYTES, tail: true
+      )
+      return State.new(name: :none, attrs: {}, raw: nil) unless content
 
-      current_from_content(File.binread(state_file_path))
+      current_from_content(content)
     end
 
     def current_from_content(content)
@@ -87,7 +92,10 @@ module Hive
       new_marker = build_marker(marker_name, attrs)
       ensure_dir(state_file_path)
       with_markers_lock(state_file_path) do
-        body = File.exist?(state_file_path) ? File.read(state_file_path, encoding: "UTF-8") : ""
+        # The state path is agent-controlled. A FIFO, device, or symlink must
+        # never be opened while the controller owns the task lock. Treat such
+        # nodes as an empty artifact and replace the directory entry atomically.
+        body = read_regular_body(state_file_path) || "".b
         replaced, count = replace_last_marker(body, new_marker)
         body = if count.positive?
                  replaced
@@ -115,7 +123,8 @@ module Hive
         marker_name = current_marker.name.to_s.upcase
         attrs = attrs_with_recovery_marker_id(marker_name, current_marker.attrs)
         new_marker = build_marker(marker_name, attrs)
-        body = File.read(state_file_path, encoding: "UTF-8")
+        body = read_regular_body(state_file_path)
+        return false unless body
         replaced, count = replace_last_marker(body, new_marker)
         return false unless count == 1
 
@@ -175,24 +184,41 @@ module Hive
 
     def write_atomic(path, body)
       dir = File.dirname(path)
-      tmp = File.join(dir, ".#{File.basename(path)}.tmp.#{Process.pid}")
+      tmp_file = Tempfile.create([ ".#{File.basename(path)}.tmp.", "" ], dir)
+      tmp = tmp_file.path
       # Preserve the artifact byte-for-byte around the marker. An opted-in
       # terminal classifier may need to replace COMPLETE with ERROR precisely
       # because the producer wrote invalid UTF-8; transcoding here would make
       # that fail-closed normalization impossible.
-      File.open(tmp, File::WRONLY | File::CREAT | File::TRUNC, 0o644) do |f|
-        f.binmode
-        f.write(body)
-        f.flush
-        begin
-          f.fsync
-        rescue StandardError
-          nil
-        end
+      tmp_file.binmode
+      tmp_file.chmod(0o644)
+      tmp_file.write(body)
+      tmp_file.flush
+      begin
+        tmp_file.fsync
+      rescue StandardError
+        nil
       end
+
+      opened = tmp_file.stat
+      current = File.lstat(tmp)
+      unless opened.file? && !current.symlink? &&
+             opened.dev == current.dev && opened.ino == current.ino
+        raise IOError, "marker temporary file identity changed before rename"
+      end
+
       File.rename(tmp, path)
+      installed = File.lstat(path)
+      unless installed.file? && opened.dev == installed.dev && opened.ino == installed.ino
+        raise IOError, "marker file identity changed during atomic rename"
+      end
     ensure
-      File.delete(tmp) if tmp && File.exist?(tmp)
+      tmp_file&.close
+      begin
+        File.unlink(tmp) if tmp
+      rescue Errno::ENOENT
+        nil
+      end
     end
 
     def attrs_with_recovery_marker_id(marker_name, attrs)
@@ -279,10 +305,10 @@ module Hive
     end
 
     def remove_marker(state_file_path, raw_marker)
-      return unless File.exist?(state_file_path)
       return if raw_marker.to_s.empty?
 
-      body = File.binread(state_file_path)
+      body = read_regular_body(state_file_path)
+      return unless body
       marker = raw_marker.to_s.b
       offset = body.index(marker)
       return unless offset
@@ -300,10 +326,34 @@ module Hive
     # current marker would expose that stale history as live state and strand
     # redispatch behind another grace/recovery cycle.
     def remove_all_markers(state_file_path)
-      return unless File.exist?(state_file_path)
+      body = read_regular_body(state_file_path)
+      return unless body
 
-      body = File.read(state_file_path, encoding: "UTF-8")
       write_atomic(state_file_path, without_markers(body))
     end
+
+    def read_regular_body(path, max_bytes: nil, tail: false)
+      flags = File::RDONLY
+      flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+      flags |= File::NONBLOCK if File.const_defined?(:NONBLOCK)
+
+      File.open(path, flags) do |io|
+        opened = io.stat
+        current = File.lstat(path)
+        return nil unless opened.file? && !current.symlink? &&
+                          opened.dev == current.dev && opened.ino == current.ino
+
+        if max_bytes
+          length = [ opened.size, max_bytes ].min
+          io.seek(opened.size - length, IO::SEEK_SET) if tail && opened.size > length
+          io.read(length).to_s.b
+        else
+          io.read.to_s.b
+        end
+      end
+    rescue SystemCallError, IOError
+      nil
+    end
+    private_class_method :read_regular_body
   end
 end

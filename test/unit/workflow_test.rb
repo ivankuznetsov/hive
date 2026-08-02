@@ -58,6 +58,7 @@ class WorkflowTest < Minitest::Test
     assert_nil stage.reviewers
     assert_nil stage.council
     assert_nil stage.deliverable
+    assert_nil stage.terminal_outcomes
     assert_nil stage.outcomes
   end
 
@@ -99,6 +100,92 @@ class WorkflowTest < Minitest::Test
     assert approval.outcomes.fetch("approve").terminal?
     refute approval.outcomes.fetch("reject").terminal?
     assert_equal "draft", approval.outcomes.fetch("reject").to
+  end
+
+  def test_terminal_outcomes_are_immutable_closed_safe_slug_lists
+    complete = [ "fixed", "not-reproduced" ]
+    blocked = [ "blocked", "needs-input" ]
+    outcomes = Hive::Workflow::TerminalOutcomes.new(complete: complete, blocked: blocked)
+
+    assert_equal complete, outcomes.complete
+    assert_equal blocked, outcomes.blocked
+    assert outcomes.frozen?
+    assert outcomes.complete.frozen?
+    assert outcomes.blocked.frozen?
+    refute_same complete, outcomes.complete
+    refute_same blocked, outcomes.blocked
+
+    invalid = [
+      [ [], [ "blocked" ], "non-empty" ],
+      [ [ "fixed", "fixed" ], [ "blocked" ], "unique" ],
+      [ [ "fixed" ], [ "blocked", "blocked" ], "unique" ],
+      [ [ "same" ], [ "same" ], "disjoint" ],
+      [ [ "bad--slug" ], [ "blocked" ], "safe slug" ],
+      [ [ "a" * 41 ], [ "blocked" ], "at most 40" ],
+      [ "fixed", [ "blocked" ], "array" ]
+    ]
+
+    invalid.each do |complete_values, blocked_values, message|
+      error = assert_raises(ArgumentError) do
+        Hive::Workflow::TerminalOutcomes.new(
+          complete: complete_values, blocked: blocked_values
+        )
+      end
+      assert_includes error.message, message
+    end
+  end
+
+  def test_workflow_enforces_terminal_outcome_stage_placement
+    outcomes = Hive::Workflow::TerminalOutcomes.new(
+      complete: [ "fixed" ], blocked: [ "blocked" ]
+    )
+    valid = Hive::Workflow.new(
+      id: :repair,
+      stages: [
+        Hive::Workflow::Stage.new(
+          name: "repair", index: 1, state_file: "repair.md", kind: :agent,
+          deliverable: "repair.md", terminal_outcomes: outcomes
+        )
+      ]
+    )
+    assert_same outcomes, valid.stages.last.terminal_outcomes
+
+    invalid_stages = [
+      [
+        Hive::Workflow::Stage.new(
+          name: "done", index: 1, state_file: "done.md", kind: :inert,
+          deliverable: "done.md", terminal_outcomes: outcomes
+        )
+      ],
+      [
+        Hive::Workflow::Stage.new(
+          name: "repair", index: 1, state_file: "repair.md", kind: :agent,
+          deliverable: "repair.md", terminal_outcomes: outcomes
+        ),
+        Hive::Workflow::Stage.new(
+          name: "done", index: 2, state_file: "done.md", kind: :inert
+        )
+      ],
+      [
+        Hive::Workflow::Stage.new(
+          name: "repair", index: 1, state_file: "repair.md", kind: :agent,
+          terminal_outcomes: outcomes
+        )
+      ],
+      [
+        Hive::Workflow::Stage.new(
+          name: "repair", index: 1, state_file: "state.md", kind: :agent,
+          deliverable: "repair.md", terminal_outcomes: outcomes
+        )
+      ]
+    ]
+
+    invalid_stages.each do |stages|
+      error = assert_raises(ArgumentError) do
+        Hive::Workflow.new(id: :repair, stages: stages)
+      end
+      assert_includes error.message, "terminal_outcomes"
+    end
   end
 
   def test_workflow_rejects_human_outcome_target_outside_descriptor

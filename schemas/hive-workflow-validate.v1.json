@@ -19,14 +19,46 @@
     "Stage": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "dir", "kind", "state_file", "instruction_path", "input"],
+      "required": ["name", "dir", "kind", "state_file", "instruction_path", "input", "terminal_outcomes"],
       "properties": {
         "name": { "type": "string" },
         "dir": { "type": "string" },
         "kind": { "type": ["string", "null"] },
         "state_file": { "type": ["string", "null"] },
         "instruction_path": { "type": ["string", "null"] },
-        "input": { "type": ["string", "null"] }
+        "input": { "type": ["string", "null"] },
+        "terminal_outcomes": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["complete", "blocked"],
+              "properties": {
+                "complete": {
+                  "type": "array",
+                  "minItems": 1,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "maxLength": 40,
+                    "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+                  }
+                },
+                "blocked": {
+                  "type": "array",
+                  "minItems": 1,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "maxLength": 40,
+                    "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+                  }
+                }
+              }
+            }
+          ]
+        }
       }
     },
     "AutomaticEdge": {

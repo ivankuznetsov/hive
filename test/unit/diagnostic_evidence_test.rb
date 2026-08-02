@@ -821,6 +821,24 @@ class DiagnosticEvidenceTest < Minitest::Test
     end
   end
 
+  def test_current_marker_parse_fault_degrades_with_breadcrumb
+    Dir.mktmpdir("hive-diagnostic-evidence") do |folder|
+      path = File.join(folder, "task.md")
+      File.write(path, "<!-- ERROR reason=boom -->\n")
+      sentinel = Hive::Markers.method(:current)
+      Hive::Markers.define_singleton_method(:current) { |*| raise ArgumentError, "simulated" }
+
+      marker = :unset
+      _out, err = capture_io do
+        marker = Hive::DiagnosticEvidence.send(:current_marker, path)
+      end
+      assert_nil marker
+      assert_match(/cannot parse marker/, err)
+    ensure
+      Hive::Markers.define_singleton_method(:current, sentinel) if sentinel
+    end
+  end
+
   # The marker-tier priority list must derive from the canonical workflow state
   # files, not a drifted hand-maintained literal. The coding artifacts stage's
   # state file is `artifact.md` (singular); the old literal carried

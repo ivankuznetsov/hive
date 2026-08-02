@@ -53,16 +53,19 @@ module Hive
       blocked = marker.name == :complete && classification.kind == :blocked
       reason = blocked ? BLOCKED_REASON : INVALID_REASON
       outcome = if marker.name == :none && classification.kind != :invalid
-                  "missing-complete-marker"
-                else
-                  classification.outcome
-                end
+        "missing-complete-marker"
+      else
+        classification.outcome
+      end
       Hive::Markers.set(
         task.state_file, :error,
         reason: reason, outcome: outcome
       )
-      normalized = result.is_a?(Hash) ? result.merge(commit: "error", status: :error) :
-                   { commit: "error", status: :error }
+      normalized = if result.is_a?(Hash)
+        result.merge(commit: "error", status: :error)
+      else
+        { commit: "error", status: :error }
+      end
       Normalization.new(result: normalized, changed: true)
     end
 

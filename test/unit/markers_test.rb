@@ -334,6 +334,40 @@ class MarkersTest < Minitest::Test
     end
   end
 
+  def test_set_rejects_temporary_file_identity_substitution_before_rename
+    with_tmp_dir do |dir|
+      file = File.join(dir, "x.md")
+      original = File.method(:lstat)
+      fake = Struct.new(:file?, :symlink?, :dev, :ino).new(true, false, -1, -1)
+      replacement = lambda do |path|
+        File.basename(path).start_with?(".x.md.tmp.") ? fake : original.call(path)
+      end
+
+      error = with_replaced_singleton_method(File, :lstat, replacement) do
+        assert_raises(IOError) { Hive::Markers.set(file, :waiting) }
+      end
+
+      assert_includes error.message, "temporary file identity changed"
+      refute File.exist?(file)
+    end
+  end
+
+  def test_set_rejects_installed_file_identity_substitution_after_rename
+    with_tmp_dir do |dir|
+      file = File.join(dir, "x.md")
+      original = File.method(:lstat)
+      fake = Struct.new(:file?, :symlink?, :dev, :ino).new(true, false, -1, -1)
+      replacement = ->(path) { path == file ? fake : original.call(path) }
+
+      error = with_replaced_singleton_method(File, :lstat, replacement) do
+        assert_raises(IOError) { Hive::Markers.set(file, :waiting) }
+      end
+
+      assert_includes error.message, "identity changed during atomic rename"
+      assert File.file?(file)
+    end
+  end
+
   def test_unknown_marker_raises
     with_tmp_dir do |dir|
       file = File.join(dir, "x.md")

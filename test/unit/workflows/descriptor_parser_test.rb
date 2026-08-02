@@ -616,6 +616,23 @@ class WorkflowsDescriptorParserTest < Minitest::Test
     assert_includes error.message, "last stage"
   end
 
+  def test_terminal_outcomes_runtime_validation_rejects_a_non_agent_stage
+    outcomes = Hive::Workflow::TerminalOutcomes.new(
+      complete: [ "verified" ], blocked: [ "blocked" ]
+    )
+    stage = Hive::Workflow::Stage.new(
+      name: "done", index: 1, state_file: "done.md", kind: :inert,
+      deliverable: "done.md", terminal_outcomes: outcomes
+    )
+    parser = Hive::Workflows::DescriptorParser.new("/tmp/repair.yml")
+
+    error = assert_raises(Hive::ConfigError) do
+      parser.send(:validate_terminal_outcomes!, [ stage ])
+    end
+
+    assert_includes error.message, "terminal_outcomes is only valid on an agent stage"
+  end
+
   def test_workspace_and_handoff_reject_unknown_enum_values
     {
       "workspace" => "checkout",

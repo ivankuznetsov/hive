@@ -195,6 +195,19 @@ class WorkflowTest < Minitest::Test
     end
   end
 
+  def test_workflow_rejects_a_non_terminal_outcomes_runtime_value
+    stage = Hive::Workflow::Stage.new(
+      name: "repair", index: 1, state_file: "repair.md", kind: :agent,
+      deliverable: "repair.md", terminal_outcomes: Object.new
+    )
+
+    error = assert_raises(ArgumentError) do
+      Hive::Workflow.new(id: :repair, stages: [ stage ])
+    end
+
+    assert_includes error.message, "terminal_outcomes must be a TerminalOutcomes value"
+  end
+
   def test_workflow_rejects_human_outcome_target_outside_descriptor
     error = assert_raises(ArgumentError) do
       Hive::Workflow.new(

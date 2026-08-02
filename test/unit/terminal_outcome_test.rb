@@ -229,4 +229,20 @@ class TerminalOutcomeTest < Minitest::Test
       assert_equal "missing-complete-marker", marker.attrs.fetch("outcome")
     end
   end
+
+  def test_normalization_replaces_a_non_hash_runner_result
+    with_tmp_dir do |dir|
+      path = File.join(dir, "repair-certificate.md")
+      File.write(path, "Outcome: blocked\n<!-- COMPLETE -->\n")
+      task = terminal_task(path)
+
+      normalization = Hive::TerminalOutcome.normalize(task, :complete)
+
+      assert normalization.changed
+      assert_equal({ commit: "error", status: :error }, normalization.result)
+      marker = Hive::Markers.current(path)
+      assert_equal "terminal_outcome_blocked", marker.attrs.fetch("reason")
+      assert_equal "blocked", marker.attrs.fetch("outcome")
+    end
+  end
 end

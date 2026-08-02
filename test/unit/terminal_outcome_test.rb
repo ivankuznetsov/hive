@@ -57,6 +57,26 @@ class TerminalOutcomeTest < Minitest::Test
     end
   end
 
+  def test_fifo_fails_closed_without_blocking
+    skip "File::NONBLOCK is unavailable" unless File.const_defined?(:NONBLOCK)
+
+    with_tmp_dir do |dir|
+      path = File.join(dir, "repair-certificate.md")
+      File.mkfifo(path, 0o600)
+
+      result = Hive::TerminalOutcome.classify(path, outcomes)
+
+      assert_equal [ :invalid, "non-regular" ], [ result.kind, result.outcome ]
+    end
+  end
+
+  def test_only_controller_owned_reasons_are_semantic_terminal_errors
+    assert Hive::TerminalOutcome.semantic_error?("reason" => "terminal_outcome_blocked")
+    assert Hive::TerminalOutcome.semantic_error?(reason: "terminal_outcome_invalid")
+    refute Hive::TerminalOutcome.semantic_error?("reason" => "terminal_outcome_future")
+    refute Hive::TerminalOutcome.semantic_error?("reason" => "exit_code")
+  end
+
   def test_reads_no_more_than_the_bounded_first_line_window
     with_tmp_dir do |dir|
       path = File.join(dir, "repair-certificate.md")

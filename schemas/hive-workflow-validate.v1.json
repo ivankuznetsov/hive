@@ -35,30 +35,22 @@
               "additionalProperties": false,
               "required": ["complete", "blocked"],
               "properties": {
-                "complete": {
-                  "type": "array",
-                  "minItems": 1,
-                  "uniqueItems": true,
-                  "items": {
-                    "type": "string",
-                    "maxLength": 40,
-                    "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
-                  }
-                },
-                "blocked": {
-                  "type": "array",
-                  "minItems": 1,
-                  "uniqueItems": true,
-                  "items": {
-                    "type": "string",
-                    "maxLength": 40,
-                    "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
-                  }
-                }
+                "complete": { "$ref": "#/$defs/TerminalOutcomeValues" },
+                "blocked": { "$ref": "#/$defs/TerminalOutcomeValues" }
               }
             }
           ]
         }
+      }
+    },
+    "TerminalOutcomeValues": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "maxLength": 40,
+        "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
       }
     },
     "AutomaticEdge": {

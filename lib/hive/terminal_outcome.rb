@@ -5,10 +5,10 @@ module Hive
   module TerminalOutcome
     MAX_FIRST_LINE_BYTES = 512
     MAX_OUTCOME_BYTES = Hive::Workflow::MAX_TERMINAL_OUTCOME_LENGTH
-    OUTCOME_LINE = /\AOutcome: (?<outcome>[a-z0-9]+(?:-[a-z0-9]+)*)\z/
-    ERROR_REASON_PREFIX = "terminal_outcome_".freeze
+    OUTCOME_PREFIX = "Outcome: ".freeze
     BLOCKED_REASON = "terminal_outcome_blocked".freeze
     INVALID_REASON = "terminal_outcome_invalid".freeze
+    ERROR_REASONS = [ BLOCKED_REASON, INVALID_REASON ].freeze
 
     Classification = Data.define(:kind, :outcome)
     Normalization = Data.define(:result, :changed)
@@ -22,10 +22,12 @@ module Hive
       utf8 = line.dup.force_encoding(Encoding::UTF_8)
       return invalid("invalid-utf8") unless utf8.valid_encoding?
 
-      match = OUTCOME_LINE.match(utf8)
-      return invalid("malformed") unless match
+      return invalid("malformed") unless utf8.start_with?(OUTCOME_PREFIX)
 
-      outcome = match[:outcome]
+      outcome = utf8.delete_prefix(OUTCOME_PREFIX)
+      unless Hive::Workflow::TERMINAL_OUTCOME_SAFE_SLUG.match?(outcome)
+        return invalid("malformed")
+      end
       return invalid("overlong") if outcome.bytesize > MAX_OUTCOME_BYTES
       return Classification.new(kind: :complete, outcome: outcome) if outcomes.complete.include?(outcome)
       return Classification.new(kind: :blocked, outcome: outcome) if outcomes.blocked.include?(outcome)
@@ -55,7 +57,7 @@ module Hive
     end
 
     def semantic_error?(attrs)
-      error_reason(attrs).start_with?(ERROR_REASON_PREFIX)
+      ERROR_REASONS.include?(error_reason(attrs))
     end
 
     def blocked_error?(attrs)
@@ -65,6 +67,7 @@ module Hive
     def read_first_line(path)
       flags = File::RDONLY
       flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+      flags |= File::NONBLOCK if File.const_defined?(:NONBLOCK)
 
       File.open(path, flags) do |io|
         opened = io.stat

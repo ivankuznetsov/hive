@@ -84,12 +84,7 @@ module Hive
         end
 
         def terminal_outcomes_payload(outcomes)
-          return nil unless outcomes
-
-          {
-            "complete" => outcomes.complete,
-            "blocked" => outcomes.blocked
-          }
+          outcomes&.to_h&.transform_keys(&:to_s)
         end
 
         def automatic_edges(workflow)

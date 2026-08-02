@@ -49,7 +49,7 @@ module Hive
     def current(state_file_path)
       return State.new(name: :none, attrs: {}, raw: nil) unless File.exist?(state_file_path)
 
-      current_from_content(File.read(state_file_path, encoding: "UTF-8"))
+      current_from_content(File.binread(state_file_path))
     end
 
     def current_from_content(content)
@@ -58,7 +58,9 @@ module Hive
       # syntax is ASCII, so scan a binary view: an invalid certificate can
       # still expose its trailing COMPLETE marker to the bounded terminal
       # outcome classifier instead of crashing before normalization.
-      content.to_s.b.scan(MARKER_RE) do
+      binary_content = content.to_s
+      binary_content = binary_content.b unless binary_content.encoding == Encoding::BINARY
+      binary_content.scan(MARKER_RE) do
         match = Regexp.last_match
         last = match
       end

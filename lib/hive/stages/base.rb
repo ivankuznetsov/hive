@@ -134,6 +134,19 @@ module Hive
         Hive::ImplementationIdentity::Store.new(task: task, cfg: cfg).resolve_stage!(stage)
       end
 
+      # Managed executable actors run from their task folder, but a yolo actor
+      # may intentionally inspect or mutate the project that owns that task.
+      # Include the project as explicit runner context only for managed
+      # workflows: ordinary brainstorm/plan stages retain their deliberately
+      # task-only add-dir boundary.
+      def managed_actor_base_add_dirs(task)
+        dirs = [ task.folder ]
+        if task.respond_to?(:managed_workflow?) && task.managed_workflow?
+          dirs.unshift(task.project_root)
+        end
+        dirs.uniq
+      end
+
       # Durable routed identities intentionally persist provider-neutral
       # routing metadata instead of rendered argv. Materialize that metadata
       # through the selected profile at the last trusted seam before launch;

@@ -879,6 +879,30 @@ class StagesAgentTest < Minitest::Test
     end
   end
 
+  def test_managed_yolo_actor_receives_project_as_explicit_runner_context
+    with_tmp_dir do |project|
+      instruction_path = File.join(project, "workflow-work.md")
+      package_root = File.join(project, ".hive-state", "workflows", "demo", "versions", "#{'a' * 40}")
+      File.write(instruction_path, "Repair the managed target.\n")
+      FileUtils.mkdir_p(package_root)
+      descriptor = instruction_workflow(instruction_path, permissions: "yolo")
+      task = task_for(project, "work", descriptor: descriptor)
+      task.define_singleton_method(:managed_workflow?) { true }
+      task.define_singleton_method(:managed_runtime_context) do |_slot_id|
+        { package_root: package_root, environment: {} }
+      end
+      task.define_singleton_method(:managed_prompt) { |_slot, body, _context| body }
+
+      with_stubbed_spawn do |captured|
+        Hive::Stages::Agent.run!(task, { "work" => { "agent" => "codex" } })
+
+        assert_equal [
+          File.realpath(task.folder), File.realpath(package_root), File.realpath(project)
+        ], captured.first.fetch(:kwargs).fetch(:add_dirs)
+      end
+    end
+  end
+
   def test_managed_codex_actor_receives_host_output_contract_for_declared_state_file
     with_tmp_dir do |project|
       instruction_path = File.join(project, "workflow-work.md")

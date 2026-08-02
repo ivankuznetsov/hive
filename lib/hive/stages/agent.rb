@@ -44,6 +44,7 @@ module Hive
         prompt, scope = Hive::Stages::Base.actor_prompt_and_scope(
           cfg, task.stage_name, task, profile,
           prompt: prompt, managed_slot: "stages.#{stage.name}",
+          base_add_dirs: Hive::Stages::Base.managed_actor_base_add_dirs(task),
           managed_outputs: [ output_path ], **permission_kwargs
         )
 

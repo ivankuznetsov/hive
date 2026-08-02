@@ -40,3 +40,12 @@
   real consumers, but Patrol's `U3` exception, a borrowed `U1a2` exception,
   the wrong removal unit, and duplicate `U1a2` entries cannot excuse zero
   consumers.
+- Resolution 03 bypasses deceptive class dispatch and rejects per-object
+  singleton overrides, including exact-secret inputs; enforces Hash node and
+  byte ceilings before avoidable key encoding/retention; projects backslashes
+  and finite Float tokens exactly like the JSON generator; scans relative paths
+  without separator-proportional component allocation; and requires coherent
+  captured-byte/digest tuples plus integer-zero teardown descendants. These are
+  still pure source-level admission rules and add no production consumer,
+  custody, filesystem/archive I/O, process, provider, credential, publication,
+  recovery, OpenClaw setup, or live behavior.

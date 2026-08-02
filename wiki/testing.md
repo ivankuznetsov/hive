@@ -64,14 +64,22 @@ proof/bundle back-edges.
 
 The resource regressions stub the pretty serializer and prove that NUL-heavy
 strings and oversized integers fail on projected output size before serializer
-entry. Hostile `Hash`, `Array`, and `String` subclasses, UTF-16LE keys and
-public identities, overlapping exact/pattern secrets, and a 4,097-byte failure
-detail with all 64 exact-secret slots fail closed. Capture regressions rebind
-the complete execution-receipt identity after inner mutation, so zero-byte
-digest and short-truncated-count rejection cannot pass merely because an outer
-receipt digest became stale. The clean-load guard also injects a root
-`WORKFLOW_CREATOR_*` poison constant to prove its anchored leak detector is
-live.
+entry. TracePoint-backed cases prove impossible Hash value-node cardinality
+rejects before key preprocessing and an aggregate-byte overflow charges a key
+before encoding it. Representative backslash strings and finite exponent/fixed
+Floats must match `JSON.pretty_generate` plus its canonical newline, while NaN
+and Infinity fail closed. Hostile `Hash`, `Array`, and `String` subclasses,
+deceptive `class` overrides, exact-class values with singleton overrides,
+singleton-backed exact secrets, UTF-16LE keys and public identities,
+overlapping exact/pattern secrets, and a 4,097-byte failure detail with all 64
+exact-secret slots fail closed. Relative-path characterization preserves the
+safe/unsafe matrix and proves separator-heavy input does not call `split`.
+Capture and teardown regressions rebind the complete execution-receipt identity
+after inner mutation, so positive bytes with the empty digest, zero-byte digest,
+short-truncated counts, and Float zero remaining descendants cannot pass merely
+because an outer receipt digest became stale. The clean-load guard also injects
+a root `WORKFLOW_CREATOR_*` poison constant to prove its anchored leak detector
+is live.
 
 This is core-only proof, not bundle custody or an activated production
 consumer; U1a2 owns that routing.

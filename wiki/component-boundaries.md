@@ -81,16 +81,23 @@ primitives/contracts only; `ExecutionContract` reuses `Contract` primitives,
 while the core cannot require `proof.rb` or `workflow_creator_bundle.rb`.
 
 Every public validator now admits only an exact plain JSON tree; subclasses
-cannot override equality, enumeration, or path behavior. External strings and
-keys must be valid UTF-8, with deterministic UTF-8 normalization limited to
-ASCII-only strings. Canonical JSON projects the complete pretty-printed byte
-size—including escaping, indentation, punctuation, numerics, and its trailing
-newline—before invoking the serializer, while retaining the final exact-size
-check. Failure detail has a 4,096-byte raw work ceiling, finds exact and pattern
-matches against the original normalized text, merges overlapping intervals,
-and replaces each merged range once before its 1,000-byte output truncation.
-Execution capture tuples bind zero captured bytes to the empty SHA-256 digest,
-and a true truncation flag requires the captured count to equal its limit.
+cannot override equality, enumeration, or path behavior. Exact-class
+inspection bypasses input dispatch and rejects per-object singleton overrides;
+global core monkeypatching remains outside this boundary. External strings,
+keys, and exact secrets must be plain valid UTF-8 values, with deterministic
+UTF-8 normalization limited to ASCII-only strings. Canonical JSON projects the
+complete pretty-printed byte size—including backslash escaping, indentation,
+punctuation, generator-accurate finite numerics, and its trailing newline—while
+rejecting NaN and Infinity. Hash admission rejects impossible remaining value
+nodes before key preprocessing, charges aggregate and per-key bytes before
+encoding or retaining each key, and retains the final exact-size check.
+Relative-path validation scans without allocating a separator-proportional
+component array. Failure detail has a 4,096-byte raw work ceiling, finds exact
+and pattern matches against the original normalized text, merges overlapping
+intervals, and replaces each merged range once before its 1,000-byte output
+truncation. Execution capture tuples bind the empty SHA-256 digest if and only
+if captured bytes are zero, a true truncation flag requires the captured count
+to equal its limit, and teardown admits only integer zero remaining descendants.
 
 This candidate truthfully has zero current production consumers. Its non-empty
 U1a2 migration exception is an executable removal fence: U1a2 must route the

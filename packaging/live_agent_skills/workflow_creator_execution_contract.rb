@@ -122,7 +122,7 @@ module HiveLiveAgentProof
         streams_valid = %w[stdout stderr].all? do |stream|
           bytes, digest, truncated = capture.values_at("#{stream}_bytes", "#{stream}_sha256", "#{stream}_truncated")
           bytes.instance_of?(Integer) && bytes.between?(0, limit) && digest.instance_of?(String) &&
-            Contract::DIGEST.match?(digest) && boolean.include?(truncated) && (!bytes.zero? || digest == empty_digest) &&
+            Contract::DIGEST.match?(digest) && boolean.include?(truncated) && (bytes.zero? == (digest == empty_digest)) &&
             (!truncated || bytes == limit)
         end
         valid = exact.call(capture, CAPTURE_KEYS) && exact.call(capture["secret_scan"], %w[scanner status]) &&
@@ -165,7 +165,7 @@ module HiveLiveAgentProof
                            "root_loss_behavior" => "fail-closed" } &&
           teardown == { "status" => "passed", "expected_labels" => labels, "receipt_labels" => labels,
                         "outer_root_reaped" => true, "remaining_descendants" => 0 } &&
-          cleanup["status"] == "passed" && target_valid &&
+          teardown["remaining_descendants"].instance_of?(Integer) && cleanup["status"] == "passed" && target_valid &&
           instruction.call(row["executed_instruction"]) && instruction.call(receipt["authored_instruction"]) &&
           instruction.call(receipt["executed_instruction"]) &&
           receipt["authored_instruction"] == row["executed_instruction"] &&

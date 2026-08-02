@@ -30,7 +30,7 @@ module HiveLiveAgentProof
         %w[deterministic_fixture not_exercised],
         %w[authenticated_openclaw executed]
       ])
-      DETAIL_LIMIT, MAX_DETAIL_INPUT_BYTES, MAX_EXACT_SECRETS = 1_000, 4_096, 64
+      DETAIL_LIMIT, MAX_DETAIL_INPUT_BYTES, MAX_EXACT_SECRETS, PLAIN = 1_000, 4_096, 64, Primitives::PLAIN
       MAX_SECRET_BYTES, MAX_INVENTORY_ENTRIES, MAX_MEMBER_BYTES, MAX_TOTAL_BYTES = 4_096, 512, 268_435_456, 1_073_741_824
       ASSERT = ->(condition, message) { raise Error, message unless condition }.freeze
       module_function
@@ -38,8 +38,8 @@ module HiveLiveAgentProof
                   execution_kind: "unavailable", model_loop: "not_started",
                   exact_secrets: [])
         inputs = [ candidate_sha, phase, reason, execution_kind, model_loop ]
-        strings_valid = inputs.all? { |value| value.instance_of?(String) && value.encoding == Encoding::UTF_8 && value.valid_encoding? }
-        strings_valid &&= detail.nil? || (detail.instance_of?(String) && detail.encoding == Encoding::UTF_8 && detail.valid_encoding?)
+        strings_valid = inputs.all? { |value| PLAIN.call(value, String) && value.encoding == Encoding::UTF_8 && value.valid_encoding? }
+        strings_valid &&= detail.nil? || (PLAIN.call(detail, String) && detail.encoding == Encoding::UTF_8 && detail.valid_encoding?)
         ASSERT.call(strings_valid, "workflow-creator non-passing evidence is invalid")
         exact_secrets = exact_secrets!(exact_secrets)
         candidate = candidate_sha.downcase
@@ -82,8 +82,8 @@ module HiveLiveAgentProof
         raise Error, "workflow-creator non-passing evidence is invalid"
       end
       def exact_secrets!(secrets)
-        valid = secrets.instance_of?(Array) && secrets.length <= MAX_EXACT_SECRETS && secrets.all? do |secret|
-          secret.instance_of?(String) && secret.encoding == Encoding::UTF_8 && secret.valid_encoding? && secret.bytesize.between?(1, MAX_SECRET_BYTES)
+        valid = PLAIN.call(secrets, Array) && secrets.length <= MAX_EXACT_SECRETS && secrets.all? do |secret|
+          PLAIN.call(secret, String) && secret.encoding == Encoding::UTF_8 && secret.valid_encoding? && secret.bytesize.between?(1, MAX_SECRET_BYTES)
         end
         ASSERT.call(valid, "workflow-creator exact secrets are invalid")
         secrets

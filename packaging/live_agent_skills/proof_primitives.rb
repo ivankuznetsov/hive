@@ -3,36 +3,37 @@ module HiveLiveAgentProof
   module WorkflowCreator
     class Error < StandardError; end
     module Primitives
-      SECRET_PATTERNS = [
-        /sk-ant-[A-Za-z0-9_-]{12,}/, /sk-(?:proj-)?[A-Za-z0-9_-]{20,}/,
-        /gh[opsu]_[A-Za-z0-9]{20,}/, /github_pat_[A-Za-z0-9_]{20,}/, /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/
-      ].freeze
+      SECRET_PATTERNS = [ /sk-ant-[A-Za-z0-9_-]{12,}/, /sk-(?:proj-)?[A-Za-z0-9_-]{20,}/, /gh[opsu]_[A-Za-z0-9]{20,}/,
+        /github_pat_[A-Za-z0-9_]{20,}/, /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/ ].freeze
       MAX_JSON_DEPTH, MAX_JSON_NODES, MAX_JSON_BYTES, MAX_JSON_INTEGER_BITS = 64, 16_384, 16_777_216, 55_732_703
+      RAW_CLASS, RAW_SINGLETON_METHODS = %i[class singleton_methods].map { |name| Object.instance_method(name).freeze }
+      PLAIN = ->(value, type) { RAW_CLASS.bind_call(value).equal?(type) && RAW_SINGLETON_METHODS.bind_call(value, false).empty? }.freeze
       module_function
       def canonical_json(value)
         nodes = projected = 0
         add = ->(size) { (projected += size) <= MAX_JSON_BYTES || raise(TypeError) }
         string_size = lambda do |string|
-          string.instance_of?(String) && string.valid_encoding? && (string.encoding == Encoding::UTF_8 || string.ascii_only?) &&
+          PLAIN.call(string, String) && string.valid_encoding? && (string.encoding == Encoding::UTF_8 || string.ascii_only?) &&
             string.bytesize + 2 <= MAX_JSON_BYTES || raise(TypeError)
-          string.bytesize + 2 + string.count(%Q("\\\b\f\n\r\t)) + (5 * string.count("\x00-\x07\x0B\x0E-\x1F"))
+          string.bytesize + 2 + string.count(%Q("\\\b\f\n\r\t)) + string.count("\\") + (5 * string.count("\x00-\x07\x0B\x0E-\x1F"))
         end
         normalize = lambda do |nested, depth|
           depth <= MAX_JSON_DEPTH && (nodes += 1) <= MAX_JSON_NODES || raise(TypeError)
-          [ Hash, Array, String, Integer, Float, TrueClass, FalseClass, NilClass ].include?(nested.class) || raise(TypeError)
+          [ Hash, Array, String, Integer, Float, TrueClass, FalseClass, NilClass ].any? { |type| PLAIN.call(nested, type) } || raise(TypeError)
           case nested
           when Hash
-            key_sizes = nested.keys.to_h { |key| string_size.call(key).then { |size| [ key.encode(Encoding::UTF_8), [ key, size ] ] } }
-            key_sizes.length == nested.length || raise(TypeError)
-            add.call({ true => 2, false => 4 + (2 * depth) + (2 * (key_sizes.length - 1)) }.fetch(key_sizes.empty?))
-            key_sizes.keys.sort.to_h { |key| key_sizes.fetch(key).then { |original, size|
-              add.call((2 * (depth + 1)) + size + 2).then { [ key, normalize.call(nested.fetch(original), depth + 1) ] } } }
+            count = nested.length; nodes + count <= MAX_JSON_NODES || raise(TypeError)
+            add.call({ true => 2, false => 4 + (2 * depth) + (2 * (count - 1)) }.fetch(count.zero?))
+            key_sizes = nested.each_key.to_h do |key|
+              size = string_size.call(key); add.call((2 * (depth + 1)) + size + 2); [ key.encode(Encoding::UTF_8), key ]
+            end.tap { |sizes| sizes.length == count || raise(TypeError) }
+            key_sizes.keys.sort.to_h { |key| [ key, normalize.call(nested.fetch(key_sizes.fetch(key)), depth + 1) ] }
           when Array
             add.call({ true => 2, false => 4 + (2 * depth) + (2 * (nested.length - 1)) }.fetch(nested.empty?))
             nested.map { |item| add.call(2 * (depth + 1)).then { normalize.call(item, depth + 1) } }
           when String then add.call(string_size.call(nested)).then { nested.encode(Encoding::UTF_8) }
           when Integer then (nested.bit_length <= MAX_JSON_INTEGER_BITS || raise(TypeError)) && add.call(nested.to_s.bytesize).then { nested }
-          when Float then (nested.finite? || raise(TypeError)) && add.call(nested.to_s.bytesize).then { nested }
+          when Float then (nested.finite? || raise(TypeError)) && add.call(JSON.generate(nested).bytesize).then { nested }
           else add.call({ true => 4, false => 5, nil => 4 }.fetch(nested)).then { nested }
           end
         end
@@ -42,10 +43,9 @@ module HiveLiveAgentProof
         raise Error, "cannot canonicalize JSON"
       end
       def safe_relative_path?(value)
-        return false unless value.instance_of?(String) && value.valid_encoding? && (value.encoding == Encoding::UTF_8 || value.ascii_only?)
+        return false unless PLAIN.call(value, String) && value.valid_encoding? && (value.encoding == Encoding::UTF_8 || value.ascii_only?)
         value = value.encode(Encoding::UTF_8)
-        return false if value.empty? || value.start_with?("/") || value.match?(/\A[A-Za-z]:/) || value.include?("\0") || value.include?("\\")
-        value.split("/", -1).none? { |part| part.empty? || part == "." || part == ".." }
+        !value.match?(%r{\A/|\A[A-Za-z]:|\x00|\\|(?:\A|/)\.{0,2}(?=/|\z)})
       end
       def secret_findings(text, exact_secrets: [])
         inspected = text.to_s.encode(Encoding::UTF_8, invalid: :replace, undef: :replace)

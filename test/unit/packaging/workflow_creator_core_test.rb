@@ -208,6 +208,56 @@ class WorkflowCreatorCoreTest < Minitest::Test
     end
   end
 
+  def test_canonical_json_stops_before_encoding_keys_past_resource_bounds
+    json_limit = CREATOR.const_get(:Primitives, false).const_get(:MAX_JSON_BYTES, false)
+    oversized_key = ("z" * (json_limit - 2)).freeze
+    late_key = "late-key".freeze
+    node_bound_hash = 16_384.times.to_h { |index| [ format("key-%05d", index).freeze, 0 ] }
+    cases = {
+      "byte-ceiling" => { oversized_key => 0, late_key => 0 },
+      "remaining-value-nodes" => node_bound_hash
+    }
+    observed = cases.to_h do |label, value|
+      encode_calls = 0
+      trace = TracePoint.new(:c_call) { |event| encode_calls += 1 if event.method_id == :encode }
+      trace.enable { assert_raises(CREATOR::Error, label) { CREATOR.canonical_json(value) } }
+      [ label, encode_calls ]
+    end
+
+    assert_equal({ "byte-ceiling" => 0, "remaining-value-nodes" => 0 }, observed)
+  end
+
+  def test_canonical_json_uses_generator_accurate_finite_float_tokens
+    values = [ 1e20, 1e-6, 1e-7 ]
+    documents = values.flat_map { |value| [ value, { "nested" => [ value ] } ] }
+    actual = documents.map do |document|
+      CREATOR.canonical_json(document)
+    rescue CREATOR::Error => error
+      "#{error.class}: #{error.message}"
+    end
+
+    assert_equal documents.map { |document| "#{JSON.pretty_generate(document)}\n" }, actual
+    [ Float::NAN, Float::INFINITY, -Float::INFINITY ].each do |value|
+      assert_raises(CREATOR::Error) { CREATOR.canonical_json(value) }
+    end
+  end
+
+  def test_canonical_json_projects_backslash_escapes_exactly
+    value = {
+      "array" => [ "C:\\tmp", "one\\two\\three" ],
+      "controls" => "line one\nline two\t\x01",
+      "path" => "runtime\\dependency.rb",
+      "quote" => "quoted \"value\""
+    }
+    actual = begin
+      CREATOR.canonical_json(value)
+    rescue CREATOR::Error => error
+      "#{error.class}: #{error.message}"
+    end
+
+    assert_equal "#{JSON.pretty_generate(value)}\n", actual
+  end
+
   def test_public_validation_boundaries_reject_json_subclasses
     hostile_hash = Class.new(Hash) { def keys = [] }
     hostile_array = Class.new(Array) { def map = [] }
@@ -258,6 +308,72 @@ class WorkflowCreatorCoreTest < Minitest::Test
       nil
     end
     assert_empty accepted, "subclass-backed evidence admitted: #{accepted.join(', ')}"
+  end
+
+  def test_public_validation_rejects_deceptive_class_and_singleton_dispatch
+    deceptive_hash = Class.new(Hash) do
+      def class = Hash
+      def keys = []
+      def length = 0
+    end
+    singleton_hash = { "hidden" => true }
+    singleton_hash.define_singleton_method(:keys) { [] }
+    singleton_hash.define_singleton_method(:length) { 0 }
+    singleton_array = [ "hidden" ]
+    singleton_array.define_singleton_method(:empty?) { true }
+    singleton_array.define_singleton_method(:map) { [] }
+    singleton_string = +"hidden"
+    singleton_string.define_singleton_method(:bytesize) { 0 }
+    singleton_string.define_singleton_method(:count) { |*| 0 }
+    singleton_string.define_singleton_method(:encode) { |*| "" }
+    singleton_secret = +"fixture-secret"
+    singleton_secret.define_singleton_method(:bytesize) { 1 }
+    deceptive_argument = Class.new(String) do
+      def instance_of?(_type) = true
+      def downcase = raise(Minitest::Assertion, "failure argument dispatched before admission")
+    end
+    singleton_detail = +"detail"
+    singleton_detail.define_singleton_method(:encode) { |*| raise Minitest::Assertion, "detail dispatched before admission" }
+    deceptive_secrets = Class.new(Array) do
+      def instance_of?(_type) = true
+      def length = 0
+      def all? = true
+    end
+    singleton_secrets = [ "fixture-secret" ]
+    singleton_secrets.define_singleton_method(:length) { 0 }
+    singleton_secrets.define_singleton_method(:all?) { true }
+    cases = {
+      "deceptive-hash-class" => -> { CREATOR.canonical_json(deceptive_hash["hidden" => true]) },
+      "exact-hash-singleton" => -> { CREATOR.canonical_json(singleton_hash) },
+      "exact-array-singleton" => -> { CREATOR.canonical_json(singleton_array) },
+      "exact-string-singleton" => -> { CREATOR.canonical_json(singleton_string) },
+      "deceptive-failure-argument" => lambda do
+        CREATOR.failure(candidate_sha: deceptive_argument.new(SHA), phase: "preflight", reason: "not_started")
+      end,
+      "exact-detail-singleton" => lambda do
+        CREATOR.failure(candidate_sha: SHA, phase: "preflight", reason: "not_started", detail: singleton_detail)
+      end,
+      "exact-secret-singleton" => lambda do
+        CREATOR.failure(candidate_sha: SHA, phase: "preflight", reason: "not_started",
+                        exact_secrets: [ singleton_secret ])
+      end,
+      "deceptive-secret-array" => lambda do
+        CREATOR.failure(candidate_sha: SHA, phase: "preflight", reason: "not_started",
+                        exact_secrets: deceptive_secrets["fixture-secret"])
+      end,
+      "exact-secret-array-singleton" => lambda do
+        CREATOR.failure(candidate_sha: SHA, phase: "preflight", reason: "not_started",
+                        exact_secrets: singleton_secrets)
+      end
+    }
+    accepted = cases.filter_map do |label, action|
+      action.call
+      label
+    rescue CREATOR::Error
+      nil
+    end
+
+    assert_empty accepted, "dispatch-backed evidence admitted: #{accepted.join(', ')}"
   end
 
   def test_failure_redaction_merges_overlapping_original_ranges
@@ -504,6 +620,26 @@ class WorkflowCreatorCoreTest < Minitest::Test
     assert_empty accepted, "incoherent capture tuples admitted: #{accepted.join(', ')}"
   end
 
+  def test_execution_capture_rejects_positive_bytes_with_empty_digest_after_rebinding
+    fixture = valid_fixture
+    capture = fixture.fetch(:receipt).fetch("commands").first.fetch("capture")
+    capture["stdout_bytes"] = 1
+    capture["stdout_sha256"] = Digest::SHA256.hexdigest("")
+    rebind_execution_receipt!(fixture)
+
+    error = assert_raises(CREATOR::Error) { validate_execution(fixture) }
+    assert_equal "workflow-creator execution process receipt is invalid", error.message
+  end
+
+  def test_execution_teardown_rejects_float_zero_after_rebinding
+    fixture = valid_fixture
+    fixture.fetch(:receipt).fetch("teardown")["remaining_descendants"] = 0.0
+    rebind_execution_receipt!(fixture)
+
+    error = assert_raises(CREATOR::Error) { validate_execution(fixture) }
+    assert_equal "workflow-creator execution aggregates are inconsistent", error.message
+  end
+
   def test_execution_contract_binds_all_canonical_document_bytes_and_kinds
     cases = {
       "swapped-documents" => lambda do |item|
@@ -606,6 +742,23 @@ class WorkflowCreatorCoreTest < Minitest::Test
     end
   end
 
+  def test_relative_path_scanning_preserves_results_without_component_allocation
+    primitives = CREATOR.const_get(:Primitives, false)
+    separator_heavy = ([ "segment" ] * 20_000).join("/")
+    safe = [ "file", "dir/file", "dir/.hidden", "...", "Cfile", "utf8/é", separator_heavy ]
+    unsafe = [ "", ".", "..", "/absolute", "../escape", "dir/../escape", "./file",
+               "dir//file", "dir/", "C:/escape", "C:relative", "C:\\escape", "dir\\escape", "nul\0path" ]
+    split_calls = 0
+    trace = TracePoint.new(:c_call) do |event|
+      split_calls += 1 if event.method_id == :split
+    end
+    observed_safe = trace.enable { safe.to_h { |path| [ path, primitives.safe_relative_path?(path) ] } }
+
+    assert observed_safe.values.all?, observed_safe.inspect
+    assert unsafe.none? { |path| primitives.safe_relative_path?(path) }
+    assert_equal 0, split_calls
+  end
+
   def test_schema_v1_vocabulary_is_bound_to_the_incumbent_proof
     require_relative "../../../packaging/live_agent_skills/proof"
     keys = %w[schema_version request prompt task_request task_key task_slug task_prompt task_new_argv commands files]
@@ -696,7 +849,7 @@ class WorkflowCreatorCoreTest < Minitest::Test
     { lines: 590, methods: 22, branches: 28 }.each do |metric, hard_limit|
       assert_operator totals.fetch(metric), :<=, hard_limit, "aggregate hard #{metric}"
     end
-    { lines: 588, methods: 22, branches: 19 }.each do |metric, target|
+    { lines: 588, methods: 22, branches: 15 }.each do |metric, target|
       assert_operator totals.fetch(metric), :<=, target, "aggregate target #{metric}"
     end
   end
@@ -836,16 +989,16 @@ class WorkflowCreatorCoreTest < Minitest::Test
       "proof_primitives.rb" => {
         requires: [ %w[require json] ],
         calls: %w[
-          ascii_only? bit_length bytebegin byteend bytesize byteslice call class count deep_freeze dup each
-          each_with_index each_with_object empty? encode encoding escape fetch filter_map finite? first
-          force_encoding freeze include? instance_of? is_a? keys lambda last last_match length map match?
-          max module_function none? pretty_generate raise require scan scrub sort sort_by! source split
-          start_with? tap then to_h to_s valid_encoding?
+          any? ascii_only? bind_call bit_length bytebegin byteend bytesize byteslice call count deep_freeze dup each
+          each_key each_with_index each_with_object empty? encode encoding equal? escape fetch filter_map finite? first
+          force_encoding freeze generate include? instance_method instance_of? is_a? keys lambda last last_match
+          length map match? max module_function pretty_generate raise require scan scrub sort sort_by! source tap then
+          to_h to_s valid_encoding? zero?
         ],
         constants: %w[
           ArgumentError Array Encoding EncodingError Error FalseClass Float GeneratorError Hash HiveLiveAgentProof
-          Integer JSON MAX_JSON_BYTES MAX_JSON_DEPTH MAX_JSON_INTEGER_BITS MAX_JSON_NODES NestingError NilClass Primitives Regexp
-          SECRET_PATTERNS StandardError String TrueClass TypeError UTF_8 WorkflowCreator
+          Integer JSON MAX_JSON_BYTES MAX_JSON_DEPTH MAX_JSON_INTEGER_BITS MAX_JSON_NODES NestingError NilClass Object PLAIN Primitives
+          RAW_CLASS RAW_SINGLETON_METHODS Regexp SECRET_PATTERNS StandardError String TrueClass TypeError UTF_8 WorkflowCreator
         ]
       },
       "workflow_creator.rb" => {
@@ -873,7 +1026,7 @@ class WorkflowCreatorCoreTest < Minitest::Test
           ARTIFACT_KEYS ASSERT ArgumentError Array BUNDLE_KEYS CLASSIFICATIONS Contract DETAIL_LIMIT DIGEST Digest Encoding EncodingError Error
           FAILURE_KEYS FAILURE_PART FILE_KEYS GeneratorError Hash HiveLiveAgentProof INSTALLATION_KEYS Integer JSON
           KeyError MANIFEST_KEYS MAX_DETAIL_INPUT_BYTES MAX_EXACT_SECRETS MAX_INVENTORY_ENTRIES MAX_MEMBER_BYTES MAX_SECRET_BYTES
-          MAX_TOTAL_BYTES NoMethodError PRIMARY_KEYS Primitives SHA SHA256 SUMMARY_KEYS String TypeError UTF_8 Vocabulary
+          MAX_TOTAL_BYTES NoMethodError PLAIN PRIMARY_KEYS Primitives SHA SHA256 SUMMARY_KEYS String TypeError UTF_8 Vocabulary
           WorkflowCreator
         ]
       },

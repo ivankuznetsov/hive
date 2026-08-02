@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release-candidate,release}.yml, packaging/{live_agent_skills,release_candidate}/, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-08-01
+updated: 2026-08-02
 tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, release-proof]
 ---
 
@@ -59,9 +59,13 @@ correlation, containment, owned-workspace cleanup, authored/executed
 instruction identity, and external-action evidence all cross-bind. Attestor
 retains the exact recursively canonical bytes and Verifier checks them without
 consulting deleted installation roots. Object-key reordering, array reordering,
-float-for-integer substitution, missing attested creator data, inventory drift,
+float-for-integer substitution (including gateway and instruction records),
+missing attested creator data, ambiguous candidate packages, inventory drift,
 release-package substitution, incomplete process custody, and secret-shaped
-material fail closed through the same validator.
+material fail closed through the same validator. Source-artifact regressions
+also prove that a PAX `path=` rewrite which GNU tar would honor is rejected,
+the exact Git global comment is accepted, and compressed/entry/expanded/member
+resource ceilings fail closed.
 
 Bundle reads are descriptor-first with no-follow and nonblocking flags. Source
 and retained directories stop enumeration after 16 entries, special files such
@@ -652,7 +656,9 @@ archive digest, but `release.yml` does not query or require that Check Run.
 `bundle exec rake smoke` also contains older live Claude workflows and may
 incur provider cost. Normal `rake test` remains local and network-free.
 `bundle exec rake coverage` uses the same network-free machinery but is
-normally owned by hosted CI.
+normally owned by hosted CI. The U1a admission-budget probe clears inherited
+`RUBYOPT` in its child before starting its own branch counter, so the coverage
+gate cannot double-start Ruby Coverage in that subprocess.
 
 ## Live Claude tmux dogfood
 

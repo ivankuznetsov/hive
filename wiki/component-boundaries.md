@@ -41,8 +41,11 @@ the only supported entry point for source, retained, passing, and non-passing
 validation; the three concrete validators remain internal collaborators. Its
 installed contract binds a complete bounded inventory and required roles, and
 its receipt contract binds the two outer model loops, command/capture/archive
-records, containment, teardown, and cleanup as one closed transaction. No
-owned type writes, links, renames,
+records, containment, teardown, and cleanup as one closed transaction. File
+record bindings are JSON-type-exact, the release manifest must identify one
+candidate package, and source-builder verification accepts only extraction-
+equivalent regular-file/directory semantics plus the exact Git global comment.
+No owned type writes, links, renames,
 locks, syncs, recovers, cleans, spawns, installs, or handles credentials.
 Attestor remains the incumbent proof-output writer; U1b owns publication and
 recovery, U14 owns deterministic execution custody, and U15 owns the provider

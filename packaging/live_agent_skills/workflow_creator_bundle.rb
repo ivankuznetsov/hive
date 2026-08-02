@@ -156,11 +156,13 @@ module HiveLiveAgentProof
           document["secret_scan"] == { "status" => "passed", "scanner" => WORKFLOW_CREATOR_SCANNER }
         assert!(valid, "#{kind} installed manifest identity is invalid")
         if kind == "candidate"
-          _name, artifact = manifest.fetch("files").find do |name, _record|
+          artifacts = manifest.fetch("files").select do |name, _record|
             name.match?(/\Ahive-cli-[0-9].*\.gem\z/)
-          end
+          end.values
+          assert!(artifacts.one?, "candidate manifest must identify exactly one package")
+          artifact = artifacts.first
           package = required.fetch("package")
-          assert!(artifact && package.slice("sha256", "size") == artifact.slice("sha256", "size"),
+          assert!(package.slice("sha256", "size") == artifact.slice("sha256", "size"),
                   "candidate installed package does not match the release artifact")
         end
         findings = HiveLiveAgentProof.secret_findings(JSON.generate(document))

@@ -22,7 +22,6 @@ module HiveLiveAgentProof
     MAX_CAPTURE_BYTES = 1_048_576
     MAX_ARCHIVE_ENTRIES = 16_384
     MAX_ARCHIVE_BYTES = 1_073_741_824
-
     class << self
       def validate!(receipt:, row:, candidate_sha:, installation_records:,
                     receipt_sha256:, candidate_installation:, openclaw_installation:)
@@ -37,7 +36,6 @@ module HiveLiveAgentProof
       rescue KeyError, TypeError, NoMethodError, ArgumentError, JSON::GeneratorError
         raise Error, "workflow-creator execution receipt is invalid"
       end
-
       private
 
       def validate_identity!(receipt, row, candidate_sha, installation_records,
@@ -54,7 +52,8 @@ module HiveLiveAgentProof
           receipt["candidate_sha"] == candidate_sha && receipt["result"] == "passed" &&
           receipt["execution_plan"] == WORKFLOW_CREATOR_EXECUTION_PLAN &&
           receipt["classification"] == expected_classification && records_match &&
-          receipt["gateway"]["identity"] == candidate.fetch("required_roles").fetch("audit_gateway") &&
+          HiveLiveAgentProof.canonical_json(receipt["gateway"]["identity"]) ==
+            HiveLiveAgentProof.canonical_json(candidate.fetch("required_roles").fetch("audit_gateway")) &&
           receipt["gateway"]["status"] == "passed" &&
           receipt["secret_scan"] == { "status" => "passed", "scanner" => WORKFLOW_CREATOR_SCANNER }
         raise Error, "workflow-creator execution receipt identity is invalid" unless valid
@@ -103,7 +102,6 @@ module HiveLiveAgentProof
         raise Error, "workflow-creator execution process labels are invalid" unless labels.uniq.length == labels.length
         labels
       end
-
       def valid_process?(process, label_key)
         capture = process["capture"]
         teardown = process["teardown"]
@@ -164,8 +162,10 @@ module HiveLiveAgentProof
                         "remaining_descendants" => 0 } &&
           teardown["remaining_descendants"].is_a?(Integer) &&
           receipt["cleanup"]["status"] == "passed" && targets_valid &&
-          receipt["authored_instruction"] == row["executed_instruction"] &&
-          receipt["executed_instruction"] == row["executed_instruction"] &&
+          HiveLiveAgentProof.canonical_json(receipt["authored_instruction"]) ==
+            HiveLiveAgentProof.canonical_json(row["executed_instruction"]) &&
+          HiveLiveAgentProof.canonical_json(receipt["executed_instruction"]) ==
+            HiveLiveAgentProof.canonical_json(row["executed_instruction"]) &&
           receipt["external_actions"] == row["external_actions"] &&
           receipt_sha256.is_a?(String) && SAFE_DIGEST.match?(receipt_sha256) &&
           %w[containment teardown cleanup].all? { |field| row[field] == summary }

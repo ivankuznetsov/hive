@@ -49,7 +49,12 @@ directories as a protected namespace. It case-folds collision keys so Linux
 and default case-insensitive macOS reach the same verdict, accepts only each
 protected path's one canonical spelling and type, and rejects leading or
 embedded dot segments, repeated separators, case aliases, duplicate
-destinations, and links at protected paths before reading builder bytes.
+destinations, and links at protected paths before reading builder bytes. It
+rejects per-entry PAX/GNU rewrite metadata; when Git emits a global PAX header,
+only one exact `comment=<candidate SHA>` record is accepted. The scan is capped
+at 256 MiB compressed, 16,384 entries, 1 GiB expanded content, and 1 MiB per
+protected builder input, so digest recomputation cannot become an unbounded
+archive parser.
 
 ## CLI side effects and evidence
 

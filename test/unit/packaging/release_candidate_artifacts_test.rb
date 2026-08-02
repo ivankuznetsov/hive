@@ -2,6 +2,7 @@ require "test_helper"
 require "digest"
 require "json"
 require "open3"
+require "stringio"
 require_relative "../../../packaging/release_candidate/artifacts"
 require_relative "../../../packaging/release_candidate/runner"
 
@@ -145,6 +146,68 @@ class ReleaseCandidateArtifactsTest < Minitest::Test
     end
   end
 
+  def test_source_builder_rejects_pax_path_rewrites_that_extraction_honors
+    with_tmp_dir do |dir|
+      artifacts = fixture_artifacts(dir)
+      source = File.join(artifacts.candidate_dir, "hive-source-#{'a' * 40}.tar.gz")
+      target = "packaging/live_agent_skills/proof.rb"
+      build_source_fixture(
+        source, builder_inputs: fixture_builder_inputs,
+        pax_rewrite: [ target, "EVIL-PAX" ]
+      )
+      refresh_source_record!(artifacts, source)
+
+      extracted = File.join(dir, "extracted")
+      FileUtils.mkdir_p(extracted)
+      stdout, stderr, status = Open3.capture3("tar", "-xzf", source, "-C", extracted)
+      assert status.success?, "#{stdout}\n#{stderr}"
+      assert_equal "EVIL-PAX", File.binread(File.join(extracted, target))
+
+      error = assert_raises(HiveReleaseCandidate::Error) { artifacts.verify! }
+      assert_includes error.message, "unsupported archive metadata"
+    end
+  end
+
+  def test_source_builder_accepts_only_the_exact_git_global_pax_comment
+    with_tmp_dir do |dir|
+      artifacts = fixture_artifacts(dir)
+      source = File.join(artifacts.candidate_dir, "hive-source-#{'a' * 40}.tar.gz")
+      build_source_fixture(
+        source, builder_inputs: fixture_builder_inputs,
+        global_comment: "a" * 40
+      )
+      refresh_source_record!(artifacts, source)
+
+      assert artifacts.verify!
+
+      build_source_fixture(
+        source, builder_inputs: fixture_builder_inputs,
+        global_comment: "b" * 40
+      )
+      refresh_source_record!(artifacts, source)
+      error = assert_raises(HiveReleaseCandidate::Error) { artifacts.verify! }
+      assert_includes error.message, "noncanonical global archive metadata"
+    end
+  end
+
+  def test_source_builder_enforces_compressed_entry_expansion_and_member_limits
+    with_tmp_dir do |dir|
+      artifacts = fixture_artifacts(dir)
+      cases = {
+        MAX_SOURCE_ARCHIVE_BYTES: [ 1, "compressed-size limit" ],
+        MAX_SOURCE_ARCHIVE_ENTRIES: [ 1, "entry or expanded-size limit" ],
+        MAX_SOURCE_EXPANDED_BYTES: [ 1, "entry or expanded-size limit" ],
+        MAX_BUILDER_INPUT_BYTES: [ 1, "builder input exceeds the size limit" ]
+      }
+      cases.each do |name, (limit, message)|
+        with_replaced_constant(HiveReleaseCandidate::Artifacts, name, limit) do
+          error = assert_raises(HiveReleaseCandidate::Error) { artifacts.verify! }
+          assert_includes error.message, message, name
+        end
+      end
+    end
+  end
+
   def test_paths_reject_symlinked_root_and_nonblocking_concurrent_lock
     with_tmp_dir do |repo|
       safe_parent = File.join(repo, "tmp", "release-candidates")
@@ -259,14 +322,61 @@ class ReleaseCandidateArtifactsTest < Minitest::Test
     )
   end
 
-  def build_source_fixture(destination, builder_inputs:)
-    Zlib::GzipWriter.open(destination) do |gzip|
-      Gem::Package::TarWriter.new(gzip) do |tar|
-        builder_inputs.each do |relative, bytes|
-          tar.add_file_simple(relative, 0o600, bytes.bytesize) { |io| io.write(bytes) }
-        end
-      end
+  def build_source_fixture(destination, builder_inputs:, global_comment: nil, pax_rewrite: nil)
+    tar = StringIO.new("".b)
+    append_tar_entry(
+      tar, name: "pax_global_header", body: "52 comment=#{global_comment}\n",
+      typeflag: "g"
+    ) if global_comment
+    builder_inputs.each do |relative, bytes|
+      append_tar_entry(tar, name: relative, body: bytes)
     end
+    if pax_rewrite
+      target, bytes = pax_rewrite
+      append_tar_entry(tar, name: "pax-header", body: pax_record("path", target), typeflag: "x")
+      append_tar_entry(tar, name: "benign-overwrite", body: bytes)
+    end
+    tar.write("\0" * 1_024)
+    Zlib::GzipWriter.open(destination) { |gzip| gzip.write(tar.string) }
+  end
+
+  def append_tar_entry(io, name:, body:, typeflag: "0")
+    header = Gem::Package::TarHeader.new(
+      name: name, prefix: "", mode: 0o600, size: body.bytesize,
+      typeflag: typeflag
+    )
+    io.write(header.to_s)
+    io.write(body)
+    io.write("\0" * ((512 - (body.bytesize % 512)) % 512))
+  end
+
+  def pax_record(key, value)
+    length = key.bytesize + value.bytesize + 4
+    loop do
+      record = "#{length} #{key}=#{value}\n"
+      return record if record.bytesize == length
+
+      length = record.bytesize
+    end
+  end
+
+  def refresh_source_record!(artifacts, source)
+    manifest_path = File.join(artifacts.candidate_dir, "manifest.json")
+    manifest = JSON.parse(File.read(manifest_path))
+    record = manifest.fetch("files").fetch(File.basename(source))
+    record["sha256"] = Digest::SHA256.file(source).hexdigest
+    record["size"] = File.size(source)
+    File.write(manifest_path, JSON.generate(manifest))
+  end
+
+  def with_replaced_constant(owner, name, value)
+    original = owner.const_get(name, false)
+    owner.send(:remove_const, name)
+    owner.const_set(name, value)
+    yield
+  ensure
+    owner.send(:remove_const, name) if owner.const_defined?(name, false)
+    owner.const_set(name, original)
   end
 
   def fixture_builder_inputs

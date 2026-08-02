@@ -363,7 +363,7 @@ class ComponentBoundariesTest < Minitest::Test
       end)
     RUBY
     out, err, status = Open3.capture3(
-      RbConfig.ruby, "-e", script, *caps.keys, chdir: ROOT
+      { "RUBYOPT" => nil }, RbConfig.ruby, "-e", script, *caps.keys, chdir: ROOT
     )
     assert status.success?, err
     branch_counts = JSON.parse(out)

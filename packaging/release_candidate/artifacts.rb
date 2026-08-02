@@ -24,6 +24,11 @@ module HiveReleaseCandidate
       packaging/live_agent_skills/workflow_creator_execution_contract.rb
       packaging/live_agent_skills/build.rb
     ].freeze
+    MAX_SOURCE_ARCHIVE_BYTES = 268_435_456
+    MAX_SOURCE_ARCHIVE_ENTRIES = 16_384
+    MAX_SOURCE_EXPANDED_BYTES = 1_073_741_824
+    MAX_BUILDER_INPUT_BYTES = 1_048_576
+    SOURCE_ENTRY_TYPES = %w[0 5 g].freeze
 
     attr_reader :repo_root, :candidate_sha, :candidate_dir
 
@@ -188,6 +193,9 @@ module HiveReleaseCandidate
         unless stat.file? && !stat.symlink? && stat.nlink == 1 && stat.uid == Process.uid
           raise Error, "candidate artifact is not a private regular file: #{name}"
         end
+        if record["kind"] == "source" && stat.size > MAX_SOURCE_ARCHIVE_BYTES
+          raise Error, "candidate source archive exceeds the compressed-size limit"
+        end
         raise Error, "artifact size mismatch for #{name}" unless stat.size == record["size"]
         unless Digest::SHA256.file(path).hexdigest == record["sha256"]
           raise Error, "artifact digest mismatch for #{name}"
@@ -259,10 +267,17 @@ module HiveReleaseCandidate
       source_name, = files.find { |_name, record| record["kind"] == "source" }
       raise Error, "candidate source artifact is missing" unless source_name
 
+      source_path = File.join(directory, source_name)
+      unless File.size(source_path).between?(1, MAX_SOURCE_ARCHIVE_BYTES)
+        raise Error, "candidate source archive exceeds the compressed-size limit"
+      end
       wanted = LIVE_AGENT_BUILDER_INPUTS
       contents = {}
       destinations = {}
       protected = {}
+      entry_count = 0
+      expanded_bytes = 0
+      global_header_seen = false
       wanted.each do |path|
         parts = path.split("/")
         (1...parts.length).each do |length|
@@ -271,9 +286,28 @@ module HiveReleaseCandidate
         end
         protected[path.downcase] = [ path, :file ]
       end
-      Zlib::GzipReader.open(File.join(directory, source_name)) do |gzip|
+      Zlib::GzipReader.open(source_path) do |gzip|
         Gem::Package::TarReader.new(gzip) do |tar|
           tar.each do |entry|
+            entry_count += 1
+            expanded_bytes += entry.size
+            unless entry_count <= MAX_SOURCE_ARCHIVE_ENTRIES &&
+                   expanded_bytes <= MAX_SOURCE_EXPANDED_BYTES
+              raise Error, "candidate source archive exceeds the entry or expanded-size limit"
+            end
+            typeflag = entry.header.typeflag
+            unless SOURCE_ENTRY_TYPES.include?(typeflag)
+              raise Error, "candidate source contains unsupported archive metadata"
+            end
+            if typeflag == "g"
+              expected_header = "52 comment=#{candidate_sha}\n"
+              valid_header = !global_header_seen && entry.full_name == "pax_global_header" &&
+                entry.size == expected_header.bytesize && entry.read(expected_header.bytesize + 1) == expected_header
+              raise Error, "candidate source contains noncanonical global archive metadata" unless valid_header
+
+              global_header_seen = true
+              next
+            end
             raw = entry.full_name
             name = entry.directory? ? raw.delete_suffix("/") : raw
             next if name == "." && entry.directory?
@@ -297,7 +331,12 @@ module HiveReleaseCandidate
             valid_type = type == :directory ? entry.directory? : entry.file?
             raise Error, "candidate source builder path has the wrong type" unless valid_type
 
-            contents[expected] = entry.read if type == :file
+            if type == :file
+              if entry.size > MAX_BUILDER_INPUT_BYTES
+                raise Error, "candidate source builder input exceeds the size limit"
+              end
+              contents[expected] = entry.read(MAX_BUILDER_INPUT_BYTES + 1)
+            end
           end
         end
       end

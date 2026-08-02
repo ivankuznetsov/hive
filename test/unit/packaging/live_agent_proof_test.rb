@@ -711,6 +711,9 @@ class LiveAgentProofTest < Minitest::Test
         "command-position-float" => [ "execution-receipt.json", ->(doc) { doc["commands"][0]["position"] = 1.0 } ],
         "archive-size-float" => [ "execution-receipt.json", ->(doc) { doc["archive_admissions"][0]["artifact_size"] = 1.0 } ],
         "capture-limit-float" => [ "execution-receipt.json", ->(doc) { doc["commands"][0]["capture"]["limit_bytes"] = 4_096.0 } ],
+        "gateway-size-float" => [ "execution-receipt.json", ->(doc) { doc["gateway"]["identity"]["size"] = doc["gateway"]["identity"]["size"].to_f } ],
+        "authored-size-float" => [ "execution-receipt.json", ->(doc) { doc["authored_instruction"]["size"] = doc["authored_instruction"]["size"].to_f } ],
+        "executed-size-float" => [ "execution-receipt.json", ->(doc) { doc["executed_instruction"]["size"] = doc["executed_instruction"]["size"].to_f } ],
         "cleanup-inode-float" => [ "execution-receipt.json", ->(doc) { doc["cleanup"]["targets"][0]["inode"] = 2.0 } ],
         "descendants-float" => [ "execution-receipt.json", ->(doc) { doc["teardown"]["remaining_descendants"] = 0.0 } ]
       }
@@ -820,6 +823,18 @@ class LiveAgentProofTest < Minitest::Test
         directory: creator, manifest: manifest, candidate_sha: SHA
       )
       assert_instance_of HiveLiveAgentProof::WorkflowCreator::Snapshot, snapshot
+      ambiguous = JSON.parse(JSON.generate(manifest))
+      package_name, package = ambiguous.fetch("files").find do |name, _record|
+        name.match?(/\Ahive-cli-[0-9].*\.gem\z/)
+      end
+      ambiguous.fetch("files")["hive-cli-9.9.9.gem"] = package.merge("kind" => "gem")
+      error = assert_raises(HiveLiveAgentProof::Error) do
+        HiveLiveAgentProof::WorkflowCreator.validate_source!(
+          directory: creator, manifest: ambiguous, candidate_sha: SHA
+        )
+      end
+      assert_includes error.message, "exactly one package"
+      assert_match(/hive-cli-/, package_name)
       failure = HiveLiveAgentProof::WorkflowCreator.failure(
         candidate_sha: SHA, phase: "preflight", reason: "not_started"
       )

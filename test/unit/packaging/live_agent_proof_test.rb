@@ -104,6 +104,274 @@ class LiveAgentProofTest < Minitest::Test
     end
   end
 
+  def test_workflow_creator_schema_v1_vocabulary_and_bytes_are_exact
+    with_tmp_dir do |dir|
+      artifacts = prepare_artifacts(dir)
+      creator_evidence = prepare_creator_evidence(dir, artifacts)
+      path = File.join(creator_evidence, "openclaw-workflow-creator.json")
+      row = JSON.parse(File.read(path))
+
+      assert_equal(
+        %w[
+          candidate_sha cleanup created_files creation_only_task_count
+          external_actions hive_commands native_activation platform
+          prompt_sha256 result schema schema_version secret_scan skill task
+          task_count task_prompt_sha256 validation
+        ],
+        row.keys.sort
+      )
+      assert_equal(
+        <<~PROMPT,
+          /hive
+          Create a three-stage editorial workflow that researches, drafts, and requires approval before publishing.
+          Use the installed Hive workflow-creator capability in this initialized project.
+          This is creation-only: validate the result, report the defaults, and do not create or run a task.
+        PROMPT
+        HiveLiveAgentProof::WORKFLOW_CREATOR_PROMPT
+      )
+      assert_equal(
+        <<~PROMPT,
+          /hive
+          Use the validated editorial workflow to create and run one task for:
+          "Research and draft the launch announcement for approval."
+          Use idempotency key workflow-creator-proof:editorial:live-proof. In this exact order: create the task,
+          run its first stage once, repeat the same creation command once to prove the retry is a no-op,
+          then query operational status. Do not publish or perform any other external action.
+        PROMPT
+        HiveLiveAgentProof::WORKFLOW_CREATOR_TASK_PROMPT
+      )
+      assert_equal(
+        [
+          [ "version" ],
+          [ "workflow", "list", "--json" ],
+          [ "workflow", "new", "editorial", "--json" ],
+          [ "workflow", "validate", "editorial", "--json" ],
+          [ "workflow", "commit", "editorial" ],
+          [ "new", "workflow-creator-proof", "--workflow", "editorial",
+            "--idempotency-key", "workflow-creator-proof:editorial:live-proof",
+            "--json", "Research and draft the launch announcement for approval." ],
+          [ "run", "editorial-live-proof" ],
+          [ "new", "workflow-creator-proof", "--workflow", "editorial",
+            "--idempotency-key", "workflow-creator-proof:editorial:live-proof",
+            "--json", "Research and draft the launch announcement for approval." ],
+          [ "status", "--operational", "--json" ]
+        ],
+        HiveLiveAgentProof::WORKFLOW_CREATOR_COMMANDS
+      )
+      assert_equal(
+        %w[
+          .hive-state/workflows/editorial.yml
+          .hive-state/workflows/editorial/draft.md
+          .hive-state/workflows/editorial/research.md
+        ],
+        HiveLiveAgentProof::WORKFLOW_CREATOR_FILES
+      )
+      assert_equal "#{JSON.pretty_generate(row)}\n", File.binread(path)
+    end
+  end
+
+  def test_attestor_and_verifier_preserve_public_and_unrelated_proof_bytes
+    with_tmp_dir do |dir|
+      artifacts = prepare_artifacts(dir)
+      evidence = prepare_evidence(dir, artifacts)
+      creator_evidence = prepare_creator_evidence(dir, artifacts)
+      creator_path = File.join(
+        creator_evidence,
+        "openclaw-workflow-creator.json"
+      )
+      creator_bytes = File.binread(creator_path)
+      creator_row = JSON.parse(creator_bytes)
+      platform_rows = HiveLiveAgentProof::PLATFORMS.to_h do |platform|
+        [ platform, JSON.parse(File.read(File.join(evidence, "#{platform}.json"))) ]
+      end
+      manifest = JSON.parse(File.read(File.join(artifacts, "artifact-manifest.json")))
+      proof = File.join(dir, "proof")
+
+      result = attest(artifacts, evidence, creator_evidence, proof)
+      attestation = result.fetch("attestation")
+
+      assert_equal creator_row, attestation.fetch("workflow_creator")
+      assert_equal creator_bytes,
+                   File.binread(File.join(proof, "evidence", "openclaw-workflow-creator.json"))
+      assert_equal manifest, attestation.fetch("artifacts")
+      assert_equal platform_rows, attestation.fetch("platforms")
+      assert_equal 6, attestation.dig("secret_scan", "files_scanned")
+      assert_equal(
+        "#{result.fetch("sha256")}  attestation.json\n",
+        File.binread(File.join(proof, "attestation.sha256"))
+      )
+
+      FileUtils.rm_rf(creator_evidence)
+      verified = verifier(proof, result.fetch("sha256")).call
+      assert_match(/hive-cli-1\.2\.3\.gem\z/, verified.fetch("gem"))
+    end
+  end
+
+  def test_current_creator_failures_have_exact_public_messages
+    with_tmp_dir do |dir|
+      artifacts = prepare_artifacts(dir)
+      evidence = prepare_evidence(dir, artifacts)
+      cases = {
+        "missing-inventory" => [
+          ->(root, _row) { FileUtils.rm_f(File.join(root, "openclaw-workflow-creator.json")) },
+          "workflow-creator evidence must contain exactly openclaw-workflow-creator.json"
+        ],
+        "extra-inventory" => [
+          ->(root, _row) { HiveLiveAgentProof.write_json(File.join(root, "extra.json"), {}) },
+          "workflow-creator evidence must contain exactly openclaw-workflow-creator.json"
+        ],
+        "identity" => [
+          ->(_root, row) { row["schema"] = "wrong" },
+          "workflow-creator evidence identity or result is invalid"
+        ],
+        "provenance" => [
+          ->(_root, row) { row["skill"]["canonical_digest"] = "0" * 64 },
+          "workflow-creator evidence canonical provenance mismatch"
+        ],
+        "activation" => [
+          ->(_root, row) { row["native_activation"]["kind"] = "generic-file-read" },
+          "workflow-creator native activation evidence is invalid"
+        ],
+        "missing-command" => [
+          ->(_root, row) { row["hive_commands"].pop },
+          "workflow-creator prompt or command sequence is invalid"
+        ],
+        "reordered-command" => [
+          lambda do |_root, row|
+            row["hive_commands"][0], row["hive_commands"][1] =
+              row["hive_commands"][1], row["hive_commands"][0]
+          end,
+          "workflow-creator prompt or command sequence is invalid"
+        ],
+        "duplicate-command" => [
+          ->(_root, row) { row["hive_commands"].insert(1, row["hive_commands"].first) },
+          "workflow-creator prompt or command sequence is invalid"
+        ],
+        "extra-command" => [
+          ->(_root, row) { row["hive_commands"] << [ "doctor", "--json" ] },
+          "workflow-creator prompt or command sequence is invalid"
+        ],
+        "missing-created-file" => [
+          ->(_root, row) { row["created_files"].pop },
+          "workflow-creator created files are incomplete"
+        ],
+        "invalid-file" => [
+          ->(_root, row) { row["created_files"].first["size"] = 0 },
+          "workflow-creator created-file records are invalid"
+        ],
+        "missing-validation" => [
+          ->(_root, row) { row["validation"] = nil },
+          "workflow-creator normalized graph is invalid"
+        ],
+        "graph-drift" => [
+          ->(_root, row) { row["validation"]["stages"] << "publish" },
+          "workflow-creator normalized graph is invalid"
+        ],
+        "unauthorized-task" => [
+          ->(_root, row) { row["task_count"] = 2 },
+          "workflow-creator proof contains an unauthorized side effect"
+        ],
+        "unauthorized-effect" => [
+          ->(_root, row) { row["external_actions"] << "publish" },
+          "workflow-creator proof contains an unauthorized side effect"
+        ],
+        "secret-scan-status" => [
+          ->(_root, row) { row["secret_scan"]["status"] = "failed" },
+          "workflow-creator evidence lacks secret-scan or cleanup proof"
+        ],
+        "cleanup-status" => [
+          ->(_root, row) { row["cleanup"]["status"] = "failed" },
+          "workflow-creator evidence lacks secret-scan or cleanup proof"
+        ],
+        "secret-content" => [
+          ->(_root, row) { row["diagnostic"] = [ "sk", "ant", "abcdefghijkl" ].join("-") },
+          "workflow-creator evidence secret scan failed: pattern:sk-ant-[A-Za-z0-9_-]{12,}"
+        ]
+      }
+
+      cases.each do |label, (mutation, expected_message)|
+        creator = prepare_creator_evidence(File.join(dir, label), artifacts)
+        path = File.join(creator, "openclaw-workflow-creator.json")
+        row = JSON.parse(File.read(path))
+        mutation.call(creator, row)
+        HiveLiveAgentProof.write_json(path, row) if File.exist?(path)
+
+        error = assert_raises(HiveLiveAgentProof::Error, label) do
+          attest(artifacts, evidence, creator, File.join(dir, "proof-#{label}"))
+        end
+        assert_equal expected_message, error.message, label
+      end
+
+      creator = prepare_creator_evidence(File.join(dir, "verifier-source"), artifacts)
+      source_proof = File.join(dir, "verifier-source-proof")
+      attest(artifacts, evidence, creator, source_proof)
+      verifier_cases = {
+        "identity" => [
+          ->(row) { row["platform"] = "wrong" },
+          "workflow-creator attested evidence is incomplete"
+        ],
+        "activation" => [
+          ->(row) { row["native_activation"]["kind"] = "generic-file-read" },
+          "workflow-creator attested native activation evidence is invalid"
+        ],
+        "contract" => [
+          ->(row) { row["prompt_sha256"] = "0" * 64 },
+          "workflow-creator attested contract is invalid"
+        ]
+      }
+      verifier_cases.each do |label, (mutation, expected_message)|
+        proof = File.join(dir, "verifier-proof-#{label}")
+        FileUtils.cp_r(source_proof, proof)
+        attestation_path = File.join(proof, "attestation.json")
+        attestation = JSON.parse(File.read(attestation_path))
+        mutation.call(attestation.fetch("workflow_creator"))
+        HiveLiveAgentProof.write_json(attestation_path, attestation)
+
+        error = assert_raises(HiveLiveAgentProof::Error, label) do
+          verifier(proof, HiveLiveAgentProof.sha256(attestation_path)).call
+        end
+        assert_equal expected_message, error.message, label
+      end
+    end
+  end
+
+  # These accepted mutations are characterization of the current duplicated
+  # verifier. They are tightening targets for U1a1/U1a2, not compatibility promises.
+  def test_current_verifier_acceptance_gaps_are_explicit
+    with_tmp_dir do |dir|
+      artifacts = prepare_artifacts(dir)
+      evidence = prepare_evidence(dir, artifacts)
+      creator_evidence = prepare_creator_evidence(dir, artifacts)
+      source_proof = File.join(dir, "source-proof")
+      attest(artifacts, evidence, creator_evidence, source_proof)
+      cases = {
+        "extra-field" => ->(row) { row["unexpected"] = true },
+        "schema-version" => ->(row) { row["schema_version"] = 999 },
+        "skill-version" => ->(row) { row["skill"]["skill_version"] = "wrong" },
+        "created-file" => lambda do |row|
+          row["created_files"].first["sha256"] = "0" * 64
+          row["created_files"].first["size"] = 0
+        end,
+        "graph" => ->(row) { row["validation"]["stages"] << "publish" }
+      }
+
+      cases.each do |label, mutation|
+        proof = File.join(dir, "proof-#{label}")
+        FileUtils.cp_r(source_proof, proof)
+        attestation_path = File.join(proof, "attestation.json")
+        attestation = JSON.parse(File.read(attestation_path))
+        mutation.call(attestation.fetch("workflow_creator"))
+        HiveLiveAgentProof.write_json(attestation_path, attestation)
+
+        verified = verifier(
+          proof,
+          HiveLiveAgentProof.sha256(attestation_path)
+        ).call
+        assert_match(/hive-cli-1\.2\.3\.gem\z/, verified.fetch("gem"), label)
+      end
+    end
+  end
+
   def test_attestor_rejects_missing_skipped_or_unsafe_platform_evidence
     with_tmp_dir do |dir|
       artifacts = prepare_artifacts(dir)

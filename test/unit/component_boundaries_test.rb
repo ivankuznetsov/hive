@@ -22,6 +22,7 @@ class ComponentBoundariesTest < Minitest::Test
       skillpack
       user-service
       work-ledger
+      workflow-creator-core
     ], contract.components.map { |component| component.fetch("id") }.sort
 
     attempts = contract.component("attempts")
@@ -74,6 +75,22 @@ class ComponentBoundariesTest < Minitest::Test
         [ entry.fetch("constant"), entry.fetch("files") ]
       end
     )
+    workflow_creator = contract.component("workflow-creator-core")
+    assert_equal "candidate", workflow_creator.fetch("state")
+    assert_equal "packaging/live_agent_skills/workflow_creator",
+                 workflow_creator.dig("entrypoint", "require")
+    assert_equal "HiveLiveAgentProof::WorkflowCreator",
+                 workflow_creator.dig("entrypoint", "constant")
+    assert_equal %w[
+      packaging/live_agent_skills/proof_primitives.rb
+      packaging/live_agent_skills/workflow_creator.rb
+      packaging/live_agent_skills/workflow_creator_contract.rb
+      packaging/live_agent_skills/workflow_creator_execution_contract.rb
+    ], workflow_creator.fetch("owned_paths").sort
+    assert_empty workflow_creator.fetch("hive_consumers")
+    assert_empty workflow_creator.fetch("component_dependencies")
+    assert_equal [ "U1a2" ], workflow_creator.fetch("migration_exceptions")
+      .map { |entry| entry.fetch("removal_unit") }
     user_service = contract.component("user-service")
     assert_equal "boundary-ready", user_service.fetch("state")
     assert_equal "hive/user_service", user_service.dig("entrypoint", "require")
@@ -248,7 +265,7 @@ class ComponentBoundariesTest < Minitest::Test
     remaining_candidates = contract.components.reject do |component|
       ready_components.include?(component)
     end
-    assert_equal %w[attempts patrol-effects],
+    assert_equal %w[attempts patrol-effects workflow-creator-core],
                  remaining_candidates.map { |entry| entry.fetch("id") }.sort
     assert remaining_candidates.all? { |component| component.fetch("state") == "candidate" }
 
@@ -290,6 +307,11 @@ class ComponentBoundariesTest < Minitest::Test
                  patrol_effects_load.fetch("constant")
     assert_empty patrol_effects_load.fetch("forbidden_loaded_features")
     assert_empty patrol_effects_load.fetch("forbidden_constants")
+    workflow_creator_load = contract.validate_clean_load!("workflow-creator-core")
+    assert_equal "HiveLiveAgentProof::WorkflowCreator",
+                 workflow_creator_load.fetch("constant")
+    assert_empty workflow_creator_load.fetch("forbidden_loaded_features")
+    assert_empty workflow_creator_load.fetch("forbidden_constants")
   end
 
   def test_final_graph_and_wiki_inventory_agree_with_the_catalog
@@ -313,8 +335,12 @@ class ComponentBoundariesTest < Minitest::Test
       assert_includes row, "[[#{wiki_link}]]"
       assert_includes wiki_index, "[[#{wiki_link}]]"
       exceptions = component.fetch("migration_exceptions")
-      if component.fetch("id") == "patrol-effects"
-        assert_equal [ "U3" ],
+      expected_exception = {
+        "patrol-effects" => [ "U3" ],
+        "workflow-creator-core" => [ "U1a2" ]
+      }[component.fetch("id")]
+      if expected_exception
+        assert_equal expected_exception,
                      exceptions.map { |entry| entry.fetch("removal_unit") }
       else
         assert_empty exceptions,
@@ -591,14 +617,56 @@ class ComponentBoundariesTest < Minitest::Test
   end
 
   def test_candidate_component_accepts_bounded_migration_exception
+    %w[U3 U3a U3b U3c U1a2].each do |removal_unit|
+      with_contract_fixture(
+        entrypoint_source: example_api_source,
+        state: "candidate",
+        migration_exceptions: [
+          { "reason" => "temporary upward edge", "removal_unit" => removal_unit }
+        ]
+      ) do |contract|
+        assert contract.validate_catalog!, removal_unit
+      end
+    end
+  end
+
+  def test_candidate_only_zero_consumer_state_requires_a_valid_staged_removal_fence
     with_contract_fixture(
       entrypoint_source: example_api_source,
       state: "candidate",
+      hive_consumers: [],
       migration_exceptions: [
-        { "reason" => "temporary upward edge", "removal_unit" => "U3" }
+        { "reason" => "U1a1 is staged before its production consumer", "removal_unit" => "U1a2" }
       ]
     ) do |contract|
       assert contract.validate_catalog!
+    end
+
+    with_contract_fixture(
+      entrypoint_source: example_api_source,
+      state: "candidate",
+      hive_consumers: []
+    ) do |contract|
+      error = assert_raises(ComponentBoundaryContract::ValidationError) do
+        contract.validate_catalog!
+      end
+      assert_match(/example\.hive_consumers/, error.message)
+      assert_match(/candidate components without consumers require a staged removal exception/, error.message)
+    end
+  end
+
+  def test_boundary_ready_component_rejects_zero_consumers_even_with_a_fence
+    with_contract_fixture(
+      entrypoint_source: example_api_source,
+      hive_consumers: [],
+      migration_exceptions: [
+        { "reason" => "not a ready-state exception", "removal_unit" => "U1a2" }
+      ]
+    ) do |contract|
+      error = assert_raises(ComponentBoundaryContract::ValidationError) do
+        contract.validate_catalog!
+      end
+      assert_match(/example\.(?:hive_consumers|migration_exceptions)/, error.message)
     end
   end
 
@@ -1127,7 +1195,7 @@ class ComponentBoundariesTest < Minitest::Test
                             entrypoint_require: "example", owned_paths: nil,
                             component_dependencies: [], allowed_hive_dependencies: [],
                             migration_exceptions: [], authorized_internal_constructions: [],
-                            internal_collaborators: nil,
+                            internal_collaborators: nil, hive_consumers: [ "lib/consumer.rb" ],
                             extra_components: [], extra_files: {})
     Dir.mktmpdir do |root|
       write_fixture(root, entrypoint_file, entrypoint_source)
@@ -1150,7 +1218,8 @@ class ComponentBoundariesTest < Minitest::Test
             allowed_hive_dependencies: allowed_hive_dependencies,
             migration_exceptions: migration_exceptions,
             authorized_internal_constructions: authorized_internal_constructions,
-            internal_collaborators: internal_collaborators
+            internal_collaborators: internal_collaborators,
+            hive_consumers: hive_consumers
           ),
           *extra_components
         ]
@@ -1163,7 +1232,7 @@ class ComponentBoundariesTest < Minitest::Test
   def fixture_component(id:, state:, entrypoint_file:, entrypoint_require:, entrypoint_constant:,
                         owned_paths:, component_dependencies: [], allowed_hive_dependencies: [],
                         migration_exceptions: [], authorized_internal_constructions: [],
-                        internal_collaborators: nil)
+                        internal_collaborators: nil, hive_consumers: [ "lib/consumer.rb" ])
     namespace = entrypoint_constant.split("::").first
     internal_collaborators ||= [ "#{namespace}::Internal" ]
     {
@@ -1188,7 +1257,7 @@ class ComponentBoundariesTest < Minitest::Test
       "internal_collaborators" => internal_collaborators,
       "forbidden_constructions" => [ "#{namespace}::Internal" ],
       "authorized_internal_constructions" => authorized_internal_constructions,
-      "hive_consumers" => [ "lib/consumer.rb" ],
+      "hive_consumers" => hive_consumers,
       "mutation_authority" => "none",
       "recovery_surface" => "none",
       "wiki_page" => "wiki/example.md",

@@ -275,6 +275,48 @@ components:
       - reason: "U3 must prove candidate-bound compressed evidence and production qualification before this internal transition boundary can be promoted."
         removal_unit: U3
 
+  - id: workflow-creator-core
+    name: Workflow Creator Proof Core
+    state: candidate
+    entrypoint:
+      file: packaging/live_agent_skills/workflow_creator.rb
+      require: packaging/live_agent_skills/workflow_creator
+      constant: HiveLiveAgentProof::WorkflowCreator
+    public_contract:
+      values:
+        - HiveLiveAgentProof::WorkflowCreator::Vocabulary
+      errors:
+        - HiveLiveAgentProof::WorkflowCreator::Error
+    owned_paths:
+      - packaging/live_agent_skills/proof_primitives.rb
+      - packaging/live_agent_skills/workflow_creator.rb
+      - packaging/live_agent_skills/workflow_creator_contract.rb
+      - packaging/live_agent_skills/workflow_creator_execution_contract.rb
+    state_contracts:
+      - "Pure schema-v1 validation only; no filesystem, process, provider, credential, publication, recovery, or custody authority"
+    schema_contracts:
+      - "Exact failed, primary, installed-closure, and declarative execution-receipt documents with recursively immutable creator vocabulary"
+    lock_contracts:
+      - "None; every operation is deterministic and in-memory"
+    component_dependencies: []
+    allowed_hive_dependencies: []
+    internal_collaborators:
+      - HiveLiveAgentProof::WorkflowCreator::Primitives
+      - HiveLiveAgentProof::WorkflowCreator::Contract
+      - HiveLiveAgentProof::WorkflowCreator::ExecutionContract
+    forbidden_constructions: []
+    authorized_internal_constructions: []
+    hive_consumers: []
+    mutation_authority: "None; validators return admitted input documents and cannot create a passing claim"
+    recovery_surface: "None; U1a2 will own bundle custody and incumbent consumer routing"
+    wiki_page: wiki/component-boundaries.md
+    focused_tests:
+      - test/unit/packaging/workflow_creator_core_test.rb
+      - test/unit/component_boundaries_test.rb
+    migration_exceptions:
+      - reason: "U1a1 stages the pure core with zero production consumers; U1a2 must route proof and release-candidate custody through it or remove it."
+        removal_unit: U1a2
+
   - id: attempts
     name: Attempts admission / future RunReceipt
     state: candidate

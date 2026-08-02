@@ -3,7 +3,7 @@ title: Component boundaries
 type: reference
 source: config/component-boundaries.yml, test/support/component_boundary_contract.rb
 created: 2026-07-25
-updated: 2026-07-30
+updated: 2026-08-02
 tags: [architecture, components, boundaries, monorepo]
 ---
 
@@ -18,6 +18,7 @@ the first and primary consumer.
 | Component | State | Current entry point | Narrative context |
 |-----------|-------|---------------------|-------------------|
 | Patrol Effect Evidence | `candidate` (U3 qualification pending) | `require "hive/modules/migration/patrol_evidence"` → `Hive::Modules::Migration::PatrolEvidence` | [[modules/patrol]] |
+| Workflow Creator Proof Core | `candidate` (U1a2 consumer fence) | `require "packaging/live_agent_skills/workflow_creator"` → `HiveLiveAgentProof::WorkflowCreator` | [[component-boundaries]] |
 | Attempts admission / future RunReceipt | `candidate` (guarded reference) | `require "hive/attempts/api"` → `Hive::Attempts::API` | [[modules/attempts]] |
 | UserService | `boundary-ready` | `require "hive/user_service"` → `Hive::UserService` | [[modules/user_service]] |
 | Agent ABI | `boundary-ready`; standalone package candidate | `require "hive/agent_runtime"` → `Hive::AgentRuntime` | [[modules/agent_cli_runtime]], [[modules/agent_profile]] |
@@ -34,8 +35,9 @@ has earned a gem, version, repository, or release.
 
 ## Final graph audit
 
-The final U2 resolution on 2026-07-29 retains eight components: six are
-`boundary-ready`; Attempts and Patrol Effect Evidence remain `candidate`.
+The final U2 resolution plus the staged U1a1 prerequisite retain nine
+components: six are `boundary-ready`; Attempts, Patrol Effect Evidence, and
+Workflow Creator Proof Core remain `candidate`.
 Patrol retains one bounded U3 exception for compressed evidence qualification
 and cutover proof. Every retained entry point has a focused clean-process load
 proof, every catalog-owned path and focused test resolves inside this
@@ -48,6 +50,7 @@ The component dependency graph has one edge:
 flowchart LR
   skillpack[Skillpack] --> agent_abi[Agent ABI]
   patrol_effects[Patrol Effect Evidence - candidate]
+  workflow_creator[Workflow Creator Proof Core - candidate]
   attempts[Attempts admission - candidate]
   user_service[UserService]
   artifact_firewall[Agent Artifact Firewall]
@@ -56,11 +59,26 @@ flowchart LR
 ```
 
 All other cataloged components depend only on explicitly allowed lower-level
-Hive primitives. The source audit found no retained experimental facade outside
+primitives. The source audit found no retained experimental facade outside
 the catalog: each promoted facade is owned by a catalog row and used by Hive,
 while Attempts and Patrol Effect Evidence are deliberately retained as guarded
 candidates rather than being promoted ahead of their remaining lifecycle or
 qualification proof.
+
+`HiveLiveAgentProof::WorkflowCreator` is the sole staged-prerequisite
+exception. Its four-file core is pure and namespaced: it exports one deeply
+frozen schema-v1 `Vocabulary`, a nested `Error`, canonical JSON, and validators
+for failed, primary, installed-closure, and declarative execution-receipt
+documents. It performs no filesystem, archive, process, provider, credential,
+publication, recovery, or bundle-custody work. The dependency direction is
+facade to primitives/contracts only; the core cannot require `proof.rb` or
+`workflow_creator_bundle.rb`.
+
+This candidate truthfully has zero current production consumers. Its non-empty
+U1a2 migration exception is an executable removal fence: U1a2 must route the
+incumbent proof and release-candidate custody consumers through the core or
+remove the staged component. It cannot become `boundary-ready` with zero
+consumers or retain that exception.
 
 This is an internal architecture verdict, not a packaging verdict. None of the
 six ready components currently has the named non-Hive adopter and independent
@@ -266,8 +284,10 @@ Each row names:
 Owned paths cannot overlap between components, component dependencies must form
 an acyclic graph, and every path in the catalog must resolve inside the
 repository. A temporary exception must include both a reason and the
-implementation unit that removes it. A `boundary-ready` component cannot keep
-an exception or depend on a `candidate` component.
+implementation unit that removes it. A candidate may have zero current Hive
+consumers only while a valid, non-empty staged removal exception records that
+unit. A `boundary-ready` component cannot have zero consumers, keep an
+exception, or depend on a `candidate` component.
 
 ## Enforcement
 

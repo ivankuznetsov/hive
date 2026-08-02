@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release-candidate,release}.yml, packaging/{live_agent_skills,release_candidate}/, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-07-30
+updated: 2026-08-02
 tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, release-proof]
 ---
 
@@ -44,6 +44,17 @@ then one created-and-run slug plus a no-op retry with the same idempotency key,
 operational status, no external actions, secret scanning, and cleanup. Missing
 provider credentials make this live gate explicitly unavailable; they never
 turn a skipped test into release evidence.
+
+`test/unit/packaging/workflow_creator_core_test.rb` independently proves the
+staged U1a1 semantic core with no live provider or filesystem fixture. It pins
+the exact prompt, argv, file, graph, task, schema, and classification bytes;
+recursively attempts to mutate every exported `Vocabulary` container, key, and
+string (including computed digests); and exercises strict failed, primary,
+installed-closure, and declarative execution-transaction matrices. It also
+loads the core alone and before/after untouched `proof.rb` under Ruby warnings,
+and statically rejects I/O/process dependencies or proof/bundle back-edges.
+This is core-only proof, not bundle custody or an activated production
+consumer; U1a2 owns that routing.
 
 ## Local feedback loop
 
@@ -129,6 +140,14 @@ Ready components cannot depend on candidates. Forbidden-construction rules
 also apply to guarded candidates, and the helper can run a named focused
 clean-load proof for a candidate such as Attempts without representing the
 whole component graph as ready.
+
+The helper also admits the narrow staged-prerequisite state used by Workflow
+Creator Proof Core: a `candidate` may list zero current Hive consumers only
+with a non-empty, valid migration exception naming its removal unit. Plan IDs
+include nested units such as `U1a2`. `boundary-ready` rows still require a
+consumer and reject all exceptions. Clean-load ownership maps both `lib/` and
+`packaging/` require paths and launches with the repository root plus `lib/` on
+the load path.
 
 The helper uses Ruby syntax rather than comments or string examples for literal
 `require`, `require_relative`, and `Constant.new` checks. It remains an

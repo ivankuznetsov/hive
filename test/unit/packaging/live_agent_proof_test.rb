@@ -468,8 +468,8 @@ class LiveAgentProofTest < Minitest::Test
   end
 
   def test_secret_scanner_rejects_provider_and_private_key_shapes
-    refute_empty HiveLiveAgentProof.secret_findings("sk-ant-abcdefghijklmnopqrstuvwxyz")
-    refute_empty HiveLiveAgentProof.secret_findings("-----BEGIN PRIVATE KEY-----")
+    refute_empty HiveLiveAgentProof.secret_findings(%w[sk ant abcdefghijklmnopqrstuvwxyz].join("-"))
+    refute_empty HiveLiveAgentProof.secret_findings([ "-----BEGIN", "PRIVATE", "KEY-----" ].join(" "))
     refute_empty HiveLiveAgentProof.secret_findings("prefix exact-value suffix", exact_secrets: [ "exact-value" ])
     assert_empty HiveLiveAgentProof.secret_findings('{"result":"passed","sha256":"abc"}')
   end

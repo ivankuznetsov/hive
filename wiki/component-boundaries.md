@@ -44,7 +44,8 @@ its receipt contract binds the two outer model loops, command/capture/archive
 records, containment, teardown, and cleanup as one closed transaction. File
 record bindings are JSON-type-exact, the release manifest must identify one
 candidate package, and source-builder verification accepts only extraction-
-equivalent regular-file/directory semantics plus the exact Git global comment.
+equivalent regular-file/directory semantics plus the exact Git global comment
+inside one complete gzip member with canonical zero end padding.
 No owned type writes, links, renames,
 locks, syncs, recovers, cleans, spawns, installs, or handles credentials.
 Attestor remains the incumbent proof-output writer; U1b owns publication and

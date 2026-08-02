@@ -190,6 +190,47 @@ class ReleaseCandidateArtifactsTest < Minitest::Test
     end
   end
 
+  def test_source_builder_rejects_a_second_gzip_member_visible_to_tar
+    with_tmp_dir do |dir|
+      artifacts = fixture_artifacts(dir)
+      source = File.join(artifacts.candidate_dir, "hive-source-#{'a' * 40}.tar.gz")
+      build_concatenated_source_fixture(source, builder_inputs: fixture_builder_inputs)
+      refresh_source_record!(artifacts, source)
+
+      stdout, stderr, status = Open3.capture3("tar", "-tzf", source)
+      assert status.success?, stderr
+      assert_includes stdout.lines.map(&:chomp), "benign-second-member.txt"
+
+      error = assert_raises(HiveReleaseCandidate::Error) { artifacts.verify! }
+      assert_includes error.message, "exactly one gzip member"
+    end
+  end
+
+  def test_source_builder_requires_canonical_tar_end_padding
+    invalid_padding = {
+      "missing" => "".b,
+      "nonzero" => ("\0" * 1_023) + "x",
+      "oversized" => "\0" * (HiveReleaseCandidate::Artifacts::MAX_SOURCE_TAR_PADDING_BYTES + 1_024),
+      "non-block-aligned" => "\0" * 1_025
+    }
+
+    invalid_padding.each do |label, padding|
+      with_tmp_dir do |dir|
+        artifacts = fixture_artifacts(dir)
+        source = File.join(artifacts.candidate_dir, "hive-source-#{'a' * 40}.tar.gz")
+        tar = StringIO.new("".b)
+        fixture_builder_inputs.each do |name, body|
+          append_tar_entry(tar, name: name, body: body)
+        end
+        File.binwrite(source, gzip_member(tar.string + padding))
+        refresh_source_record!(artifacts, source)
+
+        error = assert_raises(HiveReleaseCandidate::Error, label) { artifacts.verify! }
+        assert_includes error.message, "noncanonical tar padding", label
+      end
+    end
+  end
+
   def test_source_builder_enforces_compressed_entry_expansion_and_member_limits
     with_tmp_dir do |dir|
       artifacts = fixture_artifacts(dir)
@@ -348,6 +389,25 @@ class ReleaseCandidateArtifactsTest < Minitest::Test
     io.write(header.to_s)
     io.write(body)
     io.write("\0" * ((512 - (body.bytesize % 512)) % 512))
+  end
+
+  def build_concatenated_source_fixture(destination, builder_inputs:)
+    first = StringIO.new("".b)
+    builder_inputs.each do |name, body|
+      append_tar_entry(first, name: name, body: body)
+    end
+    second = StringIO.new("".b)
+    append_tar_entry(second, name: "benign-second-member.txt", body: "second member\n")
+    second.write("\0" * 1_024)
+    File.binwrite(destination, gzip_member(first.string) + gzip_member(second.string))
+  end
+
+  def gzip_member(bytes)
+    compressed = StringIO.new("".b)
+    writer = Zlib::GzipWriter.new(compressed)
+    writer.write(bytes)
+    writer.finish
+    compressed.string
   end
 
   def pax_record(key, value)

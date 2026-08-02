@@ -65,7 +65,9 @@ release-package substitution, incomplete process custody, and secret-shaped
 material fail closed through the same validator. Source-artifact regressions
 also prove that a PAX `path=` rewrite which GNU tar would honor is rejected,
 the exact Git global comment is accepted, and compressed/entry/expanded/member
-resource ceilings fail closed.
+resource ceilings fail closed. A second gzip member that normal tar lists is
+rejected, as are missing, nonzero, oversized, or non-block-aligned tar end
+padding; an ordinary current-head Git archive remains accepted.
 
 Bundle reads are descriptor-first with no-follow and nonblocking flags. Source
 and retained directories stop enumeration after 16 entries, special files such

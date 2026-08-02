@@ -819,8 +819,9 @@ in U1a and therefore cannot yet supply a valid bundle or claim success; this is
 an explicit non-claiming gap, not a passing skip or a credential-only blocker.
 The source-artifact side is no longer an open ambiguity: type-exact record
 binding, one candidate package, exact Git global metadata, rejection of
-per-entry path rewrites, and bounded archive scanning are now deterministic
-U1a admission rules. Only downstream production and live composition remain.
+per-entry path rewrites, one complete gzip member, canonical zero tar padding,
+and bounded archive scanning are now deterministic U1a admission rules. Only
+downstream production and live composition remain.
 
 Keep this gap open until U1b publishes the creator bundle safely, U14 produces
 the installed-closure and deterministic execution receipt, and U15 composes

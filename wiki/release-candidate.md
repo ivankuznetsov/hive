@@ -54,7 +54,10 @@ rejects per-entry PAX/GNU rewrite metadata; when Git emits a global PAX header,
 only one exact `comment=<candidate SHA>` record is accepted. The scan is capped
 at 256 MiB compressed, 16,384 entries, 1 GiB expanded content, and 1 MiB per
 protected builder input, so digest recomputation cannot become an unbounded
-archive parser.
+archive parser. Verification drains and checks the bounded tar end padding,
+requires 512-byte-aligned zero blocks, and rejects unused or trailing
+compressed bytes; concatenated gzip members therefore cannot expose entries to
+normal tar consumption outside Hive's collision, type, and resource checks.
 
 ## CLI side effects and evidence
 

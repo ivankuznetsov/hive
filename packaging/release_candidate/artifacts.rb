@@ -28,6 +28,7 @@ module HiveReleaseCandidate
     MAX_SOURCE_ARCHIVE_ENTRIES = 16_384
     MAX_SOURCE_EXPANDED_BYTES = 1_073_741_824
     MAX_BUILDER_INPUT_BYTES = 1_048_576
+    MAX_SOURCE_TAR_PADDING_BYTES = 1_048_576
     SOURCE_ENTRY_TYPES = %w[0 5 g].freeze
 
     attr_reader :repo_root, :candidate_sha, :candidate_dir
@@ -286,7 +287,10 @@ module HiveReleaseCandidate
         end
         protected[path.downcase] = [ path, :file ]
       end
-      Zlib::GzipReader.open(source_path) do |gzip|
+      compressed = File.open(source_path, "rb")
+      gzip = nil
+      begin
+        gzip = Zlib::GzipReader.new(compressed)
         Gem::Package::TarReader.new(gzip) do |tar|
           tar.each do |entry|
             entry_count += 1
@@ -339,6 +343,30 @@ module HiveReleaseCandidate
             end
           end
         end
+        padding_bytes = 0
+        begin
+          loop do
+            chunk = gzip.readpartial(16_384)
+            padding_bytes += chunk.bytesize
+            expanded_bytes += chunk.bytesize
+            valid_padding = padding_bytes <= MAX_SOURCE_TAR_PADDING_BYTES &&
+              expanded_bytes <= MAX_SOURCE_EXPANDED_BYTES && chunk.each_byte.all?(&:zero?)
+            raise Error, "candidate source contains noncanonical tar padding" unless valid_padding
+          end
+        rescue EOFError
+          nil
+        end
+        unused = gzip.unused
+        gzip.finish
+        gzip = nil
+        trailing_member = (unused && !unused.empty?) || compressed.read(1)
+        raise Error, "candidate source must contain exactly one gzip member" if trailing_member
+        canonical_padding = padding_bytes.between?(512, MAX_SOURCE_TAR_PADDING_BYTES) &&
+          (padding_bytes % 512).zero?
+        raise Error, "candidate source contains noncanonical tar padding" unless canonical_padding
+      ensure
+        gzip&.close
+        compressed.close unless compressed.closed?
       end
       missing = wanted - contents.keys
       unless missing.empty?

@@ -41,8 +41,15 @@ The candidate `builder_revision` binds the live-agent proof builder, its build
 wrapper, and all five U1a creator-contract sources, in addition to the managed
 web archive builder. Verification recomputes that identity from the committed
 source archive rather than the worktree. A creator vocabulary, schema, bundle,
-execution-summary, or primitive change therefore invalidates an artifact whose
+execution-transaction, or primitive change therefore invalidates an artifact whose
 manifest still names the older builder closure.
+
+The source-archive verifier treats those builder inputs and their ancestor
+directories as a protected namespace. It case-folds collision keys so Linux
+and default case-insensitive macOS reach the same verdict, accepts only each
+protected path's one canonical spelling and type, and rejects leading or
+embedded dot segments, repeated separators, case aliases, duplicate
+destinations, and links at protected paths before reading builder bytes.
 
 ## CLI side effects and evidence
 

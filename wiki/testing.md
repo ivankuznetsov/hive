@@ -50,13 +50,24 @@ rebuilt. Creator input is now exactly four canonical JSON files:
 `openclaw-workflow-creator.json`, `candidate-installed-manifest.json`,
 `openclaw-installed-manifest.json`, and `execution-receipt.json`. The source
 directory and files must be current-user-owned and private; installed closure
-members, authored/executed instruction identity, ordered command/prompt
-digests, classification, and the execution/containment/teardown/cleanup summary
-all cross-bind. Attestor retains the exact validated bytes and Verifier checks
-them without consulting deleted installation roots. Extra fields, wrong types,
-noncanonical bytes, inventory drift, release-package substitution, and
-secret-shaped material fail closed through the same validator. The contract
-also owns the bounded, strictly checked non-passing schema that U1b will
+manifests now carry a bounded, ordered complete inventory plus inventory-bound
+required roles, an exact installed version, and a closure digest. The execution
+receipt is a closed supervised transaction: two ordered outer model loops, nine
+positioned Hive commands, the candidate audit gateway, two archive admissions,
+bounded stdout/stderr capture, per-process and aggregate teardown, run
+correlation, containment, owned-workspace cleanup, authored/executed
+instruction identity, and external-action evidence all cross-bind. Attestor
+retains the exact recursively canonical bytes and Verifier checks them without
+consulting deleted installation roots. Object-key reordering, array reordering,
+float-for-integer substitution, missing attested creator data, inventory drift,
+release-package substitution, incomplete process custody, and secret-shaped
+material fail closed through the same validator.
+
+Bundle reads are descriptor-first with no-follow and nonblocking flags. Source
+and retained directories stop enumeration after 16 entries, special files such
+as FIFOs cannot block validation, and the retained primary must equal the row
+bound into the attestation. The contract also owns the bounded, strictly
+checked non-passing schema that U1b will
 publish before U15 preflight; its diagnostic detail is UTF-8-normalized,
 redacted, and capped at 1,000 bytes. There is no
 single-file compatibility reader. The unchanged advisory smoke/workflow still

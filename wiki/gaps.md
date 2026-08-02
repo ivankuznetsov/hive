@@ -822,11 +822,13 @@ Keep this gap open until U1b publishes the creator bundle safely, U14 produces
 the installed-closure and deterministic execution receipt, and U15 composes
 the authenticated OpenClaw model loop on an exact protected-main candidate.
 The resulting Check Run must bind both prompt digests, candidate skill and
-installed package identities, ordered Hive commands, authored/executed
-instruction bytes, exact editorial graph, zero creation-only task count, one
-authorized task and first-stage run, a no-op retry under the same idempotency
-key, matching operational status, containment, teardown, cleanup, and secret
-scan. Provider credential or quota availability remains a separate U15 gate.
+complete installed inventories, required-role and package identities, ordered
+outer model loops and Hive commands, archive admissions, bounded captures,
+authored/executed instruction bytes, exact editorial graph, zero creation-only
+task count, one authorized task and first-stage run, a no-op retry under the
+same idempotency key, matching operational status, supervised containment,
+per-process and aggregate teardown, identity-checked cleanup, and secret scan.
+Provider credential or quota availability remains a separate U15 gate.
 
 ## WorkLedger is an internal boundary, not a published format (2026-07-26)
 

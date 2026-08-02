@@ -9,11 +9,11 @@ components:
     state: candidate
     entrypoint:
       file: packaging/live_agent_skills/workflow_creator.rb
-      require: packaging/live_agent_skills/workflow_creator
-      constant: HiveLiveAgentProof::WorkflowCreatorBundle
+      require: ./packaging/live_agent_skills/workflow_creator
+      constant: HiveLiveAgentProof::WorkflowCreator
     public_contract:
       values:
-        - HiveLiveAgentProof::WorkflowCreatorBundle::Snapshot
+        - HiveLiveAgentProof::WorkflowCreator::Snapshot
       errors:
         - HiveLiveAgentProof::Error
     owned_paths:
@@ -34,11 +34,13 @@ components:
     allowed_hive_dependencies: []
     internal_collaborators:
       - HiveLiveAgentProof::WorkflowCreatorContract
+      - HiveLiveAgentProof::WorkflowCreatorBundle
       - HiveLiveAgentProof::WorkflowCreatorExecutionContract
     forbidden_constructions: []
     authorized_internal_constructions: []
     hive_consumers:
       - packaging/live_agent_skills/proof.rb
+      - packaging/release_candidate/artifacts.rb
     mutation_authority: "No U1a type mutates state; Attestor alone copies already-validated bytes through its incumbent output assembly."
     recovery_surface: "None in U1a; the old single-file producer is rejected and U1b owns all creator publication and recovery."
     wiki_page: wiki/component-boundaries.md

@@ -4,18 +4,15 @@ require "digest"
 require_relative "proof_primitives"
 
 module HiveLiveAgentProof
-  WORKFLOW_CREATOR_REQUEST =
-    "Create a three-stage editorial workflow that researches, drafts, and requires approval before publishing.".freeze
+  WORKFLOW_CREATOR_REQUEST = "Create a three-stage editorial workflow that researches, drafts, and requires approval before publishing.".freeze
   WORKFLOW_CREATOR_PROMPT = <<~PROMPT.freeze
     /hive
     #{WORKFLOW_CREATOR_REQUEST}
     Use the installed Hive workflow-creator capability in this initialized project.
     This is creation-only: validate the result, report the defaults, and do not create or run a task.
   PROMPT
-  WORKFLOW_CREATOR_TASK_REQUEST =
-    "Research and draft the launch announcement for approval.".freeze
-  WORKFLOW_CREATOR_TASK_KEY =
-    "workflow-creator-proof:editorial:live-proof".freeze
+  WORKFLOW_CREATOR_TASK_REQUEST = "Research and draft the launch announcement for approval.".freeze
+  WORKFLOW_CREATOR_TASK_KEY = "workflow-creator-proof:editorial:live-proof".freeze
   WORKFLOW_CREATOR_TASK_SLUG = "editorial-live-proof".freeze
   WORKFLOW_CREATOR_TASK_PROMPT = <<~PROMPT.freeze
     /hive
@@ -46,8 +43,7 @@ module HiveLiveAgentProof
     ".hive-state/workflows/editorial/draft.md",
     ".hive-state/workflows/editorial/research.md"
   ].freeze
-  WORKFLOW_CREATOR_EXECUTED_INSTRUCTION =
-    ".hive-state/workflows/editorial/research.md".freeze
+  WORKFLOW_CREATOR_EXECUTED_INSTRUCTION = ".hive-state/workflows/editorial/research.md".freeze
   WORKFLOW_CREATOR_NATIVE_ACTIVATION = {
     "kind" => "openclaw-skills-info", "invocation" => "/hive"
   }.freeze
@@ -68,14 +64,10 @@ module HiveLiveAgentProof
     "run_count" => 1, "current_stage" => "1-research"
   }.freeze
   WORKFLOW_CREATOR_SCANNER = "hive-live-agent-proof/v1".freeze
-  WORKFLOW_CREATOR_EVIDENCE_SCHEMA =
-    "hive-live-workflow-creator-evidence".freeze
-  WORKFLOW_CREATOR_INSTALLED_SCHEMA =
-    "hive-live-workflow-creator-installed-manifest".freeze
-  WORKFLOW_CREATOR_EXECUTION_SCHEMA =
-    "hive-live-workflow-creator-execution-receipt".freeze
-  WORKFLOW_CREATOR_EXECUTION_PLAN =
-    "hive-live-workflow-creator-execution-plan/v1".freeze
+  WORKFLOW_CREATOR_EVIDENCE_SCHEMA = "hive-live-workflow-creator-evidence".freeze
+  WORKFLOW_CREATOR_INSTALLED_SCHEMA = "hive-live-workflow-creator-installed-manifest".freeze
+  WORKFLOW_CREATOR_EXECUTION_SCHEMA = "hive-live-workflow-creator-execution-receipt".freeze
+  WORKFLOW_CREATOR_EXECUTION_PLAN = "hive-live-workflow-creator-execution-plan/v1".freeze
   WORKFLOW_CREATOR_CLASSIFICATION = {
     "execution_kind" => "authenticated_openclaw", "model_loop" => "executed"
   }.freeze
@@ -87,8 +79,32 @@ module HiveLiveAgentProof
     "candidate" => %w[audit_gateway executable interpreter_or_launcher lock package].freeze,
     "openclaw" => %w[executable interpreter_or_launcher lock package].freeze
   }.freeze
+  WORKFLOW_CREATOR_OUTER_ROLES = [
+    { "role" => "workflow-creation-model-loop",
+      "prompt_sha256" => Digest::SHA256.hexdigest(WORKFLOW_CREATOR_PROMPT) }.freeze,
+    { "role" => "authorized-work-model-loop",
+      "prompt_sha256" => Digest::SHA256.hexdigest(WORKFLOW_CREATOR_TASK_PROMPT) }.freeze
+  ].freeze
+  WORKFLOW_CREATOR_ARCHIVE_LABELS = %w[candidate-package openclaw-package].freeze
+  WORKFLOW_CREATOR_ARCHIVE_POLICY_SHA256 = Digest::SHA256.hexdigest("hive-live-workflow-creator-archive-policy/v1").freeze
+  WORKFLOW_CREATOR_CLEANUP_LABELS = %w[proof-workspace].freeze
 end
 
 require_relative "workflow_creator_contract"
 require_relative "workflow_creator_execution_contract"
 require_relative "workflow_creator_bundle"
+
+module HiveLiveAgentProof
+  module WorkflowCreator
+    Snapshot = WorkflowCreatorBundle::Snapshot
+    module_function
+
+    def failure(...) = WorkflowCreatorContract.failure(...)
+
+    def validate_nonpassing!(...) = WorkflowCreatorContract.validate_nonpassing!(...)
+
+    def validate_source!(**options) = WorkflowCreatorBundle.validate!(mode: :source, **options)
+
+    def validate_retained!(**options) = WorkflowCreatorBundle.validate!(mode: :retained, **options)
+  end
+end

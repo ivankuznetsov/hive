@@ -17,7 +17,7 @@ the first and primary consumer.
 
 | Component | State | Current entry point | Narrative context |
 |-----------|-------|---------------------|-------------------|
-| Workflow Creator Proof Contract | `candidate` (U1a validator-only) | `require "packaging/live_agent_skills/workflow_creator"` → `HiveLiveAgentProof::WorkflowCreatorBundle` | [[component-boundaries]], [[testing]], [[release-candidate]] |
+| Workflow Creator Proof Contract | `candidate` (U1a validator-only) | `require "./packaging/live_agent_skills/workflow_creator"` → `HiveLiveAgentProof::WorkflowCreator` | [[component-boundaries]], [[testing]], [[release-candidate]] |
 | Patrol Effect Evidence | `candidate` (U3 qualification pending) | `require "hive/modules/migration/patrol_evidence"` → `Hive::Modules::Migration::PatrolEvidence` | [[modules/patrol]] |
 | Attempts admission / future RunReceipt | `candidate` (guarded reference) | `require "hive/attempts/api"` → `Hive::Attempts::API` | [[modules/attempts]] |
 | UserService | `boundary-ready` | `require "hive/user_service"` → `Hive::UserService` | [[modules/user_service]] |
@@ -35,8 +35,14 @@ has earned a gem, version, repository, or release.
 
 `Workflow Creator Proof Contract` is deliberately validator-only in U1a. Its
 five source files contain one deep-frozen vocabulary, exact creator-document
-validation, read-only four-file custody, a declarative execution-summary
-validator, and shared pure primitives. No owned type writes, links, renames,
+validation, read-only four-file custody, a declarative execution-transaction
+validator, and shared pure primitives. The public `WorkflowCreator` facade is
+the only supported entry point for source, retained, passing, and non-passing
+validation; the three concrete validators remain internal collaborators. Its
+installed contract binds a complete bounded inventory and required roles, and
+its receipt contract binds the two outer model loops, command/capture/archive
+records, containment, teardown, and cleanup as one closed transaction. No
+owned type writes, links, renames,
 locks, syncs, recovers, cleans, spawns, installs, or handles credentials.
 Attestor remains the incumbent proof-output writer; U1b owns publication and
 recovery, U14 owns deterministic execution custody, and U15 owns the provider

@@ -22,3 +22,18 @@ tags: [openclaw, workflow-creator, proof, attestation, architecture]
   until U1b, U14, and U15 supply the composed path.
 - Added the validator-only component row, exact builder-source closure, focused
   mutation/custody/cross-binding tests, and the explicit downstream gap.
+- Resolution 01 hardened that boundary after three independent review lenses:
+  recursively canonical object keys while preserving array order, strict
+  integer fields, exact created-file order, one public facade, bounded
+  descriptor-first no-follow/nonblocking custody, and an attestation-required
+  retained path.
+- Installed manifests now bind a complete ordered inventory, unique required
+  roles, candidate version, package identity, total size, and closure digest.
+  The execution receipt now records two ordered outer model loops, all nine
+  positioned commands, the candidate gateway, two policy-bound archives,
+  bounded captures, per-process custody, run correlation, containment,
+  aggregate teardown, and identity-checked cleanup.
+- Candidate source verification rejects aliases, case collisions, duplicates,
+  and links throughout the protected builder closure. Adversarial tests cover
+  raw key reorder, ordered-array drift, floats, missing attestation rows, FIFOs,
+  oversized source/retained directories, closure drift, and receipt mutation.

@@ -417,7 +417,7 @@ module HiveLiveAgentProof
     end
 
     def validate_creator_evidence!(manifest)
-      WorkflowCreatorBundle.validate_source!(
+      WorkflowCreator.validate_source!(
         directory: @creator_evidence_dir, manifest: manifest,
         candidate_sha: @candidate_sha
       )
@@ -505,9 +505,9 @@ module HiveLiveAgentProof
     end
 
     def validate_workflow_creator!(manifest)
-      WorkflowCreatorBundle.validate_retained!(
+      WorkflowCreator.validate_retained!(
         directory: File.join(@proof_dir, "evidence"),
-        expected_row: @attestation["workflow_creator"], manifest: manifest,
+        expected_row: @attestation.fetch("workflow_creator", nil), manifest: manifest,
         candidate_sha: @candidate_sha
       )
     end

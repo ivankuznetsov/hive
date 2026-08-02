@@ -250,7 +250,7 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal "candidate", creator_proof.fetch("state")
     assert_equal "packaging/live_agent_skills/workflow_creator.rb",
                  creator_proof.dig("entrypoint", "file")
-    assert_equal "HiveLiveAgentProof::WorkflowCreatorBundle",
+    assert_equal "HiveLiveAgentProof::WorkflowCreator",
                  creator_proof.dig("entrypoint", "constant")
     creator_paths = %w[
       packaging/live_agent_skills/proof_primitives.rb
@@ -337,6 +337,11 @@ class ComponentBoundariesTest < Minitest::Test
                  patrol_effects_load.fetch("constant")
     assert_empty patrol_effects_load.fetch("forbidden_loaded_features")
     assert_empty patrol_effects_load.fetch("forbidden_constants")
+    creator_load = contract.validate_clean_load!("workflow-creator-proof")
+    assert_equal "HiveLiveAgentProof::WorkflowCreator",
+                 creator_load.fetch("constant")
+    assert_empty creator_load.fetch("forbidden_loaded_features")
+    assert_empty creator_load.fetch("forbidden_constants")
   end
 
   def test_workflow_creator_contract_stays_within_the_u1a_admission_budget

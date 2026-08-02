@@ -261,15 +261,43 @@ module HiveReleaseCandidate
 
       wanted = LIVE_AGENT_BUILDER_INPUTS
       contents = {}
+      destinations = {}
+      protected = {}
+      wanted.each do |path|
+        parts = path.split("/")
+        (1...parts.length).each do |length|
+          ancestor = parts.first(length).join("/")
+          protected[ancestor.downcase] = [ ancestor, :directory ]
+        end
+        protected[path.downcase] = [ path, :file ]
+      end
       Zlib::GzipReader.open(File.join(directory, source_name)) do |gzip|
         Gem::Package::TarReader.new(gzip) do |tar|
           tar.each do |entry|
-            name = entry.full_name.sub(%r{\A\./}, "")
-            next unless entry.file? && wanted.include?(name)
+            raw = entry.full_name
+            name = entry.directory? ? raw.delete_suffix("/") : raw
+            next if name == "." && entry.directory?
 
-            raise Error, "candidate source duplicates builder input #{name}" if contents.key?(name)
+            parts = name.split("/", -1)
+            unless !raw.start_with?("/") &&
+                   parts.none? { |part| part.empty? || part == "." || part == ".." }
+              raise Error, "candidate source contains an unsafe or noncanonical entry"
+            end
+            key = name.downcase
+            raise Error, "candidate source duplicates an archive destination" if destinations.key?(key)
 
-            contents[name] = entry.read
+            destinations[key] = true
+            expected, type = protected[key]
+            next unless expected
+
+            canonical = type == :directory ? "#{expected}/" : expected
+            unless raw == canonical
+              raise Error, "candidate source contains an unsafe or noncanonical builder path"
+            end
+            valid_type = type == :directory ? entry.directory? : entry.file?
+            raise Error, "candidate source builder path has the wrong type" unless valid_type
+
+            contents[expected] = entry.read if type == :file
           end
         end
       end

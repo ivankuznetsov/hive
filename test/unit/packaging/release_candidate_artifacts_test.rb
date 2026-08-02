@@ -103,6 +103,48 @@ class ReleaseCandidateArtifactsTest < Minitest::Test
     end
   end
 
+  def test_source_builder_rejects_noncanonical_archive_aliases
+    with_tmp_dir do |dir|
+      target = "packaging/live_agent_skills/workflow_creator_contract.rb"
+      cases = {
+        "embedded-dot" => [ "packaging/live_agent_skills/./workflow_creator_contract.rb", :extra ],
+        "leading-dot" => [ "./#{target}", :extra ],
+        "case-alias" => [ target.sub("workflow_creator", "Workflow_Creator"), :extra ],
+        "repeated-separator" => [ target.sub("/workflow", "//workflow"), :extra ],
+        "exact-duplicate" => [ target, :extra ],
+        "protected-symlink" => [ target, :symlink ]
+      }
+      cases.each do |label, (alias_name, kind)|
+        artifacts = fixture_artifacts(File.join(dir, label))
+        source = File.join(artifacts.candidate_dir, "hive-source-#{'a' * 40}.tar.gz")
+        inputs = fixture_builder_inputs
+        Zlib::GzipWriter.open(source) do |gzip|
+          Gem::Package::TarWriter.new(gzip) do |tar|
+            inputs.each do |name, bytes|
+              next if kind == :symlink && name == target
+
+              tar.add_file_simple(name, 0o600, bytes.bytesize) { |io| io.write(bytes) }
+            end
+            if kind == :symlink
+              tar.add_symlink(alias_name, "proof.rb", 0o777)
+            else
+              tar.add_file_simple(alias_name, 0o600, 7) { |io| io.write("aliased") }
+            end
+          end
+        end
+        manifest_path = File.join(artifacts.candidate_dir, "manifest.json")
+        manifest = JSON.parse(File.read(manifest_path))
+        record = manifest.fetch("files").fetch(File.basename(source))
+        record["sha256"] = Digest::SHA256.file(source).hexdigest
+        record["size"] = File.size(source)
+        File.write(manifest_path, JSON.generate(manifest))
+
+        error = assert_raises(HiveReleaseCandidate::Error, label) { artifacts.verify! }
+        assert_match(/candidate source (?:contains|duplicates|builder)/, error.message, label)
+      end
+    end
+  end
+
   def test_paths_reject_symlinked_root_and_nonblocking_concurrent_lock
     with_tmp_dir do |repo|
       safe_parent = File.join(repo, "tmp", "release-candidates")
@@ -178,13 +220,10 @@ class ReleaseCandidateArtifactsTest < Minitest::Test
       File.binwrite(path, bytes)
     end
     source_name = "hive-source-#{'a' * 40}.tar.gz"
-    builder_inputs = HiveReleaseCandidate::Artifacts::LIVE_AGENT_BUILDER_INPUTS.to_h do |path|
-      [ path, "#{File.basename(path)} fixture\n" ]
-    end
+    builder_inputs = fixture_builder_inputs
     build_source_fixture(
       File.join(candidate, source_name),
-      builder_inputs: builder_inputs,
-      root: dir
+      builder_inputs: builder_inputs
     )
     files[source_name] = [ "source", nil ]
     records = files.to_h do |name, (kind, _bytes)|
@@ -220,15 +259,20 @@ class ReleaseCandidateArtifactsTest < Minitest::Test
     )
   end
 
-  def build_source_fixture(destination, builder_inputs:, root:)
-    stage = File.join(root, "source-stage")
-    builder_inputs.each do |relative, bytes|
-      path = File.join(stage, relative)
-      FileUtils.mkdir_p(File.dirname(path))
-      File.binwrite(path, bytes)
+  def build_source_fixture(destination, builder_inputs:)
+    Zlib::GzipWriter.open(destination) do |gzip|
+      Gem::Package::TarWriter.new(gzip) do |tar|
+        builder_inputs.each do |relative, bytes|
+          tar.add_file_simple(relative, 0o600, bytes.bytesize) { |io| io.write(bytes) }
+        end
+      end
     end
-    _stdout, stderr, status = Open3.capture3("tar", "-czf", destination, "-C", stage, ".")
-    raise stderr unless status.success?
+  end
+
+  def fixture_builder_inputs
+    HiveReleaseCandidate::Artifacts::LIVE_AGENT_BUILDER_INPUTS.to_h do |path|
+      [ path, "#{File.basename(path)} fixture\n" ]
+    end
   end
 
   def run_git(repo, *argv)

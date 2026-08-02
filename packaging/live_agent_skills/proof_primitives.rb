@@ -25,8 +25,20 @@ module HiveLiveAgentProof
   end
 
   def canonical_json(value)
-    "#{JSON.pretty_generate(value)}\n"
-  rescue JSON::GeneratorError => e
+    normalize = lambda do |nested|
+      case nested
+      when Hash
+        raise TypeError, "JSON object keys must be strings" unless nested.keys.all?(String)
+
+        nested.keys.sort.to_h { |key| [ key, normalize.call(nested.fetch(key)) ] }
+      when Array
+        nested.map { |item| normalize.call(item) }
+      else
+        nested
+      end
+    end
+    "#{JSON.pretty_generate(normalize.call(value))}\n"
+  rescue JSON::GeneratorError, ArgumentError, TypeError => e
     raise Error, "cannot canonicalize JSON: #{e.message}"
   end
 

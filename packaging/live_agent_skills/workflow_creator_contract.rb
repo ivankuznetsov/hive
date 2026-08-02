@@ -68,7 +68,8 @@ module HiveLiveAgentProof
         exact!(row["secret_scan"], %w[scanner status], "workflow-creator non-passing secret scan")
         valid =
           row["schema"] == WORKFLOW_CREATOR_EVIDENCE_SCHEMA &&
-          row["schema_version"] == SCHEMA_VERSION && row["platform"] == "openclaw" &&
+          row["schema_version"].is_a?(Integer) && row["schema_version"] == SCHEMA_VERSION &&
+          row["platform"] == "openclaw" &&
           row["candidate_sha"].is_a?(String) &&
           (row["candidate_sha"] == "unresolved" || SAFE_SHA.match?(row["candidate_sha"]))
         valid &&=
@@ -89,8 +90,7 @@ module HiveLiveAgentProof
       def validate!(row:, manifest:, candidate_sha:, bundle_records:)
         exact!(row, KEYS, "workflow-creator evidence")
         validate_identity!(row, manifest, candidate_sha, bundle_records)
-        validate_files!(row)
-        validate_claims!(row, bundle_records.fetch(2).fetch("sha256"))
+        validate_content!(row, bundle_records.fetch(2).fetch("sha256"))
         findings = HiveLiveAgentProof.secret_findings(JSON.generate(row))
         assert!(findings.empty?, "workflow-creator evidence contains secret-shaped material")
         row
@@ -121,30 +121,34 @@ module HiveLiveAgentProof
             "status" => "passed", "scanner" => WORKFLOW_CREATOR_SCANNER
           },
           "execution_kind" => WORKFLOW_CREATOR_CLASSIFICATION["execution_kind"],
-          "model_loop" => WORKFLOW_CREATOR_CLASSIFICATION["model_loop"],
-          "evidence_bundle" => bundle_records
+          "model_loop" => WORKFLOW_CREATOR_CLASSIFICATION["model_loop"]
         }
         manifest_valid =
           manifest["schema"] == "hive-live-agent-candidate-artifacts" &&
+          manifest["schema_version"].is_a?(Integer) &&
           manifest["schema_version"] == SCHEMA_VERSION &&
           manifest["candidate_sha"] == candidate_sha &&
           manifest["files"].is_a?(Hash) &&
+          manifest["files"].values.all? { |record| record["size"].is_a?(Integer) } &&
           manifest["hive_version"].is_a?(String) && !manifest["hive_version"].empty? &&
           manifest["skill_version"].is_a?(String) && !manifest["skill_version"].empty? &&
           manifest["canonical_digest"].is_a?(String) &&
           SAFE_DIGEST.match?(manifest["canonical_digest"])
         assert!(
           candidate_sha.is_a?(String) && SAFE_SHA.match?(candidate_sha) && manifest_valid &&
-            expected.all? { |key, value| row[key] == value },
+            row["schema_version"].is_a?(Integer) &&
+            expected.all? { |key, value| row[key] == value } &&
+            HiveLiveAgentProof.canonical_json(row["evidence_bundle"]) ==
+              HiveLiveAgentProof.canonical_json(bundle_records),
           "workflow-creator evidence identity or result is invalid"
         )
       end
 
-      def validate_files!(row)
+      def validate_content!(row, receipt_sha256)
         created = row["created_files"]
         assert!(
           created.is_a?(Array) &&
-            created.map { |record| record["path"] }.sort == WORKFLOW_CREATOR_FILES &&
+            created.map { |record| record["path"] } == WORKFLOW_CREATOR_FILES &&
             created.all? { |record| valid_file_record?(record) },
           "workflow-creator created-file records are invalid"
         )
@@ -156,11 +160,10 @@ module HiveLiveAgentProof
             row["executed_instruction"] == authored,
           "workflow-creator authored and executed instructions do not match"
         )
-      end
-
-      def validate_claims!(row, receipt_sha256)
         assert!(row["validation"] == WORKFLOW_CREATOR_GRAPH, "workflow-creator normalized graph is invalid")
         task_valid =
+          row["creation_only_task_count"].is_a?(Integer) &&
+          row["task_count"].is_a?(Integer) && row.dig("task", "run_count").is_a?(Integer) &&
           row["creation_only_task_count"] == 0 && row["task_count"] == 1 &&
           row["task"] == WORKFLOW_CREATOR_TASK && row["external_actions"] == []
         assert!(task_valid, "workflow-creator proof contains an unauthorized side effect")

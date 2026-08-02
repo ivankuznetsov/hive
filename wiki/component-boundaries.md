@@ -80,11 +80,24 @@ recovery, or bundle-custody work. The dependency direction is facade to
 primitives/contracts only; `ExecutionContract` reuses `Contract` primitives,
 while the core cannot require `proof.rb` or `workflow_creator_bundle.rb`.
 
+Every public validator now admits only an exact plain JSON tree; subclasses
+cannot override equality, enumeration, or path behavior. External strings and
+keys must be valid UTF-8, with deterministic UTF-8 normalization limited to
+ASCII-only strings. Canonical JSON projects the complete pretty-printed byte
+size—including escaping, indentation, punctuation, numerics, and its trailing
+newline—before invoking the serializer, while retaining the final exact-size
+check. Failure detail has a 4,096-byte raw work ceiling, finds exact and pattern
+matches against the original normalized text, merges overlapping intervals,
+and replaces each merged range once before its 1,000-byte output truncation.
+Execution capture tuples bind zero captured bytes to the empty SHA-256 digest,
+and a true truncation flag requires the captured count to equal its limit.
+
 This candidate truthfully has zero current production consumers. Its non-empty
 U1a2 migration exception is an executable removal fence: U1a2 must route the
 incumbent proof and release-candidate custody consumers through the core or
 remove the staged component. It cannot become `boundary-ready` with zero
-consumers or retain that exception.
+consumers or retain that exception. No other catalog row may use a migration
+exception to declare zero consumers.
 
 This is an internal architecture verdict, not a packaging verdict. None of the
 six ready components currently has the named non-Hive adopter and independent
@@ -290,10 +303,12 @@ Each row names:
 Owned paths cannot overlap between components, component dependencies must form
 an acyclic graph, and every path in the catalog must resolve inside the
 repository. A temporary exception must include both a reason and the
-implementation unit that removes it. A candidate may have zero current Hive
-consumers only while a valid, non-empty staged removal exception records that
-unit. A `boundary-ready` component cannot have zero consumers, keep an
-exception, or depend on a `candidate` component.
+implementation unit that removes it. The sole zero-consumer fence is the
+`workflow-creator-core` row while it is a `candidate` with exactly one
+migration exception whose removal unit is `U1a2`. All other rows require real
+consumers even when a candidate has a valid migration exception. A
+`boundary-ready` component cannot have zero consumers, keep an exception, or
+depend on a `candidate` component.
 
 ## Enforcement
 

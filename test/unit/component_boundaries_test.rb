@@ -630,18 +630,7 @@ class ComponentBoundariesTest < Minitest::Test
     end
   end
 
-  def test_candidate_only_zero_consumer_state_requires_a_valid_staged_removal_fence
-    with_contract_fixture(
-      entrypoint_source: example_api_source,
-      state: "candidate",
-      hive_consumers: [],
-      migration_exceptions: [
-        { "reason" => "U1a1 is staged before its production consumer", "removal_unit" => "U1a2" }
-      ]
-    ) do |contract|
-      assert contract.validate_catalog!
-    end
-
+  def test_candidate_rejects_zero_consumers_without_a_staged_removal_fence
     with_contract_fixture(
       entrypoint_source: example_api_source,
       state: "candidate",
@@ -651,8 +640,63 @@ class ComponentBoundariesTest < Minitest::Test
         contract.validate_catalog!
       end
       assert_match(/example\.hive_consumers/, error.message)
-      assert_match(/candidate components without consumers require a staged removal exception/, error.message)
+      assert_match(/zero consumers are reserved for candidate workflow-creator-core with exactly one U1a2 removal exception/, error.message)
     end
+  end
+
+  def test_patrol_effects_cannot_reuse_its_u3_exception_with_zero_consumers
+    document = Marshal.load(Marshal.dump(@document))
+    component(document, "patrol-effects")["hive_consumers"] = []
+
+    error = assert_raises(ComponentBoundaryContract::ValidationError) do
+      ComponentBoundaryContract.new(document, root: ROOT).validate_catalog!
+    end
+
+    assert_match(/patrol-effects\.hive_consumers/, error.message)
+  end
+
+  def test_attempts_cannot_claim_the_u1a2_zero_consumer_exception
+    document = Marshal.load(Marshal.dump(@document))
+    attempts = component(document, "attempts")
+    attempts["hive_consumers"] = []
+    attempts["migration_exceptions"] = [
+      { "reason" => "temporary staged component", "removal_unit" => "U1a2" }
+    ]
+
+    error = assert_raises(ComponentBoundaryContract::ValidationError) do
+      ComponentBoundaryContract.new(document, root: ROOT).validate_catalog!
+    end
+
+    assert_match(/attempts\.hive_consumers/, error.message)
+  end
+
+  def test_workflow_creator_zero_consumer_exception_must_name_u1a2
+    document = Marshal.load(Marshal.dump(@document))
+    workflow_creator = component(document, "workflow-creator-core")
+    workflow_creator["migration_exceptions"] = [
+      { "reason" => "temporary staged component", "removal_unit" => "U3" }
+    ]
+
+    error = assert_raises(ComponentBoundaryContract::ValidationError) do
+      ComponentBoundaryContract.new(document, root: ROOT).validate_catalog!
+    end
+
+    assert_match(/workflow-creator-core\.hive_consumers/, error.message)
+  end
+
+  def test_workflow_creator_zero_consumer_exception_must_be_unique
+    document = Marshal.load(Marshal.dump(@document))
+    workflow_creator = component(document, "workflow-creator-core")
+    workflow_creator["migration_exceptions"] = [
+      { "reason" => "first staged component fence", "removal_unit" => "U1a2" },
+      { "reason" => "second staged component fence", "removal_unit" => "U1a2" }
+    ]
+
+    error = assert_raises(ComponentBoundaryContract::ValidationError) do
+      ComponentBoundaryContract.new(document, root: ROOT).validate_catalog!
+    end
+
+    assert_match(/workflow-creator-core\.hive_consumers/, error.message)
   end
 
   def test_boundary_ready_component_rejects_zero_consumers_at_the_named_branch
@@ -665,7 +709,7 @@ class ComponentBoundariesTest < Minitest::Test
         contract.validate_catalog!
       end
       assert_match(/example\.hive_consumers/, error.message)
-      assert_match(/candidate components without consumers require a staged removal exception/, error.message)
+      assert_match(/zero consumers are reserved for candidate workflow-creator-core with exactly one U1a2 removal exception/, error.message)
     end
   end
 

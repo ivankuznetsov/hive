@@ -178,9 +178,11 @@ class ComponentBoundaryContract
     repo_path!(row.fetch("wiki_page"), "#{component_path}.wiki_page")
     validate_migration_exceptions!(row, component_path)
     if row.fetch("hive_consumers").empty? &&
-        !(state == "candidate" && !row.fetch("migration_exceptions").empty?)
+        !(id == "workflow-creator-core" && state == "candidate" &&
+          row.fetch("migration_exceptions").one? &&
+          row.dig("migration_exceptions", 0, "removal_unit") == "U1a2")
       invalid!("#{component_path}.hive_consumers",
-               "candidate components without consumers require a staged removal exception")
+               "zero consumers are reserved for candidate workflow-creator-core with exactly one U1a2 removal exception")
     end
     validate_authorized_internal_constructions!(row, component_path)
     string!(row.fetch("mutation_authority"), "#{component_path}.mutation_authority")

@@ -188,6 +188,141 @@ class WorkflowCreatorCoreTest < Minitest::Test
     end
   end
 
+  def test_canonical_json_rejects_projected_expansion_before_pretty_serialization
+    json_limit = CREATOR.const_get(:Primitives, false).const_get(:MAX_JSON_BYTES, false)
+    adversarial = {
+      "nul-expansion" => "\0" * json_limit,
+      "oversized-integer" => 1 << (json_limit * 4)
+    }
+
+    adversarial.each do |label, value|
+      serializer = ->(*) { raise Minitest::Assertion, "pretty serializer reached for #{label}" }
+      original = JSON.method(:pretty_generate)
+      JSON.define_singleton_method(:pretty_generate, serializer)
+      begin
+        error = assert_raises(CREATOR::Error, label) { CREATOR.canonical_json(value) }
+        assert_equal "cannot canonicalize JSON", error.message
+      ensure
+        JSON.define_singleton_method(:pretty_generate, original)
+      end
+    end
+  end
+
+  def test_public_validation_boundaries_reject_json_subclasses
+    hostile_hash = Class.new(Hash) { def keys = [] }
+    hostile_array = Class.new(Array) { def map = [] }
+    hostile_string = Class.new(String) do
+      def ==(_other) = true
+      def bytesize = 0
+      def valid_encoding? = true
+    end
+    plain_hash = Class.new(Hash)
+    plain_array = Class.new(Array)
+    plain_string = Class.new(String)
+
+    cases = {
+      "canonical-hash-enumeration" => -> { CREATOR.canonical_json(hostile_hash["hidden" => true]) },
+      "canonical-array-enumeration" => -> { CREATOR.canonical_json(hostile_array["hidden"]) },
+      "canonical-string-accounting" => -> { CREATOR.canonical_json(hostile_string.new("passed")) },
+      "failure-candidate-string" => lambda do
+        CREATOR.failure(candidate_sha: plain_string.new(SHA), phase: "preflight", reason: "not_started")
+      end,
+      "nonpassing-equality" => lambda do
+        row = CREATOR.failure(candidate_sha: SHA, phase: "preflight", reason: "not_started")
+        row["result"] = hostile_string.new("passed")
+        CREATOR.validate_nonpassing!(row)
+      end,
+      "primary-hash" => lambda do
+        fixture = valid_fixture
+        fixture[:row] = plain_hash.new.merge!(fixture.fetch(:row))
+        validate_primary(fixture)
+      end,
+      "installation-array" => lambda do
+        fixture = valid_fixture
+        document = fixture.fetch(:installations).fetch("openclaw")
+        document["inventory"] = plain_array.new.concat(document.fetch("inventory"))
+        CREATOR.validate_installation!(document:, kind: "openclaw",
+                                       manifest: fixture.fetch(:manifest), candidate_sha: SHA)
+      end,
+      "execution-label-string" => lambda do
+        fixture = valid_fixture
+        label = fixture.fetch(:receipt).fetch("commands").first.fetch("attempt_label")
+        fixture.fetch(:receipt).fetch("commands").first["attempt_label"] = plain_string.new(label)
+        validate_execution(fixture)
+      end
+    }
+    accepted = cases.filter_map do |label, action|
+      action.call
+      label
+    rescue CREATOR::Error
+      nil
+    end
+    assert_empty accepted, "subclass-backed evidence admitted: #{accepted.join(', ')}"
+  end
+
+  def test_failure_redaction_merges_overlapping_original_ranges
+    cases = {
+      "exact-exact" => [ "token=abcdefghij", %w[abc abcdefghij] ],
+      "exact-pattern" => [ "token=#{secret_shape}", [ "sk-ant-abc" ] ]
+    }
+    cases.each do |label, (detail, exact_secrets)|
+      row = CREATOR.failure(candidate_sha: SHA, phase: "preflight", reason: "provider_unavailable",
+                            detail:, exact_secrets:)
+      assert_equal "token=[REDACTED]", row.fetch("detail"), label
+      refute_match(/defghij/, row.fetch("detail"), label)
+    end
+  end
+
+  def test_failure_rejects_raw_detail_above_the_documented_work_ceiling
+    contract = CREATOR.const_get(:Contract, false)
+    assert_equal 4_096, contract.const_get(:MAX_DETAIL_INPUT_BYTES, false)
+    exact_secrets = 64.times.map { |index| format("absent-secret-%02d", index) }
+    assert_raises(CREATOR::Error) do
+      CREATOR.failure(candidate_sha: SHA, phase: "preflight", reason: "provider_unavailable",
+                      detail: "x" * 4_097, exact_secrets:)
+    end
+  end
+
+  def test_public_strings_reject_non_utf8_with_domain_errors
+    utf16_sha = SHA.encode(Encoding::UTF_16LE)
+    cases = {
+      "canonical-key" => -> { CREATOR.canonical_json({ "key".encode(Encoding::UTF_16LE) => true }) },
+      "failure-candidate-sha" => lambda do
+        CREATOR.failure(candidate_sha: utf16_sha, phase: "preflight", reason: "not_started")
+      end,
+      "failure-phase" => lambda do
+        CREATOR.failure(candidate_sha: SHA, phase: "preflight".encode(Encoding::UTF_16LE), reason: "not_started")
+      end,
+      "primary-candidate-sha" => lambda do
+        fixture = valid_fixture
+        CREATOR.validate_primary!(row: fixture.fetch(:row), manifest: fixture.fetch(:manifest),
+                                  candidate_sha: utf16_sha, bundle_records: fixture.fetch(:bundle_records))
+      end,
+      "installation-path" => lambda do
+        fixture = valid_fixture
+        document = fixture.fetch(:installations).fetch("openclaw")
+        document.fetch("inventory").last["path"] = "runtime/dependency.rb".encode(Encoding::UTF_16LE)
+        CREATOR.validate_installation!(document:, kind: "openclaw",
+                                       manifest: fixture.fetch(:manifest), candidate_sha: SHA)
+      end,
+      "execution-label" => lambda do
+        fixture = valid_fixture
+        fixture.fetch(:receipt).fetch("commands").first["attempt_label"] =
+          "command-01".encode(Encoding::UTF_16LE)
+        validate_execution(fixture)
+      end
+    }
+    boundary_leaks = cases.filter_map do |label, action|
+      action.call
+      "#{label}:accepted"
+    rescue CREATOR::Error
+      nil
+    rescue EncodingError => error
+      "#{label}:#{error.class}"
+    end
+    assert_empty boundary_leaks, "non-UTF-8 boundary leaks: #{boundary_leaks.join(', ')}"
+  end
+
   def test_primary_contract_accepts_exact_claims_and_rejects_key_type_order_and_binding_drift
     fixture = valid_fixture
     assert_same fixture.fetch(:row), validate_primary(fixture)
@@ -345,6 +480,30 @@ class WorkflowCreatorCoreTest < Minitest::Test
     assert_raises(CREATOR::Error) { validate_execution(invalid) }
   end
 
+  def test_execution_capture_tuples_bind_counts_digests_and_truncation
+    cases = {
+      "zero-byte-stdout-digest" => lambda do |capture|
+        capture["stdout_sha256"] = DIGEST
+      end,
+      "short-truncated-stderr" => lambda do |capture|
+        capture["stderr_bytes"] = capture.fetch("limit_bytes") - 1
+        capture["stderr_sha256"] = DIGEST
+        capture["stderr_truncated"] = true
+      end
+    }
+    accepted = cases.filter_map do |label, mutation|
+      fixture = valid_fixture
+      mutation.call(fixture.fetch(:receipt).fetch("commands").first.fetch("capture"))
+      rebind_execution_receipt!(fixture)
+      validate_execution(fixture)
+      label
+    rescue CREATOR::Error => error
+      assert_equal "workflow-creator execution process receipt is invalid", error.message, label
+      nil
+    end
+    assert_empty accepted, "incoherent capture tuples admitted: #{accepted.join(', ')}"
+  end
+
   def test_execution_contract_binds_all_canonical_document_bytes_and_kinds
     cases = {
       "swapped-documents" => lambda do |item|
@@ -472,7 +631,7 @@ class WorkflowCreatorCoreTest < Minitest::Test
       script << "\n"
       script << <<~RUBY
         names = HiveLiveAgentProof.constants(false).map(&:to_s)
-        forbidden = (names & %w[SCHEMA_VERSION SAFE_SHA SECRET_PATTERNS Error]) + names.grep(/\AWORKFLOW_CREATOR_/)
+        forbidden = (names & %w[SCHEMA_VERSION SAFE_SHA SECRET_PATTERNS Error]) + names.grep(/\\AWORKFLOW_CREATOR_/)
         if #{order == [ core ]} && !forbidden.empty?
           abort "forbidden root constant"
         end
@@ -481,6 +640,14 @@ class WorkflowCreatorCoreTest < Minitest::Test
       out, err, status = Open3.capture3(RbConfig.ruby, "-w", "-I#{ROOT}", "-e", script)
       assert status.success?, "#{order.join(' -> ')}: #{out}#{err}"
       assert_empty err, order.join(" -> ")
+      next unless order == [ core ]
+
+      poisoned = script.sub("names = ", "HiveLiveAgentProof::WORKFLOW_CREATOR_POISON = true\nnames = ")
+      poison_out, poison_err, poison_status = Open3.capture3(
+        RbConfig.ruby, "-w", "-I#{ROOT}", "-e", poisoned
+      )
+      refute poison_status.success?, "root constant poison was not detected: #{poison_out}#{poison_err}"
+      assert_includes poison_err, "forbidden root constant"
     end
     %i[Primitives Contract ExecutionContract].each do |name|
       assert_raises(NameError) { eval("HiveLiveAgentProof::WorkflowCreator::#{name}") }
@@ -644,6 +811,11 @@ class WorkflowCreatorCoreTest < Minitest::Test
     %w[containment teardown cleanup].each { |field| row[field] = deep_dup(summary) }
   end
 
+  def rebind_execution_receipt!(fixture)
+    bind_execution_record!(fixture.fetch(:row), fixture.fetch(:bundle_records), fixture.fetch(:receipt))
+    fixture[:receipt_sha256] = fixture.fetch(:bundle_records).fetch(2).fetch("sha256")
+  end
+
   def refresh_installation!(document)
     closure = {
       "required_roles" => document.fetch("required_roles"),
@@ -664,14 +836,16 @@ class WorkflowCreatorCoreTest < Minitest::Test
       "proof_primitives.rb" => {
         requires: [ %w[require json] ],
         calls: %w[
-          all? bytesize byteslice call deep_freeze each each_with_index empty? encode fetch filter_map
-          force_encoding freeze gsub! include? is_a? keys lambda map match? module_function none?
-          pretty_generate raise require scrub sort source split start_with? to_h to_s valid_encoding?
+          ascii_only? bit_length bytebegin byteend bytesize byteslice call class count deep_freeze dup each
+          each_with_index each_with_object empty? encode encoding escape fetch filter_map finite? first
+          force_encoding freeze include? instance_of? is_a? keys lambda last last_match length map match?
+          max module_function none? pretty_generate raise require scan scrub sort sort_by! source split
+          start_with? tap then to_h to_s valid_encoding?
         ],
         constants: %w[
-          ArgumentError Array Encoding Error FalseClass Float GeneratorError Hash HiveLiveAgentProof Integer JSON
-          MAX_JSON_BYTES MAX_JSON_DEPTH MAX_JSON_NODES NestingError NilClass Primitives SECRET_PATTERNS
-          StandardError String TrueClass TypeError UTF_8 WorkflowCreator
+          ArgumentError Array Encoding EncodingError Error FalseClass Float GeneratorError Hash HiveLiveAgentProof
+          Integer JSON MAX_JSON_BYTES MAX_JSON_DEPTH MAX_JSON_INTEGER_BITS MAX_JSON_NODES NestingError NilClass Primitives Regexp
+          SECRET_PATTERNS StandardError String TrueClass TypeError UTF_8 WorkflowCreator
         ]
       },
       "workflow_creator.rb" => {
@@ -689,16 +863,16 @@ class WorkflowCreatorCoreTest < Minitest::Test
       "workflow_creator_contract.rb" => {
         requires: [ %w[require digest], %w[require_relative proof_primitives] ],
         calls: %w[
-          all? ascii_only? between? bytesize call canonical_json deep_freeze dig downcase drop each each_with_index empty? encoding
-          exact_secrets! fetch find first freeze generate hexdigest include? is_a? keys lambda length map match?
+          all? between? bytesize call canonical_json deep_freeze dig downcase drop each each_with_index empty? encoding
+          exact_secrets! fetch find first freeze generate hexdigest include? instance_of? keys lambda length map match?
           module_function nil? one? positive? raise require require_relative safe_relative_path? secret_findings
-          secret_safe_text select sort sum then to_s uniq valid_encoding? valid_manifest? validate_nonpassing!
+          secret_safe_text select sort sum then uniq valid_encoding? valid_manifest? validate_nonpassing!
           values values_at zero? zip
         ],
         constants: %w[
-          ARTIFACT_KEYS ASSERT ArgumentError Array BUNDLE_KEYS CLASSIFICATIONS Contract DETAIL_LIMIT DIGEST Digest Encoding Error
+          ARTIFACT_KEYS ASSERT ArgumentError Array BUNDLE_KEYS CLASSIFICATIONS Contract DETAIL_LIMIT DIGEST Digest Encoding EncodingError Error
           FAILURE_KEYS FAILURE_PART FILE_KEYS GeneratorError Hash HiveLiveAgentProof INSTALLATION_KEYS Integer JSON
-          KeyError MANIFEST_KEYS MAX_EXACT_SECRETS MAX_INVENTORY_ENTRIES MAX_MEMBER_BYTES MAX_SECRET_BYTES
+          KeyError MANIFEST_KEYS MAX_DETAIL_INPUT_BYTES MAX_EXACT_SECRETS MAX_INVENTORY_ENTRIES MAX_MEMBER_BYTES MAX_SECRET_BYTES
           MAX_TOTAL_BYTES NoMethodError PRIMARY_KEYS Primitives SHA SHA256 SUMMARY_KEYS String TypeError UTF_8 Vocabulary
           WorkflowCreator
         ]
@@ -707,13 +881,13 @@ class WorkflowCreatorCoreTest < Minitest::Test
         requires: [ %w[require_relative workflow_creator_contract] ],
         calls: %w[
           all? between? bytesize call canonical_json deep_freeze each_with_index empty? fetch first freeze generate
-          hexdigest include? is_a? keys lambda length map match? module_function nil? positive? raise require_relative
+          hexdigest include? instance_of? keys lambda length map match? module_function nil? positive? raise require_relative
           safe_relative_path? secret_findings slice sort uniq valid_process? validate_aggregates! validate_identity!
           validate_installation! validate_primary! validate_processes! values_at zero? zip
         ],
         constants: %w[
           ARCHIVE_KEYS ASSERT ArgumentError Array BUNDLE_KEYS CAPTURE_KEYS CLEANUP_KEYS COMMAND_KEYS CONTAINMENT_KEYS
-          Contract DIGEST Digest Error ExecutionContract FILE_KEYS GATEWAY_KEYS GeneratorError Hash HiveLiveAgentProof
+          Contract DIGEST Digest EncodingError Error ExecutionContract FILE_KEYS GATEWAY_KEYS GeneratorError Hash HiveLiveAgentProof
           Integer JSON KEYS KeyError LABEL MAX_ARCHIVE_BYTES MAX_ARCHIVE_ENTRIES MAX_CAPTURE_BYTES NoMethodError
           OUTER_KEYS PROCESS_TEARDOWN_KEYS Primitives RUN_KEYS SHA SHA256 String TARGET_KEYS TEARDOWN_KEYS TypeError
           Vocabulary WorkflowCreator

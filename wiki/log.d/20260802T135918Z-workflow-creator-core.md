@@ -27,3 +27,16 @@
   traversal paths; replaces the negative purity blocklist with exact
   Ripper-derived require/call/constant admission; reuses contract primitives;
   and isolates branch-budget subprocess coverage bootstrap state.
+- Resolution 02 rejects adversarial pretty-JSON expansion before serializer
+  entry with exact projected-byte accounting, admits only exact plain JSON
+  trees with deterministic UTF-8 strings, merges overlapping secret ranges
+  under a 4,096-byte raw-detail ceiling, binds empty/truncated capture digests
+  coherently to byte counts, and activates the anchored root-constant poison
+  control. These remain pure validation changes with no custody, I/O, process,
+  provider, credential, publication, or live behavior.
+- Resolution 02 finding 8 narrows the zero-consumer catalog fence to the
+  `workflow-creator-core` candidate with exactly one `U1a2` migration
+  exception. Other candidates still accept valid exceptions when they have
+  real consumers, but Patrol's `U3` exception, a borrowed `U1a2` exception,
+  the wrong removal unit, and duplicate `U1a2` entries cannot excuse zero
+  consumers.

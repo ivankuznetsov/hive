@@ -61,6 +61,18 @@ records. The test also loads the core alone and before/after untouched
 `proof.rb` under Ruby warnings, admits an exact Ripper-derived
 require/call/constant surface, rejects dormant I/O additions, and rejects
 proof/bundle back-edges.
+
+The resource regressions stub the pretty serializer and prove that NUL-heavy
+strings and oversized integers fail on projected output size before serializer
+entry. Hostile `Hash`, `Array`, and `String` subclasses, UTF-16LE keys and
+public identities, overlapping exact/pattern secrets, and a 4,097-byte failure
+detail with all 64 exact-secret slots fail closed. Capture regressions rebind
+the complete execution-receipt identity after inner mutation, so zero-byte
+digest and short-truncated-count rejection cannot pass merely because an outer
+receipt digest became stale. The clean-load guard also injects a root
+`WORKFLOW_CREATOR_*` poison constant to prove its anchored leak detector is
+live.
+
 This is core-only proof, not bundle custody or an activated production
 consumer; U1a2 owns that routing.
 
@@ -150,12 +162,14 @@ clean-load proof for a candidate such as Attempts without representing the
 whole component graph as ready.
 
 The helper also admits the narrow staged-prerequisite state used by Workflow
-Creator Proof Core: a `candidate` may list zero current Hive consumers only
-with a non-empty, valid migration exception naming its removal unit. Plan IDs
-include nested units such as `U1a2`. `boundary-ready` rows still require a
-consumer and reject all exceptions. Clean-load ownership maps both `lib/` and
-`packaging/` require paths and launches with the repository root plus `lib/` on
-the load path.
+Creator Proof Core: only the `workflow-creator-core` row may list zero current
+Hive consumers, and only while its state is `candidate` and it has exactly one
+valid migration exception whose removal unit is `U1a2`. Other candidates may
+retain valid migration exceptions when they have real consumers, but cannot
+borrow this zero-consumer fence; the wrong removal unit and duplicate U1a2
+exceptions also fail. `boundary-ready` rows still require a consumer and reject
+all exceptions. Clean-load ownership maps both `lib/` and `packaging/` require
+paths and launches with the repository root plus `lib/` on the load path.
 
 The helper uses Ruby syntax rather than comments or string examples for literal
 `require`, `require_relative`, and `Constant.new` checks. It remains an

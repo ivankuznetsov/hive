@@ -1,10 +1,10 @@
 ---
 title: Hive::TaskAction
 type: module
-source: lib/hive/task_action.rb
+source: lib/hive/task_action.rb, lib/hive/task_action/diagnostic.rb, lib/hive/terminal_outcome.rb
 created: 2026-04-26
-updated: 2026-07-25
-tags: [module, status, action, classifier, human-stage, diagnostic]
+updated: 2026-08-02
+tags: [module, status, action, classifier, human-stage, diagnostic, blocked, terminal-outcomes]
 ---
 
 **TLDR**: Classifier that turns a `(Hive::Task, Hive::Markers::State)` pair into a user-facing action with a stable key (per `Hive::Schemas::TaskActionKind`), a human label for `hive status` output, a copy-paste-executable shell command, an optional structured `next_action` for row-specific recovery, and (since 2026-05-16) a bounded `diagnostic` payload for red recovery rows. Used by `hive status` (action grouping + `tasks[].action`/`diagnostic` JSON fields), `hive run` (`next_action.command` / `rerun_with`), `hive approve` (`next_action.command` after a successful advance), `hive accept-finding` / `hive reject-finding` (`next_action.command` after a toggle), and `hive status --diagnose` (`#diagnostic` is the local fallback path when no agent-written artifact is fresh).
@@ -116,6 +116,13 @@ Runtime liveness can short-circuit per-stage dispatch before marker lookup:
 - **`live_task_lock: true`** → `agent_running` (label "Agent running", command nil). `Hive::Commands::Status` sets this when a task `.lock` holder PID is alive and its recorded process start time still matches. This covers pre-marker work inside `hive run`, such as auto-rebase before `REVIEW_WORKING` is written, so status and the TUI do not offer a duplicate runnable command that would immediately hit `ConcurrentRunError`.
 - **`:agent_working`** → `agent_running` (label "Agent running", command nil) when the agent is actually alive. A `hive run` is in flight; surfacing a workflow command would send the user (or an agent retry loop) straight into `ConcurrentRunError`. **Stale carve-out:** when the caller passes `pid_alive:` and `state_file_mtime:` kwargs and either (a) `pid_alive` is `false` (the per-task `.lock` recorded a `claude_pid` that's now dead), or (b) `pid_alive` is `nil` (no `.lock` claude_pid), the marker has no `pid` attr, and the state-file mtime is older than `agent_marker_grace_sec` (default 300s; threaded from `daemon.agent_marker_grace_sec` by `Hive::Commands::Status`), the action is reclassified as `:error` with a synthesized diagnostic (summary describes "agent process not alive" / "agent never attached"; detail explains the daemon will heal the on-disk marker within ~30s). This makes the row a recoverable red status immediately, without waiting for the daemon's `StaleAgentHealer` to rewrite the marker on disk.
 - **`:error`** → always `error` at the status/action layer. The stage agent recorded a failure; automatic and operator-triggered recovery both submit a fresh observation to `RecoveryCoordinator`. Consumers must refresh status before invoking the guarded `workflow.retry` action; no surface should construct its own marker-clear recipe. `StaleAgentHealer` uses the same coordinator for cooled terminal errors, including `tmux_session_terminated` / `agent_orphaned`. The coordinator derives the owning workflow command for every stage; `3-plan` therefore needs no separate clear/requeue mechanism even when an empty markerless `plan.md` would otherwise remain `:error`.
+- **`:error reason=terminal_outcome_blocked`** keeps the same public `error`
+  action key, but its label is `Blocked`; it is active rather than archived.
+  Its diagnostic retains the guarded `workflow.retry` recommendation and says
+  explicitly that retry reruns only the current terminal stage. A blocker
+  propagated from an already completed upstream stage requires a fresh task.
+  Every `reason=terminal_outcome_*` error is operator-owned and excluded from
+  daemon automatic retry; invalid outcome contracts remain visible as `Error`.
 
 `:execute_stale` maps to `RECOVER_EXECUTE` and emits `hive findings <slug>` rather than a workflow verb. Legacy `:execute_waiting findings_count>0` uses the same recovery surface so old state folders do not fall through to generic edit guidance. Running `hive develop <slug>` on either shape would refuse or loop on a non-terminal marker; pointing the user at `findings` opens the recovery loop instead.
 

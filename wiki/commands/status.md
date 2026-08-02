@@ -3,8 +3,8 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb
 created: 2026-04-25
-updated: 2026-07-25
-tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, dependencies, scheduler]
+updated: 2026-08-02
+tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, terminal-outcomes, dependencies, scheduler]
 ---
 
 **TLDR**: `hive status` now defaults to a compact operational snapshot for
@@ -58,6 +58,15 @@ scheduler-owned; `retry_in_flight` is running/agent-owned; and
 Hive owner instead of falsely claiming the scheduler will clear it.
 Disabling either the project daemon or global automatic retry restores the
 operator-owned `needs_repair` classification.
+
+Semantic terminal errors are the deliberate exception to automatic error
+retry. Any `ERROR reason=terminal_outcome_*` remains operator-owned
+`needs_repair` even when the daemon and automatic retry are enabled. The
+blocked form keeps action key `error`, presents label `Blocked`, and the TUI
+renders its sanitized declared outcome. Status still publishes the guarded
+`workflow.retry` action, but its diagnostic explains that the action reruns
+only the current terminal stage and that propagated upstream blockers require
+a fresh task.
 
 Completeness is explicit: `complete`, `partial`, or `unknown`. Missing project
 roots, legacy stage directories, invalid task metadata, unavailable/stale

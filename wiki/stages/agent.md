@@ -1,10 +1,10 @@
 ---
 title: Generic Agent Stage Runner
 type: stage
-source: lib/hive/stages/agent.rb, lib/hive/stages/agent_worktree.rb, lib/hive/stages/agent_report.rb, lib/hive/managed_git.rb, templates/agent_prompt.md.erb, templates/agent_worktree_prompt.md.erb
+source: lib/hive/stages/agent.rb, lib/hive/stages/agent_worktree.rb, lib/hive/stages/agent_report.rb, lib/hive/terminal_outcome.rb, lib/hive/managed_git.rb, templates/agent_prompt.md.erb, templates/agent_worktree_prompt.md.erb
 created: 2026-06-19
-updated: 2026-07-26
-tags: [stage, agent, workflow]
+updated: 2026-08-02
+tags: [stage, agent, workflow, terminal-outcomes, blocked]
 ---
 
 **TLDR**: `Hive::Stages::Agent` is the shared headless runner for descriptor
@@ -83,6 +83,18 @@ terminal Hive outcome.
    runner writes the equivalent marker with the selected profile as `provider`.
    Both paths return `commit=limits_reached` and retain a `retry_after` stamp so
    the daemon cooldown healer can requeue the generic stage.
+9. For a final agent stage with `terminal_outcomes`, the prompt enumerates the
+   exact complete and blocked values and requires `Outcome: <value>` as the
+   artifact's first line. After the runner returns `COMPLETE`, but before
+   archive classification or the Hive-state commit, `Hive::TerminalOutcome`
+   reads only a no-follow 513-byte window, accepts at most 512 first-line bytes,
+   requires a regular file and strict UTF-8, and matches the line exactly.
+   Declared complete values retain `COMPLETE`; declared blocked values become
+   `ERROR reason=terminal_outcome_blocked outcome=<value>`. Missing, malformed,
+   unknown, unreadable, non-regular, overlong, or invalid-UTF-8 results become
+   `ERROR reason=terminal_outcome_invalid outcome=<bounded-detail>`. The error
+   commit is transactional with the terminal snapshot, and never stamps
+   `completed_at`. Descriptors without this opt-in keep the legacy marker path.
 
 An error envelope does not by itself prove that the spawn wrote no marker.
 `Hive::Agent` writes specific state-file errors for provider limits, timeouts,

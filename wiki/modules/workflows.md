@@ -1,10 +1,10 @@
 ---
 title: Hive::Workflows
 type: module
-source: lib/hive/workflows.rb, lib/hive/workflow.rb, lib/hive/workflows/registry.rb, lib/hive/workflows/coding.rb, lib/hive/workflows/content.rb, lib/hive/workflows/bench.rb, lib/hive/workflows/descriptor_parser.rb, lib/hive/workflows/loader.rb, lib/hive/workflows/project.rb, lib/hive/workflow_package/
+source: lib/hive/workflows.rb, lib/hive/workflow.rb, lib/hive/terminal_outcome.rb, lib/hive/workflows/registry.rb, lib/hive/workflows/coding.rb, lib/hive/workflows/content.rb, lib/hive/workflows/bench.rb, lib/hive/workflows/descriptor_parser.rb, lib/hive/workflows/loader.rb, lib/hive/workflows/project.rb, lib/hive/workflow_package/
 created: 2026-04-26
-updated: 2026-07-26
-tags: [module, workflow, verbs, selection, human-stage, outcomes, honeycomb, registry, archive, retention]
+updated: 2026-08-02
+tags: [module, workflow, verbs, selection, human-stage, outcomes, terminal-outcomes, honeycomb, registry, archive, retention]
 ---
 
 **TLDR**: The coding, content, bench, and project-authored workflows are described as ordered `Hive::Workflow` value objects whose stages carry directory names, state files, incoming advance verbs, runner metadata, optional instruction files, optional permission specs, per-stage agent/model/effort overrides, council reviewer configs, terminal deliverables, and an archive visibility retention policy. `Hive::Workflows::Registry.default` still returns the coding descriptor, and the legacy public constants (`Hive::Stages::DIRS`, `Hive::Task::STAGE_NAMES` / `STATE_FILES`, `Hive::Workflows::VERBS`) are derived from it at load time. `Hive::Task` resolves a per-task descriptor from `meta.yml workflow:` or project `default_workflow`, `Hive::WorkflowSelection` centralizes CLI validation and valid-name listing, `Hive::Workflows::Registry.all` exposes the live descriptor set for built-in, runtime/test, and active-project registrations, and `Hive::Stages::Resolver` consumes `kind: :agent` / `kind: :council` as fallbacks for non-coding stage names while coding's bespoke runners remain name-authoritative only for `:coding`. Coding's descriptor now uses runtime primitive kinds (`:execute`, `:review_council`, `:finalize`) for the worktree-coupled stages; the old `:marker` descriptor kind is retired.
@@ -60,6 +60,13 @@ Per-project descriptors live under `<hive_state_path>/workflows/*.yml`, defaulti
 - the last stage may be inert, agent, council, or human. Active terminal stages
   require `COMPLETE` and their declared non-empty deliverable/artifact before
   `TaskAction` classifies them as archived.
+- A final `kind: agent` stage may opt into semantic terminal classification with
+  `terminal_outcomes: { complete: [...], blocked: [...] }`. Both lists are
+  required, non-empty, unique, disjoint lowercase safe slugs of at most 40
+  characters. The stage must declare `deliverable`, and `deliverable` must
+  equal `state_file`; council and intermediate stages cannot use this field.
+  `hive workflow validate --json` exposes the normalized object on every stage
+  (`null` when absent). See [[stages/agent]] for runtime normalization.
 - `workspace: worktree` plus `handoff: draft_pr` is one closed terminal-agent
   contract. Both fields must appear together and both `state_file` and
   `deliverable` must equal task-root `fix-report.md`. Parser and managed-package

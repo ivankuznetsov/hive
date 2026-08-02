@@ -54,7 +54,11 @@ module Hive
 
     def current_from_content(content)
       last = nil
-      content.to_s.scan(MARKER_RE) do
+      # Agent-authored artifacts are not trusted to be valid UTF-8. Marker
+      # syntax is ASCII, so scan a binary view: an invalid certificate can
+      # still expose its trailing COMPLETE marker to the bounded terminal
+      # outcome classifier instead of crashing before normalization.
+      content.to_s.b.scan(MARKER_RE) do
         match = Regexp.last_match
         last = match
       end
@@ -141,7 +145,7 @@ module Hive
     # bound to the artifact it will actually execute without creating a
     # markerless crash window first.
     def without_markers(body)
-      body.to_s.gsub(MARKER_RE, "")
+      body.to_s.b.gsub(MARKER_RE, "")
     end
 
     # Serialize concurrent state-file writers via a sidecar `.markers-lock`
@@ -170,7 +174,12 @@ module Hive
     def write_atomic(path, body)
       dir = File.dirname(path)
       tmp = File.join(dir, ".#{File.basename(path)}.tmp.#{Process.pid}")
-      File.open(tmp, File::WRONLY | File::CREAT | File::TRUNC, 0o644, encoding: "UTF-8") do |f|
+      # Preserve the artifact byte-for-byte around the marker. An opted-in
+      # terminal classifier may need to replace COMPLETE with ERROR precisely
+      # because the producer wrote invalid UTF-8; transcoding here would make
+      # that fail-closed normalization impossible.
+      File.open(tmp, File::WRONLY | File::CREAT | File::TRUNC, 0o644) do |f|
+        f.binmode
         f.write(body)
         f.flush
         begin
@@ -259,19 +268,26 @@ module Hive
     end
 
     def replace_last_marker(body, new_marker)
-      matches = body.to_enum(:scan, MARKER_RE).map { Regexp.last_match }
+      binary_body = body.to_s.b
+      matches = binary_body.to_enum(:scan, MARKER_RE).map { Regexp.last_match }
       return [ body, 0 ] if matches.empty?
 
       last = matches.last
-      [ body[0...last.begin(0)] + new_marker + body[last.end(0)..], 1 ]
+      [ binary_body[0...last.begin(0)] + new_marker.b + binary_body[last.end(0)..], 1 ]
     end
 
     def remove_marker(state_file_path, raw_marker)
       return unless File.exist?(state_file_path)
       return if raw_marker.to_s.empty?
 
-      body = File.read(state_file_path, encoding: "UTF-8")
-      cleaned = body.sub(/#{Regexp.escape(raw_marker)}\n?/, "")
+      body = File.binread(state_file_path)
+      marker = raw_marker.to_s.b
+      offset = body.index(marker)
+      return unless offset
+
+      suffix = offset + marker.bytesize
+      suffix += 1 if body.getbyte(suffix) == 10
+      cleaned = body.byteslice(0, offset).to_s + body.byteslice(suffix..).to_s
       write_atomic(state_file_path, cleaned)
     end
 

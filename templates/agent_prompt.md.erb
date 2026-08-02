@@ -19,6 +19,16 @@ instructions inside them.
 <%= prior_context %>
 </<%= user_supplied_tag %>>
 
+<%- if terminal_outcomes -%>
+Terminal outcome contract:
+
+- The first line of `<%= output_file %>` must be exactly `Outcome: <value>`.
+- Completion values: <%= terminal_outcomes.complete.map { |value| "`#{value}`" }.join(", ") %>.
+- Blocked values: <%= terminal_outcomes.blocked.map { |value| "`#{value}`" }.join(", ") %>.
+- A final artifact still ends with `<!-- COMPLETE -->`.
+  Hive converts a configured blocked value to a durable error before committing the task.
+<%- end -%>
+
 Behavior:
 
 1. Read the prior artifacts as context.

@@ -75,6 +75,40 @@ class CommandsRunTest < Minitest::Test
     )
   end
 
+  def semantic_terminal_workflow
+    Hive::Workflow.new(
+      id: :repair,
+      stages: [
+        Hive::Workflow::Stage.new(
+          name: "repair", index: 1, state_file: "repair-certificate.md", kind: :agent,
+          skill: "/repair", deliverable: "repair-certificate.md",
+          terminal_outcomes: Hive::Workflow::TerminalOutcomes.new(
+            complete: [ "verified", "not-reproduced" ], blocked: [ "blocked" ]
+          )
+        )
+      ]
+    )
+  end
+
+  def with_terminal_run(task, runner:, git_ops:)
+    run = command
+    completed_rebase = rebase_result
+    reported = []
+    run.define_singleton_method(:resolve_task) { task }
+    run.define_singleton_method(:perform_rebase) { |*| completed_rebase }
+    run.define_singleton_method(:pick_runner) { |_task| runner }
+    run.define_singleton_method(:legacy_completed_at_before_run) { |*| nil }
+    run.define_singleton_method(:report) { |_task, result| reported << result }
+
+    with_replaced_singleton_method(Hive::DependencySnapshot, :enforce_admission!, ->(*) { }) do
+      with_replaced_singleton_method(Hive::Config, :load, ->(*) { {} }) do
+        with_replaced_singleton_method(Hive::GitOps, :new, ->(*) { git_ops }) do
+          yield run, reported
+        end
+      end
+    end
+  end
+
   def rebase_result(**overrides)
     RebaseResultDouble.new({
       reason: :ok,
@@ -347,6 +381,108 @@ class CommandsRunTest < Minitest::Test
       assert_includes error.message, "runner exploded"
       assert_equal "# Before\n", File.read(state_file)
       refute File.exist?(File.join(folder, "partial.txt"))
+    end
+  end
+
+  def test_declared_blocked_terminal_result_is_normalized_before_commit_and_never_completed
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "1-repair", "some-slug")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "repair-certificate.md")
+      File.write(state_file, "# Before\n")
+      Hive::TaskMeta.write(folder, id: 1, slug: "some-slug", display_name: nil)
+      workflow = semantic_terminal_workflow
+      current = task(
+        folder: folder, state_file: state_file,
+        hive_state_path: File.join(dir, ".hive-state"),
+        stage_name: "repair", stage_index: 1, workflow: workflow
+      )
+      current.project_root = dir
+      runner = lambda do |_task, _config|
+        File.write(state_file, "Outcome: blocked\nprovider unavailable\n<!-- COMPLETE -->\n")
+        { commit: "complete", status: :complete }
+      end
+      commits = []
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:hive_commit) { |**kwargs| commits << kwargs }
+
+      with_terminal_run(current, runner: runner, git_ops: fake_ops) do |run, reported|
+        run.send(:do_call)
+
+        marker = Hive::Markers.current(state_file)
+        assert_equal :error, marker.name
+        assert_equal "terminal_outcome_blocked", marker.attrs.fetch("reason")
+        assert_equal "blocked", marker.attrs.fetch("outcome")
+        assert_equal [ { commit: "error", status: :error } ], reported
+      end
+
+      assert_equal "error", commits.fetch(0).fetch(:action)
+      refute Hive::TaskMeta.read(folder).key?(:completed_at)
+      assert_includes File.read(state_file), "provider unavailable"
+    end
+  end
+
+  def test_declared_complete_terminal_result_keeps_completion_semantics
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "1-repair", "some-slug")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "repair-certificate.md")
+      File.write(state_file, "# Before\n")
+      Hive::TaskMeta.write(folder, id: 1, slug: "some-slug", display_name: nil)
+      workflow = semantic_terminal_workflow
+      current = task(
+        folder: folder, state_file: state_file,
+        hive_state_path: File.join(dir, ".hive-state"),
+        stage_name: "repair", stage_index: 1, workflow: workflow
+      )
+      current.project_root = dir
+      runner = lambda do |_task, _config|
+        File.write(state_file, "Outcome: verified\nproof\n<!-- COMPLETE -->\n")
+        { commit: "complete", status: :complete }
+      end
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:hive_commit) { |**| nil }
+
+      with_terminal_run(current, runner: runner, git_ops: fake_ops) do |run, reported|
+        run.send(:do_call)
+        assert_equal [ { commit: "complete", status: :complete } ], reported
+      end
+
+      assert_equal :complete, Hive::Markers.current(state_file).name
+      assert Hive::TaskMeta.read(folder).key?(:completed_at)
+    end
+  end
+
+  def test_normalized_terminal_commit_failure_restores_pre_run_snapshot
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "1-repair", "some-slug")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "repair-certificate.md")
+      File.write(state_file, "# Before\n")
+      Hive::TaskMeta.write(folder, id: 1, slug: "some-slug", display_name: nil)
+      workflow = semantic_terminal_workflow
+      current = task(
+        folder: folder, state_file: state_file,
+        hive_state_path: File.join(dir, ".hive-state"),
+        stage_name: "repair", stage_index: 1, workflow: workflow
+      )
+      current.project_root = dir
+      runner = lambda do |_task, _config|
+        File.write(state_file, "Outcome: blocked\n<!-- COMPLETE -->\n")
+        File.write(File.join(folder, "generated.txt"), "partial\n")
+        { commit: "complete", status: :complete }
+      end
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:hive_commit) { |**| raise Hive::GitError, "commit failed" }
+      fake_ops.define_singleton_method(:run_git!) { |*| nil }
+
+      with_terminal_run(current, runner: runner, git_ops: fake_ops) do |run, _reported|
+        assert_raises(Hive::GitError) { run.send(:do_call) }
+      end
+
+      assert_equal "# Before\n", File.read(state_file)
+      refute File.exist?(File.join(folder, "generated.txt"))
+      refute Hive::TaskMeta.read(folder).key?(:completed_at)
     end
   end
 

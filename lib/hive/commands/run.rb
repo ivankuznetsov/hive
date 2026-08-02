@@ -19,6 +19,7 @@ require "hive/attempts/command_dispatch"
 require "hive/task_meta"
 require "hive/commit_or_rollback"
 require "hive/completion_time"
+require "hive/terminal_outcome"
 
 module Hive
   module Commands
@@ -160,9 +161,12 @@ module Hive
             end
             raise
           end
+          normalization = Hive::TerminalOutcome.normalize(task, result)
+          result = normalization.result
           commit_after(
             task, result, config: cfg, terminal_snapshot: terminal_snapshot,
-            completion_time: legacy_completed_at
+            completion_time: legacy_completed_at,
+            rollback_on_failure: normalization.changed
           )
           report(task, result)
         ensure
@@ -265,7 +269,8 @@ module Hive
         Hive::Stages::Resolver.resolve(task, descriptor: task.workflow)
       end
 
-      def commit_after(task, result, config: nil, terminal_snapshot: nil, completion_time: nil)
+      def commit_after(task, result, config: nil, terminal_snapshot: nil, completion_time: nil,
+                       rollback_on_failure: false)
         marker = Hive::Markers.current(task.state_file)
         archived = Hive::TaskAction.for(task, marker, config: config).key ==
                    Hive::Schemas::TaskActionKind::ARCHIVED
@@ -273,8 +278,9 @@ module Hive
         return unless action || archived
 
         ops = Hive::GitOps.new(task.project_root)
-        owned_snapshot = archived && terminal_snapshot.nil?
-        terminal_snapshot ||= TerminalStateSnapshot.capture(task.folder) if archived
+        transactional_terminal = archived || rollback_on_failure
+        owned_snapshot = transactional_terminal && terminal_snapshot.nil?
+        terminal_snapshot ||= TerminalStateSnapshot.capture(task.folder) if transactional_terminal
         Hive::Lock.with_commit_lock(task.hive_state_path) do
           begin
             stamp_completed_at(task, completion_time) if archived
@@ -285,7 +291,7 @@ module Hive
             )
           rescue Hive::Error, Hive::TaskMeta::InvalidMetadata,
                  SystemCallError, IOError, ArgumentError, Interrupt => e
-            if archived && terminal_snapshot
+            if transactional_terminal && terminal_snapshot
               rollback_terminal_state!(task, terminal_snapshot, ops, e)
             else
               raise

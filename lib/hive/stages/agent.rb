@@ -116,7 +116,8 @@ module Hive
             user_supplied_tag: Hive::Stages::Base.user_supplied_tag,
             prior_context: prior_artifacts(task, stage.state_file),
             skill_invocation: skill_invocation,
-            instruction_body: instruction_body
+            instruction_body: instruction_body,
+            terminal_outcomes: stage.terminal_outcomes
           )
         )
       end

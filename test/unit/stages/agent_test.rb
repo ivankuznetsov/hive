@@ -88,6 +88,64 @@ class StagesAgentTest < Minitest::Test
     end
   end
 
+  def test_opted_in_terminal_prompt_enumerates_exact_outcome_contract
+    with_tmp_dir do |project|
+      descriptor = Hive::Workflow.new(
+        id: :repair,
+        stages: [
+          Hive::Workflow::Stage.new(
+            name: "repair", index: 1, state_file: "repair-certificate.md", kind: :agent,
+            skill: "/repair", deliverable: "repair-certificate.md",
+            terminal_outcomes: Hive::Workflow::TerminalOutcomes.new(
+              complete: [ "verified", "not-reproduced" ], blocked: [ "blocked" ]
+            )
+          )
+        ]
+      )
+      task = task_for(project, "repair", descriptor: descriptor)
+
+      with_stubbed_spawn do |captured|
+        Hive::Stages::Agent.run!(task, { "repair" => { "agent" => "codex" } })
+        prompt = captured.first.fetch(:prompt)
+
+        assert_includes prompt, "must be exactly `Outcome: <value>`"
+        assert_includes prompt, "Completion values: `verified`, `not-reproduced`"
+        assert_includes prompt, "Blocked values: `blocked`"
+        assert_includes prompt, "Hive converts a configured blocked value to a durable error"
+        assert_includes prompt, "<!-- COMPLETE -->"
+      end
+    end
+  end
+
+  def test_legacy_agent_prompt_omits_terminal_outcome_contract
+    with_tmp_dir do |project|
+      task = task_for(project, "plan")
+
+      with_stubbed_spawn do |captured|
+        Hive::Stages::Agent.run!(task, { "plan" => { "agent" => "codex" } })
+        prompt = captured.first.fetch(:prompt)
+
+        refute_includes prompt, "Outcome: <value>"
+        refute_includes prompt, "Completion values:"
+        refute_includes prompt, "Blocked values:"
+      end
+    end
+  end
+
+  def test_agent_marker_read_survives_invalid_utf8_for_terminal_normalization
+    with_tmp_dir do |project|
+      task = task_for(project, "plan")
+      body = "Outcome: \xFF\n<!-- COMPLETE -->\n".b
+
+      with_stubbed_spawn(marker: body) do
+        result = Hive::Stages::Agent.run!(task, { "plan" => { "agent" => "codex" } })
+
+        assert_equal({ commit: "complete", status: :complete }, result)
+        assert_equal :complete, Hive::Markers.current(task.state_file).name
+      end
+    end
+  end
+
   def test_worktree_stage_delegates_before_generic_agent_spawn
     with_tmp_dir do |project|
       descriptor = worktree_workflow

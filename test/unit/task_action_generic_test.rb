@@ -86,6 +86,29 @@ class TaskActionGenericTest < Minitest::Test
     assert_nil errored.command
   end
 
+  def test_semantic_terminal_block_stays_active_and_exposes_stage_local_retry_guidance
+    action = action_for(
+      "report", :error,
+      {
+        "reason" => "terminal_outcome_blocked",
+        "outcome" => "needs-human",
+        "marker_id" => "semantic-block-1"
+      }
+    )
+
+    assert_equal "error", action.key
+    assert_equal "Blocked", action.label
+    assert_nil action.command
+
+    diagnostic = action.diagnostic
+    assert_equal "marker", diagnostic.fetch("source")
+    assert_includes diagnostic.fetch("detail"), "needs-human"
+    assert_includes diagnostic.fetch("detail"), "current terminal stage"
+    assert_includes diagnostic.fetch("detail"), "fresh task"
+    assert_equal "retry", diagnostic.dig("suggested_next_action", "kind")
+    assert_includes diagnostic.dig("suggested_next_action", "command"), "hive act workflow.retry"
+  end
+
   def test_council_marker_to_action_matrix
     fresh = action_for("review", :none, descriptor: council_workflow)
     assert_equal "ready_to_run", fresh.key

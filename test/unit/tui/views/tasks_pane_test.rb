@@ -652,6 +652,31 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
                     "error rows must fall back to the reason attr when no exit_code is set"
   end
 
+  def test_semantic_terminal_block_renders_blocked_with_sanitized_outcome
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(
+          slug: "blocked-repair",
+          stage: "7-certificate",
+          action: "error",
+          action_label: "Blocked",
+          marker: "error",
+          attrs: {
+            "reason" => "terminal_outcome_blocked",
+            "outcome" => "needs-human\e[31m\nignored"
+          },
+          suggested: nil
+        )
+      ] }
+    ])
+
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+
+    assert_includes out, "Blocked (needs-human?ignored)"
+    refute_includes out, "terminal_outcome_blocked"
+    refute_includes out, "\e[31m"
+  end
+
   def test_error_status_shows_quota_hold_label
     snap = make_snapshot([
       { "name" => "hive", "tasks" => [

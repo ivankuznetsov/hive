@@ -6,6 +6,9 @@ module Hive
     MAX_FIRST_LINE_BYTES = 512
     MAX_OUTCOME_BYTES = Hive::Workflow::MAX_TERMINAL_OUTCOME_LENGTH
     OUTCOME_LINE = /\AOutcome: (?<outcome>[a-z0-9]+(?:-[a-z0-9]+)*)\z/
+    ERROR_REASON_PREFIX = "terminal_outcome_".freeze
+    BLOCKED_REASON = "terminal_outcome_blocked".freeze
+    INVALID_REASON = "terminal_outcome_invalid".freeze
 
     Classification = Data.define(:kind, :outcome)
     Normalization = Data.define(:result, :changed)
@@ -41,7 +44,7 @@ module Hive
       classification = classify(task.state_file, outcomes)
       return Normalization.new(result: result, changed: false) if classification.kind == :complete
 
-      reason = classification.kind == :blocked ? "terminal_outcome_blocked" : "terminal_outcome_invalid"
+      reason = classification.kind == :blocked ? BLOCKED_REASON : INVALID_REASON
       Hive::Markers.set(
         task.state_file, :error,
         reason: reason, outcome: classification.outcome
@@ -49,6 +52,14 @@ module Hive
       normalized = result.is_a?(Hash) ? result.merge(commit: "error", status: :error) :
                    { commit: "error", status: :error }
       Normalization.new(result: normalized, changed: true)
+    end
+
+    def semantic_error?(attrs)
+      error_reason(attrs).start_with?(ERROR_REASON_PREFIX)
+    end
+
+    def blocked_error?(attrs)
+      error_reason(attrs) == BLOCKED_REASON
     end
 
     def read_first_line(path)
@@ -83,5 +94,12 @@ module Hive
       Classification.new(kind: :invalid, outcome: detail)
     end
     private_class_method :invalid
+
+    def error_reason(attrs)
+      return "" unless attrs.respond_to?(:[])
+
+      (attrs["reason"] || attrs[:reason]).to_s
+    end
+    private_class_method :error_reason
   end
 end

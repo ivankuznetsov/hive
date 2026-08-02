@@ -8,20 +8,16 @@ module HiveLiveAgentProof
         task_prompt_sha256 skill native_activation hive_commands created_files
         validation creation_only_task_count task_count task external_actions
         secret_scan execution_kind model_loop executed_instruction evidence_bundle
-        containment teardown cleanup
-      ])
+        containment teardown cleanup])
       FAILURE_KEYS = Primitives.deep_freeze(%w[
         schema schema_version platform candidate_sha result phase reason detail
-        execution_kind model_loop secret_scan
-      ])
+        execution_kind model_loop secret_scan])
       MANIFEST_KEYS = Primitives.deep_freeze(%w[
         canonical_digest candidate_sha files hive_version schema schema_version
-        skill_version
-      ])
+        skill_version])
       INSTALLATION_KEYS = Primitives.deep_freeze(%w[
         schema schema_version candidate_sha kind version closure_sha256
-        required_roles inventory total_size secret_scan
-      ])
+        required_roles inventory total_size secret_scan])
       FILE_KEYS = Primitives.deep_freeze(%w[path sha256 size])
       ARTIFACT_KEYS = Primitives.deep_freeze(%w[sha256 size])
       BUNDLE_KEYS = Primitives.deep_freeze(%w[kind path sha256 size])
@@ -35,6 +31,8 @@ module HiveLiveAgentProof
         %w[authenticated_openclaw executed]
       ])
       DETAIL_LIMIT = 1_000
+      MAX_EXACT_SECRETS = 64
+      MAX_SECRET_BYTES = 4_096
       MAX_INVENTORY_ENTRIES = 512
       MAX_MEMBER_BYTES = 268_435_456
       MAX_TOTAL_BYTES = 1_073_741_824
@@ -43,6 +41,7 @@ module HiveLiveAgentProof
       def failure(candidate_sha:, phase:, reason:, detail: nil,
                   execution_kind: "unavailable", model_loop: "not_started",
                   exact_secrets: [])
+        exact_secrets = exact_secrets!(exact_secrets)
         candidate = candidate_sha.to_s.downcase
         document = {
           "schema" => Vocabulary.fetch("evidence_schema"),
@@ -51,16 +50,17 @@ module HiveLiveAgentProof
           "candidate_sha" => SHA.match?(candidate) ? candidate : "unresolved",
           "result" => "failed", "phase" => phase.to_s, "reason" => reason.to_s,
           "detail" => detail.nil? ? nil : Primitives.secret_safe_text(
-            detail, exact_secrets: Array(exact_secrets), limit: DETAIL_LIMIT
+            detail, exact_secrets:, limit: DETAIL_LIMIT
           ),
           "execution_kind" => execution_kind.to_s, "model_loop" => model_loop.to_s,
           "secret_scan" => { "status" => "passed", "scanner" => Vocabulary.fetch("scanner") }
         }
-        validate_nonpassing!(document)
+        validate_nonpassing!(document, exact_secrets:)
       rescue TypeError, ArgumentError
         raise Error, "workflow-creator non-passing evidence is invalid"
       end
-      def validate_nonpassing!(row)
+      def validate_nonpassing!(row, exact_secrets: [])
+        exact_secrets = exact_secrets!(exact_secrets)
         valid = row.is_a?(Hash) && row.keys.sort == FAILURE_KEYS.sort &&
           row["secret_scan"].is_a?(Hash) && row["secret_scan"].keys.sort == %w[scanner status] &&
           row["schema"] == Vocabulary.fetch("evidence_schema") &&
@@ -74,18 +74,25 @@ module HiveLiveAgentProof
           CLASSIFICATIONS.include?([ row["execution_kind"], row["model_loop"] ]) &&
           row["secret_scan"] == { "status" => "passed", "scanner" => Vocabulary.fetch("scanner") }
         ASSERT.call(valid, "workflow-creator non-passing evidence is invalid")
-        ASSERT.call(Primitives.secret_findings(JSON.generate(row)).empty?,
+        ASSERT.call(Primitives.secret_findings(JSON.generate(row), exact_secrets:).empty?,
                     "workflow-creator non-passing evidence contains secret-shaped material")
         row
       rescue TypeError, NoMethodError, ArgumentError, JSON::GeneratorError
         raise Error, "workflow-creator non-passing evidence is invalid"
       end
+      def exact_secrets!(secrets)
+        valid = secrets.is_a?(Array) && secrets.length <= MAX_EXACT_SECRETS && secrets.all? do |secret|
+          secret.is_a?(String) && secret.valid_encoding? && (secret.encoding == Encoding::UTF_8 || secret.ascii_only?) && secret.bytesize.between?(1, MAX_SECRET_BYTES)
+        end
+        ASSERT.call(valid, "workflow-creator exact secrets are invalid")
+        secrets
+      end
       def validate_primary!(row:, manifest:, candidate_sha:, bundle_records:)
         exact = ->(value, keys) { value.is_a?(Hash) && value.keys.sort == keys.sort }
-        file_record = lambda do |record, positive|
+        file_record = lambda do |record|
           exact.call(record, FILE_KEYS) && Primitives.safe_relative_path?(record["path"]) &&
             record["sha256"].is_a?(String) && DIGEST.match?(record["sha256"]) &&
-            record["size"].is_a?(Integer) && (positive ? record["size"].positive? : record["size"] >= 0)
+            record["size"].is_a?(Integer) && record["size"].positive?
         end
         ASSERT.call(exact.call(row, PRIMARY_KEYS), "workflow-creator evidence fields are invalid")
         ASSERT.call(exact.call(manifest, MANIFEST_KEYS), "artifact manifest fields are invalid")
@@ -122,7 +129,7 @@ module HiveLiveAgentProof
         created = row["created_files"]
         authored = created&.find { |record| record["path"] == Vocabulary.fetch("executed_instruction") }
         content = created.is_a?(Array) && created.map { |record| record["path"] } == Vocabulary.fetch("files") &&
-          created.all? { |record| file_record.call(record, true) } && file_record.call(row["executed_instruction"], true) &&
+          created.all? { |record| file_record.call(record) } && file_record.call(row["executed_instruction"]) &&
           row["executed_instruction"] == authored && row["validation"] == Vocabulary.fetch("graph") &&
           row["creation_only_task_count"].is_a?(Integer) && row["creation_only_task_count"].zero? &&
           row["task_count"].is_a?(Integer) && row["task_count"] == 1 &&
@@ -142,6 +149,7 @@ module HiveLiveAgentProof
       end
       def valid_manifest?(manifest, candidate_sha)
         return false unless manifest.is_a?(Hash) && manifest.keys.sort == MANIFEST_KEYS.sort
+        Primitives.canonical_json(manifest)
         version = manifest["hive_version"]
         names = [
           "hive-agent-skills-#{candidate_sha}.tar.gz", "hive-cli-#{version}.gem",
@@ -159,6 +167,8 @@ module HiveLiveAgentProof
               record["sha256"].is_a?(String) && DIGEST.match?(record["sha256"]) &&
               record["size"].is_a?(Integer) && record["size"].positive?
           end
+      rescue Error
+        false
       end
       def validate_installation!(document:, kind:, manifest:, candidate_sha:)
         exact = ->(value, keys) { value.is_a?(Hash) && value.keys.sort == keys.sort }
@@ -179,7 +189,8 @@ module HiveLiveAgentProof
         required = document["required_roles"]
         ASSERT.call(exact.call(required, roles), "workflow-creator #{kind} installed required roles are invalid")
         roles_valid = required.values.all? { |item| record.call(item) && inventory.include?(item) } &&
-          required.values.map { |item| item["path"] }.uniq.length == roles.length
+          required.values.map { |item| item["path"] }.uniq.length == roles.length &&
+          required.fetch("package").fetch("size").positive?
         ASSERT.call(roles_valid, "workflow-creator #{kind} installed required roles are not inventory-bound")
         closure = { "required_roles" => required, "inventory" => inventory }
         total = inventory.sum { |item| item.fetch("size") }

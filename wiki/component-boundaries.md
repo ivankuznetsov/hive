@@ -67,12 +67,18 @@ qualification proof.
 
 `HiveLiveAgentProof::WorkflowCreator` is the sole staged-prerequisite
 exception. Its four-file core is pure and namespaced: it exports one deeply
-frozen schema-v1 `Vocabulary`, a nested `Error`, canonical JSON, and validators
-for failed, primary, installed-closure, and declarative execution-receipt
-documents. It performs no filesystem, archive, process, provider, credential,
-publication, recovery, or bundle-custody work. The dependency direction is
-facade to primitives/contracts only; the core cannot require `proof.rb` or
-`workflow_creator_bundle.rb`.
+frozen schema-v1 `Vocabulary`, a nested `Error`, resource-bounded canonical
+JSON, and validators for failed, primary, installed-closure, and declarative
+execution-receipt documents. Failure admission accepts only a bounded array of
+unambiguous exact-secret strings, and relative document paths reject both
+traversal and drive-qualified forms. Execution admission composes the primary
+and installation validators, binds canonical candidate/OpenClaw installation
+bytes to the matching primary and receipt records, and binds the canonical
+execution receipt to the third bundle record and supplied receipt digest. It
+performs no filesystem, archive, process, provider, credential, publication,
+recovery, or bundle-custody work. The dependency direction is facade to
+primitives/contracts only; `ExecutionContract` reuses `Contract` primitives,
+while the core cannot require `proof.rb` or `workflow_creator_bundle.rb`.
 
 This candidate truthfully has zero current production consumers. Its non-empty
 U1a2 migration exception is an executable removal fence: U1a2 must route the

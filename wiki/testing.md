@@ -50,9 +50,17 @@ staged U1a1 semantic core with no live provider or filesystem fixture. It pins
 the exact prompt, argv, file, graph, task, schema, and classification bytes;
 recursively attempts to mutate every exported `Vocabulary` container, key, and
 string (including computed digests); and exercises strict failed, primary,
-installed-closure, and declarative execution-transaction matrices. It also
-loads the core alone and before/after untouched `proof.rb` under Ruby warnings,
-and statically rejects I/O/process dependencies or proof/bundle back-edges.
+installed-closure, and declarative execution-transaction matrices. Canonical
+JSON has explicit depth, node, string, and output-byte ceilings; failure
+redaction rejects scalar, mapping, oversized, ambiguous-encoding, and
+over-count exact-secret inputs; and document paths reject drive-qualified as
+well as traversal forms. Execution validation composes the primary and
+installation contracts, then binds both canonical installation documents and
+the canonical execution receipt by digest and byte size before consuming their
+records. The test also loads the core alone and before/after untouched
+`proof.rb` under Ruby warnings, admits an exact Ripper-derived
+require/call/constant surface, rejects dormant I/O additions, and rejects
+proof/bundle back-edges.
 This is core-only proof, not bundle custody or an activated production
 consumer; U1a2 owns that routing.
 
@@ -179,6 +187,10 @@ transport, manifest upload exceptions, missing media directories, screenote
 config type errors, and dry-run digest completion failures.
 
 Coverage-included tests that only need a generic stdout/stderr subprocess should avoid `RbConfig.ruby` children unless they are explicitly testing Ruby coverage propagation. Those nested Ruby processes inherit the coverage `RUBYOPT`, which can make startup latency part of otherwise unrelated timeout assertions; use a tiny executable fixture script for generic capture/timeout seams.
+The workflow-creator branch-budget probe is intentionally different: its child
+clears the inherited coverage bootstrap variables before starting an isolated
+Ruby `Coverage` branch measurement, avoiding a double-start while preserving
+the exact production branch-site count.
 
 In CI (`CI=true`), tests that exercise backgrounding commands must force a foreground path (for example `foreground: true`) or stub daemonization. Otherwise the test process can daemonize before Minitest `after_run` writes `coverage/coverage.json`, leaving the parent coverage task with a missing report while child output keeps streaming. Bundler evaluates the gemspec before coverage starts, so the bootstrap reloads the preloaded `lib/hive/version.rb`, `lib/hive/errors.rb`, and `lib/hive.rb` files in dependency order. Reloaded code must therefore be idempotent; for example, self-derived enum constants must exclude `:ALL` to stay reload-safe.
 

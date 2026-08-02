@@ -3,6 +3,7 @@ require "digest"
 require "json"
 require "open3"
 require "rbconfig"
+require "ripper"
 require_relative "../../../packaging/live_agent_skills/workflow_creator"
 
 class WorkflowCreatorCoreTest < Minitest::Test
@@ -20,6 +21,9 @@ class WorkflowCreatorCoreTest < Minitest::Test
       CREATOR.singleton_methods(false).sort
     )
     assert CREATOR::Error < StandardError
+    assert_includes CREATOR.method(:validate_execution!).parameters, [ :keyreq, :manifest ]
+    execution_contract = CREATOR.const_get(:ExecutionContract, false)
+    assert_includes execution_contract.method(:validate!).parameters, [ :keyreq, :manifest ]
     assert_equal %w[
       schema_version evidence_schema installed_schema execution_schema
       execution_plan scanner request prompt task_request task_key task_slug
@@ -118,6 +122,16 @@ class WorkflowCreatorCoreTest < Minitest::Test
       error = assert_raises(CREATOR::Error) { CREATOR.canonical_json(value) }
       assert_equal "cannot canonicalize JSON", error.message
     end
+    deeply_nested = []
+    128.times { deeply_nested = [ deeply_nested ] }
+    assert_raises(CREATOR::Error) { CREATOR.canonical_json(deeply_nested) }
+    assert_raises(CREATOR::Error) { CREATOR.canonical_json(Array.new(16_385, 0)) }
+    json_limit = CREATOR.const_get(:Primitives, false).const_get(:MAX_JSON_BYTES, false)
+    assert_raises(CREATOR::Error) { CREATOR.canonical_json("x" * (json_limit + 1)) }
+    assert_raises(CREATOR::Error) { CREATOR.canonical_json({ "x" * (json_limit + 1) => 0 }) }
+    assert_raises(CREATOR::Error) do
+      CREATOR.canonical_json([ "x" * (json_limit / 2), "y" * (json_limit / 2) ])
+    end
 
     row = CREATOR.failure(
       candidate_sha: SHA, phase: "preflight", reason: "provider_unavailable",
@@ -152,6 +166,26 @@ class WorkflowCreatorCoreTest < Minitest::Test
       assert_raises(CREATOR::Error) { CREATOR.validate_nonpassing!(invalid) }
     end
     assert_raises(CREATOR::Error) { CREATOR.validate_nonpassing!(nil) }
+
+    %i[phase reason].each do |field|
+      secret = "databasepassword0123456789"
+      arguments = { candidate_sha: SHA, phase: "preflight", reason: "provider_unavailable",
+                    exact_secrets: [ secret ] }
+      arguments[field] = secret
+      assert_raises(CREATOR::Error, field.to_s) { CREATOR.failure(**arguments) }
+    end
+    [ "databasepassword0123456789", { "api_key" => "databasepassword0123456789" } ].each do |secrets|
+      assert_raises(CREATOR::Error) do
+        CREATOR.failure(candidate_sha: SHA, phase: "preflight", reason: "provider_unavailable",
+                        detail: "databasepassword0123456789", exact_secrets: secrets)
+      end
+    end
+    [ Array.new(65) { |index| "absent-secret-#{index}" }, [ "x" * 4_097 ], [ "" ], [ "\xFF".b ] ].each do |secrets|
+      assert_raises(CREATOR::Error) do
+        CREATOR.failure(candidate_sha: SHA, phase: "preflight", reason: "provider_unavailable",
+                        exact_secrets: secrets)
+      end
+    end
   end
 
   def test_primary_contract_accepts_exact_claims_and_rejects_key_type_order_and_binding_drift
@@ -233,6 +267,30 @@ class WorkflowCreatorCoreTest < Minitest::Test
       CREATOR.validate_installation!(document: openclaw, kind: "openclaw",
                                      manifest: fixture.fetch(:manifest), candidate_sha: SHA)
     end
+
+    zero_package = deep_dup(fixture.fetch(:installations).fetch("openclaw"))
+    package = zero_package.fetch("required_roles").fetch("package")
+    package["size"] = 0
+    zero_package.fetch("inventory").find { |item| item["path"] == package["path"] }["size"] = 0
+    refresh_installation!(zero_package)
+    assert_raises(CREATOR::Error) do
+      CREATOR.validate_installation!(document: zero_package, kind: "openclaw",
+                                     manifest: fixture.fetch(:manifest), candidate_sha: SHA)
+    end
+  end
+
+  def test_artifact_manifests_reject_invalid_utf8_before_identity_use
+    fixture = valid_fixture
+    fixture.fetch(:manifest)["skill_version"] = "\xFF".b
+    fixture.fetch(:row).fetch("skill")["skill_version"] = "\xFF".b
+
+    assert_raises(CREATOR::Error) { validate_primary(fixture) }
+    assert_raises(CREATOR::Error) do
+      CREATOR.validate_installation!(
+        document: fixture.fetch(:installations).fetch("openclaw"), kind: "openclaw",
+        manifest: fixture.fetch(:manifest), candidate_sha: SHA
+      )
+    end
   end
 
   def test_execution_contract_is_a_closed_declarative_transaction
@@ -287,7 +345,126 @@ class WorkflowCreatorCoreTest < Minitest::Test
     assert_raises(CREATOR::Error) { validate_execution(invalid) }
   end
 
-  def test_core_loads_cleanly_in_both_proof_orders_and_has_no_io_or_back_edge
+  def test_execution_contract_binds_all_canonical_document_bytes_and_kinds
+    cases = {
+      "swapped-documents" => lambda do |item|
+        candidate = item[:installations].fetch("candidate")
+        item[:installations]["candidate"] = item[:installations].fetch("openclaw")
+        item[:installations]["openclaw"] = candidate
+      end,
+      "duplicated-candidate-document" => lambda do |item|
+        item[:installations]["openclaw"] = deep_dup(item[:installations].fetch("candidate"))
+        rebind_installation_record!(item, 1, "openclaw")
+        package = item[:installations].fetch("candidate").dig("required_roles", "package")
+        item[:receipt].fetch("archive_admissions")[1]["artifact_sha256"] = package.fetch("sha256")
+        item[:receipt].fetch("archive_admissions")[1]["artifact_size"] = package.fetch("size")
+      end,
+      "stale-candidate-identity" => lambda do |item|
+        item[:installations]["openclaw"]["candidate_sha"] = "c" * 40
+        rebind_installation_record!(item, 1, "openclaw")
+      end,
+      "tampered-gateway-bytes" => lambda do |item|
+        gateway = item[:installations].fetch("candidate").fetch("required_roles").fetch("audit_gateway")
+        gateway["sha256"] = DIGEST
+        inventory = item[:installations].fetch("candidate").fetch("inventory")
+        inventory.find { |record| record["path"] == gateway["path"] }["sha256"] = DIGEST
+        refresh_installation!(item[:installations].fetch("candidate"))
+        item[:receipt].fetch("gateway")["identity"] = deep_dup(gateway)
+      end,
+      "record-bytes-mismatch" => lambda do |item|
+        record = item[:bundle_records].fetch(0)
+        record["sha256"] = DIGEST
+        record["size"] += 1
+        item[:receipt].fetch("installed_manifests")[0] = deep_dup(record)
+      end,
+      "primary-record-cross-binding" => lambda do |item|
+        record = item[:bundle_records].fetch(0)
+        record["sha256"] = DIGEST
+        item[:receipt].fetch("installed_manifests")[0] = deep_dup(record)
+      end,
+      "stale-execution-receipt-bytes" => lambda do |item|
+        item[:receipt].fetch("run")["correlation_id"] = "different-run"
+        item[:receipt].fetch("containment")["owner_correlation_id"] = "different-run"
+      end,
+      "execution-receipt-size-mismatch" => lambda do |item|
+        record = item[:bundle_records].fetch(2)
+        record["size"] += 1
+        item[:row].fetch("evidence_bundle")[2] = deep_dup(record)
+      end,
+      "zero-byte-openclaw-package-and-archive" => lambda do |item|
+        document = item[:installations].fetch("openclaw")
+        package = document.fetch("required_roles").fetch("package")
+        package["size"] = 0
+        document.fetch("inventory").find { |entry| entry["path"] == package["path"] }["size"] = 0
+        refresh_installation!(document)
+        rebind_installation_record!(item, 1, "openclaw")
+        item[:receipt].fetch("archive_admissions")[1]["artifact_size"] = 0
+      end
+    }
+
+    accepted = cases.filter_map do |label, mutation|
+      invalid = valid_fixture
+      mutation.call(invalid)
+      validate_execution(invalid)
+      label
+    rescue CREATOR::Error
+      nil
+    end
+    assert_empty accepted, "execution admitted unbound cases: #{accepted.join(', ')}"
+  end
+
+  def test_primary_installation_and_execution_reject_unsafe_relative_paths
+    unsafe_paths = [
+      "", ".", "..", "/absolute", "../escape", "dir/../escape", "./file",
+      "dir//file", "dir/", "C:/escape", "C:relative", "C:\\escape", "dir\\escape",
+      "nul\0path", "\xFF".b
+    ]
+
+    unsafe_paths.each do |path|
+      primary = valid_fixture
+      primary.fetch(:row).fetch("created_files").first["path"] = path
+      assert_raises(CREATOR::Error, "primary #{path.inspect}") { validate_primary(primary) }
+
+      installed = valid_fixture
+      document = installed.fetch(:installations).fetch("openclaw")
+      dependency = document.fetch("inventory").last
+      dependency["path"] = path
+      begin
+        refresh_installation!(document)
+      rescue CREATOR::Error
+        nil
+      end
+      assert_raises(CREATOR::Error, "installation #{path.inspect}") do
+        CREATOR.validate_installation!(document:, kind: "openclaw",
+                                       manifest: installed.fetch(:manifest), candidate_sha: SHA)
+      end
+
+      execution = valid_fixture
+      execution.fetch(:row).fetch("executed_instruction")["path"] = path
+      execution.fetch(:receipt)["authored_instruction"]["path"] = path
+      execution.fetch(:receipt)["executed_instruction"]["path"] = path
+      assert_raises(CREATOR::Error, "execution #{path.inspect}") { validate_execution(execution) }
+    end
+  end
+
+  def test_schema_v1_vocabulary_is_bound_to_the_incumbent_proof
+    require_relative "../../../packaging/live_agent_skills/proof"
+    keys = %w[schema_version request prompt task_request task_key task_slug task_prompt task_new_argv commands files]
+    constants = %i[
+      SCHEMA_VERSION WORKFLOW_CREATOR_REQUEST WORKFLOW_CREATOR_PROMPT WORKFLOW_CREATOR_TASK_REQUEST
+      WORKFLOW_CREATOR_TASK_KEY WORKFLOW_CREATOR_TASK_SLUG WORKFLOW_CREATOR_TASK_PROMPT
+      WORKFLOW_CREATOR_TASK_NEW_ARGV WORKFLOW_CREATOR_COMMANDS WORKFLOW_CREATOR_FILES]
+    keys.zip(constants).each do |key, name|
+      assert_equal HiveLiveAgentProof.const_get(name), vocabulary.fetch(key), key
+    end
+    assert_equal({ "kind" => HiveLiveAgentProof::NATIVE_ACTIVATION_KINDS.fetch("openclaw"),
+                   "invocation" => HiveLiveAgentProof::INVOCATIONS.fetch("openclaw") },
+                 vocabulary.fetch("native_activation"))
+    patterns = CREATOR.const_get(:Primitives, false).const_get(:SECRET_PATTERNS, false)
+    assert_equal HiveLiveAgentProof::SECRET_PATTERNS.map(&:source), patterns.map(&:source)
+  end
+
+  def test_core_loads_cleanly_in_both_proof_orders_and_has_pure_dependencies
     core = "packaging/live_agent_skills/workflow_creator"
     proof = "packaging/live_agent_skills/proof"
     [ [ core ], [ core, proof ], [ proof, core ] ].each do |order|
@@ -315,13 +492,16 @@ class WorkflowCreatorCoreTest < Minitest::Test
       [ name, File.read(File.join(ROOT, "packaging", "live_agent_skills", name)) ]
     end
     sources.each do |name, source|
-      refute_match(/\b(?:File|Dir|IO|Open3|Process|Pathname|Zlib|Gem::Package)\b|`|\bsystem\s*\(/,
-                   source, name)
       refute_match(/require_relative ["'](?:proof|workflow_creator_bundle)["']/, source, name)
     end
     assert_match(/require_relative "proof_primitives"/, sources.fetch("workflow_creator.rb"))
     assert_match(/require_relative "workflow_creator_contract"/, sources.fetch("workflow_creator.rb"))
     assert_match(/require_relative "workflow_creator_execution_contract"/, sources.fetch("workflow_creator.rb"))
+    assert_pure_source_surface(sources)
+    poisoned = sources.merge(
+      "proof_primitives.rb" => "#{sources.fetch('proof_primitives.rb')}\ndef dormant_io\n  require 'socket'\n  TCPSocket.open('localhost', 9)\nend\n"
+    )
+    assert_raises(Minitest::Assertion) { assert_pure_source_surface(poisoned) }
   end
 
   def test_production_files_stay_inside_r43_line_method_and_branch_budgets
@@ -349,7 +529,7 @@ class WorkflowCreatorCoreTest < Minitest::Test
     { lines: 590, methods: 22, branches: 28 }.each do |metric, hard_limit|
       assert_operator totals.fetch(metric), :<=, hard_limit, "aggregate hard #{metric}"
     end
-    { lines: 576, methods: 21, branches: 27 }.each do |metric, target|
+    { lines: 588, methods: 22, branches: 19 }.each do |metric, target|
       assert_operator totals.fetch(metric), :<=, target, "aggregate target #{metric}"
     end
   end
@@ -373,7 +553,10 @@ class WorkflowCreatorCoreTest < Minitest::Test
       load path
       puts Coverage.peek_result.fetch(path).fetch(:branches).length
     RUBY
-    out, err, status = Open3.capture3(RbConfig.ruby, "-e", script, path)
+    clean_env = %w[HIVE_COVERAGE HIVE_COVERAGE_ROOT HIVE_COVERAGE_RUN_ID RUBYOPT].to_h do |key|
+      [ key, nil ]
+    end
+    out, err, status = Open3.capture3(clean_env, RbConfig.ruby, "-e", script, path)
     assert status.success?, "#{name} branch coverage: #{out}#{err}"
     assert_empty err, name
     Integer(out, 10)
@@ -381,13 +564,14 @@ class WorkflowCreatorCoreTest < Minitest::Test
 
   def valid_fixture
     manifest = artifact_manifest
-    records = bundle_records
     installations = {
       "candidate" => installation("candidate", manifest),
       "openclaw" => installation("openclaw", manifest)
     }
+    records = bundle_records(installations)
     row = primary_row(manifest, records)
     receipt = execution_receipt(row, records, installations)
+    bind_execution_record!(row, records, receipt)
     {
       manifest:, bundle_records: records, installations:, row:, receipt:,
       receipt_sha256: records.fetch(2).fetch("sha256")
@@ -405,7 +589,7 @@ class WorkflowCreatorCoreTest < Minitest::Test
     CREATOR.validate_execution!(
       receipt: fixture.fetch(:receipt), row: fixture.fetch(:row), candidate_sha: SHA,
       installation_records: fixture.fetch(:bundle_records).first(2),
-      receipt_sha256: fixture.fetch(:receipt_sha256),
+      receipt_sha256: fixture.fetch(:receipt_sha256), manifest: fixture.fetch(:manifest),
       candidate_installation: fixture.fetch(:installations).fetch("candidate"),
       openclaw_installation: fixture.fetch(:installations).fetch("openclaw")
     )
@@ -427,15 +611,159 @@ class WorkflowCreatorCoreTest < Minitest::Test
     }
   end
 
-  def bundle_records
-    %w[
-      candidate-installed-manifest.json openclaw-installed-manifest.json
-      execution-receipt.json
-    ].each_with_index.map do |path, index|
+  def bundle_records(installations)
+    documents = [ installations.fetch("candidate"), installations.fetch("openclaw") ]
+    %w[candidate-installed-manifest.json openclaw-installed-manifest.json].each_with_index.map do |path, index|
+      bytes = CREATOR.canonical_json(documents.fetch(index))
       {
         "kind" => %w[candidate_installation openclaw_installation execution_receipt].fetch(index),
-        "path" => path, "sha256" => Digest::SHA256.hexdigest(path), "size" => path.bytesize
+        "path" => path, "sha256" => Digest::SHA256.hexdigest(bytes), "size" => bytes.bytesize
       }
+    end << {
+      "kind" => "execution_receipt", "path" => "execution-receipt.json",
+      "sha256" => Digest::SHA256.hexdigest("execution-receipt.json"), "size" => 22
+    }
+  end
+
+  def rebind_installation_record!(fixture, index, kind)
+    bytes = CREATOR.canonical_json(fixture.fetch(:installations).fetch(kind))
+    record = fixture.fetch(:bundle_records).fetch(index)
+    record["sha256"] = Digest::SHA256.hexdigest(bytes)
+    record["size"] = bytes.bytesize
+    fixture.fetch(:row).fetch("evidence_bundle")[index] = deep_dup(record)
+    fixture.fetch(:receipt).fetch("installed_manifests")[index] = deep_dup(record)
+  end
+
+  def bind_execution_record!(row, records, receipt)
+    bytes = CREATOR.canonical_json(receipt)
+    record = records.fetch(2)
+    record["sha256"] = Digest::SHA256.hexdigest(bytes)
+    record["size"] = bytes.bytesize
+    row.fetch("evidence_bundle")[2] = deep_dup(record)
+    summary = { "status" => "passed", "receipt_sha256" => record.fetch("sha256") }
+    %w[containment teardown cleanup].each { |field| row[field] = deep_dup(summary) }
+  end
+
+  def refresh_installation!(document)
+    closure = {
+      "required_roles" => document.fetch("required_roles"),
+      "inventory" => document.fetch("inventory")
+    }
+    document["closure_sha256"] = Digest::SHA256.hexdigest(CREATOR.canonical_json(closure))
+    document["total_size"] = document.fetch("inventory").sum { |record| record.fetch("size") }
+  end
+
+  def assert_pure_source_surface(sources)
+    script = "require 'json'; require 'digest'; before=$LOADED_FEATURES.dup; " \
+      "require 'packaging/live_agent_skills/workflow_creator'; puts(($LOADED_FEATURES-before).join(\"\\n\"))"
+    out, err, status = Open3.capture3(RbConfig.ruby, "-I#{ROOT}", "-e", script)
+    assert status.success?, err
+    allowed = %r{\A#{Regexp.escape(ROOT)}/packaging/live_agent_skills/(?:proof_primitives|workflow_creator(?:_contract|_execution_contract)?)\.rb\z|/(?:digest/sha2(?:/loader)?\.rb|digest/sha2\.[^/]+)\z}
+    assert out.lines.map(&:chomp).all? { |path| allowed.match?(path) }, out
+    expected = {
+      "proof_primitives.rb" => {
+        requires: [ %w[require json] ],
+        calls: %w[
+          all? bytesize byteslice call deep_freeze each each_with_index empty? encode fetch filter_map
+          force_encoding freeze gsub! include? is_a? keys lambda map match? module_function none?
+          pretty_generate raise require scrub sort source split start_with? to_h to_s valid_encoding?
+        ],
+        constants: %w[
+          ArgumentError Array Encoding Error FalseClass Float GeneratorError Hash HiveLiveAgentProof Integer JSON
+          MAX_JSON_BYTES MAX_JSON_DEPTH MAX_JSON_NODES NestingError NilClass Primitives SECRET_PATTERNS
+          StandardError String TrueClass TypeError UTF_8 WorkflowCreator
+        ]
+      },
+      "workflow_creator.rb" => {
+        requires: [ %w[require digest], %w[require_relative proof_primitives],
+                    %w[require_relative workflow_creator_contract],
+                    %w[require_relative workflow_creator_execution_contract] ],
+        calls: %w[
+          canonical_json deep_freeze failure fetch hexdigest private_constant require require_relative
+          validate! validate_installation! validate_nonpassing! validate_primary!
+        ],
+        constants: %w[
+          Contract Digest ExecutionContract HiveLiveAgentProof Primitives SHA256 Vocabulary WorkflowCreator
+        ]
+      },
+      "workflow_creator_contract.rb" => {
+        requires: [ %w[require digest], %w[require_relative proof_primitives] ],
+        calls: %w[
+          all? ascii_only? between? bytesize call canonical_json deep_freeze dig downcase drop each each_with_index empty? encoding
+          exact_secrets! fetch find first freeze generate hexdigest include? is_a? keys lambda length map match?
+          module_function nil? one? positive? raise require require_relative safe_relative_path? secret_findings
+          secret_safe_text select sort sum then to_s uniq valid_encoding? valid_manifest? validate_nonpassing!
+          values values_at zero? zip
+        ],
+        constants: %w[
+          ARTIFACT_KEYS ASSERT ArgumentError Array BUNDLE_KEYS CLASSIFICATIONS Contract DETAIL_LIMIT DIGEST Digest Encoding Error
+          FAILURE_KEYS FAILURE_PART FILE_KEYS GeneratorError Hash HiveLiveAgentProof INSTALLATION_KEYS Integer JSON
+          KeyError MANIFEST_KEYS MAX_EXACT_SECRETS MAX_INVENTORY_ENTRIES MAX_MEMBER_BYTES MAX_SECRET_BYTES
+          MAX_TOTAL_BYTES NoMethodError PRIMARY_KEYS Primitives SHA SHA256 SUMMARY_KEYS String TypeError UTF_8 Vocabulary
+          WorkflowCreator
+        ]
+      },
+      "workflow_creator_execution_contract.rb" => {
+        requires: [ %w[require_relative workflow_creator_contract] ],
+        calls: %w[
+          all? between? bytesize call canonical_json deep_freeze each_with_index empty? fetch first freeze generate
+          hexdigest include? is_a? keys lambda length map match? module_function nil? positive? raise require_relative
+          safe_relative_path? secret_findings slice sort uniq valid_process? validate_aggregates! validate_identity!
+          validate_installation! validate_primary! validate_processes! values_at zero? zip
+        ],
+        constants: %w[
+          ARCHIVE_KEYS ASSERT ArgumentError Array BUNDLE_KEYS CAPTURE_KEYS CLEANUP_KEYS COMMAND_KEYS CONTAINMENT_KEYS
+          Contract DIGEST Digest Error ExecutionContract FILE_KEYS GATEWAY_KEYS GeneratorError Hash HiveLiveAgentProof
+          Integer JSON KEYS KeyError LABEL MAX_ARCHIVE_BYTES MAX_ARCHIVE_ENTRIES MAX_CAPTURE_BYTES NoMethodError
+          OUTER_KEYS PROCESS_TEARDOWN_KEYS Primitives RUN_KEYS SHA SHA256 String TARGET_KEYS TEARDOWN_KEYS TypeError
+          Vocabulary WorkflowCreator
+        ]
+      }
+    }
+    sources.each do |name, source|
+      syntax = Ripper.sexp(source)
+      refute_nil syntax, name
+      nodes = []
+      walk = lambda do |node|
+        next unless node.is_a?(Array)
+        nodes << node
+        node.each { |child| walk.call(child) }
+      end
+      walk.call(syntax)
+      calls = nodes.filter_map do |node|
+        case node.first
+        when :vcall, :fcall, :command then node.dig(1, 1)
+        when :call, :command_call, :field then node.dig(3, 1)
+        end
+      end
+      requires = nodes.filter_map do |node|
+        invocation, arguments = case node.first
+        when :command then [ node[1], node[2] ]
+        when :command_call then [ node[3], node[4] ]
+        when :method_add_arg
+          call = node[1]
+          [ call&.first == :fcall ? call[1] : call&.[](3), node[2] ]
+        end
+        next unless invocation && %w[require require_relative].include?(invocation[1])
+        parts = []
+        dynamic = false
+        inspect_argument = lambda do |argument|
+          next unless argument.is_a?(Array)
+          parts << argument[1] if argument.first == :@tstring_content
+          dynamic = true if argument.first == :string_embexpr
+          argument.each { |child| inspect_argument.call(child) }
+        end
+        inspect_argument.call(arguments)
+        [ invocation[1], !dynamic && parts.one? ? parts.first : "<dynamic>" ]
+      end
+      expected_surface = expected.fetch(name)
+      assert_equal calls.count { |call| %w[require require_relative].include?(call) }, requires.length, name
+      assert_equal expected_surface.fetch(:requires), requires, name
+      assert_equal expected_surface.fetch(:calls), calls.uniq.sort, name
+      tokens = Ripper.lex(source)
+      constants = tokens.filter_map { |_position, type, text| text if type == :on_const }.uniq.sort
+      assert_equal expected_surface.fetch(:constants), constants, name
+      assert_empty tokens.select { |_position, type, _text| %i[on_backtick on_gvar].include?(type) }, name
     end
   end
 

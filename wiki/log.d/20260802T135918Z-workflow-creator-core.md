@@ -18,3 +18,12 @@
   clean/co-load, purity/back-edge, and executable line/method/branch budget
   proofs. U1a2 still owns edits to incumbent proof/custody consumers; no live
   provider, release, publication, deployment, or remote mutation occurred.
+- Resolution 01 composes primary and installation validation into execution
+  admission; binds canonical candidate/OpenClaw bytes to their record views;
+  binds canonical receipt bytes, size, and supplied digest to the third bundle
+  record; bounds canonical depth, nodes, strings, and output; rejects kind
+  substitution, stale/tampered bytes, zero-byte required packages,
+  non-array/oversized/ambiguous exact-secret inputs, and drive-qualified or
+  traversal paths; replaces the negative purity blocklist with exact
+  Ripper-derived require/call/constant admission; reuses contract primitives;
+  and isolates branch-budget subprocess coverage bootstrap state.

@@ -655,18 +655,17 @@ class ComponentBoundariesTest < Minitest::Test
     end
   end
 
-  def test_boundary_ready_component_rejects_zero_consumers_even_with_a_fence
+  def test_boundary_ready_component_rejects_zero_consumers_at_the_named_branch
     with_contract_fixture(
       entrypoint_source: example_api_source,
       hive_consumers: [],
-      migration_exceptions: [
-        { "reason" => "not a ready-state exception", "removal_unit" => "U1a2" }
-      ]
+      migration_exceptions: []
     ) do |contract|
       error = assert_raises(ComponentBoundaryContract::ValidationError) do
         contract.validate_catalog!
       end
-      assert_match(/example\.(?:hive_consumers|migration_exceptions)/, error.message)
+      assert_match(/example\.hive_consumers/, error.message)
+      assert_match(/candidate components without consumers require a staged removal exception/, error.message)
     end
   end
 

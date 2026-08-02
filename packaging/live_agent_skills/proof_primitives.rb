@@ -1,28 +1,31 @@
 require "json"
-
 module HiveLiveAgentProof
   module WorkflowCreator
     class Error < StandardError; end
     module Primitives
       SECRET_PATTERNS = [
-        /sk-ant-[A-Za-z0-9_-]{12,}/,
-        /sk-(?:proj-)?[A-Za-z0-9_-]{20,}/,
-        /gh[opsu]_[A-Za-z0-9]{20,}/,
-        /github_pat_[A-Za-z0-9_]{20,}/,
+        /sk-ant-[A-Za-z0-9_-]{12,}/, /sk-(?:proj-)?[A-Za-z0-9_-]{20,}/,
+        /gh[opsu]_[A-Za-z0-9]{20,}/, /github_pat_[A-Za-z0-9_]{20,}/,
         /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/
       ].freeze
-
+      MAX_JSON_DEPTH = 64
+      MAX_JSON_NODES = 16_384
+      MAX_JSON_BYTES = 16_777_216
       module_function
       def canonical_json(value)
-        normalize = lambda do |nested|
+        nodes = payload_bytes = 0
+        normalize = lambda do |nested, depth|
+          raise TypeError if depth > MAX_JSON_DEPTH || (nodes += 1) > MAX_JSON_NODES
           case nested
           when Hash
-            raise TypeError unless nested.keys.all?(String)
-            nested.keys.sort.to_h { |key| [ key, normalize.call(nested.fetch(key)) ] }
+            raise TypeError unless nested.keys.all? do |key|
+              key.is_a?(String) && key.valid_encoding? && (payload_bytes += key.bytesize) <= MAX_JSON_BYTES
+            end
+            nested.keys.sort.to_h { |key| [ key, normalize.call(nested.fetch(key), depth + 1) ] }
           when Array
-            nested.map { |item| normalize.call(item) }
+            nested.map { |item| normalize.call(item, depth + 1) }
           when String
-            raise TypeError unless nested.valid_encoding?
+            raise TypeError unless nested.valid_encoding? && (payload_bytes += nested.bytesize) <= MAX_JSON_BYTES
             nested
           when Integer, Float, TrueClass, FalseClass, NilClass
             nested
@@ -30,14 +33,15 @@ module HiveLiveAgentProof
             raise TypeError
           end
         end
-        "#{JSON.pretty_generate(normalize.call(value))}\n"
-      rescue JSON::GeneratorError, ArgumentError, TypeError
+        bytes = "#{JSON.pretty_generate(normalize.call(value, 0))}\n"
+        raise TypeError if bytes.bytesize > MAX_JSON_BYTES
+        bytes
+      rescue JSON::GeneratorError, JSON::NestingError, ArgumentError, TypeError
         raise Error, "cannot canonicalize JSON"
       end
       def safe_relative_path?(value)
         return false unless value.is_a?(String) && !value.empty? && value.valid_encoding?
-        return false if value.start_with?("/") || value.include?("\0")
-
+        return false if value.start_with?("/") || value.match?(/\A[A-Za-z]:/) || value.include?("\0") || value.include?("\\")
         value.split("/", -1).none? { |part| part.empty? || part == "." || part == ".." }
       end
       def secret_findings(text, exact_secrets: [])
@@ -51,7 +55,6 @@ module HiveLiveAgentProof
         end
         findings
       end
-
       def secret_safe_text(value, exact_secrets:, limit:)
         text = value.to_s.encode(
           Encoding::UTF_8, invalid: :replace, undef: :replace, replace: "\uFFFD"
@@ -63,7 +66,6 @@ module HiveLiveAgentProof
         SECRET_PATTERNS.each { |pattern| text.gsub!(pattern, "[REDACTED]") }
         text.byteslice(0, limit).force_encoding(Encoding::UTF_8).scrub("")
       end
-
       def deep_freeze(value)
         case value
         when Hash

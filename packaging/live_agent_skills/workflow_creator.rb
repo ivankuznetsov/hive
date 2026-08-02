@@ -101,9 +101,9 @@ module HiveLiveAgentProof
       Contract.validate_primary!(row:, manifest:, candidate_sha:, bundle_records:)
     def self.validate_installation!(document:, kind:, manifest:, candidate_sha:) =
       Contract.validate_installation!(document:, kind:, manifest:, candidate_sha:)
-    def self.validate_execution!(receipt:, row:, candidate_sha:, installation_records:,
+    def self.validate_execution!(receipt:, row:, candidate_sha:, manifest:, installation_records:,
                                  receipt_sha256:, candidate_installation:, openclaw_installation:) =
-      ExecutionContract.validate!(receipt:, row:, candidate_sha:, installation_records:,
+      ExecutionContract.validate!(receipt:, row:, candidate_sha:, manifest:, installation_records:,
                                   receipt_sha256:, candidate_installation:, openclaw_installation:)
   end
 end

@@ -128,7 +128,11 @@ tags: [gap, todo, release-proof, agent-skills]
   `candidate`, joined by the pure Workflow Creator Proof Core. Skillpack to
   Agent ABI is the only component dependency. The creator core has zero
   production consumers and a bounded U1a2 removal fence: U1a2 must route the
-  incumbent proof/custody consumers through it or remove it. Patrol retains one
+  incumbent proof/custody consumers through it or remove it. Its execution
+  validator now closes candidate/OpenClaw kind, bounded canonical-byte,
+  primary-row, installation-record, and execution-receipt-record binding, but
+  this remains source-level validation rather than retained custody or
+  installed/live proof. Patrol retains one
   bounded U3 exception for compressed candidate evidence and production
   qualification; Attempts remains unready because Hive has no
   demonstrated need for a supported reconciliation, supervision, capacity,

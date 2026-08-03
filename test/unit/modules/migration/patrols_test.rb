@@ -1326,11 +1326,20 @@ class ModulesMigrationPatrolsTest < Minitest::Test
         false
       end
 
+      failing_locked_probe = lambda do |*|
+        raise Hive::ConfigError, "forced probe failure"
+      end
       outcome = with_replaced_singleton_method(
-        Hive::Modules::Migration::Patrols,
-        :shadow_decision_upgrade_required?,
-        stale_hint
-      ) { migration.adopt!(now: NOW + 1) }
+        Hive::Modules::Migration::ReportMigration,
+        :required_locked?,
+        failing_locked_probe
+      ) do
+        with_replaced_singleton_method(
+          Hive::Modules::Migration::Patrols,
+          :shadow_decision_upgrade_required?,
+          stale_hint
+        ) { migration.adopt!(now: NOW + 1) }
+      end
 
       assert_equal "already_current", outcome.status
       assert_equal 2,

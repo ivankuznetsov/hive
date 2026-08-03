@@ -152,9 +152,15 @@ class ModulesMigrationPatrolEvidenceReceiptTest < Minitest::Test
   end
 
   def test_rejects_wrong_typed_and_invalid_utf8_string_fields
+    exploding_string = Class.new(String) do
+      def encode(*) = raise TypeError, "unavailable encoding"
+    end
     mutations = [
       { run_id: 1 },
+      { run_id: exploding_string.new("run-1") },
       { candidate_sha: Integer("1" * 40) },
+      { capture: {} },
+      { effects: [ {} ] },
       { fault_steps: [ 1 ] },
       { artifacts: [ { "kind" => 1, "digest" => "8" * 64 } ] },
       {
@@ -167,12 +173,24 @@ class ModulesMigrationPatrolEvidenceReceiptTest < Minitest::Test
     ]
 
     mutations.each do |mutation|
-      assert_raises(Hive::ConfigError, mutation.inspect) do
+      error = assert_raises(Hive::ConfigError, mutation.inspect) do
         Hive::Modules::Migration::PatrolEvidenceReceipt.build(
           **receipt_attributes(mutation)
         )
       end
+      assert_equal "patrol evidence receipt is malformed", error.message
     end
+
+    receipt = Hive::Modules::Migration::PatrolEvidenceReceipt.build(
+      **receipt_attributes
+    )
+    exploding_id = exploding_string.new(receipt.receipt_id)
+    error = assert_raises(Hive::ConfigError) do
+      Hive::Modules::Migration::PatrolEvidenceReceipt.from_h(
+        receipt.to_h.merge("receipt_id" => exploding_id)
+      )
+    end
+    assert_equal "patrol evidence receipt is malformed", error.message
   end
 
   private

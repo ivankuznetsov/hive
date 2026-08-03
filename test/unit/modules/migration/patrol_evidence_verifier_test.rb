@@ -98,6 +98,9 @@ class ModulesMigrationPatrolEvidenceVerifierTest < Minitest::Test
     fault_receipt = evidence_receipt(fault_steps: [ "1" ])
     artifact_receipt = evidence_receipt(artifact_kind: "1")
     digest_receipt = evidence_receipt
+    exploding_id = Class.new(String) do
+      def match?(*) = raise TypeError, "unavailable match"
+    end.new("receipt-#{'8' * 64}")
     mutations = [
       [ fault_receipt,
         expected_bindings(fault_receipt).merge("fault_steps" => [ 1 ]) ],
@@ -112,15 +115,21 @@ class ModulesMigrationPatrolEvidenceVerifierTest < Minitest::Test
           ]
         ) ],
       [ digest_receipt,
-        expected_bindings(digest_receipt).merge("reviewer" => "\xFF".b) ]
+        expected_bindings(digest_receipt).merge("reviewer" => "\xFF".b) ],
+      [ digest_receipt,
+        expected_bindings(digest_receipt).merge(
+          "effect_receipt_ids" => [ exploding_id ]
+        ) ]
     ]
 
     mutations.each do |receipt, expected|
-      assert_raises(Hive::ConfigError) do
+      error = assert_raises(Hive::ConfigError) do
         Hive::Modules::Migration::PatrolEvidenceVerifier.verify(
           receipt: receipt, expected_bindings: expected
         )
       end
+      assert_equal "patrol evidence expected bindings are malformed",
+                   error.message
     end
   end
 

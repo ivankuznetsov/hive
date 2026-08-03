@@ -19,6 +19,17 @@ class ModulesMigrationReportTest < Minitest::Test
       assert_raises(Hive::ConfigError) do
         Hive::Modules::Migration::Report.load(path)
       end
+      error = with_replaced_singleton_method(
+        Hive::Modules::Migration::Report,
+        :read_bytes,
+        ->(*) { raise Errno::EIO }
+      ) do
+        assert_raises(Hive::ConfigError) do
+          Hive::Modules::Migration::Report.load(path)
+        end
+      end
+      assert_equal "module migration report is missing or unreadable",
+                   error.message
     end
   end
 
@@ -43,6 +54,13 @@ class ModulesMigrationReportTest < Minitest::Test
       end
       assert_equal projection.to_h,
                    JSON.parse(File.binread(path))
+      expected = Digest::SHA256.hexdigest(File.binread(path))
+      assert_equal path,
+                   Hive::Modules::Migration::Report.write_projection(
+                     path, projection.to_h, expected_digest: expected
+                   )
+      assert_equal projection.to_h,
+                   JSON.parse(File.binread(path))
     end
   end
 
@@ -58,6 +76,18 @@ class ModulesMigrationReportTest < Minitest::Test
       assert_raises(Hive::ConfigError) { legacy.write(path) }
       assert_equal projection.to_h,
                    Hive::Modules::Migration::Report.load(path).to_h
+
+      v1_bytes = Hive::Modules::Migration::Report.canonical(legacy_success)
+      File.binwrite(path, v1_bytes)
+      error = assert_raises(Hive::ConfigError) do
+        Hive::Modules::Migration::Report.write_projection(
+          path, projection,
+          expected_digest: Digest::SHA256.hexdigest(v1_bytes)
+        )
+      end
+      assert_equal "module migration report v1 requires one-off migration",
+                   error.message
+      assert_equal v1_bytes, File.binread(path)
     end
   end
 
@@ -113,6 +143,62 @@ class ModulesMigrationReportTest < Minitest::Test
     refute Hive::Modules::Migration::Report.valid_legacy_payload?(
       legacy_success.merge("reviewer" => 1)
     )
+    hostile_modules = legacy_success.fetch("modules").dup
+    def hostile_modules.values = raise NoMethodError
+    hostile = legacy_success.merge("modules" => hostile_modules)
+    refute Hive::Modules::Migration::Report.valid_legacy_payload?(hostile)
+  end
+
+  def test_projection_write_rejects_oversized_serialization_before_storage
+    with_tmp_dir do |root|
+      path = File.join(root, "report.json")
+      error = with_constant(
+        Hive::Modules::Migration::Report, :MAX_REPORT_BYTES, 1
+      ) do
+        assert_raises(Hive::ConfigError) do
+          Hive::Modules::Migration::Report.write_projection(
+            path, evidence_required_projection
+          )
+        end
+      end
+
+      assert_equal "module migration report is malformed", error.message
+      refute_path_exists path
+    end
+  end
+
+  def test_writer_parser_fallbacks_are_typed_and_nonmutating
+    with_tmp_dir do |root|
+      path = File.join(root, "report.json")
+      sentinel = "sentinel"
+      File.binwrite(path, sentinel)
+      parser_error = ->(*) { raise JSON::ParserError, "forced" }
+
+      projection_error = with_replaced_singleton_method(
+        Hive::Modules::Migration::ReportProjection, :from_h, parser_error
+      ) do
+        assert_raises(Hive::ConfigError) do
+          Hive::Modules::Migration::Report.write_projection(
+            path, evidence_required_projection
+          )
+        end
+      end
+      assert_equal "module migration report is malformed",
+                   projection_error.message
+      assert_equal sentinel, File.binread(path)
+
+      legacy = Hive::Modules::Migration::Report.build(
+        record_source: [], reviewer: "reviewer", reviewed_at: NOW
+      )
+      legacy_error = with_replaced_singleton_method(
+        Hive::Modules::Migration::Report, :canonical, parser_error
+      ) do
+        assert_raises(Hive::ConfigError) { legacy.write(path) }
+      end
+      assert_equal "module migration report is malformed",
+                   legacy_error.message
+      assert_equal sentinel, File.binread(path)
+    end
   end
 
   private
@@ -149,5 +235,15 @@ class ModulesMigrationReportTest < Minitest::Test
       "modules" => modules, "eligible" => false,
       "blockers" => [ "patrol:decision_count_below_10" ]
     }
+  end
+
+  def with_constant(owner, name, replacement)
+    original = owner.const_get(name)
+    owner.send(:remove_const, name)
+    owner.const_set(name, replacement)
+    yield
+  ensure
+    owner.send(:remove_const, name)
+    owner.const_set(name, original)
   end
 end

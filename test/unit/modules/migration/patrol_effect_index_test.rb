@@ -85,6 +85,16 @@ class ModulesMigrationPatrolEffectIndexTest < Minitest::Test
     end
   end
 
+  def test_rejects_malformed_container_and_receipt_values
+    [ nil, [ {} ] ].each do |receipts|
+      error = assert_raises(Hive::ConfigError) do
+        Hive::Modules::Migration::PatrolEffectIndex.build(receipts: receipts)
+      end
+
+      assert_equal "patrol effect index is malformed", error.message
+    end
+  end
+
   private
 
   def effect_receipt(owner_epoch: 1, idempotency_key: "finding:one",

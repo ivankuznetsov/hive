@@ -211,21 +211,32 @@ class ModulesMigrationReportMigrationTest < Minitest::Test
     end
   end
 
-  def test_canonical_non_object_reports_fail_with_the_typed_error
+  def test_malformed_or_unsupported_reports_fail_with_the_typed_error
     with_tmp_dir do |root|
       path = File.join(root, "report.json")
-      [ nil, [], "report", 1 ].each do |value|
-        File.binwrite(
-          path, Hive::Modules::Migration::Report.canonical(value)
-        )
-        assert_raises(Hive::ConfigError) do
+      bytes_values = [ nil, [], "report", 1 ].map do |value|
+        Hive::Modules::Migration::Report.canonical(value)
+      end
+      bytes_values << Hive::Modules::Migration::Report.canonical(
+        "schema_version" => 3
+      )
+      bytes_values << "{"
+
+      bytes_values.each do |bytes|
+        File.binwrite(path, bytes)
+        required_error = assert_raises(Hive::ConfigError) do
           Hive::Modules::Migration::ReportMigration.required?(path)
         end
-        assert_raises(Hive::ConfigError) do
+        forward_error = assert_raises(Hive::ConfigError) do
           Hive::Modules::Migration::ReportMigration.forward(
             path: path, qualifications: [], generated_at: NOW
           )
         end
+        assert_equal "module migration report migration is malformed",
+                     required_error.message
+        assert_equal "module migration report migration is malformed",
+                     forward_error.message
+        assert_equal bytes, File.binread(path)
       end
     end
   end

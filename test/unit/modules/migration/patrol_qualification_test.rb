@@ -56,6 +56,21 @@ class ModulesMigrationPatrolQualificationTest < Minitest::Test
       documents = verified.map { |value| value.receipt.to_h }
       bindings = verified.map { |value| expected_bindings(value.receipt) }
 
+      error = assert_raises(Hive::ConfigError) do
+        Hive::Modules::Migration::Patrols.admit_deterministic_qualification!(
+          root, receipts: nil, expected_bindings: bindings,
+          generated_at: NOW + 30,
+          expected_report_digest: expected_digest,
+          hive_state_path: state_root
+        )
+      end
+      assert_equal(
+        "patrol deterministic qualification admission is malformed",
+        error.message
+      )
+      assert_equal expected_digest,
+                   Digest::SHA256.hexdigest(File.binread(path))
+
       wrong = bindings.dup
       wrong[0] = wrong.fetch(0).merge("trigger_id" => "wrong-trigger")
       assert_raises(Hive::ConfigError) do
@@ -122,6 +137,57 @@ class ModulesMigrationPatrolQualificationTest < Minitest::Test
                    qualified.lanes.fetch("deterministic").status
       assert_equal qualified.to_h,
                    Hive::Modules::Migration::Report.load(path).to_h
+    end
+  end
+
+  def test_same_run_progress_replaces_failed_lane
+    complete = complete_receipts(run_id: "run-same")
+    incomplete = complete.group_by do |value|
+      value.capture.module_name
+    end.values.map(&:first)
+    pending = build_qualification(incomplete, generated_at: NOW + 30)
+    current = Hive::Modules::Migration::ReportProjection.build(
+      qualifications: [ pending ], generated_at: NOW + 30
+    )
+    qualified = build_qualification(complete, generated_at: NOW + 60)
+    report = Hive::Modules::Migration::ReportProjection.merge(
+      existing: current, qualification: qualified, generated_at: NOW + 60
+    )
+
+    assert_equal "evidence_required", pending.status
+    assert_equal "qualified",
+                 report.lanes.fetch("deterministic").status
+  end
+
+  def test_public_admission_bounds_aggregate_effect_receipts
+    with_tmp_dir do |root|
+      state_root = File.join(root, ".hive-state")
+      path = Hive::Modules::Migration::Patrols.report_file(
+        root, hive_state_path: state_root
+      )
+      verified = [
+        verified_receipt(
+          module_name: "patrol", index: 0, effect_status: "committed"
+        ),
+        verified_receipt(
+          module_name: "architecture-patrol", index: 0,
+          effect_status: "committed"
+        )
+      ]
+
+      error = with_constant(
+        Hive::Modules::Migration::PatrolEffectIndex, :MAX_RECEIPTS, 1
+      ) do
+        assert_raises(Hive::ConfigError) do
+          admit(root, state_root, verified, "b" * 64, NOW + 30)
+        end
+      end
+
+      assert_equal(
+        "patrol deterministic qualification admission is malformed",
+        error.message
+      )
+      refute_path_exists path
     end
   end
 
@@ -282,6 +348,16 @@ class ModulesMigrationPatrolQualificationTest < Minitest::Test
           receipts: []
         ),
         generated_at: NOW + 121,
+        supersedes: prior.qualification_id
+      )
+    end
+    assert_raises(Hive::ConfigError) do
+      Hive::Modules::Migration::PatrolQualification.build(
+        lane: "deterministic", verified_receipts: complete_receipts,
+        effect_index: Hive::Modules::Migration::PatrolEffectIndex.build(
+          receipts: []
+        ),
+        generated_at: NOW + 121,
         supersedes: prior.qualification_id,
         contradiction: {
           "kind" => "production_decision_diverged",
@@ -322,6 +398,21 @@ class ModulesMigrationPatrolQualificationTest < Minitest::Test
         qualification.to_h.merge("unexpected" => true)
       )
     end
+    forged_identity = qualification.to_h.merge(
+      "qualification_id" => "qualification-#{'f' * 64}"
+    )
+    error = assert_raises(Hive::ConfigError) do
+      Hive::Modules::Migration::PatrolQualification.from_h(forged_identity)
+    end
+    assert_equal(
+      "patrol qualification identity does not match its contents",
+      error.message
+    )
+    hostile = qualification.to_h.dup
+    def hostile.each_with_object(*) = raise TypeError
+    assert_raises(Hive::ConfigError) do
+      Hive::Modules::Migration::PatrolQualification.from_h(hostile)
+    end
     forged = JSON.parse(JSON.generate(qualification.to_h))
     forged.fetch("modules").fetch("patrol")["decision_count"] = 0
     forged["qualification_id"] =
@@ -331,6 +422,39 @@ class ModulesMigrationPatrolQualificationTest < Minitest::Test
     assert_raises(Hive::ConfigError) do
       Hive::Modules::Migration::PatrolQualification.from_h(forged)
     end
+  end
+
+  def test_build_normalizes_array_coercion_failures
+    hostile = Object.new
+    def hostile.to_ary = raise TypeError
+
+    assert_raises(Hive::ConfigError) do
+      Hive::Modules::Migration::PatrolQualification.build(
+        lane: "deterministic", verified_receipts: hostile,
+        effect_index: Hive::Modules::Migration::PatrolEffectIndex.build(
+          receipts: []
+        ),
+        generated_at: NOW
+      )
+    end
+  end
+
+  def test_module_authority_terminal_effect_blocks_and_round_trips
+    shadow = verified_receipt(
+      module_name: "patrol", index: 0, effect_status: "committed",
+      effect_authority: "module"
+    )
+    receipts = complete_receipts.reject do |value|
+      value.capture.trigger.fetch("id") == "manual-patrol-0"
+    end + [ shadow ]
+
+    qualification = build_qualification(receipts)
+
+    assert_equal "evidence_required", qualification.status
+    assert_includes qualification.blockers, "module_shadow_effect"
+    assert_equal qualification.to_h,
+                 Hive::Modules::Migration::PatrolQualification
+                   .from_h(qualification.to_h).to_h
   end
 
   private
@@ -362,6 +486,7 @@ class ModulesMigrationPatrolQualificationTest < Minitest::Test
                        repository_sha: "7" * 40, occurred_at: NOW,
                        configuration_digest: nil, run_id: "run-1",
                        effect_status: nil, repository_id: "owner/demo",
+                       effect_authority: "legacy",
                        trigger_id: nil, change_window: nil,
                        decision_index: index)
     projection = projection_for(module_name, decision_index)
@@ -371,7 +496,8 @@ class ModulesMigrationPatrolQualificationTest < Minitest::Test
     )
     effects = if effect_status
       [ effect_receipt(
-        occurrence_id: capture.occurrence_id, status: effect_status
+        occurrence_id: capture.occurrence_id, status: effect_status,
+        authority: effect_authority, module_name: module_name
       ) ]
     else
       []
@@ -456,10 +582,11 @@ class ModulesMigrationPatrolQualificationTest < Minitest::Test
     )
   end
 
-  def effect_receipt(occurrence_id:, status:)
+  def effect_receipt(occurrence_id:, status:, authority: "legacy",
+                     module_name: "patrol")
     intent = Hive::Modules::Migration::EffectIntent.build(
-      module_name: "patrol", occurrence_id: occurrence_id,
-      authority: "legacy", owner_epoch: 1, sink: "finding",
+      module_name: module_name, occurrence_id: occurrence_id,
+      authority: authority, owner_epoch: 1, sink: "finding",
       target: "finding-1", idempotency_key: "finding-1",
       capability: "finding_write", created_at: NOW
     )
@@ -516,5 +643,15 @@ class ModulesMigrationPatrolQualificationTest < Minitest::Test
 
   def artifact_digest(index)
     index.to_s(16).rjust(64, "0")
+  end
+
+  def with_constant(owner, name, replacement)
+    original = owner.const_get(name)
+    owner.send(:remove_const, name)
+    owner.const_set(name, replacement)
+    yield
+  ensure
+    owner.send(:remove_const, name)
+    owner.const_set(name, original)
   end
 end

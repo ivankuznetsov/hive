@@ -36,6 +36,14 @@ class ModulesMigrationReportProjectionTest < Minitest::Test
         migration: migration_metadata.merge("archive_digest" => "e" * 64)
       )
     end
+    hostile = Object.new
+    def hostile.to_ary = raise TypeError
+    assert_raises(Hive::ConfigError) do
+      Hive::Modules::Migration::ReportProjection.build(
+        qualifications: hostile, generated_at: NOW,
+        migration: migration_metadata
+      )
+    end
   end
 
   def test_partial_report_round_trips_and_accepts_only_the_missing_lane
@@ -48,12 +56,17 @@ class ModulesMigrationReportProjectionTest < Minitest::Test
     complete = Hive::Modules::Migration::ReportProjection.merge(
       existing: loaded, qualification: installed, generated_at: NOW + 1
     )
+    from_hash = Hive::Modules::Migration::ReportProjection.build(
+      qualifications: [ deterministic.to_h ], generated_at: NOW
+    )
 
     assert_equal deterministic.to_h,
                  complete.lanes.fetch("deterministic").to_h
     assert_equal installed.to_h,
                  complete.lanes.fetch("installed_live").to_h
     assert_equal partial.report_id, complete.supersedes
+    assert_equal deterministic.qualification_id,
+                 from_hash.lanes.fetch("deterministic").qualification_id
     assert_equal "qualified", complete.status
     assert complete.eligible?
     assert_schema_valid(complete.to_h)
@@ -83,6 +96,15 @@ class ModulesMigrationReportProjectionTest < Minitest::Test
     assert_raises(Hive::ConfigError) do
       Hive::Modules::Migration::ReportProjection.merge(
         existing: partial, qualification: replacement,
+        generated_at: NOW + 1
+      )
+    end
+    forged = deterministic.to_h.merge(
+      "qualification_id" => "qualification-#{'f' * 64}"
+    )
+    assert_raises(Hive::ConfigError) do
+      Hive::Modules::Migration::ReportProjection.merge(
+        existing: partial, qualification: forged,
         generated_at: NOW + 1
       )
     end
@@ -146,6 +168,15 @@ class ModulesMigrationReportProjectionTest < Minitest::Test
     with_tmp_dir do |root|
       path = File.join(root, "report.json")
       Hive::Modules::Migration::Report.write_projection(path, ready)
+      ready_bytes = File.binread(path)
+      missing_digest = assert_raises(Hive::ConfigError) do
+        Hive::Modules::Migration::Report.write_projection(path, report)
+      end
+      assert_equal(
+        "module migration report replacement requires expected digest",
+        missing_digest.message
+      )
+      assert_equal ready_bytes, File.binread(path)
       assert_raises(Hive::ConfigError) do
         Hive::Modules::Migration::Report.write_projection(
           path, report, expected_digest: "f" * 64
@@ -235,6 +266,18 @@ class ModulesMigrationReportProjectionTest < Minitest::Test
                    .validate_successor!(
                      current: current, successor: preserved
                    ).to_h
+    replacement = lambda do |*|
+      raise TypeError
+    end
+    assert_raises(Hive::ConfigError) do
+      with_replaced_singleton_method(
+        Hive::Modules::Migration::ReportProjection, :from_h, replacement
+      ) do
+        Hive::Modules::Migration::ReportProjection.validate_successor!(
+          current: current, successor: preserved
+        )
+      end
+    end
   end
 
   def test_round_trip_rejects_extra_fields_and_forged_identity
@@ -255,6 +298,11 @@ class ModulesMigrationReportProjectionTest < Minitest::Test
       Hive::Modules::Migration::ReportProjection.from_h(
         report.to_h.merge("report_id" => "report-#{'f' * 64}")
       )
+    end
+    hostile = report.to_h.dup
+    def hostile.each_with_object(*) = raise TypeError
+    assert_raises(Hive::ConfigError) do
+      Hive::Modules::Migration::ReportProjection.from_h(hostile)
     end
   end
 

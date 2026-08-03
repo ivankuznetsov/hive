@@ -199,7 +199,12 @@ All under `daemon:` in `~/Dev/hive/config.yml`:
 
 Closed `event` enum (`Hive::Daemon::Logger::EVENTS`). Adding an event
 without updating the enum raises `ArgumentError` at the call site so
-new events are caught at CI rather than logged silently.
+new events are caught rather than logged silently. CI scans every literal
+`.event(:symbol)` producer under `lib/hive/daemon/` and requires the symbol in
+the closed enum; permissive test loggers therefore cannot hide a production
+failure-path mismatch. Merge-archive completion, module runtime, stalled
+markerless rows, dispatch-sequence promotion failures, and task-id backfill
+outcomes all use registered event names.
 
 ## Operational notes
 

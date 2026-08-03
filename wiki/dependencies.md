@@ -3,7 +3,7 @@ title: Dependencies
 type: dependencies
 source: Gemfile, hive.gemspec, Gemfile.lock, web/Gemfile, web/Gemfile.lock, .github/workflows, components/agent-cli-runtime/mirror, .llm-wiki/post-commit-refresh.sh
 created: 2026-04-25
-updated: 2026-07-31
+updated: 2026-08-02
 tags: [dependencies, gems, runtime]
 ---
 
@@ -71,6 +71,7 @@ as of this refresh.
 | `telegram-bot-ruby` | `~> 2.7` (locked 2.8.0) | Telegram Bot API client for `hive bot`. The July 23, 2026 release adds Bot API 10.0 through 10.2 support, retains MFA on publish and Ruby >= 2.7 support, and keeps four direct runtime dependencies (`dry-struct`, `faraday`, `faraday-multipart`, `zeitwerk`). Root and packaged-web lockfiles pin the reviewed version while the gemspec preserves 2.x compatibility for downstream resolvers. |
 | `faraday` | `>= 2.14.2, < 3.0` (locked 2.14.2) | HTTP transport used directly by `Hive::Bot::Transcriber` and indirectly through `telegram-bot-ruby`. The lower bound is the bundler-audit floor for CVE-2026-33637 / GHSA-5rv5-xj5j-3484. |
 | `faraday-multipart` | `~> 1.0` (locked 1.2.0) | Multipart upload support for `Hive::Bot::Transcriber` voice-note POSTs and Telegram Bot API file transport. |
+| `fiddle` | `>= 1.1` (locked 1.1.8) | Calls Linux `prctl(PR_SET_CHILD_SUBREAPER)` for exact project-provider descendant custody. Declared because Fiddle leaves Ruby's default-gem set in Ruby 3.5. |
 | `bubbletea` | `~> 0.1.4` | MVU runtime for `hive tui`. FFI binding to the Charm Go library. Owns alt-screen lifecycle, raw-mode toggling, resize handling, and the keystroke event stream. `Hive::Tui::App.run_charm` boots a `Bubbletea::Runner` against the `Hive::Tui::BubbleModel` adapter. |
 | `erb` | `>= 4.0` (locked 6.0.6 in root and web) | Template rendering used by stages, task creation, workflows, and display names. Declared because Ruby is unbundling it and packaged installs cannot assume it is present. The 6.0.6 patch fixes ERB's standalone `-h` CLI path; Hive's rendering API is unchanged. |
 | `lipgloss` | `~> 0.2.2` | Lipgloss-ruby — declarative terminal styles consumed by every `Hive::Tui::Views::*` module (`Style#foreground/.bold/.reverse/.border/.padding/.render`). FFI binding to the Charm Go library. ANSI is stripped when stdout isn't a tty (the v0.2.2 limitation tracked in `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`). |

@@ -3,14 +3,14 @@ title: 7-artifacts stage
 type: stage
 source: lib/hive/stages/artifacts.rb
 created: 2026-05-22
-updated: 2026-08-02
+updated: 2026-08-03
 tags: [stage, artifacts, release]
 ---
 
 **TLDR**: Artifact collection is the agent-backed handoff between autonomous
 review and PR finalization. Before spawn, Hive writes a deterministic,
 generation-bound `capture-requirement.json`. Visual work must retain a valid
-task-local `media/capture-manifest.json`; a bootstrap or recorder failure keeps
+task-local `media/capture-manifest.json`; a bootstrap, provider, or recorder failure keeps
 the stage in `ERROR reason=required_capture_missing`. Nonvisual work records
 `not_applicable`. Autonomous artifact collection never reads or injects
 Screenote credentials: external upload is a separate operator-confirmed action.
@@ -39,11 +39,44 @@ Screenote credentials: external upload is a separate operator-confirmed action.
 ## Media manifest
 
 Required capture writes `<task>/media/capture-manifest.json` using
-`hive-artifact-capture` v1. It binds the task slug and clean source SHA, both
-lockfile digests, immutable dependency-cache key, exact recorder command,
-fixture ids, viewport, accessibility assertions, artifact byte sizes and
-SHA-256 hashes, and teardown outcome. A `captured` receipt must contain at least
-one retained artifact and match the requirement's implementation head.
+`hive-artifact-capture` v2. Its provider-neutral envelope binds the task slug,
+clean source SHA, recorder identity and argv, disclosed environment-key names,
+artifact byte sizes and SHA-256 hashes, timestamps, diagnostic, and teardown
+outcome. Built-in Hivebox evidence keeps its lock digests, immutable cache key,
+fixture ids, viewport, and accessibility assertions inside the typed `evidence`
+block; project recorders use `evidence.type: project_provider` and bounded
+provider-specific `details`. A `captured` receipt must contain at least one
+retained artifact and match the requirement's implementation head.
+
+New producers reserve headroom by rejecting the complete serialized receipt
+above 240 KiB before publishing any provider media or manifest. Policy and Hive
+Web share a 256 KiB consumer ceiling and reject larger files before parsing.
+The environment-key disclosure is always nonempty, and failed-provider blank
+diagnostics are normalized to an actionable fallback. Project-provider capture
+is Linux-only because its custody guarantee depends on child-subreaper support.
+Before and after invoking a provider, Hive rejects Git `assume-unchanged` and
+`skip-worktree` index entries and revalidates the complete source snapshot. Git
+attestation helpers and the provider share bounded output, one monotonic
+source-custody deadline, and complete descendant cleanup. Each command runs
+beneath a freshly forked subreaper custody root, so caller children outside that
+command subtree are never enumerated, signalled, or reaped. Configured commands
+always use Ruby's direct executable/argv form, including one-item commands, so
+shell punctuation in a tracked executable name remains literal.
+
+Project media must decode as its declared image/video type. Its published name
+contains both source and artifact digests, so an identical recapture is reused
+while changed bytes at the same source SHA publish under a new name; superseded
+task-owned provider media is removed only after the replacement manifest is
+durable.
+
+The policy continues to validate retained `hive-artifact-capture` v1 manifests
+against the v1 schema and built-in-recorder requirements. New captures emit v2;
+the Web reader validates v2 receipts against the complete shared strict schema,
+renders valid v1 and v2 receipts, and hides unknown future versions. This is a
+read-compatible migration: existing task evidence does not need rewriting.
+Syntactically valid non-object receipts fail closed as unsatisfied, and provider
+recapture ignores a retained receipt unless both its root and `recorder` are
+objects with the expected provider identity.
 
 The older `<task>/media/manifest.json` remains a display compatibility format
 for existing tasks:

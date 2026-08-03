@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-07-30
+updated: 2026-08-02
 tags: [gap, todo, release-proof, agent-skills]
 ---
 
@@ -30,6 +30,14 @@ tags: [gap, todo, release-proof, agent-skills]
   exact, status advances from `reset_required` to `current`, and no unrelated
   v2 owner changes. The abandoned v2 jobs backlog is an explicit product
   tradeoff, not a continuity promise or an unimplemented migration.
+
+- Project-owned artifact providers currently require Linux
+  `PR_SET_CHILD_SUBREAPER` plus `/proc` ancestry so detached descendants remain
+  in exact custody through output drain and teardown. Provider capture fails
+  closed on macOS/BSD rather than weakening that guarantee. A portable custody
+  primitive and a live conventional-project browser provider remain follow-up
+  work; the built-in Hivebox recorder is unaffected.
+
 - `agent-cli-runtime` 0.1.0 has a self-contained package, exact-artifact
   verifier, Linux/macOS install matrix, and component-scoped trusted-publishing
   workflow. Repository-hosted controls remain operator work: the

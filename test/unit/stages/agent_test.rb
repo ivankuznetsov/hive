@@ -899,6 +899,23 @@ class StagesAgentTest < Minitest::Test
         assert_equal [
           File.realpath(task.folder), File.realpath(package_root), File.realpath(project)
         ], captured.first.fetch(:kwargs).fetch(:add_dirs)
+        prompt = captured.first.fetch(:prompt)
+        assert_includes prompt, "The registered project root may be available as target context"
+        refute_includes prompt, "Do not modify files outside the task folder"
+      end
+    end
+  end
+
+  def test_unmanaged_actor_prompt_retains_task_folder_write_boundary
+    with_tmp_dir do |project|
+      task = task_for(project, "plan")
+
+      with_stubbed_spawn do |captured|
+        Hive::Stages::Agent.run!(task, { "plan" => { "agent" => "codex" } })
+
+        prompt = captured.first.fetch(:prompt)
+        assert_includes prompt, "Do not modify files outside the task folder"
+        refute_includes prompt, "registered project root may be available as target context"
       end
     end
   end

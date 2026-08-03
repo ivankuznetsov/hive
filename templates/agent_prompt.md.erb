@@ -39,6 +39,12 @@ Behavior:
    `<!-- COMPLETE -->`.
 
 Constraints:
+<%- if managed_workflow -%>
+- Obey the managed workflow's declared stage instructions and runtime permission
+  scope. The registered project root may be available as target context; modify
+  it only when those instructions and permissions authorize the change.
+<%- else -%>
 - Do not modify files outside the task folder.
+<%- end -%>
 - The trailing marker must be exactly one of `<!-- WAITING -->` or
   `<!-- COMPLETE -->` - no other line follows it.

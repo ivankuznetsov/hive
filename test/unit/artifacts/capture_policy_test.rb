@@ -145,6 +145,24 @@ class ArtifactsCapturePolicyTest < Minitest::Test
     end
   end
 
+  def test_v2_capture_policy_requires_nonempty_environment_keys
+    policy = Hive::Artifacts::CapturePolicy.allocate
+    manifest = {
+      "recorder" => {
+        "kind" => "project_provider",
+        "name" => "fixture",
+        "command" => [ "bin/provider" ]
+      },
+      "environment_keys" => [ "PATH" ],
+      "evidence" => { "type" => "project_provider", "details" => {} }
+    }
+
+    assert policy.send(:valid_v2_capture_evidence?, manifest)
+    refute policy.send(
+      :valid_v2_capture_evidence?, manifest.merge("environment_keys" => [])
+    )
+  end
+
   def test_retained_v1_capture_manifest_remains_satisfactory_after_v2_migration
     with_task do |task|
       policy = Hive::Artifacts::CapturePolicy.new(

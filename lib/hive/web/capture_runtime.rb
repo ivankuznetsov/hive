@@ -226,6 +226,12 @@ module Hive
           "viewport" => viewport.to_h.sort.to_h,
           "accessibility_assertions" => Array(accessibility_assertions).map(&:to_s).sort
         }
+        disclosed_environment_keys =
+          Array(environment_keys || DISCLOSED_ENV_KEYS).map(&:to_s).sort
+        if disclosed_environment_keys.empty?
+          raise OwnershipError,
+                "capture manifest environment_keys must contain at least one key"
+        end
         {
           "schema" => ARTIFACT_SCHEMA,
           "schema_version" => ARTIFACT_SCHEMA_VERSION,
@@ -233,7 +239,7 @@ module Hive
           "task" => task.to_s,
           "source_sha" => source_sha.to_s,
           "recorder" => recorder.to_h,
-          "environment_keys" => Array(environment_keys || DISCLOSED_ENV_KEYS).map(&:to_s).sort,
+          "environment_keys" => disclosed_environment_keys,
           "started_at" => iso_time(started_at),
           "finished_at" => iso_time(finished_at),
           "artifacts" => Array(artifact_records).map do |artifact|

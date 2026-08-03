@@ -214,6 +214,93 @@ class WebProjectCaptureProviderTest < Minitest::Test
     end
   end
 
+  def test_one_item_command_executes_a_tracked_punctuation_filename_literally
+    Dir.mktmpdir("project-capture-punctuation") do |root|
+      source = File.join(root, "source")
+      staging = File.join(root, "staging")
+      runtime = File.join(root, "runtime")
+      executable = File.join(source, "bin", "capture;literal")
+      FileUtils.mkdir_p(File.dirname(executable))
+      FileUtils.mkdir_p(staging, mode: 0o700)
+      File.write(executable, <<~RUBY)
+        #!#{RbConfig.ruby}
+        require "json"
+        $stdin.read
+        puts JSON.generate(
+          "schema" => "hive-project-capture-result",
+          "schema_version" => 1,
+          "status" => "failed",
+          "artifacts" => [],
+          "evidence" => {},
+          "cleanup" => {
+            "port" => "released", "processes" => "clean", "runtime" => "cleaned"
+          },
+          "diagnostic" => "literal executable ran"
+        )
+      RUBY
+      FileUtils.chmod(0o755, executable)
+      run!("git", "-C", source, "init", "--quiet")
+      run!("git", "-C", source, "add", "--", "bin/capture;literal")
+      assert_equal "bin/capture;literal",
+                   run!("git", "-C", source, "ls-files", "--", "bin/capture;literal").strip
+      provider = Hive::Web::ProjectCaptureProvider.new(
+        config: {
+          "name" => "punctuation",
+          "command" => [ "bin/capture;literal" ],
+          "timeout_sec" => 2
+        },
+        environment: { "PATH" => ENV.fetch("PATH", "") }
+      )
+
+      error = assert_raises(Hive::Web::ProjectCaptureProvider::ProviderError) do
+        provider.call(
+          task: "demo-task",
+          source_root: source,
+          source_sha: "a" * 40,
+          staging_root: staging,
+          runtime_root: runtime
+        )
+      end
+
+      assert_match(/literal executable ran/, error.message)
+    end
+  end
+
+  def test_blank_failed_diagnostics_use_the_actionable_fallback
+    with_provider_fixture do |root, source, _executable|
+      expectations = {
+        "failed-empty" => "provider reported failure",
+        "failed-whitespace" => "provider reported failure",
+        "failed-actionable" => "retry after fixing the fixture"
+      }
+      expectations.each do |mode, expected|
+        staging = File.join(root, "staging-#{mode}")
+        runtime = File.join(root, "runtime-#{mode}")
+        FileUtils.mkdir_p(staging, mode: 0o700)
+        provider = Hive::Web::ProjectCaptureProvider.new(
+          config: {
+            "name" => "fixture",
+            "command" => [ "bin/provider", mode ],
+            "timeout_sec" => 2
+          },
+          environment: { "PATH" => ENV.fetch("PATH", "") }
+        )
+
+        error = assert_raises(Hive::Web::ProjectCaptureProvider::ProviderError, mode) do
+          provider.call(
+            task: "demo-task",
+            source_root: source,
+            source_sha: "a" * 40,
+            staging_root: staging,
+            runtime_root: runtime
+          )
+        end
+
+        assert_match(/failed: #{Regexp.escape(expected)}\z/, error.message, mode)
+      end
+    end
+  end
+
   private
 
   def with_provider_fixture
@@ -334,6 +421,15 @@ class WebProjectCaptureProviderTest < Minitest::Test
           result.call(
             artifacts: [ artifact.call("cleanup.png", path) ],
             cleanup: clean.merge("runtime" => "dirty")
+          )
+        when "failed-empty"
+          result.call(artifacts: [], status: "failed", diagnostic: "")
+        when "failed-whitespace"
+          result.call(artifacts: [], status: "failed", diagnostic: "   ")
+        when "failed-actionable"
+          result.call(
+            artifacts: [], status: "failed",
+            diagnostic: "retry after fixing the fixture"
           )
         when "orphan"
           path = File.join(staging, "orphan.png")

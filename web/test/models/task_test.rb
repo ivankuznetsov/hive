@@ -180,19 +180,9 @@ class TaskTest < ActiveSupport::TestCase
     media.mkpath
     image = media.join("provider.png")
     image.binwrite("png")
-    media.join("capture-manifest.json").write(JSON.generate(
-      "schema" => "hive-artifact-capture",
-      "schema_version" => 2,
-      "status" => "captured",
-      "diagnostic" => nil,
-      "artifacts" => [
-        {
-          "file" => image.basename.to_s,
-          "bytes" => image.size,
-          "sha256" => Digest::SHA256.file(image).hexdigest
-        }
-      ]
-    ))
+    media.join("capture-manifest.json").write(
+      JSON.generate(valid_v2_capture_manifest(image, task: "ship-it-260720-abcd"))
+    )
     task = Task.new(
       project: Project.new("name" => "alpha"),
       attributes: { "slug" => "ship-it-260720-abcd", "folder" => folder.to_s }
@@ -202,6 +192,58 @@ class TaskTest < ActiveSupport::TestCase
 
     assert_equal "captured", manifest.fetch("status")
     assert_equal [ "still" ], manifest.fetch("items").map { |item| item.fetch("type") }
+  ensure
+    FileUtils.remove_entry(root) if root&.exist?
+  end
+
+  test "v2 capture-manifest fails closed for every missing required field group" do
+    root = Pathname(Dir.mktmpdir("hive-web-capture-v2-required"))
+    folder = root.join("task")
+    media = folder.join("media")
+    media.mkpath
+    image = media.join("provider.png")
+    image.binwrite("png")
+    task = Task.new(
+      project: Project.new("name" => "alpha"),
+      attributes: { "slug" => "ship-it-260720-abcd", "folder" => folder.to_s }
+    )
+    manifest = valid_v2_capture_manifest(image, task: task.slug)
+    required = JSON.parse(
+      File.binread(Hive::Schemas.schema_path("hive-artifact-capture"))
+    ).fetch("required")
+
+    required.each do |field|
+      incomplete = JSON.parse(JSON.generate(manifest))
+      incomplete.delete(field)
+      media.join("capture-manifest.json").write(JSON.generate(incomplete))
+
+      assert_nil task.media_manifest, "v2 receipt missing #{field} must fail closed"
+    end
+  ensure
+    FileUtils.remove_entry(root) if root&.exist?
+  end
+
+  test "v2 capture-manifest applies nested shared schema constraints" do
+    root = Pathname(Dir.mktmpdir("hive-web-capture-v2-nested"))
+    folder = root.join("task")
+    media = folder.join("media")
+    media.mkpath
+    image = media.join("provider.png")
+    image.binwrite("png")
+    task = Task.new(
+      project: Project.new("name" => "alpha"),
+      attributes: { "slug" => "ship-it-260720-abcd", "folder" => folder.to_s }
+    )
+    manifest = valid_v2_capture_manifest(image, task: task.slug)
+    invalid_manifests = [
+      manifest.merge("environment_keys" => []),
+      manifest.merge("recorder" => manifest.fetch("recorder").merge("unexpected" => true))
+    ]
+
+    invalid_manifests.each do |invalid|
+      media.join("capture-manifest.json").write(JSON.generate(invalid))
+      assert_nil task.media_manifest
+    end
   ensure
     FileUtils.remove_entry(root) if root&.exist?
   end
@@ -236,17 +278,7 @@ class TaskTest < ActiveSupport::TestCase
     image = media.join("provider.png")
     image.binwrite("png")
     document = JSON.generate(
-      "schema" => "hive-artifact-capture",
-      "schema_version" => 2,
-      "status" => "captured",
-      "diagnostic" => nil,
-      "artifacts" => [
-        {
-          "file" => image.basename.to_s,
-          "bytes" => image.size,
-          "sha256" => Digest::SHA256.file(image).hexdigest
-        }
-      ]
+      valid_v2_capture_manifest(image, task: "ship-it-260720-abcd")
     )
     limit = Hive::ARTIFACT_CAPTURE_MANIFEST_MAX_BYTES
     task = Task.new(
@@ -391,5 +423,37 @@ class TaskTest < ActiveSupport::TestCase
     assert_same result, actual
     assert_same task, options.fetch(:task)
     assert_equal Task::DIFF_TIMEOUT_SEC, options.fetch(:timeout_sec)
+  end
+
+  private
+
+  def valid_v2_capture_manifest(image, task:)
+    {
+      "schema" => "hive-artifact-capture",
+      "schema_version" => 2,
+      "status" => "captured",
+      "task" => task,
+      "source_sha" => "a" * 40,
+      "recorder" => {
+        "kind" => "project_provider",
+        "name" => "fixture",
+        "command" => [ "bin/provider" ]
+      },
+      "environment_keys" => [ "PATH" ],
+      "started_at" => "2026-08-03T00:00:00Z",
+      "finished_at" => "2026-08-03T00:00:01Z",
+      "artifacts" => [
+        {
+          "file" => image.basename.to_s,
+          "bytes" => image.size,
+          "sha256" => Digest::SHA256.file(image).hexdigest
+        }
+      ],
+      "cleanup" => {
+        "port" => "released", "processes" => "clean", "runtime" => "cleaned"
+      },
+      "diagnostic" => nil,
+      "evidence" => { "type" => "project_provider", "details" => {} }
+    }
   end
 end

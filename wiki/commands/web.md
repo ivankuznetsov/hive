@@ -861,16 +861,18 @@ provider returns one bounded `hive-project-capture-result` v1 JSON object:
 ```
 
 Provider stdout, stderr, execution time, evidence (64 KiB), and artifact totals
-are bounded. On Linux, a child-subreaper supervisor applies one wall-clock
-deadline to the provider, output drains, and every descendant, including a
-child that calls `setsid`; project-provider capture fails closed where that
-custody primitive is unavailable. The parent also temporarily owns subreaper
-custody, records the supervisor PID/start identity and exit status, and performs
-bounded TERM/KILL cleanup if the supervisor times out, is signalled, exits
-nonzero, closes its result pipe early, or returns an invalid/undecodable result.
-Ordinary and abnormal completion both verify that the full provider tree is
-gone before the call returns. The provider environment contains only a small
-ambient allowlist plus private HOME/XDG/tmp paths.
+are bounded. On Linux, Hive first forks a dedicated child-subreaper custody root
+and then runs the supervisor and provider beneath it. One wall-clock deadline
+covers the provider, output drains, and every descendant, including a child that
+calls `setsid`; project-provider capture fails closed where that custody
+primitive is unavailable. Hive never makes the invoking caller a subreaper, and
+its unrelated children are outside process discovery, signalling, and reaping.
+The dedicated custody root records the nested supervisor PID/start identity and
+exit status, and performs bounded TERM/KILL cleanup if the supervisor times out,
+is signalled, exits nonzero, closes its result pipe early, or returns an
+invalid/undecodable result. Ordinary and abnormal completion both verify that
+the full command tree is gone before the call returns. The provider environment
+contains only a small ambient allowlist plus private HOME/XDG/tmp paths.
 
 Hive accepts artifacts only from private staging and rejects nonzero exit,
 malformed or oversized output, secret-shaped content, incomplete cleanup,

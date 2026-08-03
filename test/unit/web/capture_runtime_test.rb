@@ -69,6 +69,36 @@ class WebCaptureRuntimeTest < Minitest::Test
     end
   end
 
+  def test_manifest_requires_nonempty_environment_keys
+    Dir.mktmpdir("capture-runtime") do |root|
+      runtime = Hive::Web::CaptureRuntime.new(
+        source_root: "/source", runtime_root: root,
+        environment: {}, lifecycle_token: "token-123"
+      )
+      attributes = {
+        task: "demo",
+        source_sha: "a" * 40,
+        status: "failed",
+        cleanup: {},
+        recorder: {
+          "kind" => "project_provider",
+          "name" => "fixture",
+          "command" => [ "bin/provider" ]
+        },
+        evidence: { "type" => "project_provider", "details" => {} },
+        diagnostic: "fixture"
+      }
+
+      error = assert_raises(Hive::Web::CaptureRuntime::OwnershipError) do
+        runtime.capture_manifest(**attributes, environment_keys: [])
+      end
+      assert_match(/environment_keys must contain at least one key/, error.message)
+
+      manifest = runtime.capture_manifest(**attributes, environment_keys: [ "PATH" ])
+      assert_equal [ "PATH" ], manifest.fetch("environment_keys")
+    end
+  end
+
   def test_stale_runtime_pid_is_never_killed_with_the_wrong_token
     Dir.mktmpdir("capture-runtime") do |root|
       File.write(File.join(root, "lifecycle.json"), JSON.generate(

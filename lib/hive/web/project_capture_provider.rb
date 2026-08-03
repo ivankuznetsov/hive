@@ -46,6 +46,24 @@ module Hive
 
       class ProviderError < Hive::Error; end
 
+      # TaskCapture's source-attestation Git probes need the same bounded
+      # process-tree custody as the configured provider itself. Keep that
+      # boundary here so detached helpers cannot outlive either caller.
+      def self.capture_command_with_custody(argv:, source_root:, environment:, deadline:,
+                                            stdout_consumer: nil)
+        remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        allocate.send(
+          :supervise_provider,
+          Array(argv),
+          request: nil,
+          source_root: source_root,
+          environment: environment,
+          timeout_sec: [ remaining, 0 ].max,
+          deadline: deadline,
+          stdout_consumer: stdout_consumer
+        )
+      end
+
       def initialize(config:, environment: ENV, clock: -> { Time.now.utc })
         @config = config
         @environment = environment.to_h
@@ -82,9 +100,11 @@ module Hive
         document = parse_result(stdout)
         validate_result_shape!(document)
         if document.fetch("status") != "captured"
+          diagnostic = document["diagnostic"]
+          diagnostic = "provider reported failure" if diagnostic.to_s.strip.empty?
           raise ProviderError,
                 "project capture provider #{@config.fetch('name')} failed: " \
-                "#{bounded_diagnostic(document['diagnostic'] || 'provider reported failure')}"
+                "#{bounded_diagnostic(diagnostic)}"
         end
         artifacts = validate_artifacts!(document.fetch("artifacts"), staging_root)
         validate_staging_inventory!(staging_root, artifacts)
@@ -200,7 +220,88 @@ module Hive
         raise ProviderError, "project capture provider could not start: #{bounded_diagnostic(e)}"
       end
 
-      def supervise_provider(argv, request:, source_root:, environment:, timeout_sec:)
+      def supervise_provider(argv, request:, source_root:, environment:, timeout_sec:,
+                             deadline: nil, stdout_consumer: nil)
+        reader = writer = result_thread = custody_pid = custody_target = nil
+        result = primary_error = custody_error = nil
+        begin
+          reader, writer = IO.pipe
+          custody_pid = Process.fork do
+            reader.close
+            payload = begin
+              Process.setsid
+              encode_supervisor_result(
+                supervise_provider_in_custody(
+                  argv,
+                  request: request,
+                  source_root: source_root,
+                  environment: environment,
+                  timeout_sec: timeout_sec,
+                  deadline: deadline,
+                  stdout_consumer: stdout_consumer
+                )
+              )
+            rescue Exception => e # rubocop:disable Lint/RescueException -- trusted custody root must report before exit!
+              { "internal_error" => "#{e.class}: #{e.message}" }
+            end
+            write_supervisor_result(writer, payload)
+          ensure
+            writer.close unless writer.closed?
+            exit! 0
+          end
+          writer.close
+          custody_target = recorded_process_target!(custody_pid, "custody root")
+          result_thread = Thread.new { read_supervisor_result(reader) }
+          result_thread.report_on_exception = false
+          outer_runtime = deadline ? [ deadline - monotonic_now, 0 ].max : timeout_sec
+          outer_limit = outer_runtime + (2 * (CUSTODY_TERM_GRACE_SEC + CUSTODY_KILL_GRACE_SEC)) + 2
+          custody_status = wait_for_supervisor_status!(
+            custody_target,
+            deadline: monotonic_now + outer_limit,
+            label: "custody root"
+          )
+          unless custody_status.success?
+            raise ProviderError,
+                  "project capture provider custody root failed " \
+                  "(#{serialized_exit_detail(custody_status)})"
+          end
+          raw = begin
+            Timeout.timeout(0.5) { result_thread.value }
+          rescue Timeout::Error
+            raise ProviderError,
+                  "project capture provider custody result exceeded its read deadline"
+          end
+          result = decode_supervisor_result(raw)
+        rescue StandardError => e
+          primary_error = e
+        ensure
+          begin
+            cleanup_command_custody_tree!(custody_target)
+          rescue StandardError => e
+            custody_error = e
+          end
+          reader&.close unless reader&.closed?
+          writer&.close unless writer&.closed?
+          result_thread&.join(0.1)
+        end
+
+        if primary_error && custody_error
+          raise ProviderError,
+                "#{bounded_diagnostic(primary_error)}; command custody also failed: " \
+                "#{bounded_diagnostic(custody_error)}"
+        end
+        raise primary_error if primary_error
+        raise custody_error if custody_error
+
+        result
+      end
+
+      # The caller is never made a subreaper and is never scanned for children.
+      # This freshly forked custody root owns only the nested supervisor and the
+      # command subtree, so even abnormal supervisor death cannot transfer an
+      # unrelated caller process into cleanup custody.
+      def supervise_provider_in_custody(argv, request:, source_root:, environment:,
+                                        timeout_sec:, deadline:, stdout_consumer:)
         reader = writer = result_thread = supervisor_pid = supervisor_target = nil
         parent_was_subreaper = nil
         parent_custody_active = false
@@ -225,7 +326,9 @@ module Hive
                 request: request,
                 source_root: source_root,
                 environment: environment,
-                timeout_sec: timeout_sec
+                timeout_sec: timeout_sec,
+                deadline: deadline,
+                stdout_consumer: stdout_consumer
               )
             rescue Exception => e # rubocop:disable Lint/RescueException -- trusted supervisor must report before exit!
               { "internal_error" => "#{e.class}: #{e.message}" }
@@ -239,7 +342,8 @@ module Hive
           supervisor_target = recorded_process_target!(supervisor_pid, "supervisor")
           result_thread = Thread.new { read_supervisor_result(reader) }
           result_thread.report_on_exception = false
-          outer_limit = timeout_sec + CUSTODY_TERM_GRACE_SEC + CUSTODY_KILL_GRACE_SEC + 1
+          outer_runtime = deadline ? [ deadline - monotonic_now, 0 ].max : timeout_sec
+          outer_limit = outer_runtime + CUSTODY_TERM_GRACE_SEC + CUSTODY_KILL_GRACE_SEC + 1
           supervisor_status = wait_for_supervisor_status!(
             supervisor_target,
             deadline: monotonic_now + outer_limit
@@ -287,6 +391,61 @@ module Hive
         result
       end
 
+      def cleanup_command_custody_tree!(custody_target)
+        return unless custody_target &&
+                      Hive::ProcessKill.captured_process_alive?(custody_target)
+
+        deadline = monotonic_now + CUSTODY_TERM_GRACE_SEC + CUSTODY_KILL_GRACE_SEC
+        term_deadline = [ monotonic_now + CUSTODY_TERM_GRACE_SEC, deadline ].min
+        owned_targets = command_custody_targets(custody_target)
+        signal_targets("TERM", owned_targets)
+        remaining = wait_for_command_custody_exit(
+          custody_target, owned_targets, deadline: term_deadline, signal: "TERM"
+        )
+        unless remaining.empty?
+          signal_targets("KILL", remaining)
+          remaining = wait_for_command_custody_exit(
+            custody_target, owned_targets, deadline: deadline, signal: "KILL"
+          )
+        end
+        return if remaining.empty?
+
+        raise ProviderError,
+              "project capture provider could not terminate its command custody subtree"
+      end
+
+      def wait_for_command_custody_exit(custody_target, owned_targets, deadline:, signal:)
+        loop do
+          if Hive::ProcessKill.captured_process_alive?(custody_target)
+            owned_targets.concat(command_custody_targets(custody_target))
+          end
+          owned_targets.uniq! { |target| [ target.fetch(:pid), target.fetch(:start_time) ] }
+          reap_command_custody_root(custody_target)
+          remaining = owned_targets.select do |target|
+            Hive::ProcessKill.captured_process_alive?(target)
+          end
+          return [] if remaining.empty?
+          return remaining if monotonic_now >= deadline
+
+          signal_targets(signal, remaining)
+          sleep CUSTODY_POLL_SEC
+        end
+      end
+
+      def command_custody_targets(custody_target)
+        targets = confirmed_descendants(custody_target.fetch(:pid))
+        if Hive::ProcessKill.captured_process_alive?(custody_target)
+          targets << custody_target
+        end
+        targets.sort_by { |target| [ -target.fetch(:depth), target.fetch(:pid) ] }
+      end
+
+      def reap_command_custody_root(custody_target)
+        Process.waitpid(custody_target.fetch(:pid), Process::WNOHANG)
+      rescue Errno::ECHILD
+        nil
+      end
+
       def recorded_process_target!(pid, label)
         start_time = Hive::ProcessKill.process_start_time(pid)
         if start_time.to_s.empty?
@@ -296,20 +455,20 @@ module Hive
         { pid: pid, start_time: start_time, depth: 0 }
       end
 
-      def wait_for_supervisor_status!(target, deadline:)
+      def wait_for_supervisor_status!(target, deadline:, label: "supervisor")
         pid = target.fetch(:pid)
         loop do
           waited = Process.waitpid2(pid, Process::WNOHANG)
           if waited
             unless waited.fetch(0) == pid
-              raise ProviderError, "project capture provider supervisor identity changed"
+              raise ProviderError, "project capture provider #{label} identity changed"
             end
 
             return waited.fetch(1)
           end
           if monotonic_now >= deadline
             raise ProviderError,
-                  "project capture provider supervisor exceeded its custody deadline"
+                  "project capture provider #{label} exceeded its custody deadline"
           end
 
           live_start_time = Hive::ProcessKill.process_start_time(pid)
@@ -317,13 +476,13 @@ module Hive
             waited = Process.waitpid2(pid, Process::WNOHANG)
             return waited.fetch(1) if waited&.fetch(0) == pid
 
-            raise ProviderError, "project capture provider supervisor identity changed"
+            raise ProviderError, "project capture provider #{label} identity changed"
           end
           sleep CUSTODY_POLL_SEC
         end
       rescue Errno::ECHILD
         raise ProviderError,
-              "project capture provider supervisor exit status custody was lost"
+              "project capture provider #{label} exit status custody was lost"
       end
 
       def cleanup_parent_provider_tree!(supervisor_target)
@@ -382,15 +541,17 @@ module Hive
         "exit #{status.exitstatus.inspect}"
       end
 
-      def supervise_provider_child(argv, request:, source_root:, environment:, timeout_sec:)
+      def supervise_provider_child(argv, request:, source_root:, environment:,
+                                    timeout_sec:, deadline: nil, stdout_consumer: nil)
         stdin_reader, stdin_writer = IO.pipe
         stdout_reader, stdout_writer = IO.pipe
         stderr_reader, stderr_writer = IO.pipe
         unless supervisor_descendants.empty?
           raise ProviderError, "provider supervisor has unexpected pre-existing descendants"
         end
+        executable = argv.fetch(0)
         provider_pid = Process.spawn(
-          environment, *argv,
+          environment, [ executable, executable ], *argv.drop(1),
           chdir: source_root,
           in: stdin_reader,
           out: stdout_writer,
@@ -399,13 +560,19 @@ module Hive
           unsetenv_others: true
         )
         [ stdin_reader, stdout_writer, stderr_writer ].each(&:close)
-        stdin_writer.write("#{JSON.generate(request)}\n")
+        stdin_writer.write("#{JSON.generate(request)}\n") if request
         stdin_writer.close
         streams = {
-          stdout_reader => { data: +"".b, limit: MAX_OUTPUT_BYTES, overflow: false, open: true },
-          stderr_reader => { data: +"".b, limit: MAX_DIAGNOSTIC_BYTES, overflow: false, open: true }
+          stdout_reader => {
+            data: +"".b, limit: MAX_OUTPUT_BYTES, overflow: false, open: true,
+            consumer: stdout_consumer, consumer_error: nil
+          },
+          stderr_reader => {
+            data: +"".b, limit: MAX_DIAGNOSTIC_BYTES, overflow: false, open: true,
+            consumer: nil, consumer_error: nil
+          }
         }
-        deadline = monotonic_now + timeout_sec
+        deadline ||= monotonic_now + timeout_sec
         status = nil
         timed_out = false
 
@@ -440,6 +607,8 @@ module Hive
           "stderr" => Base64.strict_encode64(streams.fetch(stderr_reader).fetch(:data)),
           "stdout_overflow" => streams.fetch(stdout_reader).fetch(:overflow),
           "stderr_overflow" => streams.fetch(stderr_reader).fetch(:overflow),
+          "stdout_consumer_error" =>
+            streams.fetch(stdout_reader).fetch(:consumer_error),
           "timed_out" => timed_out,
           "leftover_processes" => !!leftover_processes,
           "cleanup_failed" => cleanup_failed,
@@ -474,21 +643,44 @@ module Hive
             chunk = io.read_nonblock(8192, exception: false)
             break if chunk == :wait_readable
             if chunk.nil?
+              finish_provider_stream_consumer(stream)
               stream[:open] = false
               io.close
               break
             end
 
-            remaining = stream.fetch(:limit) - stream.fetch(:data).bytesize
-            stream.fetch(:data) << chunk.byteslice(0, remaining) if remaining.positive?
-            if chunk.bytesize > remaining
-              stream[:overflow] = true
-              break
-            end
+            consume_provider_stream_chunk(stream, chunk)
+            break if stream.fetch(:overflow)
           end
         rescue IOError, Errno::EBADF
           stream[:open] = false
         end
+      end
+
+      def consume_provider_stream_chunk(stream, chunk)
+        return if stream.fetch(:consumer_error)
+
+        consumer = stream.fetch(:consumer)
+        if consumer
+          consumer.write(chunk)
+          return
+        end
+
+        remaining = stream.fetch(:limit) - stream.fetch(:data).bytesize
+        stream.fetch(:data) << chunk.byteslice(0, remaining) if remaining.positive?
+        stream[:overflow] = true if chunk.bytesize > remaining
+      rescue StandardError => e
+        stream[:consumer_error] = e.message
+        stream[:overflow] = true
+      end
+
+      def finish_provider_stream_consumer(stream)
+        return if stream.fetch(:consumer_error)
+
+        stream.fetch(:consumer)&.finish
+      rescue StandardError => e
+        stream[:consumer_error] = e.message
+        stream[:overflow] = true
       end
 
       def terminate_supervised_tree!(provider_pid, status, deadline:)
@@ -527,8 +719,12 @@ module Hive
       end
 
       def supervisor_descendants
-        first = linux_descendant_snapshot(Process.pid)
-        confirmation = linux_descendant_snapshot(Process.pid).to_h do |target|
+        confirmed_descendants(Process.pid)
+      end
+
+      def confirmed_descendants(root_pid)
+        first = linux_descendant_snapshot(root_pid)
+        confirmation = linux_descendant_snapshot(root_pid).to_h do |target|
           [ target.fetch(:pid), target ]
         end
         first.select do |target|
@@ -656,6 +852,15 @@ module Hive
         payload
       rescue JSON::ParserError, ArgumentError, KeyError
         raise ProviderError, "project capture provider supervisor returned an invalid result"
+      end
+
+      def encode_supervisor_result(payload)
+        return payload if payload["internal_error"]
+
+        payload.merge(
+          "stdout" => Base64.strict_encode64(payload.fetch("stdout")),
+          "stderr" => Base64.strict_encode64(payload.fetch("stderr"))
+        )
       end
 
       def enable_child_subreaper!

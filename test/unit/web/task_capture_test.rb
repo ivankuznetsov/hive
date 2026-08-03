@@ -229,8 +229,13 @@ class WebTaskCaptureTest < Minitest::Test
         assert_raises(Hive::Web::TaskCapture::CaptureError) { capture.call }
       end
 
-      assert_match(/no supported artifact capture provider/i, error.message)
-      assert_includes error.message, "artifacts.capture.provider"
+      assert_equal(
+        "no supported artifact capture provider is available for a conventional project root: " \
+        "the built-in recorder capability is absent and no project provider is configured. " \
+        "Declare artifacts.capture.provider in #{File.join(root, '.hive-state', 'config.yml')} " \
+        "with a project-owned recorder command.",
+        error.message
+      )
       refute_includes error.message, "web/Gemfile"
       refute_includes error.message, "web/Gemfile.lock"
       assert_equal 0, source_bundle_calls
@@ -238,6 +243,50 @@ class WebTaskCaptureTest < Minitest::Test
       assert_equal 0, server_calls
       refute File.exist?(File.join(task_folder, "media"))
       assert_equal root, File.dirname(File.dirname(File.dirname(File.dirname(task_folder))))
+    end
+  end
+
+  def test_non_linux_selection_reports_project_provider_unavailability
+    with_capture_task do |_root, task_folder, source|
+      File.write(File.join(source, "Gemfile.lock"), "GEM\n")
+      original_platform = RUBY_PLATFORM
+      original_verbose = $VERBOSE
+      $VERBOSE = nil
+      Object.send(:remove_const, :RUBY_PLATFORM)
+      Object.const_set(:RUBY_PLATFORM, "arm64-darwin26")
+      begin
+        [
+          {},
+          {
+            "artifacts" => {
+              "capture" => {
+                "provider" => {
+                  "name" => "fixture", "command" => [ "bin/provider" ],
+                  "timeout_sec" => 2
+                }
+              }
+            }
+          }
+        ].each do |project_config|
+          capture = Hive::Web::TaskCapture.new(
+            task_folder: task_folder,
+            project_config: project_config
+          )
+
+          error = assert_raises(Hive::Web::TaskCapture::CaptureError) do
+            capture.send(:select_recorder, source)
+          end
+
+          assert_match(/project-provider capture is unavailable on arm64-darwin26/i,
+                       error.message)
+          assert_match(/Linux child-subreaper support/, error.message)
+          refute_includes error.message, "Declare artifacts.capture.provider"
+        end
+      ensure
+        Object.send(:remove_const, :RUBY_PLATFORM)
+        Object.const_set(:RUBY_PLATFORM, original_platform)
+        $VERBOSE = original_verbose
+      end
     end
   end
 
@@ -252,6 +301,7 @@ class WebTaskCaptureTest < Minitest::Test
   end
 
   def test_configured_conventional_provider_publishes_valid_v2_evidence_without_hivebox
+    unrelated_child = start_unrelated_caller_child
     with_capture_task do |_root, task_folder, source|
       FileUtils.mkdir_p([ File.join(source, "app"), File.join(source, "bin") ])
       File.write(File.join(source, "Gemfile.lock"), "GEM\n")
@@ -350,9 +400,13 @@ class WebTaskCaptureTest < Minitest::Test
       policy.ensure!
       assert policy.capture_satisfied?
     end
+    assert_unrelated_caller_child_alive(unrelated_child)
+  ensure
+    stop_unrelated_caller_child(unrelated_child)
   end
 
   def test_provider_target_mutation_is_detected_before_any_media_is_published
+    unrelated_child = start_unrelated_caller_child
     with_capture_task do |_root, task_folder, source|
       FileUtils.mkdir_p([ File.join(source, "app"), File.join(source, "bin") ])
       lockfile = File.join(source, "Gemfile.lock")
@@ -420,9 +474,13 @@ class WebTaskCaptureTest < Minitest::Test
       assert_empty Dir.children(media)
       refute File.exist?(File.join(media, "capture-manifest.json"))
     end
+    assert_unrelated_caller_child_alive(unrelated_child)
+  ensure
+    stop_unrelated_caller_child(unrelated_child)
   end
 
   def test_real_provider_failures_revalidate_source_and_preserve_both_errors
+    unrelated_child = start_unrelated_caller_child
     failures = {
       "nonzero" => /failed \(exit 7\)/,
       "timeout" => /timed out after 1s/,
@@ -465,6 +523,9 @@ class WebTaskCaptureTest < Minitest::Test
         assert_empty Dir.children(File.join(task_folder, "media")), failure
       end
     end
+    assert_unrelated_caller_child_alive(unrelated_child)
+  ensure
+    stop_unrelated_caller_child(unrelated_child)
   end
 
   def test_provider_ignored_path_mutation_is_detected_before_publication
@@ -508,6 +569,286 @@ class WebTaskCaptureTest < Minitest::Test
       assert File.file?(File.join(source, "tmp", "ignored.txt")),
              "custody detection must not hide or restore the provider mutation"
       assert_empty Dir.children(File.join(task_folder, "media"))
+    end
+  end
+
+  def test_provider_source_rejects_hidden_index_flags_before_execution
+    {
+      "assume-unchanged" => "--assume-unchanged",
+      "skip-worktree" => "--skip-worktree"
+    }.each do |name, flag|
+      with_capture_task do |_root, task_folder, source|
+        head = prepare_conventional_provider_source(source)
+        run!("git", "-C", source, "update-index", flag, "--", "Gemfile.lock")
+        File.write(File.join(source, "Gemfile.lock"), "hidden #{name} mutation\n")
+        capture = Hive::Web::TaskCapture.new(
+          task_folder: task_folder,
+          environment: { "PATH" => ENV.fetch("PATH", "") }
+        )
+
+        error = assert_raises(Hive::Web::TaskCapture::CaptureError, name) do
+          capture.send(
+            :verify_provider_source!, source, head,
+            provider_executable: "bin/provider"
+          )
+        end
+
+        assert_match(/non-default Git index flags/i, error.message, name)
+      end
+    end
+  end
+
+  def test_provider_source_requires_the_literal_executable_path_to_be_tracked
+    with_capture_task do |_root, task_folder, source|
+      prepare_conventional_provider_source(source, ignored: "bin/capture*\n")
+      tracked_match = File.join(source, "bin", "capture-safe")
+      File.binwrite(tracked_match, "tracked decoy\n")
+      run!("git", "-C", source, "add", "-f", "--", "bin/capture-safe")
+      run!("git", "-C", source, "commit", "-m", "track decoy", "--quiet")
+      head = run!("git", "-C", source, "rev-parse", "HEAD").strip
+      write_executable(File.join(source, "bin", "capture*"), "#!/bin/sh\nexit 0\n")
+      capture = Hive::Web::TaskCapture.new(
+        task_folder: task_folder,
+        environment: { "PATH" => ENV.fetch("PATH", "") }
+      )
+
+      error = assert_raises(Hive::Web::TaskCapture::CaptureError) do
+        capture.send(
+          :verify_provider_source!, source, head,
+          provider_executable: "bin/capture*"
+        )
+      end
+
+      assert_match(/Git check failed/i, error.message)
+    end
+  end
+
+  def test_provider_source_rejects_hidden_index_flags_after_execution
+    {
+      "assume-unchanged" => "--assume-unchanged",
+      "skip-worktree" => "--skip-worktree"
+    }.each do |name, flag|
+      with_capture_task do |root, task_folder, source|
+        head = prepare_conventional_provider_source(source)
+        capture = Hive::Web::TaskCapture.new(
+          task_folder: task_folder,
+          environment: { "PATH" => ENV.fetch("PATH", "") }
+        )
+        snapshot = capture.send(
+          :verify_provider_source!, source, head,
+          provider_executable: "bin/provider"
+        )
+        runner = method(:run!)
+        provider = Object.new
+        provider.define_singleton_method(:call) do |**|
+          runner.call("git", "-C", source, "update-index", flag, "--", "Gemfile.lock")
+          :provider_result
+        end
+
+        error = assert_raises(Hive::Web::TaskCapture::CaptureError, name) do
+          capture.send(
+            :call_provider_with_source_custody,
+            provider,
+            source_root: source,
+            expected_head: head,
+            provider_executable: "bin/provider",
+            source_snapshot: snapshot,
+            staging: File.join(root, "staging"),
+            runtime_root: File.join(root, "runtime")
+          )
+        end
+
+        assert_match(/non-default Git index flags/i, error.message, name)
+      end
+    end
+  end
+
+  def test_provider_git_checks_share_one_monotonic_deadline
+    with_capture_task do |root, task_folder, source|
+      fake_bin = File.join(root, "fake-bin")
+      git_path = File.join(fake_bin, "git")
+      FileUtils.mkdir_p(fake_bin)
+      FileUtils.mkdir_p(File.join(source, "bin"))
+      File.binwrite(File.join(source, "bin", "provider"), "provider\n")
+      write_executable(git_path, <<~RUBY)
+        #!#{RbConfig.ruby}
+        sleep 0.06
+        marker = ARGV.index("-C")
+        source = ARGV.fetch(marker + 1)
+        command = ARGV.drop(marker + 2)
+        case command
+        when [ "rev-parse", "--show-toplevel" ]
+          puts source
+        when [ "rev-parse", "HEAD" ]
+          puts "#{'a' * 40}"
+        when [ "status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none" ]
+        when [ "ls-files", "-v", "-f", "-z" ]
+          STDOUT.write("H bin/provider\\0")
+        else
+          puts "bin/provider"
+        end
+      RUBY
+      capture = Hive::Web::TaskCapture.new(
+        task_folder: task_folder,
+        environment: { "PATH" => fake_bin }
+      )
+      original_timeout = Hive::Web::TaskCapture::PROVIDER_SOURCE_SNAPSHOT_TIMEOUT_SEC
+      original_verbose = $VERBOSE
+      $VERBOSE = nil
+      Hive::Web::TaskCapture.send(:remove_const, :PROVIDER_SOURCE_SNAPSHOT_TIMEOUT_SEC)
+      Hive::Web::TaskCapture.const_set(:PROVIDER_SOURCE_SNAPSHOT_TIMEOUT_SEC, 0.1)
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      begin
+        error = assert_raises(Hive::Web::TaskCapture::CaptureError) do
+          capture.send(
+            :verify_provider_source!, source, "a" * 40,
+            provider_executable: "bin/provider"
+          )
+        end
+        elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
+        assert_match(/source custody exceeded the 0.1-second monotonic (?:inventory )?deadline/i,
+                     error.message)
+        assert_operator elapsed, :<, 1.0
+      ensure
+        Hive::Web::TaskCapture.send(:remove_const, :PROVIDER_SOURCE_SNAPSHOT_TIMEOUT_SEC)
+        Hive::Web::TaskCapture.const_set(
+          :PROVIDER_SOURCE_SNAPSHOT_TIMEOUT_SEC, original_timeout
+        )
+        $VERBOSE = original_verbose
+      end
+    end
+  end
+
+  def test_provider_git_checks_bound_stdout_and_stderr_while_streaming
+    with_capture_task do |root, task_folder, source|
+      fake_bin = File.join(root, "fake-bin")
+      git_path = File.join(fake_bin, "git")
+      FileUtils.mkdir_p(fake_bin)
+      capture = Hive::Web::TaskCapture.new(
+        task_folder: task_folder,
+        environment: { "PATH" => fake_bin }
+      )
+
+      { "stdout" => "STDOUT", "stderr" => "STDERR" }.each do |stream, constant|
+        write_executable(git_path, <<~RUBY)
+          #!#{RbConfig.ruby}
+          #{constant}.write("x" * (2 * 1024 * 1024))
+        RUBY
+
+        error = assert_raises(Hive::Web::TaskCapture::CaptureError, stream) do
+          capture.send(:capture_git!, source, "status")
+        end
+
+        assert_match(/Git check #{stream} exceeded/i, error.message, stream)
+      end
+    end
+  end
+
+  def test_provider_index_flag_attestation_streams_large_valid_listing
+    with_capture_task do |root, task_folder, source|
+      fake_bin = File.join(root, "fake-bin")
+      git_path = File.join(fake_bin, "git")
+      FileUtils.mkdir_p(fake_bin)
+      write_executable(git_path, <<~RUBY)
+        #!#{RbConfig.ruby}
+        70_000.times { |index| STDOUT.write("H f\#{index}\\0") }
+      RUBY
+      capture = Hive::Web::TaskCapture.new(
+        task_folder: task_folder,
+        environment: { "PATH" => fake_bin }
+      )
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 5
+
+      assert_nil capture.send(
+        :verify_provider_source_index_flags!, source, deadline: deadline
+      )
+    end
+  end
+
+  def test_provider_git_check_receives_closed_empty_stdin
+    with_capture_task do |root, task_folder, source|
+      fake_bin = File.join(root, "fake-bin")
+      git_path = File.join(fake_bin, "git")
+      FileUtils.mkdir_p(fake_bin)
+      write_executable(git_path, <<~RUBY)
+        #!#{RbConfig.ruby}
+        STDOUT.write(STDIN.read.bytesize.to_s)
+      RUBY
+      capture = Hive::Web::TaskCapture.new(
+        task_folder: task_folder,
+        environment: { "PATH" => fake_bin }
+      )
+
+      assert_equal "0", capture.send(:capture_git!, source, "status")
+    end
+  end
+
+  def test_provider_git_check_owns_only_its_command_subtree
+    with_capture_task do |_root, task_folder, source|
+      head = prepare_conventional_provider_source(source)
+      capture = Hive::Web::TaskCapture.new(
+        task_folder: task_folder,
+        environment: { "PATH" => ENV.fetch("PATH", "") }
+      )
+      unrelated_child = start_unrelated_caller_child
+
+      assert_equal head, capture.send(:capture_git!, source, "rev-parse", "HEAD").strip
+      snapshot = capture.send(
+        :verify_provider_source!, source, head,
+        provider_executable: "bin/provider"
+      )
+      refute_empty snapshot
+      assert_unrelated_caller_child_alive(unrelated_child)
+    ensure
+      stop_unrelated_caller_child(unrelated_child)
+    end
+  end
+
+  def test_provider_git_check_terminates_and_reaps_a_setsid_descendant
+    with_capture_task do |root, task_folder, source|
+      fake_bin = File.join(root, "fake-bin")
+      git_path = File.join(fake_bin, "git")
+      pid_path = File.join(root, "detached.pid")
+      FileUtils.mkdir_p(fake_bin)
+      write_executable(git_path, <<~RUBY)
+        #!#{RbConfig.ruby}
+        child = fork do
+          Process.setsid
+          STDIN.reopen(File::NULL)
+          STDOUT.reopen(File::NULL, "w")
+          STDERR.reopen(File::NULL, "w")
+          File.binwrite(#{pid_path.dump}, Process.pid.to_s)
+          trap("TERM") {}
+          sleep 30
+        end
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 2
+        until File.file?(#{pid_path.dump})
+          abort "detached child did not start" if
+            Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+          sleep 0.01
+        end
+        puts "parent complete"
+      RUBY
+      capture = Hive::Web::TaskCapture.new(
+        task_folder: task_folder,
+        environment: { "PATH" => fake_bin }
+      )
+      child_pid = nil
+
+      error = assert_raises(Hive::Web::TaskCapture::CaptureError) do
+        capture.send(:capture_git!, source, "status")
+      end
+      child_pid = Integer(File.binread(pid_path))
+
+      assert_match(/left child processes running/i, error.message)
+      refute Hive::ProcessKill.pid_alive?(child_pid),
+             "detached Git helper descendant #{child_pid} survived capture_git!"
+    ensure
+      child_pid ||= Integer(File.binread(pid_path)) if defined?(pid_path) && File.file?(pid_path)
+      if child_pid && Hive::ProcessKill.pid_alive?(child_pid)
+        Hive::ProcessKill.terminate_process(child_pid, grace_seconds: 0.1)
+      end
     end
   end
 
@@ -1209,6 +1550,48 @@ class WebTaskCaptureTest < Minitest::Test
 
   PNG_1X1_BASE64 =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=".freeze
+
+  def write_executable(path, body)
+    File.binwrite(path, body)
+    FileUtils.chmod(0o755, path)
+  end
+
+  def start_unrelated_caller_child
+    pid = fork { sleep 60 }
+    start_time = Hive::ProcessKill.process_start_time(pid)
+    raise "unrelated caller child identity is unavailable" if start_time.to_s.empty?
+
+    { pid: pid, start_time: start_time }
+  rescue StandardError
+    stop_unrelated_caller_child(pid: pid, start_time: start_time) if pid
+    raise
+  end
+
+  def assert_unrelated_caller_child_alive(target)
+    pid = target.fetch(:pid)
+    assert_nil Process.waitpid(pid, Process::WNOHANG),
+               "unrelated caller child #{pid} exited during command custody"
+    assert Hive::ProcessKill.captured_process_alive?(target),
+           "unrelated caller child #{pid} lost its recorded identity during command custody"
+  rescue Errno::ECHILD
+    flunk "command custody reaped unrelated caller child #{pid}"
+  end
+
+  def stop_unrelated_caller_child(target)
+    return unless target
+
+    pid = target.fetch(:pid)
+    return if Process.waitpid(pid, Process::WNOHANG)
+
+    begin
+      Process.kill("TERM", pid)
+    rescue Errno::ESRCH
+      nil
+    end
+    Process.wait(pid)
+  rescue Errno::ECHILD
+    nil
+  end
 
   def prepare_conventional_provider_source(source, ignored: nil,
                                            provider_body: "#!/usr/bin/env ruby\n")

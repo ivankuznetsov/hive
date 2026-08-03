@@ -36,6 +36,10 @@ module Hive
       PROVIDER_SOURCE_SNAPSHOT_MAX_BYTES = 1024 * 1024 * 1024
       PROVIDER_SOURCE_SNAPSHOT_TIMEOUT_SEC = 30
       PROVIDER_SOURCE_HASH_CHUNK_BYTES = 1024 * 1024
+      PROVIDER_SOURCE_GIT_STDOUT_MAX_BYTES =
+        Hive::Web::ProjectCaptureProvider::MAX_OUTPUT_BYTES
+      PROVIDER_SOURCE_GIT_STDERR_MAX_BYTES =
+        Hive::Web::ProjectCaptureProvider::MAX_DIAGNOSTIC_BYTES
       PNG_SIGNATURE = "\x89PNG\r\n\x1a\n".b.freeze
       BUILT_IN_RECORDER_INPUTS = %w[
         Gemfile.lock
@@ -52,6 +56,54 @@ module Hive
       ].freeze
 
       class CaptureError < Hive::Error; end
+
+      class GitIndexFlagConsumer
+        def initialize(max_entries:, max_record_bytes:)
+          @max_entries = max_entries
+          @max_record_bytes = max_record_bytes
+          @entries = 0
+          @buffer = +"".b
+        end
+
+        def write(chunk)
+          @buffer << chunk.b
+          while (separator = @buffer.index("\0".b))
+            record = @buffer.slice!(0, separator)
+            @buffer.slice!(0)
+            validate_record!(record)
+          end
+          return if @buffer.bytesize <= @max_record_bytes
+
+          raise CaptureError,
+                "provider capture source Git index record exceeded its custody limit"
+        end
+
+        def finish
+          validate_record!(@buffer) unless @buffer.empty?
+        end
+
+        private
+
+        def validate_record!(record)
+          @entries += 1
+          if @entries > @max_entries
+            raise CaptureError,
+                  "provider capture source Git index exceeded the " \
+                  "#{@max_entries}-entry custody limit"
+          end
+          match = /\A([A-Za-z?]) (.*)\z/m.match(record)
+          unless match
+            raise CaptureError,
+                  "provider capture source Git index flags have an unsupported representation"
+          end
+          return if match[1] == "H"
+
+          raise CaptureError,
+                "provider capture source has non-default Git index flags " \
+                "(assume-unchanged or skip-worktree)"
+        end
+      end
+      private_constant :GitIndexFlagConsumer
 
       attr_reader :task
 
@@ -285,6 +337,12 @@ module Hive
         return { kind: :built_in } if @source_bundle
         return { kind: :built_in } if built_in_recorder_compatible?(source_root)
 
+        unless project_provider_supported?
+          raise CaptureError,
+                "project-provider capture is unavailable on #{RUBY_PLATFORM}: " \
+                "project capture provider custody requires Linux child-subreaper support"
+        end
+
         provider = @project_config.dig("artifacts", "capture", "provider")
         return { kind: :provider, config: provider } if provider
 
@@ -301,6 +359,10 @@ module Hive
         BUILT_IN_RECORDER_INPUTS.all? do |relative|
           regular_file?(File.join(source_root, relative))
         end
+      end
+
+      def project_provider_supported?
+        RUBY_PLATFORM.include?("linux")
       end
 
       def regular_file?(path)
@@ -352,31 +414,36 @@ module Hive
 
       def verify_provider_source!(source_root, expected_head, provider_executable:,
                                   expected_snapshot: nil)
+        deadline = provider_custody_monotonic_now + PROVIDER_SOURCE_SNAPSHOT_TIMEOUT_SEC
         stat = File.lstat(source_root)
         if stat.symlink? || !stat.directory? || stat.uid != Process.uid
           raise CaptureError, "provider capture source must be an owned Git worktree directory"
         end
-        top = capture_git!(source_root, "rev-parse", "--show-toplevel").strip
+        top = capture_git!(
+          source_root, "rev-parse", "--show-toplevel", deadline: deadline
+        ).strip
         unless File.realpath(top) == File.realpath(source_root)
           raise CaptureError, "provider capture source does not match the Git worktree top level"
         end
-        head = capture_git!(source_root, "rev-parse", "HEAD").strip
+        head = capture_git!(source_root, "rev-parse", "HEAD", deadline: deadline).strip
         unless head == expected_head
           raise CaptureError,
                 "capture source HEAD #{head} does not match requirement #{expected_head}"
         end
         dirty = capture_git!(
           source_root, "status", "--porcelain=v1", "--untracked-files=all",
-          "--ignore-submodules=none"
+          "--ignore-submodules=none", deadline: deadline
         )
         unless dirty.empty?
           raise CaptureError,
                 "source HEAD or cleanliness changed during project provider capture"
         end
         capture_git!(
-          source_root, "ls-files", "--error-unmatch", "--", provider_executable
+          source_root, "ls-files", "--error-unmatch", "--", provider_executable,
+          deadline: deadline
         )
-        snapshot = provider_source_snapshot!(source_root)
+        verify_provider_source_index_flags!(source_root, deadline: deadline)
+        snapshot = provider_source_snapshot!(source_root, deadline: deadline)
         if expected_snapshot && snapshot != expected_snapshot
           raise CaptureError,
                 "source custody changed during project provider capture, including ignored paths"
@@ -386,10 +453,10 @@ module Hive
         raise CaptureError, "provider capture source is unavailable: #{bounded_diagnostic(e)}"
       end
 
-      def provider_source_snapshot!(source_root)
+      def provider_source_snapshot!(source_root, deadline: nil)
         records = []
         logical_bytes = 0
-        deadline = provider_custody_monotonic_now + PROVIDER_SOURCE_SNAPSHOT_TIMEOUT_SEC
+        deadline ||= provider_custody_monotonic_now + PROVIDER_SOURCE_SNAPSHOT_TIMEOUT_SEC
         Find.find(source_root) do |path|
           enforce_provider_source_snapshot_deadline!(deadline)
           relative = path.delete_prefix("#{source_root}#{File::SEPARATOR}")
@@ -516,26 +583,84 @@ module Hive
         end
       end
 
-      def capture_git!(source_root, *args)
+      def verify_provider_source_index_flags!(source_root, deadline:)
+        consumer = GitIndexFlagConsumer.new(
+          max_entries: PROVIDER_SOURCE_SNAPSHOT_MAX_ENTRIES,
+          max_record_bytes: PROVIDER_SOURCE_GIT_STDOUT_MAX_BYTES
+        )
+        capture_git!(
+          source_root, "ls-files", "-v", "-f", "-z", deadline: deadline,
+          stdout_consumer: consumer
+        )
+        nil
+      end
+
+      def capture_git!(source_root, *args, deadline: nil, stdout_consumer: nil)
+        deadline ||= provider_custody_monotonic_now + PROVIDER_SOURCE_SNAPSHOT_TIMEOUT_SEC
+        enforce_provider_source_snapshot_deadline!(deadline)
         env = {
           "PATH" => @environment.fetch("PATH", "/usr/local/bin:/usr/bin:/bin"),
           "LANG" => @environment["LANG"],
           "LC_ALL" => @environment["LC_ALL"],
           "GIT_CONFIG_NOSYSTEM" => "1",
+          "GIT_LITERAL_PATHSPECS" => "1",
           "GIT_OPTIONAL_LOCKS" => "0",
           "GIT_TERMINAL_PROMPT" => "0"
         }.compact
-        stdout, stderr, status = Open3.capture3(
-          env,
-          "git", "-c", "core.hooksPath=/dev/null", "-c", "diff.external=",
-          "-C", source_root, *args,
-          unsetenv_others: true
+        result = Hive::Web::ProjectCaptureProvider.capture_command_with_custody(
+          argv: [
+            "git", "-c", "core.hooksPath=/dev/null", "-c", "diff.external=",
+            "-c", "core.fsmonitor=false", "-C", source_root, *args
+          ],
+          source_root: source_root,
+          environment: env,
+          deadline: deadline,
+          stdout_consumer: stdout_consumer
         )
-        unless status.success?
+        if result["internal_error"]
           raise CaptureError,
-                "provider capture Git check failed: #{bounded_diagnostic(stderr)}"
+                "provider capture Git custody failed: " \
+                "#{bounded_diagnostic(result.fetch('internal_error'))}"
         end
-        stdout
+        if result.fetch("cleanup_failed")
+          raise CaptureError,
+                "provider capture Git helper descendants could not be terminated"
+        end
+        if result["stdout_consumer_error"]
+          raise CaptureError,
+                bounded_diagnostic(result.fetch("stdout_consumer_error"))
+        end
+        enforce_provider_source_snapshot_deadline!(deadline) if result.fetch("timed_out")
+        if result.fetch("stdout_overflow")
+          raise CaptureError,
+                "provider capture Git check stdout exceeded " \
+                "#{PROVIDER_SOURCE_GIT_STDOUT_MAX_BYTES} bytes"
+        end
+        if result.fetch("stderr_overflow")
+          raise CaptureError,
+                "provider capture Git check stderr exceeded " \
+                "#{PROVIDER_SOURCE_GIT_STDERR_MAX_BYTES} bytes"
+        end
+        if result.fetch("leftover_processes")
+          raise CaptureError,
+                "provider capture Git check left child processes running"
+        end
+
+        status = result.fetch("status")
+        unless status.fetch("success")
+          exit_detail = if status.fetch("signaled")
+            "signal #{status.fetch('termsig').inspect}"
+          else
+            "exit #{status.fetch('exitstatus').inspect}"
+          end
+          detail = bounded_diagnostic(result.fetch("stderr"))
+          suffix = detail.empty? ? "" : ": #{detail}"
+          raise CaptureError,
+                "provider capture Git check failed (#{exit_detail})#{suffix}"
+        end
+        result.fetch("stdout")
+      rescue Hive::Web::ProjectCaptureProvider::ProviderError => e
+        raise CaptureError, "provider capture Git custody failed: #{bounded_diagnostic(e)}"
       end
 
       def provider_publication_plan(artifacts, media_root:, source_sha:)

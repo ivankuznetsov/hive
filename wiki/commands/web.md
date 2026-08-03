@@ -747,7 +747,9 @@ to consume it; it never deletes `plan.md` or foreground-runs the plan stage.
 `packaging/docker/Dockerfile`: agent CLIs install in an early cached layer;
 the gem builds/installs from `/app`; the Rails app bundles and precompiles
 assets (propshaft — no node build) at `/app/web` with a dummy build-time
-secret. Local non-Docker installs instead use the managed release bundle
+secret. The slim Ruby image installs `libffi-dev` before the root bundle so
+the explicit Fiddle runtime dependency can build its native extension. Local
+non-Docker installs instead use the managed release bundle
 described in [[commands/setup]]. The image includes `asciinema` (records a terminal `.cast`) and
 `ffmpeg`, but NOT a terminal-GIF encoder (`agg`/`vhs`) — `ffmpeg` cannot read a
 `.cast`, so an in-box TUI/CLI demo records a `.cast` and then writes a `failed`

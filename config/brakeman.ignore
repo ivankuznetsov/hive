@@ -129,8 +129,8 @@
       "note": "False positive. Hive::Gh.capture3 passes discrete argv elements to Process.spawn. closure_default_branch requires a validated GitHub host and owner/repository slug before constructing the repository endpoint, so no shell interprets the endpoint."
     },
     {
-      "fingerprint": "82365cb654f0943c9d99cfa4a878348fd0654f07c6a8549be823304d895e21a7",
-      "note": "False positive. HiveManagedWebArchive passes discrete argv elements to Open3.capture3. candidate_sha is a validated full hexadecimal Git OID, the web treeish is one argv element, and no shell interprets the destination, treeish, or repository path."
+      "fingerprint": "58d5357d0c5a20924f2b7195a2cb5a7a2da44ec1c82c261d9ba53ff0bd7956c8",
+      "note": "False positive. HiveManagedWebArchive passes discrete argv elements to Open3.capture3. candidate_sha is a validated full hexadecimal Git OID, timestamp is revalidated as decimal Git commit metadata before use in --mtime, and the web treeish is one argv element; no shell interprets the destination, treeish, or repository path."
     },
     {
       "fingerprint": "7c0b709f17cea7775163bea17a82f0b55c3ff8ae0064a84c1369ff51f52c3014",

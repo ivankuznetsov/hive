@@ -24,6 +24,8 @@ require "hive/commands/setup_agents"
 require "hive/tui/snapshot"
 require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/dispatch_result_queue"
+require "hive/modules/migration/patrol_decision_projection"
+require "hive/modules/migration/patrol_evidence"
 require "tmpdir"
 
 # Schema files under schemas/ are the published artefact for external
@@ -2761,5 +2763,115 @@ class SchemaFilesTest < Minitest::Test
       assert schemer.valid?(payload),
              "hive-act ErrorPayload must accept #{kind}: #{schemer.validate(payload).to_a.inspect}"
     end
+  end
+
+  def test_patrol_evidence_receipt_schema_is_strict_and_composes_u2_values
+    path = Hive::Schemas.schema_path(
+      "hive-patrol-evidence-receipt", version: 1
+    )
+    assert File.file?(path), "schema file missing: #{path}"
+    schemer = JSONSchemer.schema(JSON.parse(File.read(path)))
+    payload = patrol_evidence_receipt_payload
+
+    assert_empty schemer.validate(payload).to_a
+    refute schemer.valid?(payload.merge("unexpected" => true))
+    refute schemer.valid?(payload.merge("candidate_sha" => "not-a-sha"))
+    refute schemer.valid?(
+      payload.merge("effects" => payload.fetch("effects") + [ {} ])
+    )
+  end
+
+  def test_module_migration_report_v2_accepts_partial_lanes_and_rejects_v1
+    legacy_path = Hive::Schemas.schema_path(
+      "hive-module-migration-report", version: 1
+    )
+    assert_equal legacy_path,
+                 Hive::Schemas.schema_path("hive-module-migration-report")
+    assert_equal 1,
+                 JSON.parse(File.read(legacy_path))
+                   .dig("oneOf", 0, "properties", "schema_version", "const")
+    path = Hive::Schemas.schema_path(
+      "hive-module-migration-report", version: 2
+    )
+    assert File.file?(path), "schema file missing: #{path}"
+    schemer = JSONSchemer.schema(JSON.parse(File.read(path)))
+    payload = {
+      "schema" => "hive-module-migration-report",
+      "schema_version" => 2,
+      "report_id" => "report-#{'a' * 64}",
+      "generated_at" => "2026-08-03T12:00:00.000000Z",
+      "candidate_sha" => "b" * 40,
+      "scenario_manifest_digest" => "c" * 64,
+      "status" => "evidence_required",
+      "lanes" => {
+        "deterministic" => nil,
+        "installed_live" => nil
+      },
+      "blockers" => [ "deterministic:evidence_required" ],
+      "supersedes" => nil,
+      "migration" => {
+        "source_schema_version" => 1,
+        "source_digest" => "d" * 64,
+        "archive_digest" => "d" * 64,
+        "disposition" => "evidence_required"
+      }
+    }
+
+    assert_empty schemer.validate(payload).to_a
+    refute schemer.valid?(payload.merge("schema_version" => 1))
+    refute schemer.valid?(payload.merge("unexpected" => true))
+    refute schemer.valid?(
+      payload.merge("lanes" => payload.fetch("lanes").merge("extra" => nil))
+    )
+  end
+
+  private
+
+  def patrol_evidence_receipt_payload
+    now = Time.utc(2026, 8, 3, 12)
+    selection = Hive::Modules::Migration::PatrolDecisionProjection.build(
+      module_name: "patrol", rationale: "due"
+    )
+    capture = Hive::Modules::Migration::PatrolCapture.build(
+      module_name: "patrol",
+      project: {
+        "project_id" => "project-1", "name" => "demo",
+        "repository" => "owner/demo"
+      },
+      trigger: { "kind" => "manual", "id" => "manual-1" },
+      reservation: { "kind" => "ordinary", "id" => "reservation-1" },
+      owner: "legacy", owner_epoch: 1,
+      selection_input: { "kind" => "operation", "operation" => "test" },
+      selection: selection, outcome_class: "completed",
+      outcome: { "rationale" => "completed", "finding_ids" => [] },
+      occurred_at: now, recorded_at: now
+    )
+    {
+      "schema" => "hive-patrol-evidence-receipt",
+      "schema_version" => 1,
+      "receipt_id" => "evidence-#{'0' * 64}",
+      "run_id" => "run-1",
+      "candidate_sha" => "1" * 40,
+      "catalog_digest" => "2" * 64,
+      "source_digest" => "3" * 64,
+      "manifest_digest" => "4" * 64,
+      "configuration_digest" => "5" * 64,
+      "scenario_manifest_digest" => "6" * 64,
+      "repository" => {
+        "id" => "owner/demo", "sha" => "7" * 40,
+        "change_window" => "window-1"
+      },
+      "capture" => capture.to_h,
+      "module_projection" => selection.to_h,
+      "decision_class" => "positive_finding",
+      "effects" => [],
+      "fault_steps" => [ "restart_after_decision" ],
+      "artifacts" => [
+        { "kind" => "comparison", "digest" => "8" * 64 }
+      ],
+      "reviewer" => "reviewer-1",
+      "generated_at" => now.iso8601(6),
+      "reviewed_at" => (now + 1).iso8601(6)
+    }
   end
 end

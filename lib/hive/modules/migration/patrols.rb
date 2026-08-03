@@ -5,9 +5,9 @@ require "hive/atomic_file"
 require "hive/config"
 require "hive/module_package/managed_store"
 require "hive/modules/migration/report"
+require "hive/modules/migration/report_migration"
 require "hive/modules/migration/shadow_decision_migration"
 require "hive/workflow_package/canonical_json"
-require "hive/workflow_package/mutation_lock"
 
 module Hive
   module Modules
@@ -105,8 +105,9 @@ module Hive
           # exclusively, so a precomputed legacy candidate cannot cross an
           # ownership epoch while it is being reserved and spawned.
           def with_admission(project_root, module_name, authority:, hive_state_path: nil)
-            dir = File.dirname(state_file(project_root, hive_state_path: hive_state_path))
-            Hive::WorkflowPackage::MutationLock.with_lock(dir, shared: true) do
+            with_migration_lock(
+              project_root, hive_state_path: hive_state_path, shared: true
+            ) do
               yield admission_allowed?(
                 project_root, module_name, authority: authority,
                 hive_state_path: hive_state_path
@@ -115,8 +116,10 @@ module Hive
           end
 
           def with_migration_lock(project_root, hive_state_path: nil, shared: true, &block)
-            dir = File.dirname(state_file(project_root, hive_state_path: hive_state_path))
-            Hive::WorkflowPackage::MutationLock.with_lock(dir, shared: shared, &block)
+            Report.with_locked_storage(
+              report_file(project_root, hive_state_path: hive_state_path),
+              shared: shared
+            ) { block.call }
           end
 
           def read_state(project_root, hive_state_path: nil)
@@ -154,7 +157,9 @@ module Hive
             ShadowDecisionMigration.ensure_complete!(
               root: File.join(migration_dir, "shadow")
             )
-            false
+            ReportMigration.required?(
+              report_file(project_root, hive_state_path: hive_state_path)
+            )
           rescue Hive::ConfigError
             true
           end
@@ -204,17 +209,20 @@ module Hive
           immediate = nil
           migration_ready = false
           existing_state = nil
-          shadow_upgrade_required =
+          migration_upgrade_required =
             self.class.shadow_decision_upgrade_required?(
               project_root, hive_state_path: hive_state_path
             )
-          mutate do
+          mutate do |storage|
+            migration_upgrade_required = true if
+              !migration_upgrade_required &&
+              report_upgrade_required_locked?(storage)
             state = read || initial_state(now)
             stable = %w[shadowing module].include?(state.fetch("status"))
             legacy_stable =
               (stable || state.fetch("status") == "rolled_back") &&
-              shadow_upgrade_required
-            if stable && !shadow_upgrade_required
+              migration_upgrade_required
+            if stable && !migration_upgrade_required
               immediate = outcome("already_current", state)
               next
             end
@@ -265,7 +273,7 @@ module Hive
           # stamps only after a zero-v1 rescan. Runtime readers remain v2-only.
           migrate_shadow_decisions!
 
-          mutate do
+          mutate do |storage|
             state = read || raise(
               Hive::ConfigError,
               "patrol module migration state disappeared during adoption"
@@ -285,6 +293,7 @@ module Hive
               write(fenced)
               next outcome("pending", fenced, blockers)
             end
+            migrate_report!(storage, now)
 
             active = state.merge(
               "status" => "shadowing",
@@ -377,7 +386,11 @@ module Hive
         private
 
         def mutate(&block)
-          Hive::WorkflowPackage::MutationLock.with_lock(@migration_dir, &block)
+          Report.with_locked_storage(
+            self.class.report_file(
+              project_root, hive_state_path: hive_state_path
+            )
+          ) { |storage| block.call(storage) }
         end
 
         def initial_state(now)
@@ -454,13 +467,25 @@ module Hive
           )
         end
 
+        def migrate_report!(storage, now)
+          ReportMigration.forward_locked(
+            storage: storage, qualifications: [], generated_at: now
+          )
+        end
+
+        def report_upgrade_required_locked?(storage)
+          ReportMigration.required_locked?(storage)
+        rescue Hive::ConfigError
+          true
+        end
+
         # Older migration state can predate the v2 shadow-decision inventory.
         # Keep its ownership mode intact, but close both admissions before the
         # one-off conversion and restore them only after the exclusive migrator
         # proves every record is v2.
         def upgrade_existing_shadow_state!(previous, now)
           migrate_shadow_decisions!
-          mutate do
+          mutate do |storage|
             state = read || raise(
               Hive::ConfigError,
               "patrol module migration state disappeared during shadow upgrade"
@@ -470,6 +495,7 @@ module Hive
               raise Hive::ConfigError,
                     "patrol module migration changed during shadow upgrade"
             end
+            migrate_report!(storage, now)
 
             restored = state.merge(
               "admissions" => previous.fetch("admissions"),

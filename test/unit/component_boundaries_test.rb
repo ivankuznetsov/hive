@@ -103,9 +103,26 @@ class ComponentBoundariesTest < Minitest::Test
         Hive::Modules::Migration::EffectIntent
         Hive::Modules::Migration::EffectReceipt
         Hive::Modules::Migration::PatrolCapture
+        Hive::Modules::Migration::PatrolEffectIndex
+        Hive::Modules::Migration::PatrolEvidenceReceipt
+        Hive::Modules::Migration::PatrolEvidenceVerifier
+        Hive::Modules::Migration::PatrolQualification
+        Hive::Modules::Migration::ReportMigration
+        Hive::Modules::Migration::ReportProjection
       ],
       patrol_effects.dig("public_contract", "values").sort
     )
+    u3a_owners = %w[
+      lib/hive/modules/migration/patrol_effect_index.rb
+      lib/hive/modules/migration/patrol_evidence_receipt.rb
+      lib/hive/modules/migration/patrol_evidence_verifier.rb
+      lib/hive/modules/migration/patrol_qualification.rb
+      lib/hive/modules/migration/report_migration.rb
+      lib/hive/modules/migration/report_projection.rb
+    ]
+    assert_equal u3a_owners,
+                 patrol_effects.fetch("owned_paths") & u3a_owners,
+                 "U3a must retain exactly its approved six production owners"
     assert_equal [ "U3" ],
                  patrol_effects.fetch("migration_exceptions")
                    .map { |entry| entry.fetch("removal_unit") }
@@ -310,6 +327,34 @@ class ComponentBoundariesTest < Minitest::Test
                  patrol_effects_load.fetch("constant")
     assert_empty patrol_effects_load.fetch("forbidden_loaded_features")
     assert_empty patrol_effects_load.fetch("forbidden_constants")
+  end
+
+  def test_patrol_u3a_dependency_graph_is_closed_and_one_way
+    requires = {
+      "lib/hive/modules/migration/patrol_evidence_receipt.rb" =>
+        [ "hive/modules/migration/patrol_evidence" ],
+      "lib/hive/modules/migration/patrol_evidence_verifier.rb" =>
+        [ "hive/modules/migration/patrol_evidence_receipt" ],
+      "lib/hive/modules/migration/patrol_effect_index.rb" =>
+        [ "hive/modules/migration/patrol_evidence" ],
+      "lib/hive/modules/migration/patrol_qualification.rb" => %w[
+        hive/modules/migration/patrol_effect_index
+        hive/modules/migration/patrol_evidence_verifier
+      ],
+      "lib/hive/modules/migration/report_projection.rb" =>
+        [ "hive/modules/migration/patrol_qualification" ],
+      "lib/hive/modules/migration/report_migration.rb" => %w[
+        hive/modules/migration/report
+        hive/modules/migration/report_projection
+      ]
+    }
+
+    assert_equal 6, requires.length
+    requires.each do |relative, expected|
+      source = File.read(File.join(ROOT, relative))
+      actual = source.scan(/^require ["'](hive\/[^"']+)["']/).flatten
+      assert_equal expected, actual, relative
+    end
   end
 
   def test_final_graph_and_wiki_inventory_agree_with_the_catalog

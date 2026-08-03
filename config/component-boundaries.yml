@@ -16,6 +16,12 @@ components:
         - Hive::Modules::Migration::PatrolCapture
         - Hive::Modules::Migration::EffectIntent
         - Hive::Modules::Migration::EffectReceipt
+        - Hive::Modules::Migration::PatrolEvidenceReceipt
+        - Hive::Modules::Migration::PatrolEvidenceVerifier
+        - Hive::Modules::Migration::PatrolEffectIndex
+        - Hive::Modules::Migration::PatrolQualification
+        - Hive::Modules::Migration::ReportProjection
+        - Hive::Modules::Migration::ReportMigration
       errors:
         - Hive::ConfigError
     owned_paths:
@@ -32,7 +38,13 @@ components:
       - lib/hive/modules/migration/occurrence_recovery_index.rb
       - lib/hive/modules/migration/occurrence_record_store.rb
       - lib/hive/modules/migration/occurrence_record_validator.rb
+      - lib/hive/modules/migration/patrol_effect_index.rb
       - lib/hive/modules/migration/stable_process_lock.rb
+      - lib/hive/modules/migration/patrol_evidence_receipt.rb
+      - lib/hive/modules/migration/patrol_evidence_verifier.rb
+      - lib/hive/modules/migration/patrol_qualification.rb
+      - lib/hive/modules/migration/report_migration.rb
+      - lib/hive/modules/migration/report_projection.rb
       - lib/hive/patrol/effect_gateway.rb
       - lib/hive/refactor_patrol/action_claim_transitions.rb
       - lib/hive/refactor_patrol/action_plan_transitions.rb
@@ -61,11 +73,16 @@ components:
       - "Canonical occurrence records atomically bind prepared or uncertain delivery, terminal outcomes, and ordered projection outbox bytes; persisted sender leases and PID authority do not exist"
       - "A committed or reconciled ordinary Patrol pull request atomically appends its exact terminal receipt bytes as a typed publication outbox entry; StateStore alone projects that entry to one immutable publication_binding before tuple acknowledgement"
       - "EvidenceStore is an append-only bounded observational projection under module-runtime/migration/patrol-evidence and is never consulted for retry"
+      - "PatrolEvidenceReceipt is the canonical immutable qualification input; PatrolEvidenceVerifier compares the full fault-step and typed-artifact values plus every authority-sensitive identity with independently supplied expected bindings before creating its non-public verified token"
+      - "PatrolEffectIndex is a bounded pure run-wide duplicate projection, and PatrolQualification counts unique trigger/repository/SHA/change-window decision identities and derives immutable completeness and diversity findings without executing scenarios or recovering effects"
+      - "ReportProjection merges deterministic and installed-live qualifications without mutation authority, except that an exact superseding contradiction may invalidate its qualified lane; ReportMigration alone converts the complete released v1 report shape while validating and crash-repairing immutable source, archive, and receipt provenance"
       - "ActionRunner and RefactorPatrolScheduler decide product work; composed action/discovery transition coordinators own durable transition identities, claim fences, and replay"
       - "JobStoreFiles is the sole descriptor-confined physical I/O port for live v3 jobs, query indexes, quarantine evidence, and action locks; JobQueryIndex owns only their bounded logical projection"
       - "JobStoreFreshStart atomically archives only released v2/jobs as opaque bytes; runtime never reads or converts it, and an explicit confirmed reset alone admits an empty v3 namespace"
     schema_contracts:
       - "hive-patrol-capture v1 and hive-patrol-effect-receipt v1 are strict canonical observation records"
+      - "hive-patrol-evidence-receipt v1 binds candidate, scenario, repository, artifact, capture, effect, fault-step, reviewer, and configuration identities"
+      - "hive-module-migration-report v2 is the strict two-lane projection over unique comparable decision identities, decision-class, repository-SHA, and change-window diversity; an explicitly migrated empty projection records evidence_required rather than qualification"
       - "hive-refactor-patrol-job v3 is the sole runtime JobStore schema; released v2 jobs have no compatibility reader or converter"
       - "hive-patrol-occurrence-recovery-index v1 is a bounded rebuildable active-ID projection tied to the journal-state recovery generation; occurrence records remain authoritative"
     lock_contracts:
@@ -73,6 +90,7 @@ components:
       - "Dispatch uncertainty is reconciliation-only; exact absence must settle before a retry-safe local sink may resend, while remote absence never grants resend authority"
       - "Architecture manifest reservation and the JobStore occurrence pointer serialize before the enqueue transition; command and daemon intake share the same coordinator"
       - "Every live JobStore read, write, enumeration, quarantine publication, index publication, and action/job lock resolves through one verified ManagedDirectory anchor"
+      - "Report, report migration, and Patrols adoption share one descriptor-confined .mutation.lock authority; forward, reverse, and contradiction replacement use digest CAS, interrupted receipt publication is repaired only under that lock, and no linked authority file is followed"
       - "The stable profile activation lock excludes daemon startup; reset drains the exact daemon generation before taking the existing Patrol effect lock exclusively, then holds that effect lock, the stable generation lock, and the independent PID/start-time writer fence across opaque v2 archive, empty-v3 admission, and receipt publication"
     component_dependencies: []
     allowed_hive_dependencies:
@@ -84,6 +102,7 @@ components:
       - hive/module_package/managed_store
       - hive/modules/capability_context
       - hive/modules/migration/patrols
+      - hive/modules/migration/report
       - hive/paths
       - hive/pid_file
       - hive/refactor_patrol/job_store
@@ -237,12 +256,14 @@ components:
       - lib/hive/daemon/status_report.rb
       - lib/hive/modules/adapters/architecture_patrol.rb
       - lib/hive/modules/adapters/patrol.rb
+      - lib/hive/modules/migration/patrols.rb
+      - lib/hive/modules/migration/report.rb
       - lib/hive/patrol/pr_opener.rb
       - lib/hive/patrol/state_store.rb
       - lib/hive/refactor_patrol/action_runner.rb
       - lib/hive/refactor_patrol/job_store.rb
-    mutation_authority: "The separate ordinary and architecture gateways authorize product sinks; ordinary Patrol StateStore is the sole non-admitted projector of an already-authorized pull-request publication receipt, explicit intake, discovery, and action transition facades are the only semantic JobStore mutator call sites, the confirmed reset command alone may invoke the opaque cross-generation archive, and shared values, OccurrenceJournal, and EvidenceStore contain no product policy."
-    recovery_surface: "StateStore and JobStore are the only product recovery authorities over the single OccurrenceJournal mechanic; ordinary Patrol drains typed publication entries before suppression reads and acknowledges only after an exact binding write or no-op, while EvidenceStore remains observation-only."
+    mutation_authority: "The separate ordinary and architecture gateways authorize product sinks; ordinary Patrol StateStore is the sole non-admitted projector of an already-authorized pull-request publication receipt, explicit intake, discovery, and action transition facades are the only semantic JobStore mutator call sites, the confirmed reset command alone may invoke the opaque cross-generation archive, and shared values, OccurrenceJournal, EvidenceStore, verification, duplicate indexing, qualification, and report projection contain no product policy or execution authority."
+    recovery_surface: "StateStore and JobStore are the only product recovery authorities over the single OccurrenceJournal mechanic; ordinary Patrol drains typed publication entries before suppression reads and acknowledges only after an exact binding write or no-op, while EvidenceStore remains observation-only and ReportMigration is confined to one-off project-local report schema conversion."
     wiki_page: wiki/modules/patrol.md
     focused_tests:
       - test/unit/modules/migration/evidence_store_test.rb
@@ -250,6 +271,15 @@ components:
       - test/unit/modules/migration/occurrence_journal_test.rb
       - test/unit/modules/migration/occurrence_recovery_index_test.rb
       - test/unit/modules/migration/patrol_evidence_test.rb
+      - test/unit/modules/migration/patrol_evidence_receipt_test.rb
+      - test/unit/modules/migration/patrol_evidence_verifier_test.rb
+      - test/unit/modules/migration/patrol_effect_index_test.rb
+      - test/unit/modules/migration/patrol_qualification_test.rb
+      - test/unit/modules/migration/report_projection_test.rb
+      - test/unit/modules/migration/report_migration_test.rb
+      - test/unit/modules/migration/report_test.rb
+      - test/unit/modules/migration/patrols_test.rb
+      - test/unit/modules/migration/shadow_comparator_test.rb
       - test/unit/daemon/refactor_patrol_scheduler_test.rb
       - test/unit/daemon/activation_lock_test.rb
       - test/unit/daemon/operational_snapshot_test.rb
@@ -272,7 +302,7 @@ components:
       - test/unit/refactor_patrol/transition_gateway_test.rb
       - test/integration/refactor_patrol_command_test.rb
     migration_exceptions:
-      - reason: "U3 must prove candidate-bound compressed evidence and production qualification before this internal transition boundary can be promoted."
+      - reason: "U3a supplies the bounded pure protocol and report conversion; U3b deterministic public-path execution and U3c independently authorized installed/live qualification remain before promotion."
         removal_unit: U3
 
   - id: attempts

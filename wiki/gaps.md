@@ -11,13 +11,26 @@ tags: [gap, todo, release-proof, agent-skills]
 
 ## Current release gap
 
-- Patrol capture/effect boundaries are source- and focused-test-pinned, but
-  they are not yet compressed-campaign or live-cutover evidence. The permanent
-  U3 harness must still exercise real scheduler/event/adapter/store paths,
-  restarts around intent and outcome boundaries, shadow attempted-effect
-  denial, exact reconciliation, and run-level duplicate detection before any
-  migration qualification claim. Longer elapsed telemetry remains useful but
-  is not a substitute for that protocol.
+- Patrol capture/effect boundaries and the U3a receipt, independent verifier,
+  duplicate index, qualification value, two-lane report, and one-off report
+  conversion are source- and focused-test-pinned. U3a does not produce a
+  qualification and is not compressed-campaign, installed/live, or cutover
+  evidence. U3b must still commit independent controls and a real-reader
+  deterministic catalogue that drives both modules through the complete fault
+  matrix, including intent/outcome restarts, shadow attempted-effect denial,
+  exact reconciliation, and run-level duplicate detection. Its temporal cases
+  must explicitly simulate wall-clock/DST boundary changes, weekly cadence,
+  quota/capacity reset, and restart plus log rotation; spreading one decision
+  class over timestamps cannot qualify, and timestamp, fault-step, or artifact
+  variants sharing one trigger/repository/SHA/change-window identity count as
+  one decision. U3c must independently bind the live
+  project, installed candidate generation, configuration, scenario and
+  artifacts, and retain installed/live evidence for credential expiry and a
+  real quota-reset lifecycle under its sandbox/process-custody threat model.
+  Long-lived external resource drift remains a declared U3c live limitation,
+  not something elapsed time can prove equivalent. Elapsed telemetry remains
+  useful, but neither it nor a seven-day window substitutes for diversity and
+  protocol completeness.
 
 - The explicit JobStore fresh-start reset is source- and focused-test-pinned,
   including no-write fresh status, exact registered-project binding,

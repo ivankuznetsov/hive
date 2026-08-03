@@ -1,0 +1,165 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hivecli.sh/schemas/hive-module-migration-report.v2.json",
+  "title": "Hive module migration report v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schema_version", "report_id", "generated_at",
+    "candidate_sha", "scenario_manifest_digest", "status", "lanes",
+    "blockers", "supersedes", "migration"
+  ],
+  "properties": {
+    "schema": {"const": "hive-module-migration-report"},
+    "schema_version": {"const": 2},
+    "report_id": {"type": "string", "pattern": "^report-[0-9a-f]{64}$"},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "candidate_sha": {"type": ["string", "null"], "pattern": "^[0-9a-f]{40}$"},
+    "scenario_manifest_digest": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "status": {"enum": ["qualified", "evidence_required", "invalidated"]},
+    "lanes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deterministic", "installed_live"],
+      "properties": {
+        "deterministic": {"$ref": "#/$defs/nullable_qualification"},
+        "installed_live": {"$ref": "#/$defs/nullable_qualification"}
+      }
+    },
+    "blockers": {
+      "type": "array", "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "supersedes": {
+      "type": ["string", "null"],
+      "pattern": "^report-[0-9a-f]{64}$"
+    },
+    "migration": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/migration"}
+      ]
+    }
+  },
+  "$defs": {
+    "nullable_qualification": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/qualification"}
+      ]
+    },
+    "qualification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "qualification_id", "lane", "run_id", "candidate_sha",
+        "scenario_manifest_digest", "status", "receipt_ids", "modules",
+        "effect_count", "duplicate_effects", "elapsed_seconds", "blockers",
+        "supersedes", "contradiction", "generated_at"
+      ],
+      "properties": {
+        "qualification_id": {"type": "string", "pattern": "^qualification-[0-9a-f]{64}$"},
+        "lane": {"enum": ["deterministic", "installed_live"]},
+        "run_id": {"type": "string", "minLength": 1},
+        "candidate_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "scenario_manifest_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "status": {"enum": ["qualified", "evidence_required", "invalidated"]},
+        "receipt_ids": {
+          "type": "array", "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^evidence-[0-9a-f]{64}$"}
+        },
+        "modules": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["patrol", "architecture-patrol"],
+          "properties": {
+            "patrol": {"$ref": "#/$defs/module_summary"},
+            "architecture-patrol": {"$ref": "#/$defs/module_summary"}
+          }
+        },
+        "effect_count": {"type": "integer", "minimum": 0},
+        "duplicate_effects": {
+          "type": "array", "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "elapsed_seconds": {"type": "integer", "minimum": 0},
+        "blockers": {
+          "type": "array", "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "supersedes": {
+          "type": ["string", "null"],
+          "pattern": "^qualification-[0-9a-f]{64}$"
+        },
+        "contradiction": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/contradiction"}
+          ]
+        },
+        "generated_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "module_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decision_count", "decision_identities", "decision_classes",
+        "repository_shas", "change_windows", "configuration_digest",
+        "elapsed_seconds", "blockers"
+      ],
+      "properties": {
+        "decision_count": {"type": "integer", "minimum": 0},
+        "decision_identities": {
+          "type": "array", "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^decision-[0-9a-f]{64}$"}
+        },
+        "decision_classes": {
+          "type": "array", "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "repository_shas": {
+          "type": "array", "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+        },
+        "change_windows": {
+          "type": "array", "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "configuration_digest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+        "elapsed_seconds": {"type": "integer", "minimum": 0},
+        "blockers": {
+          "type": "array", "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "contradiction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "receipt_id", "observed_at"],
+      "properties": {
+        "kind": {"type": "string", "minLength": 1},
+        "receipt_id": {"type": "string", "pattern": "^evidence-[0-9a-f]{64}$"},
+        "observed_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "migration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_schema_version", "source_digest", "archive_digest",
+        "disposition"
+      ],
+      "properties": {
+        "source_schema_version": {"const": 1},
+        "source_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "archive_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "disposition": {"enum": ["projected", "evidence_required"]}
+      }
+    }
+  }
+}

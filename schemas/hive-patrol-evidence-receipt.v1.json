@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hive.local/schemas/hive-patrol-evidence-receipt.v1.json",
+  "title": "Hive Patrol Evidence Receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "receipt_id",
+    "run_id",
+    "candidate_sha",
+    "catalog_digest",
+    "source_digest",
+    "manifest_digest",
+    "configuration_digest",
+    "scenario_manifest_digest",
+    "repository",
+    "capture",
+    "module_projection",
+    "decision_class",
+    "effects",
+    "fault_steps",
+    "artifacts",
+    "reviewer",
+    "generated_at",
+    "reviewed_at"
+  ],
+  "properties": {
+    "schema": {"const": "hive-patrol-evidence-receipt"},
+    "schema_version": {"const": 1},
+    "receipt_id": {"type": "string", "pattern": "^evidence-[0-9a-f]{64}$"},
+    "run_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "candidate_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "catalog_digest": {"$ref": "#/$defs/digest"},
+    "source_digest": {"$ref": "#/$defs/digest"},
+    "manifest_digest": {"$ref": "#/$defs/digest"},
+    "configuration_digest": {"$ref": "#/$defs/digest"},
+    "scenario_manifest_digest": {"$ref": "#/$defs/digest"},
+    "repository": {"$ref": "#/$defs/repository"},
+    "capture": {"$ref": "#/$defs/capture"},
+    "module_projection": {"$ref": "#/$defs/projection"},
+    "decision_class": {"type": "string", "minLength": 1, "maxLength": 256},
+    "effects": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {"$ref": "#/$defs/effect_receipt"}
+    },
+    "fault_steps": {
+      "type": "array",
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "maxLength": 256}
+    },
+    "artifacts": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {"$ref": "#/$defs/artifact"}
+    },
+    "reviewer": {"type": "string", "minLength": 1, "maxLength": 1024},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "reviewed_at": {"type": "string", "format": "date-time"}
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "sha", "change_window"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "maxLength": 1024},
+        "sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "change_window": {"type": "string", "minLength": 1, "maxLength": 1024}
+      }
+    },
+    "capture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "capture_id", "module",
+        "occurrence_id", "project", "trigger", "reservation", "owner",
+        "owner_epoch", "selection_input", "selection", "outcome_class",
+        "outcome", "effect_ids", "occurred_at", "recorded_at"
+      ],
+      "properties": {
+        "schema": {"const": "hive-patrol-capture"},
+        "schema_version": {"const": 1},
+        "capture_id": {"type": "string", "pattern": "^cap-[0-9a-f]{64}$"},
+        "module": {"enum": ["patrol", "architecture-patrol"]},
+        "occurrence_id": {"type": "string", "pattern": "^occ-[0-9a-f]{64}$"},
+        "project": {"type": "object"},
+        "trigger": {"type": "object"},
+        "reservation": {"type": "object"},
+        "owner": {"enum": ["legacy", "module"]},
+        "owner_epoch": {"type": "integer", "minimum": 1},
+        "selection_input": {"type": "object"},
+        "selection": {"$ref": "#/$defs/projection"},
+        "outcome_class": {"type": ["string", "null"]},
+        "outcome": {"type": ["object", "null"]},
+        "effect_ids": {
+          "type": "array", "maxItems": 128, "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "occurred_at": {"type": "string", "format": "date-time"},
+        "recorded_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "projection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["module", "rationale", "job_id", "phase"],
+      "properties": {
+        "module": {"enum": ["patrol", "architecture-patrol"]},
+        "rationale": {"enum": ["disabled", "not_due", "due"]},
+        "job_id": {"type": ["string", "null"]},
+        "phase": {"type": ["string", "null"]}
+      }
+    },
+    "effect_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "receipt_id", "intent", "status",
+        "outcome", "recorded_at"
+      ],
+      "properties": {
+        "schema": {"const": "hive-patrol-effect-receipt"},
+        "schema_version": {"const": 1},
+        "receipt_id": {"type": "string", "pattern": "^receipt-[0-9a-f]{64}$"},
+        "intent": {"type": "object"},
+        "status": {
+          "enum": [
+            "attempted", "denied", "known_not_sent", "unknown",
+            "committed", "reconciled", "failed"
+          ]
+        },
+        "outcome": {"type": "object"},
+        "recorded_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "digest"],
+      "properties": {
+        "kind": {"type": "string", "minLength": 1, "maxLength": 256},
+        "digest": {"$ref": "#/$defs/digest"}
+      }
+    }
+  }
+}

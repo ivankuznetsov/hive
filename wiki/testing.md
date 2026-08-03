@@ -152,6 +152,41 @@ The helper uses Ruby syntax rather than comments or string examples for literal
 architecture guard, not a security sandbox; see [[component-boundaries]] for
 the enforced contract and its limits.
 
+### Patrol U3a protocol and report conversion
+
+The U3a slice is deliberately local and deterministic. Its focused files pin
+canonical receipt bounds, independent full fault-step and typed-artifact
+bindings, a non-public verified-token constructor, exact-replay versus
+semantic/idempotency duplicates, unique comparable decision identity plus
+decision-class/repository-SHA/change-window diversity, stable configuration,
+exactly superseded contradiction invalidation with persistence CAS, two-lane
+partial report reload/merge, complete released-v1 migration shapes,
+source/archive/receipt linkage, interrupted receipt repair, reverse digest CAS,
+descriptor-safe shared locking, and report migration from every stable Patrol
+adoption state. They do not execute a
+scenario, launch a provider, produce installed/live qualification, or exercise
+cutover and rollback:
+
+```bash
+bundle exec ruby -Itest -Ilib -e \
+  'ARGV.each { |path| require File.expand_path(path) }' \
+  test/unit/modules/migration/patrol_evidence_receipt_test.rb \
+  test/unit/modules/migration/patrol_evidence_verifier_test.rb \
+  test/unit/modules/migration/patrol_effect_index_test.rb \
+  test/unit/modules/migration/patrol_qualification_test.rb \
+  test/unit/modules/migration/report_projection_test.rb \
+  test/unit/modules/migration/report_migration_test.rb \
+  test/unit/modules/migration/report_test.rb
+bundle exec ruby -Itest -Ilib test/unit/modules/migration/patrols_test.rb
+bundle exec ruby -Itest -Ilib test/unit/schema_files_test.rb
+bundle exec ruby -Itest -Ilib test/unit/component_boundaries_test.rb
+```
+
+The component test fixes the U3a topology at exactly six production-owner
+paths and compares each owner's literal Hive require edges with the approved
+one-way graph. Existing U2 evidence tests remain the regression boundary for
+the receipt's embedded capture, intent, and terminal effect values.
+
 ## Coverage
 
 ```bash

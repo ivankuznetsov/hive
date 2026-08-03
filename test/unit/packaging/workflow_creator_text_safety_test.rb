@@ -121,6 +121,36 @@ class WorkflowCreatorTextSafetyTest < Minitest::Test
     assert_equal "[REDACTED]", TextSafety.redact(nested_keys, exact_secrets: owned([]))
   end
 
+  def test_complete_nested_different_label_private_keys_redact_through_the_outer_end
+    nested_keys = owned([
+      "before -----BEGIN PRIVATE KEY-----", "outer-before",
+      "-----BEGIN RSA PRIVATE KEY-----", "inner-secret", "-----END RSA PRIVATE KEY-----",
+      "outer-secret-after", "-----END PRIVATE KEY----- after"
+    ].join("\n"))
+
+    assert_equal "before [REDACTED] after", TextSafety.redact(nested_keys, exact_secrets: owned([]))
+  end
+
+  def test_complete_nested_same_label_private_keys_redact_through_the_outer_end
+    nested_keys = owned([
+      "before -----BEGIN PRIVATE KEY-----", "outer-before",
+      "-----BEGIN PRIVATE KEY-----", "inner-secret", "-----END PRIVATE KEY-----",
+      "outer-secret-after", "-----END PRIVATE KEY----- after"
+    ].join("\n"))
+
+    assert_equal "before [REDACTED] after", TextSafety.redact(nested_keys, exact_secrets: owned([]))
+  end
+
+  def test_mismatched_private_key_labels_redact_conservatively_through_the_last_end
+    mismatched_keys = owned([
+      "before -----BEGIN RSA PRIVATE KEY-----", "outer-before",
+      "-----BEGIN EC PRIVATE KEY-----", "inner-secret", "-----END DSA PRIVATE KEY-----",
+      "outer-secret-after", "-----END OPENSSH PRIVATE KEY----- after"
+    ].join("\n"))
+
+    assert_equal "before [REDACTED] after", TextSafety.redact(mismatched_keys, exact_secrets: owned([]))
+  end
+
   def test_exact_secret_count_and_byte_boundaries_accept_their_declared_maxima
     maximum_list = owned(Array.new(64) { |index| "absent-#{index}" })
     maximum_secret = "s" * MAX_BYTES

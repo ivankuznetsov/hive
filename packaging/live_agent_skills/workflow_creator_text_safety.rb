@@ -58,11 +58,10 @@ module HiveLiveAgentProof
         [ "pattern:openai", /sk-(?!ant-)(?:proj-)?[A-Za-z0-9_-]{20,}/.freeze ],
         [ "pattern:github-token", /gh[opsu]_[A-Za-z0-9]{20,}/.freeze ],
         [ "pattern:github-pat", /github_pat_[A-Za-z0-9_]{20,}/.freeze ],
-        [
-          "pattern:private-key",
+        [ "pattern:private-key",
           /-----BEGIN[ ](?:(?:RSA|EC|OPENSSH|DSA|PGP|ENCRYPTED)[ ])?PRIVATE[ ]KEY(?:[ ]BLOCK)?-----
-           [\s\S]{0,4096}?(?:-----END[ ](?:(?:RSA|EC|OPENSSH|DSA|PGP|ENCRYPTED)[ ])?
-           PRIVATE[ ]KEY(?:[ ]BLOCK)?-----|\z)/x.freeze
+           (?:[\s\S]{0,4096}-----END[ ](?:(?:RSA|EC|OPENSSH|DSA|PGP|ENCRYPTED)[ ])?
+           PRIVATE[ ]KEY(?:[ ]BLOCK)?-----|[\s\S]{0,4096}\z)/x.freeze
         ]
       ]
       OBJECT_FREEZE.send(INVOKE, PATTERNS.each { |entry| OBJECT_FREEZE.send(INVOKE, entry) })
@@ -77,7 +76,8 @@ module HiveLiveAgentProof
           fail_projection! unless OBJECT_EQUAL.send(INVOKE, OBJECT_CLASS.send(INVOKE, limit), Integer)
           bounded = INTEGER_GREATER.send(INVOKE, 0, limit) ? 0 : limit
           bounded = MAX_BYTES if INTEGER_GREATER.send(INVOKE, bounded, MAX_BYTES)
-          OBJECT_FREEZE.send(INVOKE, STRING_SCRUB.send(INVOKE, STRING_BYTESLICE.send(INVOKE, value, 0, bounded), ""))
+          output = STRING_BYTESLICE.send(INVOKE, value, 0, bounded)
+          OBJECT_FREEZE.send(INVOKE, STRING_SCRUB.send(INVOKE, output, ""))
         end
       end
       def self.safe_relative_path?(value)

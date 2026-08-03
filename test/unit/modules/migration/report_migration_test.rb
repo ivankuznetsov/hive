@@ -272,11 +272,15 @@ class ModulesMigrationReportMigrationTest < Minitest::Test
       :create,
       {
         lane: lane, run_id: "run-#{lane}", candidate_sha: "1" * 40,
+        catalog_digest: "2" * 64, source_digest: "3" * 64,
+        manifest_digest: "4" * 64,
         scenario_manifest_digest: "6" * 64, status: "qualified",
         receipt_ids: 20.times.map do |index|
           "evidence-#{Digest::SHA256.hexdigest("#{lane}:#{index}")}"
         end.sort.freeze,
-        modules: modules, effect_count: 0, duplicate_effects: [].freeze,
+        decision_replay_count: 0, modules: modules, effect_count: 0,
+        effect_replay_count: 0, duplicate_effects: [].freeze,
+        unsettled_effects: [].freeze,
         elapsed_seconds: 9, blockers: [].freeze, supersedes: nil,
         contradiction: nil, generated_at: NOW.iso8601(6)
       }

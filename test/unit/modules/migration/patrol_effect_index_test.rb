@@ -14,6 +14,7 @@ class ModulesMigrationPatrolEffectIndexTest < Minitest::Test
     assert_equal 1, index.effect_count
     assert_equal 1, index.replay_count
     assert_empty index.duplicate_effects
+    assert_empty index.unsettled_effects
     assert index.valid?
   end
 
@@ -52,6 +53,21 @@ class ModulesMigrationPatrolEffectIndexTest < Minitest::Test
     assert_equal 0, index.effect_count
     assert_equal [ denied.receipt_id ], index.observed_receipt_ids
     assert_empty index.duplicate_effects
+    assert_empty index.unsettled_effects
+    assert index.valid?
+  end
+
+  def test_unresolved_attempts_block_the_index_without_counting_as_effects
+    attempted = effect_receipt(authority: "shadow", status: "attempted")
+    unknown = effect_receipt(status: "unknown")
+    index = Hive::Modules::Migration::PatrolEffectIndex.build(
+      receipts: [ attempted, unknown ]
+    )
+
+    refute index.valid?
+    assert_equal 0, index.effect_count
+    assert_equal [ attempted.receipt_id, unknown.receipt_id ].sort,
+                 index.unsettled_effects
   end
 
   def test_history_is_bounded
@@ -80,9 +96,14 @@ class ModulesMigrationPatrolEffectIndexTest < Minitest::Test
       capability: "finding_write", claim_generation: owner_epoch,
       scope: { "fingerprint" => "fingerprint-1" }, created_at: NOW
     )
-    outcome = status == "denied" ?
-      { "reason" => "shadow_effect_denied" } :
+    outcome = case status
+    when "attempted"
+      { "attempted" => true, "reason" => "shadow_effect_denied" }
+    when "denied", "unknown"
+      { "reason" => status }
+    else
       { "finding_id" => "finding-1" }
+    end
     Hive::Modules::Migration::EffectReceipt.build(
       intent: intent, status: status, outcome: outcome, recorded_at: NOW
     )

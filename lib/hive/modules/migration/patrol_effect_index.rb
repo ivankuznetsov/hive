@@ -5,16 +5,18 @@ module Hive
     module Migration
       class PatrolEffectIndex < Data.define(
         :observed_receipt_ids, :effect_receipt_ids, :duplicate_effects,
-        :replay_count
+        :unsettled_effects, :replay_count
       )
         MAX_RECEIPTS = 4_096
         TERMINAL_EFFECT_STATUSES = %w[committed reconciled].freeze
+        UNSETTLED_EFFECT_STATUSES = %w[attempted unknown].freeze
 
         class << self
           def build(receipts:)
             observed = []
             effects = []
             duplicates = []
+            unsettled = []
             replay_count = 0
             seen_receipts = {}
             identities = {
@@ -30,6 +32,9 @@ module Hive
                 next
               end
               seen_receipts[receipt.receipt_id] = true
+              if UNSETTLED_EFFECT_STATUSES.include?(receipt.status)
+                unsettled << receipt.receipt_id
+              end
               next unless TERMINAL_EFFECT_STATUSES.include?(receipt.status)
 
               keys = identity_keys(receipt)
@@ -50,6 +55,7 @@ module Hive
               observed_receipt_ids: observed.freeze,
               effect_receipt_ids: effects.sort.freeze,
               duplicate_effects: duplicates.uniq.sort.freeze,
+              unsettled_effects: unsettled.sort.freeze,
               replay_count: replay_count
             )
           rescue NoMethodError, TypeError
@@ -95,13 +101,14 @@ module Hive
         end
 
         def effect_count = effect_receipt_ids.size
-        def valid? = duplicate_effects.empty?
+        def valid? = duplicate_effects.empty? && unsettled_effects.empty?
 
         def to_h
           {
             "observed_receipt_ids" => observed_receipt_ids,
             "effect_receipt_ids" => effect_receipt_ids,
             "duplicate_effects" => duplicate_effects,
+            "unsettled_effects" => unsettled_effects,
             "replay_count" => replay_count
           }.freeze
         end

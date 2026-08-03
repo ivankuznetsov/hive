@@ -108,8 +108,7 @@ class ModulesMigrationPatrolQualificationTest < Minitest::Test
       module_name: "patrol", index: 0, effect_status: "committed"
     )
     second = verified_receipt(
-      module_name: "patrol", index: 0, decision_class: "negative",
-      repository_sha: "8" * 40, effect_status: "reconciled"
+      module_name: "patrol", index: 0, effect_status: "reconciled"
     )
     receipts = complete_receipts.reject do |value|
       value.capture.module_name == "patrol" &&
@@ -128,6 +127,52 @@ class ModulesMigrationPatrolQualificationTest < Minitest::Test
     assert_equal "evidence_required", qualification.status
     assert_includes qualification.blockers, "duplicate_effects"
     refute_empty qualification.duplicate_effects
+  end
+
+  def test_exact_replay_stays_visible_without_increasing_readiness
+    effectful = verified_receipt(
+      module_name: "patrol", index: 0, effect_status: "committed"
+    )
+    receipts = complete_receipts.reject do |value|
+      value.capture.trigger.fetch("id") == "manual-patrol-0"
+    end + [ effectful ]
+    replayed = receipts + [ effectful ]
+    qualification = build_qualification(replayed)
+
+    assert qualification.qualified?
+    assert_equal 1, qualification.decision_replay_count
+    assert_equal 1, qualification.effect_replay_count
+    assert_equal 1, qualification.effect_count
+    assert_equal 10,
+                 qualification.modules.dig("patrol", "decision_count")
+  end
+
+  def test_unsettled_effects_and_capture_wrapper_substitution_fail_closed
+    unsettled = verified_receipt(
+      module_name: "patrol", index: 0, effect_status: "unknown"
+    )
+    receipts = complete_receipts.reject do |value|
+      value.capture.trigger.fetch("id") == "manual-patrol-0"
+    end + [ unsettled ]
+    qualification = build_qualification(receipts)
+
+    assert_equal "evidence_required", qualification.status
+    assert_includes qualification.blockers, "unsettled_effects"
+    assert_equal unsettled.effects.map(&:receipt_id),
+                 qualification.unsettled_effects
+
+    first = verified_receipt(
+      module_name: "patrol", index: 77,
+      repository_sha: "7" * 40, change_window: "window-0"
+    )
+    substituted = verified_receipt(
+      module_name: "patrol", index: 77,
+      repository_sha: "8" * 40, change_window: "window-1"
+    )
+    assert_equal first.capture.capture_id, substituted.capture.capture_id
+    assert_raises(Hive::ConfigError) do
+      build_qualification([ first, substituted ])
+    end
   end
 
   def test_later_contradiction_creates_typed_invalidation
@@ -233,9 +278,13 @@ class ModulesMigrationPatrolQualificationTest < Minitest::Test
     else
       []
     end
+    committed_effect_ids = effects.select do |effect|
+      effect.intent.authority == "legacy" &&
+        %w[committed reconciled].include?(effect.status)
+    end.map(&:receipt_id)
     capture = capture_for(
       module_name, decision_index, projection, occurred_at,
-      effect_ids: effects.map(&:receipt_id), repository_id: repository_id,
+      effect_ids: committed_effect_ids, repository_id: repository_id,
       trigger_id: trigger_id
     )
     receipt = Hive::Modules::Migration::PatrolEvidenceReceipt.build(
@@ -318,7 +367,10 @@ class ModulesMigrationPatrolQualificationTest < Minitest::Test
     )
     Hive::Modules::Migration::EffectReceipt.build(
       intent: intent, status: status,
-      outcome: { "finding_id" => "finding-1" }, recorded_at: NOW
+      outcome: status == "unknown" ?
+        { "reason" => "dispatch outcome unknown" } :
+        { "finding_id" => "finding-1" },
+      recorded_at: NOW
     )
   end
 
@@ -332,6 +384,7 @@ class ModulesMigrationPatrolQualificationTest < Minitest::Test
       "configuration_digest" => receipt.configuration_digest,
       "scenario_manifest_digest" => receipt.scenario_manifest_digest,
       "repository" => receipt.repository,
+      "receipt_id" => receipt.receipt_id,
       "capture_id" => receipt.capture.capture_id,
       "trigger_id" => receipt.capture.trigger.fetch("id"),
       "owner_epoch" => receipt.capture.owner_epoch,

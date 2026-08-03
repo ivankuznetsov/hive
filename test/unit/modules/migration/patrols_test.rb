@@ -857,6 +857,21 @@ class ModulesMigrationPatrolsTest < Minitest::Test
       end
       assert_match(/report_invalid/, error.message)
 
+      source_digest = "d" * 64
+      v2_report = Hive::Modules::Migration::ReportProjection.build(
+        qualifications: [], generated_at: NOW,
+        migration: {
+          "source_schema_version" => 1,
+          "source_digest" => source_digest,
+          "archive_digest" => source_digest,
+          "disposition" => "evidence_required"
+        }
+      )
+      error = assert_raises(Hive::ConfigError) do
+        migration.cutover!(report: v2_report, now: NOW + 2)
+      end
+      assert_match(/requires separately authorized cutover/, error.message)
+
       stale = Report.new(
         eligible?: true, blockers: [],
         configuration_digests: { "patrol" => "0" * 64, "architecture-patrol" => "b" * 64 }
@@ -1365,6 +1380,45 @@ class ModulesMigrationPatrolsTest < Minitest::Test
           project.fetch("path"),
           hive_state_path: project.fetch("hive_state_path")
         )
+    end
+  end
+
+  def test_stable_adoption_restores_admissions_after_completed_upgrade_crash
+    with_project do |project|
+      migration = Hive::Modules::Migration::Patrols.new(
+        project_root: project.fetch("path"), project: "demo",
+        hive_state_path: project.fetch("hive_state_path"), module_store: FakeStore.new,
+        quiescence_probe: ->(*) { :quiescent }
+      )
+      migration.adopt!(now: NOW)
+      report_path = Hive::Modules::Migration::Patrols.report_file(
+        project.fetch("path"),
+        hive_state_path: project.fetch("hive_state_path")
+      )
+      File.binwrite(
+        report_path,
+        Hive::Modules::Migration::Report.canonical(legacy_report)
+      )
+      Hive::Modules::Migration::ReportMigration.forward(
+        path: report_path, qualifications: [], generated_at: NOW + 1
+      )
+      fenced = migration.read.merge(
+        "admissions" => Hive::Modules::Migration::Patrols::MODULES.to_h do |name|
+          [ name, false ]
+        end,
+        "blockers" => {}, "updated_at" => (NOW + 1).iso8601(6)
+      )
+      migration.send(:write, fenced)
+
+      refute Hive::Modules::Migration::Patrols
+        .shadow_decision_upgrade_required?(
+          project.fetch("path"),
+          hive_state_path: project.fetch("hive_state_path")
+        )
+      outcome = migration.adopt!(now: NOW + 2)
+
+      assert_equal "already_current", outcome.status
+      assert outcome.state.fetch("admissions").values.all?
     end
   end
 

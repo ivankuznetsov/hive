@@ -219,10 +219,15 @@ module Hive
               report_upgrade_required_locked?(storage)
             state = read || initial_state(now)
             stable = %w[shadowing module].include?(state.fetch("status"))
+            stable_upgrade_state = %w[shadowing module rolled_back].include?(
+              state.fetch("status")
+            )
+            interrupted_upgrade = stable_upgrade_state &&
+              !state.fetch("admissions").values.all?
             legacy_stable =
-              (stable || state.fetch("status") == "rolled_back") &&
-              migration_upgrade_required
-            if stable && !migration_upgrade_required
+              stable_upgrade_state &&
+              (migration_upgrade_required || interrupted_upgrade)
+            if stable && !migration_upgrade_required && !interrupted_upgrade
               immediate = outcome("already_current", state)
               next
             end
@@ -310,6 +315,10 @@ module Hive
         end
 
         def cutover!(report:, now: Time.now.utc)
+          if report.is_a?(ReportProjection)
+            raise Hive::ConfigError,
+                  "patrol module migration report v2 requires separately authorized cutover"
+          end
           unless report.respond_to?(:eligible?) && report.eligible?
             blockers = report.respond_to?(:blockers) ? report.blockers : [ "report_invalid" ]
             raise Hive::ConfigError, "patrol module cutover evidence is incomplete: #{blockers.join(', ')}"
@@ -498,7 +507,7 @@ module Hive
             migrate_report!(storage, now)
 
             restored = state.merge(
-              "admissions" => previous.fetch("admissions"),
+              "admissions" => MODULES.to_h { |name| [ name, true ] },
               "blockers" => {},
               "updated_at" => timestamp(now)
             )

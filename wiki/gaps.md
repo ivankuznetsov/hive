@@ -15,7 +15,8 @@ tags: [gap, todo, release-proof, agent-skills]
   duplicate index, qualification value, two-lane report, and one-off report
   conversion are source- and focused-test-pinned. U3a does not produce a
   qualification and is not compressed-campaign, installed/live, or cutover
-  evidence. U3b must still commit independent controls and a real-reader
+  evidence; current report-v2 cutover is deliberately refused at the operator
+  boundary. U3b must still commit independent controls and a real-reader
   deterministic catalogue that drives both modules through the complete fault
   matrix, including intent/outcome restarts, shadow attempted-effect denial,
   exact reconciliation, and run-level duplicate detection. Its temporal cases

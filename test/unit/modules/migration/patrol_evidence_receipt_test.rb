@@ -1,6 +1,7 @@
 require "test_helper"
 require "json"
 require "json_schemer"
+require "pathname"
 require "hive/modules/migration/patrol_evidence_receipt"
 
 class ModulesMigrationPatrolEvidenceReceiptTest < Minitest::Test
@@ -28,9 +29,9 @@ class ModulesMigrationPatrolEvidenceReceiptTest < Minitest::Test
                    receipt.to_h
                  ).to_h
 
-    schema = JSONSchemer.schema(JSON.parse(File.read(
+    schema = JSONSchemer.schema(Pathname(
       Hive::Schemas.schema_path("hive-patrol-evidence-receipt", version: 1)
-    )))
+    ))
     assert_empty schema.validate(receipt.to_h).to_a
   end
 
@@ -136,6 +137,17 @@ class ModulesMigrationPatrolEvidenceReceiptTest < Minitest::Test
       Hive::Modules::Migration::PatrolEvidenceReceipt.from_h(
         receipt.to_h.merge("generated_at" => NOW.iso8601)
       )
+    end
+    %i[effects fault_steps artifacts].each do |key|
+      oversized = Array.new(
+        Hive::Modules::Migration::PatrolEvidenceReceipt::MAX_ITEMS + 1,
+        key == :fault_steps ? "step" : {}
+      )
+      assert_raises(Hive::ConfigError) do
+        Hive::Modules::Migration::PatrolEvidenceReceipt.build(
+          **receipt_attributes(key => oversized)
+        )
+      end
     end
   end
 

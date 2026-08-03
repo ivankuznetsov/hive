@@ -56,21 +56,28 @@
       "additionalProperties": false,
       "required": [
         "qualification_id", "lane", "run_id", "candidate_sha",
-        "scenario_manifest_digest", "status", "receipt_ids", "modules",
-        "effect_count", "duplicate_effects", "elapsed_seconds", "blockers",
-        "supersedes", "contradiction", "generated_at"
+        "catalog_digest", "source_digest", "manifest_digest",
+        "scenario_manifest_digest", "status", "receipt_ids",
+        "decision_replay_count", "modules", "effect_count",
+        "effect_replay_count", "duplicate_effects", "unsettled_effects",
+        "elapsed_seconds", "blockers", "supersedes", "contradiction",
+        "generated_at"
       ],
       "properties": {
         "qualification_id": {"type": "string", "pattern": "^qualification-[0-9a-f]{64}$"},
         "lane": {"enum": ["deterministic", "installed_live"]},
         "run_id": {"type": "string", "minLength": 1},
         "candidate_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "catalog_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "source_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "manifest_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "scenario_manifest_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "status": {"enum": ["qualified", "evidence_required", "invalidated"]},
         "receipt_ids": {
           "type": "array", "uniqueItems": true,
           "items": {"type": "string", "pattern": "^evidence-[0-9a-f]{64}$"}
         },
+        "decision_replay_count": {"type": "integer", "minimum": 0},
         "modules": {
           "type": "object",
           "additionalProperties": false,
@@ -81,9 +88,14 @@
           }
         },
         "effect_count": {"type": "integer", "minimum": 0},
+        "effect_replay_count": {"type": "integer", "minimum": 0},
         "duplicate_effects": {
           "type": "array", "uniqueItems": true,
           "items": {"type": "string", "minLength": 1}
+        },
+        "unsettled_effects": {
+          "type": "array", "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^receipt-[0-9a-f]{64}$"}
         },
         "elapsed_seconds": {"type": "integer", "minimum": 0},
         "blockers": {

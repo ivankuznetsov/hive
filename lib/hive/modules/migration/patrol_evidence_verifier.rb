@@ -9,8 +9,8 @@ module Hive
           artifacts candidate_sha capture_id catalog_digest
           configuration_digest decision_class effect_receipt_ids generated_at
           fault_steps manifest_digest module_projection_digest owner_epoch
-          repository reviewed_at reviewer run_id scenario_manifest_digest
-          source_digest trigger_id
+          receipt_id repository reviewed_at reviewer run_id
+          scenario_manifest_digest source_digest trigger_id
         ].freeze
 
         VerifiedReceipt = Data.define(:receipt, :binding_digest) do
@@ -55,6 +55,7 @@ module Hive
             "configuration_digest" => receipt.configuration_digest,
             "scenario_manifest_digest" => receipt.scenario_manifest_digest,
             "repository" => receipt.repository,
+            "receipt_id" => receipt.receipt_id,
             "capture_id" => receipt.capture.capture_id,
             "trigger_id" => receipt.capture.trigger.fetch("id"),
             "owner_epoch" => receipt.capture.owner_epoch,

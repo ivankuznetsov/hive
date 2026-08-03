@@ -7,9 +7,12 @@ module Hive
     module Migration
       class PatrolQualification < Data.define(
         :qualification_id, :lane, :run_id, :candidate_sha,
-        :scenario_manifest_digest, :status, :receipt_ids, :modules,
-        :effect_count, :duplicate_effects, :elapsed_seconds, :blockers,
-        :supersedes, :contradiction, :generated_at
+        :catalog_digest, :source_digest, :manifest_digest,
+        :scenario_manifest_digest, :status, :receipt_ids,
+        :decision_replay_count, :modules, :effect_count,
+        :effect_replay_count, :duplicate_effects, :unsettled_effects,
+        :elapsed_seconds, :blockers, :supersedes, :contradiction,
+        :generated_at
       )
         LANES = %w[deterministic installed_live].freeze
         STATUSES = %w[qualified evidence_required invalidated].freeze
@@ -19,9 +22,11 @@ module Hive
         MIN_REPOSITORIES = 2
         MIN_CHANGE_WINDOWS = 2
         KEYS = %w[
-          blockers candidate_sha contradiction duplicate_effects effect_count
-          elapsed_seconds generated_at lane modules qualification_id receipt_ids
-          run_id scenario_manifest_digest status supersedes
+          blockers candidate_sha catalog_digest contradiction
+          decision_replay_count duplicate_effects effect_count
+          effect_replay_count elapsed_seconds generated_at lane manifest_digest
+          modules qualification_id receipt_ids run_id scenario_manifest_digest
+          source_digest status supersedes unsettled_effects
         ].freeze
         SUMMARY_KEYS = %w[
           blockers change_windows configuration_digest decision_classes
@@ -40,10 +45,11 @@ module Hive
                 PatrolEvidenceVerifier::VerifiedReceipt
               )
             end
+            all_evidence = receipts.map(&:receipt)
             unique = receipts.uniq { |value| value.receipt.receipt_id }
             evidence = unique.map(&:receipt)
             enforce_common_bindings!(evidence)
-            effect_index = verified_effect_index(effect_index, evidence)
+            effect_index = verified_effect_index(effect_index, all_evidence)
             modules = PatrolEvidence::MODULES.to_h do |module_name|
               [ module_name, module_summary(evidence, module_name) ]
             end.freeze
@@ -52,7 +58,10 @@ module Hive
                 "#{module_name}:#{reason}"
               end
             end
-            blockers << "duplicate_effects" unless effect_index.valid?
+            blockers << "duplicate_effects" unless
+              effect_index.duplicate_effects.empty?
+            blockers << "unsettled_effects" unless
+              effect_index.unsettled_effects.empty?
             if evidence.flat_map(&:effects).any? do |effect|
                  effect.intent.authority != "legacy" &&
                    PatrolEffectIndex::TERMINAL_EFFECT_STATUSES.include?(
@@ -85,12 +94,18 @@ module Hive
               lane: lane,
               run_id: evidence.first.run_id,
               candidate_sha: evidence.first.candidate_sha,
+              catalog_digest: evidence.first.catalog_digest,
+              source_digest: evidence.first.source_digest,
+              manifest_digest: evidence.first.manifest_digest,
               scenario_manifest_digest: evidence.first.scenario_manifest_digest,
               status: status.freeze,
               receipt_ids: evidence.map(&:receipt_id).sort.freeze,
+              decision_replay_count: receipts.size - evidence.size,
               modules: modules,
               effect_count: effect_index.effect_count,
+              effect_replay_count: effect_index.replay_count,
               duplicate_effects: effect_index.duplicate_effects,
+              unsettled_effects: effect_index.unsettled_effects,
               elapsed_seconds: (occurred.max - occurred.min).to_i,
               blockers: blockers,
               supersedes: supersedes,
@@ -114,14 +129,24 @@ module Hive
               lane: enum(value["lane"], LANES),
               run_id: nonempty(value["run_id"]),
               candidate_sha: sha(value["candidate_sha"]),
+              catalog_digest: digest(value["catalog_digest"]),
+              source_digest: digest(value["source_digest"]),
+              manifest_digest: digest(value["manifest_digest"]),
               scenario_manifest_digest: digest(
                 value["scenario_manifest_digest"]
               ),
               status: enum(value["status"], STATUSES),
               receipt_ids: id_set(value["receipt_ids"], "evidence"),
+              decision_replay_count:
+                nonnegative_integer(value["decision_replay_count"]),
               modules: modules_value(value["modules"]),
               effect_count: nonnegative_integer(value["effect_count"]),
+              effect_replay_count:
+                nonnegative_integer(value["effect_replay_count"]),
               duplicate_effects: string_set(value["duplicate_effects"]),
+              unsettled_effects: id_set(
+                value["unsettled_effects"], "receipt"
+              ),
               elapsed_seconds: nonnegative_integer(value["elapsed_seconds"]),
               blockers: string_set(value["blockers"]),
               supersedes: optional_qualification_id(value["supersedes"]),
@@ -159,13 +184,21 @@ module Hive
               "lane" => attributes.fetch(:lane),
               "run_id" => attributes.fetch(:run_id),
               "candidate_sha" => attributes.fetch(:candidate_sha),
+              "catalog_digest" => attributes.fetch(:catalog_digest),
+              "source_digest" => attributes.fetch(:source_digest),
+              "manifest_digest" => attributes.fetch(:manifest_digest),
               "scenario_manifest_digest" =>
                 attributes.fetch(:scenario_manifest_digest),
               "status" => attributes.fetch(:status),
               "receipt_ids" => attributes.fetch(:receipt_ids),
+              "decision_replay_count" =>
+                attributes.fetch(:decision_replay_count),
               "modules" => attributes.fetch(:modules),
               "effect_count" => attributes.fetch(:effect_count),
+              "effect_replay_count" =>
+                attributes.fetch(:effect_replay_count),
               "duplicate_effects" => attributes.fetch(:duplicate_effects),
+              "unsettled_effects" => attributes.fetch(:unsettled_effects),
               "elapsed_seconds" => attributes.fetch(:elapsed_seconds),
               "blockers" => attributes.fetch(:blockers),
               "supersedes" => attributes.fetch(:supersedes),
@@ -205,6 +238,7 @@ module Hive
             records = evidence.select do |receipt|
               receipt.capture.module_name == module_name
             end
+            enforce_capture_bindings!(records)
             comparable = records.group_by do |receipt|
               comparable_identity(receipt)
             end
@@ -256,11 +290,30 @@ module Hive
 
           def comparable_identity(receipt)
             {
+              "capture_id" => receipt.capture.capture_id,
+              "occurrence_id" => receipt.capture.occurrence_id,
               "trigger_id" => receipt.capture.trigger.fetch("id"),
               "repository_id" => receipt.repository.fetch("id"),
               "repository_sha" => receipt.repository.fetch("sha"),
               "change_window" => receipt.repository.fetch("change_window")
             }.freeze
+          end
+
+          def enforce_capture_bindings!(records)
+            %i[capture_id occurrence_id].each do |identifier|
+              records.group_by do |receipt|
+                receipt.capture.public_send(identifier)
+              end.each_value do |group|
+                bindings = group.map do |receipt|
+                  PatrolEvidence.canonical(
+                    "repository" => receipt.repository,
+                    "decision_class" => receipt.decision_class,
+                    "module_projection" => receipt.module_projection.to_h
+                  )
+                end
+                malformed! unless bindings.uniq.one?
+              end
+            end
           end
 
           def modules_value(value)
@@ -320,6 +373,8 @@ module Hive
             malformed! unless attributes.fetch(:receipt_ids).size >= decision_count
             expected_blockers << "duplicate_effects" unless
               attributes.fetch(:duplicate_effects).empty?
+            expected_blockers << "unsettled_effects" unless
+              attributes.fetch(:unsettled_effects).empty?
             if attributes.fetch(:blockers).include?("module_shadow_effect")
               expected_blockers << "module_shadow_effect"
             end
@@ -435,9 +490,15 @@ module Hive
             :payload,
             {
               lane: lane, run_id: run_id, candidate_sha: candidate_sha,
+              catalog_digest: catalog_digest, source_digest: source_digest,
+              manifest_digest: manifest_digest,
               scenario_manifest_digest: scenario_manifest_digest,
-              status: status, receipt_ids: receipt_ids, modules: modules,
-              effect_count: effect_count, duplicate_effects: duplicate_effects,
+              status: status, receipt_ids: receipt_ids,
+              decision_replay_count: decision_replay_count, modules: modules,
+              effect_count: effect_count,
+              effect_replay_count: effect_replay_count,
+              duplicate_effects: duplicate_effects,
+              unsettled_effects: unsettled_effects,
               elapsed_seconds: elapsed_seconds, blockers: blockers,
               supersedes: supersedes, contradiction: contradiction,
               generated_at: generated_at

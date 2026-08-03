@@ -156,16 +156,20 @@ the enforced contract and its limits.
 
 The U3a slice is deliberately local and deterministic. Its focused files pin
 canonical receipt bounds, independent full fault-step and typed-artifact
-bindings, a non-public verified-token constructor, exact-replay versus
-semantic/idempotency duplicates, unique comparable decision identity plus
+bindings including exact receipt identity, a non-public verified-token
+constructor, exact-replay telemetry versus semantic/idempotency duplicates,
+unsettled-effect refusal, occurrence/capture wrapper consistency, unique comparable decision identity plus
 decision-class/repository-SHA/change-window diversity, stable configuration,
-exactly superseded contradiction invalidation with persistence CAS, two-lane
-partial report reload/merge, complete released-v1 migration shapes,
+cross-lane candidate/catalogue/source/manifest/scenario/configuration binding,
+monotonic report CAS with two fresh lanes required after invalidation, exactly
+superseded contradiction invalidation, two-lane partial report reload/merge,
+strict JSON-schema composition with the U2 values, complete released-v1 migration shapes,
 source/archive/receipt linkage, interrupted receipt repair, reverse digest CAS,
-descriptor-safe shared locking, and report migration from every stable Patrol
-adoption state. They do not execute a
+descriptor-safe shared locking, stable-admission restoration after interrupted
+upgrade, typed report-v2 cutover refusal, and report migration from every stable
+Patrol adoption state. They do not execute a
 scenario, launch a provider, produce installed/live qualification, or exercise
-cutover and rollback:
+authorized cutover and rollback:
 
 ```bash
 bundle exec ruby -Itest -Ilib -e \

@@ -1,3 +1,4 @@
+require "time"
 require "hive/modules/migration/patrol_qualification"
 
 module Hive
@@ -120,6 +121,46 @@ module Hive
             )
           end
 
+          def validate_successor!(current:, successor:)
+            current = current.is_a?(self) ? from_h(current.to_h) : from_h(current)
+            successor = successor.is_a?(self) ?
+              from_h(successor.to_h) : from_h(successor)
+            malformed! unless successor.supersedes == current.report_id &&
+                              Time.iso8601(successor.generated_at) >
+                                Time.iso8601(current.generated_at)
+
+            if current.status == "invalidated"
+              malformed! unless successor.status == "qualified" &&
+                                LANES.all? do |lane|
+                                  before = current.lanes.fetch(lane)
+                                  after = successor.lanes.fetch(lane)
+                                  before && after &&
+                                    before.qualification_id !=
+                                      after.qualification_id
+                                end
+            else
+              changed = false
+              current.lanes.each do |lane, before|
+                after = successor.lanes.fetch(lane)
+                next unless before
+                next if after&.qualification_id == before.qualification_id
+
+                invalidation = before.qualified? &&
+                  after&.status == "invalidated" &&
+                  after.supersedes == before.qualification_id
+                malformed! unless invalidation
+                changed = true
+              end
+              changed ||= current.lanes.any? do |lane, before|
+                before.nil? && successor.lanes.fetch(lane)
+              end
+              malformed! unless changed
+            end
+            successor
+          rescue ArgumentError, KeyError, NoMethodError, TypeError
+            malformed!
+          end
+
           private
 
           def create(attributes)
@@ -164,10 +205,21 @@ module Hive
 
           def common_binding(values)
             return [ nil, nil ] if values.empty?
-            candidates = values.map(&:candidate_sha).uniq
-            scenarios = values.map(&:scenario_manifest_digest).uniq
-            malformed! unless candidates.one? && scenarios.one?
-            [ candidates.first, scenarios.first ]
+            bindings = values.map do |value|
+              {
+                "candidate_sha" => value.candidate_sha,
+                "catalog_digest" => value.catalog_digest,
+                "source_digest" => value.source_digest,
+                "manifest_digest" => value.manifest_digest,
+                "scenario_manifest_digest" =>
+                  value.scenario_manifest_digest,
+                "configuration_digests" => value.configuration_digests
+              }
+            end.uniq
+            malformed! unless bindings.one?
+            binding = bindings.first
+            [ binding.fetch("candidate_sha"),
+              binding.fetch("scenario_manifest_digest") ]
           end
 
           def lane_blockers(lanes)

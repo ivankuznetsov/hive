@@ -125,6 +125,7 @@ class ModulesMigrationPatrolEvidenceVerifierTest < Minitest::Test
         "id" => "owner/demo", "sha" => "7" * 40,
         "change_window" => "window-1"
       },
+      "receipt_id" => receipt.receipt_id,
       "capture_id" => receipt.capture.capture_id,
       "trigger_id" => "manual-1",
       "owner_epoch" => 1,

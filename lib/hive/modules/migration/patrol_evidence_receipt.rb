@@ -46,8 +46,8 @@ module Hive
                                     repository.fetch("id")
                               )
 
-            effects = array(effects).map { |value| coerce_effect(value) }
-            malformed! if effects.size > MAX_ITEMS
+            effects = bounded_array(effects)
+              .map { |value| coerce_effect(value) }
             effects.each do |effect|
               malformed! unless effect.intent.module_name == capture.module_name &&
                                 effect.intent.occurrence_id == capture.occurrence_id &&
@@ -199,7 +199,7 @@ module Hive
           end
 
           def artifact_set(values, label)
-            artifacts = array(values).map do |value|
+            artifacts = bounded_array(values).map do |value|
               PatrolEvidence.exact_keys!(value, ARTIFACT_KEYS, label: label)
               {
                 "kind" => bounded_string(
@@ -208,18 +208,23 @@ module Hive
                 "digest" => digest(value["digest"], label)
               }.freeze
             end
-            malformed! if artifacts.size > MAX_ITEMS
             artifacts.sort_by! { |value| [ value.fetch("kind"), value.fetch("digest") ] }
             malformed! unless artifacts.uniq == artifacts
             artifacts.freeze
           end
 
           def string_set(values, label)
-            strings = array(values).map do |value|
+            strings = bounded_array(values).map do |value|
               bounded_string(value, label, MAX_LABEL_BYTES)
             end.sort
-            malformed! if strings.size > MAX_ITEMS || strings.uniq != strings
+            malformed! if strings.uniq != strings
             strings.freeze
+          end
+
+          def bounded_array(value)
+            value = array(value)
+            malformed! if value.size > MAX_ITEMS
+            value
           end
 
           def array(value)

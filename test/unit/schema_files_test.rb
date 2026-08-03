@@ -2,6 +2,7 @@ require "test_helper"
 require "digest"
 require "json"
 require "json_schemer"
+require "pathname"
 require "hive/commands/answer_digest"
 require "hive/commands/approve"
 require "hive/commands/bot"
@@ -2770,7 +2771,9 @@ class SchemaFilesTest < Minitest::Test
       "hive-patrol-evidence-receipt", version: 1
     )
     assert File.file?(path), "schema file missing: #{path}"
-    schemer = JSONSchemer.schema(JSON.parse(File.read(path)))
+    assert_equal path,
+                 Hive::Schemas.schema_path("hive-patrol-evidence-receipt")
+    schemer = JSONSchemer.schema(Pathname(path))
     payload = patrol_evidence_receipt_payload
 
     assert_empty schemer.validate(payload).to_a
@@ -2779,20 +2782,34 @@ class SchemaFilesTest < Minitest::Test
     refute schemer.valid?(
       payload.merge("effects" => payload.fetch("effects") + [ {} ])
     )
+    nested = JSON.parse(JSON.generate(payload))
+    nested.fetch("capture").fetch("project")["unexpected"] = true
+    refute schemer.valid?(nested)
+    nested = JSON.parse(JSON.generate(payload))
+    nested.fetch("capture").fetch("trigger")["kind"] = "unknown"
+    refute schemer.valid?(nested)
+
+    with_effect = JSON.parse(JSON.generate(payload))
+    with_effect["effects"] = [
+      JSON.parse(JSON.generate(patrol_effect_receipt_payload))
+    ]
+    assert_empty schemer.validate(with_effect).to_a
+    with_effect.fetch("effects").first.fetch("intent")["unexpected"] = true
+    refute schemer.valid?(with_effect)
   end
 
   def test_module_migration_report_v2_accepts_partial_lanes_and_rejects_v1
     legacy_path = Hive::Schemas.schema_path(
       "hive-module-migration-report", version: 1
     )
-    assert_equal legacy_path,
+    path = Hive::Schemas.schema_path(
+      "hive-module-migration-report", version: 2
+    )
+    assert_equal path,
                  Hive::Schemas.schema_path("hive-module-migration-report")
     assert_equal 1,
                  JSON.parse(File.read(legacy_path))
                    .dig("oneOf", 0, "properties", "schema_version", "const")
-    path = Hive::Schemas.schema_path(
-      "hive-module-migration-report", version: 2
-    )
     assert File.file?(path), "schema file missing: #{path}"
     schemer = JSONSchemer.schema(JSON.parse(File.read(path)))
     payload = {
@@ -2873,5 +2890,19 @@ class SchemaFilesTest < Minitest::Test
       "generated_at" => now.iso8601(6),
       "reviewed_at" => (now + 1).iso8601(6)
     }
+  end
+
+  def patrol_effect_receipt_payload
+    now = Time.utc(2026, 8, 3, 12)
+    intent = Hive::Modules::Migration::EffectIntent.build(
+      module_name: "patrol", occurrence_id: "occ-#{'a' * 64}",
+      authority: "legacy", owner_epoch: 1, sink: "finding",
+      target: "finding-1", idempotency_key: "finding-1",
+      capability: "finding_write", created_at: now
+    )
+    Hive::Modules::Migration::EffectReceipt.build(
+      intent: intent, status: "committed",
+      outcome: { "finding_id" => "finding-1" }, recorded_at: now
+    ).to_h
   end
 end

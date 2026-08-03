@@ -155,16 +155,22 @@ module Hive
           end
           with_locked_storage(path) do |storage|
             current = read_locked(storage, missing: true)
-            if current && JSON.parse(current)["schema_version"] == 1
-              raise Hive::ConfigError,
-                    "module migration report v1 requires one-off migration"
-            end
             if current == bytes
               if expected_digest && digest_bytes(current) != expected_digest
                 raise Hive::ConfigError,
                       "module migration report expected digest does not match"
               end
               next
+            end
+            if current
+              current_payload = JSON.parse(current)
+              if current_payload["schema_version"] == 1
+                raise Hive::ConfigError,
+                      "module migration report v1 requires one-off migration"
+              end
+              ReportProjection.validate_successor!(
+                current: current_payload, successor: projection
+              )
             end
             if current && expected_digest.nil?
               raise Hive::ConfigError,

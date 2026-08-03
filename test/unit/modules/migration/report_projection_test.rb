@@ -90,6 +90,24 @@ class ModulesMigrationReportProjectionTest < Minitest::Test
       Hive::Modules::Migration::ReportProjection.build(
         qualifications: [
           deterministic,
+          qualification("installed_live", catalog_digest: "e" * 64)
+        ],
+        generated_at: NOW
+      )
+    end
+    assert_raises(Hive::ConfigError) do
+      Hive::Modules::Migration::ReportProjection.build(
+        qualifications: [
+          deterministic,
+          qualification("installed_live", patrol_configuration: "e" * 64)
+        ],
+        generated_at: NOW
+      )
+    end
+    assert_raises(Hive::ConfigError) do
+      Hive::Modules::Migration::ReportProjection.build(
+        qualifications: [
+          deterministic,
           qualification("installed_live", candidate_sha: "e" * 40)
         ],
         generated_at: NOW
@@ -139,6 +157,26 @@ class ModulesMigrationReportProjectionTest < Minitest::Test
       )
       assert_equal report.to_h,
                    Hive::Modules::Migration::Report.load(path).to_h
+
+      invalidated_digest = Digest::SHA256.hexdigest(File.binread(path))
+      assert_raises(Hive::ConfigError) do
+        Hive::Modules::Migration::Report.write_projection(
+          path, ready, expected_digest: invalidated_digest
+        )
+      end
+      fresh = Hive::Modules::Migration::ReportProjection.build(
+        qualifications: [
+          qualification("deterministic", qualification_seed: "3"),
+          qualification("installed_live", qualification_seed: "4")
+        ],
+        generated_at: NOW + 122,
+        supersedes: report.report_id
+      )
+      Hive::Modules::Migration::Report.write_projection(
+        path, fresh, expected_digest: invalidated_digest
+      )
+      assert_equal fresh.to_h,
+                   Hive::Modules::Migration::Report.load(path).to_h
     end
   end
 
@@ -167,7 +205,9 @@ class ModulesMigrationReportProjectionTest < Minitest::Test
 
   def qualification(lane, candidate_sha: "1" * 40,
                     qualification_seed: lane == "deterministic" ? "1" : "2",
-                    status: "qualified", supersedes: nil, contradiction: nil)
+                    status: "qualified", supersedes: nil, contradiction: nil,
+                    catalog_digest: "2" * 64,
+                    patrol_configuration: "5" * 64)
     blockers = status == "invalidated" ? [ "contradictory_telemetry" ] : []
     modules = %w[patrol architecture-patrol].to_h do |module_name|
       [ module_name, {
@@ -181,7 +221,7 @@ class ModulesMigrationReportProjectionTest < Minitest::Test
         "repository_shas" => [ "7" * 40, "8" * 40 ],
         "change_windows" => %w[window-0 window-1],
         "configuration_digest" =>
-          (module_name == "patrol" ? "5" : "a") * 64,
+          module_name == "patrol" ? patrol_configuration : "a" * 64,
         "elapsed_seconds" => 9,
         "blockers" => []
       }.freeze ]
@@ -192,6 +232,9 @@ class ModulesMigrationReportProjectionTest < Minitest::Test
         lane: lane,
         run_id: "run-#{lane}",
         candidate_sha: candidate_sha,
+        catalog_digest: catalog_digest,
+        source_digest: "3" * 64,
+        manifest_digest: "4" * 64,
         scenario_manifest_digest: "6" * 64,
         status: status,
         receipt_ids: 20.times.map do |index|
@@ -199,9 +242,12 @@ class ModulesMigrationReportProjectionTest < Minitest::Test
             "#{qualification_seed}:#{index}"
           )}"
         end.sort.freeze,
+        decision_replay_count: 0,
         modules: modules,
         effect_count: 0,
+        effect_replay_count: 0,
         duplicate_effects: [].freeze,
+        unsettled_effects: [].freeze,
         elapsed_seconds: 9,
         blockers: blockers.freeze,
         supersedes: supersedes,

@@ -135,6 +135,11 @@ Only two existing production files may change:
 - `lib/hive/modules/migration/patrols.rb`: bounded protocol/report admission
   through its existing migration lock and adoption facade.
 
+The `Patrols` admission facade may accept raw receipt documents and
+independently computed expected bindings, then own verification, deterministic
+qualification construction, and digest-CAS report-v2 merge. It does not read or
+execute scenarios, collect evidence, construct providers, or own retries.
+
 Dependency direction is closed and one-way:
 
 ```text

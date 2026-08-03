@@ -54,6 +54,12 @@ tags: [module, patrol, review, worktree, pr, codex]
 | `Hive::Modules::Migration::ReportProjection` | `lib/hive/modules/migration/report_projection.rb` | Pure report-v2 projection over exactly `deterministic` and `installed_live` qualification lanes. Both lanes must bind the same candidate, catalogue, source, manifest, scenario, and configuration set. Persistence admits only monotonic successor reports: a missing lane may be added, a qualified lane may be exactly invalidated, and recovery from an invalidated report requires two fresh lane qualifications. Every transition remains digest-CAS guarded. An explicitly migrated empty report records `evidence_required` rather than qualification. |
 | `Hive::Modules::Migration::ReportMigration` | `lib/hive/modules/migration/report_migration.rb` | One-off project-local report converter over the existing `Report` storage facade. It accepts the complete released v1 success, null-configuration, and error-envelope shapes; preserves exact source bytes in a fixed archive; validates source/archive/receipt linkage on read-only probes; repairs an interrupted receipt publication under the existing exclusive lock; binds that immutable receipt to migration provenance rather than mutable later report bytes; uses digest CAS in both directions; and owns no cutover, rollback, retry, or effect recovery. |
 
+`Hive::Modules::Migration::Patrols.admit_deterministic_qualification!` is the
+single production admission path for U3b evidence. It accepts bounded raw
+receipt documents plus independently computed expected bindings, constructs no
+scenario or collector, and owns only verification, deterministic qualification,
+and digest-CAS report-v2 merge.
+
 ## State
 
 Patrol state is deliberately inspectable and removable:

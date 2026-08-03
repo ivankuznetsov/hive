@@ -4,8 +4,12 @@ require "time"
 require "hive/atomic_file"
 require "hive/config"
 require "hive/module_package/managed_store"
+require "hive/modules/migration/patrol_effect_index"
+require "hive/modules/migration/patrol_evidence_verifier"
+require "hive/modules/migration/patrol_qualification"
 require "hive/modules/migration/report"
 require "hive/modules/migration/report_migration"
+require "hive/modules/migration/report_projection"
 require "hive/modules/migration/shadow_decision_migration"
 require "hive/workflow_package/canonical_json"
 
@@ -147,6 +151,59 @@ module Hive
 
           def report_file(project_root, hive_state_path: nil)
             File.join(File.dirname(state_file(project_root, hive_state_path: hive_state_path)), "report.json")
+          end
+
+          # Admit deterministic evidence without giving the E2E harness access
+          # to verifier tokens or report construction. The caller supplies raw
+          # receipt documents plus independently computed expected bindings;
+          # this facade owns verification, qualification, and the report CAS.
+          def admit_deterministic_qualification!(
+            project_root, receipts:, expected_bindings:, generated_at:,
+            expected_report_digest:, hive_state_path: nil
+          )
+            valid_inputs = receipts.is_a?(Array) &&
+              expected_bindings.is_a?(Array) &&
+              receipts.size == expected_bindings.size &&
+              receipts.size.between?(1, PatrolQualification::MAX_RECEIPTS) &&
+              receipts.all?(Hash) && expected_bindings.all?(Hash) &&
+              expected_report_digest.is_a?(String) &&
+              expected_report_digest.match?(/\A[0-9a-f]{64}\z/)
+            unless valid_inputs
+              raise Hive::ConfigError,
+                    "patrol deterministic qualification admission is malformed"
+            end
+
+            verified = receipts.each_index.map do |index|
+              PatrolEvidenceVerifier.verify(
+                receipt: receipts.fetch(index),
+                expected_bindings: expected_bindings.fetch(index)
+              )
+            end.freeze
+            effects = []
+            verified.each do |receipt|
+              if effects.size + receipt.effects.size >
+                   PatrolEffectIndex::MAX_RECEIPTS
+                raise Hive::ConfigError,
+                      "patrol deterministic qualification admission is malformed"
+              end
+              effects.concat(receipt.effects)
+            end
+            qualification = PatrolQualification.build(
+              lane: "deterministic", verified_receipts: verified,
+              effect_index: PatrolEffectIndex.build(receipts: effects),
+              generated_at: generated_at
+            )
+            path = report_file(
+              project_root, hive_state_path: hive_state_path
+            )
+            projection = ReportProjection.merge(
+              existing: Report.load(path), qualification: qualification,
+              generated_at: generated_at
+            )
+            Report.write_projection(
+              path, projection, expected_digest: expected_report_digest
+            )
+            projection
           end
 
           def shadow_decision_upgrade_required?(project_root,

@@ -2,8 +2,13 @@ require "test_helper"
 require "digest"
 require "json"
 require "hive/modules/migration/patrol_qualification"
+require "hive/modules/migration/patrols"
+require "hive/modules/migration/report"
+require "hive/modules/migration/report_projection"
 
 class ModulesMigrationPatrolQualificationTest < Minitest::Test
+  include HiveTestHelper
+
   NOW = Time.utc(2026, 8, 3, 12)
 
   def test_completeness_and_diversity_qualify_without_an_elapsed_gate
@@ -27,6 +32,55 @@ class ModulesMigrationPatrolQualificationTest < Minitest::Test
     assert_equal 2,
                  qualification.modules.dig("patrol", "change_windows").size
     assert_empty qualification.blockers
+  end
+
+  def test_public_admission_verifies_documents_and_cas_merges_report
+    with_tmp_dir do |root|
+      state_root = File.join(root, ".hive-state")
+      path = Hive::Modules::Migration::Patrols.report_file(
+        root, hive_state_path: state_root
+      )
+      current = Hive::Modules::Migration::ReportProjection.build(
+        qualifications: [], generated_at: NOW,
+        migration: {
+          "source_schema_version" => 1,
+          "source_digest" => "b" * 64,
+          "archive_digest" => "b" * 64,
+          "disposition" => "evidence_required"
+        }
+      )
+      Hive::Modules::Migration::Report.write_projection(path, current)
+      expected_digest = Digest::SHA256.hexdigest(File.binread(path))
+      verified = complete_receipts
+      documents = verified.map { |value| value.receipt.to_h }
+      bindings = verified.map { |value| expected_bindings(value.receipt) }
+
+      wrong = bindings.dup
+      wrong[0] = wrong.fetch(0).merge("trigger_id" => "wrong-trigger")
+      assert_raises(Hive::ConfigError) do
+        Hive::Modules::Migration::Patrols.admit_deterministic_qualification!(
+          root, receipts: documents, expected_bindings: wrong,
+          generated_at: NOW + 30,
+          expected_report_digest: expected_digest,
+          hive_state_path: state_root
+        )
+      end
+      assert_equal expected_digest,
+                   Digest::SHA256.hexdigest(File.binread(path))
+
+      report =
+        Hive::Modules::Migration::Patrols.admit_deterministic_qualification!(
+          root, receipts: documents, expected_bindings: bindings,
+          generated_at: NOW + 30,
+          expected_report_digest: expected_digest,
+          hive_state_path: state_root
+        )
+
+      assert_equal "qualified",
+                   report.lanes.fetch("deterministic").status
+      assert_equal report.to_h,
+                   Hive::Modules::Migration::Report.load(path).to_h
+    end
   end
 
   def test_timestamp_spread_cannot_replace_decision_or_repository_diversity

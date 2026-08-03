@@ -13,10 +13,12 @@ tags: [gap, todo, release-proof, agent-skills]
 
 - Patrol capture/effect boundaries and the U3a receipt, independent verifier,
   duplicate index, qualification value, two-lane report, and one-off report
-  conversion are source- and focused-test-pinned. U3a does not produce a
-  qualification and is not compressed-campaign, installed/live, or cutover
-  evidence; current report-v2 cutover is deliberately refused at the operator
-  boundary. U3b must still commit independent controls and a real-reader
+  conversion are source- and focused-test-pinned. A narrow `Patrols` facade
+  admits raw deterministic receipt documents only after independently supplied
+  bindings verify, then digest-CAS merges report v2. U3a still does not execute
+  the compressed campaign and is not installed/live or cutover evidence;
+  current report-v2 cutover is deliberately refused at the operator boundary.
+  U3b must still commit independent controls and a real-reader
   deterministic catalogue that drives both modules through the complete fault
   matrix, including intent/outcome restarts, shadow attempted-effect denial,
   exact reconciliation, and run-level duplicate detection. Its temporal cases

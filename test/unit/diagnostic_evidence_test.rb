@@ -521,11 +521,10 @@ class DiagnosticEvidenceTest < Minitest::Test
     assert_match(/cannot stat/, err)
   end
 
-  # Invalid UTF-8 in a state file makes Markers.current's scan raise
-  # ArgumentError; current_marker treats it as "no marker", not a crash — and
-  # leaves a breadcrumb (matching the SystemCallError branch) so a corrupt
-  # state file doesn't vanish from the evidence with zero signal.
-  def test_current_marker_invalid_utf8_degrades_to_nil_with_breadcrumb
+  # Marker syntax is ASCII and scans a binary view. Invalid UTF-8 elsewhere in
+  # the marker body must not hide a later safe reason attribute or crash the
+  # diagnostic path.
+  def test_current_marker_preserves_ascii_evidence_around_invalid_utf8
     Dir.mktmpdir("hive-diagnostic-evidence") do |folder|
       path = File.join(folder, "task.md")
       File.binwrite(path, "<!-- ERROR \xFF reason=boom -->\n".b)
@@ -534,8 +533,9 @@ class DiagnosticEvidenceTest < Minitest::Test
       _out, err = capture_io do
         marker = Hive::DiagnosticEvidence.send(:current_marker, path)
       end
-      assert_nil marker
-      assert_match(/cannot parse marker/, err)
+      assert_equal :error, marker.name
+      assert_equal "boom", marker.attrs.fetch("reason")
+      assert_empty err
     end
   end
 
@@ -816,6 +816,24 @@ class DiagnosticEvidenceTest < Minitest::Test
       end
       assert_nil marker
       assert_match(/cannot read marker/, err)
+    ensure
+      Hive::Markers.define_singleton_method(:current, sentinel) if sentinel
+    end
+  end
+
+  def test_current_marker_parse_fault_degrades_with_breadcrumb
+    Dir.mktmpdir("hive-diagnostic-evidence") do |folder|
+      path = File.join(folder, "task.md")
+      File.write(path, "<!-- ERROR reason=boom -->\n")
+      sentinel = Hive::Markers.method(:current)
+      Hive::Markers.define_singleton_method(:current) { |*| raise ArgumentError, "simulated" }
+
+      marker = :unset
+      _out, err = capture_io do
+        marker = Hive::DiagnosticEvidence.send(:current_marker, path)
+      end
+      assert_nil marker
+      assert_match(/cannot parse marker/, err)
     ensure
       Hive::Markers.define_singleton_method(:current, sentinel) if sentinel
     end

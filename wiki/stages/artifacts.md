@@ -3,7 +3,7 @@ title: 7-artifacts stage
 type: stage
 source: lib/hive/stages/artifacts.rb
 created: 2026-05-22
-updated: 2026-07-25
+updated: 2026-08-02
 tags: [stage, artifacts, release]
 ---
 
@@ -75,7 +75,8 @@ rationale. See [[commands/web]].
 
 - Markerless or non-complete `7-artifacts` rows surface as `ready_to_artifacts` with `hive artifacts <slug> --from 7-artifacts`.
 - `:complete` rows surface as `ready_to_finalize` with `hive finalize <slug> --from 7-artifacts`.
-- Every persisted `ERROR`, including `tmux_session_terminated`,
+- Every persisted `ERROR` other than exact operator-owned semantic terminal
+  errors, including `tmux_session_terminated`,
   `agent_orphaned`, and `timeout`, follows the universal recovery lifecycle.
   After the shared cooldown and safety checks, `RecoveryCoordinator` admits the
   exact marker generation and reruns artifact collection. There is no

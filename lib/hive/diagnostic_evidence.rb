@@ -269,12 +269,9 @@ module Hive
       breadcrumb("cannot read marker at #{path} (#{e.class}: #{e.message})")
       nil
     rescue ArgumentError => e
-      # Markers.current reads with encoding: "UTF-8", which tags (not
-      # transcodes) the bytes; an invalid UTF-8 sequence then makes the internal
-      # `scan` raise ArgumentError ("invalid byte sequence in UTF-8"). Treat a
-      # malformed state file as "no marker" rather than crash — but leave a
-      # breadcrumb (matching the SystemCallError branch) so a corrupt-encoding
-      # state file doesn't drop out of the evidence with zero signal.
+      # Markers.current scans binary bytes so invalid UTF-8 outside an ASCII
+      # marker remains usable evidence. Keep this defensive branch for an
+      # unexpected parser/regexp encoding error and degrade with a breadcrumb.
       breadcrumb("cannot parse marker at #{path} (#{e.class}: #{e.message})")
       nil
     end

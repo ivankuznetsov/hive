@@ -61,6 +61,13 @@ local checkpoint, normally once before handoff:
 bundle exec rake test
 ```
 
+Tests that construct project-local state stores must pass a disposable project
+root from `with_tmp_dir`. Isolating `HOME` does not redirect
+`<project>/.hive-state`, so using the checkout root can pollute live Patrol
+recovery state. The Patrol PR-opener helper rejects the repository root before
+creating or reserving an occurrence, in addition to keeping each stateful test
+inside its own temporary project.
+
 Pre-release candidate operations are separately scoped. `plan`, `list`,
 `inspect`, and `collect` are observational; `run`, `resume`, and `rerun` append
 local candidate evidence; only `dispatch` writes to GitHub. A successful local

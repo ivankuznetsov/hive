@@ -6,14 +6,25 @@ Donor PR: https://github.com/ivankuznetsov/hive/pull/910
 
 Frozen donor head: `7d14ebb72801706f3029c1ca437d9f2f43825efe`
 
-Admission state: `refreshed_current_main_awaiting_admission_review_and_A1`
+Admission state: `refreshed_current_main_A1_approved_awaiting_exact_head_admission_review`
 
 Refreshed: 2026-08-03
 
-Successor base: `5c7a324b4ec2d1f3482fca41f7329ceb604c19c9`
+Successor base: `f42fc7523fba9b446c73f76303728a05686ffd17`
 
 Authoritative plan SHA-256:
 `ae517d6a53459677b3903b1b420098c3411d5a1b7167b28781e921801cd29c72`
+
+Refreshed characterization on that base: **362 runs / 2,380 assertions / 0
+failures / 0 errors / 0 skips**. Focused coverage remains complete for
+`report.rb` (`108/108` executable lines and `36/36` branches) and the bounded
+`patrols.rb` report-admission region (`25/25` executable lines and `12/12`
+branches).
+
+A1 approved the complete `15/7/11/3/0` ownership map and frozen six-owner
+boundary on 2026-08-03. Production mutation remains forbidden until an
+independent review accepts the resulting exact admission head and A2 publishes
+and reads back the durable approval checkpoint on PR #923.
 
 This ledger contains every finding or finding-shaped observation recovered from
 PR #910 exactly once. Donor resolution claims are historical evidence only;

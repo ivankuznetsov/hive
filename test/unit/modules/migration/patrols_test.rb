@@ -377,6 +377,50 @@ class ModulesMigrationPatrolsTest < Minitest::Test
     end
   end
 
+  def test_cutover_accepts_independently_rebuilt_current_shadow_evidence
+    with_project do |project|
+      store = FakeStore.new
+      migration = Hive::Modules::Migration::Patrols.new(
+        project_root: project.fetch("path"), project: "demo",
+        hive_state_path: project.fetch("hive_state_path"), module_store: store,
+        quiescence_probe: ->(*) { :quiescent }
+      )
+      migration.adopt!(now: NOW)
+      payload = {
+        "reviewer" => "reviewer-1",
+        "reviewed_at" => NOW.iso8601(6)
+      }
+      report = Struct.new(:payload) do
+        def eligible? = true
+        def blockers = []
+        def configuration_digests
+          { "patrol" => "a" * 64, "architecture-patrol" => "b" * 64 }
+        end
+      end.new(payload)
+      rebuilt = Report.new(
+        eligible?: true, blockers: [],
+        configuration_digests: report.configuration_digests
+      )
+      build_arguments = nil
+      builder = lambda do |**arguments|
+        build_arguments = arguments
+        rebuilt
+      end
+
+      outcome = with_replaced_singleton_method(
+        Hive::Modules::Migration::Report, :build, builder
+      ) do
+        migration.cutover!(report: report, now: NOW + 1)
+      end
+
+      assert_equal "module", outcome.status
+      assert_equal payload.fetch("reviewer"), build_arguments.fetch(:reviewer)
+      assert_equal payload.fetch("reviewed_at"), build_arguments.fetch(:reviewed_at)
+      assert_equal NOW + 1, build_arguments.fetch(:generated_at)
+      assert_respond_to build_arguments.fetch(:record_source), :each
+    end
+  end
+
   def test_legacy_schedulers_stop_before_config_or_claim_work_when_epoch_denies_admission
     entry = { "name" => "demo", "path" => "/project", "hive_state_path" => "/state" }
     denied = ->(_entry, _module_name, _authority) { false }
@@ -813,6 +857,21 @@ class ModulesMigrationPatrolsTest < Minitest::Test
       end
       assert_match(/report_invalid/, error.message)
 
+      source_digest = "d" * 64
+      v2_report = Hive::Modules::Migration::ReportProjection.build(
+        qualifications: [], generated_at: NOW,
+        migration: {
+          "source_schema_version" => 1,
+          "source_digest" => source_digest,
+          "archive_digest" => source_digest,
+          "disposition" => "evidence_required"
+        }
+      )
+      error = assert_raises(Hive::ConfigError) do
+        migration.cutover!(report: v2_report, now: NOW + 2)
+      end
+      assert_match(/requires separately authorized cutover/, error.message)
+
       stale = Report.new(
         eligible?: true, blockers: [],
         configuration_digests: { "patrol" => "0" * 64, "architecture-patrol" => "b" * 64 }
@@ -1185,7 +1244,220 @@ class ModulesMigrationPatrolsTest < Minitest::Test
     end
   end
 
+  def test_migration_lock_refuses_a_symlinked_authority_file
+    with_project do |project|
+      report = Hive::Modules::Migration::Patrols.report_file(
+        project.fetch("path"),
+        hive_state_path: project.fetch("hive_state_path")
+      )
+      FileUtils.mkdir_p(File.dirname(report))
+      outside = File.join(project.fetch("path"), "outside.lock")
+      File.binwrite(outside, "sentinel")
+      File.symlink(outside, File.join(File.dirname(report), ".mutation.lock"))
+
+      assert_raises(Hive::ConfigError) do
+        Hive::Modules::Migration::Patrols.with_migration_lock(
+          project.fetch("path"),
+          hive_state_path: project.fetch("hive_state_path"),
+          shared: false
+        ) { flunk "unsafe lock yielded" }
+      end
+      assert_equal "sentinel", File.binread(outside)
+    end
+  end
+
+  def test_every_stable_adoption_state_applies_report_migration
+    %w[shadowing module rolled_back].each do |status|
+      with_project do |project|
+        migration = Hive::Modules::Migration::Patrols.new(
+          project_root: project.fetch("path"), project: "demo",
+          hive_state_path: project.fetch("hive_state_path"),
+          module_store: FakeStore.new,
+          quiescence_probe: ->(*) { :quiescent }
+        )
+        migration.adopt!(now: NOW)
+        migration.send(:write, migration.read.merge("status" => status))
+        report_path = Hive::Modules::Migration::Patrols.report_file(
+          project.fetch("path"),
+          hive_state_path: project.fetch("hive_state_path")
+        )
+        File.binwrite(
+          report_path,
+          Hive::Modules::Migration::Report.canonical(legacy_report)
+        )
+
+        assert Hive::Modules::Migration::Patrols
+          .shadow_decision_upgrade_required?(
+            project.fetch("path"),
+            hive_state_path: project.fetch("hive_state_path")
+          ), status
+        outcome = migration.adopt!(now: NOW + 1)
+
+        assert_equal "already_current", outcome.status, status
+        assert_equal 2,
+                     Hive::Modules::Migration::Report.load(report_path)
+                       .payload.fetch("schema_version"), status
+        refute Hive::Modules::Migration::Patrols
+          .shadow_decision_upgrade_required?(
+            project.fetch("path"),
+            hive_state_path: project.fetch("hive_state_path")
+          ), status
+      end
+    end
+  end
+
+  def test_stable_adoption_rechecks_report_upgrade_under_the_authority_lock
+    with_project do |project|
+      migration = Hive::Modules::Migration::Patrols.new(
+        project_root: project.fetch("path"), project: "demo",
+        hive_state_path: project.fetch("hive_state_path"),
+        module_store: FakeStore.new,
+        quiescence_probe: ->(*) { :quiescent }
+      )
+      migration.adopt!(now: NOW)
+      report_path = Hive::Modules::Migration::Patrols.report_file(
+        project.fetch("path"),
+        hive_state_path: project.fetch("hive_state_path")
+      )
+      legacy_bytes =
+        Hive::Modules::Migration::Report.canonical(legacy_report)
+      stale_hint = lambda do |_root, hive_state_path: nil|
+        File.binwrite(report_path, legacy_bytes)
+        false
+      end
+
+      failing_locked_probe = lambda do |*|
+        raise Hive::ConfigError, "forced probe failure"
+      end
+      outcome = with_replaced_singleton_method(
+        Hive::Modules::Migration::ReportMigration,
+        :required_locked?,
+        failing_locked_probe
+      ) do
+        with_replaced_singleton_method(
+          Hive::Modules::Migration::Patrols,
+          :shadow_decision_upgrade_required?,
+          stale_hint
+        ) { migration.adopt!(now: NOW + 1) }
+      end
+
+      assert_equal "already_current", outcome.status
+      assert_equal 2,
+                   Hive::Modules::Migration::Report.load(report_path)
+                     .payload.fetch("schema_version")
+    end
+  end
+
+  def test_stable_adoption_completes_interrupted_report_provenance
+    with_project do |project|
+      migration = Hive::Modules::Migration::Patrols.new(
+        project_root: project.fetch("path"), project: "demo",
+        hive_state_path: project.fetch("hive_state_path"),
+        module_store: FakeStore.new,
+        quiescence_probe: ->(*) { :quiescent }
+      )
+      migration.adopt!(now: NOW)
+      report_path = Hive::Modules::Migration::Patrols.report_file(
+        project.fetch("path"),
+        hive_state_path: project.fetch("hive_state_path")
+      )
+      File.binwrite(
+        report_path,
+        Hive::Modules::Migration::Report.canonical(legacy_report)
+      )
+      Hive::Modules::Migration::ReportMigration.forward(
+        path: report_path, qualifications: [], generated_at: NOW + 1
+      )
+      receipt_path = File.join(
+        File.dirname(report_path),
+        Hive::Modules::Migration::ReportMigration::RECEIPT_NAME
+      )
+      File.unlink(receipt_path)
+
+      assert Hive::Modules::Migration::Patrols
+        .shadow_decision_upgrade_required?(
+          project.fetch("path"),
+          hive_state_path: project.fetch("hive_state_path")
+        )
+      refute File.exist?(receipt_path)
+      outcome = migration.adopt!(now: NOW + 2)
+
+      assert_equal "already_current", outcome.status
+      assert File.file?(receipt_path)
+      refute Hive::Modules::Migration::Patrols
+        .shadow_decision_upgrade_required?(
+          project.fetch("path"),
+          hive_state_path: project.fetch("hive_state_path")
+        )
+    end
+  end
+
+  def test_stable_adoption_restores_admissions_after_completed_upgrade_crash
+    with_project do |project|
+      migration = Hive::Modules::Migration::Patrols.new(
+        project_root: project.fetch("path"), project: "demo",
+        hive_state_path: project.fetch("hive_state_path"), module_store: FakeStore.new,
+        quiescence_probe: ->(*) { :quiescent }
+      )
+      migration.adopt!(now: NOW)
+      report_path = Hive::Modules::Migration::Patrols.report_file(
+        project.fetch("path"),
+        hive_state_path: project.fetch("hive_state_path")
+      )
+      File.binwrite(
+        report_path,
+        Hive::Modules::Migration::Report.canonical(legacy_report)
+      )
+      Hive::Modules::Migration::ReportMigration.forward(
+        path: report_path, qualifications: [], generated_at: NOW + 1
+      )
+      fenced = migration.read.merge(
+        "admissions" => Hive::Modules::Migration::Patrols::MODULES.to_h do |name|
+          [ name, false ]
+        end,
+        "blockers" => {}, "updated_at" => (NOW + 1).iso8601(6)
+      )
+      migration.send(:write, fenced)
+
+      refute Hive::Modules::Migration::Patrols
+        .shadow_decision_upgrade_required?(
+          project.fetch("path"),
+          hive_state_path: project.fetch("hive_state_path")
+        )
+      outcome = migration.adopt!(now: NOW + 2)
+
+      assert_equal "already_current", outcome.status
+      assert outcome.state.fetch("admissions").values.all?
+    end
+  end
+
   private
+
+  def legacy_report
+    modules = %w[patrol architecture-patrol].to_h do |module_name|
+      [ module_name, {
+        "decision_count" => 10,
+        "started_at" => "2026-07-01T00:00:00.000000Z",
+        "ended_at" => "2026-07-08T00:00:00.000000Z",
+        "elapsed_seconds" => 604_800,
+        "configuration_digest" =>
+          (module_name == "patrol" ? "a" : "b") * 64,
+        "unexplained_difference_count" => 0,
+        "duplicate_effect_count" => 0,
+        "blockers" => []
+      } ]
+    end
+    {
+      "schema" => "hive-module-migration-report", "schema_version" => 1,
+      "generated_at" => NOW.iso8601(6), "reviewer" => "reviewer-1",
+      "reviewed_at" => NOW.iso8601(6),
+      "window" => {
+        "started_at" => "2026-07-01T00:00:00.000000Z",
+        "ended_at" => "2026-07-08T00:00:00.000000Z"
+      },
+      "modules" => modules, "eligible" => true, "blockers" => []
+    }
+  end
 
   def write_legacy_shadow_decision(project)
     shadow_root = File.join(

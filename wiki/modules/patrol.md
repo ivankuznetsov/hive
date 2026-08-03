@@ -3,7 +3,7 @@ title: Hive::Patrol
 type: module
 source: lib/hive/patrol/
 created: 2026-05-28
-updated: 2026-07-30
+updated: 2026-08-03
 tags: [module, patrol, review, worktree, pr, codex]
 ---
 
@@ -47,6 +47,18 @@ tags: [module, patrol, review, worktree, pr, codex]
 | `Hive::RefactorPatrol::DiscoveryTransitions` | `lib/hive/refactor_patrol/discovery_transitions.rb` | Facade used by `RefactorPatrolScheduler` and its command child: discovery claim/checkpoint/release and diagnostic block transitions live in separate coordinators. The scheduler claims and attaches the exact child process; `--job-manifest` reconstructs the non-claiming command-side coordinator before incrementally checkpointing through that attached token. `ArchitectureOccurrenceLifecycle` alone reserves/finalizes occurrences and recovers capture/event/receipt projections; the scheduler retains cadence, candidate selection, spawn, and envelope handling. |
 | `Hive::RefactorPatrol::ClaimMaintenanceTransitions` | `lib/hive/refactor_patrol/claim_maintenance_transitions.rb` | Narrow non-outcome port for generation-fenced child-process attachment and discovery/action heartbeat renewal. Command and scheduler roots cannot call those JobStore mutators directly. |
 | `Hive::Modules::Migration::PatrolEvidence` | `lib/hive/modules/migration/patrol_evidence.rb` | Strict immutable ordinary/architecture capture, intent, and receipt values shared only as an observation protocol. `EvidenceStore` appends canonical records, maintains bounded occurrence/intent indices, and repairs them through portable lexicographic pages whose cursors freeze one high-water inventory plus an order-independent filename fingerprint. `ManagedDirectory` rejects linked managed components and descriptor-binds its bounded reads, locks, and atomic writes; evidence remains observation-only and has no mutation or recovery authority. |
+| `Hive::Modules::Migration::PatrolEvidenceReceipt` | `lib/hive/modules/migration/patrol_evidence_receipt.rb` | Canonical immutable U3 qualification input binding one run, candidate, catalogue/source/manifest/configuration/scenario set, repository change window, U2 capture, exact terminal effect receipts, fault steps, artifacts, reviewer, and timestamps. Receipt construction bounds collections before mapping, rejects cross-occurrence effects, rejects non-string or invalid-UTF-8 string fields with `Hive::ConfigError`, and requires captures to bind exactly their committed or reconciled legacy receipts; its JSON schema composes the strict U2 capture, projection, and effect schemas. |
+| `Hive::Modules::Migration::PatrolEvidenceVerifier` | `lib/hive/modules/migration/patrol_evidence_verifier.rb` | Pure verifier that re-parses a receipt and compares every authority-sensitive binding, including the exact receipt identity, complete fault-step set, and each typed artifact with caller-supplied expected values. Expected bindings retain their declared JSON types and are never string-coerced. It never derives expected project, candidate, scenario, artifact, capture, epoch, projection, or effect identities from the receipt it is checking, and only the verifier can construct its verified token. |
+| `Hive::Modules::Migration::PatrolEffectIndex` | `lib/hive/modules/migration/patrol_effect_index.rb` | Bounded immutable run-wide projection over verified effect receipts. Exact receipt replay is counted but idempotent; distinct committed/reconciled effects that collide by intent, idempotency key, or semantic identity become qualification findings. `attempted` and `unknown` effects remain visible and block qualification, while denied, known-not-sent, and failed receipts remain non-effects. |
+| `Hive::Modules::Migration::PatrolQualification` | `lib/hive/modules/migration/patrol_qualification.rb` | Pure immutable qualification value. Each module requires at least ten unique comparable trigger/repository/SHA/change-window decision identities spanning at least two decision classes, repository SHAs, and change windows under one configuration digest; timestamp, fault-step, artifact, or exact receipt replay cannot inflate the count, while decision/effect replay counts remain visible. The qualification binds the earliest capture time derived from verified receipts, so later report recovery cannot relabel pre-contradiction observations as fresh. One capture or occurrence cannot be rewrapped into conflicting repository/window decisions. Terminal non-legacy/shadow effects, unsettled effects, duplicate identities, mixed run bindings, and unsuperseded contradictions fail closed. |
+| `Hive::Modules::Migration::ReportProjection` | `lib/hive/modules/migration/report_projection.rb` | Pure report-v2 projection over exactly `deterministic` and `installed_live` qualification lanes. Both lanes must bind the same candidate, catalogue, source, manifest, scenario, and configuration set. Persistence admits only monotonic successor reports: a missing lane may be added; an `evidence_required` lane may advance through a strict same-run receipt superset or a disjoint fresh run; a qualified lane may be exactly invalidated; and recovery from an invalidated report requires new run identities, disjoint receipt sets, and evidence beginning after the latest contradiction in both lanes. Successors preserve migration provenance and every transition remains digest-CAS guarded. The v2 JSON schema accepts both strict persisted projections and the command's shared current-version error envelope. An explicitly migrated empty report records `evidence_required` rather than qualification. |
+| `Hive::Modules::Migration::ReportMigration` | `lib/hive/modules/migration/report_migration.rb` | One-off project-local report converter over the existing `Report` storage facade. It accepts the complete released v1 success, null-configuration, and error-envelope shapes; preserves exact source bytes in a fixed archive; validates source/archive/receipt linkage on read-only probes; repairs a missing receipt only for the initial unsuperseded migration projection under the existing exclusive lock; rejects missing provenance after any successor; binds that immutable receipt to migration provenance rather than mutable later report bytes; uses digest CAS in both directions; and owns no cutover, rollback, retry, or effect recovery. |
+
+`Hive::Modules::Migration::Patrols.admit_deterministic_qualification!` is the
+single production admission path for U3b evidence. It accepts bounded raw
+receipt documents plus independently computed expected bindings, constructs no
+scenario or collector, and owns only verification, deterministic qualification,
+and digest-CAS report-v2 merge.
 
 ## State
 
@@ -73,6 +85,11 @@ Patrol state is deliberately inspectable and removable:
   receipts/*.json
   indexes/occurrences/*.json
   indexes/intents/*.json
+.hive-state/module-runtime/migration/
+  .mutation.lock                 # descriptor-confined Report/Patrols authority
+  report.json                    # strict report-v2 projection at runtime
+  report.v1.archive.json         # exact one-off source bytes
+  report.migration.json          # immutable archive/projection provenance
 ```
 
 The managed repository worktree is not edited by fixes. `Fixer` uses [[modules/worktree]] to create a branch named `hive-patrol/<feature-id>-<fingerprint8>` under the project's worktree root. When `patrol.review_prs` is enabled (default), that worktree is kept after PR creation and referenced by a synthetic `6-review` task with display name `Patrol: <finding title>`. When disabled, the successful local worktree is removed after the branch is pushed and the PR opens.
@@ -188,6 +205,10 @@ lock spans the final legacy ownership check, scheduler reservation, process
 spawn, and Architecture Patrol claim attachment; cutover and rollback take the
 same lock exclusively. Status and doctor surface unadopted, fenced, and corrupt
 migration state rather than reporting an apparently healthy active module.
+The U3a report-v2 projection is evidence-only: current Patrol cutover rejects
+it with a typed operator-boundary error until a separately authorized lifecycle
+slice owns cutover. Interrupted stable upgrades restore both stable admissions
+before normal scheduling resumes.
 
 Shadow comparison consumes exact independently persisted finalized
 `PatrolCapture` records. Selection is immutable occurrence identity, not a

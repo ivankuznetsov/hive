@@ -20,8 +20,16 @@ module HiveManagedWebArchive
     FileUtils.mkdir_p(File.dirname(destination), mode: 0o700)
     raise Error, "refusing to overwrite managed web archive" if File.exist?(destination) || File.symlink?(destination)
 
+    timestamp, timestamp_stderr, timestamp_status = Open3.capture3(
+      "git", "show", "-s", "--format=%ct", candidate_sha, chdir: repo_root
+    )
+    timestamp = timestamp.strip
+    unless timestamp_status.success? && /\A[0-9]+\z/.match?(timestamp)
+      raise Error, "cannot read committed managed web timestamp: #{timestamp_stderr.strip}"
+    end
+
     _stdout, stderr, status = Open3.capture3(
-      "git", "archive", "--format=tar.gz", "--output", destination,
+      "git", "archive", "--format=tar.gz", "--mtime=@#{timestamp}", "--output", destination,
       "#{candidate_sha}:web", chdir: repo_root
     )
     unless status.success? && File.file?(destination) && !File.symlink?(destination)

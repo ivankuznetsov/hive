@@ -101,7 +101,7 @@ This is not a 37th owned observation.
 
 | Source locator | Stable ID | Reviewed SHA | Severity | Owner | Invariant | Status |
 |---|---|---|---|---|---|---|
-| C5141877842 / independent current-filesystem review / only non-blocking gap | `historical_metadata_unavailable` | `c289c3dade22f18782ee6c8f855c26851069849c` | P2 admission priority; historical severity unavailable | U3c, subordinate to Architecture Review 03 item 5 | Process teardown proof lacked an explicit process-group assertion. | Donor says the assertion was added and passed; U3c must re-prove it under its clean-head custody threat model. |
+| C5141877842 / independent current-filesystem review / only non-blocking gap | `historical_metadata_unavailable` | `historical_metadata_unavailable` | P2 admission priority; historical severity unavailable | U3c, subordinate to Architecture Review 03 item 5 | Process teardown proof lacked an explicit process-group assertion. | Donor says the assertion was added and passed at `c289c3dade22f18782ee6c8f855c26851069849c`; the review's exact dirty filesystem cannot truthfully be bound to that later resolution commit, so U3c must re-prove the assertion under its clean-head custody threat model. |
 
 ## Numeric readback
 

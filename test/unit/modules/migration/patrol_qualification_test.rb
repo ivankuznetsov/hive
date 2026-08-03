@@ -83,6 +83,47 @@ class ModulesMigrationPatrolQualificationTest < Minitest::Test
     end
   end
 
+  def test_public_admission_replaces_failed_lane_with_fresh_evidence
+    with_tmp_dir do |root|
+      state_root = File.join(root, ".hive-state")
+      path = Hive::Modules::Migration::Patrols.report_file(
+        root, hive_state_path: state_root
+      )
+      current = Hive::Modules::Migration::ReportProjection.build(
+        qualifications: [], generated_at: NOW,
+        migration: {
+          "source_schema_version" => 1,
+          "source_digest" => "b" * 64,
+          "archive_digest" => "b" * 64,
+          "disposition" => "evidence_required"
+        }
+      )
+      Hive::Modules::Migration::Report.write_projection(path, current)
+      initial_digest = Digest::SHA256.hexdigest(File.binread(path))
+      incomplete = complete_receipts(run_id: "run-incomplete")
+        .group_by { |value| value.capture.module_name }
+        .values.map(&:first)
+
+      pending = admit(root, state_root, incomplete, initial_digest, NOW + 30)
+      assert_equal "evidence_required",
+                   pending.lanes.fetch("deterministic").status
+
+      complete = complete_receipts(run_id: "run-complete")
+      assert_raises(Hive::ConfigError) do
+        admit(root, state_root, complete, initial_digest, NOW + 60)
+      end
+      pending_digest = Digest::SHA256.hexdigest(File.binread(path))
+      qualified = admit(
+        root, state_root, complete, pending_digest, NOW + 60
+      )
+
+      assert_equal "qualified",
+                   qualified.lanes.fetch("deterministic").status
+      assert_equal qualified.to_h,
+                   Hive::Modules::Migration::Report.load(path).to_h
+    end
+  end
+
   def test_timestamp_spread_cannot_replace_decision_or_repository_diversity
     receipts = %w[patrol architecture-patrol].flat_map do |module_name|
       10.times.map do |index|
@@ -104,7 +145,7 @@ class ModulesMigrationPatrolQualificationTest < Minitest::Test
     assert_operator qualification.elapsed_seconds, :>=, 7 * 24 * 60 * 60
   end
 
-  def test_repeated_comparable_identities_cannot_inflate_decision_count
+  def test_fresh_capture_wrappers_cannot_inflate_comparable_decision_count
     receipts = %w[patrol architecture-patrol].flat_map do |module_name|
       10.times.map do |index|
         control = index % 2
@@ -301,14 +342,14 @@ class ModulesMigrationPatrolQualificationTest < Minitest::Test
     )
   end
 
-  def complete_receipts(spacing: 1)
+  def complete_receipts(spacing: 1, run_id: "run-1")
     %w[patrol architecture-patrol].flat_map do |module_name|
       10.times.map do |index|
         verified_receipt(
           module_name: module_name, index: index,
           decision_class: index.even? ? "positive" : "negative",
           repository_sha: (index.even? ? "7" : "8") * 40,
-          occurred_at: NOW + (index * spacing)
+          occurred_at: NOW + (index * spacing), run_id: run_id
         )
       end
     end
@@ -322,7 +363,7 @@ class ModulesMigrationPatrolQualificationTest < Minitest::Test
                        decision_index: index)
     projection = projection_for(module_name, decision_index)
     capture = capture_for(
-      module_name, decision_index, projection, occurred_at,
+      module_name, index, projection, occurred_at,
       repository_id: repository_id, trigger_id: trigger_id
     )
     effects = if effect_status
@@ -337,7 +378,7 @@ class ModulesMigrationPatrolQualificationTest < Minitest::Test
         %w[committed reconciled].include?(effect.status)
     end.map(&:receipt_id)
     capture = capture_for(
-      module_name, decision_index, projection, occurred_at,
+      module_name, index, projection, occurred_at,
       effect_ids: committed_effect_ids, repository_id: repository_id,
       trigger_id: trigger_id
     )
@@ -455,6 +496,19 @@ class ModulesMigrationPatrolQualificationTest < Minitest::Test
       "generated_at" => receipt.generated_at,
       "reviewed_at" => receipt.reviewed_at
     }
+  end
+
+  def admit(root, state_root, receipts, expected_digest, generated_at)
+    Hive::Modules::Migration::Patrols.admit_deterministic_qualification!(
+      root,
+      receipts: receipts.map { |value| value.receipt.to_h },
+      expected_bindings: receipts.map do |value|
+        expected_bindings(value.receipt)
+      end,
+      generated_at: generated_at,
+      expected_report_digest: expected_digest,
+      hive_state_path: state_root
+    )
   end
 
   def artifact_digest(index)

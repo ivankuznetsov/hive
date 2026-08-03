@@ -290,8 +290,6 @@ module Hive
 
           def comparable_identity(receipt)
             {
-              "capture_id" => receipt.capture.capture_id,
-              "occurrence_id" => receipt.capture.occurrence_id,
               "trigger_id" => receipt.capture.trigger.fetch("id"),
               "repository_id" => receipt.repository.fetch("id"),
               "repository_sha" => receipt.repository.fetch("sha"),

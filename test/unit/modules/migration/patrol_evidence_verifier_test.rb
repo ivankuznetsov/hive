@@ -94,6 +94,36 @@ class ModulesMigrationPatrolEvidenceVerifierTest < Minitest::Test
     end
   end
 
+  def test_expected_bindings_reject_string_coercion_and_invalid_utf8
+    fault_receipt = evidence_receipt(fault_steps: [ "1" ])
+    artifact_receipt = evidence_receipt(artifact_kind: "1")
+    digest_receipt = evidence_receipt
+    mutations = [
+      [ fault_receipt,
+        expected_bindings(fault_receipt).merge("fault_steps" => [ 1 ]) ],
+      [ artifact_receipt,
+        expected_bindings(artifact_receipt).merge(
+          "artifacts" => [ { "kind" => 1, "digest" => "8" * 64 } ]
+        ) ],
+      [ digest_receipt,
+        expected_bindings(digest_receipt).merge(
+          "artifacts" => [
+            { "kind" => "comparison", "digest" => Integer("8" * 64) }
+          ]
+        ) ],
+      [ digest_receipt,
+        expected_bindings(digest_receipt).merge("reviewer" => "\xFF".b) ]
+    ]
+
+    mutations.each do |receipt, expected|
+      assert_raises(Hive::ConfigError) do
+        Hive::Modules::Migration::PatrolEvidenceVerifier.verify(
+          receipt: receipt, expected_bindings: expected
+        )
+      end
+    end
+  end
+
   def test_verified_receipt_cannot_be_constructed_by_an_ordinary_caller
     receipt = evidence_receipt
 

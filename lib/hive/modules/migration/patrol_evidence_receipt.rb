@@ -131,7 +131,7 @@ module Hive
                     "patrol evidence receipt identity does not match its contents"
             end
             receipt
-          rescue KeyError, NoMethodError, TypeError
+          rescue ArgumentError, EncodingError, KeyError, NoMethodError, TypeError
             malformed!
           end
 
@@ -239,7 +239,15 @@ module Hive
           end
 
           def nonempty(value, label)
-            PatrolEvidence.nonempty(value, label: label)
+            malformed! unless value.is_a?(String)
+            begin
+              string = value.encode(Encoding::UTF_8)
+            rescue EncodingError
+              malformed!
+            end
+            malformed! unless string.valid_encoding?
+            malformed! if string.empty?
+            string.dup.freeze
           end
 
           def timestamp(value, label)
@@ -247,15 +255,15 @@ module Hive
           end
 
           def digest(value, label)
-            string = value.to_s
+            string = nonempty(value, label)
             malformed! unless string.match?(/\A[0-9a-f]{64}\z/)
-            string.dup.freeze
+            string
           end
 
           def sha(value, label)
-            string = value.to_s
+            string = nonempty(value, label)
             malformed! unless string.match?(/\A[0-9a-f]{40}\z/)
-            string.dup.freeze
+            string
           end
 
           def malformed!

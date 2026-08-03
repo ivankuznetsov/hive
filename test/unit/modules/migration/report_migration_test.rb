@@ -107,6 +107,40 @@ class ModulesMigrationReportMigrationTest < Minitest::Test
     end
   end
 
+  def test_missing_receipt_after_successor_fails_closed_without_reconstruction
+    with_tmp_dir do |root|
+      path = File.join(root, "report.json")
+      File.binwrite(
+        path,
+        Hive::Modules::Migration::Report.canonical(legacy_success)
+      )
+      migrated = Hive::Modules::Migration::ReportMigration.forward(
+        path: path, qualifications: [], generated_at: NOW
+      )
+      replacement = Hive::Modules::Migration::ReportProjection.merge(
+        existing: migrated,
+        qualification: qualification("deterministic"),
+        generated_at: NOW + 60
+      )
+      Hive::Modules::Migration::Report.write_projection(
+        path, replacement,
+        expected_digest: Digest::SHA256.hexdigest(File.binread(path))
+      )
+      receipt_path = File.join(root, "report.migration.json")
+      File.delete(receipt_path)
+
+      assert_raises(Hive::ConfigError) do
+        Hive::Modules::Migration::ReportMigration.required?(path)
+      end
+      assert_raises(Hive::ConfigError) do
+        Hive::Modules::Migration::ReportMigration.forward(
+          path: path, qualifications: [], generated_at: NOW + 120
+        )
+      end
+      refute_path_exists receipt_path
+    end
+  end
+
   def test_reverse_migration_restores_exact_released_shape_with_caller_cas
     with_tmp_dir do |root|
       path = File.join(root, "report.json")
@@ -174,6 +208,25 @@ class ModulesMigrationReportMigrationTest < Minitest::Test
         path: path, qualifications: [], generated_at: NOW
       )
       refute Hive::Modules::Migration::ReportMigration.required?(path)
+    end
+  end
+
+  def test_canonical_non_object_reports_fail_with_the_typed_error
+    with_tmp_dir do |root|
+      path = File.join(root, "report.json")
+      [ nil, [], "report", 1 ].each do |value|
+        File.binwrite(
+          path, Hive::Modules::Migration::Report.canonical(value)
+        )
+        assert_raises(Hive::ConfigError) do
+          Hive::Modules::Migration::ReportMigration.required?(path)
+        end
+        assert_raises(Hive::ConfigError) do
+          Hive::Modules::Migration::ReportMigration.forward(
+            path: path, qualifications: [], generated_at: NOW
+          )
+        end
+      end
     end
   end
 

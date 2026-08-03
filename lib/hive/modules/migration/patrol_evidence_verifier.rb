@@ -41,7 +41,7 @@ module Hive
             receipt: receipt,
             binding_digest: PatrolEvidence.digest("binding", observed)
           )
-        rescue KeyError, NoMethodError, TypeError
+        rescue ArgumentError, EncodingError, KeyError, NoMethodError, TypeError
           malformed!
         end
 
@@ -86,7 +86,7 @@ module Hive
             "artifacts" => normalized_artifacts(value.fetch("artifacts"))
           ).freeze
           value
-        rescue KeyError, NoMethodError, TypeError
+        rescue ArgumentError, EncodingError, KeyError, NoMethodError, TypeError
           malformed!
         end
         private_class_method :normalized_expected
@@ -103,9 +103,7 @@ module Hive
         def normalized_strings(value)
           malformed! unless value.is_a?(Array)
           values = value.map do |item|
-            PatrolEvidence.nonempty(
-              item, label: "patrol evidence expected bindings"
-            )
+            strict_string(item)
           end.sort
           malformed! unless values.uniq == values
           values.freeze
@@ -119,10 +117,8 @@ module Hive
               item, PatrolEvidenceReceipt::ARTIFACT_KEYS,
               label: "patrol evidence expected bindings"
             )
-            kind = PatrolEvidence.nonempty(
-              item["kind"], label: "patrol evidence expected bindings"
-            )
-            digest = item["digest"].to_s
+            kind = strict_string(item["kind"])
+            digest = strict_string(item["digest"])
             malformed! unless digest.match?(/\A[0-9a-f]{64}\z/)
             { "kind" => kind, "digest" => digest.freeze }.freeze
           end.sort_by { |item| [ item.fetch("kind"), item.fetch("digest") ] }
@@ -130,6 +126,12 @@ module Hive
           artifacts.freeze
         end
         private_class_method :normalized_artifacts
+
+        def strict_string(value)
+          malformed! unless value.is_a?(String) && !value.empty?
+          value
+        end
+        private_class_method :strict_string
 
         def malformed!
           raise Hive::ConfigError,

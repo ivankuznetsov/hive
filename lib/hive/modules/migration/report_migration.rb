@@ -141,6 +141,8 @@ module Hive
             return parsed
           end
 
+          malformed! if projection.supersedes
+
           persist_receipt_locked(
             storage,
             source_digest: projection.migration.fetch("source_digest"),
@@ -204,7 +206,10 @@ module Hive
             storage, name: RECEIPT_NAME,
             max_bytes: MAX_RECEIPT_BYTES, missing: true
           )
-          return true unless receipt
+          unless receipt
+            malformed! if projection.supersedes
+            return true
+          end
 
           validate_receipt_linkage!(
             storage, parse_receipt(receipt), projection, output, archive_digest
@@ -265,7 +270,8 @@ module Hive
 
         def canonical_payload(bytes)
           value = JSON.parse(bytes)
-          malformed! unless bytes == Report.canonical(value)
+          malformed! unless value.is_a?(Hash) &&
+                            bytes == Report.canonical(value)
           value
         rescue JSON::ParserError, EncodingError
           malformed!

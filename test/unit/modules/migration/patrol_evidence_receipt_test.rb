@@ -151,6 +151,30 @@ class ModulesMigrationPatrolEvidenceReceiptTest < Minitest::Test
     end
   end
 
+  def test_rejects_wrong_typed_and_invalid_utf8_string_fields
+    mutations = [
+      { run_id: 1 },
+      { candidate_sha: Integer("1" * 40) },
+      { fault_steps: [ 1 ] },
+      { artifacts: [ { "kind" => 1, "digest" => "8" * 64 } ] },
+      {
+        artifacts: [
+          { "kind" => "comparison", "digest" => Integer("8" * 64) }
+        ]
+      },
+      { reviewer: 1 },
+      { reviewer: "\xFF".b }
+    ]
+
+    mutations.each do |mutation|
+      assert_raises(Hive::ConfigError, mutation.inspect) do
+        Hive::Modules::Migration::PatrolEvidenceReceipt.build(
+          **receipt_attributes(mutation)
+        )
+      end
+    end
+  end
+
   private
 
   def receipt_attributes(overrides = {})

@@ -329,7 +329,7 @@ class ComponentBoundariesTest < Minitest::Test
     assert_empty patrol_effects_load.fetch("forbidden_constants")
   end
 
-  def test_patrol_u3a_dependency_graph_is_closed_and_one_way
+  def test_patrol_u3a_require_graph_is_closed_and_one_way
     requires = {
       "lib/hive/modules/migration/patrol_evidence_receipt.rb" =>
         [ "hive/modules/migration/patrol_evidence" ],
@@ -355,6 +355,30 @@ class ComponentBoundariesTest < Minitest::Test
       actual = source.scan(/^require ["'](hive\/[^"']+)["']/).flatten
       assert_equal expected, actual, relative
     end
+  end
+
+  def test_patrol_u3a_owners_do_not_construct_later_state_owners
+    contract = ComponentBoundaryContract.new(@document, root: ROOT)
+    component = contract.component("patrol-effects")
+    owners = %w[
+      lib/hive/modules/migration/patrol_effect_index.rb
+      lib/hive/modules/migration/patrol_evidence_receipt.rb
+      lib/hive/modules/migration/patrol_evidence_verifier.rb
+      lib/hive/modules/migration/patrol_qualification.rb
+      lib/hive/modules/migration/report_migration.rb
+      lib/hive/modules/migration/report_projection.rb
+    ]
+    forbidden = component.fetch("forbidden_constructions")
+
+    offenders = owners.to_h do |relative|
+      syntax = ComponentBoundaryContract::RubySyntax.new(
+        File.read(File.join(ROOT, relative)), relative
+      )
+      [ relative, syntax.constructions & forbidden ]
+    end.reject { |_relative, constructions| constructions.empty? }
+
+    assert_empty offenders,
+                 "U3a owners must not construct U5-U7 state owners"
   end
 
   def test_final_graph_and_wiki_inventory_agree_with_the_catalog

@@ -102,9 +102,9 @@ module Hive
             return existing if current&.qualification_id ==
                                qualification.qualification_id
             if current
-              replacement = current.qualified? &&
-                qualification.status == "invalidated" &&
-                qualification.supersedes == current.qualification_id
+              replacement = evidence_required_replacement?(
+                current, qualification
+              ) || exact_invalidation?(current, qualification)
               unless replacement
                 raise Hive::ConfigError,
                       "module migration report lane is already complete"
@@ -126,17 +126,17 @@ module Hive
             successor = successor.is_a?(self) ?
               from_h(successor.to_h) : from_h(successor)
             malformed! unless successor.supersedes == current.report_id &&
+                              successor.migration == current.migration &&
                               Time.iso8601(successor.generated_at) >
                                 Time.iso8601(current.generated_at)
 
             if current.status == "invalidated"
               malformed! unless successor.status == "qualified" &&
                                 LANES.all? do |lane|
-                                  before = current.lanes.fetch(lane)
-                                  after = successor.lanes.fetch(lane)
-                                  before && after &&
-                                    before.qualification_id !=
-                                      after.qualification_id
+                                  fresh_qualification?(
+                                    current.lanes.fetch(lane),
+                                    successor.lanes.fetch(lane)
+                                  )
                                 end
             else
               changed = false
@@ -145,10 +145,10 @@ module Hive
                 next unless before
                 next if after&.qualification_id == before.qualification_id
 
-                invalidation = before.qualified? &&
-                  after&.status == "invalidated" &&
-                  after.supersedes == before.qualification_id
-                malformed! unless invalidation
+                replacement = evidence_required_replacement?(
+                  before, after
+                ) || exact_invalidation?(before, after)
+                malformed! unless replacement
                 changed = true
               end
               changed ||= current.lanes.any? do |lane, before|
@@ -220,6 +220,28 @@ module Hive
             binding = bindings.first
             [ binding.fetch("candidate_sha"),
               binding.fetch("scenario_manifest_digest") ]
+          end
+
+          def evidence_required_replacement?(before, after)
+            return false unless before.status == "evidence_required" && after &&
+                                after.status != "invalidated"
+
+            same_run_progress = before.run_id == after.run_id &&
+              before.receipt_ids != after.receipt_ids &&
+              (before.receipt_ids - after.receipt_ids).empty?
+            fresh_run = before.run_id != after.run_id &&
+              (before.receipt_ids & after.receipt_ids).empty?
+            same_run_progress || fresh_run
+          end
+
+          def exact_invalidation?(before, after)
+            before.qualified? && after&.status == "invalidated" &&
+              after.supersedes == before.qualification_id
+          end
+
+          def fresh_qualification?(before, after)
+            before && after&.qualified? && before.run_id != after.run_id &&
+              (before.receipt_ids & after.receipt_ids).empty?
           end
 
           def lane_blockers(lanes)

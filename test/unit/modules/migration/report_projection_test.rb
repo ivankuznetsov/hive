@@ -164,10 +164,29 @@ class ModulesMigrationReportProjectionTest < Minitest::Test
           path, ready, expected_digest: invalidated_digest
         )
       end
+      stale = Hive::Modules::Migration::ReportProjection.build(
+        qualifications: [
+          qualification("deterministic", generated_at: NOW + 121),
+          qualification("installed_live", generated_at: NOW + 121)
+        ],
+        generated_at: NOW + 121,
+        supersedes: report.report_id
+      )
+      assert_raises(Hive::ConfigError) do
+        Hive::Modules::Migration::Report.write_projection(
+          path, stale, expected_digest: invalidated_digest
+        )
+      end
       fresh = Hive::Modules::Migration::ReportProjection.build(
         qualifications: [
-          qualification("deterministic", qualification_seed: "3"),
-          qualification("installed_live", qualification_seed: "4")
+          qualification(
+            "deterministic", qualification_seed: "3",
+            run_id: "fresh-deterministic"
+          ),
+          qualification(
+            "installed_live", qualification_seed: "4",
+            run_id: "fresh-installed-live"
+          )
         ],
         generated_at: NOW + 122,
         supersedes: report.report_id
@@ -178,6 +197,34 @@ class ModulesMigrationReportProjectionTest < Minitest::Test
       assert_equal fresh.to_h,
                    Hive::Modules::Migration::Report.load(path).to_h
     end
+  end
+
+  def test_successor_preserves_migration_provenance
+    deterministic = qualification("deterministic")
+    current = Hive::Modules::Migration::ReportProjection.build(
+      qualifications: [ deterministic ], generated_at: NOW,
+      migration: migration_metadata.merge("disposition" => "projected")
+    )
+    installed = qualification("installed_live")
+    stripped = Hive::Modules::Migration::ReportProjection.build(
+      qualifications: [ deterministic, installed ], generated_at: NOW + 1,
+      supersedes: current.report_id
+    )
+    preserved = Hive::Modules::Migration::ReportProjection.build(
+      qualifications: [ deterministic, installed ], generated_at: NOW + 1,
+      supersedes: current.report_id, migration: current.migration
+    )
+
+    assert_raises(Hive::ConfigError) do
+      Hive::Modules::Migration::ReportProjection.validate_successor!(
+        current: current, successor: stripped
+      )
+    end
+    assert_equal preserved.to_h,
+                 Hive::Modules::Migration::ReportProjection
+                   .validate_successor!(
+                     current: current, successor: preserved
+                   ).to_h
   end
 
   def test_round_trip_rejects_extra_fields_and_forged_identity
@@ -207,7 +254,8 @@ class ModulesMigrationReportProjectionTest < Minitest::Test
                     qualification_seed: lane == "deterministic" ? "1" : "2",
                     status: "qualified", supersedes: nil, contradiction: nil,
                     catalog_digest: "2" * 64,
-                    patrol_configuration: "5" * 64)
+                    patrol_configuration: "5" * 64,
+                    run_id: "run-#{lane}", generated_at: NOW)
     blockers = status == "invalidated" ? [ "contradictory_telemetry" ] : []
     modules = %w[patrol architecture-patrol].to_h do |module_name|
       [ module_name, {
@@ -230,7 +278,7 @@ class ModulesMigrationReportProjectionTest < Minitest::Test
       :create,
       {
         lane: lane,
-        run_id: "run-#{lane}",
+        run_id: run_id,
         candidate_sha: candidate_sha,
         catalog_digest: catalog_digest,
         source_digest: "3" * 64,
@@ -252,7 +300,7 @@ class ModulesMigrationReportProjectionTest < Minitest::Test
         blockers: blockers.freeze,
         supersedes: supersedes,
         contradiction: contradiction&.freeze,
-        generated_at: NOW.iso8601(6)
+        generated_at: generated_at.iso8601(6)
       }
     )
   end

@@ -173,21 +173,20 @@ module Hive
                     "patrol deterministic qualification admission is malformed"
             end
 
+            effects = []
             verified = receipts.each_index.map do |index|
-              PatrolEvidenceVerifier.verify(
+              receipt = PatrolEvidenceVerifier.verify(
                 receipt: receipts.fetch(index),
                 expected_bindings: expected_bindings.fetch(index)
               )
-            end.freeze
-            effects = []
-            verified.each do |receipt|
               if effects.size + receipt.effects.size >
                    PatrolEffectIndex::MAX_RECEIPTS
                 raise Hive::ConfigError,
                       "patrol deterministic qualification admission is malformed"
               end
               effects.concat(receipt.effects)
-            end
+              receipt
+            end.freeze
             qualification = PatrolQualification.build(
               lane: "deterministic", verified_receipts: verified,
               effect_index: PatrolEffectIndex.build(receipts: effects),

@@ -3,7 +3,7 @@ title: 6-review stage
 type: stage
 source: lib/hive/stages/review.rb, lib/hive/stages/auto_commit.rb, lib/hive/stages/review/{ci_fix,triage,browser_test,fix_guardrail,suppression}.rb, lib/hive/commands/adhoc_review.rb, templates/{fix,ci_fix,browser_test,triage_*}*.erb
 created: 2026-04-26
-updated: 2026-07-25
+updated: 2026-07-31
 tags: [stage, review, autonomous-loop, ci, triage, fix-guardrail]
 ---
 
@@ -75,7 +75,15 @@ and falls back to the normal reviewer list unless `source` stringifies to
 `patrol`. The ad-hoc selector uses the same fail-soft reader and only switches
 when `source` stringifies case-insensitively to `ad-hoc`.
 
-After each reviewer file is written, `Review::GithubPublisher.publish!` posts a PR-level comment headed `### Reviewer: <name> - Pass NN` when `review.github_publish.enabled` is true. It reads `pr_url` from `pr.md`, skips duplicate headers on retry, scans for secrets before posting, and degrades to a stderr warning on GitHub failures so local files remain the source of truth.
+After each reviewer file is written, `Review::GithubPublisher.publish!` posts a
+PR-level comment headed `### Reviewer: <name> - Pass NN` when
+`review.github_publish.enabled` is true. Before reading comments or posting, it
+requires the controller-owned worktree pointer, exact task branch, persisted
+`head_oid`, origin host/repository, and one OPEN PR observation whose
+URL/number/branch/head all match. A forged, stale, cross-repository, or
+head-drifted `pr.md` target is inert and local reviewer files remain
+authoritative. The publisher then skips duplicate headers on retry, scans for
+secrets before posting, and degrades transport failures to a stderr warning.
 
 Per-reviewer failures retry up to `max_attempts` (default `Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS = 2`; configurable on each reviewer spec) with exponential backoff capped at 8s (1s, 2s, 4s, 8s, 8s, …). `Hive::Reviewers::Base` owns the adapters' shared retry-budget parsing, including the warning and default used when a direct/custom adapter construction bypasses config validation. After retries are exhausted, the failure is recorded as a one-line entry in `reviews/errors-NN.md` (an orchestrator-owned file — see `ORCHESTRATOR_OWNED_PREFIXES`); the reviewer's own per-pass output file stays absent so `discover_reviewer_files` correctly reports "this reviewer produced nothing this pass" instead of triaging an infra-failure stub as a real `[ ]` finding. `errors-NN.md` is unconditionally deleted at the start of every `run_reviewers` invocation and re-created on the first failure within that invocation (append-with-header-on-first-write thereafter), so a marker-clear-and-rerun that succeeds leaves no file behind and one that re-fails shows only the latest pass-NN failures rather than concatenated history. All reviewers fail → `REVIEW_ERROR phase=reviewers reason=all_failed` (the all-failed safety net is preserved). Empty reviewer list → skip directly to the all-clean branch (Phase 5).
 

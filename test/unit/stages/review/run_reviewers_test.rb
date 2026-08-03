@@ -1509,8 +1509,14 @@ class RunReviewersTest < Minitest::Test
                              error_message: "fresh failure")
       ]
 
-      with_stubbed_dispatch(adapters) do
-        Hive::Stages::Review.run_reviewers(cfg, make_ctx(dir), Task.new(dir, File.join(dir, "task.md")))
+      with_replaced_singleton_method(
+        Hive::Stages::Review::GithubPublisher,
+        :validated_pr_url,
+        ->(_task, _cfg) { "https://example.com/pr/77" }
+      ) do
+        with_stubbed_dispatch(adapters) do
+          Hive::Stages::Review.run_reviewers(cfg, make_ctx(dir), Task.new(dir, File.join(dir, "task.md")))
+        end
       end
 
       contents = File.read(stale_path)
@@ -2150,8 +2156,14 @@ class RunReviewersTest < Minitest::Test
         OkReviewer.new(cfg["review"]["reviewers"][1], make_ctx(dir))
       ]
 
-      with_stubbed_dispatch(adapters) do
-        Hive::Stages::Review.run_reviewers(cfg, make_ctx(dir), Task.new(dir, File.join(dir, "task.md")))
+      with_replaced_singleton_method(
+        Hive::Stages::Review::GithubPublisher,
+        :validated_pr_url,
+        ->(_task, _cfg) { "https://example.com/pr/77" }
+      ) do
+        with_stubbed_dispatch(adapters) do
+          Hive::Stages::Review.run_reviewers(cfg, make_ctx(dir), Task.new(dir, File.join(dir, "task.md")))
+        end
       end
 
       log_path = File.join(log_dir, "fake-gh-argv.log")

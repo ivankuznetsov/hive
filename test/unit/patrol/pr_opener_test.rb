@@ -10,6 +10,8 @@ require "hive/task"
 class HivePatrolPrOpenerTest < Minitest::Test
   include HiveTestHelper
 
+  REPOSITORY_ROOT = File.expand_path("../../..", __dir__).freeze
+
   def test_custom_hive_state_path_is_used_for_evidence_and_effect_admission
     with_tmp_dir do |root|
       custom_state = File.join(root, "external-state")
@@ -318,6 +320,11 @@ class HivePatrolPrOpenerTest < Minitest::Test
                 capture: nil, review_handoff: nil,
                 effect_gateway_factory: nil, live_config: nil,
                 capability_checker: nil, module_execution: nil)
+    if File.expand_path(project_root) == REPOSITORY_ROOT
+      raise ArgumentError,
+            "pr_opener test helper requires an isolated project root"
+    end
+
     state ||= Hive::Patrol::StateStore.new(project_root)
     state.ensure!
     capture ||= admitted_capture(project_root)
@@ -347,6 +354,14 @@ class HivePatrolPrOpenerTest < Minitest::Test
       gh: gh,
       review_handoff: review_handoff
     )
+  end
+
+  def test_pr_opener_helper_rejects_live_repository_root
+    error = assert_raises(ArgumentError) do
+      pr_opener(REPOSITORY_ROOT, cfg: cfg, gh: FakeGh.new)
+    end
+
+    assert_match(/requires an isolated project root/, error.message)
   end
 
   def admitted_capture(
@@ -661,39 +676,45 @@ class HivePatrolPrOpenerTest < Minitest::Test
   end
 
   def test_pr_body_preserves_alpha_and_root_cause_evidence
-    opener = pr_opener(Dir.pwd, cfg: cfg, gh: FakeGh.new)
+    with_tmp_dir do |dir|
+      opener = pr_opener(dir, cfg: cfg, gh: FakeGh.new)
 
-    body = opener.send(:body_for, finding, patch)
+      body = opener.send(:body_for, finding, patch(worktree_path: dir))
 
-    assert_includes body, "Alpha: `88`"
-    assert_includes body, "Scope: `cross_feature`"
-    assert_includes body, "## Contract and impact"
-    assert_includes body, finding.contract
-    assert_includes body, finding.impact
-    assert_includes body, "## Root cause"
-    assert_includes body, finding.root_cause
-    assert_includes body, "## Reproduction"
-    assert_includes body, finding.reproduction
-    assert_includes body, finding.validation
+      assert_includes body, "Alpha: `88`"
+      assert_includes body, "Scope: `cross_feature`"
+      assert_includes body, "## Contract and impact"
+      assert_includes body, finding.contract
+      assert_includes body, finding.impact
+      assert_includes body, "## Root cause"
+      assert_includes body, finding.root_cause
+      assert_includes body, "## Reproduction"
+      assert_includes body, finding.reproduction
+      assert_includes body, finding.validation
+    end
   end
 
   def test_pr_body_preserves_machine_observed_fix_proof
-    observed = patch
-    observed.validation["fix_proof"] = {
-      "root_cause" => "Confirmed queue deletion before acknowledgement.",
-      "audited_paths" => %w[app.rb lib/queue.rb],
-      "configured_command" => "bundle exec ruby test/queue_test.rb",
-      "before" => { "exit_code" => 1, "timed_out" => false },
-      "after" => { "exit_code" => 0, "timed_out" => false }
-    }
+    with_tmp_dir do |dir|
+      observed = patch(worktree_path: dir)
+      observed.validation["fix_proof"] = {
+        "root_cause" => "Confirmed queue deletion before acknowledgement.",
+        "audited_paths" => %w[app.rb lib/queue.rb],
+        "configured_command" => "bundle exec ruby test/queue_test.rb",
+        "before" => { "exit_code" => 1, "timed_out" => false },
+        "after" => { "exit_code" => 0, "timed_out" => false }
+      }
 
-    body = pr_opener(Dir.pwd, cfg: cfg, gh: FakeGh.new).send(:body_for, finding, observed)
+      body = pr_opener(dir, cfg: cfg, gh: FakeGh.new).send(
+        :body_for, finding, observed
+      )
 
-    assert_includes body, "## Observed fix proof"
-    assert_includes body, "Agent-reported root cause"
-    assert_includes body, "Confirmed queue deletion"
-    assert_includes body, "exit=1"
-    assert_includes body, "exit=0"
+      assert_includes body, "## Observed fix proof"
+      assert_includes body, "Agent-reported root cause"
+      assert_includes body, "Confirmed queue deletion"
+      assert_includes body, "exit=1"
+      assert_includes body, "exit=0"
+    end
   end
 
   def test_secret_in_agent_authored_title_blocks_before_push
@@ -1538,112 +1559,120 @@ class HivePatrolPrOpenerTest < Minitest::Test
   end
 
   def test_review_handoff_effect_reconciles_existing_task_and_supports_legacy_absence
-    validated_patch = patch
-    gh = FakeGh.new
-    gh.remote_oid = HEAD_SHA
-    reconciled_handoff = RecordingReviewHandoff.new
-    reconciled_handoff.define_singleton_method(:reconcile) do |**|
-      {
-        "status" => "matched",
-        "outcome" => { "task_path" => "/tmp/reconciled-review-task" }
-      }
+    with_tmp_dir do |dir|
+      validated_patch = patch(worktree_path: dir)
+      gh = FakeGh.new
+      gh.remote_oid = HEAD_SHA
+      reconciled_handoff = RecordingReviewHandoff.new
+      reconciled_handoff.define_singleton_method(:reconcile) do |**|
+        {
+          "status" => "matched",
+          "outcome" => { "task_path" => "/tmp/reconciled-review-task" }
+        }
+      end
+      opener = pr_opener(
+        dir, cfg: cfg, gh: gh, review_handoff: reconciled_handoff
+      )
+      gateway = ReconcilingGateway.new
+
+      task_path = opener.send(
+        :enqueue_review_task, gateway, finding, validated_patch,
+        "https://example.com/pr/7", Time.at(0)
+      )
+
+      assert_equal "/tmp/reconciled-review-task", task_path
+      assert_equal 0, gateway.effect_calls
+      assert_empty reconciled_handoff.calls
+
+      legacy_handoff = RecordingReviewHandoff.new
+      legacy_opener = pr_opener(
+        dir, cfg: cfg, gh: gh, review_handoff: legacy_handoff
+      )
+      legacy_gateway = ReconcilingGateway.new
+
+      task_path = legacy_opener.send(
+        :enqueue_review_task, legacy_gateway, finding, validated_patch,
+        "https://example.com/pr/8", Time.at(0)
+      )
+
+      assert_equal "/tmp/review-task", task_path
+      assert_equal(
+        [ { "status" => "absent", "outcome" => {} } ],
+        legacy_gateway.reconciliations
+      )
+      assert_equal 1, legacy_gateway.effect_calls
+      assert_equal 1, legacy_handoff.calls.size
     end
-    opener = pr_opener(
-      Dir.pwd, cfg: cfg, gh: gh, review_handoff: reconciled_handoff
-    )
-    gateway = ReconcilingGateway.new
-
-    task_path = opener.send(
-      :enqueue_review_task, gateway, finding, validated_patch,
-      "https://example.com/pr/7", Time.at(0)
-    )
-
-    assert_equal "/tmp/reconciled-review-task", task_path
-    assert_equal 0, gateway.effect_calls
-    assert_empty reconciled_handoff.calls
-
-    legacy_handoff = RecordingReviewHandoff.new
-    legacy_opener = pr_opener(
-      Dir.pwd, cfg: cfg, gh: gh, review_handoff: legacy_handoff
-    )
-    legacy_gateway = ReconcilingGateway.new
-
-    task_path = legacy_opener.send(
-      :enqueue_review_task, legacy_gateway, finding, validated_patch,
-      "https://example.com/pr/8", Time.at(0)
-    )
-
-    assert_equal "/tmp/review-task", task_path
-    assert_equal(
-      [ { "status" => "absent", "outcome" => {} } ],
-      legacy_gateway.reconciliations
-    )
-    assert_equal 1, legacy_gateway.effect_calls
-    assert_equal 1, legacy_handoff.calls.size
   end
 
   def test_branch_effect_reconciles_matching_remote_and_retries_confirmed_absence
-    validated_patch = patch
-    gh = FakeGh.new
-    opener = pr_opener(Dir.pwd, cfg: cfg, gh: gh)
+    with_tmp_dir do |dir|
+      validated_patch = patch(worktree_path: dir)
+      gh = FakeGh.new
+      opener = pr_opener(dir, cfg: cfg, gh: gh)
 
-    gh.remote_oid = HEAD_SHA
-    matched_gateway = ReconcilingGateway.new
-    result = opener.send(
-      :perform_branch_effect!, matched_gateway, finding, validated_patch
-    )
+      gh.remote_oid = HEAD_SHA
+      matched_gateway = ReconcilingGateway.new
+      result = opener.send(
+        :perform_branch_effect!, matched_gateway, finding, validated_patch
+      )
 
-    assert_equal HEAD_SHA, result.outcome.fetch("remote_oid")
-    assert_equal "matched", matched_gateway.reconciliations.first.fetch("status")
-    assert_equal 0, matched_gateway.effect_calls
-    assert_empty gh.pushed
+      assert_equal HEAD_SHA, result.outcome.fetch("remote_oid")
+      assert_equal "matched", matched_gateway.reconciliations.first.fetch("status")
+      assert_equal 0, matched_gateway.effect_calls
+      assert_empty gh.pushed
 
-    gh.remote_oid = nil
-    absent_gateway = ReconcilingGateway.new
-    result = opener.send(
-      :perform_branch_effect!, absent_gateway, finding, validated_patch
-    )
+      gh.remote_oid = nil
+      absent_gateway = ReconcilingGateway.new
+      result = opener.send(
+        :perform_branch_effect!, absent_gateway, finding, validated_patch
+      )
 
-    assert_equal HEAD_SHA, result.outcome.fetch("remote_oid")
-    assert_equal(
-      {
-        "status" => "absent",
-        "outcome" => { "observed_oid" => nil }
-      },
-      absent_gateway.reconciliations.first
-    )
-    assert_equal 1, absent_gateway.effect_calls
-    assert_equal [ [ Dir.pwd, validated_patch.branch ] ], gh.pushed
+      assert_equal HEAD_SHA, result.outcome.fetch("remote_oid")
+      assert_equal(
+        {
+          "status" => "absent",
+          "outcome" => { "observed_oid" => nil }
+        },
+        absent_gateway.reconciliations.first
+      )
+      assert_equal 1, absent_gateway.effect_calls
+      assert_equal [ [ dir, validated_patch.branch ] ], gh.pushed
+    end
   end
 
   def test_pull_request_effect_reconciles_the_exact_existing_pr
-    opener = pr_opener(Dir.pwd, cfg: cfg, gh: FakeGh.new)
-    gateway = ReconcilingGateway.new
+    with_tmp_dir do |dir|
+      opener = pr_opener(dir, cfg: cfg, gh: FakeGh.new)
+      gateway = ReconcilingGateway.new
 
-    result = opener.send(
-      :perform_pull_request_effect!, gateway, finding, patch, "unused body",
-      observed_prs: [ matching_pr ]
-    )
+      result = opener.send(
+        :perform_pull_request_effect!, gateway, finding,
+        patch(worktree_path: dir), "unused body", observed_prs: [ matching_pr ]
+      )
 
-    assert_equal "https://example.com/pr/1",
-                 result.outcome.fetch("pr_url")
-    assert_equal "matched", gateway.reconciliations.first.fetch("status")
-    assert_equal 0, gateway.effect_calls
+      assert_equal "https://example.com/pr/1",
+                   result.outcome.fetch("pr_url")
+      assert_equal "matched", gateway.reconciliations.first.fetch("status")
+      assert_equal 0, gateway.effect_calls
+    end
   end
 
   def test_effect_gateway_failures_are_normalized_as_github_errors
-    errors = [
-      Hive::Patrol::EffectGateway::Denied.new("authority revoked", nil),
-      Hive::Patrol::EffectGateway::ReconciliationRequired.new("outcome unknown")
-    ]
-    opener = pr_opener(Dir.pwd, cfg: cfg, gh: FakeGh.new)
+    with_tmp_dir do |dir|
+      errors = [
+        Hive::Patrol::EffectGateway::Denied.new("authority revoked", nil),
+        Hive::Patrol::EffectGateway::ReconciliationRequired.new("outcome unknown")
+      ]
+      opener = pr_opener(dir, cfg: cfg, gh: FakeGh.new)
 
-    errors.each do |gateway_error|
-      error = assert_raises(Hive::GhError) do
-        opener.send(:perform_effect) { raise gateway_error }
+      errors.each do |gateway_error|
+        error = assert_raises(Hive::GhError) do
+          opener.send(:perform_effect) { raise gateway_error }
+        end
+
+        assert_equal gateway_error.message, error.message
       end
-
-      assert_equal gateway_error.message, error.message
     end
   end
 end

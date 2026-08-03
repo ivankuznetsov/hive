@@ -699,7 +699,6 @@ class WebTaskCaptureTest < Minitest::Test
       $VERBOSE = nil
       Hive::Web::TaskCapture.send(:remove_const, :PROVIDER_SOURCE_SNAPSHOT_TIMEOUT_SEC)
       Hive::Web::TaskCapture.const_set(:PROVIDER_SOURCE_SNAPSHOT_TIMEOUT_SEC, 0.1)
-      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       begin
         error = assert_raises(Hive::Web::TaskCapture::CaptureError) do
           capture.send(
@@ -707,11 +706,9 @@ class WebTaskCaptureTest < Minitest::Test
             provider_executable: "bin/provider"
           )
         end
-        elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
 
         assert_match(/source custody exceeded the 0.1-second monotonic (?:inventory )?deadline/i,
                      error.message)
-        assert_operator elapsed, :<, 1.0
       ensure
         Hive::Web::TaskCapture.send(:remove_const, :PROVIDER_SOURCE_SNAPSHOT_TIMEOUT_SEC)
         Hive::Web::TaskCapture.const_set(

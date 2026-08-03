@@ -313,8 +313,10 @@ tooling. U1 establishes this catalog and promotion guard. Batch require
 validation covers every `boundary-ready` row, while a named static check can
 apply the same rules to one exact candidate. Across that admitted scope it:
 
-1. parses literal Ruby `require` and `require_relative` calls and rejects upward
-   dependencies on Hive commands, stages, web, release, or CLI code;
+1. parses literal Ruby `require` and `require_relative` calls, normalizes
+   repository-root-prefixed `lib/` and `packaging/` spellings through the same
+   component require-path identity, and rejects upward dependencies on Hive
+   commands, stages, web, release, or CLI code;
 2. maps every component-owned Ruby file below `lib/` or `packaging/` to its
    require path and rejects undeclared direct component dependencies;
 3. for every row that declares forbidden constructions, scans Ruby below
@@ -330,7 +332,9 @@ apply the same rules to one exact candidate. Across that admitted scope it:
 
 The committed Workflow Creator Values candidate invokes both named checks, so
 its packaging-owned require edges and fresh-process load are validated without
-widening the global `lib/**` construction scan.
+widening the global `lib/**` construction scan. Named static validation catches
+lazy upward edges even when a packaging entrypoint spells them from the
+repository root, such as `require "lib/hive/commands/run"`.
 
 Run the focused contract with:
 

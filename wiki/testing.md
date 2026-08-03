@@ -134,10 +134,12 @@ and scan the current production surface below `lib/**`. The helper can run
 named focused static and clean-load proofs for an exact candidate without
 representing the whole component graph as ready; the committed Workflow
 Creator Values row invokes both. Literal require ownership, including
-`require_relative`, and clean-load dependency detection cover catalog paths
-rooted under both `lib/` and `packaging/`: an undeclared
+`require_relative` and repository-root `lib/`/`packaging/` spellings, and
+clean-load dependency detection cover catalog paths rooted under both `lib/`
+and `packaging/`: an undeclared
 packaging-to-packaging eager edge fails both exact candidate checks, while a
-lazy edge fails named static validation and a declared equivalent loads cleanly
+lazy edge—including `require "lib/hive/commands/run"` from a packaging
+candidate—fails named static validation and a declared equivalent loads cleanly
 without widening the global construction scan. The Workflow Creator Values
 suite separately pins exact core
 type admission, recursive ownership and freezing, compact canonical bytes,

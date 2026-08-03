@@ -565,7 +565,7 @@ class ComponentBoundaryContract
       return unless arguments
 
       required = literal_string(arguments)
-      return required if required && method_name == "require"
+      return self.class.component_require_path(required) || required if required && method_name == "require"
       relative_require_path(required) if required
     end
 

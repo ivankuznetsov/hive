@@ -972,6 +972,36 @@ class ComponentBoundariesTest < Minitest::Test
     end
   end
 
+  def test_named_candidate_static_validation_normalizes_lazy_repository_root_lib_require
+    with_contract_fixture(
+      entrypoint_source: <<~RUBY,
+        module Example
+          class API
+            def self.load_upward
+              require "lib/hive/commands/run"
+            end
+          end
+        end
+      RUBY
+      state: "candidate",
+      entrypoint_file: "packaging/example.rb",
+      entrypoint_require: "packaging/example",
+      owned_paths: [ "packaging/example.rb" ]
+    ) do |contract|
+      assert contract.validate_static_boundaries!
+      clean_load = contract.validate_clean_load!("example")
+      assert_equal "Example::API", clean_load.fetch("constant")
+      assert_empty clean_load.fetch("forbidden_loaded_features")
+
+      error = assert_raises(ComponentBoundaryContract::ValidationError) do
+        contract.validate_static_boundary!("example")
+      end
+      assert_match(/example\.owned_paths/, error.message)
+      assert_match(/packaging\/example\.rb/, error.message)
+      assert_match(/hive\/commands\/run/, error.message)
+    end
+  end
+
   def test_packaging_require_relative_maps_to_component_require_identity
     with_support_component(directory: "packaging") do |fixture|
       with_contract_fixture(

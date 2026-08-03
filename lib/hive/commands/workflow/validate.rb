@@ -78,8 +78,13 @@ module Hive
             "kind" => stage.kind&.to_s,
             "state_file" => stage.state_file,
             "instruction_path" => stage.instruction,
-            "input" => stage.input
+            "input" => stage.input,
+            "terminal_outcomes" => terminal_outcomes_payload(stage.terminal_outcomes)
           }
+        end
+
+        def terminal_outcomes_payload(outcomes)
+          outcomes&.to_h&.transform_keys(&:to_s)
         end
 
         def automatic_edges(workflow)

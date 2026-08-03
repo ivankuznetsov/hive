@@ -1460,6 +1460,103 @@ class ConfigTest < Minitest::Test
                    "artifacts timeout must default to 3600 seconds per plan U1"
       assert_equal "claude", cfg.dig("artifacts", "agent"),
                    "artifacts agent must default to claude per plan U1"
+      assert_nil cfg.dig("artifacts", "capture", "provider")
+    end
+  end
+
+  def test_load_accepts_a_closed_project_capture_provider_declaration
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        artifacts:
+          capture:
+            provider:
+              name: rails
+              command: [bin/hive-capture, --format, hive-v1]
+              timeout_sec: 90
+      YAML
+
+      provider = Hive::Config.load(dir).dig("artifacts", "capture", "provider")
+
+      assert_equal "rails", provider.fetch("name")
+      assert_equal [ "bin/hive-capture", "--format", "hive-v1" ], provider.fetch("command")
+      assert_equal 90, provider.fetch("timeout_sec")
+    end
+  end
+
+  def test_load_rejects_malformed_or_open_ended_capture_provider_declarations
+    cases = {
+      "capture must be a mapping" => "artifacts:\n  capture: provider",
+      "capture keys are closed" => "artifacts:\n  capture:\n    mystery: true",
+      "provider must be a mapping" => "artifacts:\n  capture:\n    provider: bin/capture",
+      "provider keys are closed" => <<~YAML,
+        artifacts:
+          capture:
+            provider:
+              name: rails
+              command: [bin/capture]
+              shell: true
+      YAML
+      "name is required" => <<~YAML,
+        artifacts:
+          capture:
+            provider:
+              command: [bin/capture]
+      YAML
+      "command must be argv" => <<~YAML,
+        artifacts:
+          capture:
+            provider:
+              name: rails
+              command: bin/capture --unsafe
+      YAML
+      "executable cannot traverse" => <<~YAML,
+        artifacts:
+          capture:
+            provider:
+              name: rails
+              command: [../bin/capture]
+      YAML
+      "timeout is bounded" => <<~YAML
+        artifacts:
+          capture:
+            provider:
+              name: rails
+              command: [bin/capture]
+              timeout_sec: 0
+      YAML
+    }
+
+    cases.each do |label, yaml|
+      with_tmp_dir do |dir|
+        FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+        File.write(File.join(dir, ".hive-state", "config.yml"), yaml)
+
+        assert_raises(Hive::ConfigError, label) { Hive::Config.load(dir) }
+      end
+    end
+  end
+
+  def test_load_rejects_capture_provider_argv_over_the_total_budget
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(
+        File.join(dir, ".hive-state", "config.yml"),
+        {
+          "artifacts" => {
+            "capture" => {
+              "provider" => {
+                "name" => "rails",
+                "command" => [ "bin/capture", *Array.new(4, "x" * 4096) ]
+              }
+            }
+          }
+        }.to_yaml
+      )
+
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_match(/total argv.*16384 bytes/, error.message)
     end
   end
 

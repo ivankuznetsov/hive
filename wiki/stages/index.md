@@ -3,7 +3,7 @@ title: Stages Index
 type: index
 source: lib/hive/stages/
 created: 2026-04-25
-updated: 2026-07-25
+updated: 2026-08-02
 tags: [stage, index]
 ---
 
@@ -21,7 +21,17 @@ tags: [stage, index]
 | 8-finalize | `Hive::Stages::Finalize` | `pr.md`, `summary.md` | yes | [[stages/finalize]] |
 | 9-done | `Hive::Stages::Done` | `task.md` | no | [[stages/done]] |
 
-All active stages share `Hive::Stages::Base.spawn_agent` for headless agent invocation (`AgentProfile`-resolved binary; default `claude -p`) and `Hive::Stages::Base.spawn_claude!` for Claude-backed launches that honor project-global `claude.mode`. Before spawning, coding/review stages call `Base.stage_permission_scope` to resolve the effective `permissions:` spec from config. Yolo/absent specs preserve the historical per-mode defaults (headless has no built-in tool list; tmux keeps the stage allowlist), while non-yolo Claude scopes override the built-in allowlist and add `--allowedTools`/`--disallowedTools` plus any extra task-relative add-dirs. `Hive::Stages::Base.render(template_name, bindings)` handles ERB prompt rendering. In tmux mode, marker-owned Claude launches wait through `Hive::ClaudeLauncher.wait_for_terminal_marker`; if the managed tmux session disappears before a terminal marker is written, the launcher stamps `ERROR reason=tmux_session_terminated` immediately instead of waiting for the stage timeout. If the pane shows a provider-limit menu first, it stamps `ERROR reason=limits_reached` instead of the generic timeout/session-failure shape. Every persisted `ERROR` / `REVIEW_ERROR` enters the same marker-id-guarded, unbounded recovery lifecycle after the shared cooldown when current ownership and work-area safety permit. `StaleAgentHealer` schedules; `RecoveryCoordinator` persists the owning stage command and alone clears/dispatches, including for `3-plan`. 6-review uses per-spawn `status_mode` overrides so the orchestrator's `REVIEW_WORKING` marker survives sub-spawns; Claude reviewers use one shared tmux session per permission scope per pass when `claude.mode: tmux`.
+All active stages share `Hive::Stages::Base.spawn_agent` for headless agent invocation (`AgentProfile`-resolved binary; default `claude -p`) and `Hive::Stages::Base.spawn_claude!` for Claude-backed launches that honor project-global `claude.mode`. Before spawning, coding/review stages call `Base.stage_permission_scope` to resolve the effective `permissions:` spec from config. Yolo/absent specs preserve the historical per-mode defaults (headless has no built-in tool list; tmux keeps the stage allowlist), while non-yolo Claude scopes override the built-in allowlist and add `--allowedTools`/`--disallowedTools` plus any extra task-relative add-dirs. `Hive::Stages::Base.render(template_name, bindings)` handles ERB prompt rendering. In tmux mode, marker-owned Claude launches wait through `Hive::ClaudeLauncher.wait_for_terminal_marker`; if the managed tmux session disappears before a terminal marker is written, the launcher stamps `ERROR reason=tmux_session_terminated` immediately instead of waiting for the stage timeout. If the pane shows a provider-limit menu first, it stamps `ERROR reason=limits_reached` instead of the generic timeout/session-failure shape.
+
+Every persisted `ERROR` / `REVIEW_ERROR` except the exact operator-owned
+`terminal_outcome_blocked` and `terminal_outcome_invalid` reasons enters the
+same marker-id-guarded, unbounded recovery lifecycle after the shared cooldown
+when current ownership and work-area safety permit. `StaleAgentHealer`
+schedules; `RecoveryCoordinator` persists the owning stage command and alone
+clears/dispatches, including for `3-plan`. 6-review uses per-spawn `status_mode`
+overrides so the orchestrator's `REVIEW_WORKING` marker survives sub-spawns;
+Claude reviewers use one shared tmux session per permission scope per pass when
+`claude.mode: tmux`.
 
 `Hive::Stages::Agent` is a reusable descriptor-backed headless runner for
 future `kind: :agent` stages outside the coding runner names. See

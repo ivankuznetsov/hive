@@ -82,6 +82,26 @@ class HiveTestCoverageTest < Minitest::Test
     end
   end
 
+  def test_sparse_process_results_keep_only_files_with_observed_hits
+    result = {
+      "/zero.rb" => {
+        lines: [ nil, 0 ],
+        branches: { [ :if, 0, 1, 0, 1, 1 ] => { [ :then, 1, 1, 0, 1, 1 ] => 0 } }
+      },
+      "/line.rb" => { lines: [ nil, 1 ], branches: {} },
+      "/branch.rb" => {
+        lines: [ nil, 0 ],
+        branches: { [ :if, 0, 1, 0, 1, 1 ] => { [ :then, 1, 1, 0, 1, 1 ] => 1 } }
+      }
+    }
+
+    sparse = HiveTestCoverage.sparse_process_result(result)
+
+    assert_equal [ "/branch.rb", "/line.rb" ], sparse.keys.sort
+    assert_same result.fetch("/line.rb"), sparse.fetch("/line.rb")
+    assert_same result.fetch("/branch.rb"), sparse.fetch("/branch.rb")
+  end
+
   def test_reload_preloaded_entrypoint_filters_constant_redefinition_warnings_only
     with_tmp_dir do |dir|
       lib = File.join(dir, "lib")

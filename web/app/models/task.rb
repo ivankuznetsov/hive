@@ -1,4 +1,6 @@
 require "digest"
+require "json_schemer"
+require "pathname"
 require "hive/web/environment"
 
 class Task
@@ -6,6 +8,9 @@ class Task
 
   ARTIFACT_ORDER = %w[idea.md brainstorm.md plan.md task.md pr.md summary.md artifact.md].freeze
   MEDIA_FILENAME_RE = /\A[\w.-]+\.(?:png|jpe?g|gif|webp|webm|mp4)\z/i
+  CAPTURE_MANIFEST_V2_SCHEMER = JSONSchemer.schema(
+    Pathname.new(Hive::Schemas.schema_path("hive-artifact-capture", version: 2))
+  )
   DIFF_TIMEOUT_SEC = Integer(Hive::Web::Environment.value("HIVE_WEB_DIFF_TIMEOUT_SEC"))
   RECOVERY_ACTIONS = %w[recover_execute recover_review error].freeze
   RECOVERY_LABELS = {
@@ -318,10 +323,17 @@ class Task
   end
 
   def capture_media_manifest(path)
-    manifest = JSON.parse(File.read(path, 256 * 1024))
+    stat = File.lstat(path)
+    return nil unless stat.file? && !stat.symlink?
+    return nil if stat.size > Hive::ARTIFACT_CAPTURE_MANIFEST_MAX_BYTES
+
+    manifest = JSON.parse(File.binread(path, Hive::ARTIFACT_CAPTURE_MANIFEST_MAX_BYTES))
     return nil unless manifest.is_a?(Hash)
     return nil unless manifest["schema"] == "hive-artifact-capture"
-    return nil unless manifest["schema_version"] == 1
+    return nil unless [ 1, 2 ].include?(manifest["schema_version"])
+    if manifest["schema_version"] == 2
+      return nil unless CAPTURE_MANIFEST_V2_SCHEMER.valid?(manifest)
+    end
 
     status = manifest["status"].to_s
     return nil unless %w[captured failed].include?(status)

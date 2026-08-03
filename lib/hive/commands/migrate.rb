@@ -55,13 +55,21 @@ module Hive
       # `Hive::Commands::Status#detect_legacy_stage_dirs`.
       SLUG_RE = Hive::Stages::SLUG_RE
 
+      def self.restart_daemon_if_running!
+        new.send(:restart_daemon_if_running!)
+      end
+
       def initialize(project_path = Dir.pwd, display_name_generator: Hive::DisplayName::Generator,
                      managed_store_factory: Hive::WorkflowPackage::ManagedStore.method(:new),
-                     config_loader: Hive::Config.method(:load))
+                     config_loader: Hive::Config.method(:load),
+                     global_migration: Hive::Recovery::Migration.method(:ensure!),
+                     daemon_restarter: nil)
         @project_path = File.expand_path(project_path)
         @display_name_generator = display_name_generator
         @managed_store_factory = managed_store_factory
         @config_loader = config_loader
+        @global_migration = global_migration
+        @daemon_restarter = daemon_restarter
       end
 
       def call
@@ -69,7 +77,7 @@ module Hive
         stages = File.join(hive_state, "stages")
         raise Hive::InvalidTaskPath, "not a hive project: #{hive_state}" unless Dir.exist?(stages)
 
-        Hive::Recovery::Migration.ensure!
+        @global_migration.call
         moved = []
         backfilled_count = 0
         recovery_marker_count = 0
@@ -150,7 +158,9 @@ module Hive
         if repository_identity
           puts "hive: migrate backfilled registered repository identity #{repository_identity}"
         end
-        restart_daemon_if_running! if moved.any? || workflow_configuration_count.positive?
+        if moved.any? || workflow_configuration_count.positive?
+          (@daemon_restarter || method(:restart_daemon_if_running!)).call
+        end
         moved
       end
 

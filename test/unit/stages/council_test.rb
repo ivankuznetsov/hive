@@ -172,8 +172,9 @@ class StagesCouncilTest < Minitest::Test
         "Verdict: ready\n",
         "Verdict: ready\n"
       ]
+      base_add_dirs = []
 
-      with_stubbed_managed_scope(task) do
+      with_stubbed_managed_scope(task, base_add_dirs: base_add_dirs) do
         with_stubbed_spawn(outputs) do |captured|
           result = Hive::Stages::Council.run!(task, {})
 
@@ -204,6 +205,8 @@ class StagesCouncilTest < Minitest::Test
             context_slots.tally
           )
           assert_equal context_slots, prompt_slots
+          assert_equal 5, base_add_dirs.length
+          assert base_add_dirs.all? { |dirs| dirs == [ project, task.folder ] }
         end
       end
     end
@@ -765,7 +768,7 @@ class StagesCouncilTest < Minitest::Test
       end
     end
 
-    def with_stubbed_managed_scope(task)
+    def with_stubbed_managed_scope(task, base_add_dirs: nil)
       scope = {
         add_dirs: [ task.folder ], permission_mode: nil,
         allowed_tools: nil, disallowed_tools: nil
@@ -773,7 +776,10 @@ class StagesCouncilTest < Minitest::Test
       with_replaced_singleton_method(
         Hive::Stages::Base,
         :stage_permission_scope,
-        ->(*, **) { scope }
+        lambda do |*, **kwargs|
+          base_add_dirs << kwargs.fetch(:base_add_dirs) if base_add_dirs
+          scope
+        end
       ) { yield }
     end
 

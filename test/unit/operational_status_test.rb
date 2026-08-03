@@ -218,6 +218,29 @@ class OperationalStatusTest < Minitest::Test
     assert_equal "operator", disabled.fetch("blocker_owner")
   end
 
+  def test_terminal_outcome_errors_remain_operator_owned_when_auto_retry_is_enabled
+    %w[terminal_outcome_blocked terminal_outcome_invalid].each do |reason|
+      semantic_error = task(
+        action: "error",
+        slug: reason,
+        stage: "7-certificate",
+        marker: "error",
+        attrs: { "reason" => reason, "outcome" => "blocked" }
+      )
+
+      projected = project(
+        status_payload(semantic_error),
+        project_context: {
+          "demo" => { "daemon_enabled" => true, "auto_retry_enabled" => true }
+        }
+      ).fetch("tasks").first
+
+      assert_equal "needs_repair", projected.fetch("state"), reason
+      assert_equal "operator", projected.fetch("blocker_owner"), reason
+      assert_equal "task_repair", projected.dig("reasons", 0, "code"), reason
+    end
+  end
+
   def test_dependency_block_is_scheduler_owned_and_primary_unless_human_input_wins
     blocked = task(
       action: "ready_to_develop", slug: "blocked", blocked: true,
@@ -421,6 +444,7 @@ class OperationalStatusTest < Minitest::Test
       "retry_cooldown" => [ "waiting_on_provider_or_scheduler", "scheduler" ],
       "retry_in_flight" => [ "running", "agent" ],
       "retry_safety_blocked" => [ "needs_repair", "scheduler" ],
+      "semantic_terminal_error" => [ "needs_repair", "operator" ],
       "wait_for_answers" => [ "waiting_on_you", "operator" ],
       "quarantined" => [ "needs_repair", "scheduler" ],
       "skip" => [ "idle", "scheduler" ]

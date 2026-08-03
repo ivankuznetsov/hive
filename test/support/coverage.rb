@@ -107,14 +107,16 @@ module HiveTestCoverage
     Warning.define_singleton_method(:warn, original_warn) if original_warn
   end
 
-  def dump_process_result!
+  def dump_process_result!(sparse: false)
     return unless @started
     return if @dumped
 
     FileUtils.mkdir_p(@resultset_dir)
     path = File.join(@resultset_dir, "#{Process.pid}-#{object_id}.marshal")
     tmp_path = "#{path}.tmp"
-    File.binwrite(tmp_path, Marshal.dump(Coverage.result))
+    result = Coverage.result
+    result = sparse_process_result(result) if sparse
+    File.binwrite(tmp_path, Marshal.dump(result))
     File.rename(tmp_path, path)
     @dumped = true
   rescue RuntimeError => e
@@ -130,6 +132,15 @@ module HiveTestCoverage
     # silently producing a too-low coverage number.
     record_dump_error!(e)
     @dumped = true
+  end
+
+  def sparse_process_result(result)
+    result.select do |_path, entry|
+      Array(entry[:lines]).any? { |count| count.to_i.positive? } ||
+        (entry[:branches] || {}).any? do |_decision, outcomes|
+          outcomes.values.any? { |count| count.to_i.positive? }
+        end
+    end
   end
 
   def record_dump_error!(error)

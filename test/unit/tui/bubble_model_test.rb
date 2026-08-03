@@ -5856,6 +5856,26 @@ class HiveTuiBubbleModelTest < Minitest::Test
     end
   end
 
+  def test_review_marker_state_unreadable_when_state_file_stat_fails
+    Dir.mktmpdir("u6-marker-check") do |folder|
+      task_md = File.join(folder, "task.md")
+      File.write(task_md, "<!-- REVIEW_WAITING reason=fix_guardrail pass=4 -->\n")
+      row = make_review_waiting_row(folder, pass: 4)
+      original = File.method(:lstat)
+      replacement = lambda do |path|
+        raise Errno::EACCES, path if path == task_md
+
+        original.call(path)
+      end
+
+      result = with_replaced_singleton_method(File, :lstat, replacement) do
+        @model.send(:review_marker_state, row)
+      end
+
+      assert_equal :unreadable, result
+    end
+  end
+
   # pr-review-toolkit round-5 pr-test-analyzer #5 — positive test for
   # the rescue path in `dispatch_rerun_review_for`. A regression that
   # widens the rescue scope or drops the suppression flash would not

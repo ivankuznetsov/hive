@@ -88,6 +88,64 @@ class StagesAgentTest < Minitest::Test
     end
   end
 
+  def test_opted_in_terminal_prompt_enumerates_exact_outcome_contract
+    with_tmp_dir do |project|
+      descriptor = Hive::Workflow.new(
+        id: :repair,
+        stages: [
+          Hive::Workflow::Stage.new(
+            name: "repair", index: 1, state_file: "repair-certificate.md", kind: :agent,
+            skill: "/repair", deliverable: "repair-certificate.md",
+            terminal_outcomes: Hive::Workflow::TerminalOutcomes.new(
+              complete: [ "verified", "not-reproduced" ], blocked: [ "blocked" ]
+            )
+          )
+        ]
+      )
+      task = task_for(project, "repair", descriptor: descriptor)
+
+      with_stubbed_spawn do |captured|
+        Hive::Stages::Agent.run!(task, { "repair" => { "agent" => "codex" } })
+        prompt = captured.first.fetch(:prompt)
+
+        assert_includes prompt, "must be exactly `Outcome: <value>`"
+        assert_includes prompt, "Completion values: `verified`, `not-reproduced`"
+        assert_includes prompt, "Blocked values: `blocked`"
+        assert_includes prompt, "Hive converts a configured blocked value to a durable error"
+        assert_includes prompt, "<!-- COMPLETE -->"
+      end
+    end
+  end
+
+  def test_legacy_agent_prompt_omits_terminal_outcome_contract
+    with_tmp_dir do |project|
+      task = task_for(project, "plan")
+
+      with_stubbed_spawn do |captured|
+        Hive::Stages::Agent.run!(task, { "plan" => { "agent" => "codex" } })
+        prompt = captured.first.fetch(:prompt)
+
+        refute_includes prompt, "Outcome: <value>"
+        refute_includes prompt, "Completion values:"
+        refute_includes prompt, "Blocked values:"
+      end
+    end
+  end
+
+  def test_agent_marker_read_survives_invalid_utf8_for_terminal_normalization
+    with_tmp_dir do |project|
+      task = task_for(project, "plan")
+      body = "Outcome: \xFF\n<!-- COMPLETE -->\n".b
+
+      with_stubbed_spawn(marker: body) do
+        result = Hive::Stages::Agent.run!(task, { "plan" => { "agent" => "codex" } })
+
+        assert_equal({ commit: "complete", status: :complete }, result)
+        assert_equal :complete, Hive::Markers.current(task.state_file).name
+      end
+    end
+  end
+
   def test_worktree_stage_delegates_before_generic_agent_spawn
     with_tmp_dir do |project|
       descriptor = worktree_workflow
@@ -817,6 +875,47 @@ class StagesAgentTest < Minitest::Test
         assert_match(/\Astages\.work:/, captured.first.fetch(:prompt))
         policy = captured.first.fetch(:kwargs).fetch(:runtime_policy)
         assert_equal "configured", policy.environment.fetch("DEMO_INPUT")
+      end
+    end
+  end
+
+  def test_managed_yolo_actor_receives_project_as_explicit_runner_context
+    with_tmp_dir do |project|
+      instruction_path = File.join(project, "workflow-work.md")
+      package_root = File.join(project, ".hive-state", "workflows", "demo", "versions", "#{'a' * 40}")
+      File.write(instruction_path, "Repair the managed target.\n")
+      FileUtils.mkdir_p(package_root)
+      descriptor = instruction_workflow(instruction_path, permissions: "yolo")
+      task = task_for(project, "work", descriptor: descriptor)
+      task.define_singleton_method(:managed_workflow?) { true }
+      task.define_singleton_method(:managed_runtime_context) do |_slot_id|
+        { package_root: package_root, environment: {} }
+      end
+      task.define_singleton_method(:managed_prompt) { |_slot, body, _context| body }
+
+      with_stubbed_spawn do |captured|
+        Hive::Stages::Agent.run!(task, { "work" => { "agent" => "codex" } })
+
+        assert_equal [
+          File.realpath(task.folder), File.realpath(package_root), File.realpath(project)
+        ], captured.first.fetch(:kwargs).fetch(:add_dirs)
+        prompt = captured.first.fetch(:prompt)
+        assert_includes prompt, "The registered project root may be available as target context"
+        refute_includes prompt, "Do not modify files outside the task folder"
+      end
+    end
+  end
+
+  def test_unmanaged_actor_prompt_retains_task_folder_write_boundary
+    with_tmp_dir do |project|
+      task = task_for(project, "plan")
+
+      with_stubbed_spawn do |captured|
+        Hive::Stages::Agent.run!(task, { "plan" => { "agent" => "codex" } })
+
+        prompt = captured.first.fetch(:prompt)
+        assert_includes prompt, "Do not modify files outside the task folder"
+        refute_includes prompt, "registered project root may be available as target context"
       end
     end
   end

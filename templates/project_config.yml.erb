@@ -130,6 +130,16 @@ conditions:
 open_pr: {}
 artifacts:
   agent: claude
+  # Hive checkouts use the built-in locked Hivebox recorder automatically.
+  # Conventional projects declare a project-owned executable instead; Hive
+  # passes a JSON request on stdin and accepts only a bounded JSON result whose
+  # media files stay inside Hive's private staging directory. The complete argv
+  # is limited to 16 KiB; provider evidence is limited to 64 KiB.
+  # capture:
+  #   provider:
+  #     name: rails
+  #     command: [bin/hive-capture]
+  #     timeout_sec: 120
 finalize:
   agent: claude
 

@@ -36,9 +36,11 @@ module Hive
         permissions
         mapping_role
         mapping_contract
+        terminal_outcomes
         outcomes
       ].freeze
       OUTCOME_KEYS = %w[complete artifact to].freeze
+      TERMINAL_OUTCOME_KEYS = %w[complete blocked].freeze
       REVIEWER_KEYS = %w[
         name
         agent
@@ -100,6 +102,7 @@ module Hive
         stages = parse_stages(descriptor["stages"], id: id)
         validate_terminal_last_stage!(stages)
         validate_workspace_handoff!(stages)
+        validate_terminal_outcomes!(stages)
         validate_deliverable_position!(stages)
 
         build_workflow(id, stages, archive_visibility_retention_days)
@@ -132,6 +135,39 @@ module Hive
 
           raise descriptor_error(
             "stage #{stage.name.inspect} deliverable is only consumed on the last stage"
+          )
+        end
+      end
+
+      def validate_terminal_outcomes!(stages)
+        last_index = stages.length - 1
+        stages.each_with_index do |stage, index|
+          next unless stage.terminal_outcomes
+
+          unless stage.kind == :agent
+            raise descriptor_error(
+              "stage #{stage.name.inspect} terminal_outcomes is only valid on an agent stage"
+            )
+          end
+          unless index == last_index
+            raise descriptor_error(
+              "stage #{stage.name.inspect} terminal_outcomes is only valid on the last stage"
+            )
+          end
+          unless stage.deliverable
+            raise descriptor_error(
+              "stage #{stage.name.inspect} terminal_outcomes requires an explicit deliverable"
+            )
+          end
+          unless stage.deliverable == stage.state_file
+            raise descriptor_error(
+              "stage #{stage.name.inspect} terminal_outcomes deliverable must equal state_file"
+            )
+          end
+          next unless stage.workspace || stage.handoff
+
+          raise descriptor_error(
+            "stage #{stage.name.inspect} terminal_outcomes is incompatible with workspace or handoff"
           )
         end
       end
@@ -268,6 +304,10 @@ module Hive
         permissions = parse_permissions(stage, id: id, stage_name: name, label: label)
         input = optional_string(stage["input"], label: "#{label} input")
         deliverable = parse_deliverable(stage["deliverable"], label: label)
+        state_file = parse_state_file(stage["state_file"], label: label)
+        terminal_outcomes = parse_terminal_outcomes(
+          stage["terminal_outcomes"], label: label
+        ) if stage.key?("terminal_outcomes")
         workspace = parse_closed_enum(stage["workspace"], WORKSPACES, label: "#{label} workspace")
         handoff = parse_closed_enum(stage["handoff"], HANDOFFS, label: "#{label} handoff")
         condition_policy = parse_condition_policy(stage["conditions"], label: label)
@@ -279,7 +319,7 @@ module Hive
         Hive::Workflow::Stage.new(
           name: name,
           index: index,
-          state_file: parse_state_file(stage["state_file"], label: label),
+          state_file: state_file,
           advance_verb: parse_advance_verb(stage, name: name, index: index, label: label),
           kind: kind,
           skill: skill,
@@ -293,6 +333,7 @@ module Hive
           reviewers: reviewers,
           council: council,
           deliverable: deliverable,
+          terminal_outcomes: terminal_outcomes,
           workspace: workspace,
           handoff: handoff,
           condition_policy: condition_policy,
@@ -386,6 +427,22 @@ module Hive
             parsed[name] = Hive::Workflow::Outcome.new(name: name, to: target)
           end
         end.freeze
+      end
+
+      def parse_terminal_outcomes(data, label:)
+        outcome_label = "#{label} terminal_outcomes"
+        value = stringify_hash(data, label: outcome_label)
+        reject_unknown_keys!(value, TERMINAL_OUTCOME_KEYS, label: outcome_label)
+        missing = TERMINAL_OUTCOME_KEYS - value.keys
+        unless missing.empty?
+          raise descriptor_error("#{outcome_label} is missing required key(s) #{missing.inspect}")
+        end
+
+        Hive::Workflow::TerminalOutcomes.new(
+          complete: value["complete"], blocked: value["blocked"]
+        )
+      rescue ArgumentError => e
+        raise descriptor_error("#{outcome_label} #{e.message.delete_prefix('terminal_outcomes ')}")
       end
 
       def parse_instruction(value, label:)
@@ -628,7 +685,7 @@ module Hive
         return if [ :agent, :council ].include?(kind)
 
         if kind == :human
-          present = %w[skill instruction agent model effort budget_usd timeout_sec reviewers council deliverable workspace handoff conditions permissions mapping_role mapping_contract]
+          present = %w[skill instruction agent model effort budget_usd timeout_sec reviewers council deliverable workspace handoff conditions permissions mapping_role mapping_contract terminal_outcomes]
                     .select { |key| stage.key?(key) }
           return if present.empty?
 
@@ -637,7 +694,7 @@ module Hive
           )
         end
 
-        present = %w[skill instruction agent model effort budget_usd timeout_sec input reviewers council deliverable workspace handoff permissions mapping_role mapping_contract]
+        present = %w[skill instruction agent model effort budget_usd timeout_sec input reviewers council deliverable workspace handoff permissions mapping_role mapping_contract terminal_outcomes]
                   .select { |key| stage.key?(key) }
         return if present.empty?
 
@@ -660,7 +717,7 @@ module Hive
       # `permissions` are shared and stay valid on both. Reject the mismatches
       # here (fail-fast, same contract as reject_agent_only_fields!).
       COUNCIL_ONLY_FIELDS = %w[input reviewers council].freeze
-      AGENT_ONLY_FIELDS = %w[skill instruction workspace handoff].freeze
+      AGENT_ONLY_FIELDS = %w[skill instruction workspace handoff terminal_outcomes].freeze
 
       def reject_wrong_kind_fields!(stage, kind:, label:)
         if kind != :human && stage.key?("outcomes")

@@ -1,6 +1,7 @@
 require "test_helper"
 require "fileutils"
 require "hive/commands/init"
+require "hive/agent_skills/inspector"
 require "hive/agent_skills/canonical_skill"
 require "hive/agent_skills/directory_publisher"
 

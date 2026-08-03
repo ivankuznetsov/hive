@@ -8,7 +8,8 @@ coverage:
   primary: update.pipeline_available
   supporting: []
 steps:
-  # Force the brew install channel so the nudge command is the real brew string.
+  # Force a package install channel; every installed channel nudges through
+  # `hive update` so the guided path includes automatic migration.
   - kind: write_file
     path: "{run_home}/install-channel"
     content: "brew\n"
@@ -41,7 +42,7 @@ steps:
     args: [daemon, status, --json]
     schema: hive-daemon-status
     pick: [update_nudge, command]
-    equals: "brew upgrade ivankuznetsov/hive/hive"
+    equals: "hive update"
 
   - kind: stop_process
     id: daemon

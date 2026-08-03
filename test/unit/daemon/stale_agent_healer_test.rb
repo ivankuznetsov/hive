@@ -214,6 +214,20 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     assert_equal 1, @coordinator.requests.size
   end
 
+  def test_terminal_outcome_errors_are_never_submitted_for_automatic_recovery
+    %w[terminal_outcome_blocked terminal_outcome_invalid].each do |reason|
+      with_error_marker(reason: reason, extra_attrs: { "outcome" => "blocked" }) do |row, state_file|
+        heal([ row ])
+
+        assert_empty @coordinator.assessments, reason
+        assert_empty @coordinator.requests, reason
+        marker = Hive::Markers.current(state_file)
+        assert_equal :error, marker.name
+        assert_equal reason, marker.attrs.fetch("reason")
+      end
+    end
+  end
+
   def test_recovery_event_logging_is_best_effort
     logger = Object.new
     logger.define_singleton_method(:event) do |*_args, **_kwargs|

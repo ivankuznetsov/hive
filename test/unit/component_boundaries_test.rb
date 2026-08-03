@@ -249,12 +249,12 @@ class ComponentBoundariesTest < Minitest::Test
                  workflow_values.dig("entrypoint", "require")
     assert_equal "HiveLiveAgentProof::WorkflowCreator::Values",
                  workflow_values.dig("entrypoint", "constant")
-    assert_equal ["packaging/live_agent_skills/workflow_creator_values.rb"],
+    assert_equal [ "packaging/live_agent_skills/workflow_creator_values.rb" ],
                  workflow_values.fetch("owned_paths")
     assert_empty workflow_values.fetch("component_dependencies")
     assert_empty workflow_values.fetch("allowed_hive_dependencies")
     assert_empty workflow_values.fetch("hive_consumers")
-    assert_equal ["U1a1vt"],
+    assert_equal [ "U1a1vt" ],
                  workflow_values.fetch("migration_exceptions")
                    .map { |entry| entry.fetch("removal_unit") }
     assert_equal 1, workflow_values.fetch("migration_exceptions").length
@@ -337,8 +337,8 @@ class ComponentBoundariesTest < Minitest::Test
       assert_includes row, "[[#{wiki_link}]]"
       assert_includes wiki_index, "[[#{wiki_link}]]"
       expected_removals = {
-        "patrol-effects" => ["U3"],
-        "workflow-creator-values" => ["U1a1vt"]
+        "patrol-effects" => [ "U3" ],
+        "workflow-creator-values" => [ "U1a1vt" ]
       }.fetch(component.fetch("id"), [])
       assert_equal expected_removals,
                    component.fetch("migration_exceptions")

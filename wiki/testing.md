@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release-candidate,release}.yml, packaging/{live_agent_skills,release_candidate}/, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-07-30
+updated: 2026-08-03
 tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, release-proof]
 ---
 
@@ -119,16 +119,28 @@ Claude, Codex, Pi, and Grok.
 repository-local paths, unique ownership, an acyclic component graph, bounded
 migration exceptions, selected source-level dependency/construction rules,
 exact authorized internal-construction sites, and fresh-process loading for
-every `boundary-ready` component:
+every `boundary-ready` component. Guarded candidates may declare a bounded,
+named migration exception with its exact removal unit; Workflow Creator Values
+uses that staged exception only until U1a1vt lands its first consumer:
 
 ```bash
 bundle exec ruby -Itest -Ilib test/unit/component_boundaries_test.rb
+bundle exec ruby -Itest test/unit/packaging/workflow_creator_values_test.rb
 ```
 
 Ready components cannot depend on candidates. Forbidden-construction rules
 also apply to guarded candidates, and the helper can run a named focused
-clean-load proof for a candidate such as Attempts without representing the
-whole component graph as ready.
+clean-load proof for a candidate without representing the whole component
+graph as ready. The Workflow Creator Values suite separately pins exact core
+type admission, recursive ownership and freezing, compact canonical bytes,
+post-load monkeypatch resistance, clean loading without JSON or I/O runtime,
+20,000 deterministic finite-float round trips, boundary values for every
+resource cap, an exact-maximum hash comparison-count guard against quadratic
+collision scans, sealed fixed failures after `Kernel#raise` and
+`Exception#initialize` replacement, a diagnostic-only frozen-prototype check,
+and the exact source/decision/callable, repository RuboCop, and R43 RuboCop
+ceilings. The node boundary includes a nested-sibling case that reaches both
+outcomes of the inner import guard.
 
 The helper uses Ruby syntax rather than comments or string examples for literal
 `require`, `require_relative`, and `Constant.new` checks. It remains an

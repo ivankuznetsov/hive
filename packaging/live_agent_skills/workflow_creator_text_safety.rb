@@ -35,6 +35,7 @@ module HiveLiveAgentProof
       ARRAY_PUSH = seal(Array.instance_method(:<<))
       ARRAY_SET = seal(Array.instance_method(:[]=))
       STRING_APPEND = seal(String.instance_method(:<<))
+      STRING_BINARY = seal(String.instance_method(:b))
       STRING_BYTEINDEX = seal(String.instance_method(:byteindex))
       STRING_BYTESIZE = seal(String.instance_method(:bytesize))
       STRING_BYTESLICE = seal(String.instance_method(:byteslice))
@@ -43,9 +44,9 @@ module HiveLiveAgentProof
       STRING_SCRUB = seal(String.instance_method(:scrub))
       STRING_VALID = seal(String.instance_method(:valid_encoding?))
       REGEXP_MATCH = seal(Regexp.instance_method(:match))
+      MATCH_BEGIN = seal(MatchData.instance_method(:begin))
       MATCH_BYTEBEGIN = seal(MatchData.instance_method(:bytebegin))
       MATCH_BYTEEND = seal(MatchData.instance_method(:byteend))
-      MATCH_END = seal(MatchData.instance_method(:end))
       INTEGER_ADD = seal(Integer.instance_method(:+))
       INTEGER_GREATER = seal(Integer.instance_method(:>))
       INTEGER_TIMES = seal(Integer.instance_method(:times))
@@ -76,8 +77,7 @@ module HiveLiveAgentProof
           fail_projection! unless OBJECT_EQUAL.send(INVOKE, OBJECT_CLASS.send(INVOKE, limit), Integer)
           bounded = INTEGER_GREATER.send(INVOKE, 0, limit) ? 0 : limit
           bounded = MAX_BYTES if INTEGER_GREATER.send(INVOKE, bounded, MAX_BYTES)
-          output = STRING_BYTESLICE.send(INVOKE, value, 0, bounded)
-          OBJECT_FREEZE.send(INVOKE, STRING_SCRUB.send(INVOKE, output, ""))
+          OBJECT_FREEZE.send(INVOKE, STRING_SCRUB.send(INVOKE, STRING_BYTESLICE.send(INVOKE, value, 0, bounded), ""))
         end
       end
       def self.safe_relative_path?(value)
@@ -135,7 +135,7 @@ module HiveLiveAgentProof
         fail_projection! unless OBJECT_FROZEN.send(INVOKE, exact_secrets)
         fail_projection! if INTEGER_GREATER.send(INVOKE, ARRAY_LENGTH.send(INVOKE, exact_secrets), MAX_EXACT_SECRETS)
         marks = ARRAY_MULTIPLY.send(INVOKE, [ 0 ], INTEGER_ADD.send(INVOKE, STRING_BYTESIZE.send(INVOKE, value), 1))
-        findings = scan_exact!(value, exact_secrets, marks)
+        findings = scan_exact!(STRING_BINARY.send(INVOKE, value), exact_secrets, marks)
         scan_patterns!(value, findings, marks)
         [ OBJECT_FREEZE.send(INVOKE, findings), marks ]
       end
@@ -146,7 +146,7 @@ module HiveLiveAgentProof
           while (match = REGEXP_MATCH.send(INVOKE, pattern, value, position))
             found = true
             mark_range!(marks, MATCH_BYTEBEGIN.send(INVOKE, match, 0), MATCH_BYTEEND.send(INVOKE, match, 0))
-            position = MATCH_END.send(INVOKE, match, 0)
+            position = INTEGER_ADD.send(INVOKE, MATCH_BEGIN.send(INVOKE, match, 0), 1)
           end
           ARRAY_PUSH.send(INVOKE, findings, label) if found
         end
@@ -160,7 +160,7 @@ module HiveLiveAgentProof
           size = STRING_BYTESIZE.send(INVOKE, secret)
           fail_projection! unless INTEGER_GREATER.send(INVOKE, size, 0)
           fail_projection! if INTEGER_GREATER.send(INVOKE, size, MAX_BYTES)
-          found = find_exact!(value, secret, size, marks, seen)
+          found = find_exact!(value, STRING_BINARY.send(INVOKE, secret), size, marks, seen)
           ARRAY_PUSH.send(INVOKE, findings, ARRAY_GET.send(INVOKE, EXACT_FINDINGS, index)) if found
         end
         findings
@@ -191,7 +191,7 @@ module HiveLiveAgentProof
                        :OBJECT_FROZEN, :RAISE, :MODULE_CASE, :ARRAY_EACH, :ARRAY_GET, :ARRAY_INDEX, :ARRAY_LENGTH,
                        :ARRAY_MULTIPLY, :ARRAY_PUSH, :ARRAY_SET, :STRING_APPEND, :STRING_BYTEINDEX, :STRING_BYTESIZE,
                        :STRING_BYTESLICE, :STRING_ENCODING, :STRING_EQUAL, :STRING_SCRUB, :STRING_VALID, :REGEXP_MATCH,
-                       :MATCH_BYTEBEGIN, :MATCH_BYTEEND, :MATCH_END, :INTEGER_ADD, :INTEGER_GREATER,
+                       :STRING_BINARY, :MATCH_BEGIN, :MATCH_BYTEBEGIN, :MATCH_BYTEEND, :INTEGER_ADD, :INTEGER_GREATER,
                        :INTEGER_TIMES, :FAILURE_BASE, :UTF8, :UNSAFE_PATH, :PATTERNS, :EXACT_FINDINGS, :FAILURE_MATCHER
       OBJECT_FREEZE.send(INVOKE, Error)
       OBJECT_FREEZE.send(INVOKE, self)

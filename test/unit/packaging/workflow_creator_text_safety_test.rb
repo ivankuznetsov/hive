@@ -64,6 +64,14 @@ class WorkflowCreatorTextSafetyTest < Minitest::Test
     findings.each { |finding| assert_predicate finding, :frozen? }
   end
 
+  def test_overlapping_multibyte_exact_secrets_use_byte_offsets_without_splitting_codepoints
+    value = owned("ééé")
+    secrets = owned([ "éé" ])
+
+    assert_equal [ "exact-secret:0" ], TextSafety.secret_findings(value, exact_secrets: secrets)
+    assert_equal "[REDACTED]", TextSafety.redact(value, exact_secrets: secrets)
+  end
+
   def test_pattern_findings_follow_exact_indexes_in_fixed_pattern_order
     anthropic = "sk-ant-abcdefghijkl"
     openai = "sk-proj-#{'o' * 20}"
@@ -82,6 +90,35 @@ class WorkflowCreatorTextSafetyTest < Minitest::Test
       pattern:github-pat
       pattern:private-key
     ], findings
+  end
+
+  def test_overlapping_github_tokens_redact_the_complete_union
+    overlapping_tokens = owned("ghp_#{'A' * 17}ghp_#{'B' * 20}")
+
+    assert_equal [ "pattern:github-token" ],
+                 TextSafety.secret_findings(overlapping_tokens, exact_secrets: owned([]))
+    assert_equal "[REDACTED]", TextSafety.redact(overlapping_tokens, exact_secrets: owned([]))
+  end
+
+  def test_nested_truncated_private_key_envelopes_are_scanned_once_per_begin_with_a_fixed_bound
+    nested_keys = owned(
+      "-----BEGIN PRIVATE KEY-----\nouter\n-----BEGIN RSA PRIVATE KEY-----\ninner"
+    )
+    match_calls = 0
+    private_matches = 0
+    trace = TracePoint.new(:c_return) do |event|
+      next unless event.defined_class == Regexp && event.method_id == :match
+
+      match_calls += 1
+      private_matches += 1 if event.return_value
+    end
+
+    findings = trace.enable { TextSafety.secret_findings(nested_keys, exact_secrets: owned([])) }
+
+    assert_equal [ "pattern:private-key" ], findings
+    assert_equal 2, private_matches
+    assert_equal 7, match_calls
+    assert_equal "[REDACTED]", TextSafety.redact(nested_keys, exact_secrets: owned([]))
   end
 
   def test_exact_secret_count_and_byte_boundaries_accept_their_declared_maxima
@@ -177,6 +214,15 @@ class WorkflowCreatorTextSafetyTest < Minitest::Test
     refute_same errors.fetch(0), errors.fetch(1)
   end
 
+  def test_substantially_oversized_values_fail_before_projection_work
+    large = owned("x" * 100_000)
+
+    assert_projection_error { TextSafety.text(large) }
+    assert_projection_error { TextSafety.secret_findings(large, exact_secrets: owned([])) }
+    assert_projection_error { TextSafety.redact(large, exact_secrets: owned([])) }
+    refute TextSafety.safe_relative_path?(large)
+  end
+
   def test_public_surface_is_frozen_and_captured_handles_are_private
     assert TextSafety.frozen?
     assert TextSafety::Error.frozen?
@@ -184,8 +230,10 @@ class WorkflowCreatorTextSafetyTest < Minitest::Test
     assert_equal %i[redact safe_relative_path? secret_findings text], TextSafety.singleton_methods(false).sort
     refute_respond_to TextSafety, :scan
     assert TextSafety.const_defined?(:STRING_BYTESIZE, false)
+    assert TextSafety.const_defined?(:STRING_BINARY, false)
     assert TextSafety.const_defined?(:PATTERNS, false)
     assert_raises(NameError) { TextSafety::STRING_BYTESIZE }
+    assert_raises(NameError) { TextSafety::STRING_BINARY }
     assert_raises(NameError) { TextSafety::PATTERNS }
   end
 
@@ -259,6 +307,7 @@ class WorkflowCreatorTextSafetyTest < Minitest::Test
       end
       String.class_eval do
         define_method(:<<) { |*| Process.exit!(85) }
+        define_method(:b) { Process.exit!(85) }
         define_method(:byteindex) { |*| Process.exit!(86) }
         define_method(:bytesize) { Process.exit!(87) }
         define_method(:byteslice) { |*| Process.exit!(88) }
@@ -269,9 +318,9 @@ class WorkflowCreatorTextSafetyTest < Minitest::Test
       end
       Regexp.class_eval { define_method(:match) { |*| Process.exit!(93) } }
       MatchData.class_eval do
+        define_method(:begin) { |*| Process.exit!(94) }
         define_method(:bytebegin) { |*| Process.exit!(94) }
         define_method(:byteend) { |*| Process.exit!(95) }
-        define_method(:end) { |*| Process.exit!(96) }
       end
       Integer.class_eval do
         define_method(:+) { |*| Process.exit!(97) }

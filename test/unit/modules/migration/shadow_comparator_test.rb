@@ -1,6 +1,7 @@
 require "test_helper"
 require "json_schemer"
 require "hive/modules/migration/report"
+require "hive/modules/migration/report_migration"
 require "hive/modules/migration/shadow_comparator"
 
 class ModulesMigrationShadowComparatorTest < Minitest::Test
@@ -557,10 +558,18 @@ class ModulesMigrationShadowComparatorTest < Minitest::Test
       )
       path = File.join(root, "report.json")
       report.write(path)
+      assert_raises(Hive::ConfigError) do
+        Hive::Modules::Migration::Report.load(path)
+      end
+      Hive::Modules::Migration::ReportMigration.forward(
+        path: path, qualifications: [], generated_at: START
+      )
       loaded = Hive::Modules::Migration::Report.load(path)
       refute loaded.eligible?
-      assert_includes loaded.blockers, "reviewer_signoff_missing"
-      assert_equal report.configuration_digests, loaded.configuration_digests
+      assert_includes loaded.blockers, "deterministic:evidence_required"
+      assert_empty loaded.configuration_digests
+      assert_equal Hive::Modules::Migration::Report.canonical(report.payload),
+                   File.binread(File.join(root, "report.v1.archive.json"))
 
       payload = JSON.parse(File.binread(path))
       File.write(path, JSON.pretty_generate(payload))

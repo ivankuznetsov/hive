@@ -17,7 +17,7 @@ the first and primary consumer.
 
 | Component | State | Current entry point | Narrative context |
 |-----------|-------|---------------------|-------------------|
-| Patrol Effect Evidence | `candidate` (U3 qualification pending) | `require "hive/modules/migration/patrol_evidence"` → `Hive::Modules::Migration::PatrolEvidence` | [[modules/patrol]] |
+| Patrol Effect Evidence | `candidate` (U3a protocol complete; U3b/U3c proof pending) | `require "hive/modules/migration/patrol_evidence"` → `Hive::Modules::Migration::PatrolEvidence` | [[modules/patrol]] |
 | Attempts admission / future RunReceipt | `candidate` (guarded reference) | `require "hive/attempts/api"` → `Hive::Attempts::API` | [[modules/attempts]] |
 | Workflow Creator Values | `candidate` (U1a1c consumer pending) | `require "packaging/live_agent_skills/workflow_creator_text_safety"` → `HiveLiveAgentProof::WorkflowCreator::TextSafety` | [[component-boundaries]] |
 | UserService | `boundary-ready` | `require "hive/user_service"` → `Hive::UserService` | [[modules/user_service]] |
@@ -38,7 +38,8 @@ has earned a gem, version, repository, or release.
 The catalog on 2026-08-03 retains nine components: six are
 `boundary-ready`; Attempts, Patrol Effect Evidence, and Workflow Creator
 Values remain `candidate`. Patrol retains one bounded U3 exception for
-compressed evidence qualification and cutover proof. Workflow Creator Values
+deterministic public-path and independently authorized installed/live proof.
+Workflow Creator Values
 retains one bounded U1a1c exception until its first production consumer lands.
 Every retained entry point has focused clean-process load proof, every
 catalog-owned path and focused test resolves inside this repository, and the
@@ -95,6 +96,22 @@ streamed occurrence journal. Terminal outcomes and canonical projection bytes
 commit together; sequenced completions compact through high-water/floor state,
 and a saturated non-sequence fence retains terminal proof rather than replaying.
 EvidenceStore is never consulted to decide a retry or mutation.
+U3a extends this same candidate row with exactly six pure or schema-conversion
+owners: receipt, independent verifier, bounded effect index, qualification,
+report projection, and report migration. Their dependency chain is one-way
+from U2 public values toward report projection; the migration owner alone also
+depends on the existing report storage facade. The six do not construct a
+scheduler, runner, provider, process-custody component, recovery store,
+qualification runtime, or the deferred `ModulePackage::ManagedStore`,
+`Commands::Module::Lifecycle`, and `Modules::Dispatcher` U5-U7 owners. Report and Patrols
+share one descriptor-confined `.mutation.lock`; schema conversion archives the
+exact released v1 bytes, read-only probes validate source/archive/receipt
+linkage, and interrupted receipt publication resumes only under that lock.
+Report replacement, contradiction invalidation, and forward/reverse conversion
+use digest CAS without acquiring cutover, rollback, retry, redispatch, or
+effect-recovery authority. Qualification counts unique comparable
+trigger/repository/SHA/change-window decision identities, and verifier tokens
+can be constructed only after full independent binding checks.
 Ordinary Patrol publication recovery additionally treats a durable binding or
 uncertain-effect seed as custody of one exact validated patch. If its receipt
 is missing, mismatched, or unreadable, Fixer stops without resetting the
@@ -130,10 +147,15 @@ action-runner composition roots. A separate static source contract allows
 JobStore semantic mutators only inside those transition ports. This enforces
 dependency direction; it is not runtime isolation.
 
-The row remains `candidate` because U3 still has to prove the compressed
-candidate-bound evidence protocol against the repaired production stream and
-complete qualification. That exception is not permission for another recovery
-store, compatibility effect map, or cutover claim.
+The row remains `candidate`. U3a now proves the bounded value, verification,
+duplicate-index, qualification, report-v2, and one-off report-conversion
+contracts in focused tests, but does not produce qualification. U3b still owns
+the committed deterministic scenario catalogue, independent controls, pure
+collector, and complete both-module fault matrix; U3c still owns independently
+authorized installed/live candidate, project, artifact, credential, sandbox,
+process-custody, and publication proof. That exception is not permission for
+another recovery store, compatibility effect map, qualification runner, or
+cutover claim.
 
 `Hive::Attempts::API` is the guarded reference admission slice. Its public
 result contracts, focused clean-load proof, and exact internal construction

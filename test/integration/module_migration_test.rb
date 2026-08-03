@@ -89,7 +89,7 @@ class ModuleMigrationIntegrationTest < Minitest::Test
         "hive-module-shadow-decision",
         comparator.each_record.first
       )
-      assert_schema("hive-module-migration-report", report)
+      assert_schema("hive-module-migration-report", report, version: 1)
 
       assert_raises(Hive::ConfigError) do
         Hive::Commands::Module::Migration.new(
@@ -126,8 +126,9 @@ class ModuleMigrationIntegrationTest < Minitest::Test
     store.apply(preview, package_root: package, resolution: resolution, now: START)
   end
 
-  def assert_schema(name, payload)
-    schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path(name))))
+  def assert_schema(name, payload, version: nil)
+    path = Hive::Schemas.schema_path(name, version: version)
+    schema = JSONSchemer.schema(JSON.parse(File.read(path)))
     assert schema.valid?(payload), schema.validate(payload).to_a.inspect
   end
 end

@@ -11,6 +11,7 @@ class CiTestPartitionTest < Minitest::Test
     HIVE_CI_GATE_TESTS
     HIVE_CI_GATE_TEST_OPTIONS
     HIVE_DEFAULT_TEST_FILES
+    HIVE_HOSTILE_TEST_FILES
   ].freeze
 
   def test_default_suite_excludes_the_expensive_ci_gates
@@ -94,6 +95,21 @@ class CiTestPartitionTest < Minitest::Test
         test "$HIVE_EXPENSIVE_GATES_RESULT" = "success"
         test "$HIVE_E2E_RESULT" = "success"
       SHELL
+    end
+  end
+
+  def test_workflow_creator_hostile_campaign_is_opt_in
+    with_loaded_rakefile do
+      hostile_files = Object.const_get(:HIVE_HOSTILE_TEST_FILES)
+      default_files = Object.const_get(:HIVE_DEFAULT_TEST_FILES)
+      workflow = File.read(File.join(ROOT, ".github", "workflows", "ci.yml"))
+
+      assert_equal [ "test/unit/packaging/workflow_creator_values_test.rb" ], hostile_files
+      assert hostile_files.all? { |file| default_files.include?(file) },
+             "core Workflow Creator coverage must remain in the default suite"
+      assert_equal [ "test:enable_hostile" ], Rake::Task["test:hostile"].prerequisites
+      refute_includes workflow, "test:hostile"
+      refute_includes workflow, "HIVE_HOSTILE_TESTS"
     end
   end
 

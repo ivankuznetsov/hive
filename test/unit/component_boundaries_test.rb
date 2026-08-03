@@ -247,19 +247,36 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal "candidate", workflow_values.fetch("state")
     assert_equal(
       {
-        "file" => "packaging/live_agent_skills/workflow_creator_values.rb",
-        "require" => "packaging/live_agent_skills/workflow_creator_values",
-        "constant" => "HiveLiveAgentProof::WorkflowCreator::Values"
+        "file" => "packaging/live_agent_skills/workflow_creator_text_safety.rb",
+        "require" => "packaging/live_agent_skills/workflow_creator_text_safety",
+        "constant" => "HiveLiveAgentProof::WorkflowCreator::TextSafety"
       },
       workflow_values.fetch("entrypoint")
     )
-    assert_equal [ "packaging/live_agent_skills/workflow_creator_values.rb" ],
-                 workflow_values.fetch("owned_paths")
+    assert_equal %w[
+      packaging/live_agent_skills/workflow_creator_values.rb
+      packaging/live_agent_skills/workflow_creator_text_safety.rb
+    ], workflow_values.fetch("owned_paths")
+    assert_equal(
+      [
+        "HiveLiveAgentProof::WorkflowCreator::TextSafety.redact",
+        "HiveLiveAgentProof::WorkflowCreator::TextSafety.safe_relative_path?",
+        "HiveLiveAgentProof::WorkflowCreator::TextSafety.secret_findings",
+        "HiveLiveAgentProof::WorkflowCreator::TextSafety.text",
+        "HiveLiveAgentProof::WorkflowCreator::Values.capture",
+        "anonymous immutable workflow-creator value snapshot"
+      ],
+      workflow_values.dig("public_contract", "values").sort
+    )
+    assert_equal %w[
+      HiveLiveAgentProof::WorkflowCreator::TextSafety::Error
+      HiveLiveAgentProof::WorkflowCreator::Values::Error
+    ], workflow_values.dig("public_contract", "errors").sort
     assert_empty workflow_values.fetch("component_dependencies")
     assert_empty workflow_values.fetch("allowed_hive_dependencies")
     assert_empty workflow_values.fetch("hive_consumers")
     assert_equal 1, workflow_values.fetch("migration_exceptions").length
-    assert_equal "U1a1vt",
+    assert_equal "U1a1c",
                  workflow_values.dig("migration_exceptions", 0, "removal_unit")
 
     ready_components.push(
@@ -334,7 +351,7 @@ class ComponentBoundariesTest < Minitest::Test
       assert_includes wiki_index, "[[#{wiki_link}]]"
       expected_removals = {
         "patrol-effects" => [ "U3" ],
-        "workflow-creator-values" => [ "U1a1vt" ]
+        "workflow-creator-values" => [ "U1a1c" ]
       }.fetch(component.fetch("id"), [])
       assert_equal expected_removals,
                    component.fetch("migration_exceptions").map { |entry| entry.fetch("removal_unit") },

@@ -1,4 +1,5 @@
 require "test_helper"
+require "base64"
 require "hive/web/task_capture"
 
 class WebTaskCaptureTest < Minitest::Test
@@ -77,6 +78,9 @@ class WebTaskCaptureTest < Minitest::Test
       manifest = capture.call
 
       assert_equal "captured", manifest.fetch("status")
+      assert_equal 2, manifest.fetch("schema_version")
+      assert_equal "built_in", manifest.dig("recorder", "kind")
+      assert_equal "hivebox", manifest.dig("evidence", "type")
       assert_equal 2, manifest.fetch("artifacts").length
       assert_equal 2, source_bundle.calls,
                    "source must be validated before boot and again before publication"
@@ -184,6 +188,552 @@ class WebTaskCaptureTest < Minitest::Test
       capture.define_singleton_method(:owned_source_root) { source }
       error = assert_raises(Hive::Web::TaskCapture::CaptureError) { capture.call }
       assert_match(/does not match requirement/, error.message)
+    end
+  end
+
+  def test_conventional_project_without_provider_fails_before_hivebox_recorder_construction
+    with_capture_task do |root, task_folder, source|
+      FileUtils.mkdir_p(File.join(source, "app"))
+      File.write(File.join(source, "Gemfile.lock"), "GEM\n")
+      run!("git", "-C", source, "init", "-b", "main", "--quiet")
+      run!("git", "-C", source, "config", "user.email", "test@example.com")
+      run!("git", "-C", source, "config", "user.name", "Test")
+      run!("git", "-C", source, "config", "commit.gpgsign", "false")
+      run!("git", "-C", source, "add", ".")
+      run!("git", "-C", source, "commit", "-m", "fixture", "--quiet")
+      head = run!("git", "-C", source, "rev-parse", "HEAD").strip
+      capture = Hive::Web::TaskCapture.new(task_folder: task_folder)
+      capture.define_singleton_method(:capture_requirement) do
+        { "result" => "required", "implementation_head" => head }
+      end
+      capture.define_singleton_method(:owned_source_root) { source }
+      source_bundle_calls = 0
+      browser_calls = 0
+      server_calls = 0
+      source_bundle_constructor = lambda do |**|
+        source_bundle_calls += 1
+        raise "Hivebox recorder must not be constructed"
+      end
+      capture.define_singleton_method(:browser_bundle) do |_source_root|
+        browser_calls += 1
+        raise "browser bundle must not be constructed"
+      end
+      capture.define_singleton_method(:start_server) do |**|
+        server_calls += 1
+        raise "server must not start"
+      end
+
+      error = with_replaced_singleton_method(
+        Hive::Web::SourceBundle, :new, source_bundle_constructor
+      ) do
+        assert_raises(Hive::Web::TaskCapture::CaptureError) { capture.call }
+      end
+
+      assert_match(/no supported artifact capture provider/i, error.message)
+      assert_includes error.message, "artifacts.capture.provider"
+      refute_includes error.message, "web/Gemfile"
+      refute_includes error.message, "web/Gemfile.lock"
+      assert_equal 0, source_bundle_calls
+      assert_equal 0, browser_calls
+      assert_equal 0, server_calls
+      refute File.exist?(File.join(task_folder, "media"))
+      assert_equal root, File.dirname(File.dirname(File.dirname(File.dirname(task_folder))))
+    end
+  end
+
+  def test_complete_hive_tree_selects_the_built_in_recorder_capability
+    with_capture_task do |_root, task_folder, _source|
+      hive_root = File.expand_path("../../..", __dir__)
+      capture = Hive::Web::TaskCapture.new(task_folder: task_folder)
+
+      assert capture.send(:built_in_recorder_compatible?, hive_root)
+      assert_equal :built_in, capture.send(:select_recorder, hive_root).fetch(:kind)
+    end
+  end
+
+  def test_configured_conventional_provider_publishes_valid_v2_evidence_without_hivebox
+    with_capture_task do |_root, task_folder, source|
+      FileUtils.mkdir_p([ File.join(source, "app"), File.join(source, "bin") ])
+      File.write(File.join(source, "Gemfile.lock"), "GEM\n")
+      provider_path = File.join(source, "bin", "hive-capture")
+      File.write(provider_path, <<~'RUBY')
+        #!/usr/bin/env ruby
+        require "base64"
+        require "digest"
+        require "json"
+
+        request = JSON.parse($stdin.read)
+        path = File.join(request.fetch("staging_root"), "provider.png")
+        File.binwrite(
+          path,
+          Base64.decode64(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+          )
+        )
+        puts JSON.generate(
+          "schema" => "hive-project-capture-result",
+          "schema_version" => 1,
+          "status" => "captured",
+          "artifacts" => [
+            {
+              "file" => File.basename(path),
+              "bytes" => File.size(path),
+              "sha256" => Digest::SHA256.file(path).hexdigest
+            }
+          ],
+          "evidence" => {
+            "task" => request.fetch("task"),
+            "source_root" => request.fetch("source_root"),
+            "source_sha" => request.fetch("source_sha")
+          },
+          "cleanup" => {
+            "port" => "released", "processes" => "clean", "runtime" => "cleaned"
+          },
+          "diagnostic" => nil
+        )
+      RUBY
+      FileUtils.chmod(0o755, provider_path)
+      run!("git", "-C", source, "init", "-b", "main", "--quiet")
+      run!("git", "-C", source, "config", "user.email", "test@example.com")
+      run!("git", "-C", source, "config", "user.name", "Test")
+      run!("git", "-C", source, "config", "commit.gpgsign", "false")
+      run!("git", "-C", source, "add", ".")
+      run!("git", "-C", source, "commit", "-m", "fixture", "--quiet")
+      head = run!("git", "-C", source, "rev-parse", "HEAD").strip
+      File.write(
+        File.join(File.dirname(File.dirname(File.dirname(task_folder))), "config.yml"),
+        {
+          "artifacts" => {
+            "capture" => {
+              "provider" => {
+                "name" => "rails",
+                "command" => [ "bin/hive-capture" ],
+                "timeout_sec" => 10
+              }
+            }
+          }
+        }.to_yaml
+      )
+      capture = Hive::Web::TaskCapture.new(task_folder: task_folder)
+      capture.define_singleton_method(:capture_requirement) do
+        { "result" => "required", "implementation_head" => head }
+      end
+      capture.define_singleton_method(:owned_source_root) { source }
+      source_bundle_calls = 0
+
+      manifest = with_replaced_singleton_method(
+        Hive::Web::SourceBundle, :new,
+        lambda do |**|
+          source_bundle_calls += 1
+          raise "Hivebox recorder must not be constructed"
+        end
+      ) { capture.call }
+
+      assert_equal 0, source_bundle_calls
+      assert_equal 2, manifest.fetch("schema_version")
+      assert_equal "project_provider", manifest.dig("recorder", "kind")
+      assert_equal "rails", manifest.dig("recorder", "name")
+      assert_equal task_folder.split("/").last, manifest.dig("evidence", "details", "task")
+      assert_equal File.realpath(source), manifest.dig("evidence", "details", "source_root")
+      assert_equal head, manifest.dig("evidence", "details", "source_sha")
+      assert_equal 1, manifest.fetch("artifacts").length
+      assert_empty Dir.glob(File.join(task_folder, "media", ".capture-*"))
+
+      policy = Hive::Artifacts::CapturePolicy.new(
+        task: capture.task,
+        project: "demo",
+        changed_paths: [ "app/views/demo.html.erb" ],
+        task_generation: "provider-generation",
+        base_sha: "a" * 40,
+        head_sha: head
+      )
+      policy.ensure!
+      assert policy.capture_satisfied?
+    end
+  end
+
+  def test_provider_target_mutation_is_detected_before_any_media_is_published
+    with_capture_task do |_root, task_folder, source|
+      FileUtils.mkdir_p([ File.join(source, "app"), File.join(source, "bin") ])
+      lockfile = File.join(source, "Gemfile.lock")
+      File.write(lockfile, "GEM\n")
+      provider_path = File.join(source, "bin", "mutating-capture")
+      File.write(provider_path, <<~'RUBY')
+        #!/usr/bin/env ruby
+        require "digest"
+        require "json"
+
+        request = JSON.parse($stdin.read)
+        File.open(File.join(request.fetch("source_root"), "Gemfile.lock"), "a") { |file| file.puts("MUTATED") }
+        path = File.join(request.fetch("staging_root"), "provider.png")
+        File.binwrite(path, "provider")
+        puts JSON.generate(
+          "schema" => "hive-project-capture-result",
+          "schema_version" => 1,
+          "status" => "captured",
+          "artifacts" => [
+            {
+              "file" => File.basename(path),
+              "bytes" => File.size(path),
+              "sha256" => Digest::SHA256.file(path).hexdigest
+            }
+          ],
+          "evidence" => {},
+          "cleanup" => {
+            "port" => "released", "processes" => "clean", "runtime" => "cleaned"
+          },
+          "diagnostic" => nil
+        )
+      RUBY
+      FileUtils.chmod(0o755, provider_path)
+      run!("git", "-C", source, "init", "-b", "main", "--quiet")
+      run!("git", "-C", source, "config", "user.email", "test@example.com")
+      run!("git", "-C", source, "config", "user.name", "Test")
+      run!("git", "-C", source, "config", "commit.gpgsign", "false")
+      run!("git", "-C", source, "add", ".")
+      run!("git", "-C", source, "commit", "-m", "fixture", "--quiet")
+      head = run!("git", "-C", source, "rev-parse", "HEAD").strip
+      capture = Hive::Web::TaskCapture.new(
+        task_folder: task_folder,
+        project_config: {
+          "artifacts" => {
+            "capture" => {
+              "provider" => {
+                "name" => "mutator",
+                "command" => [ "bin/mutating-capture" ],
+                "timeout_sec" => 10
+              }
+            }
+          }
+        }
+      )
+      capture.define_singleton_method(:capture_requirement) do
+        { "result" => "required", "implementation_head" => head }
+      end
+      capture.define_singleton_method(:owned_source_root) { source }
+
+      error = assert_raises(Hive::Web::TaskCapture::CaptureError) { capture.call }
+
+      assert_match(/cleanliness changed/, error.message)
+      media = File.join(task_folder, "media")
+      assert File.directory?(media)
+      assert_empty Dir.children(media)
+      refute File.exist?(File.join(media, "capture-manifest.json"))
+    end
+  end
+
+  def test_real_provider_failures_revalidate_source_and_preserve_both_errors
+    failures = {
+      "nonzero" => /failed \(exit 7\)/,
+      "timeout" => /timed out after 1s/,
+      "malformed-output" => /returned malformed JSON/,
+      "overflow" => /stdout exceeded 262144 bytes/
+    }
+    provider_body = <<~'RUBY'
+      #!/usr/bin/env ruby
+
+      mode = ARGV.fetch(0)
+      File.open("Gemfile.lock", "a") { |file| file.puts("MUTATED") }
+      case mode
+      when "nonzero"
+        warn "fixture failure"
+        exit 7
+      when "timeout"
+        sleep 5
+      when "malformed-output"
+        puts "{"
+      when "overflow"
+        STDOUT.write("x" * (300 * 1024))
+      end
+    RUBY
+
+    failures.each do |failure, provider_pattern|
+      with_capture_task do |_root, task_folder, source|
+        head = prepare_conventional_provider_source(source, provider_body: provider_body)
+        capture = provider_capture(
+          task_folder: task_folder,
+          source: source,
+          head: head,
+          provider: nil,
+          command: [ "bin/provider", failure ]
+        )
+
+        error = assert_raises(Hive::Web::TaskCapture::CaptureError, failure) { capture.call }
+
+        assert_match provider_pattern, error.message, failure
+        assert_match(/source custody also failed.*source.*changed/i, error.message, failure)
+        assert_empty Dir.children(File.join(task_folder, "media")), failure
+      end
+    end
+  end
+
+  def test_provider_ignored_path_mutation_is_detected_before_publication
+    with_capture_task do |_root, task_folder, source|
+      head = prepare_conventional_provider_source(source, ignored: "tmp/\n")
+      provider = Object.new
+      provider.define_singleton_method(:call) do |staging_root:, source_root:, **|
+        FileUtils.mkdir_p(File.join(source_root, "tmp"))
+        File.write(File.join(source_root, "tmp", "ignored.txt"), "mutation")
+        path = File.join(staging_root, "proof.png")
+        File.binwrite(path, Base64.decode64(WebTaskCaptureTest::PNG_1X1_BASE64))
+        Hive::Web::ProjectCaptureProvider::Result.new(
+          name: "fixture",
+          command: [ "bin/provider" ],
+          environment_keys: [ "PATH" ],
+          artifacts: [
+            {
+              "file" => "proof.png",
+              "bytes" => File.size(path),
+              "sha256" => Digest::SHA256.file(path).hexdigest,
+              "source_path" => path
+            }
+          ],
+          evidence: {},
+          cleanup: Hive::Web::ProjectCaptureProvider::CLEANUP,
+          diagnostic: nil,
+          started_at: Time.now.utc,
+          finished_at: Time.now.utc
+        )
+      end
+      capture = provider_capture(
+        task_folder: task_folder,
+        source: source,
+        head: head,
+        provider: provider
+      )
+
+      error = assert_raises(Hive::Web::TaskCapture::CaptureError) { capture.call }
+
+      assert_match(/source.*changed/i, error.message)
+      assert File.file?(File.join(source, "tmp", "ignored.txt")),
+             "custody detection must not hide or restore the provider mutation"
+      assert_empty Dir.children(File.join(task_folder, "media"))
+    end
+  end
+
+  def test_sparse_ignored_source_mutation_hits_the_custody_byte_bound_promptly
+    with_capture_task do |_root, task_folder, source|
+      head = prepare_conventional_provider_source(source, ignored: "tmp/\n")
+      sparse_path = File.join(source, "tmp", "sparse.bin")
+      provider = Object.new
+      provider.define_singleton_method(:call) do |source_root:, **|
+        FileUtils.mkdir_p(File.dirname(sparse_path))
+        File.open(sparse_path, "wb") do |file|
+          file.truncate((1024 * 1024 * 1024) + 1)
+        end
+        nil
+      end
+      capture = provider_capture(
+        task_folder: task_folder,
+        source: source,
+        head: head,
+        provider: provider
+      )
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+
+      error = assert_raises(Hive::Web::TaskCapture::CaptureError) { capture.call }
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
+      assert_match(/source.*custody.*1073741824-byte.*limit/i, error.message)
+      assert_operator elapsed, :<,
+                      Hive::Web::TaskCapture::PROVIDER_SOURCE_SNAPSHOT_TIMEOUT_SEC
+      assert_equal (1024 * 1024 * 1024) + 1, File.size(sparse_path)
+      assert_empty Dir.children(File.join(task_folder, "media"))
+    end
+  end
+
+  def test_provider_source_snapshot_deadline_fails_with_actionable_custody_error
+    with_capture_task do |_root, task_folder, source|
+      File.binwrite(File.join(source, "small.txt"), "small")
+      capture = Hive::Web::TaskCapture.new(task_folder: task_folder)
+      readings = [ 0, Hive::Web::TaskCapture::PROVIDER_SOURCE_SNAPSHOT_TIMEOUT_SEC ]
+      capture.define_singleton_method(:provider_custody_monotonic_now) do
+        readings.shift || readings.last
+      end
+
+      error = assert_raises(Hive::Web::TaskCapture::CaptureError) do
+        capture.send(:provider_source_snapshot!, source)
+      end
+
+      assert_match(/source custody exceeded the 30-second monotonic inventory deadline/i,
+                   error.message)
+      assert_match(/reduce the source tree/i, error.message)
+    end
+  end
+
+  def test_provider_manifest_over_the_producer_budget_is_rejected_before_publication
+    with_capture_task do |_root, task_folder, source|
+      head = prepare_conventional_provider_source(source)
+      provider = Object.new
+      provider.define_singleton_method(:call) do |staging_root:, **|
+        path = File.join(staging_root, "proof.png")
+        File.binwrite(path, Base64.decode64(WebTaskCaptureTest::PNG_1X1_BASE64))
+        Hive::Web::ProjectCaptureProvider::Result.new(
+          name: "fixture",
+          command: [ "bin/provider" ],
+          environment_keys: [ "PATH" ],
+          artifacts: [
+            {
+              "file" => "proof.png",
+              "bytes" => File.size(path),
+              "sha256" => Digest::SHA256.file(path).hexdigest,
+              "source_path" => path
+            }
+          ],
+          evidence: { "blob" => "x" * Hive::ARTIFACT_CAPTURE_MANIFEST_PRODUCER_MAX_BYTES },
+          cleanup: Hive::Web::ProjectCaptureProvider::CLEANUP,
+          diagnostic: nil,
+          started_at: Time.now.utc,
+          finished_at: Time.now.utc
+        )
+      end
+      capture = provider_capture(
+        task_folder: task_folder,
+        source: source,
+        head: head,
+        provider: provider
+      )
+
+      error = assert_raises(Hive::Web::TaskCapture::CaptureError) { capture.call }
+
+      assert_match(/manifest.*producer limit.*245760 bytes/i, error.message)
+      media = File.join(task_folder, "media")
+      refute File.exist?(File.join(media, "capture-manifest.json"))
+      assert_empty Dir.children(media)
+    end
+  end
+
+  def test_manifest_producer_budget_accepts_just_below_and_rejects_just_above
+    with_capture_task do |_root, task_folder, _source|
+      capture = Hive::Web::TaskCapture.new(task_folder: task_folder)
+      limit = Hive::ARTIFACT_CAPTURE_MANIFEST_PRODUCER_MAX_BYTES
+      manifest = { "blob" => "" }
+      manifest["blob"] = "x" * (limit - 1 - JSON.generate(manifest).bytesize - 1)
+
+      assert_equal limit - 1, JSON.generate(manifest).bytesize + 1
+      assert_equal limit - 1, capture.send(:validate_manifest_budget!, manifest)
+
+      manifest["blob"] << "xx"
+      error = assert_raises(Hive::Web::TaskCapture::CaptureError) do
+        capture.send(:validate_manifest_budget!, manifest)
+      end
+      assert_match(/producer limit of #{limit} bytes/, error.message)
+    end
+  end
+
+  def test_provider_recapture_rotates_changed_bytes_and_reuses_identical_bytes_at_the_same_head
+    with_capture_task do |_root, task_folder, source|
+      head = prepare_conventional_provider_source(source)
+      payloads = [
+        Base64.decode64(PNG_1X1_BASE64) + "first",
+        Base64.decode64(PNG_1X1_BASE64) + "second",
+        Base64.decode64(PNG_1X1_BASE64) + "second"
+      ]
+      provider = Object.new
+      provider.define_singleton_method(:call) do |staging_root:, **|
+        path = File.join(staging_root, "proof.png")
+        File.binwrite(path, payloads.shift)
+        Hive::Web::ProjectCaptureProvider::Result.new(
+          name: "fixture",
+          command: [ "bin/provider" ],
+          environment_keys: [ "PATH" ],
+          artifacts: [
+            {
+              "file" => "proof.png",
+              "bytes" => File.size(path),
+              "sha256" => Digest::SHA256.file(path).hexdigest,
+              "source_path" => path
+            }
+          ],
+          evidence: {},
+          cleanup: Hive::Web::ProjectCaptureProvider::CLEANUP,
+          diagnostic: nil,
+          started_at: Time.now.utc,
+          finished_at: Time.now.utc
+        )
+      end
+      capture = provider_capture(
+        task_folder: task_folder,
+        source: source,
+        head: head,
+        provider: provider
+      )
+
+      first = capture.call.fetch("artifacts").fetch(0).fetch("file")
+      assert File.file?(File.join(task_folder, "media", first))
+
+      second = capture.call.fetch("artifacts").fetch(0).fetch("file")
+      refute_equal first, second
+      refute File.exist?(File.join(task_folder, "media", first))
+      assert File.file?(File.join(task_folder, "media", second))
+
+      third = capture.call.fetch("artifacts").fetch(0).fetch("file")
+      assert_equal second, third
+      assert_equal(
+        [ "capture-manifest.json", second ].sort,
+        Dir.children(File.join(task_folder, "media")).sort
+      )
+      assert_empty payloads
+    end
+  end
+
+  def test_provider_recapture_replaces_non_object_retained_manifests
+    invalid_manifests = {
+      "array" => [],
+      "null" => nil,
+      "scalar recorder" => {
+        "schema" => "hive-artifact-capture",
+        "schema_version" => 2,
+        "recorder" => "not-an-object",
+        "artifacts" => []
+      }
+    }
+
+    invalid_manifests.each do |shape, retained_manifest|
+      with_capture_task do |_root, task_folder, source|
+        head = prepare_conventional_provider_source(source)
+        provider = Object.new
+        provider.define_singleton_method(:call) do |staging_root:, **|
+          path = File.join(staging_root, "proof.png")
+          File.binwrite(path, Base64.decode64(WebTaskCaptureTest::PNG_1X1_BASE64))
+          Hive::Web::ProjectCaptureProvider::Result.new(
+            name: "fixture",
+            command: [ "bin/provider" ],
+            environment_keys: [ "PATH" ],
+            artifacts: [
+              {
+                "file" => "proof.png",
+                "bytes" => File.size(path),
+                "sha256" => Digest::SHA256.file(path).hexdigest,
+                "source_path" => path
+              }
+            ],
+            evidence: {},
+            cleanup: Hive::Web::ProjectCaptureProvider::CLEANUP,
+            diagnostic: nil,
+            started_at: Time.now.utc,
+            finished_at: Time.now.utc
+          )
+        end
+        media = File.join(task_folder, "media")
+        FileUtils.mkdir_p(media)
+        File.binwrite(
+          File.join(media, "capture-manifest.json"),
+          JSON.generate(retained_manifest)
+        )
+        capture = provider_capture(
+          task_folder: task_folder,
+          source: source,
+          head: head,
+          provider: provider
+        )
+
+        manifest = capture.call
+
+        assert_equal 2, manifest.fetch("schema_version"), shape
+        assert_equal "project_provider", manifest.dig("recorder", "kind"), shape
+        assert_equal 1, manifest.fetch("artifacts").length, shape
+      end
     end
   end
 
@@ -656,6 +1206,50 @@ class WebTaskCaptureTest < Minitest::Test
   end
 
   private
+
+  PNG_1X1_BASE64 =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=".freeze
+
+  def prepare_conventional_provider_source(source, ignored: nil,
+                                           provider_body: "#!/usr/bin/env ruby\n")
+    FileUtils.mkdir_p(File.join(source, "bin"))
+    File.write(File.join(source, "Gemfile.lock"), "GEM\n")
+    File.write(File.join(source, ".gitignore"), ignored) if ignored
+    provider_path = File.join(source, "bin", "provider")
+    File.write(provider_path, provider_body)
+    FileUtils.chmod(0o755, provider_path)
+    run!("git", "-C", source, "init", "-b", "main", "--quiet")
+    run!("git", "-C", source, "config", "user.email", "test@example.com")
+    run!("git", "-C", source, "config", "user.name", "Test")
+    run!("git", "-C", source, "config", "commit.gpgsign", "false")
+    run!("git", "-C", source, "add", ".")
+    run!("git", "-C", source, "commit", "-m", "fixture", "--quiet")
+    run!("git", "-C", source, "rev-parse", "HEAD").strip
+  end
+
+  def provider_capture(task_folder:, source:, head:, provider:, command: [ "bin/provider" ])
+    options = {
+      task_folder: task_folder,
+      project_config: {
+        "artifacts" => {
+          "capture" => {
+            "provider" => {
+              "name" => "fixture",
+              "command" => command,
+              "timeout_sec" => 1
+            }
+          }
+        }
+      }
+    }
+    options[:provider_factory] = ->(**) { provider } if provider
+    Hive::Web::TaskCapture.new(**options).tap do |capture|
+      capture.define_singleton_method(:capture_requirement) do
+        { "result" => "required", "implementation_head" => head }
+      end
+      capture.define_singleton_method(:owned_source_root) { source }
+    end
+  end
 
   def with_capture_task
     Dir.mktmpdir("hive-task-capture") do |root|

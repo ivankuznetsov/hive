@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-artifact-capture.v2.json",
+  "title": "Hive retained local artifact capture (v2)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schema_version", "status", "task", "source_sha", "recorder",
+    "environment_keys", "started_at", "finished_at", "artifacts", "cleanup",
+    "diagnostic", "evidence"
+  ],
+  "properties": {
+    "schema": { "const": "hive-artifact-capture" },
+    "schema_version": { "const": 2 },
+    "status": { "enum": ["captured", "failed"] },
+    "task": { "type": "string", "minLength": 1 },
+    "source_sha": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+    "recorder": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "name", "command"],
+      "properties": {
+        "kind": { "enum": ["built_in", "project_provider"] },
+        "name": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$" },
+        "command": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": { "type": "string", "minLength": 1, "maxLength": 4096 }
+        }
+      }
+    },
+    "environment_keys": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "started_at": { "type": "string", "format": "date-time" },
+    "finished_at": { "type": "string", "format": "date-time" },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["file", "bytes", "sha256"],
+        "properties": {
+          "file": { "type": "string", "minLength": 1 },
+          "bytes": { "type": "integer", "minimum": 1 },
+          "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        }
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["port", "processes", "runtime"],
+      "properties": {
+        "port": { "const": "released" },
+        "processes": { "const": "clean" },
+        "runtime": { "const": "cleaned" }
+      }
+    },
+    "diagnostic": { "type": ["string", "null"], "maxLength": 16384 },
+    "evidence": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type", "lock_digests", "cache_key", "fixture_ids", "viewport",
+            "accessibility_assertions"
+          ],
+          "properties": {
+            "type": { "const": "hivebox" },
+            "lock_digests": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["root", "web"],
+              "properties": {
+                "root": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                "web": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+              }
+            },
+            "cache_key": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "fixture_ids": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": { "type": "string", "minLength": 1 }
+            },
+            "viewport": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["width", "height"],
+              "properties": {
+                "width": { "type": "integer", "minimum": 1 },
+                "height": { "type": "integer", "minimum": 1 }
+              }
+            },
+            "accessibility_assertions": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "details"],
+          "properties": {
+            "type": { "const": "project_provider" },
+            "details": { "type": "object" }
+          }
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "recorder": { "properties": { "kind": { "const": "built_in" } } } }
+      },
+      "then": {
+        "properties": { "evidence": { "properties": { "type": { "const": "hivebox" } } } }
+      }
+    },
+    {
+      "if": {
+        "properties": { "recorder": { "properties": { "kind": { "const": "project_provider" } } } }
+      },
+      "then": {
+        "properties": { "evidence": { "properties": { "type": { "const": "project_provider" } } } }
+      }
+    }
+  ]
+}

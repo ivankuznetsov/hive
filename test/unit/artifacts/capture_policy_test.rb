@@ -145,6 +145,121 @@ class ArtifactsCapturePolicyTest < Minitest::Test
     end
   end
 
+  def test_retained_v1_capture_manifest_remains_satisfactory_after_v2_migration
+    with_task do |task|
+      policy = Hive::Artifacts::CapturePolicy.new(
+        task: task, project: "demo", changed_paths: [ "web/app.css" ],
+        task_generation: "g", base_sha: "a" * 40, head_sha: "b" * 40
+      )
+      policy.ensure!
+      media = File.join(task.folder, "media")
+      FileUtils.mkdir_p(media)
+      image = File.join(media, "legacy.png")
+      File.binwrite(image, "legacy-png")
+      manifest = {
+        "schema" => "hive-artifact-capture",
+        "schema_version" => 1,
+        "status" => "captured",
+        "task" => task.slug,
+        "source_sha" => "b" * 40,
+        "lock_digests" => { "root" => "c" * 64, "web" => "d" * 64 },
+        "cache_key" => "e" * 64,
+        "command" => [ "hive", "web", "capture" ],
+        "environment_keys" => Hive::Web::CaptureRuntime::DISCLOSED_ENV_KEYS.sort,
+        "fixture_ids" => [ "legacy-fixture" ],
+        "started_at" => "2026-07-26T03:00:00Z",
+        "finished_at" => "2026-07-26T03:01:00Z",
+        "viewport" => { "width" => 1280, "height" => 800 },
+        "accessibility_assertions" => [ "heading visible" ],
+        "artifacts" => [
+          {
+            "file" => File.basename(image),
+            "bytes" => File.size(image),
+            "sha256" => Digest::SHA256.file(image).hexdigest
+          }
+        ],
+        "cleanup" => {
+          "port" => "released", "processes" => "clean", "runtime" => "cleaned"
+        },
+        "diagnostic" => nil
+      }
+      File.write(File.join(media, "capture-manifest.json"), JSON.generate(manifest))
+
+      assert policy.capture_satisfied?
+    end
+  end
+
+  def test_capture_manifest_consumer_ceiling_accepts_just_below_and_rejects_just_above
+    with_task do |task|
+      policy = Hive::Artifacts::CapturePolicy.new(
+        task: task, project: "demo", changed_paths: [ "web/app.css" ],
+        task_generation: "g", base_sha: "a" * 40, head_sha: "b" * 40
+      )
+      policy.ensure!
+      media = File.join(task.folder, "media")
+      FileUtils.mkdir_p(media)
+      image = File.join(media, "provider.png")
+      File.binwrite(image, "png")
+      runtime = Hive::Web::CaptureRuntime.new(
+        source_root: "/source", runtime_root: File.join(task.folder, "runtime"),
+        environment: {}, lifecycle_token: "token-123"
+      )
+      manifest = runtime.capture_manifest(
+        task: task.slug,
+        source_sha: "b" * 40,
+        recorder: {
+          "kind" => "project_provider", "name" => "fixture",
+          "command" => [ "bin/provider" ]
+        },
+        environment_keys: [ "PATH" ],
+        evidence: { "type" => "project_provider", "details" => {} },
+        media_paths: [ image ],
+        status: "captured",
+        cleanup: {
+          "port" => "released", "processes" => "clean", "runtime" => "cleaned"
+        }
+      )
+      path = File.join(media, "capture-manifest.json")
+      encoded = JSON.generate(manifest)
+      limit = Hive::ARTIFACT_CAPTURE_MANIFEST_MAX_BYTES
+
+      File.binwrite(path, encoded + (" " * (limit - 1 - encoded.bytesize)))
+      assert_equal limit - 1, File.size(path)
+      assert policy.capture_satisfied?
+
+      File.binwrite(path, encoded + (" " * (limit + 1 - encoded.bytesize)))
+      assert_equal limit + 1, File.size(path)
+      refute policy.capture_satisfied?
+    end
+  end
+
+  def test_non_object_capture_manifests_fail_closed
+    with_task do |task|
+      policy = Hive::Artifacts::CapturePolicy.new(
+        task: task, project: "demo", changed_paths: [ "web/app.css" ],
+        task_generation: "g", base_sha: "a" * 40, head_sha: "b" * 40
+      )
+      policy.ensure!
+      media = File.join(task.folder, "media")
+      FileUtils.mkdir_p(media)
+      path = File.join(media, "capture-manifest.json")
+      invalid_manifests = {
+        "array" => [],
+        "null" => nil,
+        "scalar recorder" => {
+          "schema" => "hive-artifact-capture",
+          "schema_version" => 2,
+          "recorder" => "not-an-object"
+        }
+      }
+
+      invalid_manifests.each do |shape, manifest|
+        File.binwrite(path, JSON.generate(manifest))
+        refute policy.capture_satisfied?, "#{shape} manifest must fail closed"
+      end
+    end
+  end
+
   def test_for_task_collects_committed_staged_unstaged_and_untracked_paths
     with_task do |task|
       base = "a" * 40

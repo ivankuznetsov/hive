@@ -22,7 +22,7 @@ module Hive
       SCHEMA = "hive-web-capture-runtime".freeze
       SCHEMA_VERSION = 1
       ARTIFACT_SCHEMA = "hive-artifact-capture".freeze
-      ARTIFACT_SCHEMA_VERSION = 1
+      ARTIFACT_SCHEMA_VERSION = 2
       BIND = "127.0.0.1".freeze
       READY_TIMEOUT_SEC = 60
       CLEANUP_TIMEOUT_SEC = 5
@@ -195,45 +195,64 @@ module Hive
         raise OwnershipError, "refusing stale capture cleanup: lifecycle receipt is invalid"
       end
 
-      def capture_manifest(task:, source_sha:, lock_digests:, cache_key:, command:,
-                           fixture_ids:, media_paths:, status:, cleanup:,
+      def capture_manifest(task:, source_sha:, status:, cleanup:,
+                           recorder: nil, environment_keys: nil, evidence: nil,
+                           media_paths: [], artifacts: nil,
+                           lock_digests: nil, cache_key: nil, command: nil,
+                           fixture_ids: [],
                            viewport: { "width" => 1280, "height" => 800 },
                            accessibility_assertions: [], diagnostic: nil,
                            started_at: nil, finished_at: nil)
         now = @clock.call
         started_at ||= now
         finished_at ||= now
-        artifacts = Array(media_paths).sort_by { |path| File.basename(path) }.map do |path|
+        artifact_records = artifacts || Array(media_paths).sort_by { |path| File.basename(path) }.map do |path|
           {
             "file" => File.basename(path),
             "bytes" => File.size(path),
             "sha256" => ::Digest::SHA256.file(path).hexdigest
           }
         end
+        recorder ||= {
+          "kind" => "built_in",
+          "name" => "hivebox",
+          "command" => Array(command).map(&:to_s)
+        }
+        evidence ||= {
+          "type" => "hivebox",
+          "lock_digests" => lock_digests.to_h.sort.to_h,
+          "cache_key" => cache_key.to_s,
+          "fixture_ids" => Array(fixture_ids).map(&:to_s).sort,
+          "viewport" => viewport.to_h.sort.to_h,
+          "accessibility_assertions" => Array(accessibility_assertions).map(&:to_s).sort
+        }
         {
           "schema" => ARTIFACT_SCHEMA,
           "schema_version" => ARTIFACT_SCHEMA_VERSION,
           "status" => status.to_s,
           "task" => task.to_s,
           "source_sha" => source_sha.to_s,
-          "lock_digests" => lock_digests.to_h.sort.to_h,
-          "cache_key" => cache_key.to_s,
-          "command" => Array(command).map(&:to_s),
-          "environment_keys" => DISCLOSED_ENV_KEYS.sort,
-          "fixture_ids" => Array(fixture_ids).map(&:to_s).sort,
+          "recorder" => recorder.to_h,
+          "environment_keys" => Array(environment_keys || DISCLOSED_ENV_KEYS).map(&:to_s).sort,
           "started_at" => iso_time(started_at),
           "finished_at" => iso_time(finished_at),
-          "viewport" => viewport.to_h.sort.to_h,
-          "accessibility_assertions" => Array(accessibility_assertions).map(&:to_s).sort,
-          "artifacts" => artifacts,
+          "artifacts" => Array(artifact_records).map do |artifact|
+            artifact.to_h.slice("file", "bytes", "sha256")
+          end.sort_by { |artifact| artifact.fetch("file") },
           "cleanup" => cleanup.to_h.sort.to_h,
-          "diagnostic" => redacted(diagnostic)
+          "diagnostic" => redacted(diagnostic),
+          "evidence" => evidence.to_h
         }
       end
 
       def publish_manifest!(task_folder:, manifest:)
         media_root = File.join(File.expand_path(task_folder), "media")
         FileUtils.mkdir_p(media_root, mode: 0o700)
+        bytes = JSON.generate(manifest).bytesize + 1
+        if bytes > Hive::ARTIFACT_CAPTURE_MANIFEST_MAX_BYTES
+          raise OwnershipError,
+                "capture manifest exceeds the shared #{Hive::ARTIFACT_CAPTURE_MANIFEST_MAX_BYTES}-byte consumer ceiling"
+        end
         write_json_atomic(
           File.join(media_root, "capture-manifest.json"),
           manifest

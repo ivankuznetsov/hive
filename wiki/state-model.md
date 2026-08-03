@@ -1125,11 +1125,22 @@ user-visible paths or an explicit visual-proof request as `required`; other
 work is `not_applicable`. Agents cannot demote the result. A demotion records a
 confirmed operator, rationale, timestamp, and the same task generation.
 
-When required, `media/capture-manifest.json` is
-`hive-artifact-capture` v1 and must identify the same task and implementation
-head with at least one retained artifact. A `COMPLETE` marker without matching
-capture evidence is not terminal truth: the artifacts runner rewrites it to
+When required, new `media/capture-manifest.json` receipts use the
+provider-neutral `hive-artifact-capture` v2 contract and must identify the same
+task and implementation head with at least one retained artifact. Retained v1
+receipts are still validated against their original schema and built-in
+evidence rules. A `COMPLETE` marker without matching v1 or v2 capture evidence
+is not terminal truth: the artifacts runner rewrites it to
 `ERROR reason=required_capture_missing`.
+JSON arrays, `null`, and receipts with non-object recorder envelopes are invalid
+evidence rather than exceptions. Provider recapture replaces those malformed
+receipts without treating any referenced media as task-owned cleanup input.
+
+The v2 producer ceiling is 240 KiB, leaving headroom below the 256 KiB ceiling
+shared by policy and Hive Web. Project-provider artifact names bind both source
+and content digests; replacement media becomes authoritative only when the new
+manifest is published, after which superseded task-owned provider files may be
+removed.
 
 See [[stages/index]] for one page per stage.
 

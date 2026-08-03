@@ -61,6 +61,9 @@ class WebCaptureRuntimeTest < Minitest::Test
       )
 
       assert_equal JSON.generate(first), JSON.generate(second)
+      assert_equal 2, first.fetch("schema_version")
+      assert_equal "built_in", first.dig("recorder", "kind")
+      assert_equal "hivebox", first.dig("evidence", "type")
       assert_equal %w[a.png b.png], first.fetch("artifacts").map { |item| item.fetch("file") }
       assert first.fetch("artifacts").all? { |item| item.fetch("sha256").match?(/\A[0-9a-f]{64}\z/) }
     end

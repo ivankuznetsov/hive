@@ -173,19 +173,28 @@ than component-owned state. Both the Agent ABI and Artifact Firewall use it for
 bounded diagnostics, while the firewall also accepts an injected redactor.
 
 `HiveLiveAgentProof::WorkflowCreator::Values` is a packaging-owned leaf
-candidate. It captures the core operations it needs at load, imports exact
+candidate. It captures the core operations it needs at load and seals each
+bound or unbound operation behind an object-local invocation alias before the
+component is frozen, so later replacement of generic `call` or `bind_call`
+dispatch cannot redirect the importer. It imports exact
 JSON-shaped Ruby values into fresh recursively frozen containers and strings,
 rejects cycles, type subclasses, ambiguous binary encodings, normalized-key
 collisions, non-finite numbers, impossible direct hash cardinality, and
 resource overruns, and emits sorted pretty UTF-8 JSON bytes with one trailing
-newline. `Values.capture` is the sole ordinary `Snapshot` factory: alternate
-`Data` constructors and copy/update APIs are non-public. Collision admission
+newline. Snapshot allocation and `Data` initialization are captured
+separately, scalar canonical tokens come from a sealed JSON generator leaf,
+and rejected values expose one cause-free typed error. `Values.capture` is the
+sole ordinary `Snapshot` factory: alternate constructors and copy/update APIs
+are non-public, and snapshots reject Marshal transport. Collision admission
 uses a bounded linear index, while `WorkflowCreator::TextSafety` records
 overlapping exact-secret and token matches into one fixed-size difference mask
-before emitting merged UTF-8 redactions. Exact-secret searches use byte copies
-so multibyte overlaps cannot split a character boundary; complete and
-truncated PEM envelopes redact through their body, and relative paths reject
-root-expanding, option-like, and control-byte forms.
+before emitting merged UTF-8 redactions. Exact-secret searches deduplicate
+equal byte needles before scanning, retain every original finding label, and
+use byte copies so multibyte overlaps cannot split a character boundary; complete and
+truncated PEM envelopes, including encrypted PKCS#8 keys, redact through their
+body, and relative paths reject root-expanding, option-like, and control-byte
+forms. Text projections use the same sealed-operation discipline and normalize
+their public rejection surface to a cause-free typed error.
 The boundary owns no creator vocabulary or schema, retained evidence,
 mutation, recovery, process, credential, provider, or live behavior. Pre-load
 core mutation is explicitly outside this same-process boundary; captured

@@ -1,4 +1,5 @@
 require "test_helper"
+require "bundler"
 require "json"
 require "open3"
 require "rbconfig"
@@ -10,6 +11,8 @@ class WorkflowCreatorValuesTest < Minitest::Test
   ROOT = File.expand_path("../../..", __dir__)
   Values = HiveLiveAgentProof::WorkflowCreator::Values
   TextSafety = HiveLiveAgentProof::WorkflowCreator::TextSafety
+  POISONED_CHILD_ENV = %w[HIVE_COVERAGE HIVE_COVERAGE_ROOT HIVE_COVERAGE_RUN_ID RUBYOPT]
+    .to_h { |name| [ name, nil ] }.freeze
   DECISION_NODES = %i[
     if unless elsif if_mod unless_mod ifop when in rescue rescue_mod
     while until for while_mod until_mod
@@ -43,6 +46,15 @@ class WorkflowCreatorValuesTest < Minitest::Test
     assert_raises(NoMethodError) { type[value: [], canonical_bytes: +"mutable"] }
     assert_raises(NoMethodError) { type.allocate }
     assert_raises(NoMethodError) { snapshot.with(value: []) }
+    assert_raises(NameError) { Values::CLASS_ALLOCATE }
+    assert_raises(NameError) { Values::DATA_INITIALIZE }
+    assert_raises(NameError) { Values::STRING_INITIALIZE }
+    assert_raises(NameError) { TextSafety::CLASS_ALLOCATE }
+    assert_raises(NameError) { TextSafety::ARRAY_INITIALIZE }
+    assert_raises(NameError) { TextSafety::STRING_INITIALIZE }
+    assert_raises(TypeError) { Marshal.dump(snapshot) }
+    assert Values.frozen?
+    assert TextSafety.frozen?
   end
 
   def test_ascii_only_canonical_bytes_are_utf8_and_can_be_captured_again
@@ -187,7 +199,7 @@ class WorkflowCreatorValuesTest < Minitest::Test
       captured = HiveLiveAgentProof::WorkflowCreator::Values.capture({ "b" => ["value"], "a" => 1 })
       STDOUT.write(captured.canonical_bytes)
     RUBY
-    out, err, status = Open3.capture3(RbConfig.ruby, "-e", script, values_path)
+    out, err, status = poisoned_capture3(script, values_path)
 
     assert status.success?, err
     assert_equal "{\n  \"a\": 1,\n  \"b\": [\n    \"value\"\n  ]\n}\n", out
@@ -227,7 +239,7 @@ class WorkflowCreatorValuesTest < Minitest::Test
       io_write.bind_call(STDOUT, redacted)
       io_write.bind_call(STDOUT, initialized.canonical_bytes)
     RUBY
-    out, err, status = Open3.capture3(RbConfig.ruby, "-e", script, values_path)
+    out, err, status = poisoned_capture3(script, values_path)
 
     assert status.success?, err
     canonical = <<~JSON
@@ -240,6 +252,71 @@ class WorkflowCreatorValuesTest < Minitest::Test
       }
     JSON
     assert_equal canonical + "value=[REDACTED]" + canonical, out
+  end
+
+  def test_each_captured_invocation_resists_post_load_invocation_replacement
+    values_path = File.expand_path("../../../packaging/live_agent_skills/workflow_creator_values", __dir__)
+    script = <<~'RUBY'
+      require ARGV.fetch(0)
+      writer = IO.instance_method(:write)
+      writer.singleton_class.send(:alias_method, :invoke, :bind_call)
+      writer.freeze
+      UnboundMethod.class_eval { define_method(:bind_call) { |*| raise "intercepted UnboundMethod#bind_call" } }
+      Method.class_eval { define_method(:call) { |*| raise "intercepted Method#call" } }
+      values = HiveLiveAgentProof::WorkflowCreator::Values
+      safety = HiveLiveAgentProof::WorkflowCreator::TextSafety
+      captured = values.capture({ "key" => "sk-ant-abcdefghijklmnopqrstuvwxyz" })
+      redacted = safety.redact(captured.value.fetch("key"), exact_secrets: values.capture([]).value)
+      writer.invoke(STDOUT, captured.canonical_bytes)
+      writer.invoke(STDOUT, redacted)
+    RUBY
+    out, err, status = poisoned_capture3(script, values_path)
+
+    assert status.success?, err
+    assert_equal "{\n  \"key\": \"sk-ant-abcdefghijklmnopqrstuvwxyz\"\n}\n[REDACTED]", out
+  end
+
+  def test_captured_leaf_operations_resist_composite_core_replacement
+    values_path = File.expand_path("../../../packaging/live_agent_skills/workflow_creator_values", __dir__)
+    script = <<~'RUBY'
+      require ARGV.fetch(0)
+      writer = IO.instance_method(:write)
+      writer.singleton_class.send(:alias_method, :invoke, :bind_call)
+      writer.freeze
+      if ARGV.fetch(1) == "noop"
+        Data.class_eval { define_method(:initialize) { |*| nil } }
+      else
+        Data.class_eval { define_method(:initialize) { |*| raise "intercepted Data#initialize" } }
+      end
+      JSON::State.define_singleton_method(:_generate_no_fallback) { |*| "\"forged\"" }
+      Float.define_singleton_method(:===) { |*| raise "intercepted Float.===" }
+      Integer.class_eval { define_method(:<=>) { |*| raise "intercepted Integer#<=>" } }
+      values = HiveLiveAgentProof::WorkflowCreator::Values
+      safety = HiveLiveAgentProof::WorkflowCreator::TextSafety
+      captured = values.capture({ "float" => 1.5, "string" => "safe" })
+      writer.invoke(STDOUT, captured.canonical_bytes)
+      writer.invoke(STDOUT, safety.text(captured.value.fetch("string"), limit: 4))
+      writer.invoke(STDOUT, safety.redact(values.capture("secret").value,
+                                          exact_secrets: values.capture(["secret"]).value))
+    RUBY
+    expected = "{\n  \"float\": 1.5,\n  \"string\": \"safe\"\n}\nsafe[REDACTED]"
+
+    %w[noop raise].each do |mode|
+      out, err, status = poisoned_capture3(script, values_path, mode)
+      assert status.success?, "#{mode}: #{err}"
+      assert_equal expected, out, mode
+    end
+  end
+
+  def test_capture_errors_suppress_secret_bearing_causes
+    sentinel = "u1a1v-rejected-secret"
+    invalid = "#{sentinel}\xFF".dup.force_encoding(Encoding::UTF_8)
+
+    error = assert_raises(Values::Error) { Values.capture(invalid) }
+
+    assert_equal "workflow-creator value cannot be captured", error.message
+    assert_nil error.cause
+    refute_includes error.full_message, sentinel
   end
 
   def test_encoding_normalization_collision_and_numeric_limits_fail_closed
@@ -304,6 +381,8 @@ class WorkflowCreatorValuesTest < Minitest::Test
   def test_text_safety_projects_only_captured_values
     captured = Values.capture("prefix secret-token suffix")
     secret = Values.capture([ "secret-token" ])
+    safe = Values.capture("safe report")
+    no_secrets = Values.capture([])
 
     assert_equal "prefix", TextSafety.text(captured.value, limit: 6)
     assert TextSafety.safe_relative_path?(Values.capture("dir/file.json").value)
@@ -314,6 +393,50 @@ class WorkflowCreatorValuesTest < Minitest::Test
     unicode = Values.capture("é secret-token suffix").value
     assert_equal "é [REDACTED] suffix",
                  TextSafety.redact(unicode, exact_secrets: secret.value, limit: 1_000)
+    assert_equal "safe report", TextSafety.redact(safe.value, exact_secrets: no_secrets.value)
+  end
+
+  def test_text_safety_normalizes_its_four_public_error_surfaces
+    value = Values.capture("safe").value
+    non_string = Values.capture(1).value
+    non_string_secrets = Values.capture([ 1 ]).value
+    projections = {
+      text: -> { TextSafety.text(non_string) },
+      path_predicate: -> { TextSafety.safe_relative_path?(non_string) },
+      secret_findings: -> { TextSafety.secret_findings(value, exact_secrets: non_string_secrets) },
+      redact: -> { TextSafety.redact(value, exact_secrets: Values.capture([]).value, limit: "invalid") }
+    }
+
+    projections.each do |name, projection|
+      error = assert_raises(TextSafety::Error) { projection.call }
+      assert_equal "workflow-creator text cannot be projected", error.message, name
+      assert_nil error.cause, name
+    end
+    assert TextSafety.safe_relative_path?(value)
+    refute TextSafety.safe_relative_path?(Values.capture("../unsafe").value)
+  end
+
+  def test_text_safety_normalizes_encoding_errors_across_all_public_projections
+    incompatible = "safe".encode(Encoding::UTF_16LE)
+    no_secrets = Values.capture([]).value
+    projections = {
+      text: -> { TextSafety.text(incompatible) },
+      path_predicate: -> { TextSafety.safe_relative_path?(incompatible) },
+      secret_findings: -> { TextSafety.secret_findings(incompatible, exact_secrets: no_secrets) },
+      redact: -> { TextSafety.redact(incompatible, exact_secrets: no_secrets) }
+    }
+    errors = projections.transform_values do |projection|
+      projection.call
+      nil
+    rescue StandardError => error
+      error
+    end
+
+    assert_equal projections.keys.to_h { |name| [ name, TextSafety::Error ] }, errors.transform_values(&:class)
+    errors.each do |name, error|
+      assert_equal "workflow-creator text cannot be projected", error.message, name
+      assert_nil error.cause, name
+    end
   end
 
   def test_text_and_path_limits_are_utf8_safe_and_separator_bounded
@@ -362,6 +485,27 @@ class WorkflowCreatorValuesTest < Minitest::Test
     assert expanded.valid_encoding?
   end
 
+  def test_duplicate_exact_secrets_scan_each_unique_needle_once
+    value = Values.capture("a" * 4_096).value
+    one_secret = Values.capture([ "a" * 2_048 ]).value
+    duplicate_secrets = Values.capture(Array.new(64, "a" * 2_048)).value
+    measurements = [ one_secret, duplicate_secrets ].map do |exact_secrets|
+      calls = 0
+      findings = nil
+      trace = TracePoint.new(:c_call) do |event|
+        calls += 1 if event.defined_class == String && event.method_id == :byteindex
+      end
+      trace.enable { findings = TextSafety.secret_findings(value, exact_secrets: exact_secrets) }
+      [ calls, findings ]
+    end
+
+    assert_equal measurements.first.first, measurements.last.first,
+                 "exact-secret byte searches must scale with unique needles"
+    assert_equal 64, measurements.last.last.length
+    assert_equal "exact-secret:0", measurements.last.last.first
+    assert_equal "exact-secret:63", measurements.last.last.last
+  end
+
   def test_supported_token_patterns_detect_and_redact_to_utf8
     tokens = {
       "pattern:openai" => [ "sk-#{"a" * 20}", "sk-proj-#{"b" * 20}" ],
@@ -382,7 +526,7 @@ class WorkflowCreatorValuesTest < Minitest::Test
   end
 
   def test_private_key_patterns_redact_complete_and_truncated_envelopes
-    envelopes = [ "PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY", "OPENSSH PRIVATE KEY",
+    envelopes = [ "PRIVATE KEY", "ENCRYPTED PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY", "OPENSSH PRIVATE KEY",
                   "DSA PRIVATE KEY", "PGP PRIVATE KEY BLOCK" ]
     no_exact_secrets = Values.capture([]).value
 
@@ -455,7 +599,29 @@ class WorkflowCreatorValuesTest < Minitest::Test
     end
   end
 
+  def test_poisoned_children_drop_coverage_and_ruby_startup_instrumentation
+    inherited = {
+      "HIVE_COVERAGE" => "1", "HIVE_COVERAGE_ROOT" => "/sensitive/root",
+      "HIVE_COVERAGE_RUN_ID" => "sensitive-run", "RUBYOPT" => "-W0"
+    }
+    script = <<~'RUBY'
+      forbidden = %w[HIVE_COVERAGE HIVE_COVERAGE_ROOT HIVE_COVERAGE_RUN_ID RUBYOPT]
+      STDOUT.write(forbidden.filter_map { |name| "#{name}=#{ENV[name]}" if ENV.key?(name) }.join("\n"))
+    RUBY
+
+    out, err, status = poisoned_capture3(script, child_env: inherited)
+
+    assert status.success?, err
+    assert_equal "", out
+  end
+
   private
+
+  def poisoned_capture3(script, *arguments, child_env: {})
+    Bundler.with_unbundled_env do
+      Open3.capture3(child_env.merge(POISONED_CHILD_ENV), RbConfig.ruby, "-e", script, *arguments)
+    end
+  end
 
   def assert_deeply_frozen(value)
     assert value.frozen?

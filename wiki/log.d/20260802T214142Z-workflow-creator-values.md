@@ -7,14 +7,25 @@
 - Added bounded text, relative-path, exact-secret, and token-pattern
   projections over snapshot-owned values; collision checks are linear and
   overlapping redactions use one fixed-size difference mask instead of
-  rescanning or filling every matched span. Multibyte exact-secret overlaps are
-  searched through byte-semantic copies; complete and truncated PEM bodies are
-  fully redacted, and unsafe tilde, option-like, and control-byte paths fail.
+  filling every matched span. Equal exact-secret byte needles are scanned once
+  while retaining every original finding label; multibyte overlaps use
+  byte-semantic copies. Complete and truncated PEM bodies are fully redacted,
+  and unsafe tilde, option-like, and control-byte paths fail.
 - Added deterministic canonical-property, direct/module/refinement dispatch,
   post-load core replacement, exact resource boundary, and high-frequency
   secret proofs. Impossible direct Hash cardinality now fails before any key
   encoding, ambiguous `ASCII-8BIT` input fails closed, and captured allocation
   plus initialization resists post-load constructor replacement.
+- Sealed every captured bound and unbound operation behind its own frozen
+  invocation alias, captured `Data` initialization and the JSON scalar
+  generator as leaf operations, made construction handles private, and denied
+  Snapshot Marshal transport. Rejections now suppress secret-bearing causes,
+  TextSafety normalizes its four public error surfaces, and encrypted PKCS#8
+  private-key envelopes are covered alongside the existing PEM forms.
+- Isolated adversarial child processes from inherited coverage and Ruby startup
+  instrumentation. Post-load operation poisoning now proves the product path
+  without letting the coverage reporter execute through deliberately replaced
+  core methods during child teardown.
 - Registered the zero-consumer U1a1v staged prerequisite with its single
   `U1a1c` removal fence and candidate clean-load proof. Catalog validation now
   permits zero consumers only for such a fenced candidate, while focused graph

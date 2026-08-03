@@ -65,4 +65,29 @@ class ProjectTest < ActiveSupport::TestCase
     assert_equal 1, created.size
     assert_includes created.sole.join("idea.md").read, "Model the operator's idea"
   end
+
+  test "normalizes only idea-capture IO failures and preserves their cause" do
+    project = Project.new("name" => "alpha")
+    io_error = IOError.new("absolute/path/must/not/reach/the/browser")
+    command = Object.new
+    command.define_singleton_method(:call!) { raise io_error }
+
+    error = with_replaced_singleton_method(Hive::Commands::New, :new, ->(*) { command }) do
+      assert_raises(Project::IdeaCaptureError) { project.add_idea!("Retry me") }
+    end
+
+    assert_same io_error, error.cause
+    assert_equal IOError, error.cause.class
+    refute_includes error.message, io_error.message
+  end
+
+  test "does not misclassify programmer errors as idea-capture IO failures" do
+    project = Project.new("name" => "alpha")
+    command = Object.new
+    command.define_singleton_method(:call!) { raise NoMethodError, "broken adapter" }
+
+    with_replaced_singleton_method(Hive::Commands::New, :new, ->(*) { command }) do
+      assert_raises(NoMethodError) { project.add_idea!("Expose the defect") }
+    end
+  end
 end

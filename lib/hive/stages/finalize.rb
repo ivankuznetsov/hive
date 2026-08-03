@@ -35,6 +35,15 @@ module Hive
         pr_url, pr_error = pr_url_or_error(task)
         return pr_error if pr_error
 
+        # pr.md crosses an agent/user writable stage boundary. Resolve its URL
+        # through a repository-scoped PR-number lookup before any URL-bound
+        # scan or lifecycle lookup. Exact head validation still runs after
+        # verify_state! publishes legitimate review/fix commits.
+        pr_url, reference_error = validate_pr_reference!(
+          task, worktree_path, pr_url, cfg
+        )
+        return reference_error if reference_error
+
         # Fail closed before any agent or GitHub mutation. A prior
         # secret_in_pr_body / fetch failure retry must prove both the local
         # source and current remote body are clean before it can refresh the
@@ -110,6 +119,11 @@ module Hive
 
         validation = validate_complete_marker(task, marker, pr_url)
         return validation if validation
+
+        identity_result = refresh_pr_identity!(
+          task, worktree_path, pr_url, cfg
+        )
+        return identity_result if identity_result
 
         # Scan-before-ready: the runner OWNS the `gh pr ready` call so
         # the secret scan can gate it. The agent prompt now explicitly
@@ -200,6 +214,42 @@ module Hive
                           reason: "missing_pr_url",
                           detail: "finalize requires pr_url frontmatter from 5-open-pr")
         [ nil, { commit: "finalize_missing_pr_url", status: :error } ]
+      end
+
+      def validate_pr_reference!(task, worktree_path, pr_url, cfg)
+        parsed = Hive::Gh.parse_pull_request_url(pr_url)
+        unless parsed
+          Hive::Markers.set(task.state_file, :error, reason: "finalize_pr_url_invalid")
+          return [ nil, { commit: "finalize_pr_url_invalid", status: :error } ]
+        end
+
+        metadata = Hive::Gh.pr_metadata(
+          parsed.fetch("number"), cfg: cfg, chdir: worktree_path
+        )
+        observed = Hive::Gh.parse_pull_request_url(metadata.url)
+        unless metadata.number == parsed.fetch("number") &&
+               observed == parsed &&
+               metadata.is_cross_repository == false
+          Hive::Markers.set(
+            task.state_file, :error, reason: "finalize_pr_identity_mismatch"
+          )
+          return [
+            nil,
+            { commit: "finalize_pr_identity_mismatch", status: :error }
+          ]
+        end
+
+        [ parsed.fetch("url"), nil ]
+      rescue Hive::GhError => e
+        Hive::Markers.set(
+          task.state_file, :error,
+          reason: "finalize_pr_identity_refresh_failed",
+          detail: e.message.to_s[0, 200]
+        )
+        [
+          nil,
+          { commit: "finalize_pr_identity_refresh_failed", status: :error }
+        ]
       end
 
       def verify_state!(task, worktree_path, branch, cfg)

@@ -680,8 +680,18 @@ class HiveStagesOpenPrTest < Minitest::Test
         attrs: { "pr_url" => "https://example.com/pr/1", "is_draft" => "false" },
         raw: nil
       )
-      with_replaced_singleton_method(Hive::Stages::OpenPr, :remediate_orphan_pr!, ->(url) { remediated << url }) do
-        result = Hive::Stages::OpenPr.validate_complete_marker(task, marker, worktree, task.slug, cfg)
+      real = {
+        "url" => "https://example.com/pr/1",
+        "number" => 1,
+        "isDraft" => true
+      }
+      with_replaced_singleton_method(
+        Hive::Gh, :lookup_existing_pr,
+        ->(_worktree, _branch, cfg:) { real }
+      ) do
+        with_replaced_singleton_method(Hive::Stages::OpenPr, :remediate_orphan_pr!, ->(url) { remediated << url }) do
+          result = Hive::Stages::OpenPr.validate_complete_marker(task, marker, worktree, task.slug, cfg)
+        end
       end
 
       assert_equal({ commit: "open_pr_not_draft", status: :error }, result)
@@ -711,6 +721,44 @@ class HiveStagesOpenPrTest < Minitest::Test
           assert_equal({ commit: "open_pr_not_draft", status: :error }, result)
           assert_equal [ "https://example.com/pr/2" ], remediated
           assert_equal "open_pr_not_draft", Hive::Markers.current(task.state_file).attrs.fetch("reason")
+        end
+      end
+    end
+  end
+
+  def test_validate_complete_marker_never_remediates_an_unobserved_agent_url
+    with_tmp_dir do |root|
+      task = make_task(root)
+      worktree = File.join(root, "worktree")
+      FileUtils.mkdir_p(worktree)
+      marker = Hive::Markers::State.new(
+        name: :complete,
+        attrs: {
+          "pr_url" => "https://github.com/unrelated/project/pull/999",
+          "is_draft" => "true"
+        },
+        raw: nil
+      )
+      remediated = []
+
+      with_replaced_singleton_method(
+        Hive::Gh, :lookup_existing_pr,
+        ->(_worktree, _branch, cfg:) { nil }
+      ) do
+        with_replaced_singleton_method(
+          Hive::Stages::OpenPr, :remediate_orphan_pr!,
+          ->(url) { remediated << url }
+        ) do
+          result = Hive::Stages::OpenPr.validate_complete_marker(
+            task, marker, worktree, task.slug, cfg
+          )
+
+          assert_equal(
+            { commit: "open_pr_url_mismatch", status: :error },
+            result
+          )
+          assert_empty remediated,
+                       "agent-authored URLs without a controller observation must remain inert"
         end
       end
     end

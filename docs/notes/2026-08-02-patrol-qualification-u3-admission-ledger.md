@@ -6,7 +6,14 @@ Donor PR: https://github.com/ivankuznetsov/hive/pull/910
 
 Frozen donor head: `7d14ebb72801706f3029c1ca437d9f2f43825efe`
 
-Admission state: `awaiting_checkpoint_readback_A1_and_exact_head_review`
+Admission state: `refreshed_current_main_awaiting_admission_review_and_A1`
+
+Refreshed: 2026-08-03
+
+Successor base: `5c7a324b4ec2d1f3482fca41f7329ceb604c19c9`
+
+Authoritative plan SHA-256:
+`ae517d6a53459677b3903b1b420098c3411d5a1b7167b28781e921801cd29c72`
 
 This ledger contains every finding or finding-shaped observation recovered from
 PR #910 exactly once. Donor resolution claims are historical evidence only;
@@ -89,10 +96,62 @@ This is not a 37th owned observation.
 
 `READBACK donor_pr=910 donor_head=7d14ebb72801706f3029c1ca437d9f2f43825efe owned_observations=36 subordinate_gaps=1 owners{U3a=15,U3b=7,U3c=11,operator=3,rejected-invalid=0} stable_ids=29 idless_source_locators=7 reviewed_sha{known=23,historical_metadata_unavailable=13} severity{known=29,historical_metadata_unavailable=7} duplicate_owners=0 unassigned=0`
 
+## Projected U3a boundary
+
+U3a is a clean-room six-owner projection. Donor files are behavior specimens,
+not patches to transplant.
+
+Exactly six new production Ruby files are admitted:
+
+1. `lib/hive/modules/migration/patrol_evidence_receipt.rb` owns the canonical
+   immutable receipt value.
+2. `lib/hive/modules/migration/patrol_evidence_verifier.rb` owns independent
+   verification against caller-supplied expected bindings.
+3. `lib/hive/modules/migration/patrol_effect_index.rb` owns the bounded
+   run-wide semantic and idempotency duplicate index.
+4. `lib/hive/modules/migration/patrol_qualification.rb` owns the immutable
+   qualification value only.
+5. `lib/hive/modules/migration/report_projection.rb` owns pure report-v2
+   projection from verified qualification values.
+6. `lib/hive/modules/migration/report_migration.rb` owns the one-off forward
+   and reverse report migration, including immutable source/archive/receipt
+   provenance.
+
+Only two existing production files may change:
+
+- `lib/hive/modules/migration/report.rb`: bounded v2 validation and storage
+  facade edits.
+- `lib/hive/modules/migration/patrols.rb`: bounded protocol/report admission
+  through its existing migration lock and adoption facade.
+
+Dependency direction is closed and one-way:
+
+```text
+Verifier         -> Receipt + public U2 PatrolCapture/EffectIntent/EffectReceipt values
+EffectIndex      -> verified public EffectReceipt values
+Qualification    -> Verifier + EffectIndex
+ReportProjection -> Qualification
+ReportMigration  -> ReportProjection + existing Report storage
+Patrols          -> ReportMigration/ReportProjection through its existing facade
+```
+
+No U3a type may construct or depend on a scheduler, dispatcher, runner,
+provider, sandbox, process-custody component, EvidenceStore recovery path,
+U5-U7 internal owner, or operator lifecycle owner. Scenario execution,
+credentialed/live qualification, cutover, rollback, retry, redispatch, and
+component promotion remain outside this PR.
+
+The current authoritative plan intentionally uses file, owner, dependency, and
+authority bounds rather than carrying the stale per-file line/method budgets
+from the old PR #923 Design checkpoint. A new multipurpose subsystem, seventh
+owner/file, `qualification_*` runtime, or forbidden dependency is still an
+immediate `Blocked / re-scope` condition; compacting code to satisfy an
+arbitrary numeric target is not an accepted remedy.
+
 ## Admission gates
 
-The accepted plan at SHA-256
-`6f69fce6f660997ca341fe9a2f2eaa3b00c0d432cabbe58b3341930e4622a0d4`
+The authoritative plan at SHA-256
+`ae517d6a53459677b3903b1b420098c3411d5a1b7167b28781e921801cd29c72`
 already permits this finite donor transition through F6, R39, R41, and the U3a
 admission wording without weakening R6 for newly observed successor findings.
 

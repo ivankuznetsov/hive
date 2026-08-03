@@ -479,7 +479,7 @@ class WebProjectCaptureProviderTest < Minitest::Test
         end
       RUBY
       FileUtils.chmod(0o755, executable)
-      yield root, source, executable
+      with_fake_png_media_tools { yield root, source, executable }
     end
   end
 end

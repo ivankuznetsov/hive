@@ -364,20 +364,22 @@ class WebTaskCaptureTest < Minitest::Test
           }
         }.to_yaml
       )
-      capture = Hive::Web::TaskCapture.new(task_folder: task_folder)
-      capture.define_singleton_method(:capture_requirement) do
-        { "result" => "required", "implementation_head" => head }
-      end
-      capture.define_singleton_method(:owned_source_root) { source }
+      capture = nil
       source_bundle_calls = 0
-
-      manifest = with_replaced_singleton_method(
-        Hive::Web::SourceBundle, :new,
-        lambda do |**|
-          source_bundle_calls += 1
-          raise "Hivebox recorder must not be constructed"
+      manifest = with_fake_png_media_tools do
+        capture = Hive::Web::TaskCapture.new(task_folder: task_folder)
+        capture.define_singleton_method(:capture_requirement) do
+          { "result" => "required", "implementation_head" => head }
         end
-      ) { capture.call }
+        capture.define_singleton_method(:owned_source_root) { source }
+        with_replaced_singleton_method(
+          Hive::Web::SourceBundle, :new,
+          lambda do |**|
+            source_bundle_calls += 1
+            raise "Hivebox recorder must not be constructed"
+          end
+        ) { capture.call }
+      end
 
       assert_equal 0, source_bundle_calls
       assert_equal 2, manifest.fetch("schema_version")

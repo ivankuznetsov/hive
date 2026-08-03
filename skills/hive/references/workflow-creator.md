@@ -52,6 +52,9 @@ Translate the original request into the smallest complete graph:
 - Infer one durable artifact/state file per stage and reusable instruction text for agent stages.
 - Omit stage `agent` and `model` when project inheritance is sufficient.
 - Use `permissions: yolo` for ordinary local agent work unless the request or a high-consequence boundary requires less authority.
+- When a final direct agent must distinguish success from a durable domain
+  block, declare exact closed `terminal_outcomes`, make `deliverable` equal
+  `state_file`, and keep `workspace` / `handoff` absent.
 - Add a human stage only for a materially necessary decision or irreversible/high-consequence boundary. Never infer branching, specialist models, or external destinations.
 - Never publish externally, deploy, message, tag, or release from an inferred stage. A separate destination and explicit authorization are mandatory.
 
@@ -121,7 +124,7 @@ Always report:
 - created files (descriptor plus every instruction/reference path);
 - neutral scaffold or the genuinely reused template;
 - applied defaults, including ID, stage order, artifacts, inheritance,
-  permissions, automatic transitions, and every checkpoint/outcome;
+  permissions, automatic transitions, and every human or terminal outcome;
 - validation result and normalized graph;
 - task side effect (`none`, `created: true`, or `created: false`);
 - the exact next command when no task was created; and

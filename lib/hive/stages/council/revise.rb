@@ -60,6 +60,7 @@ module Hive
             profile,
             prompt: prompt(profile),
             managed_slot: "stages.#{@stage.name}.revise",
+            base_add_dirs: Hive::Stages::Base.managed_actor_base_add_dirs(@task),
             managed_outputs: [ @target_path ],
             **permission_kwargs
           )

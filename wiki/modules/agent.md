@@ -251,7 +251,7 @@ Claude/tmux teardown is deliberately narrower than a shell-pattern kill. `with_s
 
 The default Claude permission path still uses `--dangerously-skip-permissions` (`bypassPermissions`). Three controls keep this safe under the single-developer trust model:
 
-1. **`--add-dir` discipline**: the agent only sees `cwd` and explicit `--add-dir` paths. Other projects on disk are unreachable.
+1. **`--add-dir` discipline**: the agent only sees `cwd` and explicit `--add-dir` paths. Other projects on disk are unreachable. Ordinary early-stage agents receive only their task folder. Managed workflow actors that explicitly declare `yolo` also receive the owning project root because their unbounded package contract may intentionally repair that target; the generic agent and council reviewer/reviser paths all use the same managed base-context rule.
 2. **Status-mode ownership**: marker-owning stages use `:state_file_marker`; reviewer-style spawns can use `:output_file_exists` so the orchestrator, not the reviewer, owns terminal markers.
 3. **Timeout + resource ceilings**: patrol passes a tier-specific `max_tokens` ceiling and clamps it to remaining cycle/day allowance; every spawn retains a wall-clock timeout. A profile-native USD-named flag is a budget-equivalent guard on subscription-backed providers, not evidence of an extra payment.
 

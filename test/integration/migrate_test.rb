@@ -50,12 +50,31 @@ class MigrateTest < Minitest::Test
         )
         File.write(legacy_error, "# Review\n\n<!-- REVIEW_ERROR reason=timeout -->\n")
 
-        out, _err = capture_io { migrate_command(dir).call }
+        restart_calls = 0
+        out, _err = capture_io do
+          migrate_command(dir, daemon_restarter: -> { restart_calls += 1 }).call
+        end
 
         assert File.directory?(File.join(stages, "6-review", "old-review-260513-abcd"))
         assert File.directory?(File.join(stages, "8-finalize", "old-pr-260513-abcd"))
         assert File.directory?(File.join(stages, "9-done", "old-done-260513-abcd"))
         assert_includes out, "1 recovery marker upgraded"
+        assert_equal 1, restart_calls
+      end
+    end
+  end
+
+  def test_runs_the_injected_global_migration_once
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        calls = 0
+
+        capture_io do
+          migrate_command(dir, global_migration: -> { calls += 1 }).call
+        end
+
+        assert_equal 1, calls
       end
     end
   end

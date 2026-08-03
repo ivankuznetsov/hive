@@ -520,6 +520,119 @@ class WorkflowsDescriptorParserTest < Minitest::Test
     assert fix.frozen?
   end
 
+  def test_terminal_agent_parses_closed_terminal_outcomes_in_declaration_order
+    workflow = Hive::Workflows::DescriptorParser.parse_hash(
+      {
+        "id" => "repair",
+        "stages" => [
+          { "name" => "inbox", "kind" => "terminal", "state_file" => "idea.md" },
+          {
+            "name" => "repair",
+            "kind" => "agent",
+            "state_file" => "repair.md",
+            "skill" => "/repair",
+            "deliverable" => "repair.md",
+            "terminal_outcomes" => {
+              "complete" => [ "fixed", "not-reproduced" ],
+              "blocked" => [ "blocked", "needs-input" ]
+            }
+          }
+        ]
+      },
+      path: "/tmp/repair.yml"
+    )
+
+    outcomes = workflow.stages.last.terminal_outcomes
+    assert_instance_of Hive::Workflow::TerminalOutcomes, outcomes
+    assert_equal [ "fixed", "not-reproduced" ], outcomes.complete
+    assert_equal [ "blocked", "needs-input" ], outcomes.blocked
+    assert outcomes.complete.frozen?
+    assert outcomes.blocked.frozen?
+  end
+
+  def test_terminal_outcomes_reject_invalid_shapes_and_placement_with_path
+    valid_stage = lambda do
+      {
+        "name" => "repair",
+        "kind" => "agent",
+        "state_file" => "repair.md",
+        "skill" => "/repair",
+        "deliverable" => "repair.md",
+        "terminal_outcomes" => {
+          "complete" => [ "fixed" ],
+          "blocked" => [ "blocked" ]
+        }
+      }
+    end
+    cases = [
+      [ -> { valid_stage.call.tap { |stage| stage["terminal_outcomes"] = [] } }, "must be a map" ],
+      [ -> { valid_stage.call.tap { |stage| stage["terminal_outcomes"].delete("complete") } }, "complete" ],
+      [ -> { valid_stage.call.tap { |stage| stage["terminal_outcomes"]["unknown"] = [] } }, "unknown key" ],
+      [ -> { valid_stage.call.tap { |stage| stage["terminal_outcomes"]["complete"] = [] } }, "non-empty" ],
+      [ -> { valid_stage.call.tap { |stage| stage["terminal_outcomes"]["blocked"] = "blocked" } }, "array" ],
+      [ -> { valid_stage.call.tap { |stage| stage["terminal_outcomes"]["complete"] = [ "fixed", "fixed" ] } }, "unique" ],
+      [ -> { valid_stage.call.tap { |stage| stage["terminal_outcomes"]["blocked"] = [ "fixed" ] } }, "disjoint" ],
+      [ -> { valid_stage.call.tap { |stage| stage["terminal_outcomes"]["complete"] = [ "bad--slug" ] } }, "safe slug" ],
+      [ -> { valid_stage.call.tap { |stage| stage["terminal_outcomes"]["complete"] = [ "a" * 41 ] } }, "at most 40" ],
+      [ -> { valid_stage.call.tap { |stage| stage["kind"] = "terminal"; stage.delete("skill") } }, "agent stage" ],
+      [ -> { valid_stage.call.tap { |stage| stage.delete("deliverable") } }, "deliverable" ],
+      [ -> { valid_stage.call.tap { |stage| stage["deliverable"] = "other.md" } }, "must equal state_file" ],
+      [
+        -> do
+          valid_stage.call.tap do |stage|
+            stage["state_file"] = "fix-report.md"
+            stage["deliverable"] = "fix-report.md"
+            stage["workspace"] = "worktree"
+            stage["handoff"] = "draft_pr"
+          end
+        end,
+        "incompatible with workspace or handoff"
+      ]
+    ]
+
+    cases.each do |stage_builder, message|
+      error = assert_config_error(
+        { "id" => "repair", "stages" => [ stage_builder.call ] },
+        path: "/tmp/repair.yml"
+      )
+      assert_includes error.message, "/tmp/repair.yml"
+      assert_includes error.message, "terminal_outcomes"
+      assert_includes error.message, message
+    end
+
+    intermediate = valid_stage.call
+    error = assert_config_error(
+      {
+        "id" => "repair",
+        "stages" => [
+          intermediate,
+          { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
+        ]
+      },
+      path: "/tmp/repair.yml"
+    )
+    assert_includes error.message, "/tmp/repair.yml"
+    assert_includes error.message, "terminal_outcomes"
+    assert_includes error.message, "last stage"
+  end
+
+  def test_terminal_outcomes_runtime_validation_rejects_a_non_agent_stage
+    outcomes = Hive::Workflow::TerminalOutcomes.new(
+      complete: [ "verified" ], blocked: [ "blocked" ]
+    )
+    stage = Hive::Workflow::Stage.new(
+      name: "done", index: 1, state_file: "done.md", kind: :inert,
+      deliverable: "done.md", terminal_outcomes: outcomes
+    )
+    parser = Hive::Workflows::DescriptorParser.new("/tmp/repair.yml")
+
+    error = assert_raises(Hive::ConfigError) do
+      parser.send(:validate_terminal_outcomes!, [ stage ])
+    end
+
+    assert_includes error.message, "terminal_outcomes is only valid on an agent stage"
+  end
+
   def test_workspace_and_handoff_reject_unknown_enum_values
     {
       "workspace" => "checkout",

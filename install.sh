@@ -595,10 +595,30 @@ existing_canon=""
 if [[ -n "$existing_hive" ]]; then
   existing_canon="$(readlink -f "$existing_hive" 2>/dev/null || true)"
 fi
-link_canon=""
-if [[ -e "$link_path" ]]; then
-  link_canon="$(readlink -f "$link_path" 2>/dev/null || true)"
-fi
+
+# Publish a user-facing launcher only when the destination is absent or is the
+# exact absolute symlink this installer previously created. `ln -sfn` removes
+# an existing regular file (and can replace an unrelated symlink), so using it
+# without this ownership check would destroy an operator's launcher before the
+# Apache-Hive collision fallback had a chance to select `hv`.
+publish_managed_link() {
+  local path="$1" target="$2" name="$3" current_target
+
+  if [[ ! -e "$path" && ! -L "$path" ]]; then
+    ln -s "$target" "$path" || return 1
+    return 0
+  fi
+
+  if [[ -L "$path" ]]; then
+    current_target="$(readlink "$path" 2>/dev/null || true)"
+    if [[ "$current_target" == "$target" ]]; then
+      return 0
+    fi
+  fi
+
+  warn "existing ${name} at ${path}; leaving it unchanged"
+  return 1
+}
 
 # Write marker BEFORE swapping the symlink so any concurrent `hive`
 # invocation reads the new channel rather than falling through to
@@ -619,16 +639,30 @@ if [[ -n "$PREFIX" ]]; then
     printf '%s\n' "$PREFIX" > "${xdg_data_home}/install-prefix"
   fi
 fi
-ln -sfn "${gem_home}/bin/hive" "$link_path"
 
-if [[ -n "$existing_hive" ]] && [[ -n "$existing_canon" ]] && [[ "$existing_canon" != "$link_canon" ]] && [[ "$existing_canon" != "$(readlink -f "${gem_home}/bin/hive" 2>/dev/null || echo "${gem_home}/bin/hive")" ]]; then
-  ln -sfn "${gem_home}/bin/hv" "$hv_path"
-  warn "existing hive on PATH at ${existing_hive}; installed hv fallback at ${hv_path}"
+managed_hive_canon="$(readlink -f "${gem_home}/bin/hive" 2>/dev/null || echo "${gem_home}/bin/hive")"
+hive_link_published=0
+if publish_managed_link "$link_path" "${gem_home}/bin/hive" "hive"; then
+  hive_link_published=1
+fi
+
+if [[ "$hive_link_published" -ne 1 ]] ||
+   { [[ -n "$existing_hive" ]] && [[ -n "$existing_canon" ]] &&
+     [[ "$existing_canon" != "$managed_hive_canon" ]]; }; then
+  if publish_managed_link "$hv_path" "${gem_home}/bin/hv" "hv"; then
+    if [[ "$hive_link_published" -ne 1 ]]; then
+      warn "installed hv fallback at ${hv_path}; ${link_path} remains operator-owned"
+    else
+      warn "existing hive on PATH at ${existing_hive}; installed hv fallback at ${hv_path}"
+    fi
+  else
+    warn "Hive launchers remain available under ${gem_home}/bin"
+  fi
 else
   # Always refresh hv when we already own it so stale symlinks from
   # earlier installs don't dangle.
-  if [[ -L "$hv_path" ]]; then
-    ln -sfn "${gem_home}/bin/hv" "$hv_path"
+  if [[ -L "$hv_path" ]] && [[ "$(readlink "$hv_path" 2>/dev/null || true)" == "${gem_home}/bin/hv" ]]; then
+    publish_managed_link "$hv_path" "${gem_home}/bin/hv" "hv"
   fi
 fi
 

@@ -21,7 +21,11 @@ Preserve the task folder, worktree, attempt records, queue entries, locks, marke
 - A verified live worker is running. Observe it; do not kill or redispatch it.
 - Every persisted `ERROR` and `REVIEW_ERROR` is eligible for the same unbounded
   cooled retry when global and project retry gates are enabled. There is no
-  retry budget to exhaust.
+  retry budget to exhaust, except the exact `terminal_outcome_blocked` and
+  `terminal_outcome_invalid` reasons. Those two remain durable and
+  operator-owned: refresh operational status, then invoke its guarded
+  `workflow.retry` action explicitly. If the diagnostic identifies a blocker
+  propagated from an already-completed stage, create a fresh task instead.
 - `StaleAgentHealer` is the sole automatic scheduler. It submits the
   observation; `RecoveryCoordinator` alone persists the retry request, clears
   the exact marker generation, and dispatches the owning workflow command.

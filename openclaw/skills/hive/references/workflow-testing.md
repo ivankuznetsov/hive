@@ -15,6 +15,12 @@ requires a non-empty artifact; returning records the decision, moves to the
 declared stage, and leaves it waiting. Verify no agent dispatch occurs while a
 human stage waits.
 
+For `terminal_outcomes`, confirm validation returns the exact normalized lists.
+In a disposable task, exercise one complete value, one blocked value, and one
+malformed or unknown value. Complete may archive; blocked and invalid must stay
+active as exact marker-backed errors with a fresh guarded `workflow.retry`
+action. Also confirm validation rejects any workspace/handoff combination.
+
 For an explicitly requested task, repeat the same idempotency key after the
 task moves stages. The response must return one slug with `created: false`.
 Reuse with different input/workflow must fail and leave one task. Finish with a

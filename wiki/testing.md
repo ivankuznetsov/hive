@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release-candidate,release}.yml, packaging/{live_agent_skills,release_candidate}/, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-08-02
+updated: 2026-08-03
 tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, terminal-outcomes, release-proof]
 ---
 
@@ -622,7 +622,9 @@ archive digest, but `release.yml` does not query or require that Check Run.
 `bundle exec rake smoke` also contains older live Claude workflows and may
 incur provider cost. Normal `rake test` remains local and network-free.
 `bundle exec rake coverage` uses the same network-free machinery but is
-normally owned by hosted CI.
+normally owned by hosted CI. Forked custody processes that terminate through
+`exit!` explicitly flush sparse, hit-only coverage results before exiting;
+the parent retains the complete source inventory used by the 100% line gate.
 
 ## Live Claude tmux dogfood
 

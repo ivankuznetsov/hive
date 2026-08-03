@@ -353,4 +353,32 @@ class WebCaptureRuntimeTest < Minitest::Test
       assert_instance_of Hive::Web::SourceBundle, runtime.send(:source_bundle)
     end
   end
+
+  def test_readiness_serialization_and_manifest_consumer_ceiling_are_explicit
+    readiness = Hive::Web::CaptureRuntime::Readiness.new(
+      lifecycle_id: "capture-123", pid: 123, process_start_time: "456",
+      process_group: 123, port: 4567,
+      readiness_url: "http://127.0.0.1:4567/health",
+      source_sha: "a" * 40, cache_key: "b" * 64,
+      lock_digests: { "root" => "c" * 64 }, runtime_root: "/runtime",
+      storage_root: "/storage", started_at: "2026-08-03T12:00:00Z"
+    )
+    assert_equal Hive::Web::CaptureRuntime::SCHEMA, readiness.to_h.fetch("schema")
+
+    Dir.mktmpdir("capture-runtime") do |root|
+      runtime = Hive::Web::CaptureRuntime.new(
+        source_root: "/source", runtime_root: root,
+        environment: {}, lifecycle_token: "token-123"
+      )
+      oversized = {
+        "blob" => "x" * Hive::ARTIFACT_CAPTURE_MANIFEST_MAX_BYTES
+      }
+
+      error = assert_raises(Hive::Web::CaptureRuntime::OwnershipError) do
+        runtime.publish_manifest!(task_folder: root, manifest: oversized)
+      end
+      assert_match(/consumer ceiling/, error.message)
+      refute File.exist?(File.join(root, "media", "capture-manifest.json"))
+    end
+  end
 end

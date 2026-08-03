@@ -161,6 +161,10 @@ class ArtifactsCapturePolicyTest < Minitest::Test
     refute policy.send(
       :valid_v2_capture_evidence?, manifest.merge("environment_keys" => [])
     )
+    refute policy.send(
+      :valid_v2_capture_evidence?,
+      manifest.merge("recorder" => manifest.fetch("recorder").merge("kind" => "unknown"))
+    )
   end
 
   def test_retained_v1_capture_manifest_remains_satisfactory_after_v2_migration

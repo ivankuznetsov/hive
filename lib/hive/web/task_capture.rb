@@ -463,7 +463,6 @@ module Hive
           next if relative.empty?
           if relative == ".git"
             Find.prune
-            next
           end
 
           stat = File.lstat(path)

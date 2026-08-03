@@ -8,6 +8,7 @@ require "hive/markers"
 require "hive/operational_action"
 require "hive/secret_patterns"
 require "hive/diagnostic_helpers"
+require "hive/terminal_outcome"
 
 module Hive
   class TaskAction
@@ -72,7 +73,11 @@ module Hive
         return nil unless diagnostic_action?
 
         artifacts = diagnostic_artifacts.select { |path| safe_diagnostic_artifact?(path) }
-        primary = incomplete_plan_artifact? ? nil : artifacts.first
+        primary = if incomplete_plan_artifact? || Hive::TerminalOutcome.semantic_error?(marker.attrs)
+          nil
+        else
+          artifacts.first
+        end
         updated_at = diagnostic_updated_at(primary)
         detail = primary ? artifact_detail(primary) : marker_detail
 
@@ -322,6 +327,21 @@ module Hive
       end
 
       def marker_detail
+        if Hive::TerminalOutcome.semantic_error?(marker.attrs)
+          outcome = marker.attrs["outcome"].to_s
+          description = if Hive::TerminalOutcome.blocked_error?(marker.attrs)
+            "The terminal stage declared the configured blocked outcome #{outcome.inspect}."
+          else
+            "The terminal stage produced an invalid outcome contract result #{outcome.inspect}."
+          end
+          return [
+            marker_summary,
+            description,
+            "workflow.retry reruns only the current terminal stage. If this result was propagated " \
+              "from an already completed upstream stage, start a fresh task after correcting the blocker."
+          ].join("\n")
+        end
+
         if incomplete_plan_artifact?
           return [
             "PLAN_MISSING_OUTPUT",

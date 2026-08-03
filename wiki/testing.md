@@ -3,8 +3,8 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release-candidate,release}.yml, packaging/{live_agent_skills,release_candidate}/, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-07-30
-tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, release-proof]
+updated: 2026-08-03
+tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, terminal-outcomes, release-proof]
 ---
 
 **TLDR**: Minitest covers unit/integration behavior; opt-in layers cover outer
@@ -119,16 +119,33 @@ Claude, Codex, Pi, and Grok.
 repository-local paths, unique ownership, an acyclic component graph, bounded
 migration exceptions, selected source-level dependency/construction rules,
 exact authorized internal-construction sites, and fresh-process loading for
-every `boundary-ready` component:
+every `boundary-ready` component. One staged candidate may have an empty
+consumer list only when it carries exactly one bounded migration exception;
+removal units accept hierarchical plan IDs such as `U1a1vt`:
 
 ```bash
 bundle exec ruby -Itest -Ilib test/unit/component_boundaries_test.rb
+bundle exec ruby -Itest test/unit/packaging/workflow_creator_values_test.rb
 ```
 
 Ready components cannot depend on candidates. Forbidden-construction rules
 also apply to guarded candidates, and the helper can run a named focused
 clean-load proof for a candidate such as Attempts without representing the
 whole component graph as ready.
+
+Workflow Creator Values keeps its clean-load and dependency proof outside the
+generic component loader. Its focused suite directly runs the leaf under
+`ruby --disable-gems -I<repository-root>`, verifies JSON remains unloaded and
+that capture performs no `File`, `Dir`, or `Process` calls, and uses a
+leaf-local `Ripper.lex` token check that catches bare and qualified `require`
+and `require_relative` identifiers without treating comments or strings as
+code. The same suite covers exact core type admission,
+recursive ownership/freezing, canonical bytes, hostile direct and
+module-contributed dispatch, post-load core replacement, copy/Marshal denial,
+encoding and numeric boundaries, cycles/shared graphs, declared resource
+ceilings, property comparisons, and the exact R43 line/callable/decision and
+per-method RuboCop budgets. It does not assert generic require-path
+canonicalization.
 
 The helper uses Ruby syntax rather than comments or string examples for literal
 `require`, `require_relative`, and `Constant.new` checks. It remains an
@@ -344,7 +361,7 @@ exercise every migrated consumer. The follow-up attempt/projection slice runs
 | `content_workflow_daemon_e2e_test.rb`, `content_workflow_stage_test.rb`, `content_workflow_e2e_test.rb` | Content workflow proof layers — the test-only fixture e2e advances `1-inbox -> 4-done`; the built-in `:content` tests pin per-stage slash-skill prompt rendering plus marker→runner-result mapping and drive real init/new/status/daemon/policy/approve/run to `6-done/article.md` with non-empty carried artifacts. |
 | `honeycomb_workflow_lifecycle_test.rb` | A local immutable v2 git registry fixture drives canonical `catalog.json` plus `packages/NAME/VERSION/manifest.yml` through install, no-write dry-run, update, catalog-commit task pinning, list selected/retained dimensions, remove, and offline execution of the retained task. A second fixture-backed path runs preview→apply install/update/remove through the real Hive Web adapter and command constructors. Recommendation coverage pins package-effort selection, compatible-prior retention, interactive agent/model/effort editing, and identical preview/apply configuration receipts. Unit lifecycle/store coverage also pins strict browser-preview source/digest identities, first-install still-unselected checks, cleanup-error cause preservation, post-commit warning envelopes, and removal rechecks inside the mutation lock. |
 | `user_workflow_e2e_test.rb` | Project-authored workflow acceptance — `hive workflow new` scaffolds a descriptor, `hive new --workflow` creates a pinned task, generic run/approve drives it from `1-inbox -> 2-work -> 3-done`, and a same-process coding capture still uses the default coding path. |
-| `daemon_auto_retry_test.rb`, `daemon_stale_agent_healing_test.rb` | Status-to-recovery integration — real status rows feed the sole automatic scheduler, pinning stale `AGENT_WORKING` rewrites, closed coordinator events, `daemon.agent_marker_grace_sec` threading, arbitrary `ERROR` / `REVIEW_ERROR` reasons sharing one cooldown, current-work safety deferral, global/project kill switches, and fresh failure generations retrying without an exhaustion counter. |
+| `daemon_auto_retry_test.rb`, `daemon_stale_agent_healing_test.rb` | Status-to-recovery integration — real status rows feed the sole automatic scheduler, pinning stale `AGENT_WORKING` rewrites, closed coordinator events, `daemon.agent_marker_grace_sec` threading, ordinary `ERROR` / `REVIEW_ERROR` reasons sharing one cooldown, exact `terminal_outcome_blocked` / `terminal_outcome_invalid` errors remaining operator-owned, current-work safety deferral, global/project kill switches, and fresh failure generations retrying without an exhaustion counter. |
 | `full_flow_test.rb` | End-to-end: idea → brainstorm → plan → execute → open-pr → review → finalize → done. |
 | `cli_test.rb`, `cli_version_test.rb`, `cli_usage_error_json_test.rb`, `new_wrapper_argv_test.rb`, `bin_hive_refactor_patrol_usage_error_test.rb` | CLI/help/wrapper contract — init help derives the advertised `hive-init.vN` from `SCHEMA_VERSIONS`; top-level `--version`; command-local help after option-bearing invocations; leading JSON booleans and malformed assignment rejection; invalid-byte argv rejection; `hive new` task-text protection and option lifting; representative pre-dispatch JSON errors; and mode-aware refactor-patrol usage errors that validate as v1 for legacy argv and v2 for `--pr`, `--job-manifest`, or enabled `--actions`. |
 | `patrol_command_test.rb`, `unit/patrol/{finding_registry,fixer,reviewer,validator}_test.rb`, `unit/patrol/token_budget_test.rb`, `unit/usage_db_test.rb` | `hive patrol` — JSON envelope, dry-run behavior, language-neutral mapping, exact-remote SHA pinning, durable active/resolved/rejected/superseded finding lifecycle, indexed all-history semantic dedup before persistence, dry-run-to-shipping and transient-failure retry reuse, newer-target resolved/rejected recurrence, single-read/single-timestamp lifecycle transitions, shared configured validation-key admission, clean-baseline preflight, stale-target rejection/transition, globally ranked selection, immutable audit records, retry/backoff outcomes, schema validation, shared daily tokens, separate ordinary/architecture launch accounting, architecture multipliers/backstops, and patrol attribution. |
@@ -622,7 +639,9 @@ archive digest, but `release.yml` does not query or require that Check Run.
 `bundle exec rake smoke` also contains older live Claude workflows and may
 incur provider cost. Normal `rake test` remains local and network-free.
 `bundle exec rake coverage` uses the same network-free machinery but is
-normally owned by hosted CI.
+normally owned by hosted CI. Forked custody processes that terminate through
+`exit!` explicitly flush sparse, hit-only coverage results before exiting;
+the parent retains the complete source inventory used by the 100% line gate.
 
 ## Live Claude tmux dogfood
 

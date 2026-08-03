@@ -35,6 +35,8 @@ class WorkflowCommandTest < Minitest::Test
       assert_equal "authored", payload.fetch("origin")
       assert_equal descriptor, payload.fetch("descriptor_path")
       assert_equal %w[research draft approval], payload.fetch("stages").map { |row| row.fetch("name") }
+      assert payload.fetch("stages").all? { |row| row.key?("terminal_outcomes") }
+      assert payload.fetch("stages").all? { |row| row["terminal_outcomes"].nil? }
       assert_equal %w[research draft], payload.fetch("automatic_edges").map { |row| row.fetch("from") }
       assert_equal [
         [ "approval", "approve", true, nil ],
@@ -44,6 +46,30 @@ class WorkflowCommandTest < Minitest::Test
       }
 
       schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-workflow-validate"))))
+      assert_empty schemer.validate(payload).to_a
+    end
+  end
+
+  def test_validate_exposes_terminal_outcomes_and_satisfies_schema
+    with_initialized_project do |project_root|
+      descriptor = write_terminal_outcome_workflow(project_root)
+      stdout = StringIO.new
+
+      payload = Hive::Commands::Workflow.new(
+        "validate", "repair", project_root: project_root, json: true, stdout: stdout
+      ).call!
+
+      assert_equal descriptor, payload.fetch("descriptor_path")
+      assert_equal(
+        {
+          "complete" => [ "fixed", "not-reproduced" ],
+          "blocked" => [ "blocked", "needs-input" ]
+        },
+        payload.fetch("stages").last.fetch("terminal_outcomes")
+      )
+      schemer = JSONSchemer.schema(
+        JSON.parse(File.read(Hive::Schemas.schema_path("hive-workflow-validate")))
+      )
       assert_empty schemer.validate(payload).to_a
     end
   end
@@ -331,6 +357,25 @@ class WorkflowCommandTest < Minitest::Test
               artifact: draft.md
             reject:
               to: draft
+    YAML
+    descriptor
+  end
+
+  def write_terminal_outcome_workflow(project_root)
+    workflows = File.join(project_root, ".hive-state", "workflows")
+    FileUtils.mkdir_p(workflows)
+    descriptor = File.join(workflows, "repair.yml")
+    File.write(descriptor, <<~YAML)
+      id: repair
+      stages:
+        - name: repair
+          kind: agent
+          state_file: repair.md
+          skill: /repair
+          deliverable: repair.md
+          terminal_outcomes:
+            complete: [fixed, not-reproduced]
+            blocked: [blocked, needs-input]
     YAML
     descriptor
   end

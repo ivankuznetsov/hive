@@ -166,8 +166,16 @@ class ModulesMigrationReportProjectionTest < Minitest::Test
       end
       stale = Hive::Modules::Migration::ReportProjection.build(
         qualifications: [
-          qualification("deterministic", generated_at: NOW + 121),
-          qualification("installed_live", generated_at: NOW + 121)
+          qualification(
+            "deterministic", qualification_seed: "3",
+            run_id: "stale-deterministic", generated_at: NOW + 121,
+            evidence_started_at: NOW + 59
+          ),
+          qualification(
+            "installed_live", qualification_seed: "4",
+            run_id: "stale-installed-live", generated_at: NOW + 121,
+            evidence_started_at: NOW + 59
+          )
         ],
         generated_at: NOW + 121,
         supersedes: report.report_id

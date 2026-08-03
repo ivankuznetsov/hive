@@ -136,18 +136,17 @@ tags: [gap, todo, release-proof, agent-skills]
   Workflow Creator Values remain `candidate`. Skillpack to Agent ABI is the
   only component dependency. Patrol retains one bounded U3 exception for
   compressed candidate evidence and production qualification. Workflow Creator
-  Values retains exactly one U1a1vt exception because it has no production
+  Values/Text Safety retains exactly one U1a1c exception because it has no production
   consumer yet; Attempts remains unready because Hive has no
   demonstrated need for a supported reconciliation, supervision, capacity,
   loss-processing, cancellation, export, or raw-store lifecycle API.
-- U1a1vir proves the import-side R43 file, callable, decision, per-method, and
-  line-length budgets. The inherited `U1A1V-R02-ARCH-002` remains program-open
-  and transfers to U1a1vt as the sole owner of the combined values/projection
-  metric proof; the values candidate must not be described as boundary-ready
-  before that consumer and moving-fence step lands.
-  Downstream code must not accept caller-supplied snapshot instances or
-  authenticate solely by class identity because same-process Ruby reflection
-  is outside this leaf guarantee.
+- U1a1vt closes the inherited `U1A1V-R02-ARCH-002` combined metric proof at
+  498 lines / 34 callables / 55 decisions while keeping both files inside the
+  per-method R43 limits. The candidate must not be described as boundary-ready
+  before U1a1c establishes its first production consumer and removes the fence.
+  TextSafety accepts exact frozen plain Values shapes as an internal contract;
+  those checks are not provenance or origin authentication, and callers must
+  not turn them into an external trust claim.
 - No ready component has yet earned standalone packaging. There is no named
   non-Hive adopter, independently installed component artifact, separate
   compatibility promise, or explicit release decision. Those proofs belong to

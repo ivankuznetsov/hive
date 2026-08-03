@@ -22,10 +22,12 @@ Reusable mechanisms remain in this monorepo behind the canonical
 [[component-boundaries]] catalog. The nine-row internal graph has six
 `boundary-ready` facades—UserService, Agent ABI, Agent Artifact Firewall,
 Skillpack, Safe Agent Git Gate, and WorkLedger—and three guarded candidates:
-Attempts admission, Patrol Effect Evidence, and Workflow Creator Values.
+Attempts admission, Patrol Effect Evidence, and Workflow Creator Values/Text
+Safety.
 Skillpack's downward dependency on the Agent ABI is the only
 component-to-component edge. Patrol's U3 qualification fence and Workflow
-Creator Values' U1a1vt consumer fence are the only migration exceptions. Hive
+Creator Values/Text Safety's U1a1c consumer fence are the only migration
+exceptions. Hive
 is the first and primary consumer, and internal readiness does not imply a gem,
 version, repository, or release.
 

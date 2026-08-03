@@ -11,6 +11,7 @@ require "hive/plan_frontmatter"
 require "hive/task_projection/store"
 require "hive/markers"
 require "hive/draft_pr_receipt"
+require "hive/terminal_outcome"
 
 module Hive
   # Classifier that turns a (Task, Marker) pair into a user-facing
@@ -193,6 +194,11 @@ module Hive
         key: Hive::Schemas::TaskActionKind::ERROR,
         label: "Error",
         command: nil
+      },
+      blocked: {
+        key: Hive::Schemas::TaskActionKind::ERROR,
+        label: "Blocked",
+        command: nil
       }
     }.freeze
 
@@ -355,6 +361,9 @@ module Hive
       end
       if marker.name == :error && marker.attrs["reason"].to_s == Hive::DraftPrReceipt::RECOVERABLE_REASON
         return ACTIONS.fetch(:recover_draft_pr)
+      end
+      if marker.name == :error && Hive::TerminalOutcome.blocked_error?(marker.attrs)
+        return ACTIONS.fetch(:blocked)
       end
       return ACTIONS.fetch(:error) if marker.name == :error
       return ACTIONS.fetch(:manual_steering) if marker.name == :manual_steering

@@ -23,7 +23,7 @@ module Hive
       SCHEMA_VERSION = 1
       CLASSIFIER_VERSION = "visual-paths-v1".freeze
       FILE_NAME = "capture-requirement.json".freeze
-      CAPTURE_MANIFEST_MAX_BYTES = 256 * 1024
+      CAPTURE_MANIFEST_MAX_BYTES = Hive::ARTIFACT_CAPTURE_MANIFEST_MAX_BYTES
       CAPTURE_MEDIA_FILE = /\A[\w.-]+\.(?:png|jpe?g|gif|webp|webm|mp4)\z/i
       VISUAL_PATH = %r{
         \A(?:
@@ -236,30 +236,63 @@ module Hive
       end
 
       def valid_capture_manifest?(manifest, receipt)
-        return false unless capture_manifest_schemer.valid?(manifest)
+        return false unless manifest.is_a?(Hash)
+
+        version = Integer(manifest["schema_version"], exception: false)
+        return false unless [ 1, 2 ].include?(version)
+        return false unless capture_manifest_schemer(version).valid?(manifest)
         return false unless manifest["status"] == "captured"
         return false unless manifest["task"].to_s == @task.slug.to_s
         return false unless manifest["source_sha"].to_s == receipt["implementation_head"].to_s
-        return false unless manifest["environment_keys"] ==
-                            Hive::Web::CaptureRuntime::DISCLOSED_ENV_KEYS.sort
-        return false if Array(manifest["command"]).empty?
-        return false if Array(manifest["fixture_ids"]).empty?
-        return false if Array(manifest["accessibility_assertions"]).empty?
         return false unless manifest["diagnostic"].nil?
         return false unless manifest["cleanup"] == {
           "port" => "released", "processes" => "clean", "runtime" => "cleaned"
         }
         return false unless valid_capture_times?(manifest)
         return false if Hive::SecretPatterns.match?(JSON.generate(manifest))
+        evidence_valid = if version == 1
+          valid_v1_capture_evidence?(manifest)
+        else
+          valid_v2_capture_evidence?(manifest)
+        end
+        return false unless evidence_valid
 
         artifacts = Array(manifest["artifacts"])
         artifacts.any? && artifacts.all? { |artifact| valid_capture_artifact?(artifact) }
       end
 
-      def capture_manifest_schemer
-        @capture_manifest_schemer ||= JSONSchemer.schema(
-          Pathname.new(Hive::Schemas.schema_path("hive-artifact-capture"))
+      def capture_manifest_schemer(version)
+        @capture_manifest_schemers ||= {}
+        @capture_manifest_schemers[version] ||= JSONSchemer.schema(
+          Pathname.new(Hive::Schemas.schema_path("hive-artifact-capture", version: version))
         )
+      end
+
+      def valid_v1_capture_evidence?(manifest)
+        manifest["environment_keys"] == Hive::Web::CaptureRuntime::DISCLOSED_ENV_KEYS.sort &&
+          !Array(manifest["command"]).empty? &&
+          !Array(manifest["fixture_ids"]).empty? &&
+          !Array(manifest["accessibility_assertions"]).empty?
+      end
+
+      def valid_v2_capture_evidence?(manifest)
+        recorder = manifest["recorder"]
+        evidence = manifest["evidence"]
+        return false unless recorder.is_a?(Hash) && evidence.is_a?(Hash)
+        return false if Array(recorder["command"]).empty?
+        return false if Array(manifest["environment_keys"]).empty?
+
+        case recorder["kind"]
+        when "built_in"
+          evidence["type"] == "hivebox" &&
+            manifest["environment_keys"] == Hive::Web::CaptureRuntime::DISCLOSED_ENV_KEYS.sort &&
+            !Array(evidence["fixture_ids"]).empty? &&
+            !Array(evidence["accessibility_assertions"]).empty?
+        when "project_provider"
+          evidence["type"] == "project_provider" && evidence["details"].is_a?(Hash)
+        else
+          false
+        end
       end
 
       def valid_capture_times?(manifest)

@@ -3,7 +3,7 @@ title: Hive::Bot
 type: module
 source: lib/hive/bot/
 created: 2026-05-14
-updated: 2026-07-20
+updated: 2026-08-02
 tags: [bot, telegram, module, mobile]
 ---
 
@@ -100,8 +100,10 @@ Recovery push notifications intentionally hide marker attrs, exception
 classes, phase names, diagnostic summaries, and diagnostic artifact
 paths. The operator-facing message is `Stage stuck` plus one
 plain-language cause sentence. Every `ERROR` and `REVIEW_ERROR` shows
-`Autofix`, regardless of whether diagnostic retry metadata exists; Hive also
-continues its guarded automatic retries. `EXECUTE_STALE` remains manual-only
+`Autofix`, regardless of whether diagnostic retry metadata exists. Hive also
+continues guarded automatic retries except for exact operator-owned
+`terminal_outcome_blocked` and `terminal_outcome_invalid` errors.
+`EXECUTE_STALE` remains manual-only
 and shows `Show details`. Autofix callbacks carry the generated `marker_id`
 for both error kinds and revalidate every encoded stage, marker, and attr
 against the fresh status row, so a stale Telegram button cannot authorize a

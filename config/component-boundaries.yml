@@ -783,35 +783,46 @@ components:
     name: Workflow Creator Values
     state: candidate
     entrypoint:
-      file: packaging/live_agent_skills/workflow_creator_values.rb
-      require: packaging/live_agent_skills/workflow_creator_values
-      constant: HiveLiveAgentProof::WorkflowCreator::Values
+      file: packaging/live_agent_skills/workflow_creator_text_safety.rb
+      require: packaging/live_agent_skills/workflow_creator_text_safety
+      constant: HiveLiveAgentProof::WorkflowCreator::TextSafety
     public_contract:
       values:
         - HiveLiveAgentProof::WorkflowCreator::Values.capture
         - anonymous immutable workflow-creator value snapshot
+        - HiveLiveAgentProof::WorkflowCreator::TextSafety.text
+        - HiveLiveAgentProof::WorkflowCreator::TextSafety.safe_relative_path?
+        - HiveLiveAgentProof::WorkflowCreator::TextSafety.secret_findings
+        - HiveLiveAgentProof::WorkflowCreator::TextSafety.redact
       errors:
         - HiveLiveAgentProof::WorkflowCreator::Values::Error
+        - HiveLiveAgentProof::WorkflowCreator::TextSafety::Error
     owned_paths:
       - packaging/live_agent_skills/workflow_creator_values.rb
+      - packaging/live_agent_skills/workflow_creator_text_safety.rb
     state_contracts:
       - "One capture owns fresh recursively frozen JSON-shaped values and their compact canonical UTF-8 bytes"
+      - "Text projection accepts exact frozen plain Values shapes as an internal contract, not origin authentication"
+      - "Text, path checks, secret findings, and redaction are deterministic and bounded to 4096-byte inputs"
     schema_contracts:
       - "Canonical bytes preserve JSON scalar type, sort normalized UTF-8 object keys by owned bytes, and end with one newline"
+      - "Secret findings preserve exact-secret indexes before fixed pattern labels, and overlapping ranges redact once"
     lock_contracts:
       - "No locks or durable state; concurrent caller mutation is outside the capture contract"
     component_dependencies: []
     allowed_hive_dependencies: []
     internal_collaborators:
       - HiveLiveAgentProof::WorkflowCreator::Values
+      - HiveLiveAgentProof::WorkflowCreator::TextSafety
     forbidden_constructions: []
     authorized_internal_constructions: []
     hive_consumers: []
-    mutation_authority: "No external mutation authority; capture allocates only fresh in-memory values and bytes."
-    recovery_surface: "Capture fails closed with one fixed secret-free error and exposes no retry or recovery state."
+    mutation_authority: "No external mutation authority; capture and projection allocate only fresh in-memory values and text."
+    recovery_surface: "Capture and projection fail closed with fixed secret-free errors and expose no retry or recovery state."
     wiki_page: wiki/component-boundaries.md
     focused_tests:
       - test/unit/packaging/workflow_creator_values_test.rb
+      - test/unit/packaging/workflow_creator_text_safety_test.rb
     migration_exceptions:
-      - reason: "U1a1vt must consume the staged values-only boundary before it can be promoted."
-        removal_unit: U1a1vt
+      - reason: "U1a1c must establish the staged boundary's first production consumer before promotion."
+        removal_unit: U1a1c

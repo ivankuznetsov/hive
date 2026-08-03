@@ -61,6 +61,13 @@ local checkpoint, normally once before handoff:
 bundle exec rake test
 ```
 
+Tests that construct project-local state stores must pass a disposable project
+root from `with_tmp_dir`. Isolating `HOME` does not redirect
+`<project>/.hive-state`, so using the checkout root can pollute live Patrol
+recovery state. The Patrol PR-opener helper rejects the repository root before
+creating or reserving an occurrence, in addition to keeping each stateful test
+inside its own temporary project.
+
 Pre-release candidate operations are separately scoped. `plan`, `list`,
 `inspect`, and `collect` are observational; `run`, `resume`, and `rerun` append
 local candidate evidence; only `dispatch` writes to GitHub. A successful local
@@ -121,11 +128,12 @@ migration exceptions, selected source-level dependency/construction rules,
 exact authorized internal-construction sites, and fresh-process loading for
 every `boundary-ready` component. One staged candidate may have an empty
 consumer list only when it carries exactly one bounded migration exception;
-removal units accept hierarchical plan IDs such as `U1a1vt`:
+removal units accept hierarchical plan IDs such as `U1a1c`:
 
 ```bash
 bundle exec ruby -Itest -Ilib test/unit/component_boundaries_test.rb
 bundle exec ruby -Itest test/unit/packaging/workflow_creator_values_test.rb
+bundle exec ruby -Itest test/unit/packaging/workflow_creator_text_safety_test.rb
 ```
 
 Ready components cannot depend on candidates. Forbidden-construction rules
@@ -134,18 +142,30 @@ clean-load proof for a candidate such as Attempts without representing the
 whole component graph as ready.
 
 Workflow Creator Values keeps its clean-load and dependency proof outside the
-generic component loader. Its focused suite directly runs the leaf under
+generic component loader. The Values suite directly runs its leaf under
 `ruby --disable-gems -I<repository-root>`, verifies JSON remains unloaded and
 that capture performs no `File`, `Dir`, or `Process` calls, and uses a
 leaf-local `Ripper.lex` token check that catches bare and qualified `require`
 and `require_relative` identifiers without treating comments or strings as
-code. The same suite covers exact core type admission,
-recursive ownership/freezing, canonical bytes, hostile direct and
-module-contributed dispatch, post-load core replacement, copy/Marshal denial,
-encoding and numeric boundaries, cycles/shared graphs, declared resource
-ceilings, property comparisons, and the exact R43 line/callable/decision and
-per-method RuboCop budgets. It does not assert generic require-path
-canonicalization.
+code. It also covers exact core type admission, recursive ownership/freezing,
+canonical bytes, hostile dispatch, post-load core replacement, copy/Marshal
+denial, and declared resource ceilings. The expensive 20,000-case IEEE-754
+and randomized canonicalization campaign is opt-in: run
+`bundle exec rake test:hostile` (or set `HIVE_HOSTILE_TESTS=1` for the focused
+Values file). Normal `rake test` and coverage still run the deterministic
+Values and TextSafety contract tests, but skip those two property methods so
+the merge gate does not pay the hostile-campaign runtime.
+
+The TextSafety suite passes positive public inputs only through
+`Values.capture(...).value`. It covers UTF-8 byte truncation, safe-relative-path
+matrices, bounded unique exact-secret scanning, fixed pattern ordering,
+overlapping redaction ranges, complete and truncated private-key envelopes,
+fixed failures, private captured handles, both load orders, and post-load core
+replacement. The Values suite's honest Ripper counter includes methods and
+proc/lambda callables and proves the exact individual and composed
+line/callable/decision caps; the R43 RuboCop overlay checks every method in both
+production files. These tests do not assert generic require-path
+canonicalization or origin authentication.
 
 The helper uses Ruby syntax rather than comments or string examples for literal
 `require`, `require_relative`, and `Constant.new` checks. It remains an

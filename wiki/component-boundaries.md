@@ -19,7 +19,7 @@ the first and primary consumer.
 |-----------|-------|---------------------|-------------------|
 | Patrol Effect Evidence | `candidate` (U3a protocol complete; U3b/U3c proof pending) | `require "hive/modules/migration/patrol_evidence"` → `Hive::Modules::Migration::PatrolEvidence` | [[modules/patrol]] |
 | Attempts admission / future RunReceipt | `candidate` (guarded reference) | `require "hive/attempts/api"` → `Hive::Attempts::API` | [[modules/attempts]] |
-| Workflow Creator Values | `candidate` (U1a1vt consumer pending) | `require "packaging/live_agent_skills/workflow_creator_values"` → `HiveLiveAgentProof::WorkflowCreator::Values` | [[component-boundaries]] |
+| Workflow Creator Values | `candidate` (U1a1c consumer pending) | `require "packaging/live_agent_skills/workflow_creator_text_safety"` → `HiveLiveAgentProof::WorkflowCreator::TextSafety` | [[component-boundaries]] |
 | UserService | `boundary-ready` | `require "hive/user_service"` → `Hive::UserService` | [[modules/user_service]] |
 | Agent ABI | `boundary-ready`; standalone package candidate | `require "hive/agent_runtime"` → `Hive::AgentRuntime` | [[modules/agent_cli_runtime]], [[modules/agent_profile]] |
 | Agent Artifact Firewall | `boundary-ready` | `require "hive/artifact_firewall"` → `Hive::ArtifactFirewall` | [[modules/protected_files]] |
@@ -40,7 +40,7 @@ The catalog on 2026-08-03 retains nine components: six are
 Values remain `candidate`. Patrol retains one bounded U3 exception for
 deterministic public-path and independently authorized installed/live proof.
 Workflow Creator Values
-retains one bounded U1a1vt exception until its first production consumer lands.
+retains one bounded U1a1c exception until its first production consumer lands.
 Every retained entry point has focused clean-process load proof, every
 catalog-owned path and focused test resolves inside this repository, and the
 direct-construction guards pass against all production Ruby sources.
@@ -167,24 +167,38 @@ its full lifecycle is a supported component boundary: the slice does not
 publish raw storage, reconciliation, supervision, capacity, loss-policy,
 cancellation, export, or generic lifecycle operations.
 
-`Workflow Creator Values` is a staged values-only candidate.
-`HiveLiveAgentProof::WorkflowCreator::Values.capture` accepts exact core
-JSON-shaped Ruby values and returns an anonymous frozen snapshot exposing only
-fresh recursively frozen owned values and compact canonical UTF-8 bytes.
-Unsupported subclasses, non-finite floats, ambiguous or invalid encodings,
-normalized-key collisions, cycles, and declared depth, node, source-byte,
-canonical-byte, logical-work, and integer-bit ceilings fail through one fixed
-secret-free error. The leaf loads without JSON, I/O, workflow, process,
-credential, or provider dependencies.
+`Workflow Creator Values` is a staged values-and-projection candidate. Its
+singular entry point is
+`HiveLiveAgentProof::WorkflowCreator::TextSafety`; loading it real-requires the
+sibling `Values` leaf so both public modules become available. `Values.capture`
+accepts exact core JSON-shaped Ruby values and returns an anonymous frozen
+snapshot exposing only fresh recursively frozen owned values and compact
+canonical UTF-8 bytes. Unsupported subclasses, non-finite floats, ambiguous or
+invalid encodings, normalized-key collisions, cycles, and declared depth, node,
+source-byte, canonical-byte, logical-work, and integer-bit ceilings fail through
+one fixed secret-free error.
 
-The candidate has no production consumer yet. Its sole migration exception is
-`removal_unit: U1a1vt`; that unit must consume and expand the same staged row
-before promotion. U1a1vir owns no text, path, or secret projection, creator
-schema, custody, publication, or live behavior. Its source proof is deliberately
-leaf-local: the focused test uses `Ripper.lex` to reject bare and qualified
-`require` and `require_relative` identifiers while ignoring comments and
-strings, and a direct `ruby --disable-gems -I<repository-root>` subprocess
-proves clean loading. This is not generic Ruby grammar or require-path analysis.
+`TextSafety` projects exact frozen plain strings and arrays produced through a
+snapshot's `value`. That plain-shape check is a documented internal ownership
+contract, not authentication of object origin. `text` makes bounded valid UTF-8,
+`safe_relative_path?` rejects absolute, ambiguous, control-bearing, or traversal
+paths without segment splitting, `secret_findings` reports exact-secret indexes
+before fixed credential-pattern labels, and `redact` merges overlapping ranges
+into one marker. Inputs, outputs, and exact secrets are capped at 4,096 bytes;
+exact-secret lists are capped at 64. Public failures normalize to a fixed
+secret-free error with no cause. Each leaf captures its own private core-method
+handles, and focused subprocess proof covers both load orders and post-load core
+replacement. The sources load without JSON, I/O, workflow, process, credential,
+or provider dependencies.
+
+The candidate still has no production consumer. Its sole migration exception is
+`removal_unit: U1a1c`; that unit must establish the first consumer before
+promotion. U1a1vt adds no creator schema, custody, publication, or live behavior.
+The exact R43 proof is 298 lines / 20 callables / 32 decisions for `Values`, 200
+lines / 14 callables / 23 decisions for `TextSafety`, and 498 / 34 / 55 when
+composed. The Values source retains its leaf-local `Ripper.lex` no-require proof;
+the TextSafety entry point has exactly one downward `require_relative` to Values.
+This is not generic Ruby grammar, require-path analysis, or provenance security.
 
 The `Agent ABI` is boundary-ready below orchestration. `AgentRuntime` exposes
 immutable request, compiled invocation, capability/probe evidence, and
@@ -313,7 +327,7 @@ repository. A temporary exception must include both a reason and the
 implementation unit that removes it. A `boundary-ready` component cannot keep
 an exception or depend on a `candidate` component. A consumer list may be
 empty only for a `candidate` with exactly one bounded migration exception;
-hierarchical plan identifiers such as `U1a1vt` are valid removal units.
+hierarchical plan identifiers such as `U1a1c` are valid removal units.
 
 ## Enforcement
 
@@ -342,9 +356,10 @@ bundle exec ruby -Itest -Ilib test/unit/component_boundaries_test.rb
 ```
 
 The Workflow Creator Values candidate does not widen this shared syntax guard
-or the generic component clean-loader. Its no-require and direct clean-load
-proofs live only in
-`test/unit/packaging/workflow_creator_values_test.rb`.
+or the generic component clean-loader. Its Values no-require proof, composed
+R43 proof, direct entry-point load-order proof, and projection behavior live in
+`test/unit/packaging/workflow_creator_values_test.rb` and
+`test/unit/packaging/workflow_creator_text_safety_test.rb`.
 
 The syntax scan is an architecture regression guard, not a Ruby sandbox. Its
 construction rule covers literal `Constant.new`, not aliases or factory

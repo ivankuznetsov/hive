@@ -22,7 +22,12 @@ class ComponentBoundariesTest < Minitest::Test
       skillpack
       user-service
       work-ledger
+      workflow-creator-values
     ], contract.components.map { |component| component.fetch("id") }.sort
+    assert_equal [ "workflow-creator-values" ],
+                 contract.components.filter_map { |component|
+                   component.fetch("id") if component.fetch("hive_consumers").empty?
+                 }
 
     attempts = contract.component("attempts")
     assert_equal "candidate", attempts.fetch("state")
@@ -74,6 +79,23 @@ class ComponentBoundariesTest < Minitest::Test
         [ entry.fetch("constant"), entry.fetch("files") ]
       end
     )
+    creator_values = contract.component("workflow-creator-values")
+    assert_equal "candidate", creator_values.fetch("state")
+    assert_equal "packaging/live_agent_skills/workflow_creator_values",
+                 creator_values.dig("entrypoint", "require")
+    assert_equal "HiveLiveAgentProof::WorkflowCreator::Values",
+                 creator_values.dig("entrypoint", "constant")
+    assert_equal %w[
+      packaging/live_agent_skills/workflow_creator_text_safety.rb
+      packaging/live_agent_skills/workflow_creator_values.rb
+    ], creator_values.fetch("owned_paths").sort
+    assert_empty creator_values.fetch("hive_consumers")
+    assert_empty creator_values.fetch("component_dependencies")
+    assert_equal [ "U1a1c" ], creator_values.fetch("migration_exceptions").map { |entry| entry.fetch("removal_unit") }
+    creator_values_load = contract.validate_clean_load!("workflow-creator-values")
+    assert_equal "HiveLiveAgentProof::WorkflowCreator::Values", creator_values_load.fetch("constant")
+    assert_empty creator_values_load.fetch("forbidden_loaded_features")
+    assert_empty creator_values_load.fetch("forbidden_constants")
     user_service = contract.component("user-service")
     assert_equal "boundary-ready", user_service.fetch("state")
     assert_equal "hive/user_service", user_service.dig("entrypoint", "require")
@@ -248,7 +270,7 @@ class ComponentBoundariesTest < Minitest::Test
     remaining_candidates = contract.components.reject do |component|
       ready_components.include?(component)
     end
-    assert_equal %w[attempts patrol-effects],
+    assert_equal %w[attempts patrol-effects workflow-creator-values],
                  remaining_candidates.map { |entry| entry.fetch("id") }.sort
     assert remaining_candidates.all? { |component| component.fetch("state") == "candidate" }
 
@@ -313,12 +335,16 @@ class ComponentBoundariesTest < Minitest::Test
       assert_includes row, "[[#{wiki_link}]]"
       assert_includes wiki_index, "[[#{wiki_link}]]"
       exceptions = component.fetch("migration_exceptions")
-      if component.fetch("id") == "patrol-effects"
-        assert_equal [ "U3" ],
-                     exceptions.map { |entry| entry.fetch("removal_unit") }
-      else
+      expected_exception = {
+        "patrol-effects" => [ "U3" ],
+        "workflow-creator-values" => [ "U1a1c" ]
+      }.fetch(component.fetch("id"), [])
+      if expected_exception.empty?
         assert_empty exceptions,
                      "#{component.fetch('id')} retained an expired migration exception"
+      else
+        assert_equal expected_exception,
+                     exceptions.map { |entry| entry.fetch("removal_unit") }
       end
 
       component_dependencies = component.fetch("component_dependencies")
@@ -590,15 +616,33 @@ class ComponentBoundariesTest < Minitest::Test
     end
   end
 
-  def test_candidate_component_accepts_bounded_migration_exception
+  def test_zero_consumers_require_a_candidate_with_a_bounded_migration_exception
+    { "user-service" => "boundary-ready", "attempts" => "candidate" }.each do |id, state|
+      document = Marshal.load(Marshal.dump(@document))
+      entry = component(document, id)
+      entry["state"] = state
+      entry["hive_consumers"] = []
+      entry["migration_exceptions"] = []
+
+      error = assert_raises(ComponentBoundaryContract::ValidationError, id) do
+        ComponentBoundaryContract.new(document, root: ROOT).validate_catalog!
+      end
+
+      assert_match(/#{id}\.hive_consumers/, error.message)
+      assert_match(/candidate with a bounded migration exception/, error.message)
+    end
+  end
+
+  def test_candidate_component_accepts_actual_nested_plan_unit
     with_contract_fixture(
       entrypoint_source: example_api_source,
       state: "candidate",
       migration_exceptions: [
-        { "reason" => "temporary upward edge", "removal_unit" => "U3" }
+        { "reason" => "temporary upward edge", "removal_unit" => "U1a1c" }
       ]
     ) do |contract|
       assert contract.validate_catalog!
+      assert_equal "U1a1c", contract.component("example").fetch("migration_exceptions").first.fetch("removal_unit")
     end
   end
 
@@ -631,7 +675,7 @@ class ComponentBoundariesTest < Minitest::Test
       end
 
       assert_match(/example\.migration_exceptions\[0\]\.removal_unit/, error.message)
-      assert_match(/must name a plan unit such as U3/, error.message)
+      assert_match(/must name a plan unit such as U3 or U1a1c/, error.message)
     end
   end
 
@@ -683,6 +727,25 @@ class ComponentBoundariesTest < Minitest::Test
       assert_match(/example\.entrypoint/, error.message)
       assert_match(/clean load failed/, error.message)
       assert_match(/fixture boom/, error.message)
+    end
+  end
+
+  def test_clean_load_does_not_expose_root_owned_packaging_features_to_lib_entrypoints
+    with_contract_fixture(
+      entrypoint_source: <<~RUBY,
+        require "packaging/unrelated"
+        #{example_api_source}
+      RUBY
+      extra_files: {
+        "packaging/unrelated.rb" => "module Packaging; module Unrelated; end; end\n"
+      }
+    ) do |contract|
+      error = assert_raises(ComponentBoundaryContract::ValidationError) do
+        contract.validate_clean_loads!
+      end
+
+      assert_match(/clean load failed/, error.message)
+      assert_match(/cannot load such file -- packaging\/unrelated/, error.message)
     end
   end
 

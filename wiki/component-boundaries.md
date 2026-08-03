@@ -3,7 +3,7 @@ title: Component boundaries
 type: reference
 source: config/component-boundaries.yml, test/support/component_boundary_contract.rb
 created: 2026-07-25
-updated: 2026-07-30
+updated: 2026-08-02
 tags: [architecture, components, boundaries, monorepo]
 ---
 
@@ -19,6 +19,7 @@ the first and primary consumer.
 |-----------|-------|---------------------|-------------------|
 | Patrol Effect Evidence | `candidate` (U3 qualification pending) | `require "hive/modules/migration/patrol_evidence"` → `Hive::Modules::Migration::PatrolEvidence` | [[modules/patrol]] |
 | Attempts admission / future RunReceipt | `candidate` (guarded reference) | `require "hive/attempts/api"` → `Hive::Attempts::API` | [[modules/attempts]] |
+| Workflow Creator Values | `candidate` (U1a1c consumer pending) | `require "packaging/live_agent_skills/workflow_creator_values"` → `HiveLiveAgentProof::WorkflowCreator::Values` | [[component-boundaries]] |
 | UserService | `boundary-ready` | `require "hive/user_service"` → `Hive::UserService` | [[modules/user_service]] |
 | Agent ABI | `boundary-ready`; standalone package candidate | `require "hive/agent_runtime"` → `Hive::AgentRuntime` | [[modules/agent_cli_runtime]], [[modules/agent_profile]] |
 | Agent Artifact Firewall | `boundary-ready` | `require "hive/artifact_firewall"` → `Hive::ArtifactFirewall` | [[modules/protected_files]] |
@@ -34,13 +35,15 @@ has earned a gem, version, repository, or release.
 
 ## Final graph audit
 
-The final U2 resolution on 2026-07-29 retains eight components: six are
-`boundary-ready`; Attempts and Patrol Effect Evidence remain `candidate`.
-Patrol retains one bounded U3 exception for compressed evidence qualification
-and cutover proof. Every retained entry point has a focused clean-process load
-proof, every catalog-owned path and focused test resolves inside this
-repository, and the direct-construction guards pass against all production
-Ruby sources.
+The catalog currently retains nine components: six are `boundary-ready`;
+Attempts, Patrol Effect Evidence, and Workflow Creator Values remain
+`candidate`. Patrol retains a bounded U3 exception for compressed evidence
+qualification and cutover proof. Workflow Creator Values retains the sole
+zero-consumer staged-prerequisite exception, removed by U1a1c when that unit
+becomes its first production consumer. Every retained entry point has a
+focused clean-process load proof, every catalog-owned path and focused test
+resolves inside this repository, and the direct-construction guards pass
+against all production Ruby sources.
 
 The component dependency graph has one edge:
 
@@ -49,18 +52,20 @@ flowchart LR
   skillpack[Skillpack] --> agent_abi[Agent ABI]
   patrol_effects[Patrol Effect Evidence - candidate]
   attempts[Attempts admission - candidate]
+  creator_values[Workflow Creator Values - candidate]
   user_service[UserService]
   artifact_firewall[Agent Artifact Firewall]
   git_gate[Safe Agent Git Gate]
   work_ledger[WorkLedger]
 ```
 
-All other cataloged components depend only on explicitly allowed lower-level
-Hive primitives. The source audit found no retained experimental facade outside
-the catalog: each promoted facade is owned by a catalog row and used by Hive,
-while Attempts and Patrol Effect Evidence are deliberately retained as guarded
-candidates rather than being promoted ahead of their remaining lifecycle or
-qualification proof.
+All other cataloged components have no component dependency. The source audit
+found no retained experimental facade outside the catalog: each promoted
+facade is owned by a catalog row and used by Hive, while Attempts and Patrol
+Effect Evidence remain guarded pending lifecycle or qualification proof.
+Workflow Creator Values is the one explicitly staged exception: it has no
+production consumer until U1a1c and is program-incomplete if that successor is
+abandoned.
 
 This is an internal architecture verdict, not a packaging verdict. None of the
 six ready components currently has the named non-Hive adopter and independent
@@ -166,6 +171,26 @@ transaction, or the Safe Agent Git Gate.
 `Hive::SecretPatterns` remains shared lower-level Hive infrastructure rather
 than component-owned state. Both the Agent ABI and Artifact Firewall use it for
 bounded diagnostics, while the firewall also accepts an injected redactor.
+
+`HiveLiveAgentProof::WorkflowCreator::Values` is a packaging-owned leaf
+candidate. It captures the core operations it needs at load, imports exact
+JSON-shaped Ruby values into fresh recursively frozen containers and strings,
+rejects cycles, type subclasses, ambiguous binary encodings, normalized-key
+collisions, non-finite numbers, impossible direct hash cardinality, and
+resource overruns, and emits sorted pretty UTF-8 JSON bytes with one trailing
+newline. `Values.capture` is the sole ordinary `Snapshot` factory: alternate
+`Data` constructors and copy/update APIs are non-public. Collision admission
+uses a bounded linear index, while `WorkflowCreator::TextSafety` records
+overlapping exact-secret and token matches into one fixed-size difference mask
+before emitting merged UTF-8 redactions. Exact-secret searches use byte copies
+so multibyte overlaps cannot split a character boundary; complete and
+truncated PEM envelopes redact through their body, and relative paths reject
+root-expanding, option-like, and control-byte forms.
+The boundary owns no creator vocabulary or schema, retained evidence,
+mutation, recovery, process, credential, provider, or live behavior. Pre-load
+core mutation is explicitly outside this same-process boundary; captured
+allocation, initialization, traversal, and projection operations prevent later
+replacement from redirecting import dispatch.
 
 The package-only extraction lives at `components/agent-cli-runtime/` and
 publishes the neutral `AgentCliRuntime` namespace plus the bounded

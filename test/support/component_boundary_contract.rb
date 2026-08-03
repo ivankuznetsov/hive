@@ -164,7 +164,7 @@ class ComponentBoundaryContract
       next if field == "migration_exceptions"
 
       string_array!(value, "#{component_path}.#{field}",
-                    allow_empty: %w[component_dependencies allowed_hive_dependencies forbidden_constructions].include?(field))
+                    allow_empty: %w[component_dependencies allowed_hive_dependencies forbidden_constructions hive_consumers].include?(field))
     end
     forbidden_allowed = row.fetch("allowed_hive_dependencies").select { |required| forbidden_require?(required) }
     unless forbidden_allowed.empty?
@@ -176,6 +176,11 @@ class ComponentBoundaryContract
     end
     repo_path!(row.fetch("wiki_page"), "#{component_path}.wiki_page")
     validate_migration_exceptions!(row, component_path)
+    if row.fetch("hive_consumers").empty? &&
+        (state != "candidate" || row.fetch("migration_exceptions").empty?)
+      invalid!("#{component_path}.hive_consumers",
+               "may be empty only for a candidate with a bounded migration exception")
+    end
     validate_authorized_internal_constructions!(row, component_path)
     string!(row.fetch("mutation_authority"), "#{component_path}.mutation_authority")
     string!(row.fetch("recovery_surface"), "#{component_path}.recovery_surface")
@@ -190,7 +195,9 @@ class ComponentBoundaryContract
       assert_keys!(exception, %w[reason removal_unit], path)
       string!(exception.fetch("reason"), "#{path}.reason")
       removal_unit = string!(exception.fetch("removal_unit"), "#{path}.removal_unit")
-      invalid!("#{path}.removal_unit", "must name a plan unit such as U3") unless removal_unit.match?(/\AU\d+\z/)
+      unless removal_unit.match?(/\AU\d+(?:[a-z]\d*)*\z/)
+        invalid!("#{path}.removal_unit", "must name a plan unit such as U3 or U1a1c")
+      end
     end
     if row.fetch("state") == "boundary-ready" && !exceptions.empty?
       invalid!("#{component_path}.migration_exceptions", "boundary-ready components cannot retain exceptions")
@@ -371,9 +378,12 @@ class ComponentBoundaryContract
       )
     RUBY
 
+    load_paths = [ "-I#{File.join(@root, 'lib')}" ]
+    load_paths.unshift("-I#{@root}") unless entrypoint.fetch("file").start_with?("lib/")
+
     out, err, status = Open3.capture3(
       RbConfig.ruby,
-      "-I#{File.join(@root, 'lib')}",
+      *load_paths,
       "-e",
       script,
       chdir: @root

@@ -127,8 +127,17 @@ bundle exec ruby -Itest -Ilib test/unit/component_boundaries_test.rb
 
 Ready components cannot depend on candidates. Forbidden-construction rules
 also apply to guarded candidates, and the helper can run a named focused
-clean-load proof for a candidate such as Attempts without representing the
-whole component graph as ready.
+clean-load proof for a candidate such as Attempts or Workflow Creator Values
+without representing the whole component graph as ready. Candidate migration
+units accept nested plan identifiers such as `U1a1c`; malformed or free-form
+labels still fail catalog validation. An empty `hive_consumers` list is valid
+only for a `candidate` that also carries a non-empty bounded migration
+exception; boundary-ready and unfenced candidate rows must name a real Hive
+consumer. The current graph also pins Workflow Creator Values as the sole
+zero-consumer row, so the staged exception cannot spread to another candidate.
+Clean-load subprocesses expose the repository root only to catalog entrypoints
+outside `lib/`; ordinary `lib` components retain the production-like `-Ilib`
+surface and cannot silently import root-owned packaging code.
 
 The helper uses Ruby syntax rather than comments or string examples for literal
 `require`, `require_relative`, and `Constant.new` checks. It remains an

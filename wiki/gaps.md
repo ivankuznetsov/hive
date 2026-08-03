@@ -122,14 +122,17 @@ tags: [gap, todo, release-proof, agent-skills]
 
 ## Internal component boundary gap
 
-- The final internal graph audit retains eight catalog rows: UserService, Agent
+- The current internal graph retains nine catalog rows: UserService, Agent
   ABI, Agent Artifact Firewall, Skillpack, Safe Agent Git Gate, and WorkLedger
-  are `boundary-ready`; Attempts admission and Patrol Effect Evidence remain
-  `candidate`. Skillpack to Agent ABI is the only component dependency. Patrol
-  retains one bounded U3 exception for compressed candidate evidence and
-  production qualification; Attempts remains unready because Hive has no
-  demonstrated need for a supported reconciliation, supervision, capacity,
-  loss-processing, cancellation, export, or raw-store lifecycle API.
+  are `boundary-ready`; Attempts admission, Patrol Effect Evidence, and
+  Workflow Creator Values remain `candidate`. Skillpack to Agent ABI is the
+  only component dependency. Patrol retains a bounded U3 exception for
+  compressed candidate evidence and production qualification. Workflow Creator
+  Values is a zero-consumer staged prerequisite with one U1a1c removal fence;
+  it must be consumed and promoted by that immediate successor or removed.
+  Attempts remains unready because Hive has no demonstrated need for a
+  supported reconciliation, supervision, capacity, loss-processing,
+  cancellation, export, or raw-store lifecycle API.
 - No ready component has yet earned standalone packaging. There is no named
   non-Hive adopter, independently installed component artifact, separate
   compatibility promise, or explicit release decision. Those proofs belong to

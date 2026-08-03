@@ -251,6 +251,11 @@ module Hive
       # if the visible grid is empty); KeyMap uses it to refuse verbs
       # on stale-pid rows and to synthesize argv from suggested_command.
       def translate_key(key_message)
+        # Ctrl-C is framework-level termination, not a mode-specific action.
+        if key_message.key_type == Bubbletea::KeyMessage::KEY_CTRL_C
+          return Hive::Tui::Messages::TERMINATE_REQUESTED
+        end
+
         key = bubble_key_to_keymap(key_message)
         row = @hive_model.mode == :red_status_detail ? @hive_model.red_status_detail_state&.row : current_row
         Hive::Tui::KeyMap.message_for(

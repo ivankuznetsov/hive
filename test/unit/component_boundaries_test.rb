@@ -594,11 +594,28 @@ class ComponentBoundariesTest < Minitest::Test
     with_contract_fixture(
       entrypoint_source: example_api_source,
       state: "candidate",
+      hive_consumers: [],
       migration_exceptions: [
-        { "reason" => "temporary upward edge", "removal_unit" => "U3" }
+        { "reason" => "temporary staged consumer", "removal_unit" => "U1a1vt" }
       ]
     ) do |contract|
       assert contract.validate_catalog!
+    end
+  end
+
+  def test_empty_hive_consumers_require_candidate_state_and_bounded_exception
+    %w[boundary-ready candidate].each do |state|
+      with_contract_fixture(
+        entrypoint_source: example_api_source,
+        state: state,
+        hive_consumers: []
+      ) do |contract|
+        error = assert_raises(ComponentBoundaryContract::ValidationError, state) do
+          contract.validate_catalog!
+        end
+
+        assert_match(/example\.hive_consumers/, error.message)
+      end
     end
   end
 
@@ -619,19 +636,35 @@ class ComponentBoundariesTest < Minitest::Test
   end
 
   def test_migration_exception_requires_valid_removal_unit
-    with_contract_fixture(
-      entrypoint_source: example_api_source,
-      state: "candidate",
-      migration_exceptions: [
-        { "reason" => "temporary upward edge", "removal_unit" => "later" }
-      ]
-    ) do |contract|
-      error = assert_raises(ComponentBoundaryContract::ValidationError) do
-        contract.validate_catalog!
-      end
+    %w[later Ux U1A U1-a U1_a].each do |removal_unit|
+      with_contract_fixture(
+        entrypoint_source: example_api_source,
+        state: "candidate",
+        migration_exceptions: [
+          { "reason" => "temporary upward edge", "removal_unit" => removal_unit }
+        ]
+      ) do |contract|
+        error = assert_raises(ComponentBoundaryContract::ValidationError, removal_unit) do
+          contract.validate_catalog!
+        end
 
-      assert_match(/example\.migration_exceptions\[0\]\.removal_unit/, error.message)
-      assert_match(/must name a plan unit such as U3/, error.message)
+        assert_match(/example\.migration_exceptions\[0\]\.removal_unit/, error.message)
+        assert_match(/must name a plan unit/, error.message)
+      end
+    end
+  end
+
+  def test_migration_exception_accepts_hierarchical_removal_units
+    %w[U1a1vt U3c U1a2].each do |removal_unit|
+      with_contract_fixture(
+        entrypoint_source: example_api_source,
+        state: "candidate",
+        migration_exceptions: [
+          { "reason" => "temporary staged consumer", "removal_unit" => removal_unit }
+        ]
+      ) do |contract|
+        assert contract.validate_catalog!, removal_unit
+      end
     end
   end
 
@@ -683,6 +716,46 @@ class ComponentBoundariesTest < Minitest::Test
       assert_match(/example\.entrypoint/, error.message)
       assert_match(/clean load failed/, error.message)
       assert_match(/fixture boom/, error.message)
+    end
+  end
+
+  def test_packaging_entrypoint_loads_cleanly_from_repository_root
+    with_contract_fixture(
+      entrypoint_source: <<~RUBY,
+        require "packaging/support"
+        #{example_api_source}
+      RUBY
+      entrypoint_file: "packaging/example.rb",
+      entrypoint_require: "packaging/example",
+      owned_paths: [ "packaging/example.rb", "packaging/support.rb" ],
+      extra_files: {
+        "packaging/support.rb" => "module Packaging; module Support; end; end\n"
+      }
+    ) do |contract|
+      result = contract.validate_clean_loads!
+
+      assert_equal "Example::API", result.fetch("example").fetch("constant")
+      assert_empty result.fetch("example").fetch("forbidden_loaded_features")
+      assert_empty result.fetch("example").fetch("forbidden_constants")
+    end
+  end
+
+  def test_lib_entrypoint_does_not_gain_repository_root_load_path
+    with_contract_fixture(
+      entrypoint_source: <<~RUBY,
+        require "packaging/unrelated"
+        #{example_api_source}
+      RUBY
+      extra_files: {
+        "packaging/unrelated.rb" => "module Packaging; module Unrelated; end; end\n"
+      }
+    ) do |contract|
+      error = assert_raises(ComponentBoundaryContract::ValidationError) do
+        contract.validate_clean_loads!
+      end
+
+      assert_match(/clean load failed/, error.message)
+      assert_match(/cannot load such file -- packaging\/unrelated/, error.message)
     end
   end
 
@@ -1126,6 +1199,7 @@ class ComponentBoundariesTest < Minitest::Test
                             state: "boundary-ready", entrypoint_file: "lib/example.rb",
                             entrypoint_require: "example", owned_paths: nil,
                             component_dependencies: [], allowed_hive_dependencies: [],
+                            hive_consumers: [ "lib/consumer.rb" ],
                             migration_exceptions: [], authorized_internal_constructions: [],
                             internal_collaborators: nil,
                             extra_components: [], extra_files: {})
@@ -1148,6 +1222,7 @@ class ComponentBoundariesTest < Minitest::Test
             owned_paths: owned_paths || [ entrypoint_file ],
             component_dependencies: component_dependencies,
             allowed_hive_dependencies: allowed_hive_dependencies,
+            hive_consumers: hive_consumers,
             migration_exceptions: migration_exceptions,
             authorized_internal_constructions: authorized_internal_constructions,
             internal_collaborators: internal_collaborators
@@ -1162,6 +1237,7 @@ class ComponentBoundariesTest < Minitest::Test
 
   def fixture_component(id:, state:, entrypoint_file:, entrypoint_require:, entrypoint_constant:,
                         owned_paths:, component_dependencies: [], allowed_hive_dependencies: [],
+                        hive_consumers: [ "lib/consumer.rb" ],
                         migration_exceptions: [], authorized_internal_constructions: [],
                         internal_collaborators: nil)
     namespace = entrypoint_constant.split("::").first
@@ -1188,7 +1264,7 @@ class ComponentBoundariesTest < Minitest::Test
       "internal_collaborators" => internal_collaborators,
       "forbidden_constructions" => [ "#{namespace}::Internal" ],
       "authorized_internal_constructions" => authorized_internal_constructions,
-      "hive_consumers" => [ "lib/consumer.rb" ],
+      "hive_consumers" => hive_consumers,
       "mutation_authority" => "none",
       "recovery_surface" => "none",
       "wiki_page" => "wiki/example.md",

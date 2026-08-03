@@ -43,24 +43,41 @@ module Hive
         @clock = clock
       end
 
-      def dispatch(module_name:, hook_id:, event:, dry_run: false)
+      def dispatch(module_name:, hook_id:, event:, dry_run: false,
+                   admission_open: -> { true })
+        return nil unless admission_open?(admission_open)
+
         assert_project!(event)
         with_migration_admission_lock(module_name, dry_run: dry_run) do
+          return nil unless admission_open?(admission_open)
+
           dispatch_under_migration_lock(
-            module_name: module_name, hook_id: hook_id, event: event, dry_run: dry_run
+            module_name: module_name, hook_id: hook_id, event: event,
+            dry_run: dry_run, admission_open: admission_open
           )
         end
       end
 
-      def dispatch_under_migration_lock(module_name:, hook_id:, event:, dry_run:)
+      def dispatch_under_migration_lock(module_name:, hook_id:, event:, dry_run:,
+                                        admission_open:)
+        return nil unless admission_open?(admission_open)
+
         lifecycle = dry_run ? method(:without_lifecycle_lock) : @store.method(:with_admission)
         lifecycle.call(module_name) do |admitted_selection|
+          return nil unless admission_open?(admission_open)
+
           lock = dry_run ? method(:without_hook_lock) : method(:with_hook_lock)
           lock.call(module_name, hook_id) do
+            return nil unless admission_open?(admission_open)
+
             context = load_context(
               module_name, hook_id, read_only: dry_run, selection: admitted_selection
             )
+            return nil unless admission_open?(admission_open)
+
             if !dry_run && (recovered_attempt = recoverable_attempt(context, event))
+              return nil unless admission_open?(admission_open)
+
               evaluation = recovered_launch_evaluation(context, event)
               decision = persist_decision(
                 context, event, evaluation, attempt_id: recovered_attempt.attempt_id
@@ -78,6 +95,8 @@ module Hive
             end
             evaluation = evaluate(context, event)
             if dry_run || !evaluation.launch?
+              return nil unless admission_open?(admission_open)
+
               decision = dry_run ? projected_decision(context, event, evaluation) :
                 persist_decision(context, event, evaluation)
               advance_cursor(context, evaluation) unless dry_run ||
@@ -93,7 +112,14 @@ module Hive
                 module_name, context.dig(:selection, "active", "source_commit")
               )
             )
+            return nil unless admission_open?(admission_open)
+
             persist_run(module_name, hook_attempt, event)
+            unless admission_open?(admission_open)
+              close_run(module_name, hook_attempt.run_id, "shutdown_closed")
+              return nil
+            end
+
             attempt_result = @attempt_dispatcher.dispatch_module_hook(
               generation: hook_attempt, subject: hook_attempt.subject,
               argv: hook_attempt.argv, request_id: "module:#{event.fetch('event_id')}:#{hook_id}",
@@ -138,25 +164,39 @@ module Hive
         end
       end
 
-      def retry(module_name:, hook_attempt:, previous_attempt:)
+      def retry(module_name:, hook_attempt:, previous_attempt:,
+                admission_open: -> { true })
+        return nil unless admission_open?(admission_open)
+
         with_migration_admission_lock(module_name, dry_run: false) do
+          return nil unless admission_open?(admission_open)
+
           retry_under_migration_lock(
             module_name: module_name, hook_attempt: hook_attempt,
-            previous_attempt: previous_attempt
+            previous_attempt: previous_attempt, admission_open: admission_open
           )
         end
       end
 
-      def retry_under_migration_lock(module_name:, hook_attempt:, previous_attempt:)
+      def retry_under_migration_lock(module_name:, hook_attempt:, previous_attempt:,
+                                     admission_open:)
+        return nil unless admission_open?(admission_open)
+
         hook_id = hook_attempt.subject.fetch("hook")
         @store.with_admission(module_name) do |selection|
+          return nil unless admission_open?(admission_open)
+
           with_hook_lock(module_name, hook_id) do
+            return nil unless admission_open?(admission_open)
+
             unless selection&.fetch("installed") && selection.fetch("enabled")
               close_run(module_name, hook_attempt.run_id, "retry_closed")
               return nil
             end
             charge = previous_attempt["retry_charge"] + 1
             retry_attempt = hook_attempt.retry(charge)
+            return nil unless admission_open?(admission_open)
+
             result = @attempt_dispatcher.dispatch_module_hook(
               generation: retry_attempt, subject: retry_attempt.subject,
               argv: retry_attempt.argv,
@@ -176,6 +216,12 @@ module Hive
       end
 
       private
+
+      def admission_open?(predicate)
+        predicate.call == true
+      rescue StandardError
+        false
+      end
 
       def with_migration_admission_lock(module_name, dry_run:)
         unless !dry_run && Hive::Modules::Migration::Patrols::MODULES.include?(module_name.to_s)

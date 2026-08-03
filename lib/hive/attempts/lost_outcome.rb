@@ -1,5 +1,4 @@
 require "digest"
-require "fileutils"
 require "json"
 require "time"
 require "hive/atomic_file"
@@ -74,15 +73,17 @@ module Hive
       end
 
       def path(attempt_id)
-        File.join(@store.outputs_root, attempt_id, "lost-outcome.json")
+        @store.output_path(attempt_id, "lost-outcome.json")
       end
 
       def persist(attempt, data)
-        output_dir = File.join(@store.outputs_root, attempt.attempt_id)
-        FileUtils.mkdir_p(output_dir, mode: 0o700)
-        File.chmod(0o700, output_dir)
-        Hive::AtomicFile.write(path(attempt.attempt_id), JSON.generate(data) + "\n", mode: 0o600)
-        File.chmod(0o600, path(attempt.attempt_id))
+        output_path = @store.output_path(
+          attempt.attempt_id,
+          "lost-outcome.json",
+          create_directory: true
+        )
+        Hive::AtomicFile.write(output_path, JSON.generate(data) + "\n", mode: 0o600)
+        File.chmod(0o600, output_path)
         data
       rescue SystemCallError, IOError => e
         raise StoreError, "lost outcome could not be persisted: #{e.message}"

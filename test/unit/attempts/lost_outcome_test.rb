@@ -108,6 +108,26 @@ class AttemptsLostOutcomeTest < Minitest::Test
     end
   end
 
+  def test_outcome_store_refuses_a_symlinked_attempt_output_directory
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Store.new(root: root)
+      lost = lost_without_worker(store)
+      outside = File.join(root, "outside")
+      FileUtils.mkdir_p(outside)
+      File.chmod(0o755, outside)
+      File.symlink(outside, File.join(store.outputs_root, lost.attempt_id))
+      outcomes = Hive::Attempts::LostOutcomeStore.new(store: store)
+
+      error = assert_raises(Hive::Attempts::StoreError) do
+        outcomes.ensure_for(lost, now: NOW)
+      end
+
+      assert_match(/output directory.*symlink/, error.message)
+      assert_equal 0o755, File.stat(outside).mode & 0o777
+      assert_empty Dir.children(outside)
+    end
+  end
+
   def test_workerless_loss_without_a_worktree_becomes_ready
     with_tmp_dir do |root|
       store = Hive::Attempts::Store.new(root: root)

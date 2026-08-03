@@ -1,5 +1,6 @@
 require "time"
 require "json"
+require "digest"
 require "hive/managed_directory"
 require "hive/modules/migration/shadow_comparator"
 require "hive/workflow_package/canonical_json"
@@ -14,13 +15,8 @@ module Hive
 
         attr_reader :payload
 
-        Loaded = Data.define(:payload) do
-          def eligible? = payload.fetch("eligible")
-          def blockers = payload.fetch("blockers")
-          def configuration_digests
-            payload.fetch("modules").transform_values { |row| row["configuration_digest"] }
-          end
-        end
+        Storage = Data.define(:directory, :filename)
+        private_constant :Storage
 
         def self.build(record_source:, reviewer:, reviewed_at:,
                        generated_at: reviewed_at)
@@ -34,39 +30,178 @@ module Hive
 
         def self.load(path)
           bytes = read_bytes(path)
-          payload = JSON.parse(bytes)
-          unless bytes == canonical(payload) && valid_payload?(payload)
-            raise Hive::ConfigError, "module migration report is malformed"
-          end
-          Loaded.new(payload: payload.freeze)
+          payload = parse_current(bytes)
+          require "hive/modules/migration/report_projection"
+          ReportProjection.from_h(payload)
         rescue JSON::ParserError, EncodingError, SystemCallError
           raise Hive::ConfigError, "module migration report is missing or unreadable"
         end
 
         def self.read_bytes(path)
-          expanded = File.expand_path(path)
-          directory = Hive::ManagedDirectory.new(
-            root: File.dirname(expanded),
-            label: "module migration report"
-          )
-          directory.read(
-            File.basename(expanded),
-            max_bytes: MAX_REPORT_BYTES
-          )
+          with_locked_storage(path, shared: true) do |storage|
+            read_locked(storage)
+          end
         rescue Hive::ConfigError
           raise Hive::ConfigError, "module migration report is missing or unreadable"
         end
 
         def self.canonical(value) = Hive::WorkflowPackage::CanonicalJSON.generate(value)
 
-        def self.valid_payload?(payload)
-          payload.is_a?(Hash) && payload["schema"] == "hive-module-migration-report" &&
-            payload["schema_version"] == 1 && [ true, false ].include?(payload["eligible"]) &&
-            payload["modules"].is_a?(Hash) && payload["modules"].keys.sort == ShadowComparator::MODULES.sort &&
-            payload["blockers"].is_a?(Array)
+        def self.valid_payload?(payload) = valid_legacy_payload?(payload)
+
+        def self.valid_legacy_payload?(payload)
+          return false unless payload.is_a?(Hash) &&
+                              payload["schema"] == "hive-module-migration-report" &&
+                              payload["schema_version"] == 1
+          return valid_legacy_error?(payload) if payload["ok"] == false
+
+          success_keys = %w[
+            blockers eligible generated_at modules reviewed_at reviewer schema
+            schema_version window
+          ]
+          return false unless payload.keys.sort == success_keys &&
+                              [ true, false ].include?(payload["eligible"]) &&
+                              payload["generated_at"].is_a?(String) &&
+                              payload["reviewer"].is_a?(String) &&
+                              payload["reviewed_at"].is_a?(String) &&
+                              valid_legacy_window?(payload["window"]) &&
+                              payload["blockers"].is_a?(Array) &&
+                              payload["blockers"].all? { |value| value.is_a?(String) } &&
+                              payload["modules"].is_a?(Hash) &&
+                              payload["modules"].keys.sort == ShadowComparator::MODULES.sort
+          payload["modules"].values.all? { |value| valid_legacy_summary?(value) }
         rescue NoMethodError
           false
         end
+
+        def self.valid_legacy_error?(payload)
+          required = %w[error_kind exit_code message ok schema schema_version]
+          (required - payload.keys).empty? &&
+            payload["error_kind"].is_a?(String) &&
+            payload["exit_code"].is_a?(Integer) &&
+            payload["message"].is_a?(String)
+        end
+        private_class_method :valid_legacy_error?
+
+        def self.valid_legacy_window?(value)
+          value.is_a?(Hash) &&
+            %w[started_at ended_at].all? { |key| value.key?(key) }
+        end
+        private_class_method :valid_legacy_window?
+
+        def self.valid_legacy_summary?(value)
+          keys = %w[
+            blockers configuration_digest decision_count duplicate_effect_count
+            elapsed_seconds ended_at started_at unexplained_difference_count
+          ]
+          value.is_a?(Hash) && value.keys.sort == keys &&
+            value["decision_count"].is_a?(Integer) &&
+            value["decision_count"] >= 0 &&
+            value["elapsed_seconds"].is_a?(Integer) &&
+            value["elapsed_seconds"] >= 0 &&
+            [ value["started_at"], value["ended_at"] ].all? do |timestamp|
+              timestamp.nil? || timestamp.is_a?(String)
+            end &&
+            value["unexplained_difference_count"].is_a?(Integer) &&
+            value["unexplained_difference_count"] >= 0 &&
+            value["duplicate_effect_count"].is_a?(Integer) &&
+            value["duplicate_effect_count"] >= 0 &&
+            (value["configuration_digest"].nil? ||
+              value["configuration_digest"].is_a?(String)) &&
+            value["blockers"].is_a?(Array) &&
+            value["blockers"].all? { |blocker| blocker.is_a?(String) }
+        end
+        private_class_method :valid_legacy_summary?
+
+        def self.with_locked_storage(path, shared: false)
+          storage = storage_for(path)
+          storage.directory.with_lock(".mutation.lock", shared: shared) do
+            yield storage
+          end
+        end
+
+        def self.read_locked(storage, name: storage.filename,
+                             max_bytes: MAX_REPORT_BYTES, missing: false)
+          storage.directory.read(
+            name, max_bytes: max_bytes, missing: missing
+          )
+        end
+
+        def self.write_locked(storage, bytes, name: storage.filename,
+                              expected_digest: nil,
+                              max_existing_bytes: MAX_REPORT_BYTES)
+          storage.directory.atomic_write(
+            name, bytes, mode: 0o600,
+            expected_digest: expected_digest,
+            max_existing_bytes: max_existing_bytes
+          )
+        end
+
+        def self.digest_bytes(bytes)
+          ::Digest::SHA256.hexdigest(bytes)
+        end
+
+        def self.write_projection(path, projection, expected_digest: nil)
+          require "hive/modules/migration/report_projection"
+          projection = projection.is_a?(ReportProjection) ?
+            ReportProjection.from_h(projection.to_h) :
+            ReportProjection.from_h(projection)
+          bytes = canonical(projection.to_h)
+          if bytes.bytesize > MAX_REPORT_BYTES
+            raise Hive::ConfigError, "module migration report is malformed"
+          end
+          with_locked_storage(path) do |storage|
+            current = read_locked(storage, missing: true)
+            if current == bytes
+              if expected_digest && digest_bytes(current) != expected_digest
+                raise Hive::ConfigError,
+                      "module migration report expected digest does not match"
+              end
+              next
+            end
+            if current
+              current_payload = parse_current(current)
+              if current_payload["schema_version"] == 1
+                raise Hive::ConfigError,
+                      "module migration report v1 requires one-off migration"
+              end
+              ReportProjection.validate_successor!(
+                current: current_payload, successor: projection
+              )
+            end
+            if current && expected_digest.nil?
+              raise Hive::ConfigError,
+                    "module migration report replacement requires expected digest"
+            end
+            write_locked(storage, bytes, expected_digest: expected_digest)
+          end
+          path
+        rescue JSON::ParserError
+          raise Hive::ConfigError, "module migration report is malformed"
+        end
+
+        def self.storage_for(path)
+          expanded = File.expand_path(path)
+          Storage.new(
+            directory: Hive::ManagedDirectory.new(
+              root: File.dirname(expanded),
+              label: "module migration report"
+            ),
+            filename: File.basename(expanded).freeze
+          )
+        end
+        private_class_method :storage_for
+
+        def self.parse_current(bytes)
+          payload = JSON.parse(bytes)
+          unless payload.is_a?(Hash) && bytes == canonical(payload)
+            raise Hive::ConfigError, "module migration report is malformed"
+          end
+          payload
+        rescue JSON::ParserError, EncodingError, ArgumentError, TypeError
+          raise Hive::ConfigError, "module migration report is malformed"
+        end
+        private_class_method :parse_current
 
         def initialize(record_source:, reviewer:, reviewed_at:, generated_at:)
           validator = ShadowComparator.new(root: Dir.pwd)
@@ -85,17 +220,23 @@ module Hive
         def configuration_digests = payload.fetch("modules").transform_values { |row| row["configuration_digest"] }
 
         def write(path)
-          expanded = File.expand_path(path)
-          directory = Hive::ManagedDirectory.new(
-            root: File.dirname(expanded),
-            label: "module migration report"
-          )
-          directory.atomic_write(
-            File.basename(expanded),
-            self.class.canonical(payload),
-            mode: 0o600
-          )
+          bytes = self.class.canonical(payload)
+          self.class.with_locked_storage(path) do |storage|
+            current = self.class.read_locked(storage, missing: true)
+            if current && self.class.send(
+              :parse_current, current
+            )["schema_version"] == 2
+              raise Hive::ConfigError,
+                    "module migration report v2 cannot be replaced by v1"
+            end
+            expected = current && self.class.digest_bytes(current)
+            self.class.write_locked(
+              storage, bytes, expected_digest: expected
+            )
+          end
           path
+        rescue JSON::ParserError
+          raise Hive::ConfigError, "module migration report is malformed"
         end
 
         private

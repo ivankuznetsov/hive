@@ -4,10 +4,14 @@ require "time"
 require "hive/atomic_file"
 require "hive/config"
 require "hive/module_package/managed_store"
+require "hive/modules/migration/patrol_effect_index"
+require "hive/modules/migration/patrol_evidence_verifier"
+require "hive/modules/migration/patrol_qualification"
 require "hive/modules/migration/report"
+require "hive/modules/migration/report_migration"
+require "hive/modules/migration/report_projection"
 require "hive/modules/migration/shadow_decision_migration"
 require "hive/workflow_package/canonical_json"
-require "hive/workflow_package/mutation_lock"
 
 module Hive
   module Modules
@@ -105,8 +109,9 @@ module Hive
           # exclusively, so a precomputed legacy candidate cannot cross an
           # ownership epoch while it is being reserved and spawned.
           def with_admission(project_root, module_name, authority:, hive_state_path: nil)
-            dir = File.dirname(state_file(project_root, hive_state_path: hive_state_path))
-            Hive::WorkflowPackage::MutationLock.with_lock(dir, shared: true) do
+            with_migration_lock(
+              project_root, hive_state_path: hive_state_path, shared: true
+            ) do
               yield admission_allowed?(
                 project_root, module_name, authority: authority,
                 hive_state_path: hive_state_path
@@ -115,8 +120,10 @@ module Hive
           end
 
           def with_migration_lock(project_root, hive_state_path: nil, shared: true, &block)
-            dir = File.dirname(state_file(project_root, hive_state_path: hive_state_path))
-            Hive::WorkflowPackage::MutationLock.with_lock(dir, shared: shared, &block)
+            Report.with_locked_storage(
+              report_file(project_root, hive_state_path: hive_state_path),
+              shared: shared
+            ) { block.call }
           end
 
           def read_state(project_root, hive_state_path: nil)
@@ -146,6 +153,58 @@ module Hive
             File.join(File.dirname(state_file(project_root, hive_state_path: hive_state_path)), "report.json")
           end
 
+          # Admit deterministic evidence without giving the E2E harness access
+          # to verifier tokens or report construction. The caller supplies raw
+          # receipt documents plus independently computed expected bindings;
+          # this facade owns verification, qualification, and the report CAS.
+          def admit_deterministic_qualification!(
+            project_root, receipts:, expected_bindings:, generated_at:,
+            expected_report_digest:, hive_state_path: nil
+          )
+            valid_inputs = receipts.is_a?(Array) &&
+              expected_bindings.is_a?(Array) &&
+              receipts.size == expected_bindings.size &&
+              receipts.size.between?(1, PatrolQualification::MAX_RECEIPTS) &&
+              receipts.all?(Hash) && expected_bindings.all?(Hash) &&
+              expected_report_digest.is_a?(String) &&
+              expected_report_digest.match?(/\A[0-9a-f]{64}\z/)
+            unless valid_inputs
+              raise Hive::ConfigError,
+                    "patrol deterministic qualification admission is malformed"
+            end
+
+            effects = []
+            verified = receipts.each_index.map do |index|
+              receipt = PatrolEvidenceVerifier.verify(
+                receipt: receipts.fetch(index),
+                expected_bindings: expected_bindings.fetch(index)
+              )
+              if effects.size + receipt.effects.size >
+                   PatrolEffectIndex::MAX_RECEIPTS
+                raise Hive::ConfigError,
+                      "patrol deterministic qualification admission is malformed"
+              end
+              effects.concat(receipt.effects)
+              receipt
+            end.freeze
+            qualification = PatrolQualification.build(
+              lane: "deterministic", verified_receipts: verified,
+              effect_index: PatrolEffectIndex.build(receipts: effects),
+              generated_at: generated_at
+            )
+            path = report_file(
+              project_root, hive_state_path: hive_state_path
+            )
+            projection = ReportProjection.merge(
+              existing: Report.load(path), qualification: qualification,
+              generated_at: generated_at
+            )
+            Report.write_projection(
+              path, projection, expected_digest: expected_report_digest
+            )
+            projection
+          end
+
           def shadow_decision_upgrade_required?(project_root,
                                                 hive_state_path: nil)
             migration_dir = File.dirname(
@@ -154,7 +213,9 @@ module Hive
             ShadowDecisionMigration.ensure_complete!(
               root: File.join(migration_dir, "shadow")
             )
-            false
+            ReportMigration.required?(
+              report_file(project_root, hive_state_path: hive_state_path)
+            )
           rescue Hive::ConfigError
             true
           end
@@ -204,17 +265,25 @@ module Hive
           immediate = nil
           migration_ready = false
           existing_state = nil
-          shadow_upgrade_required =
+          migration_upgrade_required =
             self.class.shadow_decision_upgrade_required?(
               project_root, hive_state_path: hive_state_path
             )
-          mutate do
+          mutate do |storage|
+            migration_upgrade_required = true if
+              !migration_upgrade_required &&
+              report_upgrade_required_locked?(storage)
             state = read || initial_state(now)
             stable = %w[shadowing module].include?(state.fetch("status"))
+            stable_upgrade_state = %w[shadowing module rolled_back].include?(
+              state.fetch("status")
+            )
+            interrupted_upgrade = stable_upgrade_state &&
+              !state.fetch("admissions").values.all?
             legacy_stable =
-              (stable || state.fetch("status") == "rolled_back") &&
-              shadow_upgrade_required
-            if stable && !shadow_upgrade_required
+              stable_upgrade_state &&
+              (migration_upgrade_required || interrupted_upgrade)
+            if stable && !migration_upgrade_required && !interrupted_upgrade
               immediate = outcome("already_current", state)
               next
             end
@@ -265,7 +334,7 @@ module Hive
           # stamps only after a zero-v1 rescan. Runtime readers remain v2-only.
           migrate_shadow_decisions!
 
-          mutate do
+          mutate do |storage|
             state = read || raise(
               Hive::ConfigError,
               "patrol module migration state disappeared during adoption"
@@ -285,6 +354,7 @@ module Hive
               write(fenced)
               next outcome("pending", fenced, blockers)
             end
+            migrate_report!(storage, now)
 
             active = state.merge(
               "status" => "shadowing",
@@ -301,6 +371,10 @@ module Hive
         end
 
         def cutover!(report:, now: Time.now.utc)
+          if report.is_a?(ReportProjection)
+            raise Hive::ConfigError,
+                  "patrol module migration report v2 requires separately authorized cutover"
+          end
           unless report.respond_to?(:eligible?) && report.eligible?
             blockers = report.respond_to?(:blockers) ? report.blockers : [ "report_invalid" ]
             raise Hive::ConfigError, "patrol module cutover evidence is incomplete: #{blockers.join(', ')}"
@@ -377,7 +451,11 @@ module Hive
         private
 
         def mutate(&block)
-          Hive::WorkflowPackage::MutationLock.with_lock(@migration_dir, &block)
+          Report.with_locked_storage(
+            self.class.report_file(
+              project_root, hive_state_path: hive_state_path
+            )
+          ) { |storage| block.call(storage) }
         end
 
         def initial_state(now)
@@ -454,13 +532,25 @@ module Hive
           )
         end
 
+        def migrate_report!(storage, now)
+          ReportMigration.forward_locked(
+            storage: storage, qualifications: [], generated_at: now
+          )
+        end
+
+        def report_upgrade_required_locked?(storage)
+          ReportMigration.required_locked?(storage)
+        rescue Hive::ConfigError
+          true
+        end
+
         # Older migration state can predate the v2 shadow-decision inventory.
         # Keep its ownership mode intact, but close both admissions before the
         # one-off conversion and restore them only after the exclusive migrator
         # proves every record is v2.
         def upgrade_existing_shadow_state!(previous, now)
           migrate_shadow_decisions!
-          mutate do
+          mutate do |storage|
             state = read || raise(
               Hive::ConfigError,
               "patrol module migration state disappeared during shadow upgrade"
@@ -470,9 +560,10 @@ module Hive
               raise Hive::ConfigError,
                     "patrol module migration changed during shadow upgrade"
             end
+            migrate_report!(storage, now)
 
             restored = state.merge(
-              "admissions" => previous.fetch("admissions"),
+              "admissions" => MODULES.to_h { |name| [ name, true ] },
               "blockers" => {},
               "updated_at" => timestamp(now)
             )

@@ -3,7 +3,7 @@ title: Component boundaries
 type: reference
 source: config/component-boundaries.yml, test/support/component_boundary_contract.rb
 created: 2026-07-25
-updated: 2026-07-30
+updated: 2026-08-03
 tags: [architecture, components, boundaries, monorepo]
 ---
 
@@ -19,6 +19,7 @@ the first and primary consumer.
 |-----------|-------|---------------------|-------------------|
 | Patrol Effect Evidence | `candidate` (U3 qualification pending) | `require "hive/modules/migration/patrol_evidence"` → `Hive::Modules::Migration::PatrolEvidence` | [[modules/patrol]] |
 | Attempts admission / future RunReceipt | `candidate` (guarded reference) | `require "hive/attempts/api"` → `Hive::Attempts::API` | [[modules/attempts]] |
+| Workflow Creator Values | `candidate` (U1a1vt consumer pending) | `require "packaging/live_agent_skills/workflow_creator_values"` → `HiveLiveAgentProof::WorkflowCreator::Values` | [[component-boundaries]] |
 | UserService | `boundary-ready` | `require "hive/user_service"` → `Hive::UserService` | [[modules/user_service]] |
 | Agent ABI | `boundary-ready`; standalone package candidate | `require "hive/agent_runtime"` → `Hive::AgentRuntime` | [[modules/agent_cli_runtime]], [[modules/agent_profile]] |
 | Agent Artifact Firewall | `boundary-ready` | `require "hive/artifact_firewall"` → `Hive::ArtifactFirewall` | [[modules/protected_files]] |
@@ -34,13 +35,14 @@ has earned a gem, version, repository, or release.
 
 ## Final graph audit
 
-The final U2 resolution on 2026-07-29 retains eight components: six are
-`boundary-ready`; Attempts and Patrol Effect Evidence remain `candidate`.
-Patrol retains one bounded U3 exception for compressed evidence qualification
-and cutover proof. Every retained entry point has a focused clean-process load
-proof, every catalog-owned path and focused test resolves inside this
-repository, and the direct-construction guards pass against all production
-Ruby sources.
+The catalog on 2026-08-03 retains nine components: six are
+`boundary-ready`; Attempts, Patrol Effect Evidence, and Workflow Creator
+Values remain `candidate`. Patrol retains one bounded U3 exception for
+compressed evidence qualification and cutover proof. Workflow Creator Values
+retains one bounded U1a1vt exception until its first production consumer lands.
+Every retained entry point has focused clean-process load proof, every
+catalog-owned path and focused test resolves inside this repository, and the
+direct-construction guards pass against all production Ruby sources.
 
 The component dependency graph has one edge:
 
@@ -49,6 +51,7 @@ flowchart LR
   skillpack[Skillpack] --> agent_abi[Agent ABI]
   patrol_effects[Patrol Effect Evidence - candidate]
   attempts[Attempts admission - candidate]
+  workflow_values[Workflow Creator Values - candidate]
   user_service[UserService]
   artifact_firewall[Agent Artifact Firewall]
   git_gate[Safe Agent Git Gate]
@@ -58,9 +61,9 @@ flowchart LR
 All other cataloged components depend only on explicitly allowed lower-level
 Hive primitives. The source audit found no retained experimental facade outside
 the catalog: each promoted facade is owned by a catalog row and used by Hive,
-while Attempts and Patrol Effect Evidence are deliberately retained as guarded
-candidates rather than being promoted ahead of their remaining lifecycle or
-qualification proof.
+while Attempts, Patrol Effect Evidence, and Workflow Creator Values are
+deliberately retained as guarded candidates rather than being promoted ahead
+of their remaining lifecycle, qualification, or consumer proof.
 
 This is an internal architecture verdict, not a packaging verdict. None of the
 six ready components currently has the named non-Hive adopter and independent
@@ -141,6 +144,25 @@ Attempts intentionally remains the guarded reference instead of claiming that
 its full lifecycle is a supported component boundary: the slice does not
 publish raw storage, reconciliation, supervision, capacity, loss-policy,
 cancellation, export, or generic lifecycle operations.
+
+`Workflow Creator Values` is a staged values-only candidate.
+`HiveLiveAgentProof::WorkflowCreator::Values.capture` accepts exact core
+JSON-shaped Ruby values and returns an anonymous frozen snapshot exposing only
+fresh recursively frozen owned values and compact canonical UTF-8 bytes.
+Unsupported subclasses, non-finite floats, ambiguous or invalid encodings,
+normalized-key collisions, cycles, and declared depth, node, source-byte,
+canonical-byte, logical-work, and integer-bit ceilings fail through one fixed
+secret-free error. The leaf loads without JSON, I/O, workflow, process,
+credential, or provider dependencies.
+
+The candidate has no production consumer yet. Its sole migration exception is
+`removal_unit: U1a1vt`; that unit must consume and expand the same staged row
+before promotion. U1a1vir owns no text, path, or secret projection, creator
+schema, custody, publication, or live behavior. Its source proof is deliberately
+leaf-local: the focused test uses `Ripper.lex` to reject bare and qualified
+`require` and `require_relative` identifiers while ignoring comments and
+strings, and a direct `ruby --disable-gems -I<repository-root>` subprocess
+proves clean loading. This is not generic Ruby grammar or require-path analysis.
 
 The `Agent ABI` is boundary-ready below orchestration. `AgentRuntime` exposes
 immutable request, compiled invocation, capability/probe evidence, and
@@ -267,7 +289,9 @@ Owned paths cannot overlap between components, component dependencies must form
 an acyclic graph, and every path in the catalog must resolve inside the
 repository. A temporary exception must include both a reason and the
 implementation unit that removes it. A `boundary-ready` component cannot keep
-an exception or depend on a `candidate` component.
+an exception or depend on a `candidate` component. A consumer list may be
+empty only for a `candidate` with exactly one bounded migration exception;
+hierarchical plan identifiers such as `U1a1vt` are valid removal units.
 
 ## Enforcement
 
@@ -294,6 +318,11 @@ Run the focused contract with:
 ```bash
 bundle exec ruby -Itest -Ilib test/unit/component_boundaries_test.rb
 ```
+
+The Workflow Creator Values candidate does not widen this shared syntax guard
+or the generic component clean-loader. Its no-require and direct clean-load
+proofs live only in
+`test/unit/packaging/workflow_creator_values_test.rb`.
 
 The syntax scan is an architecture regression guard, not a Ruby sandbox. Its
 construction rule covers literal `Constant.new`, not aliases or factory

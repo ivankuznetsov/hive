@@ -11,6 +11,7 @@ require_relative "../../../packaging/live_agent_skills/workflow_creator_values"
 class WorkflowCreatorValuesTest < Minitest::Test
   ROOT = File.expand_path("../../..", __dir__)
   VALUES_PATH = File.join(ROOT, "packaging", "live_agent_skills", "workflow_creator_values.rb")
+  TEXT_SAFETY_PATH = File.join(ROOT, "packaging", "live_agent_skills", "workflow_creator_text_safety.rb")
   VALUES_REQUIRE = "packaging/live_agent_skills/workflow_creator_values"
   Values = HiveLiveAgentProof::WorkflowCreator::Values
   MAX_DEPTH = 64
@@ -303,6 +304,8 @@ class WorkflowCreatorValuesTest < Minitest::Test
   end
 
   def test_deterministic_finite_ieee_754_tokens_roundtrip_byte_exactly
+    skip "run rake test:hostile to include the hostile/property campaign" unless ENV["HIVE_HOSTILE_TESTS"] == "1"
+
     patterns = [ 0, 1 << 63 ]
     seen = patterns.to_h { |bits| [ bits, true ] }
     random = Random.new(0x1EE7_F10A7)
@@ -330,6 +333,8 @@ class WorkflowCreatorValuesTest < Minitest::Test
   end
 
   def test_large_finite_float_roundtrip_and_canonical_property_corpus
+    skip "run rake test:hostile to include the hostile/property campaign" unless ENV["HIVE_HOSTILE_TESTS"] == "1"
+
     floats = [ Float::MAX, -Float::MAX, Float::MIN, Float::EPSILON, 1.0e300, 1.0e-300, 3.141592653589793 ]
     floats.each do |value|
       bytes = Values.capture(value).canonical_bytes
@@ -555,24 +560,40 @@ class WorkflowCreatorValuesTest < Minitest::Test
     assert_equal 2, static_metrics("def guarded; left && right || fallback; end\n").fetch(:decisions)
   end
 
-  def test_production_file_stays_within_u1a1vir_exact_caps
-    source = File.read(VALUES_PATH)
-    metrics = static_metrics(source)
-    required_callables = %i[
+  def test_production_files_stay_within_u1a1vt_exact_and_composed_caps
+    values_source = File.read(VALUES_PATH)
+    text_safety_source = File.read(TEXT_SAFETY_PATH)
+    values_metrics = static_metrics(values_source)
+    text_safety_metrics = static_metrics(text_safety_source)
+    required_values_callables = %i[
       value canonical_bytes inspect marshal_dump marshal_load capture import_value
       import_hash import_array import_string import_integer import_float escape_byte append! charge! seal
       fail_capture! ===
     ]
+    required_text_safety_callables = %i[
+      text safe_relative_path? secret_findings redact project fail_projection! owned_string!
+      scan scan_exact! mark_range! seal ===
+    ]
 
-    assert_operator source.lines.length, :<=, 300
-    assert_operator metrics.fetch(:callables), :<=, 20
-    assert_operator metrics.fetch(:decisions), :<=, 32
-    assert_empty metrics.fetch(:closure_nodes)
-    required_callables.each { |name| assert_includes metrics.fetch(:method_names), name }
-    refute_match(/rubocop\s*:(?:disable|todo)/i, source)
-    refute_match(/\b(?:Struct|Data)\b/, source)
-    refute_match(/\b(?:define_method|define_singleton_method|attr_reader|attr_writer|attr_accessor)\b/, source)
-    refute_match(/\b(?:lambda|proc)\b|\bProc\.new\b/, source)
+    assert_operator values_source.lines.length, :<=, 300
+    assert_operator values_metrics.fetch(:callables), :<=, 20
+    assert_operator values_metrics.fetch(:decisions), :<=, 32
+    assert_operator text_safety_source.lines.length, :<=, 200
+    assert_operator text_safety_metrics.fetch(:callables), :<=, 14
+    assert_operator text_safety_metrics.fetch(:decisions), :<=, 24
+    assert_operator values_source.lines.length + text_safety_source.lines.length, :<=, 500
+    assert_operator values_metrics.fetch(:callables) + text_safety_metrics.fetch(:callables), :<=, 34
+    assert_operator values_metrics.fetch(:decisions) + text_safety_metrics.fetch(:decisions), :<=, 56
+    assert_empty values_metrics.fetch(:closure_nodes)
+    assert_empty text_safety_metrics.fetch(:closure_nodes)
+    required_values_callables.each { |name| assert_includes values_metrics.fetch(:method_names), name }
+    required_text_safety_callables.each { |name| assert_includes text_safety_metrics.fetch(:method_names), name }
+    [ values_source, text_safety_source ].each do |source|
+      refute_match(/rubocop\s*:(?:disable|todo)/i, source)
+      refute_match(/\b(?:Struct|Data)\b/, source)
+      refute_match(/\b(?:define_method|define_singleton_method|attr_reader|attr_writer|attr_accessor)\b/, source)
+      refute_match(/\b(?:lambda|proc)\b|\bProc\.new\b/, source)
+    end
   end
 
   def test_every_production_method_passes_the_explicit_r43_rubocop_overlay
@@ -590,7 +611,7 @@ class WorkflowCreatorValuesTest < Minitest::Test
     }
 
     Dir.mktmpdir do |directory|
-      config = File.join(directory, "u1a1vir-rubocop.yml")
+      config = File.join(directory, "u1a1vt-rubocop.yml")
       File.write(config, YAML.dump(overlay))
       rubocop_spec = Bundler.load.specs.find { |spec| spec.name == "rubocop" }
       refute_nil rubocop_spec, "the selected bundle must include RuboCop"
@@ -605,6 +626,7 @@ class WorkflowCreatorValuesTest < Minitest::Test
         "--format",
         "simple",
         VALUES_PATH,
+        TEXT_SAFETY_PATH,
         chdir: ROOT
       )
 

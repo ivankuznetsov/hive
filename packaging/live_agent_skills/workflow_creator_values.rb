@@ -4,11 +4,13 @@ module HiveLiveAgentProof
   module WorkflowCreator
     module Values
       class Error < StandardError; end
-      ERROR_MESSAGE = "workflow-creator value cannot be captured"
-      SNAPSHOT_MARSHAL_ERROR = "workflow-creator snapshots cannot be marshaled"
-      CAPTURE_FAILURE = Error.new(ERROR_MESSAGE).freeze
-      MARSHAL_FAILURE = TypeError.new(SNAPSHOT_MARSHAL_ERROR).freeze
-      EMPTY = ""
+      CAPTURE_FAILURE = Error.new("workflow-creator value cannot be captured")
+      MARSHAL_FAILURE = TypeError.new("workflow-creator snapshots cannot be marshaled")
+      failure_protocol = %i[backtrace cause exception initialize_clone initialize_copy message set_backtrace to_s]
+      [ CAPTURE_FAILURE, MARSHAL_FAILURE ].each do |failure|
+        failure_protocol.each { |name| failure.singleton_class.alias_method(name, name) }
+        failure.freeze
+      end
       INVOKE = :__workflow_creator_values_invoke__
       MAX_DEPTH = 64
       MAX_NODES = 8_192
@@ -29,7 +31,9 @@ module HiveLiveAgentProof
       end
       OBJECT_CLASS = seal(Object.instance_method(:class))
       RAISE = seal(Kernel.instance_method(:raise))
-      ERROR_INITIALIZE = seal(Exception.instance_method(:initialize))
+      OBJECT_CLONE = seal(Object.instance_method(:clone))
+      MODULE_CASE = seal(Module.instance_method(:===))
+      FAILURE_BASE = StandardError
       OBJECT_FREEZE = seal(Object.instance_method(:freeze))
       OBJECT_SET_IVAR = seal(Object.instance_method(:instance_variable_set))
       OBJECT_EQUAL = seal(BasicObject.instance_method(:equal?))
@@ -66,33 +70,33 @@ module HiveLiveAgentProof
       UTF8 = Encoding::UTF_8
       UTF16 = Encoding::UTF_16LE
       BINARY = Encoding::BINARY
-      snapshot_class = Class.new do
+      FAILURE_MATCHER = Module.new do
+        def self.===(error) = MODULE_CASE.send(INVOKE, FAILURE_BASE, error)
+      end.freeze
+      @snapshot_class = Class.new do
         def value = @value
         def canonical_bytes = @canonical_bytes
         def inspect = "#<HiveLiveAgentProof::WorkflowCreator::Values snapshot>"
         def marshal_dump
-          failure = CLASS_ALLOCATE.send(INVOKE, OBJECT_CLASS.send(INVOKE, MARSHAL_FAILURE))
-          ERROR_INITIALIZE.send(INVOKE, failure, SNAPSHOT_MARSHAL_ERROR)
+          failure = OBJECT_CLONE.send(INVOKE, MARSHAL_FAILURE, freeze: false)
           RAISE.send(INVOKE, self, failure, cause: nil)
         end
         def marshal_load(_payload)
-          failure = CLASS_ALLOCATE.send(INVOKE, OBJECT_CLASS.send(INVOKE, MARSHAL_FAILURE))
-          ERROR_INITIALIZE.send(INVOKE, failure, SNAPSHOT_MARSHAL_ERROR)
+          failure = OBJECT_CLONE.send(INVOKE, MARSHAL_FAILURE, freeze: false)
           RAISE.send(INVOKE, self, failure, cause: nil)
         end
         private :marshal_dump, :marshal_load
         undef_method :dup, :clone, :instance_variable_set, :remove_instance_variable
       end
-      snapshot_class.singleton_class.class_eval do
+      @snapshot_class.singleton_class.class_eval do
         private :new, :allocate
         undef_method :dup, :clone
       end
-      @snapshot_class = snapshot_class
       def self.capture(input)
         state = [ 0, 0, 0, [] ]
         charge!(state, 1)
         owned, fragment = import_value(input, state, 0)
-        canonical = STRING_DUP.send(INVOKE, EMPTY)
+        canonical = STRING_DUP.send(INVOKE, "")
         append!(state, canonical, fragment)
         append!(state, canonical, "\n")
         OBJECT_FREEZE.send(INVOKE, canonical)
@@ -100,11 +104,11 @@ module HiveLiveAgentProof
         OBJECT_SET_IVAR.send(INVOKE, snapshot, :@value, owned)
         OBJECT_SET_IVAR.send(INVOKE, snapshot, :@canonical_bytes, canonical)
         OBJECT_FREEZE.send(INVOKE, snapshot)
-      rescue Error, EncodingError, TypeError, ArgumentError, RangeError
+      rescue FAILURE_MATCHER
         fail_capture!
       end
       def self.fail_capture!
-        failure = ERROR_INITIALIZE.send(INVOKE, CLASS_ALLOCATE.send(INVOKE, Error), ERROR_MESSAGE)
+        failure = OBJECT_CLONE.send(INVOKE, CAPTURE_FAILURE, freeze: false)
         RAISE.send(INVOKE, self, failure, cause: nil)
       end
       def self.import_value(value, state, depth)
@@ -195,9 +199,9 @@ module HiveLiveAgentProof
         end
       end
       def self.build_collection(owned, entries, state, opening, closing)
-        output = STRING_DUP.send(INVOKE, EMPTY)
+        output = STRING_DUP.send(INVOKE, "")
         append!(state, output, opening)
-        separator = EMPTY
+        separator = ""
         ARRAY_EACH.send(INVOKE, entries) do |entry|
           append!(state, output, separator)
           fragments = ARRAY_GET.send(INVOKE, entry, 2)
@@ -213,15 +217,20 @@ module HiveLiveAgentProof
         fail_capture! if OBJECT_EQUAL.send(INVOKE, encoding, BINARY)
         bytes = STRING_BYTESIZE.send(INVOKE, value)
         source = INTEGER_ADD.send(INVOKE, ARRAY_GET.send(INVOKE, state, SOURCE_BYTES), bytes)
-        if INTEGER_GREATER.send(INVOKE, source, MAX_SOURCE_BYTES)
-          fail_capture!
-        end
+        fail_capture! if INTEGER_GREATER.send(INVOKE, source, MAX_SOURCE_BYTES)
         ARRAY_SET.send(INVOKE, state, SOURCE_BYTES, source)
         charge!(state, bytes)
         validated = STRING_ENCODE.send(INVOKE, value, UTF16)
         owned = STRING_ENCODE.send(INVOKE, validated, UTF8)
-        token = json_string(owned, state)
-        [ OBJECT_FREEZE.send(INVOKE, owned), token ]
+        output = STRING_DUP.send(INVOKE, "")
+        append!(state, output, '"')
+        index = 0
+        STRING_EACH_BYTE.send(INVOKE, owned) do |byte|
+          append!(state, output, escape_byte(owned, byte, index))
+          index = INTEGER_ADD.send(INVOKE, index, 1)
+        end
+        append!(state, output, '"')
+        [ OBJECT_FREEZE.send(INVOKE, owned), output ]
       end
       def self.import_integer(value, state)
         bits = INTEGER_BITS.send(INVOKE, value)
@@ -233,17 +242,6 @@ module HiveLiveAgentProof
         fail_capture! unless FLOAT_FINITE.send(INVOKE, value)
         charge!(state, 64)
         [ value, FLOAT_TO_S.send(INVOKE, value) ]
-      end
-      def self.json_string(value, state)
-        output = STRING_DUP.send(INVOKE, EMPTY)
-        append!(state, output, '"')
-        index = 0
-        STRING_EACH_BYTE.send(INVOKE, value) do |byte|
-          append!(state, output, escape_byte(value, byte, index))
-          index = INTEGER_ADD.send(INVOKE, index, 1)
-        end
-        append!(state, output, '"')
-        output
       end
       def self.escape_byte(value, byte, index)
         if INTEGER_EQUAL.send(INVOKE, byte, 34)
@@ -280,10 +278,9 @@ module HiveLiveAgentProof
         fail_capture! if INTEGER_GREATER.send(INVOKE, units, MAX_WORK_UNITS)
         ARRAY_SET.send(INVOKE, state, WORK_UNITS, units)
       end
-      private_class_method :seal, :import_value, :import_hash, :import_hash_entry, :import_array,
-                           :build_collection, :import_string, :import_integer, :import_float, :json_string,
-                           :escape_byte, :append!, :charge!, :fail_capture!
-      private_constant :ERROR_MESSAGE, :SNAPSHOT_MARSHAL_ERROR, :CAPTURE_FAILURE, :MARSHAL_FAILURE, :EMPTY, :INVOKE,
+      private_class_method :seal, :import_value, :import_hash_entry, :build_collection, :import_string, :import_integer,
+                           :import_float, :import_hash, :import_array, :escape_byte, :append!, :charge!, :fail_capture!
+      private_constant :CAPTURE_FAILURE, :MARSHAL_FAILURE, :INVOKE,
                        :MAX_DEPTH, :MAX_NODES, :MAX_SOURCE_BYTES, :MAX_CANONICAL_BYTES, :MAX_WORK_UNITS,
                        :MAX_INTEGER_BITS, :NODES, :SOURCE_BYTES, :WORK_UNITS, :ACTIVE, :OBJECT_CLASS, :OBJECT_FREEZE,
                        :OBJECT_SET_IVAR, :OBJECT_EQUAL, :CLASS_ALLOCATE, :HASH_EACH_PAIR, :HASH_LENGTH, :HASH_SET,
@@ -291,8 +288,9 @@ module HiveLiveAgentProof
                        :ARRAY_SORT, :STRING_DUP, :STRING_ENCODING, :STRING_BYTESIZE, :STRING_ENCODE, :STRING_EACH_BYTE,
                        :STRING_BYTESLICE, :STRING_APPEND, :STRING_COMPARE, :STRING_FORMAT, :INTEGER_ADD,
                        :INTEGER_MULTIPLY, :INTEGER_GREATER, :INTEGER_EQUAL, :INTEGER_BITS, :INTEGER_TO_S, :FLOAT_FINITE,
-                       :RAISE, :ERROR_INITIALIZE, :FLOAT_TO_S, :ENCODING_DUMMY, :UTF8, :UTF16, :BINARY
-      OBJECT_FREEZE.send(INVOKE, snapshot_class)
+                       :RAISE, :OBJECT_CLONE, :MODULE_CASE, :FAILURE_BASE, :FAILURE_MATCHER, :FLOAT_TO_S,
+                       :ENCODING_DUMMY, :UTF8, :UTF16, :BINARY
+      OBJECT_FREEZE.send(INVOKE, @snapshot_class)
       OBJECT_FREEZE.send(INVOKE, Error)
       OBJECT_FREEZE.send(INVOKE, self)
     end

@@ -18,10 +18,20 @@ tags: [architecture, component-boundaries, workflow-creator, values]
   and concurrent caller mutation remain explicit non-goals.
 - Used owned-hash length changes for expected-constant-time normalized-key
   collision admission, leaving only the separately charged canonical sort.
-  Captured allocation, initialization, and raise operations keep fixed,
-  distinct capture and Marshal failures intact after post-load replacement of
-  `Kernel#raise` or `Exception#initialize`; frozen private prototypes remain a
-  diagnostic invariant rather than the behavioral proof.
+  Retained poisoned key objects now prove that path directly, and the
+  exact-maximum comparison guard counts String `<=>`, `==`, and `eql?` behind a
+  deliberately quadratic calibration so the equality counters cannot pass
+  vacuously.
+- Made the frozen capture and Marshal prototypes required anchors. Captured
+  clone/raise operations, cloned singleton exception/backtrace/clone/copy/
+  cause/message/string protocols, and a frozen matcher backed by the captured
+  clean-load `Module#===` keep failures fresh, fixed, distinct, and
+  `cause:nil` after each relevant post-load replacement and the combined
+  surface. Failure creation no longer depends on `Exception#initialize`.
+- Extended static require ownership and clean-load feature detection to
+  catalog-owned `packaging/` paths. Declared packaging edges pass both checks;
+  undeclared equivalents fail both, without weakening existing `lib/`
+  isolation.
 - Added focused behavior, hostile-runtime, clean-load, deterministic float,
   resource-boundary, source-metric, and RuboCop proof. The catalog keeps one
   staged U1a1vt exception and no consumer until that unit adopts the boundary.

@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-07-30
+updated: 2026-08-03
 tags: [gap, todo, release-proof, agent-skills]
 ---
 
@@ -122,12 +122,14 @@ tags: [gap, todo, release-proof, agent-skills]
 
 ## Internal component boundary gap
 
-- The final internal graph audit retains eight catalog rows: UserService, Agent
+- The final internal graph audit retains nine catalog rows: UserService, Agent
   ABI, Agent Artifact Firewall, Skillpack, Safe Agent Git Gate, and WorkLedger
-  are `boundary-ready`; Attempts admission and Patrol Effect Evidence remain
-  `candidate`. Skillpack to Agent ABI is the only component dependency. Patrol
-  retains one bounded U3 exception for compressed candidate evidence and
-  production qualification; Attempts remains unready because Hive has no
+  are `boundary-ready`; Attempts admission, Patrol Effect Evidence, and
+  Workflow Creator Values remain `candidate`. Skillpack to Agent ABI is the
+  only component dependency. Patrol retains one bounded U3 exception for
+  compressed candidate evidence and production qualification; Workflow Creator
+  Values retains one bounded U1a1vt exception until its first production
+  consumer adopts the seam. Attempts remains unready because Hive has no
   demonstrated need for a supported reconciliation, supervision, capacity,
   loss-processing, cancellation, export, or raw-store lifecycle API.
 - No ready component has yet earned standalone packaging. There is no named
@@ -136,10 +138,11 @@ tags: [gap, todo, release-proof, agent-skills]
   `docs/plans/2026-07-25-002-feat-standalone-component-gems-plan.md`; internal
   readiness must not be reported as RubyGems publication eligibility.
 - The catalog guard parses literal `require`, `require_relative`, and
-  `Constant.new` edges. Dynamic loading, aliases, reflection, factories, and
-  same-user monkeypatching remain outside that test-only architecture check.
-  A future package candidate still needs an independent package harness and
-  security claims grounded in its own runtime tests.
+  `Constant.new` edges, including owned paths below both `lib/` and
+  `packaging/`. Dynamic loading, aliases, reflection, factories, and same-user
+  monkeypatching remain outside that test-only architecture check. A future
+  package candidate still needs an independent package harness and security
+  claims grounded in its own runtime tests.
 
 ## Source-file coverage (representative map)
 

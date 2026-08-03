@@ -367,7 +367,8 @@ class ComponentBoundaryContract
       prefixes = #{FORBIDDEN_REQUIRE_PREFIXES.inspect}
       unrelated = #{unrelated_owned_features.inspect}
       loaded = $LOADED_FEATURES.filter_map do |feature|
-        relative = feature.sub(%r{\\A#{Regexp.escape(File.join(@root, "lib"))}/?}, "")
+        relative = feature.sub(%r{\\A#{Regexp.escape(@root)}/?}, "")
+        relative = relative.delete_prefix("lib/")
         next unless prefixes.any? { |prefix| relative == "\#{prefix}.rb" || relative.start_with?("\#{prefix}/") } ||
                     unrelated.include?(relative)
         relative
@@ -441,9 +442,11 @@ class ComponentBoundaryContract
   end
 
   def require_path_for(relative)
-    return unless relative.start_with?("lib/") && relative.end_with?(".rb")
+    return unless relative.end_with?(".rb")
+    return relative.delete_prefix("lib/").delete_suffix(".rb") if relative.start_with?("lib/")
+    return relative.delete_suffix(".rb") if relative.start_with?("packaging/")
 
-    relative.delete_prefix("lib/").delete_suffix(".rb")
+    nil
   end
 
   def forbidden_require?(required)

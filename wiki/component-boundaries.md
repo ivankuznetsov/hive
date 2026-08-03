@@ -162,12 +162,16 @@ duplicate normalized keys, and cap overruns fail closed. Sealed public core
 operations make capture independent of caller hooks and post-load monkeypatches;
 normalized-key collision admission uses the owned hash rather than rescanning
 prior entries, while canonical ordering remains a separately charged sort.
-Captured allocation, initialization, and raise operations keep each
-caller-visible `Values::Error` and Marshal `TypeError` distinct and fixed even
-after `Kernel#raise` or `Exception#initialize` is replaced. Frozen private
-prototypes are diagnostic anchors only; poisoned-child behavior is the
-failure-path proof. Pre-load core
-mutation and concurrent mutation of the caller's graph are
+Frozen clean-load prototypes plus captured clone and raise operations keep each
+caller-visible `Values::Error` and Marshal `TypeError` fresh, distinct, fixed,
+and without a cause. Each clone retains sealed singleton implementations of the
+exception, backtrace, clone/copy, cause, message, and string protocols; the
+capture rescue matcher likewise uses the clean-load `Module#===` operation.
+Poisoned-child tests replace those operations, `Kernel#raise`, and both
+`Module#===` and `Class#===` independently and together. No failure path calls
+`Exception#initialize`, and both private prototypes are required behavioral
+anchors rather than diagnostic-only constants. Pre-load core mutation and
+concurrent mutation of the caller's graph are
 explicitly outside the contract. This is deterministic in-memory admission,
 not a Ruby sandbox or a workflow/provider boundary. The row stays `candidate`
 with an empty consumer list until U1a1vt consumes the seam and removes its one
@@ -308,8 +312,8 @@ tooling. U1 establishes this catalog and promotion guard; for every
 
 1. parses literal Ruby `require` and `require_relative` calls and rejects upward
    dependencies on Hive commands, stages, web, release, or CLI code;
-2. maps every component-owned Ruby file to its require path and rejects
-   undeclared direct component dependencies;
+2. maps every component-owned Ruby file below `lib/` or `packaging/` to its
+   require path and rejects undeclared direct component dependencies;
 3. for every row that declares forbidden constructions, scans production Ruby
    outside the component's owned paths and rejects literal `Constant.new`
    construction of listed internals except exact file/constant pairs recorded
@@ -318,7 +322,8 @@ tooling. U1 establishes this catalog and promotion guard; for every
 4. loads each ready entry point—and any explicitly requested candidate entry
    point—in a fresh Ruby process, verifies the documented
    constant, and rejects unrelated commands, stages, web code, or files owned
-   by undeclared components.
+   by undeclared components. Clean-load feature normalization applies the same
+   ownership check to both `lib/` and `packaging/` paths.
 
 Run the focused contract with:
 

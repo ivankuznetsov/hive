@@ -131,14 +131,19 @@ bundle exec ruby -Itest test/unit/packaging/workflow_creator_values_test.rb
 Ready components cannot depend on candidates. Forbidden-construction rules
 also apply to guarded candidates, and the helper can run a named focused
 clean-load proof for a candidate without representing the whole component
-graph as ready. The Workflow Creator Values suite separately pins exact core
+graph as ready. Literal require ownership and clean-load dependency detection
+cover catalog paths rooted under both `lib/` and `packaging/`: an undeclared
+packaging-to-packaging edge fails both checks, while its declared equivalent
+loads cleanly without weakening the existing `lib/` isolation. The Workflow
+Creator Values suite separately pins exact core
 type admission, recursive ownership and freezing, compact canonical bytes,
 post-load monkeypatch resistance, clean loading without JSON or I/O runtime,
 20,000 deterministic finite-float round trips, boundary values for every
-resource cap, an exact-maximum hash comparison-count guard against quadratic
-collision scans, sealed fixed failures after `Kernel#raise` and
-`Exception#initialize` replacement, a diagnostic-only frozen-prototype check,
-and the exact source/decision/callable, repository RuboCop, and R43 RuboCop
+resource cap, retained poisoned key identity, and an exact-maximum hash guard
+covering String `<=>`, `==`, and `eql?` calls with a deliberately quadratic
+calibration that proves the equality counters are live. It also pins fresh
+fixed failures across the full post-load exception-protocol poison surface and
+the exact source/decision/callable, repository RuboCop, and R43 RuboCop
 ceilings. The node boundary includes a nested-sibling case that reaches both
 outcomes of the inner import guard.
 

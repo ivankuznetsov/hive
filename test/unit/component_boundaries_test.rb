@@ -912,6 +912,54 @@ class ComponentBoundariesTest < Minitest::Test
     end
   end
 
+  def test_undeclared_packaging_component_require_fails_static_and_clean_load_checks
+    with_support_component(directory: "packaging") do |fixture|
+      with_contract_fixture(
+        entrypoint_source: <<~RUBY,
+          require "packaging/support/internal"
+          #{example_api_source}
+        RUBY
+        entrypoint_file: "packaging/example.rb",
+        entrypoint_require: "packaging/example",
+        owned_paths: [ "packaging/example.rb" ],
+        extra_components: [ fixture.fetch(:component) ],
+        extra_files: fixture.fetch(:files)
+      ) do |contract|
+        static_error = assert_raises(ComponentBoundaryContract::ValidationError) do
+          contract.validate_static_boundaries!
+        end
+        assert_match(/example\.component_dependencies/, static_error.message)
+        assert_match(/packaging\/support\/internal/, static_error.message)
+
+        load_error = assert_raises(ComponentBoundaryContract::ValidationError) do
+          contract.validate_clean_load!("example")
+        end
+        assert_match(/clean load pulled forbidden features/, load_error.message)
+        assert_match(/packaging\/support\/internal\.rb/, load_error.message)
+      end
+    end
+  end
+
+  def test_declared_packaging_component_require_passes_static_and_clean_load_checks
+    with_support_component(state: "boundary-ready", directory: "packaging") do |fixture|
+      with_contract_fixture(
+        entrypoint_source: <<~RUBY,
+          require "packaging/support/internal"
+          #{example_api_source}
+        RUBY
+        entrypoint_file: "packaging/example.rb",
+        entrypoint_require: "packaging/example",
+        owned_paths: [ "packaging/example.rb" ],
+        component_dependencies: [ "support" ],
+        extra_components: [ fixture.fetch(:component) ],
+        extra_files: fixture.fetch(:files)
+      ) do |contract|
+        assert contract.validate_static_boundaries!
+        assert_equal "Example::API", contract.validate_clean_load!("example").fetch("constant")
+      end
+    end
+  end
+
   def test_clean_load_rejects_unrelated_component_owned_feature
     with_support_component do |fixture|
       with_contract_fixture(
@@ -1203,18 +1251,19 @@ class ComponentBoundariesTest < Minitest::Test
     RUBY
   end
 
-  def with_support_component(state: "candidate")
+  def with_support_component(state: "candidate", directory: "lib")
+    require_prefix = directory == "lib" ? "" : "#{directory}/"
     component = fixture_component(
       id: "support",
       state: state,
-      entrypoint_file: "lib/support.rb",
-      entrypoint_require: "support",
+      entrypoint_file: "#{directory}/support.rb",
+      entrypoint_require: "#{require_prefix}support",
       entrypoint_constant: "Support::API",
-      owned_paths: [ "lib/support.rb", "lib/support" ]
+      owned_paths: [ "#{directory}/support.rb", "#{directory}/support" ]
     )
     files = {
-      "lib/support.rb" => "module Support; class API; end; end\n",
-      "lib/support/internal.rb" => "module Support; class Internal; end; end\n"
+      "#{directory}/support.rb" => "module Support; class API; end; end\n",
+      "#{directory}/support/internal.rb" => "module Support; class Internal; end; end\n"
     }
     yield({ component: component, files: files })
   end

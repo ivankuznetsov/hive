@@ -27,8 +27,39 @@ class WorkflowCreatorValuesTest < Minitest::Test
   POST_LOAD_FAILURE_POISONS = {
     "Kernel#raise" => "Kernel.module_eval { define_method(:raise) { |*| Process.exit!(71) } }",
     "Exception#initialize" => "Exception.class_eval { define_method(:initialize) { |*| Process.exit!(72) } }",
-    "both failure operations" => "Kernel.module_eval { define_method(:raise) { |*| Process.exit!(71) } }; " \
-                                 "Exception.class_eval { define_method(:initialize) { |*| Process.exit!(72) } }"
+    "Exception#exception" => "Exception.class_eval { define_method(:exception) { |*| attacker } }",
+    "Exception#backtrace" => "Exception.class_eval { define_method(:backtrace) { Process.exit!(73) } }",
+    "Exception#set_backtrace" =>
+      "Exception.class_eval { define_method(:set_backtrace) { |*| Process.exit!(74) } }",
+    "Exception#cause" => "Exception.class_eval { define_method(:cause) { Process.exit!(80) } }",
+    "Exception#message" => "Exception.class_eval { define_method(:message) { Process.exit!(81) } }",
+    "Exception#to_s" => "Exception.class_eval { define_method(:to_s) { Process.exit!(82) } }",
+    "Module#===" => "Module.class_eval { define_method(:===) { |*| Process.exit!(75) } }",
+    "Class#===" => "Class.class_eval { define_method(:===) { |*| Process.exit!(76) } }",
+    "clone protocol" => <<~'RUBY',
+      Object.class_eval { define_method(:clone) { |*| Process.exit!(77) } }
+      Exception.class_eval do
+        define_method(:initialize_clone) { |*| Process.exit!(78) }
+        define_method(:initialize_copy) { |*| Process.exit!(79) }
+      end
+    RUBY
+    "complete failure surface" => <<~'RUBY'
+      Kernel.module_eval { define_method(:raise) { |*| Process.exit!(71) } }
+      Object.class_eval { define_method(:clone) { |*| Process.exit!(77) } }
+      Exception.class_eval do
+        define_method(:initialize) { |*| Process.exit!(72) }
+        define_method(:exception) { |*| attacker }
+        define_method(:backtrace) { Process.exit!(73) }
+        define_method(:set_backtrace) { |*| Process.exit!(74) }
+        define_method(:cause) { Process.exit!(80) }
+        define_method(:message) { Process.exit!(81) }
+        define_method(:to_s) { Process.exit!(82) }
+        define_method(:initialize_clone) { |*| Process.exit!(78) }
+        define_method(:initialize_copy) { |*| Process.exit!(79) }
+      end
+      Module.class_eval { define_method(:===) { |*| Process.exit!(75) } }
+      Class.class_eval { define_method(:===) { |*| Process.exit!(76) } }
+    RUBY
   }.freeze
 
   def test_capture_copies_every_exact_json_type_into_compact_canonical_bytes
@@ -67,12 +98,15 @@ class WorkflowCreatorValuesTest < Minitest::Test
     key = +"key"
     value = +"value"
     list = [ value ]
-    input = { key => list }
 
     install_direct_poison(key, :public, %i[class encoding bytesize encode each_byte byteslice to_json hash eql? ==])
     install_direct_poison(value, :protected, %i[encoding bytesize encode each_byte byteslice to_json])
     install_direct_poison(list, :private, %i[class each length to_json])
+    key.freeze
+    input = {}.compare_by_identity
+    input[key] = list
     install_direct_poison(input, :public, %i[class each each_pair length to_json])
+    assert_same key, input.keys.first
 
     captured = Values.capture(input)
 
@@ -100,12 +134,15 @@ class WorkflowCreatorValuesTest < Minitest::Test
     end
     key = +"key"
     key.extend(poison)
+    key.freeze
     value = +"value"
     value.singleton_class.include(poison)
     list = [ value ]
     list.singleton_class.prepend(poison)
-    input = { key => list }
+    input = {}.compare_by_identity
+    input[key] = list
     input.singleton_class.prepend(poison)
+    assert_same key, input.keys.first
 
     captured = Values.capture(input)
 
@@ -116,12 +153,15 @@ class WorkflowCreatorValuesTest < Minitest::Test
   def test_exact_base_objects_bypass_undefined_hooks
     key = +"key"
     key.singleton_class.undef_method(:encode)
+    key.freeze
     value = +"value"
     value.singleton_class.undef_method(:bytesize)
     list = [ value ]
     list.singleton_class.undef_method(:each)
-    input = { key => list }
+    input = {}.compare_by_identity
+    input[key] = list
     input.singleton_class.undef_method(:each_pair)
+    assert_same key, input.keys.first
 
     captured = Values.capture(input)
 
@@ -214,78 +254,21 @@ class WorkflowCreatorValuesTest < Minitest::Test
   end
 
   def test_capture_error_resists_post_load_raise_and_exception_construction_replacement
-    expected = "HiveLiveAgentProof::WorkflowCreator::Values::Error|" \
-               "workflow-creator value cannot be captured|true|false"
-    observed = POST_LOAD_FAILURE_POISONS.map do |label, poison|
-      script = <<~RUBY
-        require ARGV.fetch(0)
-        values = HiveLiveAgentProof::WorkflowCreator::Values
-        #{poison}
-        errors = 2.times.map do
-          begin
-            values.capture(Object.new)
-          rescue values::Error => error
-            error
-          end
-        end
-        error = errors.fetch(0)
-        STDOUT.write(
-          [ error.class.name, error.message, error.cause.nil?, error.equal?(errors.fetch(1)) ].join("|")
-        )
-      RUBY
-
-      out, err, status = poisoned_capture3(script, VALUES_PATH)
-      [ label, status.exitstatus, out, err ]
-    end
-
-    expected_results = POST_LOAD_FAILURE_POISONS.keys.map { |label| [ label, 0, expected, "" ] }
-    assert_equal expected_results, observed
+    assert_failure_poison_resistance(
+      expression: "values.capture(Object.new)",
+      rescue_class: "values::Error",
+      expected: "HiveLiveAgentProof::WorkflowCreator::Values::Error|" \
+                "workflow-creator value cannot be captured|true|false"
+    )
   end
 
   def test_snapshot_marshal_error_resists_post_load_raise_and_exception_construction_replacement
-    expected = "TypeError|workflow-creator snapshots cannot be marshaled|true|false"
-    observed = POST_LOAD_FAILURE_POISONS.map do |label, poison|
-      script = <<~RUBY
-        require ARGV.fetch(0)
-        snapshot = HiveLiveAgentProof::WorkflowCreator::Values.capture(nil)
-        #{poison}
-        errors = 2.times.map do
-          begin
-            snapshot.__send__(:marshal_dump)
-          rescue TypeError => error
-            error
-          end
-        end
-        error = errors.fetch(0)
-        STDOUT.write(
-          [ error.class.name, error.message, error.cause.nil?, error.equal?(errors.fetch(1)) ].join("|")
-        )
-      RUBY
-
-      out, err, status = poisoned_capture3(script, VALUES_PATH)
-      [ label, status.exitstatus, out, err ]
-    end
-
-    expected_results = POST_LOAD_FAILURE_POISONS.keys.map { |label| [ label, 0, expected, "" ] }
-    assert_equal expected_results, observed
-  end
-
-  def test_private_failure_prototypes_are_frozen_diagnostic
-    prototypes = %i[CAPTURE_FAILURE MARSHAL_FAILURE].map do |name|
-      Values.const_get(name, false)
-    end
-    assert_equal [ true, true ], prototypes.map(&:frozen?),
-                 "diagnostic only: clean-load failure prototypes must be frozen"
-
-    capture_errors = 2.times.map do
-      assert_raises(Values::Error) { Values.capture(Object.new) }
-    end
-    snapshot = Values.capture(nil)
-    marshal_errors = 2.times.map do
-      assert_raises(TypeError) { snapshot.__send__(:marshal_dump) }
-    end
-    refute_same capture_errors.fetch(0), capture_errors.fetch(1)
-    refute_same marshal_errors.fetch(0), marshal_errors.fetch(1)
+    assert_failure_poison_resistance(
+      expression: "snapshot.__send__(:marshal_dump)",
+      rescue_class: "TypeError",
+      expected: "TypeError|workflow-creator snapshots cannot be marshaled|true|false",
+      setup: "snapshot = values.capture(nil)"
+    )
   end
 
   def test_encoding_normalization_controls_and_unicode_are_exact
@@ -407,18 +390,25 @@ class WorkflowCreatorValuesTest < Minitest::Test
     input = maximum_entries.times.to_h do |index|
       [ format("key-%04d", maximum_entries - index), nil ]
     end
-    comparisons = 0
     captured = nil
-    trace = TracePoint.new(:c_call) do |event|
-      comparisons += 1 if event.defined_class == String && event.method_id == :<=>
-    end
-
-    trace.enable { captured = Values.capture(input) }
+    comparisons = string_comparison_counts { captured = Values.capture(input) }
 
     comparison_budget = maximum_entries * maximum_entries.bit_length * 2
     assert_equal maximum_entries, captured.value.length
-    assert_operator comparisons, :<=, comparison_budget,
+    assert_operator comparisons.values.sum, :<=, comparison_budget,
                     "collision admission must not scan every previously imported key"
+
+    diagnostic_size = 128
+    diagnostic_keys = Array.new(diagnostic_size) { |index| format("probe-%03d", index) }
+    quadratic = string_comparison_counts do
+      diagnostic_keys.each_with_index do |key, index|
+        diagnostic_keys.first(index).each { |prior| key == prior || key.eql?(prior) }
+      end
+    end
+    equality_comparisons = quadratic.fetch(:==, 0) + quadratic.fetch(:eql?, 0)
+    diagnostic_budget = diagnostic_size * diagnostic_size.bit_length * 2
+    assert_operator equality_comparisons, :>, diagnostic_budget,
+                    "diagnostic fixture must expose equality-based quadratic scans"
   end
 
   def test_source_string_byte_cap_accepts_n_and_rejects_n_plus_one_before_transcode
@@ -551,8 +541,8 @@ class WorkflowCreatorValuesTest < Minitest::Test
     metrics = static_metrics(source)
     required_callables = %i[
       value canonical_bytes inspect marshal_dump marshal_load capture import_value
-      import_hash import_array import_string import_integer import_float json_string
-      escape_byte append! charge! seal fail_capture!
+      import_hash import_array import_string import_integer import_float escape_byte append! charge! seal
+      fail_capture! ===
     ]
 
     assert_operator source.lines.length, :<=, 300
@@ -604,6 +594,42 @@ class WorkflowCreatorValuesTest < Minitest::Test
   end
 
   private
+
+  def assert_failure_poison_resistance(expression:, rescue_class:, expected:, setup: "")
+    observed = POST_LOAD_FAILURE_POISONS.map do |label, poison|
+      script = <<~RUBY
+        require ARGV.fetch(0)
+        values = HiveLiveAgentProof::WorkflowCreator::Values
+        attacker = RuntimeError.new("attacker failure")
+        module_case = Module.instance_method(:===)
+        class_case = Class.instance_method(:===)
+        #{setup}
+        errors = 2.times.map do
+          begin
+            #{poison}
+            begin
+              #{expression}
+            ensure
+              Module.class_eval { define_method(:===, module_case) }
+              Class.class_eval { define_method(:===, class_case) }
+            end
+          rescue #{rescue_class} => error
+            error
+          end
+        end
+        error = errors.fetch(0)
+        STDOUT.write(
+          [ error.class.name, error.message, error.cause.nil?, error.equal?(errors.fetch(1)) ].join("|")
+        )
+      RUBY
+
+      out, err, status = poisoned_capture3(script, VALUES_PATH)
+      [ label, status.exitstatus, out, err ]
+    end
+
+    expected_results = POST_LOAD_FAILURE_POISONS.keys.map { |label| [ label, 0, expected, "" ] }
+    assert_equal expected_results, observed
+  end
 
   def assert_capture_error(value)
     error = assert_raises(Values::Error) { Values.capture(value) }
@@ -678,6 +704,16 @@ class WorkflowCreatorValuesTest < Minitest::Test
     Bundler.with_unbundled_env do
       Open3.capture3(POISONED_CHILD_ENV, RbConfig.ruby, "-e", script, *arguments)
     end
+  end
+
+  def string_comparison_counts
+    counts = Hash.new(0)
+    methods = %i[<=> == eql?]
+    trace = TracePoint.new(:c_call) do |event|
+      counts[event.method_id] += 1 if event.defined_class == String && methods.include?(event.method_id)
+    end
+    trace.enable { yield }
+    counts
   end
 
   def naive_decision_count(source)

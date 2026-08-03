@@ -128,14 +128,18 @@ bundle exec ruby -Itest -Ilib test/unit/component_boundaries_test.rb
 bundle exec ruby -Itest test/unit/packaging/workflow_creator_values_test.rb
 ```
 
-Ready components cannot depend on candidates. Forbidden-construction rules
-also apply to guarded candidates, and the helper can run a named focused
-clean-load proof for a candidate without representing the whole component
-graph as ready. Literal require ownership and clean-load dependency detection
-cover catalog paths rooted under both `lib/` and `packaging/`: an undeclared
-packaging-to-packaging edge fails both checks, while its declared equivalent
-loads cleanly without weakening the existing `lib/` isolation. The Workflow
-Creator Values suite separately pins exact core
+Ready components cannot depend on candidates. Batch require validation covers
+`boundary-ready` rows, while forbidden-construction rules apply to every row
+and scan the current production surface below `lib/**`. The helper can run
+named focused static and clean-load proofs for an exact candidate without
+representing the whole component graph as ready; the committed Workflow
+Creator Values row invokes both. Literal require ownership, including
+`require_relative`, and clean-load dependency detection cover catalog paths
+rooted under both `lib/` and `packaging/`: an undeclared
+packaging-to-packaging eager edge fails both exact candidate checks, while a
+lazy edge fails named static validation and a declared equivalent loads cleanly
+without widening the global construction scan. The Workflow Creator Values
+suite separately pins exact core
 type admission, recursive ownership and freezing, compact canonical bytes,
 post-load monkeypatch resistance, clean loading without JSON or I/O runtime,
 20,000 deterministic finite-float round trips, boundary values for every

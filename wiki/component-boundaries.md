@@ -41,8 +41,10 @@ Attempts, Patrol Effect Evidence, and Workflow Creator Values remain
 qualification and cutover proof. Workflow Creator Values retains one bounded
 U1a1vt exception until its first production consumer lands. Every retained
 entry point has a focused clean-process load proof, every catalog-owned path
-and focused test resolves inside this repository, and the direct-construction
-guards pass against all production Ruby sources.
+and focused test resolves inside this repository, and the global
+direct-construction guards pass across `lib/**`. The explicitly requested
+static and clean-load checks for Workflow Creator Values cover its
+packaging-owned candidate boundary.
 
 The component dependency graph has one edge:
 
@@ -307,23 +309,28 @@ an exception or depend on a `candidate` component.
 ## Enforcement
 
 `test/support/component_boundary_contract.rb` is test-only architecture
-tooling. U1 establishes this catalog and promotion guard; for every
-`boundary-ready` row it:
+tooling. U1 establishes this catalog and promotion guard. Batch require
+validation covers every `boundary-ready` row, while a named static check can
+apply the same rules to one exact candidate. Across that admitted scope it:
 
 1. parses literal Ruby `require` and `require_relative` calls and rejects upward
    dependencies on Hive commands, stages, web, release, or CLI code;
 2. maps every component-owned Ruby file below `lib/` or `packaging/` to its
    require path and rejects undeclared direct component dependencies;
-3. for every row that declares forbidden constructions, scans production Ruby
-   outside the component's owned paths and rejects literal `Constant.new`
-   construction of listed internals except exact file/constant pairs recorded
-   as current composition or compatibility sites; stale or newly listed-file
-   authorizations fail validation; and
+3. for every row that declares forbidden constructions, scans Ruby below
+   `lib/**` outside the component's owned paths and rejects literal
+   `Constant.new` construction of listed internals except exact file/constant
+   pairs recorded as current composition or compatibility sites; stale or
+   newly listed-file authorizations fail validation; and
 4. loads each ready entry point—and any explicitly requested candidate entry
    point—in a fresh Ruby process, verifies the documented
    constant, and rejects unrelated commands, stages, web code, or files owned
    by undeclared components. Clean-load feature normalization applies the same
    ownership check to both `lib/` and `packaging/` paths.
+
+The committed Workflow Creator Values candidate invokes both named checks, so
+its packaging-owned require edges and fresh-process load are validated without
+widening the global `lib/**` construction scan.
 
 Run the focused contract with:
 

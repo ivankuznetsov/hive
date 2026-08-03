@@ -29,9 +29,13 @@ tags: [architecture, component-boundaries, workflow-creator, values]
   `cause:nil` after each relevant post-load replacement and the combined
   surface. Failure creation no longer depends on `Exception#initialize`.
 - Extended static require ownership and clean-load feature detection to
-  catalog-owned `packaging/` paths. Declared packaging edges pass both checks;
-  undeclared equivalents fail both, without weakening existing `lib/`
-  isolation.
+  catalog-owned `packaging/` paths, including `require_relative` identities.
+  The global batch still scans require edges for `boundary-ready` rows and
+  forbidden constructions across `lib/**`; named static and clean-load checks
+  explicitly validate the committed Workflow Creator Values candidate's
+  packaging boundary. Declared packaging edges pass; undeclared eager edges
+  fail both named checks, while lazy edges fail named static validation without
+  widening the global scan.
 - Added focused behavior, hostile-runtime, clean-load, deterministic float,
   resource-boundary, source-metric, and RuboCop proof. The catalog keeps one
   staged U1a1vt exception and no consumer until that unit adopts the boundary.

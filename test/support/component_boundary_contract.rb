@@ -117,6 +117,13 @@ class ComponentBoundaryContract
     true
   end
 
+  def validate_static_boundary!(id)
+    entry = component(id)
+    validate_requires!(entry)
+    validate_constructions!(entry)
+    true
+  end
+
   def validate_clean_loads!
     validate_catalog! if @components.empty?
 
@@ -443,10 +450,8 @@ class ComponentBoundaryContract
 
   def require_path_for(relative)
     return unless relative.end_with?(".rb")
-    return relative.delete_prefix("lib/").delete_suffix(".rb") if relative.start_with?("lib/")
-    return relative.delete_suffix(".rb") if relative.start_with?("packaging/")
 
-    nil
+    RubySyntax.component_require_path(relative)
   end
 
   def forbidden_require?(required)
@@ -514,6 +519,13 @@ class ComponentBoundaryContract
 
   class RubySyntax
     attr_reader :requires, :constructions
+
+    def self.component_require_path(relative)
+      return relative.delete_prefix("lib/").delete_suffix(".rb") if relative.start_with?("lib/")
+      return relative.delete_suffix(".rb") if relative.start_with?("packaging/")
+
+      nil
+    end
 
     def initialize(source, path)
       @requires = []
@@ -630,9 +642,7 @@ class ComponentBoundaryContract
 
     def relative_require_path(required)
       relative = Pathname.new(File.join(File.dirname(@path), required)).cleanpath.to_s
-      return unless relative.start_with?("lib/")
-
-      relative.delete_prefix("lib/").delete_suffix(".rb")
+      self.class.component_require_path(relative)
     end
 
     def constant_path(node)

@@ -476,7 +476,11 @@ class WorkflowCreatorValuesTest < Minitest::Test
 
   def test_capture_is_pure_and_source_has_no_io_or_json_dependency
     source = File.read(VALUES_PATH)
-    refute_match(/^\s*require\b/, source)
+    require_pattern = /^\s*require(?:_relative)?\b/
+    assert_match require_pattern, "require \"json\"\n"
+    assert_match require_pattern, "  require_relative \"support\"\n"
+    refute_match require_pattern, "# require \"fixture\"\n"
+    refute_match require_pattern, source
     refute_match(/\bJSON\b/, source)
     refute_match(/\b(?:File|IO|Dir|Process|Open3)\b/, source)
 

@@ -307,6 +307,7 @@ class ComponentBoundariesTest < Minitest::Test
                  patrol_effects_load.fetch("constant")
     assert_empty patrol_effects_load.fetch("forbidden_loaded_features")
     assert_empty patrol_effects_load.fetch("forbidden_constants")
+    assert contract.validate_static_boundary!("workflow-creator-values")
     workflow_values_load = contract.validate_clean_load!("workflow-creator-values")
     assert_equal "HiveLiveAgentProof::WorkflowCreator::Values",
                  workflow_values_load.fetch("constant")
@@ -936,6 +937,68 @@ class ComponentBoundariesTest < Minitest::Test
         end
         assert_match(/clean load pulled forbidden features/, load_error.message)
         assert_match(/packaging\/support\/internal\.rb/, load_error.message)
+      end
+    end
+  end
+
+  def test_named_candidate_static_validation_rejects_lazy_packaging_require
+    with_support_component(directory: "packaging") do |fixture|
+      with_contract_fixture(
+        entrypoint_source: <<~RUBY,
+          module Example
+            class API
+              def self.load_support
+                require "packaging/support/internal"
+              end
+            end
+          end
+        RUBY
+        state: "candidate",
+        entrypoint_file: "packaging/example.rb",
+        entrypoint_require: "packaging/example",
+        owned_paths: [ "packaging/example.rb" ],
+        extra_components: [ fixture.fetch(:component) ],
+        extra_files: fixture.fetch(:files)
+      ) do |contract|
+        assert contract.validate_static_boundaries!
+        assert_equal "Example::API", contract.validate_clean_load!("example").fetch("constant")
+
+        error = assert_raises(ComponentBoundaryContract::ValidationError) do
+          contract.validate_static_boundary!("example")
+        end
+        assert_match(/example\.component_dependencies/, error.message)
+        assert_match(/packaging\/support\/internal/, error.message)
+      end
+    end
+  end
+
+  def test_packaging_require_relative_maps_to_component_require_identity
+    with_support_component(directory: "packaging") do |fixture|
+      with_contract_fixture(
+        entrypoint_source: <<~RUBY,
+          module Example
+            class API
+              def self.load_support
+                require_relative "support/internal"
+              end
+            end
+          end
+        RUBY
+        state: "candidate",
+        entrypoint_file: "packaging/example.rb",
+        entrypoint_require: "packaging/example",
+        owned_paths: [ "packaging/example.rb" ],
+        extra_components: [ fixture.fetch(:component) ],
+        extra_files: fixture.fetch(:files)
+      ) do |contract|
+        assert contract.validate_static_boundaries!
+        assert_equal "Example::API", contract.validate_clean_load!("example").fetch("constant")
+
+        error = assert_raises(ComponentBoundaryContract::ValidationError) do
+          contract.validate_static_boundary!("example")
+        end
+        assert_match(/example\.component_dependencies/, error.message)
+        assert_match(/packaging\/support\/internal/, error.message)
       end
     end
   end

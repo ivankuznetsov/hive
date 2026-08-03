@@ -98,4 +98,22 @@ class IdeasTest < ActionDispatch::IntegrationTest
     assert_match(/idea text is empty|param is missing/, response.body,
                  "blank idea text must surface a readable error, not a blank 500")
   end
+
+  test "project storage failures render a typed error without leaking paths" do
+    inbox = stage_dir(@project, "1-inbox")
+    existing_entries = inbox.children.map { |entry| entry.basename.to_s }.sort
+    original_mode = inbox.stat.mode & 0o777
+    File.chmod(0o500, inbox)
+
+    post "/ideas", params: { project: @project, text: "Permission failure" }
+
+    assert_response :unprocessable_entity
+    assert_match "Action failed", response.body
+    assert_match "could not add idea because an I/O operation failed (Errno::EACCES)", response.body
+    refute_match Regexp.escape(ENV.fetch("HIVE_TEST_HOME_ROOT")), response.body
+    assert_equal existing_entries, inbox.children.map { |entry| entry.basename.to_s }.sort,
+                 "a failed Web capture must not leave a partial task"
+  ensure
+    File.chmod(original_mode, inbox) if original_mode && inbox&.exist?
+  end
 end

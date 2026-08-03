@@ -61,8 +61,41 @@ class WebCaptureRuntimeTest < Minitest::Test
       )
 
       assert_equal JSON.generate(first), JSON.generate(second)
+      assert_equal 2, first.fetch("schema_version")
+      assert_equal "built_in", first.dig("recorder", "kind")
+      assert_equal "hivebox", first.dig("evidence", "type")
       assert_equal %w[a.png b.png], first.fetch("artifacts").map { |item| item.fetch("file") }
       assert first.fetch("artifacts").all? { |item| item.fetch("sha256").match?(/\A[0-9a-f]{64}\z/) }
+    end
+  end
+
+  def test_manifest_requires_nonempty_environment_keys
+    Dir.mktmpdir("capture-runtime") do |root|
+      runtime = Hive::Web::CaptureRuntime.new(
+        source_root: "/source", runtime_root: root,
+        environment: {}, lifecycle_token: "token-123"
+      )
+      attributes = {
+        task: "demo",
+        source_sha: "a" * 40,
+        status: "failed",
+        cleanup: {},
+        recorder: {
+          "kind" => "project_provider",
+          "name" => "fixture",
+          "command" => [ "bin/provider" ]
+        },
+        evidence: { "type" => "project_provider", "details" => {} },
+        diagnostic: "fixture"
+      }
+
+      error = assert_raises(Hive::Web::CaptureRuntime::OwnershipError) do
+        runtime.capture_manifest(**attributes, environment_keys: [])
+      end
+      assert_match(/environment_keys must contain at least one key/, error.message)
+
+      manifest = runtime.capture_manifest(**attributes, environment_keys: [ "PATH" ])
+      assert_equal [ "PATH" ], manifest.fetch("environment_keys")
     end
   end
 
@@ -318,6 +351,34 @@ class WebCaptureRuntimeTest < Minitest::Test
 
       refute_includes manifest.fetch("diagnostic"), "ghp_"
       assert_instance_of Hive::Web::SourceBundle, runtime.send(:source_bundle)
+    end
+  end
+
+  def test_readiness_serialization_and_manifest_consumer_ceiling_are_explicit
+    readiness = Hive::Web::CaptureRuntime::Readiness.new(
+      lifecycle_id: "capture-123", pid: 123, process_start_time: "456",
+      process_group: 123, port: 4567,
+      readiness_url: "http://127.0.0.1:4567/health",
+      source_sha: "a" * 40, cache_key: "b" * 64,
+      lock_digests: { "root" => "c" * 64 }, runtime_root: "/runtime",
+      storage_root: "/storage", started_at: "2026-08-03T12:00:00Z"
+    )
+    assert_equal Hive::Web::CaptureRuntime::SCHEMA, readiness.to_h.fetch("schema")
+
+    Dir.mktmpdir("capture-runtime") do |root|
+      runtime = Hive::Web::CaptureRuntime.new(
+        source_root: "/source", runtime_root: root,
+        environment: {}, lifecycle_token: "token-123"
+      )
+      oversized = {
+        "blob" => "x" * Hive::ARTIFACT_CAPTURE_MANIFEST_MAX_BYTES
+      }
+
+      error = assert_raises(Hive::Web::CaptureRuntime::OwnershipError) do
+        runtime.publish_manifest!(task_folder: root, manifest: oversized)
+      end
+      assert_match(/consumer ceiling/, error.message)
+      refute File.exist?(File.join(root, "media", "capture-manifest.json"))
     end
   end
 end

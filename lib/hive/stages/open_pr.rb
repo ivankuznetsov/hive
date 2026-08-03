@@ -167,14 +167,19 @@ module Hive
           return { commit: nil, status: marker.name }
         end
 
-        scan = Hive::Gh.scan_pr_for_secrets(state_file: task.state_file,
-                                            pr_url: marker.attrs["pr_url"],
-                                            cfg: cfg)
-        scan_result = handle_secret_scan_result(task, marker.attrs["pr_url"], scan, "open_pr")
-        return scan_result if scan_result
-
+        canonical_url = marker.attrs["pr_url"].to_s
         validation = validate_complete_marker(task, marker, worktree_path, branch, cfg)
         return validation if validation
+
+        # The marker and pr.md are agent-authored. Do not let their URL reach a
+        # controller-owned remote read or remediation call until GitHub has
+        # independently observed that exact URL on this task branch at the
+        # local worktree HEAD.
+        scan = Hive::Gh.scan_pr_for_secrets(state_file: task.state_file,
+                                            pr_url: canonical_url,
+                                            cfg: cfg)
+        scan_result = handle_secret_scan_result(task, canonical_url, scan, "open_pr")
+        return scan_result if scan_result
 
         { commit: "pr_opened_draft", status: :complete }
       end
@@ -250,23 +255,16 @@ module Hive
           Hive::Markers.set(task.state_file, :error, reason: "open_pr_marker_missing_url")
           return { commit: "open_pr_marker_missing_url", status: :error }
         end
-        unless marker.attrs["is_draft"] == "true"
-          remediate_orphan_pr!(marker_url)
-          Hive::Markers.set(task.state_file, :error, reason: "open_pr_not_draft")
-          return { commit: "open_pr_not_draft", status: :error }
-        end
-
         real = Hive::Gh.lookup_existing_pr(worktree_path, branch, cfg: cfg)
         unless real && real["url"] == marker_url
-          remediate_orphan_pr!(marker_url)
           Hive::Markers.set(task.state_file, :error,
                             reason: "open_pr_url_mismatch",
                             marker_url: marker_url,
                             real_url: real ? real["url"] : "(none)")
           return { commit: "open_pr_url_mismatch", status: :error }
         end
-        if real["isDraft"] == false
-          remediate_orphan_pr!(marker_url)
+        if marker.attrs["is_draft"] != "true" || real["isDraft"] == false
+          remediate_orphan_pr!(real["url"])
           Hive::Markers.set(task.state_file, :error, reason: "open_pr_not_draft")
           return { commit: "open_pr_not_draft", status: :error }
         end
@@ -274,7 +272,7 @@ module Hive
         remote_head = real["headRefOid"].to_s.downcase
         unless local_head.match?(/\A[a-f0-9]{40,64}\z/) &&
                remote_head == local_head
-          remediate_orphan_pr!(marker_url)
+          remediate_orphan_pr!(real["url"])
           Hive::Markers.set(
             task.state_file, :error,
             reason: "open_pr_head_mismatch",

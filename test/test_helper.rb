@@ -216,6 +216,45 @@ module HiveTestHelper
     end
   end
 
+  # Project capture delegates content validation to ffprobe and ffmpeg, but
+  # those optional runtime tools are not present on every test host. Keep the
+  # provider tests hermetic with tiny stand-ins that accept the fixture's known
+  # PNG and reject corrupt bytes while preserving the real argv/process path.
+  def with_fake_png_media_tools
+    Dir.mktmpdir("hive-test-media-tools") do |root|
+      fake_bin = File.join(root, "bin")
+      FileUtils.mkdir_p(fake_bin)
+      tool = <<~RUBY
+        #!#{RbConfig.ruby}
+        require "json"
+
+        path = if File.basename($PROGRAM_NAME) == "ffmpeg"
+          ARGV.fetch(ARGV.index("-i") + 1)
+        else
+          ARGV.last
+        end
+        signature = File.binread(path, 8)
+        valid = signature == [ 137, 80, 78, 71, 13, 10, 26, 10 ].pack("C*")
+        exit 1 unless valid
+
+        if File.basename($PROGRAM_NAME) == "ffprobe"
+          puts JSON.generate(
+            "streams" => [ { "codec_name" => "png", "codec_type" => "video" } ],
+            "format" => { "format_name" => "png_pipe", "duration" => "0" }
+          )
+        end
+      RUBY
+      %w[ffprobe ffmpeg].each do |name|
+        path = File.join(fake_bin, name)
+        File.write(path, tool)
+        FileUtils.chmod(0o755, path)
+      end
+      with_env(
+        "PATH" => [ fake_bin, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)
+      ) { yield fake_bin }
+    end
+  end
+
   # Tests run real `git` inside the tmpdir; pack-objects renames internal
   # state like `bitmap-ref-tips_*` between scan and unlink, so `Dir.mktmpdir`'s
   # built-in cleanup (which uses `FileUtils.remove_entry`) intermittently

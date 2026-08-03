@@ -24,6 +24,8 @@ module Hive
     # can't drift across those copies.
     DEFAULT_TRIAGE_OUTPUT = "reviews/triage.md"
     MAPPING_ROLES = %w[planning development reviewer].freeze
+    TERMINAL_OUTCOME_SAFE_SLUG = /\A[a-z0-9]+(?:-[a-z0-9]+)*\z/
+    MAX_TERMINAL_OUTCOME_LENGTH = 40
 
     def initialize(id:, stages:,
                    archive_visibility_retention_days: DEFAULT_ARCHIVE_VISIBILITY_RETENTION_DAYS)
@@ -108,7 +110,7 @@ module Hive
       :permissions, :status_mode, :budget_usd, :timeout_sec, :capability,
       :agent, :model, :effort, :input, :reviewers, :council, :deliverable,
       :workspace, :handoff, :condition_policy, :mapping_role, :mapping_contract,
-      :outcomes
+      :terminal_outcomes, :outcomes
     ) do
       def initialize(name:, index:, state_file:, advance_verb: nil, kind: nil,
                      skill: nil, instruction: nil, permissions: nil,
@@ -117,7 +119,7 @@ module Hive
                      input: nil, reviewers: nil, council: nil, deliverable: nil,
                      workspace: nil, handoff: nil,
                      condition_policy: nil, mapping_role: nil, mapping_contract: nil,
-                     outcomes: nil)
+                     terminal_outcomes: nil, outcomes: nil)
         outcomes = outcomes&.dup&.freeze unless outcomes&.frozen?
         super
       end
@@ -129,6 +131,47 @@ module Hive
       def initialize(name:, complete: false, artifact: nil, to: nil) = super
 
       def terminal? = complete
+    end
+
+    TerminalOutcomes = Data.define(:complete, :blocked)
+
+    class TerminalOutcomes
+      def initialize(complete:, blocked:)
+        complete = normalize_values(complete, label: "complete")
+        blocked = normalize_values(blocked, label: "blocked")
+        unless (complete & blocked).empty?
+          raise ArgumentError, "terminal_outcomes complete and blocked values must be disjoint"
+        end
+
+        super
+      end
+
+      private
+
+      def normalize_values(values, label:)
+        unless values.is_a?(Array)
+          raise ArgumentError, "terminal_outcomes #{label} must be an array"
+        end
+        if values.empty?
+          raise ArgumentError, "terminal_outcomes #{label} must be non-empty"
+        end
+        unless values.uniq.length == values.length
+          raise ArgumentError, "terminal_outcomes #{label} values must be unique"
+        end
+
+        values.each do |value|
+          unless value.is_a?(String) && TERMINAL_OUTCOME_SAFE_SLUG.match?(value)
+            raise ArgumentError,
+                  "terminal_outcomes #{label} value #{value.inspect} must be a lowercase safe slug"
+          end
+          if value.length > MAX_TERMINAL_OUTCOME_LENGTH
+            raise ArgumentError,
+                  "terminal_outcomes #{label} value #{value.inspect} must be at most " \
+                  "#{MAX_TERMINAL_OUTCOME_LENGTH} characters"
+          end
+        end
+        values.dup.freeze
+      end
     end
 
     Council = Data.define(:quorum, :max_rounds, :exit_rule, :on_max_rounds, :triage_output, :revise) do
@@ -197,8 +240,38 @@ module Hive
         allowed_kinds: KNOWN_KINDS
       )
       each { |stage| validate_human_stage!(stage) }
+      each_with_index { |stage, index| validate_terminal_outcomes!(stage, index: index) }
     rescue Hive::WorkLedger::InvalidDescriptor => e
       raise ArgumentError, "workflow #{id.inspect} #{e.message}"
+    end
+
+    def validate_terminal_outcomes!(stage, index:)
+      return unless stage.respond_to?(:terminal_outcomes) && stage.terminal_outcomes
+
+      unless stage.terminal_outcomes.is_a?(TerminalOutcomes)
+        raise ArgumentError,
+              "workflow #{id.inspect} stage #{stage.name.inspect} terminal_outcomes must be a TerminalOutcomes value"
+      end
+      unless stage.kind == :agent
+        raise ArgumentError,
+              "workflow #{id.inspect} stage #{stage.name.inspect} terminal_outcomes is only valid on an agent stage"
+      end
+      unless index == stages.length - 1
+        raise ArgumentError,
+              "workflow #{id.inspect} stage #{stage.name.inspect} terminal_outcomes is only valid on the last stage"
+      end
+      unless stage.deliverable
+        raise ArgumentError,
+              "workflow #{id.inspect} stage #{stage.name.inspect} terminal_outcomes requires an explicit deliverable"
+      end
+      unless stage.deliverable == stage.state_file
+        raise ArgumentError,
+              "workflow #{id.inspect} stage #{stage.name.inspect} terminal_outcomes requires deliverable to equal state_file"
+      end
+      return unless stage.workspace || stage.handoff
+
+      raise ArgumentError,
+            "workflow #{id.inspect} stage #{stage.name.inspect} terminal_outcomes is incompatible with workspace or handoff"
     end
 
     def validate_human_stage!(stage)

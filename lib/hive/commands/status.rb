@@ -1497,6 +1497,7 @@ module Hive
         "Ready to archive",
         "Archived",
         "Manually steered",
+        "Blocked",
         "Error"
       ].freeze
 

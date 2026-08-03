@@ -362,10 +362,13 @@ module Hive
         brew  → brew upgrade ivankuznetsov/hive/hive
         aur   → yay -Syu hive-bin (or paru when yay is unavailable)
         bash  → download the pinned install.sh to a tempfile, then run it
-        dev   → prints git pull && bundle install guidance
+        dev   → prints git pull && bundle install && hive migrate --all guidance
 
       Hive never swaps its own binary in place and never guesses across
-      channels.
+      channels. After the channel updater succeeds, the newly installed Hive
+      binary runs `hive migrate --all` and reports progress for every
+      registered project. A failed project is named with a human-readable
+      error and an exact recovery command.
     DESC
     option :dry_run, type: :boolean, default: false, desc: "print the selected updater command without executing it"
     def update
@@ -441,9 +444,20 @@ module Hive
     end
 
     desc "migrate [PROJECT_PATH]", "Migrate legacy project config, task folders, and metadata"
-    def migrate(project_path = Dir.pwd)
-      require "hive/commands/migrate"
-      Hive::Commands::Migrate.new(project_path).call
+    option :all, type: :boolean, default: false,
+                 desc: "migrate global state and every registered project"
+    def migrate(project_path = nil)
+      if options[:all]
+        if project_path
+          raise Hive::UsageError, "hive migrate: PROJECT_PATH and --all are mutually exclusive"
+        end
+
+        require "hive/commands/migrate_all"
+        Hive::Commands::MigrateAll.new.call
+      else
+        require "hive/commands/migrate"
+        Hive::Commands::Migrate.new(project_path || Dir.pwd).call
+      end
     end
 
     desc "wiki SUBCOMMAND", "Manage generated wiki artifacts (compile-log)"

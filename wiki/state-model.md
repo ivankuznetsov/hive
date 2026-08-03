@@ -1,10 +1,10 @@
 ---
 title: State Model
 type: data-model
-source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/completion_time.rb, lib/hive/completed_at_backfiller.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/modules/migration/occurrence_*.rb, lib/hive/modules/migration/patrol_*.rb, lib/hive/modules/migration/shadow_*.rb, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
+source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/completed_at_backfiller.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/modules/migration/occurrence_*.rb, lib/hive/modules/migration/patrol_*.rb, lib/hive/modules/migration/shadow_*.rb, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
 created: 2026-04-25
-updated: 2026-07-30
-tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, retention, dependencies, admission, web]
+updated: 2026-08-02
+tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, retention, terminal-outcomes, dependencies, admission, web]
 ---
 
 **TLDR**: Hive's workflow state has no application database. Task/project state lives in `.hive-state` and feature worktrees; durable task execution ownership lives in versioned attempt records under the global state home. Evidence-bound delivered/superseded closure is a separate task-local authority retained with an archived task, never fabricated attempt success.
@@ -55,6 +55,14 @@ Each stage has exactly one "state file" the runner writes the marker into. This 
 | `9-done` | `task.md` | reused from `4-execute` |
 
 For coding tasks, mapping is encoded in `Hive::Task::STATE_FILES` (`lib/hive/task.rb:15`), derived from `Hive::Workflows::Registry.default`. `Hive::Task#state_file` uses the task's selected workflow descriptor (`workflow.state_file_for(stage_name)`) so non-coding workflows can carry their own stage-state filenames while field-less coding tasks keep the historical paths.
+
+An opted-in terminal agent state file carries two distinct signals: the trailing
+Hive marker controls the runner protocol, while the exact first-line `Outcome:`
+value supplies workflow semantics. Hive validates that value before the
+completion commit. A declared block or invalid value replaces `COMPLETE` with a
+real attributed `ERROR`, so the task remains in its active stage, has no
+`completed_at`, stays out of archive projections, and remains eligible for an
+explicit observation-token retry.
 
 ## Task metadata sidecar
 
@@ -1117,11 +1125,22 @@ user-visible paths or an explicit visual-proof request as `required`; other
 work is `not_applicable`. Agents cannot demote the result. A demotion records a
 confirmed operator, rationale, timestamp, and the same task generation.
 
-When required, `media/capture-manifest.json` is
-`hive-artifact-capture` v1 and must identify the same task and implementation
-head with at least one retained artifact. A `COMPLETE` marker without matching
-capture evidence is not terminal truth: the artifacts runner rewrites it to
+When required, new `media/capture-manifest.json` receipts use the
+provider-neutral `hive-artifact-capture` v2 contract and must identify the same
+task and implementation head with at least one retained artifact. Retained v1
+receipts are still validated against their original schema and built-in
+evidence rules. A `COMPLETE` marker without matching v1 or v2 capture evidence
+is not terminal truth: the artifacts runner rewrites it to
 `ERROR reason=required_capture_missing`.
+JSON arrays, `null`, and receipts with non-object recorder envelopes are invalid
+evidence rather than exceptions. Provider recapture replaces those malformed
+receipts without treating any referenced media as task-owned cleanup input.
+
+The v2 producer ceiling is 240 KiB, leaving headroom below the 256 KiB ceiling
+shared by policy and Hive Web. Project-provider artifact names bind both source
+and content digests; replacement media becomes authoritative only when the new
+manifest is published, after which superseded task-owned provider files may be
+removed.
 
 See [[stages/index]] for one page per stage.
 

@@ -159,6 +159,41 @@ class MigrateAllCommandTest < Minitest::Test
     assert_equal 1, restart_calls
   end
 
+  def test_default_daemon_restarter_delegates_to_migrate
+    restart_calls = 0
+    migrate = Object.new
+    migrate.define_singleton_method(:restart_daemon_if_running!) { restart_calls += 1 }
+
+    with_replaced_singleton_method(Hive::Commands::Migrate, :new, -> { migrate }) do
+      Hive::Commands::Migrate.restart_daemon_if_running!
+    end
+
+    assert_equal 1, restart_calls
+  end
+
+  def test_resolves_recovery_binary_from_the_active_invocation
+    error_output = StringIO.new
+    env = { "PATH" => "/usr/local/bin" }
+
+    with_replaced_singleton_method(Hive::InvokedBinary, :path, ->(env:) { "/usr/local/bin/hv" }) do
+      assert_raises(Hive::Error) do
+        Hive::Commands::MigrateAll.new(
+          projects: [ { "name" => "alpha", "path" => "/tmp/alpha" } ],
+          output: StringIO.new,
+          error_output: error_output,
+          env: env,
+          global_migration: -> { },
+          command_factory: lambda { |_path|
+            Command.new(-> { raise Hive::ConfigError, "profile is unavailable" })
+          }
+        ).call
+      end
+    end
+
+    assert_includes error_output.string,
+                    "hive: migration: recovery: /usr/local/bin/hv migrate /tmp/alpha"
+  end
+
   def test_missing_registered_project_prints_restore_and_registry_cleanup_commands
     output = StringIO.new
     error_output = StringIO.new

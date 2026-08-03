@@ -748,3 +748,40 @@ components:
       - test/unit/task_projection_test.rb
       - test/unit/workflow_test.rb
     migration_exceptions: []
+
+  - id: workflow-creator-values
+    name: Workflow Creator Values
+    state: candidate
+    entrypoint:
+      file: packaging/live_agent_skills/workflow_creator_values.rb
+      require: packaging/live_agent_skills/workflow_creator_values
+      constant: HiveLiveAgentProof::WorkflowCreator::Values
+    public_contract:
+      values:
+        - HiveLiveAgentProof::WorkflowCreator::Values.capture
+        - anonymous immutable workflow-creator value snapshot
+      errors:
+        - HiveLiveAgentProof::WorkflowCreator::Values::Error
+    owned_paths:
+      - packaging/live_agent_skills/workflow_creator_values.rb
+    state_contracts:
+      - "One capture owns fresh recursively frozen JSON-shaped values and their compact canonical UTF-8 bytes"
+    schema_contracts:
+      - "Canonical bytes preserve JSON scalar type, sort normalized UTF-8 object keys by owned bytes, and end with one newline"
+    lock_contracts:
+      - "No locks or durable state; concurrent caller mutation is outside the capture contract"
+    component_dependencies: []
+    allowed_hive_dependencies: []
+    internal_collaborators:
+      - HiveLiveAgentProof::WorkflowCreator::Values
+    forbidden_constructions: []
+    authorized_internal_constructions: []
+    hive_consumers: []
+    mutation_authority: "No external mutation authority; capture allocates only fresh in-memory values and bytes."
+    recovery_surface: "Capture fails closed with one fixed secret-free error and exposes no retry or recovery state."
+    wiki_page: wiki/component-boundaries.md
+    focused_tests:
+      - test/unit/packaging/workflow_creator_values_test.rb
+    migration_exceptions:
+      - reason: "U1a1vt must consume the staged values-only boundary before it can be promoted."
+        removal_unit: U1a1vt

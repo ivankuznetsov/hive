@@ -22,6 +22,7 @@ class ComponentBoundariesTest < Minitest::Test
       skillpack
       user-service
       work-ledger
+      workflow-creator-values
     ], contract.components.map { |component| component.fetch("id") }.sort
 
     attempts = contract.component("attempts")
@@ -242,13 +243,29 @@ class ComponentBoundariesTest < Minitest::Test
     )
     assert_empty work_ledger.fetch("migration_exceptions")
 
+    workflow_values = contract.component("workflow-creator-values")
+    assert_equal "candidate", workflow_values.fetch("state")
+    assert_equal "packaging/live_agent_skills/workflow_creator_values",
+                 workflow_values.dig("entrypoint", "require")
+    assert_equal "HiveLiveAgentProof::WorkflowCreator::Values",
+                 workflow_values.dig("entrypoint", "constant")
+    assert_equal ["packaging/live_agent_skills/workflow_creator_values.rb"],
+                 workflow_values.fetch("owned_paths")
+    assert_empty workflow_values.fetch("component_dependencies")
+    assert_empty workflow_values.fetch("allowed_hive_dependencies")
+    assert_empty workflow_values.fetch("hive_consumers")
+    assert_equal ["U1a1vt"],
+                 workflow_values.fetch("migration_exceptions")
+                   .map { |entry| entry.fetch("removal_unit") }
+    assert_equal 1, workflow_values.fetch("migration_exceptions").length
+
     ready_components.push(
       agent_abi, artifact_firewall, skillpack, git_gate, work_ledger
     )
     remaining_candidates = contract.components.reject do |component|
       ready_components.include?(component)
     end
-    assert_equal %w[attempts patrol-effects],
+    assert_equal %w[attempts patrol-effects workflow-creator-values],
                  remaining_candidates.map { |entry| entry.fetch("id") }.sort
     assert remaining_candidates.all? { |component| component.fetch("state") == "candidate" }
 
@@ -290,6 +307,13 @@ class ComponentBoundariesTest < Minitest::Test
                  patrol_effects_load.fetch("constant")
     assert_empty patrol_effects_load.fetch("forbidden_loaded_features")
     assert_empty patrol_effects_load.fetch("forbidden_constants")
+    workflow_values_load = contract.validate_clean_load!("workflow-creator-values")
+    assert_equal "HiveLiveAgentProof::WorkflowCreator::Values",
+                 workflow_values_load.fetch("constant")
+    assert_empty workflow_values_load.fetch("forbidden_loaded_features")
+    assert_empty workflow_values_load.fetch("forbidden_constants")
+    require File.join(ROOT, "packaging", "live_agent_skills", "workflow_creator_values")
+    refute HiveLiveAgentProof::WorkflowCreator::Values.const_defined?(:Snapshot, false)
   end
 
   def test_final_graph_and_wiki_inventory_agree_with_the_catalog
@@ -312,14 +336,14 @@ class ComponentBoundariesTest < Minitest::Test
       wiki_link = component.fetch("wiki_page").delete_prefix("wiki/").delete_suffix(".md")
       assert_includes row, "[[#{wiki_link}]]"
       assert_includes wiki_index, "[[#{wiki_link}]]"
-      exceptions = component.fetch("migration_exceptions")
-      if component.fetch("id") == "patrol-effects"
-        assert_equal [ "U3" ],
-                     exceptions.map { |entry| entry.fetch("removal_unit") }
-      else
-        assert_empty exceptions,
-                     "#{component.fetch('id')} retained an expired migration exception"
-      end
+      expected_removals = {
+        "patrol-effects" => ["U3"],
+        "workflow-creator-values" => ["U1a1vt"]
+      }.fetch(component.fetch("id"), [])
+      assert_equal expected_removals,
+                   component.fetch("migration_exceptions")
+                     .map { |entry| entry.fetch("removal_unit") },
+                   "#{component.fetch('id')} has an unexpected migration fence"
 
       component_dependencies = component.fetch("component_dependencies")
       dependencies[component.fetch("id")] = component_dependencies unless component_dependencies.empty?

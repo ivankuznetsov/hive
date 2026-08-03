@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/commands/init"
+require "hive/agent_skills/inspector"
 
 class InitAgentSkillsTest < Minitest::Test
   include HiveTestHelper

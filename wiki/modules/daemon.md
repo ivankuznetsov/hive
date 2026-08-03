@@ -3,8 +3,8 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-07-26
-tags: [daemon, module, automation, dispatcher, operational-status, snapshots]
+updated: 2026-08-02
+tags: [daemon, module, automation, dispatcher, operational-status, snapshots, terminal-outcomes, recovery]
 ---
 
 **TLDR**: Small modules under `Hive::Daemon::*` that together form
@@ -377,7 +377,11 @@ advances a workflow stage directly:
    the row alone.
 
    Every `ERROR` and `REVIEW_ERROR` is a durable retry state, never a permanent
-   workflow terminal. Every reason—including lost sessions,
+   workflow terminal. The exact `terminal_outcome_blocked` and
+   `terminal_outcome_invalid` reasons are operator-owned exceptions: the daemon
+   does not schedule them automatically, while a fresh operational snapshot
+   still exposes their guarded `workflow.retry` action. Every other
+   reason—including lost sessions,
    `unpushed_commits`, reviewer crashes, `agent_preflight_failed`,
    tampering/integrity classifications, dirty-worktree failures, unknown
    failures, and timeouts—re-enters after the same shared marker-age

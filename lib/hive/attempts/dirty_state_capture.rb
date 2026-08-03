@@ -19,9 +19,11 @@ module Hive
       def capture(attempt:, worktree:, now: Time.now.utc)
         raise StoreError, "attempt worktree is unavailable" unless worktree && File.directory?(worktree)
 
-        directory = File.join(@store.outputs_root, attempt.attempt_id, "dirty-state")
-        FileUtils.mkdir_p(directory, mode: 0o700)
-        File.chmod(0o700, directory)
+        directory = @store.output_directory(
+          attempt.attempt_id,
+          "dirty-state",
+          create: true
+        )
 
         revision = git(worktree, "rev-parse", "HEAD").strip
         status = git(worktree, "status", "--porcelain=v2", "-z", "--untracked-files=all")

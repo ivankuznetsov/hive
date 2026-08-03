@@ -120,6 +120,64 @@ class OperationalActionTest < Minitest::Test
                  assertions.fetch(0).fetch(:observation_token)
   end
 
+  def test_semantic_terminal_block_keeps_guarded_workflow_retry_available
+    observed = {
+      "project" => "demo",
+      "slug" => "blocked-repair",
+      "folder" => "/tmp/blocked-repair",
+      "state_file" => "/tmp/blocked-repair/repair-certificate.md",
+      "workflow" => "root-cause-repair",
+      "stage" => "7-certificate",
+      "marker" => "error",
+      "attrs" => {
+        "reason" => "terminal_outcome_blocked",
+        "outcome" => "blocked",
+        "marker_id" => "semantic-block-1"
+      },
+      "mtime" => "2026-08-02T09:00:00.000000Z",
+      "action" => "error",
+      "live_task_lock" => false,
+      "blocked" => false,
+      "held" => nil
+    }
+
+    action = Hive::OperationalAction.descriptor(project: "demo", row: observed)
+
+    assert_equal "workflow.retry", action.fetch("action_id")
+    assert_equal "demo:blocked-repair", action.fetch("target")
+    assert_match(/\A[0-9a-f]{64}\z/, action.fetch("observation_token"))
+    refute action.fetch("confirmation_required")
+  end
+
+  def test_invalid_terminal_outcome_keeps_guarded_workflow_retry_available
+    observed = {
+      "project" => "demo",
+      "slug" => "invalid-repair",
+      "folder" => "/tmp/invalid-repair",
+      "state_file" => "/tmp/invalid-repair/repair-certificate.md",
+      "workflow" => "root-cause-repair",
+      "stage" => "7-certificate",
+      "marker" => "error",
+      "attrs" => {
+        "reason" => "terminal_outcome_invalid",
+        "outcome" => "malformed",
+        "marker_id" => "semantic-invalid-1"
+      },
+      "mtime" => "2026-08-02T09:00:00.000000Z",
+      "action" => "error",
+      "live_task_lock" => false,
+      "blocked" => false,
+      "held" => nil
+    }
+
+    action = Hive::OperationalAction.descriptor(project: "demo", row: observed)
+
+    assert_equal "workflow.retry", action.fetch("action_id")
+    assert_equal "demo:invalid-repair", action.fetch("target")
+    assert_match(/\A[0-9a-f]{64}\z/, action.fetch("observation_token"))
+    refute action.fetch("confirmation_required")
+  end
+
   def test_max_pass_review_escalation_is_not_a_confirmation_free_retry
     with_tmp_dir do |folder|
       reviews = File.join(folder, "reviews")

@@ -8,6 +8,10 @@ module Hive
   # One place to change on a repository rename.
   REPO_OWNER = "ivankuznetsov".freeze
   REPO_NAME = "hive".freeze
+  ARTIFACT_CAPTURE_MANIFEST_MAX_BYTES = 256 * 1024
+  ARTIFACT_CAPTURE_MANIFEST_PRODUCER_MAX_BYTES = 240 * 1024
+  PROJECT_CAPTURE_PROVIDER_MAX_COMMAND_BYTES = 16 * 1024
+  PROJECT_CAPTURE_PROVIDER_MAX_EVIDENCE_BYTES = 64 * 1024
 
   module Schemas
     # JSON schema versions for the agent-callable contracts emitted by the
@@ -28,7 +32,7 @@ module Hive
       "hive-web-install" => 1,
       "hive-capture-requirement" => 1,
       "hive-web-capture-runtime" => 1,
-      "hive-artifact-capture" => 1,
+      "hive-artifact-capture" => 2,
       "hive-doctor" => 2,
       "hive-status-diagnose" => 2,
       "hive-run" => 2,

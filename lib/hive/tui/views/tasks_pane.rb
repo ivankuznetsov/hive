@@ -7,6 +7,7 @@ require "hive/tui/styles"
 require "hive/tui/text"
 require "hive/tui/views/format"
 require "hive/tui/views/hyperlink"
+require "hive/terminal_outcome"
 
 module Hive
   module Tui
@@ -335,6 +336,10 @@ module Hive
         def error_status(row)
           attrs = row.attrs || {}
           return Hive::AgentLimit.held_label(attrs) if Hive::AgentLimit.held?(row.marker, attrs)
+          if Hive::TerminalOutcome.blocked_error?(attrs)
+            outcome = Hive::Tui::Text.sanitize(attrs["outcome"])
+            return outcome.empty? ? "Blocked" : "Blocked (#{outcome})"
+          end
 
           exit_code = Hive::Tui::Text.sanitize(attrs["exit_code"])
           reason = Hive::Tui::Text.sanitize(attrs["reason"])

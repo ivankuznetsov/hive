@@ -19,6 +19,7 @@ require "hive/attempts/command_dispatch"
 require "hive/task_meta"
 require "hive/commit_or_rollback"
 require "hive/completion_time"
+require "hive/terminal_outcome"
 
 module Hive
   module Commands
@@ -150,8 +151,13 @@ module Hive
           runner = pick_runner(task)
           terminal_snapshot = terminal_state_snapshot(task)
           legacy_completed_at = legacy_completed_at_before_run(task, marker, config: cfg)
+          normalization = nil
           begin
-            result = Hive::Stages::Base.with_stage_events(task, cfg: cfg) { runner.call(task, cfg) }
+            result = Hive::Stages::Base.with_stage_events(task, cfg: cfg) do
+              raw_result = runner.call(task, cfg)
+              normalization = Hive::TerminalOutcome.normalize(task, raw_result)
+              normalization.result
+            end
           rescue Exception => e
             if terminal_snapshot
               rollback_terminal_state!(
@@ -162,7 +168,8 @@ module Hive
           end
           commit_after(
             task, result, config: cfg, terminal_snapshot: terminal_snapshot,
-            completion_time: legacy_completed_at
+            completion_time: legacy_completed_at,
+            rollback_on_failure: normalization.changed
           )
           report(task, result)
         ensure
@@ -265,7 +272,8 @@ module Hive
         Hive::Stages::Resolver.resolve(task, descriptor: task.workflow)
       end
 
-      def commit_after(task, result, config: nil, terminal_snapshot: nil, completion_time: nil)
+      def commit_after(task, result, config: nil, terminal_snapshot: nil, completion_time: nil,
+                       rollback_on_failure: false)
         marker = Hive::Markers.current(task.state_file)
         archived = Hive::TaskAction.for(task, marker, config: config).key ==
                    Hive::Schemas::TaskActionKind::ARCHIVED
@@ -273,8 +281,9 @@ module Hive
         return unless action || archived
 
         ops = Hive::GitOps.new(task.project_root)
-        owned_snapshot = archived && terminal_snapshot.nil?
-        terminal_snapshot ||= TerminalStateSnapshot.capture(task.folder) if archived
+        transactional_terminal = archived || rollback_on_failure
+        owned_snapshot = transactional_terminal && terminal_snapshot.nil?
+        terminal_snapshot ||= TerminalStateSnapshot.capture(task.folder) if transactional_terminal
         Hive::Lock.with_commit_lock(task.hive_state_path) do
           begin
             stamp_completed_at(task, completion_time) if archived
@@ -285,7 +294,7 @@ module Hive
             )
           rescue Hive::Error, Hive::TaskMeta::InvalidMetadata,
                  SystemCallError, IOError, ArgumentError, Interrupt => e
-            if archived && terminal_snapshot
+            if transactional_terminal && terminal_snapshot
               rollback_terminal_state!(task, terminal_snapshot, ops, e)
             else
               raise
@@ -523,6 +532,16 @@ module Hive
             }
           end
 
+          if Hive::TerminalOutcome.semantic_error?(marker.attrs)
+            return {
+              "kind" => Hive::Schemas::NextActionKind::NO_OP,
+              "reason" => marker.attrs["reason"],
+              "error" => marker.attrs,
+              "instructions" => "refresh `hive status --operational --json` and invoke this task's " \
+                                "guarded workflow.retry action with `hive act`"
+            }
+          end
+
           { "kind" => Hive::Schemas::NextActionKind::NO_OP, "error" => marker.attrs }
         when :review_error
           # Surface phase + reason from the marker so polling agents can
@@ -660,7 +679,12 @@ module Hive
           puts "  next: manual steering active; automated run skipped"
         when :error, :review_error
           warn "  status: ERROR (#{marker.attrs.inspect})"
-          if marker.name == :review_error
+          if marker.name == :error && Hive::TerminalOutcome.semantic_error?(marker.attrs)
+            warn "  reason: #{marker.attrs['reason']}"
+            warn "  outcome: #{marker.attrs['outcome']}" if marker.attrs["outcome"]
+            warn "  next: refresh `hive status --operational --json` and invoke this task's " \
+                 "guarded workflow.retry action with `hive act`"
+          elsif marker.name == :review_error
             phase = marker.attrs["phase"]
             reason = marker.attrs["reason"]
             warn "  phase: #{phase}" if phase

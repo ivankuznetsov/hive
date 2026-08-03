@@ -194,6 +194,13 @@ module Hive
           )
         end
         directories = ([ task_root, package_root ] + scope.add_dirs_extra).uniq
+        # Yolo is already the explicit unbounded trust preset. Preserve the
+        # caller's declared project/worktree roots as runner context so agents
+        # such as Codex do not mistake an authorized target for an out-of-scope
+        # workspace. Portable non-yolo actors keep these roots read-only below.
+        if scope.yolo?
+          directories = (directories + trusted_actor_read_roots(base_add_dirs)).uniq
+        end
         child_environment = actor_environment(environment)
         if profile.name != :claude && !scope.yolo?
           directories = (

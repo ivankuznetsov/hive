@@ -1,5 +1,6 @@
 require "fileutils"
 require "rbconfig"
+require "securerandom"
 require "yaml"
 require "hive/config"
 require "hive/paths"
@@ -160,12 +161,95 @@ module Hive
         bin_home = Hive::Paths.bin_home
         %w[hive hv].each do |name|
           link = File.join(bin_home, name)
-          next unless File.symlink?(link)
+          next unless managed_bash_launcher_link?(link, name)
 
-          File.unlink(link)
+          quarantine = File.join(
+            bin_home,
+            ".hive-uninstall-#{name}-#{Process.pid}-#{SecureRandom.hex(6)}"
+          )
+          File.rename(link, quarantine)
+          if managed_bash_launcher_link?(quarantine, name)
+            File.unlink(quarantine)
+          else
+            restore_replaced_launcher(quarantine, link)
+          end
         rescue Errno::ENOENT
           next
         end
+      end
+
+      def restore_replaced_launcher(quarantine, link)
+        if !File.exist?(link) && !File.symlink?(link)
+          File.rename(quarantine, link)
+          @output.puts "hive: warning: launcher changed during uninstall; restored #{link}"
+        else
+          @output.puts "hive: warning: launcher changed during uninstall; preserved it at #{quarantine}"
+        end
+      rescue SystemCallError => e
+        @output.puts "hive: warning: could not restore changed launcher #{link}: #{e.message}; preserved it at #{quarantine}"
+      end
+
+      # `install.sh` publishes absolute user-bin symlinks to wrappers under an
+      # authenticated bash-channel data home. Basename alone is not ownership:
+      # an operator may already have an unrelated `hive` or `hv` symlink.
+      # Require the exact managed layout, current-UID regular wrapper, and a
+      # stable current-UID bash marker before removing the launcher.
+      def managed_bash_launcher_link?(link, name)
+        return false unless File.symlink?(link)
+
+        target = File.expand_path(File.readlink(link), File.dirname(link))
+        bin_dir = File.dirname(target)
+        gems_dir = File.dirname(bin_dir)
+        data_home = File.dirname(gems_dir)
+        return false unless File.basename(target) == name
+        return false unless File.basename(bin_dir) == "bin"
+        return false unless File.basename(gems_dir) == "gems"
+        return false unless File.basename(data_home) == "hive"
+        return false unless managed_bash_data_home?(data_home)
+
+        target_stat = File.lstat(target)
+        return false unless target_stat.file? && target_stat.uid == Process.uid
+
+        marker = File.join(data_home, "install-channel")
+        stable_owned_file_content(marker, max_bytes: 16)&.strip == "bash"
+      rescue SystemCallError
+        false
+      end
+
+      def managed_bash_data_home?(candidate)
+        expanded_candidate = File.expand_path(candidate)
+        return true if expanded_candidate == File.expand_path(Hive::Paths.data_home)
+
+        prefix = stable_owned_file_content(
+          File.join(Hive::Paths.data_home, "install-prefix"),
+          max_bytes: 4_096
+        )&.strip
+        return false if prefix.to_s.empty?
+
+        expanded_candidate == File.join(File.expand_path(prefix), "hive")
+      rescue ArgumentError
+        false
+      end
+
+      def stable_owned_file_content(path, max_bytes:)
+        before = File.lstat(path)
+        return nil unless before.file? &&
+                          before.uid == Process.uid &&
+                          before.nlink == 1 &&
+                          before.size <= max_bytes
+
+        flags = File::RDONLY | File::NONBLOCK
+        flags |= File::NOFOLLOW if defined?(File::NOFOLLOW)
+        File.open(path, flags) do |file|
+          opened = file.stat
+          return nil unless opened.dev == before.dev &&
+                            opened.ino == before.ino &&
+                            opened.size == before.size
+
+          file.read(max_bytes)
+        end
+      rescue SystemCallError
+        nil
       end
 
       def cleanup_project_state(projects)

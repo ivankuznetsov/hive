@@ -42,6 +42,38 @@ class SchemaFilesTest < Minitest::Test
     assert_equal 1, doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
   end
 
+  def test_artifact_capture_v2_requires_nonempty_environment_keys
+    schemer = JSONSchemer.schema(
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-artifact-capture")))
+    )
+    manifest = {
+      "schema" => "hive-artifact-capture",
+      "schema_version" => 2,
+      "status" => "captured",
+      "task" => "demo-task",
+      "source_sha" => "a" * 40,
+      "recorder" => {
+        "kind" => "project_provider",
+        "name" => "fixture",
+        "command" => [ "bin/provider" ]
+      },
+      "environment_keys" => [ "PATH" ],
+      "started_at" => "2026-08-03T00:00:00Z",
+      "finished_at" => "2026-08-03T00:00:01Z",
+      "artifacts" => [
+        { "file" => "proof.png", "bytes" => 1, "sha256" => "b" * 64 }
+      ],
+      "cleanup" => {
+        "port" => "released", "processes" => "clean", "runtime" => "cleaned"
+      },
+      "diagnostic" => nil,
+      "evidence" => { "type" => "project_provider", "details" => {} }
+    }
+
+    assert schemer.valid?(manifest)
+    refute schemer.valid?(manifest.merge("environment_keys" => []))
+  end
+
   def test_native_web_schema_files_accept_versioned_success_and_error_shapes
     service = {
       "platform" => "linux", "unit_path" => "/tmp/hive-web.service",

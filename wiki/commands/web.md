@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-07-26
+updated: 2026-08-02
 tags: [command, web, rails, turbo, hivebox-container, archive, retention]
 ---
 
@@ -640,7 +640,12 @@ writing a daemon request. `Task#run!` compares the submitted action and stage
 with the freshly loaded row, refuses stale forms, and wraps queue-writer
 `ArgumentError`s (for example the queue's stricter slug grammar) as typed 422s
 instead of surfacing an opaque 500. Idea creation likewise enters
-`Project#add_idea!`, and `POST /daemon/repair` is the conventional create action
+`Project#add_idea!`. `Hive::Commands::New#call!` deliberately leaves
+`SystemCallError`/`IOError` raising for in-process adapters, so the Rails
+resource normalizes those failures to a path-redacted typed 422 while retaining
+the original exception as its cause for diagnostics. Other exceptions still
+follow the ordinary programmer-error 500 path rather than being mislabeled as
+operator failures. `POST /daemon/repair` is the conventional create action
 on `DaemonRepairsController`, backed by `Daemon#repair!`. CSRF is Rails-default (per-form
 tokens). Outside verified local-loopback access every route except `/health`, `/up`, `/login`,
 `/logout`, `/auth/github*`, and the dev/test-only `/dev_login` is behind the
@@ -826,13 +831,78 @@ ignores late responses after disconnect.
 supported task recorder. The task must be in `7-artifacts`, have a current
 `required` capture receipt, and own the exact clean source worktree. The
 optional source root is an assertion: it must resolve to that owned worktree.
-The command seeds deterministic private fixture data, records the board-to-task
-flow through pinned Playwright Chromium, verifies PNG and WebM output with
-ffmpeg/ffprobe, rechecks the clean source HEAD, and publishes task-local media
-plus `media/capture-manifest.json` only after teardown. `--json` emits that
-manifest; the text form reports the retained artifact count and destination.
-Capture applicability ignores generated HTML marker comments, so fields such
-as `browser=skipped` cannot manufacture a user request for visual proof.
+Recorder selection occurs before any Hivebox bundle, browser, server, runtime,
+or media-staging object is constructed. A positive capability check selects the
+built-in recorder only when the source has the complete locked Hive/Hivebox web
+layout. A conventional project instead uses its validated
+`artifacts.capture.provider` declaration. With neither capability nor a
+provider, capture stops with an actionable configuration diagnostic; it never
+asks the project to fabricate Hivebox dependency files.
+
+The built-in path seeds deterministic private fixture data, records the
+board-to-task flow through pinned Playwright Chromium, verifies PNG and WebM
+output with ffmpeg/ffprobe, rechecks the clean source HEAD, and publishes
+task-local media plus `media/capture-manifest.json` only after teardown.
+`--json` emits that manifest; the text form reports the retained artifact count
+and destination.
+
+A project provider is a tracked executable path relative to the owned source
+root and is launched as discrete argv, never through a shell. The complete argv
+is limited to 16 KiB. Hive sends one
+`hive-project-capture-request` v1 JSON document on stdin with the exact task
+slug, real source root, immutable source SHA, and private staging root. The
+provider returns one bounded `hive-project-capture-result` v1 JSON object:
+
+```json
+{
+  "schema": "hive-project-capture-result",
+  "schema_version": 1,
+  "status": "captured",
+  "artifacts": [{"file": "proof.png", "bytes": 123, "sha256": "<64 hex>"}],
+  "evidence": {},
+  "cleanup": {"port": "released", "processes": "clean", "runtime": "cleaned"},
+  "diagnostic": null
+}
+```
+
+Provider stdout, stderr, execution time, evidence (64 KiB), and artifact totals
+are bounded. On Linux, Hive first forks a dedicated child-subreaper custody root
+and then runs the supervisor and provider beneath it. One wall-clock deadline
+covers the provider, output drains, and every descendant, including a child that
+calls `setsid`; project-provider capture fails closed where that custody
+primitive is unavailable. Hive never makes the invoking caller a subreaper, and
+its unrelated children are outside process discovery, signalling, and reaping.
+The dedicated custody root records the nested supervisor PID/start identity and
+exit status, and performs bounded TERM/KILL cleanup if the supervisor times out,
+is signalled, exits nonzero, closes its result pipe early, or returns an
+invalid/undecodable result. Ordinary and abnormal completion both verify that
+the full command tree is gone before the call returns. The provider environment
+contains only a small ambient allowlist plus private HOME/XDG/tmp paths.
+
+Hive accepts artifacts only from private staging and rejects nonzero exit,
+malformed or oversized output, secret-shaped content, incomplete cleanup,
+undeclared files, path traversal, symlinks/special files, missing or tampered
+media, and source mutation. Media must pass both an ffprobe type/container
+check and an ffmpeg decode. Source custody compares the exact HEAD, Git-visible
+cleanliness, and a complete working-tree entry/content snapshot (excluding Git
+administrative metadata) that includes ignored paths, after every attempted
+execution even when the provider fails; a combined diagnostic preserves both
+provider and custody failures. Each snapshot is limited to 250,000 entries and
+1 GiB of cumulative regular-file logical bytes, hashes files in 1 MiB streaming
+chunks, and checks one 30-second monotonic deadline throughout inventory and
+hashing. Oversized or over-deadline trees fail with a custody diagnostic before
+publication.
+
+The producer rejects a fully serialized manifest above 240 KiB before
+publication, below the shared 256 KiB policy/Web reader ceiling. Media names
+include source and artifact digests. A repeat capture at the same source SHA
+reuses identical bytes, gives changed bytes a new name, publishes the manifest
+last, and removes only superseded task-owned provider media after that publish.
+The tracked provider executable still runs as the local operator and is not an
+operating-system filesystem sandbox; projects should review it with the same
+trust as other project-owned tooling. Capture applicability ignores generated
+HTML marker comments, so fields such as `browser=skipped` cannot manufacture a
+user request for visual proof.
 
 `hive web capture-server` is an internal recorder interface. It requires an
 exact clean source root, private runtime root, lifecycle token, and inherited
@@ -857,7 +927,7 @@ capture runtime, so its externally compiled CSS and JavaScript are served in
 the recording without writing `public/assets` into the source worktree. Normal
 production web service asset handling is unchanged.
 
-The environment is deny-by-default: it gets private HOME/XDG/Hive/storage,
+The built-in environment is deny-by-default: it gets private HOME/XDG/Hive/storage,
 bundle, assets, and tmp roots plus an ephemeral Rails secret; provider,
 GitHub/Telegram/release, SSH-agent, proxy, Bundler/Gem override, and Ruby hook
 state is not inherited. `BrowserBundle` installs the exact Playwright 1.60.0

@@ -131,11 +131,16 @@ module Hive
                                 Time.iso8601(current.generated_at)
 
             if current.status == "invalidated"
+              contradiction_at = current.lanes.values.filter_map do |value|
+                value&.contradiction&.fetch("observed_at")
+              end.map { |value| Time.iso8601(value) }.max
+              malformed! unless contradiction_at
               malformed! unless successor.status == "qualified" &&
                                 LANES.all? do |lane|
                                   fresh_qualification?(
                                     current.lanes.fetch(lane),
-                                    successor.lanes.fetch(lane)
+                                    successor.lanes.fetch(lane),
+                                    observed_after: contradiction_at
                                   )
                                 end
             else
@@ -239,9 +244,11 @@ module Hive
               after.supersedes == before.qualification_id
           end
 
-          def fresh_qualification?(before, after)
-            before && after&.qualified? && before.run_id != after.run_id &&
-              (before.receipt_ids & after.receipt_ids).empty?
+          def fresh_qualification?(before, replacement, observed_after:)
+            before && replacement&.qualified? &&
+              before.run_id != replacement.run_id &&
+              (before.receipt_ids & replacement.receipt_ids).empty? &&
+              Time.iso8601(replacement.evidence_started_at) > observed_after
           end
 
           def lane_blockers(lanes)

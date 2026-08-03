@@ -368,7 +368,19 @@ class ComponentBoundariesTest < Minitest::Test
       lib/hive/modules/migration/report_migration.rb
       lib/hive/modules/migration/report_projection.rb
     ]
-    forbidden = component.fetch("forbidden_constructions")
+    later_owners = %w[
+      Hive::ModulePackage::ManagedStore
+      Hive::Commands::Module::Lifecycle
+      Hive::Modules::Dispatcher
+    ]
+    forbidden = component.fetch("forbidden_constructions") + later_owners
+
+    later_owners.each do |constant|
+      syntax = ComponentBoundaryContract::RubySyntax.new(
+        "#{constant}.new\n", "u3a-construction-mutation.rb"
+      )
+      assert_includes syntax.constructions, constant
+    end
 
     offenders = owners.to_h do |relative|
       syntax = ComponentBoundaryContract::RubySyntax.new(

@@ -334,7 +334,8 @@ class ModulesMigrationReportMigrationTest < Minitest::Test
         decision_replay_count: 0, modules: modules, effect_count: 0,
         effect_replay_count: 0, duplicate_effects: [].freeze,
         unsettled_effects: [].freeze,
-        elapsed_seconds: 9, blockers: [].freeze, supersedes: nil,
+        elapsed_seconds: 9, evidence_started_at: NOW.iso8601(6),
+        blockers: [].freeze, supersedes: nil,
         contradiction: nil, generated_at: NOW.iso8601(6)
       }
     )

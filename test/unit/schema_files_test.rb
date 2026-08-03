@@ -2835,6 +2835,12 @@ class SchemaFilesTest < Minitest::Test
     }
 
     assert_empty schemer.validate(payload).to_a
+    error = Hive::Schemas::ErrorEnvelope.build(
+      schema: "hive-module-migration-report",
+      error: Hive::ConfigError.new("reviewer is required"),
+      error_kind: "error"
+    )
+    assert_empty schemer.validate(error).to_a
     refute schemer.valid?(payload.merge("schema_version" => 1))
     refute schemer.valid?(payload.merge("unexpected" => true))
     refute schemer.valid?(

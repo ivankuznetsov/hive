@@ -2,49 +2,72 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://hivecli.sh/schemas/hive-module-migration-report.v2.json",
   "title": "Hive module migration report v2",
-  "type": "object",
-  "additionalProperties": false,
-  "required": [
-    "schema", "schema_version", "report_id", "generated_at",
-    "candidate_sha", "scenario_manifest_digest", "status", "lanes",
-    "blockers", "supersedes", "migration"
+  "oneOf": [
+    {"$ref": "#/$defs/SuccessPayload"},
+    {"$ref": "#/$defs/ErrorPayload"}
   ],
-  "properties": {
-    "schema": {"const": "hive-module-migration-report"},
-    "schema_version": {"const": 2},
-    "report_id": {"type": "string", "pattern": "^report-[0-9a-f]{64}$"},
-    "generated_at": {"type": "string", "format": "date-time"},
-    "candidate_sha": {"type": ["string", "null"], "pattern": "^[0-9a-f]{40}$"},
-    "scenario_manifest_digest": {
-      "type": ["string", "null"],
-      "pattern": "^[0-9a-f]{64}$"
-    },
-    "status": {"enum": ["qualified", "evidence_required", "invalidated"]},
-    "lanes": {
+  "$defs": {
+    "SuccessPayload": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["deterministic", "installed_live"],
+      "required": [
+        "schema", "schema_version", "report_id", "generated_at",
+        "candidate_sha", "scenario_manifest_digest", "status", "lanes",
+        "blockers", "supersedes", "migration"
+      ],
       "properties": {
-        "deterministic": {"$ref": "#/$defs/nullable_qualification"},
-        "installed_live": {"$ref": "#/$defs/nullable_qualification"}
+        "schema": {"const": "hive-module-migration-report"},
+        "schema_version": {"const": 2},
+        "report_id": {"type": "string", "pattern": "^report-[0-9a-f]{64}$"},
+        "generated_at": {"type": "string", "format": "date-time"},
+        "candidate_sha": {"type": ["string", "null"], "pattern": "^[0-9a-f]{40}$"},
+        "scenario_manifest_digest": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "status": {"enum": ["qualified", "evidence_required", "invalidated"]},
+        "lanes": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["deterministic", "installed_live"],
+          "properties": {
+            "deterministic": {"$ref": "#/$defs/nullable_qualification"},
+            "installed_live": {"$ref": "#/$defs/nullable_qualification"}
+          }
+        },
+        "blockers": {
+          "type": "array", "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "supersedes": {
+          "type": ["string", "null"],
+          "pattern": "^report-[0-9a-f]{64}$"
+        },
+        "migration": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/migration"}
+          ]
+        }
       }
     },
-    "blockers": {
-      "type": "array", "uniqueItems": true,
-      "items": {"type": "string", "minLength": 1}
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "ok", "error_class", "error_kind",
+        "exit_code", "message"
+      ],
+      "properties": {
+        "schema": {"const": "hive-module-migration-report"},
+        "schema_version": {"const": 2},
+        "ok": {"const": false},
+        "error_class": {"type": "string", "minLength": 1},
+        "error_kind": {"enum": ["usage", "error"]},
+        "exit_code": {"type": "integer"},
+        "message": {"type": "string"}
+      }
     },
-    "supersedes": {
-      "type": ["string", "null"],
-      "pattern": "^report-[0-9a-f]{64}$"
-    },
-    "migration": {
-      "oneOf": [
-        {"type": "null"},
-        {"$ref": "#/$defs/migration"}
-      ]
-    }
-  },
-  "$defs": {
     "nullable_qualification": {
       "oneOf": [
         {"type": "null"},
@@ -60,8 +83,8 @@
         "scenario_manifest_digest", "status", "receipt_ids",
         "decision_replay_count", "modules", "effect_count",
         "effect_replay_count", "duplicate_effects", "unsettled_effects",
-        "elapsed_seconds", "blockers", "supersedes", "contradiction",
-        "generated_at"
+        "elapsed_seconds", "evidence_started_at", "blockers", "supersedes",
+        "contradiction", "generated_at"
       ],
       "properties": {
         "qualification_id": {"type": "string", "pattern": "^qualification-[0-9a-f]{64}$"},
@@ -98,6 +121,7 @@
           "items": {"type": "string", "pattern": "^receipt-[0-9a-f]{64}$"}
         },
         "elapsed_seconds": {"type": "integer", "minimum": 0},
+        "evidence_started_at": {"type": "string", "format": "date-time"},
         "blockers": {
           "type": "array", "uniqueItems": true,
           "items": {"type": "string", "minLength": 1}

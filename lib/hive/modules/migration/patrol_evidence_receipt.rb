@@ -99,6 +99,8 @@ module Hive
               label: label
             )
             new(receipt_id: receipt_id, **attributes)
+          rescue ArgumentError, EncodingError, KeyError, NoMethodError, TypeError
+            malformed!
           end
 
           def from_h(value)

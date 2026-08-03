@@ -19,6 +19,7 @@ class ModulesMigrationPatrolQualificationTest < Minitest::Test
     assert qualification.qualified?
     assert_equal "qualified", qualification.status
     assert_operator qualification.elapsed_seconds, :<, 60
+    assert_equal NOW.iso8601(6), qualification.evidence_started_at
     assert_equal 10,
                  qualification.modules.dig("patrol", "decision_count")
     assert_equal 10,
@@ -134,7 +135,9 @@ class ModulesMigrationPatrolQualificationTest < Minitest::Test
         )
       end
     end
-    qualification = build_qualification(receipts)
+    qualification = build_qualification(
+      receipts, generated_at: NOW + (10 * 24 * 60 * 60)
+    )
 
     refute qualification.qualified?
     assert_equal "evidence_required", qualification.status
@@ -332,13 +335,13 @@ class ModulesMigrationPatrolQualificationTest < Minitest::Test
 
   private
 
-  def build_qualification(receipts)
+  def build_qualification(receipts, generated_at: NOW + 30)
     index = Hive::Modules::Migration::PatrolEffectIndex.build(
       receipts: receipts.flat_map(&:effects)
     )
     Hive::Modules::Migration::PatrolQualification.build(
       lane: "deterministic", verified_receipts: receipts,
-      effect_index: index, generated_at: NOW + 30
+      effect_index: index, generated_at: generated_at
     )
   end
 

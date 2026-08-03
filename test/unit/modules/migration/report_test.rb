@@ -61,6 +61,34 @@ class ModulesMigrationReportTest < Minitest::Test
     end
   end
 
+  def test_writers_reject_malformed_current_state_without_mutation
+    projection = evidence_required_projection
+    legacy = Hive::Modules::Migration::Report.build(
+      record_source: [], reviewer: "reviewer", reviewed_at: NOW
+    )
+    malformed = [
+      Hive::Modules::Migration::Report.canonical(nil),
+      Hive::Modules::Migration::Report.canonical([]),
+      Hive::Modules::Migration::Report.canonical("report"),
+      Hive::Modules::Migration::Report.canonical(1),
+      JSON.pretty_generate(legacy_success)
+    ]
+
+    malformed.each do |bytes|
+      with_tmp_dir do |root|
+        path = File.join(root, "report.json")
+        File.binwrite(path, bytes)
+
+        assert_raises(Hive::ConfigError) do
+          Hive::Modules::Migration::Report.write_projection(path, projection)
+        end
+        assert_equal bytes, File.binread(path)
+        assert_raises(Hive::ConfigError) { legacy.write(path) }
+        assert_equal bytes, File.binread(path)
+      end
+    end
+  end
+
   def test_released_v1_success_and_error_shapes_remain_migration_inputs
     success = legacy_success
     success.fetch("modules").fetch("patrol")["configuration_digest"] = nil

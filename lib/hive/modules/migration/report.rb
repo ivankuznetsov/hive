@@ -30,10 +30,7 @@ module Hive
 
         def self.load(path)
           bytes = read_bytes(path)
-          payload = JSON.parse(bytes)
-          unless bytes == canonical(payload)
-            raise Hive::ConfigError, "module migration report is malformed"
-          end
+          payload = parse_current(bytes)
           require "hive/modules/migration/report_projection"
           ReportProjection.from_h(payload)
         rescue JSON::ParserError, EncodingError, SystemCallError
@@ -163,7 +160,7 @@ module Hive
               next
             end
             if current
-              current_payload = JSON.parse(current)
+              current_payload = parse_current(current)
               if current_payload["schema_version"] == 1
                 raise Hive::ConfigError,
                       "module migration report v1 requires one-off migration"
@@ -195,6 +192,17 @@ module Hive
         end
         private_class_method :storage_for
 
+        def self.parse_current(bytes)
+          payload = JSON.parse(bytes)
+          unless payload.is_a?(Hash) && bytes == canonical(payload)
+            raise Hive::ConfigError, "module migration report is malformed"
+          end
+          payload
+        rescue JSON::ParserError, EncodingError, ArgumentError, TypeError
+          raise Hive::ConfigError, "module migration report is malformed"
+        end
+        private_class_method :parse_current
+
         def initialize(record_source:, reviewer:, reviewed_at:, generated_at:)
           validator = ShadowComparator.new(root: Dir.pwd)
           @reviewer = reviewer.to_s.strip
@@ -215,7 +223,9 @@ module Hive
           bytes = self.class.canonical(payload)
           self.class.with_locked_storage(path) do |storage|
             current = self.class.read_locked(storage, missing: true)
-            if current && JSON.parse(current)["schema_version"] == 2
+            if current && self.class.send(
+              :parse_current, current
+            )["schema_version"] == 2
               raise Hive::ConfigError,
                     "module migration report v2 cannot be replaced by v1"
             end

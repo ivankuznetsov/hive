@@ -11,8 +11,8 @@ module Hive
         :scenario_manifest_digest, :status, :receipt_ids,
         :decision_replay_count, :modules, :effect_count,
         :effect_replay_count, :duplicate_effects, :unsettled_effects,
-        :elapsed_seconds, :blockers, :supersedes, :contradiction,
-        :generated_at
+        :elapsed_seconds, :evidence_started_at, :blockers, :supersedes,
+        :contradiction, :generated_at
       )
         LANES = %w[deterministic installed_live].freeze
         STATUSES = %w[qualified evidence_required invalidated].freeze
@@ -24,9 +24,10 @@ module Hive
         KEYS = %w[
           blockers candidate_sha catalog_digest contradiction
           decision_replay_count duplicate_effects effect_count
-          effect_replay_count elapsed_seconds generated_at lane manifest_digest
-          modules qualification_id receipt_ids run_id scenario_manifest_digest
-          source_digest status supersedes unsettled_effects
+          effect_replay_count elapsed_seconds evidence_started_at generated_at
+          lane manifest_digest modules qualification_id receipt_ids run_id
+          scenario_manifest_digest source_digest status supersedes
+          unsettled_effects
         ].freeze
         SUMMARY_KEYS = %w[
           blockers change_windows configuration_digest decision_classes
@@ -90,6 +91,8 @@ module Hive
               "evidence_required"
             end
             occurred = evidence.map { |receipt| Time.iso8601(receipt.capture.occurred_at) }
+            generated_at = timestamp(generated_at)
+            malformed! if occurred.max > Time.iso8601(generated_at)
             attributes = {
               lane: lane,
               run_id: evidence.first.run_id,
@@ -107,10 +110,11 @@ module Hive
               duplicate_effects: effect_index.duplicate_effects,
               unsettled_effects: effect_index.unsettled_effects,
               elapsed_seconds: (occurred.max - occurred.min).to_i,
+              evidence_started_at: occurred.min.utc.iso8601(6).freeze,
               blockers: blockers,
               supersedes: supersedes,
               contradiction: contradiction,
-              generated_at: timestamp(generated_at)
+              generated_at: generated_at
             }
             validate_semantics!(attributes)
             create(attributes)
@@ -148,6 +152,7 @@ module Hive
                 value["unsettled_effects"], "receipt"
               ),
               elapsed_seconds: nonnegative_integer(value["elapsed_seconds"]),
+              evidence_started_at: timestamp(value["evidence_started_at"]),
               blockers: string_set(value["blockers"]),
               supersedes: optional_qualification_id(value["supersedes"]),
               contradiction: contradiction_value(value["contradiction"]),
@@ -200,6 +205,8 @@ module Hive
               "duplicate_effects" => attributes.fetch(:duplicate_effects),
               "unsettled_effects" => attributes.fetch(:unsettled_effects),
               "elapsed_seconds" => attributes.fetch(:elapsed_seconds),
+              "evidence_started_at" =>
+                attributes.fetch(:evidence_started_at),
               "blockers" => attributes.fetch(:blockers),
               "supersedes" => attributes.fetch(:supersedes),
               "contradiction" => attributes.fetch(:contradiction),
@@ -369,6 +376,9 @@ module Hive
               summary.fetch("decision_count")
             end
             malformed! unless attributes.fetch(:receipt_ids).size >= decision_count
+            malformed! if Time.iso8601(
+              attributes.fetch(:evidence_started_at)
+            ) > Time.iso8601(attributes.fetch(:generated_at))
             expected_blockers << "duplicate_effects" unless
               attributes.fetch(:duplicate_effects).empty?
             expected_blockers << "unsettled_effects" unless
@@ -497,7 +507,8 @@ module Hive
               effect_replay_count: effect_replay_count,
               duplicate_effects: duplicate_effects,
               unsettled_effects: unsettled_effects,
-              elapsed_seconds: elapsed_seconds, blockers: blockers,
+              elapsed_seconds: elapsed_seconds,
+              evidence_started_at: evidence_started_at, blockers: blockers,
               supersedes: supersedes, contradiction: contradiction,
               generated_at: generated_at
             },

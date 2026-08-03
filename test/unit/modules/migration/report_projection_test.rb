@@ -181,11 +181,13 @@ class ModulesMigrationReportProjectionTest < Minitest::Test
         qualifications: [
           qualification(
             "deterministic", qualification_seed: "3",
-            run_id: "fresh-deterministic"
+            run_id: "fresh-deterministic", generated_at: NOW + 121,
+            evidence_started_at: NOW + 61
           ),
           qualification(
             "installed_live", qualification_seed: "4",
-            run_id: "fresh-installed-live"
+            run_id: "fresh-installed-live", generated_at: NOW + 121,
+            evidence_started_at: NOW + 61
           )
         ],
         generated_at: NOW + 122,
@@ -255,7 +257,8 @@ class ModulesMigrationReportProjectionTest < Minitest::Test
                     status: "qualified", supersedes: nil, contradiction: nil,
                     catalog_digest: "2" * 64,
                     patrol_configuration: "5" * 64,
-                    run_id: "run-#{lane}", generated_at: NOW)
+                    run_id: "run-#{lane}", generated_at: NOW,
+                    evidence_started_at: NOW)
     blockers = status == "invalidated" ? [ "contradictory_telemetry" ] : []
     modules = %w[patrol architecture-patrol].to_h do |module_name|
       [ module_name, {
@@ -297,6 +300,7 @@ class ModulesMigrationReportProjectionTest < Minitest::Test
         duplicate_effects: [].freeze,
         unsettled_effects: [].freeze,
         elapsed_seconds: 9,
+        evidence_started_at: evidence_started_at.iso8601(6),
         blockers: blockers.freeze,
         supersedes: supersedes,
         contradiction: contradiction&.freeze,

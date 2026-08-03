@@ -101,8 +101,9 @@ owners: receipt, independent verifier, bounded effect index, qualification,
 report projection, and report migration. Their dependency chain is one-way
 from U2 public values toward report projection; the migration owner alone also
 depends on the existing report storage facade. The six do not construct a
-scheduler, dispatcher, runner, provider, process-custody component, recovery
-store, operator lifecycle owner, or qualification runtime. Report and Patrols
+scheduler, runner, provider, process-custody component, recovery store,
+qualification runtime, or the deferred `ModulePackage::ManagedStore`,
+`Commands::Module::Lifecycle`, and `Modules::Dispatcher` U5-U7 owners. Report and Patrols
 share one descriptor-confined `.mutation.lock`; schema conversion archives the
 exact released v1 bytes, read-only probes validate source/archive/receipt
 linkage, and interrupted receipt publication resumes only under that lock.

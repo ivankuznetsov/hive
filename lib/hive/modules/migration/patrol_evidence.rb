@@ -97,14 +97,8 @@ module Hive
               )
             end.freeze
           when String
-            begin
-              string = value.encode(Encoding::UTF_8)
-            rescue EncodingError
-              malformed!(label)
-            end
-            malformed!(label) unless string.valid_encoding?
-            malformed!(label) if string.bytesize > MAX_STRING_BYTES
-            string.dup.freeze
+            malformed!(label) if value.bytesize > MAX_STRING_BYTES
+            value.dup.freeze
           when Integer, TrueClass, FalseClass, NilClass
             value
           when Float

@@ -2175,6 +2175,9 @@ module Hive
       # instead of a Row) is dropped — every production and test
       # caller passes a Row.
       def review_marker_state(row)
+        state = File.lstat(row.state_file)
+        return :unreadable unless state.file? && !state.symlink?
+
         marker = Hive::Markers.current(row.state_file)
         return :drifted unless marker.name == :review_waiting
 

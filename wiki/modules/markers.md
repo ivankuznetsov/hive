@@ -3,11 +3,11 @@ title: Hive::Markers
 type: module
 source: lib/hive/markers.rb
 created: 2026-04-25
-updated: 2026-07-25
-tags: [marker, protocol, flock, recovery, migration]
+updated: 2026-08-02
+tags: [marker, protocol, flock, recovery, migration, binary, filesystem-safety]
 ---
 
-**TLDR**: Locked HTML-comment marker protocol. `Markers.current(path)` returns the *last* marker in a file as a `State` struct; `Markers.set(path, name, attrs)` writes via `flock(LOCK_EX)`, replacing the last marker (or appending if none).
+**TLDR**: Locked HTML-comment marker protocol. `Markers.current(path)` safely returns the *last* marker in a bounded binary tail of a regular file as a `State` struct; `Markers.set(path, name, attrs)` writes via `flock(LOCK_EX)` and a securely-created sibling temporary file, replacing the last marker (or appending if none).
 
 ## Marker grammar
 
@@ -93,14 +93,26 @@ State = Struct.new(:name, :attrs, :raw, keyword_init: true)
 ## `current(path)`
 
 - Returns `State(name: :none, attrs: {}, raw: nil)` if the file is missing.
-- Otherwise scans the entire content with `MARKER_RE` and keeps the *last* match.
+- Opens with no-follow and nonblocking flags, verifies the opened inode is the
+  same regular file returned by `lstat`, and returns `:none` for symlinks,
+  FIFOs, devices, unreadable paths, or a raced replacement.
+- Reads at most the trailing 1 MiB as binary bytes, scans with `MARKER_RE`, and
+  keeps the *last* match. Invalid UTF-8 outside the ASCII marker does not abort
+  status or terminal-outcome normalization.
 - Returns `:none` if no markers are present (e.g. an in-flight agent that hasn't written one yet).
 
 ## `set(path, name, attrs = {})`
 
 - `name` is upcased; raises `ArgumentError` if not in `KNOWN_NAMES`.
 - Builds the marker text via `build_marker`. Attribute values containing whitespace get double-quoted. Double quotes are normalized to single quotes, `<!--` is rewritten to `< !--`, and `-->` is rewritten to `-- >` so generated attrs cannot confuse HTML-comment marker boundaries.
-- Opens the file with `RDWR | CREAT, 0o644`, takes `LOCK_EX`, reads the full body, replaces the *last* marker via `replace_last_marker`, or appends if none. Truncates and rewrites in place.
+- Takes the sidecar `LOCK_EX`, reads only a verified regular file as binary,
+  replaces the *last* marker via `replace_last_marker`, or appends if none. A
+  symlink, FIFO, device, or raced replacement is never opened and is replaced
+  as an empty artifact instead.
+- Persists through a random `O_EXCL` sibling created by `Tempfile`, checks its
+  open inode against the directory entry before rename, and verifies the
+  installed inode after rename. This prevents a predictable temporary-path
+  symlink from redirecting controller writes outside the task folder.
 - This locking is what makes concurrent writes from `Hive::Agent` (during a run) and `Markers.set` (from tests or recovery) safe.
 
 ## `parse_attrs`
@@ -109,7 +121,11 @@ Parses the attribute string into a Hash. Format: `key=value` pairs, optional dou
 
 ## Tests
 
-- `test/unit/markers_test.rb` — round-trip set/get, attribute quoting/sanitization, last-marker semantics, missing-file handling, Git stderr attrs containing `branch -> branch`, and migration compare-and-swap refusal after a newer generation lands.
+- `test/unit/markers_test.rb` — round-trip set/get, binary preservation,
+  attribute quoting/sanitization, last-marker semantics, bounded sparse-file
+  tails, nonblocking FIFO and no-follow symlink refusal, predictable-temp
+  symlink resistance, Git stderr attrs containing `branch -> branch`, and
+  migration compare-and-swap refusal after a newer generation lands.
 
 ## Used by
 

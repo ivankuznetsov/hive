@@ -2,6 +2,7 @@ require "time"
 require "hive/operational_action"
 require "hive/workflows"
 require "hive/task_closure"
+require "hive/terminal_outcome"
 
 module Hive
   # Agent-first projection over the established hive-status graph. The input
@@ -521,6 +522,8 @@ module Hive
         [ "idle", "none" ]
       when "retry_safety_blocked"
         [ "needs_repair", disposition["owner"] || "operator" ]
+      when "semantic_terminal_error"
+        [ "needs_repair", "operator" ]
       when "recovery_unavailable"
         [ "unknown", "hive" ]
       when "wait_for_answers"
@@ -739,7 +742,8 @@ module Hive
     def automatic_error_retry?(project, row)
       daemon_enabled?(project["name"]) &&
         auto_retry_enabled?(project["name"]) &&
-        %w[error review_error].include?(row["marker"].to_s)
+        %w[error review_error].include?(row["marker"].to_s) &&
+        !Hive::TerminalOutcome.semantic_error?(row["attrs"])
     end
 
     def auto_retry_enabled?(project_name)

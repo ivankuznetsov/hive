@@ -142,7 +142,12 @@ leaf-local `Ripper.lex` token check that catches bare and qualified `require`
 and `require_relative` identifiers without treating comments or strings as
 code. It also covers exact core type admission, recursive ownership/freezing,
 canonical bytes, hostile dispatch, post-load core replacement, copy/Marshal
-denial, declared resource ceilings, and property comparisons.
+denial, and declared resource ceilings. The expensive 20,000-case IEEE-754
+and randomized canonicalization campaign is opt-in: run
+`bundle exec rake test:hostile` (or set `HIVE_HOSTILE_TESTS=1` for the focused
+Values file). Normal `rake test` and coverage still run the deterministic
+Values and TextSafety contract tests, but skip those two property methods so
+the merge gate does not pay the hostile-campaign runtime.
 
 The TextSafety suite passes positive public inputs only through
 `Values.capture(...).value`. It covers UTF-8 byte truncation, safe-relative-path

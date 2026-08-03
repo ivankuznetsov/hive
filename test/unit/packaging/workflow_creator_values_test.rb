@@ -304,6 +304,8 @@ class WorkflowCreatorValuesTest < Minitest::Test
   end
 
   def test_deterministic_finite_ieee_754_tokens_roundtrip_byte_exactly
+    skip "run rake test:hostile to include the hostile/property campaign" unless ENV["HIVE_HOSTILE_TESTS"] == "1"
+
     patterns = [ 0, 1 << 63 ]
     seen = patterns.to_h { |bits| [ bits, true ] }
     random = Random.new(0x1EE7_F10A7)
@@ -331,6 +333,8 @@ class WorkflowCreatorValuesTest < Minitest::Test
   end
 
   def test_large_finite_float_roundtrip_and_canonical_property_corpus
+    skip "run rake test:hostile to include the hostile/property campaign" unless ENV["HIVE_HOSTILE_TESTS"] == "1"
+
     floats = [ Float::MAX, -Float::MAX, Float::MIN, Float::EPSILON, 1.0e300, 1.0e-300, 3.141592653589793 ]
     floats.each do |value|
       bytes = Values.capture(value).canonical_bytes

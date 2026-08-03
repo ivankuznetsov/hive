@@ -965,3 +965,14 @@ or historical package lane ran during this implementation. The current source
 version and latest-stable row are both 0.6.9, so `candidate_not_newer` must keep
 the candidate blocked. No version choice, tag, publication, deployment, or
 release was authorized.
+
+## Automatic post-update migration needs installed-channel smoke (2026-08-03)
+
+Focused source tests prove that brew, AUR, and bash update commands complete
+before the newly resolved Hive binary runs `hive migrate --all`; fleet tests
+prove visible progress, continue-after-project-failure behavior, readable
+errors, and exact recovery commands. No real package-manager installation was
+mutated during this implementation. Before calling the operational path proven
+on every channel, run one disposable installed upgrade for brew, AUR, and bash
+and retain the updater plus migration output. This gap does not weaken the
+local command contract or its deterministic tests.

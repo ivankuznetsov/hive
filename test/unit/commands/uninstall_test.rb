@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/commands/uninstall"
+require "hive/user_service"
 
 class UninstallCommandTest < Minitest::Test
   include HiveTestHelper

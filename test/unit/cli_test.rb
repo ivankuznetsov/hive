@@ -171,6 +171,17 @@ class HiveCliTest < Minitest::Test
       Hive::CLI.start([ "migrate", "/tmp/project" ])
       assert_equal [ "/tmp/project" ], calls.first.fetch(:args)
     end
+
+    require "hive/commands/migrate_all"
+    with_command_new_stub(Hive::Commands::MigrateAll) do |calls|
+      Hive::CLI.start([ "migrate", "--all" ])
+      assert_empty calls.first.fetch(:args)
+    end
+
+    error = assert_raises(Hive::UsageError) do
+      Hive::CLI.start([ "migrate", "/tmp/project", "--all" ])
+    end
+    assert_match(/PROJECT_PATH and --all are mutually exclusive/, error.message)
   end
 
   def test_doctor_loads_project_config_and_exits_with_command_status

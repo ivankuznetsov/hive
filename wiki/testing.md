@@ -119,16 +119,33 @@ Claude, Codex, Pi, and Grok.
 repository-local paths, unique ownership, an acyclic component graph, bounded
 migration exceptions, selected source-level dependency/construction rules,
 exact authorized internal-construction sites, and fresh-process loading for
-every `boundary-ready` component:
+every `boundary-ready` component. One staged candidate may have an empty
+consumer list only when it carries exactly one bounded migration exception;
+removal units accept hierarchical plan IDs such as `U1a1vt`:
 
 ```bash
 bundle exec ruby -Itest -Ilib test/unit/component_boundaries_test.rb
+bundle exec ruby -Itest test/unit/packaging/workflow_creator_values_test.rb
 ```
 
 Ready components cannot depend on candidates. Forbidden-construction rules
 also apply to guarded candidates, and the helper can run a named focused
 clean-load proof for a candidate such as Attempts without representing the
 whole component graph as ready.
+
+Workflow Creator Values keeps its clean-load and dependency proof outside the
+generic component loader. Its focused suite directly runs the leaf under
+`ruby --disable-gems -I<repository-root>`, verifies JSON remains unloaded and
+that capture performs no `File`, `Dir`, or `Process` calls, and uses a
+leaf-local `Ripper.lex` token check that catches bare and qualified `require`
+and `require_relative` identifiers without treating comments or strings as
+code. The same suite covers exact core type admission,
+recursive ownership/freezing, canonical bytes, hostile direct and
+module-contributed dispatch, post-load core replacement, copy/Marshal denial,
+encoding and numeric boundaries, cycles/shared graphs, declared resource
+ceilings, property comparisons, and the exact R43 line/callable/decision and
+per-method RuboCop budgets. It does not assert generic require-path
+canonicalization.
 
 The helper uses Ruby syntax rather than comments or string examples for literal
 `require`, `require_relative`, and `Constant.new` checks. It remains an

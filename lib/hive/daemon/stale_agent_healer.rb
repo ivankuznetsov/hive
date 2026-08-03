@@ -8,6 +8,7 @@ require "hive/process_kill"
 require "hive/workflows"
 require "hive/daemon/recovery_coordinator"
 require "hive/attempts/lost_outcome"
+require "hive/terminal_outcome"
 
 module Hive
   module Daemon
@@ -299,7 +300,9 @@ module Hive
       end
 
       def auto_retry_allowed?(row, projects)
-        @auto_retry_enabled && (projects.nil? || projects.include?(row.project))
+        @auto_retry_enabled &&
+          !Hive::TerminalOutcome.semantic_error?(marker_attrs_for(row)) &&
+          (projects.nil? || projects.include?(row.project))
       end
 
       def task_for_attempt(attempt, outcome)

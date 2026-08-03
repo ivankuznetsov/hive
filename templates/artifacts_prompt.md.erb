@@ -31,24 +31,31 @@ started and is authoritative for this generation.
 
 ## Required local capture
 
-Use the project's supported recorder. For Hive's own web UI, run:
+Use the public capture command for the owned worktree:
 
 ```sh
 hive web capture --task-folder <%= task_folder %> --source-root <%= worktree_path %>
 ```
 
-That public command owns the supervised capture server, pinned browser cache,
-synthetic fixture, PNG/WebM recording, teardown, and manifest publication. Do
-not call `hive web capture-server` directly, construct an ambient
-`BUNDLE_GEMFILE`, reuse a long-lived web service, or install dependencies into
-the linked worktree.
+That command automatically selects the built-in Hivebox recorder or the
+configured project provider before constructing recorder-specific resources.
+The built-in path owns the supervised capture server, pinned browser cache,
+synthetic fixture, PNG/WebM recording, teardown, and manifest publication. A
+configured project provider receives the exact task, source root, source HEAD,
+and private staging root; Hive validates its media and publishes the manifest.
+Do not call `hive web capture-server` directly, construct an ambient
+`BUNDLE_GEMFILE`, reuse a long-lived web service, install dependencies into the
+linked worktree, or invoke a provider outside the public command.
 
 Capture must use deterministic synthetic or explicitly sanitized data. Keep
-media small and task-local. A success manifest must be
-`hive-artifact-capture` v1 and bind the exact clean source HEAD, lockfile
-digests, cache key, command, fixture IDs, viewport, accessibility assertions,
-artifact byte sizes and SHA-256 hashes, and teardown outcome. Do not claim
-success for partial output.
+media small and task-local. Every new success manifest must use
+`hive-artifact-capture` v2 and bind the exact clean source HEAD, recorder kind,
+recorder argv, disclosed environment-key names, artifact byte sizes and SHA-256
+hashes, typed recorder evidence, and teardown outcome. Built-in evidence carries
+Hivebox lock/cache/fixture/viewport/accessibility fields; configured providers
+carry bounded provider-neutral details. v1 manifests are retained compatibility
+evidence only, not output for a new capture. Do not claim success for partial
+output.
 
 Required media remains local. Do not call Screenote or any external upload tool,
 do not upload to a signed URL, and do not add a remote URL. External publication

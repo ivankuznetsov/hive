@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-07-30
+updated: 2026-08-03
 tags: [gap, todo, release-proof, agent-skills]
 ---
 
@@ -30,6 +30,14 @@ tags: [gap, todo, release-proof, agent-skills]
   exact, status advances from `reset_required` to `current`, and no unrelated
   v2 owner changes. The abandoned v2 jobs backlog is an explicit product
   tradeoff, not a continuity promise or an unimplemented migration.
+
+- Project-owned artifact providers currently require Linux
+  `PR_SET_CHILD_SUBREAPER` plus `/proc` ancestry so detached descendants remain
+  in exact custody through output drain and teardown. Provider capture fails
+  closed on macOS/BSD rather than weakening that guarantee. A portable custody
+  primitive and a live conventional-project browser provider remain follow-up
+  work; the built-in Hivebox recorder is unaffected.
+
 - `agent-cli-runtime` 0.1.0 has a self-contained package, exact-artifact
   verifier, Linux/macOS install matrix, and component-scoped trusted-publishing
   workflow. Repository-hosted controls remain operator work: the
@@ -122,14 +130,23 @@ tags: [gap, todo, release-proof, agent-skills]
 
 ## Internal component boundary gap
 
-- The final internal graph audit retains eight catalog rows: UserService, Agent
+- The internal graph now retains nine catalog rows: UserService, Agent
   ABI, Agent Artifact Firewall, Skillpack, Safe Agent Git Gate, and WorkLedger
-  are `boundary-ready`; Attempts admission and Patrol Effect Evidence remain
-  `candidate`. Skillpack to Agent ABI is the only component dependency. Patrol
-  retains one bounded U3 exception for compressed candidate evidence and
-  production qualification; Attempts remains unready because Hive has no
+  are `boundary-ready`; Attempts admission, Patrol Effect Evidence, and
+  Workflow Creator Values remain `candidate`. Skillpack to Agent ABI is the
+  only component dependency. Patrol retains one bounded U3 exception for
+  compressed candidate evidence and production qualification. Workflow Creator
+  Values/Text Safety retains exactly one U1a1c exception because it has no production
+  consumer yet; Attempts remains unready because Hive has no
   demonstrated need for a supported reconciliation, supervision, capacity,
   loss-processing, cancellation, export, or raw-store lifecycle API.
+- U1a1vt closes the inherited `U1A1V-R02-ARCH-002` combined metric proof at
+  498 lines / 34 callables / 55 decisions while keeping both files inside the
+  per-method R43 limits. The candidate must not be described as boundary-ready
+  before U1a1c establishes its first production consumer and removes the fence.
+  TextSafety accepts exact frozen plain Values shapes as an internal contract;
+  those checks are not provenance or origin authentication, and callers must
+  not turn them into an external trust claim.
 - No ready component has yet earned standalone packaging. There is no named
   non-Hive adopter, independently installed component artifact, separate
   compatibility promise, or explicit release decision. Those proofs belong to
@@ -948,3 +965,14 @@ or historical package lane ran during this implementation. The current source
 version and latest-stable row are both 0.6.9, so `candidate_not_newer` must keep
 the candidate blocked. No version choice, tag, publication, deployment, or
 release was authorized.
+
+## Automatic post-update migration needs installed-channel smoke (2026-08-03)
+
+Focused source tests prove that brew, AUR, and bash update commands complete
+before the newly resolved Hive binary runs `hive migrate --all`; fleet tests
+prove visible progress, continue-after-project-failure behavior, readable
+errors, and exact recovery commands. No real package-manager installation was
+mutated during this implementation. Before calling the operational path proven
+on every channel, run one disposable installed upgrade for brew, AUR, and bash
+and retain the updater plus migration output. This gap does not weaken the
+local command contract or its deterministic tests.

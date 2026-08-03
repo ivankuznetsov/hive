@@ -118,7 +118,10 @@ module Hive
         "stages" => {}
       },
       "open_pr" => {},
-      "artifacts" => { "agent" => "claude" },
+      "artifacts" => {
+        "agent" => "claude",
+        "capture" => { "provider" => nil }
+      },
       "finalize" => { "agent" => "claude" },
       # Per-CLI agent profiles. Each project may override `bin`,
       # `env_override`, or `min_version` to pin to a different binary or
@@ -2042,6 +2045,7 @@ module Hive
       validate_review_attempts!(cfg, source_path)
       validate_attempt_timers!(cfg, source_path)
       validate_conditions!(cfg, source_path)
+      validate_artifact_capture!(cfg, source_path)
       validate_daemon!(cfg, source_path)
       validate_web_config!(cfg, source_path)
       validate_screenote!(cfg, source_path)
@@ -2300,6 +2304,74 @@ module Hive
           raise ConfigError, "conditions.stages.#{stage} in #{describe_source(source_path)}: #{e.message}"
         end
       end
+    end
+
+    def validate_artifact_capture!(cfg, source_path)
+      capture = cfg.dig("artifacts", "capture")
+      unless capture.is_a?(Hash)
+        raise ConfigError,
+              "artifacts.capture in #{describe_source(source_path)} must be a Hash; " \
+              "got #{capture.inspect} (#{capture.class})"
+      end
+
+      unknown_capture = capture.keys - %w[provider]
+      unless unknown_capture.empty?
+        raise ConfigError,
+              "artifacts.capture in #{describe_source(source_path)} has unknown keys: " \
+              "#{unknown_capture.map(&:inspect).sort.join(', ')}"
+      end
+
+      provider = capture["provider"]
+      return if provider.nil?
+
+      unless provider.is_a?(Hash)
+        raise ConfigError,
+              "artifacts.capture.provider in #{describe_source(source_path)} must be a Hash or nil; " \
+              "got #{provider.inspect} (#{provider.class})"
+      end
+
+      unknown_provider = provider.keys - %w[name command timeout_sec]
+      unless unknown_provider.empty?
+        raise ConfigError,
+              "artifacts.capture.provider in #{describe_source(source_path)} has unknown keys: " \
+              "#{unknown_provider.map(&:inspect).sort.join(', ')}"
+      end
+
+      name = provider["name"]
+      unless name.is_a?(String) && name.match?(/\A[a-z][a-z0-9_-]{0,63}\z/)
+        raise ConfigError,
+              "artifacts.capture.provider.name in #{describe_source(source_path)} must match " \
+              "[a-z][a-z0-9_-]{0,63}"
+      end
+
+      command = provider["command"]
+      unless command.is_a?(Array) && command.length.between?(1, 32) &&
+             command.all? { |part| part.is_a?(String) && !part.empty? && part.bytesize <= 4096 && !part.include?("\0") }
+        raise ConfigError,
+              "artifacts.capture.provider.command in #{describe_source(source_path)} must be an " \
+              "Array of 1..32 non-empty String argv values"
+      end
+      command_bytes = command.sum { |part| part.bytesize + 1 }
+      if command_bytes > Hive::PROJECT_CAPTURE_PROVIDER_MAX_COMMAND_BYTES
+        raise ConfigError,
+              "artifacts.capture.provider.command total argv in #{describe_source(source_path)} " \
+              "must not exceed #{Hive::PROJECT_CAPTURE_PROVIDER_MAX_COMMAND_BYTES} bytes"
+      end
+      executable = command.first.tr("\\", "/")
+      segments = executable.split("/", -1)
+      if executable.start_with?("/") || executable.match?(/\A[A-Za-z]:\//) ||
+         segments.any? { |segment| segment.empty? || segment == "." || segment == ".." }
+        raise ConfigError,
+              "artifacts.capture.provider.command[0] in #{describe_source(source_path)} must be a " \
+              "project-relative executable path without traversal"
+      end
+
+      timeout = provider.fetch("timeout_sec", 120)
+      return if timeout.is_a?(Integer) && timeout.between?(1, 600)
+
+      raise ConfigError,
+            "artifacts.capture.provider.timeout_sec in #{describe_source(source_path)} must be an " \
+            "integer between 1 and 600"
     end
 
     def validate_stage_skill_by_agent!(cfg, source_path)

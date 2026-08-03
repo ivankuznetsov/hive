@@ -14,6 +14,13 @@ class StagesArtifactsPromptTest < Minitest::Test
       assert_includes prompt, "Capture requirement: not_applicable"
       assert_includes prompt, "media/capture-manifest.json"
       assert_includes prompt, "hive-artifact-capture"
+      assert_includes prompt, "`hive-artifact-capture` v2"
+      assert_match(
+        /automatically selects the built-in Hivebox recorder or the\s+configured project provider/,
+        prompt
+      )
+      assert_match(/v1 manifests are retained compatibility\s+evidence only/, prompt)
+      refute_match(/success manifest must be\s+`hive-artifact-capture` v1/, prompt)
       assert_match(/Do not call Screenote or any external upload tool/, prompt)
       refute_includes prompt, "create_screenshot_upload"
       assert_includes prompt, "Completion — REQUIRED",

@@ -1257,6 +1257,30 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal true, disposition.fetch(:retry_safe)
   end
 
+  def test_terminal_outcome_errors_bypass_automatic_retry_assessment
+    %w[terminal_outcome_blocked terminal_outcome_invalid].each do |reason|
+      snapshot = FakeOperationalSnapshot.new
+      dispatcher, supervisor = make_dispatcher(rows: [], operational_snapshot: snapshot)
+      healer = dispatcher.instance_variable_get(:@stale_agent_healer)
+      healer.define_singleton_method(:retry_assessment) do |*_args, **_kwargs|
+        raise "semantic terminal errors must not be assessed automatically"
+      end
+      observed = row(
+        marker: "error",
+        action: "error",
+        command: nil,
+        marker_attrs: { "reason" => reason, "outcome" => "blocked" }
+      )
+
+      dispatcher.send(:handle_row, observed, now: T0)
+
+      assert_empty supervisor.spawned
+      disposition = snapshot.calls.last.last
+      assert_equal :semantic_terminal_error, disposition.fetch(:decision)
+      assert_equal "operator", disposition.fetch(:owner)
+    end
+  end
+
   def test_error_retry_publishes_safety_block_instead_of_false_scheduler_ownership
     snapshot = FakeOperationalSnapshot.new
     dispatcher, supervisor = make_dispatcher(rows: [], operational_snapshot: snapshot)

@@ -713,6 +713,29 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
     end
   end
 
+  def test_yolo_actor_preserves_trusted_caller_roots_as_runner_context
+    with_tmp_dir do |dir|
+      task = File.join(dir, "task")
+      package = File.join(dir, "package")
+      project = File.join(dir, "project")
+      FileUtils.mkdir_p([ task, package, project ])
+
+      policy = Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+        "yolo",
+        task_folder: task,
+        package_root: package,
+        profile: Hive::AgentProfiles.lookup(:codex),
+        base_add_dirs: [ project, task ]
+      )
+
+      assert_equal [
+        File.realpath(task), File.realpath(package), File.realpath(project)
+      ], policy.directories
+      assert_equal policy.directories, policy.agent_add_dirs
+      assert_equal "bypassPermissions", policy.permission_mode
+    end
+  end
+
   def test_portable_actor_rejects_unavailable_or_non_directory_trusted_caller_roots
     with_tmp_dir do |dir|
       task = File.join(dir, "task")

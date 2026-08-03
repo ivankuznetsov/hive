@@ -81,6 +81,7 @@ module Hive
             profile,
             prompt: prompt(profile),
             managed_slot: "stages.#{@stage.name}.reviewers.#{@reviewer.name}",
+            base_add_dirs: Hive::Stages::Base.managed_actor_base_add_dirs(@task),
             managed_outputs: [ @output_path ],
             **permission_kwargs
           )

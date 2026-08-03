@@ -3,7 +3,7 @@ title: 5-open-pr stage
 type: stage
 source: lib/hive/stages/open_pr.rb, templates/open_pr_prompt.md.erb
 created: 2026-05-13
-updated: 2026-07-24
+updated: 2026-07-31
 tags: [stage, pr, github]
 ---
 
@@ -43,9 +43,12 @@ The first two checks are the shared `Hive::Stages::Base.worktree_pointer_or_exit
    full `head_oid`, and
    ends with a required completion section that makes the
    `<!-- COMPLETE pr_url=... is_draft=true -->` marker the last line.
-8. Secret-scan the resulting `pr.md` and PR body, revalidate that GitHub's
-   `headRefOid` is the exact local `HEAD`, and canonicalize the immutable PR
-   identity in frontmatter before returning success.
+8. Treat the resulting marker and `pr.md` URL as untrusted until a fresh,
+   branch-scoped GitHub observation proves the same URL at the exact local
+   `HEAD`. An unobserved or mismatched URL records an error without fetching,
+   editing, or closing that URL. Only after this proof does the controller
+   canonicalize the immutable PR identity, secret-scan the PR body, and run
+   any leak remediation.
 
 ## Marker → commit action
 

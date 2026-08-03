@@ -13,6 +13,11 @@ with `git archive`, builds the gem/source/agent-skill/managed-web artifacts once
 and stores immutable artifacts plus append-only attempt evidence under the
 gitignored `tmp/release-candidates/<sha>/` root.
 
+The managed-Web subtree archive pins every entry to the candidate commit
+timestamp. Archiving `<sha>:web` without that explicit timestamp would use the
+wall clock for the tree object and make repeated exact-SHA builds produce
+different bytes.
+
 `plan` is the default and is read-only. `list` and `inspect` are observational.
 `run`, `resume`, and `rerun` are explicit local mutations; local attempts use
 the candidate SHA plus attempt ID, refuse identity drift, and take a nonblocking

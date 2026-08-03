@@ -36,6 +36,7 @@ require "hive/commands/update"
 require "hive/attempts/api"
 require "hive/attempts/generation"
 require "hive/modules/migration/coordinator"
+require "hive/terminal_outcome"
 
 module Hive
   module Daemon
@@ -1147,6 +1148,24 @@ module Hive
             decision: :merge_reconciliation_pending,
             owner: "hive",
             reason: "task-bound pull request delivery is being reconciled"
+          )
+          return
+        end
+        if %w[error review_error].include?(row.marker.to_s) &&
+           Hive::TerminalOutcome.semantic_error?(row.marker_attrs)
+          @logger.event(
+            :skipped,
+            project: row.project,
+            slug: row.slug,
+            stage: row.stage,
+            action: row.action,
+            reason: "semantic_terminal_error"
+          )
+          observe_operational_disposition(
+            row,
+            decision: :semantic_terminal_error,
+            owner: "operator",
+            reason: "terminal outcome errors require an explicit guarded retry"
           )
           return
         end
@@ -3001,7 +3020,9 @@ module Hive
       end
 
       def auto_retry_error_row?(row)
-        auto_retry_enabled? && %w[error review_error].include?(row.marker.to_s)
+        auto_retry_enabled? &&
+          !Hive::TerminalOutcome.semantic_error?(row.marker_attrs) &&
+          %w[error review_error].include?(row.marker.to_s)
       end
 
       def retry_disposition(row, assessment)

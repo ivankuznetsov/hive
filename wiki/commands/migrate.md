@@ -1,25 +1,35 @@
 ---
 title: hive migrate
 type: command
-source: lib/hive/commands/migrate.rb, lib/hive/stages.rb
+source: lib/hive/commands/migrate.rb, lib/hive/commands/migrate_all.rb, lib/hive/stages.rb
 created: 2026-05-21
-updated: 2026-07-26
-tags: [command, migration, config, reviewers, stages, task-id, display-name, recovery]
+updated: 2026-08-03
+tags: [command, migration, config, reviewers, stages, task-id, display-name, recovery, update]
 ---
 
 **TLDR**: `hive migrate [PROJECT_PATH]` is the explicit, idempotent upgrade
-path for legacy project config, tasks created before the PR-first layout and
-later 7-artifacts insertion, task-id/display-name sidecar additions, managed
-workflow configuration pins, and the one-off recovery-state and
-recovery-marker identity cutovers.
+path for one project. `hive migrate --all` checks global state and every
+registered project; `hive update` runs that fleet form automatically after a
+successful package update.
 
 ## Usage
 
 ```bash
 hive migrate [PROJECT_PATH]
+hive migrate --all
 ```
 
 `PROJECT_PATH` defaults to the current directory. The command requires `<project>/.hive-state/stages/` to exist.
+
+`--all` and `PROJECT_PATH` are mutually exclusive. Fleet mode prints a global
+state check, one progress row and result per registered project, and a final
+success/failure count. It continues after a project failure so one broken
+registration does not hide the rest of the migration inventory, then exits
+non-zero with a human-readable summary. Every failed project includes a
+shell-escaped single-project recovery command using the active `hive` or `hv`
+wrapper. If a registered path is missing or no longer contains a Hive project,
+the command instead names the restore path plus exact `forget` and `prune`
+cleanup commands while keeping the fleet result visibly incomplete.
 
 Before project-local changes, the command runs the owner-private recovery-state
 cutover for the current Hive state home. Daemon and bot startup run the same
@@ -54,10 +64,17 @@ keep. Generated Hive configs use a block-form `review:` mapping; a hand-written
 flow mapping must be converted manually before the comment-preserving rewrite
 can run.
 
-`hive update` replaces the installed CLI through its package channel and does
-not mutate or commit every registered project's tracked state. The compatibility
-alias is what makes that binary update safe; run `hive migrate` in each warned
-project to persist the correction.
+After replacing the installed CLI through its package channel, `hive update`
+runs the new binary's `hive migrate --all`. That can mutate and commit each
+registered project's tracked `.hive-state` exactly as an explicit
+single-project migration would. A failed project is named with its error and
+`hive migrate PROJECT_PATH` recovery command; successful projects are not
+rolled back.
+
+Each single-project migration still requests a daemon restart when it changes
+stage layout or managed workflow pins. Fleet mode coalesces those requests and
+restarts at most once after all registered projects have been attempted, so a
+fresh daemon never starts against a half-migrated fleet.
 
 `Stages::Finalize` likewise reads legacy `budget_usd.pr` /
 `timeout_sec.pr` as fallbacks. `hive migrate` rewrites those keys to
@@ -165,6 +182,9 @@ A rerun after successful migration prints that there is nothing to move and keep
 ## Tests
 
 - `test/unit/commands/migrate_renames_consistency_test.rb` pins the stage rename map against `Hive::Stages::DIRS`.
+- `test/unit/commands/migrate_all_test.rb` covers global and per-project fleet
+  progress, continue-after-failure behavior, human-readable errors, and exact
+  recovery commands.
 - `test/integration/migrate_test.rb` covers stage-dir moves, the legacy
   reviewers relocation/conflict boundary, other config rewrites, task-id
   backfill order, display-name backfill, `ERROR` / `REVIEW_ERROR` identity

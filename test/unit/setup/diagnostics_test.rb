@@ -87,6 +87,18 @@ class SetupDiagnosticsTest < Minitest::Test
     end
   end
 
+  def test_managed_qmd_candidate_recognizes_the_configured_path_before_installation
+    Dir.mktmpdir("hive-diag") do |dir|
+      with_env("HIVE_HOME" => File.join(dir, "hive-home")) do
+        diagnostics = Hive::Setup::Diagnostics.new(path: "", ruby_version: "3.4.1")
+        managed_qmd = File.join(Hive::Paths.data_home, "qmd", "bin", "qmd")
+
+        refute File.exist?(managed_qmd)
+        assert diagnostics.send(:managed_qmd_candidate?, managed_qmd)
+      end
+    end
+  end
+
   def test_agent_authenticated_via_on_disk_token_without_env_var
     Dir.mktmpdir("hive-diag") do |dir|
       %w[git tmux gh claude codex node npm sqlite3].each { |name| executable(dir, name) }
@@ -136,6 +148,81 @@ class SetupDiagnosticsTest < Minitest::Test
       assert_equal "ok", row.status
       assert_equal qmd, row.detail
       refute row.bootstrappable
+    end
+  end
+
+  def test_qmd_present_but_unstartable_is_bootstrappable
+    Dir.mktmpdir("hive-diag") do |dir|
+      with_env("HIVE_HOME" => File.join(dir, "hive-home")) do
+        qmd = File.join(Hive::Paths.data_home, "qmd", "bin", "qmd")
+        FileUtils.mkdir_p(File.dirname(qmd))
+        File.write(qmd, "#!/bin/sh\n")
+        FileUtils.chmod(0o755, qmd)
+        secret = [ "sk", "A" * 24 ].join("-")
+        runner = lambda do |argv|
+          assert_equal [ qmd, "--version" ], argv
+          [ "", "NODE_MODULE_VERSION mismatch #{secret}\e[31m#{'x' * 1_500}", Status.new(false) ]
+        end
+        diag = Hive::Setup::Diagnostics.new(path: "", runner: runner, ruby_version: "3.4.1")
+
+        row = diag.check_qmd
+
+        assert_equal "missing", row.status
+        assert row.bootstrappable
+        assert_match(/failed to start/, row.detail)
+        assert_match(/NODE_MODULE_VERSION mismatch/, row.detail)
+        assert_includes row.detail, "[REDACTED:openai_api_key]"
+        refute_includes row.detail, secret
+        assert_operator row.detail.length, :<, 1_200
+      end
+    end
+  end
+
+  def test_qmd_unstartable_outside_the_managed_install_fails_hard
+    Dir.mktmpdir("hive-diag") do |dir|
+      qmd = executable(dir, "qmd")
+      runner = ->(_argv) { [ "", "operator qmd failed", Status.new(false) ] }
+      diag = Hive::Setup::Diagnostics.new(path: dir, runner: runner, ruby_version: "3.4.1")
+
+      row = diag.check_qmd
+
+      assert_equal "missing", row.status
+      refute row.bootstrappable
+      assert_match(/Repair or remove/, row.fix_command)
+    end
+  end
+
+  def test_qmd_timeout_is_reported_without_aborting_diagnostics
+    Dir.mktmpdir("hive-diag") do |dir|
+      qmd = executable(dir, "qmd")
+      runner = lambda do |_argv|
+        raise Hive::Error, "hive setup: qmd startup probe timed out after 10s"
+      end
+      diag = Hive::Setup::Diagnostics.new(
+        path: dir, runner: runner, ruby_version: "3.4.1"
+      )
+
+      row = diag.check_qmd
+
+      assert_equal "missing", row.status
+      refute row.bootstrappable
+      assert_match(/timed out after 10s/, row.detail)
+      assert_match(/Repair or remove #{Regexp.escape(qmd)}/, row.fix_command)
+    end
+  end
+
+  def test_qmd_spawn_failure_is_reported_without_aborting_diagnostics
+    Dir.mktmpdir("hive-diag") do |dir|
+      executable(dir, "qmd")
+      runner = ->(_argv) { raise Errno::EACCES, "qmd-secret" }
+      diag = Hive::Setup::Diagnostics.new(
+        path: dir, runner: runner, ruby_version: "3.4.1"
+      )
+
+      row = diag.check_qmd
+
+      assert_equal "missing", row.status
+      assert_match(/Permission denied/, row.detail)
     end
   end
 

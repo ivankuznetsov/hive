@@ -291,6 +291,25 @@ class TuiStateSourceTest < Minitest::Test
     source&.stop
   end
 
+  def test_stale_archive_refresh_rearms_after_a_newer_publication_wins
+    with_direct_project do
+      source = Hive::Tui::StateSource.new
+      source.instance_variable_set(:@archive_refresh_dirty, false)
+      source.instance_variable_set(:@archive_refresh_failures, 2)
+      source.instance_variable_set(:@archive_last_error, RuntimeError.new("old failure"))
+      source.define_singleton_method(:replace_archived_cache) { |*, **| false }
+
+      source.send(:refresh_archived_cache, Hive::Config.registered_projects)
+
+      assert source.instance_variable_get(:@archive_refresh_dirty),
+             "a stale background result must schedule a fresh archive pass"
+      assert_equal 0, source.instance_variable_get(:@archive_refresh_failures)
+      assert_nil source.instance_variable_get(:@archive_last_error)
+    ensure
+      source&.stop
+    end
+  end
+
   def test_visible_archive_cache_keeps_a_new_terminal_row_across_active_reparses
     with_direct_project do |_project, hive_state|
       active_folder = write_state_task(

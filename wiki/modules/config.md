@@ -3,11 +3,11 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-07-30
+updated: 2026-08-02
 tags: [config, yaml, validation]
 ---
 
-**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, update, web, and Screenote base-url settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, default workflow, worktree root, budgets, timeouts, **stage agents**, project-owned `models`, project/top-level and per-stage `permissions`, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, review-stage roles, daemon enrollment, experimental babysitter enrollment, ordinary patrol, and scheduled architecture patrol). Project config root keys are strict: `Config.load(project_root)` rejects unsupported keys before merging defaults, while registered workflow stage names remain the sanctioned dynamic extension for stage overrides. Architecture-patrol discovery, issue review output, and automatic mutation remain separate settings. Fresh init enables issue output with discovery as the default review surface; legacy or hand-written config that omits `issue_filing.enabled` remains effect-free. `Config.load(project_root)` captures frozen raw field provenance for implementation-owning `agent`/`model`/`effort` keys before it **recursively** deep-merges project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays are replaced wholesale, never per-element merged. Screenote OAuth tokens live outside YAML in `screenote.json`, created by `hive connect screenote`.
+**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, update, web, and Screenote base-url settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, default workflow, worktree root, budgets, timeouts, **stage agents**, project-owned `models`, project/top-level and per-stage `permissions`, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, an optional project-owned artifact capture provider, review-stage roles, daemon enrollment, experimental babysitter enrollment, ordinary patrol, and scheduled architecture patrol). Project config root keys are strict: `Config.load(project_root)` rejects unsupported keys before merging defaults, while registered workflow stage names remain the sanctioned dynamic extension for stage overrides. Architecture-patrol discovery, issue review output, and automatic mutation remain separate settings. Fresh init enables issue output with discovery as the default review surface; legacy or hand-written config that omits `issue_filing.enabled` remains effect-free. `Config.load(project_root)` captures frozen raw field provenance for implementation-owning `agent`/`model`/`effort` keys before it **recursively** deep-merges project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays are replaced wholesale, never per-element merged. Screenote OAuth tokens live outside YAML in `screenote.json`, created by `hive connect screenote`.
 
 The live project template includes a commented, copyable `models:` example.
 Exact and coarse entries inherit model and effort independently, never select an
@@ -86,6 +86,38 @@ overrides stay distinguishable. This structural pass runs before the legacy
 top-level-reviewers warning. Reachable-profile capability validation remains a
 separate, pure routing-domain step after exact/coarse shadowing is known.
 
+## Project artifact capture provider
+
+Hive checkouts need no declaration: the complete locked Hivebox web layout
+selects the built-in recorder. A conventional project can declare one
+project-owned executable:
+
+```yaml
+artifacts:
+  agent: claude
+  capture:
+    provider:
+      name: rails
+      command: [bin/hive-capture]
+      timeout_sec: 120
+```
+
+`provider` defaults to `nil`. When present it is a closed mapping: `name` must
+match `[a-z][a-z0-9_-]{0,63}`, `command` is 1–32 non-empty argv strings whose
+first item is a traversal-free project-relative executable path (the capture
+boundary also requires that executable to be tracked at the immutable HEAD),
+the complete argv is at most 16 KiB, and `timeout_sec` is an integer from 1
+through 600. Unknown fields, a shell command string, oversized argv,
+absolute/traversing executables, or malformed values fail during `Config.load`,
+before capture starts. The provider request/result ABI and publication checks
+are documented in [[commands/web]].
+
+This declaration is additive. Projects that omit it retain their prior config
+shape: compatible Hivebox trees continue on the built-in recorder, while
+incompatible conventional trees receive the precise unsupported-provider
+diagnostic until they opt in. Retained v1 capture manifests remain readable;
+new successful capture emits the provider-neutral v2 manifest.
+
 ## Condition authority
 
 ```yaml
@@ -146,7 +178,7 @@ The built-in downstream policy is `open_pr=medium`, `review.fix=high`, and `revi
   "plan"       => { "agent" => "claude" },
   "execute"    => { "agent" => "claude" },  # rendered template recommends `codex`
   "open_pr"    => {},
-  "artifacts"  => { "agent" => "claude" },
+  "artifacts"  => { "agent" => "claude", "capture" => { "provider" => nil } },
   "finalize"   => { "agent" => "claude" },
   "agents" => {
     "claude" => { "bin" => "claude", "env_override" => "HIVE_CLAUDE_BIN", "min_version" => "2.1.118" },

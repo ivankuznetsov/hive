@@ -669,12 +669,14 @@ class WebTaskCaptureTest < Minitest::Test
     with_capture_task do |root, task_folder, source|
       fake_bin = File.join(root, "fake-bin")
       git_path = File.join(fake_bin, "git")
+      calls_path = File.join(root, "git-calls.log")
       FileUtils.mkdir_p(fake_bin)
       FileUtils.mkdir_p(File.join(source, "bin"))
       File.binwrite(File.join(source, "bin", "provider"), "provider\n")
       write_executable(git_path, <<~RUBY)
         #!#{RbConfig.ruby}
-        sleep 0.06
+        File.open(#{calls_path.inspect}, "a") { |file| file.puts(ARGV.join("\\t")) }
+        sleep 0.12
         marker = ARGV.index("-C")
         source = ARGV.fetch(marker + 1)
         command = ARGV.drop(marker + 2)
@@ -698,8 +700,7 @@ class WebTaskCaptureTest < Minitest::Test
       original_verbose = $VERBOSE
       $VERBOSE = nil
       Hive::Web::TaskCapture.send(:remove_const, :PROVIDER_SOURCE_SNAPSHOT_TIMEOUT_SEC)
-      Hive::Web::TaskCapture.const_set(:PROVIDER_SOURCE_SNAPSHOT_TIMEOUT_SEC, 0.1)
-      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      Hive::Web::TaskCapture.const_set(:PROVIDER_SOURCE_SNAPSHOT_TIMEOUT_SEC, 0.2)
       begin
         error = assert_raises(Hive::Web::TaskCapture::CaptureError) do
           capture.send(
@@ -707,11 +708,10 @@ class WebTaskCaptureTest < Minitest::Test
             provider_executable: "bin/provider"
           )
         end
-        elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
 
-        assert_match(/source custody exceeded the 0.1-second monotonic (?:inventory )?deadline/i,
+        assert_match(/source custody exceeded the 0.2-second monotonic (?:inventory )?deadline/i,
                      error.message)
-        assert_operator elapsed, :<, 1.0
+        assert_operator File.readlines(calls_path).length, :<, 5
       ensure
         Hive::Web::TaskCapture.send(:remove_const, :PROVIDER_SOURCE_SNAPSHOT_TIMEOUT_SEC)
         Hive::Web::TaskCapture.const_set(

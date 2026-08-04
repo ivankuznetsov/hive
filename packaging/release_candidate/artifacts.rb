@@ -39,6 +39,7 @@ module HiveReleaseCandidate
     MAX_BUILDER_INPUT_BYTES = 1_048_576
     MAX_SOURCE_TAR_PADDING_BYTES = 1_048_576
     SOURCE_ENTRY_TYPES = %w[0 5 g].freeze
+    MANAGED_WEB_ENV_KEYS = %w[PATH LANG LC_ALL LC_CTYPE TZ].freeze
 
     attr_reader :repo_root, :candidate_sha, :candidate_dir
 
@@ -264,9 +265,10 @@ module HiveReleaseCandidate
           version: ARGV.fetch(2), destination: ARGV.fetch(3)
         )
       RUBY
+      environment = MANAGED_WEB_ENV_KEYS.to_h { |key| [ key, ENV[key] ] }.compact
       _stdout, stderr, status = Open3.capture3(
-        RbConfig.ruby, "--disable-gems", "-r", helper, "-e", script,
-        repo_root, candidate_sha, version, destination, chdir: export
+        environment, RbConfig.ruby, "--disable-gems", "-r", helper, "-e", script,
+        repo_root, candidate_sha, version, destination, chdir: export, unsetenv_others: true
       )
       unless status.success? && File.file?(destination) && !File.symlink?(destination)
         FileUtils.rm_f(destination)

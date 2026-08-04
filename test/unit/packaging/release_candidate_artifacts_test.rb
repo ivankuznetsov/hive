@@ -100,7 +100,10 @@ class ReleaseCandidateArtifactsTest < Minitest::Test
       File.write(helper, <<~'RUBY')
         module HiveManagedWebArchive
           def self.build(repo_root:, candidate_sha:, version:, destination:)
-            File.binwrite(destination, [repo_root, candidate_sha, version, "candidate-helper"].join("\n"))
+            File.binwrite(
+              destination,
+              [repo_root, candidate_sha, version, "candidate-helper", ENV.fetch("RUBYOPT", "scrubbed")].join("\n")
+            )
           end
         end
       RUBY
@@ -109,9 +112,12 @@ class ReleaseCandidateArtifactsTest < Minitest::Test
         repo_root: dir, candidate_sha: "a" * 40, candidate_dir: File.join(dir, "candidate")
       )
 
-      artifacts.send(:build_managed_web, export, "0.6.9", destination)
+      poisoned_rubyopt = [ "-rjson", ENV.fetch("RUBYOPT") ].join(" ")
+      with_env("RUBYOPT" => poisoned_rubyopt) do
+        artifacts.send(:build_managed_web, export, "0.6.9", destination)
+      end
 
-      assert_equal [ dir, "a" * 40, "0.6.9", "candidate-helper" ].join("\n"), File.binread(destination)
+      assert_equal [ dir, "a" * 40, "0.6.9", "candidate-helper", "scrubbed" ].join("\n"), File.binread(destination)
     end
   end
 

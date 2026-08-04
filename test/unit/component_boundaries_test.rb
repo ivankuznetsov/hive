@@ -298,8 +298,8 @@ class ComponentBoundariesTest < Minitest::Test
     assert_empty workflow_values.fetch("migration_exceptions")
 
     workflow_core = contract.component("workflow-creator-core")
-    assert_equal "candidate", workflow_core.fetch("state")
-    assert_equal "./packaging/live_agent_skills/workflow_creator",
+    assert_equal "boundary-ready", workflow_core.fetch("state")
+    assert_equal "./packaging/live_agent_skills/workflow_creator_evidence",
                  workflow_core.dig("entrypoint", "require")
     assert_equal [ "workflow-creator-values" ], workflow_core.fetch("component_dependencies")
     assert_equal %w[
@@ -307,15 +307,25 @@ class ComponentBoundariesTest < Minitest::Test
       packaging/live_agent_skills/workflow_creator_contract.rb
       packaging/live_agent_skills/workflow_creator_execution_contract.rb
       packaging/live_agent_skills/workflow_creator_bundle.rb
+      packaging/live_agent_skills/workflow_creator_evidence.rb
+      packaging/live_agent_skills/workflow_creator_receipt_publisher.rb
     ], workflow_core.fetch("owned_paths")
-    assert_equal [ "packaging/live_agent_skills/proof.rb" ], workflow_core.fetch("hive_consumers")
+    assert_equal [
+      "packaging/live_agent_skills/proof.rb",
+      "test/smoke/live_hive_workflow_creator_smoke_test.rb"
+    ], workflow_core.fetch("hive_consumers")
+    assert_equal [ "HiveLiveAgentProof::WorkflowCreatorReceiptPublisher" ],
+                 workflow_core.fetch("forbidden_constructions")
+    assert_equal [ "packaging/live_agent_skills/workflow_creator_evidence.rb" ],
+                 workflow_core.fetch("authorized_internal_constructions").first.fetch("files")
     assert_empty workflow_core.fetch("migration_exceptions")
 
-    ready_components.push(agent_abi, artifact_firewall, skillpack, git_gate, work_ledger, workflow_values)
+    ready_components.push(agent_abi, artifact_firewall, skillpack, git_gate, work_ledger,
+                          workflow_values, workflow_core)
     remaining_candidates = contract.components.reject do |component|
       ready_components.include?(component)
     end
-    assert_equal %w[attempts patrol-effects workflow-creator-core],
+    assert_equal %w[attempts patrol-effects],
                  remaining_candidates.map { |entry| entry.fetch("id") }.sort
     assert remaining_candidates.all? { |component| component.fetch("state") == "candidate" }
 
@@ -327,6 +337,7 @@ class ComponentBoundariesTest < Minitest::Test
       skillpack
       user-service
       work-ledger
+      workflow-creator-core
       workflow-creator-values
     ], ready_loads.keys.sort
     agent_abi_load = ready_loads.fetch("agent-abi")
@@ -354,7 +365,7 @@ class ComponentBoundariesTest < Minitest::Test
     assert_empty work_ledger_load.fetch("forbidden_loaded_features")
     assert_empty work_ledger_load.fetch("forbidden_constants")
     workflow_core_load = contract.validate_clean_load!("workflow-creator-core")
-    assert_equal "HiveLiveAgentProof::WorkflowCreator", workflow_core_load.fetch("constant")
+    assert_equal "HiveLiveAgentProof::WorkflowCreatorEvidence", workflow_core_load.fetch("constant")
     assert_empty workflow_core_load.fetch("forbidden_loaded_features")
     assert_empty workflow_core_load.fetch("forbidden_constants")
     patrol_effects_load = contract.validate_clean_load!("patrol-effects")
@@ -372,13 +383,88 @@ class ComponentBoundariesTest < Minitest::Test
       workflow_creator.rb workflow_creator_contract.rb workflow_creator_execution_contract.rb
     ].map { |name| File.read(File.join(ROOT, "packaging/live_agent_skills", name)) }.join("\n")
 
-    assert_includes proof, 'require_relative "workflow_creator_bundle"'
+    assert_includes proof, 'require_relative "workflow_creator_evidence"'
     assert_includes bundle, 'require_relative "workflow_creator"'
     refute_match(/workflow_creator_bundle|proof\.rb/, core)
     metrics = ruby_metrics(bundle)
     assert_operator File.readlines(bundle_path).length, :<=, 220
     assert_operator metrics.fetch(:callables), :<=, 10
     assert_operator metrics.fetch(:decisions), :<=, 28
+  end
+
+
+  def test_workflow_creator_publisher_is_constructed_only_by_the_typed_facade
+    contract = ComponentBoundaryContract.new(@document, root: ROOT)
+    component = contract.component("workflow-creator-core")
+    publisher = "HiveLiveAgentProof::WorkflowCreatorReceiptPublisher"
+    authorized = component.fetch("authorized_internal_constructions").first
+
+    assert_equal publisher, authorized.fetch("constant")
+    assert_equal [ "packaging/live_agent_skills/workflow_creator_evidence.rb" ],
+                 authorized.fetch("files")
+    assert contract.validate_static_boundaries!
+
+    document = Marshal.load(Marshal.dump(@document))
+    component(document, "workflow-creator-core")["authorized_internal_constructions"] = []
+    error = assert_raises(ComponentBoundaryContract::ValidationError) do
+      ComponentBoundaryContract.new(document, root: ROOT).validate_static_boundaries!
+    end
+    assert_match(/workflow-creator-core\.forbidden_constructions/, error.message)
+    assert_match(/workflow_creator_evidence\.rb/, error.message)
+  end
+
+  def test_custom_construction_roots_do_not_disable_the_production_scan
+    with_contract_fixture(
+      entrypoint_source: "module Example; class API; end; class Internal; end; end\n",
+      consumer_source: "Example::Internal.new\n",
+      construction_scan_paths: [ "packaging" ],
+      extra_files: { "packaging/release_candidate.rb" => "Example::API.new\n" }
+    ) do |contract|
+      error = assert_raises(ComponentBoundaryContract::ValidationError) do
+        contract.validate_static_boundaries!
+      end
+
+      assert_match(/lib\/consumer\.rb/, error.message)
+      assert_match(/Example::Internal/, error.message)
+    end
+  end
+
+  def test_custom_construction_roots_cover_packaging_release_code
+    with_contract_fixture(
+      entrypoint_source: "module Example; class API; end; class Internal; end; end\n",
+      construction_scan_paths: [ "packaging" ],
+      extra_files: { "packaging/release_candidate.rb" => "Example::Internal.new\n" }
+    ) do |contract|
+      error = assert_raises(ComponentBoundaryContract::ValidationError) do
+        contract.validate_static_boundaries!
+      end
+
+      assert_match(/packaging\/release_candidate\.rb/, error.message)
+      assert_match(/Example::Internal/, error.message)
+    end
+  end
+
+
+  def test_workflow_creator_publication_stays_inside_the_u1b_owner_budget
+    production = %w[
+      packaging/live_agent_skills/workflow_creator_evidence.rb
+      packaging/live_agent_skills/workflow_creator_receipt_publisher.rb
+    ]
+    facade, publisher = production.map { |relative| File.read(File.join(ROOT, relative)) }
+
+    assert_equal 2, production.length
+    assert_includes facade, 'require_relative "workflow_creator_bundle"'
+    assert_includes facade, 'require_relative "workflow_creator_receipt_publisher"'
+    assert_equal 1, facade.scan(/WorkflowCreatorReceiptPublisher\.new/).length
+    assert_includes publisher, "class WorkflowCreatorReceiptPublisher"
+    assert_includes publisher, "class Native"
+    assert_match(/openat/, publisher)
+    assert_match(/linkat/, publisher)
+    assert_match(/renameat/, publisher)
+    assert_match(/unlinkat/, publisher)
+    refute_match(/Hive::AtomicFile|WorkflowCreatorAtomicFile/, "#{facade}\n#{publisher}")
+    refute_match(/OpenClaw|credential|provider|Process\.(?:spawn|kill|wait)|Open3/,
+                 "#{facade}\n#{publisher}")
   end
 
   def test_patrol_u3a_require_graph_is_closed_and_one_way
@@ -1065,6 +1151,15 @@ class ComponentBoundariesTest < Minitest::Test
     end
   end
 
+
+  def test_parenthesized_and_parenthesis_free_new_forms_are_both_detected
+    forms = [ "Example::Internal.new(:value)\n", "Example::Internal.new :value\n" ]
+    forms.each do |source|
+      syntax = ComponentBoundaryContract::RubySyntax.new(source, "construction-form.rb")
+      assert_includes syntax.constructions, "Example::Internal", source
+    end
+  end
+
   def test_lexically_resolved_internal_construction_cannot_evade_boundary
     with_contract_fixture(
       entrypoint_source: <<~RUBY,
@@ -1242,11 +1337,6 @@ class ComponentBoundariesTest < Minitest::Test
         field: /authorized_internal_constructions\[0\]\.files/,
         message: /must not contain duplicates/
       },
-      "component-owned file" => {
-        mutate: ->(site, _sites) { site["files"] = [ "lib/owned_builder.rb" ] },
-        field: /authorized_internal_constructions\[0\]\.files\[0\]/,
-        message: /component-owned files do not need construction authorization/
-      },
       "blank reason" => {
         mutate: ->(site, _sites) { site["reason"] = " " },
         field: /authorized_internal_constructions\[0\]\.reason/,
@@ -1357,7 +1447,7 @@ class ComponentBoundariesTest < Minitest::Test
                             component_dependencies: [], allowed_hive_dependencies: [],
                             migration_exceptions: [], authorized_internal_constructions: [],
                             internal_collaborators: nil, hive_consumers: [ "lib/consumer.rb" ],
-                            extra_components: [], extra_files: {})
+                            construction_scan_paths: nil, extra_components: [], extra_files: {})
     Dir.mktmpdir do |root|
       write_fixture(root, entrypoint_file, entrypoint_source)
       write_fixture(root, "lib/consumer.rb", consumer_source)
@@ -1381,7 +1471,9 @@ class ComponentBoundariesTest < Minitest::Test
             authorized_internal_constructions: authorized_internal_constructions,
             internal_collaborators: internal_collaborators,
             hive_consumers: hive_consumers
-          ),
+          ).tap do |component|
+            component["construction_scan_paths"] = construction_scan_paths if construction_scan_paths
+          end,
           *extra_components
         ]
       }

@@ -244,7 +244,7 @@ jobs:
           HIVE_CREATOR_EVIDENCE_PATH: ${{ runner.temp }}/workflow-creator-evidence/openclaw-workflow-creator.json
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/workflow-creator-evidence"
+          install -d -m 0700 "$RUNNER_TEMP/workflow-creator-evidence"
           cd candidate-source
           bundle exec ruby -Itest test/smoke/live_hive_workflow_creator_smoke_test.rb
       - name: Upload redacted workflow-creator evidence

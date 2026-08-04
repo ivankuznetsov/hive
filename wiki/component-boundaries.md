@@ -20,7 +20,7 @@ the first and primary consumer.
 | Patrol Effect Evidence | `candidate` (U3a protocol complete; U3b/U3c proof pending) | `require "hive/modules/migration/patrol_evidence"` → `Hive::Modules::Migration::PatrolEvidence` | [[modules/patrol]] |
 | Attempts admission / future RunReceipt | `candidate` (guarded reference) | `require "hive/attempts/api"` → `Hive::Attempts::API` | [[modules/attempts]] |
 | Workflow Creator Values | `boundary-ready` | `require "./packaging/live_agent_skills/workflow_creator_text_safety"` → `HiveLiveAgentProof::WorkflowCreator::TextSafety` | [[component-boundaries]] |
-| Workflow Creator Core | `candidate` (U1a2 custody complete; U1b publication pending) | `require "./packaging/live_agent_skills/workflow_creator"` → `HiveLiveAgentProof::WorkflowCreator` | [[component-boundaries]] |
+| Workflow Creator | `boundary-ready` | `require "./packaging/live_agent_skills/workflow_creator_evidence"` → `HiveLiveAgentProof::WorkflowCreatorEvidence` | [[component-boundaries]] |
 | UserService | `boundary-ready` | `require "hive/user_service"` → `Hive::UserService` | [[modules/user_service]] |
 | Agent ABI | `boundary-ready`; standalone package candidate | `require "hive/agent_runtime"` → `Hive::AgentRuntime` | [[modules/agent_cli_runtime]], [[modules/agent_profile]] |
 | Agent Artifact Firewall | `boundary-ready` | `require "hive/artifact_firewall"` → `Hive::ArtifactFirewall` | [[modules/protected_files]] |
@@ -36,13 +36,12 @@ has earned a gem, version, repository, or release.
 
 ## Final graph audit
 
-The catalog on 2026-08-04 retains ten components: seven are
-`boundary-ready`; Attempts, Patrol Effect Evidence, and Workflow Creator Core
-remain `candidate`.
+The catalog on 2026-08-04 retains ten components: eight are
+`boundary-ready`; Attempts and Patrol Effect Evidence remain `candidate`.
 Patrol retains one bounded U3 exception for deterministic public-path and
-independently authorized installed/live proof. Workflow Creator Core removed
-its U1a2 exception after the incumbent proof consumer adopted exact bundle
-custody, but stays candidate until U1b supplies the publication boundary.
+independently authorized installed/live proof. Workflow Creator is now composed
+through its U1b typed publication facade after the incumbent proof consumer
+adopted exact bundle custody.
 Every retained entry point has focused clean-process load proof, every
 catalog-owned path and focused test resolves inside this repository, and the
 direct-construction guards pass against all production Ruby sources.
@@ -52,7 +51,7 @@ The component dependency graph has two edges:
 ```mermaid
 flowchart LR
   skillpack[Skillpack] --> agent_abi[Agent ABI]
-  workflow_core[Workflow Creator Core - candidate] --> workflow_values[Workflow Creator Values]
+  workflow_core[Workflow Creator] --> workflow_values[Workflow Creator Values]
   patrol_effects[Patrol Effect Evidence - candidate]
   attempts[Attempts admission - candidate]
   user_service[UserService]
@@ -64,12 +63,12 @@ flowchart LR
 All other cataloged components depend only on explicitly allowed lower-level
 Hive primitives. The source audit found no retained experimental facade outside
 the catalog: each promoted facade is owned by a catalog row and used by Hive,
-while Attempts, Patrol Effect Evidence, and Workflow Creator Core are
-deliberately retained as guarded candidates rather than being promoted ahead
-of their remaining lifecycle, qualification, or publication proof.
+while Attempts and Patrol Effect Evidence are deliberately retained as guarded
+candidates rather than being promoted ahead of their remaining lifecycle or
+qualification proof.
 
 This is an internal architecture verdict, not a packaging verdict. None of the
-seven ready components currently has the named non-Hive adopter and independent
+eight ready components currently has the named non-Hive adopter and independent
 package proof required by the standalone-gem plan.
 
 `Patrol Effect Evidence` owns the immutable cross-product capture, selection,
@@ -205,6 +204,28 @@ credential-pattern scan to every admitted member, so the aggregate scan count
 describes bytes that were actually scanned. No one-file compatibility path
 remains.
 
+`WorkflowCreatorEvidence` is the composed component entry point and the only
+constructor of the private `WorkflowCreatorReceiptPublisher`. Its public API
+accepts a bundle directory, derives the primary target exclusively from the
+frozen creator vocabulary, and publishes only canonical non-passing receipts
+admitted by the semantic core. Initialization descriptor-tightens a newly
+created regular staging inode to 0600 before writing any bytes, fsyncs it, and
+uses descriptor-relative no-clobber linking. A bounded cooperative
+directory lock serializes complete initialization and replacement transitions.
+Exact retries and one-link or two-link interrupted states converge; different bytes,
+unsafe types or permissions, excess or outside-prefix links, parent rebinding,
+and native failures fail through typed evidence errors. Replacement revalidates
+the expected identity and bytes under a cooperative lock on the held target
+directory descriptor immediately before descriptor-relative rename,
+and a retry after rename re-fsyncs the exact desired target. Directory scanning
+is bounded and FIFO/special entries use no-follow, nonblocking opens. The boundary
+assumes all supported writers use the facade; arbitrary same-user raw filesystem
+mutation is outside its cooperative contract and does not justify a second
+cross-platform exchange subsystem in U1b. The protected smoke adapter currently
+emits an explicit non-passing U14-custody gap
+even after its model loop succeeds; U14/U15 retain execution and live-claim
+authority.
+
 The approved U1a1c budget re-scope permits only named private semantic-helper
 decomposition. Its ceilings are 125/7/4 for the facade, 260/15/24 for the
 contract, 215/13/20 for execution, 590/34/48 for U1a1c, and 1090/68/104 for the
@@ -226,11 +247,11 @@ handles, and focused subprocess proof covers both load orders and post-load core
 replacement. The sources load without JSON, I/O, workflow, process, credential,
 or provider dependencies.
 
-The Values seam and Workflow Creator Core both have production consumers and no
-migration exception. Core remains a custody-complete candidate: U1a2 adds proof
-custody and independent retained verification, but no provider, process,
-publisher, workflow mutation, or claim that the live workflow already emits the
-complete bundle.
+The Values seam and composed Workflow Creator are boundary-ready, have production
+consumers, and retain no migration exception. U1a2 adds proof custody and
+independent retained verification; U1b adds the fixed non-passing receipt
+publication boundary, but neither claims provider/process custody or that the live
+workflow already emits the complete bundle.
 The exact R43 proof is 298 lines / 20 callables / 32 decisions for `Values`, 200
 lines / 14 callables / 23 decisions for `TextSafety`, and 498 / 34 / 55 when
 composed. The Values source retains its leaf-local `Ripper.lex` no-require proof;
@@ -399,10 +420,13 @@ R43 proof, direct entry-point load-order proof, and projection behavior live in
 `test/unit/packaging/workflow_creator_text_safety_test.rb`; semantic-core proof
 lives in `test/unit/packaging/workflow_creator_core_test.rb`, while exact source
 and retained bundle custody is covered by
-`test/unit/packaging/live_agent_proof_test.rb`.
+`test/unit/packaging/live_agent_proof_test.rb`. Publication state, crash,
+concurrency, path, special-file, native-platform, and cleanup proof lives in
+`test/unit/packaging/workflow_creator_evidence_test.rb`.
 
 The syntax scan is an architecture regression guard, not a Ruby sandbox. Its
-construction rule covers literal `Constant.new`, not aliases or factory
+construction rule covers literal parenthesized and parenthesis-free
+`Constant.new` calls, not aliases or factory
 methods. Construction authorization is file-granular: it rejects a named
 internal from a newly listed file, but it does not distinguish multiple call
 sites for that internal inside an already authorized composition root. It does

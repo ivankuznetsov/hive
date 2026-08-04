@@ -45,6 +45,10 @@ operational status, no external actions, secret scanning, and cleanup. Missing
 provider credentials make this live gate explicitly unavailable; they never
 turn a skipped test into release evidence.
 
+The U1b adapter publishes through `WorkflowCreatorEvidence` but deliberately
+retains a typed non-passing receipt after a successful model loop until U14
+supplies execution custody and U15 owns the final authenticated claim.
+
 ## Local feedback loop
 
 During implementation, run the smallest relevant test files directly:
@@ -135,11 +139,15 @@ bundle exec ruby -Itest -Ilib test/unit/component_boundaries_test.rb
 bundle exec ruby -Itest test/unit/packaging/workflow_creator_values_test.rb
 bundle exec ruby -Itest test/unit/packaging/workflow_creator_text_safety_test.rb
 bundle exec ruby -Itest test/unit/packaging/workflow_creator_core_test.rb
+bundle exec ruby -Itest test/unit/packaging/workflow_creator_evidence_test.rb
 bundle exec ruby -Itest test/unit/packaging/live_agent_proof_test.rb
 ```
 
 Ready components cannot depend on candidates. Forbidden-construction rules
-also apply to guarded candidates, and the helper can run a named focused
+also apply to guarded candidates. Components can name a bounded construction
+scan surface; its Ripper fence recognizes both parenthesized and
+parenthesis-free `.new` calls and permits a private collaborator only at the
+catalog-authorized composition file. The helper can run a named focused
 clean-load proof for a candidate such as Attempts without representing the
 whole component graph as ready.
 

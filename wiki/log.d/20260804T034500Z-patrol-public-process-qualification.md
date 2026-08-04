@@ -24,3 +24,8 @@ tags: [patrol, architecture-patrol, e2e, qualification]
   JobStore transitions. Their intent and idempotency identities still detect
   replay, but a fenced recovery generation no longer looks like a duplicate
   remote side effect.
+- Confined fake-agent logs to the disposable run home, explicitly removed host
+  Claude credentials, bounded every Git child under the campaign deadline,
+  and required generation-bound drained-shutdown proof before teardown can
+  succeed. A captured process-tree fallback terminates owned survivors when a
+  failed daemon cannot publish that proof.

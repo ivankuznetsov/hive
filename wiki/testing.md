@@ -232,7 +232,9 @@ computes the expected receipt and verifier bindings independently before the
 production `Patrols` receipt and admission facades are invoked. No test code
 constructs a `PatrolCapture`, effect receipt, evidence store, adapter, or
 scheduler. Every CLI has a deadline, the whole campaign has one outer deadline,
-and all process groups are terminated in `ensure`.
+all Git children run in bounded process groups, and teardown requires the
+daemon's generation-bound drained-shutdown proof. Fake-agent credentials are
+explicitly unset and its audit log stays inside the disposable run home.
 
 The default test suite runs only the fast collector and fake-provider boundary
 tests. The campaign is also excluded from `rake e2e`, coverage, and every

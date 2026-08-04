@@ -4,11 +4,15 @@ require "json"
 require "open3"
 require "shellwords"
 require "time"
+require "timeout"
 require "tmpdir"
 require "yaml"
+require "hive/daemon/operational_snapshot"
 require "hive/modules/migration/patrols"
 require "hive/modules/migration/report"
+require "hive/process_kill"
 require "hive/workflow_package/canonical_json"
+require "hive/workflow_package/runtime_policy"
 require_relative "../lib/background_process"
 require_relative "../lib/cli_driver"
 require_relative "../lib/gh_stub"
@@ -44,6 +48,8 @@ module Hive
       RUN_TIMEOUT = 300.0
       WAIT_TIMEOUT = 30.0
       CLI_TIMEOUT = 20.0
+      DAEMON_STOP_GRACE = 3.0
+      CLEANUP_TERM_GRACE = 0.5
       MAX_EVIDENCE_BYTES = 512 * 1024
       CATALOG_KEYS = %w[cases schema schema_version].freeze
       CASE_KEYS = %w[decision_class id mode module].freeze
@@ -64,6 +70,7 @@ module Hive
           report = qualify!(records, catalog_bytes, candidate_sha)
           proof = proof_for(report, records, candidate_sha)
           @gh_stub.verify!
+          verify_fake_agent_isolation!
           succeeded = true
           proof
         ensure
@@ -415,7 +422,11 @@ module Hive
             "PATH" => "#{File.dirname(@git_ssh_proxy)}:#{ENV.fetch('PATH', '')}",
             "GIT_SSH_COMMAND" => @git_ssh_proxy,
             "GIT_SSH_VARIANT" => "ssh",
-            "HIVE_FAKE_CLAUDE_OUTPUT" => agent_output
+            "HIVE_FAKE_CLAUDE_OUTPUT" => agent_output,
+            "HIVE_FAKE_CLAUDE_LOG_DIR" =>
+              File.join(@run_home, "fake-claude"),
+            "ANTHROPIC_API_KEY" => nil,
+            "CLAUDE_API_KEY" => nil
           }
         )
         JSON.parse(result.stdout)
@@ -614,16 +625,108 @@ module Hive
             "HIVE_FAKE_CLAUDE_PATROL_OUTPUT_ROOT" =>
               File.join(state_path, "patrol", "runs"),
             "HIVE_FAKE_CLAUDE_LOG_DIR" =>
-              File.join(@run_home, "fake-claude")
+              File.join(@run_home, "fake-claude"),
+            "ANTHROPIC_API_KEY" => nil,
+            "CLAUDE_API_KEY" => nil
           },
           log_path: File.join(@run_home, "daemon-#{label}.log")
         ).start
+        process_start_time = Hive::Lock.process_start_time(@daemon.pid)
+        if process_start_time.to_s.empty?
+          raise "qualification daemon process identity is unavailable"
+        end
+        @daemon_identity = Hive::Daemon::OperationalSnapshot.daemon_identity(
+          pid: @daemon.pid, process_start_time: process_start_time
+        )
+        @daemon
       end
 
       def stop_daemon
-        @daemon&.stop
+        return unless @daemon
+
+        targets = Hive::ProcessKill.process_tree_snapshot(@daemon.pid) || []
+        @daemon.stop(grace: DAEMON_STOP_GRACE)
+        verify_daemon_shutdown!(@daemon_identity, targets)
       ensure
+        cleanup_owned_targets(targets || [])
         @daemon = nil
+        @daemon_identity = nil
+      end
+
+      def verify_daemon_shutdown!(identity, captured_targets)
+        unless identity
+          raise "qualification daemon process identity is unavailable"
+        end
+        reader = Hive::Daemon::OperationalSnapshot::Reader.new(
+          path: Hive::Paths.operational_snapshot_path(@run_home),
+          expected_daemon: identity,
+          pid_path: File.join(@run_home, ".daemon.pid")
+        )
+        acknowledgement = reader.shutdown_acknowledgement(
+          expected_daemon: identity
+        )
+        unless acknowledgement
+          raise "qualification daemon did not publish drained shutdown proof"
+        end
+
+        targets = captured_targets + acknowledgement.fetch(
+          "child_inventory"
+        ).map { |target| symbolize_process_target(target) }
+        if targets.any? { |target| Hive::ProcessKill.captured_process_alive?(target) }
+          raise "qualification daemon left an owned process alive"
+        end
+      end
+
+      def cleanup_owned_targets(targets)
+        live = targets.select do |target|
+          Hive::ProcessKill.captured_process_alive?(target)
+        end
+        return if live.empty?
+
+        Hive::ProcessKill.signal_captured_processes(
+          "TERM", live, require_identity: true
+        )
+        deadline = monotonic + CLEANUP_TERM_GRACE
+        sleep 0.05 while monotonic < deadline && live.any? do |target|
+          Hive::ProcessKill.captured_process_alive?(target)
+        end
+        live.select! { |target| Hive::ProcessKill.captured_process_alive?(target) }
+        unless live.empty?
+          Hive::ProcessKill.signal_captured_processes(
+            "KILL", live, require_identity: true
+          )
+          deadline = monotonic + Hive::ProcessKill::KILL_GRACE_SECONDS
+          sleep 0.05 while monotonic < deadline && live.any? do |target|
+            Hive::ProcessKill.captured_process_alive?(target)
+          end
+        end
+        survivor = live.find do |target|
+          Hive::ProcessKill.captured_process_alive?(target)
+        end
+        return unless survivor
+
+        raise "qualification teardown could not terminate an owned process"
+      end
+
+      def symbolize_process_target(target)
+        {
+          pid: Integer(target.fetch("pid")),
+          pgid: Integer(target.fetch("pgid")),
+          start_time: target.fetch("start_time").to_s
+        }
+      end
+
+      def verify_fake_agent_isolation!
+        path = File.join(@run_home, "fake-claude", "fake-claude-argv.log")
+        lines = File.readlines(path, chomp: true)
+        %w[ANTHROPIC_API_KEY CLAUDE_API_KEY].each do |key|
+          observed = lines.grep(/\Aenv_#{key}=/)
+          unless observed.any? && observed.all? { |line| line == "env_#{key}=__unset__" }
+            raise "qualification fake agent inherited #{key}"
+          end
+        end
+      rescue Errno::ENOENT
+        raise "qualification fake-agent audit log is unavailable"
       end
 
       def cleanup_run_dir(run_dir)
@@ -685,7 +788,7 @@ module Hive
 
       def run_git(*args, root: @project_root)
         command = root ? [ "git", "-C", root, *args ] : [ "git", *args ]
-        out, err, status = Open3.capture3(*command)
+        out, err, status = capture_command(*command)
         raise "git command failed: #{err.empty? ? out : err}" unless status.success?
 
         out
@@ -732,7 +835,7 @@ module Hive
       end
 
       def clean_candidate!
-        out, err, status = Open3.capture3(
+        out, err, status = capture_command(
           "git", "-C", Paths.repo_root,
           "status", "--porcelain", "--untracked-files=all"
         )
@@ -761,9 +864,19 @@ module Hive
       end
 
       def committed_output(*args)
-        out, err, status = Open3.capture3("git", "-C", Paths.repo_root, *args)
+        out, err, status = capture_command(
+          "git", "-C", Paths.repo_root, *args
+        )
         raise "cannot read qualification candidate: #{err}" unless status.success?
         out
+      end
+
+      def capture_command(*command)
+        Hive::WorkflowPackage::RuntimePolicy.capture3_bounded(
+          *command, timeout_sec: command_timeout
+        )
+      rescue Timeout::Error
+        raise "Patrol qualification command timed out: #{command.first}"
       end
 
       def monotonic

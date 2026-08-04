@@ -308,6 +308,14 @@ module Hive
             raise Error, "qualification observations are malformed"
           end
           rows = data.fetch("cases")
+          raise Error, "qualification observation cardinality is malformed" unless rows.is_a?(Array)
+          ids = rows.map { |row| row.is_a?(Hash) ? row["id"] : nil }
+          unless ids.none?(&:nil?) && ids.uniq.size == ids.size
+            raise Error, "qualification observation IDs are duplicated"
+          end
+          unless rows.size == @catalog.cases.size
+            raise Error, "qualification observation cardinality is malformed"
+          end
           result = rows.to_h do |row|
             raise Error, "qualification observation keys are malformed" unless
               row.is_a?(Hash) && row.keys.sort == OBSERVATION_KEYS
@@ -529,12 +537,65 @@ module Hive
             version = @catalog_manifests.fetch(name).fetch("version")
             manifest = YAML.safe_load(File.binread(File.join(catalog_repo, "modules", name, version, "manifest.yml")))
             choices = install_choices(manifest)
-            preview = hive([ "module", "install", "honeycomb/#{name}@#{manifest.fetch('version')}",
-                             "--dry-run", "--json", *choices ], env: rewrite)
-            receipt = JSON.parse(preview.stdout).fetch("preview_receipt")
-            hive([ "module", "install", "honeycomb/#{name}@#{manifest.fetch('version')}",
-                   "--yes", "--receipt", receipt, "--json", *choices ], env: rewrite)
+            source = "honeycomb/#{name}@#{manifest.fetch('version')}"
+            preview = JSON.parse(
+              hive([ "module", "install", source, "--dry-run", "--json", *choices ],
+                   env: rewrite).stdout
+            )
+            validate_lifecycle!(preview, name:, statuses: [ "preview" ])
+            unless preview["preview_receipt"].to_s.match?(/\A[0-9]+\.[0-9a-f]{64}\z/) &&
+                   preview["configuration_digest"].to_s.match?(/\A[0-9a-f]{64}\z/)
+              raise Error, "#{name} module preview identity is malformed"
+            end
+            expected = {
+              "version" => version, "catalog_commit" => @catalog_commit,
+              "source_commit" => @catalog_manifests.fetch(name).fetch("source_sha"),
+              "manifest_digest" => @catalog_manifests.fetch(name).fetch("manifest_sha256"),
+              "configuration_digest" => preview.fetch("configuration_digest")
+            }
+            apply = JSON.parse(
+              hive([ "module", "install", source, "--yes", "--receipt",
+                     preview.fetch("preview_receipt"), "--json", *choices ],
+                   env: rewrite).stdout
+            )
+            validate_lifecycle!(apply, name:, statuses: %w[installed already_current])
+            validate_generation!(apply.dig("selection", "active"), expected, name:)
+            inspected = JSON.parse(hive([ "module", "inspect", name, "--json" ]).stdout)
+            validate_inspection!(inspected, name:, expected:)
           end
+        end
+
+        def validate_lifecycle!(payload, name:, statuses:)
+          valid = payload.is_a?(Hash) &&
+            payload["schema"] == "hive-module-lifecycle" &&
+            payload["schema_version"] == 1 && payload["ok"] == true &&
+            payload["operation"] == "install" && payload["name"] == name &&
+            statuses.include?(payload["status"])
+          raise Error, "#{name} module lifecycle response is malformed" unless valid
+        end
+
+        def validate_generation!(generation, expected, name:)
+          unless generation.is_a?(Hash) && generation.keys.sort == expected.keys.sort &&
+                 generation == expected
+            raise Error, "#{name} installed generation differs from the exact catalogue"
+          end
+        end
+
+        def validate_inspection!(payload, name:, expected:)
+          valid = payload.is_a?(Hash) && payload.keys.sort == %w[modules ok schema schema_version] &&
+            payload["schema"] == "hive-module-status" && payload["schema_version"] == 1 &&
+            payload["ok"] == true && payload["modules"].is_a?(Array) && payload["modules"].one?
+          status = payload.dig("modules", 0)
+          valid &&= status.is_a?(Hash) && status["name"] == name &&
+            status["lifecycle_state"] == "active" && status["installed"] == true &&
+            status["enabled"] == true && status["failure_reason"].nil? &&
+            status["integrity"] == {
+              "configuration_valid" => true, "generation_present" => true,
+              "activation_fenced" => false, "journal_present" => false
+            }
+          raise Error, "#{name} installed selection is unavailable" unless valid
+
+          validate_generation!(status.fetch("active"), expected, name:)
         end
 
         def install_choices(manifest)
@@ -595,7 +656,7 @@ module Hive
           end
           { "receipts" => prepared.map(&:first), "bindings" => prepared.map(&:last),
             "case_results" => case_results.sort_by { |row| row.fetch("id") },
-            "generated_at" => generated_at }
+            "common" => common, "generated_at" => generated_at }
         end
 
         def expected_receipt(common, case_row, observation, record, generated_at)
@@ -641,11 +702,20 @@ module Hive
             "generated_at" => prepared.fetch("generated_at"),
             "receipts" => prepared.fetch("receipts")
           }
-          JSON.parse(hive([ "module", "migration", "deterministic-qualification", "--yes", "--json" ],
-                          stdin_data: JSON.generate(request)).stdout)
+          report = JSON.parse(
+            hive([ "module", "migration", "deterministic-qualification", "--yes", "--json" ],
+                 stdin_data: JSON.generate(request)).stdout
+          )
+          stat = File.lstat(report_path)
+          unless stat.file? && !stat.symlink? && stat.size <= MAX_EVIDENCE_BYTES &&
+                 File.binread(report_path) == PatrolQualification.canonical(report)
+            raise Error, "deterministic qualification response differs from the persisted report"
+          end
+          report
         end
 
         def proof(candidate, catalog, report, prepared)
+          validate_qualification_report!(report, candidate:, catalog:, prepared:)
           lane = report.fetch("lanes").fetch("deterministic")
           raise Error, "reduced deterministic evidence did not qualify" unless lane.fetch("status") == "qualified"
           MODULES.each do |name|
@@ -672,6 +742,81 @@ module Hive
               "prepared_records_not_fresh_scheduler_matrix"
             ]
           }
+        end
+
+        def validate_qualification_report!(report, candidate:, catalog:, prepared:)
+          keys = %w[
+            blockers candidate_sha generated_at lanes migration report_id
+            scenario_manifest_digest schema schema_version status supersedes
+          ]
+          common = prepared.fetch("common")
+          valid = report.is_a?(Hash) && report.keys.sort == keys.sort &&
+            report["schema"] == "hive-module-migration-report" &&
+            report["schema_version"] == 2 && report["candidate_sha"] == candidate.fetch("sha") &&
+            report["scenario_manifest_digest"] == common.fetch("scenario_manifest_digest") &&
+            %w[evidence_required qualified].include?(report["status"]) &&
+            report["blockers"].is_a?(Array) &&
+            report["lanes"].is_a?(Hash) && report["lanes"].keys.sort == %w[deterministic installed_live]
+          raise Error, "deterministic qualification report is malformed" unless valid
+
+          lane = report.dig("lanes", "deterministic")
+          lane_keys = %w[
+            blockers candidate_sha catalog_digest contradiction decision_replay_count
+            duplicate_effects effect_count effect_replay_count elapsed_seconds
+            evidence_started_at generated_at lane manifest_digest modules qualification_id
+            receipt_ids run_id scenario_manifest_digest source_digest status supersedes
+            unsettled_effects
+          ]
+          receipt_ids = prepared.fetch("receipts").map { |receipt| receipt.fetch("receipt_id") }.sort
+          valid = lane.is_a?(Hash) && lane.keys.sort == lane_keys.sort &&
+            lane["lane"] == "deterministic" && lane["status"] == "qualified" &&
+            lane["run_id"] == common.fetch("run_id") &&
+            lane["candidate_sha"] == candidate.fetch("sha") &&
+            lane["catalog_digest"] == common.fetch("catalog_digest") &&
+            lane["source_digest"] == common.fetch("source_digest") &&
+            lane["manifest_digest"] == common.fetch("manifest_digest") &&
+            lane["scenario_manifest_digest"] == common.fetch("scenario_manifest_digest") &&
+            receipt_ids.uniq.size == receipt_ids.size && lane["receipt_ids"] == receipt_ids &&
+            lane["modules"].is_a?(Hash) && lane["modules"].keys.sort == MODULES.sort &&
+            lane["blockers"] == [] &&
+            lane["duplicate_effects"] == [] && lane["unsettled_effects"] == []
+          raise Error, "deterministic qualification lane differs from this campaign" unless valid
+
+          MODULES.each do |name|
+            receipts = prepared.fetch("receipts").select do |receipt|
+              receipt.dig("module_projection", "module") == name
+            end
+            summary = lane.dig("modules", name)
+            expected = catalog.expectations.fetch(name)
+            summary_keys = %w[
+              blockers change_windows configuration_digest decision_classes
+              decision_count decision_identities elapsed_seconds repository_shas
+            ]
+            configurations = receipts.map { |row| row.fetch("configuration_digest") }.uniq
+            valid = summary.is_a?(Hash) && summary.keys.sort == summary_keys.sort &&
+              summary["decision_count"] == receipts.size &&
+              summary["decision_count"] == expected.fetch("decision_count") &&
+              summary["decision_identities"].is_a?(Array) &&
+              summary["decision_identities"].size == receipts.size &&
+              summary["decision_identities"].uniq.size == receipts.size &&
+              summary["decision_identities"].all? { |id| id.to_s.match?(/\Adecision-[0-9a-f]{64}\z/) } &&
+              summary["decision_classes"] == receipts.map { |row| row.fetch("decision_class") }.uniq.sort &&
+              summary["repository_shas"] == receipts.map { |row| row.dig("repository", "sha") }.uniq.sort &&
+              summary["change_windows"] == receipts.map { |row| row.dig("repository", "change_window") }.uniq.sort &&
+              configurations.one? && summary["configuration_digest"] == configurations.first &&
+              summary["blockers"] == []
+            raise Error, "qualified #{name} summary differs from this campaign" unless valid
+          end
+
+          qualification_id = "qualification-#{Digest::SHA256.hexdigest(
+            PatrolQualification.canonical(lane.reject { |key, _| key == "qualification_id" })
+          )}"
+          report_id = "report-#{Digest::SHA256.hexdigest(
+            PatrolQualification.canonical(report.reject { |key, _| key == "report_id" })
+          )}"
+          unless lane["qualification_id"] == qualification_id && report["report_id"] == report_id
+            raise Error, "deterministic qualification identity differs from its contents"
+          end
         end
 
         def write_evidence(value)

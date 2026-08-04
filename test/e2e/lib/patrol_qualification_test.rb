@@ -69,6 +69,16 @@ class E2EPatrolQualificationSupportTest < Minitest::Test
       record.fetch("module_decision")["rationale"] = "due"
       File.binwrite(path, Hive::E2E::PatrolQualification.canonical(record))
       document = JSON.parse(File.binread(observations))
+      document.fetch("cases") << document.fetch("cases").first.dup
+      File.binwrite(observations, JSON.generate(document))
+      duplicate_id = assert_raises(Hive::E2E::PatrolQualification::Error) do
+        ObservationReader.new(
+          project_root: project, observations_path: observations, catalog: catalog
+        ).each { }
+      end
+      assert_match(/IDs are duplicated/, duplicate_id.message)
+
+      document.fetch("cases").pop
       document.fetch("cases")[1]["trigger_id"] = document.fetch("cases")[0].fetch("trigger_id")
       File.binwrite(observations, JSON.generate(document))
       duplicate = assert_raises(Hive::E2E::PatrolQualification::Error) do
@@ -120,6 +130,43 @@ class E2EPatrolQualificationSupportTest < Minitest::Test
     end
   end
 
+  def test_module_install_contract_rejects_noop_or_unbound_responses
+    controller = Controller.allocate
+    expected = {
+      "version" => "0.1.0", "catalog_commit" => "a" * 40,
+      "source_commit" => "b" * 40, "manifest_digest" => "c" * 64,
+      "configuration_digest" => "d" * 64
+    }
+    lifecycle = {
+      "schema" => "hive-module-lifecycle", "schema_version" => 1,
+      "ok" => true, "operation" => "install", "status" => "installed",
+      "name" => "patrol", "selection" => { "active" => expected }
+    }
+    inspection = {
+      "schema" => "hive-module-status", "schema_version" => 1, "ok" => true,
+      "modules" => [
+        {
+          "name" => "patrol", "lifecycle_state" => "active", "installed" => true,
+          "enabled" => true, "failure_reason" => nil, "active" => expected,
+          "integrity" => {
+            "configuration_valid" => true, "generation_present" => true,
+            "activation_fenced" => false, "journal_present" => false
+          }
+        }
+      ]
+    }
+
+    controller.send(:validate_lifecycle!, lifecycle, name: "patrol", statuses: [ "installed" ])
+    controller.send(:validate_generation!, expected, expected, name: "patrol")
+    controller.send(:validate_inspection!, inspection, name: "patrol", expected: expected)
+    assert_raises(Hive::E2E::PatrolQualification::Error) do
+      controller.send(:validate_lifecycle!, {}, name: "patrol", statuses: [ "installed" ])
+    end
+    assert_raises(Hive::E2E::PatrolQualification::Error) do
+      controller.send(:validate_generation!, {}, expected, name: "patrol")
+    end
+  end
+
   def test_child_and_campaign_timeouts_are_distinct_and_kill_the_process_group
     Dir.mktmpdir("patrol-qualification-timeout") do |root|
       pid_path = File.join(root, "child.pid")
@@ -159,21 +206,12 @@ class E2EPatrolQualificationSupportTest < Minitest::Test
         "fault" => case_row.fault, "process_outcomes" => process_outcomes(case_row.fault)
       }
     end
-    report = {
-      "lanes" => {
-        "deterministic" => {
-          "status" => "qualified", "qualification_id" => "qualification-1",
-          "modules" => catalog.expectations.transform_values do |row|
-            { "decision_count" => row.fetch("decision_count") }
-          end
-        }
-      }
-    }
-    prepared = { "receipts" => Array.new(20) { {} }, "case_results" => case_results }
     candidate = {
       "sha" => "a" * 40, "archive_sha256" => "b" * 64,
       "gem_sha256" => "c" * 64, "installed_hive_sha256" => "d" * 64
     }
+    prepared = qualification_prepared(catalog, candidate, case_results)
+    report = qualification_report(catalog, candidate, prepared)
 
     proof = controller.send(:proof, candidate, catalog, report, prepared)
 
@@ -183,6 +221,13 @@ class E2EPatrolQualificationSupportTest < Minitest::Test
     assert_equal catalog.cases.map(&:id).sort,
                  proof.fetch("case_results").map { |row| row.fetch("id") }
     assert proof.fetch("case_results").all? { |row| row.fetch("process_outcomes").is_a?(Array) }
+
+    stale = Marshal.load(Marshal.dump(report))
+    stale["candidate_sha"] = "f" * 40
+    stale["report_id"] = digest_id("report", stale, "report_id")
+    assert_raises(Hive::E2E::PatrolQualification::Error) do
+      controller.send(:proof, candidate, catalog, stale, prepared)
+    end
   end
 
   private
@@ -240,6 +285,80 @@ class E2EPatrolQualificationSupportTest < Minitest::Test
         "#{path.delete_prefix(root)}\0#{Digest::SHA256.file(path).hexdigest}"
       end.join("\0")
     )
+  end
+
+  def qualification_prepared(catalog, candidate, case_results)
+    common = {
+      "run_id" => "u3br-test", "candidate_sha" => candidate.fetch("sha"),
+      "catalog_digest" => "1" * 64, "source_digest" => "2" * 64,
+      "manifest_digest" => "3" * 64, "scenario_manifest_digest" => "4" * 64
+    }
+    receipts = catalog.cases.map.with_index do |case_row, index|
+      module_index = catalog.cases.count do |candidate_row|
+        candidate_row.module_name == case_row.module_name && candidate_row.id <= case_row.id
+      end - 1
+      repository_sha = if case_row.module_name == "patrol"
+        (module_index < 5 ? "a" : "b") * 40
+      else
+        format("%040x", module_index + 1)
+      end
+      common.merge(
+        "receipt_id" => "evidence-#{format('%064x', index + 1)}",
+        "configuration_digest" => (case_row.module_name == "patrol" ? "c" : "d") * 64,
+        "module_projection" => { "module" => case_row.module_name },
+        "decision_class" => case_row.decision_class,
+        "repository" => {
+          "id" => "github.com/acme/demo", "sha" => repository_sha,
+          "change_window" => "window-#{case_row.id}"
+        }
+      )
+    end
+    { "receipts" => receipts, "case_results" => case_results, "common" => common }
+  end
+
+  def qualification_report(catalog, candidate, prepared)
+    summaries = MODULES.to_h do |name|
+      receipts = prepared.fetch("receipts").select do |receipt|
+        receipt.dig("module_projection", "module") == name
+      end
+      [ name, {
+        "decision_count" => receipts.size,
+        "decision_identities" => receipts.each_index.map { |index| "decision-#{format('%064x', index + 1)}" },
+        "decision_classes" => receipts.map { |row| row.fetch("decision_class") }.uniq.sort,
+        "repository_shas" => receipts.map { |row| row.dig("repository", "sha") }.uniq.sort,
+        "change_windows" => receipts.map { |row| row.dig("repository", "change_window") }.uniq.sort,
+        "configuration_digest" => receipts.first.fetch("configuration_digest"),
+        "elapsed_seconds" => 1, "blockers" => []
+      } ]
+    end
+    common = prepared.fetch("common")
+    lane = common.merge(
+      "lane" => "deterministic", "status" => "qualified",
+      "receipt_ids" => prepared.fetch("receipts").map { |row| row.fetch("receipt_id") }.sort,
+      "decision_replay_count" => 0, "modules" => summaries,
+      "effect_count" => 0, "effect_replay_count" => 0,
+      "duplicate_effects" => [], "unsettled_effects" => [], "elapsed_seconds" => 1,
+      "evidence_started_at" => "2026-08-04T10:00:00.000000Z", "blockers" => [],
+      "supersedes" => nil, "contradiction" => nil,
+      "generated_at" => "2026-08-04T10:01:00.000000Z"
+    )
+    lane["qualification_id"] = digest_id("qualification", lane, "qualification_id")
+    report = {
+      "schema" => "hive-module-migration-report", "schema_version" => 2,
+      "generated_at" => "2026-08-04T10:01:00.000000Z",
+      "candidate_sha" => candidate.fetch("sha"),
+      "scenario_manifest_digest" => common.fetch("scenario_manifest_digest"),
+      "status" => "evidence_required",
+      "lanes" => { "deterministic" => lane, "installed_live" => nil },
+      "blockers" => [ "installed_live:evidence_required" ],
+      "supersedes" => nil, "migration" => nil
+    }
+    report.merge("report_id" => digest_id("report", report, "report_id"))
+  end
+
+  def digest_id(prefix, value, key)
+    payload = value.reject { |name, _| name == key }
+    "#{prefix}-#{Digest::SHA256.hexdigest(Hive::E2E::PatrolQualification.canonical(payload))}"
   end
 
   def process_outcomes(fault)

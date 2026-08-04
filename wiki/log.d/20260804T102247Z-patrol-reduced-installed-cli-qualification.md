@@ -17,6 +17,9 @@ tags: [patrol, qualification, e2e, modules]
 - Bounded every child and campaign, killed whole owned process groups, isolated
   the environment, and retained bounded redacted secret-scanned evidence with
   exact proof counts and compact typed process outcomes for every case.
+- Reject duplicate observation rows, require exact module apply/inspect
+  generation readback, and bind the canonical persisted report to this exact
+  candidate, scenario, receipt set, module summaries, and content identities.
 - This does not prove independent same-head controls, fresh scheduler-driven
   matrix execution, installed/live package channels, full U3b/U3c, catalogue
   promotion, or mutator cutover.

@@ -239,11 +239,16 @@ privately installs the exact candidate gem through
 `packaging/live_agent_skills/install_candidate_gem.sh`, and invokes only that
 installed `bin/hive` from the project cwd. Both first-party modules are
 installed through the public preview/receipt/consent CLI against a local Git
-catalogue selected with `GIT_CONFIG_*` URL rewriting. Each ordinary and
+catalogue selected with `GIT_CONFIG_*` URL rewriting. Apply responses and
+`module inspect` readback must bind the exact catalog commit, source revision,
+manifest digest, and configuration digest. Each ordinary and
 Architecture Patrol selector goes through the internal installed-CLI facade,
 `hive module migration deterministic-receipt --json`; the final raw receipts
 and independently reconstructed bindings go through
-`deterministic-qualification --yes --json` and real report-v2 digest CAS.
+`deterministic-qualification --yes --json` and real report-v2 digest CAS. The
+returned v2 projection must equal the canonical persisted report and bind this
+campaign's candidate, run, scenario, receipts, module summaries, and content
+identities.
 
 Every child has bounded stdin/stdout/stderr, an allowlisted environment, a
 monotonic child deadline nested under a campaign deadline, `pgroup: true`, and

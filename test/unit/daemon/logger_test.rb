@@ -82,6 +82,24 @@ class HiveDaemonLoggerTest < Minitest::Test
     end
   end
 
+  # A production `.event(:foo, ...)` call whose symbol is absent from EVENTS
+  # raises ArgumentError only when that path runs. Permissive fake loggers in
+  # dispatcher tests cannot catch that integration error, so keep every
+  # literal daemon event synchronized with the real closed enum.
+  def test_every_daemon_event_symbol_is_whitelisted
+    daemon_dir = File.expand_path("../../../lib/hive/daemon", __dir__)
+    emitted = Dir[File.join(daemon_dir, "**", "*.rb")].flat_map do |file|
+      File.read(file).scan(/\.event\(:([a-z_][a-z0-9_]*)/).flatten.map(&:to_sym)
+    end.uniq
+
+    refute_empty emitted,
+                 "expected to find at least one .event(:symbol) call under lib/hive/daemon/"
+    unknown = emitted - Hive::Daemon::Logger::EVENTS
+    assert_empty unknown,
+                 "these daemon event symbols are emitted but absent from Logger::EVENTS " \
+                 "and would raise ArgumentError at runtime: #{unknown.inspect}"
+  end
+
   # ── rotation ──────────────────────────────────────────────────────────
 
   def test_logger_rotates_past_size_threshold

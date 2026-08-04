@@ -61,6 +61,52 @@ class WorkflowCreatorEvidenceTest < Minitest::Test
     end
   end
 
+  def test_two_initializers_serialize_the_complete_transition
+    with_private_bundle do |bundle|
+      entered_link = Queue.new
+      release_link = Queue.new
+      attempted_lock = Queue.new
+      with_native_method(native_class, :lock, lambda do |original, instance, *args|
+        attempted_lock << true if Thread.current[:u1b_initializer] == :second
+        original.bind_call(instance, *args)
+      end) do
+        with_native_method(native_class, :linkat, lambda do |original, instance, *args|
+          if Thread.current[:u1b_initializer] == :first
+            entered_link << true
+            release_link.pop
+          end
+          original.bind_call(instance, *args)
+        end) do
+          first = Thread.new do
+            Thread.current[:u1b_initializer] = :first
+            Evidence.initialize!(bundle_directory: bundle, candidate_sha: SHA)
+          rescue StandardError => e
+            e
+          end
+          Timeout.timeout(2) { entered_link.pop }
+          second = Thread.new do
+            Thread.current[:u1b_initializer] = :second
+            Evidence.initialize!(bundle_directory: bundle, candidate_sha: SHA)
+          rescue StandardError => e
+            e
+          end
+          Timeout.timeout(2) { attempted_lock.pop }
+          assert second.alive?, "second initializer passed the held descriptor lock"
+          release_link << true
+          values = [ first.value, second.value ]
+
+          assert values.all? { |value| value.respond_to?(:canonical_bytes) }, values.map(&:inspect).join("\n")
+          assert_equal 1, File.stat(target(bundle)).nlink
+          assert_empty staging_entries(bundle)
+        ensure
+          release_link << true if first&.alive?
+          first&.join(1)
+          second&.join(1)
+        end
+      end
+    end
+  end
+
   def test_transient_link_is_recovered_and_both_cleanup_orders_converge
     with_private_bundle do |bundle|
       receipt = initial_receipt
@@ -85,24 +131,47 @@ class WorkflowCreatorEvidenceTest < Minitest::Test
       stage = staging_path(bundle, "linked")
       write_private(stage, receipt.canonical_bytes)
       File.link(stage, target(bundle))
-      ready = Queue.new
-      start = Queue.new
-      results = 2.times.map do
-        Thread.new do
-          ready << true
-          start.pop
-          Evidence.initialize!(bundle_directory: bundle, candidate_sha: SHA)
-        rescue StandardError => e
-          e
+      entered_cleanup = Queue.new
+      release_cleanup = Queue.new
+      attempted_lock = Queue.new
+      with_native_method(native_class, :lock, lambda do |original, instance, *args|
+        attempted_lock << true if Thread.current[:u1b_recovery] == :second
+        original.bind_call(instance, *args)
+      end) do
+        with_native_method(native_class, :unlinkat, lambda do |original, instance, *args|
+          if Thread.current[:u1b_recovery] == :first
+            entered_cleanup << true
+            release_cleanup.pop
+          end
+          original.bind_call(instance, *args)
+        end) do
+          first = Thread.new do
+            Thread.current[:u1b_recovery] = :first
+            Evidence.initialize!(bundle_directory: bundle, candidate_sha: SHA)
+          rescue StandardError => e
+            e
+          end
+          Timeout.timeout(2) { entered_cleanup.pop }
+          second = Thread.new do
+            Thread.current[:u1b_recovery] = :second
+            Evidence.initialize!(bundle_directory: bundle, candidate_sha: SHA)
+          rescue StandardError => e
+            e
+          end
+          Timeout.timeout(2) { attempted_lock.pop }
+          assert second.alive?, "second recovery caller passed the held descriptor lock"
+          release_cleanup << true
+          values = [ first.value, second.value ]
+
+          assert values.all? { |value| value.respond_to?(:canonical_bytes) }, values.map(&:inspect).join("\n")
+          assert_equal 1, File.stat(target(bundle)).nlink
+          assert_empty staging_entries(bundle)
+        ensure
+          release_cleanup << true if first&.alive?
+          first&.join(1)
+          second&.join(1)
         end
       end
-      2.times { ready.pop }
-      2.times { start << true }
-      values = results.map(&:value)
-
-      assert values.all? { |value| value.respond_to?(:canonical_bytes) }, values.map(&:inspect).join("\n")
-      assert_equal 1, File.stat(target(bundle)).nlink
-      assert_empty staging_entries(bundle)
     end
   end
 
@@ -115,6 +184,41 @@ class WorkflowCreatorEvidenceTest < Minitest::Test
 
       refute_path_exists orphan
       assert_equal [ File.basename(target(bundle)) ], Dir.children(bundle)
+      assert_empty staging_entries(bundle)
+    end
+  end
+
+  def test_interrupted_pre_rename_stage_is_cleaned_before_replacement
+    with_private_bundle do |bundle|
+      initial = Evidence.initialize!(bundle_directory: bundle, candidate_sha: SHA)
+      desired = failure_receipt("proof_failed")
+      orphan = staging_path(bundle, "pre-rename")
+      write_private(orphan, desired.canonical_bytes)
+
+      replaced = Evidence.replace_nonpassing!(
+        bundle_directory: bundle, expected: initial.value, receipt: desired.value
+      )
+
+      assert_equal desired.canonical_bytes, replaced.canonical_bytes
+      assert_equal desired.canonical_bytes, File.binread(target(bundle))
+      refute_path_exists orphan
+      assert_empty staging_entries(bundle)
+    end
+  end
+
+  def test_linked_different_initialization_settles_to_a_conflict
+    with_private_bundle do |bundle|
+      receipt = initial_receipt
+      stage = staging_path(bundle, "linked-different")
+      write_private(stage, receipt.canonical_bytes)
+      File.link(stage, target(bundle))
+
+      assert_raises(Evidence::Conflict) do
+        Evidence.initialize!(bundle_directory: bundle, candidate_sha: "b" * 40)
+      end
+
+      assert_equal receipt.canonical_bytes, File.binread(target(bundle))
+      assert_equal 1, File.stat(target(bundle)).nlink
       assert_empty staging_entries(bundle)
     end
   end
@@ -272,6 +376,89 @@ class WorkflowCreatorEvidenceTest < Minitest::Test
     end
   end
 
+  def test_descriptor_lock_wait_is_bounded
+    skip "fork is unavailable" unless Process.respond_to?(:fork)
+    with_private_bundle do |bundle|
+      ready_read, ready_write = IO.pipe
+      release_read, release_write = IO.pipe
+      child = Process.fork do
+        ready_read.close
+        release_write.close
+        File.open(bundle, File::RDONLY) do |directory|
+          directory.flock(File::LOCK_EX)
+          ready_write.write("1")
+          ready_write.close
+          release_read.read(1)
+        end
+        exit! 0
+      end
+      ready_write.close
+      release_read.close
+      assert_equal "1", Timeout.timeout(2) { ready_read.read(1) }
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+
+      assert_raises(Evidence::Unavailable) do
+        Evidence.initialize!(bundle_directory: bundle, candidate_sha: SHA)
+      end
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
+      assert_operator elapsed, :>=, 1.5
+      assert_operator elapsed, :<, 3.0
+      refute_path_exists target(bundle)
+      assert_empty staging_entries(bundle)
+    ensure
+      begin
+        release_write&.write("1")
+      rescue IOError
+        nil
+      end
+      release_write&.close
+      ready_read&.close
+      Process.wait(child) if child
+    end
+  end
+
+  def test_unlock_failure_preserves_a_primary_conflict_and_exact_retry_converges
+    with_private_bundle do |bundle|
+      initial = Evidence.initialize!(bundle_directory: bundle, candidate_sha: SHA)
+      with_native_method(native_class, :unlock, lambda do |_original, _instance, *|
+        raise IOError, "injected unlock failure"
+      end) do
+        assert_raises(Evidence::Conflict) do
+          Evidence.initialize!(bundle_directory: bundle, candidate_sha: "b" * 40)
+        end
+        assert_raises(Evidence::Unavailable) do
+          Evidence.initialize!(bundle_directory: bundle, candidate_sha: SHA)
+        end
+      end
+
+      recovered = Evidence.initialize!(bundle_directory: bundle, candidate_sha: SHA)
+      assert_equal initial.canonical_bytes, recovered.canonical_bytes
+      assert_empty staging_entries(bundle)
+    end
+  end
+
+  def test_context_cleanup_attempts_both_descriptor_closes
+    with_private_bundle do |bundle|
+      descriptors = []
+      with_native_method(native_class, :close, lambda do |original, instance, io|
+        descriptors << io
+        raise IOError, "injected first close failure" if descriptors.length == 1
+
+        original.bind_call(instance, io)
+      end) do
+        assert_raises(Evidence::Unavailable) do
+          Evidence.initialize!(bundle_directory: bundle, candidate_sha: SHA)
+        end
+      end
+
+      assert_equal 2, descriptors.length
+      assert_predicate descriptors.last, :closed?
+      descriptors.first.close unless descriptors.first.closed?
+      assert_equal initial_receipt.canonical_bytes, File.binread(target(bundle))
+    end
+  end
+
   def test_file_fsync_precedes_link_and_cleanup_precedes_directory_fsync
     with_private_bundle do |bundle|
       events = []
@@ -344,18 +531,30 @@ class WorkflowCreatorEvidenceTest < Minitest::Test
   def test_rename_failure_preserves_expected_target_and_cleans_staging
     with_private_bundle do |bundle|
       initial = Evidence.initialize!(bundle_directory: bundle, candidate_sha: SHA)
-      with_native_method(native_class, :renameat, lambda do |_original, _instance, *|
-        raise Errno::EACCES, "injected rename failure"
+      events = []
+      with_native_method(native_class, :unlinkat, lambda do |original, instance, *args|
+        events << :cleanup
+        original.bind_call(instance, *args)
       end) do
-        assert_raises(Evidence::Unavailable) do
-          Evidence.replace_nonpassing!(
-            bundle_directory: bundle, expected: initial.value,
-            receipt: failure_receipt("proof_failed").value
-          )
+        with_native_method(native_class, :unlock, lambda do |original, instance, *args|
+          events << :unlock
+          original.bind_call(instance, *args)
+        end) do
+          with_native_method(native_class, :renameat, lambda do |_original, _instance, *|
+            raise Errno::EACCES, "injected rename failure"
+          end) do
+            assert_raises(Evidence::Unavailable) do
+              Evidence.replace_nonpassing!(
+                bundle_directory: bundle, expected: initial.value,
+                receipt: failure_receipt("proof_failed").value
+              )
+            end
+          end
         end
       end
       assert_equal initial.canonical_bytes, File.binread(target(bundle))
       assert_empty staging_entries(bundle)
+      assert_operator events.index(:cleanup), :<, events.index(:unlock)
     end
   end
 

@@ -154,6 +154,7 @@ class ReleaseContractTest < Minitest::Test
     refute_nil creator_step
     assert_equal "${{ secrets.OPENAI_API_KEY }}", creator_step.dig("env", "OPENAI_API_KEY")
     assert_includes creator_step.fetch("run"), "live_hive_workflow_creator_smoke_test.rb"
+    assert_includes creator_step.fetch("run"), 'install -d -m 0700 "$RUNNER_TEMP/workflow-creator-evidence"'
     assert_includes body, "workflow-creator-evidence-openclaw"
     assert_includes body, "creator-evidence"
   end

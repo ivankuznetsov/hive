@@ -29,27 +29,35 @@ module HiveLiveAgentProof
 
     def initialize_receipt(bytes)
       bytes = safe_bytes(bytes)
-      with_context do |context|
-        current = settle(context, accepted: [ bytes ], interrupted: bytes)
-        return durable_retry(context, current, bytes) if current
-
-        stage = write_stage(context, bytes)
+      with_locked_context do |context|
         begin
-          verify_bindings!(context)
-          @native.linkat(context.staging, stage.name, context.target, @target_name)
-        rescue Errno::EEXIST
-          remove_known_stage(context, stage)
-          winner = settle(context, accepted: [ bytes ], interrupted: bytes)
-          raise Conflict, "creator evidence initialization conflicts" unless winner&.bytes == bytes
+          current = settle(context)
+          if current
+            raise Conflict, "creator evidence initialization conflicts" unless current.bytes == bytes
 
-          return durable_retry(context, winner, bytes)
+            return durable_retry(context, current, bytes)
+          end
+
+          stage = write_stage(context, bytes)
+          begin
+            verify_bindings!(context)
+            @native.linkat(context.staging, stage.name, context.target, @target_name)
+          rescue Errno::EEXIST
+            remove_known_stage(context, stage)
+            stage = nil
+            winner = settle(context)
+            raise Conflict, "creator evidence initialization conflicts" unless winner&.bytes == bytes
+
+            return durable_retry(context, winner, bytes)
+          end
+          remove_linked_stage(context, stage)
+          stage = nil
+          verify_exact_target!(context, bytes)
+          sync_directories(context)
+          :initialized
+        ensure
+          remove_known_stage(context, stage) if stage
         end
-        remove_linked_stage(context, stage)
-        verify_exact_target!(context, bytes)
-        sync_directories(context)
-        :initialized
-      ensure
-        remove_known_stage(context, stage) if context && stage
       end
     rescue Conflict, Unsafe
       raise
@@ -62,11 +70,9 @@ module HiveLiveAgentProof
     def replace_receipt(expected_bytes, desired_bytes)
       expected = safe_bytes(expected_bytes)
       desired = safe_bytes(desired_bytes)
-      with_context do |context|
-        @native.lock(context.target)
-        locked = true
+      with_locked_context do |context|
         begin
-          current = settle(context, accepted: [ expected, desired ], interrupted: desired)
+          current = settle(context)
           raise Conflict, "creator evidence replacement has no expected target" unless current
           return durable_retry(context, current, desired) if current.bytes == desired
           raise Conflict, "creator evidence replacement conflicts" unless current.bytes == expected
@@ -80,10 +86,8 @@ module HiveLiveAgentProof
           sync_directories(context)
           :replaced
         ensure
-          @native.unlock(context.target) if locked
+          remove_known_stage(context, stage) if stage
         end
-      ensure
-        remove_known_stage(context, stage) if context && stage
       end
     rescue Conflict, Unsafe
       raise
@@ -99,8 +103,24 @@ module HiveLiveAgentProof
       context = open_context
       yield context
     ensure
-      context&.target&.close
-      context&.staging&.close
+      close_descriptors(context&.target, context&.staging, primary: $!)
+    end
+
+    def with_locked_context
+      with_context do |context|
+        @native.lock(context.target)
+        locked = true
+        begin
+          yield context
+        ensure
+          primary = $!
+          begin
+            @native.unlock(context.target) if locked
+          rescue StandardError => cleanup_error
+            raise cleanup_error unless primary
+          end
+        end
+      end
     end
 
     def open_context
@@ -124,13 +144,10 @@ module HiveLiveAgentProof
     rescue Errno::ELOOP, Errno::ENOTDIR
       raise Unsafe, "creator evidence directory binding is unsafe", cause: nil
     ensure
-      unless completed
-        target&.close
-        staging&.close
-      end
+      close_descriptors(target, staging, primary: $!) unless completed
     end
 
-    def settle(context, accepted:, interrupted:)
+    def settle(context)
       4.times do
         target = read_optional(context.target, @target_name)
         stages = staging_entries(context)
@@ -139,7 +156,6 @@ module HiveLiveAgentProof
           raise Unsafe, "creator evidence staging state is ambiguous" unless stages.length == 1
           stage = stages.first
           raise Unsafe, "creator evidence staging link state is unsafe" unless stage.links == 1
-          raise Conflict, "creator evidence initialization conflicts" unless stage.bytes == interrupted
 
           remove_entry(context.staging, stage.name)
           @native.fsync(context.staging)
@@ -152,8 +168,15 @@ module HiveLiveAgentProof
         end
         raise Unsafe, "creator evidence staging state is ambiguous" unless stages.length == 1
         stage = stages.first
+        if stage.links == 1
+          raise Unsafe, "creator evidence staging link state is unsafe" unless target.links == 1
+
+          remove_entry(context.staging, stage.name)
+          @native.fsync(context.staging)
+          next
+        end
         linked = target.links == 2 && stage.links == 2 && target.inode == stage.inode &&
-                 target.bytes == stage.bytes && accepted.include?(target.bytes)
+                 target.bytes == stage.bytes
         raise Unsafe, "creator evidence linked state is unsafe" unless linked
 
         remove_entry(context.staging, stage.name)
@@ -162,6 +185,20 @@ module HiveLiveAgentProof
         next
       end
       raise Unsafe, "creator evidence state did not stabilize"
+    end
+
+    def close_descriptors(*descriptors, primary:)
+      cleanup_error = nil
+      descriptors.compact.each do |descriptor|
+        next if descriptor.closed?
+
+        begin
+          @native.close(descriptor)
+        rescue StandardError => error
+          cleanup_error ||= error
+        end
+      end
+      raise cleanup_error if cleanup_error && !primary
     end
 
     def write_stage(context, bytes)
@@ -343,6 +380,8 @@ module HiveLiveAgentProof
     end
 
     class Native
+      LOCK_TIMEOUT_SECONDS = 2.0
+      LOCK_RETRY_SECONDS = 0.01
       FLAGS = {
         linux: { directory: 0o200000 | 0o400000 | 0o2000000 | 0o4000,
                  read: 0o400000 | 0o2000000 | 0o4000,
@@ -418,11 +457,26 @@ module HiveLiveAgentProof
       end
 
       def lock(directory)
-        call_zero(@flock, directory.fileno, File::LOCK_EX)
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + LOCK_TIMEOUT_SECONDS
+        loop do
+          result = @flock.call(directory.fileno, File::LOCK_EX | File::LOCK_NB)
+          return if result.zero?
+
+          error = SystemCallError.new("native creator evidence lock", Fiddle.last_error)
+          raise error unless error.is_a?(Errno::EWOULDBLOCK) || error.is_a?(Errno::EAGAIN)
+          raise Errno::ETIMEDOUT, "creator evidence lock wait exceeded" if
+            Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+
+          sleep LOCK_RETRY_SECONDS
+        end
       end
 
       def unlock(directory)
         call_zero(@flock, directory.fileno, File::LOCK_UN)
+      end
+
+      def close(io)
+        io.close
       end
 
       private

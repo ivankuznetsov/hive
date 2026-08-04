@@ -229,8 +229,9 @@ jobs:
   # tests can only stub launchctl. This job exercises the real round-trip on a
   # hosted macOS runner (which runs the user in a GUI session, so user-agent
   # `launchctl load` works). Scope is the install mechanics — not that the
-  # service stays up (that needs the web bundle / a bound port). No untrusted
-  # workflow input is used in any run step.
+  # service stays up (that needs the web bundle / a bound port). One focused
+  # creator-evidence happy path also executes its native syscalls on Darwin.
+  # No untrusted workflow input is used in any run step.
   launchd-macos:
     name: launchd service install (macOS)
     runs-on: macos-15
@@ -240,6 +241,10 @@ jobs:
         with:
           ruby-version: "3.4"
           bundler-cache: true
+      - name: workflow creator native publication happy path
+        run: >-
+          bundle exec ruby -Itest test/unit/packaging/workflow_creator_evidence_test.rb
+          --name test_replacement_is_compare_and_swap_and_post_rename_retry_is_exact
       - name: daemon launchd install round-trip
         run: |
           set -euo pipefail

@@ -430,9 +430,10 @@ class ComponentBoundaryContract
   end
 
   def construction_scan_files(entry)
-    return ruby_files(entry.fetch("construction_scan_paths")) if entry.key?("construction_scan_paths")
+    external_production = production_ruby_files - ruby_files(entry.fetch("owned_paths"))
+    return external_production unless entry.key?("construction_scan_paths")
 
-    production_ruby_files - ruby_files(entry.fetch("owned_paths"))
+    (external_production + ruby_files(entry.fetch("construction_scan_paths"))).uniq
   end
 
   def ruby_files(paths)

@@ -413,6 +413,37 @@ class ComponentBoundariesTest < Minitest::Test
     assert_match(/workflow_creator_evidence\.rb/, error.message)
   end
 
+  def test_custom_construction_roots_do_not_disable_the_production_scan
+    with_contract_fixture(
+      entrypoint_source: "module Example; class API; end; class Internal; end; end\n",
+      consumer_source: "Example::Internal.new\n",
+      construction_scan_paths: [ "packaging" ],
+      extra_files: { "packaging/release_candidate.rb" => "Example::API.new\n" }
+    ) do |contract|
+      error = assert_raises(ComponentBoundaryContract::ValidationError) do
+        contract.validate_static_boundaries!
+      end
+
+      assert_match(/lib\/consumer\.rb/, error.message)
+      assert_match(/Example::Internal/, error.message)
+    end
+  end
+
+  def test_custom_construction_roots_cover_packaging_release_code
+    with_contract_fixture(
+      entrypoint_source: "module Example; class API; end; class Internal; end; end\n",
+      construction_scan_paths: [ "packaging" ],
+      extra_files: { "packaging/release_candidate.rb" => "Example::Internal.new\n" }
+    ) do |contract|
+      error = assert_raises(ComponentBoundaryContract::ValidationError) do
+        contract.validate_static_boundaries!
+      end
+
+      assert_match(/packaging\/release_candidate\.rb/, error.message)
+      assert_match(/Example::Internal/, error.message)
+    end
+  end
+
 
   def test_workflow_creator_publication_stays_inside_the_u1b_owner_budget
     production = %w[
@@ -1416,7 +1447,7 @@ class ComponentBoundariesTest < Minitest::Test
                             component_dependencies: [], allowed_hive_dependencies: [],
                             migration_exceptions: [], authorized_internal_constructions: [],
                             internal_collaborators: nil, hive_consumers: [ "lib/consumer.rb" ],
-                            extra_components: [], extra_files: {})
+                            construction_scan_paths: nil, extra_components: [], extra_files: {})
     Dir.mktmpdir do |root|
       write_fixture(root, entrypoint_file, entrypoint_source)
       write_fixture(root, "lib/consumer.rb", consumer_source)
@@ -1440,7 +1471,9 @@ class ComponentBoundariesTest < Minitest::Test
             authorized_internal_constructions: authorized_internal_constructions,
             internal_collaborators: internal_collaborators,
             hive_consumers: hive_consumers
-          ),
+          ).tap do |component|
+            component["construction_scan_paths"] = construction_scan_paths if construction_scan_paths
+          end,
           *extra_components
         ]
       }

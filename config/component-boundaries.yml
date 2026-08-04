@@ -873,7 +873,7 @@ components:
     lock_contracts:
       - "Semantic validation is pure; the publication state machine owns only the fixed primary receipt and bounded-prefix staging links"
       - "Held directory descriptors and native no-follow openat/linkat/renameat/unlinkat calls bind publication and cleanup"
-      - "A cooperative native lock on the held target-directory descriptor serializes complete replacement transitions"
+      - "A bounded cooperative native lock on the held target-directory descriptor serializes complete initialization and replacement transitions"
     component_dependencies:
       - workflow-creator-values
     allowed_hive_dependencies: []
@@ -890,12 +890,12 @@ components:
           - packaging/live_agent_skills/workflow_creator_evidence.rb
         reason: "The typed creator evidence facade is the sole publication composition root"
     construction_scan_paths:
-      - packaging/live_agent_skills
+      - packaging
     hive_consumers:
       - packaging/live_agent_skills/proof.rb
       - test/smoke/live_hive_workflow_creator_smoke_test.rb
-    mutation_authority: "Only the evidence facade publishes the vocabulary-fixed primary receipt; it cannot choose filenames, execute commands, select providers, handle credentials, or issue a live-success claim."
-    recovery_surface: "Exact retries and bounded same-inode transient recovery converge; ambiguous links, changed parents, unsafe entries, conflicts, and native failures fail through typed creator evidence errors."
+    mutation_authority: "Only the evidence facade publishes the vocabulary-fixed primary receipt; it cannot choose filenames, execute commands, acquire or select credentials, or issue a live-success claim."
+    recovery_surface: "Exact retries and bounded one-link or same-inode two-link recovery converge; ambiguous links, changed parents, unsafe entries, conflicts, and native failures fail through typed creator evidence errors."
     wiki_page: wiki/component-boundaries.md
     focused_tests:
       - test/unit/packaging/workflow_creator_core_test.rb

@@ -147,7 +147,7 @@ class LiveHiveWorkflowCreatorSmokeTest < Minitest::Test
       publication_failure = begin
         publish_nonclaiming_receipt(
           File.dirname(evidence_path), initial_receipt, candidate_sha, failure,
-          model_loop_executed
+          model_loop_executed, exact_secrets: [ credential ]
         )
         nil
       rescue StandardError => e
@@ -221,6 +221,27 @@ class LiveHiveWorkflowCreatorSmokeTest < Minitest::Test
       postloop = JSON.parse(File.binread(File.join(bundle, "openclaw-workflow-creator.json")))
       assert_equal [ "u14_execution_custody_unavailable", "authenticated_openclaw", "executed" ],
                    postloop.values_at("reason", "execution_kind", "model_loop")
+    end
+  end
+
+  def test_nonclaiming_receipt_redacts_the_exact_provider_credential
+    with_tmp_dir do |root|
+      bundle = File.join(root, "credential")
+      FileUtils.mkdir_p(bundle, mode: 0o700)
+      FileUtils.chmod(0o700, bundle)
+      secret = "provider-credential-that-must-not-escape"
+      initial = HiveLiveAgentProof::WorkflowCreatorEvidence.initialize!(
+        bundle_directory: bundle, candidate_sha: "a" * 40
+      )
+
+      publish_nonclaiming_receipt(
+        bundle, initial, "a" * 40, RuntimeError.new("provider rejected #{secret}"), false,
+        exact_secrets: [ secret ]
+      )
+
+      bytes = File.binread(File.join(bundle, "openclaw-workflow-creator.json"))
+      refute_includes bytes, secret
+      assert_includes JSON.parse(bytes).fetch("detail"), "[REDACTED]"
     end
   end
 
@@ -624,7 +645,8 @@ class LiveHiveWorkflowCreatorSmokeTest < Minitest::Test
     File.open(path, File::WRONLY | File::CREAT | File::TRUNC, 0o600) { |file| file.write(body) }
   end
 
-  def publish_nonclaiming_receipt(bundle, initial, candidate_sha, failure, model_loop_executed)
+  def publish_nonclaiming_receipt(bundle, initial, candidate_sha, failure, model_loop_executed,
+                                  exact_secrets: [])
     proven_but_uncomposed = failure.nil? && model_loop_executed
     receipt = HiveLiveAgentProof::WorkflowCreator.failure(
       candidate_sha:,
@@ -632,10 +654,11 @@ class LiveHiveWorkflowCreatorSmokeTest < Minitest::Test
       reason: proven_but_uncomposed ? "u14_execution_custody_unavailable" : "proof_failed",
       detail: failure&.message,
       execution_kind: model_loop_executed ? "authenticated_openclaw" : "unavailable",
-      model_loop: model_loop_executed ? "executed" : "not_started"
+      model_loop: model_loop_executed ? "executed" : "not_started",
+      exact_secrets:
     )
     HiveLiveAgentProof::WorkflowCreatorEvidence.replace_nonpassing!(
-      bundle_directory: bundle, expected: initial.value, receipt: receipt.value
+      bundle_directory: bundle, expected: initial.value, receipt: receipt.value, exact_secrets:
     )
   end
 

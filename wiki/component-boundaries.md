@@ -209,15 +209,19 @@ constructor of the private `WorkflowCreatorReceiptPublisher`. Its public API
 accepts a bundle directory, derives the primary target exclusively from the
 frozen creator vocabulary, and publishes only canonical non-passing receipts
 admitted by the semantic core. Initialization uses an fsynced 0600 regular
-staging inode and descriptor-relative no-clobber linking. Exact retries and the
-bounded two-link recovery state converge without replacement; different bytes,
+staging inode and descriptor-relative no-clobber linking. A bounded cooperative
+directory lock serializes complete initialization and replacement transitions.
+Exact retries and one-link or two-link interrupted states converge; different bytes,
 unsafe types or permissions, excess or outside-prefix links, parent rebinding,
 and native failures fail through typed evidence errors. Replacement revalidates
 the expected identity and bytes under a cooperative lock on the held target
 directory descriptor immediately before descriptor-relative rename,
 and a retry after rename re-fsyncs the exact desired target. Directory scanning
-is bounded and FIFO/special entries use no-follow, nonblocking opens. The
-protected smoke adapter currently emits an explicit non-passing U14-custody gap
+is bounded and FIFO/special entries use no-follow, nonblocking opens. The boundary
+assumes all supported writers use the facade; arbitrary same-user raw filesystem
+mutation is outside its cooperative contract and does not justify a second
+cross-platform exchange subsystem in U1b. The protected smoke adapter currently
+emits an explicit non-passing U14-custody gap
 even after its model loop succeeds; U14/U15 retain execution and live-claim
 authority.
 
@@ -242,11 +246,11 @@ handles, and focused subprocess proof covers both load orders and post-load core
 replacement. The sources load without JSON, I/O, workflow, process, credential,
 or provider dependencies.
 
-The Values seam and Workflow Creator Core both have production consumers and no
-migration exception. Core remains a custody-complete candidate: U1a2 adds proof
-custody and independent retained verification, but no provider, process,
-publisher, workflow mutation, or claim that the live workflow already emits the
-complete bundle.
+The Values seam and composed Workflow Creator are boundary-ready, have production
+consumers, and retain no migration exception. U1a2 adds proof custody and
+independent retained verification; U1b adds the fixed non-passing receipt
+publication boundary, but neither claims provider/process custody or that the live
+workflow already emits the complete bundle.
 The exact R43 proof is 298 lines / 20 callables / 32 decisions for `Values`, 200
 lines / 14 callables / 23 decisions for `TextSafety`, and 498 / 34 / 55 when
 composed. The Values source retains its leaf-local `Ripper.lex` no-require proof;

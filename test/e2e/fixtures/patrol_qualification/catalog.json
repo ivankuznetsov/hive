@@ -1,0 +1,26 @@
+{
+  "schema": "hive-patrol-public-process-catalog",
+  "schema_version": 1,
+  "cases": [
+    { "id": "ordinary-01", "module": "patrol", "mode": "due", "decision_class": "due" },
+    { "id": "ordinary-02", "module": "patrol", "mode": "not_due", "decision_class": "not_due" },
+    { "id": "ordinary-03", "module": "patrol", "mode": "disabled", "decision_class": "disabled" },
+    { "id": "ordinary-04", "module": "patrol", "mode": "not_due", "decision_class": "not_due" },
+    { "id": "ordinary-05", "module": "patrol", "mode": "disabled", "decision_class": "disabled" },
+    { "id": "ordinary-06", "module": "patrol", "mode": "not_due", "decision_class": "not_due" },
+    { "id": "ordinary-07", "module": "patrol", "mode": "disabled", "decision_class": "disabled" },
+    { "id": "ordinary-08", "module": "patrol", "mode": "not_due", "decision_class": "not_due" },
+    { "id": "ordinary-09", "module": "patrol", "mode": "disabled", "decision_class": "disabled" },
+    { "id": "ordinary-10", "module": "patrol", "mode": "not_due", "decision_class": "not_due" },
+    { "id": "architecture-01", "module": "architecture-patrol", "mode": "direct", "decision_class": "manual_complete" },
+    { "id": "architecture-02", "module": "architecture-patrol", "mode": "direct", "decision_class": "manual_complete" },
+    { "id": "architecture-03", "module": "architecture-patrol", "mode": "direct", "decision_class": "manual_complete" },
+    { "id": "architecture-04", "module": "architecture-patrol", "mode": "direct", "decision_class": "manual_complete" },
+    { "id": "architecture-05", "module": "architecture-patrol", "mode": "direct", "decision_class": "manual_complete" },
+    { "id": "architecture-06", "module": "architecture-patrol", "mode": "retry", "decision_class": "manual_recovered" },
+    { "id": "architecture-07", "module": "architecture-patrol", "mode": "retry", "decision_class": "manual_recovered" },
+    { "id": "architecture-08", "module": "architecture-patrol", "mode": "retry", "decision_class": "manual_recovered" },
+    { "id": "architecture-09", "module": "architecture-patrol", "mode": "retry", "decision_class": "manual_recovered" },
+    { "id": "architecture-10", "module": "architecture-patrol", "mode": "retry", "decision_class": "manual_recovered" }
+  ]
+}

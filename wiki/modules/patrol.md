@@ -301,10 +301,16 @@ replay. Recovery failures persist one bounded UTF-8 diagnostic cell with
 60/300/900-second retry backoff; successful generation-matched recovery clears
 it after restart.
 
-This boundary remains an internal `candidate`. U3 must still bind the repaired
-production decision/effect stream into the compressed candidate evidence
-protocol and satisfy production qualification before the catalog can promote
-it or any mutator cutover can be claimed.
+This boundary remains an internal `candidate`. The opt-in U3b campaign in
+`test/e2e/qualification/` binds real legacy decisions, module projections,
+terminal effects, daemon restarts, PR-scoped retries, and recovery to the
+compressed U3a receipt protocol. Its catalogue supplies expected inventory and
+classes only; run-derived repository SHAs, windows, attempts, and persisted raw
+records are independently reconstructed before the public receipt/admission
+facades accept them. The campaign is a pre-release proof, not a default CI
+scenario and not authority for mutator cutover. Installed/live provider,
+credential-expiry, quota-reset, and operator cutover/rollback drills remain
+separate U3c/lifecycle work.
 
 ## Safety invariants
 

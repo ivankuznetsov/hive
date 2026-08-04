@@ -122,6 +122,17 @@ namespace :e2e do
   task :clean do
     ruby "bin/hive-e2e", "clean"
   end
+
+  Rake::TestTask.new(:patrol_qualification) do |t|
+    t.libs << "test"
+    t.libs << "lib"
+    t.libs << "test/e2e/lib"
+    t.test_files = FileList[
+      "test/e2e/qualification/patrol_qualification_test.rb"
+    ]
+    t.warning = false
+    t.description = "Run the opt-in deterministic Patrol qualification campaign"
+  end
 end
 
 task "test:require_nonempty_ci_gate" do

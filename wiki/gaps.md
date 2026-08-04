@@ -18,25 +18,25 @@ tags: [gap, todo, release-proof, agent-skills]
   trigger identity under the shared migration lock, constructs its canonical
   receipt from record-owned capture, projection, and effects, and admits raw
   receipt documents only after independently supplied bindings verify before
-  digest-CAS merging report v2. U3a still does not execute
-  the compressed campaign and is not installed/live or cutover evidence;
-  current report-v2 cutover is deliberately refused at the operator boundary.
-  U3b must still commit independent controls and a real-reader
-  deterministic catalogue that drives both modules through the complete fault
-  matrix, including intent/outcome restarts, shadow attempted-effect denial,
-  exact reconciliation, and run-level duplicate detection. Its temporal cases
-  must explicitly simulate wall-clock/DST boundary changes, weekly cadence,
-  quota/capacity reset, and restart plus log rotation; spreading one decision
-  class over timestamps cannot qualify, and timestamp, fault-step, or artifact
-  variants sharing one trigger/repository/SHA/change-window identity count as
-  one decision. U3c must independently bind the live
+  digest-CAS merging report v2. U3b now supplies a bounded, opt-in
+  public-process campaign: committed controls, a real-reader catalogue, owned
+  CLI/daemon process groups, default-deny GitHub transport, ordinary
+  due/not-due/disabled/restart coverage, Architecture Patrol released-attempt
+  retry and recovery, and independently reconstructed receipt bindings. It is
+  intentionally outside default tests, E2E, coverage, and hosted CI. It proves
+  those named deterministic invariants; it does not claim that injected faults
+  replace soak, installed/live observation, or every operational lifecycle.
+  Current report-v2 cutover remains deliberately refused at the operator
+  boundary. U3c must independently bind the live
   project, installed candidate generation, configuration, scenario and
   artifacts, and retain installed/live evidence for credential expiry and a
   real quota-reset lifecycle under its sandbox/process-custody threat model.
   Long-lived external resource drift remains a declared U3c live limitation,
   not something elapsed time can prove equivalent. Elapsed telemetry remains
   useful, but neither it nor a seven-day window substitutes for diversity and
-  protocol completeness.
+  protocol completeness. Wall-clock/DST cadence, credential expiry, real
+  quota reset, log rotation, and cutover/rollback drills remain U3c or
+  operator-lifecycle evidence rather than responsibilities of the U3b harness.
 
 - The explicit JobStore fresh-start reset is source- and focused-test-pinned,
   including no-write fresh status, exact registered-project binding,

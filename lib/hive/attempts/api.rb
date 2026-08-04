@@ -42,6 +42,12 @@ module Hive
         )
       end
 
+      def dispatch_module_hook(project_root:, argv:, **attributes)
+        daemon.dispatch_module_hook(
+          project_root: project_root, argv: argv, **attributes
+        )
+      end
+
       private
 
       def foreground

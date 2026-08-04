@@ -53,22 +53,28 @@ module Hive
 
       module_function
 
-      def fresh_install!(sandbox:, run_home:)
+      def fresh_install!(sandbox:, run_home:, configurations: {},
+                         project_id: PROJECT_ID)
         store = module_store(sandbox)
         %w[patrol architecture-patrol].each do |name|
           package = File.join(REPO_ROOT, "modules", name)
           resolution, descriptor = resolution_for(package)
-          install!(store, package, resolution, descriptor, now: START)
+          overrides = configurations.fetch(name, {})
+          install!(
+            store, package, resolution, descriptor, now: START,
+            settings: overrides.fetch("settings", {}),
+            hooks: overrides.fetch("hooks", {}), project_id: project_id
+          )
         end
 
         attempt_store = attempt_store(run_home)
         inspector_rows = Hive::Modules::Inspector.new(
-          store: store, project_id: PROJECT_ID,
+          store: store, project_id: project_id,
           attempt_store: attempt_store, clock: -> { START + 60 }
         ).all.map(&:to_h)
         project = {
           "path" => sandbox, "hive_state_path" => state_path(sandbox),
-          "project_id" => PROJECT_ID
+          "project_id" => project_id
         }
         web_rows = Hive::Web::ModuleLifecycle.new(
           attempt_store: attempt_store, clock: -> { START + 60 }
@@ -224,16 +230,25 @@ module Hive
         Hive::Modules::Entrypoints.register("demo.run") { 0 }
       end
 
-      def install!(store, package, resolution, descriptor, now:)
-        options = lifecycle_options(store, package, resolution, descriptor)
+      def install!(store, package, resolution, descriptor, now:,
+                   settings: {}, hooks: {}, project_id: PROJECT_ID)
+        options = lifecycle_options(
+          store, package, resolution, descriptor,
+          settings: settings, hooks: hooks, project_id: project_id
+        )
         preview = Hive::Commands::Module::Install.new(
           "honeycomb/#{descriptor.name}", **options,
           yes: false, dry_run: true, receipt: nil
         ).call!
-        Hive::Commands::Module::Install.new(
+        result = Hive::Commands::Module::Install.new(
           "honeycomb/#{descriptor.name}", **options,
           yes: true, dry_run: false, receipt: preview.fetch("preview_receipt")
         ).call!
+        # Scenario clocks are deliberately fixed. Re-enable through the public
+        # store transition so subsequent event fixtures observe that clock as
+        # the activation high-water mark instead of wall time.
+        store.enable(descriptor.name, now: now)
+        result
       end
 
       def update!(store, package, resolution, descriptor, now:, health_check: nil)
@@ -251,20 +266,25 @@ module Hive
         ).call!
       end
 
-      def lifecycle_options(store, package, resolution, descriptor, activation_health_check: nil)
+      def lifecycle_options(store, package, resolution, descriptor,
+                            activation_health_check: nil, settings: {},
+                            hooks: {}, project_id: PROJECT_ID)
+        resolved_settings = default_settings(descriptor).merge(settings)
+        resolved_hooks = default_hooks(descriptor).merge(hooks)
         {
           project_root: File.dirname(store.hive_state_path), json: true,
-          stdout: StringIO.new, settings: default_settings(descriptor).map { |key, value|
+          stdout: StringIO.new, settings: resolved_settings.map { |key, value|
             "#{key}=#{value}"
           },
-          hooks: default_hooks(descriptor).map { |key, value|
+          hooks: resolved_hooks.map { |key, value|
             "#{key}=#{value ? 'enabled' : 'disabled'}"
           },
           grants: grant_choices(descriptor.permissions),
           catalog_client: FakeCatalog.new(package, resolution), store: store,
           committer: ->(*) { },
           setup_context: {
-            "project_id" => PROJECT_ID, "project" => File.basename(File.dirname(store.hive_state_path))
+            "project_id" => project_id,
+            "project" => File.basename(File.dirname(store.hive_state_path))
           },
           activation_health_check: activation_health_check
         }

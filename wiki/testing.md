@@ -212,6 +212,33 @@ paths and compares each owner's literal Hive require edges with the approved
 one-way graph. Existing U2 evidence tests remain the regression boundary for
 the receipt's embedded capture, intent, and terminal effect values.
 
+### Patrol U3b public-process qualification
+
+U3b is an explicit pre-release check, not a merge-CI tax:
+
+```bash
+bundle exec rake e2e:patrol_qualification
+```
+
+The campaign requires a clean candidate checkout and binds its committed
+catalogue, driver, production adapter sources, and first-party manifests to
+`HEAD`. It installs both modules in one disposable project, runs ordinary
+Patrol through owned daemon generations, runs Architecture Patrol through the
+real PR-scoped CLI and default-deny `gh` shim, and runs one bounded daemon
+generation after each finalized architecture occurrence. A final bounded
+daemon generation performs the one-off report-v2 conversion before deterministic
+evidence is admitted. A test-owned raw-record collector
+computes the expected receipt and verifier bindings independently before the
+production `Patrols` receipt and admission facades are invoked. No test code
+constructs a `PatrolCapture`, effect receipt, evidence store, adapter, or
+scheduler. Every CLI has a deadline, the whole campaign has one outer deadline,
+and all process groups are terminated in `ensure`.
+
+The default test suite runs only the fast collector and fake-provider boundary
+tests. The campaign is also excluded from `rake e2e`, coverage, and every
+hosted workflow; operators run it once against a final local candidate when
+the stronger pre-release evidence is needed.
+
 ## Coverage
 
 ```bash

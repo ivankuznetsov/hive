@@ -92,6 +92,37 @@ class AttemptsAPITest < Minitest::Test
     assert_equal "codex", call.fetch(:provider)
   end
 
+  def test_dispatch_module_hook_delegates_daemon_admission
+    daemon = Object.new
+    call = nil
+    daemon.define_singleton_method(:dispatch_module_hook) do |**attributes|
+      call = attributes
+      :accepted
+    end
+    api = Hive::Attempts::API.new(foreground: Object.new, daemon: daemon)
+
+    result = api.dispatch_module_hook(
+      project_root: "/repo",
+      argv: %w[hive __module-hook attempt-1],
+      generation: :generation,
+      subject: :subject,
+      request_id: "request-3",
+      provider: "internal",
+      interactive: false,
+      now: Time.at(2).utc
+    )
+
+    assert_equal :accepted, result
+    assert_equal "/repo", call.fetch(:project_root)
+    assert_equal %w[hive __module-hook attempt-1], call.fetch(:argv)
+    assert_equal :generation, call.fetch(:generation)
+    assert_equal :subject, call.fetch(:subject)
+    assert_equal "request-3", call.fetch(:request_id)
+    assert_equal "internal", call.fetch(:provider)
+    assert_equal false, call.fetch(:interactive)
+    assert_equal Time.at(2).utc, call.fetch(:now)
+  end
+
   def test_default_adapters_share_the_injected_store
     store = Object.new
     foreground_store = nil

@@ -26,8 +26,51 @@ ARGV_LOG="${LOG_DIR}/fake-claude-argv.log"
   done
 } >> "$ARGV_LOG"
 
+# Patrol launches verify their isolation flags against `claude --help` before
+# reviewing. Keep that capability probe side-effect free even when the
+# ordinary-Patrol output fixture is enabled.
+if [[ " $* " == *" --help "* ]]; then
+  printf '%s\n' '--safe-mode Disable project and user customizations'
+  printf '%s\n' '--disable-slash-commands Disable slash commands'
+  printf '%s\n' '--tools <tools...> Restrict available tools'
+  exit 0
+fi
+
 if [[ -n "${HIVE_FAKE_CLAUDE_OUTPUT:-}" ]]; then
   printf '%s\n' "${HIVE_FAKE_CLAUDE_OUTPUT}"
+fi
+
+# Opt-in ordinary-Patrol fixture. The real reviewer chooses a fresh run path,
+# so a fixed HIVE_FAKE_CLAUDE_WRITE_FILE cannot target it. Read the exact path
+# from the prompt, but admit only one direct child of the caller-provided
+# Patrol runs root; this mode cannot turn prompt text into an arbitrary write.
+if [[ "${HIVE_FAKE_CLAUDE_PATROL_EMPTY:-}" == "1" ]]; then
+  patrol_root="${HIVE_FAKE_CLAUDE_PATROL_OUTPUT_ROOT:-}"
+  if [[ -z "$patrol_root" || "$patrol_root" != /* || "$patrol_root" == *$'\n'* || \
+        "$patrol_root" == *'/../'* || "$patrol_root" == */.. || "$patrol_root" == *'/./'* ]]; then
+    printf 'fake-claude: unsafe Patrol output root\n' >&2
+    exit 65
+  fi
+
+  patrol_output=""
+  for argument in "$@"; do
+    while IFS= read -r line; do
+      [[ "$line" == "$patrol_root/"* ]] || continue
+      relative="${line#"$patrol_root/"}"
+      [[ "$relative" =~ ^review-[[:alnum:]_-]+/findings\.json$ ]] || continue
+      if [[ -n "$patrol_output" && "$patrol_output" != "$line" ]]; then
+        printf 'fake-claude: multiple Patrol output paths\n' >&2
+        exit 65
+      fi
+      patrol_output="$line"
+    done <<< "$argument"
+  done
+  if [[ -z "$patrol_output" ]]; then
+    printf 'fake-claude: Patrol output path was not found\n' >&2
+    exit 65
+  fi
+  mkdir -p "$(dirname "$patrol_output")"
+  printf '{"findings":[]}\n' > "$patrol_output"
 fi
 
 if [[ -n "${HIVE_FAKE_CLAUDE_DELAY_BEFORE_WRITE:-}" ]]; then

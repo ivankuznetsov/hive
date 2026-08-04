@@ -13,6 +13,7 @@ tags: [test, e2e, tui, incidents, modules, artifacts]
 
 ```bash
 bundle exec rake e2e:lib_test   # harness library tests
+bundle exec rake e2e:patrol_qualification # opt-in pre-release Patrol proof
 bin/hive-e2e list               # scenario inventory
 bin/hive-e2e run                # all scenarios
 bin/hive-e2e run --filter tui   # tag filter
@@ -25,6 +26,18 @@ bin/hive-e2e clean              # old run cleanup
 ```
 
 `rake e2e` delegates to `bin/hive-e2e run`. The default `rake test` suite does not run e2e scenarios.
+
+`e2e:patrol_qualification` is deliberately outside `rake test`, `rake e2e`,
+coverage, and hosted CI. It is a candidate-clean, pre-release campaign that
+owns every subprocess and daemon process group, uses the default-deny GitHub
+shim, and records twenty real legacy/module comparisons in one disposable Git
+repository. The ordinary cases exercise due, not-due, disabled, child
+completion, and daemon restart paths. The architecture cases exercise real
+PR-scoped CLI discovery, released-attempt retry, and daemon recovery. The
+catalogue declares only the expected inventory and decision classes; repository
+SHAs, change windows, attempts, outcomes, effects, and receipt bindings come
+from the run. Small collector and fixture contract tests remain in the normal
+suite.
 
 ## Semantic coverage
 

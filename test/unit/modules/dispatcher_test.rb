@@ -356,6 +356,37 @@ class ModulesDispatcherTest < Minitest::Test
     end
   end
 
+  def test_admission_predicate_errors_fail_closed_before_state_mutation
+    with_runtime do |runtime|
+      result = runtime.fetch(:dispatcher).dispatch(
+        module_name: "demo", hook_id: "task", event: runtime.fetch(:event),
+        admission_open: -> { raise IOError, "shutdown state unavailable" }
+      )
+
+      assert_nil result
+      assert_empty runtime.fetch(:attempt_store).scan.records
+      assert_empty runtime.fetch(:journal).all
+    end
+  end
+
+  def test_shutdown_after_run_persistence_closes_run_before_attempt_dispatch
+    with_runtime do |runtime|
+      runs = File.join(runtime.fetch(:store).runtime_path("demo"), "runs", "*.json")
+      admission_open = -> { Dir[runs].empty? }
+
+      result = runtime.fetch(:dispatcher).dispatch(
+        module_name: "demo", hook_id: "task", event: runtime.fetch(:event),
+        admission_open: admission_open
+      )
+
+      assert_nil result
+      assert_empty runtime.fetch(:attempt_store).scan.records
+      run = JSON.parse(File.binread(Dir[runs].fetch(0)))
+      assert_equal "failed", run.fetch("status")
+      assert_equal "shutdown_closed", run.dig("retry", "reason")
+    end
+  end
+
   def test_malformed_hook_state_lock_failure_and_foreign_event_fail_closed
     with_runtime do |runtime|
       hooks_path = File.join(runtime.fetch(:store).runtime_path("demo"), "hooks.json")

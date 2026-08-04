@@ -3,7 +3,7 @@ title: Hive::Events
 type: module
 source: lib/hive/events.rb
 created: 2026-05-23
-updated: 2026-07-26
+updated: 2026-07-31
 tags: [module, events, observability, status, append-only]
 ---
 
@@ -43,9 +43,18 @@ paired with a `Hive::Modules::DecisionJournal` launch or skip receipt, including
 generation/configuration/grant identity and the linked attempt when admitted.
 The daemon is the sole autonomous dispatcher. The ledger maintains a canonical
 event-id and latest-schedule index, while the daemon durably advances an event
-offset after each fully evaluated occurrence. Idle ticks therefore do not
-reparse retained event or decision histories; an absent or crash-stale index is
-rebuilt from the immutable event files before use.
+offset after each fully evaluated occurrence. TERM/INT closes the shared daemon
+admission predicate between hook evaluations. If it closes after one hook but
+before the occurrence is fully evaluated, the offset does not advance; the
+next daemon generation replays that occurrence, the decision journal dedupes
+the already-admitted hook, and the remaining hook stays eligible. Idle ticks
+therefore do not reparse retained event or decision histories; an absent or
+crash-stale index is rebuilt from the immutable event files before use.
+
+The same predicate crosses module migration, package-admission, and hook locks
+and is rechecked immediately before new-hook and retry provider dispatch.
+Closing admission while one of those locks is held cannot launch work after
+shutdown.
 
 Legacy registry rows derive the same deterministic project UUID during
 read-time projection and daemon persistence, so events written before backfill

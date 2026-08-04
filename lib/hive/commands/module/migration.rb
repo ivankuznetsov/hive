@@ -1,6 +1,7 @@
 require "json"
 require "time"
 require "hive/config"
+require "hive/commands/module/errors"
 require "hive/modules/migration/patrols"
 require "hive/modules/migration/report"
 require "hive/modules/migration/shadow_comparator"
@@ -10,30 +11,83 @@ module Hive
   module Commands
     class Module
       class Migration
-        ACTIONS = %w[status report cutover rollback].freeze
+        ACTIONS = %w[
+          status report cutover rollback deterministic-receipt
+          deterministic-qualification
+        ].freeze
+        MAX_REQUEST_BYTES = 16 * 1024 * 1024
 
-        def initialize(action, project_root:, json:, stdout:, yes: false, reviewer: nil, **)
+        def initialize(action, project_root:, json:, stdout:, stdin: $stdin, yes: false,
+                       reviewer: nil, **)
           @action = action.to_s
           @project_root = File.expand_path(project_root)
           @json = json
           @stdout = stdout
+          @stdin = stdin
           @yes = yes
           @reviewer = reviewer
         end
 
         def call
           unless ACTIONS.include?(@action)
-            raise UsageError, "module migration requires status, report, cutover, or rollback"
+            raise UsageError,
+                  "module migration requires status, report, cutover, rollback, " \
+                  "deterministic-receipt, or deterministic-qualification"
           end
           case @action
           when "status" then emit_state(read_state)
           when "report" then build_report
           when "cutover" then cutover
           when "rollback" then rollback
+          when "deterministic-receipt" then deterministic_receipt
+          when "deterministic-qualification" then deterministic_qualification
           end
         end
 
         private
+
+        def deterministic_receipt
+          request = read_request!(%w[metadata selector])
+          receipt = Hive::Modules::Migration::Patrols.deterministic_receipt_for!(
+            @project_root, selector: request.fetch("selector"),
+            metadata: request.fetch("metadata"), hive_state_path: hive_state_path
+          )
+          emit(receipt, "Patrol deterministic evidence receipt")
+        end
+
+        def deterministic_qualification
+          require_confirmation!("admit deterministic patrol qualification")
+          request = read_request!(
+            %w[expected_bindings expected_report_digest generated_at receipts]
+          )
+          projection = Hive::Modules::Migration::Patrols.admit_deterministic_qualification!(
+            @project_root, receipts: request.fetch("receipts"),
+            expected_bindings: request.fetch("expected_bindings"),
+            generated_at: request.fetch("generated_at"),
+            expected_report_digest: request.fetch("expected_report_digest"),
+            hive_state_path: hive_state_path
+          )
+          emit(projection.to_h, "Patrol deterministic qualification admitted")
+        end
+
+        def read_request!(expected_keys)
+          bytes = @stdin.read(MAX_REQUEST_BYTES + 1).to_s
+          if bytes.bytesize > MAX_REQUEST_BYTES
+            raise Hive::ConfigError,
+                  "module migration request exceeds #{MAX_REQUEST_BYTES} bytes"
+          end
+          text = bytes.dup.force_encoding(Encoding::UTF_8)
+          unless text.valid_encoding?
+            raise Hive::ConfigError, "module migration request must be valid UTF-8 JSON"
+          end
+          request = JSON.parse(text)
+          unless request.is_a?(Hash) && request.keys.sort == expected_keys
+            raise Hive::ConfigError, "module migration request has unexpected keys"
+          end
+          request
+        rescue JSON::ParserError, EncodingError
+          raise Hive::ConfigError, "module migration request must be one JSON object"
+        end
 
         def build_report
           require_confirmation!("review shadow evidence")

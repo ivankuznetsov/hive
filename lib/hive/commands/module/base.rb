@@ -2,6 +2,7 @@ require "digest"
 require "json"
 require "time"
 require "hive"
+require "hive/commands/module/errors"
 require "hive/config"
 require "hive/git_ops"
 require "hive/lock"
@@ -15,14 +16,6 @@ require "hive/workflow_package/managed_store"
 module Hive
   module Commands
     class Module
-      class ConsentRequired < Hive::Error
-        def exit_code = Hive::ExitCodes::USAGE
-      end
-
-      class OwnershipError < Hive::Error
-        def exit_code = Hive::ExitCodes::USAGE
-      end
-
       class Base
         def initialize(project_root:, json:, stdout:, stdin: $stdin, yes: false, dry_run: false,
                        receipt: nil, store: nil, committer: nil, inspector: nil)

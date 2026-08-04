@@ -117,7 +117,8 @@ class ModuleCommandTest < Minitest::Test
       [ "doctor", "demo" ] => "hive-module-doctor",
       [ "dry-run", "demo" ] => "hive-module-dry-run",
       [ "migration", "status" ] => "hive-module-migration",
-      [ "migration", "report" ] => "hive-module-migration-report"
+      [ "migration", "report" ] => "hive-module-migration-report",
+      [ "migration", "deterministic-qualification" ] => "hive-module-migration-report"
     }
     mappings.each do |(verb, subject), schema|
       command = Hive::Commands::Module.new(verb, subject, project_root: "/project")

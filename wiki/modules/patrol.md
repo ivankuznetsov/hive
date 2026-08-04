@@ -81,6 +81,13 @@ receipt documents plus independently computed expected bindings, constructs no
 scenario or collector, and owns only verification, deterministic qualification,
 and digest-CAS report-v2 merge.
 
+The internal `hive module migration deterministic-receipt` and
+`deterministic-qualification` actions expose only those two facades. They read
+one exact-key, strict UTF-8 JSON object from bounded stdin; qualification also
+requires `--yes`. They accept no request path and add no runner, store, or
+cutover authority. Their command layer loads only shared lightweight errors,
+not the module lifecycle/store base.
+
 ## State
 
 Patrol state is deliberately inspectable and removable:

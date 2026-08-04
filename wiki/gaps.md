@@ -995,3 +995,11 @@ mutated during this implementation. Before calling the operational path proven
 on every channel, run one disposable installed upgrade for brew, AUR, and bash
 and retain the updater plus migration output. This gap does not weaken the
 local command contract or its deterministic tests.
+
+## Workflow Creator semantic core awaits custody (2026-08-04)
+
+Workflow Creator Core is intentionally a semantic-only candidate until U1a2
+supplies retained-bundle custody and the first incumbent proof consumer. The
+current boundary proves immutable, caller-isolated schema validation but does
+not claim that `proof.rb` delegates to it or that validated receipt bytes are
+retained, published, or release-qualified.

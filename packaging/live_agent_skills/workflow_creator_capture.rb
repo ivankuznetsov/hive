@@ -13,6 +13,7 @@ module HiveLiveAgentProof
       MAX_TAIL_BYTES = 4_096
       SCAN_SLICE_BYTES = 2_048
       REDACTED = "[REDACTED]".freeze
+      NO_SECRETS = [].freeze
 
       def initialize(limit_bytes:, tail_bytes: MAX_TAIL_BYTES, exact_secrets: [])
         @limit = integer_in!(limit_bytes, 1..MAX_LIMIT_BYTES, "capture limit")
@@ -86,10 +87,13 @@ module HiveLiveAgentProof
         while offset < bytes.bytesize
           slice = bytes.byteslice(offset, SCAN_SLICE_BYTES)
           state.fetch(:window) << slice
+          @exact_secrets.each_with_index do |secret, index|
+            state.fetch(:findings) << "exact-secret:#{index}" if state.fetch(:window).include?(secret.b)
+          end
           overflow = state.fetch(:window).bytesize - MAX_TAIL_BYTES
           state[:window] = state.fetch(:window).byteslice(overflow, MAX_TAIL_BYTES) if overflow.positive?
           owned = state.fetch(:window).dup.force_encoding(Encoding::UTF_8).scrub("").freeze
-          state.fetch(:findings).concat(TextSafety.secret_findings(owned, exact_secrets: @exact_secrets))
+          state.fetch(:findings).concat(TextSafety.secret_findings(owned, exact_secrets: NO_SECRETS))
           state.fetch(:findings).uniq!
           offset += slice.bytesize
         end

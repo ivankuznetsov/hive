@@ -17,6 +17,7 @@ module HiveLiveAgentProof
       LABEL = /\A[a-z][a-z0-9_-]{0,127}\z/
       MAX_IPC_BYTES = 64 * 1024
       MAX_STDIN_BYTES = 16 * 1024
+      MAX_DRAIN_READS = 8
       POLL_SECONDS = 0.01
       PR_SET_CHILD_SUBREAPER = 36
       def initialize(correlation_id:, output_limit: 64 * 1024, tail_limit: 4_096, exact_secrets: [],
@@ -196,8 +197,8 @@ module HiveLiveAgentProof
           drain(streams, capture)
         end
       end
-      def descendants
-        pending = child_pids(Process.pid, true)
+      def descendants(root_pid = Process.pid, required: true)
+        pending = child_pids(root_pid, required)
         seen = {}
         pending.each_with_object([]) do |pid, targets|
           next if seen[pid]
@@ -248,7 +249,7 @@ module HiveLiveAgentProof
       def drain(streams, capture)
         ready = IO.select(streams.keys, nil, nil, POLL_SECONDS)&.first || []
         ready.each do |io|
-          loop do
+          MAX_DRAIN_READS.times do
             chunk = io.read_nonblock(8_192, exception: false)
             break if chunk == :wait_readable
             if chunk.nil?
@@ -306,11 +307,12 @@ module HiveLiveAgentProof
       end
 
       def terminate_custody(pid, identity)
-        Process.kill("KILL", -pid) if process_start_time(pid) == identity
-      rescue Errno::ESRCH
+        return unless process_start_time(pid) == identity
+        signal_targets("KILL", descendants(pid, required: false))
+        Process.kill("KILL", pid)
+        Process.waitpid(pid)
+      rescue Errno::ESRCH, Errno::ECHILD
         nil
-      ensure
-        Process.waitpid(pid, Process::WNOHANG) rescue nil
       end
 
       def settle_custody(pid, identity)

@@ -44,8 +44,9 @@ module HiveLiveAgentProof
       workspace = input.fetch("workspace_path")
       @workspace_path = File.join(File.realpath(File.dirname(workspace)), File.basename(workspace)).freeze
       @bundle_directory = File.realpath(input.fetch("bundle_directory")).freeze
-      paths = [ @candidate.fetch("root"), @openclaw.fetch("root") ].map { |path| File.realpath(path) }
-      paths.concat([ @workspace_path, @bundle_directory ])
+      @candidate_root, @openclaw_root =
+        [ @candidate.fetch("root"), @openclaw.fetch("root") ].map { |path| File.realpath(path) }
+      paths = [ @candidate_root, @openclaw_root, @workspace_path, @bundle_directory ]
       raise Error if paths.combination(2).any? do |left, right|
         left == right || left.start_with?("#{right}/") || right.start_with?("#{left}/")
       end
@@ -66,12 +67,15 @@ module HiveLiveAgentProof
       @openclaw_installation = scan_openclaw
       executable = role_path(@candidate, "executable")
       gateway = role_path(@candidate, "audit_gateway")
+      raise Error unless File.basename(gateway) == WorkflowCreatorGateway::WRAPPER_NAME
       @gateway = WorkflowCreatorGateway.new(
         root: File.dirname(gateway), candidate_executable: executable,
         candidate_identity: observed_file(executable, relative_role(@candidate, executable)),
-        environment: @candidate.fetch("environment"), cwd: @workspace_path, supervisor: @supervisor
+        environment: @candidate.fetch("environment"), cwd: @workspace_path, supervisor: @supervisor,
+        socket_root: @workspace_path
       )
       @gateway_path = @gateway.start!
+      @candidate_installation = scan_candidate
       self
     rescue StandardError => error
       abort_session
@@ -84,12 +88,13 @@ module HiveLiveAgentProof
 
     def draft!(executed_instruction:)
       raise Conflict, "workflow-creator execution draft already exists" if @draft
+      raise Error, "workflow-creator execution has failed" unless @result.status == "not_started"
       observation = WorkflowCreator::Values.capture(executed_instruction).value
       expected = WorkflowCreator::Vocabulary.fetch("executed_instruction")
       raise Error unless observation == observed_file(File.join(@workspace_path, expected), expected)
       commands = @gateway.finish!
-      @candidate_installation = scan_candidate
-      @openclaw_installation = scan_openclaw
+      raise Error unless scan_candidate.canonical_bytes == @candidate_installation.canonical_bytes
+      raise Error unless scan_openclaw.canonical_bytes == @openclaw_installation.canonical_bytes
       archives = ARCHIVE_LABELS.map do |label|
         row = @archives.fetch(label)
         WorkflowCreatorArchive.admit!(archive: row.fetch("path"), label:,
@@ -137,6 +142,10 @@ module HiveLiveAgentProof
         WorkflowCreatorReceiptPublisher.new(bundle_directory: @bundle_directory, target_name: name)
                                        .initialize_receipt(bytes)
       end
+      WorkflowCreatorBundle.retained(
+        directory: @bundle_directory, expected_primary: primary.value,
+        manifest: @manifest, candidate_sha: @candidate_sha
+      )
       @result = Result.new(status: "passed")
     rescue WorkflowCreatorReceiptPublisher::Conflict
       fail_result
@@ -171,12 +180,15 @@ module HiveLiveAgentProof
       raw = { "argv" => launch.fetch(:argv), "environment" => launch.fetch(:environment),
               "stdin_data" => launch[:stdin_data] }
       options = WorkflowCreator::Values.capture(raw).value
-      @outer_launches[label] = options.fetch("argv")
+      prompt = WorkflowCreator::Vocabulary.values_at("prompt", "task_prompt").fetch(OUTER_LABELS.index(label))
+      raise Error unless options.fetch("stdin_data") == prompt
       args = { executable: role_path(@openclaw, "executable"), argv: options.fetch("argv"),
                environment: options.fetch("environment"), cwd: @workspace_path,
                stdin_data: options.fetch("stdin_data") }
-      label == OUTER_LABELS.first ? @supervisor.run_outer_workflow_creator(**args) :
+      receipt = label == OUTER_LABELS.first ? @supervisor.run_outer_workflow_creator(**args) :
         @supervisor.run_outer_authorized_work(**args)
+      @outer_launches[label] = options
+      receipt
     rescue StandardError => error
       fail_result
       raise_execution(error)
@@ -200,9 +212,11 @@ module HiveLiveAgentProof
         capture = process.fetch("capture").except("tails")
         capture["secret_scan"] = capture.fetch("secret_scan").except("findings")
         role = roles.fetch(index)
+        launch = @outer_launches.fetch(label)
         { "label" => label, "role" => role.fetch("role"),
-          "argv_sha256" => Digest::SHA256.hexdigest(WorkflowCreator::Values.capture(@outer_launches.fetch(label)).canonical_bytes),
-          "prompt_sha256" => role.fetch("prompt_sha256"), "exit_code" => process.fetch("exit_code"),
+          "argv_sha256" => Digest::SHA256.hexdigest(WorkflowCreator::Values.capture(launch.fetch("argv")).canonical_bytes),
+          "prompt_sha256" => Digest::SHA256.hexdigest(launch.fetch("stdin_data")),
+          "exit_code" => process.fetch("exit_code"),
           "signal" => process.fetch("signal"), "completed" => process.fetch("completed"),
           "capture" => capture, "teardown" => process.fetch("teardown") }
       end
@@ -238,12 +252,15 @@ module HiveLiveAgentProof
     end
 
     def role_path(source, role)
+      root = File.realpath(source.fetch("root"))
       value = source.fetch(role)
-      value.start_with?(File::SEPARATOR) ? value : File.join(source.fetch("root"), value)
+      path = File.expand_path(value, root)
+      raise Error unless path.start_with?("#{root}/")
+      path
     end
 
     def relative_role(source, path)
-      prefix = "#{source.fetch("root")}/"
+      prefix = "#{File.realpath(source.fetch("root"))}/"
       raise Error unless path.start_with?(prefix)
       path.delete_prefix(prefix)
     end

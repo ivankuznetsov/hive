@@ -47,16 +47,22 @@ class WorkflowCreatorGatewayTest < Minitest::Test
   end
 
   def test_wrong_order_and_duplicate_each_permanently_poison_the_gateway
-    with_gateway do |gateway, wrapper|
+    with_gateway do |gateway, wrapper, log|
       _out, _err, status = invoke(wrapper, Creator::Vocabulary.fetch("commands").fetch(1))
       refute status.success?
+      _out, _err, status = invoke(wrapper, Creator::Vocabulary.fetch("commands").first)
+      refute status.success?
+      refute File.exist?(log)
       assert_raises(Gateway::Error) { gateway.finish! }
     end
 
-    with_gateway do |gateway, wrapper|
+    with_gateway do |gateway, wrapper, log|
       assert_wrapper(wrapper, [ "version" ])
       _out, _err, status = invoke(wrapper, [ "version" ])
       refute status.success?
+      _out, _err, status = invoke(wrapper, Creator::Vocabulary.fetch("commands").fetch(1))
+      refute status.success?
+      assert_equal 1, File.readlines(log).length
       assert_raises(Gateway::Error) { gateway.finish! }
     end
   end

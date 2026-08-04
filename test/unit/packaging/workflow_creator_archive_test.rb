@@ -63,7 +63,8 @@ class WorkflowCreatorArchiveTest < Minitest::Test
       "traversal" => [ [ :file, "../escape", "x" ] ],
       "absolute" => [ [ :file, "/escape", "x" ] ],
       "duplicate" => [ [ :file, "same", "x" ], [ :file, "same", "y" ] ],
-      "file-parent" => [ [ :file, "node", "x" ], [ :file, "node/child", "y" ] ]
+      "file-parent" => [ [ :file, "node", "x" ], [ :file, "node/child", "y" ] ],
+      "separated-file-parent" => [ [ :file, "a", "x" ], [ :file, "a.", "x" ], [ :file, "a/child", "y" ] ]
     }
 
     cases.each do |name, entries|
@@ -74,6 +75,21 @@ class WorkflowCreatorArchiveTest < Minitest::Test
         error = assert_raises(Archive::Error, name) { admit(path) }
         assert_equal "workflow-creator archive is not safely admissible", error.message
       end
+    end
+  end
+
+  def test_refuses_trailing_gzip_members_and_raw_gem_bytes
+    with_tmp_dir do |root|
+      path = File.join(root, "concatenated.tar.gz")
+      first = gzip_tar_bytes { |tar| tar.add_file_simple("first", 0o644, 1) { |io| io.write("a") } }
+      second = gzip_tar_bytes { |tar| tar.add_file_simple("second", 0o644, 1) { |io| io.write("b") } }
+      File.binwrite(path, first + second)
+
+      assert_raises(Archive::Error) { admit(path) }
+
+      gem = build_fixture_gem(root)
+      File.open(gem, "ab") { |file| file.write("trailing") }
+      assert_raises(Archive::Error) { admit(gem, label: "candidate-package") }
     end
   end
 

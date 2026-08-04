@@ -304,6 +304,19 @@ class ComponentBoundariesTest < Minitest::Test
                  workflow_core.dig("entrypoint", "require")
     assert_equal [ "workflow-creator-values" ], workflow_core.fetch("component_dependencies")
     assert_equal %w[
+      HiveLiveAgentProof::WorkflowCreator::Vocabulary
+      HiveLiveAgentProof::WorkflowCreator.commands_for
+      HiveLiveAgentProof::WorkflowCreator.failure
+      HiveLiveAgentProof::WorkflowCreator.validate_nonpassing!
+      HiveLiveAgentProof::WorkflowCreator.validate_primary!
+      HiveLiveAgentProof::WorkflowCreator.validate_installation!
+      HiveLiveAgentProof::WorkflowCreator.validate_execution!
+      HiveLiveAgentProof::WorkflowCreatorBundle.source
+      HiveLiveAgentProof::WorkflowCreatorBundle.retained
+      HiveLiveAgentProof::WorkflowCreatorEvidence.initialize!
+      HiveLiveAgentProof::WorkflowCreatorEvidence.replace_nonpassing!
+    ], workflow_core.dig("public_contract", "values")
+    assert_equal %w[
       packaging/live_agent_skills/workflow_creator.rb
       packaging/live_agent_skills/workflow_creator_contract.rb
       packaging/live_agent_skills/workflow_creator_execution_contract.rb
@@ -493,11 +506,11 @@ class ComponentBoundariesTest < Minitest::Test
 
     line_count = ->(*names) { names.sum { |name| File.readlines(File.join(directory, name)).length } }
     assert_operator line_count.call("workflow_creator_archive.rb", "workflow_creator_installation.rb"),
-                    :<=, 390
+                    :<=, 410
     assert_operator line_count.call("workflow_creator_capture.rb", "workflow_creator_process_supervisor.rb"),
-                    :<=, 485
+                    :<=, 495
     assert_operator line_count.call("workflow_creator_gateway.rb", "workflow_creator_execution.rb"),
-                    :<=, 575
+                    :<=, 600
 
     assert contract.validate_static_boundaries!
   end

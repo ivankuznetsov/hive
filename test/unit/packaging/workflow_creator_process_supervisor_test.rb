@@ -91,6 +91,35 @@ class WorkflowCreatorProcessSupervisorTest < Minitest::Test
     end
   end
 
+  def test_continuous_output_cannot_starve_timeout_or_reaping
+    pid = nil
+    Dir.mktmpdir("creator-supervisor-output") do |dir|
+      pid_file = File.join(dir, "writer.pid")
+      code = <<~RUBY
+        File.write(#{pid_file.dump}, Process.pid)
+        trap("TERM") {}
+        chunk = "x" * 8_192
+        loop { STDOUT.write(chunk); STDOUT.flush }
+      RUBY
+      supervisor = build_supervisor(timeout: 0.1, term_grace: 0.03, kill_grace: 0.2,
+                                    output_limit: 4_096)
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      receipt = supervisor.run_command(
+        position: 1, executable: RUBY, argv: [ "-e", code ], environment: {}, cwd: dir
+      )
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+      pid = Integer(File.read(pid_file))
+
+      assert receipt.fetch("timed_out")
+      assert receipt.dig("capture", "stdout_truncated")
+      assert_equal "passed", receipt.dig("teardown", "status")
+      assert_operator elapsed, :<, 2
+      refute process_alive?(pid)
+    end
+  ensure
+    Process.kill("KILL", pid) if pid && process_alive?(pid)
+  end
+
   def test_detached_descendant_is_discovered_killed_and_reaped_after_root_exit
     detached_pid = nil
     Dir.mktmpdir("creator-supervisor") do |dir|

@@ -21,14 +21,15 @@ class WorkflowCreatorExecutionTest < Minitest::Test
   def test_real_outer_processes_interleave_gateway_commands_and_publish_support_last
     with_fixture do |fixture|
       primary_path = File.join(fixture.fetch(:bundle_directory), "openclaw-workflow-creator.json")
-      File.binwrite(primary_path, "preexisting-primary\n")
       session = start_session(fixture)
 
       session.run_outer_workflow_creator(
-        argv: [ "creator" ], environment: outer_environment(session, fixture)
+        argv: [ "creator" ], environment: outer_environment(session, fixture),
+        stdin_data: Creator::Vocabulary.fetch("prompt")
       )
       session.run_outer_authorized_work(
-        argv: [ "work" ], environment: outer_environment(session, fixture)
+        argv: [ "work" ], environment: outer_environment(session, fixture),
+        stdin_data: Creator::Vocabulary.fetch("task_prompt")
       )
       fixture_pids = File.readlines(fixture.fetch(:outer_pids), chomp: true).map { |value| Integer(value) }
       observation = file_record(fixture.fetch(:workspace_path), Creator::Vocabulary.fetch("executed_instruction"))
@@ -37,7 +38,7 @@ class WorkflowCreatorExecutionTest < Minitest::Test
       assert_equal %i[receipt_bytes receipt_sha256 receipt_size], draft.members
       assert_equal Digest::SHA256.hexdigest(draft.receipt_bytes), draft.receipt_sha256
       assert_equal draft.receipt_bytes.bytesize, draft.receipt_size
-      assert_equal "preexisting-primary\n", File.binread(primary_path)
+      refute File.exist?(primary_path)
       refute Dir.exist?(fixture.fetch(:workspace_path))
       assert fixture_pids.none? { |pid| process_alive?(pid) }
       refute File.exist?(File.join(fixture.dig(:candidate, "root"), "audit", ".workflow-creator-gateway.sock"))
@@ -45,10 +46,11 @@ class WorkflowCreatorExecutionTest < Minitest::Test
       receipt = JSON.parse(draft.receipt_bytes)
       candidate_record, openclaw_record = receipt.fetch("installed_manifests")
       primary = primary_row(fixture, draft, observation, candidate_record, openclaw_record)
+      primary_bytes = publish_primary(fixture, primary)
       result = session.finish!(primary_row: primary)
 
       assert_equal "passed", result.status
-      assert_equal "preexisting-primary\n", File.binread(primary_path)
+      assert_equal primary_bytes, File.binread(primary_path)
       members = Dir.children(fixture.fetch(:bundle_directory)).sort_by do |name|
         Creator::Vocabulary.fetch("bundle_files").index(name)
       end
@@ -96,6 +98,10 @@ class WorkflowCreatorExecutionTest < Minitest::Test
       assert_raises(Execution::Error) { session.finish!(primary_row: invalid) }
       assert_empty Dir.children(fixture.fetch(:bundle_directory))
       assert_equal "failed", session.result.status
+      assert_raises(Execution::Error) { session.finish!(primary_row: primary) }
+      assert_equal Creator::Vocabulary.fetch("bundle_files").drop(1).sort,
+                   Dir.children(fixture.fetch(:bundle_directory)).sort
+      publish_primary(fixture, primary)
       assert_equal "passed", session.finish!(primary_row: primary).status
       assert_equal "passed", session.finish!(primary_row: primary).status
     ensure
@@ -112,12 +118,68 @@ class WorkflowCreatorExecutionTest < Minitest::Test
     end
   end
 
+  def test_gateway_destination_must_stay_inside_the_candidate_closure
+    with_fixture do |fixture|
+      escaped = fixture.merge(
+        candidate: fixture.fetch(:candidate).merge(
+          "audit_gateway" => File.join(fixture.fetch(:bundle_directory), "workflow-creator-gateway")
+        )
+      )
+
+      assert_raises(Execution::Error) { start_session(escaped) }
+      assert_empty Dir.children(fixture.fetch(:bundle_directory))
+      refute Dir.exist?(fixture.fetch(:workspace_path))
+    end
+  end
+
+  def test_outer_prompts_and_installed_closures_are_launch_bound
+    with_fixture do |fixture|
+      session = start_session(fixture)
+      assert_raises(Execution::Error) do
+        session.run_outer_workflow_creator(
+          argv: [ "creator" ], environment: outer_environment(session, fixture)
+        )
+      end
+      refute File.exist?(fixture.fetch(:outer_pids))
+    ensure
+      session&.close
+    end
+
+    with_fixture do |fixture|
+      session, observation = execute_outer(fixture)
+      File.binwrite(fixture.dig(:openclaw, "lock"), "drifted-lock\n")
+
+      assert_raises(Execution::Error) { session.draft!(executed_instruction: observation) }
+      assert_empty Dir.children(fixture.fetch(:bundle_directory))
+    ensure
+      session&.close
+    end
+  end
+
+  def test_rejected_duplicate_outer_launch_cannot_rewrite_evidence
+    with_fixture do |fixture|
+      session, observation = execute_outer(fixture)
+
+      assert_raises(Execution::Error) do
+        session.run_outer_workflow_creator(
+          argv: [ "different" ], environment: outer_environment(session, fixture),
+          stdin_data: Creator::Vocabulary.fetch("prompt")
+        )
+      end
+      assert_raises(Execution::Error) { session.draft!(executed_instruction: observation) }
+      assert_empty Dir.children(fixture.fetch(:bundle_directory))
+    ensure
+      session&.close
+    end
+  end
+
   def test_partial_publication_converges_and_partial_or_failed_outer_runs_cannot_draft
     with_fixture do |fixture|
       session, observation = execute_outer(fixture)
       draft = session.draft!(executed_instruction: observation)
       receipt = JSON.parse(draft.receipt_bytes)
       primary = primary_row(fixture, draft, observation, *receipt.fetch("installed_manifests"))
+      publish_primary(fixture, primary)
       blocker = File.join(fixture.fetch(:bundle_directory), "openclaw-installed-manifest.json")
       Dir.mkdir(blocker, 0o700)
 
@@ -133,7 +195,6 @@ class WorkflowCreatorExecutionTest < Minitest::Test
 
     with_fixture do |fixture|
       primary_path = File.join(fixture.fetch(:bundle_directory), "openclaw-workflow-creator.json")
-      File.binwrite(primary_path, "keep-primary\n")
       support = File.join(fixture.fetch(:bundle_directory), "candidate-installed-manifest.json")
       File.binwrite(support, "divergent")
       File.chmod(0o600, support)
@@ -141,9 +202,10 @@ class WorkflowCreatorExecutionTest < Minitest::Test
       draft = session.draft!(executed_instruction: observation)
       receipt = JSON.parse(draft.receipt_bytes)
       primary = primary_row(fixture, draft, observation, *receipt.fetch("installed_manifests"))
+      primary_bytes = publish_primary(fixture, primary)
 
       assert_raises(Execution::Error) { session.finish!(primary_row: primary) }
-      assert_equal "keep-primary\n", File.binread(primary_path)
+      assert_equal primary_bytes, File.binread(primary_path)
       refute File.exist?(File.join(fixture.fetch(:bundle_directory), "execution-receipt.json"))
       assert_equal "divergent", File.binread(support)
     ensure
@@ -152,7 +214,10 @@ class WorkflowCreatorExecutionTest < Minitest::Test
 
     with_fixture do |fixture|
       session = start_session(fixture)
-      session.run_outer_workflow_creator(argv: [ "creator" ], environment: outer_environment(session, fixture))
+      session.run_outer_workflow_creator(
+        argv: [ "creator" ], environment: outer_environment(session, fixture),
+        stdin_data: Creator::Vocabulary.fetch("prompt")
+      )
       assert_raises(Execution::Error) { session.draft!(executed_instruction: {}) }
       assert_empty Dir.children(fixture.fetch(:bundle_directory))
       assert_equal "failed", session.result.status
@@ -187,10 +252,12 @@ class WorkflowCreatorExecutionTest < Minitest::Test
   def execute_outer(fixture, outcome: "passed")
     session = start_session(fixture)
     session.run_outer_workflow_creator(
-      argv: [ "creator" ], environment: outer_environment(session, fixture)
+      argv: [ "creator" ], environment: outer_environment(session, fixture),
+      stdin_data: Creator::Vocabulary.fetch("prompt")
     )
     session.run_outer_authorized_work(
-      argv: [ "work" ], environment: outer_environment(session, fixture, outcome:)
+      argv: [ "work" ], environment: outer_environment(session, fixture, outcome:),
+      stdin_data: Creator::Vocabulary.fetch("task_prompt")
     )
     observation = file_record(fixture.fetch(:workspace_path), Creator::Vocabulary.fetch("executed_instruction"))
     [ session, observation ]
@@ -368,6 +435,14 @@ class WorkflowCreatorExecutionTest < Minitest::Test
   def file_record(root, relative)
     path = File.join(root, relative)
     { "path" => relative, "sha256" => Digest::SHA256.file(path).hexdigest, "size" => File.size(path) }
+  end
+
+  def publish_primary(fixture, primary)
+    bytes = Creator::Values.capture(primary).canonical_bytes
+    path = File.join(fixture.fetch(:bundle_directory), "openclaw-workflow-creator.json")
+    File.binwrite(path, bytes)
+    File.chmod(0o600, path)
+    bytes
   end
 
   def primary_row(fixture, draft, observation, candidate_record, openclaw_record)

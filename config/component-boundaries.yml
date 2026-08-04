@@ -836,6 +836,7 @@ components:
     public_contract:
       values:
         - HiveLiveAgentProof::WorkflowCreator::Vocabulary
+        - HiveLiveAgentProof::WorkflowCreator.commands_for
         - HiveLiveAgentProof::WorkflowCreator.failure
         - HiveLiveAgentProof::WorkflowCreator.validate_nonpassing!
         - HiveLiveAgentProof::WorkflowCreator.validate_primary!

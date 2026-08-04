@@ -283,16 +283,23 @@ for the three vocabulary-fixed support filenames
 `candidate-installed-manifest.json`, `openclaw-installed-manifest.json`, and
 `execution-receipt.json`. The downstream `proof.rb` consumer observes those
 members only through `WorkflowCreatorBundle`'s exact retained-bundle
-revalidation. U14 cannot publish `openclaw-workflow-creator.json`.
+revalidation. `finish!` now performs that same full retained-bundle check before
+returning `passed`; a missing or divergent independently written primary leaves
+the support publication retryable but non-passing. U14 cannot publish
+`openclaw-workflow-creator.json`.
 
 The mutation boundary is exact. Callers supply candidate/OpenClaw roots,
 versions, manifests, inventories, executable/launcher/lock/package paths,
 environment, and secrets. U14 may validate those bytes, admit only the two
 fixed archive labels, create one absent owner-private proof workspace, serialize
 the nine Vocabulary command positions through its fixed local gateway, launch
-the two fixed outer labels, capture bounded redacted output, supervise teardown,
-publish the three support members, and remove only the workspace whose current
-device/inode still matches its creation row. It cannot choose or expose a
+the two fixed outer labels only with their vocabulary-bound prompts, capture
+bounded redacted output, supervise teardown, publish the three support members,
+and remove only the workspace whose current device/inode still matches its
+creation row. The wrapper stays inside the stable candidate closure while its
+private socket lives in the proof workspace; permanent gateway poison admits no
+later command. Final rescans must match the pre-launch installation snapshots.
+It cannot choose or expose a
 provider, model, credential, installed version, workflow policy, primary-receipt
 writer, or passing/live classification.
 

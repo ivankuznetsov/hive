@@ -37,6 +37,18 @@ class WorkflowCreatorCaptureTest < Minitest::Test
     refute_includes result.to_s, secret
   end
 
+  def test_detects_a_maximum_window_secret_before_trimming_scan_overlap
+    secret = "s" * 3_000
+    capture = Capture.new(limit_bytes: 8_192, exact_secrets: [ secret ])
+
+    capture.write(:stdout, ("x" * 1_097) + secret + ("y" * 2_047))
+    result = capture.finish
+
+    assert_equal "failed", result.dig("secret_scan", "status")
+    assert_equal [ "stdout:exact-secret:0" ], result.dig("secret_scan", "findings")
+    assert_equal "[REDACTED]", result.dig("tails", "stdout")
+  end
+
   def test_detects_a_secret_pattern_split_across_chunks_after_the_byte_cap
     token = "sk-proj-#{'a' * 24}"
     capture = Capture.new(limit_bytes: 4, tail_bytes: 32)

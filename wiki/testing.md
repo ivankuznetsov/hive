@@ -169,8 +169,8 @@ allows the private receipt publisher in execution only for the three
 Vocabulary-fixed support members. It also checks that command labels are
 sourced from `WorkflowCreator::Vocabulary`, that the six-source relative
 require closure cannot widen to Hive runtime code, and that the readable
-pairwise source budgets remain exact: archive + installation at most 390 lines,
-capture + supervisor at most 485, and gateway + execution at most 575. These
+pairwise source budgets remain exact: archive + installation at most 410 lines,
+capture + supervisor at most 495, and gateway + execution at most 600. These
 are pair budgets, not per-file compression targets.
 
 The archive, installation, capture, supervisor, and gateway files exercise
@@ -180,6 +180,16 @@ sequence-bound nine-command gateway. They establish a deterministic U14
 substrate only. No focused test selects a provider/model/credential, performs
 an authenticated model loop, lets U14 publish the primary receipt, or upgrades
 the result into a live passing claim; those remain U15 responsibilities.
+
+The final-head regressions also cover concatenated gzip members and raw gem
+tail bytes, non-adjacent file/descendant archive conflicts, 3,000-byte exact
+secrets across scan slices, a continuously writable child that must still time
+out and be reaped, commands after permanent gateway poison, gateway paths that
+escape the candidate closure, missing outer prompt bytes, duplicate outer
+launches, final installed-closure drift, and full-bundle validation before a
+session can return `passed`. A missing primary can leave the fixed support
+members as a safe partial publication; adding the independently authored
+canonical primary and retrying converges without U14 writing that primary.
 
 The live-agent proof suite exercises the strict U1a2 cutover: source admission
 requires the exact four canonical vocabulary-named JSON files in an

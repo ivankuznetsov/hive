@@ -22,13 +22,15 @@ module HiveLiveAgentProof
     /ix
     REFUSAL = "workflow-creator gateway refused request\n"
 
-    def initialize(root:, candidate_executable:, candidate_identity:, environment:, cwd:, supervisor:)
-      @root, @candidate, @cwd = [ root, candidate_executable, cwd ].map { |path| File.expand_path(path) }
+    def initialize(root:, candidate_executable:, candidate_identity:, environment:, cwd:, supervisor:,
+                   socket_root: root)
+      @root, @socket_root, @candidate, @cwd =
+        [ root, socket_root, candidate_executable, cwd ].map { |path| File.expand_path(path) }
       @identity = WorkflowCreator::Values.capture(candidate_identity).value
       @environment = WorkflowCreator::Values.capture(environment).value
       @supervisor = supervisor
       @wrapper_path = File.join(@root, WRAPPER_NAME)
-      @socket_path = File.join(@root, SOCKET_NAME)
+      @socket_path = File.join(@socket_root, SOCKET_NAME)
       @token = SecureRandom.hex(32).freeze
       @receipts, @position, @mutex = [], 1, Mutex.new
       @poisoned = @started = @stopping = false
@@ -59,6 +61,7 @@ module HiveLiveAgentProof
     def finish!
       complete = @mutex.synchronize do
         valid = @started && !@poisoned && @receipts.length == 9 && @position == 10
+        @stopping = true
         @poisoned = true unless valid
         valid
       end
@@ -78,6 +81,7 @@ module HiveLiveAgentProof
 
     def validate_inputs!
       @root_identity = directory_identity(@root, private: true)
+      @socket_root_identity = directory_identity(@socket_root, private: true)
       @cwd_identity = directory_identity(@cwd, private: false)
       environment_valid = @environment.instance_of?(Hash) && @environment.all? do |key, value|
         [ key, value ].all? { |item| item.instance_of?(String) && !item.empty? && !item.include?("\0") } &&
@@ -178,7 +182,8 @@ module HiveLiveAgentProof
     end
 
     def dispatch(request)
-      valid = request.instance_of?(Hash) && request.keys.sort == %w[argv credential_env token]
+      valid = @started && !@stopping && !@poisoned && request.instance_of?(Hash) &&
+        request.keys.sort == %w[argv credential_env token]
       valid &&= request.values_at("token", "credential_env") == [ @token, false ]
       expected = expected_command
       unless valid && request["argv"].instance_of?(Array) && request["argv"] == expected
@@ -251,6 +256,7 @@ module HiveLiveAgentProof
 
     def verify_base!
       raise Error unless directory_identity(@root, private: true) == @root_identity
+      raise Error unless directory_identity(@socket_root, private: true) == @socket_root_identity
       raise Error unless directory_identity(@cwd, private: false) == @cwd_identity
       stat = File.lstat(@candidate)
       valid = file_identity(stat) == @candidate_identity && Digest::SHA256.file(@candidate).hexdigest == @candidate_digest
@@ -289,7 +295,7 @@ module HiveLiveAgentProof
       nil
     end
     def stop_server
-      @stopping = true
+      @mutex.synchronize { @stopping = true }
       @server&.close rescue nil
       @thread&.join(2)
       stat = File.lstat(@socket_path)

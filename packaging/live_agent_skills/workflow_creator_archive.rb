@@ -17,6 +17,7 @@ module HiveLiveAgentProof
     MAX_PATH_BYTES = 240
     MAX_PATH_DEPTH = 32
     MAX_COMPRESSION_RATIO = 100
+    MAX_TAR_PADDING_BYTES = 1_048_576
     MAX_SECONDS = 5.0
     CHUNK_BYTES = 65_536
     READ_FLAGS = if defined?(File::NOFOLLOW) && defined?(File::NONBLOCK)
@@ -82,15 +83,18 @@ module HiveLiveAgentProof
           outer_bytes = scan_tar(file, state, timer, started) do |entry, path|
             next false unless path == "data.tar.gz"
             nested += 1
-            with_gzip(entry) do |gzip|
+            with_gzip(entry, timer, started) do |gzip|
               compression_budget!(scan_tar(gzip, state, timer, started), entry.size)
             end
             true
           end
           raise Error, MESSAGE unless nested == 1
+          validate_tar_tail!(file, timer, started)
           compression_budget!(outer_bytes, file.stat.size)
         else
-          with_gzip(file) { |gzip| compression_budget!(scan_tar(gzip, state, timer, started), file.stat.size) }
+          with_gzip(file, timer, started) do |gzip|
+            compression_budget!(scan_tar(gzip, state, timer, started), file.stat.size)
+          end
         end
         state
       end
@@ -120,9 +124,14 @@ module HiveLiveAgentProof
         local_total
       end
 
-      def with_gzip(io)
+      def with_gzip(io, timer, started)
         gzip = Zlib::GzipReader.new(io)
         yield gzip
+        validate_tar_tail!(gzip, timer, started)
+        unused = gzip.unused
+        gzip.finish
+        gzip = nil
+        raise Error, MESSAGE if (unused && !unused.empty?) || io.read(1)
       ensure
         gzip&.finish
       end
@@ -158,8 +167,21 @@ module HiveLiveAgentProof
 
       def validate_tree!(paths, total)
         ordered = paths.keys.sort
-        ordered.each_cons(2) { |left, right| raise Error, MESSAGE if paths.fetch(left) == :file && right.start_with?("#{left}/") }
+        ordered.each do |path|
+          parts = path.split("/")
+          1.upto(parts.length - 1) { |count| raise Error, MESSAGE if paths[parts.first(count).join("/")] == :file }
+        end
         raise Error, MESSAGE if ordered.empty? || !total.positive?
+      end
+
+      def validate_tar_tail!(io, timer, started)
+        padding = 0
+        while (chunk = io.read(CHUNK_BYTES))
+          padding += chunk.bytesize
+          raise Error, MESSAGE if padding > MAX_TAR_PADDING_BYTES || chunk.each_byte.any?(&:nonzero?)
+          time_remaining!(timer, started)
+        end
+        raise Error, MESSAGE unless padding.between?(512, MAX_TAR_PADDING_BYTES) && (padding % 512).zero?
       end
 
       def compression_budget!(total, compressed)

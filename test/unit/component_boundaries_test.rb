@@ -22,6 +22,7 @@ class ComponentBoundariesTest < Minitest::Test
       skillpack
       user-service
       work-ledger
+      workflow-creator-core
       workflow-creator-values
     ], contract.components.map { |component| component.fetch("id") }.sort
 
@@ -261,11 +262,11 @@ class ComponentBoundariesTest < Minitest::Test
     assert_empty work_ledger.fetch("migration_exceptions")
 
     workflow_values = contract.component("workflow-creator-values")
-    assert_equal "candidate", workflow_values.fetch("state")
+    assert_equal "boundary-ready", workflow_values.fetch("state")
     assert_equal(
       {
         "file" => "packaging/live_agent_skills/workflow_creator_text_safety.rb",
-        "require" => "packaging/live_agent_skills/workflow_creator_text_safety",
+        "require" => "./packaging/live_agent_skills/workflow_creator_text_safety",
         "constant" => "HiveLiveAgentProof::WorkflowCreator::TextSafety"
       },
       workflow_values.fetch("entrypoint")
@@ -291,18 +292,31 @@ class ComponentBoundariesTest < Minitest::Test
     ], workflow_values.dig("public_contract", "errors").sort
     assert_empty workflow_values.fetch("component_dependencies")
     assert_empty workflow_values.fetch("allowed_hive_dependencies")
-    assert_empty workflow_values.fetch("hive_consumers")
-    assert_equal 1, workflow_values.fetch("migration_exceptions").length
-    assert_equal "U1a1c",
-                 workflow_values.dig("migration_exceptions", 0, "removal_unit")
+    assert_equal [ "packaging/live_agent_skills/workflow_creator.rb" ],
+                 workflow_values.fetch("hive_consumers")
+    assert_empty workflow_values.fetch("migration_exceptions")
+
+    workflow_core = contract.component("workflow-creator-core")
+    assert_equal "candidate", workflow_core.fetch("state")
+    assert_equal "./packaging/live_agent_skills/workflow_creator",
+                 workflow_core.dig("entrypoint", "require")
+    assert_equal [ "workflow-creator-values" ], workflow_core.fetch("component_dependencies")
+    assert_equal %w[
+      packaging/live_agent_skills/workflow_creator.rb
+      packaging/live_agent_skills/workflow_creator_contract.rb
+      packaging/live_agent_skills/workflow_creator_execution_contract.rb
+    ], workflow_core.fetch("owned_paths")
+    assert_empty workflow_core.fetch("hive_consumers")
+    assert_equal [ "U1a2" ],
+                 workflow_core.fetch("migration_exceptions").map { |entry| entry.fetch("removal_unit") }
 
     ready_components.push(
-      agent_abi, artifact_firewall, skillpack, git_gate, work_ledger
+      agent_abi, artifact_firewall, skillpack, git_gate, work_ledger, workflow_values
     )
     remaining_candidates = contract.components.reject do |component|
       ready_components.include?(component)
     end
-    assert_equal %w[attempts patrol-effects workflow-creator-values],
+    assert_equal %w[attempts patrol-effects workflow-creator-core],
                  remaining_candidates.map { |entry| entry.fetch("id") }.sort
     assert remaining_candidates.all? { |component| component.fetch("state") == "candidate" }
 
@@ -314,6 +328,7 @@ class ComponentBoundariesTest < Minitest::Test
       skillpack
       user-service
       work-ledger
+      workflow-creator-values
     ], ready_loads.keys.sort
     agent_abi_load = ready_loads.fetch("agent-abi")
     assert_equal "Hive::AgentRuntime", agent_abi_load.fetch("constant")
@@ -432,7 +447,7 @@ class ComponentBoundariesTest < Minitest::Test
       assert_includes wiki_index, "[[#{wiki_link}]]"
       expected_removals = {
         "patrol-effects" => [ "U3" ],
-        "workflow-creator-values" => [ "U1a1c" ]
+        "workflow-creator-core" => [ "U1a2" ]
       }.fetch(component.fetch("id"), [])
       assert_equal expected_removals,
                    component.fetch("migration_exceptions").map { |entry| entry.fetch("removal_unit") },
@@ -442,7 +457,10 @@ class ComponentBoundariesTest < Minitest::Test
       dependencies[component.fetch("id")] = component_dependencies unless component_dependencies.empty?
     end
 
-    assert_equal({ "skillpack" => [ "agent-abi" ] }, dependencies)
+    assert_equal(
+      { "skillpack" => [ "agent-abi" ], "workflow-creator-core" => [ "workflow-creator-values" ] },
+      dependencies
+    )
   end
 
   def test_production_consumers_do_not_bypass_artifact_firewall

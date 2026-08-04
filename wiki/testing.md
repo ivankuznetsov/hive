@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release-candidate,release}.yml, packaging/{live_agent_skills,release_candidate}/, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-08-03
+updated: 2026-08-04
 tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, terminal-outcomes, release-proof]
 ---
 
@@ -134,6 +134,7 @@ removal units accept hierarchical plan IDs such as `U1a1c`:
 bundle exec ruby -Itest -Ilib test/unit/component_boundaries_test.rb
 bundle exec ruby -Itest test/unit/packaging/workflow_creator_values_test.rb
 bundle exec ruby -Itest test/unit/packaging/workflow_creator_text_safety_test.rb
+bundle exec ruby -Itest test/unit/packaging/workflow_creator_core_test.rb
 ```
 
 Ready components cannot depend on candidates. Forbidden-construction rules

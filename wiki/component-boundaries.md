@@ -20,7 +20,7 @@ the first and primary consumer.
 | Patrol Effect Evidence | `candidate` (U3a protocol complete; U3b/U3c proof pending) | `require "hive/modules/migration/patrol_evidence"` → `Hive::Modules::Migration::PatrolEvidence` | [[modules/patrol]] |
 | Attempts admission / future RunReceipt | `candidate` (guarded reference) | `require "hive/attempts/api"` → `Hive::Attempts::API` | [[modules/attempts]] |
 | Workflow Creator Values | `boundary-ready` | `require "./packaging/live_agent_skills/workflow_creator_text_safety"` → `HiveLiveAgentProof::WorkflowCreator::TextSafety` | [[component-boundaries]] |
-| Workflow Creator Core | `candidate` (U1a2 consumer pending) | `require "./packaging/live_agent_skills/workflow_creator"` → `HiveLiveAgentProof::WorkflowCreator` | [[component-boundaries]] |
+| Workflow Creator Core | `candidate` (U1a2 custody complete; U1b publication pending) | `require "./packaging/live_agent_skills/workflow_creator"` → `HiveLiveAgentProof::WorkflowCreator` | [[component-boundaries]] |
 | UserService | `boundary-ready` | `require "hive/user_service"` → `Hive::UserService` | [[modules/user_service]] |
 | Agent ABI | `boundary-ready`; standalone package candidate | `require "hive/agent_runtime"` → `Hive::AgentRuntime` | [[modules/agent_cli_runtime]], [[modules/agent_profile]] |
 | Agent Artifact Firewall | `boundary-ready` | `require "hive/artifact_firewall"` → `Hive::ArtifactFirewall` | [[modules/protected_files]] |
@@ -38,9 +38,11 @@ has earned a gem, version, repository, or release.
 
 The catalog on 2026-08-04 retains ten components: seven are
 `boundary-ready`; Attempts, Patrol Effect Evidence, and Workflow Creator Core
-remain `candidate`. Patrol retains one bounded U3 exception for deterministic
-public-path and independently authorized installed/live proof. Workflow Creator
-Core retains one bounded U1a2 exception for custody and incumbent-consumer proof.
+remain `candidate`.
+Patrol retains one bounded U3 exception for deterministic public-path and
+independently authorized installed/live proof. Workflow Creator Core removed
+its U1a2 exception after the incumbent proof consumer adopted exact bundle
+custody, but stays candidate until U1b supplies the publication boundary.
 Every retained entry point has focused clean-process load proof, every
 catalog-owned path and focused test resolves inside this repository, and the
 direct-construction guards pass against all production Ruby sources.
@@ -64,7 +66,7 @@ Hive primitives. The source audit found no retained experimental facade outside
 the catalog: each promoted facade is owned by a catalog row and used by Hive,
 while Attempts, Patrol Effect Evidence, and Workflow Creator Core are
 deliberately retained as guarded candidates rather than being promoted ahead
-of their remaining lifecycle, qualification, or consumer proof.
+of their remaining lifecycle, qualification, or publication proof.
 
 This is an internal architecture verdict, not a packaging verdict. None of the
 seven ready components currently has the named non-Hive adopter and independent
@@ -188,10 +190,26 @@ marker when projection exceeds its bounded work ceiling, and snapshots only the
 internally constructed result afterward. It owns no retention, publication,
 process, provider, credential, archive I/O, or recovery authority.
 
+`WorkflowCreatorBundle` is the component's bounded custody owner above that
+semantic facade. `proof.rb` requires only this owner, which requires the Core;
+the Core never requires upward into custody or proof. Source admission accepts
+exactly the four vocabulary-named canonical JSON files from an owner-private
+directory through no-follow, single-link, current-owner, size-bounded,
+identity-stable descriptors. It validates both installation manifests, the
+primary and exact bundle records, then the execution receipt through the Core's
+public facade. Attestation retains those exact four bytes. Verification repeats
+the same validation from the retained evidence directory, where platform JSON
+may coexist, and compares the independently captured attested primary by
+canonical bytes. Before retention, the incumbent attestor applies its raw
+credential-pattern scan to every admitted member, so the aggregate scan count
+describes bytes that were actually scanned. No one-file compatibility path
+remains.
+
 The approved U1a1c budget re-scope permits only named private semantic-helper
 decomposition. Its ceilings are 125/7/4 for the facade, 260/15/24 for the
 contract, 215/13/20 for execution, 590/34/48 for U1a1c, and 1090/68/104 for the
-Values/TextSafety/Core composition (lines/callables/decisions). Public APIs,
+Values/TextSafety/Core composition (lines/callables/decisions). The U1a2 bundle
+owner is independently capped at 220/10/28 and currently measures 146/10/26. Public APIs,
 owned files, responsibilities, dependency direction, and decision ceilings did
 not widen.
 
@@ -208,10 +226,11 @@ handles, and focused subprocess proof covers both load orders and post-load core
 replacement. The sources load without JSON, I/O, workflow, process, credential,
 or provider dependencies.
 
-The Values seam now has its first production consumer and no migration
-exception. Workflow Creator Core retains `removal_unit: U1a2` until retained
-bundle custody and the first incumbent proof consumer land. U1a1vt adds no
-creator schema, custody, publication, or live behavior.
+The Values seam and Workflow Creator Core both have production consumers and no
+migration exception. Core remains a custody-complete candidate: U1a2 adds proof
+custody and independent retained verification, but no provider, process,
+publisher, workflow mutation, or claim that the live workflow already emits the
+complete bundle.
 The exact R43 proof is 298 lines / 20 callables / 32 decisions for `Values`, 200
 lines / 14 callables / 23 decisions for `TextSafety`, and 498 / 34 / 55 when
 composed. The Values source retains its leaf-local `Ripper.lex` no-require proof;
@@ -378,7 +397,9 @@ entry point without widening the generic loader. Its Values no-require proof, co
 R43 proof, direct entry-point load-order proof, and projection behavior live in
 `test/unit/packaging/workflow_creator_values_test.rb` and
 `test/unit/packaging/workflow_creator_text_safety_test.rb`; semantic-core proof
-lives in `test/unit/packaging/workflow_creator_core_test.rb`.
+lives in `test/unit/packaging/workflow_creator_core_test.rb`, while exact source
+and retained bundle custody is covered by
+`test/unit/packaging/live_agent_proof_test.rb`.
 
 The syntax scan is an architecture regression guard, not a Ruby sandbox. Its
 construction rule covers literal `Constant.new`, not aliases or factory

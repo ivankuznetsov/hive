@@ -1005,10 +1005,16 @@ on every channel, run one disposable installed upgrade for brew, AUR, and bash
 and retain the updater plus migration output. This gap does not weaken the
 local command contract or its deterministic tests.
 
-## Workflow Creator semantic core awaits custody (2026-08-04)
+## Live Workflow Creator still needs complete bundle production (2026-08-04)
 
-Workflow Creator Core is intentionally a semantic-only candidate until U1a2
-supplies retained-bundle custody and the first incumbent proof consumer. The
-current boundary proves immutable, caller-isolated schema validation but does
-not claim that `proof.rb` delegates to it or that validated receipt bytes are
-retained, published, or release-qualified.
+U1a2 makes the incumbent attestor and verifier require, retain, and
+independently revalidate the exact four-file Workflow Creator bundle. The
+Core therefore has a real consumer and no migration exception, but remains a
+custody-complete candidate until U1b supplies the publication boundary. The
+current live workflow still uploads only `openclaw-workflow-creator.json`, so
+that live result is now explicitly unavailable rather than accepted through a
+legacy one-file fallback. U1b/U14/U15 must produce the two installation
+manifests and execution receipt alongside the primary before a live passing
+claim is possible. No provider-backed run, publication, or release
+qualification was performed here; hostile/property campaigns remain optional
+and outside the normal merge gate.

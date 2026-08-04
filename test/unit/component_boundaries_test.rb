@@ -1,4 +1,5 @@
 require "test_helper"
+require "ripper"
 require_relative "../support/component_boundary_contract"
 
 class ComponentBoundariesTest < Minitest::Test
@@ -305,14 +306,12 @@ class ComponentBoundariesTest < Minitest::Test
       packaging/live_agent_skills/workflow_creator.rb
       packaging/live_agent_skills/workflow_creator_contract.rb
       packaging/live_agent_skills/workflow_creator_execution_contract.rb
+      packaging/live_agent_skills/workflow_creator_bundle.rb
     ], workflow_core.fetch("owned_paths")
-    assert_empty workflow_core.fetch("hive_consumers")
-    assert_equal [ "U1a2" ],
-                 workflow_core.fetch("migration_exceptions").map { |entry| entry.fetch("removal_unit") }
+    assert_equal [ "packaging/live_agent_skills/proof.rb" ], workflow_core.fetch("hive_consumers")
+    assert_empty workflow_core.fetch("migration_exceptions")
 
-    ready_components.push(
-      agent_abi, artifact_firewall, skillpack, git_gate, work_ledger, workflow_values
-    )
+    ready_components.push(agent_abi, artifact_firewall, skillpack, git_gate, work_ledger, workflow_values)
     remaining_candidates = contract.components.reject do |component|
       ready_components.include?(component)
     end
@@ -354,11 +353,32 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal "Hive::WorkLedger", work_ledger_load.fetch("constant")
     assert_empty work_ledger_load.fetch("forbidden_loaded_features")
     assert_empty work_ledger_load.fetch("forbidden_constants")
+    workflow_core_load = contract.validate_clean_load!("workflow-creator-core")
+    assert_equal "HiveLiveAgentProof::WorkflowCreator", workflow_core_load.fetch("constant")
+    assert_empty workflow_core_load.fetch("forbidden_loaded_features")
+    assert_empty workflow_core_load.fetch("forbidden_constants")
     patrol_effects_load = contract.validate_clean_load!("patrol-effects")
     assert_equal "Hive::Modules::Migration::PatrolEvidence",
                  patrol_effects_load.fetch("constant")
     assert_empty patrol_effects_load.fetch("forbidden_loaded_features")
     assert_empty patrol_effects_load.fetch("forbidden_constants")
+  end
+
+  def test_workflow_creator_bundle_dependency_direction_and_budget
+    proof = File.read(File.join(ROOT, "packaging/live_agent_skills/proof.rb"))
+    bundle_path = File.join(ROOT, "packaging/live_agent_skills/workflow_creator_bundle.rb")
+    bundle = File.read(bundle_path)
+    core = %w[
+      workflow_creator.rb workflow_creator_contract.rb workflow_creator_execution_contract.rb
+    ].map { |name| File.read(File.join(ROOT, "packaging/live_agent_skills", name)) }.join("\n")
+
+    assert_includes proof, 'require_relative "workflow_creator_bundle"'
+    assert_includes bundle, 'require_relative "workflow_creator"'
+    refute_match(/workflow_creator_bundle|proof\.rb/, core)
+    metrics = ruby_metrics(bundle)
+    assert_operator File.readlines(bundle_path).length, :<=, 220
+    assert_operator metrics.fetch(:callables), :<=, 10
+    assert_operator metrics.fetch(:decisions), :<=, 28
   end
 
   def test_patrol_u3a_require_graph_is_closed_and_one_way
@@ -446,8 +466,7 @@ class ComponentBoundariesTest < Minitest::Test
       assert_includes row, "[[#{wiki_link}]]"
       assert_includes wiki_index, "[[#{wiki_link}]]"
       expected_removals = {
-        "patrol-effects" => [ "U3" ],
-        "workflow-creator-core" => [ "U1a2" ]
+        "patrol-effects" => [ "U3" ]
       }.fetch(component.fetch("id"), [])
       assert_equal expected_removals,
                    component.fetch("migration_exceptions").map { |entry| entry.fetch("removal_unit") },
@@ -1271,6 +1290,25 @@ class ComponentBoundariesTest < Minitest::Test
   end
 
   private
+
+  def ruby_metrics(source)
+    stack = [ Ripper.sexp(source) ]
+    callables = 0
+    decisions = 0
+    decision_nodes = %i[
+      if unless elsif if_mod unless_mod ifop when in rescue rescue_mod while until for while_mod until_mod
+    ]
+    until stack.empty?
+      node = stack.pop
+      next unless node.instance_of?(Array)
+      type = node.first
+      callables += 1 if %i[def defs lambda].include?(type)
+      decisions += 1 if decision_nodes.include?(type)
+      decisions += 1 if type == :binary && %i[&& ||].include?(node[2])
+      stack.concat(node.select { |child| child.instance_of?(Array) })
+    end
+    { callables:, decisions: }
+  end
 
   def contract_component_owned_files(id)
     component(@document, id).fetch("owned_paths").flat_map do |relative|

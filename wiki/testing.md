@@ -135,12 +135,28 @@ bundle exec ruby -Itest -Ilib test/unit/component_boundaries_test.rb
 bundle exec ruby -Itest test/unit/packaging/workflow_creator_values_test.rb
 bundle exec ruby -Itest test/unit/packaging/workflow_creator_text_safety_test.rb
 bundle exec ruby -Itest test/unit/packaging/workflow_creator_core_test.rb
+bundle exec ruby -Itest test/unit/packaging/live_agent_proof_test.rb
 ```
 
 Ready components cannot depend on candidates. Forbidden-construction rules
 also apply to guarded candidates, and the helper can run a named focused
 clean-load proof for a candidate such as Attempts without representing the
 whole component graph as ready.
+
+The live-agent proof suite exercises the strict U1a2 cutover: source admission
+requires the exact four canonical vocabulary-named JSON files in an
+owner-private directory, attestation retains those exact bytes, and verification
+revalidates them after the source directory disappears. Missing, extra,
+symlinked, hardlinked, non-private, oversized, noncanonical, cross-bound, or
+retained-substituted members fail through the existing proof error boundary.
+Semantically valid support members containing credential-shaped bytes also
+fail before any proof directory is created. Release-candidate coverage proves
+the managed-Web archive executes the exported candidate helper even when it
+differs from the checkout-loaded implementation.
+The live workflow still produces only the former primary file, so provider-backed
+Workflow Creator proof remains unavailable until the complete bundle-producing
+units land; this focused suite is deterministic custody/semantic proof, not a
+live pass.
 
 Workflow Creator Values keeps its clean-load and dependency proof outside the
 generic component loader. The Values suite directly runs its leaf under

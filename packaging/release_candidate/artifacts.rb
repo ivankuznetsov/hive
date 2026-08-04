@@ -9,12 +9,37 @@ require "rubygems/package"
 require "tmpdir"
 require "zlib"
 require_relative "paths"
-require_relative "../managed_web_archive"
 
 module HiveReleaseCandidate
   class Artifacts
     MANIFEST_SCHEMA = "hive-release-candidate-artifacts"
     KINDS = %w[gem source skills web].freeze
+    LIVE_AGENT_BUILDER_INPUTS = %w[
+      packaging/live_agent_skills/proof.rb
+      packaging/live_agent_skills/workflow_creator_bundle.rb
+      packaging/live_agent_skills/workflow_creator.rb
+      packaging/live_agent_skills/workflow_creator_contract.rb
+      packaging/live_agent_skills/workflow_creator_execution_contract.rb
+      packaging/live_agent_skills/workflow_creator_text_safety.rb
+      packaging/live_agent_skills/workflow_creator_values.rb
+      packaging/live_agent_skills/build.rb
+    ].freeze
+    BUILDER_INPUTS = (LIVE_AGENT_BUILDER_INPUTS + [ "packaging/managed_web_archive.rb" ]).freeze
+    BUILDER_ARCHIVE_PATHS = BUILDER_INPUTS.each_with_object({}) do |path, result|
+      parts = path.split("/")
+      (1...parts.length).each do |length|
+        ancestor = parts.first(length).join("/")
+        result[ancestor.downcase] = [ ancestor, :directory ].freeze
+      end
+      result[path.downcase] = [ path, :file ].freeze
+    end.freeze
+    MAX_SOURCE_ARCHIVE_BYTES = 268_435_456
+    MAX_SOURCE_ARCHIVE_ENTRIES = 16_384
+    MAX_SOURCE_EXPANDED_BYTES = 1_073_741_824
+    MAX_BUILDER_INPUT_BYTES = 1_048_576
+    MAX_SOURCE_TAR_PADDING_BYTES = 1_048_576
+    SOURCE_ENTRY_TYPES = %w[0 5 g].freeze
+    MANAGED_WEB_ENV_KEYS = %w[PATH LANG LC_ALL LC_CTYPE TZ].freeze
 
     attr_reader :repo_root, :candidate_sha, :candidate_dir
 
@@ -85,10 +110,7 @@ module HiveReleaseCandidate
       FileUtils.rm_f(incumbent_manifest_path)
 
       web_name = "hive-web-#{version}.tar.gz"
-      HiveManagedWebArchive.build(
-        repo_root: repo_root, candidate_sha: candidate_sha, version: version,
-        destination: File.join(output, web_name)
-      )
+      build_managed_web(export, version, File.join(output, web_name))
 
       expected = {
         "gem" => gem_name,
@@ -121,8 +143,6 @@ module HiveReleaseCandidate
       write_private_json(File.join(output, "manifest.json"), manifest)
     rescue JSON::ParserError, KeyError => e
       raise Error, "invalid incumbent candidate manifest: #{e.message}"
-    rescue HiveManagedWebArchive::Error => e
-      raise Error, e.message
     end
 
     def verify_directory!(directory)
@@ -234,16 +254,37 @@ module HiveReleaseCandidate
       raise Error, "cannot build committed candidate gem: #{stderr.strip}" unless status.success?
     end
 
+    def build_managed_web(export, version, destination)
+      helper = File.join(export, "packaging", "managed_web_archive.rb")
+      unless File.file?(helper) && !File.symlink?(helper)
+        raise Error, "committed candidate has no managed web artifact builder"
+      end
+      script = <<~'RUBY'
+        HiveManagedWebArchive.build(
+          repo_root: ARGV.fetch(0), candidate_sha: ARGV.fetch(1),
+          version: ARGV.fetch(2), destination: ARGV.fetch(3)
+        )
+      RUBY
+      environment = MANAGED_WEB_ENV_KEYS.to_h { |key| [ key, ENV[key] ] }.compact
+      _stdout, stderr, status = Open3.capture3(
+        environment, RbConfig.ruby, "--disable-gems", "-r", helper, "-e", script,
+        repo_root, candidate_sha, version, destination, chdir: export, unsetenv_others: true
+      )
+      unless status.success? && File.file?(destination) && !File.symlink?(destination)
+        FileUtils.rm_f(destination)
+        raise Error, "committed managed web builder failed: #{stderr.strip}"
+      end
+    end
+
     def builder_revision(export)
-      paths = [
-        File.join(export, "packaging", "live_agent_skills", "proof.rb"),
-        File.join(export, "packaging", "live_agent_skills", "build.rb"),
-        File.expand_path("../managed_web_archive.rb", __dir__)
-      ]
       digest = Digest::SHA256.new
-      paths.each do |path|
+      BUILDER_INPUTS.each do |label|
+        path = File.join(export, label)
         raise Error, "candidate builder input is missing: #{path}" unless File.file?(path) && !File.symlink?(path)
-        digest << File.basename(path) << "\0" << File.binread(path) << "\0"
+        if File.size(path) > MAX_BUILDER_INPUT_BYTES
+          raise Error, "candidate builder input exceeds the size limit: #{label}"
+        end
+        digest << label << "\0" << File.binread(path) << "\0"
       end
       digest.hexdigest
     end
@@ -252,36 +293,109 @@ module HiveReleaseCandidate
       source_name, = files.find { |_name, record| record["kind"] == "source" }
       raise Error, "candidate source artifact is missing" unless source_name
 
-      wanted = %w[
-        packaging/live_agent_skills/proof.rb
-        packaging/live_agent_skills/build.rb
-      ]
-      contents = {}
-      Zlib::GzipReader.open(File.join(directory, source_name)) do |gzip|
-        Gem::Package::TarReader.new(gzip) do |tar|
-          tar.each do |entry|
-            name = entry.full_name.sub(%r{\A\./}, "")
-            contents[name] = entry.read if entry.file? && wanted.include?(name)
-          end
-        end
-      end
-      missing = wanted - contents.keys
+      source_path = File.join(directory, source_name)
+      contents = source_builder_contents(source_path)
+      missing = BUILDER_INPUTS - contents.keys
       unless missing.empty?
         raise Error, "candidate source omits builder input #{missing.first}"
       end
 
       digest = Digest::SHA256.new
-      wanted.each do |name|
-        digest << File.basename(name) << "\0" << contents.fetch(name) << "\0"
+      BUILDER_INPUTS.each do |name|
+        digest << name << "\0" << contents.fetch(name) << "\0"
       end
-      managed = File.expand_path("../managed_web_archive.rb", __dir__)
-      unless File.file?(managed) && !File.symlink?(managed)
-        raise Error, "managed web builder input is missing"
-      end
-      digest << File.basename(managed) << "\0" << File.binread(managed) << "\0"
       digest.hexdigest
     rescue Zlib::GzipFile::Error, Gem::Package::TarInvalidError, EOFError => e
       raise Error, "cannot verify candidate source builder inputs: #{e.message}"
+    end
+
+    def source_builder_contents(source_path)
+      unless File.size(source_path).between?(1, MAX_SOURCE_ARCHIVE_BYTES)
+        raise Error, "candidate source archive exceeds the compressed-size limit"
+      end
+      state = { contents: {}, destinations: {}, entries: 0, expanded: 0, global_header: false }
+      compressed = File.open(source_path, "rb")
+      gzip = Zlib::GzipReader.new(compressed)
+      Gem::Package::TarReader.new(gzip) do |tar|
+        tar.each { |entry| collect_source_entry!(entry, state) }
+      end
+      validate_source_tail!(gzip, compressed, state)
+      gzip = nil
+      state.fetch(:contents)
+    ensure
+      gzip&.close
+      compressed&.close unless compressed&.closed?
+    end
+
+    def collect_source_entry!(entry, state)
+      state[:entries] += 1
+      state[:expanded] += entry.size
+      unless state[:entries] <= MAX_SOURCE_ARCHIVE_ENTRIES && state[:expanded] <= MAX_SOURCE_EXPANDED_BYTES
+        raise Error, "candidate source archive exceeds the entry or expanded-size limit"
+      end
+      type = entry.header.typeflag
+      raise Error, "candidate source contains an unsupported archive entry" unless SOURCE_ENTRY_TYPES.include?(type)
+      return collect_global_header!(entry, state) if type == "g"
+
+      name = source_entry_name!(entry)
+      return unless name
+      key = name.downcase
+      raise Error, "candidate source duplicates an archive destination" if state[:destinations].key?(key)
+      state[:destinations][key] = true
+      collect_builder_entry!(entry, state, name, key)
+    end
+
+    def source_entry_name!(entry)
+      raw = entry.full_name.sub(%r{\A\./}, "")
+      name = entry.directory? ? raw.delete_suffix("/") : raw
+      return if name == "." && entry.directory?
+      parts = name.split("/", -1)
+      unsafe = name.start_with?("/") || parts.any? { |part| part.empty? || part == "." || part == ".." }
+      raise Error, "candidate source contains an unsafe archive entry" if unsafe
+      name
+    end
+
+    def collect_builder_entry!(entry, state, name, key)
+      expected, expected_type = BUILDER_ARCHIVE_PATHS[key]
+      return unless expected
+      valid_type = expected_type == :directory ? entry.directory? : entry.file?
+      unless name == expected && valid_type
+        raise Error, "candidate source builder path has a noncanonical name or wrong type"
+      end
+      return unless expected_type == :file
+      raise Error, "candidate source builder input exceeds the size limit" if entry.size > MAX_BUILDER_INPUT_BYTES
+      state[:contents][expected] = entry.read(MAX_BUILDER_INPUT_BYTES + 1)
+    end
+
+    def collect_global_header!(entry, state)
+      expected = "52 comment=#{candidate_sha}\n"
+      valid = !state[:global_header] && entry.full_name == "pax_global_header" &&
+        entry.size == expected.bytesize && entry.read(expected.bytesize + 1) == expected
+      raise Error, "candidate source contains noncanonical global archive metadata" unless valid
+      state[:global_header] = true
+    end
+
+    def validate_source_tail!(gzip, compressed, state)
+      padding = 0
+      begin
+        loop do
+          chunk = gzip.readpartial(16_384)
+          padding += chunk.bytesize
+          state[:expanded] += chunk.bytesize
+          valid = padding <= MAX_SOURCE_TAR_PADDING_BYTES && state[:expanded] <= MAX_SOURCE_EXPANDED_BYTES &&
+            chunk.each_byte.all?(&:zero?)
+          raise Error, "candidate source contains noncanonical tar padding" unless valid
+        end
+      rescue EOFError
+        nil
+      end
+      unused = gzip.unused
+      gzip.finish
+      trailing_member = (unused && !unused.empty?) || compressed.read(1)
+      raise Error, "candidate source must contain exactly one gzip member" if trailing_member
+      unless padding.between?(512, MAX_SOURCE_TAR_PADDING_BYTES) && (padding % 512).zero?
+        raise Error, "candidate source contains noncanonical tar padding"
+      end
     end
 
     def write_private_json(path, value)

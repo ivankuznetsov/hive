@@ -90,6 +90,83 @@ class E2EPatrolQualificationSupportTest < Minitest::Test
     end
   end
 
+  def test_shadow_inventory_rejects_special_oversized_and_unbounded_evidence
+    Dir.mktmpdir("patrol-qualification-bounds") do |root|
+      project = File.join(root, "project")
+      state = File.join(project, ".hive-state")
+      FileUtils.mkdir_p(state)
+      File.binwrite(File.join(state, "config.yml"), {}.to_yaml)
+      catalog = Catalog.load(CATALOG_PATH)
+      observations = write_records_and_observations(root, state, catalog)
+      directory = File.join(state, "module-runtime/migration/shadow/architecture-patrol")
+      special_path = File.join(directory, "#{'f' * 64}.json")
+
+      File.mkfifo(special_path)
+      assert_raises(Error) { qualification_reader(project, observations, catalog).each { } }
+      FileUtils.rm_f(special_path)
+
+      target = Dir.glob(File.join(directory, "*.json")).first
+      File.symlink(target, special_path)
+      assert_raises(Error) { qualification_reader(project, observations, catalog).each { } }
+      FileUtils.rm_f(special_path)
+
+      File.binwrite(special_path, "x" * (MAX_EVIDENCE_BYTES + 1))
+      assert_raises(Error) { qualification_reader(project, observations, catalog).each { } }
+      FileUtils.rm_f(special_path)
+
+      excess_paths = 45.times.map do |index|
+        path = File.join(directory, "#{format('%064x', 1_000 + index)}.json")
+        File.binwrite(path, Hive::E2E::PatrolQualification.canonical({}))
+        path
+      end
+      count_error = assert_raises(Error) do
+        qualification_reader(project, observations, catalog).each { }
+      end
+      assert_match(/file-count bound/, count_error.message)
+      excess_paths.each { |path| FileUtils.rm_f(path) }
+
+      aggregate_paths = 16.times.map do |index|
+        path = File.join(directory, "#{format('%064x', 2_000 + index)}.json")
+        value = { "comparable" => false, "padding" => "x" * (MAX_EVIDENCE_BYTES - 100) }
+        File.binwrite(path, Hive::E2E::PatrolQualification.canonical(value))
+        path
+      end
+      byte_error = assert_raises(Error) do
+        qualification_reader(project, observations, catalog).each { }
+      end
+      assert_match(/aggregate byte bound/, byte_error.message)
+      aggregate_paths.each { |path| FileUtils.rm_f(path) }
+
+      reader = qualification_reader(project, observations, catalog)
+      reader.instance_variable_set(:@deadline, monotonic)
+      assert_raises(CampaignTimeout) { reader.each { } }
+    end
+  end
+
+  def test_report_reader_is_no_follow_bounded_and_deadline_limited
+    Dir.mktmpdir("patrol-qualification-report") do |root|
+      controller = Controller.allocate
+      controller.instance_variable_set(:@deadline, monotonic + 5)
+      report = File.join(root, "report.json")
+      target = File.join(root, "target.json")
+      File.binwrite(target, "{}\n")
+
+      File.mkfifo(report)
+      assert_raises(Error) { controller.send(:read_report, report) }
+      FileUtils.rm_f(report)
+
+      File.symlink(target, report)
+      assert_raises(Error) { controller.send(:read_report, report) }
+      FileUtils.rm_f(report)
+
+      File.binwrite(report, "x" * (MAX_EVIDENCE_BYTES + 1))
+      assert_raises(Error) { controller.send(:read_report, report) }
+
+      controller.instance_variable_set(:@deadline, monotonic)
+      assert_raises(CampaignTimeout) { controller.send(:read_report, target) }
+    end
+  end
+
   def test_child_process_has_allowlisted_environment_and_typed_failures
     Dir.mktmpdir("patrol-qualification-child") do |root|
       env = { "PATH" => "/usr/bin:/bin", "ONLY_ALLOWED" => "yes" }
@@ -116,17 +193,111 @@ class E2EPatrolQualificationSupportTest < Minitest::Test
     end
   end
 
+  def test_child_process_reaps_descendants_after_terminal_leader_results
+    Dir.mktmpdir("patrol-qualification-terminal-cleanup") do |root|
+      process = ChildProcess.new(deadline: monotonic + 5, env: { "PATH" => "/usr/bin:/bin" })
+
+      [ 0, 7 ].each do |exit_status|
+        pid_path = File.join(root, "descendant-#{exit_status}.pid")
+        command = "sleep 30 & child=$!; echo $child > #{pid_path}; exit #{exit_status}"
+        if exit_status.zero?
+          process.run("/bin/sh", "-c", command, label: "success", cwd: root)
+        else
+          error = assert_raises(ProcessFailure) do
+            process.run("/bin/sh", "-c", command, label: "failure", cwd: root)
+          end
+          assert_equal [ "exit", exit_status ], [ error.kind, error.status ]
+        end
+        descendant_pid = Integer(File.binread(pid_path))
+        refute process_alive?(descendant_pid), "terminal leader must not leave a descendant"
+      end
+    end
+  end
+
   def test_controller_uses_only_the_archived_installed_public_boundary
     source = File.binread(File.expand_path("patrol_qualification.rb", __dir__))
 
     assert_includes source, '"archive", "--format=tar"'
     assert_includes source, "packaging/live_agent_skills/install_candidate_gem.sh"
     assert_includes source, "GIT_CONFIG_KEY_0"
+    assert_includes source, '"GIT_CONFIG_NOSYSTEM" => "1"'
+    assert_includes source, '"GIT_CONFIG_GLOBAL" => "/dev/null"'
+    assert_includes source, '"GIT_CONFIG_SYSTEM" => "/dev/null"'
+    assert_includes source, '"GIT_ATTR_NOSYSTEM" => "1"'
+    assert_includes source, 'File.join(candidate.fetch("root"), "test/e2e/fixtures/patrol_qualification/catalog.json")'
+    assert_includes source, "executing qualification controller differs from the archived candidate"
+    assert_includes source, "candidate checkout changed while its archive was captured"
     assert_includes source, '"module", "migration", "deterministic-receipt", "--json"'
     assert_includes source,
                     '"module", "migration", "deterministic-qualification", "--yes", "--json"'
     %w[ManagedStore ModuleScenarioSupport Scheduler Dispatcher].each do |forbidden|
       refute_includes source, forbidden
+    end
+  end
+
+  def test_controller_closes_git_configuration_and_keeps_one_catalogue_rewrite
+    Dir.mktmpdir("patrol-qualification-git-env") do |root|
+      controller = Controller.allocate
+      controller.instance_variable_set(:@hive_home, File.join(root, "home"))
+      controller.instance_variable_set(:@deadline, monotonic + 5)
+      controller.send(:setup_process, root)
+      env = controller.instance_variable_get(:@env)
+
+      assert_equal "1", env.fetch("GIT_CONFIG_NOSYSTEM")
+      assert_equal "/dev/null", env.fetch("GIT_CONFIG_GLOBAL")
+      assert_equal "/dev/null", env.fetch("GIT_CONFIG_SYSTEM")
+      assert_equal "1", env.fetch("GIT_ATTR_NOSYSTEM")
+      assert_equal "4", env.fetch("GIT_CONFIG_COUNT")
+      assert_equal %w[core.hooksPath commit.gpgsign tag.gpgsign credential.helper],
+                   4.times.map { |index| env.fetch("GIT_CONFIG_KEY_#{index}") }
+
+      source = File.binread(File.expand_path("patrol_qualification.rb", __dir__))
+      assert_includes source, '"GIT_CONFIG_COUNT" => "5"'
+      assert_includes source, '"GIT_CONFIG_KEY_4" => "url.file://#{catalog_repo}/.insteadOf"'
+      refute_includes source, '"GIT_CONFIG_KEY_5"'
+    end
+  end
+
+  def test_candidate_capture_pins_archive_and_rechecks_the_checkout
+    Dir.mktmpdir("patrol-qualification-candidate") do |root|
+      fixture = File.join(root, "fixture")
+      archived_controller = File.join(fixture, "test/e2e/lib/patrol_qualification.rb")
+      FileUtils.mkdir_p(File.dirname(archived_controller))
+      FileUtils.cp(File.expand_path("patrol_qualification.rb", __dir__), archived_controller)
+      run_root = File.join(root, "run")
+      FileUtils.mkdir_p(run_root)
+      sha = "a" * 40
+      labels = []
+      controller = Controller.allocate
+      controller.instance_variable_set(:@repo_root, fixture)
+      controller.instance_variable_set(:@deadline, monotonic + 5)
+      controller.define_singleton_method(:git) do |*arguments, label:, **|
+        labels << label
+        case label
+        when "resolve candidate", "recheck candidate head"
+          Result.new("#{sha}\n", "", 0)
+        when "inspect candidate", "recheck candidate cleanliness"
+          Result.new("", "", 0)
+        when "archive candidate"
+          archive = arguments.fetch(arguments.index("--output") + 1)
+          system("tar", "-cf", archive, "-C", fixture, ".", exception: true)
+          Result.new("", "", 0)
+        else
+          flunk("unexpected Git label #{label}")
+        end
+      end
+      controller.define_singleton_method(:run) do |*command, **|
+        system(*command, exception: true)
+        Result.new("", "", 0)
+      end
+
+      candidate = controller.send(:materialize_candidate, run_root)
+
+      assert_equal sha, candidate.fetch("sha")
+      assert_equal [
+        "resolve candidate", "inspect candidate", "archive candidate",
+        "recheck candidate head", "recheck candidate cleanliness"
+      ], labels
     end
   end
 
@@ -183,16 +354,65 @@ class E2EPatrolQualificationSupportTest < Minitest::Test
         campaign.run("/bin/sh", "-c", "sleep 30", label: "campaign", cwd: root, timeout: 5)
       end
 
+      noisy_pid_path = File.join(root, "noisy.pids")
       noisy = ChildProcess.new(deadline: monotonic + 5, env: { "PATH" => "/usr/bin:/bin" })
+      timeout = 0.25
       started = monotonic
       assert_raises(ChildTimeout) do
+        program = <<~RUBY
+          STDOUT.sync = true
+          worker = spawn(#{RbConfig.ruby.inspect}, "-e", "sleep 30")
+          File.write(#{noisy_pid_path.inspect}, "\#{Process.pid} \#{worker}")
+          chunk = "x" * 16_384
+          loop { STDOUT.write(chunk) }
+        RUBY
         noisy.run(
-          RbConfig.ruby, "-e", 'STDOUT.sync = true; chunk = "x" * 16_384; loop { STDOUT.write(chunk) }',
-          label: "noisy", cwd: root, stdin_data: "i" * (2 * 1024 * 1024), timeout: 0.1
+          RbConfig.ruby, "-e", program, label: "noisy", cwd: root,
+          stdin_data: "i" * (2 * 1024 * 1024), timeout: timeout
         )
       end
-      assert_operator monotonic - started, :<, 2.0,
+      elapsed = monotonic - started
+      assert_operator elapsed, :>=, timeout * 0.6,
+                      "timeout should track the requested deadline instead of firing immediately"
+      assert_operator elapsed, :<, 1.5,
                       "blocked stdin and noisy stdout must remain under the child deadline"
+      leader_pid, worker_pid = File.binread(noisy_pid_path).split.map { |value| Integer(value) }
+      refute process_alive?(leader_pid), "timed-out leader must be gone"
+      refute process_group_alive?(leader_pid), "timed-out process group must be gone"
+      refute process_alive?(worker_pid), "timed-out worker must be gone"
+    end
+  end
+
+  def test_process_outcome_statuses_are_kind_specific
+    reader = ObservationReader.allocate
+    valid = ->(kind, status, fault = "provider_failure") do
+      reader.send(:valid_process_outcomes?,
+                  "fault_observed" => fault,
+                  "process_outcomes" => [ { "kind" => kind, "status" => status } ])
+    end
+
+    assert valid.call("exit", 0, "none")
+    assert valid.call("exit", 255)
+    assert valid.call("signal", Signal.list.fetch("TERM"))
+    assert valid.call("child_timeout", CHILD_TIMEOUT_STATUS)
+    [ -1, 256, "7" ].each { |status| refute valid.call("exit", status) }
+    [ 0, 999, "15" ].each { |status| refute valid.call("signal", status) }
+    [ 0, 123, "124" ].each { |status| refute valid.call("child_timeout", status) }
+  end
+
+  def test_evidence_redacts_secret_patterns_inside_error_strings
+    Dir.mktmpdir("patrol-qualification-redaction") do |root|
+      controller = Controller.allocate
+      controller.instance_variable_set(:@evidence_root, root)
+      token = "github_pat_#{'A' * 40}"
+
+      path = controller.send(:write_evidence,
+                             "status" => "failed", "error" => "request rejected: #{token}")
+      bytes = File.binread(path)
+
+      refute_includes bytes, token
+      assert_includes bytes, "[REDACTED:github_fine_grained_pat]"
+      assert_empty Hive::SecretPatterns.scan(bytes)
     end
   end
 
@@ -376,8 +596,22 @@ class E2EPatrolQualificationSupportTest < Minitest::Test
 
   def monotonic = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
+  def qualification_reader(project, observations, catalog)
+    ObservationReader.new(
+      project_root: project, observations_path: observations, catalog: catalog,
+      deadline: monotonic + 5
+    )
+  end
+
   def process_alive?(pid)
     Process.kill(0, pid)
+    true
+  rescue Errno::ESRCH
+    false
+  end
+
+  def process_group_alive?(pid)
+    Process.kill(0, -pid)
     true
   rescue Errno::ESRCH
     false

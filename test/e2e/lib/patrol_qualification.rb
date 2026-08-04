@@ -6,6 +6,7 @@ require "rbconfig"
 require "tmpdir"
 require "time"
 require "yaml"
+require_relative "../../../lib/hive/secret_patterns"
 
 module Hive
   module E2E
@@ -21,7 +22,20 @@ module Hive
       MAX_STREAM_BYTES = 1 * 1024 * 1024
       MAX_STDIN_BYTES = 8 * 1024 * 1024
       MAX_EVIDENCE_BYTES = 512 * 1024
+      MAX_SHADOW_FILES = 64
+      MAX_SHADOW_BYTES = 8 * 1024 * 1024
       CHILD_TIMEOUT = 30.0
+      CHILD_TIMEOUT_STATUS = 124
+      TERMINAL_SIGNALS = %w[
+        HUP INT QUIT ILL TRAP ABRT IOT FPE KILL BUS SEGV SYS PIPE ALRM TERM
+        XCPU XFSZ VTALRM PROF USR1 USR2 PWR IO POLL
+      ].filter_map { |name| Signal.list[name] }.uniq.freeze
+      GIT_OVERRIDES = [
+        "-c", "core.hooksPath=/dev/null",
+        "-c", "commit.gpgsign=false",
+        "-c", "tag.gpgsign=false",
+        "-c", "credential.helper="
+      ].freeze
 
       class Error < StandardError; end
       class ChildTimeout < Error; end
@@ -58,16 +72,42 @@ module Hive
         end
       end
 
+      def monotonic
+        Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      end
+
+      def check_deadline!(deadline, label)
+        return unless deadline && monotonic >= deadline
+
+        raise CampaignTimeout, "qualification campaign deadline expired while reading #{label}"
+      end
+
+      def bounded_read(path, label:, limit: MAX_EVIDENCE_BYTES, deadline: nil)
+        check_deadline!(deadline, label)
+        raise Error, "#{label} cannot be opened without following links" unless
+          File.const_defined?(:NOFOLLOW) && File.const_defined?(:NONBLOCK)
+
+        flags = File::RDONLY | File::NOFOLLOW | File::NONBLOCK
+        File.open(path, flags) do |file|
+          stat = file.stat
+          raise Error, "#{label} must be a bounded regular file" unless
+            stat.file? && stat.size <= limit
+          bytes = file.read(limit + 1)
+          raise Error, "#{label} exceeds its byte bound" if bytes.bytesize > limit
+          check_deadline!(deadline, label)
+          bytes
+        end
+      rescue Errno::ELOOP, Errno::ENXIO, SystemCallError => e
+        raise Error, "#{label} is unreadable: #{e.message}"
+      end
+
       class Catalog
         attr_reader :cases, :contracts, :expectations, :bytes
 
-        def self.load(path)
-          stat = File.lstat(path)
-          raise Error, "qualification catalogue must be a bounded regular file" unless
-            stat.file? && !stat.symlink? && stat.size <= MAX_EVIDENCE_BYTES
-          new(File.binread(path))
-        rescue SystemCallError => e
-          raise Error, "qualification catalogue is unreadable: #{e.message}"
+        def self.load(path, deadline: nil)
+          new(PatrolQualification.bounded_read(
+            path, label: "qualification catalogue", deadline: deadline
+          ))
         end
 
         def initialize(bytes)
@@ -184,6 +224,8 @@ module Hive
                     "#{label} exceeded #{limit.round(3)} seconds")
             end
             status = wait.value
+            terminate_group(pid)
+            cleaned_up = true
             unless join_until(workers, command_deadline)
               terminate_group(pid)
               streams.each { |io| close(io) }
@@ -200,7 +242,7 @@ module Hive
         rescue SystemCallError => e
           raise ProcessFailure.new("spawn", e.class.name, label)
         ensure
-          if pid && status.nil? && !cleaned_up
+          if pid && !cleaned_up
             terminate_group(pid)
             streams.each { |io| close(io) }
             join_until(workers, monotonic + 0.5)
@@ -262,9 +304,10 @@ module Hive
         OUTCOME_KEYS = %w[kind status].freeze
         OUTCOME_KINDS = %w[child_timeout exit signal].freeze
 
-        def initialize(project_root:, observations_path:, catalog:)
+        def initialize(project_root:, observations_path:, catalog:, deadline: nil)
           @project_root = File.expand_path(project_root)
           @catalog = catalog
+          @deadline = deadline
           @observations = read_observations(observations_path)
         end
 
@@ -297,11 +340,9 @@ module Hive
         private
 
         def read_observations(path)
-          stat = File.lstat(path)
-          unless stat.file? && !stat.symlink? && stat.size <= MAX_EVIDENCE_BYTES
-            raise Error, "qualification observations must be a bounded regular file"
-          end
-          @bytes = File.binread(path).freeze
+          @bytes = PatrolQualification.bounded_read(
+            path, label: "qualification observations", deadline: @deadline
+          ).freeze
           data = JSON.parse(@bytes)
           unless data.is_a?(Hash) && data.keys.sort == %w[cases schema schema_version] &&
                  data["schema"] == "hive-patrol-reduced-observations" && data["schema_version"] == 1
@@ -337,9 +378,17 @@ module Hive
           outcomes = row["process_outcomes"]
           return false unless outcomes.is_a?(Array) && !outcomes.empty? && outcomes.size <= 4
           return false unless outcomes.all? do |outcome|
-            outcome.is_a?(Hash) && outcome.keys.sort == OUTCOME_KEYS &&
-              OUTCOME_KINDS.include?(outcome["kind"]) &&
+            next false unless outcome.is_a?(Hash) && outcome.keys.sort == OUTCOME_KEYS &&
+                              OUTCOME_KINDS.include?(outcome["kind"])
+
+            case outcome["kind"]
+            when "exit"
               outcome["status"].is_a?(Integer) && outcome["status"].between?(0, 255)
+            when "signal"
+              outcome["status"].is_a?(Integer) && TERMINAL_SIGNALS.include?(outcome["status"])
+            when "child_timeout"
+              outcome["status"] == CHILD_TIMEOUT_STATUS
+            end
           end
 
           failed = ->(outcome) { outcome["kind"] != "exit" || outcome["status"] != 0 }
@@ -361,12 +410,29 @@ module Hive
           root = File.join(state_path, "module-runtime", "migration", "shadow")
           records = []
           extra = false
+          file_count = 0
+          byte_count = 0
           MODULES.each do |name|
-            Dir.glob(File.join(root, name, "*.json")) do |path|
-              stat = File.lstat(path)
-              raise Error, "shadow evidence is not a bounded regular file" unless
-                stat.file? && !stat.symlink? && stat.size <= MAX_EVIDENCE_BYTES
-              bytes = File.binread(path)
+            directory = File.join(root, name)
+            directory_stat = File.lstat(directory)
+            raise Error, "shadow evidence directory must not be linked" unless
+              directory_stat.directory? && !directory_stat.symlink?
+            paths = []
+            Dir.foreach(directory) do |entry|
+              next if entry == "." || entry == ".."
+
+              PatrolQualification.check_deadline!(@deadline, "shadow inventory")
+              file_count += 1
+              raise Error, "shadow evidence exceeds its file-count bound" if file_count > MAX_SHADOW_FILES
+              raise Error, "shadow evidence contains an unexpected child" unless entry.match?(/\A[0-9a-f]{64}\.json\z/)
+              paths << File.join(directory, entry)
+            end
+            paths.sort.each do |path|
+              bytes = PatrolQualification.bounded_read(
+                path, label: "shadow evidence", deadline: @deadline
+              )
+              byte_count += bytes.bytesize
+              raise Error, "shadow evidence exceeds its aggregate byte bound" if byte_count > MAX_SHADOW_BYTES
               record = JSON.parse(bytes)
               unless bytes == PatrolQualification.canonical(record)
                 raise Error, "shadow evidence is not canonical JSON"
@@ -411,7 +477,10 @@ module Hive
         end
 
         def state_path
-          config = YAML.safe_load(File.binread(File.join(@project_root, ".hive-state", "config.yml"))) || {}
+          config = YAML.safe_load(PatrolQualification.bounded_read(
+            File.join(@project_root, ".hive-state", "config.yml"),
+            label: "qualification project config", deadline: @deadline
+          )) || {}
           File.expand_path(config.fetch("hive_state_path", ".hive-state"), @project_root)
         rescue Psych::Exception, SystemCallError
           File.join(@project_root, ".hive-state")
@@ -431,11 +500,13 @@ module Hive
         end
 
         def run!
-          catalog_path = File.join(@repo_root, "test/e2e/fixtures/patrol_qualification/catalog.json")
-          catalog = Catalog.load(catalog_path)
           Dir.mktmpdir("hive-patrol-u3br") do |run_root|
             setup_process(run_root)
             candidate = materialize_candidate(run_root)
+            catalog = Catalog.load(
+              File.join(candidate.fetch("root"), "test/e2e/fixtures/patrol_qualification/catalog.json"),
+              deadline: @deadline
+            )
             install_candidate(candidate, run_root)
             catalog_repo = build_module_catalog(candidate, run_root)
             install_modules(catalog_repo)
@@ -456,6 +527,14 @@ module Hive
         def setup_process(run_root)
           @env = {
             "HOME" => @hive_home, "HIVE_HOME" => @hive_home,
+            "GIT_ATTR_NOSYSTEM" => "1", "GIT_CONFIG_GLOBAL" => "/dev/null",
+            "GIT_CONFIG_NOSYSTEM" => "1", "GIT_CONFIG_SYSTEM" => "/dev/null",
+            "GIT_CONFIG_COUNT" => "4",
+            "GIT_CONFIG_KEY_0" => "core.hooksPath", "GIT_CONFIG_VALUE_0" => "/dev/null",
+            "GIT_CONFIG_KEY_1" => "commit.gpgsign", "GIT_CONFIG_VALUE_1" => "false",
+            "GIT_CONFIG_KEY_2" => "tag.gpgsign", "GIT_CONFIG_VALUE_2" => "false",
+            "GIT_CONFIG_KEY_3" => "credential.helper", "GIT_CONFIG_VALUE_3" => "",
+            "GIT_TERMINAL_PROMPT" => "0",
             "HIVE_SKIP_LLM_WIKI_SCHEDULER" => "1", "HIVE_SKIP_LLM_WIKI_SYSTEMCTL" => "1",
             "HIVE_SKIP_LLM_WIKI_POST_COMMIT" => "1", "LANG" => "C.UTF-8", "LC_ALL" => "C.UTF-8",
             "PATH" => [ File.dirname(RbConfig.ruby), "/usr/bin", "/bin" ].join(":"),
@@ -465,17 +544,34 @@ module Hive
         end
 
         def materialize_candidate(run_root)
-          status = run("git", "-C", @repo_root, "status", "--porcelain", "--untracked-files=all",
+          sha = git("-C", @repo_root, "rev-parse", "HEAD", label: "resolve candidate").stdout.strip
+          raise Error, "candidate HEAD is not a full SHA" unless sha.match?(/\A[0-9a-f]{40}\z/)
+          status = git("-C", @repo_root, "status", "--porcelain", "--untracked-files=all",
                        label: "inspect candidate").stdout
           raise Error, "qualification requires a clean candidate checkout" unless status.empty?
-          sha = run("git", "-C", @repo_root, "rev-parse", "HEAD", label: "resolve candidate").stdout.strip
-          raise Error, "candidate HEAD is not a full SHA" unless sha.match?(/\A[0-9a-f]{40}\z/)
           archive = File.join(run_root, "candidate.tar")
-          run("git", "-C", @repo_root, "archive", "--format=tar", "--output", archive, sha,
+          git("-C", @repo_root, "archive", "--format=tar", "--output", archive, sha,
               label: "archive candidate")
           root = File.join(run_root, "candidate")
           FileUtils.mkdir_p(root)
           run("tar", "-xf", archive, "-C", root, label: "materialize candidate")
+          executing_controller = PatrolQualification.bounded_read(
+            File.expand_path(__FILE__), label: "executing qualification controller", deadline: @deadline
+          )
+          archived_controller = PatrolQualification.bounded_read(
+            File.join(root, "test/e2e/lib/patrol_qualification.rb"),
+            label: "archived qualification controller", deadline: @deadline
+          )
+          unless Digest::SHA256.digest(executing_controller) == Digest::SHA256.digest(archived_controller)
+            raise Error, "executing qualification controller differs from the archived candidate"
+          end
+          captured_head = git("-C", @repo_root, "rev-parse", "HEAD",
+                              label: "recheck candidate head").stdout.strip
+          captured_status = git("-C", @repo_root, "status", "--porcelain", "--untracked-files=all",
+                                label: "recheck candidate cleanliness").stdout
+          unless captured_head == sha && captured_status.empty?
+            raise Error, "candidate checkout changed while its archive was captured"
+          end
           { "sha" => sha, "archive_sha256" => Digest::SHA256.file(archive).hexdigest, "root" => root }
         end
 
@@ -517,21 +613,21 @@ module Hive
           File.binwrite(File.join(root, "catalog.json"), PatrolQualification.canonical(
             "schema" => "honeycomb-catalog/v3", "entries" => entries
           ))
-          run("git", "init", "-b", "main", "--quiet", cwd: root, label: "initialize local catalog")
-          run("git", "add", "--", ".", cwd: root, label: "stage local catalog")
-          run("git", "-c", "user.email=qualification@example.invalid",
+          git("init", "-b", "main", "--quiet", cwd: root, label: "initialize local catalog")
+          git("add", "--", ".", cwd: root, label: "stage local catalog")
+          git("-c", "user.email=qualification@example.invalid",
               "-c", "user.name=Hive qualification", "-c", "commit.gpgsign=false",
               "commit", "-m", "qualification catalog", "--quiet",
               cwd: root, label: "commit local catalog")
-          @catalog_commit = run("git", "rev-parse", "HEAD", cwd: root, label: "resolve local catalog").stdout.strip
+          @catalog_commit = git("rev-parse", "HEAD", cwd: root, label: "resolve local catalog").stdout.strip
           root
         end
 
         def install_modules(catalog_repo)
           rewrite = {
-            "GIT_CONFIG_COUNT" => "1",
-            "GIT_CONFIG_KEY_0" => "url.file://#{catalog_repo}/.insteadOf",
-            "GIT_CONFIG_VALUE_0" => "https://github.com/ivankuznetsov/honeycomb.git"
+            "GIT_CONFIG_COUNT" => "5",
+            "GIT_CONFIG_KEY_4" => "url.file://#{catalog_repo}/.insteadOf",
+            "GIT_CONFIG_VALUE_4" => "https://github.com/ivankuznetsov/honeycomb.git"
           }
           MODULES.each do |name|
             version = @catalog_manifests.fetch(name).fetch("version")
@@ -616,7 +712,7 @@ module Hive
         def collect_receipts(catalog, candidate)
           reader = ObservationReader.new(project_root: @project_root,
                                          observations_path: @observations_path,
-                                         catalog: catalog)
+                                         catalog: catalog, deadline: @deadline)
           catalog_digest = Digest::SHA256.hexdigest(catalog.bytes)
           common = {
             "run_id" => "u3br-#{candidate.fetch('sha')[0, 12]}",
@@ -696,9 +792,10 @@ module Hive
 
         def admit_qualification(prepared)
           report_path = File.join(state_path, "module-runtime", "migration", "report.json")
+          report_before = read_report(report_path)
           request = {
             "expected_bindings" => prepared.fetch("bindings"),
-            "expected_report_digest" => Digest::SHA256.file(report_path).hexdigest,
+            "expected_report_digest" => Digest::SHA256.hexdigest(report_before),
             "generated_at" => prepared.fetch("generated_at"),
             "receipts" => prepared.fetch("receipts")
           }
@@ -706,12 +803,17 @@ module Hive
             hive([ "module", "migration", "deterministic-qualification", "--yes", "--json" ],
                  stdin_data: JSON.generate(request)).stdout
           )
-          stat = File.lstat(report_path)
-          unless stat.file? && !stat.symlink? && stat.size <= MAX_EVIDENCE_BYTES &&
-                 File.binread(report_path) == PatrolQualification.canonical(report)
+          report_after = read_report(report_path)
+          unless report_after == PatrolQualification.canonical(report)
             raise Error, "deterministic qualification response differs from the persisted report"
           end
           report
+        end
+
+        def read_report(path)
+          PatrolQualification.bounded_read(
+            path, label: "qualification report", deadline: @deadline
+          )
         end
 
         def proof(candidate, catalog, report, prepared)
@@ -823,7 +925,7 @@ module Hive
           redacted = redact(value)
           bytes = PatrolQualification.canonical(redacted)
           raise Error, "qualification evidence exceeds its bound" if bytes.bytesize > MAX_EVIDENCE_BYTES
-          if bytes.match?(/(?:ghp_|github_pat_|sk-[A-Za-z0-9]|BEGIN (?:RSA |OPENSSH )?PRIVATE KEY)/)
+          if Hive::SecretPatterns.scan(bytes).any?
             raise Error, "qualification evidence contains a secret pattern"
           end
           FileUtils.mkdir_p(@evidence_root, mode: 0o700)
@@ -836,15 +938,25 @@ module Hive
           case value
           when Hash
             value.to_h do |key, child|
-              [ key, key.to_s.match?(/token|secret|password|credential/i) ? "[REDACTED]" : redact(child) ]
+              redacted_key = Hive::SecretPatterns.redact(key.to_s)
+              redacted_child = if key.to_s.match?(/token|secret|password|credential/i)
+                "[REDACTED]"
+              else
+                redact(child)
+              end
+              [ redacted_key, redacted_child ]
             end
           when Array then value.map { |child| redact(child) }
+          when String then Hive::SecretPatterns.redact(value)
           else value
           end
         end
 
         def state_path
-          config = YAML.safe_load(File.binread(File.join(@project_root, ".hive-state", "config.yml"))) || {}
+          config = YAML.safe_load(PatrolQualification.bounded_read(
+            File.join(@project_root, ".hive-state", "config.yml"),
+            label: "qualification project config", deadline: @deadline
+          )) || {}
           File.expand_path(config.fetch("hive_state_path", ".hive-state"), @project_root)
         end
 
@@ -856,6 +968,10 @@ module Hive
         def run(*command, label:, cwd: @repo_root, stdin_data: "", env: {})
           process = env.empty? ? @process : ChildProcess.new(deadline: @deadline, env: @env.merge(env))
           process.run(*command, label: label, cwd: cwd, stdin_data: stdin_data, timeout: @child_timeout)
+        end
+
+        def git(*arguments, **options)
+          run("git", *GIT_OVERRIDES, *arguments, **options)
         end
 
         def monotonic = Process.clock_gettime(Process::CLOCK_MONOTONIC)

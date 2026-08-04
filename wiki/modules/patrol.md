@@ -313,7 +313,14 @@ under `test/e2e/` can take a prepared disposable project's real persisted
 ordinary and Architecture Patrol shadow records through an archived, privately
 installed candidate's internal receipt and qualification process facade. It neither creates
 those scheduler records nor supplies independent controls: catalogue and
-controller remain same-head test assets. Interior atomic crash contracts stay
+controller remain same-head test assets. The controller pins and archives the
+candidate before loading its catalogue, digest-binds its executing source to
+the archived copy, closes ambient Git configuration, and rechecks candidate
+HEAD and cleanliness after capture. Shadow/report input uses descriptor-bound
+no-follow reads, count and byte ceilings, and the campaign's monotonic deadline;
+owned process groups are reaped even after a terminal leader result. Retained
+evidence redacts and scans every string through `Hive::SecretPatterns`, and
+typed process outcomes validate status according to their exact kind. Interior atomic crash contracts stay
 owned by their exact focused tests. Full independent U3b qualification,
 installed/live U3c evidence, catalogue promotion, and mutator cutover therefore
 remain unproven.

@@ -3,7 +3,7 @@ title: Durable task attempts
 type: module
 source: lib/hive/attempts/
 created: 2026-07-16
-updated: 2026-07-27
+updated: 2026-08-04
 tags: [attempts, ownership, leases, daemon, recovery]
 ---
 
@@ -17,7 +17,7 @@ reconciles and applies policy; it does not own or reap task agents.
 
 | Module | Responsibility |
 |--------|----------------|
-| `API` | Provide Hive commands, bot delivery, and daemon recovery with the stable admission operations `dispatch`, `dispatch_request`, and `dispatch_successor`, while keeping one injected store shared by its foreground and daemon adapters. |
+| `API` | Provide Hive commands, bot delivery, daemon recovery, and module-hook delivery with the stable admission operations `dispatch`, `dispatch_request`, `dispatch_successor`, and `dispatch_module_hook`, while keeping one injected store shared by its foreground and daemon adapters. |
 | `Contracts` | Define the public `ClientResult`, `DispatchResult`, and `UnsupportedDetachment` values independently of the internal client, dispatcher, and launcher implementations. |
 | `Record`, `Store` | Read and write only v3 records, perform locked guarded transitions with atomic write/fsync/rename persistence, and copy nested record/checkpoint/receipt values through `Hive::StringifyKeys`. The default store fails closed while an old v1 root remains; daemon/bot startup or explicit `hive migrate` owns the one-off mutation. |
 | `Capability`, `Context` | Generate one-time launch authority, authenticate the exact worker process/task/stage, revalidate generation at the mutation boundary, and expose process-local compatibility projections after transport variables are scrubbed. |
@@ -36,7 +36,8 @@ reconciles and applies policy; it does not own or reap task agents.
 its first and primary consumer: durable CLI commands call `dispatch`, bot and
 other local producers call the same operation non-interactively, and daemon
 queue delivery or loss recovery call `dispatch_request` and
-`dispatch_successor`. An injected `Store` is shared by both adapter paths.
+`dispatch_successor`; the module daemon calls `dispatch_module_hook` through
+the same facade. An injected `Store` is shared by both adapter paths.
 
 `Entrypoint` and `ConfiguredDispatcher` are internal adapters behind that
 boundary. `Dispatcher`, `DetachedLauncher`, `Client`, and the persistence
@@ -61,7 +62,8 @@ candidate because this guarded reference does not turn the full durable-attempt
 lifecycle into a supported component API:
 reconciliation, supervision, capacity, loss processing, cancellation, export,
 and raw store operations remain internal. The supported facade still has only
-`dispatch`, `dispatch_request`, and `dispatch_successor`; its clean-process
+`dispatch`, `dispatch_request`, `dispatch_successor`, and the module-specific
+`dispatch_module_hook`; its clean-process
 load brings in the result contracts without commands, stages, web code, or
 other candidate entry points.
 

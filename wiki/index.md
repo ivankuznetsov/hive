@@ -25,8 +25,7 @@ Skillpack, Safe Agent Git Gate, WorkLedger, and Workflow Creator Values/Text
 Safety—and three guarded candidates: Attempts admission, Patrol Effect
 Evidence, and Workflow Creator Core. Skillpack's dependency on Agent ABI and
 the Core's dependency on Values are the two component edges. Patrol's U3
-qualification fence and Workflow Creator Core's U1a2 consumer fence are the
-only migration exceptions. Hive
+qualification fence is the only migration exception. Hive
 is the first and primary consumer, and internal readiness does not imply a gem,
 version, repository, or release.
 

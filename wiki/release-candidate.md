@@ -18,6 +18,16 @@ timestamp. Archiving `<sha>:web` without that explicit timestamp would use the
 wall clock for the tree object and make repeated exact-SHA builds produce
 different bytes.
 
+Candidate `builder_revision` hashes stable repository-relative labels plus the
+exact committed bytes for `proof.rb`, the Workflow Creator bundle/Core/
+contract/execution/Values/TextSafety sources, `build.rb`, and
+`packaging/managed_web_archive.rb`. Verification re-derives that identity from
+the retained source archive with bounded compressed size, entry count,
+expanded bytes, and per-input bytes. Missing, duplicate, case/noncanonical,
+wrong-type, linked/unsupported, oversized, or drifted closure entries fail
+closed; this is narrow exact-input admission for the builder closure, not a
+generic archive extraction subsystem.
+
 `plan` is the default and is read-only. `list` and `inspect` are observational.
 `run`, `resume`, and `rerun` are explicit local mutations; local attempts use
 the candidate SHA plus attempt ID, refuse identity drift, and take a nonblocking

@@ -842,34 +842,40 @@ components:
         - HiveLiveAgentProof::WorkflowCreator.validate_installation!
         - HiveLiveAgentProof::WorkflowCreator.validate_execution!
       errors:
+        - HiveLiveAgentProof::Error
         - HiveLiveAgentProof::WorkflowCreator::Error
     owned_paths:
       - packaging/live_agent_skills/workflow_creator.rb
       - packaging/live_agent_skills/workflow_creator_contract.rb
       - packaging/live_agent_skills/workflow_creator_execution_contract.rb
+      - packaging/live_agent_skills/workflow_creator_bundle.rb
     state_contracts:
       - "Each public input is captured once before semantic validation, and the admitted primary snapshot is returned"
       - "Failure construction captures stable caller inputs and detail once, then captures only its constructed result"
       - "The semantic core is declarative and owns no retention, publication, process, provider, or credential state"
+      - "The bundle owner reads one exact four-file source bundle and independently revalidates retained proof bytes"
     schema_contracts:
       - "Vocabulary and failed, primary, installation, and execution schema-v1 fields are exact and deeply immutable"
       - "Installed closures, ordered commands, capture digests, classifications, and receipt summaries are cross-bound"
+      - "Source and retained bundle members are canonical JSON whose exact bytes bind the primary, installations, and receipt"
     lock_contracts:
       - "No locks or durable state; validation is pure over immutable Values snapshots"
+      - "Source custody uses owner-private no-follow reads; proof retention and output creation remain with the incumbent attestor"
     component_dependencies:
       - workflow-creator-values
     allowed_hive_dependencies: []
     internal_collaborators:
       - HiveLiveAgentProof::WorkflowCreator::Contract
       - HiveLiveAgentProof::WorkflowCreator::ExecutionContract
+      - HiveLiveAgentProof::WorkflowCreatorBundle
     forbidden_constructions: []
     authorized_internal_constructions: []
-    hive_consumers: []
-    mutation_authority: "No mutation authority; allocates only failure evidence and immutable semantic snapshots."
-    recovery_surface: "Validation fails closed with WorkflowCreator::Error and exposes no retry or recovery state."
+    hive_consumers:
+      - packaging/live_agent_skills/proof.rb
+    mutation_authority: "No mutation authority; reads bounded exact bundle bytes and allocates only immutable validated results. Attestation retention remains above the seam."
+    recovery_surface: "Semantic or custody validation fails closed through HiveLiveAgentProof::Error and exposes no retry or recovery state."
     wiki_page: wiki/component-boundaries.md
     focused_tests:
       - test/unit/packaging/workflow_creator_core_test.rb
-    migration_exceptions:
-      - reason: "U1a2 must establish retained bundle custody and the first incumbent proof consumer."
-        removal_unit: U1a2
+      - test/unit/packaging/live_agent_proof_test.rb
+    migration_exceptions: []

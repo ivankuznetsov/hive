@@ -188,7 +188,9 @@ strict JSON-schema composition with the U2 values, complete released-v1 migratio
 source/archive/receipt linkage, interrupted receipt repair, reverse digest CAS,
 descriptor-safe shared locking, stable-admission restoration after interrupted
 upgrade, typed report-v2 cutover refusal, and report migration from every stable
-Patrol adoption state. They do not execute a
+Patrol adoption state. The focused module-migration command test also pins the
+bounded strict-UTF-8 stdin facade, exact top-level request keys, delegation,
+result projection, and deterministic-qualification consent gate. They do not execute a
 scenario, launch a provider, produce installed/live qualification, or exercise
 authorized cutover and rollback:
 

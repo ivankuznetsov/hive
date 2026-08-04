@@ -1,5 +1,6 @@
 require "test_helper"
 require "json"
+require "hive/daemon/patrol_scheduler"
 require "hive/daemon/refactor_patrol_scheduler"
 
 class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
@@ -1221,7 +1222,8 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       store: store,
       entry: {
         "project_id" => "demo-id",
-        "name" => "demo"
+        "name" => "demo",
+        "repository_identity" => "github.com/acme/demo"
       },
       aggregate: {
         "job_id" => value.fetch("job_id"),
@@ -1242,6 +1244,26 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     assert_equal transition_capture.to_h,
                  lifecycle_capture.to_h
     assert_equal [ lifecycle_capture, T0 ], reserved
+
+    ordinary_capture = Hive::Daemon::PatrolScheduler
+      .new(registry: -> { [] })
+      .send(
+        :capture_reservation,
+        {
+          "project_id" => "demo-id", "name" => "demo",
+          "repository_identity" => "github.com/acme/demo"
+        },
+        { "owner" => "legacy", "admission" => true, "epoch" => 1 },
+        T0, poll_interval_sec: 600,
+        selection_input: {
+          "kind" => "operation", "operation" => "qualification-proof"
+        },
+        selection: Hive::Modules::Migration::PatrolDecisionProjection.build(
+          module_name: "patrol", rationale: "due"
+        )
+      )
+    assert_equal ordinary_capture.project.fetch("repository"),
+                 lifecycle_capture.project.fetch("repository")
   end
 
   def test_recovery_store_initialization_errors_keep_the_original_diagnostic

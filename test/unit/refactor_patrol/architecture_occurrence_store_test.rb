@@ -187,6 +187,55 @@ class RefactorPatrolArchitectureOccurrenceStoreTest < Minitest::Test
                  )
   end
 
+  def test_manifest_repository_target_binds_the_pr_url_host_and_slug
+    assert_equal "github.com/owner/demo",
+                 Hive::RefactorPatrol::PrManifest.repository_target(
+                   manifest.fetch("source")
+                 )
+    urls = [
+      "https://github.com/other/demo/pull/7",
+      "mailto:user@example.com",
+      "urn:foo"
+    ]
+    urls.each do |url|
+      source = manifest.fetch("source").merge("url" => url)
+      assert_raises(Hive::RefactorPatrol::PrManifest::Invalid) do
+        Hive::RefactorPatrol::PrManifest.repository_target(source)
+      end
+    end
+  end
+
+  def test_pre_target_repository_capture_is_admitted_only_for_exact_replay
+    legacy = capture_for(
+      manifest,
+      project: capture.project.merge("repository" => "owner/demo")
+    )
+    fresh = occurrence_store(journal: Journal.new)
+    assert_raises(InconsistentRecord) do
+      fresh.reserve_manifest!(manifest, capture: legacy, now: NOW)
+    end
+
+    journal = Journal.new
+    journal.record = {
+      "occurrence_id" => legacy.occurrence_id,
+      "provisional_capture" => legacy.to_h
+    }
+    replay = occurrence_store(
+      journal: journal,
+      job_reader: ->(_job_id) {
+        job.merge("occurrence_id" => legacy.occurrence_id)
+      }
+    )
+    assert_equal legacy.occurrence_id,
+                 replay.reserve_manifest!(
+                   manifest, capture: legacy, now: NOW
+                 ).fetch("occurrence_id")
+    assert_equal legacy.occurrence_id,
+                 replay.reserve!(
+                   "job-7", capture: legacy, now: NOW
+                 ).fetch("occurrence_id")
+  end
+
   def test_rebuild_recovery_index_translates_journal_corruption
     journal = Journal.new
     journal.failure = :rebuild_recovery_index!
@@ -543,7 +592,8 @@ class RefactorPatrolArchitectureOccurrenceStoreTest < Minitest::Test
       project: project || {
         "project_id" => "project-1",
         "name" => source.fetch("registration"),
-        "repository" => source.fetch("repository")
+        "repository" =>
+          Hive::RefactorPatrol::PrManifest.repository_target(source)
       },
       trigger: {
         "kind" => "pull_request.merged",

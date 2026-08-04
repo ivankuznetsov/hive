@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-08-03
+updated: 2026-08-04
 tags: [gap, todo, release-proof, agent-skills]
 ---
 
@@ -14,8 +14,11 @@ tags: [gap, todo, release-proof, agent-skills]
 - Patrol capture/effect boundaries and the U3a receipt, independent verifier,
   duplicate index, qualification value, two-lane report, and one-off report
   conversion are source- and focused-test-pinned. A narrow `Patrols` facade
-  admits raw deterministic receipt documents only after independently supplied
-  bindings verify, then digest-CAS merges report v2. U3a still does not execute
+  now selects exactly one comparable terminal shadow decision by module and
+  trigger identity under the shared migration lock, constructs its canonical
+  receipt from record-owned capture, projection, and effects, and admits raw
+  receipt documents only after independently supplied bindings verify before
+  digest-CAS merging report v2. U3a still does not execute
   the compressed campaign and is not installed/live or cutover evidence;
   current report-v2 cutover is deliberately refused at the operator boundary.
   U3b must still commit independent controls and a real-reader

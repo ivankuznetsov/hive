@@ -149,6 +149,10 @@ owner-private directory, attestation retains those exact bytes, and verification
 revalidates them after the source directory disappears. Missing, extra,
 symlinked, hardlinked, non-private, oversized, noncanonical, cross-bound, or
 retained-substituted members fail through the existing proof error boundary.
+Semantically valid support members containing credential-shaped bytes also
+fail before any proof directory is created. Release-candidate coverage proves
+the managed-Web archive executes the exported candidate helper even when it
+differs from the checkout-loaded implementation.
 The live workflow still produces only the former primary file, so provider-backed
 Workflow Creator proof remains unavailable until the complete bundle-producing
 units land; this focused suite is deterministic custody/semantic proof, not a

@@ -176,6 +176,31 @@ class LiveAgentProofTest < Minitest::Test
     end
   end
 
+  def test_attestor_rejects_secrets_in_workflow_creator_support_members
+    with_tmp_dir do |dir|
+      artifacts = prepare_artifacts(dir)
+      evidence = prepare_evidence(dir, artifacts)
+      creator_evidence = prepare_creator_evidence(dir, artifacts)
+      row_path = File.join(creator_evidence, "openclaw-workflow-creator.json")
+      receipt_path = File.join(creator_evidence, "execution-receipt.json")
+      row = JSON.parse(File.read(row_path))
+      receipt = JSON.parse(File.read(receipt_path))
+      secret = "sk-ant-abcdefghijklmnop"
+      receipt.fetch("run")["correlation_id"] = secret
+      receipt.fetch("containment")["owner_correlation_id"] = secret
+      bind_creator_receipt!(row, row.fetch("evidence_bundle"), receipt)
+      write_canonical_json(receipt_path, receipt)
+      write_canonical_json(row_path, row)
+
+      proof = File.join(dir, "proof-secret")
+      error = assert_raises(HiveLiveAgentProof::Error) do
+        attest(artifacts, evidence, creator_evidence, proof)
+      end
+      assert_includes error.message, "secret scan failed"
+      refute_path_exists proof
+    end
+  end
+
   def test_attestor_rejects_unsafe_workflow_creator_sources
     with_tmp_dir do |dir|
       artifacts = prepare_artifacts(dir)

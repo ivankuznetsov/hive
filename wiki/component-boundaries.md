@@ -200,7 +200,10 @@ primary and exact bundle records, then the execution receipt through the Core's
 public facade. Attestation retains those exact four bytes. Verification repeats
 the same validation from the retained evidence directory, where platform JSON
 may coexist, and compares the independently captured attested primary by
-canonical bytes. No one-file compatibility path remains.
+canonical bytes. Before retention, the incumbent attestor applies its raw
+credential-pattern scan to every admitted member, so the aggregate scan count
+describes bytes that were actually scanned. No one-file compatibility path
+remains.
 
 The approved U1a1c budget re-scope permits only named private semantic-helper
 decomposition. Its ceilings are 125/7/4 for the facade, 260/15/24 for the

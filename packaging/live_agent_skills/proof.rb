@@ -465,9 +465,16 @@ module HiveLiveAgentProof
     end
 
     def validate_creator_evidence!(manifest)
-      WorkflowCreatorBundle.source(
+      bundle = WorkflowCreatorBundle.source(
         directory: @creator_evidence_dir, manifest:, candidate_sha: @candidate_sha
       )
+      bundle.bytes.each do |name, bytes|
+        findings = HiveLiveAgentProof.secret_findings(bytes)
+        unless findings.empty?
+          raise Error, "#{name} workflow-creator evidence secret scan failed: #{findings.join(', ')}"
+        end
+      end
+      bundle
     end
   end
 

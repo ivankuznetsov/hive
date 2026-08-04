@@ -92,6 +92,29 @@ class ReleaseCandidateArtifactsTest < Minitest::Test
     end
   end
 
+  def test_managed_web_build_executes_the_exported_candidate_helper
+    with_tmp_dir do |dir|
+      export = File.join(dir, "export")
+      helper = File.join(export, "packaging", "managed_web_archive.rb")
+      FileUtils.mkdir_p(File.dirname(helper))
+      File.write(helper, <<~'RUBY')
+        module HiveManagedWebArchive
+          def self.build(repo_root:, candidate_sha:, version:, destination:)
+            File.binwrite(destination, [repo_root, candidate_sha, version, "candidate-helper"].join("\n"))
+          end
+        end
+      RUBY
+      destination = File.join(dir, "hive-web.tar.gz")
+      artifacts = HiveReleaseCandidate::Artifacts.new(
+        repo_root: dir, candidate_sha: "a" * 40, candidate_dir: File.join(dir, "candidate")
+      )
+
+      artifacts.send(:build_managed_web, export, "0.6.9", destination)
+
+      assert_equal [ dir, "a" * 40, "0.6.9", "candidate-helper" ].join("\n"), File.binread(destination)
+    end
+  end
+
   def test_artifact_path_collision_fails_before_any_build
     with_tmp_dir do |dir|
       candidate = File.join(dir, "candidate")

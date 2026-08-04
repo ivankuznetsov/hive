@@ -26,7 +26,10 @@ the retained source archive with bounded compressed size, entry count,
 expanded bytes, and per-input bytes. Missing, duplicate, case/noncanonical,
 wrong-type, linked/unsupported, oversized, or drifted closure entries fail
 closed; this is narrow exact-input admission for the builder closure, not a
-generic archive extraction subsystem.
+generic archive extraction subsystem. The managed-Web helper runs in an
+isolated Ruby process from that exported candidate source, so the executed
+implementation and the recorded builder identity cannot diverge when a local
+checkout differs from the requested candidate SHA.
 
 `plan` is the default and is read-only. `list` and `inspect` are observational.
 `run`, `resume`, and `rerun` are explicit local mutations; local attempts use

@@ -9,7 +9,6 @@ require "rubygems/package"
 require "tmpdir"
 require "zlib"
 require_relative "paths"
-require_relative "../managed_web_archive"
 
 module HiveReleaseCandidate
   class Artifacts
@@ -110,10 +109,7 @@ module HiveReleaseCandidate
       FileUtils.rm_f(incumbent_manifest_path)
 
       web_name = "hive-web-#{version}.tar.gz"
-      HiveManagedWebArchive.build(
-        repo_root: repo_root, candidate_sha: candidate_sha, version: version,
-        destination: File.join(output, web_name)
-      )
+      build_managed_web(export, version, File.join(output, web_name))
 
       expected = {
         "gem" => gem_name,
@@ -146,8 +142,6 @@ module HiveReleaseCandidate
       write_private_json(File.join(output, "manifest.json"), manifest)
     rescue JSON::ParserError, KeyError => e
       raise Error, "invalid incumbent candidate manifest: #{e.message}"
-    rescue HiveManagedWebArchive::Error => e
-      raise Error, e.message
     end
 
     def verify_directory!(directory)
@@ -257,6 +251,27 @@ module HiveReleaseCandidate
         "gem", "build", "hive.gemspec", "--output", destination, chdir: export
       )
       raise Error, "cannot build committed candidate gem: #{stderr.strip}" unless status.success?
+    end
+
+    def build_managed_web(export, version, destination)
+      helper = File.join(export, "packaging", "managed_web_archive.rb")
+      unless File.file?(helper) && !File.symlink?(helper)
+        raise Error, "committed candidate has no managed web artifact builder"
+      end
+      script = <<~'RUBY'
+        HiveManagedWebArchive.build(
+          repo_root: ARGV.fetch(0), candidate_sha: ARGV.fetch(1),
+          version: ARGV.fetch(2), destination: ARGV.fetch(3)
+        )
+      RUBY
+      _stdout, stderr, status = Open3.capture3(
+        RbConfig.ruby, "--disable-gems", "-r", helper, "-e", script,
+        repo_root, candidate_sha, version, destination, chdir: export
+      )
+      unless status.success? && File.file?(destination) && !File.symlink?(destination)
+        FileUtils.rm_f(destination)
+        raise Error, "committed managed web builder failed: #{stderr.strip}"
+      end
     end
 
     def builder_revision(export)

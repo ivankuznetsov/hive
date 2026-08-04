@@ -42,6 +42,19 @@ module Hive
         )
       end
 
+      def dispatch_module_hook(project_root:, generation:, subject:, argv:,
+                               request_id:, provider:, interactive: false,
+                               predecessor_attempt_id: nil, retry_charge: 0,
+                               now: Time.now.utc)
+        daemon.dispatch_module_hook(
+          project_root: project_root, generation: generation, subject: subject,
+          argv: argv, request_id: request_id, provider: provider,
+          interactive: interactive,
+          predecessor_attempt_id: predecessor_attempt_id,
+          retry_charge: retry_charge, now: now
+        )
+      end
+
       private
 
       def foreground

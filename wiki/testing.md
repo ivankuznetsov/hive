@@ -214,6 +214,57 @@ paths and compares each owner's literal Hive require edges with the approved
 one-way graph. Existing U2 evidence tests remain the regression boundary for
 the receipt's embedded capture, intent, and terminal effect values.
 
+### Patrol reduced installed-CLI qualification smoke
+
+`bundle exec rake e2e:patrol_qualification_reduced` is opt-in and hostile to a
+casual checkout: it requires absolute `HIVE_PATROL_QUALIFICATION_PROJECT`,
+`HIVE_PATROL_QUALIFICATION_HOME`,
+`HIVE_PATROL_QUALIFICATION_OBSERVATIONS`, and
+`HIVE_PATROL_QUALIFICATION_EVIDENCE` paths. The disposable project must already
+contain exactly twenty real comparable shadow records described by the
+committed catalogue and observation document. The controller is read-only over
+those records.
+
+The observation document is a
+`hive-patrol-reduced-observations` v1 object with one exact case row per
+catalogue ID. Each row binds the persisted trigger ID, repository SHA, change
+window, catalogue fault label, and one-to-four typed external process outcomes
+(`exit`, `signal`, or `child_timeout`). Success is `{kind: "exit", status: 0}`;
+retry and restart cases must retain both the failed/signalled first outcome and
+the successful successor. These rows are process evidence supplied with the
+prepared project, not facts inferred from a receipt returned by the candidate.
+
+The controller uses `git archive <full HEAD>`, hashes the archive, builds and
+privately installs the exact candidate gem through
+`packaging/live_agent_skills/install_candidate_gem.sh`, and invokes only that
+installed `bin/hive` from the project cwd. Both first-party modules are
+installed through the public preview/receipt/consent CLI against a local Git
+catalogue selected with `GIT_CONFIG_*` URL rewriting. Each ordinary and
+Architecture Patrol selector goes through the internal installed-CLI facade,
+`hive module migration deterministic-receipt --json`; the final raw receipts
+and independently reconstructed bindings go through
+`deterministic-qualification --yes --json` and real report-v2 digest CAS.
+
+Every child has bounded stdin/stdout/stderr, an allowlisted environment, a
+monotonic child deadline nested under a campaign deadline, `pgroup: true`, and
+TERM/KILL whole-group teardown. Spawn, exit, signal, child-timeout, and
+campaign-timeout results remain distinct. Success and failure summaries are
+bounded, redacted, secret-scanned, mode-0600 evidence; successful evidence is
+not discarded. The successful proof records the exact E2E and focused-contract
+counts plus a compact, ID-sorted `case_results` inventory containing each
+case's module, fault label, and typed process outcomes.
+
+The catalogue labels only externally observable process-boundary cases as
+`e2e`: the combined post-reservation process restart, provider/CLI failure,
+released-attempt retry, and finalized outbox/reconciliation recovery. Capture versus
+decision persistence, module projection persistence, effect-intent uncertainty,
+and the GitHub shim barrier are `focused_test` links to exact existing test
+methods. External process kills do not claim those interior atomic contracts.
+The same-head catalogue is not an independent oracle, prepared records are not
+a fresh scheduler-driven matrix, and a private exact-gem install is not
+Homebrew/AUR/install.sh installed/live proof. This smoke therefore does not
+close full U3b, U3-ARCH-005, or U3c.
+
 ## Coverage
 
 ```bash

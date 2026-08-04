@@ -3,7 +3,7 @@ title: Agentic E2E Suite
 type: reference
 source: test/e2e/, bin/hive-e2e, schemas/hive-e2e-{coverage,selection}.v1.json, Rakefile
 created: 2026-04-29
-updated: 2026-07-27
+updated: 2026-08-04
 tags: [test, e2e, tui, incidents, modules, artifacts]
 ---
 
@@ -13,6 +13,7 @@ tags: [test, e2e, tui, incidents, modules, artifacts]
 
 ```bash
 bundle exec rake e2e:lib_test   # harness library tests
+bundle exec rake e2e:patrol_qualification_reduced # opt-in prepared-project smoke
 bin/hive-e2e list               # scenario inventory
 bin/hive-e2e run                # all scenarios
 bin/hive-e2e run --filter tui   # tag filter
@@ -25,6 +26,24 @@ bin/hive-e2e clean              # old run cleanup
 ```
 
 `rake e2e` delegates to `bin/hive-e2e run`. The default `rake test` suite does not run e2e scenarios.
+
+The reduced Patrol qualification smoke is also excluded from `rake e2e`, the
+default suite, coverage, and hosted CI. It requires four explicit absolute-path
+environment inputs for a disposable project, its isolated Hive home, a
+read-only observation document, and retained evidence. The controller archives
+the clean full candidate `HEAD`, builds and privately installs that gem, creates
+a local Git module catalogue from those archived bytes, and redirects only the
+catalogue URL through `GIT_CONFIG_*`. It then invokes only the installed
+`bin/hive` from the project directory for module installation and the internal
+deterministic receipt/qualification process facade.
+
+This is a prepared-record public-process smoke, not the full Patrol U3b matrix:
+it does not run the schedulers that produced the supplied records, and its
+catalogue and controls live at the same candidate head. Successful output
+therefore proves neither independent-control authority nor installed/live U3c
+coverage. Its retained proof includes exact E2E/focused counts and a compact
+ID-sorted record of every case's module, fault label, and typed process
+outcomes.
 
 ## Semantic coverage
 

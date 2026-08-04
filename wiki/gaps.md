@@ -18,13 +18,21 @@ tags: [gap, todo, release-proof, agent-skills]
   trigger identity under the shared migration lock, constructs its canonical
   receipt from record-owned capture, projection, and effects, and admits raw
   receipt documents only after independently supplied bindings verify before
-  digest-CAS merging report v2. U3a still does not execute
-  the compressed campaign and is not installed/live or cutover evidence;
-  current report-v2 cutover is deliberately refused at the operator boundary.
-  U3b must still commit independent controls and a real-reader
-  deterministic catalogue that drives both modules through the complete fault
-  matrix, including intent/outcome restarts, shadow attempted-effect denial,
-  exact reconciliation, and run-level duplicate detection. Its temporal cases
+  digest-CAS merging report v2. A reduced, opt-in U3b successor now commits a
+  strict real-reader catalogue, archives and privately installs the exact
+  candidate gem, installs the first-party modules through the public CLI and a
+  local Git catalogue URL rewrite, and drives prepared real ordinary and
+  Architecture Patrol shadow records through the internal installed-CLI
+  receipt/admission process facade with bounded process custody and retained
+  secret-scanned evidence.
+  This is deliberately only a prepared-record installed-CLI smoke. Its
+  same-head controls are not independent, fixture/prepared-record ingestion is
+  not a fresh scheduler-driven fault matrix, and the private gem is not a live
+  package-channel install. Interior crash contracts are linked to focused tests
+  rather than mislabelled E2E. Current report-v2 cutover remains deliberately
+  refused at the operator boundary. Full U3b must still supply independent
+  controls and freshly drive both modules through the complete process-boundary
+  matrix; its temporal cases
   must explicitly simulate wall-clock/DST boundary changes, weekly cadence,
   quota/capacity reset, and restart plus log rotation; spreading one decision
   class over timestamps cannot qualify, and timestamp, fault-step, or artifact
@@ -36,7 +44,8 @@ tags: [gap, todo, release-proof, agent-skills]
   Long-lived external resource drift remains a declared U3c live limitation,
   not something elapsed time can prove equivalent. Elapsed telemetry remains
   useful, but neither it nor a seven-day window substitutes for diversity and
-  protocol completeness.
+  protocol completeness. The reduced smoke closes none of U3-ARCH-005, U3c,
+  catalogue promotion, or mutator cutover authority.
 
 - The explicit JobStore fresh-start reset is source- and focused-test-pinned,
   including no-write fresh status, exact registered-project binding,

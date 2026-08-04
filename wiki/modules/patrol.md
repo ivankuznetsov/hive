@@ -308,10 +308,15 @@ replay. Recovery failures persist one bounded UTF-8 diagnostic cell with
 60/300/900-second retry backoff; successful generation-matched recovery clears
 it after restart.
 
-This boundary remains an internal `candidate`. U3 must still bind the repaired
-production decision/effect stream into the compressed candidate evidence
-protocol and satisfy production qualification before the catalog can promote
-it or any mutator cutover can be claimed.
+This boundary remains an internal `candidate`. The opt-in reduced U3b successor
+under `test/e2e/` can take a prepared disposable project's real persisted
+ordinary and Architecture Patrol shadow records through an archived, privately
+installed candidate's internal receipt and qualification process facade. It neither creates
+those scheduler records nor supplies independent controls: catalogue and
+controller remain same-head test assets. Interior atomic crash contracts stay
+owned by their exact focused tests. Full independent U3b qualification,
+installed/live U3c evidence, catalogue promotion, and mutator cutover therefore
+remain unproven.
 
 ## Safety invariants
 

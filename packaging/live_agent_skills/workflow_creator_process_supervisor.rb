@@ -30,8 +30,8 @@ module HiveLiveAgentProof
         @timeout = positive_float(timeout, "timeout")
         @term_grace = positive_float(term_grace, "TERM grace")
         @kill_grace = positive_float(kill_grace, "KILL grace")
-        @launched = {}
-        @receipts = []
+        @launched, @receipts = {}, []
+        @state_mutex = Mutex.new
         @workspace = @cleanup = nil
       rescue Values::Error
         raise Error, "workflow-creator exact secrets are invalid"
@@ -45,16 +45,19 @@ module HiveLiveAgentProof
       end
       def run_outer_workflow_creator(**options) = launch("outer-workflow-creator", **options)
       def run_outer_authorized_work(**options) = launch("outer-authorized-work", **options)
-      def receipts = copy(@receipts)
+      def receipts = @state_mutex.synchronize { copy(@receipts) }
       def teardown
-        labels = @receipts.map { |row| row.fetch("label") }
-        started = @launched.any?
-        all_received = started && @receipts.length == @launched.length
-        complete = labels == LABELS && @receipts.all? { |row| row.dig("teardown", "status") == "passed" }
+        launched, receipts = @state_mutex.synchronize { [ @launched.dup, copy(@receipts) ] }
+        labels = receipts.map { |row| row.fetch("label") }
+        started = launched.any?
+        all_received = started && receipts.length == launched.length
+        complete = all_received && launched.keys.sort == LABELS.sort && labels.sort == LABELS.sort &&
+                   labels.uniq.length == LABELS.length &&
+                   receipts.all? { |row| row.dig("teardown", "status") == "passed" }
         copy("status" => started ? (complete ? "passed" : "failed") : "not_started",
-             "expected_labels" => LABELS, "receipt_labels" => labels,
+             "expected_labels" => LABELS, "receipt_labels" => complete ? LABELS : labels,
              "outer_root_reaped" => all_received,
-                          "remaining_descendants" => started ? remaining_receipts : nil)
+             "remaining_descendants" => started ? remaining_receipts(receipts) : nil)
       end
       def create_proof_workspace(path)
         raise Error, "proof workspace is already owned" if @workspace
@@ -82,9 +85,11 @@ module HiveLiveAgentProof
       private
       def launch(label, executable:, argv:, environment:, cwd:, stdin_data: nil)
         validate_launch!(executable, argv, environment, cwd, stdin_data)
-        raise Error, "workflow-creator process label was already launched" if @launched.key?(label)
-        @launched[label] = true
-        sequence = @launched.length
+        sequence = @state_mutex.synchronize do
+          raise Error, "workflow-creator process label was already launched" if @launched.key?(label)
+          @launched[label] = true
+          @launched.length
+        end
         reader, writer = IO.pipe
         cancel_reader, cancel_writer = IO.pipe
         writer.close_on_exec = true
@@ -110,7 +115,7 @@ module HiveLiveAgentProof
         raise Error, "workflow-creator supervisor receipt is invalid" unless envelope_valid
         receipt = envelope.fetch("receipt")
         validate_receipt!(receipt, label)
-        @receipts << receipt
+        @state_mutex.synchronize { @receipts << receipt }
         copy(receipt)
       rescue JSON::ParserError, SystemCallError, Timeout::Error
         raise Error, "workflow-creator supervisor receipt is invalid"
@@ -338,7 +343,7 @@ module HiveLiveAgentProof
         copy(@cleanup)
       end
 
-      def remaining_receipts = @receipts.count { |row| row.dig("teardown", "descendants") != "none" }
+      def remaining_receipts(receipts) = receipts.count { |row| row.dig("teardown", "descendants") != "none" }
       def safe_string?(value) = value.instance_of?(String) && !value.empty? && !value.include?("\0")
       def path_exists?(path)
         File.lstat(path)

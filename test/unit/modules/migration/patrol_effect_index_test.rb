@@ -44,6 +44,32 @@ class ModulesMigrationPatrolEffectIndexTest < Minitest::Test
     assert index.duplicate_effects.any? { |value| value.start_with?("semantic:") }
   end
 
+  def test_distinct_local_transitions_do_not_semantically_collide_across_generations
+    receipts = %w[job discovery action].flat_map do |sink|
+      [ 1, 2 ].map do |generation|
+        local_transition_receipt(sink:, generation:)
+      end
+    end
+    index = Hive::Modules::Migration::PatrolEffectIndex.build(receipts:)
+
+    assert index.valid?
+    assert_equal 6, index.effect_count
+    assert_empty index.duplicate_effects
+  end
+
+  def test_ordinary_patrol_local_sink_names_retain_semantic_collision_checks
+    receipts = [ 1, 2 ].map do |generation|
+      local_transition_receipt(
+        sink: "job", generation: generation, module_name: "patrol"
+      )
+    end
+    index = Hive::Modules::Migration::PatrolEffectIndex.build(receipts:)
+
+    refute index.valid?
+    assert_equal 1, index.effect_count
+    assert index.duplicate_effects.any? { |value| value.start_with?("semantic:") }
+  end
+
   def test_denied_shadow_attempts_are_observable_but_are_not_effects
     denied = effect_receipt(authority: "shadow", status: "denied")
     index = Hive::Modules::Migration::PatrolEffectIndex.build(
@@ -116,6 +142,25 @@ class ModulesMigrationPatrolEffectIndexTest < Minitest::Test
     end
     Hive::Modules::Migration::EffectReceipt.build(
       intent: intent, status: status, outcome: outcome, recorded_at: NOW
+    )
+  end
+
+  def local_transition_receipt(sink:, generation:, module_name: "architecture-patrol")
+    intent = Hive::Modules::Migration::EffectIntent.build(
+      module_name: module_name, occurrence_id: "occ-#{'a' * 64}",
+      authority: "legacy", owner_epoch: generation, sink: sink,
+      target: "job-1", idempotency_key: "#{sink}:#{generation}",
+      capability: "filesystem_write", claim_generation: generation,
+      scope: { "job_id" => "job-1", "operation" => "test" },
+      created_at: NOW
+    )
+    Hive::Modules::Migration::EffectReceipt.build(
+      intent: intent, status: "committed",
+      outcome: {
+        "transition_status" => "applied",
+        "transition_digest" => "#{generation}" * 64
+      },
+      recorded_at: NOW
     )
   end
 

@@ -863,6 +863,11 @@ not produce a trusted live attestation. Keep this gap open until the dedicated
 `live-workflow-creator` job succeeds for an exact protected-main candidate and
 the resulting Check Run binds the prompt, candidate skill digest, ordered Hive
 commands, exact editorial graph, zero task count, secret scan, and cleanup.
+U1b now owns crash-safe publication of the fixed primary receipt, but its
+temporary protected-smoke adapter intentionally records
+`u14_execution_custody_unavailable` rather than turning successful model output
+into a live-success claim. U14 must first prove installed execution custody and
+U15 must then own credential routing and the authenticated final translation.
 The same proof must also attest one explicitly authorized task, one first-stage
 run, a no-op retry with the same idempotency key, and matching operational
 status.

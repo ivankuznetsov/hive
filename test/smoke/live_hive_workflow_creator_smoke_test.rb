@@ -7,6 +7,7 @@ require "rbconfig"
 require "timeout"
 require "yaml"
 require_relative "../../packaging/live_agent_skills/proof"
+require_relative "../../packaging/live_agent_skills/workflow_creator_evidence"
 
 # Authenticated, opt-in proof that OpenClaw discovers the exact candidate
 # /hive skill and follows its workflow-creator route. The success oracle is the
@@ -35,10 +36,14 @@ class LiveHiveWorkflowCreatorSmokeTest < Minitest::Test
     availability!(!evidence_path.empty?, "HIVE_CREATOR_EVIDENCE_PATH is missing")
     availability!(!credential.empty?, "OPENAI_API_KEY is unavailable")
     availability!(!binary.nil?, "openclaw binary is not on PATH")
+    initial_receipt = HiveLiveAgentProof::WorkflowCreatorEvidence.initialize!(
+      bundle_directory: File.dirname(evidence_path), candidate_sha:
+    )
 
     root = Dir.mktmpdir("hive-live-workflow-creator")
     FileUtils.chmod(0o700, root)
     evidence = base_evidence(candidate_sha)
+    model_loop_executed = false
     failure = nil
     begin
       manifest = validate_candidate_artifacts!(artifacts, candidate_sha)
@@ -62,6 +67,7 @@ class LiveHiveWorkflowCreatorSmokeTest < Minitest::Test
         ],
         chdir: workspace
       )
+      model_loop_executed = true
       assert status.success?,
              "OpenClaw workflow creator failed: #{redact(stderr, credential).lines.first(12).join}\n" \
              "#{redact(stdout, credential).lines.first(12).join}"
@@ -138,9 +144,18 @@ class LiveHiveWorkflowCreatorSmokeTest < Minitest::Test
     ensure
       FileUtils.rm_rf(root)
       evidence["cleanup"] = { "status" => File.exist?(root) ? "failed" : "passed" }
-      write_evidence(evidence_path, evidence)
+      publication_failure = begin
+        publish_nonclaiming_receipt(
+          File.dirname(evidence_path), initial_receipt, candidate_sha, failure,
+          model_loop_executed
+        )
+        nil
+      rescue StandardError => e
+        e
+      end
     end
     raise failure if failure
+    raise publication_failure if publication_failure
   end
 
   def test_controlled_hive_enforces_the_editorial_graph_and_command_order
@@ -179,6 +194,33 @@ class LiveHiveWorkflowCreatorSmokeTest < Minitest::Test
       assert_equal false, retry_payload.fetch("created")
       assert_equal 1, task.fetch("run_count")
       assert_equal 1, task_count(workspace)
+    end
+  end
+
+
+  def test_nonclaiming_receipt_distinguishes_preloop_and_postloop_outcomes
+    with_tmp_dir do |root|
+      bundle = File.join(root, "preloop")
+      FileUtils.mkdir_p(bundle, mode: 0o700)
+      FileUtils.chmod(0o700, bundle)
+      initial = HiveLiveAgentProof::WorkflowCreatorEvidence.initialize!(
+        bundle_directory: bundle, candidate_sha: "a" * 40
+      )
+      publish_nonclaiming_receipt(bundle, initial, "a" * 40, RuntimeError.new("failed"), false)
+      preloop = JSON.parse(File.binread(File.join(bundle, "openclaw-workflow-creator.json")))
+      assert_equal [ "proof_failed", "unavailable", "not_started" ],
+                   preloop.values_at("reason", "execution_kind", "model_loop")
+
+      bundle = File.join(root, "postloop")
+      FileUtils.mkdir_p(bundle, mode: 0o700)
+      FileUtils.chmod(0o700, bundle)
+      initial = HiveLiveAgentProof::WorkflowCreatorEvidence.initialize!(
+        bundle_directory: bundle, candidate_sha: "a" * 40
+      )
+      publish_nonclaiming_receipt(bundle, initial, "a" * 40, nil, true)
+      postloop = JSON.parse(File.binread(File.join(bundle, "openclaw-workflow-creator.json")))
+      assert_equal [ "u14_execution_custody_unavailable", "authenticated_openclaw", "executed" ],
+                   postloop.values_at("reason", "execution_kind", "model_loop")
     end
   end
 
@@ -582,14 +624,19 @@ class LiveHiveWorkflowCreatorSmokeTest < Minitest::Test
     File.open(path, File::WRONLY | File::CREAT | File::TRUNC, 0o600) { |file| file.write(body) }
   end
 
-  def write_evidence(path, evidence)
-    return if path.to_s.empty?
-
-    findings = HiveLiveAgentProof.secret_findings(JSON.generate(evidence))
-    evidence["secret_scan"] = {
-      "status" => "failed", "scanner" => "hive-live-agent-proof/v1"
-    } unless findings.empty?
-    HiveLiveAgentProof.write_json(path, evidence)
+  def publish_nonclaiming_receipt(bundle, initial, candidate_sha, failure, model_loop_executed)
+    proven_but_uncomposed = failure.nil? && model_loop_executed
+    receipt = HiveLiveAgentProof::WorkflowCreator.failure(
+      candidate_sha:,
+      phase: proven_but_uncomposed ? "evidence" : "proof",
+      reason: proven_but_uncomposed ? "u14_execution_custody_unavailable" : "proof_failed",
+      detail: failure&.message,
+      execution_kind: model_loop_executed ? "authenticated_openclaw" : "unavailable",
+      model_loop: model_loop_executed ? "executed" : "not_started"
+    )
+    HiveLiveAgentProof::WorkflowCreatorEvidence.replace_nonpassing!(
+      bundle_directory: bundle, expected: initial.value, receipt: receipt.value
+    )
   end
 
   def find_executable(name)

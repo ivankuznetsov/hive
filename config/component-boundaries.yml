@@ -827,12 +827,12 @@ components:
     migration_exceptions: []
 
   - id: workflow-creator-core
-    name: Workflow Creator Core
-    state: candidate
+    name: Workflow Creator
+    state: boundary-ready
     entrypoint:
-      file: packaging/live_agent_skills/workflow_creator.rb
-      require: ./packaging/live_agent_skills/workflow_creator
-      constant: HiveLiveAgentProof::WorkflowCreator
+      file: packaging/live_agent_skills/workflow_creator_evidence.rb
+      require: ./packaging/live_agent_skills/workflow_creator_evidence
+      constant: HiveLiveAgentProof::WorkflowCreatorEvidence
     public_contract:
       values:
         - HiveLiveAgentProof::WorkflowCreator::Vocabulary
@@ -841,26 +841,39 @@ components:
         - HiveLiveAgentProof::WorkflowCreator.validate_primary!
         - HiveLiveAgentProof::WorkflowCreator.validate_installation!
         - HiveLiveAgentProof::WorkflowCreator.validate_execution!
+        - HiveLiveAgentProof::WorkflowCreatorBundle.source
+        - HiveLiveAgentProof::WorkflowCreatorBundle.retained
+        - HiveLiveAgentProof::WorkflowCreatorEvidence.initialize!
+        - HiveLiveAgentProof::WorkflowCreatorEvidence.replace_nonpassing!
       errors:
         - HiveLiveAgentProof::Error
         - HiveLiveAgentProof::WorkflowCreator::Error
+        - HiveLiveAgentProof::WorkflowCreatorEvidence::Conflict
+        - HiveLiveAgentProof::WorkflowCreatorEvidence::UnsafeStorage
+        - HiveLiveAgentProof::WorkflowCreatorEvidence::Unavailable
     owned_paths:
       - packaging/live_agent_skills/workflow_creator.rb
       - packaging/live_agent_skills/workflow_creator_contract.rb
       - packaging/live_agent_skills/workflow_creator_execution_contract.rb
       - packaging/live_agent_skills/workflow_creator_bundle.rb
+      - packaging/live_agent_skills/workflow_creator_evidence.rb
+      - packaging/live_agent_skills/workflow_creator_receipt_publisher.rb
     state_contracts:
       - "Each public input is captured once before semantic validation, and the admitted primary snapshot is returned"
       - "Failure construction captures stable caller inputs and detail once, then captures only its constructed result"
       - "The semantic core is declarative and owns no retention, publication, process, provider, or credential state"
       - "The bundle owner reads one exact four-file source bundle and independently revalidates retained proof bytes"
+      - "The evidence facade alone initializes and compare-and-swap replaces the vocabulary-fixed primary receipt"
+      - "Publication converges exact retries and bounded transient recovery without clobbering conflicting bytes"
     schema_contracts:
       - "Vocabulary and failed, primary, installation, and execution schema-v1 fields are exact and deeply immutable"
       - "Installed closures, ordered commands, capture digests, classifications, and receipt summaries are cross-bound"
       - "Source and retained bundle members are canonical JSON whose exact bytes bind the primary, installations, and receipt"
+      - "Published non-passing receipts are exact canonical bytes admitted by the merged creator semantic contract"
     lock_contracts:
-      - "No locks or durable state; validation is pure over immutable Values snapshots"
-      - "Source custody uses owner-private no-follow reads; proof retention and output creation remain with the incumbent attestor"
+      - "Semantic validation is pure; the publication state machine owns only the fixed primary receipt and bounded-prefix staging links"
+      - "Held directory descriptors and native no-follow openat/linkat/renameat/unlinkat calls bind publication and cleanup"
+      - "A cooperative native lock on the held target-directory descriptor serializes complete replacement transitions"
     component_dependencies:
       - workflow-creator-values
     allowed_hive_dependencies: []
@@ -868,14 +881,24 @@ components:
       - HiveLiveAgentProof::WorkflowCreator::Contract
       - HiveLiveAgentProof::WorkflowCreator::ExecutionContract
       - HiveLiveAgentProof::WorkflowCreatorBundle
-    forbidden_constructions: []
-    authorized_internal_constructions: []
+      - HiveLiveAgentProof::WorkflowCreatorReceiptPublisher
+    forbidden_constructions:
+      - HiveLiveAgentProof::WorkflowCreatorReceiptPublisher
+    authorized_internal_constructions:
+      - constant: HiveLiveAgentProof::WorkflowCreatorReceiptPublisher
+        files:
+          - packaging/live_agent_skills/workflow_creator_evidence.rb
+        reason: "The typed creator evidence facade is the sole publication composition root"
+    construction_scan_paths:
+      - packaging/live_agent_skills
     hive_consumers:
       - packaging/live_agent_skills/proof.rb
-    mutation_authority: "No mutation authority; reads bounded exact bundle bytes and allocates only immutable validated results. Attestation retention remains above the seam."
-    recovery_surface: "Semantic or custody validation fails closed through HiveLiveAgentProof::Error and exposes no retry or recovery state."
+      - test/smoke/live_hive_workflow_creator_smoke_test.rb
+    mutation_authority: "Only the evidence facade publishes the vocabulary-fixed primary receipt; it cannot choose filenames, execute commands, select providers, handle credentials, or issue a live-success claim."
+    recovery_surface: "Exact retries and bounded same-inode transient recovery converge; ambiguous links, changed parents, unsafe entries, conflicts, and native failures fail through typed creator evidence errors."
     wiki_page: wiki/component-boundaries.md
     focused_tests:
       - test/unit/packaging/workflow_creator_core_test.rb
+      - test/unit/packaging/workflow_creator_evidence_test.rb
       - test/unit/packaging/live_agent_proof_test.rb
     migration_exceptions: []

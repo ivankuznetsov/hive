@@ -41,7 +41,7 @@ module HiveLiveAgentProof
 
   class Error < StandardError; end
 
-  require_relative "workflow_creator_bundle"
+  require_relative "workflow_creator_evidence"
 
   creator_vocabulary = WorkflowCreator::Vocabulary
   WORKFLOW_CREATOR_REQUEST = creator_vocabulary.fetch("request")

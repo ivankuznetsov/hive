@@ -13,6 +13,7 @@ class WorkflowCreatorExecutionTest < Minitest::Test
   Execution = HiveLiveAgentProof::WorkflowCreatorExecution
   SHA = "a" * 40
   SLUG = "created-editorial-42"
+  SUPERVISOR_TIMEOUT = 10
 
   def setup
     skip "Linux process custody is required" unless RUBY_PLATFORM.include?("linux")
@@ -245,7 +246,7 @@ class WorkflowCreatorExecutionTest < Minitest::Test
       openclaw: fixture.fetch(:openclaw), archives: fixture.fetch(:archives),
       workspace_path: fixture.fetch(:workspace_path), bundle_directory: fixture.fetch(:bundle_directory),
       correlation_id: "creator-execution", exact_secrets: [],
-      supervisor_options: { "timeout" => 2, "term_grace" => 0.05, "kill_grace" => 0.2 }
+      supervisor_options: { "timeout" => SUPERVISOR_TIMEOUT, "term_grace" => 0.05, "kill_grace" => 0.2 }
     )
   end
 

@@ -49,8 +49,9 @@ provider credentials make this live gate explicitly unavailable; they never
 turn a skipped test into release evidence.
 
 The U1b adapter publishes through `WorkflowCreatorEvidence` but deliberately
-retains a typed non-passing receipt after a successful model loop until U14
-supplies execution custody and U15 owns the final authenticated claim.
+retains a typed non-passing receipt after a successful model loop. U14 now
+supplies deterministic execution custody; U15 still owns authenticated
+provider orchestration and the final passing claim.
 
 ## Local feedback loop
 
@@ -143,6 +144,12 @@ bundle exec ruby -Itest test/unit/packaging/workflow_creator_values_test.rb
 bundle exec ruby -Itest test/unit/packaging/workflow_creator_text_safety_test.rb
 bundle exec ruby -Itest test/unit/packaging/workflow_creator_core_test.rb
 bundle exec ruby -Itest test/unit/packaging/workflow_creator_evidence_test.rb
+bundle exec ruby -Itest test/unit/packaging/workflow_creator_execution_test.rb
+bundle exec ruby -Itest test/unit/packaging/workflow_creator_archive_test.rb
+bundle exec ruby -Itest test/unit/packaging/workflow_creator_installation_test.rb
+bundle exec ruby -Itest test/unit/packaging/workflow_creator_capture_test.rb
+bundle exec ruby -Itest test/unit/packaging/workflow_creator_process_supervisor_test.rb
+bundle exec ruby -Itest test/unit/packaging/workflow_creator_gateway_test.rb
 bundle exec ruby -Itest test/unit/packaging/live_agent_proof_test.rb
 ```
 
@@ -154,6 +161,26 @@ catalog-authorized composition file. The helper can run a named focused
 clean-load proof for a candidate such as Attempts without representing the
 whole component graph as ready.
 
+The Workflow Creator Execution row fixes the U14 inventory at exactly six
+runtime sources and one downward component edge to Workflow Creator Core. Its
+contract test makes execution the only constructor of Gateway and
+ProcessSupervisor, ProcessSupervisor the only constructor of Capture, and
+allows the private receipt publisher in execution only for the three
+Vocabulary-fixed support members. It also checks that command labels are
+sourced from `WorkflowCreator::Vocabulary`, that the six-source relative
+require closure cannot widen to Hive runtime code, and that the readable
+pairwise source budgets remain exact: archive + installation at most 390 lines,
+capture + supervisor at most 485, and gateway + execution at most 520. These
+are pair budgets, not per-file compression targets.
+
+The archive, installation, capture, supervisor, and gateway files exercise
+regular-only bounded archives, exact installed closures, capped redacted
+streams, Linux-only process custody with caller-loss teardown, and the
+sequence-bound nine-command gateway. They establish a deterministic U14
+substrate only. No focused test selects a provider/model/credential, performs
+an authenticated model loop, lets U14 publish the primary receipt, or upgrades
+the result into a live passing claim; those remain U15 responsibilities.
+
 The live-agent proof suite exercises the strict U1a2 cutover: source admission
 requires the exact four canonical vocabulary-named JSON files in an
 owner-private directory, attestation retains those exact bytes, and verification
@@ -164,10 +191,9 @@ Semantically valid support members containing credential-shaped bytes also
 fail before any proof directory is created. Release-candidate coverage proves
 the managed-Web archive executes the exported candidate helper even when it
 differs from the checkout-loaded implementation.
-The live workflow still produces only the former primary file, so provider-backed
-Workflow Creator proof remains unavailable until the complete bundle-producing
-units land; this focused suite is deterministic custody/semantic proof, not a
-live pass.
+The protected live workflow is not yet wired through U14 by authenticated U15
+orchestration, so provider-backed Workflow Creator proof remains unavailable;
+this focused suite is deterministic custody/semantic proof, not a live pass.
 
 Workflow Creator Values keeps its clean-load and dependency proof outside the
 generic component loader. The Values suite directly runs its leaf under

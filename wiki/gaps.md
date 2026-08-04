@@ -866,11 +866,22 @@ commands, exact editorial graph, zero task count, secret scan, and cleanup.
 U1b now owns crash-safe publication of the fixed primary receipt, but its
 temporary protected-smoke adapter intentionally records
 `u14_execution_custody_unavailable` rather than turning successful model output
-into a live-success claim. U14 must first prove installed execution custody and
-U15 must then own credential routing and the authenticated final translation.
+into a live-success claim. U14 now supplies the deterministic installed,
+archive, gateway, capture, process-custody, and fixed-support-publication
+substrate, but U15 must still route credentials/providers, orchestrate the
+authenticated run, and own the final passing translation.
 The same proof must also attest one explicitly authorized task, one first-stage
 run, a no-op retry with the same idempotency key, and matching operational
 status.
+
+U14 process custody is Linux-only and deliberately fails closed on other
+platforms. It tests caller loss while the trusted custody root remains alive;
+it does not claim recovery after an external actor SIGKILLs that custody root
+itself. Coherent arbitrary same-UID compromise is also excluded because such
+an actor can rewrite process, filesystem, and private IPC evidence together.
+Closing those stronger guarantees would require a separate OS identity or
+equivalent protected broker, not a compatibility reader or another in-process
+Ruby fence.
 
 ## WorkLedger is an internal boundary, not a published format (2026-07-26)
 
@@ -1013,13 +1024,11 @@ local command contract or its deterministic tests.
 ## Live Workflow Creator still needs complete bundle production (2026-08-04)
 
 U1a2 makes the incumbent attestor and verifier require, retain, and
-independently revalidate the exact four-file Workflow Creator bundle. The
-Core therefore has a real consumer and no migration exception, but remains a
-custody-complete candidate until U1b supplies the publication boundary. The
-current live workflow still uploads only `openclaw-workflow-creator.json`, so
-that live result is now explicitly unavailable rather than accepted through a
-legacy one-file fallback. U1b/U14/U15 must produce the two installation
-manifests and execution receipt alongside the primary before a live passing
-claim is possible. No provider-backed run, publication, or release
-qualification was performed here; hostile/property campaigns remain optional
-and outside the normal merge gate.
+independently revalidate the exact four-file Workflow Creator bundle. U1b owns
+the primary receipt, and U14 adds a boundary-ready deterministic substrate that
+can publish only the two installation manifests and execution receipt. The
+protected live workflow still lacks U15 authenticated orchestration, so no
+provider-backed result may be upgraded to a passing claim. The old one-file
+shape remains rejected; U14 introduces no compatibility reader. No
+provider-backed run, publication, or release qualification was performed here;
+hostile/property campaigns remain optional and outside the normal merge gate.

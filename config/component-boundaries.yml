@@ -888,7 +888,8 @@ components:
       - constant: HiveLiveAgentProof::WorkflowCreatorReceiptPublisher
         files:
           - packaging/live_agent_skills/workflow_creator_evidence.rb
-        reason: "The typed creator evidence facade is the sole publication composition root"
+          - packaging/live_agent_skills/workflow_creator_execution.rb
+        reason: "The typed evidence facade owns the primary receipt, while the execution facade may construct the same private publisher only for the three vocabulary-fixed support members"
     construction_scan_paths:
       - packaging
     hive_consumers:
@@ -900,5 +901,91 @@ components:
     focused_tests:
       - test/unit/packaging/workflow_creator_core_test.rb
       - test/unit/packaging/workflow_creator_evidence_test.rb
+      - test/unit/packaging/live_agent_proof_test.rb
+    migration_exceptions: []
+
+  - id: workflow-creator-execution
+    name: Workflow Creator Execution
+    state: boundary-ready
+    entrypoint:
+      file: packaging/live_agent_skills/workflow_creator_execution.rb
+      require: ./packaging/live_agent_skills/workflow_creator_execution
+      constant: HiveLiveAgentProof::WorkflowCreatorExecution
+    public_contract:
+      values:
+        - HiveLiveAgentProof::WorkflowCreatorExecution.start!
+        - HiveLiveAgentProof::WorkflowCreatorExecution#gateway_path
+        - HiveLiveAgentProof::WorkflowCreatorExecution#workspace_path
+        - HiveLiveAgentProof::WorkflowCreatorExecution#run_outer_workflow_creator
+        - HiveLiveAgentProof::WorkflowCreatorExecution#run_outer_authorized_work
+        - HiveLiveAgentProof::WorkflowCreatorExecution#draft!
+        - HiveLiveAgentProof::WorkflowCreatorExecution#finish!
+        - HiveLiveAgentProof::WorkflowCreatorExecution#result
+        - HiveLiveAgentProof::WorkflowCreatorExecution#close
+      errors:
+        - HiveLiveAgentProof::WorkflowCreatorExecution::Error
+        - HiveLiveAgentProof::WorkflowCreatorExecution::Conflict
+        - HiveLiveAgentProof::WorkflowCreatorExecution::Unavailable
+    owned_paths:
+      - packaging/live_agent_skills/workflow_creator_execution.rb
+      - packaging/live_agent_skills/workflow_creator_installation.rb
+      - packaging/live_agent_skills/workflow_creator_gateway.rb
+      - packaging/live_agent_skills/workflow_creator_archive.rb
+      - packaging/live_agent_skills/workflow_creator_process_supervisor.rb
+      - packaging/live_agent_skills/workflow_creator_capture.rb
+    state_contracts:
+      - "One typed session owns the proof workspace, fixed gateway, installed closures, archive admissions, bounded captures, supervisor receipts, draft support publication, and final result"
+      - "Linux child-subreaper custody covers the nine vocabulary-defined candidate commands and exactly two outer model-loop labels; zero launches remains not_started and each launch requires one complete teardown receipt"
+      - "The session exposes only its fixed gateway/workspace paths, two closed outer launches, draft, finish, result, and idempotent close lifecycle; it exposes no generic process, archive, installation, publisher, or cleanup primitive"
+      - "U14 is a deterministic stable substrate for U15 orchestration, not evidence that an authenticated provider run or live Workflow Creator proof occurred"
+    schema_contracts:
+      - "Command positions and labels come from the Workflow Creator Vocabulary and bind exact argv, created task slug, capture digest, teardown, archive, installation, and receipt identities"
+      - "Archive admission accepts only regular owner-controlled candidate-package and openclaw-package members under fixed entry, byte, ratio, path, and elapsed-time ceilings"
+      - "Installation closure binds exact caller-supplied roots, manifests, inventory bytes, required role paths, candidate identity, and OpenClaw version without selecting any of them"
+      - "Publication targets exactly candidate-installed-manifest.json, openclaw-installed-manifest.json, and execution-receipt.json from the vocabulary; the primary openclaw-workflow-creator.json remains owned by WorkflowCreatorEvidence"
+    lock_contracts:
+      - "The gateway serializes one sequence-bound local-socket transaction and poisons the session on changed command, candidate, wrapper, socket, workspace, or credential-environment evidence"
+      - "The supervisor retains Linux process-tree custody through containment, caller-loss handling, TERM/KILL escalation, drain, and reaping before a teardown receipt can pass"
+      - "Fixed support publication reuses the private descriptor-relative publisher and its cooperative directory lock; cleanup removes only a session-created path whose current device and inode match its ownership row"
+    component_dependencies:
+      - workflow-creator-core
+    allowed_hive_dependencies: []
+    internal_collaborators:
+      - HiveLiveAgentProof::WorkflowCreatorArchive
+      - HiveLiveAgentProof::WorkflowCreatorInstallation
+      - HiveLiveAgentProof::WorkflowCreatorGateway
+      - HiveLiveAgentProof::WorkflowCreator::ProcessSupervisor
+      - HiveLiveAgentProof::WorkflowCreator::Capture
+    forbidden_constructions:
+      - HiveLiveAgentProof::WorkflowCreatorGateway
+      - HiveLiveAgentProof::WorkflowCreator::ProcessSupervisor
+      - HiveLiveAgentProof::WorkflowCreator::Capture
+    authorized_internal_constructions:
+      - constant: HiveLiveAgentProof::WorkflowCreatorGateway
+        files:
+          - packaging/live_agent_skills/workflow_creator_execution.rb
+        reason: "WorkflowCreatorExecution is the sole fixed audit-gateway composition root"
+      - constant: HiveLiveAgentProof::WorkflowCreator::ProcessSupervisor
+        files:
+          - packaging/live_agent_skills/workflow_creator_execution.rb
+        reason: "WorkflowCreatorExecution is the sole Linux process-custody composition root"
+      - constant: HiveLiveAgentProof::WorkflowCreator::Capture
+        files:
+          - packaging/live_agent_skills/workflow_creator_process_supervisor.rb
+        reason: "ProcessSupervisor alone constructs bounded capture inside its private custody child"
+    construction_scan_paths:
+      - packaging
+    hive_consumers:
+      - packaging/live_agent_skills/proof.rb
+    mutation_authority: "The session may create and identity-bound-clean one proof workspace, execute only the eleven closed labels through its private Linux supervisor, inspect the two fixed archive kinds and caller-selected installed closures, and publish only the three vocabulary-fixed support members. It cannot publish the primary receipt or choose a provider, model, credential, installation version, workflow policy, or live-success classification."
+    recovery_surface: "Caller loss, timeouts, descendant teardown, partial capture, poisoned gateway state, changed filesystem/process identities, unsafe archives/installations, support-file conflicts, and close-before-finish fail closed with bounded receipts or fixed errors. Arbitrary coherent same-UID compromise and externally SIGKILLing the trusted custody root itself are outside the claim."
+    wiki_page: wiki/component-boundaries.md
+    focused_tests:
+      - test/unit/packaging/workflow_creator_execution_test.rb
+      - test/unit/packaging/workflow_creator_archive_test.rb
+      - test/unit/packaging/workflow_creator_installation_test.rb
+      - test/unit/packaging/workflow_creator_capture_test.rb
+      - test/unit/packaging/workflow_creator_process_supervisor_test.rb
+      - test/unit/packaging/workflow_creator_gateway_test.rb
       - test/unit/packaging/live_agent_proof_test.rb
     migration_exceptions: []

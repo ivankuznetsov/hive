@@ -179,7 +179,7 @@ class WorkflowCreatorGatewayTest < Minitest::Test
   def assert_private_gateway(root, wrapper)
     assert_equal 0o700, File.lstat(root).mode & 0o777
     assert_equal File.join(root, "workflow-creator-gateway"), wrapper
-    assert_equal 0o600, File.lstat(wrapper).mode & 0o777
+    assert_equal 0o700, File.lstat(wrapper).mode & 0o777
     socket = File.join(root, ".workflow-creator-gateway.sock")
     assert File.lstat(socket).socket?
     assert_equal 0o600, File.lstat(socket).mode & 0o777
@@ -193,7 +193,7 @@ class WorkflowCreatorGatewayTest < Minitest::Test
   end
 
   def invoke(wrapper, argv, inherited = {})
-    Open3.capture3(inherited, RUBY, wrapper, *argv, unsetenv_others: true)
+    Open3.capture3(inherited, wrapper, *argv, unsetenv_others: true)
   end
 
   def run_all(wrapper)

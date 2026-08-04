@@ -314,7 +314,10 @@ want an additional authenticated native-agent diagnostic may create four
 GitHub environments restricted to protected `main` workflow runs:
 
 - `live-agent-skills-openclaw`: `OPENAI_API_KEY` and environment variable
-  `HIVE_LIVE_MODEL` naming its OpenClaw model.
+  `HIVE_LIVE_MODEL` naming its OpenClaw model. The Workflow Creator lane also
+  accepts `OPENROUTER_API_KEY` when that model starts with `openrouter/`; the
+  exact model prefix selects one provider and the other credential is not
+  passed to OpenClaw.
 - `live-agent-skills-claude`: `ANTHROPIC_API_KEY` and a Claude-compatible
   `HIVE_LIVE_MODEL`.
 - `live-agent-skills-codex`: `CODEX_API_KEY` and a Codex-compatible
@@ -333,6 +336,15 @@ The optional workflow refuses a non-main dispatch, a workflow revision not
 loaded from `refs/heads/main`, a
 non-full SHA, a candidate not reachable from `origin/main`, or an unprotected
 main branch.
+
+The Workflow Creator diagnostic additionally installs the committed OpenClaw
+lock with lifecycle scripts disabled, audits production dependencies, seals the
+installed runtime before credentials are available, and admits the exact
+package archive and Node runtime recorded by that lock. It initializes a typed
+non-passing receipt before setup; setup, policy, provider, model, process, or
+evidence failure therefore remains uploadable rather than becoming a missing
+artifact. The authenticated run is authorization- and exact-head-bound and is
+not part of normal pull-request CI.
 
 ### 3. Homebrew tap
 

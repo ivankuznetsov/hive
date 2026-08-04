@@ -48,10 +48,10 @@ secret scanning, and cleanup. Missing
 provider credentials make this live gate explicitly unavailable; they never
 turn a skipped test into release evidence.
 
-The U1b adapter publishes through `WorkflowCreatorEvidence` but deliberately
-retains a typed non-passing receipt after a successful model loop. U14 now
-supplies deterministic execution custody; U15 still owns authenticated
-provider orchestration and the final passing claim.
+U1b remains the only primary publisher, U14 owns deterministic execution
+custody, and the U15 live runner now composes them into the final passing claim.
+The default local test remains credential-free and skipped; only an explicitly
+authorized run on the unchanged exact head can produce authenticated evidence.
 
 ## Local feedback loop
 
@@ -813,6 +813,17 @@ The protected `live-agent-skills.yml` workflow can additionally:
    seven-day structural evidence;
 7. validate all four evidence rows, assemble the candidate/provenance-bound
    private proof, and create a `live-agent-skills` Check Run on the exact SHA.
+
+The separate Workflow Creator cell is a thin adapter over
+`WorkflowCreatorLiveSetup` and `WorkflowCreatorLiveRunner`. Offline focused
+tests cover exact OpenAI/OpenRouter selection, opposite-provider and tool-child
+credential stripping, transport refusal, immutable candidate/OpenClaw closure
+admission, SQLite-backed OpenClaw approval-policy readback, authored editorial
+graph and task observation, deterministic first-stage execution, typed failure
+publication, and runtime tamper detection. The smoke test contributes only live
+availability gates and final bundle assertions. Its authenticated model calls
+run only through explicit workflow dispatch and exact-head authorization; the
+hostile suites and live lane are not normal pull-request CI.
 
 The repository-owned selector and attestation verifier remain covered by
 executable fixtures for optional diagnostic runs. They validate workflow/run

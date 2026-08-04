@@ -21,7 +21,8 @@ the first and primary consumer.
 | Attempts admission / future RunReceipt | `candidate` (guarded reference) | `require "hive/attempts/api"` → `Hive::Attempts::API` | [[modules/attempts]] |
 | Workflow Creator Values | `boundary-ready` | `require "./packaging/live_agent_skills/workflow_creator_text_safety"` → `HiveLiveAgentProof::WorkflowCreator::TextSafety` | [[component-boundaries]] |
 | Workflow Creator | `boundary-ready` | `require "./packaging/live_agent_skills/workflow_creator_evidence"` → `HiveLiveAgentProof::WorkflowCreatorEvidence` | [[component-boundaries]] |
-| Workflow Creator Execution | `boundary-ready` (deterministic U14 substrate; U15 live orchestration pending) | `require "./packaging/live_agent_skills/workflow_creator_execution"` → `HiveLiveAgentProof::WorkflowCreatorExecution` | [[component-boundaries]] |
+| Workflow Creator Execution | `boundary-ready` (deterministic U14 substrate) | `require "./packaging/live_agent_skills/workflow_creator_execution"` → `HiveLiveAgentProof::WorkflowCreatorExecution` | [[component-boundaries]] |
+| Workflow Creator Live Orchestration | `boundary-ready` (U15 runner; authenticated exact-head proof remains optional and authorization-gated) | `require "./packaging/live_agent_skills/workflow_creator_live_setup"` → `HiveLiveAgentProof::WorkflowCreatorLiveSetup` | [[component-boundaries]] |
 | UserService | `boundary-ready` | `require "hive/user_service"` → `Hive::UserService` | [[modules/user_service]] |
 | Agent ABI | `boundary-ready`; standalone package candidate | `require "hive/agent_runtime"` → `Hive::AgentRuntime` | [[modules/agent_cli_runtime]], [[modules/agent_profile]] |
 | Agent Artifact Firewall | `boundary-ready` | `require "hive/artifact_firewall"` → `Hive::ArtifactFirewall` | [[modules/protected_files]] |
@@ -37,23 +38,25 @@ has earned a gem, version, repository, or release.
 
 ## Final graph audit
 
-The catalog on 2026-08-04 retains eleven components: nine are
+The catalog on 2026-08-04 retains twelve components: ten are
 `boundary-ready`; Attempts and Patrol Effect Evidence remain `candidate`.
 Patrol retains one bounded U3 exception for deterministic public-path and
 independently authorized installed/live proof. Workflow Creator is composed
-through its U1b typed publication facade, and Workflow Creator Execution adds
-the stable deterministic U14 custody seam below still-pending U15 authenticated
-orchestration.
+through its U1b typed publication facade, Workflow Creator Execution supplies
+the stable deterministic U14 custody seam, and Workflow Creator Live
+Orchestration owns the U15 provider/setup/evidence sequence above it.
 Every retained entry point has focused clean-process load proof, every
 catalog-owned path and focused test resolves inside this repository, and the
 direct-construction guards pass against all production Ruby sources.
 
-The component dependency graph has three edges:
+The component dependency graph has five edges:
 
 ```mermaid
 flowchart LR
   skillpack[Skillpack] --> agent_abi[Agent ABI]
   workflow_execution[Workflow Creator Execution] --> workflow_core[Workflow Creator]
+  workflow_live[Workflow Creator Live Orchestration] --> workflow_execution
+  workflow_live --> workflow_core
   workflow_core[Workflow Creator] --> workflow_values[Workflow Creator Values]
   patrol_effects[Patrol Effect Evidence - candidate]
   attempts[Attempts admission - candidate]
@@ -296,9 +299,10 @@ the nine Vocabulary command positions through its fixed local gateway, launch
 the two fixed outer labels only with their vocabulary-bound prompts, capture
 bounded redacted output, supervise teardown, publish the three support members,
 and remove only the workspace whose current device/inode still matches its
-creation row. The wrapper stays inside the stable candidate closure while its
-private socket lives in the proof workspace; permanent gateway poison admits no
-later command. Final rescans must match the pre-launch installation snapshots.
+creation row. The owner-executable wrapper stays inside the stable private
+candidate closure while its private socket lives in the proof workspace;
+permanent gateway poison admits no later command. Final rescans must match the
+pre-launch installation snapshots.
 It cannot choose or expose a
 provider, model, credential, installed version, workflow policy, primary-receipt
 writer, or passing/live classification.
@@ -310,9 +314,20 @@ TERM/KILL escalation, output drain, descendant reaping, and one teardown receipt
 per launch. It does not claim survival after an external actor SIGKILLs that
 trusted custody root itself, and coherent arbitrary same-UID compromise remains
 outside the contract. Boundary readiness therefore means the deterministic U14
-substrate is stable; U15 still must supply authenticated provider/credential
-routing, live orchestration, and translation of a completed run into a passing
-proof claim.
+substrate is stable; it does not itself claim an authenticated provider run.
+
+`WorkflowCreatorLiveSetup` is the U15 composition entry point. It admits the
+exact candidate artifacts and installed candidate/OpenClaw runtimes, creates
+small immutable identity closures, projects the exact candidate `/hive` skill,
+prepares one private initialized project, installs and reads back the exact
+SQLite-backed OpenClaw execution policy, and returns only closed runner
+callables. `WorkflowCreatorLiveRunner` selects the provider from the committed
+model prefix, exposes exactly the selected credential to the two U14-supervised
+OpenClaw launches, strips provider and repository authority from tool children,
+observes the exact authored graph/task/fixture effects, and finalizes the U1b
+primary receipt. The workflow and smoke remain adapters. An authenticated
+passing artifact is still exact-head and explicit-authorization evidence; the
+catalog row does not make that optional network proof a normal CI gate.
 
 The `Agent ABI` is boundary-ready below orchestration. `AgentRuntime` exposes
 immutable request, compiled invocation, capability/probe evidence, and

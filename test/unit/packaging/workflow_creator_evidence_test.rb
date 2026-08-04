@@ -24,12 +24,19 @@ class WorkflowCreatorEvidenceTest < Minitest::Test
 
 
   def test_public_api_accepts_only_typed_bundle_operations_and_publisher_is_private
-    assert_equal %i[initialize! replace_nonpassing!], Evidence.singleton_methods(false).sort
+    assert_equal %i[
+      initialize! replace_nonpassing! replace_primary! replace_primary_with_failure!
+    ], Evidence.singleton_methods(false).sort
     assert_equal [ [ :keyreq, :bundle_directory ], [ :keyreq, :candidate_sha ] ],
                  Evidence.method(:initialize!).parameters
     replacement_parameters = Evidence.method(:replace_nonpassing!).parameters
     assert_equal %i[bundle_directory expected receipt exact_secrets],
                  replacement_parameters.map(&:last)
+    assert_equal %i[bundle_directory expected receipt manifest candidate_sha bundle_records],
+                 Evidence.method(:replace_primary!).parameters.map(&:last)
+    assert_equal %i[
+      bundle_directory expected receipt manifest candidate_sha bundle_records exact_secrets
+    ], Evidence.method(:replace_primary_with_failure!).parameters.map(&:last)
     assert_raises(NameError) { HiveLiveAgentProof::WorkflowCreatorReceiptPublisher }
   end
 

@@ -112,12 +112,12 @@ module HiveLiveAgentProof
     end
 
     def install_wrapper!
-      File.open(@wrapper_path, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |file|
+      File.open(@wrapper_path, File::WRONLY | File::CREAT | File::EXCL, 0o700) do |file|
         file.write(wrapper_source)
         file.flush
         file.fsync
       end
-      File.chmod(0o600, @wrapper_path)
+      File.chmod(0o700, @wrapper_path)
       @wrapper_identity = file_identity(File.lstat(@wrapper_path)).freeze
       @wrapper_digest = Digest::SHA256.file(@wrapper_path).hexdigest
     rescue SystemCallError
@@ -268,7 +268,7 @@ module HiveLiveAgentProof
       socket = File.lstat(@socket_path)
       wrapper = File.lstat(@wrapper_path)
       valid = socket.socket? && node_identity(socket) == @socket_identity
-      valid &&= wrapper.file? && (wrapper.mode & 0o777) == 0o600 && file_identity(wrapper) == @wrapper_identity
+      valid &&= wrapper.file? && (wrapper.mode & 0o777) == 0o700 && file_identity(wrapper) == @wrapper_identity
       valid &&= Digest::SHA256.file(@wrapper_path).hexdigest == @wrapper_digest
       raise Error unless valid
     rescue StandardError

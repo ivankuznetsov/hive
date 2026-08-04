@@ -863,13 +863,14 @@ not produce a trusted live attestation. Keep this gap open until the dedicated
 `live-workflow-creator` job succeeds for an exact protected-main candidate and
 the resulting Check Run binds the prompt, candidate skill digest, ordered Hive
 commands, exact editorial graph, zero task count, secret scan, and cleanup.
-U1b now owns crash-safe publication of the fixed primary receipt, but its
-temporary protected-smoke adapter intentionally records
-`u14_execution_custody_unavailable` rather than turning successful model output
-into a live-success claim. U14 now supplies the deterministic installed,
-archive, gateway, capture, process-custody, and fixed-support-publication
-substrate, but U15 must still route credentials/providers, orchestrate the
-authenticated run, and own the final passing translation.
+U1b owns crash-safe publication of the fixed primary receipt and U14 supplies
+the deterministic installed, archive, gateway, capture, process-custody, and
+fixed-support-publication substrate. U15 now owns exact dependency/setup
+admission, selected-provider credential routing, OpenClaw policy readback, the
+two authenticated outer loops, independent task/effect observation, and final
+passing translation. This gap remains open only until that runner produces a
+successful explicitly authorized artifact on the unchanged exact head; offline
+and hosted non-network tests do not substitute for that evidence.
 The same proof must also attest one explicitly authorized task, one first-stage
 run, a no-op retry with the same idempotency key, and matching operational
 status.
@@ -1021,14 +1022,15 @@ on every channel, run one disposable installed upgrade for brew, AUR, and bash
 and retain the updater plus migration output. This gap does not weaken the
 local command contract or its deterministic tests.
 
-## Live Workflow Creator still needs complete bundle production (2026-08-04)
+## Live Workflow Creator still needs authorized exact-head evidence (2026-08-04)
 
 U1a2 makes the incumbent attestor and verifier require, retain, and
 independently revalidate the exact four-file Workflow Creator bundle. U1b owns
 the primary receipt, and U14 adds a boundary-ready deterministic substrate that
-can publish only the two installation manifests and execution receipt. The
-protected live workflow still lacks U15 authenticated orchestration, so no
-provider-backed result may be upgraded to a passing claim. The old one-file
-shape remains rejected; U14 introduces no compatibility reader. No
-provider-backed run, publication, or release qualification was performed here;
-hostile/property campaigns remain optional and outside the normal merge gate.
+can publish only the two installation manifests and execution receipt. U15 now
+composes the authenticated OpenClaw run, exact task/effect observations, U1b
+primary publication, and U14 finalization into that four-file bundle. The old
+one-file shape remains rejected and no compatibility reader exists. No
+provider-backed exact-head run, publication, or release qualification was
+performed here; hostile/property campaigns remain optional and outside the
+normal merge gate.

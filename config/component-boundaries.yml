@@ -846,6 +846,8 @@ components:
         - HiveLiveAgentProof::WorkflowCreatorBundle.retained
         - HiveLiveAgentProof::WorkflowCreatorEvidence.initialize!
         - HiveLiveAgentProof::WorkflowCreatorEvidence.replace_nonpassing!
+        - HiveLiveAgentProof::WorkflowCreatorEvidence.replace_primary!
+        - HiveLiveAgentProof::WorkflowCreatorEvidence.replace_primary_with_failure!
       errors:
         - HiveLiveAgentProof::Error
         - HiveLiveAgentProof::WorkflowCreator::Error
@@ -864,7 +866,7 @@ components:
       - "Failure construction captures stable caller inputs and detail once, then captures only its constructed result"
       - "The semantic core is declarative and owns no retention, publication, process, provider, or credential state"
       - "The bundle owner reads one exact four-file source bundle and independently revalidates retained proof bytes"
-      - "The evidence facade alone initializes and compare-and-swap replaces the vocabulary-fixed primary receipt"
+      - "The evidence facade alone initializes and compare-and-swap replaces the vocabulary-fixed primary receipt, including typed primary-to-failure finalization"
       - "Publication converges exact retries and bounded transient recovery without clobbering conflicting bytes"
     schema_contracts:
       - "Vocabulary and failed, primary, installation, and execution schema-v1 fields are exact and deeply immutable"
@@ -903,6 +905,80 @@ components:
       - test/unit/packaging/workflow_creator_core_test.rb
       - test/unit/packaging/workflow_creator_evidence_test.rb
       - test/unit/packaging/live_agent_proof_test.rb
+    migration_exceptions: []
+
+  - id: workflow-creator-live
+    name: Workflow Creator Live Orchestration
+    state: boundary-ready
+    entrypoint:
+      file: packaging/live_agent_skills/workflow_creator_live_setup.rb
+      require: ./packaging/live_agent_skills/workflow_creator_live_setup
+      constant: HiveLiveAgentProof::WorkflowCreatorLiveSetup
+    public_contract:
+      values:
+        - HiveLiveAgentProof::WorkflowCreatorLiveSetup.prepare!
+        - HiveLiveAgentProof::WorkflowCreatorLiveRunner.initialize_evidence!
+        - HiveLiveAgentProof::WorkflowCreatorLiveRunner.fail!
+        - HiveLiveAgentProof::WorkflowCreatorLiveRunner.run!
+        - HiveLiveAgentProof::WorkflowCreatorLiveRunner::Result
+        - HiveLiveAgentProof::WorkflowCreatorOpenClawRuntime.capture!
+        - HiveLiveAgentProof::WorkflowCreatorOpenClawRuntime.verify!
+      errors:
+        - HiveLiveAgentProof::WorkflowCreatorLiveSetup::Error
+        - HiveLiveAgentProof::WorkflowCreatorLiveRunner::Error
+        - HiveLiveAgentProof::WorkflowCreatorOpenClawRuntime::Error
+    owned_paths:
+      - packaging/live_agent_skills/workflow_creator_live_setup.rb
+      - packaging/live_agent_skills/workflow_creator_live_runner.rb
+      - packaging/live_agent_skills/workflow_creator_openclaw_runtime.rb
+      - packaging/live_agent_skills/openclaw/package.json
+      - packaging/live_agent_skills/openclaw/package-lock.json
+    state_contracts:
+      - "One setup result binds the exact candidate artifacts, installed candidate and OpenClaw runtimes, immutable dependency identities, projected skill, private workspace preparation, and independent external-action observation"
+      - "One runner derives the provider from the exact model prefix, exposes only its selected credential to the two outer OpenClaw launches, and strips provider and repository authority from every downstream tool process"
+      - "The initial typed non-passing receipt exists before setup or credential preflight; each ordinary exit compare-and-swap finalizes it through Workflow Creator Core as exactly one passing or typed non-passing primary"
+      - "The smoke test and workflow select fixtures and paths only; orchestration, policy, evidence translation, and cleanup remain inside this component"
+    schema_contracts:
+      - "The configuration record binds candidate SHA, model/provider/transport, exact OpenClaw lock and package identity, reviewed lifecycle scripts, runtime tree seal, shell sanitizer, and projected skill manifest"
+      - "OpenClaw configuration admits only workspace-scoped primitive file tools plus the exact U14 gateway path, and the SQLite-backed approvals policy must read back with exact security, ask, fallback, and allowlist fields before model execution"
+      - "Passing primary evidence comes only from the exact authored editorial graph, zero-task creation observation, one authorized task and deterministic first-stage fixture, exact nine candidate commands, two authenticated outer loops, and independently observed zero external actions"
+    lock_contracts:
+      - "Setup creates only absent owner-private closure, workspace, state, home, and evidence paths; identity seals are rechecked before credential injection and after both model loops"
+      - "The U14 execution session remains the sole candidate gateway and process-custody owner; live orchestration exposes no generic command runner or evidence filename"
+    component_dependencies:
+      - workflow-creator-core
+      - workflow-creator-execution
+    allowed_hive_dependencies: []
+    internal_collaborators:
+      - HiveLiveAgentProof::WorkflowCreatorLiveRunner
+      - HiveLiveAgentProof::WorkflowCreatorOpenClawRuntime
+      - HiveLiveAgentProof::WorkflowCreatorLiveSetup::WorkspacePreparer
+      - HiveLiveAgentProof::WorkflowCreatorLiveSetup::ExternalActionsObserver
+    forbidden_constructions:
+      - HiveLiveAgentProof::WorkflowCreatorLiveSetup::WorkspacePreparer
+      - HiveLiveAgentProof::WorkflowCreatorLiveSetup::ExternalActionsObserver
+    authorized_internal_constructions:
+      - constant: HiveLiveAgentProof::WorkflowCreatorLiveSetup::WorkspacePreparer
+        files:
+          - packaging/live_agent_skills/workflow_creator_live_setup.rb
+        reason: "The setup facade alone constructs the fixed workspace-preparation callable"
+      - constant: HiveLiveAgentProof::WorkflowCreatorLiveSetup::ExternalActionsObserver
+        files:
+          - packaging/live_agent_skills/workflow_creator_live_setup.rb
+        reason: "The setup facade alone constructs the fixed external-action observation callable"
+    construction_scan_paths:
+      - packaging
+    hive_consumers:
+      - test/smoke/live_hive_workflow_creator_smoke_test.rb
+    mutation_authority: "The setup may materialize only its exact immutable closures and one disposable proof workspace; the runner may invoke only the two vocabulary-fixed OpenClaw loops through U14, publish only through Workflow Creator Core, and delete only U14-owned disposable state. Neither may choose a dependency version, release, repository effect, or provider endpoint outside its committed records."
+    recovery_surface: "Missing credentials or prerequisites remain typed blocked evidence; invalid/tampered closures, policy drift, transport overrides, tool authority, model/process failures, incomplete observations, publication conflicts, and cleanup failures remain typed non-passing evidence. A head change invalidates authenticated evidence and requires fresh authorization."
+    wiki_page: wiki/component-boundaries.md
+    focused_tests:
+      - test/unit/packaging/workflow_creator_live_setup_test.rb
+      - test/unit/packaging/workflow_creator_live_runner_test.rb
+      - test/unit/packaging/workflow_creator_openclaw_runtime_test.rb
+      - test/smoke/live_hive_workflow_creator_smoke_test.rb
+      - test/unit/release_contract_test.rb
     migration_exceptions: []
 
   - id: workflow-creator-execution

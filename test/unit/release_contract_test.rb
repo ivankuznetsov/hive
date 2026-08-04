@@ -103,6 +103,7 @@ class ReleaseContractTest < Minitest::Test
     assert_includes body, "workflow_dispatch:"
     assert_includes body, "candidate_sha:"
     assert_includes body, '[[ "$GITHUB_REF" == "refs/heads/main" ]]'
+    assert_includes body, '[[ "$GITHUB_ACTOR" == "$AUTHORIZED_DISPATCH_ACTOR" ]]'
     assert_includes body, "git merge-base --is-ancestor"
     assert_equal({ "node-version" => "22" }, setup_node.fetch("with"))
     assert_includes body, "branches/main"
@@ -157,6 +158,55 @@ class ReleaseContractTest < Minitest::Test
     assert_includes creator_step.fetch("run"), 'install -d -m 0700 "$RUNNER_TEMP/workflow-creator-evidence"'
     assert_includes body, "workflow-creator-evidence-openclaw"
     assert_includes body, "creator-evidence"
+  end
+
+  def test_live_workflow_creator_has_one_pinned_credential_and_evidence_boundary
+    workflow = YAML.safe_load_file(LIVE_AGENT_WORKFLOW, aliases: true)
+    jobs = workflow.fetch("jobs")
+    creator = jobs.fetch("live-workflow-creator")
+    steps = creator.fetch("steps")
+
+    assert_equal({ "actions" => "read", "contents" => "read" }, creator.fetch("permissions"))
+    steps.filter_map { |step| step["uses"] }.each do |action|
+      assert_match(/@[0-9a-f]{40}\z/, action, "#{action} must be full-SHA pinned")
+    end
+
+    checkout = steps.find { |step| step.fetch("uses", "").start_with?("actions/checkout@") }
+    refute_nil checkout
+    assert_equal false, checkout.dig("with", "persist-credentials")
+    initialize_step = steps.find { |step| step["name"] == "Initialize typed workflow-creator evidence" }
+    download_step = steps.find { |step| step["name"] == "Download exact candidate artifacts" }
+    install_step = steps.find { |step| step["name"] == "Install locked OpenClaw and exact candidate" }
+    run_step = steps.find { |step| step["name"] == "Run authenticated workflow-creator proof" }
+    upload_step = steps.find { |step| step["name"] == "Upload redacted workflow-creator evidence" }
+    [ initialize_step, download_step, install_step, run_step, upload_step ].each { |step| refute_nil step }
+    assert_operator steps.index(initialize_step), :<, steps.index(download_step)
+    creator_node = steps.find { |step| step.fetch("uses", "") == SETUP_NODE_ACTION }
+    assert_equal({ "node-version" => "22.23.1" }, creator_node.fetch("with"))
+    assert_includes install_step.fetch("run"), "npm ci --ignore-scripts"
+    assert_includes install_step.fetch("run"), "npm audit --omit=dev"
+    assert_includes install_step.fetch("run"), 'npm pack "openclaw@$openclaw_version" --ignore-scripts'
+    assert_includes install_step.fetch("run"), "HIVE_PROVEN_HIVE_BIN=\$candidate_runtime/rubygems-bin/hive"
+    assert_includes install_step.fetch("run"), 'HIVE_NODE_BIN=$(realpath "$(command -v node)")'
+    assert_equal "${{ always() }}", upload_step.fetch("if")
+    assert_match(%r{workflow-creator-evidence/?\z}, upload_step.dig("with", "path"))
+
+    provider_keys = %w[OPENAI_API_KEY OPENROUTER_API_KEY]
+    credential_steps = steps.select do |step|
+      (step.fetch("env", {}).keys & provider_keys).any?
+    end
+    assert_equal [ run_step ], credential_steps
+    assert_equal provider_keys, run_step.fetch("env").keys.grep(/API_KEY\z/).sort
+    %w[GH_TOKEN GITHUB_TOKEN GIT_ASKPASS SSH_AUTH_SOCK].each do |name|
+      refute run_step.fetch("env").key?(name)
+    end
+
+    steps.filter_map { |step| step["run"] }.each do |script|
+      refute_match(/\$\{\{\s*(?:inputs|github\.event)\./, script)
+    end
+    assert_equal "${{ github.repository_owner }}",
+                 jobs.fetch("validate").fetch("steps").find { |step| step["id"] == "candidate" }
+                     .dig("env", "AUTHORIZED_DISPATCH_ACTOR")
   end
 
   def test_tag_release_selects_and_reverifies_exact_pre_tag_candidate

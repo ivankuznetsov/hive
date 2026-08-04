@@ -25,6 +25,7 @@ class ComponentBoundariesTest < Minitest::Test
       work-ledger
       workflow-creator-core
       workflow-creator-execution
+      workflow-creator-live
       workflow-creator-values
     ], contract.components.map { |component| component.fetch("id") }.sort
 
@@ -315,6 +316,8 @@ class ComponentBoundariesTest < Minitest::Test
       HiveLiveAgentProof::WorkflowCreatorBundle.retained
       HiveLiveAgentProof::WorkflowCreatorEvidence.initialize!
       HiveLiveAgentProof::WorkflowCreatorEvidence.replace_nonpassing!
+      HiveLiveAgentProof::WorkflowCreatorEvidence.replace_primary!
+      HiveLiveAgentProof::WorkflowCreatorEvidence.replace_primary_with_failure!
     ], workflow_core.dig("public_contract", "values")
     assert_equal %w[
       packaging/live_agent_skills/workflow_creator.rb
@@ -397,8 +400,32 @@ class ComponentBoundariesTest < Minitest::Test
     )
     assert_empty workflow_execution.fetch("migration_exceptions")
 
+    workflow_live = contract.component("workflow-creator-live")
+    assert_equal "boundary-ready", workflow_live.fetch("state")
+    assert_equal(
+      {
+        "file" => "packaging/live_agent_skills/workflow_creator_live_setup.rb",
+        "require" => "./packaging/live_agent_skills/workflow_creator_live_setup",
+        "constant" => "HiveLiveAgentProof::WorkflowCreatorLiveSetup"
+      },
+      workflow_live.fetch("entrypoint")
+    )
+    assert_equal %w[workflow-creator-core workflow-creator-execution],
+                 workflow_live.fetch("component_dependencies")
+    assert_empty workflow_live.fetch("allowed_hive_dependencies")
+    assert_equal %w[
+      packaging/live_agent_skills/workflow_creator_live_setup.rb
+      packaging/live_agent_skills/workflow_creator_live_runner.rb
+      packaging/live_agent_skills/workflow_creator_openclaw_runtime.rb
+      packaging/live_agent_skills/openclaw/package.json
+      packaging/live_agent_skills/openclaw/package-lock.json
+    ], workflow_live.fetch("owned_paths")
+    assert_equal [ "test/smoke/live_hive_workflow_creator_smoke_test.rb" ],
+                 workflow_live.fetch("hive_consumers")
+    assert_empty workflow_live.fetch("migration_exceptions")
+
     ready_components.push(agent_abi, artifact_firewall, skillpack, git_gate, work_ledger,
-                          workflow_values, workflow_core, workflow_execution)
+                          workflow_values, workflow_core, workflow_execution, workflow_live)
     remaining_candidates = contract.components.reject do |component|
       ready_components.include?(component)
     end
@@ -416,6 +443,7 @@ class ComponentBoundariesTest < Minitest::Test
       work-ledger
       workflow-creator-core
       workflow-creator-execution
+      workflow-creator-live
       workflow-creator-values
     ], ready_loads.keys.sort
     agent_abi_load = ready_loads.fetch("agent-abi")
@@ -709,6 +737,7 @@ class ComponentBoundariesTest < Minitest::Test
       {
         "skillpack" => [ "agent-abi" ],
         "workflow-creator-core" => [ "workflow-creator-values" ],
+        "workflow-creator-live" => [ "workflow-creator-core", "workflow-creator-execution" ],
         "workflow-creator-execution" => [ "workflow-creator-core" ]
       },
       dependencies

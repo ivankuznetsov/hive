@@ -13,6 +13,7 @@ class WorkflowCreatorCoreTest < Minitest::Test
   ROOT = File.expand_path("../../..", __dir__)
   SHA = "a" * 40
   DIGEST = "b" * 64
+  TASK_SLUG = "research-and-draft-the-launch-260804-ab12"
   Creator = HiveLiveAgentProof::WorkflowCreator
   Values = Creator::Values
   SOURCES = %w[
@@ -26,12 +27,13 @@ class WorkflowCreatorCoreTest < Minitest::Test
 
   def test_public_api_and_vocabulary_are_exact_and_deeply_frozen
     assert_equal %i[
-      failure validate_execution! validate_installation! validate_nonpassing! validate_primary!
+      commands_for failure validate_execution! validate_installation! validate_nonpassing! validate_primary!
     ], Creator.singleton_methods(false).sort
     assert Creator::Error < StandardError
     assert_equal %w[
       schema_version evidence_schema installed_schema execution_schema execution_plan scanner
-      request prompt task_request task_key task_slug task_prompt task_new_argv commands files
+      request prompt task_request task_key task_slug task_prompt task_new_argv command_labels commands
+      task_slug_binding files
       executed_instruction native_activation graph task classification bundle_files member_roles
       outer_roles archive_labels archive_policy_sha256 cleanup_labels
     ], Creator::Vocabulary.keys
@@ -39,6 +41,11 @@ class WorkflowCreatorCoreTest < Minitest::Test
     assert_equal "hive-live-workflow-creator-evidence", Creator::Vocabulary.fetch("evidence_schema")
     assert_equal "hive-live-workflow-creator-installed-manifest", Creator::Vocabulary.fetch("installed_schema")
     assert_equal "hive-live-workflow-creator-execution-receipt", Creator::Vocabulary.fetch("execution_schema")
+    assert_equal [ "run", "{created_slug}" ], Creator::Vocabulary.fetch("commands").fetch(6)
+    assert_equal TASK_SLUG, Creator.commands_for(task_slug: TASK_SLUG).value.fetch(6).fetch(1)
+    assert_equal({ "source_position" => 6, "source_result_field" => "slug",
+                   "target_position" => 7, "target_argument" => 1, "template" => "{created_slug}" },
+                 Creator::Vocabulary.fetch("task_slug_binding"))
     assert_deeply_frozen(Creator::Vocabulary)
   end
 
@@ -172,6 +179,9 @@ class WorkflowCreatorCoreTest < Minitest::Test
       installation_records_type: ->(item) { item[:installation_records] = {} },
       evidence_bundle_length: ->(item) { item[:row]["evidence_bundle"] = [] },
       command_order: ->(item) { item[:receipt]["commands"].reverse! },
+      command_label: ->(item) { item[:receipt]["commands"][0]["attempt_label"] = "command-01" },
+      task_slug_binding: ->(item) { item[:receipt]["task_slug_binding"]["value"] = "other-task-260804-ab12" },
+      task_slug_source: ->(item) { item[:receipt]["task_slug_binding"]["source_position"] = 5 },
       position_float: ->(item) { item[:receipt]["commands"][0]["position"] = 1.0 },
       exit_float: ->(item) { item[:receipt]["commands"][0]["exit_code"] = 0.0 },
       teardown_float: ->(item) { item[:receipt]["teardown"]["remaining_descendants"] = 0.0 },
@@ -220,9 +230,9 @@ class WorkflowCreatorCoreTest < Minitest::Test
   def test_r43_source_metrics_and_explicit_method_overlay_stay_within_budget
     metrics = SOURCES.transform_values { |path| static_metrics(File.read(path)) }
     expected_caps = {
-      "workflow_creator.rb" => [ 125, 7, 4 ],
+      "workflow_creator.rb" => [ 140, 7, 4 ],
       "workflow_creator_contract.rb" => [ 260, 15, 24 ],
-      "workflow_creator_execution_contract.rb" => [ 215, 13, 20 ]
+      "workflow_creator_execution_contract.rb" => [ 235, 14, 20 ]
     }
     SOURCES.each do |name, path|
       lines, callables, decisions = expected_caps.fetch(name)
@@ -231,17 +241,17 @@ class WorkflowCreatorCoreTest < Minitest::Test
       assert_operator metrics.fetch(name).fetch(:decisions), :<=, decisions
       assert_empty metrics.fetch(name).fetch(:closure_nodes)
     end
-    assert_operator SOURCES.values.sum { |path| File.readlines(path).length }, :<=, 590
-    assert_operator metrics.values.sum { |item| item.fetch(:callables) }, :<=, 34
+    assert_operator SOURCES.values.sum { |path| File.readlines(path).length }, :<=, 635
+    assert_operator metrics.values.sum { |item| item.fetch(:callables) }, :<=, 36
     assert_operator metrics.values.sum { |item| item.fetch(:decisions) }, :<=, 48
     values_path = File.join(ROOT, "packaging/live_agent_skills/workflow_creator_values.rb")
     safety_path = File.join(ROOT, "packaging/live_agent_skills/workflow_creator_text_safety.rb")
     values = static_metrics(File.read(values_path))
     safety = static_metrics(File.read(safety_path))
     composed_sources = SOURCES.values + [ values_path, safety_path ]
-    assert_operator composed_sources.sum { |path| File.readlines(path).length }, :<=, 1_090
+    assert_operator composed_sources.sum { |path| File.readlines(path).length }, :<=, 1_135
     assert_operator metrics.values.sum { |item| item.fetch(:callables) } + values.fetch(:callables) +
-                    safety.fetch(:callables), :<=, 68
+                    safety.fetch(:callables), :<=, 70
     assert_operator metrics.values.sum { |item| item.fetch(:decisions) } + values.fetch(:decisions) +
                     safety.fetch(:decisions), :<=, 104
     assert_r43_rubocop
@@ -348,9 +358,10 @@ class WorkflowCreatorCoreTest < Minitest::Test
       "skill" => { "skill_version" => manifest.fetch("skill_version"),
                    "canonical_digest" => manifest.fetch("canonical_digest") },
       "native_activation" => deep_dup(Creator::Vocabulary.fetch("native_activation")),
-      "hive_commands" => deep_dup(Creator::Vocabulary.fetch("commands")), "created_files" => created,
+      "hive_commands" => deep_dup(Creator.commands_for(task_slug: TASK_SLUG).value), "created_files" => created,
       "validation" => deep_dup(Creator::Vocabulary.fetch("graph")), "creation_only_task_count" => 0,
-      "task_count" => 1, "task" => deep_dup(Creator::Vocabulary.fetch("task")), "external_actions" => [],
+      "task_count" => 1, "task" => deep_dup(Creator::Vocabulary.fetch("task")).merge("slug" => TASK_SLUG),
+      "external_actions" => [],
       "secret_scan" => passing_scan, "execution_kind" => "authenticated_openclaw", "model_loop" => "executed",
       "executed_instruction" => deep_dup(created.fetch(2)), "evidence_bundle" => deep_dup(records),
       "containment" => deep_dup(summary), "teardown" => deep_dup(summary), "cleanup" => deep_dup(summary)
@@ -358,8 +369,8 @@ class WorkflowCreatorCoreTest < Minitest::Test
   end
 
   def execution_receipt(row, records, installations)
-    command_labels = Creator::Vocabulary.fetch("commands").each_index.map { |index| format("command-%02d", index + 1) }
-    commands = Creator::Vocabulary.fetch("commands").each_with_index.map do |argv, index|
+    command_labels = Creator::Vocabulary.fetch("command_labels")
+    commands = Creator.commands_for(task_slug: TASK_SLUG).value.each_with_index.map do |argv, index|
       process_receipt("attempt_label" => command_labels.fetch(index)).merge(
         "position" => index + 1, "argv" => deep_dup(argv)
       )
@@ -386,6 +397,7 @@ class WorkflowCreatorCoreTest < Minitest::Test
                             "nested_stage" => { "execution_kind" => "deterministic_fixture",
                                                 "model_loop" => "not_exercised" } },
       "installed_manifests" => deep_dup(records.first(2)),
+      "task_slug_binding" => deep_dup(Creator::Vocabulary.fetch("task_slug_binding")).merge("value" => TASK_SLUG),
       "run" => { "correlation_id" => correlation, "expected_labels" => labels },
       "gateway" => { "identity" => deep_dup(installations.fetch("candidate").dig("required_roles", "audit_gateway")),
                      "command_labels" => command_labels, "status" => "passed" },

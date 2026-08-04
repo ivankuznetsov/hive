@@ -16,7 +16,13 @@ module HiveReleaseCandidate
     KINDS = %w[gem source skills web].freeze
     LIVE_AGENT_BUILDER_INPUTS = %w[
       packaging/live_agent_skills/proof.rb
+      packaging/live_agent_skills/workflow_creator_archive.rb
       packaging/live_agent_skills/workflow_creator_bundle.rb
+      packaging/live_agent_skills/workflow_creator_capture.rb
+      packaging/live_agent_skills/workflow_creator_execution.rb
+      packaging/live_agent_skills/workflow_creator_gateway.rb
+      packaging/live_agent_skills/workflow_creator_installation.rb
+      packaging/live_agent_skills/workflow_creator_process_supervisor.rb
       packaging/live_agent_skills/workflow_creator.rb
       packaging/live_agent_skills/workflow_creator_contract.rb
       packaging/live_agent_skills/workflow_creator_execution_contract.rb

@@ -44,6 +44,26 @@ class ModulesMigrationPatrolEffectIndexTest < Minitest::Test
     assert index.duplicate_effects.any? { |value| value.start_with?("semantic:") }
   end
 
+  def test_distinct_local_transitions_do_not_collide_across_claim_generations
+    first = effect_receipt(
+      module_name: "architecture-patrol", sink: "discovery",
+      target: "job-1:checkpoint", idempotency_key: "checkpoint:1",
+      claim_generation: 1, scope: { "job_id" => "job-1" }
+    )
+    retried = effect_receipt(
+      module_name: "architecture-patrol", sink: "discovery",
+      target: "job-1:checkpoint", idempotency_key: "checkpoint:2",
+      claim_generation: 2, scope: { "job_id" => "job-1" }
+    )
+    index = Hive::Modules::Migration::PatrolEffectIndex.build(
+      receipts: [ first, retried ]
+    )
+
+    assert index.valid?
+    assert_equal 2, index.effect_count
+    assert_empty index.duplicate_effects
+  end
+
   def test_denied_shadow_attempts_are_observable_but_are_not_effects
     denied = effect_receipt(authority: "shadow", status: "denied")
     index = Hive::Modules::Migration::PatrolEffectIndex.build(
@@ -98,13 +118,16 @@ class ModulesMigrationPatrolEffectIndexTest < Minitest::Test
   private
 
   def effect_receipt(owner_epoch: 1, idempotency_key: "finding:one",
-                     authority: "legacy", status: "committed")
+                     authority: "legacy", status: "committed",
+                     module_name: "patrol", sink: "finding",
+                     target: "finding-1", claim_generation: owner_epoch,
+                     scope: { "fingerprint" => "fingerprint-1" })
     intent = Hive::Modules::Migration::EffectIntent.build(
-      module_name: "patrol", occurrence_id: "occ-#{'a' * 64}",
-      authority: authority, owner_epoch: owner_epoch, sink: "finding",
-      target: "finding-1", idempotency_key: idempotency_key,
-      capability: "finding_write", claim_generation: owner_epoch,
-      scope: { "fingerprint" => "fingerprint-1" }, created_at: NOW
+      module_name: module_name, occurrence_id: "occ-#{'a' * 64}",
+      authority: authority, owner_epoch: owner_epoch, sink: sink,
+      target: target, idempotency_key: idempotency_key,
+      capability: "finding_write", claim_generation: claim_generation,
+      scope: scope, created_at: NOW
     )
     outcome = case status
     when "attempted"

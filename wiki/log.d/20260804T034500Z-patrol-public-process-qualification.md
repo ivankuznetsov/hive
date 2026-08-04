@@ -19,3 +19,8 @@ tags: [patrol, architecture-patrol, e2e, qualification]
 - Restored the missing `Attempts::API#dispatch_module_hook` delegation exposed
   by the real daemon run, so module events reach the configured durable-attempt
   adapter instead of failing at the facade.
+- Kept semantic duplicate detection for externally observable effects while
+  treating distinct `job`, `discovery`, and `action` receipts as local
+  JobStore transitions. Their intent and idempotency identities still detect
+  replay, but a fenced recovery generation no longer looks like a duplicate
+  remote side effect.

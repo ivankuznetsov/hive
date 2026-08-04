@@ -10,6 +10,7 @@ module Hive
         MAX_RECEIPTS = 4_096
         TERMINAL_EFFECT_STATUSES = %w[committed reconciled].freeze
         UNSETTLED_EFFECT_STATUSES = %w[attempted unknown].freeze
+        LOCAL_TRANSITION_SINKS = %w[action discovery job].freeze
 
         class << self
           def build(receipts:)
@@ -73,7 +74,7 @@ module Hive
 
           def identity_keys(receipt)
             intent = receipt.intent
-            {
+            keys = {
               intent: intent.intent_id,
               idempotency: PatrolEvidence.digest(
                 "effect-key",
@@ -82,7 +83,11 @@ module Hive
                   "sink" => intent.sink,
                   "idempotency_key" => intent.idempotency_key
                 }
-              ),
+              )
+            }
+            return keys if LOCAL_TRANSITION_SINKS.include?(intent.sink)
+
+            keys.merge(
               semantic: PatrolEvidence.digest(
                 "effect-semantic",
                 {
@@ -92,7 +97,7 @@ module Hive
                   "scope" => intent.scope
                 }
               )
-            }
+            )
           end
 
           def malformed!

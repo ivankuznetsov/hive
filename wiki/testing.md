@@ -39,9 +39,12 @@ editorial prompt in a disposable initialized project. Its controlled Hive
 surface permits only version, workflow inventory, scaffold, validation, and
 the populated-graph commit before task creation.
 Attestation verifies the prompt digest, native `/hive` discovery, ordered argv,
-created-file digests, exact normalized graph, zero tasks after creation-only,
-then one created-and-run slug plus a no-op retry with the same idempotency key,
-operational status, no external actions, secret scanning, and cleanup. Missing
+the exact nine semantic command labels, and the receipt binding that takes the
+`slug` returned by task-creation position 6 and places it into argument 1 of
+run position 7. It also verifies created-file digests, the exact normalized
+graph, zero tasks after creation-only, then one created-and-run slug plus a no-op
+retry with the same idempotency key, operational status, no external actions,
+secret scanning, and cleanup. Missing
 provider credentials make this live gate explicitly unavailable; they never
 turn a skipped test into release evidence.
 

@@ -18,6 +18,11 @@ module HiveLiveAgentProof
     task_request = "Research and draft the launch announcement for approval."
     task_key = "workflow-creator-proof:editorial:live-proof"
     task_slug = "editorial-live-proof"
+    command_labels = %w[
+      candidate-version candidate-workflow-list candidate-workflow-new candidate-workflow-validate
+      candidate-workflow-commit candidate-task-create candidate-task-run candidate-task-retry
+      candidate-operational-status
+    ]
     task_prompt = <<~PROMPT
       /hive
       Use the validated editorial workflow to create and run one task for:
@@ -44,11 +49,16 @@ module HiveLiveAgentProof
       "request" => request, "prompt" => prompt, "task_request" => task_request,
       "task_key" => task_key, "task_slug" => task_slug, "task_prompt" => task_prompt,
       "task_new_argv" => task_argv,
+      "command_labels" => command_labels,
       "commands" => [
         [ "version" ], [ "workflow", "list", "--json" ], [ "workflow", "new", "editorial", "--json" ],
         [ "workflow", "validate", "editorial", "--json" ], [ "workflow", "commit", "editorial" ], task_argv,
-        [ "run", task_slug ], task_argv, [ "status", "--operational", "--json" ]
+        [ "run", "{created_slug}" ], task_argv, [ "status", "--operational", "--json" ]
       ],
+      "task_slug_binding" => {
+        "source_position" => 6, "source_result_field" => "slug", "target_position" => 7,
+        "target_argument" => 1, "template" => "{created_slug}"
+      },
       "files" => files, "executed_instruction" => files.fetch(2),
       "native_activation" => { "kind" => "openclaw-skills-info", "invocation" => "/hive" },
       "graph" => {
@@ -62,7 +72,7 @@ module HiveLiveAgentProof
         ]
       },
       "task" => {
-        "slug" => task_slug, "workflow" => "editorial", "first_created" => true,
+        "workflow" => "editorial", "first_created" => true,
         "retry_created" => false, "run_count" => 1, "current_stage" => "1-research"
       },
       "classification" => { "execution_kind" => "authenticated_openclaw", "model_loop" => "executed" },
@@ -92,6 +102,19 @@ module HiveLiveAgentProof
   module WorkflowCreator
     private_constant :Contract, :ExecutionContract
 
+    def self.commands_for(task_slug:)
+      slug = capture(task_slug).value
+      Contract.assert!(Contract::TASK_SLUG.match?(slug), "workflow-creator task slug is invalid")
+      commands, binding = Vocabulary.values_at("commands", "task_slug_binding")
+      resolved = commands.map(&:dup)
+      target = resolved.fetch(binding.fetch("target_position") - 1)
+      Contract.assert!(target.fetch(binding.fetch("target_argument")) == binding.fetch("template"),
+                       "workflow-creator command template is invalid")
+      target[binding.fetch("target_argument")] = slug
+      Values.capture(resolved)
+    rescue ArgumentError, IndexError, KeyError, NoMethodError, TypeError, Values::Error
+      raise Error, "workflow-creator task slug is invalid"
+    end
     def self.failure(...) = Contract.failure(...)
     def self.validate_nonpassing!(row, exact_secrets: []) =
       Contract.validate_nonpassing!(capture(row), capture(exact_secrets).value)

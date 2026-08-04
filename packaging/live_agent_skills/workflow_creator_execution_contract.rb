@@ -3,7 +3,8 @@
 module HiveLiveAgentProof::WorkflowCreator
     module ExecutionContract
       KEYS = %w[schema schema_version candidate_sha result execution_plan classification installed_manifests run gateway
-                archive_admissions commands outer_processes authored_instruction executed_instruction external_actions
+                task_slug_binding archive_admissions commands outer_processes authored_instruction executed_instruction
+                external_actions
                 containment teardown cleanup secret_scan].freeze
       COMMAND_KEYS = %w[position attempt_label argv exit_code signal completed capture teardown].freeze
       OUTER_KEYS = %w[label role argv_sha256 prompt_sha256 exit_code signal completed capture teardown].freeze
@@ -12,6 +13,7 @@ module HiveLiveAgentProof::WorkflowCreator
       PROCESS_TEARDOWN_KEYS = %w[status term_sent kill_sent reaped descendants owner_complete].freeze
       ARCHIVE_KEYS = %w[label artifact_sha256 artifact_size policy_sha256 entry_count uncompressed_bytes status].freeze
       RUN_KEYS, GATEWAY_KEYS = %w[correlation_id expected_labels].freeze, %w[identity command_labels status].freeze
+      BINDING_KEYS = %w[source_position source_result_field target_position target_argument template value].freeze
       CONTAINMENT_KEYS = %w[status mechanism established_before_launch owner_correlation_id root_loss_behavior].freeze
       TEARDOWN_KEYS = %w[status expected_labels receipt_labels outer_root_reaped remaining_descendants].freeze
       CLEANUP_KEYS, LABEL = %w[status targets].freeze, /\A[a-z][a-z0-9_-]{0,127}\z/.freeze
@@ -29,7 +31,7 @@ module HiveLiveAgentProof::WorkflowCreator
         Contract.validate_installation!(openclaw_installation_snapshot, Values.capture("openclaw"),
                                         manifest_snapshot, candidate_snapshot)
         identity!(receipt, row, candidate_sha, records, candidate_installation_snapshot, openclaw_installation_snapshot)
-        labels, correlation = processes!(receipt)
+        labels, correlation = processes!(receipt, row)
         aggregates!(receipt, row, labels, correlation, receipt_sha_snapshot.value, receipt_snapshot.canonical_bytes)
         receipt_snapshot
       rescue ArgumentError, IndexError, KeyError, NoMethodError, TypeError, Values::Error, TextSafety::Error
@@ -99,8 +101,11 @@ module HiveLiveAgentProof::WorkflowCreator
           Contract.assert!(size.positive? && entries.between?(1, 16_384) && bytes.between?(1, 1_073_741_824), message)
         end
       end
-      def processes!(receipt)
-        commands = commands!(receipt.fetch("commands"))
+      def processes!(receipt, row)
+        binding = receipt.fetch("task_slug_binding")
+        commands = commands!(receipt.fetch("commands"), binding)
+        Contract.assert!(row.dig("task", "slug") == binding.fetch("value"),
+                         "workflow-creator task slug binding is invalid")
         outer = outer_processes!(receipt.fetch("outer_processes"))
         labels = commands + outer
         Contract.assert!(labels.uniq.length == labels.length, "workflow-creator execution process labels are invalid")
@@ -113,18 +118,25 @@ module HiveLiveAgentProof::WorkflowCreator
                          "workflow-creator execution gateway labels are invalid")
         [ labels, correlation ]
       end
-      def commands!(commands)
-        expected = Vocabulary.fetch("commands")
+      def commands!(commands, binding)
         message = "workflow-creator command receipts are invalid"
+        Contract.exact!(binding, BINDING_KEYS, message)
+        Contract.assert!(binding.except("value") == Vocabulary.fetch("task_slug_binding"), message)
+        expected = HiveLiveAgentProof::WorkflowCreator.commands_for(task_slug: binding.fetch("value")).value
+        labels = Vocabulary.fetch("command_labels")
         Contract.assert!(commands.instance_of?(Array), message)
         Contract.assert!(commands.length == expected.length, message)
         commands.each_with_index.map do |command, index|
-          Contract.exact!(command, COMMAND_KEYS, message)
-          position, argv = command.values_at("position", "argv")
-          Contract.assert!([ position.class, position, argv ] == [ Integer, index + 1, expected.fetch(index) ], message)
-          process!(command, "attempt_label")
-          command.fetch("attempt_label")
+          command!(command, index, expected.fetch(index), labels.fetch(index), message)
         end
+      end
+      def command!(command, index, expected, label, message)
+        Contract.exact!(command, COMMAND_KEYS, message)
+        position, argv = command.values_at("position", "argv")
+        Contract.assert!([ position.class, position, argv, command.fetch("attempt_label") ] ==
+                         [ Integer, index + 1, expected, label ], message)
+        process!(command, "attempt_label")
+        command.fetch("attempt_label")
       end
       def outer_processes!(outer)
         expected = Vocabulary.fetch("outer_roles")

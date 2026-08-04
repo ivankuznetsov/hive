@@ -51,7 +51,7 @@ module HiveLiveAgentProof
   WORKFLOW_CREATOR_TASK_SLUG = creator_vocabulary.fetch("task_slug")
   WORKFLOW_CREATOR_TASK_PROMPT = creator_vocabulary.fetch("task_prompt")
   WORKFLOW_CREATOR_TASK_NEW_ARGV = creator_vocabulary.fetch("task_new_argv")
-  WORKFLOW_CREATOR_COMMANDS = creator_vocabulary.fetch("commands")
+  WORKFLOW_CREATOR_COMMANDS = WorkflowCreator.commands_for(task_slug: WORKFLOW_CREATOR_TASK_SLUG).value
   WORKFLOW_CREATOR_FILES = creator_vocabulary.fetch("files")
 
   module_function

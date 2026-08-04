@@ -16,6 +16,7 @@ module HiveLiveAgentProof::WorkflowCreator
       BUNDLE_KEYS, SUMMARY_KEYS = %w[kind path sha256 size].freeze, %w[receipt_sha256 status].freeze
       SHA = /\A[0-9a-f]{40}\z/.freeze
       DIGEST = /\A[0-9a-f]{64}\z/.freeze
+      TASK_SLUG = /\A[a-z][a-z0-9-]{0,62}[a-z0-9]\z/.freeze
       FAILURE_PART = /\A[a-z][a-z0-9_]{0,63}\z/.freeze
       CLASSIFICATIONS = Values.capture([ %w[unavailable not_started], %w[deterministic_fixture not_exercised],
                                          %w[authenticated_openclaw executed] ]).value
@@ -143,9 +144,12 @@ module HiveLiveAgentProof::WorkflowCreator
         end
       end
       def primary_claims!(row, manifest, candidate_sha)
-        schema, activation, commands, graph, task, classification, scanner, prompt, task_prompt = Vocabulary.values_at(
-          "evidence_schema", "native_activation", "commands", "graph", "task", "classification", "scanner",
+        schema, activation, graph, task, classification, scanner, prompt, task_prompt = Vocabulary.values_at(
+          "evidence_schema", "native_activation", "graph", "task", "classification", "scanner",
           "prompt", "task_prompt")
+        task_slug = row.dig("task", "slug")
+        commands = HiveLiveAgentProof::WorkflowCreator.commands_for(task_slug:).value
+        task = task.merge("slug" => task_slug)
         expected = {
           "schema" => schema, "schema_version" => 1, "platform" => "openclaw", "candidate_sha" => candidate_sha,
           "result" => "passed", "skill" => manifest.slice("skill_version", "canonical_digest"),

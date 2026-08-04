@@ -9,6 +9,7 @@ class LiveAgentProofTest < Minitest::Test
   WORKFLOW_SHA = "b" * 40
   REPOSITORY = "ivankuznetsov/hive"
   Creator = HiveLiveAgentProof::WorkflowCreator
+  CREATOR_TASK_SLUG = "research-and-draft-the-launch-260804-ab12"
 
   def test_builder_produces_deterministic_four_platform_artifacts
     with_tmp_dir do |dir|
@@ -438,9 +439,12 @@ class LiveAgentProofTest < Minitest::Test
       "task_prompt_sha256" => Digest::SHA256.hexdigest(Creator::Vocabulary.fetch("task_prompt")),
       "skill" => manifest.slice("skill_version", "canonical_digest"),
       "native_activation" => deep_dup(Creator::Vocabulary.fetch("native_activation")),
-      "hive_commands" => deep_dup(Creator::Vocabulary.fetch("commands")), "created_files" => created,
+      "hive_commands" => deep_dup(Creator.commands_for(task_slug: CREATOR_TASK_SLUG).value),
+      "created_files" => created,
       "validation" => deep_dup(Creator::Vocabulary.fetch("graph")), "creation_only_task_count" => 0,
-      "task_count" => 1, "task" => deep_dup(Creator::Vocabulary.fetch("task")), "external_actions" => [],
+      "task_count" => 1,
+      "task" => deep_dup(Creator::Vocabulary.fetch("task")).merge("slug" => CREATOR_TASK_SLUG),
+      "external_actions" => [],
       "secret_scan" => creator_passing_scan, "execution_kind" => "authenticated_openclaw",
       "model_loop" => "executed", "executed_instruction" => deep_dup(created.fetch(2)),
       "evidence_bundle" => deep_dup(records), "containment" => deep_dup(summary),
@@ -449,10 +453,8 @@ class LiveAgentProofTest < Minitest::Test
   end
 
   def creator_execution_receipt(row, records, installations)
-    command_labels = Creator::Vocabulary.fetch("commands").each_index.map do |index|
-      format("command-%02d", index + 1)
-    end
-    commands = Creator::Vocabulary.fetch("commands").each_with_index.map do |argv, index|
+    command_labels = Creator::Vocabulary.fetch("command_labels")
+    commands = Creator.commands_for(task_slug: CREATOR_TASK_SLUG).value.each_with_index.map do |argv, index|
       creator_process_receipt("attempt_label" => command_labels.fetch(index)).merge(
         "position" => index + 1, "argv" => deep_dup(argv)
       )
@@ -483,6 +485,9 @@ class LiveAgentProofTest < Minitest::Test
         "nested_stage" => { "execution_kind" => "deterministic_fixture", "model_loop" => "not_exercised" }
       },
       "installed_manifests" => deep_dup(records.first(2)),
+      "task_slug_binding" => deep_dup(Creator::Vocabulary.fetch("task_slug_binding")).merge(
+        "value" => CREATOR_TASK_SLUG
+      ),
       "run" => { "correlation_id" => correlation, "expected_labels" => labels },
       "gateway" => {
         "identity" => deep_dup(installations.fetch("candidate").dig("required_roles", "audit_gateway")),

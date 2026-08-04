@@ -183,7 +183,11 @@ one fixed secret-free error.
 component edge. The core owns an immutable schema-v1 vocabulary and validates
 failed, primary, installed-closure, and declarative execution receipts only
 after caller values have been imported into owned snapshots. Successful
-validation returns the primary snapshot. Failure construction separately
+validation returns the primary snapshot. Its nine-command plan assigns one
+semantic label to each position. Because `hive new` owns slug generation,
+position 7 is an explicit `{created_slug}` template: the execution receipt binds
+argument 1 to the `slug` field returned by position 6, and the primary task row
+must carry that same value. Failure construction separately
 captures stable inputs and diagnostic detail, substitutes a fixed omitted-detail
 marker when projection exceeds its bounded work ceiling, and snapshots only the
 internally constructed result afterward. It owns no retention, publication,
@@ -227,8 +231,8 @@ even after its model loop succeeds; U14/U15 retain execution and live-claim
 authority.
 
 The approved U1a1c budget re-scope permits only named private semantic-helper
-decomposition. Its ceilings are 125/7/4 for the facade, 260/15/24 for the
-contract, 215/13/20 for execution, 590/34/48 for U1a1c, and 1090/68/104 for the
+decomposition. Its ceilings are 140/7/4 for the facade, 260/15/24 for the
+contract, 235/14/20 for execution, 635/36/48 for U1a1c, and 1135/70/104 for the
 Values/TextSafety/Core composition (lines/callables/decisions). The U1a2 bundle
 owner is independently capped at 220/10/28 and currently measures 146/10/26. Public APIs,
 owned files, responsibilities, dependency direction, and decision ceilings did

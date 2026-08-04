@@ -36,7 +36,8 @@ module Hive
             project: {
               "project_id" => project_id.to_s,
               "name" => source.fetch("registration"),
-              "repository" => source.fetch("repository")
+              "repository" =>
+                Hive::RefactorPatrol::PrManifest.repository_target(source)
             },
             trigger: {
               "kind" => "pull_request.merged",

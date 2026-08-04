@@ -3,7 +3,7 @@ title: Hive::Patrol
 type: module
 source: lib/hive/patrol/
 created: 2026-05-28
-updated: 2026-08-03
+updated: 2026-08-04
 tags: [module, patrol, review, worktree, pr, codex]
 ---
 
@@ -54,8 +54,29 @@ tags: [module, patrol, review, worktree, pr, codex]
 | `Hive::Modules::Migration::ReportProjection` | `lib/hive/modules/migration/report_projection.rb` | Pure report-v2 projection over exactly `deterministic` and `installed_live` qualification lanes. Both lanes must bind the same candidate, catalogue, source, manifest, scenario, and configuration set. Persistence admits only monotonic successor reports: a missing lane may be added; an `evidence_required` lane may advance through a strict same-run receipt superset or a disjoint fresh run; a qualified lane may be exactly invalidated; and recovery from an invalidated report requires new run identities, disjoint receipt sets, and evidence beginning after the latest contradiction in both lanes. Successors preserve migration provenance and every transition remains digest-CAS guarded. The v2 JSON schema accepts both strict persisted projections and the command's shared current-version error envelope. An explicitly migrated empty report records `evidence_required` rather than qualification. |
 | `Hive::Modules::Migration::ReportMigration` | `lib/hive/modules/migration/report_migration.rb` | One-off project-local report converter over the existing `Report` storage facade. It accepts the complete released v1 success, null-configuration, and error-envelope shapes; preserves exact source bytes in a fixed archive; validates source/archive/receipt linkage on read-only probes; repairs a missing receipt only for the initial unsuperseded migration projection under the existing exclusive lock; rejects missing provenance after any successor; binds that immutable receipt to migration provenance rather than mutable later report bytes; uses digest CAS in both directions; and owns no cutover, rollback, retry, or effect recovery. |
 
-`Hive::Modules::Migration::Patrols.admit_deterministic_qualification!` is the
-single production admission path for U3b evidence. It accepts bounded raw
+`Hive::Modules::Migration::Patrols.deterministic_receipt_for!` is the bounded
+U3b receipt-construction seam. Its exact module/trigger-id selector must resolve
+one comparable terminal shadow record while the exclusive migration lock is held;
+the record supplies the capture, decision projection, and complete
+observational effect set, while caller metadata remains subject to the receipt
+protocol's configuration checks and must exactly match the nonempty repository
+target captured by the product scheduler. Both Patrol products use the same
+host-qualified `host/owner/name` target: ordinary Patrol derives it from the
+registration and Architecture Patrol binds the manifest repository to its PR
+URL host. Missing, ambiguous,
+nonterminal, divergent, duplicate-effect, configuration-mismatched, or
+identity-mismatched evidence fails closed.
+
+New Architecture Patrol captures require the host-qualified target. The
+occurrence store accepts an older owner/name-only project only when the exact
+same immutable capture is already durable (or its job pointer already binds
+that occurrence); replay compatibility cannot create new qualification
+evidence. The deterministic receipt facade requires an exact
+`host/owner/name` target and rejects owner/name-only replay even when caller
+metadata repeats that legacy value.
+
+`Hive::Modules::Migration::Patrols.admit_deterministic_qualification!` remains
+the single production admission path for U3b evidence. It accepts bounded raw
 receipt documents plus independently computed expected bindings, constructs no
 scenario or collector, and owns only verification, deterministic qualification,
 and digest-CAS report-v2 merge.

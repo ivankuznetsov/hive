@@ -3,10 +3,12 @@ require "hive/daemon/patrol_scheduler"
 require "hive/daemon/refactor_patrol_scheduler"
 require "hive/modules/migration/patrols"
 require "hive/modules/migration/coordinator"
+require "hive/modules/migration/shadow_comparator"
 require "hive/patrol/state_store"
 require "hive/refactor_patrol/job_store"
 require "hive/refactor_patrol/pr_manifest"
 require "hive/refactor_patrol/transition_gateway"
+require "timeout"
 
 class ModulesMigrationPatrolsTest < Minitest::Test
   include HiveTestHelper
@@ -92,6 +94,303 @@ class ModulesMigrationPatrolsTest < Minitest::Test
     def module_hook? = true
     def subject = { "module" => module_name }
     def [](key) = key == "project" ? project : nil
+  end
+
+  def test_deterministic_receipt_selects_one_terminal_shadow_capture
+    with_project do |project|
+      capture = patrol_capture
+      effect = legacy_effect_receipt(capture)
+      terminal = terminal_patrol_capture(
+        capture, effect_ids: [ effect.receipt_id ]
+      )
+      record_shadow_decision(project, capture: terminal, effects: [ effect ])
+
+      receipt = Hive::Modules::Migration::Patrols.deterministic_receipt_for!(
+        project.fetch("path"),
+        selector: { "module" => "patrol", "trigger_id" => "manual-1" },
+        metadata: deterministic_receipt_metadata,
+        hive_state_path: project.fetch("hive_state_path")
+      )
+
+      assert_equal terminal.capture_id, receipt.dig("capture", "capture_id")
+      assert_equal [ effect.receipt_id ],
+                   receipt.fetch("effects").map { |item| item.fetch("receipt_id") }
+      assert_equal "hive-patrol-evidence-receipt", receipt.fetch("schema")
+    end
+  end
+
+  def test_deterministic_receipt_requires_one_semantic_match
+    with_project do |project|
+      error = assert_raises(Hive::ConfigError) do
+        Hive::Modules::Migration::Patrols.deterministic_receipt_for!(
+          project.fetch("path"),
+          selector: { "module" => "patrol", "trigger_id" => "missing" },
+          metadata: deterministic_receipt_metadata,
+          hive_state_path: project.fetch("hive_state_path")
+        )
+      end
+      assert_match(/not found/, error.message)
+    end
+
+    with_project do |project|
+      [ "manual", "direct" ].each do |kind|
+        capture = terminal_patrol_capture(
+          patrol_capture(trigger: { "kind" => kind, "id" => "same" })
+        )
+        record_shadow_decision(project, capture: capture)
+      end
+
+      error = assert_raises(Hive::ConfigError) do
+        Hive::Modules::Migration::Patrols.deterministic_receipt_for!(
+          project.fetch("path"),
+          selector: { "module" => "patrol", "trigger_id" => "same" },
+          metadata: deterministic_receipt_metadata,
+          hive_state_path: project.fetch("hive_state_path")
+        )
+      end
+      assert_match(/ambiguous/, error.message)
+    end
+  end
+
+  def test_deterministic_receipt_rejects_mismatched_observational_evidence
+    cases = {
+      "nonterminal" => lambda do |project|
+        record_shadow_decision(project, capture: patrol_capture)
+        deterministic_receipt_metadata
+      end,
+      "configuration" => lambda do |project|
+        record_shadow_decision(
+          project, capture: terminal_patrol_capture(patrol_capture)
+        )
+        deterministic_receipt_metadata("configuration_digest" => "d" * 64)
+      end,
+      "effects" => lambda do |project|
+        capture = patrol_capture
+        record_shadow_decision(
+          project, capture: terminal_patrol_capture(capture),
+          effects: [ legacy_effect_receipt(capture) ]
+        )
+        deterministic_receipt_metadata
+      end,
+      "inconsistent" => lambda do |project|
+        capture = terminal_patrol_capture(patrol_capture)
+        projection = Hive::Modules::Migration::PatrolDecisionProjection.build(
+          module_name: "patrol", rationale: "not_due"
+        )
+        record_shadow_decision(
+          project, capture: capture, module_projection: projection
+        )
+        deterministic_receipt_metadata
+      end,
+      "repository" => lambda do |project|
+        record_shadow_decision(
+          project, capture: terminal_patrol_capture(patrol_capture)
+        )
+        deterministic_receipt_metadata(
+          "repository" => deterministic_receipt_metadata.fetch("repository")
+            .merge("id" => "other/demo")
+        )
+      end,
+      "repository-unbound" => lambda do |project|
+        capture = patrol_capture(repository: nil)
+        record_shadow_decision(
+          project, capture: terminal_patrol_capture(capture)
+        )
+        deterministic_receipt_metadata
+      end,
+      "repository-hostless-replay" => lambda do |project|
+        capture = patrol_capture(repository: "acme/demo")
+        record_shadow_decision(
+          project, capture: terminal_patrol_capture(capture)
+        )
+        deterministic_receipt_metadata(
+          "repository" => deterministic_receipt_metadata
+            .fetch("repository").merge("id" => "acme/demo")
+        )
+      end
+    }
+
+    cases.each do |name, prepare|
+      with_project do |project|
+        metadata = prepare.call(project)
+        error = assert_raises(Hive::ConfigError, name) do
+          Hive::Modules::Migration::Patrols.deterministic_receipt_for!(
+            project.fetch("path"),
+            selector: { "module" => "patrol", "trigger_id" => "manual-1" },
+            metadata: metadata,
+            hive_state_path: project.fetch("hive_state_path")
+          )
+        end
+        assert_match(/inconsistent/, error.message) if name == "inconsistent"
+      end
+    end
+  end
+
+  def test_deterministic_receipt_rejects_mixed_selector_and_metadata_keys
+    selector = { "module" => "patrol", trigger_id: "manual-1" }
+    metadata = deterministic_receipt_metadata
+    metadata[:reviewer] = metadata.delete("reviewer")
+
+    with_project do |project|
+      [ [ selector, deterministic_receipt_metadata ],
+        [ { "module" => "patrol", "trigger_id" => "manual-1" }, metadata ] ]
+        .each do |candidate_selector, candidate_metadata|
+          error = assert_raises(Hive::ConfigError) do
+            Hive::Modules::Migration::Patrols.deterministic_receipt_for!(
+              project.fetch("path"),
+              selector: candidate_selector,
+              metadata: candidate_metadata,
+              hive_state_path: project.fetch("hive_state_path")
+            )
+          end
+          assert_match(/is malformed/, error.message)
+        end
+    end
+  end
+
+  def test_deterministic_receipt_supports_architecture_patrol_exact_evidence
+    with_project do |project|
+      capture = terminal_patrol_capture(
+        architecture_capture(architecture_manifest)
+      )
+      record_shadow_decision(project, capture: capture)
+
+      receipt = Hive::Modules::Migration::Patrols.deterministic_receipt_for!(
+        project.fetch("path"),
+        selector: {
+          "module" => "architecture-patrol",
+          "trigger_id" => capture.trigger.fetch("id")
+        },
+        metadata: deterministic_receipt_metadata,
+        hive_state_path: project.fetch("hive_state_path")
+      )
+
+      assert_equal "architecture-patrol", receipt.dig("capture", "module")
+      assert_empty receipt.fetch("effects")
+
+      assert_raises(Hive::ConfigError) do
+        Hive::Modules::Migration::Patrols.deterministic_receipt_for!(
+          project.fetch("path"),
+          selector: {
+            "module" => "architecture-patrol",
+            "trigger_id" => capture.trigger.fetch("id")
+          },
+          metadata: deterministic_receipt_metadata(
+            "configuration_digest" => "d" * 64
+          ),
+          hive_state_path: project.fetch("hive_state_path")
+        )
+      end
+    end
+
+    with_project do |project|
+      capture = terminal_patrol_capture(
+        architecture_capture(architecture_manifest)
+      )
+      record_shadow_decision(
+        project, capture: capture, effects: [ legacy_effect_receipt(capture) ]
+      )
+
+      assert_raises(Hive::ConfigError) do
+        Hive::Modules::Migration::Patrols.deterministic_receipt_for!(
+          project.fetch("path"),
+          selector: {
+            "module" => "architecture-patrol",
+            "trigger_id" => capture.trigger.fetch("id")
+          },
+          metadata: deterministic_receipt_metadata,
+          hive_state_path: project.fetch("hive_state_path")
+        )
+      end
+    end
+  end
+
+  def test_deterministic_receipt_excludes_a_concurrent_matching_write
+    with_project do |project|
+      capture = terminal_patrol_capture(patrol_capture)
+      record_shadow_decision(project, capture: capture)
+      entered_build = Queue.new
+      release_build = Queue.new
+      receipt_result = Queue.new
+      writer_entered_lock = Queue.new
+      writer_result = Queue.new
+      receipt_class = Hive::Modules::Migration::PatrolEvidenceReceipt
+      original_build = receipt_class.method(:build)
+      receipt_thread = nil
+      writer_thread = nil
+
+      build = lambda do |**attributes|
+        entered_build << true
+        release_build.pop
+        original_build.call(**attributes)
+      end
+
+      receipt_class.singleton_class.define_method(:build, &build)
+      begin
+        receipt_thread = Thread.new do
+          value = Hive::Modules::Migration::Patrols.deterministic_receipt_for!(
+            project.fetch("path"),
+            selector: { "module" => "patrol", "trigger_id" => "manual-1" },
+            metadata: deterministic_receipt_metadata,
+            hive_state_path: project.fetch("hive_state_path")
+          )
+          receipt_result << value
+        rescue StandardError => e
+          receipt_result << e
+        end
+        Timeout.timeout(5) { entered_build.pop }
+
+        writer_lock = lambda do |shared: true, &block|
+          writer_entered_lock << true
+          Hive::Modules::Migration::Patrols.with_migration_lock(
+            project.fetch("path"),
+            hive_state_path: project.fetch("hive_state_path"),
+            shared: shared,
+            &block
+          )
+        end
+        competing = terminal_patrol_capture(
+          patrol_capture(trigger: { "kind" => "direct", "id" => "manual-1" })
+        )
+        writer_thread = Thread.new do
+          record_shadow_decision(
+            project, capture: competing, admission_lock: writer_lock
+          )
+          writer_result << :written
+        rescue StandardError => e
+          writer_result << e
+        end
+        Timeout.timeout(5) { writer_entered_lock.pop }
+        Timeout.timeout(5) do
+          Thread.pass until writer_thread.status == "sleep" ||
+                            !writer_thread.alive?
+        end
+        assert writer_thread.alive?,
+               "the competing writer must remain fenced while the receipt builds"
+        assert_equal "sleep", writer_thread.status
+
+        release_build << true
+        assert receipt_thread.join(5), "receipt construction did not finish"
+        assert_kind_of Hash, receipt_result.pop
+        assert writer_thread.join(5), "competing writer did not finish"
+        assert_equal :written, writer_result.pop
+      ensure
+        receipt_class.singleton_class.define_method(:build, original_build)
+        release_build << true if receipt_thread&.alive?
+        receipt_thread&.join(1)
+        writer_thread&.join(1)
+      end
+
+      error = assert_raises(Hive::ConfigError) do
+        Hive::Modules::Migration::Patrols.deterministic_receipt_for!(
+          project.fetch("path"),
+          selector: { "module" => "patrol", "trigger_id" => "manual-1" },
+          metadata: deterministic_receipt_metadata,
+          hive_state_path: project.fetch("hive_state_path")
+        )
+      end
+      assert_match(/ambiguous/, error.message)
+    end
   end
 
   def test_fences_live_adoption_then_cuts_over_and_rolls_back_one_epoch
@@ -1488,15 +1787,16 @@ class ModulesMigrationPatrolsTest < Minitest::Test
     )
   end
 
-  def patrol_capture
+  def patrol_capture(trigger: { "kind" => "manual", "id" => "manual-1" },
+                     repository: "github.com/acme/demo")
     Hive::Modules::Migration::PatrolCapture.build(
       module_name: "patrol",
       project: {
         "project_id" => "project-1",
         "name" => "demo",
-        "repository" => "acme/demo"
+        "repository" => repository
       },
-      trigger: { "kind" => "manual", "id" => "manual-1" },
+      trigger: trigger,
       reservation: { "kind" => "ordinary", "id" => "reservation-1" },
       owner: "legacy",
       owner_epoch: 1,
@@ -1516,7 +1816,7 @@ class ModulesMigrationPatrolsTest < Minitest::Test
     )
   end
 
-  def terminal_patrol_capture(capture)
+  def terminal_patrol_capture(capture, effect_ids: capture.effect_ids)
     Hive::Modules::Migration::PatrolCapture.build(
       module_name: capture.module_name,
       project: capture.project,
@@ -1528,10 +1828,61 @@ class ModulesMigrationPatrolsTest < Minitest::Test
       selection: capture.selection,
       outcome_class: "completed",
       outcome: { "rationale" => "completed" },
-      effect_ids: capture.effect_ids,
+      effect_ids: effect_ids,
       occurred_at: capture.occurred_at,
       recorded_at: NOW
     )
+  end
+
+  def record_shadow_decision(project, capture:, effects: [],
+                             module_projection: capture.selection,
+                             admission_lock: nil)
+    root = File.join(
+      project.fetch("hive_state_path"), "module-runtime", "migration", "shadow"
+    )
+    options = { root: root }
+    options[:admission_lock] = admission_lock if admission_lock
+    Hive::Modules::Migration::ShadowComparator.new(**options).record!(
+      module_name: capture.module_name,
+      trigger: capture.trigger,
+      legacy_capture: capture,
+      module_projection: module_projection,
+      configuration_digest: "c" * 64,
+      occurred_at: capture.occurred_at,
+      legacy_effects: effects
+    )
+  end
+
+  def legacy_effect_receipt(capture)
+    intent = Hive::Modules::Migration::EffectIntent.build(
+      module_name: capture.module_name,
+      occurrence_id: capture.occurrence_id,
+      authority: "legacy", owner_epoch: capture.owner_epoch,
+      sink: "finding", target: "finding-1",
+      idempotency_key: "finding-1", capability: "finding_write",
+      created_at: NOW
+    )
+    Hive::Modules::Migration::EffectReceipt.build(
+      intent: intent, status: "committed",
+      outcome: { "finding_id" => "finding-1" }, recorded_at: NOW
+    )
+  end
+
+  def deterministic_receipt_metadata(overrides = {})
+    {
+      "run_id" => "run-1", "candidate_sha" => "1" * 40,
+      "catalog_digest" => "2" * 64, "source_digest" => "3" * 64,
+      "manifest_digest" => "4" * 64, "configuration_digest" => "c" * 64,
+      "scenario_manifest_digest" => "6" * 64,
+      "repository" => {
+        "id" => "github.com/acme/demo", "sha" => "7" * 40,
+        "change_window" => "window-1"
+      },
+      "decision_class" => "positive_finding", "fault_steps" => [ "restart" ],
+      "artifacts" => [ { "kind" => "comparison", "digest" => "8" * 64 } ],
+      "reviewer" => "reviewer-1", "generated_at" => NOW,
+      "reviewed_at" => NOW + 1
+    }.merge(overrides)
   end
 
   def architecture_manifest

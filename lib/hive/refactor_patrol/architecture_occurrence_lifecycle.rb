@@ -50,7 +50,7 @@ module Hive
           project: {
             "project_id" => entry.fetch("project_id"),
             "name" => entry.fetch("name"),
-            "repository" => source.fetch("repository")
+            "repository" => entry["repository_identity"]
           },
           trigger: {
             "kind" => "pull_request.merged",

@@ -30,10 +30,14 @@ module Hive
         Hive::RefactorPatrol::PrManifest.validate!(data)
         capture = capture_value(capture)
         source = data.fetch("source")
+        legacy_replay = legacy_repository_replay?(capture, source)
         valid = capture.reservation["job_id"] == data.fetch("job_id") &&
                 capture.reservation["id"] == data.fetch("job_id") &&
                 capture.project["name"] == source.fetch("registration") &&
-                capture.project["repository"] == source.fetch("repository") &&
+                repository_matches_source?(
+                  capture.project["repository"], source,
+                  allow_legacy: legacy_replay
+                ) &&
                 capture.trigger["manifest_digest"] ==
                   data.fetch("manifest_checksum") &&
                 capture.trigger["merge_sha"] == source.fetch("merge_sha")
@@ -50,17 +54,20 @@ module Hive
         id = validate_id!(job_id)
         capture = capture_value(capture)
         aggregate = @job_reader.call(id)
+        pointer_matches = aggregate.fetch("occurrence_id") ==
+                          capture.occurrence_id
         valid = capture.reservation["job_id"] == id &&
                 capture.reservation["id"] == id &&
                 capture.project["name"] ==
                   aggregate.dig("source", "registration") &&
-                capture.project["repository"] ==
-                  aggregate.dig("source", "repository")
+                repository_matches_source?(
+                  capture.project["repository"], aggregate.fetch("source"),
+                  allow_legacy: pointer_matches
+                )
         raise @inconsistent_record,
               "architecture patrol occurrence does not match its job" unless valid
 
-        unless aggregate.fetch("occurrence_id") ==
-               capture.occurrence_id
+        unless pointer_matches
           raise @inconsistent_record,
                 "architecture patrol job occurrence identity is immutable"
         end
@@ -245,6 +252,32 @@ module Hive
       end
 
       private
+
+      def repository_matches_source?(capture_repository, source,
+                                     allow_legacy: false)
+        repository = source.fetch("repository")
+        current = if source.key?("url")
+          capture_repository ==
+            Hive::RefactorPatrol::PrManifest.repository_target(source)
+        else
+          _host, separator, captured_slug =
+            capture_repository.to_s.partition("/")
+          !separator.empty? && captured_slug == repository
+        end
+        current || (allow_legacy && capture_repository == repository)
+      rescue Hive::ConfigError, KeyError, NoMethodError
+        false
+      end
+
+      def legacy_repository_replay?(capture, source)
+        return false unless
+          capture.project["repository"] == source.fetch("repository")
+
+        existing = @journal.fetch(capture.occurrence_id)
+        existing && existing.fetch("provisional_capture") == capture.to_h
+      rescue Hive::ConfigError, KeyError
+        false
+      end
 
       def architecture_intent!(value)
         intent =

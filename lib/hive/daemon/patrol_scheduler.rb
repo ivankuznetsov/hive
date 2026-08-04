@@ -396,7 +396,7 @@ module Hive
           project: {
             "project_id" => entry.fetch("project_id"),
             "name" => entry.fetch("name"),
-            "repository" => entry["repository"]
+            "repository" => entry["repository_identity"]
           },
           trigger: trigger,
           reservation: {

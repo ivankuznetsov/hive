@@ -3,13 +3,16 @@ require "json"
 require "time"
 require "hive/atomic_file"
 require "hive/config"
+require "hive/gh/repository_identity"
 require "hive/module_package/managed_store"
 require "hive/modules/migration/patrol_effect_index"
+require "hive/modules/migration/patrol_evidence_receipt"
 require "hive/modules/migration/patrol_evidence_verifier"
 require "hive/modules/migration/patrol_qualification"
 require "hive/modules/migration/report"
 require "hive/modules/migration/report_migration"
 require "hive/modules/migration/report_projection"
+require "hive/modules/migration/shadow_comparator"
 require "hive/modules/migration/shadow_decision_migration"
 require "hive/workflow_package/canonical_json"
 
@@ -27,6 +30,14 @@ module Hive
         }.freeze
         STATUSES = %w[pending shadowing cutover_pending module rollback_pending rolled_back].freeze
         OWNERS = %w[legacy module].freeze
+        DETERMINISTIC_RECEIPT_SELECTOR_KEYS = %w[module trigger_id].freeze
+        DETERMINISTIC_RECEIPT_METADATA_KEYS = %w[
+          artifacts candidate_sha catalog_digest configuration_digest
+          decision_class fault_steps generated_at manifest_digest repository
+          reviewed_at reviewer run_id scenario_manifest_digest source_digest
+        ].freeze
+        private_constant :DETERMINISTIC_RECEIPT_SELECTOR_KEYS,
+                         :DETERMINISTIC_RECEIPT_METADATA_KEYS
         Outcome = Data.define(:status, :state, :blockers, :restored)
 
         class << self
@@ -153,6 +164,88 @@ module Hive
             File.join(File.dirname(state_file(project_root, hive_state_path: hive_state_path)), "report.json")
           end
 
+          # Build one receipt from the immutable comparison record selected by
+          # product identity. The harness supplies only candidate metadata; it
+          # cannot substitute captures, projections, or effect observations.
+          def deterministic_receipt_for!(project_root, selector:, metadata:,
+                                         hive_state_path: nil)
+            selector_label = "patrol deterministic receipt selector"
+            exact_string_keys!(
+              selector, DETERMINISTIC_RECEIPT_SELECTOR_KEYS,
+              label: selector_label
+            )
+            module_name = selector.fetch("module")
+            trigger_id = selector.fetch("trigger_id")
+            valid_selector = MODULES.include?(module_name) &&
+              trigger_id.is_a?(String) && trigger_id.valid_encoding? &&
+              !trigger_id.empty? &&
+              trigger_id.bytesize <= PatrolEvidenceReceipt::MAX_LABEL_BYTES
+            PatrolEvidence.malformed!(selector_label) unless valid_selector
+            exact_string_keys!(
+              metadata, DETERMINISTIC_RECEIPT_METADATA_KEYS,
+              label: "patrol deterministic receipt metadata"
+            )
+
+            with_migration_lock(
+              project_root, hive_state_path: hive_state_path, shared: false
+            ) do
+              comparator = ShadowComparator.new(
+                root: File.join(
+                  File.dirname(
+                    state_file(project_root, hive_state_path: hive_state_path)
+                  ),
+                  "shadow"
+                ),
+                admission_lock: ->(shared: true, &block) { block.call }
+              )
+              matches = []
+              comparator.each_record(module_name) do |record|
+                matches << record if record.dig("trigger", "id") == trigger_id
+                break if matches.size > 1
+              end
+              if matches.empty?
+                raise Hive::ConfigError,
+                      "patrol deterministic receipt evidence was not found"
+              end
+              unless matches.one?
+                raise Hive::ConfigError,
+                      "patrol deterministic receipt evidence is ambiguous"
+              end
+
+              record = matches.fetch(0)
+              unless record.fetch("comparable") &&
+                     record.fetch("unexplained_differences").empty? &&
+                     record.fetch("duplicate_effects").empty?
+                raise Hive::ConfigError,
+                      "patrol deterministic receipt evidence is inconsistent"
+              end
+              unless metadata.fetch("configuration_digest") ==
+                     record.fetch("configuration_digest")
+                raise Hive::ConfigError,
+                      "patrol deterministic receipt configuration changed"
+              end
+              capture_repository = record.dig(
+                "legacy_capture", "project", "repository"
+              )
+              metadata_repository = metadata.fetch("repository", nil)
+              repository_id = metadata_repository.fetch("id", nil) if
+                metadata_repository.is_a?(Hash)
+              unless canonical_repository_target?(capture_repository) &&
+                     capture_repository == repository_id
+                raise Hive::ConfigError,
+                      "patrol deterministic receipt repository changed"
+              end
+
+              PatrolEvidenceReceipt.build(
+                capture: record.fetch("legacy_capture"),
+                module_projection: record.fetch("module_decision"),
+                effects: record.fetch("legacy_effects") +
+                  record.fetch("module_effects"),
+                **metadata.transform_keys(&:to_sym)
+              ).to_h
+            end
+          end
+
           # Admit deterministic evidence without giving the E2E harness access
           # to verifier tokens or report construction. The caller supplies raw
           # receipt documents plus independently computed expected bindings;
@@ -240,6 +333,29 @@ module Hive
           rescue NoMethodError
             raise Hive::ConfigError, "patrol module migration state is malformed"
           end
+
+          def exact_string_keys!(value, keys, label:)
+            unless value.is_a?(Hash) &&
+                   value.keys.all? { |key| key.instance_of?(String) }
+              PatrolEvidence.malformed!(label)
+            end
+            PatrolEvidence.exact_keys!(value, keys, label: label)
+          end
+          private :exact_string_keys!
+
+          def canonical_repository_target?(value)
+            return false unless value.is_a?(String)
+
+            host, owner, name, *extra = value.split("/", -1)
+            return false unless extra.empty?
+
+            Hive::Gh::RepositoryIdentity.github_repository_target(
+              "#{owner}/#{name}", host
+            ) == value
+          rescue Hive::GhError
+            false
+          end
+          private :canonical_repository_target?
 
           def canonical(value) = Hive::WorkflowPackage::CanonicalJSON.generate(value)
         end

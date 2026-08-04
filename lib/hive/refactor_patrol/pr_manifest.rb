@@ -1,7 +1,9 @@
 require "digest"
 require "json"
 require "time"
+require "uri"
 require "hive"
+require "hive/gh/repository_identity"
 
 module Hive
   module RefactorPatrol
@@ -80,6 +82,31 @@ module Hive
         ::Digest::SHA256.hexdigest(canonical_json(payload))
       end
 
+      def repository_target(source)
+        repository = Hive::Gh::RepositoryIdentity.validated_repository_slug(
+          source.fetch("repository")
+        )
+        number = source.fetch("number")
+        uri = URI.parse(source.fetch("url"))
+        match = uri.path.match(
+          %r{\A/([^/]+/[^/]+)/pull/([1-9]\d*)\z}
+        ) if uri.path.is_a?(String)
+        valid = uri.is_a?(URI::HTTP) && uri.host && match &&
+                match[1].casecmp?(repository) &&
+                number.is_a?(Integer) && number.positive? &&
+                match[2].to_i == number && uri.userinfo.nil? &&
+                uri.query.nil? && uri.fragment.nil?
+        raise Invalid, "refactor patrol job manifest source repository is invalid" unless valid
+
+        Hive::Gh::RepositoryIdentity.github_repository_target(
+          repository, uri.host
+        )
+      rescue Hive::GhError, ArgumentError, KeyError, TypeError,
+             URI::InvalidURIError
+        raise Invalid,
+              "refactor patrol job manifest source repository is invalid"
+      end
+
       def valid_file?(file)
         return false unless file.is_a?(Hash)
         return false unless (file.keys - %w[path status previous_path]).empty?
@@ -126,6 +153,7 @@ module Hive
           raise Invalid, "refactor patrol job manifest source fields are invalid"
         end
         Time.iso8601(source.fetch("merged_at"))
+        repository_target(source)
       end
       private_class_method :canonical_json_value, :validate_source!
     end

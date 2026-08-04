@@ -42,6 +42,7 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       "name" => name,
       "path" => dir,
       "project_id" => "#{name}-id",
+      "repository_identity" => "github.com/acme/#{name}",
       "hive_state_path" => File.join(dir, ".hive-state")
     }
   end
@@ -93,6 +94,8 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       assert_equal "reserved", occurrence.fetch("phase")
       assert_equal capture.occurrence_id,
                    dispatches.first.fetch(:command).split.last
+      assert_equal entry.fetch("repository_identity"),
+                   capture.project.fetch("repository")
 
       evidence = Hive::Modules::Migration::EvidenceStore.new(
         root: File.join(
@@ -870,7 +873,7 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       project: {
         "project_id" => entry.fetch("project_id"),
         "name" => entry.fetch("name"),
-        "repository" => entry["repository"]
+        "repository" => entry["repository_identity"]
       },
       trigger: {
         "kind" => "schedule",

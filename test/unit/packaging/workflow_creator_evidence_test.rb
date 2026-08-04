@@ -251,6 +251,7 @@ class WorkflowCreatorEvidenceTest < Minitest::Test
 
   def test_replacement_is_compare_and_swap_and_post_rename_retry_is_exact
     with_private_bundle do |bundle|
+      native_publisher(bundle).initialize_receipt(initial_receipt.canonical_bytes)
       initial = Evidence.initialize!(bundle_directory: bundle, candidate_sha: SHA)
       desired = failure_receipt("proof_failed")
 
@@ -721,8 +722,18 @@ class WorkflowCreatorEvidenceTest < Minitest::Test
   end
 
   def native_class
-    publisher = HiveLiveAgentProof.const_get(:WorkflowCreatorReceiptPublisher, false)
-    publisher.const_get(:Native, false)
+    publisher_class.const_get(:Native, false)
+  end
+
+  def native_publisher(bundle)
+    publisher_class.new(
+      bundle_directory: bundle,
+      target_name: Creator::Vocabulary.fetch("bundle_files").first
+    )
+  end
+
+  def publisher_class
+    HiveLiveAgentProof.const_get(:WorkflowCreatorReceiptPublisher, false)
   end
 
   def with_native_method(native, name, replacement)

@@ -208,8 +208,9 @@ remains.
 constructor of the private `WorkflowCreatorReceiptPublisher`. Its public API
 accepts a bundle directory, derives the primary target exclusively from the
 frozen creator vocabulary, and publishes only canonical non-passing receipts
-admitted by the semantic core. Initialization uses an fsynced 0600 regular
-staging inode and descriptor-relative no-clobber linking. A bounded cooperative
+admitted by the semantic core. Initialization descriptor-tightens a newly
+created regular staging inode to 0600 before writing any bytes, fsyncs it, and
+uses descriptor-relative no-clobber linking. A bounded cooperative
 directory lock serializes complete initialization and replacement transitions.
 Exact retries and one-link or two-link interrupted states converge; different bytes,
 unsafe types or permissions, excess or outside-prefix links, parent rebinding,

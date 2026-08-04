@@ -205,6 +205,7 @@ module HiveLiveAgentProof
       name = "#{context.prefix}#{SecureRandom.hex(16)}"
       file = @native.create_file_at(context.staging, name, FILE_MODE)
       begin
+        file.chmod(FILE_MODE)
         offset = 0
         offset += file.write(bytes.byteslice(offset..)) while offset < bytes.bytesize
         @native.fsync(file)
@@ -422,7 +423,11 @@ module HiveLiveAgentProof
       end
 
       def create_file_at(directory, name, mode)
-        io(call_fd(@openat, directory.fileno, name, @flags.fetch(:create), mode), "wb")
+        File.for_fd(
+          call_fd(@openat, directory.fileno, name, @flags.fetch(:create), mode),
+          "wb",
+          autoclose: true
+        )
       end
 
       def linkat(source_directory, source_name, target_directory, target_name)

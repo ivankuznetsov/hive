@@ -286,6 +286,21 @@ class WorkflowCreatorEvidenceTest < Minitest::Test
     end
   end
 
+  def test_initialization_corrects_a_too_open_created_descriptor
+    with_private_bundle do |bundle|
+      with_native_method(native_class, :create_file_at, lambda do |original, instance, *args|
+        file = original.bind_call(instance, *args)
+        file.chmod(0o644)
+        file
+      end) do
+        receipt = Evidence.initialize!(bundle_directory: bundle, candidate_sha: SHA)
+
+        assert_equal receipt.canonical_bytes, File.binread(target(bundle))
+        assert_equal 0o600, File.stat(target(bundle)).mode & 0o777
+      end
+    end
+  end
+
   def test_replacement_rejects_a_target_changed_away_from_expected_and_desired
     with_private_bundle do |bundle|
       initial = Evidence.initialize!(bundle_directory: bundle, candidate_sha: SHA)

@@ -1,7 +1,7 @@
 require "json"
 require "time"
 require "hive/config"
-require "hive/commands/module/base"
+require "hive/commands/module/errors"
 require "hive/modules/migration/patrols"
 require "hive/modules/migration/report"
 require "hive/modules/migration/shadow_comparator"

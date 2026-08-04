@@ -1,4 +1,5 @@
 require "test_helper"
+require "open3"
 require "hive/commands/module/migration"
 
 class ModuleMigrationCommandTest < Minitest::Test
@@ -184,6 +185,17 @@ class ModuleMigrationCommandTest < Minitest::Test
     end
     assert_equal Hive::ExitCodes::USAGE, error.exit_code
     assert_match(/deterministic-receipt, or deterministic-qualification/, error.message)
+  end
+
+  def test_migration_load_does_not_load_the_module_lifecycle_base
+    script = <<~RUBY
+      $LOAD_PATH.unshift(#{File.expand_path("../../../lib", __dir__).inspect})
+      require "hive/commands/module/migration"
+      abort "module lifecycle base loaded" if $LOADED_FEATURES.any? { |path| path.end_with?("/hive/commands/module/base.rb") }
+    RUBY
+    _out, err, status = Open3.capture3(RbConfig.ruby, "-e", script)
+
+    assert status.success?, err
   end
 
   private

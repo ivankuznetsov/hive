@@ -130,7 +130,8 @@ module Hive
         when "doctor" then "hive-module-doctor"
         when "dry-run" then "hive-module-dry-run"
         when "migration"
-          @subject == "report" ? "hive-module-migration-report" : "hive-module-migration"
+          %w[report deterministic-qualification].include?(@subject) ?
+            "hive-module-migration-report" : "hive-module-migration"
         else "hive-module-lifecycle"
         end
       end

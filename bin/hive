@@ -440,7 +440,8 @@ def json_usage_error_contract(argv)
         argv, argv.index("migration") || command_index,
         value_options: %w[--reviewer]
       )
-      migration_action == "report" ? "hive-module-migration-report" : "hive-module-migration"
+      %w[report deterministic-qualification].include?(migration_action) ?
+        "hive-module-migration-report" : "hive-module-migration"
     else "hive-module-lifecycle"
     end
     return { schema: schema, error_kind: "usage" }

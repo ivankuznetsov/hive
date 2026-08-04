@@ -31,19 +31,18 @@ module HiveLiveAgentProof
         ).value
         validate_inputs!(inputs)
         timer = clock || -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) }
-        started = timestamp(timer)
-        result = inspect_archive(inputs.fetch("archive"), inputs.fetch("label"), timer, started)
+        result = inspect_archive(inputs.fetch("archive"), inputs.fetch("label"), timer, timestamp(timer))
         filesystem_budget!(result, inputs.fetch("available_bytes"), inputs.fetch("available_entries"))
         WorkflowCreator::Values.capture(result)
       rescue StandardError
         raise Error, MESSAGE, cause: nil
       end
+
       private
 
       def validate_inputs!(inputs)
-        labels = WorkflowCreator::Vocabulary.fetch("archive_labels")
         integers = inputs.values_at("available_bytes", "available_entries")
-        valid = labels.include?(inputs.fetch("label"))
+        valid = WorkflowCreator::Vocabulary.fetch("archive_labels").include?(inputs.fetch("label"))
         valid &&= integers.all? { |value| value.instance_of?(Integer) && value >= 0 }
         valid &&= READ_FLAGS
         raise Error, MESSAGE unless valid
@@ -55,10 +54,9 @@ module HiveLiveAgentProof
           valid_file!(stat)
           digest = digest_file(file, timer, started)
           file.rewind
-          paths, total = read_entries(file, timer, started)
+          count, total = read_entries(file, label, timer, started)
           verify_identity!(file, stat)
-          validate_tree!(paths, total, stat.size)
-          archive_record(label, digest, stat.size, paths.length, total)
+          archive_record(label, digest, stat.size, count, total)
         end
       end
 
@@ -77,26 +75,54 @@ module HiveLiveAgentProof
         digest.hexdigest
       end
 
-      def read_entries(file, timer, started)
+      def read_entries(file, label, timer, started)
+        state = [ 0, 0 ]
+        if label == "candidate-package"
+          nested = 0
+          outer_bytes = scan_tar(file, state, timer, started) do |entry, path|
+            next false unless path == "data.tar.gz"
+            nested += 1
+            with_gzip(entry) do |gzip|
+              compression_budget!(scan_tar(gzip, state, timer, started), entry.size)
+            end
+            true
+          end
+          raise Error, MESSAGE unless nested == 1
+          compression_budget!(outer_bytes, file.stat.size)
+        else
+          with_gzip(file) { |gzip| compression_budget!(scan_tar(gzip, state, timer, started), file.stat.size) }
+        end
+        state
+      end
+
+      def scan_tar(io, state, timer, started)
         paths = {}
-        total = 0
-        gzip = Zlib::GzipReader.new(file)
-        Gem::Package::TarReader.new(gzip) do |tar|
+        local_total = 0
+        Gem::Package::TarReader.new(io) do |tar|
           tar.each do |entry|
-            raise Error, MESSAGE if paths.length >= MAX_ENTRIES
+            state[0] += 1
+            raise Error, MESSAGE if state[0] > MAX_ENTRIES
             kind = entry_kind(entry)
             path = normalized_path(entry.full_name, directory: kind == :directory)
             raise Error, MESSAGE if paths.key?(path)
             size = entry.header.size
             raise Error, MESSAGE unless size.instance_of?(Integer) && size.between?(0, MAX_ENTRY_BYTES)
-            total += size
-            raise Error, MESSAGE if total > MAX_TOTAL_BYTES
+            local_total += size
+            state[1] += size
+            raise Error, MESSAGE if state[1] > MAX_TOTAL_BYTES
             paths[path] = kind
-            consume(entry, timer, started) if kind == :file
+            handled = kind == :file && block_given? && yield(entry, path)
+            consume(entry, timer, started) if kind == :file && !handled
             time_remaining!(timer, started)
           end
         end
-        [ paths, total ]
+        validate_tree!(paths, local_total)
+        local_total
+      end
+
+      def with_gzip(io)
+        gzip = Zlib::GzipReader.new(io)
+        yield gzip
       ensure
         gzip&.finish
       end
@@ -130,19 +156,18 @@ module HiveLiveAgentProof
         end
       end
 
-      def validate_tree!(paths, total, compressed)
+      def validate_tree!(paths, total)
         ordered = paths.keys.sort
-        ordered.each_cons(2) do |left, right|
-          raise Error, MESSAGE if paths.fetch(left) == :file && right.start_with?("#{left}/")
-        end
-        valid = !ordered.empty? && total.positive?
-        valid &&= total <= compressed * MAX_COMPRESSION_RATIO
-        raise Error, MESSAGE unless valid
+        ordered.each_cons(2) { |left, right| raise Error, MESSAGE if paths.fetch(left) == :file && right.start_with?("#{left}/") }
+        raise Error, MESSAGE if ordered.empty? || !total.positive?
+      end
+
+      def compression_budget!(total, compressed)
+        raise Error, MESSAGE unless compressed.positive? && total <= compressed * MAX_COMPRESSION_RATIO
       end
 
       def filesystem_budget!(result, available_bytes, available_entries)
-        valid = result.fetch("uncompressed_bytes") <= available_bytes
-        valid &&= result.fetch("entry_count") <= available_entries
+        valid = result.fetch("uncompressed_bytes") <= available_bytes && result.fetch("entry_count") <= available_entries
         raise Error, MESSAGE unless valid
       end
 
@@ -168,8 +193,7 @@ module HiveLiveAgentProof
       end
 
       def time_remaining!(timer, started)
-        elapsed = timestamp(timer) - started
-        raise Error, MESSAGE unless elapsed.between?(0, MAX_SECONDS)
+        raise Error, MESSAGE unless (timestamp(timer) - started).between?(0, MAX_SECONDS)
       end
     end
   end

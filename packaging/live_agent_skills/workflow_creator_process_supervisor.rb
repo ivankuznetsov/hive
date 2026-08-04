@@ -12,9 +12,7 @@ module HiveLiveAgentProof
     class ProcessSupervisor
       class Error < StandardError; end
 
-      COMMAND_LABELS = %w[candidate-version candidate-workflow-list candidate-workflow-new
-                          candidate-workflow-validate candidate-workflow-commit candidate-task-create
-                          candidate-task-run candidate-task-retry candidate-operational-status].freeze
+      COMMAND_LABELS = Vocabulary.fetch("command_labels")
       LABELS = (COMMAND_LABELS + %w[outer-workflow-creator outer-authorized-work]).freeze
       LABEL = /\A[a-z][a-z0-9_-]{0,127}\z/
       MAX_IPC_BYTES = 64 * 1024

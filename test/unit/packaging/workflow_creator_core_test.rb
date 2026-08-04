@@ -18,6 +18,8 @@ class WorkflowCreatorCoreTest < Minitest::Test
   SOURCES = %w[
     workflow_creator.rb workflow_creator_contract.rb workflow_creator_execution_contract.rb
   ].to_h { |name| [ name, File.join(ROOT, "packaging", "live_agent_skills", name) ] }.freeze
+  POISONED_CHILD_ENV = %w[HIVE_COVERAGE HIVE_COVERAGE_ROOT HIVE_COVERAGE_RUN_ID RUBYOPT]
+    .to_h { |name| [ name, nil ] }.freeze
   DECISIONS = %i[
     if unless elsif if_mod unless_mod ifop when in rescue rescue_mod while until for while_mod until_mod
   ].freeze
@@ -200,10 +202,12 @@ class WorkflowCreatorCoreTest < Minitest::Test
       "require './packaging/live_agent_skills/proof'; require './packaging/live_agent_skills/workflow_creator'"
     ]
     scripts.each do |script|
-      out, err, status = Open3.capture3(
-        RbConfig.ruby, "--disable-gems", "-I#{ROOT}", "-e",
-        "#{script}; puts HiveLiveAgentProof::WorkflowCreator::Vocabulary.fetch('schema_version')", chdir: ROOT
-      )
+      out, err, status = Bundler.with_unbundled_env do
+        Open3.capture3(
+          POISONED_CHILD_ENV, RbConfig.ruby, "--disable-gems", "-I#{ROOT}", "-e",
+          "#{script}; puts HiveLiveAgentProof::WorkflowCreator::Vocabulary.fetch('schema_version')", chdir: ROOT
+        )
+      end
       assert status.success?, err
       assert_equal "1\n", out
     end

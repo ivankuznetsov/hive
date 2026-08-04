@@ -19,12 +19,13 @@ Updated: 2026-08-04
 Folder-as-agent workflow engine: a Ruby 3.4 / Thor CLI control plane where descriptor-backed workflows move task folders through filesystem stages, stage agents compile provider-neutral invocations through `Hive::AgentRuntime` and configurable AgentProfile adapters (`claude` default, `codex`, `pi`, `grok`), and `mv` between directories remains the approval primitive. The built-in `coding` workflow drives the nine-stage PR pipeline (`1-inbox` → `2-brainstorm` → `3-plan` → `4-execute` → `5-open-pr` → `6-review` → `7-artifacts` → `8-finalize` → `9-done`), while the built-in `content` and `bench` workflows and project-authored workflows share the same generic runner/status/action machinery. Agent operation is centered on the additive operational status contract, coherent daemon scheduler snapshots, bounded semantic `hive watch`, tokenized routine `hive act`, and stable-ID semantic E2E profiles; the legacy full JSON graph remains compatible. Hive packages one canonical operating skill projected to OpenClaw `/hive`, Claude `/hive`, Codex `$hive`, and Pi `/skill:hive`, with read-only `hive doctor`, consent-safe setup, deterministic trusted pre-release proof, and optional four-agent live diagnostics.
 
 Reusable mechanisms remain in this monorepo behind the canonical
-[[component-boundaries]] catalog. The ten-row internal graph has eight
+[[component-boundaries]] catalog. The eleven-row internal graph has nine
 `boundary-ready` facades—UserService, Agent ABI, Agent Artifact Firewall,
 Skillpack, Safe Agent Git Gate, WorkLedger, and Workflow Creator Values/Text
-Safety plus the composed Workflow Creator—and two guarded candidates: Attempts
-admission and Patrol Effect Evidence. Skillpack's dependency on Agent ABI and
-the Core's dependency on Values are the two component edges. Patrol's U3
+Safety plus the composed Workflow Creator and deterministic Workflow Creator
+Execution custody—and two guarded candidates: Attempts admission and Patrol
+Effect Evidence. Skillpack's dependency on Agent ABI, Execution's dependency
+on Core, and Core's dependency on Values are the three component edges. Patrol's U3
 qualification fence is the only migration exception. Hive
 is the first and primary consumer, and internal readiness does not imply a gem,
 version, repository, or release.

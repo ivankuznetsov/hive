@@ -914,6 +914,8 @@ components:
     public_contract:
       values:
         - HiveLiveAgentProof::WorkflowCreatorExecution.start!
+        - HiveLiveAgentProof::WorkflowCreatorExecution::Draft
+        - HiveLiveAgentProof::WorkflowCreatorExecution::Result
         - HiveLiveAgentProof::WorkflowCreatorExecution#gateway_path
         - HiveLiveAgentProof::WorkflowCreatorExecution#workspace_path
         - HiveLiveAgentProof::WorkflowCreatorExecution#run_outer_workflow_creator
@@ -934,7 +936,7 @@ components:
       - packaging/live_agent_skills/workflow_creator_process_supervisor.rb
       - packaging/live_agent_skills/workflow_creator_capture.rb
     state_contracts:
-      - "One typed session owns the proof workspace, fixed gateway, installed closures, archive admissions, bounded captures, supervisor receipts, draft support publication, and final result"
+      - "One typed session owns the proof workspace, fixed gateway, installed closures, archive admissions, bounded captures, supervisor receipts, draft support bytes, fixed final support publication, and final result"
       - "Linux child-subreaper custody covers the nine vocabulary-defined candidate commands and exactly two outer model-loop labels; zero launches remains not_started and each launch requires one complete teardown receipt"
       - "The session exposes only its fixed gateway/workspace paths, two closed outer launches, draft, finish, result, and idempotent close lifecycle; it exposes no generic process, archive, installation, publisher, or cleanup primitive"
       - "U14 is a deterministic stable substrate for U15 orchestration, not evidence that an authenticated provider run or live Workflow Creator proof occurred"

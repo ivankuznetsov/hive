@@ -93,13 +93,22 @@ class WorkflowCreatorExecutionTest < Minitest::Test
       invalid = JSON.parse(JSON.generate(primary))
       invalid.fetch("evidence_bundle").fetch(2)["sha256"] = "0" * 64
 
-      assert_raises(Creator::Error) { session.finish!(primary_row: invalid) }
+      assert_raises(Execution::Error) { session.finish!(primary_row: invalid) }
       assert_empty Dir.children(fixture.fetch(:bundle_directory))
       assert_equal "failed", session.result.status
       assert_equal "passed", session.finish!(primary_row: primary).status
       assert_equal "passed", session.finish!(primary_row: primary).status
     ensure
       session&.close
+    end
+  end
+
+  def test_owned_paths_must_not_overlap
+    with_fixture do |fixture|
+      overlapping = fixture.merge(bundle_directory: fixture.dig(:candidate, "root"))
+
+      assert_raises(Execution::Error) { start_session(overlapping) }
+      refute Dir.exist?(fixture.fetch(:workspace_path))
     end
   end
 

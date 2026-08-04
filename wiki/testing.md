@@ -170,7 +170,7 @@ Vocabulary-fixed support members. It also checks that command labels are
 sourced from `WorkflowCreator::Vocabulary`, that the six-source relative
 require closure cannot widen to Hive runtime code, and that the readable
 pairwise source budgets remain exact: archive + installation at most 390 lines,
-capture + supervisor at most 485, and gateway + execution at most 520. These
+capture + supervisor at most 485, and gateway + execution at most 575. These
 are pair budgets, not per-file compression targets.
 
 The archive, installation, capture, supervisor, and gateway files exercise

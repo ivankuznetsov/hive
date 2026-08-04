@@ -18,7 +18,11 @@ orchestration remains pending.
 ProcessSupervisor alone constructs Capture. The private receipt publisher
 remains hidden and is authorized from execution only for fixed support-file
 publication. Source closure, command-label vocabulary ownership, clean loading,
-and the 390/485/520 pairwise readable-line budgets are component-tested.
+and the 390/485/575 pairwise readable-line budgets are component-tested. The
+gateway/execution projection was corrected from 520 after implementation showed
+that the smaller number encouraged compression across fixed IPC and two-phase
+receipt lifecycle code or omission of disjoint custody-root validation without
+removing a responsibility owner.
 
 **Limits:** Process custody is Linux-only. Caller-loss teardown is tested, but
 externally SIGKILLing the trusted custody root itself is not claimed, and

@@ -23,7 +23,7 @@ module HiveLiveAgentProof
     ARCHIVE_LABELS = WorkflowCreator::Vocabulary.fetch("archive_labels")
     SUPERVISOR_KEYS = %w[output_limit tail_limit timeout term_grace kill_grace].freeze
 
-    def self.start!(**options) = new(**options).tap(&:start!)
+    def self.start!(**options) = new(**options).send(:activate)
     private_class_method :new
 
     attr_reader :gateway_path, :workspace_path
@@ -41,18 +41,24 @@ module HiveLiveAgentProof
       raise Error unless @archives.keys == ARCHIVE_LABELS
       options = input.fetch("supervisor_options")
       raise Error unless options.instance_of?(Hash) && (options.keys - SUPERVISOR_KEYS).empty?
-      @workspace_path = File.expand_path(input.fetch("workspace_path")).freeze
-      @bundle_directory = File.expand_path(input.fetch("bundle_directory")).freeze
+      workspace = input.fetch("workspace_path")
+      @workspace_path = File.join(File.realpath(File.dirname(workspace)), File.basename(workspace)).freeze
+      @bundle_directory = File.realpath(input.fetch("bundle_directory")).freeze
+      paths = [ @candidate.fetch("root"), @openclaw.fetch("root") ].map { |path| File.realpath(path) }
+      paths.concat([ @workspace_path, @bundle_directory ])
+      raise Error if paths.combination(2).any? do |left, right|
+        left == right || left.start_with?("#{right}/") || right.start_with?("#{left}/")
+      end
       @correlation_id = input.fetch("correlation_id")
       @exact_secrets = input.fetch("exact_secrets")
       @supervisor_options = options.transform_keys(&:to_sym)
       @result = Result.new(status: "not_started")
       @outer_launches = {}
-    rescue WorkflowCreator::Values::Error, KeyError, TypeError
+    rescue WorkflowCreator::Values::Error, KeyError, TypeError, SystemCallError
       raise Error, "workflow-creator execution inputs are invalid", cause: nil
     end
 
-    def start!
+    def activate
       @supervisor = WorkflowCreator::ProcessSupervisor.new(
         correlation_id: @correlation_id, exact_secrets: @exact_secrets, **@supervisor_options
       )
@@ -69,8 +75,9 @@ module HiveLiveAgentProof
       self
     rescue StandardError => error
       abort_session
-      raise error
+      raise_execution(error)
     end
+    private :activate
 
     def run_outer_workflow_creator(**launch) = run_outer(OUTER_LABELS.first, launch)
     def run_outer_authorized_work(**launch) = run_outer(OUTER_LABELS.last, launch)
@@ -108,7 +115,7 @@ module HiveLiveAgentProof
                          receipt_size: bytes.bytesize)
     rescue StandardError => error
       abort_session
-      raise error
+      raise_execution(error)
     end
 
     def finish!(primary_row:)
@@ -142,7 +149,7 @@ module HiveLiveAgentProof
       raise Error, "workflow-creator execution publication failed", cause: nil
     rescue StandardError => error
       fail_result
-      raise error
+      raise_execution(error)
     end
 
     def result = @result
@@ -157,7 +164,8 @@ module HiveLiveAgentProof
     private
 
     def run_outer(label, launch)
-      raise Error unless ([ :argv, :environment ]..[ :argv, :environment, :stdin_data ]).cover?(launch.keys.sort)
+      keys = launch.keys.sort
+      raise Error unless keys == %i[argv environment] || keys == %i[argv environment stdin_data]
       current = scan_openclaw
       raise Error unless current.canonical_bytes == @openclaw_installation.canonical_bytes
       raw = { "argv" => launch.fetch(:argv), "environment" => launch.fetch(:environment),
@@ -171,7 +179,7 @@ module HiveLiveAgentProof
         @supervisor.run_outer_authorized_work(**args)
     rescue StandardError => error
       fail_result
-      raise error
+      raise_execution(error)
     end
 
     def scan_candidate
@@ -255,5 +263,10 @@ module HiveLiveAgentProof
 
     def abort_session = close
     def fail_result = @result = Result.new(status: "failed")
+
+    def raise_execution(error)
+      raise error if error.is_a?(Error)
+      raise Error, "workflow-creator execution failed", cause: nil
+    end
   end
 end

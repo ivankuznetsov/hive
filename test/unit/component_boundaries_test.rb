@@ -350,6 +350,8 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal(
       %w[
         HiveLiveAgentProof::WorkflowCreatorExecution.start!
+        HiveLiveAgentProof::WorkflowCreatorExecution::Draft
+        HiveLiveAgentProof::WorkflowCreatorExecution::Result
         HiveLiveAgentProof::WorkflowCreatorExecution#gateway_path
         HiveLiveAgentProof::WorkflowCreatorExecution#workspace_path
         HiveLiveAgentProof::WorkflowCreatorExecution#run_outer_workflow_creator
@@ -495,7 +497,7 @@ class ComponentBoundariesTest < Minitest::Test
     assert_operator line_count.call("workflow_creator_capture.rb", "workflow_creator_process_supervisor.rb"),
                     :<=, 485
     assert_operator line_count.call("workflow_creator_gateway.rb", "workflow_creator_execution.rb"),
-                    :<=, 520
+                    :<=, 575
 
     assert contract.validate_static_boundaries!
   end

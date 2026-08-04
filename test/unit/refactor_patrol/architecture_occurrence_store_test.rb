@@ -194,6 +194,7 @@ class RefactorPatrolArchitectureOccurrenceStoreTest < Minitest::Test
                  )
     urls = [
       "https://github.com/other/demo/pull/7",
+      "https://%",
       "mailto:user@example.com",
       "urn:foo"
     ]
@@ -234,6 +235,14 @@ class RefactorPatrolArchitectureOccurrenceStoreTest < Minitest::Test
                  replay.reserve!(
                    "job-7", capture: legacy, now: NOW
                  ).fetch("occurrence_id")
+
+    corrupt_journal = Journal.new
+    corrupt_journal.failure = :fetch
+    assert_raises(InconsistentRecord) do
+      occurrence_store(journal: corrupt_journal).reserve_manifest!(
+        manifest, capture: legacy, now: NOW
+      )
+    end
   end
 
   def test_rebuild_recovery_index_translates_journal_corruption
@@ -275,6 +284,19 @@ class RefactorPatrolArchitectureOccurrenceStoreTest < Minitest::Test
     end
     assert_raises(InconsistentRecord) do
       store.reserve_manifest!({}, capture: capture, now: NOW)
+    end
+
+    malformed_source = occurrence_store(
+      journal: journal,
+      job_reader: ->(_job_id) {
+        job.merge(
+          "occurrence_id" => capture.occurrence_id,
+          "source" => { "registration" => "demo" }
+        )
+      }
+    )
+    assert_raises(InconsistentRecord) do
+      malformed_source.reserve!("job-7", capture: capture, now: NOW)
     end
 
     assert_raises(InconsistentRecord) do

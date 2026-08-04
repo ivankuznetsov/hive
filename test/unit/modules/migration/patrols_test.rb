@@ -172,6 +172,16 @@ class ModulesMigrationPatrolsTest < Minitest::Test
         )
         deterministic_receipt_metadata
       end,
+      "inconsistent" => lambda do |project|
+        capture = terminal_patrol_capture(patrol_capture)
+        projection = Hive::Modules::Migration::PatrolDecisionProjection.build(
+          module_name: "patrol", rationale: "not_due"
+        )
+        record_shadow_decision(
+          project, capture: capture, module_projection: projection
+        )
+        deterministic_receipt_metadata
+      end,
       "repository" => lambda do |project|
         record_shadow_decision(
           project, capture: terminal_patrol_capture(patrol_capture)
@@ -203,7 +213,7 @@ class ModulesMigrationPatrolsTest < Minitest::Test
     cases.each do |name, prepare|
       with_project do |project|
         metadata = prepare.call(project)
-        assert_raises(Hive::ConfigError, name) do
+        error = assert_raises(Hive::ConfigError, name) do
           Hive::Modules::Migration::Patrols.deterministic_receipt_for!(
             project.fetch("path"),
             selector: { "module" => "patrol", "trigger_id" => "manual-1" },
@@ -211,6 +221,7 @@ class ModulesMigrationPatrolsTest < Minitest::Test
             hive_state_path: project.fetch("hive_state_path")
           )
         end
+        assert_match(/inconsistent/, error.message) if name == "inconsistent"
       end
     end
   end
@@ -1824,6 +1835,7 @@ class ModulesMigrationPatrolsTest < Minitest::Test
   end
 
   def record_shadow_decision(project, capture:, effects: [],
+                             module_projection: capture.selection,
                              admission_lock: nil)
     root = File.join(
       project.fetch("hive_state_path"), "module-runtime", "migration", "shadow"
@@ -1834,7 +1846,7 @@ class ModulesMigrationPatrolsTest < Minitest::Test
       module_name: capture.module_name,
       trigger: capture.trigger,
       legacy_capture: capture,
-      module_projection: capture.selection,
+      module_projection: module_projection,
       configuration_digest: "c" * 64,
       occurred_at: capture.occurred_at,
       legacy_effects: effects

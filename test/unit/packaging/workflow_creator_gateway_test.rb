@@ -88,6 +88,21 @@ class WorkflowCreatorGatewayTest < Minitest::Test
     end
   end
 
+  def test_credential_like_candidate_environment_is_rejected_before_start
+    Dir.mktmpdir("creator-gateway-environment") do |dir|
+      root, cwd = File.join(dir, "private"), File.join(dir, "cwd")
+      [ root, cwd ].each { |path| Dir.mkdir(path, 0o700) }
+      candidate = write_candidate(File.join(cwd, "candidate"))
+
+      assert_raises(Gateway::Error) do
+        build_gateway(
+          root:, cwd:, candidate:, log: File.join(cwd, "log"),
+          environment: { "API_TOKEN" => "must-not-cross" }
+        )
+      end
+    end
+  end
+
   def test_an_extra_command_after_position_nine_poisons_the_completed_sequence
     with_gateway do |gateway, wrapper|
       run_all(wrapper)
@@ -139,7 +154,7 @@ class WorkflowCreatorGatewayTest < Minitest::Test
     end
   end
 
-  def build_gateway(root:, cwd:, candidate:, log:, mode: "ok")
+  def build_gateway(root:, cwd:, candidate:, log:, mode: "ok", environment: nil)
     stat = File.lstat(candidate)
     identity = {
       "path" => File.basename(candidate), "sha256" => Digest::SHA256.file(candidate).hexdigest,
@@ -151,7 +166,7 @@ class WorkflowCreatorGatewayTest < Minitest::Test
     )
     Gateway.new(
       root:, candidate_executable: candidate, candidate_identity: identity,
-      environment: { "FAKE_MODE" => mode, "FAKE_STATE" => log }, cwd:, supervisor:
+      environment: environment || { "FAKE_MODE" => mode, "FAKE_STATE" => log }, cwd:, supervisor:
     )
   end
 

@@ -15,6 +15,11 @@ module HiveLiveAgentProof
     WRAPPER_NAME = "workflow-creator-gateway"
     SOCKET_NAME = ".workflow-creator-gateway.sock"
     TASK_SLUG = /\A[a-z][a-z0-9-]{0,62}[a-z0-9]\z/
+    CREDENTIAL = /
+      (?:^|_)
+      (?:TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?|API_?KEY|PRIVATE_?KEY|AUTH(?:ORIZATION)?|COOKIE|SESSION)
+      (?:_|$)
+    /ix
     REFUSAL = "workflow-creator gateway refused request\n"
 
     def initialize(root:, candidate_executable:, candidate_identity:, environment:, cwd:, supervisor:)
@@ -75,7 +80,8 @@ module HiveLiveAgentProof
       @root_identity = directory_identity(@root, private: true)
       @cwd_identity = directory_identity(@cwd, private: false)
       environment_valid = @environment.instance_of?(Hash) && @environment.all? do |key, value|
-        [ key, value ].all? { |item| item.instance_of?(String) && !item.empty? && !item.include?("\0") }
+        [ key, value ].all? { |item| item.instance_of?(String) && !item.empty? && !item.include?("\0") } &&
+          !CREDENTIAL.match?(key)
       end
       supervisor_valid = @supervisor.instance_of?(WorkflowCreator::ProcessSupervisor)
       labels_valid = WorkflowCreator::Vocabulary.fetch("command_labels") ==
@@ -122,7 +128,7 @@ module HiveLiveAgentProof
         TOKEN = #{@token.dump}
         SOCKET_PATH = #{@socket_path.dump}
         LIMIT = #{MAX_IPC_BYTES}
-        CREDENTIAL = /(?:^|_)(?:TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?|API_?KEY|PRIVATE_?KEY|AUTH(?:ORIZATION)?|COOKIE|SESSION)(?:_|$)/i
+        CREDENTIAL = #{CREDENTIAL.inspect}
         begin
           unsafe = ENV.keys.any? { |key| CREDENTIAL.match?(key) }
           request = JSON.generate("token" => TOKEN, "argv" => ARGV, "credential_env" => unsafe)

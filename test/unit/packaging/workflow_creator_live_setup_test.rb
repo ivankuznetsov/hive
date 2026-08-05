@@ -51,6 +51,7 @@ class WorkflowCreatorLiveSetupTest < Minitest::Test
       assert File.file?(File.join(fixture.fetch(:workspace), ".hive-state/config.yml"))
       assert File.file?(File.join(fixture.fetch(:workspace), ".git"))
       assert File.directory?(File.join(control, "git"))
+      refute File.exist?(File.join(control, "git/hooks/post-commit"))
       candidate_environment = options.dig(:candidate, "environment")
       refute candidate_environment.fetch("HOME").start_with?("#{fixture.fetch(:workspace)}/")
       refute candidate_environment.fetch("HIVE_HOME").start_with?("#{fixture.fetch(:workspace)}/")
@@ -175,9 +176,15 @@ class WorkflowCreatorLiveSetupTest < Minitest::Test
     end
   end
 
+  def test_rejects_a_correlation_identity_the_process_supervisor_cannot_admit
+    with_setup_fixture do |fixture|
+      assert_raises(Setup::Error) { prepare(fixture, correlation_id: "workflow-creator:invalid") }
+    end
+  end
+
   private
 
-  def prepare(fixture)
+  def prepare(fixture, correlation_id: "workflow-creator-live-setup")
     Setup.prepare!(
       candidate_dir: fixture.fetch(:candidate_dir), candidate_sha: SHA,
       hive_version: Hive::VERSION, canonical: fixture.fetch(:canonical),
@@ -193,7 +200,7 @@ class WorkflowCreatorLiveSetupTest < Minitest::Test
         "endpoint" => "https://openrouter.ai/api/v1", "proxy" => nil,
         "ca" => nil, "redirects" => "deny"
       },
-      correlation_id: "workflow-creator-live-setup", supervisor_options: {}
+      correlation_id:, supervisor_options: {}
     )
   end
 
@@ -277,6 +284,16 @@ class WorkflowCreatorLiveSetupTest < Minitest::Test
       require "json"
       if ARGV.first == "init"
         workspace = File.expand_path(ARGV.fetch(1))
+        abort "init requires the main checkout" unless File.directory?(File.join(workspace, ".git"))
+        hook = File.join(workspace, ".git", "hooks", "post-commit")
+        File.write(hook, <<~HOOK)
+          #!/usr/bin/env bash
+
+          # BEGIN LLM WIKI POST-COMMIT
+          exit 0
+          # END LLM WIKI POST-COMMIT
+        HOOK
+        File.chmod(0o755, hook)
         state = File.join(workspace, ".hive-state")
         FileUtils.mkdir_p(state)
         File.write(File.join(state, "config.yml"), "---\ndaemon:\n  enabled: false\n")

@@ -110,7 +110,11 @@ class LiveHiveWorkflowCreatorSmokeTest < Minitest::Test
   def correlation_id(candidate_sha)
     run = ENV.fetch("GITHUB_RUN_ID", "local")
     attempt = ENV.fetch("GITHUB_RUN_ATTEMPT", "1")
-    "workflow-creator:#{candidate_sha}:#{run}:#{attempt}"
+    value = "workflow-creator-#{candidate_sha}-#{run}-#{attempt}"
+    raise "invalid Workflow Creator correlation identity" unless
+      HiveLiveAgentProof::WorkflowCreator::ProcessSupervisor::LABEL.match?(value)
+
+    value
   end
 
   def provider_secrets

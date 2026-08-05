@@ -382,7 +382,8 @@ module HiveLiveAgentProof
     end
 
     def validate_roots!
-      raise Error if @hive_version.empty? || @correlation_id.empty?
+      raise Error if @hive_version.empty? ||
+        !WorkflowCreator::ProcessSupervisor::LABEL.match?(@correlation_id)
       raise Error unless PROVIDER_ENDPOINTS.fetch(@provider) == @transport.fetch("endpoint")
       raise Error unless @model.start_with?("#{@provider}/")
       raise Error unless @transport.keys.sort == %w[ca endpoint proxy redirects]
@@ -504,6 +505,9 @@ module HiveLiveAgentProof
     end
 
     class WorkspacePreparer
+      LLM_WIKI_HOOK_BEGIN = "# BEGIN LLM WIKI POST-COMMIT\n"
+      LLM_WIKI_HOOK_END = "# END LLM WIKI POST-COMMIT\n"
+
       def initialize(workspace:, skill_source:, candidate_executable:, candidate_environment:,
                      openclaw_executable:, projection_manifest_sha256:, control_root:)
         @workspace, @skill_source, @candidate = workspace, skill_source, candidate_executable
@@ -534,7 +538,7 @@ module HiveLiveAgentProof
         write(File.join(workspace, ".gitignore"), proof_gitignore)
         write(File.join(workspace, "README.md"), "# Workflow creator live proof\n")
         @git_directory = File.join(@control_root, "git")
-        git!(workspace, "init", "--separate-git-dir", @git_directory, "-b", "main")
+        git!(workspace, "init", "-b", "main")
         git!(workspace, "config", "user.name", "Hive Live Proof")
         git!(workspace, "config", "user.email", "hive-live-proof@example.invalid")
         git!(workspace, "add", "--", ".gitignore", "README.md")
@@ -554,6 +558,8 @@ module HiveLiveAgentProof
         disabled &&= answers.fetch("patrol_mode") == "off"
         raise Error unless minimal && disabled
         raise Error unless File.file?(File.join(workspace, ".hive-state", "config.yml"))
+        remove_managed_post_commit_hook!
+        relocate_git_directory!
         raise Error unless git_output(workspace, "remote").empty?
         @projection, @skill_destination = projection, destination
         @git_pointer_bytes = safe_skill_file(File.join(workspace, ".git"))
@@ -821,6 +827,33 @@ module HiveLiveAgentProof
           "HOME" => @environment.value.fetch("HOME"),
           "GIT_CONFIG_NOSYSTEM" => "1", "GIT_CONFIG_GLOBAL" => "/dev/null"
         }
+      end
+
+      def relocate_git_directory!
+        source = File.join(@workspace, ".git")
+        raise Error unless private_directory?(source)
+        raise Error if File.exist?(@git_directory) || File.symlink?(@git_directory)
+
+        File.rename(source, @git_directory)
+        write(source, "gitdir: #{@git_directory}\n")
+      rescue SystemCallError
+        raise Error
+      end
+
+      def remove_managed_post_commit_hook!
+        path = File.join(@workspace, ".git", "hooks", "post-commit")
+        return unless File.exist?(path) || File.symlink?(path)
+
+        lines = safe_skill_file(path).lines
+        starts = lines.each_index.select { |index| lines.fetch(index) == LLM_WIKI_HOOK_BEGIN }
+        finishes = lines.each_index.select { |index| lines.fetch(index) == LLM_WIKI_HOOK_END }
+        raise Error unless starts.length == 1 && finishes.length == 1 && starts.first < finishes.first
+
+        retained = lines[...starts.first] + lines[(finishes.first + 1)..]
+        raise Error unless retained.join.strip == "#!/usr/bin/env bash"
+        File.unlink(path)
+      rescue SystemCallError
+        raise Error
       end
 
       def git!(workspace, *argv)

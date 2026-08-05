@@ -322,9 +322,14 @@ exact candidate artifacts and installed candidate/OpenClaw runtimes, creates
 small immutable identity closures, projects the exact candidate `/hive` skill,
 prepares one private initialized project, installs and reads back the exact
 SQLite-backed OpenClaw execution policy, and returns only closed runner
-callables. Candidate homes, the separate Git directory, OpenClaw state/config,
-and approvals stay in that control root, while U14's socket stays in the
-owner-private workspace parent; the model sees only the disposable worktree.
+callables. Hive initialization runs against an ordinary main checkout, then
+setup atomically relocates its Git directory into the control root and leaves
+only Git's pointer file behind. It removes the otherwise active managed LLM-wiki
+post-commit hook before relocation because the bounded proof does not run wiki
+refreshes. Candidate homes, that separate Git directory,
+OpenClaw state/config, and approvals stay in the control root, while U14's
+socket stays in the owner-private workspace parent; the model sees only the
+disposable worktree.
 Exact Git, skill, config, and approval identities are
 rechecked at every candidate command and around both model loops.
 `WorkflowCreatorLiveRunner` selects the provider from the committed model

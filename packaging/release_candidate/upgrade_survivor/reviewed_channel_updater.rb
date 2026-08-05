@@ -25,11 +25,14 @@ module HiveReleaseCandidate
           raise Error, "channel update path already exists: #{path}" if File.exist?(path) || File.symlink?(path)
         end
         prepare_channel_marker(prefix, channel)
+        channel_hive_home = File.join(run_root, "channel-state", "hive")
+        FileUtils.mkdir_p(channel_hive_home, mode: 0o700)
         shim = File.join(
           CONTROL_ROOT,
           channel == "linux-bash" ? "channel_shims/linux" : "channel_shims/macos"
         )
         environment = candidate_target.environment.merge(
+          "HIVE_HOME" => channel_hive_home,
           "PATH" => [ shim, candidate_target.environment.fetch("PATH") ].join(File::PATH_SEPARATOR),
           "HIVE_PREFIX" => prefix,
           "HOMEBREW_PREFIX" => prefix,

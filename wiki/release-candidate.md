@@ -213,8 +213,12 @@ candidate migration runs.
 Snapshots name registry, config/default workflow, task identity/content/stage,
 dependencies, markers, durable attempts, dispatch receipts, channel sidecars,
 managed-web data, inert service definitions, status JSON, doctor JSON, and
-installed bytes. Status/doctor comparison removes only version, binary path,
-PID/timing, schema-version, and array-order noise. Every other state change
+installed bytes. Status/doctor comparison removes version, binary path,
+PID/timing, schema-version, and array-order noise. It also omits the candidate's
+version-owned managed-skill `expected` projection and treats newly emitted
+empty task defaults (`closure: null`, `outcomes: []`, and a zero hidden archive
+count) as equivalent to their absence. Observed managed-skill state and every
+non-empty task or archive value remain protected. Every other state change
 appears as a normalized JSON-pointer diff; the historical archive/runtime
 migration and candidate install identity are the only initial allowlisted
 migrations. A second candidate run accepts no changes.
@@ -224,7 +228,10 @@ any surviving daemon, TUI, web, producer, observer, candidate, or inert service
 stub. The channel phase first clones and records the authenticated baseline
 prefix, then invokes the installed candidate's real `hive update` command
 against an offline reviewed seam: a fixed curl/download shim on Linux and a
-fixed local-formula Homebrew shim on macOS. It verifies the candidate gem
+fixed local-formula Homebrew shim on macOS. The updater receives a dedicated
+empty `HIVE_HOME` beneath the lane run root, so representative phase state
+cannot shadow the reviewed prefix's channel marker or participate in the
+channel-only migration. It verifies the candidate gem
 digest, wrapper role, sidecars, dependency closure, exact active inventory, and
 absence of stale baseline files. AUR remains in its incumbent post-release
 gate.

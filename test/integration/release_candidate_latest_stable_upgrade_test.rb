@@ -210,6 +210,29 @@ class ReleaseCandidateLatestStableUpgradeTest < Minitest::Test
     end
   end
 
+  def test_default_channel_executor_ignores_the_phase_hive_home_channel_marker
+    with_tmp_dir do |dir|
+      baseline = target(dir, "baseline", "0.6.9", "a" * 64)
+      candidate = target(dir, "candidate", "0.7.0", "b" * 64)
+      phase_hive_home = candidate.environment.fetch("HIVE_HOME")
+      FileUtils.mkdir_p(phase_hive_home)
+      File.write(File.join(phase_hive_home, "install-channel"), "bash\n")
+      executor = HiveReleaseCandidate::UpgradeSurvivor::FixedChannelExecutor.new(
+        targets: { "baseline" => baseline, "candidate" => candidate }
+      )
+      run_root = File.join(dir, "run")
+      FileUtils.mkdir_p(run_root)
+
+      receipt = executor.call(
+        row: nil, platform: "linux-x86_64", candidate_target: candidate,
+        run_root: run_root
+      )
+
+      assert_equal "passed", receipt.fetch("status")
+      assert_equal "linux-bash", receipt.fetch("channel")
+    end
+  end
+
   def test_extracted_channel_updater_preserves_the_macos_shim_root
     with_tmp_dir do |dir|
       baseline = target(dir, "baseline", "0.6.9", "a" * 64)
@@ -270,6 +293,9 @@ class ReleaseCandidateLatestStableUpgradeTest < Minitest::Test
                #!/usr/bin/env bash
                set -euo pipefail
                if [[ "${1:-}" == "update" ]]; then
+                 if [[ -f "${HIVE_HOME:?}/install-channel" ]]; then
+                   exec "${HIVE_RC_CONTROL_ROOT:?}/channel_update_fixture.sh"
+                 fi
                  exec "${HIVE_RC_CONTROL_ROOT:?}/channel_update_fixture.sh" \
                    "--prefix=${HIVE_RC_CHANNEL_PREFIX:?}"
                fi

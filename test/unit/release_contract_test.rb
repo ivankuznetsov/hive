@@ -373,13 +373,13 @@ class ReleaseContractTest < Minitest::Test
     assert_includes body, "source_artifact_run_id"
     assert_includes body, "source_artifact_run_attempt"
     assert_includes body, "source_artifact_name"
-    assert_includes body, '.external_id == ("hive-release-candidate:v1:"'
+    assert_includes body, ".external_id == (\"hive-release-candidate:v1:\""
     assert_includes body, "display_title"
     refute_includes body, "|| true"
     assert_includes validate_body,
                     "check-runs?check_name=hive-release-candidate&filter=all&per_page=100"
-    assert_includes validate_body, '.head_sha == $candidate'
-    refute_includes validate_body, '.details_url'
+    assert_includes validate_body, ".head_sha == $candidate"
+    refute_includes validate_body, ".details_url"
 
     %w[catalog release-e2e package managed-web freshness candidate-version].each do |job_name|
       job = jobs.fetch(job_name)

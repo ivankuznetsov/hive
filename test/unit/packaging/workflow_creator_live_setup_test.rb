@@ -44,12 +44,39 @@ class WorkflowCreatorLiveSetupTest < Minitest::Test
       observation = prepare_workspace(result, fixture)
       assert_equal "prepared", observation.fetch("status")
       assert_match(/\A[0-9a-f]{64}\z/, observation.fetch("openclaw_effective_policy_sha256"))
-      assert File.file?(File.join(fixture.fetch(:workspace), ".hive-openclaw/state/openclaw.sqlite"))
+      assert_equal "openclaw-skills-info", observation.dig("native_activation", "kind")
+      control = options.fetch(:control_root)
+      assert File.file?(File.join(control, "openclaw/state/openclaw.sqlite"))
       assert File.file?(File.join(fixture.fetch(:workspace), "skills/hive/SKILL.md"))
       assert File.file?(File.join(fixture.fetch(:workspace), ".hive-state/config.yml"))
+      assert File.file?(File.join(fixture.fetch(:workspace), ".git"))
+      assert File.directory?(File.join(control, "git"))
+      candidate_environment = options.dig(:candidate, "environment")
+      refute candidate_environment.fetch("HOME").start_with?("#{fixture.fetch(:workspace)}/")
+      refute candidate_environment.fetch("HIVE_HOME").start_with?("#{fixture.fetch(:workspace)}/")
+      assert result.fetch(:workspace_preparer).verify_control_plane!
       remotes, status = Open3.capture2(fixture.fetch(:git), "-C", fixture.fetch(:workspace), "remote")
       assert status.success?
       assert_empty remotes
+    end
+  end
+
+  def test_model_writable_git_skill_and_openclaw_control_tamper_fail_closed
+    with_setup_fixture do |fixture|
+      result = prepare(fixture)
+      prepare_workspace(result, fixture)
+      File.binwrite(File.join(fixture.fetch(:workspace), ".git"), "gitdir: /tmp/attacker\n")
+
+      assert_raises(Setup::Error) { result.fetch(:workspace_preparer).verify_command_boundary! }
+    end
+
+    with_setup_fixture do |fixture|
+      result = prepare(fixture)
+      prepare_workspace(result, fixture)
+      config = File.join(result.dig(:execution_options, :control_root), "openclaw/openclaw.json")
+      File.open(config, "ab") { |file| file.write("drift") }
+
+      assert_raises(Setup::Error) { result.fetch(:workspace_preparer).verify_control_plane! }
     end
   end
 
@@ -172,7 +199,7 @@ class WorkflowCreatorLiveSetupTest < Minitest::Test
 
   def prepare_workspace(result, fixture)
     workspace = fixture.fetch(:workspace)
-    state = File.join(workspace, ".hive-openclaw")
+    state = File.join(result.dig(:execution_options, :control_root), "openclaw")
     home = File.join(state, "home")
     bin = File.join(state, "bin")
     FileUtils.mkdir_p([ workspace, state, home, bin ], mode: 0o700)
@@ -296,6 +323,8 @@ class WorkflowCreatorLiveSetupTest < Minitest::Test
         printf '{"exists":true,"file":'
         cat "$OPENCLAW_STATE_DIR/effective-approvals.json"
         printf '}\\n'
+      elif [ "\${1:-} \${2:-} \${3:-} \${4:-}" = "skills info hive --json" ]; then
+        printf '{"name":"hive","eligible":true,"userInvocable":true,"filePath":"%s/skills/hive/SKILL.md"}\\n' "$PWD"
       else
         exit 81
       fi

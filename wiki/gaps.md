@@ -1029,7 +1029,9 @@ independently revalidate the exact four-file Workflow Creator bundle. U1b owns
 the primary receipt, and U14 adds a boundary-ready deterministic substrate that
 can publish only the two installation manifests and execution receipt. U15 now
 composes the authenticated OpenClaw run, exact task/effect observations, U1b
-primary publication, and U14 finalization into that four-file bundle. The old
+primary publication, retained native skill discovery, exact operational task
+binding, external control-root revalidation, and U14 finalization into that
+four-file bundle. The old
 one-file shape remains rejected and no compatibility reader exists. No
 provider-backed exact-head run, publication, or release qualification was
 performed here; hostile/property campaigns remain optional and outside the

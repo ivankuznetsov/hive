@@ -332,7 +332,9 @@ passes only the selected platform's credential into its disposable child
 environment, never copies host auth state, retains no model prose, scans raw
 process output before redaction, and removes the private home before success.
 
-The optional workflow refuses a non-main dispatch, a workflow revision not
+The optional workflow accepts only a fresh first-attempt dispatch whose
+dispatching and triggering actors are both the repository owner; reruns are
+refused before credential-bearing jobs. It also refuses a non-main dispatch, a workflow revision not
 loaded from `refs/heads/main`, a
 non-full SHA, a candidate not reachable from `origin/main`, or an unprotected
 main branch.
@@ -343,7 +345,10 @@ installed runtime before credentials are available, and admits the exact
 package archive and Node runtime recorded by that lock. It initializes a typed
 non-passing receipt before setup; setup, policy, provider, model, process, or
 evidence failure therefore remains uploadable rather than becoming a missing
-artifact. The authenticated run is authorization- and exact-head-bound and is
+artifact. Candidate homes, separate Git metadata, OpenClaw control state, and
+the sibling gateway socket remain outside the model workspace and are revalidated at
+command/launch boundaries. Success additionally requires retained native skill
+discovery and an operational row bound to the created task. The authenticated run is authorization- and exact-head-bound and is
 not part of normal pull-request CI.
 
 ### 3. Homebrew tap

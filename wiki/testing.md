@@ -170,7 +170,7 @@ Vocabulary-fixed support members. It also checks that command labels are
 sourced from `WorkflowCreator::Vocabulary`, that the six-source relative
 require closure cannot widen to Hive runtime code, and that the readable
 pairwise source budgets remain exact: archive + installation at most 410 lines,
-capture + supervisor at most 495, and gateway + execution at most 600. These
+capture + supervisor at most 495, and gateway + execution at most 615. These
 are pair budgets, not per-file compression targets.
 
 The archive, installation, capture, supervisor, and gateway files exercise
@@ -818,11 +818,14 @@ The separate Workflow Creator cell is a thin adapter over
 `WorkflowCreatorLiveSetup` and `WorkflowCreatorLiveRunner`. Offline focused
 tests cover exact OpenAI/OpenRouter selection, opposite-provider and tool-child
 credential stripping, transport refusal, immutable candidate/OpenClaw closure
-admission, SQLite-backed OpenClaw approval-policy readback, authored editorial
-graph and task observation, deterministic first-stage execution, typed failure
+admission, native `skills info` path/content proof, SQLite-backed OpenClaw
+approval-policy readback, external control-root and separate-Git-dir tamper
+refusal, exact operational task binding, authored editorial graph and task
+observation, deterministic first-stage execution, typed bootstrap/failure
 publication, and runtime tamper detection. The smoke test contributes only live
 availability gates and final bundle assertions. Its authenticated model calls
-run only through explicit workflow dispatch and exact-head authorization; the
+run only through a fresh, first-attempt owner dispatch and exact-head
+authorization; workflow reruns are refused before any credential-bearing job. The
 hostile suites and live lane are not normal pull-request CI.
 
 The repository-owned selector and attestation verifier remain covered by

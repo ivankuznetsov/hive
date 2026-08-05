@@ -92,14 +92,24 @@ executed instruction plus retained candidate/OpenClaw closures.
 - Remove provider, GitHub, Git helper/config, SSH, and generic agent authority
   from model-invoked tool and candidate environments. Bind approved endpoint,
   proxy, and CA inputs and reject unapproved overrides before credential use.
+- Keep candidate homes, Git metadata, OpenClaw state/config/approvals, and the
+  sibling gateway socket outside the model-writable workspace. Revalidate the separate
+  Git control files and projected skill at every candidate command, and the
+  complete OpenClaw control plane before and after both outer launches.
 - Admit and invoke the committed exact OpenClaw package/version/registry/
   integrity closure and native executable path. The workflow installs that
   lock; it does not select a floating package.
+- Require retained native `openclaw skills info hive --json` evidence and bind
+  the final operational payload to the one created editorial task at
+  `1-research`; neither claim may be synthesized from model success alone.
 - Compose the two exact outer prompts, authored instruction, U14 draft, U1b
   primary publication, and U14 finish/cleanup without a compatibility reader
   or synthetic success fields.
 - Keep the smoke responsible only for live availability and result assertions;
   keep the workflow responsible only for immutable setup and artifact upload.
+- Refuse workflow reruns and revalidate both dispatch and triggering actor in
+  each credential-bearing job. Finalize only an outstanding `not_started`
+  receipt after bootstrap failure, preserving any more specific runner result.
 
 ## Verification and authority fence
 

@@ -137,6 +137,23 @@ class WorkflowCreatorLiveRunnerTest < Minitest::Test
     end
   end
 
+  class VerifiedPreparer
+    attr_reader :control_checks
+
+    def initialize(callable, fail_control_at: nil)
+      @callable, @fail_control_at, @control_checks = callable, fail_control_at, 0
+    end
+
+    def call(**options) = @callable.call(**options)
+    def verify_command_boundary! = true
+
+    def verify_control_plane!
+      @control_checks += 1
+      raise "control plane changed" if @control_checks == @fail_control_at
+      true
+    end
+  end
+
   def test_selects_each_provider_with_both_credentials_and_strips_authority
     %w[openai openrouter].each do |provider|
       with_fixture(provider:) do |fixture|
@@ -155,11 +172,12 @@ class WorkflowCreatorLiveRunnerTest < Minitest::Test
         end
         config = JSON.parse(File.binread(child.fetch("OPENCLAW_CONFIG_PATH")))
         assert_equal "allowlist", config.dig("tools", "exec", "mode")
-        assert_equal [ File.dirname(File.join(session.workspace_path, ".hive-openclaw", "bin", "hive")) ],
+        assert_equal [ File.join(fixture.dig(:execution_options, :control_root), "openclaw", "bin") ],
                      config.dig("tools", "exec", "pathPrepend")
         refute_includes JSON.generate(config), "passEnv"
         assert_equal fixture.fetch(:shell_path), child.fetch("SHELL")
-        refute File.exist?(File.join(session.workspace_path, ".hive-openclaw", "exec-approvals.json"))
+        refute File.exist?(File.join(fixture.dig(:execution_options, :control_root),
+                                     "openclaw", "exec-approvals.json"))
       end
     end
   end
@@ -183,6 +201,36 @@ class WorkflowCreatorLiveRunnerTest < Minitest::Test
 
       assert_equal "passed", result.status, result.receipt.value.inspect
       assert prepared
+      assert_equal 4, fixture.fetch(:preparer).control_checks
+    end
+  end
+
+  def test_control_plane_change_between_outer_loops_fails_the_claim
+    with_fixture do |fixture|
+      preparer = VerifiedPreparer.new(->(**) { workspace_preparation(fixture) }, fail_control_at: 3)
+      result = run_fixture(fixture, workspace_preparer: preparer)
+
+      assert_equal "failed", result.status
+      assert_equal "control_plane_changed", retained_receipt(fixture).fetch("reason")
+      assert_equal 1, fixture.fetch(:sessions).fetch(0).launches.length
+    end
+  end
+
+  def test_missing_or_invalid_native_skill_discovery_cannot_publish
+    [
+      ->(row) { row.delete("native_activation") },
+      ->(row) { row.fetch("native_activation")["eligible"] = false }
+    ].each do |mutate|
+      with_fixture do |fixture|
+        preparer = lambda do |**|
+          workspace_preparation(fixture).tap { |row| mutate.call(row) }
+        end
+        result = run_fixture(fixture, workspace_preparer: preparer)
+
+        assert_equal "failed", result.status
+        assert_equal "workspace_preparation_failed", retained_receipt(fixture).fetch("reason")
+        assert_empty fixture.fetch(:sessions).fetch(0).launches
+      end
     end
   end
 
@@ -434,6 +482,19 @@ class WorkflowCreatorLiveRunnerTest < Minitest::Test
 
       assert_equal [ "setup", "artifact_download_failed", "failed" ],
                    receipt.values_at("phase", "reason", "result")
+
+      assert_equal 0, Runner::Command.call([ "finalize-bootstrap" ], environment:)
+      preserved = JSON.parse(File.binread(environment.fetch("HIVE_CREATOR_EVIDENCE_PATH")))
+      assert_equal "artifact_download_failed", preserved.fetch("reason")
+
+      fresh = File.join(root, "fresh")
+      FileUtils.mkdir_p(fresh, mode: 0o700)
+      environment["HIVE_CREATOR_EVIDENCE_PATH"] = File.join(fresh, "openclaw-workflow-creator.json")
+      assert_equal 0, Runner::Command.call([ "initialize" ], environment:)
+      assert_equal 0, Runner::Command.call([ "finalize-bootstrap" ], environment:)
+      finalized = JSON.parse(File.binread(environment.fetch("HIVE_CREATOR_EVIDENCE_PATH")))
+      assert_equal [ "setup", "bootstrap_failed", "failed" ],
+                   finalized.values_at("phase", "reason", "result")
     end
   end
 
@@ -451,6 +512,9 @@ class WorkflowCreatorLiveRunnerTest < Minitest::Test
     end if runtime_install_verifier == :fixture
     external_actions_observer ||= ->(**) { { "status" => "observed", "actions" => [] } }
     workspace_preparer ||= ->(**) { workspace_preparation(fixture) }
+    workspace_preparer = VerifiedPreparer.new(workspace_preparer) unless
+      workspace_preparer.respond_to?(:verify_control_plane!)
+    fixture[:preparer] = workspace_preparer
     Runner.run!(
       candidate_sha: SHA, model: fixture.fetch(:model), host_environment: fixture.fetch(:environment),
       configuration_record: fixture.fetch(:configuration_record),
@@ -467,13 +531,29 @@ class WorkflowCreatorLiveRunnerTest < Minitest::Test
       skill_root = File.join(candidate_root, "skill", "hive")
       workspace = File.join(root, "workspace")
       runtime_install_root = File.join(root, "openclaw-runtime-install")
+      control_root = File.join(root, "workflow-creator-control")
       FileUtils.mkdir_p(
         [ bundle, runtime_install_root, skill_root, File.join(openclaw_root, "bin"), File.join(openclaw_root, "runtime"),
-          File.join(openclaw_root, "security") ], mode: 0o700
+          File.join(openclaw_root, "security"), control_root ], mode: 0o700
       )
       FileUtils.chmod(0o700, bundle)
+      FileUtils.chmod(0o700, control_root)
       skill_manifest = File.join(skill_root, "projection-manifest.json")
-      File.binwrite(skill_manifest, "{\"schema\":\"test-openclaw-skill\"}\n")
+      skill_path = File.join(skill_root, "SKILL.md")
+      skill_bytes = "# Hive fixture skill\n"
+      File.binwrite(skill_path, skill_bytes)
+      write_canonical(
+        skill_manifest,
+        {
+          "schema" => "hive-workflow-creator-openclaw-skill/v1", "schema_version" => 1,
+          "platform" => "openclaw", "invocation" => "/hive", "skill_version" => "2026.8.4",
+          "canonical_digest" => Digest::SHA256.hexdigest("canonical"),
+          "files" => [
+            { "path" => "SKILL.md", "sha256" => Digest::SHA256.hexdigest(skill_bytes),
+              "size" => skill_bytes.bytesize }
+          ]
+        }
+      )
       skill_sha = Digest::SHA256.file(skill_manifest).hexdigest
       binary = File.join(openclaw_root, "bin", "openclaw")
       File.binwrite(binary, "#!/bin/sh\nexit 0\n")
@@ -532,7 +612,7 @@ class WorkflowCreatorLiveRunnerTest < Minitest::Test
           "root" => openclaw_root, "version" => TEST_OPENCLAW_VERSION, "inventory" => inventory,
           "executable" => binary, "interpreter_or_launcher" => node, "lock" => lock_path, "package" => package
         },
-        archives: {}, workspace_path: workspace, bundle_directory: bundle,
+        archives: {}, workspace_path: workspace, bundle_directory: bundle, control_root:,
         correlation_id: "live-creator", supervisor_options: {}
       }
       yield root:, bundle:, model:, environment:, configuration_record: config_path, lock_path:,
@@ -589,13 +669,22 @@ class WorkflowCreatorLiveRunnerTest < Minitest::Test
 
   def workspace_preparation(fixture)
     digest = fixture.fetch(:configuration_record).then { |path| Digest::SHA256.file(path).hexdigest }
+    configuration = JSON.parse(File.binread(fixture.fetch(:configuration_record)))
+    skill = File.join(
+      fixture.dig(:execution_options, :candidate, "root"), configuration.dig("skill", "path"), "SKILL.md"
+    )
     {
       "schema" => "hive-workflow-creator-workspace-preparation", "schema_version" => 1,
       "status" => "prepared", "skill_manifest_sha256" =>
-        JSON.parse(File.binread(fixture.fetch(:configuration_record))).dig("skill", "projection_manifest_sha256"),
+        configuration.dig("skill", "projection_manifest_sha256"),
       "init_stdout_sha256" => digest, "git_head" => "b" * 40,
       "openclaw_config_validation_sha256" => digest,
-      "openclaw_effective_policy_sha256" => digest
+      "openclaw_effective_policy_sha256" => digest,
+      "native_activation" => {
+        "kind" => "openclaw-skills-info", "invocation" => "/hive", "name" => "hive",
+        "eligible" => true, "user_invocable" => true, "path" => "skills/hive/SKILL.md",
+        "sha256" => Digest::SHA256.file(skill).hexdigest, "size" => File.size(skill)
+      }
     }
   end
 

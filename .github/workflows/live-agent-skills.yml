@@ -41,6 +41,14 @@ jobs:
             echo "live proof dispatch is restricted to the repository owner" >&2
             exit 1
           }
+          [[ "$GITHUB_TRIGGERING_ACTOR" == "$AUTHORIZED_DISPATCH_ACTOR" ]] || {
+            echo "live proof execution is restricted to the repository owner" >&2
+            exit 1
+          }
+          [[ "$GITHUB_RUN_ATTEMPT" == "1" ]] || {
+            echo "live proof requires a fresh owner dispatch; reruns are refused" >&2
+            exit 1
+          }
           [[ "$GITHUB_REF" == "refs/heads/main" ]] || {
             echo "proof must be dispatched from refs/heads/main" >&2
             exit 1
@@ -139,6 +147,14 @@ jobs:
             display: Pi
             npm_package: "@mariozechner/pi-coding-agent"
     steps:
+      - name: Revalidate live-proof authorization
+        env:
+          AUTHORIZED_DISPATCH_ACTOR: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_ACTOR" == "$AUTHORIZED_DISPATCH_ACTOR" ]]
+          [[ "$GITHUB_TRIGGERING_ACTOR" == "$AUTHORIZED_DISPATCH_ACTOR" ]]
+          [[ "$GITHUB_RUN_ATTEMPT" == "1" ]]
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: live-agent-candidate-artifacts-${{ github.run_attempt }}
@@ -209,6 +225,14 @@ jobs:
       actions: read
       contents: read
     steps:
+      - name: Revalidate live-proof authorization
+        env:
+          AUTHORIZED_DISPATCH_ACTOR: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_ACTOR" == "$AUTHORIZED_DISPATCH_ACTOR" ]]
+          [[ "$GITHUB_TRIGGERING_ACTOR" == "$AUTHORIZED_DISPATCH_ACTOR" ]]
+          [[ "$GITHUB_RUN_ATTEMPT" == "1" ]]
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.validate.outputs.candidate_sha }}
@@ -287,6 +311,13 @@ jobs:
           install -d -m 0700 "$RUNNER_TEMP/workflow-creator-evidence"
           cd candidate-source
           bundle exec ruby -Itest test/smoke/live_hive_workflow_creator_smoke_test.rb
+      - name: Finalize workflow-creator bootstrap failure evidence
+        if: ${{ failure() }}
+        env:
+          HIVE_CANDIDATE_SHA: ${{ needs.validate.outputs.candidate_sha }}
+          HIVE_CREATOR_EVIDENCE_PATH: ${{ runner.temp }}/workflow-creator-evidence/openclaw-workflow-creator.json
+        run: |
+          ruby candidate-source/packaging/live_agent_skills/workflow_creator_live_runner.rb finalize-bootstrap
       - name: Upload redacted workflow-creator evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

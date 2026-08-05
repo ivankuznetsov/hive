@@ -22,6 +22,7 @@ module HiveLiveAgentProof
     MAX_RUNTIME_FILES = 50_000
     MAX_FILE_BYTES = 268_435_456
     MAX_TOTAL_BYTES = 1_073_741_824
+    CONTROL_DIRECTORY = "workflow-creator-control"
     NPM_REGISTRY = "https://registry.npmjs.org"
     CONFIGURATION_SCHEMA = "hive-live-openclaw-creator-configuration/v1"
     CANDIDATE_RUNTIME_SCHEMA = "hive-workflow-creator-candidate-runtime/v1"
@@ -39,6 +40,7 @@ module HiveLiveAgentProof
     CREDENTIAL = /(?:TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|API_?KEY|PRIVATE_?KEY|AUTHORIZATION|COOKIE|SESSION)/i
     OPENCLAW_LOCAL_ENV = %w[HOME OPENCLAW_STATE_DIR OPENCLAW_CONFIG_PATH PATH LANG LC_ALL TERM TMPDIR
                              SHELL HIVE_LIVE_PROOF].freeze
+    private_constant :CONTROL_DIRECTORY
 
     class << self
       def prepare!(**options) = new(**options).send(:prepare)
@@ -74,6 +76,8 @@ module HiveLiveAgentProof
     end
 
     def prepare
+      @control_root = File.join(@output_root, CONTROL_DIRECTORY)
+      Dir.mkdir(@control_root, 0o700)
       verified = CandidateVerifier.new(
         candidate_dir: @candidate_dir, candidate_sha: @candidate_sha,
         expected_hive_version: @hive_version, canonical: @canonical
@@ -89,7 +93,8 @@ module HiveLiveAgentProof
       preparer = WorkspacePreparer.new(
         workspace: @workspace, skill_source:, candidate_executable: candidate.fetch("executable"),
         candidate_environment:, openclaw_executable: openclaw.fetch("executable"),
-        projection_manifest_sha256: configuration.dig("skill", "projection_manifest_sha256")
+        projection_manifest_sha256: configuration.dig("skill", "projection_manifest_sha256"),
+        control_root: @control_root
       )
       observer = ExternalActionsObserver.new(
         workspace: @workspace, candidate_environment:, fixture_path: fixture,
@@ -99,7 +104,8 @@ module HiveLiveAgentProof
         candidate_sha: @candidate_sha, model: @model, configuration_record: configuration.fetch("path"),
         execution_options: {
           candidate_sha: @candidate_sha, manifest: verified.fetch("manifest"), candidate:, openclaw:, archives:,
-          workspace_path: @workspace, bundle_directory: @bundle, correlation_id: @correlation_id,
+          workspace_path: @workspace, bundle_directory: @bundle, control_root: @control_root,
+          correlation_id: @correlation_id,
           supervisor_options: @supervisor_options
         },
         runtime_install_verifier: WorkflowCreatorOpenClawRuntime.method(:verify!),
@@ -143,8 +149,8 @@ module HiveLiveAgentProof
       inventory = inventory.sort
       raise Error if inventory.length > MAX_IDENTITY_FILES || inventory.uniq.length != inventory.length
       environment = {
-        "PATH" => "/usr/bin:/bin", "HOME" => File.join(@workspace, ".hive-proof-home"),
-        "HIVE_HOME" => File.join(@workspace, ".hive-proof-hive-home"),
+        "PATH" => "/usr/bin:/bin", "HOME" => File.join(@control_root, "candidate-home"),
+        "HIVE_HOME" => File.join(@control_root, "candidate-hive-home"),
         "GEM_HOME" => @candidate_runtime, "GEM_PATH" => @candidate_runtime,
         "HIVE_CLAUDE_BIN" => fixture, "HIVE_DAEMON_NO_AUTO_REEXEC" => "1",
         "HIVE_SKIP_LLM_WIKI_SCHEDULER" => "1", "HIVE_SKIP_LLM_WIKI_SYSTEMCTL" => "1",
@@ -338,6 +344,8 @@ module HiveLiveAgentProof
         #!/bin/sh
         set -eu
         hive_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+        export GIT_CONFIG_NOSYSTEM=1
+        export GIT_CONFIG_GLOBAL=/dev/null
         exec "$hive_root/runtime/ruby" "$hive_root/libexec/candidate-runtime-guard.rb" "$@"
       SH
     end
@@ -380,6 +388,8 @@ module HiveLiveAgentProof
       raise Error unless @transport.keys.sort == %w[ca endpoint proxy redirects]
       raise Error unless @transport.fetch("redirects") == "deny"
       raise Error unless File.directory?(@output_root) && private_directory?(@output_root)
+      control_root = File.join(@output_root, CONTROL_DIRECTORY)
+      raise Error if File.exist?(control_root) || File.symlink?(control_root)
       expected = [ File.join(@output_root, "candidate-runtime"), File.join(@output_root, "openclaw-runtime") ]
       raise Error unless [ @candidate_runtime, @openclaw_runtime ] == expected
       raise Error unless [ @candidate_runtime, @openclaw_runtime, @bundle ].all? { |path| private_directory?(path) }
@@ -495,11 +505,15 @@ module HiveLiveAgentProof
 
     class WorkspacePreparer
       def initialize(workspace:, skill_source:, candidate_executable:, candidate_environment:,
-                     openclaw_executable:, projection_manifest_sha256:)
+                     openclaw_executable:, projection_manifest_sha256:, control_root:)
         @workspace, @skill_source, @candidate = workspace, skill_source, candidate_executable
         @openclaw = openclaw_executable
         @environment = WorkflowCreator::Values.capture(candidate_environment)
         @projection_sha = projection_manifest_sha256
+        @control_root = File.realpath(control_root)
+        raise Error unless private_directory?(@control_root, exact: true)
+        raise Error if @control_root == @workspace || @control_root.start_with?("#{@workspace}/") ||
+          @workspace.start_with?("#{@control_root}/")
         @git = %w[/usr/bin/git /bin/git].find { |path| File.executable?(path) }
         raise Error unless @git
       end
@@ -519,7 +533,8 @@ module HiveLiveAgentProof
         FileUtils.mkdir_p([ @environment.value.fetch("HOME"), @environment.value.fetch("HIVE_HOME") ], mode: 0o700)
         write(File.join(workspace, ".gitignore"), proof_gitignore)
         write(File.join(workspace, "README.md"), "# Workflow creator live proof\n")
-        git!(workspace, "init", "-b", "main")
+        @git_directory = File.join(@control_root, "git")
+        git!(workspace, "init", "--separate-git-dir", @git_directory, "-b", "main")
         git!(workspace, "config", "user.name", "Hive Live Proof")
         git!(workspace, "config", "user.email", "hive-live-proof@example.invalid")
         git!(workspace, "add", "--", ".gitignore", "README.md")
@@ -540,17 +555,52 @@ module HiveLiveAgentProof
         raise Error unless minimal && disabled
         raise Error unless File.file?(File.join(workspace, ".hive-state", "config.yml"))
         raise Error unless git_output(workspace, "remote").empty?
+        @projection, @skill_destination = projection, destination
+        @git_pointer_bytes = safe_skill_file(File.join(workspace, ".git"))
+        @git_config_bytes = safe_skill_file(File.join(@git_directory, "config"))
         approval = configure_openclaw!(openclaw_environment, gateway_path)
+        @prepared = true
+        verify_control_plane!
         WorkflowCreator::Values.capture(
           "schema" => "hive-workflow-creator-workspace-preparation", "schema_version" => 1,
           "status" => "prepared", "skill_manifest_sha256" => @projection_sha,
           "init_stdout_sha256" => Digest::SHA256.hexdigest(stdout),
           "git_head" => git_output(workspace, "rev-parse", "HEAD"),
           "openclaw_config_validation_sha256" => approval.fetch("config_validation_sha256"),
-          "openclaw_effective_policy_sha256" => approval.fetch("effective_policy_sha256")
+          "openclaw_effective_policy_sha256" => approval.fetch("effective_policy_sha256"),
+          "native_activation" => approval.fetch("native_activation")
         ).value
       rescue StandardError => error
         raise Error, "workflow-creator workspace preparation failed: #{error.class}: #{error.message}", cause: nil
+      end
+
+      def verify_command_boundary!
+        raise Error unless @prepared && private_directory?(@control_root, exact: true)
+        raise Error unless private_directory?(@git_directory)
+        raise Error unless safe_skill_file(File.join(@workspace, ".git")) == @git_pointer_bytes
+        raise Error unless safe_skill_file(File.join(@git_directory, "config")) == @git_config_bytes
+        raise Error unless git_output(@workspace, "remote").empty?
+        raise Error unless active_git_hooks.empty?
+        raise Error if candidate_git_config_paths.any? { |path| File.exist?(path) || File.symlink?(path) }
+        verify_materialized_skill!
+        true
+      rescue StandardError
+        raise Error, "workflow-creator command boundary changed", cause: nil
+      end
+
+      def verify_control_plane!
+        verify_command_boundary!
+        raise Error unless safe_skill_file(@config_path) == @config_bytes
+        config_stdout = run_openclaw!(@openclaw_environment, "config", "validate")
+        raise Error unless Digest::SHA256.hexdigest(config_stdout) == @config_validation_sha256
+        snapshot = JSON.parse(run_openclaw!(@openclaw_environment, "approvals", "get", "--json"))
+        effective = admit_effective_policy!(snapshot, @policy)
+        digest = Digest::SHA256.hexdigest(WorkflowCreator::Values.capture(effective).canonical_bytes)
+        raise Error unless digest == @effective_policy_sha256
+        raise Error unless discover_openclaw_skill!(@openclaw_environment) == @native_activation
+        true
+      rescue StandardError
+        raise Error, "workflow-creator control plane changed", cause: nil
       end
 
       private
@@ -596,6 +646,16 @@ module HiveLiveAgentProof
         write(File.join(destination, "projection-manifest.json"), safe_skill_file(manifest))
       end
 
+      def verify_materialized_skill!
+        @projection.fetch("files").each do |record|
+          content = safe_skill_file(File.join(@skill_destination, record.fetch("path")))
+          raise Error unless record.values_at("sha256", "size") ==
+                             [ Digest::SHA256.hexdigest(content), content.bytesize ]
+        end
+        manifest = safe_skill_file(File.join(@skill_destination, "projection-manifest.json"))
+        raise Error unless Digest::SHA256.hexdigest(manifest) == @projection_sha
+      end
+
       def safe_skill_file(path)
         stat = File.lstat(path)
         valid = stat.file? && !stat.symlink? && stat.uid == Process.uid && stat.nlink == 1
@@ -608,13 +668,13 @@ module HiveLiveAgentProof
 
       def configure_openclaw!(provided_environment, gateway_path)
         environment = credential_free_openclaw_environment(provided_environment)
-        expected_gateway = File.join(@workspace, ".hive-openclaw", "bin", "hive")
+        expected_gateway = File.join(@control_root, "openclaw", "bin", "hive")
         raise Error unless gateway_path == expected_gateway && File.symlink?(gateway_path)
         raise Error unless File.executable?(File.realpath(gateway_path))
 
         config_stdout = run_openclaw!(environment, "config", "validate")
         policy = approvals(gateway_path)
-        request_path = File.join(@workspace, ".hive-openclaw", "approvals-request.json")
+        request_path = File.join(@control_root, "openclaw", "approvals-request.json")
         write(request_path, WorkflowCreator::Values.capture(policy).canonical_bytes)
         run_openclaw!(
           environment, "approvals", "set", "--file", request_path, "--json",
@@ -622,11 +682,19 @@ module HiveLiveAgentProof
         )
         snapshot = JSON.parse(run_openclaw!(environment, "approvals", "get", "--json"))
         effective = admit_effective_policy!(snapshot, policy)
+        @openclaw_environment = WorkflowCreator::Values.capture(environment).value
+        @config_path = environment.fetch("OPENCLAW_CONFIG_PATH")
+        @config_bytes = safe_skill_file(@config_path)
+        @policy = WorkflowCreator::Values.capture(policy).value
+        @config_validation_sha256 = Digest::SHA256.hexdigest(config_stdout)
+        @effective_policy_sha256 = Digest::SHA256.hexdigest(
+          WorkflowCreator::Values.capture(effective).canonical_bytes
+        )
+        @native_activation = discover_openclaw_skill!(environment)
         {
-          "config_validation_sha256" => Digest::SHA256.hexdigest(config_stdout),
-          "effective_policy_sha256" => Digest::SHA256.hexdigest(
-            WorkflowCreator::Values.capture(effective).canonical_bytes
-          )
+          "config_validation_sha256" => @config_validation_sha256,
+          "effective_policy_sha256" => @effective_policy_sha256,
+          "native_activation" => @native_activation
         }
       rescue JSON::ParserError, SystemCallError, WorkflowCreator::Values::Error
         raise Error
@@ -638,9 +706,9 @@ module HiveLiveAgentProof
         required = %w[HOME OPENCLAW_STATE_DIR OPENCLAW_CONFIG_PATH SHELL HIVE_LIVE_PROOF]
         raise Error unless required.all? { |key| raw.key?(key) }
         expected = {
-          "HOME" => File.join(@workspace, ".hive-openclaw", "home"),
-          "OPENCLAW_STATE_DIR" => File.join(@workspace, ".hive-openclaw"),
-          "OPENCLAW_CONFIG_PATH" => File.join(@workspace, ".hive-openclaw", "openclaw.json"),
+          "HOME" => File.join(@control_root, "openclaw", "home"),
+          "OPENCLAW_STATE_DIR" => File.join(@control_root, "openclaw"),
+          "OPENCLAW_CONFIG_PATH" => File.join(@control_root, "openclaw", "openclaw.json"),
           "HIVE_LIVE_PROOF" => "1"
         }
         raise Error unless expected.all? { |key, value| raw[key] == value }
@@ -677,12 +745,28 @@ module HiveLiveAgentProof
         socket = file.fetch("socket")
         exact_file = file.keys.sort == %w[agents defaults socket version]
         exact_file &&= socket.instance_of?(Hash) && socket.keys.sort == %w[path token]
-        exact_file &&= socket.fetch("path") == File.join(@workspace, ".hive-openclaw", "exec-approvals.sock")
+        exact_file &&= socket.fetch("path") == File.join(@control_root, "openclaw", "exec-approvals.sock")
         exact_file &&= /\A[A-Za-z0-9_-]{24,128}\z/.match?(socket.fetch("token"))
         exact_file &&= file.fetch("version") == 1 && file.fetch("defaults") == expected.fetch("defaults")
         exact_file &&= main == expected.dig("agents", "main")
         raise Error unless exact_file
         { "file" => expected }
+      end
+
+      def discover_openclaw_skill!(environment)
+        info = JSON.parse(run_openclaw!(environment, "skills", "info", "hive", "--json"))
+        expected_path = File.join(@skill_destination, "SKILL.md")
+        valid = info.values_at("name", "eligible", "userInvocable") == [ "hive", true, true ]
+        valid &&= File.realpath(info.fetch("filePath")) == File.realpath(expected_path)
+        raise Error unless valid
+        content = safe_skill_file(expected_path)
+        WorkflowCreator::Values.capture(
+          "kind" => "openclaw-skills-info", "invocation" => "/hive", "name" => "hive",
+          "eligible" => true, "user_invocable" => true, "path" => "skills/hive/SKILL.md",
+          "sha256" => Digest::SHA256.hexdigest(content), "size" => content.bytesize
+        ).value
+      rescue JSON::ParserError, KeyError, SystemCallError
+        raise Error
       end
 
       def run_openclaw!(environment, *argv, allowed_stderr: "")
@@ -712,9 +796,36 @@ module HiveLiveAgentProof
         nil
       end
 
+      def private_directory?(path, exact: false)
+        stat = File.lstat(path)
+        valid = File.realpath(path) == path && stat.directory? && !stat.symlink? && stat.uid == Process.uid
+        valid &&= exact ? (stat.mode & 0o077).zero? : (stat.mode & 0o022).zero?
+        valid
+      rescue SystemCallError
+        false
+      end
+
+      def active_git_hooks
+        hooks = File.join(@git_directory, "hooks")
+        return [] unless Dir.exist?(hooks)
+        Dir.children(hooks).reject { |name| name.end_with?(".sample") }
+      end
+
+      def candidate_git_config_paths
+        home = @environment.value.fetch("HOME")
+        [ File.join(home, ".gitconfig"), File.join(home, ".config", "git", "config") ]
+      end
+
+      def git_environment
+        {
+          "HOME" => @environment.value.fetch("HOME"),
+          "GIT_CONFIG_NOSYSTEM" => "1", "GIT_CONFIG_GLOBAL" => "/dev/null"
+        }
+      end
+
       def git!(workspace, *argv)
         _stdout, stderr, status = Open3.capture3(
-          { "HOME" => @environment.value.fetch("HOME") }, @git, "-C", workspace, *argv,
+          git_environment, @git, "-C", workspace, *argv,
           unsetenv_others: true
         )
         raise Error unless status.success? && stderr.empty?
@@ -722,7 +833,7 @@ module HiveLiveAgentProof
 
       def git_output(workspace, *argv)
         stdout, stderr, status = Open3.capture3(
-          { "HOME" => @environment.value.fetch("HOME") }, @git, "-C", workspace, *argv,
+          git_environment, @git, "-C", workspace, *argv,
           unsetenv_others: true
         )
         raise Error unless status.success? && stderr.empty?
@@ -734,7 +845,7 @@ module HiveLiveAgentProof
       end
 
       def proof_gitignore
-        ".workflow-creator-gateway.sock\n.hive-proof-home/\n.hive-proof-hive-home/\nskills/\n"
+        "skills/\n"
       end
     end
 
@@ -777,7 +888,11 @@ module HiveLiveAgentProof
 
       def git_output(workspace, *argv)
         stdout, _stderr, status = Open3.capture3(
-          { "HOME" => @environment.value.fetch("HOME") }, @git, "-C", workspace, *argv,
+          {
+            "HOME" => @environment.value.fetch("HOME"),
+            "GIT_CONFIG_NOSYSTEM" => "1", "GIT_CONFIG_GLOBAL" => "/dev/null"
+          },
+          @git, "-C", workspace, *argv,
           unsetenv_others: true
         )
         raise Error unless status.success?

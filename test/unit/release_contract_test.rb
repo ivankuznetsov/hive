@@ -104,6 +104,8 @@ class ReleaseContractTest < Minitest::Test
     assert_includes body, "candidate_sha:"
     assert_includes body, '[[ "$GITHUB_REF" == "refs/heads/main" ]]'
     assert_includes body, '[[ "$GITHUB_ACTOR" == "$AUTHORIZED_DISPATCH_ACTOR" ]]'
+    assert_includes body, '[[ "$GITHUB_TRIGGERING_ACTOR" == "$AUTHORIZED_DISPATCH_ACTOR" ]]'
+    assert_includes body, '[[ "$GITHUB_RUN_ATTEMPT" == "1" ]]'
     assert_includes body, "git merge-base --is-ancestor"
     assert_equal({ "node-version" => "22" }, setup_node.fetch("with"))
     assert_includes body, "branches/main"
@@ -178,8 +180,13 @@ class ReleaseContractTest < Minitest::Test
     download_step = steps.find { |step| step["name"] == "Download exact candidate artifacts" }
     install_step = steps.find { |step| step["name"] == "Install locked OpenClaw and exact candidate" }
     run_step = steps.find { |step| step["name"] == "Run authenticated workflow-creator proof" }
+    finalizer_step = steps.find do |step|
+      step["name"] == "Finalize workflow-creator bootstrap failure evidence"
+    end
     upload_step = steps.find { |step| step["name"] == "Upload redacted workflow-creator evidence" }
-    [ initialize_step, download_step, install_step, run_step, upload_step ].each { |step| refute_nil step }
+    [ initialize_step, download_step, install_step, run_step, finalizer_step, upload_step ].each do |step|
+      refute_nil step
+    end
     assert_operator steps.index(initialize_step), :<, steps.index(download_step)
     creator_node = steps.find { |step| step.fetch("uses", "") == SETUP_NODE_ACTION }
     assert_equal({ "node-version" => "22.23.1" }, creator_node.fetch("with"))
@@ -189,6 +196,10 @@ class ReleaseContractTest < Minitest::Test
     assert_includes install_step.fetch("run"), "HIVE_PROVEN_HIVE_BIN=\$candidate_runtime/rubygems-bin/hive"
     assert_includes install_step.fetch("run"), 'HIVE_NODE_BIN=$(realpath "$(command -v node)")'
     assert_equal "${{ always() }}", upload_step.fetch("if")
+    assert_equal "${{ failure() }}", finalizer_step.fetch("if")
+    assert_includes finalizer_step.fetch("run"), "workflow_creator_live_runner.rb finalize-bootstrap"
+    assert_operator steps.index(run_step), :<, steps.index(finalizer_step)
+    assert_operator steps.index(finalizer_step), :<, steps.index(upload_step)
     assert_match(%r{workflow-creator-evidence/?\z}, upload_step.dig("with", "path"))
 
     provider_keys = %w[OPENAI_API_KEY OPENROUTER_API_KEY]
@@ -207,6 +218,14 @@ class ReleaseContractTest < Minitest::Test
     assert_equal "${{ github.repository_owner }}",
                  jobs.fetch("validate").fetch("steps").find { |step| step["id"] == "candidate" }
                      .dig("env", "AUTHORIZED_DISPATCH_ACTOR")
+    %w[live-agent live-workflow-creator].each do |job_name|
+      authorization = jobs.fetch(job_name).fetch("steps").find do |step|
+        step["name"] == "Revalidate live-proof authorization"
+      end
+      refute_nil authorization
+      assert_includes authorization.fetch("run"), "GITHUB_TRIGGERING_ACTOR"
+      assert_includes authorization.fetch("run"), "GITHUB_RUN_ATTEMPT"
+    end
   end
 
   def test_tag_release_selects_and_reverifies_exact_pre_tag_candidate

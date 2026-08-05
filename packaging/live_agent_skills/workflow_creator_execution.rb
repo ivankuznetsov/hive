@@ -29,7 +29,10 @@ module HiveLiveAgentProof
     attr_reader :gateway_path, :workspace_path
 
     def initialize(candidate_sha:, manifest:, candidate:, openclaw:, archives:, workspace_path:,
-                   bundle_directory:, correlation_id:, exact_secrets: [], supervisor_options: {})
+                   bundle_directory:, correlation_id:, exact_secrets: [], supervisor_options: {},
+                   command_boundary_verifier: nil)
+      @command_boundary_verifier = command_boundary_verifier
+      raise Error unless @command_boundary_verifier.nil? || @command_boundary_verifier.respond_to?(:call)
       input = WorkflowCreator::Values.capture(
         "candidate_sha" => candidate_sha, "manifest" => manifest, "candidate" => candidate,
         "openclaw" => openclaw, "archives" => archives, "workspace_path" => workspace_path,
@@ -46,6 +49,7 @@ module HiveLiveAgentProof
       @bundle_directory = File.realpath(input.fetch("bundle_directory")).freeze
       @candidate_root, @openclaw_root =
         [ @candidate.fetch("root"), @openclaw.fetch("root") ].map { |path| File.realpath(path) }
+      @socket_root = File.dirname(@workspace_path).freeze
       paths = [ @candidate_root, @openclaw_root, @workspace_path, @bundle_directory ]
       raise Error if paths.combination(2).any? do |left, right|
         left == right || left.start_with?("#{right}/") || right.start_with?("#{left}/")
@@ -72,7 +76,7 @@ module HiveLiveAgentProof
         root: File.dirname(gateway), candidate_executable: executable,
         candidate_identity: observed_file(executable, relative_role(@candidate, executable)),
         environment: @candidate.fetch("environment"), cwd: @workspace_path, supervisor: @supervisor,
-        socket_root: @workspace_path
+        socket_root: @socket_root, runtime_verifier: @command_boundary_verifier
       )
       @gateway_path = @gateway.start!
       @candidate_installation = scan_candidate

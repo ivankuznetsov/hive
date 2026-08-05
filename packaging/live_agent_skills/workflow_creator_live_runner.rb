@@ -70,7 +70,7 @@ module HiveLiveAgentProof
     SKILL_KEYS = %w[path projection_manifest_sha256].freeze
     WORKSPACE_PREPARATION_KEYS = %w[schema schema_version status skill_manifest_sha256 init_stdout_sha256
                                     git_head openclaw_config_validation_sha256
-                                    openclaw_effective_policy_sha256].freeze
+                                    openclaw_effective_policy_sha256 native_activation].freeze
     CREATOR_ARGV = [ "agent", "--local", "--agent", "main", "--message",
                      WorkflowCreator::Vocabulary.fetch("prompt"), "--timeout", "180", "--json" ].freeze
     AUTHORIZED_ARGV = [ "agent", "--local", "--agent", "main", "--message",
@@ -93,6 +93,25 @@ module HiveLiveAgentProof
       Result.new(status: "failed", provider: nil, receipt: admitted)
     rescue JSON::ParserError, SystemCallError
       raise Error, "workflow-creator live failure evidence is unavailable", cause: nil
+    end
+
+    def self.finalize_bootstrap_failure!(bundle_directory:, candidate_sha:)
+      path = File.join(bundle_directory, WorkflowCreator::Vocabulary.fetch("bundle_files").first)
+      expected = JSON.parse(File.binread(path))
+      admitted = WorkflowCreator.validate_nonpassing!(expected)
+      initial = admitted.value.values_at("candidate_sha", "phase", "reason", "result") ==
+        [ candidate_sha.to_s.downcase, "preflight", "not_started", "failed" ]
+      return Result.new(status: "failed", provider: nil, receipt: admitted) unless initial
+
+      receipt = WorkflowCreator.failure(
+        candidate_sha:, phase: "setup", reason: "bootstrap_failed"
+      )
+      replaced = WorkflowCreatorEvidence.replace_nonpassing!(
+        bundle_directory:, expected: admitted.value, receipt: receipt.value
+      )
+      Result.new(status: "failed", provider: nil, receipt: replaced)
+    rescue JSON::ParserError, SystemCallError, WorkflowCreator::Error
+      raise Error, "workflow-creator live bootstrap evidence is unavailable", cause: nil
     end
 
     private_class_method :new
@@ -121,16 +140,20 @@ module HiveLiveAgentProof
         bundle_directory: @bundle_directory, candidate_sha: @candidate_sha
       )
       admit_preflight!
-      options = @execution_options.merge(exact_secrets: [ @credential ])
+      admit_preparer!
+      options = @execution_options.except(:control_root).merge(
+        exact_secrets: [ @credential ],
+        command_boundary_verifier: @workspace_preparer.method(:verify_command_boundary!)
+      )
       @session = @execution_factory.call(**options)
       environment, gateway_link = configure_openclaw
       prepare_workspace!(environment, gateway_link)
       @model_loop_started = true
-      @session.run_outer_workflow_creator(
+      run_outer!(:run_outer_workflow_creator,
         argv: CREATOR_ARGV, environment:, stdin_data: WorkflowCreator::Vocabulary.fetch("prompt")
       )
       observe_creation_only!
-      @session.run_outer_authorized_work(
+      run_outer!(:run_outer_authorized_work,
         argv: AUTHORIZED_ARGV, environment:, stdin_data: WorkflowCreator::Vocabulary.fetch("task_prompt")
       )
       observe_external_actions!
@@ -176,6 +199,33 @@ module HiveLiveAgentProof
       admit_runtime_install!(@configuration.fetch("runtime_install"), launcher_sha256)
     rescue KeyError, TypeError
       raise Failure.new("preflight", "invalid_openclaw_closure")
+    end
+
+    def admit_preparer!
+      methods = %i[call verify_command_boundary! verify_control_plane!]
+      raise Failure.new("preflight", "invalid_workspace_preparer") unless
+        methods.all? { |method| @workspace_preparer.respond_to?(method) }
+    end
+
+    def run_outer!(method, **options)
+      verify_control_plane!
+      result = @session.public_send(method, **options)
+      verify_control_plane!
+      result
+    rescue Failure
+      raise
+    rescue StandardError
+      verify_control_plane!
+      raise
+    end
+
+    def verify_control_plane!
+      raise Failure.new("configuration", "control_plane_changed") unless
+        @workspace_preparer.verify_control_plane! == true
+    rescue Failure
+      raise
+    rescue StandardError
+      raise Failure.new("configuration", "control_plane_changed")
     end
 
     def provider_for(model)
@@ -242,9 +292,18 @@ module HiveLiveAgentProof
       manifest_relative = manifest.delete_prefix(prefix)
       valid &&= candidate.fetch("inventory").include?(manifest_relative)
       valid &&= /\A[0-9a-f]{64}\z/.match?(skill.fetch("projection_manifest_sha256"))
-      valid &&= Digest::SHA256.hexdigest(safe_file(manifest)) == skill.fetch("projection_manifest_sha256")
+      manifest_bytes = safe_file(manifest)
+      valid &&= Digest::SHA256.hexdigest(manifest_bytes) == skill.fetch("projection_manifest_sha256")
+      projection = JSON.parse(manifest_bytes)
+      files = projection.fetch("files")
+      skill_record = files.find { |record| record["path"] == "SKILL.md" }
+      valid &&= skill_record.instance_of?(Hash) && skill_record.keys.sort == %w[path sha256 size]
+      content = safe_file(File.join(path, "SKILL.md"))
+      valid &&= skill_record.values_at("sha256", "size") ==
+        [ Digest::SHA256.hexdigest(content), content.bytesize ]
       raise Failure.new("preflight", "invalid_skill_projection") unless valid
-    rescue KeyError, SystemCallError, TypeError
+      @skill_record = WorkflowCreator::Values.capture(skill_record).value
+    rescue JSON::ParserError, KeyError, NoMethodError, SystemCallError, TypeError, WorkflowCreator::Values::Error
       raise Failure.new("preflight", "invalid_skill_projection")
     end
 
@@ -389,7 +448,10 @@ module HiveLiveAgentProof
 
     def configure_openclaw
       workspace = @session.workspace_path
-      state = File.join(workspace, ".hive-openclaw")
+      control = File.expand_path(@execution_options.fetch(:control_root))
+      raise Failure.new("configuration", "openclaw_configuration_failed") unless
+        File.realpath(control) == control && (File.lstat(control).mode & 0o077).zero?
+      state = File.join(control, "openclaw")
       bin = File.join(state, "bin")
       home = File.join(state, "home")
       FileUtils.mkdir_p([ bin, home ], mode: 0o700)
@@ -448,11 +510,28 @@ module HiveLiveAgentProof
                     openclaw_effective_policy_sha256].all? do |key|
         /\A[0-9a-f]{64}\z/.match?(row.fetch(key))
       end
+      @native_activation = row.fetch("native_activation")
+      valid &&= valid_native_activation?(@native_activation)
       raise Failure.new("configuration", "workspace_preparation_failed") unless valid
     rescue Failure
       raise
     rescue StandardError
       raise Failure.new("configuration", "workspace_preparation_failed")
+    end
+
+    def valid_native_activation?(row)
+      expected_path = "skills/hive/SKILL.md"
+      expected = {
+        "kind" => "openclaw-skills-info", "invocation" => "/hive", "name" => "hive",
+        "eligible" => true, "user_invocable" => true, "path" => expected_path
+      }
+      row.instance_of?(Hash) && row.keys.sort ==
+        %w[eligible invocation kind name path sha256 size user_invocable] &&
+        row.slice(*expected.keys) == expected && /\A[0-9a-f]{64}\z/.match?(row["sha256"]) &&
+        row["size"].instance_of?(Integer) && row["size"].positive? &&
+        row.values_at("sha256", "size") == [ @skill_record.fetch("sha256"), @skill_record.fetch("size") ]
+    rescue KeyError, TypeError
+      false
     end
 
     def created_files
@@ -535,6 +614,7 @@ module HiveLiveAgentProof
         "task_prompt_sha256" => Digest::SHA256.hexdigest(WorkflowCreator::Vocabulary.fetch("task_prompt")),
         "skill" => manifest.slice("skill_version", "canonical_digest"),
         "native_activation" => WorkflowCreator::Vocabulary.fetch("native_activation"),
+        "native_activation_evidence" => @native_activation,
         "hive_commands" => WorkflowCreator.commands_for(task_slug: slug).value,
         "created_files" => files, "validation" => WorkflowCreator::Vocabulary.fetch("graph"),
         "creation_only_task_count" => @creation_only_task_count, "task_count" => 1,
@@ -648,6 +728,11 @@ module HiveLiveAgentProof
           WorkflowCreatorLiveRunner.fail!(
             bundle_directory: bundle, candidate_sha: candidate, phase: arguments.fetch(0),
             reason: arguments.fetch(1), exact_secrets: provider_secrets(environment)
+          )
+        when "finalize-bootstrap"
+          raise Error unless arguments.empty?
+          WorkflowCreatorLiveRunner.finalize_bootstrap_failure!(
+            bundle_directory: bundle, candidate_sha: candidate
           )
         else
           raise Error

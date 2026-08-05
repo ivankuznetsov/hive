@@ -538,7 +538,7 @@ class ComponentBoundariesTest < Minitest::Test
     assert_operator line_count.call("workflow_creator_capture.rb", "workflow_creator_process_supervisor.rb"),
                     :<=, 495
     assert_operator line_count.call("workflow_creator_gateway.rb", "workflow_creator_execution.rb"),
-                    :<=, 600
+                    :<=, 615
 
     assert contract.validate_static_boundaries!
   end

@@ -300,7 +300,8 @@ the two fixed outer labels only with their vocabulary-bound prompts, capture
 bounded redacted output, supervise teardown, publish the three support members,
 and remove only the workspace whose current device/inode still matches its
 creation row. The owner-executable wrapper stays inside the stable private
-candidate closure while its private socket lives in the proof workspace;
+candidate closure while its private socket lives in the owner-private parent
+outside the model workspace;
 permanent gateway poison admits no later command. Final rescans must match the
 pre-launch installation snapshots.
 It cannot choose or expose a
@@ -321,11 +322,17 @@ exact candidate artifacts and installed candidate/OpenClaw runtimes, creates
 small immutable identity closures, projects the exact candidate `/hive` skill,
 prepares one private initialized project, installs and reads back the exact
 SQLite-backed OpenClaw execution policy, and returns only closed runner
-callables. `WorkflowCreatorLiveRunner` selects the provider from the committed
-model prefix, exposes exactly the selected credential to the two U14-supervised
+callables. Candidate homes, the separate Git directory, OpenClaw state/config,
+and approvals stay in that control root, while U14's socket stays in the
+owner-private workspace parent; the model sees only the disposable worktree.
+Exact Git, skill, config, and approval identities are
+rechecked at every candidate command and around both model loops.
+`WorkflowCreatorLiveRunner` selects the provider from the committed model
+prefix, exposes exactly the selected credential to the two U14-supervised
 OpenClaw launches, strips provider and repository authority from tool children,
-observes the exact authored graph/task/fixture effects, and finalizes the U1b
-primary receipt. The workflow and smoke remain adapters. An authenticated
+requires real `openclaw skills info hive --json` discovery and the exact final
+operational task row, observes the authored graph/task/fixture effects, and
+finalizes the U1b primary receipt. The workflow and smoke remain adapters. An authenticated
 passing artifact is still exact-head and explicit-authorization evidence; the
 catalog row does not make that optional network proof a normal CI gate.
 

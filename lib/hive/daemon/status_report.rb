@@ -174,7 +174,6 @@ module Hive
       rescue StandardError
         nil
       end
-
     end
   end
 end

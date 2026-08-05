@@ -182,7 +182,6 @@ module Hive
             File.expand_path(project_root)
           )
         end
-
       end
 
       def initialize(project_root, hive_state_path: nil)

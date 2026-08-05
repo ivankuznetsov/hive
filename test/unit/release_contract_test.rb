@@ -360,7 +360,7 @@ class ReleaseContractTest < Minitest::Test
     upgrade = jobs.fetch("upgrade").fetch("steps").find do |step|
       step["name"] == "Run installed historical producer and candidate without network"
     end.fetch("run")
-    profile = '(version 1) (deny default) (allow process*) (allow file-read*) ' \
+    profile = "(version 1) (deny default) (allow process*) (allow file-read*) " \
       '(allow file-write* (subpath \"$HIVE_RC_RUN_ROOT\")) (deny network*)'
     assert_includes upgrade, %(profile="#{profile}")
     assert_equal 1, upgrade.scan('sandbox-exec -p "$profile"').size

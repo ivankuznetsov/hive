@@ -150,5 +150,4 @@ class BinHiveRefactorPatrolUsageErrorTest < Minitest::Test
       JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol-jobs")))
     )
   end
-
 end

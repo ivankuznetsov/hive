@@ -37,11 +37,11 @@ class ReleaseCandidateCliTest < Minitest::Test
     assert_empty err
     assert_equal "hive-release-candidate-plan", result.fetch("schema")
     assert_equal SHA, result.fetch("candidate_sha")
-    assert_equal "0.6.9", result.fetch("candidate_version")
+    assert_equal "0.7.0", result.fetch("candidate_version")
     assert_equal "qa_blocked", result.fetch("qa_status")
     assert_includes result.fetch("blockers"), "remote_validation_required"
     if result["baseline_version"]
-      assert_includes result.fetch("blockers"), "candidate_not_newer"
+      refute_includes result.fetch("blockers"), "candidate_not_newer"
     else
       assert_includes result.fetch("blockers"), "baseline_catalog_missing_or_invalid"
     end

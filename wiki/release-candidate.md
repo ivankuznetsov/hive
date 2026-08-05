@@ -42,9 +42,10 @@ attempt results rather than copying or rewriting terminal evidence.
 
 Local evidence keeps `trust_scope`, `scope_status`, and `qa_status` separate. A
 passing requested local scope exits successfully but remains `qa_blocked` on
-`remote_validation_required`. The v0.6.9 development candidate is also blocked
-by `candidate_not_newer`; the command does not choose a version or print/perform
-a release action. `dispatch` is the sole explicit GitHub-writing verb and
+`remote_validation_required`. The v0.7.0 development candidate is newer than
+the reviewed v0.6.9 baseline, so `candidate_not_newer` no longer applies; the
+command does not choose a version or print/perform a release action. `dispatch`
+is the sole explicit GitHub-writing verb and
 `collect` is read-only. Both bind a request ID, candidate/workflow SHA,
 action-lock digest, exact run/attempt, and artifact ID/digest. Dispatch either
 resolves that request-bounded run or returns `dispatched_unresolved`; collect
@@ -386,9 +387,8 @@ explicit decision to create and push `vX.Y.Z` may start `release.yml`. The
 candidate CLI and trusted aggregate never choose a version, create a tag,
 publish, deploy, or release.
 
-Current hosted evidence remains intentionally blocked: the checked-in source
-version is 0.6.9 and the reviewed latest-stable alias is also v0.6.9, so
-`candidate_not_newer` applies. The first real native-platform and historical
-package campaign additionally exposed shallow-tag checkout, managed-Web CLI,
-and staged dependency-cache failures that remain separate dogfood findings.
-No release action was authorized or performed.
+The checked-in source metadata is prepared as 0.7.0 while the reviewed
+latest-stable alias remains v0.6.9, clearing only the candidate-version
+comparison. Previous hosted evidence belongs to its exact older candidate SHA
+and cannot qualify these bytes; a fresh trusted remote campaign is still
+required. No release action was authorized or performed.

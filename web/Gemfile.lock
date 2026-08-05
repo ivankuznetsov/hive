@@ -1,7 +1,7 @@
 PATH
   remote: ..
   specs:
-    hive-cli (0.6.9)
+    hive-cli (0.7.0)
       base64 (>= 0.2)
       bubbletea (= 0.1.4)
       bundler (= 2.7.2)

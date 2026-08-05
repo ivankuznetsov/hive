@@ -256,7 +256,7 @@ big versions.
   is pre-1.0; `1.0.0` is reserved for when the CLI/JSON contracts are declared
   stable.
 
-**How to cut a release:** bump `VERSION` in `lib/hive.rb`, sync **both**
+**How to cut a release:** bump `VERSION` in `lib/hive/version.rb`, sync **both**
 `Gemfile.lock` and `web/Gemfile.lock` (`hive-cli (X.Y.Z)` — Hive web
 depends on the gem via `path: ".."` in a source checkout, so a stale web lock fails its frozen
 `bundle install`), bump the `vX.Y.Z` installer-URL refs in `README.md` /
@@ -430,7 +430,7 @@ version until you bump it manually or set the token.
 
 ## Cutting a release
 
-1. Bump the version in `lib/hive.rb` (`VERSION = "X.Y.Z"`) and update
+1. Bump the version in `lib/hive/version.rb` (`VERSION = "X.Y.Z"`) and update
    `CHANGELOG.md`, both lockfiles, and pinned installer URLs.
 2. Commit, open a PR, merge to `main`.
 3. Record the full merged commit and confirm the release metadata matches it:

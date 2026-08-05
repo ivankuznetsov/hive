@@ -164,7 +164,10 @@ process-custody, and publication proof. The packaging-only reduced U3c harness
 now composes those custody checks through exactly five evidence owners and the
 existing E2E controller's read-only `external_smoke` entry, but it creates no
 catalog component, admission facade, report lane, recovery owner, or promotion
-authority. That exception is not permission for
+authority. Candidate execution consumes an independently admitted read-only
+source mount while build mutations remain in sandbox state; host composition
+binds a canonical expiring authorization to the registered project's live
+repository/HEAD/state and retains only a closed terminal result. That exception is not permission for
 another recovery store, compatibility effect map, qualification runner, or
 cutover claim.
 

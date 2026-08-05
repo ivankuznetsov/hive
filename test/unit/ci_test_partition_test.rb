@@ -104,7 +104,11 @@ class CiTestPartitionTest < Minitest::Test
       default_files = Object.const_get(:HIVE_DEFAULT_TEST_FILES)
       workflow = File.read(File.join(ROOT, ".github", "workflows", "ci.yml"))
 
-      assert_equal [ "test/unit/packaging/workflow_creator_values_test.rb" ], hostile_files
+      assert_equal %w[
+        test/unit/packaging/patrol_evidence_candidate_test.rb
+        test/unit/packaging/patrol_evidence_sandbox_test.rb
+        test/unit/packaging/workflow_creator_values_test.rb
+      ], hostile_files.sort
       assert hostile_files.all? { |file| default_files.include?(file) },
              "core Workflow Creator coverage must remain in the default suite"
       assert_equal [ "test:enable_hostile" ], Rake::Task["test:hostile"].prerequisites

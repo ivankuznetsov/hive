@@ -32,9 +32,9 @@ module HivePatrolEvidence
     DIGEST = /\A[0-9a-f]{64}\z/
     IDENTITY_KEYS = %w[
       dependency_closure dependency_closure_sha256 gem_sha256 installed_hive_sha256
-      module_manifest_sha256 toolchain toolchain_sha256
+      module_manifest_sha256 source_tree_sha256 toolchain toolchain_sha256
     ].freeze
-    CLOSURE_KEYS = %w[full_name name platform spec_sha256 version].freeze
+    CLOSURE_KEYS = %w[basename bytesize spec_sha256].freeze
     TOOLCHAIN_KEYS = %w[bundler ruby rubygems].freeze
 
     def initialize(repo_root:, controller_sha:, candidate_sha:, command_runner: nil)
@@ -62,7 +62,10 @@ module HivePatrolEvidence
       end
       @archive_identity = stat
       inventory = self.class.send(:inspect_archive!, archive)
-      manifests = load_module_manifests
+      source = File.join(root, "candidate-source")
+      source_inventory = self.class.send(:materialize_archive!, archive, source)
+      @source_identity = File.lstat(source)
+      manifests = load_module_manifests(source)
       @prepared = {
         "controller_sha" => @controller_sha,
         "candidate_sha" => @candidate_sha,
@@ -70,6 +73,8 @@ module HivePatrolEvidence
         "archive_sha256" => inventory.fetch("archive_sha256"),
         "archive_member_count" => inventory.fetch("archive_member_count"),
         "archive_total_bytes" => inventory.fetch("archive_total_bytes"),
+        "source_path" => source,
+        "source_tree_sha256" => source_inventory.fetch("source_tree_sha256"),
         "module_manifests" => manifests,
         "module_manifest_sha256" => digest_json(manifests)
       }.freeze
@@ -82,6 +87,7 @@ module HivePatrolEvidence
     def verify!(receipt:)
       raise Error.new("candidate_identity", "candidate was not prepared") unless @prepared
       verify_archive!
+      verify_source!
       row = receipt.fetch("candidate")
       unless row.is_a?(Hash) && row.keys.sort == %w[archive_sha256 candidate_sha identity_after identity_before] &&
              row.values_at("candidate_sha", "archive_sha256") ==
@@ -94,6 +100,9 @@ module HivePatrolEvidence
       unless before.fetch("module_manifest_sha256") == @prepared.fetch("module_manifest_sha256")
         raise Error.new("candidate_identity", "installed module manifests differ")
       end
+      unless before.fetch("source_tree_sha256") == @prepared.fetch("source_tree_sha256")
+        raise Error.new("candidate_identity", "installed source tree differs")
+      end
 
       {
         "candidate_sha" => @candidate_sha,
@@ -101,6 +110,7 @@ module HivePatrolEvidence
         "archive_member_count" => @prepared.fetch("archive_member_count"),
         "archive_total_bytes" => @prepared.fetch("archive_total_bytes"),
         "module_manifest_sha256" => @prepared.fetch("module_manifest_sha256"),
+        "source_tree_sha256" => @prepared.fetch("source_tree_sha256"),
         "gem_sha256" => before.fetch("gem_sha256"),
         "installed_hive_sha256" => before.fetch("installed_hive_sha256"),
         "dependency_closure_sha256" => before.fetch("dependency_closure_sha256"),
@@ -167,6 +177,167 @@ module HivePatrolEvidence
         raise
       rescue SystemCallError, Gem::Package::TarInvalidError, ArgumentError
         raise Error.new("candidate_archive", "candidate archive is malformed"), cause: nil
+      end
+
+      def materialize_archive!(archive, root)
+        raise Error.new("path_custody", "candidate source destination already exists") if
+          File.exist?(root) || File.symlink?(root)
+        Dir.mkdir(root, 0o700)
+        File.open(archive, read_flags) do |file|
+          Gem::Package::TarReader.new(file) do |tar|
+            tar.each do |entry|
+              kind = entry_kind(entry)
+              if kind == :metadata
+                consume(entry)
+                next
+              end
+              name = safe_path(entry.full_name, directory: kind == :directory)
+              if kind == :directory
+                ensure_directory!(root, name)
+              else
+                write_file!(root, name, entry)
+              end
+            end
+          end
+        end
+        freeze_source_tree!(root)
+        inspect_source_tree!(root)
+      rescue Error
+        raise
+      rescue SystemCallError, Gem::Package::TarInvalidError, ArgumentError
+        raise Error.new("candidate_archive", "candidate source materialization failed"), cause: nil
+      end
+
+      def ensure_directory!(root, relative)
+        current = root
+        relative.split("/").each do |part|
+          current = File.join(current, part)
+          begin
+            Dir.mkdir(current, 0o700)
+          rescue Errno::EEXIST
+            nil
+          end
+          stat = File.lstat(current)
+          unless stat.directory? && !stat.symlink? && stat.uid == Process.uid
+            raise Error.new("path_custody", "candidate source directory is unsafe")
+          end
+        end
+      end
+
+      def write_file!(root, relative, entry)
+        parent = File.dirname(relative)
+        ensure_directory!(root, parent) unless parent == "."
+        path = File.join(root, relative)
+        flags = File::WRONLY | File::CREAT | File::EXCL
+        flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+        mode = (entry.header.mode.to_i & 0o111).zero? ? 0o444 : 0o555
+        File.open(path, flags, 0o600) do |output|
+          until entry.eof?
+            remaining = entry.size - entry.pos
+            chunk = entry.read([ CHUNK_BYTES, remaining ].min)
+            raise Error.new("candidate_archive", "candidate archive member ended early") if
+              chunk.nil? || chunk.empty?
+            output.write(chunk)
+          end
+          output.flush
+          output.fsync
+        end
+        File.chmod(mode, path)
+      rescue Errno::EEXIST, Errno::ELOOP
+        raise Error.new("path_custody", "candidate source file path is unsafe"), cause: nil
+      end
+
+      def freeze_source_tree!(root)
+        directories = [ root ]
+        walk = lambda do |directory|
+          Dir.each_child(directory) do |name|
+            path = File.join(directory, name)
+            stat = File.lstat(path)
+            if stat.directory? && !stat.symlink?
+              directories << path
+              walk.call(path)
+            elsif !stat.file? || stat.symlink?
+              raise Error.new("path_custody", "candidate source contains a special entry")
+            end
+          end
+        end
+        walk.call(root)
+        directories.sort_by { |path| -path.count(File::SEPARATOR) }.each do |directory|
+          File.chmod(0o555, directory)
+          File.open(directory, File::RDONLY) { |handle| handle.fsync }
+        end
+      end
+
+      def inspect_source_tree!(root)
+        root_stat = File.lstat(root)
+        unless root_stat.directory? && !root_stat.symlink? && root_stat.uid == Process.uid &&
+               (root_stat.mode & 0o777) == 0o555
+          raise Error.new("candidate_identity", "candidate source root is unsafe")
+        end
+        rows = []
+        total = 0
+        walk = lambda do |directory, prefix|
+          Dir.each_child(directory).sort_by(&:b).each do |name|
+            relative = prefix.empty? ? name : File.join(prefix, name)
+            path = File.join(directory, name)
+            stat = File.lstat(path)
+            kind = stat.directory? && !stat.symlink? ? :directory : :file
+            safe_path(relative, directory: kind == :directory)
+            raise Error.new("candidate_identity", "candidate source has too many members") if
+              rows.size >= MAX_MEMBERS
+            if kind == :directory
+              unless stat.uid == Process.uid && (stat.mode & 0o777) == 0o555
+                raise Error.new("candidate_identity", "candidate source directory is unsafe")
+              end
+              rows << { "kind" => "directory", "mode" => 0o555, "path" => relative }
+              walk.call(path, relative)
+            else
+              unless stat.file? && !stat.symlink? && stat.nlink == 1 && stat.uid == Process.uid &&
+                     [ 0o444, 0o555 ].include?(stat.mode & 0o777) &&
+                     stat.size.between?(0, MAX_MEMBER_BYTES)
+                raise Error.new("candidate_identity", "candidate source file is unsafe")
+              end
+              total += stat.size
+              raise Error.new("candidate_identity", "candidate source is oversized") if
+                total > MAX_TOTAL_BYTES
+              digest = Digest::SHA256.new
+              File.open(path, read_flags) do |file|
+                opened = file.stat
+                unless %i[dev ino uid mode nlink size].all? do |field|
+                  opened.public_send(field) == stat.public_send(field)
+                end
+                  raise Error.new("candidate_identity", "candidate source file identity changed")
+                end
+                while (chunk = file.read(CHUNK_BYTES))
+                  digest.update(chunk)
+                end
+              end
+              rows << {
+                "kind" => "file", "mode" => stat.mode & 0o777, "path" => relative,
+                "sha256" => digest.hexdigest, "size" => stat.size
+              }
+            end
+          end
+        end
+        walk.call(root, "")
+        raise Error.new("candidate_identity", "candidate source tree is empty") if rows.empty?
+        { "source_tree_sha256" => canonical_digest(rows.sort_by { |row| row.fetch("path") }) }
+      rescue Error
+        raise
+      rescue SystemCallError, ArgumentError
+        raise Error.new("candidate_identity", "candidate source tree is unavailable"), cause: nil
+      end
+
+      def canonical_digest(value)
+        Digest::SHA256.hexdigest(JSON.generate(canonical_value(value)))
+      end
+
+      def canonical_value(value)
+        case value
+        when Hash then value.keys.sort.to_h { |key| [ key, canonical_value(value.fetch(key)) ] }
+        when Array then value.map { |item| canonical_value(item) }
+        else value
+        end
       end
 
       def entry_kind(entry)
@@ -248,6 +419,22 @@ module HivePatrolEvidence
       raise Error.new("candidate_identity", "candidate archive is unavailable"), cause: nil
     end
 
+    def verify_source!
+      path = @prepared.fetch("source_path")
+      current = File.lstat(path)
+      unless %i[dev ino uid mode].all? do |field|
+        current.public_send(field) == @source_identity.public_send(field)
+      end
+        raise Error.new("candidate_identity", "candidate source root identity changed")
+      end
+      inventory = self.class.send(:inspect_source_tree!, path)
+      unless inventory.fetch("source_tree_sha256") == @prepared.fetch("source_tree_sha256")
+        raise Error.new("candidate_identity", "candidate source tree bytes changed")
+      end
+    rescue Errno::ENOENT, Errno::ELOOP, Errno::EACCES
+      raise Error.new("candidate_identity", "candidate source tree is unavailable"), cause: nil
+    end
+
     def validate_input!
       unless SHA.match?(@controller_sha) && SHA.match?(@candidate_sha) &&
              @controller_sha != @candidate_sha
@@ -258,10 +445,17 @@ module HivePatrolEvidence
       raise Error.new("candidate_identity", "candidate commit is unavailable") unless resolved == @candidate_sha
     end
 
-    def load_module_manifests
+    def load_module_manifests(source)
       MODULES.to_h do |name|
-        bytes = git_output("show", "#{@candidate_sha}:modules/#{name}/manifest.yml")
-        raise Error.new("candidate_identity", "module manifest is oversized") if bytes.bytesize > MAX_MANIFEST_BYTES
+        path = File.join(source, "modules", name, "manifest.yml")
+        bytes = File.open(path, self.class.send(:read_flags)) do |file|
+          stat = file.stat
+          unless stat.file? && stat.nlink == 1 && stat.uid == Process.uid &&
+                 stat.size.between?(1, MAX_MANIFEST_BYTES)
+            raise Error.new("candidate_identity", "module manifest is unsafe")
+          end
+          file.read(MAX_MANIFEST_BYTES + 1)
+        end
         manifest = YAML.safe_load(bytes, permitted_classes: [], permitted_symbols: [], aliases: false)
         valid = manifest.is_a?(Hash) && manifest["version"].is_a?(String) &&
           manifest["release_sha256"].to_s.match?(DIGEST) &&
@@ -288,15 +482,16 @@ module HivePatrolEvidence
       end
       closure = value.fetch("dependency_closure")
       unless closure.is_a?(Array) && closure.size.between?(1, MAX_CLOSURE_MEMBERS) &&
-             closure == closure.sort_by { |row| row.fetch("full_name") } &&
-             closure.map { |row| row.fetch("full_name") }.uniq.size == closure.size
+             closure == closure.sort_by { |row| row.fetch("basename") } &&
+             closure.map { |row| row.fetch("basename") }.uniq.size == closure.size
         raise Error.new("candidate_identity", "dependency closure is malformed")
       end
       closure.each do |row|
         valid = row.is_a?(Hash) && row.keys.sort == CLOSURE_KEYS &&
-          row.values_at("name", "version", "platform", "full_name").all? do |item|
-            item.is_a?(String) && item.bytesize.between?(1, 256)
-          end && row.fetch("spec_sha256").to_s.match?(DIGEST)
+          row.fetch("basename").is_a?(String) &&
+          row.fetch("basename").match?(/\A[A-Za-z0-9][A-Za-z0-9._-]{0,239}\.gemspec\z/) &&
+          row.fetch("bytesize").is_a?(Integer) && row.fetch("bytesize").between?(1, 1024 * 1024) &&
+          row.fetch("spec_sha256").to_s.match?(DIGEST)
         raise Error.new("candidate_identity", "dependency closure is malformed") unless valid
       end
       toolchain = value.fetch("toolchain")
@@ -313,14 +508,10 @@ module HivePatrolEvidence
       raise Error.new("candidate_identity", "installed identity is malformed"), cause: nil
     end
 
-    def digest_json(value) = Digest::SHA256.hexdigest(JSON.generate(canonical_value(value)))
+    def digest_json(value) = self.class.send(:canonical_digest, value)
 
     def canonical_value(value)
-      case value
-      when Hash then value.keys.sort.to_h { |key| [ key, canonical_value(value.fetch(key)) ] }
-      when Array then value.map { |item| canonical_value(item) }
-      else value
-      end
+      self.class.send(:canonical_value, value)
     end
 
     def git_output(*arguments)

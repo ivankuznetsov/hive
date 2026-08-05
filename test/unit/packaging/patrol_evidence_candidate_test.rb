@@ -25,6 +25,11 @@ class PatrolEvidenceCandidateTest < Minitest::Test
         assert_operator record.fetch("archive_total_bytes"), :>, 0
         assert_equal %w[architecture-patrol patrol], record.fetch("module_manifests").keys
         assert record.fetch("module_manifest_sha256").match?(/\A[0-9a-f]{64}\z/)
+        assert record.fetch("source_tree_sha256").match?(/\A[0-9a-f]{64}\z/)
+        assert_equal 0o555, File.stat(record.fetch("source_path")).mode & 0o777
+        source_files = Dir.glob(File.join(record.fetch("source_path"), "**", "*"))
+                          .select { |path| File.file?(path) }
+        assert source_files.all? { |path| [ 0o444, 0o555 ].include?(File.stat(path).mode & 0o777) }
       end
     end
   end
@@ -62,6 +67,12 @@ class PatrolEvidenceCandidateTest < Minitest::Test
         receipt["candidate"]["identity_after"]["installed_hive_sha256"] = digest("changed")
         error = assert_raises(Candidate::Error) { owner.verify!(receipt:) }
         assert_equal "candidate_identity", error.reason
+
+        source_file = File.join(prepared.fetch("source_path"), "candidate.txt")
+        File.chmod(0o644, source_file)
+        File.binwrite(source_file, "changed source\n")
+        error = assert_raises(Candidate::Error) { owner.verify!(receipt:) }
+        assert_equal "candidate_identity", error.reason
       end
     end
   end
@@ -84,13 +95,14 @@ class PatrolEvidenceCandidateTest < Minitest::Test
 
   def installed_identity(prepared)
     closure = [
-      { "name" => "hive-cli", "version" => "0.7.0", "platform" => "ruby",
-        "full_name" => "hive-cli-0.7.0", "spec_sha256" => digest("spec") }
+      { "basename" => "hive-cli-0.7.0.gemspec", "bytesize" => 12,
+        "spec_sha256" => digest("spec") }
     ]
     {
       "gem_sha256" => digest("gem"),
       "installed_hive_sha256" => digest("hive"),
       "module_manifest_sha256" => prepared.fetch("module_manifest_sha256"),
+      "source_tree_sha256" => prepared.fetch("source_tree_sha256"),
       "dependency_closure" => closure,
       "dependency_closure_sha256" => digest(canonical_json(closure)),
       "toolchain" => {

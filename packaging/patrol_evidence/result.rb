@@ -32,8 +32,29 @@ module HivePatrolEvidence
       smoke_validation unexpected_failure
     ].freeze
     AUTHORITY_KEYS = %w[
-      authorization_sha256 candidate_sha controller_script_sha256 controller_sha
-      invocation_id run_id runner_sha256
+      authorization_expires_at authorization_nonce_sha256 authorization_sha256 candidate_sha
+      control_tree_sha256 controller_script_sha256 controller_sha image invocation_id
+      observations_sha256 project_binding_sha256 run_id runner_sha256
+    ].freeze
+    CANDIDATE_PREPARED_KEYS = %w[
+      archive_member_count archive_sha256 archive_total_bytes candidate_sha
+      module_manifest_sha256 source_tree_sha256 status
+    ].freeze
+    CANDIDATE_VERIFIED_KEYS = %w[
+      archive_member_count archive_sha256 archive_total_bytes candidate_sha
+      dependency_closure_sha256 gem_sha256 installed_hive_sha256 module_manifest_sha256
+      source_tree_sha256 status toolchain_sha256
+    ].freeze
+    SANDBOX_KEYS = %w[
+      cpus engine engine_sha256 engine_version image image_id memory network process_limit
+      root_filesystem status writable_bytes writable_inodes
+    ].freeze
+    SMOKE_KEYS = %w[
+      catalog_digest modules receipt_count report_sha256 scenario_manifest_digest status
+    ].freeze
+    PROVIDER_KEYS = %w[model provider response_sha256 status usage].freeze
+    PROCESS_KEYS = %w[
+      container_id_sha256 exit_code outcome owner status stderr_sha256 stdout_sha256 teardown
     ].freeze
 
     class << self
@@ -66,7 +87,8 @@ module HivePatrolEvidence
         validate_authority!(authority)
         validate_time!(started_at, "started_at")
         validate_time!(finished_at, "finished_at") if finished_at
-        raise Error, "patrol smoke process evidence is malformed" unless process_evidence.is_a?(Array)
+        validate_records!(status, candidate:, sandbox:, smoke:, provider:, process_evidence:)
+        validate_cross_fields!(status, candidate:, sandbox:, smoke:, provider:, process_evidence:, finished_at:)
 
         document = {
           "schema" => SCHEMA,
@@ -107,15 +129,125 @@ module HivePatrolEvidence
         valid = authority.is_a?(Hash) && authority.keys.sort == AUTHORITY_KEYS &&
           authority.values_at("controller_sha", "candidate_sha").all? do |sha|
             sha.is_a?(String) && sha.match?(/\A[0-9a-f]{40}\z/)
-          end && authority.values_at("runner_sha256", "controller_script_sha256",
-                                     "authorization_sha256").all? do |digest|
+          end && authority.values_at(
+            "runner_sha256", "controller_script_sha256", "control_tree_sha256",
+            "authorization_sha256", "authorization_nonce_sha256", "observations_sha256",
+            "project_binding_sha256"
+          ).all? do |digest|
             digest.is_a?(String) && digest.match?(/\A[0-9a-f]{64}\z/)
           end && authority.values_at("run_id", "invocation_id").all? do |value|
             value.is_a?(String) && value.match?(/\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z/)
-          end
+          end && authority.fetch("image").is_a?(String) &&
+          authority.fetch("image").match?(/\A[a-z0-9][a-z0-9._\/-]*@sha256:[0-9a-f]{64}\z/) &&
+          utc_time?(authority.fetch("authorization_expires_at"))
         raise Error, "patrol smoke authority binding is malformed" unless valid
         raise Error, "controller and candidate SHAs must be distinct" if
           authority.fetch("controller_sha") == authority.fetch("candidate_sha")
+      end
+
+      def validate_records!(status, candidate:, sandbox:, smoke:, provider:, process_evidence:)
+        raise Error, "patrol smoke process evidence is malformed" unless
+          process_evidence.is_a?(Array) && process_evidence.size <= 1
+        process_evidence.each { |row| validate_process!(row) }
+        validate_candidate!(candidate) if candidate
+        validate_sandbox!(sandbox) if sandbox
+        validate_smoke!(smoke) if smoke
+        validate_provider!(provider) if provider
+
+        return unless status == "installed_live_smoke_verified"
+
+        valid = candidate&.fetch("status", nil) == "verified" && sandbox&.fetch("status", nil) == "passed" &&
+          smoke&.fetch("status", nil) == "passed" && provider&.fetch("status", nil) == "passed" &&
+          process_evidence.one? && process_evidence.dig(0, "status") == "reaped" &&
+          process_evidence.dig(0, "outcome") == "success" &&
+          process_evidence.dig(0, "teardown") == "verified" &&
+          process_evidence.dig(0, "exit_code") == 0
+        raise Error, "verified patrol smoke is missing closed success evidence" unless valid
+      rescue KeyError, NoMethodError, TypeError
+        raise Error, "patrol smoke component evidence is malformed", cause: nil
+      end
+
+      def validate_cross_fields!(status, candidate:, sandbox:, smoke:, provider:, process_evidence:, finished_at:)
+        if status == "not_started"
+          valid = [ candidate, sandbox, smoke, provider, finished_at ].all?(&:nil?) && process_evidence.empty?
+        else
+          valid = !finished_at.nil?
+        end
+        raise Error, "patrol smoke status fields are inconsistent" unless valid
+      end
+
+      def validate_candidate!(value)
+        keys = value.fetch("status") == "prepared" ? CANDIDATE_PREPARED_KEYS : CANDIDATE_VERIFIED_KEYS
+        valid = value.is_a?(Hash) && %w[prepared verified].include?(value.fetch("status")) &&
+          value.keys.sort == keys &&
+          %w[candidate_sha].all? { |key| value.fetch(key).to_s.match?(/\A[0-9a-f]{40}\z/) } &&
+          %w[archive_sha256 module_manifest_sha256 source_tree_sha256].all? do |key|
+            value.fetch(key).to_s.match?(/\A[0-9a-f]{64}\z/)
+          end && value.fetch("archive_member_count").is_a?(Integer) &&
+          value.fetch("archive_member_count").positive? &&
+          value.fetch("archive_total_bytes").is_a?(Integer) && value.fetch("archive_total_bytes").positive?
+        if value.fetch("status") == "verified"
+          valid &&= %w[
+            dependency_closure_sha256 gem_sha256 installed_hive_sha256 toolchain_sha256
+          ].all? { |key| value.fetch(key).to_s.match?(/\A[0-9a-f]{64}\z/) }
+        end
+        raise Error, "patrol smoke candidate evidence is malformed" unless valid
+      end
+
+      def validate_sandbox!(value)
+        valid = value.is_a?(Hash) && value.keys.sort == SANDBOX_KEYS && value.fetch("status") == "passed" &&
+          %w[docker podman].include?(value.fetch("engine")) &&
+          value.fetch("engine_version").is_a?(String) && !value.fetch("engine_version").empty? &&
+          value.values_at("engine_sha256").all? { |item| item.to_s.match?(/\A[0-9a-f]{64}\z/) } &&
+          value.fetch("image").to_s.match?(/@sha256:[0-9a-f]{64}\z/) &&
+          value.fetch("image_id").to_s.match?(/\Asha256:[0-9a-f]{64}\z/) &&
+          value.values_at("network", "root_filesystem", "memory", "cpus") ==
+            %w[none read_only 2g 2] &&
+          value.fetch("process_limit").is_a?(Integer) && value.fetch("process_limit").positive? &&
+          value.fetch("writable_bytes").is_a?(Integer) && value.fetch("writable_bytes").positive? &&
+          value.fetch("writable_inodes").is_a?(Integer) && value.fetch("writable_inodes").positive?
+        raise Error, "patrol smoke sandbox evidence is malformed" unless valid
+      end
+
+      def validate_smoke!(value)
+        valid = value.is_a?(Hash) && value.keys.sort == SMOKE_KEYS && value.fetch("status") == "passed" &&
+          value.fetch("modules") == %w[architecture-patrol patrol] &&
+          value.fetch("receipt_count").is_a?(Integer) && value.fetch("receipt_count").positive? &&
+          %w[catalog_digest report_sha256 scenario_manifest_digest].all? do |key|
+            value.fetch(key).to_s.match?(/\A[0-9a-f]{64}\z/)
+          end
+        raise Error, "patrol smoke controller evidence is malformed" unless valid
+      end
+
+      def validate_provider!(value)
+        usage = value.fetch("usage")
+        valid = value.is_a?(Hash) && value.keys.sort == PROVIDER_KEYS && value.fetch("status") == "passed" &&
+          value.values_at("provider", "model") == [ "openrouter", "openai/gpt-5.6-terra" ] &&
+          value.fetch("response_sha256").to_s.match?(/\A[0-9a-f]{64}\z/) &&
+          usage.is_a?(Hash) && usage.keys.sort == %w[completion_tokens prompt_tokens total_tokens] &&
+          usage.values.all? { |item| item.is_a?(Integer) && item.positive? } &&
+          usage.fetch("total_tokens") >= usage.fetch("prompt_tokens") + usage.fetch("completion_tokens")
+        raise Error, "patrol smoke provider evidence is malformed" unless valid
+      end
+
+      def validate_process!(value)
+        valid = value.is_a?(Hash) && value.keys.sort == PROCESS_KEYS && value.fetch("owner") == "sandbox" &&
+          %w[reaped not_reaped].include?(value.fetch("status")) &&
+          %w[success failed timeout interrupted unavailable].include?(value.fetch("outcome")) &&
+          %w[verified unverified].include?(value.fetch("teardown")) &&
+          [ nil, Integer ].any? { |type| type.nil? ? value.fetch("exit_code").nil? : value.fetch("exit_code").is_a?(type) } &&
+          [ nil, value.fetch("container_id_sha256") ].compact.all? do |digest|
+            digest.to_s.match?(/\A[0-9a-f]{64}\z/)
+          end && %w[stdout_sha256 stderr_sha256].all? do |key|
+            value.fetch(key).to_s.match?(/\A[0-9a-f]{64}\z/)
+          end
+        raise Error, "patrol smoke process evidence is malformed" unless valid
+      end
+
+      def utc_time?(value)
+        Time.iso8601(value.to_s).utc_offset.zero?
+      rescue ArgumentError
+        false
       end
 
       def validate_time!(value, label)

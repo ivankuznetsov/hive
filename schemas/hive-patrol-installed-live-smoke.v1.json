@@ -47,8 +47,9 @@
       "additionalProperties": false,
       "required": [
         "run_id", "controller_sha", "candidate_sha", "runner_sha256",
-        "controller_script_sha256",
-        "authorization_sha256", "invocation_id"
+        "controller_script_sha256", "control_tree_sha256", "authorization_sha256",
+        "authorization_nonce_sha256", "authorization_expires_at", "invocation_id",
+        "image", "observations_sha256", "project_binding_sha256"
       ],
       "properties": {
         "run_id": { "$ref": "#/$defs/safeId" },
@@ -56,18 +57,30 @@
         "candidate_sha": { "$ref": "#/$defs/sha" },
         "runner_sha256": { "$ref": "#/$defs/digest" },
         "controller_script_sha256": { "$ref": "#/$defs/digest" },
+        "control_tree_sha256": { "$ref": "#/$defs/digest" },
         "authorization_sha256": { "$ref": "#/$defs/digest" },
-        "invocation_id": { "$ref": "#/$defs/safeId" }
+        "authorization_nonce_sha256": { "$ref": "#/$defs/digest" },
+        "authorization_expires_at": { "$ref": "#/$defs/time" },
+        "invocation_id": { "$ref": "#/$defs/safeId" },
+        "image": { "$ref": "#/$defs/image" },
+        "observations_sha256": { "$ref": "#/$defs/digest" },
+        "project_binding_sha256": { "$ref": "#/$defs/digest" }
       }
     },
-    "candidate": { "$ref": "#/$defs/nullableRecord" },
-    "sandbox": { "$ref": "#/$defs/nullableRecord" },
-    "smoke": { "$ref": "#/$defs/nullableRecord" },
-    "provider": { "$ref": "#/$defs/nullableRecord" },
+    "candidate": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/preparedCandidate" },
+        { "$ref": "#/$defs/verifiedCandidate" }
+      ]
+    },
+    "sandbox": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/sandbox" }] },
+    "smoke": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/smoke" }] },
+    "provider": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/provider" }] },
     "process_evidence": {
       "type": "array",
       "maxItems": 64,
-      "items": { "type": "object" }
+      "items": { "$ref": "#/$defs/processEvidence" }
     },
     "started_at": { "type": "string", "format": "date-time", "maxLength": 64 },
     "finished_at": {
@@ -87,6 +100,7 @@
           "sandbox": { "type": "null" },
           "smoke": { "type": "null" },
           "provider": { "type": "null" },
+          "process_evidence": { "maxItems": 0 },
           "finished_at": { "type": "null" }
         }
       }
@@ -96,11 +110,36 @@
       "then": {
         "properties": {
           "reason": { "type": "null" },
-          "candidate": { "type": "object" },
-          "sandbox": { "type": "object" },
-          "smoke": { "type": "object" },
-          "provider": { "type": "object" },
+          "candidate": { "$ref": "#/$defs/verifiedCandidate" },
+          "sandbox": { "$ref": "#/$defs/sandbox" },
+          "smoke": { "$ref": "#/$defs/smoke" },
+          "provider": { "$ref": "#/$defs/provider" },
+          "process_evidence": {
+            "type": "array", "minItems": 1, "maxItems": 1,
+            "items": {
+              "allOf": [
+                { "$ref": "#/$defs/processEvidence" },
+                {
+                  "properties": {
+                    "status": { "const": "reaped" }, "outcome": { "const": "success" },
+                    "teardown": { "const": "verified" }, "exit_code": { "const": 0 },
+                    "container_id_sha256": { "$ref": "#/$defs/digest" }
+                  }
+                }
+              ]
+            }
+          },
           "finished_at": { "type": "string" }
+        },
+        "required": ["candidate", "sandbox", "smoke", "provider", "process_evidence"]
+      }
+    },
+    {
+      "if": { "properties": { "status": { "enum": ["blocked", "failed"] } } },
+      "then": {
+        "properties": {
+          "reason": { "type": "string" },
+          "finished_at": { "$ref": "#/$defs/time" }
         }
       }
     }
@@ -112,11 +151,111 @@
     },
     "sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
     "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-    "nullableRecord": {
-      "oneOf": [
-        { "type": "null" },
-        { "type": "object" }
+    "time": { "type": "string", "format": "date-time", "maxLength": 64 },
+    "image": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._/-]*@sha256:[0-9a-f]{64}$"
+    },
+    "candidateCore": {
+      "type": "object",
+      "properties": {
+        "candidate_sha": { "$ref": "#/$defs/sha" },
+        "archive_sha256": { "$ref": "#/$defs/digest" },
+        "archive_member_count": { "type": "integer", "minimum": 1, "maximum": 4096 },
+        "archive_total_bytes": { "type": "integer", "minimum": 1, "maximum": 268435456 },
+        "module_manifest_sha256": { "$ref": "#/$defs/digest" },
+        "source_tree_sha256": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "preparedCandidate": {
+      "allOf": [
+        { "$ref": "#/$defs/candidateCore" },
+        {
+          "additionalProperties": false,
+          "required": ["status", "candidate_sha", "archive_sha256", "archive_member_count", "archive_total_bytes", "module_manifest_sha256", "source_tree_sha256"],
+          "properties": {
+            "status": { "const": "prepared" },
+            "candidate_sha": { "$ref": "#/$defs/sha" },
+            "archive_sha256": { "$ref": "#/$defs/digest" },
+            "archive_member_count": { "type": "integer", "minimum": 1, "maximum": 4096 },
+            "archive_total_bytes": { "type": "integer", "minimum": 1, "maximum": 268435456 },
+            "module_manifest_sha256": { "$ref": "#/$defs/digest" },
+            "source_tree_sha256": { "$ref": "#/$defs/digest" }
+          }
+        }
       ]
+    },
+    "verifiedCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "candidate_sha", "archive_sha256", "archive_member_count", "archive_total_bytes", "module_manifest_sha256", "source_tree_sha256", "gem_sha256", "installed_hive_sha256", "dependency_closure_sha256", "toolchain_sha256"],
+      "properties": {
+        "status": { "const": "verified" },
+        "candidate_sha": { "$ref": "#/$defs/sha" },
+        "archive_sha256": { "$ref": "#/$defs/digest" },
+        "archive_member_count": { "type": "integer", "minimum": 1, "maximum": 4096 },
+        "archive_total_bytes": { "type": "integer", "minimum": 1, "maximum": 268435456 },
+        "module_manifest_sha256": { "$ref": "#/$defs/digest" },
+        "source_tree_sha256": { "$ref": "#/$defs/digest" },
+        "gem_sha256": { "$ref": "#/$defs/digest" },
+        "installed_hive_sha256": { "$ref": "#/$defs/digest" },
+        "dependency_closure_sha256": { "$ref": "#/$defs/digest" },
+        "toolchain_sha256": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "sandbox": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "engine", "engine_version", "engine_sha256", "image", "image_id", "network", "root_filesystem", "writable_bytes", "writable_inodes", "process_limit", "memory", "cpus"],
+      "properties": {
+        "status": { "const": "passed" }, "engine": { "enum": ["docker", "podman"] },
+        "engine_version": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "engine_sha256": { "$ref": "#/$defs/digest" }, "image": { "$ref": "#/$defs/image" },
+        "image_id": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "network": { "const": "none" }, "root_filesystem": { "const": "read_only" },
+        "writable_bytes": { "const": 536870912 }, "writable_inodes": { "const": 16384 },
+        "process_limit": { "const": 64 }, "memory": { "const": "2g" }, "cpus": { "const": "2" }
+      }
+    },
+    "smoke": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "modules", "receipt_count", "catalog_digest", "scenario_manifest_digest", "report_sha256"],
+      "properties": {
+        "status": { "const": "passed" },
+        "modules": { "const": ["architecture-patrol", "patrol"] },
+        "receipt_count": { "type": "integer", "minimum": 1 },
+        "catalog_digest": { "$ref": "#/$defs/digest" },
+        "scenario_manifest_digest": { "$ref": "#/$defs/digest" },
+        "report_sha256": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "provider": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "provider", "model", "response_sha256", "usage"],
+      "properties": {
+        "status": { "const": "passed" }, "provider": { "const": "openrouter" },
+        "model": { "const": "openai/gpt-5.6-terra" }, "response_sha256": { "$ref": "#/$defs/digest" },
+        "usage": {
+          "type": "object", "additionalProperties": false,
+          "required": ["prompt_tokens", "completion_tokens", "total_tokens"],
+          "properties": {
+            "prompt_tokens": { "type": "integer", "minimum": 1 },
+            "completion_tokens": { "type": "integer", "minimum": 1 },
+            "total_tokens": { "type": "integer", "minimum": 2 }
+          }
+        }
+      }
+    },
+    "processEvidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["owner", "status", "outcome", "teardown", "exit_code", "container_id_sha256", "stdout_sha256", "stderr_sha256"],
+      "properties": {
+        "owner": { "const": "sandbox" }, "status": { "enum": ["reaped", "not_reaped"] },
+        "outcome": { "enum": ["success", "failed", "timeout", "interrupted", "unavailable"] },
+        "teardown": { "enum": ["verified", "unverified"] },
+        "exit_code": { "type": ["integer", "null"] },
+        "container_id_sha256": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/digest" }] },
+        "stdout_sha256": { "$ref": "#/$defs/digest" }, "stderr_sha256": { "$ref": "#/$defs/digest" }
+      }
     }
   }
 }

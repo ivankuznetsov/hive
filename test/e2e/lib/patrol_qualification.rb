@@ -3,7 +3,6 @@ require "fileutils"
 require "json"
 require "open3"
 require "rbconfig"
-require "rubygems"
 require "tmpdir"
 require "time"
 require "yaml"
@@ -25,6 +24,14 @@ module Hive
       MAX_EVIDENCE_BYTES = 512 * 1024
       MAX_SHADOW_FILES = 64
       MAX_SHADOW_BYTES = 8 * 1024 * 1024
+      MAX_EXTERNAL_SOURCE_MEMBERS = 4_096
+      MAX_EXTERNAL_SOURCE_BYTES = 256 * 1024 * 1024
+      MAX_EXTERNAL_SOURCE_PATH_BYTES = 240
+      MAX_EXTERNAL_SOURCE_PATH_DEPTH = 32
+      MAX_EXTERNAL_GEM_BYTES = 256 * 1024 * 1024
+      MAX_EXTERNAL_GEMSPEC_BYTES = 1024 * 1024
+      MAX_EXTERNAL_CLOSURE_BYTES = 64 * 1024 * 1024
+      MAX_EXTERNAL_HIVE_BYTES = 8 * 1024 * 1024
       CHILD_TIMEOUT = 30.0
       CHILD_TIMEOUT_STATUS = 124
       TERMINAL_SIGNALS = %w[
@@ -41,6 +48,15 @@ module Hive
       class Error < StandardError; end
       class ChildTimeout < Error; end
       class CampaignTimeout < Error; end
+
+      class StreamOverflow < Error
+        attr_reader :stream
+
+        def initialize(stream, label)
+          @stream = stream
+          super("#{label} #{stream} exceeds its byte bound")
+        end
+      end
 
       class ProcessFailure < Error
         attr_reader :kind, :status
@@ -207,7 +223,10 @@ module Hive
             pid = wait.pid
             input.binmode
             streams = [ input, out, err ]
-            workers = [ Thread.new { drain(out, stdout) }, Thread.new { drain(err, stderr) } ]
+            workers = [
+              Thread.new { drain(out, stdout, stream: "stdout", label:, pid:) },
+              Thread.new { drain(err, stderr, stream: "stderr", label:, pid:) }
+            ]
             workers << Thread.new do
               input.write(stdin_data)
             rescue Errno::EPIPE, IOError
@@ -220,6 +239,7 @@ module Hive
               terminate_group(pid)
               streams.each { |io| close(io) }
               join_until(workers, monotonic + 0.5)
+              raise_worker_errors!(workers)
               cleaned_up = true
               raise(campaign_limited ? CampaignTimeout : ChildTimeout,
                     "#{label} exceeded #{limit.round(3)} seconds")
@@ -234,6 +254,7 @@ module Hive
               raise(campaign_limited ? CampaignTimeout : ChildTimeout,
                     "#{label} did not close its process streams before the deadline")
             end
+            raise_worker_errors!(workers)
           end
           unless status.success?
             kind, value = status.signaled? ? [ "signal", status.termsig ] : [ "exit", status.exitstatus ]
@@ -252,13 +273,23 @@ module Hive
 
         private
 
-        def drain(io, destination)
+        def drain(io, destination, stream:, label:, pid:)
           while (chunk = io.read(16 * 1024))
             remaining = MAX_STREAM_BYTES - destination.bytesize
-            destination << chunk.byteslice(0, remaining) if remaining.positive?
+            if chunk.bytesize > remaining
+              begin
+                Process.kill("TERM", -pid)
+              rescue Errno::ESRCH
+                nil
+              end
+              raise StreamOverflow.new(stream, label)
+            end
+            destination << chunk
           end
         rescue IOError
           nil
+        ensure
+          close(io)
         end
 
         def terminate_group(pid)
@@ -285,6 +316,10 @@ module Hive
             thread.join(remaining)
           end
           threads.none?(&:alive?)
+        end
+
+        def raise_worker_errors!(threads)
+          threads.each { |thread| thread.value unless thread.alive? }
         end
 
         def close(io)
@@ -538,7 +573,8 @@ module Hive
                  controller_sha != candidate_sha && candidate.is_a?(Hash) &&
                  candidate.fetch("candidate_sha") == candidate_sha &&
                  candidate.fetch("archive_sha256").to_s.match?(/\A[0-9a-f]{64}\z/) &&
-                 candidate.fetch("module_manifest_sha256").to_s.match?(/\A[0-9a-f]{64}\z/)
+                 candidate.fetch("module_manifest_sha256").to_s.match?(/\A[0-9a-f]{64}\z/) &&
+                 candidate.fetch("source_tree_sha256").to_s.match?(/\A[0-9a-f]{64}\z/)
             raise Error, "external smoke authority binding is malformed"
           end
           unless sandbox_result.is_a?(Hash) && sandbox_result.keys.sort == %w[
@@ -622,7 +658,10 @@ module Hive
                  controller_sha != candidate_sha && candidate.is_a?(Hash) &&
                  candidate.fetch("candidate_sha") == candidate_sha &&
                  candidate.fetch("archive_sha256").to_s.match?(/\A[0-9a-f]{64}\z/) &&
-                 candidate.fetch("module_manifest_sha256").to_s.match?(/\A[0-9a-f]{64}\z/)
+                 candidate.fetch("module_manifest_sha256").to_s.match?(/\A[0-9a-f]{64}\z/) &&
+                 candidate.fetch("source_tree_sha256").to_s.match?(/\A[0-9a-f]{64}\z/) &&
+                 candidate.fetch("source_root").is_a?(String) &&
+                 File.absolute_path(candidate.fetch("source_root")) == candidate.fetch("source_root")
             raise Error, "external smoke worker authority binding is malformed"
           end
           run_root = File.join(File.dirname(@repo_root), "external-smoke")
@@ -636,12 +675,18 @@ module Hive
           installed = {
             "sha" => candidate_sha, "candidate_sha" => candidate_sha,
             "archive_sha256" => candidate.fetch("archive_sha256"), "root" => @repo_root,
+            "source_root" => candidate.fetch("source_root"),
+            "source_tree_sha256" => candidate.fetch("source_tree_sha256"),
             "module_manifest_sha256" => candidate.fetch("module_manifest_sha256")
           }
           install_candidate(installed, run_root)
           catalog_repo = build_module_catalog(installed, run_root)
           install_modules(catalog_repo)
           identity_before = external_installed_identity(installed)
+          unless identity_before.values_at("source_tree_sha256", "module_manifest_sha256") ==
+                 installed.values_at("source_tree_sha256", "module_manifest_sha256")
+            raise Error, "external smoke admitted source identity differs"
+          end
           prepared = collect_receipts(catalog, installed, claim: "u3c")
           inspections = revalidate_external_modules
           identity_after = external_installed_identity(installed)
@@ -687,29 +732,27 @@ module Hive
             raise Error, "installed dependency specifications are unavailable"
           end
           closure = []
+          closure_bytes = 0
           Dir.each_child(specifications) do |name|
             raise Error, "installed dependency closure exceeds its member bound" if closure.size >= 4_096
-            path = File.join(specifications, name)
-            bytes = PatrolQualification.bounded_read(
-              path, label: "installed dependency specification", limit: 1024 * 1024,
-              deadline: @deadline
-            )
-            specification = Gem::Specification.load(path)
-            unless specification && specification.name.to_s.bytesize.between?(1, 256) &&
-                   specification.version.to_s.bytesize.between?(1, 256) &&
-                   specification.platform.to_s.bytesize.between?(1, 256)
-              raise Error, "installed dependency specification is malformed"
+            unless name.match?(/\A[A-Za-z0-9][A-Za-z0-9._-]{0,239}\.gemspec\z/)
+              raise Error, "installed dependency specification name is unsafe"
             end
+            path = File.join(specifications, name)
+            identity = external_regular_file_identity(
+              path, label: "installed dependency specification",
+              limit: MAX_EXTERNAL_GEMSPEC_BYTES
+            )
+            closure_bytes += identity.fetch("bytesize")
+            raise Error, "installed dependency closure exceeds its aggregate byte bound" if
+              closure_bytes > MAX_EXTERNAL_CLOSURE_BYTES
             closure << {
-              "name" => specification.name.to_s,
-              "version" => specification.version.to_s,
-              "platform" => specification.platform.to_s,
-              "full_name" => specification.full_name.to_s,
-              "spec_sha256" => Digest::SHA256.hexdigest(bytes)
+              "basename" => name, "bytesize" => identity.fetch("bytesize"),
+              "spec_sha256" => identity.fetch("sha256")
             }
           end
-          closure.sort_by! { |row| row.fetch("full_name") }
-          names = closure.map { |row| row.fetch("full_name") }
+          closure.sort_by! { |row| row.fetch("basename") }
+          names = closure.map { |row| row.fetch("basename") }
           raise Error, "installed dependency closure is empty or duplicated" if
             closure.empty? || names.uniq.size != names.size
           toolchain = {
@@ -719,10 +762,17 @@ module Hive
           }
           canonical_closure = JSON.generate(PatrolQualification.canonical_value(closure))
           canonical_toolchain = JSON.generate(PatrolQualification.canonical_value(toolchain))
+          source_tree_sha256 = external_source_tree_sha256(candidate.fetch("source_root"))
+          module_manifest_sha256 = external_module_manifest_sha256(candidate.fetch("source_root"))
           {
-            "gem_sha256" => candidate.fetch("gem_sha256"),
-            "installed_hive_sha256" => candidate.fetch("installed_hive_sha256"),
-            "module_manifest_sha256" => candidate.fetch("module_manifest_sha256"),
+            "gem_sha256" => external_regular_file_identity(
+              @candidate_gem_path, label: "built candidate gem", limit: MAX_EXTERNAL_GEM_BYTES
+            ).fetch("sha256"),
+            "installed_hive_sha256" => external_regular_file_identity(
+              @hive_bin, label: "installed candidate hive", limit: MAX_EXTERNAL_HIVE_BYTES
+            ).fetch("sha256"),
+            "module_manifest_sha256" => module_manifest_sha256,
+            "source_tree_sha256" => source_tree_sha256,
             "dependency_closure" => closure,
             "dependency_closure_sha256" => Digest::SHA256.hexdigest(canonical_closure),
             "toolchain" => toolchain,
@@ -730,6 +780,116 @@ module Hive
           }
         rescue Errno::ENOENT, Errno::EACCES
           raise Error, "installed dependency closure is unavailable"
+        end
+
+        def external_regular_file_identity(path, label:, limit:)
+          flags = File::RDONLY
+          flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+          flags |= File::NONBLOCK if File.const_defined?(:NONBLOCK)
+          File.open(path, flags) do |file|
+            stat = file.stat
+            unless stat.file? && stat.nlink == 1 && stat.uid == Process.uid &&
+                   stat.size.between?(1, limit)
+              raise Error, "#{label} is not a bounded owner-controlled regular file"
+            end
+            digest = Digest::SHA256.new
+            bytesize = 0
+            while (chunk = file.read(64 * 1024))
+              bytesize += chunk.bytesize
+              raise Error, "#{label} exceeds its byte bound" if bytesize > limit
+              digest.update(chunk)
+              PatrolQualification.check_deadline!(@deadline, label)
+            end
+            { "bytesize" => bytesize, "sha256" => digest.hexdigest }
+          end
+        rescue Errno::ELOOP, Errno::ENXIO, SystemCallError => e
+          raise Error, "#{label} is unreadable: #{e.class.name}"
+        end
+
+        def external_regular_file_bytes(path, label:, limit:)
+          identity = external_regular_file_identity(path, label:, limit:)
+          bytes = PatrolQualification.bounded_read(path, label:, limit:, deadline: @deadline)
+          unless bytes.bytesize == identity.fetch("bytesize") &&
+                 Digest::SHA256.hexdigest(bytes) == identity.fetch("sha256")
+            raise Error, "#{label} changed while it was read"
+          end
+          bytes
+        end
+
+        def external_module_manifest_sha256(source_root)
+          manifests = MODULES.to_h do |name|
+            bytes = external_regular_file_bytes(
+              File.join(source_root, "modules", name, "manifest.yml"),
+              label: "admitted #{name} module manifest", limit: 1024 * 1024
+            )
+            manifest = YAML.safe_load(bytes, permitted_classes: [], permitted_symbols: [], aliases: false)
+            valid = manifest.is_a?(Hash) && manifest["version"].is_a?(String) &&
+              manifest["release_sha256"].to_s.match?(/\A[0-9a-f]{64}\z/) &&
+              manifest.dig("source", "revision").to_s.match?(/\A[0-9a-f]{40}\z/)
+            raise Error, "admitted #{name} module manifest is malformed" unless valid
+            [ name, {
+              "bytes_sha256" => Digest::SHA256.hexdigest(bytes),
+              "version" => manifest.fetch("version"),
+              "release_sha256" => manifest.fetch("release_sha256"),
+              "source_revision" => manifest.dig("source", "revision")
+            } ]
+          end
+          Digest::SHA256.hexdigest(JSON.generate(PatrolQualification.canonical_value(manifests)))
+        rescue Psych::Exception, KeyError, TypeError
+          raise Error, "admitted module manifest identity is malformed"
+        end
+
+        def external_source_tree_sha256(root)
+          root_stat = File.lstat(root)
+          unless root_stat.directory? && !root_stat.symlink? && root_stat.uid == Process.uid &&
+                 (root_stat.mode & 0o777) == 0o555
+            raise Error, "admitted source root is unsafe"
+          end
+          rows = []
+          total = 0
+          walk = lambda do |directory, prefix|
+            Dir.each_child(directory).sort_by(&:b).each do |name|
+              relative = prefix.empty? ? name : File.join(prefix, name)
+              path = File.join(directory, name)
+              stat = File.lstat(path)
+              valid_path = relative.valid_encoding? && !relative.empty? &&
+                relative.bytesize <= MAX_EXTERNAL_SOURCE_PATH_BYTES &&
+                relative.split("/").none? { |part| part.empty? || part == "." || part == ".." } &&
+                relative.count("/") + 1 <= MAX_EXTERNAL_SOURCE_PATH_DEPTH
+              raise Error, "admitted source path is unsafe" unless valid_path
+              raise Error, "admitted source exceeds its member bound" if
+                rows.size >= MAX_EXTERNAL_SOURCE_MEMBERS
+              if stat.directory? && !stat.symlink?
+                unless stat.uid == Process.uid && (stat.mode & 0o777) == 0o555
+                  raise Error, "admitted source directory is unsafe"
+                end
+                rows << { "kind" => "directory", "mode" => 0o555, "path" => relative }
+                walk.call(path, relative)
+              else
+                unless stat.file? && !stat.symlink? && stat.nlink == 1 && stat.uid == Process.uid &&
+                       [ 0o444, 0o555 ].include?(stat.mode & 0o777)
+                  raise Error, "admitted source file is unsafe"
+                end
+                identity = external_regular_file_identity(
+                  path, label: "admitted source file", limit: MAX_EXTERNAL_SOURCE_BYTES
+                )
+                total += identity.fetch("bytesize")
+                raise Error, "admitted source exceeds its aggregate byte bound" if
+                  total > MAX_EXTERNAL_SOURCE_BYTES
+                rows << {
+                  "kind" => "file", "mode" => stat.mode & 0o777, "path" => relative,
+                  "sha256" => identity.fetch("sha256"), "size" => identity.fetch("bytesize")
+                }
+              end
+            end
+          end
+          walk.call(root, "")
+          raise Error, "admitted source tree is empty" if rows.empty?
+          Digest::SHA256.hexdigest(JSON.generate(
+            PatrolQualification.canonical_value(rows.sort_by { |row| row.fetch("path") })
+          ))
+        rescue Errno::ELOOP, Errno::ENOENT, Errno::EACCES => e
+          raise Error, "admitted source tree is unavailable: #{e.class.name}"
         end
 
         def setup_process(run_root)
@@ -789,6 +949,7 @@ module Hive
               cwd: candidate.fetch("root"), label: "build candidate gem")
           install_root = File.join(run_root, "installed")
           @install_root = install_root
+          @candidate_gem_path = gem_file
           installer = File.join(candidate.fetch("root"), "packaging/live_agent_skills/install_candidate_gem.sh")
           run("/bin/bash", installer, gem_file, install_root, label: "install candidate gem")
           @hive_bin = File.join(install_root, "bin", "hive")
@@ -802,9 +963,13 @@ module Hive
 
         def build_module_catalog(candidate, run_root)
           root = File.join(run_root, "catalog")
+          admitted_root = candidate.fetch("source_root", candidate.fetch("root"))
           entries = MODULES.map do |name|
-            source = File.join(candidate.fetch("root"), "modules", name)
-            manifest = YAML.safe_load(File.binread(File.join(source, "manifest.yml")))
+            source = File.join(admitted_root, "modules", name)
+            manifest = YAML.safe_load(PatrolQualification.bounded_read(
+              File.join(source, "manifest.yml"), label: "catalogue #{name} manifest",
+              limit: 1024 * 1024, deadline: @deadline
+            ))
             version = manifest.fetch("version")
             destination = File.join(root, "modules", name, version)
             FileUtils.mkdir_p(File.dirname(destination))
@@ -925,18 +1090,19 @@ module Hive
                                          observations_path: @observations_path,
                                          catalog: catalog, deadline: @deadline)
           catalog_digest = Digest::SHA256.hexdigest(catalog.bytes)
+          manifest_digest = if claim == "u3c"
+            candidate.fetch("module_manifest_sha256")
+          else
+            Digest::SHA256.hexdigest(MODULES.map { |name|
+              File.binread(File.join(candidate.fetch("root"), "modules", name, "manifest.yml"))
+            }.join("\0"))
+          end
           common = {
             "run_id" => "#{claim}-#{candidate.fetch('sha')[0, 12]}",
             "candidate_sha" => candidate.fetch("sha"),
             "catalog_digest" => catalog_digest,
             "source_digest" => candidate.fetch("archive_sha256"),
-            "manifest_digest" => if claim == "u3c"
-              candidate.fetch("module_manifest_sha256")
-            else
-              Digest::SHA256.hexdigest(MODULES.map { |name|
-                File.binread(File.join(candidate.fetch("root"), "modules", name, "manifest.yml"))
-              }.join("\0"))
-            end,
+            "manifest_digest" => manifest_digest,
             "scenario_manifest_digest" => Digest::SHA256.hexdigest(catalog.bytes + "\0" + reader.bytes),
             "artifacts" => [
               { "kind" => "candidate_archive", "digest" => candidate.fetch("archive_sha256") },

@@ -316,8 +316,8 @@ module HiveReleaseCandidate
     end
 
     def bounded(value)
-      string = value.to_s
-      string.bytesize > OUTPUT_LIMIT ? string.byteslice(0, OUTPUT_LIMIT) : string
+      string = value.to_s.b.byteslice(0, OUTPUT_LIMIT)
+      string.force_encoding(Encoding::UTF_8).scrub
     end
   end
 end

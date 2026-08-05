@@ -82,10 +82,6 @@ module HiveReleaseCandidate
 
       run_id = positive_integer(match[1], "evidence run ID")
       run_attempt = positive_integer(match[2], "evidence run attempt")
-      expected_details = "https://github.com/#{repository}/actions/runs/#{run_id}"
-      unless check["details_url"] == expected_details
-        raise Error, "candidate Check Run details URL is invalid"
-      end
       {
         "candidate_sha" => candidate_sha,
         "evidence_run_id" => run_id,

@@ -11,6 +11,23 @@ tags: [gap, todo, release-proof, agent-skills]
 
 ## Current release gap
 
+- Release-candidate protected-main dogfood run `31005500332` retained exact
+  terminal evidence, but only seven of fourteen required gates passed. The
+  expected `candidate_not_newer` result is joined by harness findings: catalog
+  tests lacked historical tags in a shallow checkout, managed-Web verification
+  called a removed `--hive-bin` option, latest-stable staging omitted a locked
+  `bigdecimal-4.1.2.gem`, the legacy fetch observed a changing shallow file,
+  and the macOS sandbox lane exited without a typed diagnostic. Protected
+  ordinary CI also completed after the candidate run had already sampled it.
+  Named-retry run `31006277887` then exposed GitHub Check Run details-URL
+  canonicalization before its selected gate ran. Source now uses the exact
+  candidate/external-ID binding instead, but a fresh post-merge campaign and
+  targeted retry must prove the hosted path. The U8 coordinator extraction is
+  deliberately move-only: current local attempts checkpoint captured INT/TERM,
+  not an uncatchable hard crash between a gate result and evidence publication.
+  Adding a durable in-progress journal remains a separately admitted behavior
+  change rather than hidden refactor scope.
+
 - Patrol capture/effect boundaries and the U3a receipt, independent verifier,
   duplicate index, qualification value, two-lane report, and one-off report
   conversion are source- and focused-test-pinned. A narrow `Patrols` facade

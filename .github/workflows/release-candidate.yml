@@ -213,16 +213,16 @@ jobs:
             )"
             source_evidence_sha256="$(sha256sum "$source_evidence" | awk '{print $1}')"
             source_checks="$(
-              gh api "repos/${GITHUB_REPOSITORY}/commits/${CANDIDATE_SHA}/check-runs?check_name=hive-release-candidate"
+              gh api "repos/${GITHUB_REPOSITORY}/commits/${CANDIDATE_SHA}/check-runs?check_name=hive-release-candidate&filter=all&per_page=100"
             )"
             test "$(jq --arg run "$SOURCE_RUN_ID" --arg attempt "$SOURCE_RUN_ATTEMPT" \
-              --arg digest "$source_evidence_sha256" '
+              --arg digest "$source_evidence_sha256" --arg candidate "$CANDIDATE_SHA" '
                 [.check_runs[] | select(
                   .name == "hive-release-candidate" and
                   .app.slug == "github-actions" and
+                  .head_sha == $candidate and
                   .status == "completed" and
                   (.conclusion == "success" or .conclusion == "failure") and
-                  ((.details_url // "") | contains("/actions/runs/" + $run)) and
                   .external_id == ("hive-release-candidate:v1:" + $run + ":" + $attempt + ":" + $digest)
                 )] | length
               ' <<<"$source_checks")" = 1

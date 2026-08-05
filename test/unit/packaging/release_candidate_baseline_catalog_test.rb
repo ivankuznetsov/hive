@@ -270,7 +270,7 @@ class ReleaseCandidateBaselineCatalogTest < Minitest::Test
     end
   end
 
-  def test_runner_accepts_only_exact_catalog_cache_attestation
+  def test_baseline_cache_accepts_only_exact_catalog_cache_attestation
     with_tmp_dir do |repo|
       cache = File.join(repo, "tmp/release-candidates/baseline-cache")
       FileUtils.mkdir_p(File.join(cache, "attestations"))
@@ -306,9 +306,12 @@ class ReleaseCandidateBaselineCatalogTest < Minitest::Test
         "verified_dependency_closure_sha256" => closure_digest,
         "rows" => %w[latest-stable legacy-bench-v041].sort
       ) + "\n")
-      runner = HiveReleaseCandidate::Runner.new(repo_root: repo)
+      repository = HiveReleaseCandidate::Repository.new(repo)
+      baseline_cache = HiveReleaseCandidate::BaselineCache.new(
+        repo_root: repo, repository: repository
+      )
 
-      verified = runner.send(
+      verified = baseline_cache.send(
         :baseline_cache_attestation, catalog, cache, inventory, closures
       )
       assert_equal "verified", verified.fetch("status")
@@ -318,7 +321,7 @@ class ReleaseCandidateBaselineCatalogTest < Minitest::Test
       document = JSON.parse(File.binread(path))
       document["rows"] = [ "latest-stable" ]
       File.write(path, JSON.generate(document) + "\n")
-      invalid = runner.send(
+      invalid = baseline_cache.send(
         :baseline_cache_attestation, catalog, cache, inventory, closures
       )
       assert_equal "invalid", invalid.fetch("status")

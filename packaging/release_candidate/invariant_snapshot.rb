@@ -17,7 +17,7 @@ module HiveReleaseCandidate
     MAX_CAPTURE_BYTES = 1_048_576
     SEMANTIC_JSON_SECTIONS = %w[doctor_json status_json].freeze
     VOLATILE_JSON_KEYS = %w[
-      binary binary_path elapsed_ms executable finished_at generated_at
+      age_seconds binary binary_path elapsed_ms executable finished_at generated_at
       hive_version observed_at pid process_start_time schema_version started_at
       timestamp updated_at version
     ].freeze
@@ -32,7 +32,7 @@ module HiveReleaseCandidate
         raise Error, "invariant snapshot has unknown sections: #{extra.join(', ')}" unless extra.empty?
 
         SEMANTIC_JSON_SECTIONS.each do |name|
-          normalized[name] = semantic_json(normalized.fetch(name))
+          normalized[name] = semantic_json(normalized.fetch(name), path: [ name ])
         end
         canonical = deep_sort(normalized)
         {
@@ -163,19 +163,43 @@ module HiveReleaseCandidate
         end
       end
 
-      def semantic_json(value)
+      def semantic_json(value, path:)
         case value
         when Hash
           value.keys.sort.each_with_object({}) do |key, output|
-            next if VOLATILE_JSON_KEYS.include?(key)
-            output[key] = semantic_json(value.fetch(key))
+            child = value.fetch(key)
+            next if omit_semantic_json_key?(path: path, key: key, value: child)
+            output[key] = semantic_json(child, path: path + [ key ])
           end
         when Array
-          value.map { |child| semantic_json(child) }
+          value.each_with_index.map { |child, index| semantic_json(child, path: path + [ index ]) }
             .sort_by { |child| JSON.generate(deep_sort(child)) }
         else
           value
         end
+      end
+
+      def omit_semantic_json_key?(path:, key:, value:)
+        return true if VOLATILE_JSON_KEYS.include?(key)
+        return true if key == "expected" && doctor_managed_skill_path?(path)
+        return true if key == "hidden_archived_task_count" && value == 0 && status_project_path?(path)
+        return true if key == "closure" && value.nil? && status_task_path?(path)
+        return true if key == "outcomes" && value == [] && status_task_path?(path)
+
+        false
+      end
+
+      def doctor_managed_skill_path?(path)
+        path.length == 3 && path[0, 2] == %w[doctor_json managed_skills] && path[2].is_a?(Integer)
+      end
+
+      def status_project_path?(path)
+        path.length == 3 && path[0, 2] == %w[status_json projects] && path[2].is_a?(Integer)
+      end
+
+      def status_task_path?(path)
+        path.length == 5 && path[0, 2] == %w[status_json projects] &&
+          path[2].is_a?(Integer) && path[3] == "tasks" && path[4].is_a?(Integer)
       end
 
       def safe_root!(value)

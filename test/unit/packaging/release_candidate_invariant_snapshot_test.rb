@@ -87,6 +87,107 @@ class ReleaseCandidateInvariantSnapshotTest < Minitest::Test
     ).fetch("passed")
   end
 
+  def test_doctor_ignores_version_owned_managed_skill_expectations_but_not_observed_state
+    first = state("task body" => "keep")
+    first["doctor_json"] = {
+      "schema" => "hive-doctor",
+      "managed_skills" => [ {
+        "stage" => "hive.operations",
+        "expected" => { "version" => "0.6.9", "canonical_digest" => "a" * 64 },
+        "native" => { "available" => true, "tree_digest" => "c" * 64 }
+      } ]
+    }
+    second = Marshal.load(Marshal.dump(first))
+    second["doctor_json"]["managed_skills"][0]["expected"] = {
+      "version" => "0.7.0", "canonical_digest" => "b" * 64
+    }
+
+    before = HiveReleaseCandidate::InvariantSnapshot.build(
+      row_id: "latest-stable", sections: first
+    )
+    after = HiveReleaseCandidate::InvariantSnapshot.build(
+      row_id: "latest-stable", sections: second
+    )
+    assert HiveReleaseCandidate::InvariantSnapshot.compare(
+      before: before, after: after, allowed_migrations: []
+    ).fetch("passed")
+
+    second["doctor_json"]["managed_skills"][0]["native"]["tree_digest"] = "d" * 64
+    changed = HiveReleaseCandidate::InvariantSnapshot.build(
+      row_id: "latest-stable", sections: second
+    )
+    diff = HiveReleaseCandidate::InvariantSnapshot.compare(
+      before: before, after: changed, allowed_migrations: []
+    )
+
+    refute diff.fetch("passed")
+    assert_equal(
+      [ "/doctor_json/managed_skills/0/native/tree_digest" ],
+      diff.fetch("unexpected").map { |item| item.fetch("path") }
+    )
+  end
+
+  def test_status_ignores_elapsed_age_and_additive_empty_defaults
+    first = state("task body" => "keep")
+    first["status_json"] = {
+      "schema" => "hive-status",
+      "projects" => [ { "name" => "hive", "tasks" => [ { "id" => 7 } ] } ]
+    }
+    second = Marshal.load(Marshal.dump(first))
+    project = second["status_json"]["projects"][0]
+    project["hidden_archived_task_count"] = 0
+    project["tasks"][0].merge!(
+      "age_seconds" => 4,
+      "closure" => nil,
+      "outcomes" => []
+    )
+
+    before = HiveReleaseCandidate::InvariantSnapshot.build(
+      row_id: "latest-stable", sections: first
+    )
+    after = HiveReleaseCandidate::InvariantSnapshot.build(
+      row_id: "latest-stable", sections: second
+    )
+
+    assert HiveReleaseCandidate::InvariantSnapshot.compare(
+      before: before, after: after, allowed_migrations: []
+    ).fetch("passed")
+  end
+
+  def test_status_keeps_nonempty_archive_closure_and_outcome_state
+    first = state("task body" => "keep")
+    first["status_json"] = {
+      "schema" => "hive-status",
+      "projects" => [ { "name" => "hive", "tasks" => [ { "id" => 7 } ] } ]
+    }
+    second = Marshal.load(Marshal.dump(first))
+    project = second["status_json"]["projects"][0]
+    project["hidden_archived_task_count"] = 1
+    project["tasks"][0].merge!(
+      "closure" => { "status" => "operator_required" },
+      "outcomes" => [ { "name" => "approve" } ]
+    )
+
+    before = HiveReleaseCandidate::InvariantSnapshot.build(
+      row_id: "latest-stable", sections: first
+    )
+    after = HiveReleaseCandidate::InvariantSnapshot.build(
+      row_id: "latest-stable", sections: second
+    )
+    paths = HiveReleaseCandidate::InvariantSnapshot.compare(
+      before: before, after: after, allowed_migrations: []
+    ).fetch("unexpected").map { |item| item.fetch("path") }
+
+    assert_equal(
+      [
+        "/status_json/projects/0/hidden_archived_task_count",
+        "/status_json/projects/0/tasks/0/closure",
+        "/status_json/projects/0/tasks/0/outcomes"
+      ],
+      paths
+    )
+  end
+
   private
 
   def state(tasks)

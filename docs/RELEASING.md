@@ -161,11 +161,11 @@ ruby packaging/release_candidate/materialize_baseline_cache.rb \
   "$PWD/tmp/release-candidates/baseline-cache"
 ```
 
-At the time of this implementation, the source version and reviewed
-latest-stable baseline are both 0.6.9. That exact source must report
-`candidate_not_newer` and cannot produce `qa_ready` evidence. Preparing a newer
-version is a separate reviewed release-prep change; the candidate tool never
-chooses or bumps it.
+For this release preparation, the source version is 0.7.0 and the reviewed
+latest-stable baseline remains v0.6.9. The candidate must not report
+`candidate_not_newer`; it may advance to `qa_ready` only after every other
+deterministic blocker clears. The candidate tool never chooses or bumps the
+version.
 
 `run`, `resume`, and `rerun` create only local, append-only evidence under
 `tmp/release-candidates/<sha>/`. A passing local scope remains `qa_blocked`.

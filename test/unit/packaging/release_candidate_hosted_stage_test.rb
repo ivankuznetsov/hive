@@ -91,33 +91,61 @@ class ReleaseCandidateHostedStageTest < Minitest::Test
       run_root = File.join(dir, "run")
       source_cache = File.join(dir, "runner-cache")
       consumer_cache = File.join(dir, "container-cache")
+      dependency_fixture = File.join(
+        ROOT, "test/e2e/sample-project/vendor/cache/rake-13.4.2.gem"
+      )
+      dependency = {
+        "filename" => File.basename(dependency_fixture),
+        "size" => File.size(dependency_fixture),
+        "sha256" => Digest::SHA256.file(dependency_fixture).hexdigest
+      }
+      row_root = File.join(consumer_cache, "closures", "legacy-bench-v041", "gems")
+      candidate_root = File.join(consumer_cache, "closures", "candidate", "gems")
+      [ row_root, candidate_root ].each do |root|
+        FileUtils.mkdir_p(root)
+        FileUtils.cp(dependency_fixture, File.join(root, dependency.fetch("filename")))
+      end
       staged_path = write_staged_inputs(
         run_root,
         row_id: "legacy-bench-v041",
         closures: {
-          "baseline" => closure("baseline", File.join(source_cache, "closures/legacy-bench-v041/gems")),
-          "observer" => closure("observer", File.join(source_cache, "closures/legacy-bench-v041/gems")),
-          "candidate" => closure("candidate", File.join(source_cache, "closures/candidate/gems"))
+          "baseline" => closure(
+            "baseline", File.join(source_cache, "closures/legacy-bench-v041/gems"), dependency
+          ),
+          "observer" => closure(
+            "observer", File.join(source_cache, "closures/legacy-bench-v041/gems"), dependency
+          ),
+          "candidate" => closure(
+            "candidate", File.join(source_cache, "closures/candidate/gems"), dependency
+          )
         }
       )
       staged_bytes = File.binread(staged_path)
       installed_closures = nil
+      installed_dependencies = nil
       stage = HiveReleaseCandidate::HostedStage.new(
         repo_root: ROOT, cache_root: consumer_cache, run_root: run_root
       )
       stage.define_singleton_method(:stage_targets) do |_row, _manifest, closures|
         installed_closures = closures
+        installed_dependencies = closures.transform_values do |closure|
+          installable_dependencies(closure)
+        end
       end
 
       stage.install(
         row_id: "legacy-bench-v041", platform: "linux-x86_64", candidate_sha: SHA
       )
 
-      row_root = File.join(consumer_cache, "closures", "legacy-bench-v041", "gems")
       assert_equal row_root, installed_closures.dig("baseline", "root")
       assert_equal row_root, installed_closures.dig("observer", "root")
-      assert_equal File.join(consumer_cache, "closures", "candidate", "gems"),
-                   installed_closures.dig("candidate", "root")
+      assert_equal candidate_root, installed_closures.dig("candidate", "root")
+      assert_equal [ File.join(row_root, dependency.fetch("filename")) ],
+                   installed_dependencies.fetch("baseline")
+      assert_equal [ File.join(row_root, dependency.fetch("filename")) ],
+                   installed_dependencies.fetch("observer")
+      assert_equal [ File.join(candidate_root, dependency.fetch("filename")) ],
+                   installed_dependencies.fetch("candidate")
       assert_equal staged_bytes, File.binread(staged_path)
     end
   end
@@ -176,8 +204,10 @@ class ReleaseCandidateHostedStageTest < Minitest::Test
 
   private
 
-  def closure(role, root)
-    { "role" => role, "root" => root, "sha256" => role[0] * 64 }
+  def closure(role, root, dependency = nil)
+    value = { "role" => role, "root" => root, "sha256" => role[0] * 64 }
+    value["gems"] = [ dependency ] if dependency
+    value
   end
 
   def write_staged_inputs(run_root, row_id: "latest-stable", platform: "linux-x86_64",

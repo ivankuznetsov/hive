@@ -31,6 +31,15 @@ class ReleaseContractTest < Minitest::Test
     assert_equal 1, read("CHANGELOG.md").scan(/^## #{version}$/).size
     assert_equal 1, read("README.md").scan(%r{/v#{version}/install\.sh}).size
     assert_equal 2, read("install.md").scan(%r{/v#{version}/install\.sh}).size
+
+    releasing = read("docs/RELEASING.md")
+    dependencies = read("wiki/dependencies.md")
+    assert_includes releasing, "the source version is #{Hive::VERSION}"
+    assert_includes releasing, "latest-stable baseline remains v0.6.9"
+    assert_includes releasing, "must not report\n`candidate_not_newer`"
+    assert_includes dependencies,
+                    "The v#{Hive::VERSION} release-prep checkout is `#{Hive::VERSION}`"
+    assert_equal 2, dependencies.scan("hive-cli (#{Hive::VERSION})").size
   end
 
   def test_public_credibility_copy_matches_current_capabilities

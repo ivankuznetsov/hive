@@ -996,30 +996,6 @@ module Hive
       ).call
     end
 
-    desc(
-      "refactor-patrol-reset PROJECT",
-      "Archive obsolete Architecture Patrol jobs and start with empty v3"
-    )
-    long_desc <<~DESC
-      Retires only the registered project's released v2/jobs directory. Hive
-      atomically archives its exact opaque bytes, preserves every other v2
-      Architecture Patrol owner and the global terminal-proof catalog, and
-      activates an empty v3 JobStore. It never converts or imports the old
-      backlog. --confirm is mandatory.
-
-      A running profile daemon and its supervised process tree are stopped and
-      verified before reset, then restarted only if this command stopped them.
-      Existing non-empty v3 state is never overwritten.
-    DESC
-    option :confirm, type: :boolean, default: false,
-                     desc: "confirm that the archived v2 backlog will not be imported"
-    def refactor_patrol_reset(project)
-      require "hive/commands/refactor_patrol_reset"
-      Hive::Commands::RefactorPatrolReset.new(
-        project, confirm: options[:confirm], json: options[:json]
-      ).call
-    end
-
     desc "answer-digest", "Send a daily digest of tasks waiting on human input"
     # wrap: false so the Examples / Exit codes blocks keep their line breaks.
     long_desc <<~DESC, wrap: false

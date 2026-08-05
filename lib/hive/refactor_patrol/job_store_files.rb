@@ -19,14 +19,14 @@ module Hive
 
       attr_reader :directory, :root
 
-      def initialize(root:, anchor:, corrupt_record:, inconsistent_record:,
+      def initialize(root:, anchor: nil, corrupt_record:, inconsistent_record:,
                      directory: nil)
         @root = File.expand_path(root)
         @corrupt_record = corrupt_record
         @inconsistent_record = inconsistent_record
         @directory = directory || Hive::ManagedDirectory.new(
           root: @root,
-          anchor: File.expand_path(anchor),
+          anchor: anchor && File.expand_path(anchor),
           label: "v3 refactor patrol JobStore"
         )
       end

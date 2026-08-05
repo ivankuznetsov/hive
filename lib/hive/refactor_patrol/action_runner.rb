@@ -82,8 +82,7 @@ module Hive
         end
         @job_store = job_store || JobStore.new(
           @project_root,
-          hive_state_path: @hive_state_path,
-          project: project_entry
+          hive_state_path: @hive_state_path
         )
         @family_store = family_store || FamilyStore.new(
           @project_root, hive_state_path: @hive_state_path,
@@ -133,8 +132,7 @@ module Hive
               end
               JobStore.new(
                 expanded_root,
-                hive_state_path: entry && entry["hive_state_path"],
-                project: entry
+                hive_state_path: entry && entry["hive_state_path"]
               )
             end
           )

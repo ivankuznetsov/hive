@@ -923,7 +923,7 @@ class ModulesMigrationPatrolsTest < Minitest::Test
 
     with_project do |project|
       store = Hive::RefactorPatrol::JobStore.new(
-        project.fetch("path"), project: project
+        project.fetch("path")
       )
       manifest = architecture_manifest
       capture = architecture_capture(manifest)
@@ -942,7 +942,7 @@ class ModulesMigrationPatrolsTest < Minitest::Test
 
     with_project do |project|
       store = Hive::RefactorPatrol::JobStore.new(
-        project.fetch("path"), project: project
+        project.fetch("path")
       )
       256.times do |index|
         store.write_job!(architecture_job(index))
@@ -1030,7 +1030,7 @@ class ModulesMigrationPatrolsTest < Minitest::Test
 
     with_project do |project|
       Hive::RefactorPatrol::JobStore.new(
-        project.fetch("path"), project: project
+        project.fetch("path")
       ).write_job!(architecture_job(1))
 
       result = default_coordinator(project).tick(now: NOW).fetch(0)
@@ -1041,7 +1041,7 @@ class ModulesMigrationPatrolsTest < Minitest::Test
 
     with_project do |project|
       store = Hive::RefactorPatrol::JobStore.new(
-        project.fetch("path"), project: project
+        project.fetch("path")
       )
       aggregate = architecture_job(1)
       store.write_job!(aggregate)
@@ -1060,11 +1060,10 @@ class ModulesMigrationPatrolsTest < Minitest::Test
     end
   end
 
-  def test_default_coordinator_probe_fails_closed_on_unreset_v2_jobs
+  def test_default_coordinator_probe_ignores_v2_jobs
     with_project do |project|
-      released = Hive::RefactorPatrol::JobStore.released_jobs_root_for(
-        project.fetch("path"),
-        hive_state_path: project.fetch("hive_state_path")
+      released = File.join(
+        project.fetch("hive_state_path"), "refactor_patrol", "v2", "jobs"
       )
       FileUtils.mkdir_p(released)
       opaque = File.join(released, "opaque-job.bytes")
@@ -1073,11 +1072,8 @@ class ModulesMigrationPatrolsTest < Minitest::Test
 
       result = default_coordinator(project).tick(now: NOW).fetch(0)
 
-      assert_equal :pending, result.fetch(:status)
-      assert_equal(
-        { "architecture-patrol" => "ambiguous" },
-        result.fetch(:blockers)
-      )
+      assert_equal :shadowing, result.fetch(:status)
+      assert_empty result.fetch(:blockers)
       assert_equal bytes, File.binread(opaque)
     end
   end

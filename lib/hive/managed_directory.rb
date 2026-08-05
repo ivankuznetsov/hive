@@ -9,7 +9,6 @@ module Hive
   # resolved relative to directory descriptors held for one reentrant session.
   class ManagedDirectory
     class UnsafeError < Hive::ConfigError; end
-    class ExchangeUnavailable < Hive::ConfigError; end
 
     private_constant :NativeAt
 
@@ -123,56 +122,6 @@ module Hive
       return nil if missing
 
       unsafe!
-    rescue Hive::ConfigError
-      raise
-    rescue SystemCallError, IOError, ArgumentError, TypeError
-      unsafe!
-    end
-
-    # Atomically swaps one directory child with one regular-file sibling. This
-    # is the only safe primitive for retiring a legacy writable namespace:
-    # after the syscall, the public name is already the regular-file
-    # tombstone, while the exact directory survives under +archive_name+.
-    # A two-rename fallback is intentionally forbidden.
-    def exchange_directory_with_regular!(
-      directory_name:, regular_name:
-    )
-      live = single_component(directory_name)
-      archive = single_component(regular_name)
-      with_session(create_root: false) do |session|
-        session.with_directory([], create: false) do |parent|
-          directory_identity = directory_identity_at(
-            parent.directory, live
-          )
-          regular_identity = regular_identity_at(
-            parent.directory, archive
-          )
-          unsafe! unless directory_identity && regular_identity
-          session.verify_binding!(parent)
-          unsafe! unless directory_identity ==
-            directory_identity_at(parent.directory, live)
-          unsafe! unless regular_identity ==
-            regular_identity_at(parent.directory, archive)
-
-          @native.exchangeat(parent.directory, live, archive)
-
-          unsafe! unless regular_identity ==
-            regular_identity_at(parent.directory, live)
-          unsafe! unless directory_identity ==
-            directory_identity_at(parent.directory, archive)
-          @native.fsync_directory(parent.directory)
-          session.verify_binding!(parent)
-          {
-            tombstone_path: File.join(root, live),
-            archive_path: File.join(root, archive)
-          }.freeze
-        end
-      end
-    rescue NativeAt::Unavailable, Errno::ENOSYS, Errno::EINVAL,
-           Errno::EOPNOTSUPP, Errno::ENOTSUP => error
-      raise ExchangeUnavailable,
-            "#{@label} requires atomic filesystem exchange " \
-            "(#{error.class}: #{error.message})"
     rescue Hive::ConfigError
       raise
     rescue SystemCallError, IOError, ArgumentError, TypeError
@@ -788,29 +737,6 @@ module Hive
     def validate_regular!(stat)
       unsafe! unless stat.file? && !stat.symlink? && stat.nlink == 1
       stat
-    end
-
-    def directory_identity_at(parent, name)
-      directory = @native.open_directory(parent, name)
-      stat = IO.for_fd(
-        directory.fileno, autoclose: false
-      ).stat
-      validate_directory!(stat)
-      identity(stat)
-    rescue Errno::ENOENT
-      nil
-    ensure
-      directory&.close
-    end
-
-    def regular_identity_at(parent, name)
-      file = @native.open_file(parent, name, File::RDONLY)
-      stat = validate_regular!(file.stat)
-      identity(stat)
-    rescue Errno::ENOENT
-      nil
-    ensure
-      file&.close
     end
 
     def regular_snapshot(stat)

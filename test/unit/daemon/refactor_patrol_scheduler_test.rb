@@ -46,7 +46,7 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       configured = File.join(dir, "state", "hive")
       entry = entry(dir, "demo").merge("hive_state_path" => configured)
       store = Hive::RefactorPatrol::JobStore.new(
-        dir, hive_state_path: configured, project: entry
+        dir, hive_state_path: configured
       )
       enqueue(store)
       scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
@@ -264,13 +264,13 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       [ first_dir, second_dir ].each { |dir| FileUtils.mkdir_p(dir) }
       entries = [ entry(first_dir, "one"), entry(second_dir, "two") ]
       first_store = Hive::RefactorPatrol::JobStore.new(
-        first_dir, project: entries.fetch(0)
+        first_dir
       )
       enqueue(first_store, registration: "one")
       stores = {
         first_dir => first_store,
         second_dir => Hive::RefactorPatrol::JobStore.new(
-          second_dir, project: entries.fetch(1)
+          second_dir
         )
       }
       scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
@@ -295,7 +295,7 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       [ first_dir, second_dir ].each { |dir| FileUtils.mkdir_p(dir) }
       entries = [ entry(first_dir, "one"), entry(second_dir, "two") ]
       first_store = Hive::RefactorPatrol::JobStore.new(
-        first_dir, project: entries.fetch(0)
+        first_dir
       )
       enqueue(first_store, registration: "one")
       configs = {
@@ -323,13 +323,13 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       [ first_dir, second_dir ].each { |dir| FileUtils.mkdir_p(dir) }
       entries = [ entry(first_dir, "one"), entry(second_dir, "two") ]
       first_store = Hive::RefactorPatrol::JobStore.new(
-        first_dir, project: entries.fetch(0)
+        first_dir
       )
       enqueue(first_store, registration: "one")
       stores = {
         first_dir => first_store,
         second_dir => Hive::RefactorPatrol::JobStore.new(
-          second_dir, project: entries.fetch(1)
+          second_dir
         )
       }
       identities = {
@@ -385,7 +385,7 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       [ first_dir, second_dir ].each { |dir| FileUtils.mkdir_p(dir) }
       entries = [ entry(first_dir, "demo"), entry(second_dir, "duplicate") ]
       first_store = Hive::RefactorPatrol::JobStore.new(
-        first_dir, project: entries.fetch(0)
+        first_dir
       )
       write_action_job(first_dir, first_store)
       initialized = first_store.initialize_actions!(
@@ -410,7 +410,7 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       stores = {
         first_dir => first_store,
         second_dir => Hive::RefactorPatrol::JobStore.new(
-          second_dir, project: entries.fetch(1)
+          second_dir
         )
       }
       scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
@@ -529,7 +529,7 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
                    store.effect_state(failed_intent).fetch("state")
 
       restarted_store = Hive::RefactorPatrol::JobStore.new(
-        dir, project: entry
+        dir
       )
       restarted = scheduler(entry, restarted_store)
       assert_empty restarted.candidates(now: T0 + 3)
@@ -1684,7 +1684,7 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       yield(
         dir,
         entry,
-        Hive::RefactorPatrol::JobStore.new(dir, project: entry)
+        Hive::RefactorPatrol::JobStore.new(dir)
       )
     end
   end

@@ -239,8 +239,7 @@ module Hive
       def stored_continuation_identities(entry, _cfg)
         JobStore.new(
           entry.fetch("path"),
-          hive_state_path: entry["hive_state_path"],
-          project: entry
+          hive_state_path: entry["hive_state_path"]
         ).each_job.filter_map do |aggregate|
           self.class.identity_from_source(aggregate.fetch("source")) if
             self.class.remote_continuation_evidence?(aggregate)

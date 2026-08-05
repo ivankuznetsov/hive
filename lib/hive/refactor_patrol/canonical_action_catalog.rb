@@ -72,8 +72,7 @@ module Hive
           end
           JobStore.new(
             expanded,
-            hive_state_path: entry["hive_state_path"],
-            project: entry
+            hive_state_path: entry["hive_state_path"]
           )
         end
         @clock = clock

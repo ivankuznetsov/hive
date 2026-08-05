@@ -162,110 +162,6 @@ class ManagedDirectoryTest < Minitest::Test
     end
   end
 
-  def test_atomically_exchanges_a_directory_with_a_regular_tombstone
-    with_tmp_dir do |root|
-      legacy = File.join(root, "v2")
-      archive = File.join(root, ".v2-cutover")
-      FileUtils.mkdir_p(File.join(legacy, "jobs"))
-      File.binwrite(File.join(legacy, "jobs", "one.json"), "legacy")
-      File.binwrite(archive, "tombstone")
-      legacy_identity = File.stat(legacy).then { |stat| [ stat.dev, stat.ino ] }
-      tombstone_identity =
-        File.stat(archive).then { |stat| [ stat.dev, stat.ino ] }
-      directory = Hive::ManagedDirectory.new(
-        root: root, label: "schema cutover"
-      )
-
-      result = directory.exchange_directory_with_regular!(
-        directory_name: "v2", regular_name: ".v2-cutover"
-      )
-
-      assert_equal File.join(root, "v2"), result.fetch(:tombstone_path)
-      assert_equal File.join(root, ".v2-cutover"),
-                   result.fetch(:archive_path)
-      assert File.file?(File.join(root, "v2"))
-      assert_equal "tombstone", File.binread(File.join(root, "v2"))
-      assert File.directory?(File.join(root, ".v2-cutover"))
-      assert_equal "legacy",
-                   File.binread(File.join(root, ".v2-cutover", "jobs", "one.json"))
-      assert_equal tombstone_identity,
-                   File.stat(File.join(root, "v2")).then { |stat| [ stat.dev, stat.ino ] }
-      assert_equal legacy_identity,
-                   File.stat(File.join(root, ".v2-cutover")).then { |stat| [ stat.dev, stat.ino ] }
-    end
-  end
-
-  def test_atomic_exchange_fails_closed_without_platform_support
-    with_tmp_dir do |root|
-      FileUtils.mkdir_p(File.join(root, "v2"))
-      File.binwrite(File.join(root, ".v2-cutover"), "tombstone")
-      directory = Hive::ManagedDirectory.new(
-        root: root, label: "schema cutover"
-      )
-      native = directory.instance_variable_get(:@native)
-      unavailable = native.class.const_get(:Unavailable)
-
-      with_replaced_singleton_method(
-        native,
-        :exchangeat,
-        ->(*) { raise unavailable }
-      ) do
-        error = assert_raises(
-          Hive::ManagedDirectory::ExchangeUnavailable
-        ) do
-          directory.exchange_directory_with_regular!(
-            directory_name: "v2", regular_name: ".v2-cutover"
-          )
-        end
-        assert_match(/requires atomic filesystem exchange/, error.message)
-      end
-
-      assert File.directory?(File.join(root, "v2"))
-      assert_equal "tombstone", File.binread(File.join(root, ".v2-cutover"))
-    end
-  end
-
-  def test_atomic_exchange_translates_missing_and_filesystem_failures
-    with_tmp_dir do |root|
-      FileUtils.mkdir_p(File.join(root, "v2"))
-      directory = Hive::ManagedDirectory.new(
-        root: root, label: "schema cutover"
-      )
-
-      assert_raises(Hive::ConfigError) do
-        directory.exchange_directory_with_regular!(
-          directory_name: "v2", regular_name: ".missing-cutover"
-        )
-      end
-
-      tombstone = File.join(root, ".v2-cutover")
-      File.binwrite(tombstone, "tombstone")
-      FileUtils.rm_rf(File.join(root, "v2"))
-      assert_raises(Hive::ConfigError) do
-        directory.exchange_directory_with_regular!(
-          directory_name: "v2", regular_name: ".v2-cutover"
-        )
-      end
-
-      FileUtils.mkdir_p(File.join(root, "v2"))
-      native = directory.instance_variable_get(:@native)
-      with_replaced_singleton_method(
-        native,
-        :exchangeat,
-        ->(*) { raise Errno::EIO, "atomic exchange" }
-      ) do
-        assert_raises(Hive::ConfigError) do
-          directory.exchange_directory_with_regular!(
-            directory_name: "v2", regular_name: ".v2-cutover"
-          )
-        end
-      end
-
-      assert File.directory?(File.join(root, "v2"))
-      assert_equal "tombstone", File.binread(tombstone)
-    end
-  end
-
   def test_accepts_the_filesystem_root_as_the_nearest_existing_anchor
     root = File.join(
       File::SEPARATOR,
@@ -1312,24 +1208,6 @@ class ManagedDirectoryTest < Minitest::Test
         native.class.platform_flags("arm64-darwin")
       )
       assert_nil native.class.platform_flags("java")
-    end
-  end
-
-  def test_native_adapter_treats_an_optional_missing_symbol_as_unavailable
-    with_tmp_dir do |root|
-      native = Hive::ManagedDirectory.new(
-        root: root, label: "test state"
-      ).instance_variable_get(:@native)
-
-      with_replaced_singleton_method(
-        native,
-        :function,
-        ->(*) { raise Fiddle::DLError, "missing optional symbol" }
-      ) do
-        assert_nil native.send(
-          :optional_function, Fiddle::Handle::DEFAULT, "optional", []
-        )
-      end
     end
   end
 

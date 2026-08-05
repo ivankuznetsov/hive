@@ -6,10 +6,10 @@ module Hive
     class Collisions
       Result = Struct.new(:thesis, :suppressed, :reason, :reference, keyword_init: true)
 
-      def initialize(project_root, state:, v2_fingerprints: {})
+      def initialize(project_root, state:, terminal_fingerprints: {})
         @project_root = File.expand_path(project_root)
         @state = state
-        @v2_fingerprints = v2_fingerprints || {}
+        @terminal_fingerprints = terminal_fingerprints || {}
       end
 
       def check(thesis)
@@ -31,7 +31,7 @@ module Hive
       def own_collision(thesis)
         fingerprints = @state.fingerprints
         dismissed = @state.dismissed
-        if @v2_fingerprints.key?(thesis.fingerprint)
+        if @terminal_fingerprints.key?(thesis.fingerprint)
           thesis.collision = { "kind" => "collision_already_seen", "reference" => thesis.fingerprint }
           return Result.new(
             thesis: thesis, suppressed: true,

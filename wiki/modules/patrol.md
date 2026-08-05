@@ -370,20 +370,14 @@ remain unproven.
   transition coordinator before reviewing. It never claims independently; its
   incremental checkpoints and heartbeats use only the exact PID/start-time and
   generation-bound token attached by the scheduler.
-- JobStore runtime and child completion accept v3 only. Hive has no released-v2
-  reader, converter, install-wide coordinator, package hook, or retry timer.
-  A released `v2/jobs` directory blocks runtime until the operator runs
-  `hive refactor-patrol-reset PROJECT --confirm` for that exact registered
-  project. The command excludes daemon activation, drains the exact daemon
-  generation, then takes the existing Patrol effect lock exclusively across
-  its independent writer fence, opaque archive exchange, empty-v3 admission,
-  and receipt. It never enumerates the archive and preserves every other v2
-  owner plus the global terminal-proof catalog. A restarted daemon must publish
-  generation-bound runtime readiness. Another OS user makes the same decision
-  under their own profile; Hive never performs a privileged host sweep.
-  Existing non-empty v3 state, malformed transaction evidence, or an
-  unprovable writer fence fails closed instead of choosing which state to
-  overwrite.
+- JobStore runtime and child completion accept v3 only. Construction and
+  read-only queries do not create state; the first mutation lazily creates
+  only v3. Hive has no released-v2 reader, probe, converter, reset command,
+  archive layer, package hook, or retry timer. Arbitrary `v2/jobs` bytes are
+  ignored while every other live v2 owner and the global terminal-proof
+  catalog remain unchanged.
+  Malformed v3 job, occurrence, or query-index evidence fails closed instead
+  of being rewritten.
 - Live v3 jobs, query sidecars, quarantine evidence, and action locks are
   accessed only through one descriptor-confined `JobStoreFiles` port. A
   store-wide admission lock enforces the 8,192-job bound before any new

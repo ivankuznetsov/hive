@@ -638,85 +638,6 @@ class HiveCommandsDaemonTest < Minitest::Test
     assert_equal "probe exploded", payload.fetch("message")
   end
 
-  def test_job_store_reset_status_surfaces_fresh_and_reset_required_projects
-    fresh = File.join(@home, "fresh")
-    released = File.join(@home, "released")
-    FileUtils.mkdir_p(fresh)
-    FileUtils.mkdir_p(
-      File.join(
-        released, ".hive-state", "refactor_patrol", "v2", "jobs"
-      )
-    )
-    registry = [
-      {
-        "name" => "fresh",
-        "project_id" => "project-fresh",
-        "path" => fresh,
-        "real_path" => File.realpath(fresh),
-        "hive_state_path" => File.join(fresh, ".hive-state")
-      },
-      {
-        "name" => "released",
-        "project_id" => "project-released",
-        "path" => released,
-        "real_path" => File.realpath(released),
-        "hive_state_path" => File.join(released, ".hive-state")
-      }
-    ]
-    report = Hive::Daemon::StatusReport.new(
-      hive_home: @home,
-      project_registry: -> { registry }
-    )
-
-    payload = report.send(:job_store_reset_payload)
-
-    assert payload.fetch("ok")
-    assert_equal(
-      "hive-refactor-patrol-jobstore-generation-status",
-      payload.fetch("schema")
-    )
-    assert_equal %w[fresh reset_required],
-                 payload.fetch("projects").map { |row|
-                   row.fetch("status")
-                 }
-  end
-
-  def test_job_store_reset_status_isolates_a_malformed_project
-    report = Hive::Daemon::StatusReport.new(
-      hive_home: @home,
-      project_registry: -> {
-        [ { "name" => "broken", "project_id" => "" } ]
-      }
-    )
-
-    payload = report.send(:job_store_reset_payload)
-
-    refute payload.fetch("ok")
-    row = payload.fetch("projects").fetch(0)
-    assert_equal "error", row.fetch("status")
-    assert_includes row.fetch("error"), "KeyError"
-  end
-
-  def test_job_store_reset_status_degrades_an_unavailable_registry
-    report = Hive::Daemon::StatusReport.new(
-      hive_home: @home,
-      project_registry: -> {
-        raise IOError, "synthetic registry failure"
-      }
-    )
-
-    payload = report.send(:job_store_reset_payload)
-
-    refute payload.fetch("ok")
-    assert_empty payload.fetch("projects")
-    assert_equal(
-      "hive-refactor-patrol-jobstore-generation-status",
-      payload.fetch("schema")
-    )
-    assert_match(/IOError: synthetic registry failure/,
-                 payload.fetch("error"))
-  end
-
   def test_status_payload_reads_legacy_registry_without_mutating_disk
     with_tmp_dir do |root|
       home = File.join(root, "home")
@@ -765,10 +686,7 @@ class HiveCommandsDaemonTest < Minitest::Test
 
         payload = report.payload
 
-        assert_equal [ "fresh" ],
-                     payload.dig("job_store_resets", "projects").map {
-                       |entry| entry.fetch("status")
-                     }
+        refute payload.key?("job_store_resets")
         assert File.file?(legacy),
                "status must preserve the legacy registry at its exact path"
         refute File.exist?(current),

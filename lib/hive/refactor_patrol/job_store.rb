@@ -11,7 +11,6 @@ require "hive/refactor_patrol/caps"
 require "hive/refactor_patrol/job_indexes"
 require "hive/refactor_patrol/job_query_index"
 require "hive/refactor_patrol/job_record_validator"
-require "hive/refactor_patrol/job_store_fresh_start"
 require "hive/refactor_patrol/job_store_files"
 require "hive/refactor_patrol/state_paths"
 require "hive/modules/migration/patrols"
@@ -132,78 +131,6 @@ module Hive
           )
         end
 
-        def released_jobs_root_for(project_root, hive_state_path: nil)
-          StatePaths.released_jobs_root(
-            state_path_for(project_root, hive_state_path)
-          )
-        end
-
-        def generation_state_present?(
-          project_root, hive_state_path: nil, project: nil
-        )
-          state = state_path_for(project_root, hive_state_path)
-          direct_paths = [
-            StatePaths.current_root(state),
-            StatePaths.released_jobs_root(state),
-            File.join(
-              StatePaths.generation_root(state),
-              JobStoreFreshStart::RECEIPT_NAME
-            )
-          ]
-          return true if direct_paths.any? do |path|
-            generation_path_present?(path)
-          end
-
-          released_root = StatePaths.released_root(state)
-          return false unless generation_path_present?(released_root)
-
-          identity = project_identity(project_root, project)
-          generation_path_present?(
-            File.join(
-              released_root,
-              JobStoreFreshStart.archive_name_for(
-                identity.fetch("project_id")
-              )
-            )
-          )
-        end
-
-        def reset_released_jobs!(
-          project_root,
-          hive_state_path: nil,
-          project: nil,
-          writer_fence: Hive::RefactorPatrol::JobStoreWriterFence.new
-        )
-          fresh_start(
-            project_root,
-            hive_state_path: hive_state_path,
-            project: project,
-            writer_fence: writer_fence
-          ).reset!
-        end
-
-        def ensure_current_namespace!(
-          project_root,
-          hive_state_path: nil,
-          project: nil,
-          writer_fence: Hive::RefactorPatrol::JobStoreWriterFence.new
-        )
-          fresh_start(
-            project_root,
-            hive_state_path: hive_state_path,
-            project: project,
-            writer_fence: writer_fence
-          ).ensure_current!
-        end
-
-        def generation_status(project_root, hive_state_path: nil, project: nil)
-          fresh_start(
-            project_root,
-            hive_state_path: hive_state_path,
-            project: project
-          ).status
-        end
-
         def canonical_action_id(repository:, kind:, identity:,
                                 host: "github.com")
           normalized_host = host.to_s.strip.downcase
@@ -249,30 +176,6 @@ module Hive
 
         private
 
-        def generation_path_present?(path)
-          File.lstat(path)
-          true
-        rescue Errno::ENOENT
-          false
-        end
-
-        def fresh_start(
-          project_root,
-          hive_state_path: nil,
-          project: nil,
-          writer_fence: Hive::RefactorPatrol::JobStoreWriterFence.new
-        )
-          state = state_path_for(project_root, hive_state_path)
-          JobStoreFreshStart.new(
-            state_root: state,
-            project: project_identity(project_root, project),
-            target_version: SCHEMA_VERSION,
-            corrupt_record: CorruptRecord,
-            inconsistent_record: InconsistentRecord,
-            writer_fence: writer_fence
-          )
-        end
-
         def state_path_for(project_root, hive_state_path)
           File.expand_path(
             hive_state_path || ".hive-state",
@@ -280,43 +183,18 @@ module Hive
           )
         end
 
-        def project_identity(project_root, project)
-          return project if project
-
-          expanded_root = File.expand_path(project_root)
-          registered = Hive::Config.registered_projects.select do |entry|
-            File.expand_path(entry.fetch("path")) == expanded_root
-          end
-          if registered.size > 1
-            raise ArgumentError,
-                  "JobStore project identity is ambiguous for #{expanded_root}"
-          end
-          registered.first || {
-            "name" => File.basename(File.expand_path(project_root)),
-            "project_id" =>
-              "local-#{Digest::SHA256.hexdigest(File.expand_path(project_root))}"
-          }
-        end
       end
 
-      def initialize(project_root, hive_state_path: nil, project: nil,
-                     writer_fence: nil)
+      def initialize(project_root, hive_state_path: nil)
         @project_root = File.expand_path(project_root)
         @hive_state_path = File.expand_path(hive_state_path || ".hive-state", @project_root)
         @root = self.class.root_for(@project_root, hive_state_path: @hive_state_path)
         @record_validator = JobRecordValidator.new(contract: self.class)
         @job_files = JobStoreFiles.new(
           root: @root,
-          anchor: @hive_state_path,
           corrupt_record: CorruptRecord,
           inconsistent_record: InconsistentRecord
         )
-        @generation_options = {
-          hive_state_path: @hive_state_path,
-          project: project
-        }
-        @generation_options[:writer_fence] = writer_fence if writer_fence
-        assert_runtime_generation_admission!
         @current_namespace_ready = false
         @claim_transitions = ClaimTransitions.new(inconsistent_record: InconsistentRecord)
         @job_indexes = JobIndexes.new(
@@ -2322,39 +2200,8 @@ module Hive
       def prepare_current_namespace!
         return true if @current_namespace_ready
 
-        self.class.ensure_current_namespace!(
-          @project_root, **@generation_options
-        )
         @job_files.prepare!
         @current_namespace_ready = true
-      end
-
-      # Runtime never reads, converts, or retires released v2 jobs. The
-      # operator must explicitly archive them before this v3-only store can be
-      # constructed.
-      def assert_runtime_generation_admission!
-        return true unless self.class.generation_state_present?(
-          @project_root,
-          hive_state_path: @hive_state_path,
-          project: @generation_options[:project]
-        )
-
-        status = self.class.generation_status(
-          @project_root,
-          hive_state_path: @hive_state_path,
-          project: @generation_options[:project]
-        ).fetch("status")
-        return true if %w[fresh current].include?(status)
-
-        raise InconsistentRecord.new(
-          "explicit fresh-start reset is required before v3 runtime admission",
-          path: @hive_state_path
-        )
-      rescue KeyError
-        raise InconsistentRecord.new(
-          "JobStore generation status is malformed",
-          path: @hive_state_path
-        )
       end
 
       def json_copy(value)

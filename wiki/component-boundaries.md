@@ -128,24 +128,14 @@ is byte-for-byte equivalent to the complete binding derived from its terminal
 receipt and matches the attempted patch; absent, partial, or conflicting
 bindings retain the checkout for operator-visible recovery.
 
-`JobStoreFreshStart` is the only cross-generation JobStore boundary. It has no
-v2 reader or converter: an explicitly confirmed, daemon-fenced command
-atomically exchanges only `v2/jobs` with a canonical marker, retains the exact
-opaque directory under its transaction-bound archive name, and admits an empty
-v3 store. `JobStore` is its only runtime composition root. Existing non-empty
-v3 state and malformed or incomplete transaction evidence fail closed.
-The reset first holds the stable profile activation lock and drains the exact
-daemon generation, then takes the existing Patrol effect lock exclusively.
-That effect lock, a stable JobStore generation lock, and an independent
-PID/start-time writer fence remain held across the exchange, empty-v3
-admission, and receipt publication. A restarted daemon is accepted only after
-the same generation-bound operational snapshot reports runtime readiness.
-The deterministic archive name is also a generation-presence sentinel:
-archive-without-marker is corrupt/incomplete state and can never be treated as
-a fresh project.
-The shared Patrol capture and shadow-decision protocols contain no
-`job_store.schema_v2_import` trigger or `schema_v2_import` outcome. Opaque
-reset, not an effect-journal import, is the only released-JobStore transition.
+`JobStore` authority is fixed directly at `refactor_patrol/v3`. Construction
+and read-only queries do not create state; the first authoritative mutation
+lazily prepares only the v3 managed directory. Runtime never probes, reads,
+hashes, moves, deletes, or interprets `v2/jobs`, so arbitrary v2 bytes neither
+block nor override an existing v3 store. The other live Architecture Patrol
+owners under `refactor_patrol/v2` remain independent and unchanged. The shared
+Patrol capture and shadow-decision protocols still contain no
+`job_store.schema_v2_import` trigger or `schema_v2_import` outcome.
 
 The Patrol row has a non-empty construction boundary. Shared stores and
 mechanisms, both product gateways, and intake/discovery/action/claim-maintenance

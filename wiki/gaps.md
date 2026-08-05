@@ -76,18 +76,6 @@ tags: [gap, todo, release-proof, agent-skills]
   protocol completeness. The reduced smoke closes none of U3-ARCH-005, full
   U3c qualification, catalogue promotion, or mutator cutover authority.
 
-- The explicit JobStore fresh-start reset is source- and focused-test-pinned,
-  including no-write fresh status, exact registered-project binding,
-  daemon/process-tree quiescence, independent PID/start-time writer fencing,
-  atomic opaque-directory exchange, interrupted reset resume, other-v2-owner
-  preservation, empty-v3 admission, and non-empty-v3 conflict refusal. This goal
-  deliberately does not run the command against a live project. Before release,
-  dogfood it on a disposable registered project on each supported deployment
-  filesystem and retain evidence that the daemon restarts, archive bytes remain
-  exact, status advances from `reset_required` to `current`, and no unrelated
-  v2 owner changes. The abandoned v2 jobs backlog is an explicit product
-  tradeoff, not a continuity promise or an unimplemented migration.
-
 - Project-owned artifact providers currently require Linux
   `PR_SET_CHILD_SUBREAPER` plus `/proc` ancestry so detached descendants remain
   in exact custody through output drain and teardown. Provider capture fails
@@ -464,17 +452,11 @@ Patrol job, discovery, action, and final decision, live effect-time
 generation/grant checks, stable process/thread sender locks with persisted
 uncertainty but no lease/PID authority, gateway-owned retry-safe local absence,
 remote-absence refusal, store-minted byte-stable receipts, canonical outboxes,
-restart-persistent normalized recovery backoff, v3-only JobStore runtime with
-an explicit opaque fresh-start reset for released v2, exact-digest-bound
+restart-persistent normalized recovery backoff, direct v3-only JobStore runtime
+that ignores obsolete v2 jobs, exact-digest-bound
 shadow-v1 conversion, and bounded occurrence/intent evidence indices. Those fixtures
 prove the repaired boundary but intentionally do not satisfy the operational
 rollout gate.
-
-No live project reset was run while building U2. The destructive boundary is
-covered only by hermetic storage, process, lock-order, crash-resume, and
-runtime-readiness tests. An operator must still explicitly confirm any real
-per-project archive/reset after reviewing `daemon status --json`; U2 does not
-perform that cutover automatically.
 
 U3 still needs to make the candidate-bound compressed evidence protocol part of
 the test harness, feed it from these finalized occurrences without consulting

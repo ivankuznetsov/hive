@@ -271,8 +271,7 @@ module Hive
         @job_store_factory = lambda do
           JobStore.new(
             @project_root,
-            hive_state_path: @hive_state_path,
-            project: project
+            hive_state_path: @hive_state_path
           )
         end
       end

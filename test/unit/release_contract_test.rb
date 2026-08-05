@@ -12,6 +12,9 @@ class ReleaseContractTest < Minitest::Test
   ROOT = File.expand_path("../..", __dir__)
   RELEASE_WORKFLOW = File.join(ROOT, ".github/workflows/release.yml")
   CANDIDATE_WORKFLOW = File.join(ROOT, ".github/workflows/release-candidate.yml")
+  VALIDATE_DISPATCH = File.join(ROOT, "packaging/release_candidate/workflows/validate_dispatch.sh")
+  QUERY_EVIDENCE = File.join(ROOT, "packaging/release_candidate/workflows/query_evidence.sh")
+  COLLECT_EVIDENCE = File.join(ROOT, "packaging/release_candidate/workflows/collect_evidence.sh")
   LIVE_AGENT_WORKFLOW = File.join(ROOT, ".github/workflows/live-agent-skills.yml")
   RELEASE_SELECTOR = File.join(ROOT, "packaging/live_agent_skills/select_release_proof.rb")
   SETUP_NODE_ACTION = "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
@@ -330,6 +333,7 @@ class ReleaseContractTest < Minitest::Test
 
   def test_candidate_version_gate_reads_the_reviewed_catalog
     body = File.read(CANDIDATE_WORKFLOW)
+    validator = File.read(VALIDATE_DISPATCH)
     workflow = YAML.safe_load_file(CANDIDATE_WORKFLOW, aliases: true)
     job = workflow.fetch("jobs").fetch("candidate-version")
     command = job.fetch("steps").last.fetch("run")
@@ -339,8 +343,41 @@ class ReleaseContractTest < Minitest::Test
     assert_includes command, "BASELINE_VERSION"
     refute_match(/Gem::Version\.new\(\"0\.6\.9\"\)/, command)
     assert_includes body, "trusted_control=\"$RUNNER_TEMP/trusted-control\""
-    assert_includes body,
+    assert_includes validator,
                     '-r"$trusted_control/packaging/release_candidate/aggregate"'
+  end
+
+  def test_candidate_workflow_runs_bounded_scripts_from_trusted_control
+    workflow = YAML.safe_load_file(CANDIDATE_WORKFLOW, aliases: true)
+    jobs = workflow.fetch("jobs")
+    identity = jobs.fetch("validate").fetch("steps").find { |step| step["id"] == "identity" }
+    bootstrap = identity.fetch("run")
+    validator_path = "packaging/release_candidate/workflows/validate_dispatch.sh"
+
+    assert_operator bootstrap.index('git archive "$workflow_sha"'), :<,
+                    bootstrap.index("$trusted_control/#{validator_path}")
+    assert_includes bootstrap, 'test "$archived_sha256" = "$committed_sha256"'
+    assert_includes bootstrap,
+                    'WORKFLOW_SHA="$workflow_sha" TRUSTED_CONTROL="$trusted_control" bash "$validator"'
+
+    attest_steps = jobs.fetch("attest").fetch("steps")
+    query = attest_steps.find { |step| step["name"] == "Query exact jobs and ordinary CI identity" }
+    collect = attest_steps.find do |step|
+      step["name"] == "Collect exact gate receipts and predecessor evidence"
+    end
+    assert_equal "bash packaging/release_candidate/workflows/query_evidence.sh", query.fetch("run")
+    assert_equal "bash packaging/release_candidate/workflows/collect_evidence.sh", collect.fetch("run")
+
+    [ VALIDATE_DISPATCH, QUERY_EVIDENCE, COLLECT_EVIDENCE ].each do |path|
+      source = File.read(path)
+      assert source.start_with?("#!/usr/bin/env bash\nset -euo pipefail\n"), path
+      refute_includes source, "${{", path
+      assert_operator source.lines.size, :<=, 130, path
+      assert_includes read("packaging/release_candidate/repository.rb"), path.delete_prefix("#{ROOT}/")
+    end
+
+    aggregate = JSON.generate(jobs.fetch("aggregate"))
+    refute_includes aggregate, "packaging/release_candidate/workflows"
   end
 
   def test_candidate_workflow_declares_the_closed_required_job_registry
@@ -361,6 +398,7 @@ class ReleaseContractTest < Minitest::Test
 
   def test_candidate_retry_executes_only_selected_receipted_replacements
     body = File.read(CANDIDATE_WORKFLOW)
+    validator = File.read(VALIDATE_DISPATCH)
     workflow = YAML.safe_load_file(CANDIDATE_WORKFLOW, aliases: true)
     jobs = workflow.fetch("jobs")
     validate_body = jobs.fetch("validate").fetch("steps").find do |step|
@@ -368,18 +406,20 @@ class ReleaseContractTest < Minitest::Test
     end.fetch("run")
 
     assert_includes body, "selected_gates"
-    assert_includes body, "RetrySelection"
+    assert_includes validator, "RetrySelection"
     assert_includes body, "source_evidence_sha256"
     assert_includes body, "source_artifact_run_id"
     assert_includes body, "source_artifact_run_attempt"
     assert_includes body, "source_artifact_name"
-    assert_includes body, ".external_id == (\"hive-release-candidate:v1:\""
-    assert_includes body, "display_title"
+    assert_includes validator, ".external_id == (\"hive-release-candidate:v1:\""
+    assert_includes validator, "display_title"
     refute_includes body, "|| true"
-    assert_includes validate_body,
+    refute_includes validator, "|| true"
+    assert_includes validator,
                     "check-runs?check_name=hive-release-candidate&filter=all&per_page=100"
-    assert_includes validate_body, ".head_sha == $candidate"
-    refute_includes validate_body, ".details_url"
+    assert_includes validator, ".head_sha == $candidate"
+    refute_includes validator, ".details_url"
+    assert_includes validate_body, "$trusted_control/packaging/release_candidate/workflows/validate_dispatch.sh"
 
     %w[catalog release-e2e package managed-web freshness candidate-version].each do |job_name|
       job = jobs.fetch(job_name)

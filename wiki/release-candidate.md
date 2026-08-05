@@ -248,6 +248,17 @@ lock, terminal evidence digest, and digest-bound aggregate Check.
 Candidate/evidence artifacts retain for 30 days and blocking jobs receive no
 provider credentials.
 
+The workflow keeps GitHub expressions, permissions, dependencies, the initial
+protected-main trust bootstrap, and the checkout-free Check publisher in YAML.
+After the bootstrap proves `workflow_sha == GITHUB_SHA`, it archives the exact
+committed `packaging/release_candidate/` tree, digest-checks the archived
+dispatch validator against `git show`, and runs that validator only from the
+trusted archive. The attestation job's exact-workflow checkout runs two small
+committed scripts for job/ordinary-CI queries and receipt/predecessor
+collection. These three private workflow scripts are part of candidate tool
+identity; candidate construction, platform sandbox commands, aggregate
+construction, and publication remain at their existing review surfaces.
+
 Historical packages, dependency closures, and candidate bytes are downloaded
 and authenticated before installed package code runs. Installation and the U4
 lane then run with a scrubbed environment and network disabled. Linux uses a
@@ -283,12 +294,12 @@ candidate SHA, GitHub Actions app, terminal state, and exact external identity,
 then independently revalidate the referenced run, jobs, evidence artifact, and
 evidence body.
 
-The first authorized protected-main campaign ran on 2026-08-05 against exact
-candidate/workflow SHA `0904ef6832c7b8fbc41c87afc324d2b30caef08d` as run
-`31005500332`, attempt 1. It retained candidate artifact `8930132232` with
+The post-U8 protected-main campaign ran on 2026-08-05 against exact
+candidate/workflow SHA `f113b6a238c0922e60ceafb091a9b215ce7c451e` as run
+`31014105054`, attempt 1. It retained candidate artifact `8933713266` with
 digest
-`sha256:4ebf7a2ebafc54db450fa97bee38219c70c76ff6de5ce8ef667b135614889da4`
-and terminal evidence artifact `8930404097`. The aggregate was correctly
+`sha256:1a947e62ab4971c30db56523080397b552286be9665ce9e7b41423c3445ae3e7`
+and terminal evidence artifact `8934052738`. The aggregate was correctly
 `qa_blocked`: seven of fourteen required gates passed and seven failed. This
 was dogfood evidence, not release authority, and no release action occurred.
 
@@ -302,12 +313,16 @@ SHA plus the Check Run's GitHub Actions app, terminal conclusion, and signed
 external ID/evidence digest; it does not treat the mutable details URL as an
 identity field.
 
-The first named-retry dogfood run, `31006277887`, failed closed at the obsolete
-details-URL assertion before its selected gate ran. Its partial terminal
-artifact intentionally had no top-level `evidence.json`, so read-only
-collection rejected it instead of treating partial diagnostics as trusted
-evidence. A fresh post-fix targeted run is still required to prove selected
-gate execution and predecessor artifact reuse.
+Post-fix named retry `31015265841`, attempt 1 selected only `Candidate version
+newer`. Its terminal evidence artifact `8934240492` binds predecessor run
+`31014105054`, source evidence digest
+`8b955774619c938f1ddefb7c230d7c0c14f1b9f67dde3a42e9e7c09b5ddd8750`,
+and replacement set containing exactly that gate. The effective set takes that
+one row from the retry and every other row from the source run, while reusing
+the original candidate artifact ID, name, producer run/attempt, and digest.
+The version gate still failed as expected because 0.6.9 is not newer than the
+reviewed 0.6.9 baseline, so the retry remained `qa_blocked`; it nevertheless
+proves selected-gate execution and immutable predecessor reuse.
 
 The explicit hosted command sequence is:
 

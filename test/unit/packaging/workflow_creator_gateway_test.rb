@@ -84,6 +84,28 @@ class WorkflowCreatorGatewayTest < Minitest::Test
     end
   end
 
+  def test_operational_status_must_bind_the_exact_created_task_and_stage
+    %w[operational-malformed operational-wrong-slug operational-wrong-stage].each do |mode|
+      with_gateway(mode:) do |gateway, wrapper|
+        run_until_status(wrapper)
+        _out, _err, status = invoke(wrapper, Creator::Vocabulary.fetch("commands").fetch(8))
+
+        refute status.success?, mode
+        assert_raises(Gateway::Error, mode) { gateway.finish! }
+      end
+    end
+  end
+
+  def test_runtime_verifier_failure_poisons_before_candidate_launch
+    with_gateway(runtime_verifier: -> { false }) do |gateway, wrapper, log|
+      _out, _err, status = invoke(wrapper, Creator::Vocabulary.fetch("commands").first)
+
+      refute status.success?
+      refute File.exist?(log)
+      assert_raises(Gateway::Error) { gateway.finish! }
+    end
+  end
+
   def test_credential_like_inherited_environment_poison_is_reported_without_launch
     with_gateway do |gateway, wrapper, log|
       _out, _err, status = invoke(wrapper, [ "version" ], "API_TOKEN" => "must-not-cross")
@@ -146,13 +168,13 @@ class WorkflowCreatorGatewayTest < Minitest::Test
 
   private
 
-  def with_gateway(mode: "ok")
+  def with_gateway(mode: "ok", runtime_verifier: nil)
     Dir.mktmpdir("creator-gateway") do |dir|
       root, cwd = File.join(dir, "private"), File.join(dir, "cwd")
       [ root, cwd ].each { |path| Dir.mkdir(path, 0o700) }
       candidate = write_candidate(File.join(cwd, "candidate"))
       log = File.join(cwd, "launches.jsonl")
-      gateway = build_gateway(root:, cwd:, candidate:, log:, mode:)
+      gateway = build_gateway(root:, cwd:, candidate:, log:, mode:, runtime_verifier:)
       wrapper = gateway.start!
       yield gateway, wrapper, log, cwd, root, candidate
     ensure
@@ -160,7 +182,8 @@ class WorkflowCreatorGatewayTest < Minitest::Test
     end
   end
 
-  def build_gateway(root:, cwd:, candidate:, log:, mode: "ok", environment: nil)
+  def build_gateway(root:, cwd:, candidate:, log:, mode: "ok", environment: nil,
+                    runtime_verifier: nil)
     stat = File.lstat(candidate)
     identity = {
       "path" => File.basename(candidate), "sha256" => Digest::SHA256.file(candidate).hexdigest,
@@ -172,14 +195,15 @@ class WorkflowCreatorGatewayTest < Minitest::Test
     )
     Gateway.new(
       root:, candidate_executable: candidate, candidate_identity: identity,
-      environment: environment || { "FAKE_MODE" => mode, "FAKE_STATE" => log }, cwd:, supervisor:
+      environment: environment || { "FAKE_MODE" => mode, "FAKE_STATE" => log }, cwd:, supervisor:,
+      runtime_verifier:
     )
   end
 
   def assert_private_gateway(root, wrapper)
     assert_equal 0o700, File.lstat(root).mode & 0o777
     assert_equal File.join(root, "workflow-creator-gateway"), wrapper
-    assert_equal 0o600, File.lstat(wrapper).mode & 0o777
+    assert_equal 0o700, File.lstat(wrapper).mode & 0o777
     socket = File.join(root, ".workflow-creator-gateway.sock")
     assert File.lstat(socket).socket?
     assert_equal 0o600, File.lstat(socket).mode & 0o777
@@ -193,15 +217,19 @@ class WorkflowCreatorGatewayTest < Minitest::Test
   end
 
   def invoke(wrapper, argv, inherited = {})
-    Open3.capture3(inherited, RUBY, wrapper, *argv, unsetenv_others: true)
+    Open3.capture3(inherited, wrapper, *argv, unsetenv_others: true)
   end
 
   def run_all(wrapper)
+    run_until_status(wrapper)
+    assert_wrapper(wrapper, Creator::Vocabulary.fetch("commands").fetch(8))
+  end
+
+  def run_until_status(wrapper)
     commands = Creator::Vocabulary.fetch("commands")
     commands.first(6).each { |argv| assert_wrapper(wrapper, argv) }
     assert_wrapper(wrapper, [ "run", CREATED_SLUG ])
     assert_wrapper(wrapper, commands.fetch(7))
-    assert_wrapper(wrapper, commands.fetch(8))
   end
 
   def write_candidate(path)
@@ -234,7 +262,20 @@ class WorkflowCreatorGatewayTest < Minitest::Test
                              "created" => count.zero?, "slug" => #{CREATED_SLUG.inspect})
         end
       when ["run", #{CREATED_SLUG.inspect}] then puts "ran"
-      when ["status", "--operational", "--json"] then puts JSON.generate("ok" => true)
+      when ["status", "--operational", "--json"]
+        if mode == "operational-malformed"
+          puts "not-json"
+        else
+          slug = mode == "operational-wrong-slug" ? "another-created-task" : #{CREATED_SLUG.inspect}
+          stage = mode == "operational-wrong-stage" ? "2-draft" : "1-research"
+          puts JSON.generate(
+            "schema" => "hive-operational-status", "schema_version" => 3, "ok" => true,
+            "tasks" => [
+              { "identity" => { "slug" => slug }, "workflow" => "editorial",
+                "position" => { "stage" => stage } }
+            ]
+          )
+        end
       else
         warn "unexpected command"
         exit 90

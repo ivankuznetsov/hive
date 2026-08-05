@@ -45,12 +45,15 @@ requires re-scoping.
 
 The implementation slices retain separate readable aggregate ceilings:
 archive/installation at 410 lines, capture/supervision at 495 lines, and
-gateway/execution at 600 lines. The gateway/execution budget was raised from
+gateway/execution at 615 lines. The gateway/execution budget was raised from
 its provisional 520-line projection when the real fixed IPC and two-phase receipt
 composition plus disjoint custody roots proved that the smaller number required
 compressed lifecycle code or a weaker mutation boundary. The final-head review
 added exact archive-tail, bounded-drain, stable-installation, and full-bundle
-completion checks without adding another owner.
+completion checks without adding another owner. U15's final security review
+then added an external model-inaccessible socket path, one injected command-
+boundary verifier, and final operational-result validation; the pair ceiling
+moved from 600 to 615 rather than compressing those checks or adding an owner.
 These are architecture budgets, not incentives
 to compress source formatting or weaken exception-path cleanup.
 

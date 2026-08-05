@@ -439,6 +439,11 @@ class LiveAgentProofTest < Minitest::Test
       "task_prompt_sha256" => Digest::SHA256.hexdigest(Creator::Vocabulary.fetch("task_prompt")),
       "skill" => manifest.slice("skill_version", "canonical_digest"),
       "native_activation" => deep_dup(Creator::Vocabulary.fetch("native_activation")),
+      "native_activation_evidence" => {
+        "kind" => "openclaw-skills-info", "invocation" => "/hive", "name" => "hive",
+        "eligible" => true, "user_invocable" => true, "path" => "skills/hive/SKILL.md",
+        "sha256" => Digest::SHA256.hexdigest("fixture-skill"), "size" => 13
+      },
       "hive_commands" => deep_dup(Creator.commands_for(task_slug: CREATOR_TASK_SLUG).value),
       "created_files" => created,
       "validation" => deep_dup(Creator::Vocabulary.fetch("graph")), "creation_only_task_count" => 0,

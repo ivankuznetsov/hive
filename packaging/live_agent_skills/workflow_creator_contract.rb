@@ -3,10 +3,9 @@
 module HiveLiveAgentProof::WorkflowCreator
     module Contract
       PRIMARY_KEYS = %w[schema schema_version platform candidate_sha result prompt_sha256 task_prompt_sha256 skill
-                        native_activation hive_commands created_files validation creation_only_task_count task_count
-                        task external_actions secret_scan execution_kind model_loop executed_instruction
-                        evidence_bundle containment teardown
-                        cleanup].freeze
+                        native_activation native_activation_evidence hive_commands created_files validation
+                        creation_only_task_count task_count task external_actions secret_scan execution_kind
+                        model_loop executed_instruction evidence_bundle containment teardown cleanup].freeze
       FAILURE = %w[schema schema_version platform candidate_sha result phase reason detail execution_kind model_loop
                     secret_scan].freeze
       MANIFEST = %w[canonical_digest candidate_sha files hive_version schema schema_version skill_version].freeze
@@ -96,7 +95,7 @@ module HiveLiveAgentProof::WorkflowCreator
         assert!(Values.capture(evidence_bundle).canonical_bytes == bundle_snapshot.canonical_bytes,
                 "workflow-creator evidence bundle is invalid")
         primary_claims!(row, manifest, candidate_sha)
-        primary_files!(row)
+        primary_evidence!(row)
         summary = { "status" => "passed", "receipt_sha256" => bundle_records.fetch(2).fetch("sha256") }
         assert!(row.values_at("containment", "teardown", "cleanup").all? { |value| value == summary },
                 "workflow-creator execution claims are not passing")
@@ -166,7 +165,14 @@ module HiveLiveAgentProof::WorkflowCreator
         numeric << row.dig("task", "run_count")
         assert!(numeric.all? { |value| value.instance_of?(Integer) }, "workflow-creator numeric claims are invalid")
       end
-      def primary_files!(row)
+      def primary_evidence!(row)
+        activation = row.fetch("native_activation_evidence")
+        activation_expected = { "kind" => "openclaw-skills-info", "invocation" => "/hive", "name" => "hive",
+                                "eligible" => true, "user_invocable" => true,
+                                "path" => "skills/hive/SKILL.md" }
+        message = "workflow-creator native activation evidence is invalid"
+        exact!(activation, activation_expected.keys + %w[sha256 size], message, expected: activation_expected)
+        record!(activation.slice(*FILE_KEYS), FILE_KEYS, message, path: true, positive: true)
         created, instruction = row.values_at("created_files", "executed_instruction")
         assert!(created.instance_of?(Array), "workflow-creator primary files are invalid")
         created.each { |item| record!(item, FILE_KEYS, "workflow-creator file invalid", path: true, positive: true) }
@@ -239,11 +245,7 @@ module HiveLiveAgentProof::WorkflowCreator
         assert!([ digest.class, size.class ] == [ String, Integer ], message)
         assert!(DIGEST.match?(digest), message)
         assert!(TextSafety.safe_relative_path?(value.fetch("path")), message) if path
-        if positive
-          assert!(size.positive?, message)
-        else
-          assert!(size.between?(0, MAX_MEMBER_BYTES), message)
-        end
+        assert!(positive ? size.positive? : size.between?(0, MAX_MEMBER_BYTES), message)
         assert!(value.values_at("path", "kind") == binding, message) if binding
       end
       def exact!(value, keys, message, expected: nil)
@@ -251,8 +253,6 @@ module HiveLiveAgentProof::WorkflowCreator
         assert!(value.keys.sort == keys.sort, message)
         assert!(value.slice(*expected.keys) == expected, message) if expected
       end
-      def assert!(condition, message)
-        raise Error, message unless condition
-      end
+      def assert!(condition, message) = condition ? true : raise(Error, message)
     end
 end

@@ -48,10 +48,10 @@ secret scanning, and cleanup. Missing
 provider credentials make this live gate explicitly unavailable; they never
 turn a skipped test into release evidence.
 
-The U1b adapter publishes through `WorkflowCreatorEvidence` but deliberately
-retains a typed non-passing receipt after a successful model loop. U14 now
-supplies deterministic execution custody; U15 still owns authenticated
-provider orchestration and the final passing claim.
+U1b remains the only primary publisher, U14 owns deterministic execution
+custody, and the U15 live runner now composes them into the final passing claim.
+The default local test remains credential-free and skipped; only an explicitly
+authorized run on the unchanged exact head can produce authenticated evidence.
 
 ## Local feedback loop
 
@@ -170,7 +170,7 @@ Vocabulary-fixed support members. It also checks that command labels are
 sourced from `WorkflowCreator::Vocabulary`, that the six-source relative
 require closure cannot widen to Hive runtime code, and that the readable
 pairwise source budgets remain exact: archive + installation at most 410 lines,
-capture + supervisor at most 495, and gateway + execution at most 600. These
+capture + supervisor at most 495, and gateway + execution at most 615. These
 are pair budgets, not per-file compression targets.
 
 The archive, installation, capture, supervisor, and gateway files exercise
@@ -813,6 +813,24 @@ The protected `live-agent-skills.yml` workflow can additionally:
    seven-day structural evidence;
 7. validate all four evidence rows, assemble the candidate/provenance-bound
    private proof, and create a `live-agent-skills` Check Run on the exact SHA.
+
+The separate Workflow Creator cell is a thin adapter over
+`WorkflowCreatorLiveSetup` and `WorkflowCreatorLiveRunner`. Offline focused
+tests cover exact OpenAI/OpenRouter selection, opposite-provider and tool-child
+credential stripping, transport refusal, immutable candidate/OpenClaw closure
+admission, native `skills info` path/content proof, SQLite-backed OpenClaw
+approval-policy readback, external control-root and separate-Git-dir tamper
+refusal, exact operational task binding, authored editorial graph and task
+observation, deterministic first-stage execution, typed bootstrap/failure
+publication, and runtime tamper detection. The setup fixture copies the host
+Ruby into its current-user-owned input closure and seals all generated inputs
+under umask `0077`, so strict ownership and writable-input rejection are
+independent of toolcache ownership and a runner's ambient umask.
+The smoke test contributes only live availability gates and final bundle
+assertions. Its authenticated model calls run only through a fresh,
+first-attempt owner dispatch and exact-head
+authorization; workflow reruns are refused before any credential-bearing job.
+The hostile suites and live lane are not normal pull-request CI.
 
 The repository-owned selector and attestation verifier remain covered by
 executable fixtures for optional diagnostic runs. They validate workflow/run

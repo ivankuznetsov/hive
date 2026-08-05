@@ -22,6 +22,9 @@ module HiveReleaseCandidate
       packaging/live_agent_skills/workflow_creator_execution.rb
       packaging/live_agent_skills/workflow_creator_gateway.rb
       packaging/live_agent_skills/workflow_creator_installation.rb
+      packaging/live_agent_skills/workflow_creator_live_runner.rb
+      packaging/live_agent_skills/workflow_creator_live_setup.rb
+      packaging/live_agent_skills/workflow_creator_openclaw_runtime.rb
       packaging/live_agent_skills/workflow_creator_process_supervisor.rb
       packaging/live_agent_skills/workflow_creator.rb
       packaging/live_agent_skills/workflow_creator_contract.rb

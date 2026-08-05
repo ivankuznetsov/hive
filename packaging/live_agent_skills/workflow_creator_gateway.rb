@@ -23,12 +23,13 @@ module HiveLiveAgentProof
     REFUSAL = "workflow-creator gateway refused request\n"
 
     def initialize(root:, candidate_executable:, candidate_identity:, environment:, cwd:, supervisor:,
-                   socket_root: root)
+                   socket_root: root, runtime_verifier: nil)
       @root, @socket_root, @candidate, @cwd =
         [ root, socket_root, candidate_executable, cwd ].map { |path| File.expand_path(path) }
       @identity = WorkflowCreator::Values.capture(candidate_identity).value
       @environment = WorkflowCreator::Values.capture(environment).value
       @supervisor = supervisor
+      @runtime_verifier = runtime_verifier
       @wrapper_path = File.join(@root, WRAPPER_NAME)
       @socket_path = File.join(@socket_root, SOCKET_NAME)
       @token = SecureRandom.hex(32).freeze
@@ -88,9 +89,10 @@ module HiveLiveAgentProof
           !CREDENTIAL.match?(key)
       end
       supervisor_valid = @supervisor.instance_of?(WorkflowCreator::ProcessSupervisor)
+      verifier_valid = @runtime_verifier.nil? || @runtime_verifier.respond_to?(:call)
       labels_valid = WorkflowCreator::Vocabulary.fetch("command_labels") ==
         WorkflowCreator::ProcessSupervisor::COMMAND_LABELS
-      raise Error unless environment_valid && supervisor_valid && labels_valid
+      raise Error unless environment_valid && supervisor_valid && verifier_valid && labels_valid
       admit_candidate!
     rescue KeyError, SystemCallError, Error
       raise Error, "workflow-creator gateway inputs are invalid"
@@ -112,12 +114,12 @@ module HiveLiveAgentProof
     end
 
     def install_wrapper!
-      File.open(@wrapper_path, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |file|
+      File.open(@wrapper_path, File::WRONLY | File::CREAT | File::EXCL, 0o700) do |file|
         file.write(wrapper_source)
         file.flush
         file.fsync
       end
-      File.chmod(0o600, @wrapper_path)
+      File.chmod(0o700, @wrapper_path)
       @wrapper_identity = file_identity(File.lstat(@wrapper_path)).freeze
       @wrapper_digest = Digest::SHA256.file(@wrapper_path).hexdigest
     rescue SystemCallError
@@ -217,9 +219,11 @@ module HiveLiveAgentProof
     end
 
     def semantic_result?(receipt, stdout)
-      return true unless [ 6, 8 ].include?(@position)
+      return true unless [ 6, 8, 9 ].include?(@position)
       return false unless receipt.dig("capture", "stdout_bytes") == stdout.b.bytesize
       payload = JSON.parse(stdout)
+      return operational_status?(payload) if @position == 9
+
       valid = payload.instance_of?(Hash) && payload.values_at("schema", "ok", "created") ==
         [ "hive-new", true, @position == 6 ]
       valid &&= @position == 6 ? TASK_SLUG.match?(payload["slug"]) : payload["slug"] == @task_slug
@@ -227,6 +231,14 @@ module HiveLiveAgentProof
       valid
     rescue JSON::ParserError, TypeError
       false
+    end
+
+    def operational_status?(payload)
+      valid = payload.instance_of?(Hash) && payload.values_at("schema", "schema_version", "ok") ==
+        [ "hive-operational-status", 3, true ] && payload["tasks"].instance_of?(Array) && payload["tasks"].one?
+      task = payload["tasks"].first if valid
+      valid && task.instance_of?(Hash) && task["workflow"] == "editorial" &&
+        task.dig("identity", "slug") == @task_slug && task.dig("position", "stage") == "1-research"
     end
 
     def passing?(receipt)
@@ -265,10 +277,11 @@ module HiveLiveAgentProof
 
     def verify_runtime!
       verify_base!
+      raise Error unless @runtime_verifier.nil? || @runtime_verifier.call == true
       socket = File.lstat(@socket_path)
       wrapper = File.lstat(@wrapper_path)
       valid = socket.socket? && node_identity(socket) == @socket_identity
-      valid &&= wrapper.file? && (wrapper.mode & 0o777) == 0o600 && file_identity(wrapper) == @wrapper_identity
+      valid &&= wrapper.file? && (wrapper.mode & 0o777) == 0o700 && file_identity(wrapper) == @wrapper_identity
       valid &&= Digest::SHA256.file(@wrapper_path).hexdigest == @wrapper_digest
       raise Error unless valid
     rescue StandardError

@@ -42,7 +42,7 @@ class WorkflowCreatorExecutionTest < Minitest::Test
       refute File.exist?(primary_path)
       refute Dir.exist?(fixture.fetch(:workspace_path))
       assert fixture_pids.none? { |pid| process_alive?(pid) }
-      refute File.exist?(File.join(fixture.dig(:candidate, "root"), "audit", ".workflow-creator-gateway.sock"))
+      refute File.exist?(File.join(fixture.fetch(:root), ".workflow-creator-gateway.sock"))
 
       receipt = JSON.parse(draft.receipt_bytes)
       candidate_record, openclaw_record = receipt.fetch("installed_manifests")
@@ -349,7 +349,14 @@ class WorkflowCreatorExecutionTest < Minitest::Test
         puts JSON.generate("schema" => "hive-new", "ok" => true,
                            "created" => count.zero?, "slug" => #{SLUG.inspect})
       when ["run", #{SLUG.inspect}] then puts "ran"
-      when ["status", "--operational", "--json"] then puts JSON.generate("ok" => true)
+      when ["status", "--operational", "--json"]
+        puts JSON.generate(
+          "schema" => "hive-operational-status", "schema_version" => 3, "ok" => true,
+          "tasks" => [
+            { "identity" => { "slug" => #{SLUG.inspect} }, "workflow" => "editorial",
+              "position" => { "stage" => "1-research" } }
+          ]
+        )
       else exit 90
       end
     RUBY
@@ -461,6 +468,11 @@ class WorkflowCreatorExecutionTest < Minitest::Test
       "task_prompt_sha256" => Digest::SHA256.hexdigest(Creator::Vocabulary.fetch("task_prompt")),
       "skill" => fixture.fetch(:manifest).slice("skill_version", "canonical_digest"),
       "native_activation" => Creator::Vocabulary.fetch("native_activation"),
+      "native_activation_evidence" => {
+        "kind" => "openclaw-skills-info", "invocation" => "/hive", "name" => "hive",
+        "eligible" => true, "user_invocable" => true, "path" => "skills/hive/SKILL.md",
+        "sha256" => Digest::SHA256.hexdigest("fixture-skill"), "size" => 13
+      },
       "hive_commands" => Creator.commands_for(task_slug: SLUG).value,
       "created_files" => files, "validation" => Creator::Vocabulary.fetch("graph"),
       "creation_only_task_count" => 0, "task_count" => 1,

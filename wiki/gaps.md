@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-08-04
+updated: 2026-08-05
 tags: [gap, todo, release-proof, agent-skills]
 ---
 
@@ -30,22 +30,29 @@ tags: [gap, todo, release-proof, agent-skills]
   not a fresh scheduler-driven fault matrix, and the private gem is not a live
   package-channel install. Interior crash contracts are linked to focused tests
   rather than mislabelled E2E. Current report-v2 cutover remains deliberately
-  refused at the operator boundary. Full U3b must still supply independent
-  controls and freshly drive both modules through the complete process-boundary
-  matrix; its temporal cases
-  must explicitly simulate wall-clock/DST boundary changes, weekly cadence,
-  quota/capacity reset, and restart plus log rotation; spreading one decision
-  class over timestamps cannot qualify, and timestamp, fault-step, or artifact
-  variants sharing one trigger/repository/SHA/change-window identity count as
-  one decision. U3c must independently bind the live
-  project, installed candidate generation, configuration, scenario and
-  artifacts, and retain installed/live evidence for credential expiry and a
-  real quota-reset lifecycle under its sandbox/process-custody threat model.
+  refused at the operator boundary. The complete fresh scheduler/fault matrix
+  is deferred until an observed defect or explicit operator readmission
+  justifies the additional architecture. A proposed reduced U3c may prove
+  exact installed candidate, both first-party modules,
+  sandbox/process/resource custody, and a separate authenticated provider
+  transport probe. The controller must already be on protected `main` and may
+  evaluate only a distinct later candidate. The result must retain explicit fences:
+  prepared records are not a fresh matrix, the provider probe is not a Patrol
+  decision, and the result cannot write the report's `installed_live` lane or
+  emit `evidence_ready_for_operator`. Full U3b/U3c would still need independent
+  controls, freshly driven decisions for both modules, and explicit
+  wall-clock/DST, weekly cadence, quota reset, credential expiry, restart, and
+  log-rotation coverage.
+  The reduced admission now requires a read-only controller mode that proves
+  report bytes remain unchanged, an exact protected-main controller checkout,
+  digest-bound runtime closure, quota-backed writable storage, a closed
+  provider success predicate, locked publication, and bounded retained
+  evidence. None of those proposed U3c controls exists in production yet.
   Long-lived external resource drift remains a declared U3c live limitation,
   not something elapsed time can prove equivalent. Elapsed telemetry remains
   useful, but neither it nor a seven-day window substitutes for diversity and
-  protocol completeness. The reduced smoke closes none of U3-ARCH-005, U3c,
-  catalogue promotion, or mutator cutover authority.
+  protocol completeness. The reduced smoke closes none of U3-ARCH-005, full
+  U3c qualification, catalogue promotion, or mutator cutover authority.
 
 - The explicit JobStore fresh-start reset is source- and focused-test-pinned,
   including no-write fresh status, exact registered-project binding,

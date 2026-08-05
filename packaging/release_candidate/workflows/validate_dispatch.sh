@@ -117,8 +117,10 @@ if [[ -n "$SOURCE_RUN_ID$SOURCE_RUN_ATTEMPT$SOURCE_ARTIFACT_ID$SOURCE_ARTIFACT_D
   retry=true
 fi
 
-echo "workflow_sha=$workflow_sha" >> "$GITHUB_OUTPUT"
-echo "action_lock_sha256=$computed_action_lock" >> "$GITHUB_OUTPUT"
-echo "retry=$retry" >> "$GITHUB_OUTPUT"
-echo "selected_gates=$selected_gates" >> "$GITHUB_OUTPUT"
-echo "source_evidence_sha256=$source_evidence_sha256" >> "$GITHUB_OUTPUT"
+{
+  echo "workflow_sha=$workflow_sha"
+  echo "action_lock_sha256=$computed_action_lock"
+  echo "retry=$retry"
+  echo "selected_gates=$selected_gates"
+  echo "source_evidence_sha256=$source_evidence_sha256"
+} >> "$GITHUB_OUTPUT"

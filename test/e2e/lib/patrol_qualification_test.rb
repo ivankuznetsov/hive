@@ -214,6 +214,24 @@ class E2EPatrolQualificationSupportTest < Minitest::Test
     end
   end
 
+  def test_child_process_fails_closed_on_stream_overflow
+    Dir.mktmpdir("patrol-qualification-output-bound") do |root|
+      process = ChildProcess.new(deadline: monotonic + 5, env: { "PATH" => "/usr/bin:/bin" })
+
+      %w[stdout stderr].each do |stream|
+        descriptor = stream == "stdout" ? "STDOUT" : "STDERR"
+        error = assert_raises(StreamOverflow) do
+          process.run(
+            RbConfig.ruby, "-e", "#{descriptor}.write('x' * #{MAX_STREAM_BYTES + 1})",
+            label: "#{stream} overflow", cwd: root
+          )
+        end
+        assert_equal stream, error.stream
+        assert_match(/exceeds its byte bound/, error.message)
+      end
+    end
+  end
+
   def test_controller_uses_only_the_archived_installed_public_boundary
     source = File.binread(File.expand_path("patrol_qualification.rb", __dir__))
 
@@ -358,7 +376,7 @@ class E2EPatrolQualificationSupportTest < Minitest::Test
       noisy = ChildProcess.new(deadline: monotonic + 5, env: { "PATH" => "/usr/bin:/bin" })
       timeout = 0.25
       started = monotonic
-      assert_raises(ChildTimeout) do
+      overflow = assert_raises(StreamOverflow) do
         program = <<~RUBY
           STDOUT.sync = true
           worker = spawn(#{RbConfig.ruby.inspect}, "-e", "sleep 30")
@@ -372,10 +390,9 @@ class E2EPatrolQualificationSupportTest < Minitest::Test
         )
       end
       elapsed = monotonic - started
-      assert_operator elapsed, :>=, timeout * 0.6,
-                      "timeout should track the requested deadline instead of firing immediately"
+      assert_equal "stdout", overflow.stream
       assert_operator elapsed, :<, 1.5,
-                      "blocked stdin and noisy stdout must remain under the child deadline"
+                      "output overflow must fail before the outer child deadline"
       leader_pid, worker_pid = File.binread(noisy_pid_path).split.map { |value| Integer(value) }
       refute process_alive?(leader_pid), "timed-out leader must be gone"
       refute process_group_alive?(leader_pid), "timed-out process group must be gone"
@@ -450,7 +467,246 @@ class E2EPatrolQualificationSupportTest < Minitest::Test
     end
   end
 
+  def test_external_smoke_is_read_only_distinct_head_and_never_admits_qualification
+    Dir.mktmpdir("patrol-external-smoke") do |root|
+      project = File.join(root, "project")
+      state = File.join(project, ".hive-state")
+      FileUtils.mkdir_p(state)
+      File.binwrite(File.join(state, "config.yml"), "hive_state_path: .hive-state\n")
+      catalog = Catalog.load(CATALOG_PATH)
+      observations = write_records_and_observations(root, state, catalog)
+      report_path = File.join(state, "module-runtime", "migration", "report.json")
+      FileUtils.mkdir_p(File.dirname(report_path))
+      report_bytes = Hive::E2E::PatrolQualification.canonical(
+        "schema" => "hive-module-migration-report", "schema_version" => 2,
+        "status" => "evidence_required"
+      )
+      File.binwrite(report_path, report_bytes)
+      candidate = {
+        "candidate_sha" => "b" * 40, "archive_sha256" => "c" * 64,
+        "module_manifest_sha256" => "d" * 64, "source_tree_sha256" => "e" * 64
+      }
+      generated_at = "2026-08-05T10:00:00.000000Z"
+      reader = ObservationReader.new(
+        project_root: project, observations_path: observations, catalog: catalog,
+        deadline: monotonic + 5
+      )
+      common = {
+        "run_id" => "u3c-#{candidate.fetch('candidate_sha')[0, 12]}",
+        "candidate_sha" => candidate.fetch("candidate_sha"),
+        "catalog_digest" => Digest::SHA256.hexdigest(catalog.bytes),
+        "source_digest" => candidate.fetch("archive_sha256"),
+        "manifest_digest" => candidate.fetch("module_manifest_sha256"),
+        "scenario_manifest_digest" => Digest::SHA256.hexdigest(catalog.bytes + "\0" + reader.bytes),
+        "artifacts" => [
+          { "kind" => "candidate_archive", "digest" => candidate.fetch("archive_sha256") },
+          { "kind" => "scenario_catalog", "digest" => Digest::SHA256.hexdigest(catalog.bytes) }
+        ],
+        "reviewer" => "hive-e2e/u3c-smoke"
+      }
+      controller = Controller.allocate
+      controller.instance_variable_set(:@repo_root, File.expand_path("../../..", __dir__))
+      controller.instance_variable_set(:@project_root, project)
+      controller.instance_variable_set(:@observations_path, observations)
+      controller.instance_variable_set(:@deadline, monotonic + 5)
+      receipts = []
+      configurations = Hash.new { |hash, key| hash[key] = [] }
+      reader.each do |case_row, observation, record|
+        receipts << controller.send(:expected_receipt, common, case_row, observation, record, generated_at)
+        configurations[case_row.module_name] << record.fetch("configuration_digest")
+      end
+      sandbox_result = {
+        "generated_at" => generated_at,
+        "receipts" => receipts,
+        "module_inspections" => MODULES.to_h do |name|
+          [ name, { "status" => "active", "configuration_digest" => configurations.fetch(name).uniq.fetch(0) } ]
+        end,
+        "report_before_sha256" => Digest::SHA256.hexdigest(report_bytes),
+        "report_after_sha256" => Digest::SHA256.hexdigest(report_bytes)
+      }
+
+      result = controller.external_smoke(
+        controller_sha: "a" * 40, candidate_sha: candidate.fetch("candidate_sha"),
+        candidate:, sandbox_result:
+      )
+
+      assert_equal "passed", result.fetch("status")
+      assert_equal MODULES, result.fetch("modules")
+      assert_equal catalog.cases.size, result.fetch("receipt_count")
+      assert_equal report_bytes, File.binread(report_path)
+      source = File.binread(File.expand_path("patrol_qualification.rb", __dir__))
+      external_source = source[/def external_smoke\b.*?^        private/m]
+      refute_nil external_source
+      refute_includes external_source, "admit_qualification"
+      refute_includes external_source, "PatrolQualification.build"
+
+      sandbox_result["receipts"][0] = sandbox_result.fetch("receipts").fetch(1)
+      assert_raises(Hive::E2E::PatrolQualification::Error) do
+        controller.external_smoke(
+          controller_sha: "a" * 40, candidate_sha: candidate.fetch("candidate_sha"),
+          candidate:, sandbox_result:
+        )
+      end
+    end
+  end
+
+  def test_external_smoke_worker_runs_only_the_closed_sandbox_sequence
+    Dir.mktmpdir("patrol-external-worker") do |root|
+      candidate_root = File.join(root, "candidate")
+      source_root = File.join(root, "source")
+      FileUtils.mkdir_p(candidate_root)
+      FileUtils.mkdir_p(source_root)
+      calls = []
+      identity = {
+        "gem_sha256" => "1" * 64, "installed_hive_sha256" => "2" * 64,
+        "module_manifest_sha256" => "3" * 64, "dependency_closure" => [],
+        "dependency_closure_sha256" => "4" * 64, "toolchain" => {},
+        "toolchain_sha256" => "5" * 64, "source_tree_sha256" => "8" * 64
+      }
+      controller = Controller.allocate
+      controller.instance_variable_set(:@repo_root, candidate_root)
+      controller.instance_variable_set(:@project_root, File.join(root, "project"))
+      controller.instance_variable_set(:@observations_path, File.join(root, "observations.json"))
+      controller.instance_variable_set(:@evidence_root, File.join(root, "evidence"))
+      controller.instance_variable_set(:@deadline, monotonic + 5)
+      controller.define_singleton_method(:state_path) { File.join(root, "state") }
+      controller.define_singleton_method(:setup_process) { |_| calls << :setup }
+      controller.define_singleton_method(:read_report) { |_| "unchanged-report\n" }
+      controller.define_singleton_method(:install_candidate) do |candidate, _|
+        calls << :install_candidate
+        candidate["gem_sha256"] = "1" * 64
+        candidate["installed_hive_sha256"] = "2" * 64
+      end
+      controller.define_singleton_method(:build_module_catalog) do |candidate, _|
+        calls << :build_catalog
+        raise "source root was not preserved" unless candidate.fetch("source_root") == source_root
+        File.join(root, "catalog")
+      end
+      controller.define_singleton_method(:install_modules) { |_| calls << :install_modules }
+      controller.define_singleton_method(:external_installed_identity) do |_|
+        calls << :installed_identity
+        identity
+      end
+      controller.define_singleton_method(:collect_receipts) do |_, _, claim:|
+        calls << [ :collect_receipts, claim ]
+        { "generated_at" => "2026-08-05T10:00:00Z", "receipts" => [] }
+      end
+      controller.define_singleton_method(:revalidate_external_modules) do
+        calls << :revalidate_modules
+        MODULES.to_h { |name| [ name, { "status" => "active", "configuration_digest" => "6" * 64 } ] }
+      end
+
+      result = controller.external_smoke(
+        controller_sha: "a" * 40, candidate_sha: "b" * 40,
+        candidate: {
+          "candidate_sha" => "b" * 40, "archive_sha256" => "7" * 64,
+          "module_manifest_sha256" => "3" * 64, "source_root" => source_root,
+          "source_tree_sha256" => "8" * 64
+        },
+        trusted_catalog_path: CATALOG_PATH, worker: true
+      )
+
+      assert_equal [
+        :setup, :install_candidate, :build_catalog, :install_modules,
+        :installed_identity, [ :collect_receipts, "u3c" ], :revalidate_modules,
+        :installed_identity
+      ], calls
+      assert_equal identity, result.dig("candidate", "identity_before")
+      assert_equal identity, result.dig("candidate", "identity_after")
+      assert_equal Digest::SHA256.hexdigest("unchanged-report\n"),
+                   result.dig("payload", "report_after_sha256")
+    end
+  end
+  def test_external_installed_identity_treats_gemspecs_as_opaque_and_rehashes_artifacts
+    Dir.mktmpdir("patrol-external-identity") do |root|
+      install_root = File.join(root, "installed")
+      specifications = File.join(install_root, "specifications")
+      source_root = File.join(root, "source")
+      FileUtils.mkdir_p(specifications)
+      write_external_source_manifests(source_root)
+      begin
+        candidate_gem = File.join(root, "candidate.gem")
+        hive_bin = File.join(install_root, "bin", "hive")
+        FileUtils.mkdir_p(File.dirname(hive_bin))
+        File.binwrite(candidate_gem, "candidate gem one\n")
+        File.binwrite(hive_bin, "installed hive one\n")
+        sentinel = File.join(root, "gemspec-executed")
+        gemspec = File.join(specifications, "hostile-1.0.0.gemspec")
+        gemspec_bytes = "File.binwrite(#{sentinel.dump}, 'executed')\n"
+        File.binwrite(gemspec, gemspec_bytes)
+
+        controller = Controller.allocate
+        controller.instance_variable_set(:@deadline, monotonic + 5)
+        controller.instance_variable_set(:@install_root, install_root)
+        controller.instance_variable_set(:@candidate_gem_path, candidate_gem)
+        controller.instance_variable_set(:@hive_bin, hive_bin)
+        controller.define_singleton_method(:run) do |command, *arguments, **|
+          value = [ command, *arguments ].join(" ")
+          Result.new("#{value} version\n", "", 0)
+        end
+        candidate = { "source_root" => source_root }
+
+        before = controller.send(:external_installed_identity, candidate)
+
+        refute File.exist?(sentinel), "opaque gemspec inventory must never evaluate Ruby"
+        assert_equal [ {
+          "basename" => "hostile-1.0.0.gemspec", "bytesize" => gemspec_bytes.bytesize,
+          "spec_sha256" => Digest::SHA256.hexdigest(gemspec_bytes)
+        } ], before.fetch("dependency_closure")
+        assert_equal Digest::SHA256.hexdigest("candidate gem one\n"), before.fetch("gem_sha256")
+        assert_equal Digest::SHA256.hexdigest("installed hive one\n"),
+                     before.fetch("installed_hive_sha256")
+
+        File.binwrite(candidate_gem, "candidate gem two\n")
+        File.binwrite(hive_bin, "installed hive two\n")
+        manifest_path = File.join(source_root, "modules", "patrol", "manifest.yml")
+        File.chmod(0o644, manifest_path)
+        File.binwrite(manifest_path, File.binread(manifest_path).sub("version: 1.0.0", "version: 1.0.1"))
+        File.chmod(0o444, manifest_path)
+        after = controller.send(:external_installed_identity, candidate)
+
+        refute_equal before.fetch("gem_sha256"), after.fetch("gem_sha256")
+        refute_equal before.fetch("installed_hive_sha256"), after.fetch("installed_hive_sha256")
+        refute_equal before.fetch("module_manifest_sha256"), after.fetch("module_manifest_sha256")
+        refute_equal before.fetch("source_tree_sha256"), after.fetch("source_tree_sha256")
+        refute File.exist?(sentinel)
+      ensure
+        thaw_external_source(source_root)
+      end
+    end
+  end
+
   private
+
+  def write_external_source_manifests(root)
+    MODULES.each do |name|
+      directory = File.join(root, "modules", name)
+      FileUtils.mkdir_p(directory)
+      File.binwrite(File.join(directory, "manifest.yml"), <<~YAML)
+        name: #{name}
+        version: 1.0.0
+        release_sha256: #{Digest::SHA256.hexdigest(name)}
+        source:
+          revision: #{"a" * 40}
+      YAML
+    end
+    Dir.glob(File.join(root, "**", "*"), File::FNM_DOTMATCH)
+       .select { |path| File.file?(path) }
+       .each { |path| File.chmod(0o444, path) }
+    Dir.glob(File.join(root, "**", "*"), File::FNM_DOTMATCH)
+       .select { |path| File.directory?(path) }
+       .sort_by { |path| -path.count(File::SEPARATOR) }
+       .each { |path| File.chmod(0o555, path) }
+    File.chmod(0o555, root)
+  end
+
+  def thaw_external_source(root)
+    return unless File.exist?(root)
+
+    [ root, *Dir.glob(File.join(root, "**", "*"), File::FNM_DOTMATCH) ]
+      .select { |path| File.directory?(path) }
+      .each { |path| File.chmod(0o755, path) }
+  end
 
   def write_records_and_observations(root, state, catalog)
     observations = catalog.cases.map.with_index do |case_row, index|

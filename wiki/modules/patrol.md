@@ -1,9 +1,9 @@
 ---
 title: Hive::Patrol
 type: module
-source: lib/hive/patrol/
+source: lib/hive/patrol/, packaging/patrol_evidence/, test/e2e/lib/patrol_qualification.rb
 created: 2026-05-28
-updated: 2026-08-04
+updated: 2026-08-05
 tags: [module, patrol, review, worktree, pr, codex]
 ---
 
@@ -87,6 +87,28 @@ one exact-key, strict UTF-8 JSON object from bounded stdin; qualification also
 requires `--yes`. They accept no request path and add no runner, store, or
 cutover authority. Their command layer loads only shared lightweight errors,
 not the module lifecycle/store base.
+
+The separately invoked reduced installed/live smoke has exactly five
+packaging owners: `Result` owns the canonical bounded schema and claim fences;
+`Candidate` owns streamed archive and exact installed closure/module identity;
+`Sandbox` owns the fixed digest-pinned container and whole-process custody;
+`ProviderProbe` owns one closed host-side authenticated transport check; and
+`Runner` owns manual authority, composition, expected-byte publication, and
+explicit retention cleanup. The existing E2E controller supplies only the
+bounded read-only `external_smoke` operation. The sandbox mounts that exact
+trusted controller script and its secret-pattern support as separate read-only
+files plus a separately admitted read-only candidate source tree; candidate
+builds run only from a writable copy. Installed gemspecs remain opaque hashed
+files and are never evaluated by the trusted controller. Runner binds one
+canonical one-hour authorization to the controller/candidate/image/invocation,
+the live registered project repository/HEAD/state tree, and the observation
+file, then rejects retained authorization replay. Transient archives, source,
+container custody, and controller scratch data stay outside the retained
+result-only evidence directory. The sandbox uses one hashed engine executable
+and a closed environment for probe, execution, and ID-owned teardown; it never
+loads the candidate's controller copy or mounts the controller checkout. This path does not construct
+`PatrolQualification`, write report v2's `installed_live` lane, schedule or
+recover Patrol work, admit evidence for an operator, or authorize cutover.
 
 ## State
 

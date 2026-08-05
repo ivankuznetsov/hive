@@ -43,11 +43,15 @@ tags: [gap, todo, release-proof, agent-skills]
   controls, freshly driven decisions for both modules, and explicit
   wall-clock/DST, weekly cadence, quota reset, credential expiry, restart, and
   log-rotation coverage.
-  The reduced admission now requires a read-only controller mode that proves
-  report bytes remain unchanged, an exact protected-main controller checkout,
-  digest-bound runtime closure, quota-backed writable storage, a closed
-  provider success predicate, locked publication, and bounded retained
-  evidence. None of those proposed U3c controls exists in production yet.
+  The reduced source boundary now implements the read-only controller mode,
+  exact protected-main control-tree check, live project/registry/repository/state
+  binding, one-hour canonical one-time authorization, immutable admitted source
+  plus opaque gemspec inventory, digest-bound runtime closure, aggregate-bounded
+  writable storage, closed provider predicate, locked publication, and
+  result-only retained evidence. Its credential-free contract tests include an
+  opt-in detached-process campaign outside default CI. No real container or
+  provider invocation has authenticated this infrastructure yet; that remains a
+  separate post-merge exact-head operator authorization, not a source claim.
   Long-lived external resource drift remains a declared U3c live limitation,
   not something elapsed time can prove equivalent. Elapsed telemetry remains
   useful, but neither it nor a seven-day window substitutes for diversity and

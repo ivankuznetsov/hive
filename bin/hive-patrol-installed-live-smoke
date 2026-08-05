@@ -1,0 +1,127 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "optparse"
+require "securerandom"
+require "time"
+require_relative "../packaging/patrol_evidence/runner"
+
+class PatrolSmokeUsageError < StandardError; end
+
+repo_root = File.expand_path("..", __dir__)
+options = {
+  invocation_id: "manual-#{Time.now.utc.strftime('%Y%m%dT%H%M%SZ')}-#{SecureRandom.hex(4)}"
+}
+parser = OptionParser.new do |value|
+  value.banner = "Usage: bin/hive-patrol-installed-live-smoke [options]"
+  value.on("--controller-sha SHA", "Authorized protected-main controller SHA") { |item| options[:controller_sha] = item }
+  value.on("--candidate-sha SHA", "Distinct later candidate SHA") { |item| options[:candidate_sha] = item }
+  value.on("--authorization-file PATH", "Owner-private fresh authorization bytes") do |item|
+    options[:authorization_file] = item
+  end
+  value.on("--authorization-template", "Print one fresh exact-scope authorization document") do
+    options[:authorization_template] = true
+  end
+  value.on("--invocation-id ID", "Unique manual invocation identity") { |item| options[:invocation_id] = item }
+  value.on("--evidence-root PATH", "Pre-created owner-private local evidence store") do |item|
+    options[:evidence_root] = item
+  end
+  value.on("--hive-home PATH", "Owner-private Hive registry root for the disposable project") do |item|
+    options[:hive_home] = item
+  end
+  value.on("--cleanup-result PATH", "Remove one retained result after its minimum age") do |item|
+    options[:cleanup_result] = item
+  end
+  value.on("--project-root PATH", "Disposable prepared project root") { |item| options[:project_root] = item }
+  value.on("--observations PATH", "Prepared observation document") { |item| options[:observations_path] = item }
+  value.on("--image IMAGE@sha256:DIGEST", "Preinstalled immutable sandbox image") { |item| options[:image] = item }
+  value.on("-h", "--help", "Show this help") do
+    puts value
+    exit 0
+  end
+end
+begin
+  parser.parse!
+  raise PatrolSmokeUsageError, "unexpected positional arguments: #{ARGV.join(' ')}" unless ARGV.empty?
+
+  if options[:cleanup_result]
+    raise PatrolSmokeUsageError, "--evidence-root is required for cleanup" unless options[:evidence_root]
+    irrelevant = options.keys & %i[
+      authorization_file authorization_template candidate_sha controller_sha hive_home image
+      observations_path project_root
+    ]
+    unless irrelevant.empty?
+      raise PatrolSmokeUsageError, "cleanup does not accept: #{irrelevant.sort.join(', ')}"
+    end
+    HivePatrolEvidence::Runner.cleanup!(
+      evidence_root: options.fetch(:evidence_root), result_path: options.fetch(:cleanup_result)
+    )
+    puts '{"status":"removed"}'
+    exit 0
+  end
+
+  required = %i[
+    controller_sha candidate_sha evidence_root hive_home project_root observations_path image
+  ]
+  required << :authorization_file unless options[:authorization_template]
+  missing = required.reject { |key| options.key?(key) }
+  raise PatrolSmokeUsageError, "missing required options: #{missing.join(', ')}" unless missing.empty?
+
+  if options[:authorization_template]
+    raise PatrolSmokeUsageError, "--authorization-template and --authorization-file are mutually exclusive" if
+      options[:authorization_file]
+    $stdout.write(HivePatrolEvidence::Runner.authorization_template!(
+      repo_root:, evidence_root: options.fetch(:evidence_root), hive_home: options.fetch(:hive_home),
+      controller_sha: options.fetch(:controller_sha), candidate_sha: options.fetch(:candidate_sha),
+      invocation_id: options.fetch(:invocation_id), project_root: options.fetch(:project_root),
+      observations_path: options.fetch(:observations_path), image: options.fetch(:image)
+    ))
+    exit 0
+  end
+
+  authorization_path = File.expand_path(options.fetch(:authorization_file))
+  flags = File::RDONLY
+  flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+  authorization = File.open(authorization_path, flags) do |file|
+    stat = file.stat
+    unless stat.file? && stat.nlink == 1 && stat.uid == Process.uid &&
+           (stat.mode & 0o077).zero? && stat.size.between?(1, 8192)
+      raise HivePatrolEvidence::Runner::AuthorityError.new(
+        "manual_authority_missing", "authorization file is unsafe"
+      )
+    end
+    file.read(8193)
+  end
+
+  %w[INT TERM].each do |signal|
+    Signal.trap(signal) do
+      raise HivePatrolEvidence::Runner::CancellationError.new(
+        "process_custody", "patrol smoke was interrupted"
+      )
+    end
+  end
+  outcome = HivePatrolEvidence::Runner.run!(
+    repo_root:,
+    evidence_root: options.fetch(:evidence_root),
+    hive_home: options.fetch(:hive_home),
+    controller_sha: options.fetch(:controller_sha),
+    candidate_sha: options.fetch(:candidate_sha),
+    authorization:,
+    invocation_id: options.fetch(:invocation_id),
+    project_root: options.fetch(:project_root),
+    observations_path: options.fetch(:observations_path),
+    image: options.fetch(:image)
+  )
+  $stdout.write(outcome.fetch("result").canonical_bytes)
+  exit(outcome.fetch("status") == "installed_live_smoke_verified" ? 0 : 75)
+rescue OptionParser::ParseError, PatrolSmokeUsageError => e
+  warn e.message
+  warn parser
+  exit 64
+rescue HivePatrolEvidence::Runner::Error => e
+  warn "patrol installed/live smoke refused: #{e.reason}"
+  exit 78
+rescue Errno::ENOENT, Errno::ELOOP, Errno::EACCES, Errno::EISDIR
+  warn "patrol installed/live smoke refused: input_unavailable"
+  exit 78
+end

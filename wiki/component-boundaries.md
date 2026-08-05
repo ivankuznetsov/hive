@@ -3,7 +3,7 @@ title: Component boundaries
 type: reference
 source: config/component-boundaries.yml, test/support/component_boundary_contract.rb
 created: 2026-07-25
-updated: 2026-08-04
+updated: 2026-08-05
 tags: [architecture, components, boundaries, monorepo]
 ---
 
@@ -17,7 +17,7 @@ the first and primary consumer.
 
 | Component | State | Current entry point | Narrative context |
 |-----------|-------|---------------------|-------------------|
-| Patrol Effect Evidence | `candidate` (U3a protocol complete; U3b/U3c proof pending) | `require "hive/modules/migration/patrol_evidence"` → `Hive::Modules::Migration::PatrolEvidence` | [[modules/patrol]] |
+| Patrol Effect Evidence | `candidate` (U3a protocol complete; reduced installed/live smoke source-pinned; full U3b/U3c proof pending) | `require "hive/modules/migration/patrol_evidence"` → `Hive::Modules::Migration::PatrolEvidence` | [[modules/patrol]] |
 | Attempts admission / future RunReceipt | `candidate` (guarded reference) | `require "hive/attempts/api"` → `Hive::Attempts::API` | [[modules/attempts]] |
 | Workflow Creator Values | `boundary-ready` | `require "./packaging/live_agent_skills/workflow_creator_text_safety"` → `HiveLiveAgentProof::WorkflowCreator::TextSafety` | [[component-boundaries]] |
 | Workflow Creator | `boundary-ready` | `require "./packaging/live_agent_skills/workflow_creator_evidence"` → `HiveLiveAgentProof::WorkflowCreatorEvidence` | [[component-boundaries]] |
@@ -160,7 +160,14 @@ contracts in focused tests, but does not produce qualification. U3b still owns
 the committed deterministic scenario catalogue, independent controls, pure
 collector, and complete both-module fault matrix; U3c still owns independently
 authorized installed/live candidate, project, artifact, credential, sandbox,
-process-custody, and publication proof. That exception is not permission for
+process-custody, and publication proof. The packaging-only reduced U3c harness
+now composes those custody checks through exactly five evidence owners and the
+existing E2E controller's read-only `external_smoke` entry, but it creates no
+catalog component, admission facade, report lane, recovery owner, or promotion
+authority. Candidate execution consumes an independently admitted read-only
+source mount while build mutations remain in sandbox state; host composition
+binds a canonical expiring authorization to the registered project's live
+repository/HEAD/state and retains only a closed terminal result. That exception is not permission for
 another recovery store, compatibility effect map, qualification runner, or
 cutover claim.
 

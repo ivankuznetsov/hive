@@ -1,9 +1,9 @@
 ---
 title: Testing
 type: reference
-source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release-candidate,release}.yml, packaging/{live_agent_skills,release_candidate}/, config/brakeman.ignore
+source: test/, Rakefile, bin/hive-eval, bin/hive-patrol-installed-live-smoke, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release-candidate,release}.yml, packaging/{live_agent_skills,release_candidate,patrol_evidence}/, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-08-04
+updated: 2026-08-05
 tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, terminal-outcomes, release-proof]
 ---
 
@@ -332,6 +332,41 @@ The same-head catalogue is not an independent oracle, prepared records are not
 a fresh scheduler-driven matrix, and a private exact-gem install is not
 Homebrew/AUR/install.sh installed/live proof. This smoke therefore does not
 close full U3b, U3-ARCH-005, or U3c.
+
+### Patrol reduced installed/live smoke contracts
+
+The production `packaging/patrol_evidence/` boundary has exactly five runtime
+owners: `Result`, `Candidate`, `Sandbox`, `ProviderProbe`, and `Runner`.
+Focused tests under `test/unit/packaging/patrol_evidence_*_test.rb` pin canonical
+secret-free results, streamed archive/path limits, exact installed closure and
+module identity, a digest-pinned networkless/read-only-root container with
+whole-process teardown, the closed one-request provider predicate, manual
+authority before credential access, live registered-project/HEAD/state drift
+checks, one-time authorization replay refusal, expected-byte publication,
+result-only retention, typed full-store refusal, non-destructive explicit
+cleanup, closed success/failure record schemas, and the command's stable
+usage/refusal exits.
+The container contract loads separately mounted read-only protected-main
+controller/support files and explicitly forbids the candidate's controller
+copy from becoming execution authority.
+`test/e2e/lib/patrol_qualification_test.rb` separately proves that
+`external_smoke` cannot mutate report v2 or call normal qualification admission.
+
+The manual command is deliberately two-step: `--authorization-template` emits
+one canonical 15-minute document for the exact controller, later candidate,
+invocation ID, image, registered disposable project, and observations. The
+operator saves that document as an owner-private file and passes it once with
+`--authorization-file`; a changed scope, expiry, or retained replay fails before
+credential access. Generating a template is not itself permission to make the
+provider call.
+
+The hostile archive/path/process slice remains opt-in with
+`bundle exec rake test:hostile` (or `HIVE_HOSTILE_TESTS=1`); it includes archive
+replacement/path cases and default-executor success/failure/timeout teardown of
+a detached session. Its hostile cases are skipped by ordinary focused, default,
+coverage, and hosted-CI runs. Provider tests use an injected transport and never consume
+a hosted credential. A real command invocation is therefore operator evidence,
+not a fact established by these tests.
 
 ## Coverage
 

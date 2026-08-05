@@ -1,8 +1,8 @@
 # Patrol installed/live smoke threat model
 
-Status: proposed U3c admission; production mutation is forbidden until an
-independent reliability/security review accepts this document and the operator
-explicitly approves this exact scope.
+Status: reduced U3c infrastructure candidate. Credentialed execution remains
+forbidden until this exact infrastructure head is merged, hosted checks are
+terminal, and the operator separately authorizes one later candidate invocation.
 
 Design base: `3b8b6fc9b037359b3d0c3a6f7b8a8e3c0c33ef32`
 
@@ -66,7 +66,7 @@ record digests of the existing U3a report and reduced U3b proof, but it must not
 write the migration report, construct a `PatrolQualification`, or call the
 report-admission facade.
 
-Each run receives one new runner-owned mode-`0700` directory beneath an owned
+Each run receives one new runner-owned mode-`0700` result directory beneath an owned
 mode-`0700` local evidence store. The runner refuses a pre-existing run
 directory, persists mode-`0600` `not_started` until terminal replacement,
 retains the resulting file for at least 30 days, and never deletes evidence
@@ -76,6 +76,9 @@ aggregate; saturation returns
 cleanup after that minimum age may remove only a selected mode-`0600` regular
 file whose owner and recorded device/inode still match, followed by its
 unchanged empty run directory. Evidence otherwise remains until that cleanup.
+Candidate archives, admitted source, container IDs, and controller scratch data
+live in a separate runner-owned transient workspace that is identity-checked and
+removed before credential access. They never enter the retained result directory.
 
 ## Trust boundaries
 
@@ -171,21 +174,21 @@ provider, or publisher API.
 
 | Threat | Required control | Failure |
 | --- | --- | --- |
-| Candidate or dependency substitution | Resolve a full candidate commit distinct from the protected-main controller SHA, archive once, hash the archive/gem/installed executable/module manifests/dependency inventory, and verify those exact identities before and after execution. Hosted candidates must be reachable from protected `main`. Never select an executable by filename alone. | `failed:candidate_identity` |
+| Candidate or dependency substitution | Resolve a full candidate commit distinct from the protected-main controller SHA, archive once, safely materialize and hash a read-only source tree, build from a separate writable copy, treat installed gemspecs as opaque bounded bytes, and rehash the archive/gem/installed executable/module/source/dependency inventories before and after execution. Hosted candidates must be reachable from protected `main`. Never select an executable by filename alone. | `failed:candidate_identity` |
 | Mutable image or toolchain | Resolve the OCI image by immutable `sha256` digest before the run and prohibit later pulls. Record and reverify the engine identity, image/rootfs digest, Ruby, RubyGems, Bundler, controller script bytes, and the complete installed gem dependency closure before and after execution; the image/rootfs digest binds its native libraries. | `failed:runtime_identity` |
 | Archive traversal or special members | Admit only bounded regular files and directories beneath a new runner-owned root. Reject absolute paths, `..`, links, devices, sockets, fifos, duplicate members, and over-limit inventory before extraction. | `failed:candidate_archive` |
 | Pre-existing or replaced paths | Refuse every destination that exists before creation. Record device/inode after creation and remove only an unchanged owned identity. A replacement is preserved and cleanup fails closed. | `failed:path_custody` |
 | Candidate host access | Run the installed candidate in a dedicated, networkless, read-only-root container with no host procfs, no host home, no Docker socket, no credential, no ambient Git/SSH/provider variables, dropped capabilities, `no-new-privileges`, and only runner-created byte- and inode-limited tmpfs or quota-backed state/output mounts. Constrain every writable layer. Copy only bounded admitted outputs after verified teardown. No unsandboxed fallback. | `blocked:sandbox_unavailable` or `failed:sandbox_contract` |
-| Process or resource escape | Give the container an exact label/ID, private PID namespace, whole-container TERM/KILL teardown, bounded pids/memory/CPU/time/output/files, and verify terminal container/process-group state on success, error, timeout, interrupt, and runner exception. | `failed:process_custody` |
+| Process or resource escape | Give each invocation a unique label/name and owned CID, use one hashed engine executable under a closed environment, private PID namespace, whole-container TERM/KILL teardown by owned ID only, bounded pids/memory/CPU/time/output/files, and verify terminal container/process-group state on success, error, timeout, interrupt, and runner exception. | `failed:process_custody` |
 | Credential leakage | Select exactly one provider credential in the host probe. Candidate and sandbox environments contain none. Never place the credential in argv, paths, prompts, logs, exceptions, result fields, or uploaded artifacts. Scan retained bytes against exact-secret and generic secret patterns. | `failed:credential_custody` |
 | Transport override, exfiltration, or false success | Before reading the credential, bind one exact HTTPS origin/path, model, proxy policy, and CA policy and reject ambient endpoint, proxy, or CA overrides. Permit one fixed bounded request with redirects disabled. Success requires the expected JSON content type and schema, no error object, the selected model identity, non-empty output, and positive usage. Retain only admitted status/usage and the response digest, never response text. | `failed:provider_transport` |
 | Provider unavailability, expiry, or quota | Preserve the candidate custody evidence and return typed `blocked` or `failed`; never reuse an old live success for a new head and never convert provider failure into a skip. | `blocked:provider_unavailable` or typed provider failure |
 | External effect or target escape | Supply no GitHub/effect credential, deny candidate network, and run no mutating Patrol path. Prepared effect receipts are historical inputs only. Any future live effect requires a separately threat-modelled, repository-scoped readmission. | `failed:effect_forbidden` |
-| Self-attested live binding | Execute protected-main controller bytes outside the candidate mount. Resolve the disposable project registration, repository identity/HEAD, installed candidate, module generations/configuration, observation digest, and result path from host-owned inputs before and after execution. Candidate output cannot supply expected bindings. | `failed:authority_binding` |
+| Self-attested live binding | Execute commit-matched protected-main controller/support/catalog bytes outside the candidate mount. Resolve and digest the disposable project registration, path identity, repository identity/HEAD, state/configuration tree, observation file identity, installed candidate, and module generations from host-owned inputs before and after each phase. Candidate output cannot supply expected bindings. | `failed:authority_binding` |
 | Unbounded input or output | Stream inventories before sort/allocation; cap every admitted file, member count, child stream, provider body, result, process count, and campaign deadline. Do not hold two full admitted payloads simultaneously. | typed bound failure |
 | Partial or conflicting publication | Persist `not_started` before preflight. Hold one owner-checked, no-follow lock on a stable recorded inode from the expected-byte read through staged validation, file fsync, atomic replacement, and parent-directory fsync. Recheck path identity while locked. An existing different terminal result or competing writer is a conflict. | `failed:publication_conflict` |
 | Artifact accumulation or unsafe deletion | Use one owned evidence root and the retention/count/aggregate-byte limits in the result contract. Refuse new evidence when full. Never delete automatically; explicit cleanup verifies the selected regular file's owner and device/inode through an already-open no-follow descriptor. | `blocked:evidence_store_full` or `failed:evidence_custody` |
-| Execution authority confusion | Refuse unless the local controller checkout is clean, equals the explicitly authorized full controller SHA, and that SHA is reachable from protected `main`; the candidate SHA must be distinct. Resolve both from Git objects before reading the credential, run no host-side command from candidate bytes, and bind controller/candidate SHAs, runner digest, operator authorization input, and invocation identity into the terminal result. Hosted workflows remain credential-free and cannot emit success. | command fails before credential use |
+| Execution authority confusion | Scrub ambient Git state and require the remote protected-main ref; refuse unless the local controller checkout is clean, equals the explicitly authorized full controller SHA, and every loaded control file equals that commit. The candidate SHA must be distinct and reachable. Require one canonical authorization binding controller/candidate/image/invocation/provider/model/project/observations plus UTC issue/expiry and nonce; atomically reject a retained digest replay before credential access. Hosted workflows remain credential-free and cannot emit success. | command fails before credential use |
 
 Initial implementation bounds are deliberately conservative: at most 4,096
 candidate/dependency members and 256 MiB total admitted bytes; 8 MiB prepared

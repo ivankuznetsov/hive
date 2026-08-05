@@ -20,7 +20,9 @@ HIVE_DEFAULT_TEST_FILES = FileList[
   "test/{unit,integration,babysitter}/**/*_test.rb"
 ].exclude(*HIVE_CI_GATE_TESTS.values).to_a.freeze
 HIVE_HOSTILE_TEST_FILES = FileList[
-  "test/unit/packaging/workflow_creator_values_test.rb"
+  "test/unit/packaging/workflow_creator_values_test.rb",
+  "test/unit/packaging/patrol_evidence_candidate_test.rb",
+  "test/unit/packaging/patrol_evidence_sandbox_test.rb"
 ].to_a.freeze
 
 # Default local suite. Self-contained, uses fake-claude / fake-gh, and makes no
@@ -52,7 +54,7 @@ Rake::TestTask.new("test:hostile" => "test:enable_hostile") do |t|
   t.libs << "lib"
   t.test_files = HIVE_HOSTILE_TEST_FILES
   t.warning = false
-  t.description = "Run the opt-in Workflow Creator hostile/property campaign"
+  t.description = "Run opt-in hostile/property campaigns outside default CI"
 end
 
 desc "Run the default suite with merged stdlib Coverage reporting and a 100% line threshold"

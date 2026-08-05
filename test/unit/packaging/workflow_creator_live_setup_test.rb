@@ -197,11 +197,15 @@ class WorkflowCreatorLiveSetupTest < Minitest::Test
     assert_equal File.binread(path), bytes
   end
 
-  def test_fixture_seals_inputs_under_a_group_writable_ambient_umask
+  def test_fixture_normalizes_host_toolchain_ownership_and_ambient_umask
     previous_umask = File.umask(0o002)
     with_setup_fixture do |fixture|
+      ruby = File.lstat(fixture.fetch(:ruby))
       result = prepare(fixture)
 
+      assert_equal Process.uid, ruby.uid
+      assert_equal 1, ruby.nlink
+      assert_equal 0, ruby.mode & 0o022
       assert_equal SHA, result.fetch(:candidate_sha)
     end
   ensure
@@ -215,7 +219,7 @@ class WorkflowCreatorLiveSetupTest < Minitest::Test
       candidate_dir: fixture.fetch(:candidate_dir), candidate_sha: SHA,
       hive_version: Hive::VERSION, canonical: fixture.fetch(:canonical),
       candidate_runtime_root: fixture.fetch(:candidate_runtime),
-      candidate_hive: fixture.fetch(:candidate_hive), ruby: RbConfig.ruby,
+      candidate_hive: fixture.fetch(:candidate_hive), ruby: fixture.fetch(:ruby),
       openclaw_runtime_root: fixture.fetch(:openclaw_runtime),
       openclaw_entrypoint: fixture.fetch(:openclaw_entrypoint), node: fixture.fetch(:node),
       openclaw_lock: fixture.fetch(:openclaw_lock), openclaw_package: fixture.fetch(:openclaw_package),
@@ -272,6 +276,10 @@ class WorkflowCreatorLiveSetupTest < Minitest::Test
       FileUtils.mkdir_p([ artifacts_root, candidate_runtime, openclaw_runtime, bundle ], mode: 0o700)
       FileUtils.chmod(0o700, bundle)
 
+      ruby = File.join(artifacts_root, "ruby")
+      FileUtils.copy_file(File.realpath(RbConfig.ruby), ruby)
+      File.chmod(0o700, ruby)
+
       candidate_gem = File.join(artifacts_root, "hive-cli-#{Hive::VERSION}.gem")
       source = File.join(artifacts_root, "source.tar.gz")
       File.binwrite(candidate_gem, "candidate-gem\n")
@@ -299,7 +307,7 @@ class WorkflowCreatorLiveSetupTest < Minitest::Test
       File.binwrite(openclaw_lock, JSON.generate(package_lock(openclaw_package)))
       git = %w[/usr/bin/git /bin/git].find { |path| File.executable?(path) }
 
-      yield root:, canonical:, candidate_dir:, candidate_gem:, output:, candidate_runtime:,
+      yield root:, canonical:, candidate_dir:, candidate_gem:, output:, candidate_runtime:, ruby:,
             candidate_hive:, openclaw_runtime:, openclaw_entrypoint:, node:, openclaw_package:,
             openclaw_lock:, bundle:, workspace:, git:
     end

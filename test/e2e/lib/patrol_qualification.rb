@@ -3,6 +3,7 @@ require "fileutils"
 require "json"
 require "open3"
 require "rbconfig"
+require "rubygems"
 require "tmpdir"
 require "time"
 require "yaml"
@@ -522,7 +523,214 @@ module Hive
           end
         end
 
+        # Read-only U3c seam. The worker branch runs only the archived candidate's
+        # build/install/receipt commands inside the admitted sandbox; this host
+        # branch independently replays the trusted catalogue controls and never
+        # reaches qualification/report publication.
+        def external_smoke(controller_sha:, candidate_sha:, candidate:, sandbox_result: nil,
+                           trusted_catalog_path: nil, worker: false)
+          return external_smoke_worker(
+            controller_sha:, candidate_sha:, candidate:, trusted_catalog_path:
+          ) if worker
+
+          unless controller_sha.to_s.match?(/\A[0-9a-f]{40}\z/) &&
+                 candidate_sha.to_s.match?(/\A[0-9a-f]{40}\z/) &&
+                 controller_sha != candidate_sha && candidate.is_a?(Hash) &&
+                 candidate.fetch("candidate_sha") == candidate_sha &&
+                 candidate.fetch("archive_sha256").to_s.match?(/\A[0-9a-f]{64}\z/) &&
+                 candidate.fetch("module_manifest_sha256").to_s.match?(/\A[0-9a-f]{64}\z/)
+            raise Error, "external smoke authority binding is malformed"
+          end
+          unless sandbox_result.is_a?(Hash) && sandbox_result.keys.sort == %w[
+            generated_at module_inspections receipts report_after_sha256 report_before_sha256
+          ]
+            raise Error, "external smoke sandbox result is malformed"
+          end
+          generated_at = Time.iso8601(sandbox_result.fetch("generated_at"))
+          raise Error, "external smoke generation time must be UTC" unless generated_at.utc_offset.zero?
+
+          catalog = Catalog.load(
+            File.join(@repo_root, "test/e2e/fixtures/patrol_qualification/catalog.json"),
+            deadline: @deadline
+          )
+          reader = ObservationReader.new(
+            project_root: @project_root, observations_path: @observations_path,
+            catalog:, deadline: @deadline
+          )
+          catalog_digest = Digest::SHA256.hexdigest(catalog.bytes)
+          common = {
+            "run_id" => "u3c-#{candidate_sha[0, 12]}",
+            "candidate_sha" => candidate_sha,
+            "catalog_digest" => catalog_digest,
+            "source_digest" => candidate.fetch("archive_sha256"),
+            "manifest_digest" => candidate.fetch("module_manifest_sha256"),
+            "scenario_manifest_digest" => Digest::SHA256.hexdigest(catalog.bytes + "\0" + reader.bytes),
+            "artifacts" => [
+              { "kind" => "candidate_archive", "digest" => candidate.fetch("archive_sha256") },
+              { "kind" => "scenario_catalog", "digest" => catalog_digest }
+            ],
+            "reviewer" => "hive-e2e/u3c-smoke"
+          }
+          expected_receipts = []
+          configurations = Hash.new { |hash, key| hash[key] = [] }
+          reader.each do |case_row, observation, record|
+            expected_receipts << expected_receipt(
+              common, case_row, observation, record, sandbox_result.fetch("generated_at")
+            )
+            configurations[case_row.module_name] << record.fetch("configuration_digest")
+          end
+          unless PatrolQualification.canonical(sandbox_result.fetch("receipts")) ==
+                 PatrolQualification.canonical(expected_receipts)
+            raise Error, "external smoke receipts differ from the trusted controls"
+          end
+          inspections = sandbox_result.fetch("module_inspections")
+          unless inspections.is_a?(Hash) && inspections.keys.sort == MODULES.sort
+            raise Error, "external smoke module inspection inventory differs"
+          end
+          MODULES.each do |name|
+            expected_configuration = configurations.fetch(name).uniq
+            row = inspections.fetch(name)
+            valid = expected_configuration.one? && row.is_a?(Hash) &&
+              row.keys.sort == %w[configuration_digest status] &&
+              row.values_at("status", "configuration_digest") ==
+                [ "active", expected_configuration.fetch(0) ]
+            raise Error, "external smoke #{name} revalidation differs" unless valid
+          end
+          report_digest = Digest::SHA256.hexdigest(read_report(
+            File.join(state_path, "module-runtime", "migration", "report.json")
+          ))
+          before, after = sandbox_result.values_at("report_before_sha256", "report_after_sha256")
+          unless before.to_s.match?(/\A[0-9a-f]{64}\z/) && before == after && before == report_digest
+            raise Error, "external smoke changed the migration report"
+          end
+          {
+            "status" => "passed", "modules" => MODULES,
+            "receipt_count" => expected_receipts.size,
+            "catalog_digest" => catalog_digest,
+            "scenario_manifest_digest" => common.fetch("scenario_manifest_digest"),
+            "report_sha256" => report_digest
+          }.freeze
+        rescue ArgumentError, KeyError, TypeError => e
+          raise Error, "external smoke result is malformed: #{e.class.name}"
+        end
+
         private
+
+        def external_smoke_worker(controller_sha:, candidate_sha:, candidate:, trusted_catalog_path:)
+          unless controller_sha.to_s.match?(/\A[0-9a-f]{40}\z/) &&
+                 candidate_sha.to_s.match?(/\A[0-9a-f]{40}\z/) &&
+                 controller_sha != candidate_sha && candidate.is_a?(Hash) &&
+                 candidate.fetch("candidate_sha") == candidate_sha &&
+                 candidate.fetch("archive_sha256").to_s.match?(/\A[0-9a-f]{64}\z/) &&
+                 candidate.fetch("module_manifest_sha256").to_s.match?(/\A[0-9a-f]{64}\z/)
+            raise Error, "external smoke worker authority binding is malformed"
+          end
+          run_root = File.join(File.dirname(@repo_root), "external-smoke")
+          raise Error, "external smoke worker root must not pre-exist" if File.exist?(run_root)
+          Dir.mkdir(run_root, 0o700)
+          FileUtils.mkdir_p(@evidence_root, mode: 0o700)
+          setup_process(run_root)
+          catalog = Catalog.load(trusted_catalog_path, deadline: @deadline)
+          report_path = File.join(state_path, "module-runtime", "migration", "report.json")
+          report_before = read_report(report_path)
+          installed = {
+            "sha" => candidate_sha, "candidate_sha" => candidate_sha,
+            "archive_sha256" => candidate.fetch("archive_sha256"), "root" => @repo_root,
+            "module_manifest_sha256" => candidate.fetch("module_manifest_sha256")
+          }
+          install_candidate(installed, run_root)
+          catalog_repo = build_module_catalog(installed, run_root)
+          install_modules(catalog_repo)
+          identity_before = external_installed_identity(installed)
+          prepared = collect_receipts(catalog, installed, claim: "u3c")
+          inspections = revalidate_external_modules
+          identity_after = external_installed_identity(installed)
+          report_after = read_report(report_path)
+          unless report_before == report_after
+            raise Error, "external smoke worker changed the migration report"
+          end
+          {
+            "candidate" => {
+              "candidate_sha" => candidate_sha,
+              "archive_sha256" => candidate.fetch("archive_sha256"),
+              "identity_before" => identity_before,
+              "identity_after" => identity_after
+            },
+            "payload" => {
+              "generated_at" => prepared.fetch("generated_at"),
+              "receipts" => prepared.fetch("receipts"),
+              "module_inspections" => inspections,
+              "report_before_sha256" => Digest::SHA256.hexdigest(report_before),
+              "report_after_sha256" => Digest::SHA256.hexdigest(report_after)
+            }
+          }
+        rescue SystemCallError, JSON::ParserError, Psych::Exception => e
+          raise Error, "external smoke worker failed: #{e.class.name}"
+        end
+
+        def revalidate_external_modules
+          MODULES.to_h do |name|
+            expected = @installed_generations.fetch(name)
+            inspected = JSON.parse(hive([ "module", "inspect", name, "--json" ]).stdout)
+            validate_inspection!(inspected, name:, expected:)
+            [ name, {
+              "status" => "active",
+              "configuration_digest" => expected.fetch("configuration_digest")
+            } ]
+          end
+        end
+
+        def external_installed_identity(candidate)
+          specifications = File.join(@install_root, "specifications")
+          stat = File.lstat(specifications)
+          unless stat.directory? && !stat.symlink? && stat.uid == Process.uid
+            raise Error, "installed dependency specifications are unavailable"
+          end
+          closure = []
+          Dir.each_child(specifications) do |name|
+            raise Error, "installed dependency closure exceeds its member bound" if closure.size >= 4_096
+            path = File.join(specifications, name)
+            bytes = PatrolQualification.bounded_read(
+              path, label: "installed dependency specification", limit: 1024 * 1024,
+              deadline: @deadline
+            )
+            specification = Gem::Specification.load(path)
+            unless specification && specification.name.to_s.bytesize.between?(1, 256) &&
+                   specification.version.to_s.bytesize.between?(1, 256) &&
+                   specification.platform.to_s.bytesize.between?(1, 256)
+              raise Error, "installed dependency specification is malformed"
+            end
+            closure << {
+              "name" => specification.name.to_s,
+              "version" => specification.version.to_s,
+              "platform" => specification.platform.to_s,
+              "full_name" => specification.full_name.to_s,
+              "spec_sha256" => Digest::SHA256.hexdigest(bytes)
+            }
+          end
+          closure.sort_by! { |row| row.fetch("full_name") }
+          names = closure.map { |row| row.fetch("full_name") }
+          raise Error, "installed dependency closure is empty or duplicated" if
+            closure.empty? || names.uniq.size != names.size
+          toolchain = {
+            "ruby" => run("ruby", "--version", label: "resolve installed Ruby").stdout.strip,
+            "rubygems" => run("gem", "--version", label: "resolve installed RubyGems").stdout.strip,
+            "bundler" => run("bundle", "--version", label: "resolve installed Bundler").stdout.strip
+          }
+          canonical_closure = JSON.generate(PatrolQualification.canonical_value(closure))
+          canonical_toolchain = JSON.generate(PatrolQualification.canonical_value(toolchain))
+          {
+            "gem_sha256" => candidate.fetch("gem_sha256"),
+            "installed_hive_sha256" => candidate.fetch("installed_hive_sha256"),
+            "module_manifest_sha256" => candidate.fetch("module_manifest_sha256"),
+            "dependency_closure" => closure,
+            "dependency_closure_sha256" => Digest::SHA256.hexdigest(canonical_closure),
+            "toolchain" => toolchain,
+            "toolchain_sha256" => Digest::SHA256.hexdigest(canonical_toolchain)
+          }
+        rescue Errno::ENOENT, Errno::EACCES
+          raise Error, "installed dependency closure is unavailable"
+        end
 
         def setup_process(run_root)
           @env = {
@@ -580,6 +788,7 @@ module Hive
           run("gem", "build", "hive.gemspec", "--output", gem_file,
               cwd: candidate.fetch("root"), label: "build candidate gem")
           install_root = File.join(run_root, "installed")
+          @install_root = install_root
           installer = File.join(candidate.fetch("root"), "packaging/live_agent_skills/install_candidate_gem.sh")
           run("/bin/bash", installer, gem_file, install_root, label: "install candidate gem")
           @hive_bin = File.join(install_root, "bin", "hive")
@@ -624,6 +833,7 @@ module Hive
         end
 
         def install_modules(catalog_repo)
+          @installed_generations = {}
           rewrite = {
             "GIT_CONFIG_COUNT" => "5",
             "GIT_CONFIG_KEY_4" => "url.file://#{catalog_repo}/.insteadOf",
@@ -658,6 +868,7 @@ module Hive
             validate_generation!(apply.dig("selection", "active"), expected, name:)
             inspected = JSON.parse(hive([ "module", "inspect", name, "--json" ]).stdout)
             validate_inspection!(inspected, name:, expected:)
+            @installed_generations[name] = expected.freeze
           end
         end
 
@@ -709,25 +920,29 @@ module Hive
           settings + hooks + grants.flatten
         end
 
-        def collect_receipts(catalog, candidate)
+        def collect_receipts(catalog, candidate, claim: "u3br")
           reader = ObservationReader.new(project_root: @project_root,
                                          observations_path: @observations_path,
                                          catalog: catalog, deadline: @deadline)
           catalog_digest = Digest::SHA256.hexdigest(catalog.bytes)
           common = {
-            "run_id" => "u3br-#{candidate.fetch('sha')[0, 12]}",
+            "run_id" => "#{claim}-#{candidate.fetch('sha')[0, 12]}",
             "candidate_sha" => candidate.fetch("sha"),
             "catalog_digest" => catalog_digest,
             "source_digest" => candidate.fetch("archive_sha256"),
-            "manifest_digest" => Digest::SHA256.hexdigest(MODULES.map { |name|
-              File.binread(File.join(candidate.fetch("root"), "modules", name, "manifest.yml"))
-            }.join("\0")),
+            "manifest_digest" => if claim == "u3c"
+              candidate.fetch("module_manifest_sha256")
+            else
+              Digest::SHA256.hexdigest(MODULES.map { |name|
+                File.binread(File.join(candidate.fetch("root"), "modules", name, "manifest.yml"))
+              }.join("\0"))
+            end,
             "scenario_manifest_digest" => Digest::SHA256.hexdigest(catalog.bytes + "\0" + reader.bytes),
             "artifacts" => [
               { "kind" => "candidate_archive", "digest" => candidate.fetch("archive_sha256") },
               { "kind" => "scenario_catalog", "digest" => catalog_digest }
             ],
-            "reviewer" => "hive-e2e/u3br"
+            "reviewer" => claim == "u3c" ? "hive-e2e/u3c-smoke" : "hive-e2e/u3br"
           }
           generated_at = Time.now.utc.iso8601(6)
           prepared = []

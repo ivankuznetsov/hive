@@ -450,6 +450,153 @@ class E2EPatrolQualificationSupportTest < Minitest::Test
     end
   end
 
+  def test_external_smoke_is_read_only_distinct_head_and_never_admits_qualification
+    Dir.mktmpdir("patrol-external-smoke") do |root|
+      project = File.join(root, "project")
+      state = File.join(project, ".hive-state")
+      FileUtils.mkdir_p(state)
+      File.binwrite(File.join(state, "config.yml"), "hive_state_path: .hive-state\n")
+      catalog = Catalog.load(CATALOG_PATH)
+      observations = write_records_and_observations(root, state, catalog)
+      report_path = File.join(state, "module-runtime", "migration", "report.json")
+      FileUtils.mkdir_p(File.dirname(report_path))
+      report_bytes = Hive::E2E::PatrolQualification.canonical(
+        "schema" => "hive-module-migration-report", "schema_version" => 2,
+        "status" => "evidence_required"
+      )
+      File.binwrite(report_path, report_bytes)
+      candidate = {
+        "candidate_sha" => "b" * 40, "archive_sha256" => "c" * 64,
+        "module_manifest_sha256" => "d" * 64
+      }
+      generated_at = "2026-08-05T10:00:00.000000Z"
+      reader = ObservationReader.new(
+        project_root: project, observations_path: observations, catalog: catalog,
+        deadline: monotonic + 5
+      )
+      common = {
+        "run_id" => "u3c-#{candidate.fetch('candidate_sha')[0, 12]}",
+        "candidate_sha" => candidate.fetch("candidate_sha"),
+        "catalog_digest" => Digest::SHA256.hexdigest(catalog.bytes),
+        "source_digest" => candidate.fetch("archive_sha256"),
+        "manifest_digest" => candidate.fetch("module_manifest_sha256"),
+        "scenario_manifest_digest" => Digest::SHA256.hexdigest(catalog.bytes + "\0" + reader.bytes),
+        "artifacts" => [
+          { "kind" => "candidate_archive", "digest" => candidate.fetch("archive_sha256") },
+          { "kind" => "scenario_catalog", "digest" => Digest::SHA256.hexdigest(catalog.bytes) }
+        ],
+        "reviewer" => "hive-e2e/u3c-smoke"
+      }
+      controller = Controller.allocate
+      controller.instance_variable_set(:@repo_root, File.expand_path("../../..", __dir__))
+      controller.instance_variable_set(:@project_root, project)
+      controller.instance_variable_set(:@observations_path, observations)
+      controller.instance_variable_set(:@deadline, monotonic + 5)
+      receipts = []
+      configurations = Hash.new { |hash, key| hash[key] = [] }
+      reader.each do |case_row, observation, record|
+        receipts << controller.send(:expected_receipt, common, case_row, observation, record, generated_at)
+        configurations[case_row.module_name] << record.fetch("configuration_digest")
+      end
+      sandbox_result = {
+        "generated_at" => generated_at,
+        "receipts" => receipts,
+        "module_inspections" => MODULES.to_h do |name|
+          [ name, { "status" => "active", "configuration_digest" => configurations.fetch(name).uniq.fetch(0) } ]
+        end,
+        "report_before_sha256" => Digest::SHA256.hexdigest(report_bytes),
+        "report_after_sha256" => Digest::SHA256.hexdigest(report_bytes)
+      }
+
+      result = controller.external_smoke(
+        controller_sha: "a" * 40, candidate_sha: candidate.fetch("candidate_sha"),
+        candidate:, sandbox_result:
+      )
+
+      assert_equal "passed", result.fetch("status")
+      assert_equal MODULES, result.fetch("modules")
+      assert_equal catalog.cases.size, result.fetch("receipt_count")
+      assert_equal report_bytes, File.binread(report_path)
+      source = File.binread(File.expand_path("patrol_qualification.rb", __dir__))
+      external_source = source[/def external_smoke\b.*?^        private/m]
+      refute_nil external_source
+      refute_includes external_source, "admit_qualification"
+      refute_includes external_source, "PatrolQualification.build"
+
+      sandbox_result["receipts"][0] = sandbox_result.fetch("receipts").fetch(1)
+      assert_raises(Hive::E2E::PatrolQualification::Error) do
+        controller.external_smoke(
+          controller_sha: "a" * 40, candidate_sha: candidate.fetch("candidate_sha"),
+          candidate:, sandbox_result:
+        )
+      end
+    end
+  end
+
+  def test_external_smoke_worker_runs_only_the_closed_sandbox_sequence
+    Dir.mktmpdir("patrol-external-worker") do |root|
+      candidate_root = File.join(root, "candidate")
+      FileUtils.mkdir_p(candidate_root)
+      calls = []
+      identity = {
+        "gem_sha256" => "1" * 64, "installed_hive_sha256" => "2" * 64,
+        "module_manifest_sha256" => "3" * 64, "dependency_closure" => [],
+        "dependency_closure_sha256" => "4" * 64, "toolchain" => {},
+        "toolchain_sha256" => "5" * 64
+      }
+      controller = Controller.allocate
+      controller.instance_variable_set(:@repo_root, candidate_root)
+      controller.instance_variable_set(:@project_root, File.join(root, "project"))
+      controller.instance_variable_set(:@observations_path, File.join(root, "observations.json"))
+      controller.instance_variable_set(:@evidence_root, File.join(root, "evidence"))
+      controller.instance_variable_set(:@deadline, monotonic + 5)
+      controller.define_singleton_method(:state_path) { File.join(root, "state") }
+      controller.define_singleton_method(:setup_process) { |_| calls << :setup }
+      controller.define_singleton_method(:read_report) { |_| "unchanged-report\n" }
+      controller.define_singleton_method(:install_candidate) do |candidate, _|
+        calls << :install_candidate
+        candidate["gem_sha256"] = "1" * 64
+        candidate["installed_hive_sha256"] = "2" * 64
+      end
+      controller.define_singleton_method(:build_module_catalog) do |_, _|
+        calls << :build_catalog
+        File.join(root, "catalog")
+      end
+      controller.define_singleton_method(:install_modules) { |_| calls << :install_modules }
+      controller.define_singleton_method(:external_installed_identity) do |_|
+        calls << :installed_identity
+        identity
+      end
+      controller.define_singleton_method(:collect_receipts) do |_, _, claim:|
+        calls << [ :collect_receipts, claim ]
+        { "generated_at" => "2026-08-05T10:00:00Z", "receipts" => [] }
+      end
+      controller.define_singleton_method(:revalidate_external_modules) do
+        calls << :revalidate_modules
+        MODULES.to_h { |name| [ name, { "status" => "active", "configuration_digest" => "6" * 64 } ] }
+      end
+
+      result = controller.external_smoke(
+        controller_sha: "a" * 40, candidate_sha: "b" * 40,
+        candidate: {
+          "candidate_sha" => "b" * 40, "archive_sha256" => "7" * 64,
+          "module_manifest_sha256" => "3" * 64
+        },
+        trusted_catalog_path: CATALOG_PATH, worker: true
+      )
+
+      assert_equal [
+        :setup, :install_candidate, :build_catalog, :install_modules,
+        :installed_identity, [ :collect_receipts, "u3c" ], :revalidate_modules,
+        :installed_identity
+      ], calls
+      assert_equal identity, result.dig("candidate", "identity_before")
+      assert_equal identity, result.dig("candidate", "identity_after")
+      assert_equal Digest::SHA256.hexdigest("unchanged-report\n"),
+                   result.dig("payload", "report_after_sha256")
+    end
+  end
+
   private
 
   def write_records_and_observations(root, state, catalog)

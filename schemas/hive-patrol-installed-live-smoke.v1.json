@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hive.local/schemas/hive-patrol-installed-live-smoke.v1.json",
+  "title": "Hive reduced Patrol installed/live smoke result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schema_version", "status", "reason", "claim_fences",
+    "same_user_limitation", "authority", "candidate", "sandbox", "smoke",
+    "provider", "process_evidence", "started_at", "finished_at"
+  ],
+  "properties": {
+    "schema": { "const": "hive-patrol-installed-live-smoke" },
+    "schema_version": { "const": 1 },
+    "status": {
+      "enum": ["not_started", "installed_live_smoke_verified", "blocked", "failed"]
+    },
+    "reason": {
+      "type": ["string", "null"],
+      "enum": [
+        null, "manual_authority_missing", "sandbox_unavailable",
+        "installed_dependency_missing", "credential_unavailable",
+        "provider_unavailable", "evidence_store_full", "candidate_identity",
+        "candidate_archive", "runtime_identity", "path_custody", "sandbox_contract",
+        "process_custody", "credential_custody", "provider_transport",
+        "effect_forbidden", "authority_binding", "input_bound", "output_bound",
+        "publication_conflict", "evidence_custody", "smoke_validation",
+        "unexpected_failure"
+      ]
+    },
+    "claim_fences": {
+      "const": [
+        "not_full_u3b",
+        "prepared_records_not_fresh_scheduler_matrix",
+        "controller_does_not_supply_full_independent_matrix",
+        "not_report_installed_live_qualification",
+        "provider_probe_not_patrol_decision",
+        "not_evidence_ready_for_operator",
+        "not_cutover_or_promotion_authority"
+      ]
+    },
+    "same_user_limitation": {
+      "const": "same_user_host_processes_are_outside_the_sandbox_claim"
+    },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id", "controller_sha", "candidate_sha", "runner_sha256",
+        "controller_script_sha256",
+        "authorization_sha256", "invocation_id"
+      ],
+      "properties": {
+        "run_id": { "$ref": "#/$defs/safeId" },
+        "controller_sha": { "$ref": "#/$defs/sha" },
+        "candidate_sha": { "$ref": "#/$defs/sha" },
+        "runner_sha256": { "$ref": "#/$defs/digest" },
+        "controller_script_sha256": { "$ref": "#/$defs/digest" },
+        "authorization_sha256": { "$ref": "#/$defs/digest" },
+        "invocation_id": { "$ref": "#/$defs/safeId" }
+      }
+    },
+    "candidate": { "$ref": "#/$defs/nullableRecord" },
+    "sandbox": { "$ref": "#/$defs/nullableRecord" },
+    "smoke": { "$ref": "#/$defs/nullableRecord" },
+    "provider": { "$ref": "#/$defs/nullableRecord" },
+    "process_evidence": {
+      "type": "array",
+      "maxItems": 64,
+      "items": { "type": "object" }
+    },
+    "started_at": { "type": "string", "format": "date-time", "maxLength": 64 },
+    "finished_at": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "string", "format": "date-time", "maxLength": 64 }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "not_started" } } },
+      "then": {
+        "properties": {
+          "reason": { "type": "null" },
+          "candidate": { "type": "null" },
+          "sandbox": { "type": "null" },
+          "smoke": { "type": "null" },
+          "provider": { "type": "null" },
+          "finished_at": { "type": "null" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "status": { "const": "installed_live_smoke_verified" } } },
+      "then": {
+        "properties": {
+          "reason": { "type": "null" },
+          "candidate": { "type": "object" },
+          "sandbox": { "type": "object" },
+          "smoke": { "type": "object" },
+          "provider": { "type": "object" },
+          "finished_at": { "type": "string" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "safeId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "nullableRecord": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "object" }
+      ]
+    }
+  }
+}

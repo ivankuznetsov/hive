@@ -60,6 +60,32 @@ class ReleaseCandidateRemoteWorkflowTest < Minitest::Test
     assert_equal false, result.fetch("release_action_performed")
   end
 
+  def test_github_client_normalizes_identical_comparison_without_head_commit
+    status = Struct.new(:success?).new(true)
+    command_runner = lambda do |*argv, **options|
+      assert_equal [
+        "gh", "api", "repos/ivankuznetsov/hive/compare/#{SHA}...#{SHA}"
+      ], argv
+      assert_equal File.expand_path("../../..", __dir__), options.fetch(:chdir)
+      payload = {
+        "status" => "identical",
+        "base_commit" => { "sha" => SHA },
+        "head_commit" => nil
+      }
+      [ JSON.generate(payload), "", status ]
+    end
+    client = HiveReleaseCandidate::GitHubClient.new(
+      repo_root: File.expand_path("../../..", __dir__),
+      repository: "ivankuznetsov/hive",
+      command_runner: command_runner
+    )
+
+    assert_equal(
+      { "status" => "identical", "base_sha" => SHA, "head_sha" => SHA },
+      client.comparison(base: SHA, head: SHA)
+    )
+  end
+
   def test_dispatch_returns_dispatched_unresolved_after_bounded_resolution
     client = FakeClient.new(runs: [], dispatches: [])
     sleeps = 0

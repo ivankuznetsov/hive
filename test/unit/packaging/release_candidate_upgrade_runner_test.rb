@@ -4,7 +4,7 @@ require_relative "../../../packaging/release_candidate/runner"
 class ReleaseCandidateUpgradeRunnerTest < Minitest::Test
   SHA = "a" * 40
 
-  def test_runner_executes_both_upgrade_gates_only_after_cache_and_sandbox_preflight
+  def test_gate_execution_runs_both_upgrade_gates_only_after_cache_and_sandbox_preflight
     rows = []
     upgrade = lambda do |row_id:, candidate_manifest:, **|
       rows << row_id
@@ -18,8 +18,8 @@ class ReleaseCandidateUpgradeRunnerTest < Minitest::Test
         "network_after_staging" => "none", "candidate_sha" => candidate_sha
       }
     end
-    runner = HiveReleaseCandidate::Runner.new(
-      repo_root: File.expand_path("../../..", __dir__),
+    registry = HiveReleaseCandidate::GateRegistry.new
+    execution = HiveReleaseCandidate::GateExecution.new(
       upgrade_executor: upgrade, sandbox: sandbox
     )
     manifest = {
@@ -37,8 +37,8 @@ class ReleaseCandidateUpgradeRunnerTest < Minitest::Test
     artifacts = Struct.new(:candidate_dir).new("/candidate")
 
     %w[latest_stable_upgrade legacy_bench_v041_upgrade].each do |name|
-      result = runner.send(
-        :execute_gate, runner.registry.fetch(name),
+      result = execution.call(
+        registry.fetch(name),
         artifacts: artifacts, inputs: {}, manifest: manifest,
         baseline_cache: cache
       )
@@ -47,8 +47,8 @@ class ReleaseCandidateUpgradeRunnerTest < Minitest::Test
     end
     assert_equal %w[latest-stable legacy-bench-v041], rows
 
-    missing = runner.send(
-      :execute_gate, runner.registry.fetch("latest_stable_upgrade"),
+    missing = execution.call(
+      registry.fetch("latest_stable_upgrade"),
       artifacts: artifacts, inputs: {}, manifest: manifest,
       baseline_cache: { "status" => "missing", "reason" => "baseline_assets_missing" }
     )
@@ -61,15 +61,13 @@ class ReleaseCandidateUpgradeRunnerTest < Minitest::Test
     assert_equal 2, rows.size, "missing cache must not invoke the producer"
   end
 
-  def test_runner_does_not_claim_sandbox_availability_without_a_local_executor
+  def test_gate_execution_does_not_claim_sandbox_availability_without_a_local_executor
     sandbox = Object.new
     sandbox.define_singleton_method(:capability) do |**|
       raise "sandbox must not be probed without an executable local lane"
     end
-    runner = HiveReleaseCandidate::Runner.new(
-      repo_root: File.expand_path("../../..", __dir__),
-      sandbox: sandbox
-    )
+    registry = HiveReleaseCandidate::GateRegistry.new
+    execution = HiveReleaseCandidate::GateExecution.new(sandbox: sandbox)
     manifest = {
       "candidate_sha" => SHA, "hive_version" => "0.6.9",
       "files" => {
@@ -84,8 +82,8 @@ class ReleaseCandidateUpgradeRunnerTest < Minitest::Test
     }
     artifacts = Struct.new(:candidate_dir).new("/candidate")
 
-    result = runner.send(
-      :execute_gate, runner.registry.fetch("latest_stable_upgrade"),
+    result = execution.call(
+      registry.fetch("latest_stable_upgrade"),
       artifacts: artifacts, inputs: {}, manifest: manifest,
       baseline_cache: cache
     )
@@ -100,22 +98,21 @@ class ReleaseCandidateUpgradeRunnerTest < Minitest::Test
   end
 
   def test_candidate_version_gate_uses_the_reviewed_catalog_input
-    runner = HiveReleaseCandidate::Runner.new(
-      repo_root: File.expand_path("../../..", __dir__)
-    )
-    gate = runner.registry.fetch("candidate_version")
+    registry = HiveReleaseCandidate::GateRegistry.new
+    execution = HiveReleaseCandidate::GateExecution.new
+    gate = registry.fetch("candidate_version")
     artifacts = Struct.new(:candidate_dir).new("/candidate")
     cache = { "status" => "available" }
 
-    passed = runner.send(
-      :execute_gate, gate,
+    passed = execution.call(
+      gate,
       artifacts: artifacts,
       inputs: { "baselines" => { "latest_stable_version" => "0.6.9" } },
       manifest: { "hive_version" => "0.7.0" },
       baseline_cache: cache
     )
-    unavailable = runner.send(
-      :execute_gate, gate,
+    unavailable = execution.call(
+      gate,
       artifacts: artifacts,
       inputs: { "baselines" => { "status" => "unavailable" } },
       manifest: { "hive_version" => "0.7.0" },
@@ -128,8 +125,15 @@ class ReleaseCandidateUpgradeRunnerTest < Minitest::Test
   end
 
   def test_resume_selects_only_incomplete_or_absent_default_gates
-    runner = HiveReleaseCandidate::Runner.new(
-      repo_root: File.expand_path("../../..", __dir__)
+    repo_root = File.expand_path("../../..", __dir__)
+    repository = HiveReleaseCandidate::Repository.new(repo_root)
+    registry = HiveReleaseCandidate::GateRegistry.new
+    attempt = HiveReleaseCandidate::LocalAttempt.new(
+      repo_root: repo_root, runs_root: nil, repository: repository, registry: registry,
+      baseline_cache: HiveReleaseCandidate::BaselineCache.new(
+        repo_root: repo_root, repository: repository
+      ),
+      gate_execution: HiveReleaseCandidate::GateExecution.new
     )
     source = {
       "effective_gate_set" => [
@@ -140,7 +144,7 @@ class ReleaseCandidateUpgradeRunnerTest < Minitest::Test
       ]
     }
 
-    selected = runner.send(:missing_for_resume, source).map(&:name)
+    selected = attempt.send(:missing_for_resume, source).map(&:name)
 
     assert_includes selected, "latest_stable_upgrade"
     assert_includes selected, "legacy_bench_v041_upgrade"

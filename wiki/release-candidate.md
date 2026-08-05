@@ -3,7 +3,7 @@ title: Release Candidate Evidence
 type: reference
 source: bin/hive-release-candidate, packaging/release_candidate/, packaging/managed_web_archive.rb, .github/workflows/{release-candidate,release}.yml
 created: 2026-07-27
-updated: 2026-08-04
+updated: 2026-08-05
 tags: [release, candidate, evidence, packaging, safety]
 ---
 
@@ -78,6 +78,18 @@ inputs, scope/trust/QA status, blockers, and a non-authoritative next action.
 `scope_status: passed` means only the requested local scope passed. It cannot
 turn local `trust_scope` into `trusted_remote` or clear
 `remote_validation_required`.
+
+## Orchestration boundaries
+
+`Runner` is the stable public façade and composition root. `Repository` owns
+committed candidate inputs and Git identity; `BaselineCache` performs only
+cache authorization and observation; `GateExecution` returns gate results
+without persistence; `LocalAttempt` owns candidate locking, attempt selection,
+artifact/input preparation, interruption capture, and evidence publication;
+and `RemoteRun` owns dispatch/retry/collection orchestration while retaining
+`RemoteWorkflow` as the protected-main and remote-payload boundary. These are
+internal collaborators: none constructs or requires `Runner`, and no new
+public component contract is implied.
 
 ## Reviewed release baselines
 
@@ -257,11 +269,37 @@ skipped, cancelled, or failed cells produce retained `qa_blocked` evidence.
 The final `aggregate` job checks out no code, verifies terminal evidence by
 SHA-256, and alone receives `checks: write`; its stable success or failure
 Check Run external identity includes the evidence digest. Live-agent proof
-remains advisory.
+remains advisory. Retry admission and release selection both ignore the Check
+Run details URL because GitHub rewrites it after creation. They bind the
+candidate SHA, GitHub Actions app, terminal state, and exact external identity,
+then independently revalidate the referenced run, jobs, evidence artifact, and
+evidence body.
 
-No hosted workflow was dispatched during implementation. The workflow and
-targeted-retry behavior remain contract-tested source until an explicitly
-authorized exact-head hosted run exercises the real matrix.
+The first authorized protected-main campaign ran on 2026-08-05 against exact
+candidate/workflow SHA `0904ef6832c7b8fbc41c87afc324d2b30caef08d` as run
+`31005500332`, attempt 1. It retained candidate artifact `8930132232` with
+digest
+`sha256:4ebf7a2ebafc54db450fa97bee38219c70c76ff6de5ce8ef667b135614889da4`
+and terminal evidence artifact `8930404097`. The aggregate was correctly
+`qa_blocked`: seven of fourteen required gates passed and seven failed. This
+was dogfood evidence, not release authority, and no release action occurred.
+
+That run also exposed two remote-edge response shapes. GitHub's compare API
+can report identical full SHAs while omitting `head_commit`; the CLI normalizes
+that exact response to the verified base SHA before protected-main identity
+validation. GitHub also canonicalizes a newly created Check Run's requested
+workflow-run details URL to `/runs/<check-id>`. Retry admission therefore binds
+the separately verified source run/attempt and artifact to the exact candidate
+SHA plus the Check Run's GitHub Actions app, terminal conclusion, and signed
+external ID/evidence digest; it does not treat the mutable details URL as an
+identity field.
+
+The first named-retry dogfood run, `31006277887`, failed closed at the obsolete
+details-URL assertion before its selected gate ran. Its partial terminal
+artifact intentionally had no top-level `evidence.json`, so read-only
+collection rejected it instead of treating partial diagnostics as trusted
+evidence. A fresh post-fix targeted run is still required to prove selected
+gate execution and predecessor artifact reuse.
 
 The explicit hosted command sequence is:
 
@@ -325,7 +363,9 @@ explicit decision to create and push `vX.Y.Z` may start `release.yml`. The
 candidate CLI and trusted aggregate never choose a version, create a tag,
 publish, deploy, or release.
 
-Current implementation evidence is intentionally blocked: the checked-in
-source version is 0.6.9 and the reviewed latest-stable alias is also v0.6.9, so
-`candidate_not_newer` applies. No real hosted, native-platform, or historical
-package candidate run was performed, and no release action was authorized.
+Current hosted evidence remains intentionally blocked: the checked-in source
+version is 0.6.9 and the reviewed latest-stable alias is also v0.6.9, so
+`candidate_not_newer` applies. The first real native-platform and historical
+package campaign additionally exposed shallow-tag checkout, managed-Web CLI,
+and staged dependency-cache failures that remain separate dogfood findings.
+No release action was authorized or performed.

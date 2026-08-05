@@ -310,10 +310,13 @@ module HiveReleaseCandidate
 
     def comparison(base:, head:)
       payload = api("repos/#{repo_slug}/compare/#{base}...#{head}")
+      base_sha = payload.dig("base_commit", "sha")
+      head_sha = payload.dig("head_commit", "sha")
+      head_sha ||= base_sha if payload["status"] == "identical"
       {
         "status" => payload["status"],
-        "base_sha" => payload.dig("base_commit", "sha"),
-        "head_sha" => payload.dig("head_commit", "sha")
+        "base_sha" => base_sha,
+        "head_sha" => head_sha
       }
     end
 

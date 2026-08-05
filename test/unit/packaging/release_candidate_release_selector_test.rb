@@ -54,6 +54,17 @@ class ReleaseCandidateReleaseSelectorTest < Minitest::Test
     end
   end
 
+  def test_selection_accepts_github_rewritten_check_run_details_url
+    fixture = fixture()
+    fixture.dig(:checks, "check_runs", 0)["details_url"] =
+      "https://github.com/#{REPOSITORY}/runs/123456789"
+
+    result = selector(fixture).select
+
+    assert_equal 42, result.fetch("evidence_run_id")
+    assert_equal EVIDENCE_SHA, result.fetch("evidence_sha256")
+  end
+
   def test_verifies_trusted_evidence_artifact_producer_and_ordinary_ci
     fixture = fixture()
     selected = selector(fixture).select
@@ -107,7 +118,6 @@ class ReleaseCandidateReleaseSelectorTest < Minitest::Test
       "candidate SHA" => ->(f) { f.dig(:checks, "check_runs", 0)["head_sha"] = "9" * 40 },
       "check conclusion" => ->(f) { f.dig(:checks, "check_runs", 0)["conclusion"] = "failure" },
       "external ID" => ->(f) { f.dig(:checks, "check_runs", 0)["external_id"] = "invalid" },
-      "details URL" => ->(f) { f.dig(:checks, "check_runs", 0)["details_url"] = "https://example.test" },
       "workflow path" => ->(f) { f[:run]["path"] = ".github/workflows/other.yml" },
       "workflow revision" => ->(f) { f[:run]["head_sha"] = "short" },
       "branch" => ->(f) { f[:run]["head_branch"] = "feature" },

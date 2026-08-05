@@ -182,6 +182,19 @@ class WorkflowCreatorLiveSetupTest < Minitest::Test
     end
   end
 
+  def test_admits_an_immutable_root_owned_toolchain_binary
+    path = %w[/usr/bin/ruby /bin/sh].find do |candidate|
+      stat = File.lstat(candidate)
+      stat.file? && !stat.symlink? && stat.uid.zero? && (stat.mode & 0o022).zero?
+    rescue SystemCallError
+      false
+    end
+    skip "no immutable root-owned toolchain binary is available" unless path
+
+    bytes = Setup.allocate.send(:safe_file, path, 268_435_456)
+    assert_equal File.binread(path), bytes
+  end
+
   private
 
   def prepare(fixture, correlation_id: "workflow-creator-live-setup")

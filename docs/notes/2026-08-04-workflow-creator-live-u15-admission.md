@@ -100,7 +100,9 @@ executed instruction plus retained candidate/OpenClaw closures.
   before and after both outer launches.
 - Admit and invoke the committed exact OpenClaw package/version/registry/
   integrity closure and native executable path. The workflow installs that
-  lock; it does not select a floating package.
+  lock; it does not select a floating package. External toolchain inputs must
+  be immutable regular files owned by either the runner or root, matching
+  hosted toolcache ownership without admitting foreign-user files.
 - Require retained native `openclaw skills info hive --json` evidence and bind
   the final operational payload to the one created editorial task at
   `1-research`; neither claim may be synthesized from model success alone.

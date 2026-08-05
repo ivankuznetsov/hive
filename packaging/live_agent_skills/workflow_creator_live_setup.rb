@@ -438,7 +438,8 @@ module HiveLiveAgentProof
 
     def safe_file(path, limit)
       stat = File.lstat(path)
-      valid = stat.file? && !stat.symlink? && stat.uid == Process.uid && stat.nlink == 1
+      trusted_owner = stat.uid == Process.uid || stat.uid.zero?
+      valid = stat.file? && !stat.symlink? && trusted_owner && stat.nlink == 1
       valid &&= (stat.mode & 0o022).zero? && stat.size.between?(1, limit)
       raise Error unless valid
       bytes = File.binread(path)

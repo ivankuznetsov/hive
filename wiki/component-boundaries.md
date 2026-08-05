@@ -332,6 +332,9 @@ socket stays in the owner-private workspace parent; the model sees only the
 disposable worktree.
 Exact Git, skill, config, and approval identities are
 rechecked at every candidate command and around both model loops.
+Setup accepts immutable external toolchain files owned only by the current
+runner or root; copied identity members are always recreated under the runner's
+private closure.
 `WorkflowCreatorLiveRunner` selects the provider from the committed model
 prefix, exposes exactly the selected credential to the two U14-supervised
 OpenClaw launches, strips provider and repository authority from tool children,

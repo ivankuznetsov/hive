@@ -559,14 +559,10 @@ and thesis schema. Scheduled JobStore state uses a split namespace:
 
 ```text
 .hive-state/refactor_patrol/
-  jobstore-fresh-start.json      # completed opaque reset receipt, when needed
   v2/
     reconciler.json              # exact-host catch-up checkpoint, schema v2
     reconciler-progress.json     # identity-bound page/intake cursor, schema v1
     manifests/<job-id>.json      # write-once source occurrence
-    jobs/                        # obsolete backlog before explicit reset
-    jobs                         # regular reset marker after explicit reset
-    .jobs-v2-archive-<nonce>/    # exact opaque archived backlog
     families/<family-id>.json    # rebuildable semantic-family projection
     results/<dispatch-id>.json   # daemon completion channel; removed on reap
     runs/ and logs/              # agent evidence
@@ -576,11 +572,11 @@ and thesis schema. Scheduled JobStore state uses a split namespace:
     indexes/                     # rebuildable job/action/query projections
 ```
 
-Hive never reads or converts the obsolete v2 jobs directory. Its presence
-blocks scheduled runtime until the operator explicitly archives it and accepts
-an empty v3 start with `hive refactor-patrol-reset PROJECT --confirm`; see
-[[commands/refactor-patrol-reset]]. Every non-JobStore v2 owner above remains
-live across that reset.
+JobStore authority is fixed at v3. Construction and `--list`/`--show` do not
+create state, while the first mutation lazily creates only v3. Runtime never
+probes, reads, hashes, moves, deletes, or interprets an obsolete `v2/jobs`
+entry; arbitrary v2 bytes are ignored and an existing v3 store always wins.
+Every non-JobStore v2 owner above remains live and unchanged.
 
 Terminal remote-effect proof is repository-global rather than registration
 local:

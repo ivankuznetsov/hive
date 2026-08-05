@@ -604,15 +604,10 @@ v2 owners:
 
 ```text
 <hive_state_path>/refactor_patrol/
-├── jobstore-fresh-start.json             # completed opaque reset receipt
-├── .jobstore-generation.lock             # stable cross-generation lock
 ├── v2/
 │   ├── reconciler.json                   # host-bound catch-up checkpoint
 │   ├── reconciler-progress.json          # restart-safe page/intake cursor
 │   ├── manifests/<job-id>.json           # checksummed immutable merge input
-│   ├── jobs/                             # released backlog before reset
-│   ├── jobs                              # regular marker after reset
-│   ├── .jobs-v2-archive-<nonce>/         # exact opaque archived backlog
 │   ├── families/<family-id>.json
 │   ├── results/<dispatch-id>.json
 │   ├── runs/
@@ -624,34 +619,12 @@ v2 owners:
     └── indexes/job-query/                # rebuildable ordered query index
 ```
 
-A genuinely fresh project initializes the empty v3 namespace on its first
-authoritative mutation. Read-only status avoids creating that namespace.
-Released `v2/jobs` instead blocks v3 runtime admission with
-`reset_required`; Hive has no v2 compatibility reader, converter,
-installation sweep, package hook, timer, or automatic constructor fallback.
-
-The only transition is the explicit per-project
-`hive refactor-patrol-reset PROJECT --confirm` choice. A stable profile-wide
-activation lock excludes daemon startup; the current daemon then drains under
-its normal shared effect admission, after which the command takes the Patrol
-effect lock exclusively. That lock remains held across an independent writer
-fence, atomic exchange of the public v2 jobs directory with a canonical regular
-marker, empty-v3 admission, and the transaction-bound receipt outside both
-generations. The exact directory bytes remain under
-`.jobs-v2-archive-<nonce>` and are never enumerated or imported. Every other
-v2 owner and the separate global terminal-proof catalog remain untouched. A
-restarted daemon must publish readiness for its exact PID/start generation
-before command success. See [[commands/refactor-patrol-reset]].
-
-The same command resumes an exchange that completed before its receipt was
-written. A non-empty v3 store alongside released or incomplete v2 state is a
-`conflict`, never an overwrite candidate. Malformed markers, receipts,
-archives, entry types, or writer evidence fail closed for operator repair. The
-deterministic archive path is itself generation evidence, so an archive without
-its public marker is never interpreted as a fresh project.
-`hive daemon status --json` reports `fresh`, `current`,
-`reset_required`, `reset_incomplete`, `conflict`, or an isolated
-per-project `error` without performing the reset.
+A fresh project initializes the v3 namespace on its first authoritative
+mutation. Construction and read-only job queries do not create it. JobStore
+never probes, reads, hashes, moves, deletes, or interprets `v2/jobs`; arbitrary
+v2 bytes are ignored, including when a non-empty v3 store already exists. The
+other live v2 owners and the separate global terminal-proof catalog remain
+independent and unchanged.
 
 Read-only job listing is bounded by the `indexes/job-query/` sequence
 projection rather than a scan of every aggregate. Each authoritative new job

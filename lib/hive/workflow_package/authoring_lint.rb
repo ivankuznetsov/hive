@@ -62,6 +62,7 @@ module Hive
       ].freeze
       GENERIC_SECRET = /\b(?:api[_-]?key|client[_-]?secret|password|token)\b\s*[:=]\s*["']([^"'\s]{16,})["']/i
       PAYMENT_CARD = /(?<!\d)(?:\d[ -]?){12,18}\d(?!\d)/
+      HEX_SHA256 = /(?<![0-9a-f])[0-9a-f]{64}(?![0-9a-f])/i
       PII_PATTERNS = [
         [ "pii.government-id", /\b(?:ssn|social\s+security(?:\s+number)?|national\s+id)\s*[:#-]?\s*\d{3}-\d{2}-\d{4}\b/i, :error, "Context-labeled government identifier detected" ],
         [ "pii.email", /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i, :warning, "Email address observed" ],
@@ -219,13 +220,29 @@ module Hive
               "High-entropy credential assignment detected", evidence: match[0]
             )
           end
-          each_match(line, PAYMENT_CARD) do |match|
-            next unless luhn_valid?(match[0])
 
-            add(
-              "pii.payment-card", :error, entry.path, line_number, match.begin(0) + 1,
-              "Checksum-valid payment card number detected", evidence: match[0]
-            )
+          payment_card_matches = []
+          each_match(line, PAYMENT_CARD) { |match| payment_card_matches << match }
+          unless payment_card_matches.empty?
+            sha256_spans = []
+            each_match(line, HEX_SHA256) { |match| sha256_spans << match.offset(0) }
+            sha256_index = 0
+            payment_card_matches.each do |match|
+              while (sha256_span = sha256_spans[sha256_index]) &&
+                    sha256_span.last <= match.begin(0)
+                sha256_index += 1
+              end
+              sha256_span = sha256_spans[sha256_index]
+              next if sha256_span &&
+                      sha256_span.first <= match.begin(0) &&
+                      sha256_span.last >= match.end(0)
+              next unless luhn_valid?(match[0])
+
+              add(
+                "pii.payment-card", :error, entry.path, line_number, match.begin(0) + 1,
+                "Checksum-valid payment card number detected", evidence: match[0]
+              )
+            end
           end
           PII_PATTERNS.each do |rule, regex, severity, message|
             each_match(line, regex) do |match|

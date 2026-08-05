@@ -145,9 +145,10 @@ class GoldenPathE2E < ApplicationSystemTestCase
 
     # --- The daemon drives brainstorm→plan→execute on its own --------------
     # Each hop is a real dispatch + real fake-agent run + real stage logic.
-    # Wait for the durable PR-gate result rather than the transient execute
-    # badge: a fast daemon can complete execute between two browser renders.
-    assert_selector ".task-meta", text: "Ready to open PR", wait: 90
+    # Wait for the durable PR-gate stage rather than its transient action
+    # label: after promotion a fast daemon may immediately dispatch open-pr,
+    # replacing "Ready to open PR" while the task remains at the same gate.
+    assert_selector ".stage-badge.stage-5", text: "open-pr", wait: 90
 
     # The implementation commit is real and lives in a real worktree.
     worktrees = Dir[File.join(ENV["HIVE_TEST_HOME_ROOT"], "worktrees", "*")]

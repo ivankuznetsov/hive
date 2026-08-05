@@ -3678,7 +3678,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
                            registration: "polyglot", analysis_sha: "c" * 40,
                            project: nil)
     store = Hive::RefactorPatrol::JobStore.new(
-      dir, hive_state_path: hive_state_path, project: project
+      dir, hive_state_path: hive_state_path
     )
     capture = architecture_capture(
       job_id: job_id,

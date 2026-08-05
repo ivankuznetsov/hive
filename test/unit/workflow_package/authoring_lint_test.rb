@@ -105,6 +105,21 @@ class WorkflowPackageAuthoringLintTest < Minitest::Test
     end
   end
 
+  def test_payment_card_detection_ignores_digit_runs_inside_sha256_digests
+    digest = "52df59143b7795758910762bf480eaaecb1f8e2ee8d4bf25b2170d7741bb6d1d"
+
+    with_lint_package(
+      "Digest: #{digest}; Card: 4242 4242 4242 4242\n",
+      files: { "manifest.yml" => "release_sha256: \"#{digest}\"\n" }
+    ) do |root, manifest|
+      findings = Lint.verify(root, manifest: manifest).findings
+
+      assert_equal 1, findings.count { |finding| finding.rule_id == "pii.payment-card" }
+      assert_equal "instructions/work.md",
+                   findings.find { |finding| finding.rule_id == "pii.payment-card" }.path
+    end
+  end
+
   def test_declared_baseline_network_and_broad_permissions_match_upstream_dispositions
     permissions = {
       "risk" => "high", "capabilities" => %w[network shell],

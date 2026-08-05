@@ -117,25 +117,9 @@ module Hive
               :live : :quiescent
           when "architecture-patrol"
             require "hive/refactor_patrol/job_store"
-            return :quiescent unless
-              Hive::RefactorPatrol::JobStore.generation_state_present?(
-                project_root,
-                hive_state_path: hive_state_path,
-                project: entry
-              )
-
-            generation = Hive::RefactorPatrol::JobStore.generation_status(
-              project_root,
-              hive_state_path: hive_state_path,
-              project: entry
-            )
-            return :ambiguous unless
-              %w[fresh current].include?(generation.fetch("status"))
-
             store = Hive::RefactorPatrol::JobStore.new(
               project_root,
-              hive_state_path: hive_state_path,
-              project: entry
+              hive_state_path: hive_state_path
             )
             if store.recovery_active? ||
                store.incomplete_jobs?

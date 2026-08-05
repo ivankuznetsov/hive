@@ -260,19 +260,11 @@ module Hive
         )
         @root = File.join(@hive_state_path, "refactor_patrol", "v2", "families")
         @clock = clock
-        project = begin
-          Hive::Config.registered_projects.find do |entry|
-            File.expand_path(entry.fetch("path")) == @project_root
-          end
-        rescue Hive::ConfigError, KeyError, TypeError
-          nil
-        end
         @job_store = job_store
         @job_store_factory = lambda do
           JobStore.new(
             @project_root,
-            hive_state_path: @hive_state_path,
-            project: project
+            hive_state_path: @hive_state_path
           )
         end
       end

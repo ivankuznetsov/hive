@@ -9,35 +9,6 @@ class RefactorPatrolJobStoreTest < Minitest::Test
 
   T0 = Time.utc(2026, 7, 10, 12, 0, 0)
 
-  def test_runtime_admission_rejects_a_malformed_generation_status
-    store = Hive::RefactorPatrol::JobStore.allocate
-    store.instance_variable_set(:@project_root, "/projects/demo")
-    store.instance_variable_set(
-      :@hive_state_path, "/projects/demo/.hive-state"
-    )
-    store.instance_variable_set(:@generation_options, { project: nil })
-
-    error = with_replaced_singleton_method(
-      Hive::RefactorPatrol::JobStore,
-      :generation_state_present?,
-      ->(*, **) { true }
-    ) do
-      with_replaced_singleton_method(
-        Hive::RefactorPatrol::JobStore,
-        :generation_status,
-        ->(*, **) { {} }
-      ) do
-        assert_raises(
-          Hive::RefactorPatrol::JobStore::InconsistentRecord
-        ) do
-          store.send(:assert_runtime_generation_admission!)
-        end
-      end
-    end
-
-    assert_match(/generation status is malformed/, error.message)
-  end
-
   def test_writes_and_strictly_reads_authoritative_job_aggregate
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
@@ -334,16 +305,21 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     end
   end
 
-  def test_v2_writes_leave_legacy_state_byte_identical
+  def test_first_mutation_creates_only_v3_and_leaves_v2_jobs_byte_identical
     with_tmp_dir do |dir|
-      legacy_dir = File.join(dir, ".hive-state", "refactor_patrol")
-      FileUtils.mkdir_p(legacy_dir)
-      legacy_path = File.join(legacy_dir, "fingerprints.json")
-      File.binwrite(legacy_path, "{\n  \"legacy\": true\n}\n")
+      legacy_jobs = File.join(
+        dir, ".hive-state", "refactor_patrol", "v2", "jobs"
+      )
+      FileUtils.mkdir_p(legacy_jobs)
+      legacy_path = File.join(legacy_jobs, "opaque-job.bytes")
+      File.binwrite(legacy_path, "\x00released-v2-is-not-read\xff".b)
       before = File.binread(legacy_path)
+      store = Hive::RefactorPatrol::JobStore.new(dir)
 
-      Hive::RefactorPatrol::JobStore.new(dir).write_job!(job)
+      refute Dir.exist?(store.root), "construction must not create v3 state"
+      store.write_job!(job)
 
+      assert File.file?(File.join(store.root, "jobs", "job-1.json"))
       assert_equal before, File.binread(legacy_path)
     end
   end
@@ -2500,7 +2476,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     end
   end
 
-  def test_canonical_action_rejects_an_empty_identity_and_ambiguous_project_registration
+  def test_canonical_action_rejects_an_empty_identity
     store = Hive::RefactorPatrol::JobStore.new("/tmp/example")
     assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
       store.canonical_action_id(
@@ -2508,28 +2484,6 @@ class RefactorPatrolJobStoreTest < Minitest::Test
         kind: "fix",
         identity: " "
       )
-    end
-
-    with_tmp_dir do |root|
-      duplicate = {
-        "name" => "demo",
-        "path" => root,
-        "project_id" => "project-demo"
-      }
-      with_replaced_singleton_method(
-        Hive::Config,
-        :registered_projects,
-        -> { [ duplicate, duplicate.dup ] }
-      ) do
-        error = assert_raises(ArgumentError) do
-          Hive::RefactorPatrol::JobStore.send(
-            :project_identity,
-            root,
-            nil
-          )
-        end
-        assert_match(/identity is ambiguous/, error.message)
-      end
     end
   end
 

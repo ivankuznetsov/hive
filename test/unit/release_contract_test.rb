@@ -31,6 +31,15 @@ class ReleaseContractTest < Minitest::Test
     assert_equal 1, read("CHANGELOG.md").scan(/^## #{version}$/).size
     assert_equal 1, read("README.md").scan(%r{/v#{version}/install\.sh}).size
     assert_equal 2, read("install.md").scan(%r{/v#{version}/install\.sh}).size
+
+    releasing = read("docs/RELEASING.md")
+    dependencies = read("wiki/dependencies.md")
+    assert_includes releasing, "the source version is #{Hive::VERSION}"
+    assert_includes releasing, "latest-stable baseline remains v0.6.9"
+    assert_includes releasing, "must not report\n`candidate_not_newer`"
+    assert_includes dependencies,
+                    "The v#{Hive::VERSION} release-prep checkout is `#{Hive::VERSION}`"
+    assert_equal 2, dependencies.scan("hive-cli (#{Hive::VERSION})").size
   end
 
   def test_public_credibility_copy_matches_current_capabilities
@@ -329,6 +338,44 @@ class ReleaseContractTest < Minitest::Test
     assert_includes body, "--network=none"
     assert_match(/ruby@sha256:[0-9a-f]{64}/, body)
     refute_includes body, "sudo unshare"
+  end
+
+  def test_candidate_workflow_preserves_hosted_gate_execution_contracts
+    workflow = YAML.safe_load_file(CANDIDATE_WORKFLOW, aliases: true)
+    jobs = workflow.fetch("jobs")
+    catalog_checkout = jobs.fetch("catalog").fetch("steps").find do |step|
+      step.fetch("uses", "").start_with?("actions/checkout@") && !step.dig("with", "path")
+    end
+    assert_equal 0, catalog_checkout.dig("with", "fetch-depth")
+
+    managed_web = jobs.fetch("managed-web").fetch("steps").find do |step|
+      step["name"] == "Verify managed web candidate"
+    end.fetch("run")
+    assert_includes managed_web, '--hive-bin="$install_root/bin/hive"'
+    assert_includes managed_web, '--archive="$web_file"'
+    assert_includes managed_web, '--sha256="$web_sha"'
+    assert_includes managed_web, '--prefix="$RUNNER_TEMP/managed"'
+    refute_match(/--(?:hive-bin|archive|sha256|prefix)\s+"/, managed_web)
+
+    upgrade = jobs.fetch("upgrade").fetch("steps").find do |step|
+      step["name"] == "Run installed historical producer and candidate without network"
+    end.fetch("run")
+    profile = "(version 1) (deny default) (allow process*) (allow file-read*) " \
+      '(allow file-write* (subpath \"$HIVE_RC_RUN_ROOT\")) (deny network*)'
+    assert_includes upgrade, %(profile="#{profile}")
+    assert_equal 1, upgrade.scan('sandbox-exec -p "$profile"').size
+    assert_includes upgrade, "checkpoint=sandbox-run"
+    assert_includes upgrade, "checkpoint=ruby-smoke"
+    assert_includes upgrade, "checkpoint=sandbox-shell"
+    assert_includes upgrade, "failure phase=%s status=%s"
+    %w[
+      ruby-smoke hosted-stage-install sandbox-attestation baseline-cache-attestation
+      baseline-target-attestation candidate-target-attestation hosted-upgrade-lane
+    ].each do |phase|
+      assert_includes upgrade, "run_phase #{phase}"
+    end
+    refute_includes upgrade, "allow sysctl-read"
+    refute_includes upgrade, "allow mach-lookup"
   end
 
   def test_candidate_version_gate_reads_the_reviewed_catalog

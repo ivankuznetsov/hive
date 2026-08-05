@@ -1246,7 +1246,7 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
   end
 
   def job_store(dir)
-    Hive::RefactorPatrol::JobStore.new(dir, project: entry_for(dir))
+    Hive::RefactorPatrol::JobStore.new(dir)
   end
 
   def entry_for(dir, name: "demo")

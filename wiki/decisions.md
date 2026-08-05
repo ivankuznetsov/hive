@@ -673,7 +673,7 @@ and ADR-031 describe removed behavior and are superseded by this decision.
 
 ## ADR-041: Released JobStore v2 is an explicit opaque fresh start
 
-**Status:** Active
+**Status:** Superseded by ADR-042
 
 **Context:** Preserving an obsolete Architecture Patrol backlog across a
 JobStore schema change required a privileged, all-user discovery and execution
@@ -718,6 +718,37 @@ trigger or outcome; no dormant effect-journal compatibility path can convert
 the archived backlog. The deterministic opaque archive name remains a
 generation sentinel: if its public marker is missing, runtime fails closed
 rather than interpreting the project as fresh.
+
+## ADR-042: JobStore authority starts directly at v3
+
+**Status:** Active
+
+**Context:** ADR-041's explicit reset/archive path was built for an unreleased
+compatibility boundary. It added a public command and schema, generation
+status/admission checks, daemon/process quiescence, writer fences, archive
+receipts, and a filesystem-exchange primitive even though JobStore v2 is not a
+released runtime contract. Those checks also made arbitrary obsolete v2 bytes
+block or conflict with the current v3 authority.
+
+**Decision:** Architecture Patrol JobStore authority is fixed at
+`refactor_patrol/v3`. Construction, `--list`, `--show`, and module-migration
+quiescence inspect only v3 and do not create state. The first authoritative
+mutation lazily creates v3. Runtime never probes, reads, hashes, moves, deletes,
+archives, or interprets `v2/jobs`; a non-empty v3 store always wins regardless
+of arbitrary v2 bytes.
+
+Remove the reset command/schema/status projection, fresh-start/archive state,
+generation locks and admission checks, reset-only writer quiescence/fencing,
+and the now-unused managed-directory atomic-exchange primitive. Keep the daemon
+activation lock for normal startup. Keep every non-JobStore owner under
+`refactor_patrol/v2` and the global terminal-proof catalog unchanged.
+
+**Consequences:** Fresh projects remain read-only until their first JobStore
+mutation and then create only v3. Obsolete v2 jobs receive no continuity or
+operator recovery promise, but Hive also leaves their bytes untouched. Daemon
+status returns to its released v0.6.9 v1 shape without `job_store_resets`, while
+retaining later valid fields such as the `binary_drift: unreadable` state. This
+decision supersedes ADR-041.
 
 ## ADR-032: Per-stage controls overlay the current durable identity
 

@@ -42,9 +42,10 @@ attempt results rather than copying or rewriting terminal evidence.
 
 Local evidence keeps `trust_scope`, `scope_status`, and `qa_status` separate. A
 passing requested local scope exits successfully but remains `qa_blocked` on
-`remote_validation_required`. The v0.6.9 development candidate is also blocked
-by `candidate_not_newer`; the command does not choose a version or print/perform
-a release action. `dispatch` is the sole explicit GitHub-writing verb and
+`remote_validation_required`. The v0.7.0 development candidate is newer than
+the reviewed v0.6.9 baseline, so `candidate_not_newer` no longer applies; the
+command does not choose a version or print/perform a release action. `dispatch`
+is the sole explicit GitHub-writing verb and
 `collect` is read-only. Both bind a request ID, candidate/workflow SHA,
 action-lock digest, exact run/attempt, and artifact ID/digest. Dispatch either
 resolves that request-bounded run or returns `dispatched_unresolved`; collect
@@ -162,6 +163,14 @@ manifests can resolve an executable, and it must be an owned executable regular
 file beneath that root. Equal semantic versions remain distinguishable by
 root, wrapper, gem, and skills digests.
 
+Hosted fetch evidence retains the producer namespace's absolute cache roots,
+but those paths are not executable authority. Install validates the exact
+closed role set and each embedded role identity, then derives an in-memory
+closure root beneath the consumer's current `HIVE_RC_CACHE_ROOT`. This keeps
+the staged JSON immutable while allowing the Linux host cache to be consumed
+through its read-only `/cache` mount; baseline and observer share their
+reviewed row root, while candidate dependencies remain separately rooted.
+
 Installed processes receive a closed environment: only locale and time-zone
 values may survive from the host. `HOME`, `HIVE_HOME`, XDG roots, gem roots,
 and `PATH` are rebuilt beneath isolated state/target roots; Bundler, checkout,
@@ -258,6 +267,15 @@ committed scripts for job/ordinary-CI queries and receipt/predecessor
 collection. These three private workflow scripts are part of candidate tool
 identity; candidate construction, platform sandbox commands, aggregate
 construction, and publication remain at their existing review surfaces.
+
+Catalog integrity uses a full-history candidate checkout because its focused
+contracts read the reviewed historical tags. Managed-Web verification passes
+the helper's documented `--name=value` arguments. The macOS upgrade cell keeps
+its existing deny-default sandbox profile unchanged and runs bounded,
+same-profile shell and Ruby probes before installation. Constant-size
+checkpoint and exit-status lines then identify install, each required
+attestation, and upgrade-lane failures without adding sandbox permissions or
+provider credentials.
 
 Historical packages, dependency closures, and candidate bytes are downloaded
 and authenticated before installed package code runs. Installation and the U4
@@ -386,9 +404,8 @@ explicit decision to create and push `vX.Y.Z` may start `release.yml`. The
 candidate CLI and trusted aggregate never choose a version, create a tag,
 publish, deploy, or release.
 
-Current hosted evidence remains intentionally blocked: the checked-in source
-version is 0.6.9 and the reviewed latest-stable alias is also v0.6.9, so
-`candidate_not_newer` applies. The first real native-platform and historical
-package campaign additionally exposed shallow-tag checkout, managed-Web CLI,
-and staged dependency-cache failures that remain separate dogfood findings.
-No release action was authorized or performed.
+The checked-in source metadata is prepared as 0.7.0 while the reviewed
+latest-stable alias remains v0.6.9, clearing only the candidate-version
+comparison. Previous hosted evidence belongs to its exact older candidate SHA
+and cannot qualify these bytes; a fresh trusted remote campaign is still
+required. No release action was authorized or performed.

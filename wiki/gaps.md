@@ -16,9 +16,10 @@ tags: [gap, todo, release-proof, agent-skills]
   retained exact terminal evidence, but only seven of fourteen required gates
   passed. The expected `candidate_not_newer` result is joined by harness
   findings: catalog tests lacked historical tags in a shallow checkout,
-  managed-Web verification called a removed `--hive-bin` option, Linux upgrade
-  staging omitted the locked `bigdecimal-4.1.2.gem`, and the macOS upgrade lane
-  exited without a typed diagnostic. Ordinary CI, artifact/package checks, all
+  managed-Web verification used split arguments unsupported by its equals-only
+  verifier, Linux upgrade installation consumed producer-host closure roots
+  inside the `/cache` container namespace, and the macOS upgrade lane exited
+  without a typed diagnostic. Ordinary CI, artifact/package checks, all
   native installs, baseline freshness, and release E2E passed. Named retry run
   `31015265841` selected only `Candidate version newer`, reused the original
   candidate artifact, and composed every unselected effective row from the
@@ -28,6 +29,11 @@ tags: [gap, todo, release-proof, agent-skills]
   not an uncatchable hard crash between a gate result and evidence publication.
   Adding a durable in-progress journal remains a separately admitted behavior
   change rather than hidden refactor scope.
+  The local gate repair now covers the three confirmed harness defects and adds
+  same-profile macOS shell/Ruby probes plus phase checkpoints without widening
+  the sandbox policy. The exact macOS denial remains unknown until a fresh
+  hosted run reports the first failing checkpoint; no local test can promote
+  this candidate to trusted release evidence.
 
 - Patrol capture/effect boundaries and the U3a receipt, independent verifier,
   duplicate index, qualification value, two-lane report, and one-off report
@@ -75,18 +81,6 @@ tags: [gap, todo, release-proof, agent-skills]
   useful, but neither it nor a seven-day window substitutes for diversity and
   protocol completeness. The reduced smoke closes none of U3-ARCH-005, full
   U3c qualification, catalogue promotion, or mutator cutover authority.
-
-- The explicit JobStore fresh-start reset is source- and focused-test-pinned,
-  including no-write fresh status, exact registered-project binding,
-  daemon/process-tree quiescence, independent PID/start-time writer fencing,
-  atomic opaque-directory exchange, interrupted reset resume, other-v2-owner
-  preservation, empty-v3 admission, and non-empty-v3 conflict refusal. This goal
-  deliberately does not run the command against a live project. Before release,
-  dogfood it on a disposable registered project on each supported deployment
-  filesystem and retain evidence that the daemon restarts, archive bytes remain
-  exact, status advances from `reset_required` to `current`, and no unrelated
-  v2 owner changes. The abandoned v2 jobs backlog is an explicit product
-  tradeoff, not a continuity promise or an unimplemented migration.
 
 - Project-owned artifact providers currently require Linux
   `PR_SET_CHILD_SUBREAPER` plus `/proc` ancestry so detached descendants remain
@@ -464,17 +458,11 @@ Patrol job, discovery, action, and final decision, live effect-time
 generation/grant checks, stable process/thread sender locks with persisted
 uncertainty but no lease/PID authority, gateway-owned retry-safe local absence,
 remote-absence refusal, store-minted byte-stable receipts, canonical outboxes,
-restart-persistent normalized recovery backoff, v3-only JobStore runtime with
-an explicit opaque fresh-start reset for released v2, exact-digest-bound
+restart-persistent normalized recovery backoff, direct v3-only JobStore runtime
+that ignores obsolete v2 jobs, exact-digest-bound
 shadow-v1 conversion, and bounded occurrence/intent evidence indices. Those fixtures
 prove the repaired boundary but intentionally do not satisfy the operational
 rollout gate.
-
-No live project reset was run while building U2. The destructive boundary is
-covered only by hermetic storage, process, lock-order, crash-resume, and
-runtime-readiness tests. An operator must still explicitly confirm any real
-per-project archive/reset after reviewing `daemon status --json`; U2 does not
-perform that cutover automatically.
 
 U3 still needs to make the candidate-bound compressed evidence protocol part of
 the test harness, feed it from these finalized occurrences without consulting

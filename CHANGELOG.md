@@ -2,13 +2,49 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with user-facing bullets and, for notable releases, descriptive subsections — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.7.0
+
+Hive 0.7.0 expands workflow authoring and makes unattended operation safer,
+with stronger recovery, release evidence, and Patrol qualification boundaries.
+
+### Workflows and agents
+
+- Added natural-language workflow creation with read-only validation, safe
+  previews, durable human decisions, and idempotent task creation. (#854)
+- Added immutable Honeycomb v1 package publication with dry-run validation and
+  retry-safe submission and reconciliation. (#857)
+- Fixed Honeycomb publication rejecting SHA-256 digests whose numeric runs
+  happened to satisfy the payment-card checksum.
+- Added provider-neutral per-stage model and effort routing across the built-in
+  workflow surface, including bounded Codex and Grok actors. (#856, #862)
+
+### Durable operation
+
+- Made `hive update` migrate every registered project after a successful
+  upgrade, continuing past individual failures with exact recovery commands.
+  (#930)
+- Added configurable archived-task visibility and immutable completion times,
+  shared consistently by status, the TUI, and Hive web. (#855)
+- Hardened retries and attempt recovery so delivered tasks close before retry,
+  terminal replays stop cleanly, and blocked terminal outcomes remain visible.
+  (#847, #849, #858, #865, #870, #871, #884, #922)
+- Improved Hive web with full-width task views, bounded worktree-native
+  capture, owner-login proxy handling, and reliable same-version bundle repair.
+  (#845, #867, #881, #890, #905, #915, #928)
+- Fixed the TUI so Ctrl-C exits consistently from every mode. (#918)
+
+### Patrol and release safety
+
+- Added installable Patrol modules, made JobStore v3 the sole runtime authority
+  without reading or moving obsolete v2 jobs, and added deterministic and
+  installed-CLI qualification evidence. (#886, #907, #923, #935, #939, #940,
+  #941, #947)
+- Added trusted pre-tag release-candidate evidence and reproducible, exact-byte
+  artifact handoff so a later authorized tag can publish already-proven bytes
+  without rebuilding them. (#904, #917, #948, #949, #950)
+
 ## 0.6.9
 
-- Added provider-neutral per-stage model and effort routing for Hive's closed
-  built-in workflow surface. Exact and coarse fields inherit independently,
-  implementation-owned retries retain their generation-scoped identity, and
-  provider-native validation/argv rendering happens before effects. Existing
-  configs without `models:` remain migration-free.
 - Fixed managed llm-wiki services timing out during a valid multi-batch drain.
   The outer systemd limit now covers the worker's bounded worst case of three
   agent and indexing batches, while retaining the 4 GiB memory limit, no-swap

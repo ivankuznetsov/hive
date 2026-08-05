@@ -57,11 +57,11 @@ module HiveReleaseCandidate
                Digest::SHA256.hexdigest(JSON.generate(candidate_manifest))
         raise Error, "hosted staged-input identity mismatch"
       end
-      closures = staged.fetch("closures")
-      stage_targets(row, candidate_manifest, closures)
+      staged_closures = staged.fetch("closures")
+      stage_targets(row, candidate_manifest, rebind_closure_roots(row, staged_closures))
 
       release_assets = staged.fetch("release_assets")
-      closure_rows = closures.values
+      closure_rows = staged_closures.values
       write_attestations(row, platform, candidate_sha, release_assets, closure_rows)
     end
 
@@ -205,6 +205,22 @@ module HiveReleaseCandidate
         skills: skills, closure: closures.fetch("candidate"),
         expected_digest: gem_row.fetch("sha256")
       )
+    end
+
+    def rebind_closure_roots(row, closures)
+      expected_roles = row.packages.keys.map { |role| target_role(role) } + [ "candidate" ]
+      unless closures.is_a?(Hash) && closures.keys.sort == expected_roles.sort
+        raise Error, "hosted staged closure role set mismatch"
+      end
+
+      closures.to_h do |role, closure|
+        unless closure.is_a?(Hash) && closure["role"] == role
+          raise Error, "hosted staged closure identity mismatch for #{role}"
+        end
+
+        cache_id = role == "candidate" ? "candidate" : row.id
+        [ role, closure.merge("root" => File.join(@cache_root, "closures", cache_id, "gems")) ]
+      end
     end
 
     def stage_candidate_closure

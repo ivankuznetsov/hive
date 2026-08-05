@@ -242,7 +242,9 @@ weakening owner-authored descriptor compatibility:
   descriptor/metadata/README ownership and snapshot referenced instructions
   plus declared assets once without following links. `RegistryManifestBuilder`
   emits the immutable Honeycomb version directory and canonical digests;
-  `AuthoringLint` runs the pinned pure-analysis policy before publication.
+  `AuthoringLint` runs the pinned pure-analysis policy before publication. Its
+  payment-card rule ignores digit runs wholly contained in exact SHA-256 tokens,
+  while continuing to reject ordinary Luhn-valid card numbers.
 - `PublishStore` retains owner-private immutable bundles and monotonic receipts;
   `RegistrySubmission` journals mutation intent and verifies direct/fork branch,
   commit, package, and PR identity; `PublishResolver` combines exact current

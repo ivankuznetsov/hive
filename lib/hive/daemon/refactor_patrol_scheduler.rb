@@ -539,8 +539,7 @@ module Hive
 
         Hive::RefactorPatrol::JobStore.new(
           entry.fetch("path"),
-          hive_state_path: entry.fetch("hive_state_path"),
-          project: entry
+          hive_state_path: entry.fetch("hive_state_path")
         )
       end
 

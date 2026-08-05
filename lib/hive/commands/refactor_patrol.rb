@@ -104,9 +104,9 @@ module Hive
         @reviewer_factory = reviewer_factory
         @leverage_factory = leverage_factory || ->(root, cfg) { Hive::RefactorPatrol::Leverage.new(root, cfg: cfg) }
         @caps_factory = caps_factory || ->(cfg) { Hive::RefactorPatrol::Caps.new(cfg) }
-        @collisions_factory = collisions_factory || lambda do |root, state, v2_fingerprints|
+        @collisions_factory = collisions_factory || lambda do |root, state, terminal_fingerprints|
           Hive::RefactorPatrol::Collisions.new(
-            root, state: state, v2_fingerprints: v2_fingerprints
+            root, state: state, terminal_fingerprints: terminal_fingerprints
           )
         end
         @manifest_resolver_factory = manifest_resolver_factory
@@ -339,7 +339,7 @@ module Hive
       end
 
       def build_collisions(project_root, state)
-        fingerprints = v2_terminal_fingerprints(project_root)
+        fingerprints = terminal_fingerprints(project_root)
         if @collisions_factory.arity == 2
           @collisions_factory.call(project_root, state)
         else
@@ -347,7 +347,7 @@ module Hive
         end
       end
 
-      def v2_terminal_fingerprints(project_root)
+      def terminal_fingerprints(project_root)
         return {} unless pr_mode?
         return {} if @explicit_replay
 
@@ -1138,26 +1138,6 @@ module Hive
 
       def run_job_query
         entry, project_root, = resolve_project!
-        generation = Hive::RefactorPatrol::JobStore.generation_status(
-          project_root,
-          hive_state_path: entry.fetch("hive_state_path"),
-          project: entry
-        )
-        case generation.fetch("status")
-        when "reset_required"
-          raise Hive::ConfigError,
-                "released refactor patrol v2 jobs require an explicit " \
-                "fresh start; run `hive refactor-patrol-reset " \
-                "#{entry.fetch('name')} --confirm`"
-        when "reset_incomplete"
-          raise Hive::ConfigError,
-                "refactor patrol JobStore fresh start is incomplete; rerun " \
-                "`hive refactor-patrol-reset #{entry.fetch('name')} --confirm`"
-        when "conflict"
-          raise Hive::ConfigError,
-                "refactor patrol JobStore generations conflict; inspect " \
-                "`hive daemon status --json` before operator repair"
-        end
         query = Hive::RefactorPatrol::JobQuery.new(
           job_store_for(entry, project_root)
         )
@@ -1222,8 +1202,7 @@ module Hive
 
         Hive::RefactorPatrol::JobStore.new(
           project_root,
-          hive_state_path: entry.fetch("hive_state_path"),
-          project: entry
+          hive_state_path: entry.fetch("hive_state_path")
         )
       end
 

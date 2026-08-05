@@ -73,17 +73,9 @@ module Hive
         )
         @token_budget = token_budget
         @registration = registration.to_s.empty? ? cfg["project_name"].to_s : registration.to_s
-        project_entry = begin
-          Hive::Config.registered_projects.find do |entry|
-            File.expand_path(entry.fetch("path")) == @project_root
-          end
-        rescue Hive::ConfigError, KeyError, TypeError
-          nil
-        end
         @job_store = job_store || JobStore.new(
           @project_root,
-          hive_state_path: @hive_state_path,
-          project: project_entry
+          hive_state_path: @hive_state_path
         )
         @family_store = family_store || FamilyStore.new(
           @project_root, hive_state_path: @hive_state_path,
@@ -133,8 +125,7 @@ module Hive
               end
               JobStore.new(
                 expanded_root,
-                hive_state_path: entry && entry["hive_state_path"],
-                project: entry
+                hive_state_path: entry && entry["hive_state_path"]
               )
             end
           )

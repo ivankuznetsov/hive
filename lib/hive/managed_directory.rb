@@ -711,14 +711,6 @@ module Hive
       [ components[0...-1], components.last ]
     end
 
-    def single_component(value)
-      text = value.to_s
-      unsafe! unless validated_relative(text) == text &&
-                     !text.include?(File::SEPARATOR) &&
-                     text != "."
-      text
-    end
-
     def validated_relative(value)
       unsafe! unless value.is_a?(String) && !value.empty?
       components = value.split(File::SEPARATOR, -1)

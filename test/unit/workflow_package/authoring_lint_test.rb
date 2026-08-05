@@ -109,7 +109,7 @@ class WorkflowPackageAuthoringLintTest < Minitest::Test
     digest = "52df59143b7795758910762bf480eaaecb1f8e2ee8d4bf25b2170d7741bb6d1d"
 
     with_lint_package(
-      "Card: 4242 4242 4242 4242\n",
+      "Digest: #{digest}; Card: 4242 4242 4242 4242\n",
       files: { "manifest.yml" => "release_sha256: \"#{digest}\"\n" }
     ) do |root, manifest|
       findings = Lint.verify(root, manifest: manifest).findings

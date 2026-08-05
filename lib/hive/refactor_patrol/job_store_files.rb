@@ -26,7 +26,7 @@ module Hive
         @inconsistent_record = inconsistent_record
         @directory = directory || Hive::ManagedDirectory.new(
           root: @root,
-          anchor: anchor && File.expand_path(anchor),
+          anchor: anchor,
           label: "v3 refactor patrol JobStore"
         )
       end

@@ -220,14 +220,29 @@ module Hive
               "High-entropy credential assignment detected", evidence: match[0]
             )
           end
-          each_match(line, PAYMENT_CARD) do |match|
-            next if inside_sha256?(line, match)
-            next unless luhn_valid?(match[0])
 
-            add(
-              "pii.payment-card", :error, entry.path, line_number, match.begin(0) + 1,
-              "Checksum-valid payment card number detected", evidence: match[0]
-            )
+          payment_card_matches = []
+          each_match(line, PAYMENT_CARD) { |match| payment_card_matches << match }
+          unless payment_card_matches.empty?
+            sha256_spans = []
+            each_match(line, HEX_SHA256) { |match| sha256_spans << match.offset(0) }
+            sha256_index = 0
+            payment_card_matches.each do |match|
+              while (sha256_span = sha256_spans[sha256_index]) &&
+                    sha256_span.last <= match.begin(0)
+                sha256_index += 1
+              end
+              sha256_span = sha256_spans[sha256_index]
+              next if sha256_span &&
+                      sha256_span.first <= match.begin(0) &&
+                      sha256_span.last >= match.end(0)
+              next unless luhn_valid?(match[0])
+
+              add(
+                "pii.payment-card", :error, entry.path, line_number, match.begin(0) + 1,
+                "Checksum-valid payment card number detected", evidence: match[0]
+              )
+            end
           end
           PII_PATTERNS.each do |rule, regex, severity, message|
             each_match(line, regex) do |match|
@@ -823,13 +838,6 @@ module Hive
           doubled > 9 ? doubled - 9 : doubled
         end
         (sum % 10).zero?
-      end
-
-      def inside_sha256?(line, match)
-        line.to_enum(:scan, HEX_SHA256).any? do
-          digest = Regexp.last_match
-          digest.begin(0) <= match.begin(0) && digest.end(0) >= match.end(0)
-        end
       end
 
       def normalize_host(host)

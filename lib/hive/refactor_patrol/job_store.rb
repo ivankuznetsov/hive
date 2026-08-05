@@ -187,8 +187,8 @@ module Hive
 
       def initialize(project_root, hive_state_path: nil)
         @project_root = File.expand_path(project_root)
-        @hive_state_path = File.expand_path(hive_state_path || ".hive-state", @project_root)
-        @root = self.class.root_for(@project_root, hive_state_path: @hive_state_path)
+        hive_state_root = File.expand_path(hive_state_path || ".hive-state", @project_root)
+        @root = self.class.root_for(@project_root, hive_state_path: hive_state_root)
         @record_validator = JobRecordValidator.new(contract: self.class)
         @job_files = JobStoreFiles.new(
           root: @root,

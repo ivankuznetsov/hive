@@ -220,6 +220,14 @@ digest, wrapper role, sidecars, dependency closure, exact active inventory, and
 absence of stale baseline files. AUR remains in its incumbent post-release
 gate.
 
+`UpgradeSurvivor` is the stable coordinator for preflight, fixed phase order,
+invariant comparison, channel verification, and teardown. Channel-prefix
+verification, the reviewed channel updater, channel execution, state capture,
+and phase execution live in focused collaborators under
+`packaging/release_candidate/upgrade_survivor/`. The extraction preserves the
+existing class names, command/environment contracts, and evidence shape; the
+candidate tool-input digest includes every collaborator source.
+
 Focused tests use a deterministic fake installed binary, which is explicitly
 not acceptable producer evidence. This implementation did not execute the real
 v0.6.9/v0.4.1/v0.4.2 packages or a container; those authenticated platform

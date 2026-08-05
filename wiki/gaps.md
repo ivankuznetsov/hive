@@ -11,18 +11,19 @@ tags: [gap, todo, release-proof, agent-skills]
 
 ## Current release gap
 
-- Release-candidate protected-main dogfood run `31005500332` retained exact
-  terminal evidence, but only seven of fourteen required gates passed. The
-  expected `candidate_not_newer` result is joined by harness findings: catalog
-  tests lacked historical tags in a shallow checkout, managed-Web verification
-  called a removed `--hive-bin` option, latest-stable staging omitted a locked
-  `bigdecimal-4.1.2.gem`, the legacy fetch observed a changing shallow file,
-  and the macOS sandbox lane exited without a typed diagnostic. Protected
-  ordinary CI also completed after the candidate run had already sampled it.
-  Named-retry run `31006277887` then exposed GitHub Check Run details-URL
-  canonicalization before its selected gate ran. Source now uses the exact
-  candidate/external-ID binding instead, but a fresh post-merge campaign and
-  targeted retry must prove the hosted path. The U8 coordinator extraction is
+- Release-candidate protected-main dogfood run `31014105054` at exact
+  candidate/workflow SHA `f113b6a238c0922e60ceafb091a9b215ce7c451e`
+  retained exact terminal evidence, but only seven of fourteen required gates
+  passed. The expected `candidate_not_newer` result is joined by harness
+  findings: catalog tests lacked historical tags in a shallow checkout,
+  managed-Web verification called a removed `--hive-bin` option, Linux upgrade
+  staging omitted the locked `bigdecimal-4.1.2.gem`, and the macOS upgrade lane
+  exited without a typed diagnostic. Ordinary CI, artifact/package checks, all
+  native installs, baseline freshness, and release E2E passed. Named retry run
+  `31015265841` selected only `Candidate version newer`, reused the original
+  candidate artifact, and composed every unselected effective row from the
+  source run, closing the hosted retry-path gap while correctly remaining
+  `qa_blocked`. The U8 coordinator extraction is
   deliberately move-only: current local attempts checkpoint captured INT/TERM,
   not an uncatchable hard crash between a gate result and evidence publication.
   Adding a durable in-progress journal remains a separately admitted behavior

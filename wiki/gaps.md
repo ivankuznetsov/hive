@@ -43,6 +43,11 @@ tags: [gap, todo, release-proof, agent-skills]
   controls, freshly driven decisions for both modules, and explicit
   wall-clock/DST, weekly cadence, quota reset, credential expiry, restart, and
   log-rotation coverage.
+  The reduced admission now requires a read-only controller mode that proves
+  report bytes remain unchanged, an exact protected-main controller checkout,
+  digest-bound runtime closure, quota-backed writable storage, a closed
+  provider success predicate, locked publication, and bounded retained
+  evidence. None of those proposed U3c controls exists in production yet.
   Long-lived external resource drift remains a declared U3c live limitation,
   not something elapsed time can prove equivalent. Elapsed telemetry remains
   useful, but neither it nor a seven-day window substitutes for diversity and

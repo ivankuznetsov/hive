@@ -23,9 +23,12 @@ evidence, not Patrol qualification evidence.
 
 The controller and candidate are separate authorities. U3c infrastructure must
 first merge to protected `main`; only that recorded controller SHA may evaluate
-a different later candidate SHA. The controller is never mounted into the
-candidate sandbox. A PR-head or same-SHA bootstrap run may test failure and
-custody paths, but it cannot emit the passing status.
+a different later candidate SHA. The credentialed probe runs only from an
+operator-invoked local command at that exact controller SHA; hosted workflows
+never receive the credential and cannot emit the passing status. The candidate
+checkout is untrusted input, and the controller is never mounted into its
+sandbox. A PR-head or same-SHA bootstrap run may test failure and custody paths,
+but it cannot emit the passing status.
 
 Every retained success must carry these claim fences:
 
@@ -63,12 +66,24 @@ record digests of the existing U3a report and reduced U3b proof, but it must not
 write the migration report, construct a `PatrolQualification`, or call the
 report-admission facade.
 
+Each run receives one new runner-owned mode-`0700` directory beneath an owned
+mode-`0700` local evidence store. The runner refuses a pre-existing run
+directory, persists mode-`0600` `not_started` until terminal replacement,
+retains the resulting file for at least 30 days, and never deletes evidence
+automatically. The store admits at most 128 result files and 64 MiB in
+aggregate; saturation returns
+`blocked:evidence_store_full` without deleting old evidence. Explicit operator
+cleanup after that minimum age may remove only a selected mode-`0600` regular
+file whose owner and recorded device/inode still match, followed by its
+unchanged empty run directory. Evidence otherwise remains until that cleanup.
+
 ## Trust boundaries
 
 Trusted for this bounded claim:
 
 - the host-side runner and control checkout at a separately recorded full SHA;
-- a manually authorized workflow revision reachable from protected `main`;
+- an operator-invoked local command from the accepted full controller SHA on
+  protected `main`;
 - the host kernel and the admitted container engine/runtime;
 - the configured TLS trust roots and the selected provider endpoint;
 - the operator-created disposable input project and prepared observation file.
@@ -101,8 +116,8 @@ runner.
 ## Projected ownership and dependency map
 
 U3c is capped at five packaging runtime Ruby files and five responsibility
-owners, below the program ceiling of eight files. Tests, one schema, the thin
-workflow adapter, and documentation add no runtime owner.
+owners, below the program ceiling of eight files. Tests, one schema, the bounded
+existing-controller seam, and documentation add no packaging runtime owner.
 
 | Projected path | Sole responsibility |
 | --- | --- |
@@ -115,26 +130,34 @@ workflow adapter, and documentation add no runtime owner.
 Additional admitted paths are:
 
 - `schemas/hive-patrol-installed-live-smoke.v1.json`;
-- `.github/workflows/patrol-qualification.yml`, a manual thin adapter only;
 - one bounded edit to `test/e2e/lib/patrol_qualification.rb` and its focused
-  test so the existing controller can take an explicit candidate SHA while
-  loading its catalogue/control bytes from the separately trusted checkout;
-- focused `test/unit/packaging/patrol_evidence_*_test.rb` and workflow contract
+  test to add an explicit read-only `external_smoke` mode. That mode takes a
+  distinct candidate SHA, loads catalogue/control bytes from the separately
+  trusted checkout, runs candidate build/install/CLI work only through the
+  admitted sandbox, stops after receipt and module validation, and proves the
+  migration report bytes are unchanged. It never calls `admit_qualification`,
+  constructs a qualification, writes U3b evidence, or publishes a report;
+- focused `test/unit/packaging/patrol_evidence_*_test.rb` and command contract
   tests;
 - the required release and wiki documentation plus one wiki log fragment.
 
 The bounded controller edit is required because current main deliberately
-asserts that its executing controller equals the archived candidate controller.
-It may add only the external-candidate seam; the same-head default and its claim
-fences remain unchanged. U3c must not add or copy a second scenario controller.
+asserts that its executing controller equals the archived candidate controller,
+and its normal `run!` path unconditionally admits a qualification report. It may
+add only the closed `external_smoke` entry point above. The existing `run!`,
+`admit_qualification`, report publication, same-head default, and claim fences
+remain unchanged and are not reachable from this mode. U3c must not add or copy
+a second scenario controller. This bounded edit is an admitted test-controller
+seam, not a sixth packaging runtime owner.
 
 Dependency direction is one way:
 
 ```text
-manual workflow / local command
+manual local command
   -> Runner
        -> Candidate
-       -> Sandbox -> existing reduced U3b controller in external-candidate mode
+       -> existing reduced U3b controller in read-only external_smoke mode
+            -> Sandbox
        -> ProviderProbe
        -> Result
 ```
@@ -149,25 +172,30 @@ provider, or publisher API.
 | Threat | Required control | Failure |
 | --- | --- | --- |
 | Candidate or dependency substitution | Resolve a full candidate commit distinct from the protected-main controller SHA, archive once, hash the archive/gem/installed executable/module manifests/dependency inventory, and verify those exact identities before and after execution. Hosted candidates must be reachable from protected `main`. Never select an executable by filename alone. | `failed:candidate_identity` |
+| Mutable image or toolchain | Resolve the OCI image by immutable `sha256` digest before the run and prohibit later pulls. Record and reverify the engine identity, image/rootfs digest, Ruby, RubyGems, Bundler, controller script bytes, and the complete installed gem dependency closure before and after execution; the image/rootfs digest binds its native libraries. | `failed:runtime_identity` |
 | Archive traversal or special members | Admit only bounded regular files and directories beneath a new runner-owned root. Reject absolute paths, `..`, links, devices, sockets, fifos, duplicate members, and over-limit inventory before extraction. | `failed:candidate_archive` |
 | Pre-existing or replaced paths | Refuse every destination that exists before creation. Record device/inode after creation and remove only an unchanged owned identity. A replacement is preserved and cleanup fails closed. | `failed:path_custody` |
-| Candidate host access | Run the installed candidate in a dedicated, networkless, read-only-root container with no host procfs, no host home, no Docker socket, no credential, no ambient Git/SSH/provider variables, dropped capabilities, `no-new-privileges`, and only runner-created writable state/output mounts. No unsandboxed fallback. | `blocked:sandbox_unavailable` or `failed:sandbox_contract` |
+| Candidate host access | Run the installed candidate in a dedicated, networkless, read-only-root container with no host procfs, no host home, no Docker socket, no credential, no ambient Git/SSH/provider variables, dropped capabilities, `no-new-privileges`, and only runner-created byte- and inode-limited tmpfs or quota-backed state/output mounts. Constrain every writable layer. Copy only bounded admitted outputs after verified teardown. No unsandboxed fallback. | `blocked:sandbox_unavailable` or `failed:sandbox_contract` |
 | Process or resource escape | Give the container an exact label/ID, private PID namespace, whole-container TERM/KILL teardown, bounded pids/memory/CPU/time/output/files, and verify terminal container/process-group state on success, error, timeout, interrupt, and runner exception. | `failed:process_custody` |
 | Credential leakage | Select exactly one provider credential in the host probe. Candidate and sandbox environments contain none. Never place the credential in argv, paths, prompts, logs, exceptions, result fields, or uploaded artifacts. Scan retained bytes against exact-secret and generic secret patterns. | `failed:credential_custody` |
-| Transport override or exfiltration | Bind one HTTPS endpoint, model, proxy policy, and CA policy before reading the credential. Permit one fixed bounded request and no redirects to an unapproved origin. Retain status/usage and response digest, not response text. | `failed:provider_transport` |
+| Transport override, exfiltration, or false success | Before reading the credential, bind one exact HTTPS origin/path, model, proxy policy, and CA policy and reject ambient endpoint, proxy, or CA overrides. Permit one fixed bounded request with redirects disabled. Success requires the expected JSON content type and schema, no error object, the selected model identity, non-empty output, and positive usage. Retain only admitted status/usage and the response digest, never response text. | `failed:provider_transport` |
 | Provider unavailability, expiry, or quota | Preserve the candidate custody evidence and return typed `blocked` or `failed`; never reuse an old live success for a new head and never convert provider failure into a skip. | `blocked:provider_unavailable` or typed provider failure |
 | External effect or target escape | Supply no GitHub/effect credential, deny candidate network, and run no mutating Patrol path. Prepared effect receipts are historical inputs only. Any future live effect requires a separately threat-modelled, repository-scoped readmission. | `failed:effect_forbidden` |
 | Self-attested live binding | Execute protected-main controller bytes outside the candidate mount. Resolve the disposable project registration, repository identity/HEAD, installed candidate, module generations/configuration, observation digest, and result path from host-owned inputs before and after execution. Candidate output cannot supply expected bindings. | `failed:authority_binding` |
 | Unbounded input or output | Stream inventories before sort/allocation; cap every admitted file, member count, child stream, provider body, result, process count, and campaign deadline. Do not hold two full admitted payloads simultaneously. | typed bound failure |
-| Partial or conflicting publication | Persist `not_started` before preflight. Validate a complete terminal replacement in a private staged file, fsync it, and replace only the exact expected prior bytes. An existing different terminal result is a conflict. | `failed:publication_conflict` |
-| Workflow authority confusion | `workflow_dispatch` only; validate dispatch actor and triggering actor in every secret-bearing job; reject reruns; pin actions by full SHA; pass untrusted values through environment variables, not interpolated shell. | workflow fails before credential use |
+| Partial or conflicting publication | Persist `not_started` before preflight. Hold one owner-checked, no-follow lock on a stable recorded inode from the expected-byte read through staged validation, file fsync, atomic replacement, and parent-directory fsync. Recheck path identity while locked. An existing different terminal result or competing writer is a conflict. | `failed:publication_conflict` |
+| Artifact accumulation or unsafe deletion | Use one owned evidence root and the retention/count/aggregate-byte limits in the result contract. Refuse new evidence when full. Never delete automatically; explicit cleanup verifies the selected regular file's owner and device/inode through an already-open no-follow descriptor. | `blocked:evidence_store_full` or `failed:evidence_custody` |
+| Execution authority confusion | Refuse unless the local controller checkout is clean, equals the explicitly authorized full controller SHA, and that SHA is reachable from protected `main`; the candidate SHA must be distinct. Resolve both from Git objects before reading the credential, run no host-side command from candidate bytes, and bind controller/candidate SHAs, runner digest, operator authorization input, and invocation identity into the terminal result. Hosted workflows remain credential-free and cannot emit success. | command fails before credential use |
 
 Initial implementation bounds are deliberately conservative: at most 4,096
 candidate/dependency members and 256 MiB total admitted bytes; 8 MiB prepared
 observations; 1 MiB stdout plus 1 MiB stderr per child; 512 KiB terminal
-result; 64 processes, 2 GiB memory, two CPUs, 30 seconds per ordinary child,
-180 seconds for the one provider request, and 10 minutes for the campaign.
-Changing a bound requires a focused test and an admission-document amendment.
+result; 512 MiB and 16,384 inodes across candidate-writable filesystems; 64
+processes, 2 GiB memory, two CPUs, 30 seconds per ordinary child, 180 seconds
+for the one provider request, and 10 minutes for the campaign. The local
+evidence-store limits are 128 results and 64 MiB, and every result remains for
+at least 30 days. Changing a bound or retention value requires a focused test
+and an admission-document amendment.
 
 ## Inherited U3c observations
 
@@ -204,16 +232,16 @@ Before production mutation:
 Before a credentialed run:
 
 1. Credential-free custody and failure-path tests pass on one clean exact head.
-2. Required hosted CI and the final independent security review are terminal on
-   that unchanged head.
+2. Required hosted CI and the final independent reliability/security review are
+   terminal on that unchanged head.
 3. The operator freshly authorizes one provider run for that exact head. A head
-   change or workflow rerun invalidates the authorization.
+   change or second invocation invalidates the authorization.
 
 The infrastructure PR cannot authenticate or qualify itself. Its merge makes a
 trusted controller available; the first passing live smoke necessarily targets
 a later, distinct candidate commit under a separate exact-head authorization.
 
 The hostile archive/path/process campaign is opt-in and remains outside normal
-CI. Focused deterministic contract tests stay in normal CI. No U3c result
-authorizes merge, release, publication, deployment, report-v2 cutover,
-rollback, or component promotion.
+CI. Focused deterministic contract tests stay in normal CI. No hosted workflow
+receives the provider credential. No U3c result authorizes merge, release,
+publication, deployment, report-v2 cutover, rollback, or component promotion.

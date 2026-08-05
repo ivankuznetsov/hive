@@ -18,5 +18,5 @@ v2's `installed_live` lane or emit `evidence_ready_for_operator`.
 provider-backed Patrol decisions, credential-expiry/quota-reset lifecycle, and
 the inherited `U3-I06` / `U3-ARCH-006` obligations remain deferred until an
 observed defect or explicit operator readmission justifies that architecture.
-Production mutation remains forbidden until independent security acceptance
-and explicit operator signoff on the reduced claim.
+Production mutation remains forbidden until independent reliability/security
+acceptance and explicit operator signoff on the reduced claim.

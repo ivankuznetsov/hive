@@ -14,7 +14,7 @@ The bounded proof also removes Hive init's managed LLM-wiki post-commit hook
 before relocation, leaving no active Git hook in the candidate control plane.
 The smoke now emits the supervisor's admitted hyphenated correlation identity;
 setup rejects incompatible identities before building either closure.
-Hosted coverage exposed root-owned Ruby/Node toolcache inputs. Setup now admits
+The installed-runtime probe exercises root-owned toolchain inputs. Setup admits
 only immutable regular inputs owned by UID 0 or the current runner, then copies
 them into the runner-owned identity closure; foreign-user inputs remain denied.
 The existing U14 gateway/execution pair budget moved narrowly from 600 to 615

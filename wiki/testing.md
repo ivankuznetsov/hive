@@ -822,11 +822,14 @@ admission, native `skills info` path/content proof, SQLite-backed OpenClaw
 approval-policy readback, external control-root and separate-Git-dir tamper
 refusal, exact operational task binding, authored editorial graph and task
 observation, deterministic first-stage execution, typed bootstrap/failure
-publication, and runtime tamper detection. The smoke test contributes only live
-availability gates and final bundle assertions. Its authenticated model calls
-run only through a fresh, first-attempt owner dispatch and exact-head
-authorization; workflow reruns are refused before any credential-bearing job. The
-hostile suites and live lane are not normal pull-request CI.
+publication, and runtime tamper detection. The setup fixture seals its generated
+external inputs under umask `0077`, so strict writable-input rejection is
+independent of a runner's ambient umask.
+The smoke test contributes only live availability gates and final bundle
+assertions. Its authenticated model calls run only through a fresh,
+first-attempt owner dispatch and exact-head
+authorization; workflow reruns are refused before any credential-bearing job.
+The hostile suites and live lane are not normal pull-request CI.
 
 The repository-owned selector and attestation verifier remain covered by
 executable fixtures for optional diagnostic runs. They validate workflow/run

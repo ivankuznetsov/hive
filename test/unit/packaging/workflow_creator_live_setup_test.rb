@@ -182,17 +182,30 @@ class WorkflowCreatorLiveSetupTest < Minitest::Test
     end
   end
 
-  def test_admits_an_immutable_root_owned_toolchain_binary
-    path = %w[/usr/bin/ruby /bin/sh].find do |candidate|
+  def test_admits_an_immutable_runner_or_root_owned_toolchain_binary
+    path = [ File.realpath(RbConfig.ruby), "/usr/bin/ruby", "/bin/sh" ].find do |candidate|
       stat = File.lstat(candidate)
-      stat.file? && !stat.symlink? && stat.uid.zero? && (stat.mode & 0o022).zero?
+      trusted_owner = stat.uid == Process.uid || stat.uid.zero?
+      stat.file? && !stat.symlink? && trusted_owner && stat.nlink == 1 &&
+        (stat.mode & 0o022).zero?
     rescue SystemCallError
       false
     end
-    skip "no immutable root-owned toolchain binary is available" unless path
+    skip "no immutable runner- or root-owned toolchain binary is available" unless path
 
     bytes = Setup.allocate.send(:safe_file, path, 268_435_456)
     assert_equal File.binread(path), bytes
+  end
+
+  def test_fixture_seals_inputs_under_a_group_writable_ambient_umask
+    previous_umask = File.umask(0o002)
+    with_setup_fixture do |fixture|
+      result = prepare(fixture)
+
+      assert_equal SHA, result.fetch(:candidate_sha)
+    end
+  ensure
+    File.umask(previous_umask) if previous_umask
   end
 
   private
@@ -246,6 +259,7 @@ class WorkflowCreatorLiveSetupTest < Minitest::Test
   end
 
   def with_setup_fixture
+    previous_umask = File.umask(0o077)
     with_tmp_dir do |root|
       canonical = Hive::AgentSkills::CanonicalSkill.new
       artifacts_root = File.join(root, "artifact-input")
@@ -289,6 +303,8 @@ class WorkflowCreatorLiveSetupTest < Minitest::Test
             candidate_hive:, openclaw_runtime:, openclaw_entrypoint:, node:, openclaw_package:,
             openclaw_lock:, bundle:, workspace:, git:
     end
+  ensure
+    File.umask(previous_umask) if previous_umask
   end
 
   def fake_hive_source

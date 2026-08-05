@@ -210,6 +210,30 @@ class ReleaseCandidateLatestStableUpgradeTest < Minitest::Test
     end
   end
 
+  def test_extracted_channel_updater_preserves_the_macos_shim_root
+    with_tmp_dir do |dir|
+      baseline = target(dir, "baseline", "0.6.9", "a" * 64)
+      candidate = target(dir, "candidate", "0.6.9", "b" * 64)
+      executor = HiveReleaseCandidate::UpgradeSurvivor::FixedChannelExecutor.new(
+        targets: { "baseline" => baseline, "candidate" => candidate }
+      )
+      run_root = File.join(dir, "run")
+      FileUtils.mkdir_p(run_root)
+
+      receipt = executor.call(
+        row: nil, platform: "macos-arm64", candidate_target: candidate,
+        run_root: run_root
+      )
+
+      assert_equal "passed", receipt.fetch("status")
+      assert_equal "homebrew-local-formula", receipt.fetch("channel")
+      assert_equal(
+        "macos-homebrew-local-formula-hive-update",
+        receipt.dig("update", "seam")
+      )
+    end
+  end
+
   private
 
   def runner(dir, targets, executor, channel)

@@ -243,6 +243,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.candidate_sha }}
+          fetch-depth: 0
           persist-credentials: false
       - name: Check out trusted gate control
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -432,8 +433,8 @@ jobs:
           packaging/live_agent_skills/install_candidate_gem.sh "$gem_file" "$install_root"
           web_sha="$(ruby -rjson -e 'm=JSON.parse(File.read(File.join(ENV.fetch("RUNNER_TEMP"), "candidate", "manifest.json"))); puts m["files"].find { |_k,v| v["kind"]=="web" }[1]["sha256"]')"
           packaging/verify-managed-web-setup.sh \
-            --hive-bin "$install_root/bin/hive" --archive "$web_file" \
-            --sha256 "$web_sha" --prefix "$RUNNER_TEMP/managed"
+            --hive-bin="$install_root/bin/hive" --archive="$web_file" \
+            --sha256="$web_sha" --prefix="$RUNNER_TEMP/managed"
 
   native:
     name: ${{ matrix.job_name }}
@@ -646,26 +647,53 @@ jobs:
               ' sandbox "${{ matrix.row }}" "${{ matrix.platform }}" "$CANDIDATE_SHA"
           else
             profile="(version 1) (deny default) (allow process*) (allow file-read*) (allow file-write* (subpath \"$HIVE_RC_RUN_ROOT\")) (deny network*)"
-            sandbox-exec -p "$profile" \
-              env -i HOME="$HIVE_RC_RUN_ROOT/home" \
-              HIVE_HOME="$HIVE_RC_RUN_ROOT/hive" \
-              TMPDIR="$HIVE_RC_RUN_ROOT/tmp" \
-              XDG_CONFIG_HOME="$HIVE_RC_RUN_ROOT/xdg/config" \
-              XDG_CACHE_HOME="$HIVE_RC_RUN_ROOT/xdg/cache" \
-              XDG_DATA_HOME="$HIVE_RC_RUN_ROOT/xdg/data" \
-              XDG_STATE_HOME="$HIVE_RC_RUN_ROOT/xdg/state" \
-              HIVE_RC_REPO_ROOT="$HIVE_RC_CONTROL_ROOT" \
-              HIVE_RC_CACHE_ROOT="$HIVE_RC_CACHE_ROOT" \
-              HIVE_RC_RUN_ROOT="$HIVE_RC_RUN_ROOT" \
-              PATH="$ruby_bin_dir:/usr/local/bin:/usr/bin:/bin" \
-              bash -ceu '
-                ruby "$HIVE_RC_REPO_ROOT/packaging/release_candidate/hosted_stage.rb" install "$1" "$2" "$3"
-                test -f "$HIVE_RC_RUN_ROOT/sandbox-attestation.json"
-                test -f "$HIVE_RC_RUN_ROOT/baseline-cache-attestation.json"
-                test -f "$HIVE_RC_RUN_ROOT/targets/$1/baseline/target.json"
-                test -f "$HIVE_RC_RUN_ROOT/targets/$1/candidate/target.json"
-                ruby "$HIVE_RC_REPO_ROOT/packaging/release_candidate/hosted_upgrade_lane.rb" "$1" "$2" "$3"
+            sandbox_environment=(
+              env -i
+              "HOME=$HIVE_RC_RUN_ROOT/home"
+              "HIVE_HOME=$HIVE_RC_RUN_ROOT/hive"
+              "TMPDIR=$HIVE_RC_RUN_ROOT/tmp"
+              "XDG_CONFIG_HOME=$HIVE_RC_RUN_ROOT/xdg/config"
+              "XDG_CACHE_HOME=$HIVE_RC_RUN_ROOT/xdg/cache"
+              "XDG_DATA_HOME=$HIVE_RC_RUN_ROOT/xdg/data"
+              "XDG_STATE_HOME=$HIVE_RC_RUN_ROOT/xdg/state"
+              "HIVE_RC_REPO_ROOT=$HIVE_RC_CONTROL_ROOT"
+              "HIVE_RC_CACHE_ROOT=$HIVE_RC_CACHE_ROOT"
+              "HIVE_RC_RUN_ROOT=$HIVE_RC_RUN_ROOT"
+              "PATH=$ruby_bin_dir:/usr/local/bin:/usr/bin:/bin"
+            )
+            printf 'hive-release-candidate: checkpoint=sandbox-run status=start\n'
+            if sandbox-exec -p "$profile" "${sandbox_environment[@]}" bash -ceu '
+                run_phase() {
+                  phase="$1"
+                  shift
+                  printf "hive-release-candidate: checkpoint=%s status=start\n" "$phase"
+                  if "$@"; then
+                    printf "hive-release-candidate: checkpoint=%s status=passed\n" "$phase"
+                  else
+                    status=$?
+                    printf >&2 "hive-release-candidate: failure phase=%s status=%s\n" "$phase" "$status"
+                    exit "$status"
+                  fi
+                }
+                printf "hive-release-candidate: checkpoint=sandbox-shell status=entered\n"
+                run_phase ruby-smoke ruby -e \
+                  "STDOUT.sync = true; puts \"hive-release-candidate: checkpoint=ruby-smoke status=passed\""
+                run_phase hosted-stage-install \
+                  ruby "$HIVE_RC_REPO_ROOT/packaging/release_candidate/hosted_stage.rb" install "$1" "$2" "$3"
+                run_phase sandbox-attestation test -f "$HIVE_RC_RUN_ROOT/sandbox-attestation.json"
+                run_phase baseline-cache-attestation test -f "$HIVE_RC_RUN_ROOT/baseline-cache-attestation.json"
+                run_phase baseline-target-attestation test -f "$HIVE_RC_RUN_ROOT/targets/$1/baseline/target.json"
+                run_phase candidate-target-attestation test -f "$HIVE_RC_RUN_ROOT/targets/$1/candidate/target.json"
+                run_phase hosted-upgrade-lane \
+                  ruby "$HIVE_RC_REPO_ROOT/packaging/release_candidate/hosted_upgrade_lane.rb" "$1" "$2" "$3"
               ' sandbox "${{ matrix.row }}" "${{ matrix.platform }}" "$CANDIDATE_SHA"
+            then
+              printf 'hive-release-candidate: checkpoint=sandbox-run status=passed\n'
+            else
+              status=$?
+              printf >&2 'hive-release-candidate: failure phase=sandbox-run status=%s\n' "$status"
+              exit "$status"
+            fi
           fi
 
   freshness:

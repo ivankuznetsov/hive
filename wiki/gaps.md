@@ -16,9 +16,10 @@ tags: [gap, todo, release-proof, agent-skills]
   retained exact terminal evidence, but only seven of fourteen required gates
   passed. The expected `candidate_not_newer` result is joined by harness
   findings: catalog tests lacked historical tags in a shallow checkout,
-  managed-Web verification called a removed `--hive-bin` option, Linux upgrade
-  staging omitted the locked `bigdecimal-4.1.2.gem`, and the macOS upgrade lane
-  exited without a typed diagnostic. Ordinary CI, artifact/package checks, all
+  managed-Web verification used split arguments unsupported by its equals-only
+  verifier, Linux upgrade installation consumed producer-host closure roots
+  inside the `/cache` container namespace, and the macOS upgrade lane exited
+  without a typed diagnostic. Ordinary CI, artifact/package checks, all
   native installs, baseline freshness, and release E2E passed. Named retry run
   `31015265841` selected only `Candidate version newer`, reused the original
   candidate artifact, and composed every unselected effective row from the
@@ -28,6 +29,11 @@ tags: [gap, todo, release-proof, agent-skills]
   not an uncatchable hard crash between a gate result and evidence publication.
   Adding a durable in-progress journal remains a separately admitted behavior
   change rather than hidden refactor scope.
+  The local gate repair now covers the three confirmed harness defects and adds
+  same-profile macOS shell/Ruby probes plus phase checkpoints without widening
+  the sandbox policy. The exact macOS denial remains unknown until a fresh
+  hosted run reports the first failing checkpoint; no local test can promote
+  this candidate to trusted release evidence.
 
 - Patrol capture/effect boundaries and the U3a receipt, independent verifier,
   duplicate index, qualification value, two-lane report, and one-off report

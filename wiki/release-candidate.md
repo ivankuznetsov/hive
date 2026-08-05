@@ -163,6 +163,14 @@ manifests can resolve an executable, and it must be an owned executable regular
 file beneath that root. Equal semantic versions remain distinguishable by
 root, wrapper, gem, and skills digests.
 
+Hosted fetch evidence retains the producer namespace's absolute cache roots,
+but those paths are not executable authority. Install validates the exact
+closed role set and each embedded role identity, then derives an in-memory
+closure root beneath the consumer's current `HIVE_RC_CACHE_ROOT`. This keeps
+the staged JSON immutable while allowing the Linux host cache to be consumed
+through its read-only `/cache` mount; baseline and observer share their
+reviewed row root, while candidate dependencies remain separately rooted.
+
 Installed processes receive a closed environment: only locale and time-zone
 values may survive from the host. `HOME`, `HIVE_HOME`, XDG roots, gem roots,
 and `PATH` are rebuilt beneath isolated state/target roots; Bundler, checkout,
@@ -259,6 +267,15 @@ committed scripts for job/ordinary-CI queries and receipt/predecessor
 collection. These three private workflow scripts are part of candidate tool
 identity; candidate construction, platform sandbox commands, aggregate
 construction, and publication remain at their existing review surfaces.
+
+Catalog integrity uses a full-history candidate checkout because its focused
+contracts read the reviewed historical tags. Managed-Web verification passes
+the helper's documented `--name=value` arguments. The macOS upgrade cell keeps
+its existing deny-default sandbox profile unchanged and runs bounded,
+same-profile shell and Ruby probes before installation. Constant-size
+checkpoint and exit-status lines then identify install, each required
+attestation, and upgrade-lane failures without adding sandbox permissions or
+provider credentials.
 
 Historical packages, dependency closures, and candidate bytes are downloaded
 and authenticated before installed package code runs. Installation and the U4

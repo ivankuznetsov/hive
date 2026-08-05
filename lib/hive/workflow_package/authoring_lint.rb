@@ -62,6 +62,7 @@ module Hive
       ].freeze
       GENERIC_SECRET = /\b(?:api[_-]?key|client[_-]?secret|password|token)\b\s*[:=]\s*["']([^"'\s]{16,})["']/i
       PAYMENT_CARD = /(?<!\d)(?:\d[ -]?){12,18}\d(?!\d)/
+      HEX_SHA256 = /(?<![0-9a-f])[0-9a-f]{64}(?![0-9a-f])/i
       PII_PATTERNS = [
         [ "pii.government-id", /\b(?:ssn|social\s+security(?:\s+number)?|national\s+id)\s*[:#-]?\s*\d{3}-\d{2}-\d{4}\b/i, :error, "Context-labeled government identifier detected" ],
         [ "pii.email", /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i, :warning, "Email address observed" ],
@@ -220,6 +221,7 @@ module Hive
             )
           end
           each_match(line, PAYMENT_CARD) do |match|
+            next if inside_sha256?(line, match)
             next unless luhn_valid?(match[0])
 
             add(
@@ -821,6 +823,13 @@ module Hive
           doubled > 9 ? doubled - 9 : doubled
         end
         (sum % 10).zero?
+      end
+
+      def inside_sha256?(line, match)
+        line.to_enum(:scan, HEX_SHA256).any? do
+          digest = Regexp.last_match
+          digest.begin(0) <= match.begin(0) && digest.end(0) >= match.end(0)
+        end
       end
 
       def normalize_host(host)

@@ -13,6 +13,8 @@ with stronger recovery, release evidence, and Patrol qualification boundaries.
   previews, durable human decisions, and idempotent task creation. (#854)
 - Added immutable Honeycomb v1 package publication with dry-run validation and
   retry-safe submission and reconciliation. (#857)
+- Fixed Honeycomb publication rejecting SHA-256 digests whose numeric runs
+  happened to satisfy the payment-card checksum.
 - Added provider-neutral per-stage model and effort routing across the built-in
   workflow surface, including bounded Codex and Grok actors. (#856, #862)
 

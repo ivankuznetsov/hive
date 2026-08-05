@@ -1858,8 +1858,7 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
   def complete_zero_envelope(entry)
     aggregate = Hive::RefactorPatrol::JobStore.new(
       entry.fetch("path"),
-      hive_state_path: entry.fetch("hive_state_path"),
-      project: entry
+      hive_state_path: entry.fetch("hive_state_path")
     ).read_job("job-7")
     {
       "schema" => "hive-refactor-patrol", "schema_version" => 3, "ok" => true,

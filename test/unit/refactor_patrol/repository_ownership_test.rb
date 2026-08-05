@@ -394,9 +394,9 @@ class RefactorPatrolRepositoryOwnershipTest < Minitest::Test
       )
       fake_store = Object.new
       fake_store.define_singleton_method(:each_job) { [ aggregate ] }
-      captured_project = nil
-      replacement = lambda do |_path, project:, **_options|
-        captured_project = project
+      captured_store_arguments = nil
+      replacement = lambda do |path, **options|
+        captured_store_arguments = [ path, options ]
         fake_store
       end
 
@@ -406,7 +406,8 @@ class RefactorPatrolRepositoryOwnershipTest < Minitest::Test
         )
         assert_equal [ identity("acme/demo", "github.com") ],
                      guard.send(:stored_continuation_identities, target, config(enabled: false))
-        assert_equal target.fetch("project_id"), captured_project.fetch("project_id")
+        assert_equal target.fetch("path"), captured_store_arguments.fetch(0)
+        assert_nil captured_store_arguments.fetch(1).fetch(:hive_state_path)
       end
     end
   end

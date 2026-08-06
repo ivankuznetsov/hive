@@ -46,8 +46,9 @@ jobs:
           profile="(version 1) (deny default) (allow process*) (allow file-read*) (allow sysctl-read) (allow file-write* (literal \"/dev/null\")) (allow file-write* (subpath \"$run_root\")) (deny network*)"
           sandbox-exec -p "$profile" env -i \
             "HOME=$run_root/home" "TMPDIR=$run_root/tmp" \
+            "LANG=en_US.UTF-8" "LC_ALL=en_US.UTF-8" \
             "PATH=$ruby_bin_dir:/usr/local/bin:/usr/bin:/bin" \
-            ruby -e 'File.open("/dev/null", "w") { |io| io.write("") }; STDOUT.sync = true; puts "release-candidate-ruby-sandbox: passed"'
+            ruby -e 'abort "expected UTF-8 external encoding" unless Encoding.default_external == Encoding::UTF_8; File.open("/dev/null", "w") { |io| io.write("") }; STDOUT.sync = true; puts "release-candidate-ruby-sandbox: passed"'
 
   arch-dry-run:
     name: Arch dry run

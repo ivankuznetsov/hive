@@ -284,11 +284,15 @@ contracts read the reviewed historical tags. Managed-Web verification passes
 the helper's documented `--name=value` arguments. The macOS upgrade cell keeps
 a deny-default sandbox and permits read-only `sysctl` calls needed by the
 hosted Ruby runtime plus writes to the literal `/dev/null` device used by
-RubyGems. Network remains denied, every other write remains confined to the run
-root, and Mach service lookup is not allowed. Install smoke starts Ruby and
-opens `/dev/null` for writing under the same profile on every PR. Constant-size
-checkpoint and exit-status lines identify install, each required attestation,
-and upgrade-lane failures without provider credentials.
+RubyGems. Its scrubbed process environment fixes `LANG` and `LC_ALL` to
+`en_US.UTF-8`, so installed historical and candidate processes receive a
+deterministic UTF-8 external encoding instead of macOS's US-ASCII fallback.
+Network remains denied, every other write remains confined to the run root,
+and Mach service lookup is not allowed. Install smoke starts Ruby, verifies
+that exact external encoding, and opens `/dev/null` for writing under the same
+profile on every PR. Constant-size checkpoint and exit-status lines identify
+install, each required attestation, and upgrade-lane failures without provider
+credentials.
 
 Historical packages, dependency closures, and candidate bytes are downloaded
 and authenticated before installed package code runs. Installation and the U4

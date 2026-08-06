@@ -367,6 +367,9 @@ class ReleaseContractTest < Minitest::Test
     assert_equal 1, upgrade.scan('sandbox-exec -p "$profile"').size
     assert_includes upgrade, "checkpoint=sandbox-run"
     assert_includes upgrade, "checkpoint=ruby-smoke"
+    assert_includes upgrade, '"LANG=en_US.UTF-8"'
+    assert_includes upgrade, '"LC_ALL=en_US.UTF-8"'
+    assert_includes upgrade, "Encoding.default_external == Encoding::UTF_8"
     assert_includes upgrade, 'File.open(\"/dev/null\", \"w\")'
     assert_includes upgrade, "checkpoint=sandbox-shell"
     assert_includes upgrade, "failure phase=%s status=%s"
@@ -384,6 +387,8 @@ class ReleaseContractTest < Minitest::Test
       '(allow file-write* (subpath \"$run_root\")) (deny network*)'
     assert_includes install_smoke, %(profile="#{smoke_profile}")
     assert_includes install_smoke, 'sandbox-exec -p "$profile" env -i'
+    assert_includes install_smoke, '"LANG=en_US.UTF-8" "LC_ALL=en_US.UTF-8"'
+    assert_includes install_smoke, "Encoding.default_external == Encoding::UTF_8"
     assert_includes install_smoke, 'File.open("/dev/null", "w")'
     refute_includes install_smoke, "allow mach-lookup"
   end

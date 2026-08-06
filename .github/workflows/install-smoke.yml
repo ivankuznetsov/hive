@@ -33,7 +33,21 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # pinned 2026-07-26
+        with:
+          ruby-version: "3.4"
       - run: bash install.sh --dry-run --version=v0.1.0
+      - name: Verify release-candidate Ruby sandbox
+        shell: bash
+        run: |
+          run_root="$(mktemp -d "$RUNNER_TEMP/hive-release-candidate-sandbox.XXXXXX")"
+          mkdir -p "$run_root/home" "$run_root/tmp"
+          ruby_bin_dir="$(dirname "$(command -v ruby)")"
+          profile="(version 1) (deny default) (allow process*) (allow file-read*) (allow sysctl-read) (allow file-write* (subpath \"$run_root\")) (deny network*)"
+          sandbox-exec -p "$profile" env -i \
+            "HOME=$run_root/home" "TMPDIR=$run_root/tmp" \
+            "PATH=$ruby_bin_dir:/usr/local/bin:/usr/bin:/bin" \
+            ruby -e 'STDOUT.sync = true; puts "release-candidate-ruby-sandbox: passed"'
 
   arch-dry-run:
     name: Arch dry run

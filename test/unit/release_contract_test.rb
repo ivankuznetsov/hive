@@ -360,7 +360,7 @@ class ReleaseContractTest < Minitest::Test
     upgrade = jobs.fetch("upgrade").fetch("steps").find do |step|
       step["name"] == "Run installed historical producer and candidate without network"
     end.fetch("run")
-    profile = "(version 1) (deny default) (allow process*) (allow file-read*) " \
+    profile = "(version 1) (deny default) (allow process*) (allow file-read*) (allow sysctl-read) " \
       '(allow file-write* (subpath \"$HIVE_RC_RUN_ROOT\")) (deny network*)'
     assert_includes upgrade, %(profile="#{profile}")
     assert_equal 1, upgrade.scan('sandbox-exec -p "$profile"').size
@@ -374,8 +374,14 @@ class ReleaseContractTest < Minitest::Test
     ].each do |phase|
       assert_includes upgrade, "run_phase #{phase}"
     end
-    refute_includes upgrade, "allow sysctl-read"
     refute_includes upgrade, "allow mach-lookup"
+
+    install_smoke = read(".github/workflows/install-smoke.yml")
+    smoke_profile = "(version 1) (deny default) (allow process*) (allow file-read*) (allow sysctl-read) " \
+      '(allow file-write* (subpath \"$run_root\")) (deny network*)'
+    assert_includes install_smoke, %(profile="#{smoke_profile}")
+    assert_includes install_smoke, 'sandbox-exec -p "$profile" env -i'
+    refute_includes install_smoke, "allow mach-lookup"
   end
 
   def test_candidate_version_gate_reads_the_reviewed_catalog

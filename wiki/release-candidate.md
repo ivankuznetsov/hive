@@ -278,11 +278,12 @@ construction, and publication remain at their existing review surfaces.
 Catalog integrity uses a full-history candidate checkout because its focused
 contracts read the reviewed historical tags. Managed-Web verification passes
 the helper's documented `--name=value` arguments. The macOS upgrade cell keeps
-its existing deny-default sandbox profile unchanged and runs bounded,
-same-profile shell and Ruby probes before installation. Constant-size
-checkpoint and exit-status lines then identify install, each required
-attestation, and upgrade-lane failures without adding sandbox permissions or
-provider credentials.
+a deny-default sandbox and permits read-only `sysctl` calls needed by the
+hosted Ruby runtime; network remains denied, writes remain confined to the run
+root, and Mach service lookup is not allowed. Install smoke exercises a minimal
+Ruby process under the same profile on every PR. Constant-size checkpoint and
+exit-status lines identify install, each required attestation, and upgrade-lane
+failures without provider credentials.
 
 Historical packages, dependency closures, and candidate bytes are downloaded
 and authenticated before installed package code runs. Installation and the U4
@@ -292,7 +293,9 @@ all capabilities are dropped, no-new-privileges and a PID ceiling are set,
 only the trusted control repository and authenticated cache are mounted
 read-only, and the run root is the sole writable mount. macOS uses a
 deny-network sandbox on its ephemeral runner with the same trusted-control,
-read-only-cache, and writable-run split.
+read-only-cache, and writable-run split. Captured subprocess diagnostics are
+bounded and normalized to valid UTF-8 before they enter JSON evidence, including
+when a byte limit cuts through a multibyte sequence.
 
 Every blocking cell compares its candidate-controlled harness paths
 byte-for-byte with the separately checked-out trusted workflow revision before

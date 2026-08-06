@@ -646,7 +646,7 @@ jobs:
                 ruby /repo/packaging/release_candidate/hosted_upgrade_lane.rb "$1" "$2" "$3"
               ' sandbox "${{ matrix.row }}" "${{ matrix.platform }}" "$CANDIDATE_SHA"
           else
-            profile="(version 1) (deny default) (allow process*) (allow file-read*) (allow file-write* (subpath \"$HIVE_RC_RUN_ROOT\")) (deny network*)"
+            profile="(version 1) (deny default) (allow process*) (allow file-read*) (allow sysctl-read) (allow file-write* (subpath \"$HIVE_RC_RUN_ROOT\")) (deny network*)"
             sandbox_environment=(
               env -i
               "HOME=$HIVE_RC_RUN_ROOT/home"

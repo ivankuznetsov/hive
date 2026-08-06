@@ -62,6 +62,48 @@ class ReleaseCandidateLatestStableUpgradeTest < Minitest::Test
     end
   end
 
+  def test_normalizes_phase_diagnostics_before_serializing_evidence
+    with_tmp_dir do |dir|
+      targets = {
+        "baseline" => target(
+          dir, "baseline", "0.6.9",
+          "9e9d065f67ccf3381b263f9a5ca44afb79b3122309b1b87c2477ddb6b2fba7a1"
+        ),
+        "candidate" => target(dir, "candidate", "0.6.9", "b" * 64)
+      }
+      state = latest_state
+      executor = lambda do |target:, phase:, **|
+        snapshot = Marshal.load(Marshal.dump(state))
+        snapshot["install_identity"]["gem_sha256"] = "b" * 64 unless phase == "before"
+        {
+          "status" => "passed", "producer_kind" => "real-installed",
+          "target_gem_sha256" => target.manifest.fetch("gem_sha256"),
+          "snapshot" => snapshot, "stdout" => "diagnostic\xFF".b,
+          "stderr" => ("e" * 65_535 + "\xE2\x82\xAC").b,
+          "processes" => [], "services" => []
+        }
+      end
+      channel = lambda do |**|
+        {
+          "status" => "passed", "channel" => "linux-bash",
+          "candidate_gem_sha256" => "b" * 64, "stale_files" => [],
+          "wrapper_role" => "candidate", "sidecars_current" => true,
+          "dependencies_current" => true
+        }
+      end
+
+      result = runner(dir, targets, executor, channel).run(
+        row_id: "latest-stable", platform: "linux-x86_64"
+      )
+
+      result.fetch("phases").each do |phase|
+        assert_predicate phase.fetch("stdout"), :valid_encoding?
+        assert_predicate phase.fetch("stderr"), :valid_encoding?
+      end
+      assert JSON.generate(result)
+    end
+  end
+
   def test_rejects_task_change_non_idempotency_stale_channel_and_fixture_substitution
     with_tmp_dir do |dir|
       targets = {

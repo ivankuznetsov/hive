@@ -1,4 +1,5 @@
 require "test_helper"
+require "json"
 require_relative "../../../packaging/release_candidate/process_teardown"
 
 class ReleaseCandidateProcessTeardownTest < Minitest::Test
@@ -68,6 +69,27 @@ class ReleaseCandidateProcessTeardownTest < Minitest::Test
       end
     ensure
       ENV.delete("HIVE_U4_HOST_SECRET")
+    end
+  end
+
+  def test_capture_normalizes_binary_and_truncated_output_for_json_receipts
+    Dir.mktmpdir("release-candidate-process") do |dir|
+      target = Struct.new(:role, :executable, :state_root).new(
+        "candidate", RbConfig.ruby, dir
+      )
+      runner = HiveReleaseCandidate::ProcessTeardown.new(output_limit: 5)
+
+      receipt = runner.capture(
+        target: target,
+        argv: [ "-e", "$stdout.binmode; $stdout.write(\"ok\\xFF\\xE2\\x82\\xAC\".b)" ],
+        environment: {}, cwd: dir, label: "binary-output"
+      )
+
+      assert receipt.fetch("stdout_truncated")
+      assert_equal Encoding::UTF_8, receipt.fetch("stdout").encoding
+      assert_predicate receipt.fetch("stdout"), :valid_encoding?
+      assert_equal "ok\uFFFD\uFFFD", receipt.fetch("stdout")
+      assert JSON.generate(receipt)
     end
   end
 end

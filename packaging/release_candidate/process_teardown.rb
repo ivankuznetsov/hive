@@ -128,7 +128,7 @@ module HiveReleaseCandidate
     end
 
     def read_bounded(io)
-      output = +""
+      output = String.new(encoding: Encoding::BINARY)
       truncated = false
       while (chunk = io.read(16 * 1024))
         remaining = @output_limit - output.bytesize
@@ -137,7 +137,8 @@ module HiveReleaseCandidate
         end
         truncated ||= chunk.bytesize > remaining
       end
-      [ output, truncated ]
+      output.force_encoding(Encoding::UTF_8)
+      [ output.scrub, truncated ]
     ensure
       io.close rescue nil
     end

@@ -652,6 +652,8 @@ jobs:
               "HOME=$HIVE_RC_RUN_ROOT/home"
               "HIVE_HOME=$HIVE_RC_RUN_ROOT/hive"
               "TMPDIR=$HIVE_RC_RUN_ROOT/tmp"
+              "LANG=en_US.UTF-8"
+              "LC_ALL=en_US.UTF-8"
               "XDG_CONFIG_HOME=$HIVE_RC_RUN_ROOT/xdg/config"
               "XDG_CACHE_HOME=$HIVE_RC_RUN_ROOT/xdg/cache"
               "XDG_DATA_HOME=$HIVE_RC_RUN_ROOT/xdg/data"
@@ -677,7 +679,7 @@ jobs:
                 }
                 printf "hive-release-candidate: checkpoint=sandbox-shell status=entered\n"
                 run_phase ruby-smoke ruby -e \
-                  "File.open(\"/dev/null\", \"w\") { |io| io.write(\"\") }; STDOUT.sync = true; puts \"hive-release-candidate: checkpoint=ruby-smoke status=passed\""
+                  "abort \"expected UTF-8 external encoding\" unless Encoding.default_external == Encoding::UTF_8; File.open(\"/dev/null\", \"w\") { |io| io.write(\"\") }; STDOUT.sync = true; puts \"hive-release-candidate: checkpoint=ruby-smoke status=passed\""
                 run_phase hosted-stage-install \
                   ruby "$HIVE_RC_REPO_ROOT/packaging/release_candidate/hosted_stage.rb" install "$1" "$2" "$3"
                 run_phase sandbox-attestation test -f "$HIVE_RC_RUN_ROOT/sandbox-attestation.json"

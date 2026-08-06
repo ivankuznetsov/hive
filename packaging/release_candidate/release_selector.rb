@@ -546,7 +546,10 @@ module HiveReleaseCandidate
       raise Error, "candidate manifest filenames do not match the release identity" unless actual == expected
 
       source = File.join(candidate_dir, expected.fetch("source"))
-      selected = read_source_entries(source, [ SOURCE_VERSION_PATH, BASELINE_PATH ])
+      selected = read_source_entries(
+        source, [ SOURCE_VERSION_PATH, BASELINE_PATH ],
+        candidate_sha: candidate_sha
+      )
       source_version = selected.fetch(SOURCE_VERSION_PATH)
         .match(/\bVERSION\s*=\s*["']([^"']+)["']/)&.[](1)
       unless source_version == tag_version
@@ -569,13 +572,25 @@ module HiveReleaseCandidate
 
     private
 
-    def read_source_entries(path, wanted)
+    def read_source_entries(path, wanted, candidate_sha:)
       found = {}
+      global_header = false
       Zlib::GzipReader.open(path) do |gzip|
         Gem::Package::TarReader.new(gzip) do |tar|
           tar.each do |entry|
             name = entry.full_name.sub(%r{\A\./}, "")
             validate_tar_name!(name)
+            if entry.header.typeflag == "g"
+              expected = "52 comment=#{candidate_sha}\n"
+              valid = !global_header && name == "pax_global_header" &&
+                entry.size == expected.bytesize &&
+                entry.read(expected.bytesize + 1) == expected
+              unless valid
+                raise Error, "candidate source contains noncanonical global archive metadata"
+              end
+              global_header = true
+              next
+            end
             unless entry.file? || entry.directory?
               raise Error, "candidate source contains a link or special entry"
             end

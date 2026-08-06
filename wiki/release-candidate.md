@@ -410,6 +410,10 @@ agent-skill, and managed-web filenames for the tag version and target SHA. The
 source archive must declare that version through the canonical
 `lib/hive/version.rb` source, and it must remain newer than the catalog-pinned
 latest stable version already proven by the blocking candidate gate.
+Tag-time source inspection accepts the optional single canonical PAX global
+header emitted by `git archive` for the exact candidate SHA. It independently
+rejects duplicate or malformed global metadata and still rejects links and
+every other special archive entry.
 
 Only the manifest-bound gem, skill, and web bytes are restaged for native
 install and publication. The source archive stays an internal retained QA

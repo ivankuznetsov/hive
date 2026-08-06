@@ -3,7 +3,7 @@ title: Hive::Worktree
 type: module
 source: lib/hive/worktree.rb, lib/hive/draft_pr_receipt.rb, lib/hive/agent_git_gate.rb, lib/hive/stages/agent_worktree.rb
 created: 2026-04-25
-updated: 2026-07-24
+updated: 2026-08-06
 tags: [worktree, git, pointer, dependencies, draft-pr, handoff]
 ---
 
@@ -152,6 +152,15 @@ registration may be pruned only for the same missing destination. An existing
 tree is reusable only when it passes all three checks. The gate's typed
 `created`/`existing` disposition is translated back to the historical symbol
 return contract, while failures remain `Hive::WorktreeError`.
+
+`create_exact!` also repairs the stricter registered-but-broken case used by
+Architecture Patrol fixes. When Git still lists the exact worktree but its
+reported repository root is not that exact path, Hive first moves
+the entire remaining directory into the sibling `.hive-quarantine/` tree,
+warns with that recovery path, removes only that stale registration, and then
+reattaches the already-validated branch. A symlinked path, failed quarantine,
+registration that remains after targeted removal, or a second unresolved
+quarantine for the same slug fails closed instead of growing disk use.
 
 ## `exists?`
 

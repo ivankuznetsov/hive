@@ -1,5 +1,6 @@
 require "open3"
 require "fileutils"
+require "securerandom"
 require "yaml"
 require "hive/config"
 require "hive/git_ref"
@@ -200,6 +201,7 @@ module Hive
       expected = self.class.run_materialize_git!(
         @project_root, "rev-parse", "--verify", "#{base_sha}^{commit}"
       ).strip
+      recover_broken_exact_registration!
 
       if exists?
         checked_out = self.class.run_materialize_git!(path, "branch", "--show-current").strip
@@ -260,6 +262,60 @@ module Hive
 
       true
     end
+
+    # A killed cleanup or external filesystem repair can leave Git's
+    # registration pointing at a directory whose .git pointer is gone. Such
+    # a path is neither reusable nor addable. Preserve every remaining byte
+    # in a sibling quarantine, prune only the now-missing registration, and
+    # let create_exact! reattach the already-validated branch.
+    def recover_broken_exact_registration!
+      return unless list_worktree_paths.include?(path)
+      return if usable_git_worktree?
+
+      if File.symlink?(path)
+        raise WorktreeError,
+              "broken exact worktree path is a symlink and cannot be recovered: #{path}"
+      end
+      if File.exist?(path)
+        quarantine_root = File.join(File.dirname(path), ".hive-quarantine")
+        FileUtils.mkdir_p(quarantine_root)
+        existing = Dir.glob(
+          File.join(quarantine_root, "#{File.basename(path)}-*")
+        )
+        unless existing.empty?
+          raise WorktreeError,
+                "broken exact worktree has an unresolved prior quarantine: #{existing.min}"
+        end
+        quarantine = File.join(
+          quarantine_root,
+          "#{File.basename(path)}-#{Time.now.utc.strftime('%Y%m%dT%H%M%S')}-#{SecureRandom.hex(4)}"
+        )
+        FileUtils.mv(path, quarantine)
+        warn "[hive] preserved broken exact worktree at #{quarantine}"
+      end
+
+      self.class.run_materialize_git!(
+        @project_root, "worktree", "remove", "--force", path
+      )
+      if list_worktree_paths.include?(path)
+        raise WorktreeError,
+              "broken exact worktree registration could not be removed: #{path}"
+      end
+      true
+    rescue SystemCallError => e
+      raise WorktreeError,
+            "broken exact worktree could not be preserved: #{e.message}"
+    end
+
+    def usable_git_worktree?
+      return false unless File.directory?(path)
+
+      top_level, _err, status = Open3.capture3(
+        "git", "-C", path, "rev-parse", "--show-toplevel"
+      )
+      status.success? && File.expand_path(top_level.strip) == File.expand_path(path)
+    end
+    private :recover_broken_exact_registration!, :usable_git_worktree?
 
     def remove!(path: self.path, force: false)
       args = [ "worktree", "remove" ]

@@ -1075,6 +1075,41 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
     end
   end
 
+  def test_feature_map_persists_as_one_retry_safe_batch_effect
+    with_tmp_dir do |root|
+      evidence_root = File.join(root, "evidence")
+      store = configured_store(root, evidence_root)
+      features = 140.times.map do |index|
+        Hive::Patrol::Feature.new(
+          id: "feature-#{index}",
+          kind: "component",
+          entrypoints: [ "lib/feature_#{index}.rb" ],
+          owned_files: [ "lib/feature_#{index}.rb" ],
+          context_files: [],
+          tests: []
+        )
+      end
+
+      assert_equal features, store.write_features(features)
+
+      record = store.occurrence(capture.occurrence_id)
+      assert_equal 1, record.fetch("effects").size
+      assert_equal "features",
+                   record.fetch("effects").values.first.dig(
+                     "semantic", "target"
+                   )
+      assert_equal 140,
+                   Dir.glob(File.join(store.root, "features", "*.json")).size
+
+      reloaded = configured_store(root, evidence_root)
+      assert_equal features.map(&:to_h),
+                   reloaded.write_features(features).map(&:to_h)
+      assert_equal 1,
+                   reloaded.occurrence(capture.occurrence_id)
+                           .fetch("effects").size
+    end
+  end
+
   def test_effect_recovery_values_and_fingerprint_lock_fail_closed
     with_tmp_dir do |root|
       store = Hive::Patrol::StateStore.new(root)

@@ -325,6 +325,82 @@ class WorktreeTest < Minitest::Test
     end
   end
 
+  def test_create_exact_quarantines_a_registered_worktree_with_a_missing_git_pointer
+    with_initialized_project do |dir, root|
+      pinned = run!("git", "-C", dir, "rev-parse", "HEAD").strip
+      branch = "hive-refactor/exact-broken"
+      wt = Hive::Worktree.new(dir, "exact-broken", worktree_root: root)
+      wt.create_exact!(branch, base_sha: pinned)
+      File.write(File.join(wt.path, "untracked-recovery.txt"), "preserve me\n")
+      FileUtils.rm_f(File.join(wt.path, ".git"))
+
+      result = nil
+      _out, err = capture_io do
+        result = wt.create_exact!(branch, base_sha: pinned)
+      end
+
+      assert_equal :created, result
+      assert_equal branch,
+                   run!("git", "-C", wt.path, "branch", "--show-current").strip
+      assert_equal pinned, run!("git", "-C", wt.path, "rev-parse", "HEAD").strip
+      quarantined = Dir.glob(
+        File.join(root, ".hive-quarantine", "exact-broken-*")
+      )
+      assert_equal 1, quarantined.size
+      assert_equal "preserve me\n",
+                   File.read(File.join(quarantined.first, "untracked-recovery.txt"))
+      assert_includes err, "preserved broken exact worktree"
+    end
+  end
+
+  def test_create_exact_does_not_mistake_an_enclosing_checkout_for_the_worktree
+    with_tmp_git_repo do |dir|
+      root = File.join(dir, ".nested-worktrees")
+      FileUtils.mkdir_p(root)
+      pinned = run!("git", "-C", dir, "rev-parse", "HEAD").strip
+      branch = "hive-refactor/exact-nested-broken"
+      wt = Hive::Worktree.new(dir, "exact-nested-broken", worktree_root: root)
+      wt.create_exact!(branch, base_sha: pinned)
+      FileUtils.rm_f(File.join(wt.path, ".git"))
+
+      result = nil
+      capture_io do
+        result = wt.create_exact!(branch, base_sha: pinned)
+      end
+
+      assert_equal :created, result
+      assert_equal branch,
+                   run!("git", "-C", wt.path, "branch", "--show-current").strip
+      assert File.file?(File.join(wt.path, ".git"))
+      assert_equal 1, Dir.glob(
+        File.join(root, ".hive-quarantine", "exact-nested-broken-*")
+      ).size
+    end
+  end
+
+  def test_create_exact_refuses_to_accumulate_repeated_quarantines
+    with_initialized_project do |dir, root|
+      pinned = run!("git", "-C", dir, "rev-parse", "HEAD").strip
+      branch = "hive-refactor/exact-repeated-broken"
+      wt = Hive::Worktree.new(dir, "exact-repeated-broken", worktree_root: root)
+      wt.create_exact!(branch, base_sha: pinned)
+      FileUtils.rm_f(File.join(wt.path, ".git"))
+      capture_io { wt.create_exact!(branch, base_sha: pinned) }
+      File.write(File.join(wt.path, "second-recovery.txt"), "keep here\n")
+      FileUtils.rm_f(File.join(wt.path, ".git"))
+
+      error = assert_raises(Hive::WorktreeError) do
+        capture_io { wt.create_exact!(branch, base_sha: pinned) }
+      end
+
+      assert_includes error.message, "unresolved prior quarantine"
+      assert_equal "keep here\n", File.read(File.join(wt.path, "second-recovery.txt"))
+      assert_equal 1, Dir.glob(
+        File.join(root, ".hive-quarantine", "exact-repeated-broken-*")
+      ).size
+    end
+  end
+
   def test_pointer_validation_blocks_path_traversal
     Dir.mktmpdir do |root|
       assert_raises(Hive::WorktreeError) do

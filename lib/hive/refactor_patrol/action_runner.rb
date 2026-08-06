@@ -49,6 +49,7 @@ module Hive
       ISSUE_SUPPRESSING_FIX_OUTCOMES = %w[no_diff pr_opened merged].freeze
       REMOTE_UNCERTAIN_OUTCOME = "remote_outcome_unknown".freeze
       FIX_RELEASE_EVIDENCE_LIMIT = 2_000
+      RETRY_BACKOFF_SEC = ActionClaimTransitions::RETRY_BACKOFF_SEC
       AUTHORITY_RECHECK_SEC = 3600
       AUTHORITY_RECHECK_REASONS = %w[authority_revoked discovery_revoked].freeze
 
@@ -63,7 +64,7 @@ module Hive
                      registration: nil, token_budget: nil,
                      effect_gateway_factory: nil, evidence_store: nil,
                      occurrence_id: nil, module_execution: nil,
-                     lease_sec: 3600, backoff_sec: 60,
+                     lease_sec: 3600, backoff_sec: RETRY_BACKOFF_SEC,
                      authority_backoff_sec: AUTHORITY_RECHECK_SEC)
         @project_root = File.expand_path(project_root)
         @cfg = cfg

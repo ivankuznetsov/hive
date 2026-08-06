@@ -196,8 +196,8 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       assert_equal :retry, result.fetch(:status)
       aggregate = store.read_job("action-job")
       assert_equal "action_child_failed_or_signaled", aggregate.fetch("attempts").last.fetch("reason")
-      assert_empty scheduler.candidates(now: T0 + 60)
-      assert_equal [ "action-job" ], scheduler.candidates(now: T0 + 61).map { |item| item.fetch(:job_id) }
+      assert_empty scheduler.candidates(now: T0 + 3600)
+      assert_equal [ "action-job" ], scheduler.candidates(now: T0 + 3601).map { |item| item.fetch(:job_id) }
     end
   end
 
@@ -220,6 +220,9 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       aggregate = store.read_job("action-job")
       assert_equal "repository_identity_drift", aggregate.fetch("attempts").last.fetch("reason")
       assert_empty aggregate.fetch("actions")
+      assert_empty scheduler.candidates(now: T0 + 3599)
+      assert_equal [ "action-job" ],
+                   scheduler.candidates(now: T0 + 3600).map { |item| item.fetch(:job_id) }
     end
   end
 

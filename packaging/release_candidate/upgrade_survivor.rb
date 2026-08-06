@@ -33,9 +33,32 @@ module HiveReleaseCandidate
       ],
       "legacy-bench-v041" => %w[
         /builtin_runtime
+        /configuration/default_workflow
+        /default_workflow
+        /doctor_json
+        /global_registry
         /install_identity
         /legacy_descriptor
         /legacy_instructions
+        /project_registry
+        /status_json/projects/0/tasks/0/admission_error
+        /status_json/projects/0/tasks/0/attempt_id
+        /status_json/projects/0/tasks/0/commit_generation
+        /status_json/projects/0/tasks/0/condition_gate
+        /status_json/projects/0/tasks/0/condition_history
+        /status_json/projects/0/tasks/0/condition_migration
+        /status_json/projects/0/tasks/0/condition_overrides
+        /status_json/projects/0/tasks/0/condition_provenance
+        /status_json/projects/0/tasks/0/condition_task_generation
+        /status_json/projects/0/tasks/0/condition_warning
+        /status_json/projects/0/tasks/0/conditions
+        /status_json/projects/0/tasks/0/current_attempt
+        /status_json/projects/0/tasks/0/evidence
+        /status_json/projects/0/tasks/0/shadow_audit
+        /status_json/projects/0/tasks/0/task_generation
+        /status_json/projects/0/tasks/0/task_lock_id
+        /status_json/projects/0/tasks/0/task_lock_pid
+        /status_json/projects/0/tasks/0/task_lock_process_start_time
       ]
     }.freeze
     OUTPUT_LIMIT = 64 * 1024

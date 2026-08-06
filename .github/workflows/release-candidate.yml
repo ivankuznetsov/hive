@@ -646,7 +646,7 @@ jobs:
                 ruby /repo/packaging/release_candidate/hosted_upgrade_lane.rb "$1" "$2" "$3"
               ' sandbox "${{ matrix.row }}" "${{ matrix.platform }}" "$CANDIDATE_SHA"
           else
-            profile="(version 1) (deny default) (allow process*) (allow file-read*) (allow sysctl-read) (allow file-write* (subpath \"$HIVE_RC_RUN_ROOT\")) (deny network*)"
+            profile="(version 1) (deny default) (allow process*) (allow file-read*) (allow sysctl-read) (allow file-write* (literal \"/dev/null\")) (allow file-write* (subpath \"$HIVE_RC_RUN_ROOT\")) (deny network*)"
             sandbox_environment=(
               env -i
               "HOME=$HIVE_RC_RUN_ROOT/home"
@@ -677,7 +677,7 @@ jobs:
                 }
                 printf "hive-release-candidate: checkpoint=sandbox-shell status=entered\n"
                 run_phase ruby-smoke ruby -e \
-                  "STDOUT.sync = true; puts \"hive-release-candidate: checkpoint=ruby-smoke status=passed\""
+                  "File.open(\"/dev/null\", \"w\") { |io| io.write(\"\") }; STDOUT.sync = true; puts \"hive-release-candidate: checkpoint=ruby-smoke status=passed\""
                 run_phase hosted-stage-install \
                   ruby "$HIVE_RC_REPO_ROOT/packaging/release_candidate/hosted_stage.rb" install "$1" "$2" "$3"
                 run_phase sandbox-attestation test -f "$HIVE_RC_RUN_ROOT/sandbox-attestation.json"

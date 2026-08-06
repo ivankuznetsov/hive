@@ -18,8 +18,8 @@ module HiveReleaseCandidate
     SEMANTIC_JSON_SECTIONS = %w[doctor_json status_json].freeze
     VOLATILE_JSON_KEYS = %w[
       age_seconds binary binary_path elapsed_ms executable finished_at generated_at
-      hive_version observed_at pid process_start_time schema_version started_at
-      timestamp updated_at version
+      hive_version observation_mtime observed_at pid process_start_time schema_version
+      started_at timestamp updated_at version
     ].freeze
 
     class << self

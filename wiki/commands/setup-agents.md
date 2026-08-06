@@ -3,7 +3,7 @@ title: hive setup-agents
 type: command
 source: skills/hive/, config/agent-skills.yml, lib/hive/agent_skills/, lib/hive/commands/setup_agents.rb
 created: 2026-07-10
-updated: 2026-07-26
+updated: 2026-08-06
 tags: [command, agents, skills, hive, canonical, provisioning, consent]
 ---
 
@@ -211,6 +211,8 @@ hand-edit `openclaw/skills/hive/`.
 - `test/unit/agent_skills/adapters/*_test.rb`
 - `test/unit/commands/setup_agents_test.rb`
 - `test/integration/{agent_skill_adapters,setup_agents}_test.rb`
+- `test/integration/gem_package_scripts_test.rb` (the installed public command
+  loads its configuration dependency without relying on the source test bundle)
 - `test/smoke/live_agent_skill_resolution_smoke_test.rb` (explicit opt-in, disposable homes)
 - `test/smoke/live_hive_operating_skill_smoke_test.rb` (four-platform,
   exact-artifact release proof; skips diagnostically outside protected runs)

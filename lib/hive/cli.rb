@@ -325,6 +325,7 @@ module Hive
     option :agent, type: :array, desc: "scope to configured agent name(s)"
     option :skill, type: :array, desc: "scope to managed capability id(s)"
     def setup_agents
+      require "hive/config"
       require "hive/commands/setup_agents"
       cfg = Hive::Config.load(Dir.pwd)
       exit Hive::Commands::SetupAgents.new(

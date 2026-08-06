@@ -149,8 +149,22 @@ class InstallScriptTest < Minitest::Test
     assert_includes script, 'command -v cosign >/dev/null 2>&1 || die "missing installer prerequisite \'cosign\''
     assert_includes script,
                     '--certificate-identity-regexp "^https://github\\\\.com/${REPO_OWNER}/${REPO_NAME}/' \
-                    '\\\\.github/workflows/release\\\\.yml@refs/tags/${VERSION}$"'
+                    '\\\\.github/workflows/release\\\\.yml@refs/tags/${version}$"'
     refute_includes script, "install cosign for additional keyless signature verification"
+  end
+
+  def test_latest_release_resolution_binds_cosign_to_the_resolved_tag
+    Dir.mktmpdir("hive-installer-latest-identity") do |dir|
+      cosign_args = File.join(dir, "cosign-args")
+
+      _out, err, status = run_installer(
+        dir, "none", hive_version: nil, cosign_args: cosign_args
+      )
+
+      assert status.success?, err
+      assert_includes File.binread(cosign_args),
+                      "@refs/tags/v0.0.0$"
+    end
   end
 
   private
@@ -173,18 +187,20 @@ class InstallScriptTest < Minitest::Test
     end
   end
 
-  def run_installer(dir, failure)
+  def run_installer(dir, failure, hive_version: "v0.0.0", cosign_args: nil)
     fake_bin = create_installer_fakes(dir)
+    env = {
+      "PATH" => "#{fake_bin}:/usr/bin:/bin",
+      "HOME" => File.join(dir, "home"),
+      "HIVE_PREFIX" => File.join(dir, "prefix"),
+      "XDG_BIN_HOME" => File.join(dir, "bin"),
+      "HIVE_VERSION" => hive_version,
+      "HIVE_INSTALL_QMD" => "0",
+      "HIVE_INSTALL_TEST_FAILURE" => failure,
+      "HIVE_INSTALL_TEST_COSIGN_ARGS" => cosign_args
+    }.compact
     Open3.capture3(
-      {
-        "PATH" => "#{fake_bin}:/usr/bin:/bin",
-        "HOME" => File.join(dir, "home"),
-        "HIVE_PREFIX" => File.join(dir, "prefix"),
-        "XDG_BIN_HOME" => File.join(dir, "bin"),
-        "HIVE_VERSION" => "v0.0.0",
-        "HIVE_INSTALL_QMD" => "0",
-        "HIVE_INSTALL_TEST_FAILURE" => failure
-      },
+      env,
       "/bin/bash", INSTALL_SCRIPT
     )
   end
@@ -206,6 +222,10 @@ class InstallScriptTest < Minitest::Test
     FileUtils.mkdir_p(fake_bin)
     write_executable(File.join(fake_bin, "curl"), <<~'SH')
       #!/bin/bash
+      if [[ "$*" == *'/releases/latest'* ]]; then
+        printf '{"tag_name":"v0.0.0"}\n200'
+        exit 0
+      fi
       out=""
       while [[ $# -gt 0 ]]; do
         if [[ "$1" == "-o" ]]; then
@@ -225,7 +245,13 @@ class InstallScriptTest < Minitest::Test
       esac
       printf '200'
     SH
-    write_executable(File.join(fake_bin, "cosign"), "#!/bin/sh\nexit 0\n")
+    write_executable(File.join(fake_bin, "cosign"), <<~'SH')
+      #!/bin/sh
+      if [ -n "${HIVE_INSTALL_TEST_COSIGN_ARGS:-}" ]; then
+        printf '%s\n' "$@" > "$HIVE_INSTALL_TEST_COSIGN_ARGS"
+      fi
+      exit 0
+    SH
     write_executable(File.join(fake_bin, "ruby"), <<~'SH')
       #!/bin/sh
       case "$*" in

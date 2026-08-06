@@ -416,8 +416,11 @@ rejects duplicate or malformed global metadata and still rejects links and
 every other special archive entry.
 
 Only the manifest-bound gem, skill, and web bytes are restaged for native
-install and publication. The source archive stays an internal retained QA
-input. The tag workflow has no gem, source, skill, or web build and no fallback
+install and publication. The macOS and Linux ARM install gates count the
+selected gem with a shell glob array and require its sole entry to be non-empty;
+they do not parse platform-specific, padded `wc` output. The source archive
+stays an internal retained QA input. The tag workflow has no gem, source,
+skill, or web build and no fallback
 dispatch or rebuild: missing, expired, mixed, stale, or substituted proof fails
 before the existing GitHub Release, Homebrew, AUR, Docker, and post-release
 graph can begin.

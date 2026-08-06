@@ -138,6 +138,7 @@ class ReleaseCandidateInvariantSnapshotTest < Minitest::Test
     project["hidden_archived_task_count"] = 0
     project["tasks"][0].merge!(
       "age_seconds" => 4,
+      "observation_mtime" => "2026-08-06T00:48:15.176470Z",
       "closure" => nil,
       "outcomes" => []
     )

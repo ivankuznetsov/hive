@@ -21,6 +21,7 @@ class ReleaseCandidateLegacyBenchV041UpgradeTest < ReleaseCandidateLatestStableU
       after["legacy_instructions"] = { "status" => "archived", "path" => "bench.legacy" }
       after["builtin_runtime"] = { "status" => "installed" }
       after["install_identity"]["gem_sha256"] = "6" * 64
+      apply_historical_schema_migrations!(after)
       executor = lambda do |target:, phase:, **|
         phases << [ target.role, phase ]
         snapshot = phase == "before" || phase == "observer" ? before : after
@@ -64,6 +65,8 @@ class ReleaseCandidateLegacyBenchV041UpgradeTest < ReleaseCandidateLatestStableU
       )
       assert_equal "legacy_workflow_collision", result.dig("phases", 1, "reason")
       assert result.dig("phases", 3, "task_continuation")
+      assert result.dig("invariants", "transition_diff", "passed")
+      assert_empty result.dig("invariants", "transition_diff", "unexpected")
     end
   end
 
@@ -88,11 +91,77 @@ class ReleaseCandidateLegacyBenchV041UpgradeTest < ReleaseCandidateLatestStableU
     end
   end
 
+  def test_historical_schema_allowlist_keeps_core_task_state_protected
+    before = legacy_state
+    after = Marshal.load(Marshal.dump(before))
+    apply_historical_schema_migrations!(after)
+    after.dig("status_json", "projects", 0, "tasks", 0)["stage"] = "9-done"
+
+    diff = HiveReleaseCandidate::InvariantSnapshot.compare(
+      before: HiveReleaseCandidate::InvariantSnapshot.build(
+        row_id: "legacy-bench-v041", sections: before
+      ),
+      after: HiveReleaseCandidate::InvariantSnapshot.build(
+        row_id: "legacy-bench-v041", sections: after
+      ),
+      allowed_migrations: HiveReleaseCandidate::UpgradeSurvivor::ALLOWED_MIGRATIONS.fetch(
+        "legacy-bench-v041"
+      )
+    )
+
+    refute diff.fetch("passed")
+    assert_equal(
+      [ "/status_json/projects/0/tasks/0/stage" ],
+      diff.fetch("unexpected").map { |change| change.fetch("path") }
+    )
+  end
+
   private
+
+  def apply_historical_schema_migrations!(state)
+    state["configuration"]["default_workflow"] = "bench"
+    state["default_workflow"] = "bench"
+    state["global_registry"] = { "status" => "migrated", "project_id" => "project-1" }
+    state["project_registry"] = { "status" => "migrated", "project_id" => "project-1" }
+    state["doctor_json"] = {
+      "schema" => "hive-doctor.v2",
+      "summary" => { "legacy_failures" => 0, "warnings" => 0 },
+      "managed_skills" => []
+    }
+    state["status_json"] = {
+      "schema" => "hive-status",
+      "projects" => [ {
+        "name" => "project",
+        "tasks" => [ {
+          "id" => 7,
+          "stage" => "1-inbox",
+          "admission_error" => nil,
+          "attempt_id" => nil,
+          "commit_generation" => 0,
+          "condition_gate" => nil,
+          "condition_history" => [],
+          "condition_migration" => { "effective" => "markers" },
+          "condition_overrides" => [],
+          "condition_provenance" => { "projector" => "TaskProjection/v1" },
+          "condition_task_generation" => 0,
+          "condition_warning" => nil,
+          "conditions" => [ { "condition" => "Merged", "state" => "pending" } ],
+          "current_attempt" => nil,
+          "evidence" => [],
+          "observation_mtime" => "2026-08-06T00:48:15Z",
+          "shadow_audit" => { "ready" => false },
+          "task_generation" => nil,
+          "task_lock_id" => nil,
+          "task_lock_pid" => nil,
+          "task_lock_process_start_time" => nil
+        } ]
+      } ]
+    }
+  end
 
   def legacy_state
     latest_state.merge(
-      "default_workflow" => "bench",
+      "default_workflow" => "coding",
       "tasks" => {
         "task-7" => {
           "id" => 7, "slug" => "legacy-campaign-260714-abcd",
@@ -108,7 +177,19 @@ class ReleaseCandidateLegacyBenchV041UpgradeTest < ReleaseCandidateLatestStableU
         "sha256" => "8" * 64
       },
       "builtin_runtime" => { "status" => "absent" },
-      "install_identity" => { "gem_sha256" => "4" * 64 }
+      "install_identity" => { "gem_sha256" => "4" * 64 },
+      "status_json" => {
+        "schema" => "hive-status",
+        "projects" => [ {
+          "name" => "project",
+          "tasks" => [ { "id" => 7, "stage" => "1-inbox" } ]
+        } ]
+      },
+      "doctor_json" => {
+        "schema" => "hive-doctor.v1",
+        "checks" => [ { "kind" => "stage", "status" => "missing" } ],
+        "summary" => { "missing" => 1 }
+      }
     )
   end
 end

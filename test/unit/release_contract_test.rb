@@ -361,11 +361,13 @@ class ReleaseContractTest < Minitest::Test
       step["name"] == "Run installed historical producer and candidate without network"
     end.fetch("run")
     profile = "(version 1) (deny default) (allow process*) (allow file-read*) (allow sysctl-read) " \
+      '(allow file-write* (literal \"/dev/null\")) ' \
       '(allow file-write* (subpath \"$HIVE_RC_RUN_ROOT\")) (deny network*)'
     assert_includes upgrade, %(profile="#{profile}")
     assert_equal 1, upgrade.scan('sandbox-exec -p "$profile"').size
     assert_includes upgrade, "checkpoint=sandbox-run"
     assert_includes upgrade, "checkpoint=ruby-smoke"
+    assert_includes upgrade, 'File.open(\"/dev/null\", \"w\")'
     assert_includes upgrade, "checkpoint=sandbox-shell"
     assert_includes upgrade, "failure phase=%s status=%s"
     %w[
@@ -378,9 +380,11 @@ class ReleaseContractTest < Minitest::Test
 
     install_smoke = read(".github/workflows/install-smoke.yml")
     smoke_profile = "(version 1) (deny default) (allow process*) (allow file-read*) (allow sysctl-read) " \
+      '(allow file-write* (literal \"/dev/null\")) ' \
       '(allow file-write* (subpath \"$run_root\")) (deny network*)'
     assert_includes install_smoke, %(profile="#{smoke_profile}")
     assert_includes install_smoke, 'sandbox-exec -p "$profile" env -i'
+    assert_includes install_smoke, 'File.open("/dev/null", "w")'
     refute_includes install_smoke, "allow mach-lookup"
   end
 

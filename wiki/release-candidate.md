@@ -3,7 +3,7 @@ title: Release Candidate Evidence
 type: reference
 source: bin/hive-release-candidate, packaging/release_candidate/, packaging/managed_web_archive.rb, .github/workflows/{release-candidate,release}.yml
 created: 2026-07-27
-updated: 2026-08-05
+updated: 2026-08-06
 tags: [release, candidate, evidence, packaging, safety]
 ---
 
@@ -217,11 +217,15 @@ installed bytes. Status/doctor comparison removes version, binary path,
 PID/timing, schema-version, and array-order noise. It also omits the candidate's
 version-owned managed-skill `expected` projection and treats newly emitted
 empty task defaults (`closure: null`, `outcomes: []`, and a zero hidden archive
-count) as equivalent to their absence. Observed managed-skill state and every
-non-empty task or archive value remain protected. Every other state change
-appears as a normalized JSON-pointer diff; the historical archive/runtime
-migration and candidate install identity are the only initial allowlisted
-migrations. A second candidate run accepts no changes.
+count) as equivalent to their absence. Observation mtimes are also volatile.
+Observed managed-skill state and persisted task or archive values remain
+protected. Every other state change appears as a normalized JSON-pointer diff.
+The v0.4.1 transition explicitly permits the legacy archive/runtime install,
+the candidate install identity, the bench default binding, the one-time project
+registry identity rewrite, the doctor v1-to-v2 envelope replacement, and only
+the named additive task-condition projection fields emitted by current status.
+Core task identity, contents, stage, dependencies, and markers remain outside
+the allowlist. A second candidate run accepts no changes.
 
 Each command has bounded stdout/stderr and a process group. Teardown fails for
 any surviving daemon, TUI, web, producer, observer, candidate, or inert service
@@ -279,11 +283,12 @@ Catalog integrity uses a full-history candidate checkout because its focused
 contracts read the reviewed historical tags. Managed-Web verification passes
 the helper's documented `--name=value` arguments. The macOS upgrade cell keeps
 a deny-default sandbox and permits read-only `sysctl` calls needed by the
-hosted Ruby runtime; network remains denied, writes remain confined to the run
-root, and Mach service lookup is not allowed. Install smoke exercises a minimal
-Ruby process under the same profile on every PR. Constant-size checkpoint and
-exit-status lines identify install, each required attestation, and upgrade-lane
-failures without provider credentials.
+hosted Ruby runtime plus writes to the literal `/dev/null` device used by
+RubyGems. Network remains denied, every other write remains confined to the run
+root, and Mach service lookup is not allowed. Install smoke starts Ruby and
+opens `/dev/null` for writing under the same profile on every PR. Constant-size
+checkpoint and exit-status lines identify install, each required attestation,
+and upgrade-lane failures without provider credentials.
 
 Historical packages, dependency closures, and candidate bytes are downloaded
 and authenticated before installed package code runs. Installation and the U4

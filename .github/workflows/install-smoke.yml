@@ -43,11 +43,11 @@ jobs:
           run_root="$(mktemp -d "$RUNNER_TEMP/hive-release-candidate-sandbox.XXXXXX")"
           mkdir -p "$run_root/home" "$run_root/tmp"
           ruby_bin_dir="$(dirname "$(command -v ruby)")"
-          profile="(version 1) (deny default) (allow process*) (allow file-read*) (allow sysctl-read) (allow file-write* (subpath \"$run_root\")) (deny network*)"
+          profile="(version 1) (deny default) (allow process*) (allow file-read*) (allow sysctl-read) (allow file-write* (literal \"/dev/null\")) (allow file-write* (subpath \"$run_root\")) (deny network*)"
           sandbox-exec -p "$profile" env -i \
             "HOME=$run_root/home" "TMPDIR=$run_root/tmp" \
             "PATH=$ruby_bin_dir:/usr/local/bin:/usr/bin:/bin" \
-            ruby -e 'STDOUT.sync = true; puts "release-candidate-ruby-sandbox: passed"'
+            ruby -e 'File.open("/dev/null", "w") { |io| io.write("") }; STDOUT.sync = true; puts "release-candidate-ruby-sandbox: passed"'
 
   arch-dry-run:
     name: Arch dry run

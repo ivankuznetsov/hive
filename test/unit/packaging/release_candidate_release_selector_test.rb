@@ -244,6 +244,22 @@ class ReleaseCandidateReleaseSelectorTest < Minitest::Test
     end
   end
 
+  def test_candidate_verifier_rejects_source_link_after_canonical_global_header
+    Dir.mktmpdir("release-candidate-link") do |dir|
+      candidate = build_candidate_fixture(
+        dir, VERSION, suffix: "-link", source_symlink: true
+      )
+
+      error = assert_raises(HiveReleaseCandidate::Error) do
+        HiveReleaseCandidate::ReleaseCandidateVerifier.new.call(
+          repo_root: ROOT, candidate_dir: candidate,
+          candidate_sha: CANDIDATE_SHA, tag_version: VERSION
+        )
+      end
+      assert_match(/unsupported archive entry|link or special entry/, error.message)
+    end
+  end
+
   def test_publication_verifier_rehashes_only_exact_manifest_bound_public_bytes
     Dir.mktmpdir("release-publication-verifier") do |dir|
       candidate = build_candidate_fixture(dir, VERSION)
@@ -394,7 +410,7 @@ class ReleaseCandidateReleaseSelectorTest < Minitest::Test
     }
   end
 
-  def build_candidate_fixture(root, version, suffix: "")
+  def build_candidate_fixture(root, version, suffix: "", source_symlink: false)
     directory = File.join(root, "candidate#{suffix}")
     FileUtils.mkdir_p(directory)
     source_name = "hive-source-#{CANDIDATE_SHA}.tar.gz"
@@ -404,7 +420,7 @@ class ReleaseCandidateReleaseSelectorTest < Minitest::Test
       "hive-web-#{version}.tar.gz" => [ "web", "web" ]
     }
     source_path = File.join(directory, source_name)
-    write_source_archive(source_path, version)
+    write_source_archive(source_path, version, source_symlink: source_symlink)
     files[source_name] = [ "source", File.binread(source_path) ]
     files.each do |name, (_kind, content)|
       path = File.join(directory, name)
@@ -432,7 +448,7 @@ class ReleaseCandidateReleaseSelectorTest < Minitest::Test
     directory
   end
 
-  def write_source_archive(path, version)
+  def write_source_archive(path, version, source_symlink: false)
     entries = {
       "lib/hive/version.rb" => "module Hive\n  VERSION = \"#{version}\"\nend\n",
       "packaging/release_candidate/baselines.yml" =>
@@ -442,10 +458,19 @@ class ReleaseCandidateReleaseSelectorTest < Minitest::Test
       entries[name] = File.binread(File.join(ROOT, name))
     end
     Zlib::GzipWriter.open(path) do |gzip|
+      metadata = "52 comment=#{CANDIDATE_SHA}\n"
+      header = Gem::Package::TarHeader.new(
+        name: "pax_global_header", mode: 0o644, size: metadata.bytesize,
+        typeflag: "g", prefix: "", mtime: 0
+      )
+      gzip.write(header.to_s)
+      gzip.write(metadata)
+      gzip.write("\0" * ((512 - (metadata.bytesize % 512)) % 512))
       Gem::Package::TarWriter.new(gzip) do |tar|
         entries.each do |name, content|
           tar.add_file_simple(name, 0o600, content.bytesize) { |io| io.write(content) }
         end
+        tar.add_symlink("unsafe-link", "target", 0o777) if source_symlink
       end
     end
   end

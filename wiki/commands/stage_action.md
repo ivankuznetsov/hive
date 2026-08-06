@@ -60,8 +60,12 @@ proof.
 The receipt is written atomically before transition. Its exact digest enters a
 separate `TransitionGuard.validate_closure!` path; it is not attempt success
 evidence and cannot weaken the ordinary marker/condition guard. StageAction
-may then force the task from any active stage to `9-done`, run the Done stage,
-and retain `closure.json`. A crash after receipt write resumes idempotently;
+may then force the task from any active stage to `9-done`, run the Done stage
+with the internal no-rebase override, and retain `closure.json`. The immutable
+delivery evidence has already settled the feature branch, while Done only
+writes the terminal marker and cleanup instructions, so replaying stale branch
+commits cannot affect closure and must not dispatch conflict-resolution agents.
+A crash after receipt write resumes through the same no-rebase path;
 an already-completed transition is a no-op. Corrupt, unsupported, stale, or
 identity-mismatched receipts are quarantined and never authorize a move.
 

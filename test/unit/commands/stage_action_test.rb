@@ -329,8 +329,8 @@ class CommandsStageActionTest < Minitest::Test
       archive.define_singleton_method(:publish_task_completed) do |completed|
         runs << [ :published, completed ]
       end
-      archive.define_singleton_method(:run_at) do |folder, observation_guard:|
-        runs << [ folder, observation_guard ]
+      archive.define_singleton_method(:run_at) do |folder, observation_guard:, no_rebase:|
+        runs << [ folder, observation_guard, no_rebase ]
       end
       with_replaced_singleton_method(
         Hive::Conditions::TransitionGuard, :validate_closure!, ->(*) { true }
@@ -344,7 +344,7 @@ class CommandsStageActionTest < Minitest::Test
           )
         end
       end
-      assert_equal [ [ task.folder, nil ], [ :published, task ] ], runs
+      assert_equal [ [ task.folder, nil, true ], [ :published, task ] ], runs
     end
   end
 end

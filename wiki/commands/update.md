@@ -43,6 +43,10 @@ A missing marker means `dev`, the git-checkout fallback. Malformed markers fail 
 | `dev` | prints `git pull && bundle install && hive migrate --all` guidance and exits 0 |
 
 The bash channel deliberately downloads to a tempfile rather than piping remote script bytes into a shell. Helper preflight checks make missing `brew`, `curl`, `yay`, or `paru` errors actionable.
+The installer binds cosign verification to the resolved release tag whether
+that tag came from `HIVE_VERSION`/`--version` or the latest-release API; the
+latest-version path therefore authenticates the same exact workflow identity
+as an explicitly pinned install.
 
 ## Automatic migration
 

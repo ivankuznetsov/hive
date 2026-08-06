@@ -519,6 +519,12 @@ class ReleaseContractTest < Minitest::Test
     assert_equal "select-candidate", install.fetch("needs")
     assert_equal [ "select-candidate", "install-gate" ], finalize.fetch("needs")
 
+    install_body = install.fetch("steps").filter_map { |step| step["run"] }.join("\n")
+    assert_includes install_body, "gem_files=(selected/dist/hive-cli-*.gem)"
+    assert_includes install_body,
+                    '[[ "${#gem_files[@]}" -eq 1 && -f "${gem_files[0]}" && -s "${gem_files[0]}" ]]'
+    refute_includes install_body, "wc -l"
+
     finalize_body = finalize.fetch("steps").filter_map { |step| step["run"] }.join("\n")
     assert_includes finalize_body, "select_release_candidate.rb publication"
     assert_includes finalize_body, "selected/dist/SHA256SUMS"

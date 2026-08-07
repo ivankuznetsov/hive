@@ -52,6 +52,53 @@ class StatusBroadcasterTest < ActiveSupport::TestCase
     def stop = @stops += 1
   end
 
+  class CurrentStateFeed
+    attr_reader :snapshot_state_calls
+
+    def initialize(state)
+      @state = state
+      @snapshot_state_calls = 0
+    end
+
+    def current_state = @state
+
+    def snapshot_state
+      @snapshot_state_calls += 1
+      raise "HTTP render must not scan"
+    end
+
+    def current_version?(candidate) = candidate == @state&.token
+    def stop = nil
+  end
+
+  class ColdStateFeed
+    attr_reader :stops
+
+    def initialize(state)
+      @state = nil
+      @next_state = state
+      @started = Queue.new
+      @updates = Queue.new
+      @stops = 0
+    end
+
+    def current_state = @state
+
+    def each_state
+      @state = @next_state
+      @started << true
+      yield @state
+      loop do
+        @state = @updates.pop
+        yield @state
+      end
+    end
+
+    def wait_until_started = Timeout.timeout(2) { @started.pop }
+    def current_version?(candidate) = candidate == @state&.token
+    def stop = @stops += 1
+  end
+
   teardown do
     StatusBroadcaster.stop!
     StatusBroadcaster.feed = nil
@@ -86,6 +133,54 @@ class StatusBroadcasterTest < ActiveSupport::TestCase
     feed.wait_until_started
     assert_equal 1, feed.snapshot_calls,
                  "the first subscriber must reuse the request snapshot"
+  end
+
+  test "a cached HTTP snapshot does not rescan the fleet" do
+    payload = { "projects" => [ { "name" => "demo", "tasks" => [] } ] }
+    state = Hive::Web::StatusFeed::State.new(
+      payload:, token: "cached-token", availability: "fresh",
+      last_success_at: "2026-08-07T12:00:00Z", error: nil,
+      scan_count: 1, generation: 1
+    )
+    feed = CurrentStateFeed.new(state)
+    StatusBroadcaster.feed = feed
+
+    page_snapshot = StatusBroadcaster.snapshot_with_version
+
+    assert_same payload, page_snapshot.payload
+    assert_equal "cached-token", page_snapshot.version
+    assert_equal 0, feed.snapshot_state_calls
+  end
+
+  test "a cold HTTP snapshot renders loading and the first subscriber publishes fresh state" do
+    payload = { "projects" => [ { "name" => "demo", "tasks" => [] } ] }
+    state = Hive::Web::StatusFeed::State.new(
+      payload:, token: "fresh-token", availability: "fresh",
+      last_success_at: "2026-08-07T12:00:00Z", error: nil,
+      scan_count: 1, generation: 1
+    )
+    feed = ColdStateFeed.new(state)
+    StatusBroadcaster.feed = feed
+    delivered = Queue.new
+    original_broadcast = StatusBroadcaster.method(:broadcast)
+    StatusBroadcaster.define_singleton_method(:broadcast) { |snapshot| delivered << snapshot }
+
+    page_snapshot = StatusBroadcaster.snapshot_with_version
+
+    assert page_snapshot.unavailable?
+    assert_equal StatusBroadcaster::LOADING_VERSION, page_snapshot.version
+    assert StatusBroadcaster.current_version?(page_snapshot.version),
+           "catch-up must wait for the first background publication"
+
+    StatusBroadcaster.subscriber_connected!
+    feed.wait_until_started
+    assert_same payload, Timeout.timeout(2) { delivered.pop }
+    refute StatusBroadcaster.current_version?(page_snapshot.version)
+  ensure
+    if original_broadcast
+      StatusBroadcaster.define_singleton_method(:broadcast, original_broadcast)
+      StatusBroadcaster.singleton_class.send(:private, :broadcast)
+    end
   end
 
   test "archive snapshots bypass ordinary feed priming" do

@@ -336,9 +336,10 @@ the CSS/JavaScript manifest before the atomic bundle swap; both commands run
 through the locked Bundler and current Ruby without relying on `bundle` or a
 matching Ruby shim on `PATH`. Same-version installs with missing assets are
 repaired.
-Reads render
-`Commands::Status#json_payload` snapshots; live updates flow over Turbo
-Streams, with production Action Cable accepting same-origin-as-host and
+Status-page reads render the latest process-wide `StatusFeed` publication (or
+an explicit cold loading state) without running the fleet projection on the
+HTTP thread. The first accepted Cable subscription owns a cold projection;
+live updates then flow over Turbo Streams, with production Action Cable accepting same-origin-as-host and
 `HIVE_WEB_ORIGIN` only as an extra allow for split-origin deployments:
 `StatusBroadcaster` (self-healing subscriber loop) bridges
 `Hive::Web::StatusFeed` — one shared poller, volatile-field-deduped — to a

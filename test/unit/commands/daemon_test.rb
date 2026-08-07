@@ -590,6 +590,14 @@ class HiveCommandsDaemonTest < Minitest::Test
                            version: Hive::VERSION)
   end
 
+  def test_binary_drift_path_when_file_identity_probe_fails
+    with_replaced_singleton_method(File, :identical?, ->(*) { raise Errno::EIO, "identity unavailable" }) do
+      assert_equal "path",
+                   drift_for({ "service_installed" => true,
+                               "installed_binary" => "/old/hive", "expected_binary" => "/new/hive" })
+    end
+  end
+
   def test_binary_drift_unreadable_when_version_probe_fails_at_expected_path
     # Unit present, path matches, but `--version` returns nil (wedged binary):
     # surfaced as actionable "unreadable" drift, not a healthy "none".

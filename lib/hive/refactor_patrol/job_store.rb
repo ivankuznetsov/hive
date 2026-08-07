@@ -1634,16 +1634,12 @@ module Hive
       def issue_waiting_on_fix?(action, actions)
         return false unless action.fetch("kind") == "issue"
 
-        family_id = action["family_id"]
+        family_id = action.fetch("family_id")
         actions.any? do |candidate|
           next false unless candidate.fetch("kind") == "fix"
           next false if candidate.fetch("terminal")
 
-          if family_id
-            candidate["family_id"] == family_id
-          else
-            candidate.fetch("thesis_id") == action.fetch("thesis_id")
-          end
+          candidate["family_id"] == family_id
         end
       end
 

@@ -3,8 +3,8 @@ title: hive babysit
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/babysit.rb, bin/hive-babysitter-stub-git, bin/hive-babysitter-stub-gh.rb
 created: 2026-05-26
-updated: 2026-07-16
-tags: [command, babysitter, daemon, github]
+updated: 2026-08-07
+tags: [command, babysitter, daemon, github, systemd, launchd]
 ---
 
 **TLDR**: `hive babysit` manages the experimental PR babysitter. It is a separate process from `hive daemon`: it polls open PRs for projects with `babysitter.enabled: true`, skips ignored labels, and asks the configured development agent to repair conflicts or red CI in an isolated PR worktree.
@@ -18,11 +18,26 @@ hive babysit restart [--detach] [--dry-run]
 hive babysit status
 hive babysit reload
 hive babysit tail
+hive babysit install [--force]
 hive babysit --once PROJECT [--dry-run]
 hive babysit --once --all [--dry-run]
 ```
 
 The command is bare-text in v1; it does not emit a `--json` envelope.
+
+`install` writes and starts the supervised per-user service through
+`Hive::UserService`: `hive-babysitter.service` on Linux systemd-user or
+`local.hive-babysitter.plist` on macOS launchd. It runs `hive babysit start`
+in the foreground; project-level `babysitter.enabled` remains the mutation
+gate. `--force` backs up and replaces a drifted unit. Service definitions keep
+custom `HIVE_HOME`/XDG filesystem roots but never persist provider credentials.
+`hive setup` installs this service by default, while `hive uninstall` removes
+it. When a detached babysitter is already running, install first reuses the
+ownership-aware bounded stop path before the service manager starts its
+replacement. Uninstall uses the same stop path before removing any service or
+data, and aborts without teardown when PID ownership cannot be read or verified.
+`install --dry-run` is rejected because installing a service is a real host
+mutation.
 
 ## Lifecycle
 

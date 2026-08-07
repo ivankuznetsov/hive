@@ -403,6 +403,75 @@ class UninstallCommandTest < Minitest::Test
     end
   end
 
+  def test_linux_babysitter_unit_disable_removes_unit
+    with_xdg_home do
+      unit = File.expand_path("~/.config/systemd/user/hive-babysitter.service")
+      FileUtils.mkdir_p(File.dirname(unit))
+      File.write(unit, "unit\n")
+      calls = []
+
+      Hive::Commands::Uninstall.new(
+        purge: true, output: StringIO.new,
+        runner: ->(argv) { calls << argv; true }, host_os: "linux"
+      ).call
+
+      assert_includes calls, %w[systemctl --user disable --now hive-babysitter]
+      refute File.exist?(unit), "babysitter unit must be removed after a successful disable"
+    end
+  end
+
+  def test_stop_foreground_babysitter_reuses_safe_stop_lifecycle
+    with_xdg_home do
+      captured = nil
+      stopper = Object.new
+      stopper.define_singleton_method(:call) { true }
+      with_replaced_singleton_method(Hive::Commands::Babysit, :new, lambda { |subcommand, **kwargs|
+        captured = [ subcommand, kwargs ]
+        stopper
+      }) do
+        Hive::Commands::Uninstall.new(output: StringIO.new).send(
+          :stop_foreground_babysitter
+        )
+      end
+
+      assert_equal "stop", captured.first
+      assert_equal Hive::Paths.state_home, captured.last.fetch(:hive_home)
+      assert_equal true, captured.last.fetch(:quiet)
+    end
+  end
+
+  def test_unreadable_babysitter_pid_aborts_before_any_uninstall_mutation
+    with_xdg_home do
+      FileUtils.mkdir_p(Hive::Paths.state_home)
+      pid_file = File.join(Hive::Paths.state_home, ".babysitter.pid")
+      File.write(pid_file, "unreadable")
+      unit = File.expand_path("~/.config/systemd/user/hive-babysitter.service")
+      FileUtils.mkdir_p(File.dirname(unit))
+      File.write(unit, "unit\n")
+      calls = []
+      original_read = File.method(:read)
+
+      error = with_replaced_singleton_method(File, :read, lambda { |path, *args|
+        raise Errno::EACCES, path if path == pid_file
+
+        original_read.call(path, *args)
+      }) do
+        assert_raises(Hive::Error) do
+          Hive::Commands::Uninstall.new(
+            purge: true,
+            output: StringIO.new,
+            runner: ->(argv) { calls << argv; true },
+            host_os: "linux"
+          ).call
+        end
+      end
+
+      assert_includes error.message, "no services or data were removed"
+      assert File.exist?(unit)
+      assert_empty calls
+    end
+  end
+
   def test_linux_web_unit_disable_removes_unit
     with_xdg_home do
       unit = File.expand_path("~/.config/systemd/user/hive-web.service")

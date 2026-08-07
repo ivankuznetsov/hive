@@ -1,0 +1,24 @@
+# Installer-managed systemd user unit for the Hive PR babysitter.
+# Re-run `hive babysit install` instead of editing this file by hand.
+
+[Unit]
+Description=Hive PR babysitter
+After=network-online.target
+Wants=network-online.target
+StartLimitBurst=3
+StartLimitIntervalSec=300
+
+[Service]
+Type=simple
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.local/bin/hive babysit start
+Restart=on-failure
+RestartSec=30s
+# TERM reaches the dispatcher first so an active synchronous repair can drain.
+# If it outlives the CLI's 600-second grace period, systemd kills the remaining
+# process group instead of leaving an unsupervised repair agent behind.
+KillMode=mixed
+TimeoutStopSec=610
+
+[Install]
+WantedBy=default.target

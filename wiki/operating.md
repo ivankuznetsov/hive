@@ -132,7 +132,7 @@ before fallback aliasing is possible.
 
 The daemon installer remains idempotent install-time infrastructure, while
 `hive setup` is the normal post-install first run. On supported Linux/macOS it
-installs/enables/starts both the daemon and Hive web services, optionally
+installs/enables/starts the daemon, PR babysitter, and Hive web services, optionally
 enrolls the current project, and returns distinct web installed, enabled,
 running, manager-available, and ready state. Package hooks cannot reliably
 start a per-user service on every host, so Homebrew/AUR caveats direct users to
@@ -366,14 +366,18 @@ results look right, stop the dry-run process and start live mode:
 hive babysit restart --detach
 ```
 
+For persistent supervision, normal `hive setup` installs and starts the
+platform-native per-user service. Existing installations can repair it
+directly with `hive babysit install --force`. The service is global but remains
+idle for projects without `babysitter.enabled: true`.
+
 `hive babysit reload` refreshes config/log settings only; the detached
 Ruby process keeps the source code it loaded at start. After pulling a
 new checkout or upgrading Hive, run `hive babysit status` and restart if
 it reports that the process predates the current source checkout.
 
 Kill switch: set `babysitter.enabled: false`; the dispatcher reloads
-project config each tick. v1 has no launchd/systemd install command for
-the babysitter.
+project config each tick.
 
 ## First run: the mandatory `--dry-run` shakedown
 
@@ -414,7 +418,7 @@ hive daemon start --detach
 
 ## Autostart
 
-`hive setup` writes and enables the platform daemon and Hive web units by
+`hive setup` writes and enables the platform daemon, babysitter, and Hive web units by
 default (see ADR-024). On Linux they land under
 `~/.config/systemd/user/`; on macOS under `~/Library/LaunchAgents/`.
 `hive init` also idempotently ensures

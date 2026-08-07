@@ -3,10 +3,10 @@ require "json"
 module Hive
   module Commands
     module ServiceInstaller
-      # Shared command-side orchestration for daemon and bot service installs.
+      # Shared command-side orchestration for service installs.
       # The platform installers own unit writes and service-manager calls; this
       # mixin owns their identical human summaries, JSON envelopes, and typed
-      # failure translation. Consumers provide only four identity hooks.
+      # failure translation. JSON consumers additionally provide a schema hook.
       module ResultPresenter
         private
 

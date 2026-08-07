@@ -15,6 +15,7 @@ related_components:
   - lib/hive/commands/service_installer/base.rb
   - lib/hive/commands/daemon/service_installer.rb
   - lib/hive/commands/bot/service_installer.rb
+  - lib/hive/commands/babysit/service_installer.rb
   - lib/hive/commands/uninstall.rb
 tags:
   - service-installer
@@ -31,7 +32,7 @@ tags:
 
 ## Context
 
-Hive ships two per-user autostart services: the orchestration `daemon` and the Telegram `bot`. Each can be installed as a native init unit (systemd-user on Linux, launchd on macOS) via `hive daemon install` / `hive bot install`. The install lifecycle is non-trivial: it must detect drift against a user-edited unit, back up before overwriting, write atomically, enable/load through the right service manager, bake a correct `PATH` so a version-managed Ruby resolves, and report a precise outcome and exit code. Doing this twice — once per service — invited copy-paste divergence.
+Hive originally shipped two per-user autostart services: the orchestration `daemon` and the Telegram `bot`. The same boundary now also owns the web and PR babysitter services. Each can be installed as a native init unit (systemd-user on Linux, launchd on macOS). The install lifecycle is non-trivial: it must detect drift against a user-edited unit, back up before overwriting, write atomically, enable/load through the right service manager, bake a correct `PATH` so a version-managed Ruby resolves, and report a precise outcome and exit code. Duplicating that lifecycle invited copy-paste divergence.
 
 The bot-autostart work (PR #195) factored that lifecycle into `Hive::Commands::ServiceInstaller::Base`, a template-method abstract class, with `Daemon::ServiceInstaller` and `Bot::ServiceInstaller` as thin subclasses. The base was extracted **first**, before any bot code was written — the commit was validated as byte-identical (the existing daemon installer test passed unchanged, plus a side-by-side render+messages diff) so the refactor carried zero behavioral drift for the daemon (session history). The bot installer was then added as a subclass. Along the way two cross-platform gotchas were nailed down: a macOS-specific respawn-loop circuit breaker, and a corrupt-pid teardown rule. This doc captures all three so the next platform installer (a Windows service, an OpenRC unit, a second daemon) can be added by overriding hooks rather than re-deriving the mechanics.
 
@@ -41,6 +42,7 @@ Source files:
 - `lib/hive/commands/service_installer/base.rb`
 - `lib/hive/commands/daemon/service_installer.rb`
 - `lib/hive/commands/bot/service_installer.rb`
+- `lib/hive/commands/babysit/service_installer.rb`
 - `lib/hive/commands/uninstall.rb`
 - `examples/launchd/hive-bot.plist`, `examples/systemd/hive-bot.service`
 

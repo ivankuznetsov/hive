@@ -20,6 +20,10 @@ module Hive
 
       def call
         projects = registered_projects
+        # Stop the babysitter before any service or data mutation. It can be
+        # inside a live repair, and unreadable ownership evidence must fail
+        # closed instead of leaving a partial uninstall.
+        deregister_babysitter
         deregister_daemon
         deregister_bot
         deregister_web
@@ -54,6 +58,14 @@ module Hive
         stop_foreground_bot
         require "hive/commands/bot/service_installer"
         deregister_unit(Hive::Commands::Bot::ServiceInstaller.new(**service_installer_options))
+      end
+
+      def deregister_babysitter
+        stop_foreground_babysitter
+        require "hive/commands/babysit/service_installer"
+        deregister_unit(
+          Hive::Commands::Babysit::ServiceInstaller.new(**service_installer_options)
+        )
       end
 
       def deregister_web
@@ -129,6 +141,19 @@ module Hive
         @output.puts "hive: warning: bot pid #{pid} is alive but could not be signalled (EPERM); it may still be running after uninstall"
       rescue Errno::ESRCH, Errno::ENOENT, Psych::Exception
         nil
+      end
+
+      def stop_foreground_babysitter
+        require "hive/commands/babysit"
+        Hive::Commands::Babysit.new(
+          "stop",
+          hive_home: Hive::Paths.state_home,
+          quiet: true
+        ).call
+      rescue Hive::Error, SystemCallError, IOError, Psych::Exception => e
+        raise Hive::Error,
+              "hive uninstall: could not safely stop babysitter (#{e.class}: #{e.message}); " \
+              "no services or data were removed"
       end
 
       def remove_user_config_and_cache

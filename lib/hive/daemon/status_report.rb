@@ -120,7 +120,7 @@ module Hive
             # be parsed — distinct from "no service" so the operator gets a
             # signal that the installed unit is corrupt and needs repair.
             "unparseable"
-          elsif expected.to_s != "" && File.expand_path(installed) != File.expand_path(expected)
+          elsif expected.to_s != "" && !same_binary?(installed, expected)
             "path"
           elsif installed_version.nil?
             # Unit present and the binary is at the expected path, but
@@ -145,6 +145,14 @@ module Hive
           "installed_binary_version" => installed_version,
           "binary_drift" => drift
         }
+      end
+
+      def same_binary?(installed, expected)
+        installed_path = File.expand_path(installed)
+        expected_path = File.expand_path(expected)
+        installed_path == expected_path || File.identical?(installed_path, expected_path)
+      rescue SystemCallError
+        false
       end
 
       def binary_version(binary)

@@ -576,6 +576,20 @@ class HiveCommandsDaemonTest < Minitest::Test
                            version: Hive::VERSION)
   end
 
+  def test_binary_drift_none_when_installed_symlink_targets_expected_binary
+    expected = File.join(@home, "deployments", "hive", "bin", "hive")
+    installed = File.join(@home, ".local", "bin", "hive")
+    FileUtils.mkdir_p(File.dirname(expected))
+    FileUtils.mkdir_p(File.dirname(installed))
+    File.write(expected, "#!/bin/sh\n")
+    File.symlink(expected, installed)
+
+    assert_equal "none",
+                 drift_for({ "service_installed" => true,
+                             "installed_binary" => installed, "expected_binary" => expected },
+                           version: Hive::VERSION)
+  end
+
   def test_binary_drift_unreadable_when_version_probe_fails_at_expected_path
     # Unit present, path matches, but `--version` returns nil (wedged binary):
     # surfaced as actionable "unreadable" drift, not a healthy "none".

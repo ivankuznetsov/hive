@@ -12,6 +12,7 @@ require "hive/process_kill"
 require "hive/refactor_patrol/checkout_guard"
 require "hive/refactor_patrol/job_store"
 require "hive/refactor_patrol/architecture_occurrence_lifecycle"
+require "hive/refactor_patrol/action_claim_transitions"
 require "hive/refactor_patrol/claim_maintenance_transitions"
 require "hive/refactor_patrol/discovery_transitions"
 require "hive/refactor_patrol/pr_manifest"
@@ -30,6 +31,8 @@ module Hive
       PATROL_SLUG_PREFIX = "refactor-patrol".freeze
       MODULE_SCHEDULE = "*/10 * * * *".freeze
       RETRY_BACKOFF_SEC = 60
+      ACTION_RETRY_BACKOFF_SEC =
+        Hive::RefactorPatrol::ActionClaimTransitions::RETRY_BACKOFF_SEC
       SUPPORTED_REPORT_SCHEMA_VERSIONS = [
         Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol")
       ].freeze
@@ -606,7 +609,7 @@ module Hive
           block_through_gateway!(
             entry, store, aggregate, phase: phase,
             reason: reason, evidence: evidence, now: now,
-            backoff_sec: RETRY_BACKOFF_SEC
+            backoff_sec: retry_backoff_sec(phase)
           )
         end
         @events << {
@@ -690,7 +693,7 @@ module Hive
             reason: action_completion_failure_reason(exit_code, envelope),
             evidence: {},
             now: now,
-            backoff_sec: RETRY_BACKOFF_SEC
+            backoff_sec: ACTION_RETRY_BACKOFF_SEC
           )
           :retry
         end
@@ -706,6 +709,10 @@ module Hive
         return "action_missing_envelope" if envelope.nil?
 
         "action_malformed_or_mismatched_envelope"
+      end
+
+      def retry_backoff_sec(phase)
+        phase.to_sym == :action ? ACTION_RETRY_BACKOFF_SEC : RETRY_BACKOFF_SEC
       end
 
       def valid_report_envelope?(envelope)

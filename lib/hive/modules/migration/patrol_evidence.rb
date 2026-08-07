@@ -14,7 +14,11 @@ module Hive
         MAX_CAPTURE_BYTES = 48 * 1024
         MAX_RECEIPT_BYTES = 128 * 1024
         MAX_INTENT_BYTES = 32 * 1024
-        MAX_EFFECTS_PER_OCCURRENCE = 128
+        # One occurrence must leave enough room for a bounded action retry
+        # episode as well as its claim/release pairs. Ordinary feature maps
+        # are persisted as one batch effect, so repository size no longer
+        # consumes this safety envelope one feature at a time.
+        MAX_EFFECTS_PER_OCCURRENCE = 192
         MAX_JSON_DEPTH = 32
         MAX_JSON_NODES = 8_192
         MAX_STRING_BYTES = 32 * 1024

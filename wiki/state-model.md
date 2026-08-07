@@ -552,6 +552,13 @@ Each occurrence directory also has one canonical
 (`hive-patrol-occurrence-recovery-index` v1), capped at 512 KiB and 4,096
 active ids. These files are coordination metadata only:
 
+The occurrence record admits at most 192 terminal effect cells. This is a
+safety envelope, not a unit-of-work counter: ordinary mapping persists its
+complete feature set as one digest-bound, locally retry-safe batch effect, and
+Architecture Patrol retryable action failures wait one hour before minting a
+new claim/release generation. Existing 128-effect records remain valid and
+have bounded recovery headroom.
+
 - scheduled ordinary attempts, module events, and Architecture Patrol jobs use
   canonical window/generation identities with bounded high-water entries and a
   compacted closed-through floor;

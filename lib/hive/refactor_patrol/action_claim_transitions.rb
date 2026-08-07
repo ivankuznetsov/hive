@@ -6,6 +6,8 @@ module Hive
     # Claim-scoped action transitions: claim, settle, and write-once receipt
     # updates. Every live mutation is fenced and exactly reconcilable.
     class ActionClaimTransitions
+      RETRY_BACKOFF_SEC = 3600
+
       def initialize(context:, owner:, owner_pid:,
                      owner_process_start_time:, lease_sec:, claim_resolver:)
         @context = context

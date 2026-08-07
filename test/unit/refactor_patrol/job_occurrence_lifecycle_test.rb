@@ -4,11 +4,12 @@ require "hive/refactor_patrol/job_occurrence_lifecycle"
 class HiveRefactorPatrolJobOccurrenceLifecycleTest < Minitest::Test
   class Occurrences
     attr_reader :calls
-    attr_accessor :effect_state_value
+    attr_accessor :effect_state_value, :snapshot_state
 
     def initialize
       @calls = []
       @effect_state_value = nil
+      @snapshot_state = "prepared"
     end
 
     def reserve_manifest!(*args, **options)
@@ -42,6 +43,22 @@ class HiveRefactorPatrolJobOccurrenceLifecycleTest < Minitest::Test
     def effect_state(intent)
       record(:effect_state, [ intent ], {})
       effect_state_value
+    end
+
+    def effect_recovery_snapshot(occurrence_id, intent_ids:)
+      record(
+        :effect_recovery_snapshot, [ occurrence_id ],
+        { intent_ids: intent_ids }
+      )
+      intent_ids.to_h do |intent_id|
+        [
+          intent_id,
+          {
+            "semantic" => { "intent_id" => intent_id },
+            "state" => snapshot_state
+          }
+        ]
+      end
     end
 
     private
@@ -104,6 +121,18 @@ class HiveRefactorPatrolJobOccurrenceLifecycleTest < Minitest::Test
     assert_equal %w[intake-7 remote-7], unsettled.map { |intent, _| intent.fetch("intent_id") }
     assert_equal 1, validator.calls.size
     assert_equal "/jobs/job-7.json", validator.calls.first.fetch(2)
+  end
+
+  def test_terminal_transition_recovery_uses_one_occurrence_snapshot
+    occurrences = Occurrences.new
+    occurrences.snapshot_state = "committed"
+    lifecycle = build_lifecycle(occurrences: occurrences)
+
+    assert_empty lifecycle.unsettled_recorded_transitions("job-7")
+    assert_equal [ :effect_recovery_snapshot ],
+                 occurrences.calls.map(&:first)
+    assert_equal %w[intake-7 remote-7],
+                 occurrences.calls.first.dig(2, :intent_ids)
   end
 
   def test_rejects_conflicting_transition_identity

@@ -187,6 +187,36 @@ class RefactorPatrolArchitectureOccurrenceStoreTest < Minitest::Test
                  )
   end
 
+  def test_recovery_snapshot_reads_the_occurrence_once_for_all_intents
+    journal = Journal.new
+    cells = {
+      intent.intent_id => {
+        "semantic" => { "intent_id" => intent.intent_id },
+        "state" => "committed"
+      },
+      "intent-#{'f' * 64}" => {
+        "semantic" => { "intent_id" => "intent-#{'f' * 64}" },
+        "state" => "denied"
+      }
+    }
+    journal.record = {
+      "occurrence_id" => capture.occurrence_id,
+      "effects" => cells
+    }
+    store = occurrence_store(journal: journal)
+
+    snapshot = store.effect_recovery_snapshot(
+      capture.occurrence_id, intent_ids: cells.keys
+    )
+
+    assert_equal %w[committed denied],
+                 snapshot.values.map { |cell| cell.fetch("state") }
+    assert_equal 1, journal.calls.count { |call| call.first == :fetch }
+    refute_same cells.fetch(intent.intent_id),
+                snapshot.fetch(intent.intent_id)
+    assert snapshot.fetch(intent.intent_id).fetch("semantic").frozen?
+  end
+
   def test_manifest_repository_target_binds_the_pr_url_host_and_slug
     assert_equal "github.com/owner/demo",
                  Hive::RefactorPatrol::PrManifest.repository_target(

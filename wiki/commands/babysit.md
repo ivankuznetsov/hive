@@ -3,8 +3,8 @@ title: hive babysit
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/babysit.rb, bin/hive-babysitter-stub-git, bin/hive-babysitter-stub-gh.rb
 created: 2026-05-26
-updated: 2026-07-16
-tags: [command, babysitter, daemon, github]
+updated: 2026-08-07
+tags: [command, babysitter, daemon, github, systemd, launchd]
 ---
 
 **TLDR**: `hive babysit` manages the experimental PR babysitter. It is a separate process from `hive daemon`: it polls open PRs for projects with `babysitter.enabled: true`, skips ignored labels, and asks the configured development agent to repair conflicts or red CI in an isolated PR worktree.
@@ -18,11 +18,26 @@ hive babysit restart [--detach] [--dry-run]
 hive babysit status
 hive babysit reload
 hive babysit tail
+hive babysit install [--force]
 hive babysit --once PROJECT [--dry-run]
 hive babysit --once --all [--dry-run]
 ```
 
 The command is bare-text in v1; it does not emit a `--json` envelope.
+
+`install` writes and starts the supervised per-user service through
+`Hive::UserService`: `hive-babysitter.service` on Linux systemd-user or
+`local.hive-babysitter.plist` on macOS launchd. It runs `hive babysit start`
+in the foreground; project-level `babysitter.enabled` remains the mutation
+gate. `--force` backs up and replaces a drifted unit. Service definitions keep
+custom `HIVE_HOME`/XDG filesystem roots but never persist provider credentials.
+`hive setup` installs this service by default, while `hive uninstall` removes
+it. When a detached babysitter is already running, install first reuses the
+ownership-aware bounded stop path before the service manager starts its
+replacement. Uninstall uses the same stop path before removing any service or
+data, and aborts without teardown when PID ownership cannot be read or verified.
+`install --dry-run` is rejected because installing a service is a real host
+mutation.
 
 ## Lifecycle
 
@@ -42,15 +57,21 @@ Per-project config lives in `<project>/.hive-state/config.yml`:
 babysitter:
   enabled: true
   interval: 10m
+  agent: claude
   max_concurrent_prs: 2
   labels_ignore: [wip, do-not-merge, draft]
   dry_run: false
   auto_rebase: true
   budget_minutes: 30
   budget_usd: 50
+
+models:
+  babysitter:
+    model: claude-opus-5
+    effort: max
 ```
 
-`ProjectTick` reloads the project config on every tick, so changing `babysitter.enabled: false` is the kill switch and takes effect within one poll interval. `interval` accepts integer seconds or strings like `10m`, `30s`, and `1h`. `auto_rebase` (default `true`; `false` disables) controls auto-rebasing green-but-`BEHIND` PRs — see PR Processing below.
+`ProjectTick` reloads the project config on every tick, so changing `babysitter.enabled: false` is the kill switch and takes effect within one poll interval. `interval` accepts integer seconds or strings like `10m`, `30s`, and `1h`. `agent` optionally selects a registered provider for PR repair and falls back to `execute.agent`; the top-level `models.babysitter` route controls that provider's model and effort. `auto_rebase` (default `true`; `false` disables) controls auto-rebasing green-but-`BEHIND` PRs — see PR Processing below.
 
 ## PR Processing
 
@@ -63,7 +84,7 @@ For each enabled project, the babysitter:
 5. Sorts by actionability (`DIRTY`/`BLOCKED`/`UNSTABLE`, then `BEHIND`/`UNKNOWN`, then neutral) with `updatedAt` as the tie-breaker, and truncates to `max_concurrent_prs`.
 6. Runs `Hive::Babysitter::PrFixer` on each selected PR.
 
-`PrFixer` first checks `gh pr view --json mergeable,mergeStateStatus,statusCheckRollup`. If the PR is mergeable and checks are successful or queued (green), it normally records a `noop`/`already-green` event and does not spawn an agent. The exception: a green PR whose `mergeStateStatus` is `BEHIND` cannot merge under strict "branch must be up-to-date" protection. When `auto_rebase` is enabled (default), `PrFixer#handle_green` materializes the PR worktree, runs `GhOps.rebase_onto_base` (resolve `git remote get-url --push origin`, fetch `<base>` from that source with fallback to `origin`, then `git rebase FETCH_HEAD`), and on a clean rebase force-pushes the rebased HEAD to the PR's **real head branch** (`headRefName`, not the internal `hive-babysitter/pr-<n>` worktree branch) with an explicit `--force-with-lease=<headRefName>:<headRefOid>` so the PR becomes `CLEAN`/mergeable (emits `rebase`/`success`, counted as `fixed`). A rebase that conflicts is aborted and left for a human: no force-push, no fix agent, no label (emits `rebase`/`conflict`, counted as `needs_human`); it is re-evaluated cheaply on the next tick. With `auto_rebase: false` a green-but-`BEHIND` PR just `noop`s. If the PR is not green, `PrFixer` materializes the worktree, gathers failing-job logs plus diff stats, renders `templates/babysitter_pr_fix_prompt.md.erb`, and spawns the configured `execute.agent` through `Hive::Stages::Base.spawn_agent` with `status_mode: :exit_code_only`.
+`PrFixer` first checks `gh pr view --json mergeable,mergeStateStatus,statusCheckRollup`. If the PR is mergeable and checks are successful or queued (green), it normally records a `noop`/`already-green` event and does not spawn an agent. The exception: a green PR whose `mergeStateStatus` is `BEHIND` cannot merge under strict "branch must be up-to-date" protection. When `auto_rebase` is enabled (default), `PrFixer#handle_green` materializes the PR worktree, runs `GhOps.rebase_onto_base` (resolve `git remote get-url --push origin`, fetch `<base>` from that source with fallback to `origin`, then `git rebase FETCH_HEAD`), and on a clean rebase force-pushes the rebased HEAD to the PR's **real head branch** (`headRefName`, not the internal `hive-babysitter/pr-<n>` worktree branch) with an explicit `--force-with-lease=<headRefName>:<headRefOid>` so the PR becomes `CLEAN`/mergeable (emits `rebase`/`success`, counted as `fixed`). A rebase that conflicts is aborted and left for a human: no force-push, no fix agent, no label (emits `rebase`/`conflict`, counted as `needs_human`); it is re-evaluated cheaply on the next tick. With `auto_rebase: false` a green-but-`BEHIND` PR just `noop`s. If the PR is not green, `PrFixer` materializes the worktree, gathers failing-job logs plus diff stats, renders `templates/babysitter_pr_fix_prompt.md.erb`, and spawns `babysitter.agent` (falling back to `execute.agent`) through `Hive::Stages::Base.spawn_agent` with `status_mode: :exit_code_only`.
 
 Materialization replaces the prior `.hive-state/babysitter/worktrees/<pr>/`
 checkout before fetching the exact PR head. If a container or interrupted tool

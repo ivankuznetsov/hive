@@ -6,7 +6,7 @@ You are installing the `hive` CLI for the user. Treat this prompt as the source 
 
 Install the latest stable Hive release, install or repair the QMD wiki indexer,
 verify `hive --version`, run the normal native `hive setup`, offer project
-initialization, and report the truthful daemon and Hive web service state. Do
+initialization, and report the truthful daemon, babysitter, and Hive web service state. Do
 not auto-install runtime dependencies such as `git`, `gh`, agent CLIs, or
 Node.js/npm; QMD is the exception once npm is already available because Hive's
 managed wiki refresh scripts use it. The bash installer requires Ruby 3.4,
@@ -135,7 +135,7 @@ versioned envelope:
 ```
 
 On supported Linux/macOS this bootstraps the authenticated managed Rails
-bundle, installs/enables/starts the daemon and Hive web services, optionally
+bundle, installs/enables/starts the daemon, PR babysitter, and Hive web services, optionally
 enrolls the current project only after separate explicit consent, probes bounded readiness, and reports the effective
 URL. Report `service_installed`, `service_enabled`, `service_running`, `ready`,
 and `readiness` separately; never describe the URL as available when `ready` is

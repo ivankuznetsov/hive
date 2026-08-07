@@ -132,6 +132,39 @@ class BabysitterPrFixerTest < Minitest::Test
     end
   end
 
+  def test_agent_spawn_honors_babysitter_provider_override
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      worktree_path = File.join(dir, "wt")
+      FileUtils.mkdir_p(worktree_path)
+      routed_cfg = cfg.merge(
+        "execute" => { "agent" => "codex" },
+        "babysitter" => cfg.fetch("babysitter").merge("agent" => "claude"),
+        "models" => {
+          "babysitter" => { "model" => "claude-opus-5", "effort" => "max" }
+        }
+      )
+      captured = nil
+
+      stub_non_green_context(project, worktree_path) do
+        with_replaced_singleton_method(
+          Hive::Stages::Base,
+          :spawn_agent,
+          lambda { |_task, **kwargs| captured = kwargs; { status: :ok } }
+        ) do
+          outcome = Hive::Babysitter::PrFixer.run(
+            pr, project, routed_cfg, dry_run: false, logger: nil, inflight: Set.new
+          )
+          assert_equal :success, outcome
+        end
+      end
+
+      assert_equal :claude, captured.fetch(:profile).name
+      assert_equal [ "--model", "claude-opus-5", "--effort", "max" ],
+                   captured.fetch(:routing_arguments).subcommand_arguments
+    end
+  end
+
   def test_agent_failure_labels_comments_and_gives_up
     with_tmp_dir do |dir|
       project = project_entry(dir)

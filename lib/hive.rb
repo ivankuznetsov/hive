@@ -696,6 +696,21 @@ module Hive
     end
   end
 
+  # `hive babysit install` uses the same drift-safe managed-service contract
+  # as daemon and bot installation while keeping its CLI error identity
+  # separate for stable exit-code handling.
+  class BabysitterInstallDriftError < Error
+    def exit_code
+      ExitCodes::USAGE
+    end
+  end
+
+  class BabysitterInstallFailed < Error
+    def exit_code
+      ExitCodes::SOFTWARE
+    end
+  end
+
   # Raised by `hive run` when the stage's terminal marker is :error. The
   # runner itself succeeded — the agent recorded a task-level failure.
   # Distinct from StageError (which signals a runner bug / git failure).

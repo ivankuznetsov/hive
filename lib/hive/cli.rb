@@ -1379,6 +1379,8 @@ module Hive
         status                            Show running / not-running.
         reload                            Send SIGHUP to reload config/log settings.
         tail                              Stream babysitter.log.
+        install [--force]                 Install and start the platform-native
+                                          per-user babysitter service.
 
       One-shot:
         hive babysit --once PROJECT       Run one babysitter pass for PROJECT.
@@ -1395,6 +1397,8 @@ module Hive
                      desc: "run with babysitter dry-run side-effect guards"
     option :all, type: :boolean, default: false,
                  desc: "with --once, run one pass for every enabled project"
+    option :force, type: :boolean, default: false,
+                   desc: "for install: overwrite an existing unit (saves <path>.bak)"
     def babysit(subcommand = nil, *targets)
       require "hive/commands/babysit"
       if options[:once] && Hive::Commands::Babysit::VALID_SUBCOMMANDS.include?(subcommand.to_s)
@@ -1406,6 +1410,15 @@ module Hive
         raise Hive::InvalidTaskPath,
               "hive babysit #{subcommand}: too many positional arguments #{targets.inspect}; expected one PROJECT"
       end
+      if options[:force] && subcommand != "install"
+        raise Hive::InvalidTaskPath,
+              "hive babysit #{subcommand}: --force only applies to `install`; " \
+              "drop it or use `hive babysit install --force`"
+      end
+      if options[:dry_run] && subcommand == "install"
+        raise Hive::InvalidTaskPath,
+              "hive babysit install: --dry-run does not apply to service installation"
+      end
 
       target = options[:once] ? (targets.first || subcommand) : targets.first
       Hive::Commands::Babysit.new(
@@ -1414,7 +1427,8 @@ module Hive
         detach: options[:detach],
         dry_run: options[:dry_run],
         once: options[:once],
-        all: options[:all]
+        all: options[:all],
+        force: options[:force]
       ).call
     end
 

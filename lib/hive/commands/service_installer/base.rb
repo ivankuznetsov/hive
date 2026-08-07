@@ -10,17 +10,23 @@ module Hive
   module Commands
     module ServiceInstaller
       # Platform-agnostic mechanics shared by per-user autostart service
-      # installers (daemon, bot, web). Subclasses supply only the service
+      # installers (daemon, babysitter, bot, web). Subclasses supply only the service
       # identity (`service_name`, `cli_label`, `service_noun`, `unit_noun`),
       # the rendered unit/plist bodies (`render_systemd` / `render_launchd`),
       # and an optional `upgrade_restart_warning` string appended on a Linux
       # force-upgrade restart. The unit path derives from `service_name`
       # (see `target_path`).
       class Base
+        PERSISTED_RUNTIME_ENV = %w[
+          HIVE_HOME XDG_CACHE_HOME XDG_CONFIG_HOME XDG_DATA_HOME
+          XDG_STATE_HOME
+        ].freeze
+
         attr_reader :messages
 
         def initialize(host_os: RbConfig::CONFIG["host_os"], home: nil, binary_path: nil, runner: nil,
-                       systemctl_available: nil, launchctl_available: nil, status_reader: nil)
+                       systemctl_available: nil, launchctl_available: nil, status_reader: nil,
+                       environment: ENV)
           @host_os = host_os
           # Anchor on the real user home for launchd/systemd paths —
           # HIVE_HOME is a config/test override that does not apply
@@ -34,6 +40,7 @@ module Hive
           @status_reader = status_reader
           @systemctl_available = systemctl_available
           @launchctl_available = launchctl_available
+          @runtime_environment = environment
           @messages = []
         end
 
@@ -331,6 +338,52 @@ module Hive
             # spawn. Rewrite the bare element to the real home. The daemon plist
             # has no WorkingDirectory, so this is a no-op there.
             .gsub(%r{<string>/Users/YOU</string>}, "<string>#{escaped_home}</string>")
+        end
+
+        # Persist only filesystem roots needed to resolve Hive's registry and
+        # state after the service manager replaces the interactive shell
+        # environment. Provider credentials deliberately stay out of units.
+        def render_systemd_runtime_environment(rendered)
+          lines = resolved_runtime_environment.map do |name, value|
+            "Environment=#{name}=#{Shellwords.escape(value)}"
+          end
+          anchor = rendered.match?(/^Environment=HIVE_BIN=.*$/) ?
+            /^Environment=HIVE_BIN=.*$/ : /^Environment=PATH=.*$/
+          rendered.sub(anchor) do |line|
+            ([ line ] + lines).join("\n")
+          end
+        end
+
+        def render_launchd_runtime_environment(rendered)
+          entries = resolved_runtime_environment.map do |name, value|
+            "    <key>#{CGI.escapeHTML(name)}</key>\n" \
+              "    <string>#{CGI.escapeHTML(value)}</string>"
+          end.join("\n")
+          rendered.sub(
+            "    <key>PATH</key>",
+            "#{entries}\n    <key>PATH</key>"
+          )
+        end
+
+        def resolved_runtime_environment
+          PERSISTED_RUNTIME_ENV.each_with_object({}) do |name, result|
+            value = @runtime_environment[name].to_s
+            next if value.empty?
+
+            unsafe = value.each_byte.any? do |byte|
+              byte < 0x20 || byte == 0x7f
+            end
+            absolute = File.absolute_path(value) == value
+            if unsafe || !absolute
+              raise Hive::ConfigError,
+                    "#{name} must be an absolute path without control bytes"
+            end
+
+            result[name] = File.expand_path(value)
+          rescue ArgumentError
+            raise Hive::ConfigError,
+                  "#{name} must be an absolute path without control bytes"
+          end
         end
 
         def resolved_binary

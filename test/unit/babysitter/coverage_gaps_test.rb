@@ -61,10 +61,10 @@ class BabysitterCoverageGapsTest < Minitest::Test
   end
 
   def test_cli_babysit_rejects_once_subcommand_and_extra_targets_then_dispatches
-    cli = Hive::CLI.new([], { once: true, detach: false, dry_run: false, all: false })
+    cli = Hive::CLI.new([], { once: true, detach: false, dry_run: false, all: false, force: false })
     assert_raises(Hive::InvalidTaskPath) { cli.babysit("start") }
 
-    cli = Hive::CLI.new([], { once: false, detach: false, dry_run: false, all: false })
+    cli = Hive::CLI.new([], { once: false, detach: false, dry_run: false, all: false, force: false })
     assert_raises(Hive::InvalidTaskPath) { cli.babysit("status", "one", "two") }
 
     calls = []
@@ -74,7 +74,18 @@ class BabysitterCoverageGapsTest < Minitest::Test
     }) do
       assert_equal :called, cli.babysit("status")
     end
-    assert_equal [ [ "status", nil ], { detach: false, dry_run: false, once: false, all: false } ], calls.first
+    assert_equal [
+      [ "status", nil ],
+      { detach: false, dry_run: false, once: false, all: false, force: false }
+    ], calls.first
+
+    cli = Hive::CLI.new([], { once: false, detach: false, dry_run: true, all: false, force: false })
+    error = assert_raises(Hive::InvalidTaskPath) { cli.babysit("install") }
+    assert_includes error.message, "--dry-run does not apply"
+
+    cli = Hive::CLI.new([], { once: false, detach: false, dry_run: false, all: false, force: true })
+    error = assert_raises(Hive::InvalidTaskPath) { cli.babysit("status") }
+    assert_includes error.message, "--force only applies"
   end
 
   def test_command_call_routes_known_subcommands_and_rejects_unknown

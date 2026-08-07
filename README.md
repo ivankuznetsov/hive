@@ -37,7 +37,7 @@ The result Hive built in that reel lives at [ivankuznetsov/shipped](https://gith
 
 ## Install
 
-Hive ships as a rubygem (`hive-cli`) plus a managed Hive web bundle attached to each GitHub Release. A cosign-signed checksum manifest authenticates both artifacts before installation or extraction. Each native channel installs the same gem; the normal `hive setup` then installs Hive-owned dependencies, the daemon, and the managed loopback web service. Project initialization still controls daemon enrollment independently.
+Hive ships as a rubygem (`hive-cli`) plus a managed Hive web bundle attached to each GitHub Release. A cosign-signed checksum manifest authenticates both artifacts before installation or extraction. Each native channel installs the same gem; the normal `hive setup` then installs Hive-owned dependencies, the daemon, the PR babysitter, and the managed loopback web service. Project initialization still controls daemon and babysitter enrollment independently.
 
 | Platform | Channel |
 |----------|---------|
@@ -74,7 +74,7 @@ hive setup
 `hive setup` checks Ruby 3.4, git, tmux, `gh`, Claude, Codex, Node/npm,
 QMD, SQLite, and the Rails bundle. Before other mutations it previews and
 provisions Hive's operating skill for Claude, Codex, and Pi. It then installs
-the Hive-owned pieces it can manage, installs the daemon and Hive web services,
+the Hive-owned pieces it can manage, installs the daemon, PR babysitter, and Hive web services,
 enrolls the current project, and reports the effective URL plus installed,
 enabled, running, and readiness state. Interactive setup confirms once; JSON
 or non-TTY setup must pass `--yes` or it makes no changes. The untouched
@@ -361,6 +361,7 @@ The TUI is the recommended human interface and an agent-driven CLI is the recomm
 | Review findings | `hive findings`, `hive accept-finding`, `hive reject-finding` | Inspect GFM-checkbox findings from the latest review pass and tick which ones should feed the next fix pass. See [docs/cli.md#findings-triage](docs/cli.md#findings-triage). |
 | Patrol | `hive patrol` | Run one opt-in repository patrol cycle: map feature slices, review them, validate fixes, and open PRs for passed fixes only. See [docs/cli.md#patrol](docs/cli.md#patrol). |
 | Daemon | `hive daemon install/enable/start/status/tail/stop/disable` | Manage the global daemon service plus per-project enrollment. The service polls `hive status --json` and dispatches workflow verbs for enrolled projects. Read [wiki/operating.md](wiki/operating.md) before going live. See [docs/cli.md#daemon](docs/cli.md#daemon). |
+| PR babysitter | `hive babysit install/start/status/tail/stop` | Supervise opt-in repair of conflicted or red GitHub PRs. Normal `hive setup` installs the global service; each project remains gated by `babysitter.enabled`. |
 | Diagnostics & agent setup | `hive status [--operational|--full]`, `hive watch`, `hive act`, `hive doctor`, `hive setup-agents`, `hive rebase-status`, `hive markers clear`, `hive metrics rollback-rate` | Inspect compact or full task state, observe semantic transitions, execute a fresh closed routine action, diagnose configured skills without writes, consent to provision managed built-ins, or use the explicit recovery diagnostics. See [docs/cli.md#diagnostics](docs/cli.md#diagnostics). |
 | Registry & lifecycle | `hive init`, `hive update`, `hive uninstall`, `hive forget`, `hive prune`, `hive migrate`, `hive tree` | Attach Hive to a project, upgrade the installed CLI, remove it, prune the global registry, migrate legacy project state, or print the Thor command tree. See [docs/cli.md#lower-level-surface](docs/cli.md#lower-level-surface). |
 

@@ -3,13 +3,18 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-08-05
+updated: 2026-08-07
 tags: [gap, todo, release-proof, agent-skills]
 ---
 
 **TLDR**: The wiki has broad domain coverage for the current `lib/`, command, stage, TUI, daemon, bot, native Hive web, Hivebox container, testing/static-analysis, template/prompt, and release surfaces, but the source-file map below is representative rather than an automatically verified one-file-per-source audit. Remaining gaps are mainly live behavioral verification and a few deeper reference pages.
 
 ## Current release gap
+
+- Managed babysitter installation is source- and focused-test-pinned for
+  systemd and launchd, including detached-process takeover and safe uninstall
+  delegation. A live systemd user-service dogfood is the immediate post-merge
+  proof target. Native launchd lifecycle proof remains pending on macOS.
 
 - Release-candidate protected-main dogfood run `31014105054` at exact
   candidate/workflow SHA `f113b6a238c0922e60ceafb091a9b215ce7c451e`

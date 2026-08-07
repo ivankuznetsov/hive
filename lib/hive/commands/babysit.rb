@@ -8,13 +8,15 @@ require "hive/lock"
 require "hive/pid_file"
 require "hive/babysitter/dispatcher"
 require "hive/babysitter/logger"
+require "hive/commands/service_installer/result_presenter"
 
 module Hive
   module Commands
     class Babysit
       include Hive::PidFile
+      include Hive::Commands::ServiceInstaller::ResultPresenter
 
-      VALID_SUBCOMMANDS = %w[start stop restart status reload tail].freeze
+      VALID_SUBCOMMANDS = %w[start stop restart status reload tail install].freeze
       # Give an active PR repair tick time to drain; PrFixer may be inside
       # a synchronous agent spawn with child processes and temporary worktrees.
       STOP_GRACE_SEC = 600
@@ -23,14 +25,30 @@ module Hive
       POLL_INTERVAL_SEC = 0.5
 
       def initialize(subcommand = nil, target = nil, detach: false, dry_run: false,
-                     once: false, all: false, hive_home: Hive::Paths.state_home)
+                     once: false, all: false, force: false,
+                     hive_home: Hive::Paths.state_home, quiet: false)
         @subcommand = subcommand
         @target = target
         @detach = detach
         @dry_run = dry_run
         @once = once
         @all = all
+        @force = force
+        @json = false
         @hive_home = hive_home
+        @quiet = quiet
+      end
+
+      # Move a previously supported detached babysitter under the service
+      # manager before enabling the managed unit. Reuse the normal stop path
+      # so PID ownership and the active-repair drain have one policy.
+      def self.prepare_service_takeover!(installer:, hive_home: Hive::Paths.state_home)
+        state = installer.service_lifecycle_state
+        return unless state["service_manager_available"]
+        return if state["service_running"]
+        return unless File.exist?(File.join(hive_home, ".babysitter.pid"))
+
+        new("stop", hive_home: hive_home, quiet: true).call
       end
 
       def call
@@ -49,6 +67,7 @@ module Hive
         when "status"  then status_daemon
         when "reload"  then reload_daemon
         when "tail"    then tail_daemon
+        when "install" then install_babysitter
         end
       end
 
@@ -61,6 +80,19 @@ module Hive
       end
 
       private
+
+      def install_babysitter
+        require "hive/commands/babysit/service_installer"
+        installer = Hive::Commands::Babysit::ServiceInstaller.new(
+          binary_path: Hive::InvokedBinary.path
+        )
+        self.class.prepare_service_takeover!(installer: installer, hive_home: @hive_home)
+        perform_service_install(installer)
+      end
+
+      def service_install_label = "babysit"
+      def service_install_drift_error = Hive::BabysitterInstallDriftError
+      def service_install_failure_error = Hive::BabysitterInstallFailed
 
       def start_daemon
         FileUtils.mkdir_p(@hive_home)
@@ -310,6 +342,14 @@ module Hive
         return true if stop_daemon
 
         raise Hive::Error, "hive babysitter: stop failed; inspect #{pid_file}"
+      end
+
+      def puts(*messages)
+        Kernel.puts(*messages) unless @quiet
+      end
+
+      def warn(*messages)
+        Kernel.warn(*messages) unless @quiet
       end
 
       def restart_daemon

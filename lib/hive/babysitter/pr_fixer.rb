@@ -215,7 +215,10 @@ module Hive
 
       def spawn_agent(worktree_path, context)
         task = babysitter_task(worktree_path)
-        profile = Hive::AgentProfiles.lookup(@cfg.dig("execute", "agent") || "claude", cfg: @cfg)
+        profile = Hive::AgentProfiles.lookup(
+          @cfg.dig("babysitter", "agent") || @cfg.dig("execute", "agent") || "claude",
+          cfg: @cfg
+        )
         prompt = render_prompt(worktree_path, context)
         spawn = lambda do
           Hive::Stages::Base.spawn_agent(

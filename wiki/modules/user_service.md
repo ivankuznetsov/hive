@@ -3,7 +3,7 @@ title: UserService
 type: module
 source: lib/hive/user_service.rb, lib/hive/user_service/
 created: 2026-07-26
-updated: 2026-07-26
+updated: 2026-08-07
 tags: [module, services, systemd, launchd, boundaries]
 ---
 
@@ -11,7 +11,7 @@ tags: [module, services, systemd, launchd, boundaries]
 
 `Hive::UserService` is Hive's platform-neutral boundary for per-user service
 files and their systemd-user or launchd lifecycle. Hive remains its first and
-primary consumer through thin daemon, bot, web, setup, init, status, and
+primary consumer through thin daemon, babysitter, bot, web, setup, init, status, and
 uninstall adapters.
 
 ## Public entry point
@@ -48,7 +48,7 @@ UserService owns:
 
 Hive adapters continue to own:
 
-- daemon, bot, and web templates;
+- daemon, babysitter, bot, and web templates;
 - executable and install-channel resolution;
 - web environment rendering;
 - command messages, JSON envelopes, prompts, and service nouns;
@@ -75,6 +75,6 @@ Focused coverage lives in:
 
 - `test/unit/user_service/user_service_test.rb`
 - `test/unit/commands/service_installer/base_test.rb`
-- daemon, bot, and web service-installer tests
+- daemon, babysitter, bot, and web service-installer tests
 - `test/unit/commands/uninstall_test.rb`
 - `test/unit/component_boundaries_test.rb`

@@ -10,6 +10,7 @@ require "hive/invoked_binary"
 require "hive/commands/init"
 require "hive/commands/daemon"
 require "hive/commands/daemon/service_installer"
+require "hive/commands/babysit/service_installer"
 require "hive/commands/web/service_installer"
 
 # End-to-end coverage of the `hive setup` orchestrator (lib/hive/commands/setup.rb):
@@ -117,6 +118,7 @@ class SetupOrchestratorTest < Minitest::Test
     # singleton methods on the installer classes, so `self` inside the lambda is
     # the class, not this test — a bare `fake_installer` call would NameError.
     daemon_installer = fake_installer
+    babysitter_installer = fake_installer
     web_installer = fake_installer
     agent_plan = Hive::AgentSkills::ProvisioningPlan.new(
       inspections: [].freeze,
@@ -144,17 +146,20 @@ class SetupOrchestratorTest < Minitest::Test
                 with_replaced_singleton_method(Hive::InvokedBinary, :path, ->(*) { "/usr/bin/hive" }) do
             with_replaced_singleton_method(Hive::Commands::Daemon::ServiceInstaller, :new,
               ->(**_kw) { daemon_installer }) do
-              with_replaced_singleton_method(Hive::Commands::Web::ServiceInstaller, :new,
-                ->(**_kw) { web_installer }) do
-                with_replaced_singleton_method(Hive::Commands::SetupAgents, :new,
-                  ->(**_kw) { agent_setup }) do
-                  require "hive/web/service_status"
-                  status = web_installer.service_state.merge(
-                    "ready" => true, "readiness" => "ready", "url" => "http://127.0.0.1:4567"
-                  )
-                  with_replaced_singleton_method(Hive::Web::ServiceStatus, :snapshot,
-                    ->(**_kw) { status }) do
-                    stub_web_config { yield }
+              with_replaced_singleton_method(Hive::Commands::Babysit::ServiceInstaller, :new,
+                ->(**_kw) { babysitter_installer }) do
+                with_replaced_singleton_method(Hive::Commands::Web::ServiceInstaller, :new,
+                  ->(**_kw) { web_installer }) do
+                  with_replaced_singleton_method(Hive::Commands::SetupAgents, :new,
+                    ->(**_kw) { agent_setup }) do
+                    require "hive/web/service_status"
+                    status = web_installer.service_state.merge(
+                      "ready" => true, "readiness" => "ready", "url" => "http://127.0.0.1:4567"
+                    )
+                    with_replaced_singleton_method(Hive::Web::ServiceStatus, :snapshot,
+                      ->(**_kw) { status }) do
+                      stub_web_config { yield }
+                    end
                   end
                 end
               end
@@ -238,7 +243,7 @@ class SetupOrchestratorTest < Minitest::Test
     assert_equal "managed_service", payload["mode"]
     assert_equal true, payload["ok"]
     names = payload["phases"].map { |p| p["name"] }
-    assert_equal %w[diagnostics agent_skills web_bundle daemon_service enroll web_service web], names,
+    assert_equal %w[diagnostics agent_skills web_bundle daemon_service babysitter_service enroll web_service web], names,
                  "phases must be recorded in provisioning order"
     assert payload["phases"].all? { |p| p["ok"] }, "every phase ok on the happy path"
   end
@@ -369,7 +374,7 @@ class SetupOrchestratorTest < Minitest::Test
 
     names = JSON.parse(output.string)["phases"].map { |p| p["name"] }
     refute_includes names, "enroll", "--no-init must not record an enroll phase"
-    assert_equal %w[diagnostics agent_skills web_bundle daemon_service web_service web], names
+    assert_equal %w[diagnostics agent_skills web_bundle daemon_service babysitter_service web_service web], names
   end
 
   # ── --service: web service installed ─────────────────────────────────
@@ -495,12 +500,14 @@ class SetupOrchestratorTest < Minitest::Test
       with_replaced_singleton_method(Hive::Web::AppBundle, :ensure!, ->(*) { raise Hive::Error, "bad bundle" }) do
         with_replaced_singleton_method(Hive::Commands::Daemon::ServiceInstaller, :new,
           ->(**) { fake_installer }) do
-          observed = fake_installer(state: {
-            "platform" => "linux", "unit_path" => "/tmp/unit.service",
-            "service_installed" => true, "service_enabled" => true,
-            "service_running" => true, "service_manager_available" => true
-          })
-          observed.define_singleton_method(:install!) { |**| flunk "blocked setup must not mutate service" }
+          with_replaced_singleton_method(Hive::Commands::Babysit::ServiceInstaller, :new,
+            ->(**) { fake_installer }) do
+            observed = fake_installer(state: {
+              "platform" => "linux", "unit_path" => "/tmp/unit.service",
+              "service_installed" => true, "service_enabled" => true,
+              "service_running" => true, "service_manager_available" => true
+            })
+            observed.define_singleton_method(:install!) { |**| flunk "blocked setup must not mutate service" }
             with_replaced_singleton_method(Hive::Commands::Web::ServiceInstaller, :new,
               ->(**) { observed }) do
               stub_web_config do
@@ -511,6 +518,7 @@ class SetupOrchestratorTest < Minitest::Test
                   Hive::Commands::Setup.new(json: true, no_init: true, yes: true, output: output).call
                 end
               end
+            end
           end
         end
       end
@@ -886,6 +894,54 @@ class SetupOrchestratorTest < Minitest::Test
     phase = setup.instance_variable_get(:@phases).last
     assert_equal false, phase["ok"]
     assert_match(/Errno::EACCES/, phase["message"])
+  end
+
+  def test_install_babysitter_records_managed_service_phase
+    setup = Hive::Commands::Setup.new(output: StringIO.new)
+    installer = fake_installer(
+      success: true,
+      wire: "written",
+      target_path: "/tmp/hive-babysitter.service",
+      messages: [ "enabled" ]
+    )
+
+    with_replaced_singleton_method(Hive::InvokedBinary, :path, ->(*) { "/usr/bin/hive" }) do
+      with_replaced_singleton_method(
+        Hive::Commands::Babysit::ServiceInstaller,
+        :new,
+        ->(**_kwargs) { installer }
+      ) do
+        setup.send(:install_babysitter)
+      end
+    end
+
+    phase = setup.instance_variable_get(:@phases).last
+    assert_equal "babysitter_service", phase["name"]
+    assert_equal true, phase["ok"]
+    assert_equal "written", phase["outcome"]
+    assert_equal "/tmp/hive-babysitter.service", phase["target_path"]
+    assert_equal [ "enabled" ], phase["messages"]
+  end
+
+  def test_install_babysitter_records_a_failed_takeover_without_installing_unit
+    setup = Hive::Commands::Setup.new(output: StringIO.new)
+    installer = fake_installer
+    installer.define_singleton_method(:install!) do |**|
+      raise "service install must not run after takeover failure"
+    end
+
+    with_replaced_singleton_method(Hive::Commands::Babysit::ServiceInstaller, :new, ->(**) { installer }) do
+      with_replaced_singleton_method(Hive::Commands::Babysit, :prepare_service_takeover!, lambda { |**|
+        raise Hive::Error, "ownership could not be verified"
+      }) do
+        setup.send(:install_babysitter)
+      end
+    end
+
+    phase = setup.instance_variable_get(:@phases).last
+    assert_equal "babysitter_service", phase["name"]
+    assert_equal false, phase["ok"]
+    assert_includes phase["message"], "ownership could not be verified"
   end
 
   # ── enroll_project ───────────────────────────────────────────────────

@@ -1448,6 +1448,46 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     end
   end
 
+  def test_related_issue_does_not_bypass_fix_action_backoff
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      store.write_job!(classified_job(
+        "policy" => {
+          "discovery" => true, "auto_fix" => true,
+          "issue_filing" => true
+        }
+      ))
+      initialized = store.initialize_actions!(
+        "job-1",
+        specifications: [
+          {
+            "thesis_id" => "accepted", "kind" => "fix",
+            "family_id" => "af1-#{'f' * 64}"
+          },
+          {
+            "thesis_id" => "accepted", "kind" => "issue",
+            "family_id" => "af1-#{'f' * 64}"
+          }
+        ],
+        now: T0
+      )
+      fix = initialized.fetch("actions").find { |action| action.fetch("kind") == "fix" }
+      token = store.claim_action!(
+        "job-1", fix.fetch("canonical_action_id"),
+        owner: "runner", now: T0, lease_sec: 10
+      )
+
+      store.release_action!(
+        token, outcome: "fix_agent_failed", now: T0 + 1,
+        backoff_sec: 3600
+      )
+
+      assert_empty store.actionable_jobs(now: T0 + 3599)
+      assert_equal [ "job-1" ],
+                   store.actionable_jobs(now: T0 + 3601).map { |job| job.fetch("job_id") }
+    end
+  end
+
   def test_newly_classified_job_is_actionable_before_catalog_initialization
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)

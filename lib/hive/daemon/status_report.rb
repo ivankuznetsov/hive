@@ -27,9 +27,10 @@ module Hive
 
       attr_reader :pid_file, :log_file
 
-      def initialize(hive_home: Hive::Paths.state_home)
+      def initialize(hive_home: Hive::Paths.state_home, environment: ENV)
         @pid_file = File.join(hive_home, ".daemon.pid")
         @log_file = File.join(hive_home, "logs", "daemon.log")
+        @environment = environment
       end
 
       # Liveness snapshot ({running:, pid:, uptime_sec:}) from the PID file.
@@ -94,7 +95,9 @@ module Hive
       # whole report.
       def probe_service_state
         require "hive/commands/daemon/service_installer"
-        installer = Hive::Commands::Daemon::ServiceInstaller.new
+        runtime_binary = @environment["HIVE_BIN"].to_s
+        runtime_binary = nil if runtime_binary.empty?
+        installer = Hive::Commands::Daemon::ServiceInstaller.new(binary_path: runtime_binary)
         installer.service_state.merge(
           "installed_binary" => installer.installed_exec_binary,
           "expected_binary" => installer.expected_binary

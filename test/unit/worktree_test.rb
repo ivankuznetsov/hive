@@ -401,6 +401,68 @@ class WorktreeTest < Minitest::Test
     end
   end
 
+  def test_broken_exact_registration_rejects_a_symlink_path
+    with_tmp_dir do |dir|
+      root = File.join(dir, "worktrees")
+      FileUtils.mkdir_p(root)
+      wt = Hive::Worktree.new(dir, "symlinked", worktree_root: root)
+      File.symlink(dir, wt.path)
+      wt.define_singleton_method(:list_worktree_paths) { [ path ] }
+      wt.define_singleton_method(:usable_git_worktree?) { false }
+
+      error = assert_raises(Hive::WorktreeError) do
+        wt.send(:recover_broken_exact_registration!)
+      end
+
+      assert_includes error.message, "is a symlink and cannot be recovered"
+      assert File.symlink?(wt.path)
+    end
+  end
+
+  def test_broken_exact_registration_requires_removal_to_clear_the_exact_path
+    with_tmp_dir do |dir|
+      root = File.join(dir, "worktrees")
+      FileUtils.mkdir_p(root)
+      wt = Hive::Worktree.new(dir, "still-registered", worktree_root: root)
+      wt.define_singleton_method(:list_worktree_paths) { [ path ] }
+      wt.define_singleton_method(:usable_git_worktree?) { false }
+
+      with_replaced_singleton_method(
+        Hive::Worktree, :run_materialize_git!, ->(*) { "" }
+      ) do
+        error = assert_raises(Hive::WorktreeError) do
+          wt.send(:recover_broken_exact_registration!)
+        end
+
+        assert_includes error.message,
+                        "registration could not be removed"
+      end
+    end
+  end
+
+  def test_broken_exact_registration_translates_preservation_failures
+    with_tmp_dir do |dir|
+      root = File.join(dir, "worktrees")
+      FileUtils.mkdir_p(root)
+      wt = Hive::Worktree.new(dir, "unmovable", worktree_root: root)
+      FileUtils.mkdir_p(wt.path)
+      wt.define_singleton_method(:list_worktree_paths) { [ path ] }
+      wt.define_singleton_method(:usable_git_worktree?) { false }
+
+      with_replaced_singleton_method(
+        FileUtils, :mv,
+        ->(*) { raise Errno::EACCES, wt.path }
+      ) do
+        error = assert_raises(Hive::WorktreeError) do
+          wt.send(:recover_broken_exact_registration!)
+        end
+
+        assert_includes error.message,
+                        "broken exact worktree could not be preserved"
+      end
+    end
+  end
+
   def test_pointer_validation_blocks_path_traversal
     Dir.mktmpdir do |root|
       assert_raises(Hive::WorktreeError) do

@@ -1110,6 +1110,74 @@ class PatrolStateStoreEffectIntentsTest < Minitest::Test
     end
   end
 
+  def test_feature_batch_reconciliation_distinguishes_complete_and_partial_state
+    with_tmp_dir do |root|
+      store = Hive::Patrol::StateStore.new(root)
+      store.ensure!
+      reconciliations = {}
+      gateway = Object.new
+      gateway.define_singleton_method(:perform!) do |target:, reconcile:, **, &effect|
+        effect.call
+        reconciliations[target] = reconcile
+        Object.new
+      end
+      store.instance_variable_set(:@state_effect_gateway, gateway)
+      store.instance_variable_set(:@effect_capture, capture)
+      features = 2.times.map do |index|
+        Hive::Patrol::Feature.new(
+          id: "feature-#{index}",
+          kind: "component",
+          entrypoints: [ "lib/feature_#{index}.rb" ],
+          owned_files: [ "lib/feature_#{index}.rb" ],
+          context_files: [],
+          tests: []
+        )
+      end
+
+      assert_equal features.first.to_h, store.write_feature(features.first)
+      assert_equal features, store.write_features(features)
+
+      matched = reconciliations.fetch("features").call(nil)
+      assert_equal "matched", matched.fetch("status")
+      assert_match(/\A[0-9a-f]{64}\z/,
+                   matched.dig("outcome", "content_digest"))
+
+      FileUtils.rm_f(
+        File.join(store.root, "features", "#{features.last.id}.json")
+      )
+      incomplete = reconciliations.fetch("features").call(nil)
+      assert_equal "absent", incomplete.fetch("status")
+      assert_equal "incomplete", incomplete.dig("outcome", "observed")
+    end
+  end
+
+  def test_feature_batch_rejects_missing_and_duplicate_identities
+    with_tmp_dir do |root|
+      store = Hive::Patrol::StateStore.new(root)
+      feature = Hive::Patrol::Feature.new(
+        id: "feature-1",
+        kind: "component",
+        entrypoints: [],
+        owned_files: [],
+        context_files: [],
+        tests: []
+      )
+      missing = feature.dup
+      missing.id = ""
+
+      missing_error = assert_raises(Hive::ConfigError) do
+        store.write_features([ missing ])
+      end
+      duplicate_error = assert_raises(Hive::ConfigError) do
+        store.write_features([ feature, feature.dup ])
+      end
+
+      assert_equal "patrol feature batch identities are malformed",
+                   missing_error.message
+      assert_equal missing_error.message, duplicate_error.message
+    end
+  end
+
   def test_effect_recovery_values_and_fingerprint_lock_fail_closed
     with_tmp_dir do |root|
       store = Hive::Patrol::StateStore.new(root)

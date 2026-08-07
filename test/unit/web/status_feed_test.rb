@@ -231,6 +231,28 @@ class StatusFeedTest < Minitest::Test
                 "a new daemon generation must never inherit the predecessor's scheduler authority"
   end
 
+  def test_cached_status_command_passes_through_a_malformed_current_receipt
+    malformed = {
+      "status" => "current",
+      "phase" => "complete",
+      "valid_until" => "not-a-time",
+      "daemon" => { "generation" => "daemon-1" }
+    }
+    recovery_status = RecordingRecoveryStatus.new
+    command = Hive::Web::CachedStatusCommand.new(
+      source: RecordingSource.new,
+      recovery_status_command: recovery_status,
+      scheduler_snapshot_reader: ScriptedSchedulerReader.new(malformed),
+      clock: -> { Time.utc(2026, 8, 7, 14, 30) }
+    )
+    payload = command.json_payload([])
+
+    command.operational_recoveries([], status_payload: payload)
+
+    assert_same malformed, recovery_status.scheduler_snapshot,
+                "an unauthenticated receipt must be surfaced instead of retained as scheduler authority"
+  end
+
   def test_archive_snapshot_uses_the_lossless_status_command_without_priming_the_ordinary_feed
     with_tmp_global_config do
       ordinary = CountingStatus.new([ { "projects" => [ { "name" => "ordinary" } ] } ])

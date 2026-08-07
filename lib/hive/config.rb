@@ -657,7 +657,8 @@ module Hive
       %w[review ci agent],
       %w[review triage agent],
       %w[review fix agent],
-      %w[review browser_test agent]
+      %w[review browser_test agent],
+      %w[babysitter agent]
     ].freeze
 
     # `/plan` was Hive's original wiki-first planning alias. It remains the

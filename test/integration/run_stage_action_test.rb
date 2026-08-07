@@ -2,6 +2,7 @@ require "test_helper"
 require "hive/commands/init"
 require "hive/commands/new"
 require "hive/commands/stage_action"
+require "hive/rebase"
 
 class RunStageActionTest < Minitest::Test
   include HiveTestHelper
@@ -49,6 +50,28 @@ class RunStageActionTest < Minitest::Test
 
         assert File.directory?(brainstorm)
         assert_equal :waiting, Hive::Markers.current(File.join(brainstorm, "brainstorm.md")).name
+      end
+    end
+  end
+
+  def test_ordinary_stage_dispatch_still_invokes_rebase
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _inbox, slug = seed_inbox(dir)
+        brainstorm = File.join(dir, ".hive-state", "stages", "2-brainstorm", slug)
+        ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = File.join(brainstorm, "brainstorm.md")
+        ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## Round 1\n<!-- WAITING -->\n"
+        calls = 0
+        rebase = lambda do |*_args|
+          calls += 1
+          Hive::Rebase::Result.disabled
+        end
+
+        with_replaced_singleton_method(Hive::Rebase, :perform, rebase) do
+          capture_io { Hive::Commands::StageAction.new("brainstorm", slug).call }
+        end
+
+        assert_equal 1, calls
       end
     end
   end
@@ -162,11 +185,16 @@ class RunStageActionTest < Minitest::Test
         with_replaced_singleton_method(
           Hive::Conditions::TransitionGuard, :validate_closure!, guard
         ) do
-          capture_io do
-            Hive::Commands::StageAction.new(
-              "archive", slug, project: project,
-              closure_receipt_digest: "a" * 64
-            ).call
+          with_replaced_singleton_method(
+            Hive::Rebase, :perform,
+            ->(*) { raise "evidence closure must not invoke rebase" }
+          ) do
+            capture_io do
+              Hive::Commands::StageAction.new(
+                "archive", slug, project: project,
+                closure_receipt_digest: "a" * 64
+              ).call
+            end
           end
         end
 

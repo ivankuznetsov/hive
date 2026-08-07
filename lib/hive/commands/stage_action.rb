@@ -209,7 +209,7 @@ module Hive
             return emit_archive_noop(task)
           end
 
-          run_at(task.folder, observation_guard: nil)
+          run_at(task.folder, observation_guard: nil, no_rebase: true)
           resumed = Hive::Task.new(task.folder)
           publish_task_completed(resumed)
           return emit_phase(resumed, "closure_resumed")
@@ -234,7 +234,7 @@ module Hive
           quiet: true,
           observation_guard: closure_guard
         ).call
-        run_at(new_folder, observation_guard: nil)
+        run_at(new_folder, observation_guard: nil, no_rebase: true)
         closed = Hive::Task.new(new_folder)
         publish_task_completed(closed)
         emit_phase(closed, "closed_with_evidence")
@@ -256,12 +256,13 @@ module Hive
         ).call
       end
 
-      def run_at(folder, observation_guard:)
+      def run_at(folder, observation_guard:, no_rebase: false)
         Hive::Commands::Run.new(
           folder,
           project: @project_filter,
           json: false,
           quiet: @json || @quiet,
+          no_rebase: no_rebase,
           observation_guard: observation_guard
         ).call
       end

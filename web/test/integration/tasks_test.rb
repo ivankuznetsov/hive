@@ -9,6 +9,7 @@ class TasksTest < ActionDispatch::IntegrationTest
   setup do
     @project = create_hive_project!
     @slug = create_task!(@project, "actions probe")
+    refresh_status_feed!
     sign_in!
   end
 
@@ -598,7 +599,7 @@ class TasksTest < ActionDispatch::IntegrationTest
                  stage_dir(@project, "6-review").join(@slug))
     state_file = stage_dir(@project, "6-review").join(@slug, "task.md")
     state_file.write("# t\n\n<!-- REVIEW_ERROR phase=triage reason=merge_conflict pass=1 -->\n")
-    snapshot = StatusBroadcaster.snapshot
+    snapshot = refresh_status_feed!
     row = snapshot.fetch("projects")
                   .find { |project| project["name"] == @project }
                   .fetch("tasks")
@@ -856,7 +857,7 @@ class TasksTest < ActionDispatch::IntegrationTest
     # pipeline's approval primitive) and materialize the derived path.
     FileUtils.mv(stage_dir(@project, "1-inbox").join(@slug),
                  stage_dir(@project, "4-execute").join(@slug))
-    project_payload = StatusBroadcaster.snapshot.fetch("projects", [])
+    project_payload = refresh_status_feed!.fetch("projects", [])
                                         .find { |p| p["name"] == @project }
     row = project_payload.fetch("tasks", []).find { |t| t["slug"] == @slug }
     assert row["worktree_path"].present?, "an execute-stage task must derive a worktree path"

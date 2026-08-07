@@ -43,6 +43,22 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
     end
   end
 
+  def test_effect_intent_recovers_terminal_semantics_from_the_receipt
+    with_journal do |journal|
+      intent = effect_intent
+      journal.prepare_effect!(intent, now: NOW)
+      journal.mark_dispatch_uncertain!(intent, now: NOW + 1)
+      journal.settle_effect!(
+        intent, status: "reconciled", outcome: {}, now: NOW + 2
+      )
+
+      assert_equal intent.to_h,
+                   journal.effect_intent(
+                     intent.occurrence_id, intent.intent_id
+                   ).to_h
+    end
+  end
+
   def test_recovery_active_is_one_view_for_reserved_and_pending_projection
     with_journal do |journal|
       occurrence_id = patrol_capture.occurrence_id

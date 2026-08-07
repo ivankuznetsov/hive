@@ -75,9 +75,20 @@ module Hive
       def unsettled_recorded_transitions(job)
         aggregate = aggregate_for(job)
         occurrence_id = aggregate.fetch("occurrence_id")
-        collect_recorded_effect_transitions(aggregate).filter_map do |transition|
+        transitions = collect_recorded_effect_transitions(aggregate)
+        snapshot = occurrence_store.effect_recovery_snapshot(
+          occurrence_id,
+          intent_ids: transitions.map do |transition|
+            transition.fetch("intent_id")
+          end
+        )
+        transitions.filter_map do |transition|
+          cell = snapshot.fetch(transition.fetch("intent_id"))
+          validate_transition!(transition, cell.fetch("semantic"), aggregate)
+          next if Hive::Modules::Migration::OccurrenceJournal::
+                    TERMINAL_STATES.include?(cell.fetch("state"))
+
           intent = effect_intent(occurrence_id, transition.fetch("intent_id"))
-          validate_transition!(transition, intent, aggregate)
           state = effect_state(intent)
           next if state && Hive::Modules::Migration::OccurrenceJournal::
                             TERMINAL_STATES.include?(state.fetch("state"))
@@ -100,11 +111,11 @@ module Hive
         @occurrences.respond_to?(:call) ? @occurrences.call : @occurrences
       end
 
-      def validate_transition!(transition, intent, aggregate)
+      def validate_transition!(transition, semantic, aggregate)
         if transition.key?("semantic_digest")
           @record_validator.validate_transition_semantic!(
             transition,
-            semantic: intent,
+            semantic: semantic,
             path: @job_path.call(aggregate.fetch("job_id"))
           )
         elsif transition.fetch("intent_id") != aggregate.fetch("intake_transition_id")

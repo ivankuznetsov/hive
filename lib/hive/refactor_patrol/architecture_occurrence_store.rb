@@ -157,6 +157,32 @@ module Hive
         raise @corrupt_record, e.message
       end
 
+      # Recovery validates the occurrence once, then checks every job
+      # transition against that immutable snapshot. Terminal effect cells never
+      # need the per-intent journal read used by live delivery.
+      def effect_recovery_snapshot(occurrence_id, intent_ids:)
+        record = @journal.fetch(occurrence_id)
+        unless record
+          raise @corrupt_record, "architecture patrol occurrence is missing"
+        end
+
+        effects = record.fetch("effects")
+        Array(intent_ids).to_h do |intent_id|
+          cell = effects[intent_id.to_s]
+          unless cell
+            raise @corrupt_record, "patrol effect intent is missing"
+          end
+
+          projection = {
+            "semantic" => cell.fetch("semantic"),
+            "state" => cell.fetch("state")
+          }
+          [ intent_id.to_s, json_copy(projection, freeze: true) ]
+        end.freeze
+      rescue Hive::ConfigError => e
+        raise @corrupt_record, e.message
+      end
+
       def with_effect_sender_lock(intent, &block)
         normalized = architecture_intent!(intent)
         block_error = nil
@@ -370,8 +396,8 @@ module Hive
         @id_validator.call(job_id)
       end
 
-      def json_copy(value)
-        JSON.parse(JSON.generate(value))
+      def json_copy(value, freeze: false)
+        JSON.parse(JSON.generate(value), freeze: freeze)
       rescue JSON::GeneratorError, TypeError => e
         raise @corrupt_record,
               "refactor patrol job is not JSON serializable (#{e.message})"

@@ -451,20 +451,21 @@ under lock before resuming the persisted phase.
 
 Hivebox's `web/app/models/status_broadcaster.rb` is a Rails model class, but it
 is not an ActiveRecord workflow entity. It bridges `Hive::Web::StatusFeed` to
-Turbo Streams. `StatusFeed#snapshot` computes a fresh
-`Hive::Commands::Status#json_payload(Hive::Config.registered_projects)` for
-request-time reads, then overlays canonical recovery receipts from that same
+Turbo Streams. Status-page HTTP requests read `StatusFeed#current_state`
+without scanning. A cold process returns an explicit loading snapshot; the
+first accepted Cable subscription computes
+`Hive::Commands::Status#json_payload(Hive::Config.registered_projects)` on the
+broadcaster thread, then overlays canonical recovery receipts from that same
 producer's operational payload by project/slug in memory. This performs no
 second registry scan. This ordinary archive projection includes each
 project's aggregate `hidden_archived_task_count`; task objects remain
 unchanged. `StatusFeed#archive_snapshot` separately requests lossless archive
 mode for the dedicated Archive route and never primes or replaces the ordinary
-live-feed baseline. That page-render ordinary snapshot primes the live feed, avoiding a
-second full-registry scan when the page's Cable connection arrives. The first
-idle request owns that baseline until the poller starts; competing page renders
-cannot replace it. Each rendered status/task page carries a canonical SHA-256
-token for the exact semantic payload it saw, even when that payload did not win
-the baseline claim. The token ignores `generated_at` / `age_seconds`, sorts hash
+live-feed baseline. Cached page renders carry the canonical SHA-256 token for
+the exact semantic payload they saw. A cold loading page carries a bounded
+sentinel token that remains current only until its first background publication
+succeeds, preventing a catch-up request from racing that publication. The
+semantic token ignores `generated_at` / `age_seconds`, sorts hash
 keys canonically, and is therefore comparable across Puma workers and process
 restarts rather than being a process-local event counter.
 After its stream is confirmed, `StatusChannel#catch_up` sends one targeted

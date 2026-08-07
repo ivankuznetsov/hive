@@ -22,6 +22,7 @@ class ApplicationSystemTestCase < ActionDispatch::SystemTestCase
     visit "/dev_login?as=#{login}"
     assert_selector ".topbar-session", text: login,
                     wait: 5
+    wait_for_status_snapshot
   end
 
   # owner: "" writes a CLAIMABLE instance (the key is omitted — the config
@@ -41,6 +42,14 @@ class ApplicationSystemTestCase < ActionDispatch::SystemTestCase
     Timeout.timeout(15) do
       sleep 0.01 until StatusBroadcaster.instance_variable_get(:@subscriber_count).to_i == 1
     end
+  end
+
+  # The first HTTP render may intentionally be the non-blocking loading
+  # shell. Most browser scenarios exercise the live board rather than that
+  # transient, so wait for Cable's first background projection explicitly.
+  def wait_for_status_snapshot
+    assert_selector "[data-status-version]", visible: :all, wait: 15
+    assert_no_selector "[data-status-availability='unavailable']", visible: :all, wait: 15
   end
 
   private

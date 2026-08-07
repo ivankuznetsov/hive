@@ -4,6 +4,7 @@
 # so the current URL and saved preference remain the only view authority.
 class StatusBroadcaster
   CHANNEL = "status".freeze
+  LOADING_VERSION = "loading".freeze
   LIFECYCLE_MUTEX = Mutex.new
   PageSnapshot = Struct.new(
     :payload, :version, :availability, :last_success_at, :error,
@@ -34,8 +35,23 @@ class StatusBroadcaster
 
     def snapshot_with_version
       current_feed = feed
-      if current_feed.respond_to?(:snapshot_state)
-        state = current_feed.snapshot_state
+      if current_feed.respond_to?(:current_state)
+        state = current_feed.current_state
+        unless state
+          # Do not hold the first HTTP response behind a cold fleet scan. The
+          # page renders its explicit loading state, then the first accepted
+          # Cable subscription performs the scan on the broadcaster thread
+          # and publishes that first real snapshot.
+          @broadcast_pending = true
+          return PageSnapshot.new(
+            payload: Hive::Web::StatusFeed::UNAVAILABLE_PAYLOAD,
+            version: LOADING_VERSION,
+            availability: "unavailable",
+            last_success_at: nil,
+            error: nil
+          )
+        end
+
         PageSnapshot.new(
           payload: state.payload,
           version: state.token,
@@ -70,6 +86,8 @@ class StatusBroadcaster
     end
 
     def current_version?(candidate)
+      return true if candidate == LOADING_VERSION && @broadcast_pending
+
       feed.current_version?(candidate)
     end
 

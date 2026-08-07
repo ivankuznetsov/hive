@@ -71,6 +71,13 @@ module ActiveSupport
       raise "hive test helper could not identify the task created for #{text.inspect}"
     end
 
+    # Simulate a completed StatusFeed poll when an integration test needs a
+    # current fleet projection. Production HTTP requests deliberately do not
+    # perform this scan; the accepted Cable subscription owns it instead.
+    def refresh_status_feed!
+      StatusBroadcaster.feed.snapshot_state.payload
+    end
+
     def stage_dir(project, stage)
       Pathname(File.join(ENV["HIVE_TEST_HOME_ROOT"], "repos", project, ".hive-state", "stages", stage))
     end

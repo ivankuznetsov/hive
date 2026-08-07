@@ -4,6 +4,12 @@ require "hive/commands/babysit/service_installer"
 class BabysitServiceInstallerTest < Minitest::Test
   include HiveTestHelper
 
+  def test_labels_the_managed_unit_for_operator_messages
+    installer = Hive::Commands::Babysit::ServiceInstaller.new(host_os: "linux")
+
+    assert_equal "babysitter unit", installer.send(:unit_noun)
+  end
+
   def test_linux_unit_runs_foreground_and_drains_before_killing_children
     with_tmp_dir do |dir|
       commands = []

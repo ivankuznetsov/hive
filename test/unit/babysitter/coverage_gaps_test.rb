@@ -82,6 +82,10 @@ class BabysitterCoverageGapsTest < Minitest::Test
     cli = Hive::CLI.new([], { once: false, detach: false, dry_run: true, all: false, force: false })
     error = assert_raises(Hive::InvalidTaskPath) { cli.babysit("install") }
     assert_includes error.message, "--dry-run does not apply"
+
+    cli = Hive::CLI.new([], { once: false, detach: false, dry_run: false, all: false, force: true })
+    error = assert_raises(Hive::InvalidTaskPath) { cli.babysit("status") }
+    assert_includes error.message, "--force only applies"
   end
 
   def test_command_call_routes_known_subcommands_and_rejects_unknown

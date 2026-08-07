@@ -570,6 +570,44 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     end
   end
 
+  def test_transient_action_failures_use_the_hourly_retry_interval
+    with_tmp_dir do |dir|
+      store = write_classified_job(
+        dir,
+        policy: snapshot_policy("auto_fix" => true),
+        dispositions: dispositions(
+          accepted: [ disposition(thesis(id: "hourly-retry")) ]
+        )
+      )
+      failed = Hive::RefactorPatrol::Fixer::Result.new(
+        outcome: "fix_error", terminal: false, analysis_sha: "c" * 40,
+        details: { "error" => "temporary failure" }
+      )
+      fixer = FakeFixer.new(failed, fix_result("no_diff", terminal: true))
+      current = T0
+      runner = build_runner(
+        dir,
+        store: store,
+        fixer: fixer,
+        backoff_sec: nil,
+        clock: -> { current }
+      )
+
+      first = runner.run(job_id: "job-1")
+      claim = first.actions.find { |action| action.fetch("kind") == "fix" }
+                   .fetch("claims").last
+      assert_equal (T0 + 3600).iso8601, claim.fetch("next_eligible_at")
+
+      current = T0 + 3599
+      runner.run(job_id: "job-1")
+      assert_equal 1, fixer.calls.size
+
+      current = T0 + 3600
+      assert runner.run(job_id: "job-1").complete?
+      assert_equal 2, fixer.calls.size
+    end
+  end
+
   def test_closed_unmerged_refactor_pr_routes_the_accepted_thesis_to_an_issue
     with_tmp_dir do |dir|
       item = thesis(id: "closed-pr")
@@ -3637,8 +3675,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
                    repository_resolver: ->(*) {
                      { "repository" => "acme/polyglot", "host" => "github.com" }
                    })
-    Hive::RefactorPatrol::ActionRunner.new(
-      dir,
+    options = {
       cfg: cfg,
       hive_state_path: hive_state_path,
       job_store: store,
@@ -3655,9 +3692,10 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       config_loader: config_loader,
       gate_reader: gate_reader,
       lease_sec: 60,
-      backoff_sec: backoff_sec,
       authority_backoff_sec: authority_backoff_sec
-    )
+    }
+    options[:backoff_sec] = backoff_sec unless backoff_sec.nil?
+    Hive::RefactorPatrol::ActionRunner.new(dir, **options)
   end
 
   def repository_snapshot(repo, store)

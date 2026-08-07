@@ -511,6 +511,44 @@ class HiveCommandsDaemonTest < Minitest::Test
     assert_empty schema.validate(doc).map { |error| error["error"] }
   end
 
+  def test_status_probe_uses_explicit_runtime_hive_bin_instead_of_private_path_wrapper
+    stable_hive = File.join(@home, ".local", "bin", "hive")
+    private_hive = File.join(@home, "web-gems", "bin", "hive")
+    report = Hive::Daemon::StatusReport.new(
+      hive_home: @home,
+      environment: {
+        "HIVE_BIN" => stable_hive,
+        "PATH" => File.dirname(private_hive)
+      }
+    )
+    captured = nil
+    fake = Struct.new(:stable_hive) do
+      def service_state
+        {
+          "service_installed" => true,
+          "service_enabled" => true,
+          "unit_path" => "/home/u/.config/systemd/user/hive-daemon.service"
+        }
+      end
+
+      def installed_exec_binary = stable_hive
+      def expected_binary = stable_hive
+    end.new(stable_hive)
+
+    require "hive/commands/daemon/service_installer"
+    state = with_replaced_singleton_method(
+      Hive::Commands::Daemon::ServiceInstaller, :new,
+      lambda { |**kwargs|
+        captured = kwargs
+        fake
+      }
+    ) { report.send(:probe_service_state) }
+
+    assert_equal stable_hive, captured.fetch(:binary_path),
+                 "the managed web process must honor the unit's explicit HIVE_BIN"
+    assert_equal stable_hive, state.fetch("expected_binary")
+  end
+
   def test_status_json_degrades_service_fields_to_null_when_probe_raises
     command = daemon("status", json: true)
     write_pid_payload(pid: 1234)
@@ -574,6 +612,28 @@ class HiveCommandsDaemonTest < Minitest::Test
                  drift_for({ "service_installed" => true,
                              "installed_binary" => "/x/hive", "expected_binary" => "/x/hive" },
                            version: Hive::VERSION)
+  end
+
+  def test_binary_drift_none_when_installed_symlink_targets_expected_binary
+    expected = File.join(@home, "deployments", "hive", "bin", "hive")
+    installed = File.join(@home, ".local", "bin", "hive")
+    FileUtils.mkdir_p(File.dirname(expected))
+    FileUtils.mkdir_p(File.dirname(installed))
+    File.write(expected, "#!/bin/sh\n")
+    File.symlink(expected, installed)
+
+    assert_equal "none",
+                 drift_for({ "service_installed" => true,
+                             "installed_binary" => installed, "expected_binary" => expected },
+                           version: Hive::VERSION)
+  end
+
+  def test_binary_drift_path_when_file_identity_probe_fails
+    with_replaced_singleton_method(File, :identical?, ->(*) { raise Errno::EIO, "identity unavailable" }) do
+      assert_equal "path",
+                   drift_for({ "service_installed" => true,
+                               "installed_binary" => "/old/hive", "expected_binary" => "/new/hive" })
+    end
   end
 
   def test_binary_drift_unreadable_when_version_probe_fails_at_expected_path

@@ -15,7 +15,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
       completed_at: Time.now.utc - (4 * Hive::ArchiveFilter::SECONDS_PER_DAY)
     )
 
-    visit dev_login_path(as: "alice")
+    sign_in!
 
     assert_no_selector ".kanban-card[data-task-slug='#{slug}']"
     find(".archive-summary a", text: "… and 1 older archived task (hive archive to view)").click
@@ -30,7 +30,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
   test "operator switches between the live board and grid without losing the preference" do
     project = create_hive_project!("kanban-browser-app")
     slug = create_task!(project, "Move through a native board")
-    visit dev_login_path(as: "alice")
+    sign_in!
 
     assert_selector "#status-board"
     assert_selector ".kanban-card", text: "Move through a native board"
@@ -71,7 +71,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
   test "board remains contained at a mobile viewport" do
     project = create_hive_project!("kanban-#{"unbroken" * 8}")
     create_task!(project, "A deliberately long kanban task title that must stay inside the mobile viewport")
-    visit dev_login_path(as: "alice")
+    sign_in!
     page.current_window.resize_to(375, 812)
 
     assert_selector "#status-board"
@@ -99,7 +99,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
   test "board uses the available width on large screens" do
     project = create_hive_project!("kanban-wide-app")
     create_task!(project, "Use the whole workspace")
-    visit dev_login_path(as: "alice")
+    sign_in!
     page.current_window.resize_to(3840, 1400)
 
     metrics = page.evaluate_script(<<~JS)
@@ -134,7 +134,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
     hidden_project = create_hive_project!("kanban-hidden-app")
     create_task!(selected_project, "Keep this project selected")
     create_task!(hidden_project, "Hide this other project")
-    visit dev_login_path(as: "alice")
+    sign_in!
 
     click_project_filter(selected_project)
     assert_selector ".kanban-band[data-project-name='#{selected_project}']"
@@ -149,7 +149,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
 
   test "a refresh deferred during a failed idea submission is replayed" do
     project = create_hive_project!("kanban-refresh-replay-app")
-    visit dev_login_path(as: "alice")
+    sign_in!
 
     execute_script(<<~JS)
       document.querySelector("#composer").dispatchEvent(new CustomEvent("turbo:submit-start", {
@@ -179,7 +179,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
     moving_project = create_hive_project!("kanban-moving-app")
     focused_slug = create_task!(focused_project, "Keep this action focused")
     disable_daemon!(focused_project)
-    visit dev_login_path(as: "alice")
+    sign_in!
 
     focused_card = find(".kanban-card[data-task-slug='#{focused_slug}']")
     focused_card.find_button("Run brainstorm")
@@ -219,7 +219,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
   test "a focused task follows its card when the live workflow stage changes" do
     project = create_hive_project!("kanban-focused-move-app")
     slug = create_task!(project, "Follow this moving card")
-    visit dev_login_path(as: "alice")
+    sign_in!
     assert_selector "#status-stream-source[connected]", visible: :all, wait: 10
     wait_for_status_subscribers(1)
     expected_href = evaluate_script(<<~JS)
@@ -241,7 +241,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
     project = create_hive_project!("kanban-action-race-app")
     slug = create_task!(project, "Queue this exactly once")
     disable_daemon!(project)
-    visit dev_login_path(as: "alice")
+    sign_in!
     dispatches = Queue.new
     replacement = lambda do |**attributes|
       dispatches << attributes
@@ -269,7 +269,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
   test "cancelling a task confirmation does not block later live refreshes" do
     project = create_hive_project!("task-cancelled-confirm-app")
     slug = create_task!(project, "Keep refreshing after cancel")
-    visit dev_login_path(as: "alice")
+    sign_in!
     visit task_path(project, slug)
     assert_status_refresh_ready
 
@@ -289,7 +289,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
   test "a Cable reconnect catches up after a missed status broadcast" do
     with_slow_status_feed do |feed|
       project = create_hive_project!("kanban-cable-reconnect-app")
-      visit dev_login_path(as: "alice")
+      sign_in!
       assert_selector "#status-stream-source[connected]", visible: :all, wait: 10
       rendered_token = status_page_token
 
@@ -320,7 +320,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
     with_slow_status_feed do |feed|
       project = create_hive_project!("kanban-history-reconnect-app")
       original_slug = create_task!(project, "Open this before history restore")
-      visit dev_login_path(as: "alice")
+      sign_in!
       assert_selector "#status-stream-source[connected]", visible: :all, wait: 10
       board_token = status_page_token
 
@@ -347,7 +347,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
     with_slow_status_feed do |feed|
       project = create_hive_project!("kanban-navigation-request-app")
       slug = create_task!(project, "Open with one request")
-      visit dev_login_path(as: "alice")
+      sign_in!
       assert_selector "#status-stream-source[connected]", visible: :all, wait: 10
       task_pathname = task_path(project, slug)
 
@@ -374,7 +374,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
     with_slow_status_feed do
       project = create_hive_project!("kanban-worker-lag-app")
       slug = create_task!(project, "Open across mismatched workers")
-      visit dev_login_path(as: "alice")
+      sign_in!
       assert_selector "#status-stream-source[connected]", visible: :all, wait: 10
       task_pathname = task_path(project, slug)
 
@@ -437,7 +437,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
         with_replaced_singleton_method(
           StatusBroadcaster, :current_page_snapshot, changing_current_snapshot
         ) do
-          visit dev_login_path(as: "alice")
+          sign_in!
           assert_selector "#status-stream-source[connected]", visible: :all, wait: 10
           task_pathname = task_path(project, slug)
 
@@ -475,7 +475,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
   end
 
   test "a real Cable disconnect releases the catch-up attempt for later recovery" do
-    visit dev_login_path(as: "alice")
+    sign_in!
     assert_selector "#status-stream-source[connected]", visible: :all, wait: 10
 
     result = evaluate_script(<<~JS)
@@ -512,7 +512,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
   end
 
   test "DOM teardown during reconnect waits for the current confirmation" do
-    visit dev_login_path(as: "alice")
+    sign_in!
     assert_selector "#status-stream-source[connected]", visible: :all, wait: 10
     wait_for_status_subscribers(1)
 
@@ -541,7 +541,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
     with_slow_status_feed do
       project = create_hive_project!("kanban-catch-up-location-app")
       slug = create_task!(project, "Open after a Board catch-up")
-      visit dev_login_path(as: "alice")
+      sign_in!
       assert_selector "#status-stream-source[connected]", visible: :all, wait: 10
       board_token = status_page_token
       execute_script(<<~JS)
@@ -578,7 +578,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
   test "navigation consumes a catch-up handoff before the next connection settles" do
     project = create_hive_project!("kanban-unconfirmed-navigation-app")
     slug = create_task!(project, "Navigate before Cable settles")
-    visit dev_login_path(as: "alice")
+    sign_in!
     assert_selector "#status-stream-source[connected]", visible: :all, wait: 10
 
     result = evaluate_script(<<~JS, task_path(project, slug))
@@ -625,7 +625,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
   test "a failed intermediate catch-up cannot revive an older URL handoff" do
     project = create_hive_project!("kanban-failed-navigation-app")
     slug = create_task!(project, "Return after a failed catch-up")
-    visit dev_login_path(as: "alice")
+    sign_in!
     assert_selector "#status-stream-source[connected]", visible: :all, wait: 10
 
     result = evaluate_script(<<~JS, task_path(project, slug))
@@ -691,7 +691,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
   end
 
   test "a source-less navigation cannot restore a cached catch-up handoff" do
-    visit dev_login_path(as: "alice")
+    sign_in!
     assert_selector "#status-stream-source[connected]", visible: :all, wait: 10
 
     execute_script(<<~JS)
@@ -721,7 +721,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
     with_slow_status_feed do |feed|
       project = create_hive_project!("task-cable-reconnect-app")
       slug = create_task!(project, "Keep this task current")
-      visit dev_login_path(as: "alice")
+      sign_in!
       visit task_path(project, slug)
       assert_selector "#status-stream-source[connected]", visible: :all, wait: 10
       rendered_token = status_page_token
@@ -749,7 +749,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
   end
 
   test "a pending status subscription is cancelled across disconnect and reconnect" do
-    visit dev_login_path(as: "alice")
+    sign_in!
 
     result = evaluate_script(<<~JS)
       (async () => {
@@ -811,7 +811,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
   end
 
   test "DOM teardown waits for Cable confirmation before server unsubscribe" do
-    visit dev_login_path(as: "alice")
+    sign_in!
     visit repos_path
     assert_no_selector "#status-stream-source", visible: :all
     wait_for_status_subscribers(0)
@@ -862,7 +862,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
   end
 
   test "a detached source has bounded cleanup when confirmation never arrives" do
-    visit dev_login_path(as: "alice")
+    sign_in!
     visit repos_path
     wait_for_status_subscribers(0)
 
@@ -948,7 +948,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
   end
 
   test "a server startup rejection retries the live source" do
-    visit dev_login_path(as: "alice")
+    sign_in!
     visit repos_path
     wait_for_status_subscribers(0)
     original_delay = evaluate_script(<<~JS)
@@ -990,7 +990,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
   end
 
   test "a deferred adapter failure reconnects the live source" do
-    visit dev_login_path(as: "alice")
+    sign_in!
     visit repos_path
     wait_for_status_subscribers(0)
     adapter = ActionCable.server.pubsub
@@ -1021,7 +1021,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
   end
 
   test "a status source retries after asynchronous consumer setup rejects" do
-    visit dev_login_path(as: "alice")
+    sign_in!
 
     with_status_catch_up_observer do |catch_ups|
       result = evaluate_script(<<~JS)
@@ -1085,7 +1085,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
   end
 
   test "a status source removes a partial Action Cable registration before retry" do
-    visit dev_login_path(as: "alice")
+    sign_in!
 
     with_status_catch_up_observer do |catch_ups|
       result = evaluate_script(<<~JS)
@@ -1167,7 +1167,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
   end
 
   test "disconnect cancels a rejected consumer retry before it creates a subscription" do
-    visit dev_login_path(as: "alice")
+    sign_in!
 
     result = evaluate_script(<<~JS)
       (async () => {

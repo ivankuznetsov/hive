@@ -74,7 +74,7 @@ module Hive
           features.concat(documentation_features(files))
         end
         features = dedupe(features)
-        features.each { |feature| @state.write_feature(feature) } unless @dry_run
+        @state.write_features(features) unless @dry_run || features.empty?
         features
       end
 

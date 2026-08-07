@@ -280,7 +280,8 @@ class ModulesMigrationEvidenceStoreTest < Minitest::Test
       index_path = File.join(
         root, "indexes", "occurrences", "#{occurrence_id}.json"
       )
-      receipt_ids = 128.times.map do |index|
+      receipt_ids = Hive::Modules::Migration::PatrolEvidence::
+                      MAX_EFFECTS_PER_OCCURRENCE.times.map do |index|
         "receipt-#{index.to_s(16).rjust(64, '0')}"
       end
       index = {

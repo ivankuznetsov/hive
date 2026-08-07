@@ -381,6 +381,65 @@ module Hive
         ) { write_record("features", feature) }
       end
 
+      # Mapping one repository is one semantic state transition. Persisting
+      # every feature through a separate effect made the journal bound depend
+      # on repository size and could exhaust an otherwise healthy occurrence.
+      # The digest descriptor keeps the retry proof bounded while the block is
+      # safe to replay after a partial local write.
+      def write_features(features)
+        supplied = Array(features)
+        identities = supplied.map { |feature| feature.id.to_s }
+        return [] if identities.empty?
+
+        ids = identities.sort
+        if ids.any?(&:empty?) || ids.uniq.size != ids.size
+          raise Hive::ConfigError,
+                "patrol feature batch identities are malformed"
+        end
+
+        unless @state_effect_gateway
+          supplied.each { |feature| write_record("features", feature) }
+          return supplied
+        end
+
+        records = supplied.map do |feature|
+          value = effect_object(feature.to_h)
+          [ feature.id.to_s, value, effect_digest(value), feature ]
+        end.sort_by(&:first)
+
+        descriptor = {
+          "features" => records.map do |identity, _value, content_digest, _feature|
+            {
+              "id" => identity,
+              "content_digest" => content_digest
+            }
+          end
+        }
+        reconcile = lambda do |_intent, digest|
+          matched = records.all? do |identity, _value, content_digest, _feature|
+            observed = effect_target_value("features/#{identity}")
+            observed && effect_digest(observed) == content_digest
+          end
+          {
+            "status" => matched ? "matched" : "absent",
+            "outcome" => matched ?
+              { "content_digest" => digest } :
+              { "observed" => "incomplete" }
+          }
+        end
+        effect_write(
+          sink: "state",
+          target: "features",
+          value: descriptor,
+          reconcile: reconcile
+        ) do
+          records.each do |_identity, _value, _content_digest, feature|
+            write_record("features", feature)
+          end
+        end
+        supplied
+      end
+
       def write_finding(finding)
         effect_write(
           sink: "finding",
@@ -520,7 +579,7 @@ module Hive
         operation = fingerprint_operation(
           fingerprint, set: set, deleted: deleted, replace: replace
         )
-        content_digest = fingerprint_operation_digest(operation)
+        content_digest = effect_digest(operation)
         recovery_scope = scope.merge(
           "fingerprint_operation" =>
             Hive::Modules::Migration::PatrolEvidence.canonical(operation)
@@ -856,13 +915,7 @@ module Hive
         operation = fingerprint_operation(
           fingerprint, set: set, deleted: deleted, replace: replace
         )
-        fingerprint_operation_digest(operation)
-      end
-
-      def fingerprint_operation_digest(operation)
-        ::Digest::SHA256.hexdigest(
-          Hive::Modules::Migration::PatrolEvidence.canonical(operation)
-        )
+        effect_digest(operation)
       end
 
       def fingerprint_operation(fingerprint, set:, deleted:, replace:)
@@ -910,21 +963,16 @@ module Hive
         data
       end
 
-      def effect_write(sink:, target:, value:, capability: "filesystem_write")
+      def effect_write(sink:, target:, value:, capability: "filesystem_write",
+                       reconcile: nil)
         return yield unless @state_effect_gateway
 
         normalized = effect_object(value)
-        digest = ::Digest::SHA256.hexdigest(
-          Hive::Modules::Migration::PatrolEvidence.canonical(normalized)
-        )
-        result = @state_effect_gateway.perform!(
-          sink: sink,
-          target: target,
-          idempotency_key: [
-            @effect_capture.occurrence_id, sink, target, digest
-          ].join(":"),
-          capability: capability,
-          reconcile: lambda do |_intent|
+        digest = effect_digest(normalized)
+        reconciliation = if reconcile
+          ->(intent) { reconcile.call(intent, digest) }
+        else
+          lambda do |_intent|
             observed = effect_target_value(target)
             if observed == normalized
               {
@@ -940,6 +988,15 @@ module Hive
               }
             end
           end
+        end
+        result = @state_effect_gateway.perform!(
+          sink: sink,
+          target: target,
+          idempotency_key: [
+            @effect_capture.occurrence_id, sink, target, digest
+          ].join(":"),
+          capability: capability,
+          reconcile: reconciliation
         ) do
           yield
           { "content_digest" => digest }
@@ -989,6 +1046,12 @@ module Hive
         result
       rescue JSON::GeneratorError, TypeError
         raise Hive::ConfigError, "patrol effect recovery state is malformed"
+      end
+
+      def effect_digest(value)
+        ::Digest::SHA256.hexdigest(
+          Hive::Modules::Migration::PatrolEvidence.canonical(value)
+        )
       end
 
       def with_fingerprint_lock(shared: false)

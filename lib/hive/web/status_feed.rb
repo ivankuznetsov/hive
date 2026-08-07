@@ -47,9 +47,9 @@ module Hive
     # The process-wide owner of the expensive fleet status computation. In
     # Rails, StatusBroadcaster bridges each changed snapshot to Turbo Streams.
     #
-    # HTTP status renders and the Cable poller both enter refresh_state, whose
-    # single-flight gate guarantees that concurrent callers share one scan.
-    # The default command makes that scan a bounded active-task refresh:
+    # The Cable poller enters refresh_state while HTTP status renders only read
+    # the latest completed state. The default command makes each background
+    # scan a bounded active-task refresh:
     # terminal membership/policy changes and a five-minute archive backstop
     # refresh the ordinary archive projection, while complete archive reads
     # remain on-demand. An idle server performs no scans.

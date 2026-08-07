@@ -399,7 +399,9 @@ Honeycomb projections.
   `Hive::Daemon::StatusReport.safe_payload` directly instead of constructing a
   `Hive::Commands::Daemon` CLI object; the view also reads
   `StatusReport::BINARY_DRIFT_ACTIONABLE` for the Repair affordance, so CLI
-  JSON and web drift handling share the same producer constants.
+  JSON and web drift handling share the same producer constants. The producer
+  honors the service's explicit `HIVE_BIN` before PATH lookup; the managed
+  web gem bin directory may lead PATH without becoming a false daemon target.
   It presents one compact state banner (running, warning, or stopped), hides
   internal service-installation fields, and surfaces binary drift as the
   human-facing “Binary path differs” repair action. A running supervised
@@ -814,10 +816,13 @@ fleet-wide status producer. Explicit `source=archive` routes use that same
 targeted resolver with retention filtering disabled, so hidden terminal tasks
 remain addressable and mutations revalidate current task state without a stale
 fleet cache. One process-wide `StatusFeed` owns polling,
-single-flight refresh, actual scan count, and latest-good state. First-scan
-failure renders an explicit unavailable page. A later failure retains the last
-good rows with an accessible warning and disables freshness-dependent mutation
-controls until a fresh token arrives.
+single-flight refresh, actual scan count, and latest-good state. Status-page
+HTTP renders never perform a fleet scan: they use the latest published state,
+or render the explicit loading state on a cold process. The first accepted
+Turbo/Cable subscription performs that cold scan on the broadcaster thread and
+publishes the real snapshot. A later failure retains the last good rows with an
+accessible warning and disables freshness-dependent mutation controls until a
+fresh token arrives.
 
 Task diff uses `Hive::Web::TaskDiff`: it validates the owned worktree pointer,
 runs argv-form Git commands in bounded process groups, caps and redacts output,

@@ -2170,7 +2170,7 @@ module Hive
       # it has no enable switch even when the daemon is disabled.
       add_model_routing_call(calls, cfg, "diagnose", execute_agent)
       add_model_routing_call(
-        calls, cfg, "babysitter", execute_agent,
+        calls, cfg, "babysitter", cfg.dig("babysitter", "agent") || execute_agent,
         enabled: cfg.dig("babysitter", "enabled") == true,
         current: model_routing_current(cfg["babysitter"])
       )

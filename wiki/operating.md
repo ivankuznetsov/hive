@@ -342,11 +342,17 @@ Existing projects can opt in by adding or editing this block in
 babysitter:
   enabled: true
   interval: 10m
+  agent: claude
   max_concurrent_prs: 2
   labels_ignore: [wip, do-not-merge, draft]
   dry_run: false
   budget_minutes: 30
   budget_usd: 50
+
+models:
+  babysitter:
+    model: claude-opus-5
+    effort: max
 ```
 
 Run a read-only shakedown before live use:

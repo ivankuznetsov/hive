@@ -12,3 +12,5 @@ Hive/XDG state roots without persisting provider secrets, and uses bounded
 stop/respawn behavior for active repair agents. Setup safely drains an existing
 detached babysitter before manager takeover, while uninstall reuses the same
 ownership-aware drain before any service or data removal.
+Projects can select a dedicated `babysitter.agent` and route it through
+`models.babysitter`; omitting the agent preserves the `execute.agent` fallback.

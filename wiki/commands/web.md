@@ -307,6 +307,12 @@ Honeycomb projections.
   no second unfiltered archive scan. Steady liveness refreshes scan only active
   workflow stages and merge cached visible terminal rows, so the five-second
   cadence is proportional to active work rather than total archive size.
+  During the same daemon generation's brief `started` phase,
+  `CachedStatusCommand` retains the prior completed scheduler observation only
+  while that observation remains valid. This prevents cooldown/recovery rows
+  from flipping to transiently unavailable and triggering two full-page Turbo
+  refreshes per daemon tick; restart, expiry, stale, and invalid observations
+  still surface immediately.
   Terminal-directory changes, policy edits, and retention boundaries rebuild
   the ordinary projection immediately; a five-minute backstop repairs missed
   signals. `/archive` remains lossless by invoking the unfiltered Status

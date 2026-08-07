@@ -93,12 +93,23 @@ class StatusFeedTest < Minitest::Test
   end
 
   class RecordingRecoveryStatus
-    attr_reader :projects, :payload
+    attr_reader :projects, :payload, :scheduler_snapshot
 
-    def operational_recoveries(projects, status_payload:)
+    def operational_recoveries(projects, status_payload:, scheduler_snapshot:)
       @projects = projects
       @payload = status_payload
+      @scheduler_snapshot = scheduler_snapshot
       [ { "identity" => { "project" => "demo", "slug" => "task" } } ]
+    end
+  end
+
+  class ScriptedSchedulerReader
+    def initialize(*snapshots)
+      @snapshots = snapshots
+    end
+
+    def read(now:)
+      @snapshots.shift || raise("scheduler snapshot script exhausted at #{now.iso8601}")
     end
   end
 
@@ -136,9 +147,16 @@ class StatusFeedTest < Minitest::Test
   def test_cached_status_command_delegates_recovery_join_with_the_cached_payload
     source = RecordingSource.new
     recovery_status = RecordingRecoveryStatus.new
+    scheduler = {
+      "status" => "current",
+      "phase" => "complete",
+      "valid_until" => "2099-01-01T00:00:00Z",
+      "daemon" => { "generation" => "daemon-1" }
+    }
     command = Hive::Web::CachedStatusCommand.new(
       source: source,
-      recovery_status_command: recovery_status
+      recovery_status_command: recovery_status,
+      scheduler_snapshot_reader: ScriptedSchedulerReader.new(scheduler)
     )
     payload = command.json_payload([])
 
@@ -147,7 +165,70 @@ class StatusFeedTest < Minitest::Test
     assert_equal "task", rows.dig(0, "identity", "slug")
     assert_equal [ { "name" => "demo" } ], recovery_status.projects
     assert_same payload, recovery_status.payload
+    assert_same scheduler, recovery_status.scheduler_snapshot
     assert_equal 1, source.calls
+  end
+
+  def test_cached_status_command_retains_current_scheduler_receipts_during_tick_start
+    now = Time.utc(2026, 8, 7, 14, 30)
+    current = {
+      "status" => "current",
+      "phase" => "complete",
+      "valid_until" => (now + 90).iso8601,
+      "daemon" => { "generation" => "daemon-1" }
+    }
+    started = {
+      "status" => "unavailable",
+      "reason" => "tick_started",
+      "phase" => "started",
+      "valid_until" => (now + 120).iso8601,
+      "daemon" => { "generation" => "daemon-1" }
+    }
+    recovery_status = RecordingRecoveryStatus.new
+    command = Hive::Web::CachedStatusCommand.new(
+      source: RecordingSource.new,
+      recovery_status_command: recovery_status,
+      scheduler_snapshot_reader: ScriptedSchedulerReader.new(current, started),
+      clock: -> { now }
+    )
+    payload = command.json_payload([])
+
+    command.operational_recoveries([], status_payload: payload)
+    command.operational_recoveries([], status_payload: payload)
+
+    assert_same current, recovery_status.scheduler_snapshot,
+                "an in-progress tick must retain the same generation's still-valid completed snapshot"
+  end
+
+  def test_cached_status_command_does_not_retain_snapshot_across_daemon_generation
+    now = Time.utc(2026, 8, 7, 14, 30)
+    current = {
+      "status" => "current",
+      "phase" => "complete",
+      "valid_until" => (now + 90).iso8601,
+      "daemon" => { "generation" => "daemon-1" }
+    }
+    restarted = {
+      "status" => "unavailable",
+      "reason" => "tick_started",
+      "phase" => "started",
+      "valid_until" => (now + 120).iso8601,
+      "daemon" => { "generation" => "daemon-2" }
+    }
+    recovery_status = RecordingRecoveryStatus.new
+    command = Hive::Web::CachedStatusCommand.new(
+      source: RecordingSource.new,
+      recovery_status_command: recovery_status,
+      scheduler_snapshot_reader: ScriptedSchedulerReader.new(current, restarted),
+      clock: -> { now }
+    )
+    payload = command.json_payload([])
+
+    command.operational_recoveries([], status_payload: payload)
+    command.operational_recoveries([], status_payload: payload)
+
+    assert_same restarted, recovery_status.scheduler_snapshot,
+                "a new daemon generation must never inherit the predecessor's scheduler authority"
   end
 
   def test_archive_snapshot_uses_the_lossless_status_command_without_priming_the_ordinary_feed

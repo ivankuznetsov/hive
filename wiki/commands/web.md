@@ -399,7 +399,9 @@ Honeycomb projections.
   `Hive::Daemon::StatusReport.safe_payload` directly instead of constructing a
   `Hive::Commands::Daemon` CLI object; the view also reads
   `StatusReport::BINARY_DRIFT_ACTIONABLE` for the Repair affordance, so CLI
-  JSON and web drift handling share the same producer constants.
+  JSON and web drift handling share the same producer constants. The producer
+  honors the service's explicit `HIVE_BIN` before PATH lookup; the managed
+  web gem bin directory may lead PATH without becoming a false daemon target.
   It presents one compact state banner (running, warning, or stopped), hides
   internal service-installation fields, and surfaces binary drift as the
   human-facing “Binary path differs” repair action. A running supervised

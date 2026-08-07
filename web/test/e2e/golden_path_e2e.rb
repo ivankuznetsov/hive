@@ -113,7 +113,8 @@ class GoldenPathE2E < ApplicationSystemTestCase
     fill_in "New idea", with: "Golden path sample idea"
     find(".composer select[name='project']").find("option[value='#{@project}']").select_option
     click_button "Add idea"
-    assert_selector ".task-row", text: "Golden path sample idea", wait: 10
+    slug_prefix = "golden-path-sample-idea-"
+    assert_selector ".task-row .task-slug", text: slug_prefix, wait: 10
 
     # --- The daemon pulls it from the inbox on its own ----------------------
     # No clicking: the golden path is "drop the idea, the pipeline runs".
@@ -123,7 +124,7 @@ class GoldenPathE2E < ApplicationSystemTestCase
     # Turbo may replace the grid row while the daemon advances the task. Read
     # the slug from the current DOM, then navigate directly instead of holding
     # a row element across live updates.
-    slug = task_slug_from_grid!("Golden path sample idea")
+    slug = task_slug_from_grid!(slug_prefix)
     visit "/tasks/#{@project}/#{slug}"
     answer_field = find("textarea[name='answers[1]']", wait: 45)
     assert_text "Ship the sample feature?"
@@ -164,21 +165,21 @@ class GoldenPathE2E < ApplicationSystemTestCase
 
   # The status grid is Turbo-replaced while the daemon advances tasks. Read the
   # slug from a single current-DOM query instead of retaining a Capybara element.
-  def task_slug_from_grid!(title, timeout: 10)
-    title_json = title.to_json
+  def task_slug_from_grid!(identity, timeout: 10)
+    identity_json = identity.to_json
     deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
     loop do
       slug = page.evaluate_script(<<~JS)
         (() => {
           const rows = Array.from(document.querySelectorAll(".task-row"));
-          const row = rows.find((node) => node.textContent.includes(#{title_json}));
+          const row = rows.find((node) => node.textContent.includes(#{identity_json}));
           return row?.querySelector(".task-slug")?.textContent?.trim();
         })()
       JS
       return slug if slug && !slug.empty?
 
       if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
-        raise "task row for #{title.inspect} never exposed a slug"
+        raise "task row for #{identity.inspect} never exposed a slug"
       end
 
       sleep 0.1

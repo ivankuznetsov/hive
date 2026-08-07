@@ -378,6 +378,7 @@ module Hive
             if action.fetch("owner_job_id") != aggregate.fetch("job_id")
               next linked_action_ready?(action)
             end
+            next false if issue_waiting_on_fix?(action, actions)
 
             !action_backoff_active?(action, now)
           end
@@ -1628,6 +1629,22 @@ module Hive
       def action_backoff_active?(action, now)
         deadline = Array(action["claims"]).last&.fetch("next_eligible_at", nil)
         deadline && Time.iso8601(deadline) > now
+      end
+
+      def issue_waiting_on_fix?(action, actions)
+        return false unless action.fetch("kind") == "issue"
+
+        family_id = action["family_id"]
+        actions.any? do |candidate|
+          next false unless candidate.fetch("kind") == "fix"
+          next false if candidate.fetch("terminal")
+
+          if family_id
+            candidate["family_id"] == family_id
+          else
+            candidate.fetch("thesis_id") == action.fetch("thesis_id")
+          end
+        end
       end
 
       def continuation_after_revocation?(action)

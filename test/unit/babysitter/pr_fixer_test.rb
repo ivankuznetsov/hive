@@ -165,7 +165,7 @@ class BabysitterPrFixerTest < Minitest::Test
     end
   end
 
-  def test_agent_failure_labels_comments_and_gives_up
+  def test_agent_failure_comments_and_gives_up_when_label_fails
     with_tmp_dir do |dir|
       project = project_entry(dir)
       worktree_path = File.join(dir, "wt")
@@ -177,7 +177,7 @@ class BabysitterPrFixerTest < Minitest::Test
         with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, ->(*_args, **_kwargs) { { status: :error, final_message: "tests failed" } }) do
           with_replaced_singleton_method(Hive::Babysitter::GhOps, :add_label, lambda { |*args, **_kwargs|
             label_calls << args
-            Hive::Gh::PushResult.new(success: true, stdout: "", stderr: "")
+            Hive::Gh::PushResult.new(success: false, stdout: "", stderr: "label unavailable")
           }) do
             with_replaced_singleton_method(Hive::Babysitter::GhOps, :post_pr_comment, lambda { |*args, **_kwargs|
               comment_calls << args
@@ -194,6 +194,11 @@ class BabysitterPrFixerTest < Minitest::Test
       assert_equal 1, comment_calls.size
       assert_includes comment_calls.first[2], "tests failed"
       events = File.readlines(File.join(project.fetch("hive_state_path"), "babysitter", "events.jsonl")).map { |line| JSON.parse(line) }
+      assert events.any? do |event|
+        event["action"] == "label-apply" && event["outcome"] == "failure" &&
+          event["message"] == "label unavailable"
+      end
+      assert events.any? { |event| event["action"] == "pr-comment" && event["outcome"] == "success" }
       assert events.any? { |event| event["action"] == "give-up" && event["outcome"] == "failure" }
     end
   end

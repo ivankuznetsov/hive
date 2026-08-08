@@ -323,11 +323,13 @@ module Hive
           cfg: @cfg,
           dry_run: @dry_run
         )
+        label_error = [ label_result.stderr, label_result.stdout ].map { |value| value.to_s.strip }.find { |value| !value.empty? }
         Hive::Babysitter::Events.emit(
           project: @project,
           pr: number,
           action: "label-apply",
-          outcome: @dry_run ? "dry_run" : (label_result.success? ? "success" : "failure")
+          outcome: @dry_run ? "dry_run" : (label_result.success? ? "success" : "failure"),
+          message: label_result.success? ? nil : label_error&.byteslice(0, 500)
         )
 
         comment_result = Hive::Babysitter::GhOps.post_pr_comment(

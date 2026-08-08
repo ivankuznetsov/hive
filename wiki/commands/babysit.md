@@ -94,7 +94,16 @@ administrative state is then pruned immediately with `--expire now`. Failure to
 quarantine or prune aborts the pass explicitly; it cannot leave the same opaque
 `worktree add` error repeating on every tick.
 
-On success, the babysitter is silent on the PR. On failure, timeout, or budget exhaustion it applies `babysitter/needs-human` and posts one give-up comment per PR per UTC hour.
+On success, the babysitter is silent on the PR. On failure, timeout, or budget
+exhaustion it applies `babysitter/needs-human` and posts one give-up comment per
+PR per UTC hour. The first label application idempotently provisions the
+repository label with `gh label create`, so operators do not need to create it
+during repository setup. Hive searches for the exact label instead of scanning
+the repository catalogue. A concurrent creation is accepted only after Hive
+verifies that the label now exists, without overwriting its metadata. If
+provisioning is denied, label application fails closed, records the reason in
+the babysitter event, and lets the independent give-up comment preserve the
+repair blocker.
 
 ## Dry Run
 

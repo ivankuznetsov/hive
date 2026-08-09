@@ -1354,6 +1354,9 @@ class RefactorPatrolFixerTest < Minitest::Test
         minimum_tokens >= 0 && stage != "refactor-patrol-fix"
       end
       budget.define_singleton_method(:exhaustion_message) { "architecture cycle exhausted" }
+      budget.define_singleton_method(:resource_exhaustion) do
+        { reason: "daily_token_limit", limit: 600_000, observed: 700_000 }
+      end
       subject = Hive::RefactorPatrol::Fixer.new(dir, cfg: cfg(dir), token_budget: budget)
 
       result = subject.send(
@@ -1363,6 +1366,34 @@ class RefactorPatrolFixerTest < Minitest::Test
 
       assert_equal :error, result.fetch(:status)
       assert_equal "architecture cycle exhausted", result.fetch(:error_message)
+      assert_equal(
+        { reason: "daily_token_limit", limit: 600_000, observed: 700_000 },
+        result.fetch(:resource_exhaustion)
+      )
+    end
+  end
+
+  def test_transient_agent_failure_preserves_structured_resource_exhaustion
+    with_repo do |repo, analysis_sha|
+      result = fixer(
+        repo,
+        agent: lambda do |**|
+          {
+            status: :error,
+            error_message: "daily budget exhausted",
+            resource_exhaustion: {
+              reason: "daily_token_limit", limit: 600_000, observed: 700_000
+            }
+          }
+        end
+      ).attempt(
+        thesis: thesis, job_id: "job-7", analysis_sha: analysis_sha
+      )
+
+      assert_equal "fix_agent_failed", result.outcome
+      refute result.terminal
+      assert_equal "daily_token_limit",
+                   result.details.dig("resource_exhaustion", "reason")
     end
   end
 

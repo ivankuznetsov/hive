@@ -48,6 +48,21 @@ class PatrolTokenBudgetTest < Minitest::Test
     )
   end
 
+  def test_resource_exhaustion_backoff_paces_daily_limits_to_next_utc_day
+    now = Time.utc(2026, 7, 16, 12, 30)
+
+    assert_equal 41_400, Hive::Patrol::TokenBudget.resource_exhaustion_backoff_sec(
+      [ "daily_token_limit", "daily_agent_spawn_limit" ],
+      now: now, fallback: 60
+    )
+    assert_equal 60, Hive::Patrol::TokenBudget.resource_exhaustion_backoff_sec(
+      [ "cycle_token_limit" ], now: now, fallback: 60
+    )
+    assert_equal 60, Hive::Patrol::TokenBudget.resource_exhaustion_backoff_sec(
+      [], now: now, fallback: 60
+    )
+  end
+
   def test_cycle_token_limit_stops_the_next_spawn
     with_budget do |budget, _dir, now|
       assert budget.acquire

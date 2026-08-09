@@ -3,7 +3,7 @@ title: State Model
 type: data-model
 source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/completed_at_backfiller.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/modules/migration/occurrence_*.rb, lib/hive/modules/migration/patrol_*.rb, lib/hive/modules/migration/shadow_*.rb, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
 created: 2026-04-25
-updated: 2026-08-02
+updated: 2026-08-09
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, retention, terminal-outcomes, dependencies, admission, web]
 ---
 
@@ -553,12 +553,18 @@ Each occurrence directory also has one canonical
 (`hive-patrol-occurrence-recovery-index` v1), capped at 512 KiB and 4,096
 active ids. These files are coordination metadata only:
 
-The occurrence record admits at most 192 terminal effect cells. This is a
+The occurrence record admits at most 256 terminal effect cells. This is a
 safety envelope, not a unit-of-work counter: ordinary mapping persists its
 complete feature set as one digest-bound, locally retry-safe batch effect, and
-Architecture Patrol retryable action failures wait one hour before minting a
-new claim/release generation. Existing 128-effect records remain valid and
-have bounded recovery headroom.
+Architecture Patrol retryable action failures normally wait one hour before
+minting a new claim/release generation. A structured daily resource ceiling
+waits until the next UTC day, and a valid action child that changed no job
+state receives the same one-hour durable cooldown instead of immediate
+redispatch. Existing 192-effect records remain valid and have bounded recovery
+headroom. The scheduler reserves the final effect cell for a durable
+`effect_capacity_exhausted` action blocker. A record already at the hard limit
+is omitted from dispatch and surfaced as blocked, so bounded storage exhaustion
+cannot restart the child on every daemon tick.
 
 - scheduled ordinary attempts, module events, and Architecture Patrol jobs use
   canonical window/generation identities with bounded high-water entries and a

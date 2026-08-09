@@ -3,7 +3,7 @@ title: hive refactor-patrol
 type: command
 source: lib/hive/commands/refactor_patrol.rb, lib/hive/refactor_patrol/*
 created: 2026-07-02
-updated: 2026-07-28
+updated: 2026-08-09
 tags: [command, refactor-patrol, architecture, json, daemon]
 ---
 
@@ -367,6 +367,17 @@ persisted with each new block. Only a strictly newer claim supersedes that
 lifecycle blocker, independent of wall-clock rollback or same-second writes.
 Legacy blocks without the snapshot use a conservative strictly-later timestamp
 fallback, so ambiguous equality keeps the blocker visible.
+
+Action dispatch also binds a digest of the job aggregate observed at
+reservation. A schema-valid child result that leaves that digest unchanged is
+`action_no_progress`: the daemon persists a one-hour action block instead of
+dispatching the same inert child on every scheduler tick. Fix-agent resource
+exhaustion retains its structured reason; daily token or launch ceilings wait
+until the next UTC day, while other transient failures keep the hourly retry.
+When an occurrence reaches its reserved effect-capacity boundary, the daemon
+records `effect_capacity_exhausted` in the last available cell and stops action
+dispatch. Records already at the hard limit are also excluded from dispatch
+and reported as blocked rather than entering another child loop.
 
 ## Fix and issue routing
 

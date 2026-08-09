@@ -1953,6 +1953,52 @@ class ModulesMigrationOccurrenceJournalTest < Minitest::Test
     end
   end
 
+  def test_existing_192_effect_occurrence_accepts_and_settles_recovery
+    with_journal do |journal|
+      occurrence_id = patrol_capture.occurrence_id
+      effect_store = journal.instance_variable_get(:@store)
+      effect_state = journal.instance_variable_get(:@effects)
+      effect_store.mutate(occurrence_id) do |record|
+        record["effects"] = 192.times.to_h do |index|
+          intent = effect_intent(target: "owner/demo:existing-#{index}")
+          [ intent.intent_id, effect_state.send(:build_cell, intent, NOW) ]
+        end
+        record
+      end
+      reopened = Hive::Modules::Migration::OccurrenceJournal.new(
+        journal.root,
+        module_name: "patrol"
+      )
+      recovery = effect_intent(target: "owner/demo:recovery")
+
+      reopened.prepare_effect!(recovery, now: NOW + 1)
+      reopened.mark_dispatch_uncertain!(recovery, now: NOW + 2)
+      receipt = reopened.settle_effect!(
+        recovery,
+        status: "committed",
+        outcome: { "pr_url" => "https://example.test/recovery" },
+        now: NOW + 3
+      )
+
+      assert_equal "committed", receipt.status
+      assert_equal 193,
+                   reopened.fetch(occurrence_id).fetch("effects").size
+      with_constant(
+        Hive::Modules::Migration::PatrolEvidence,
+        :MAX_EFFECTS_PER_OCCURRENCE,
+        193
+      ) do
+        error = assert_raises(Hive::ConfigError) do
+          reopened.prepare_effect!(
+            effect_intent(target: "owner/demo:overflow"),
+            now: NOW + 4
+          )
+        end
+        assert_equal "patrol occurrence effect limit exceeded", error.message
+      end
+    end
+  end
+
   def test_collaborator_corruption_guards_reject_unvalidated_recovery_state
     with_journal do |journal|
       capture = patrol_capture

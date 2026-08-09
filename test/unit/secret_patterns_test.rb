@@ -169,6 +169,22 @@ class SecretPatternsTest < Minitest::Test
     refute_match_any("password=abc")
   end
 
+  def test_password_prose_does_not_match_an_assignment
+    refute_match_any("Rate limits apply to password resets, confirmations, and sign-ins.")
+  end
+
+  def test_high_signal_password_forms_remain_protected
+    samples = {
+      "ALTER USER app PASSWORD 's3cretpassphrase42';" => :password_sql,
+      "<password>s3cretpassphrase42</password>" => :password_xml,
+      "deploy --password s3cretpassphrase42" => :password_cli
+    }
+
+    samples.each do |value, pattern|
+      assert_match_name(value, pattern)
+    end
+  end
+
   def test_authorization_bearer_token_is_detected
     assert_match_name(
       "Authorization: Bearer abc123XYZdef456ghi789jklMNO",

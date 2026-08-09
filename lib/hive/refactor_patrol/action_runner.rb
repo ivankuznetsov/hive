@@ -7,6 +7,7 @@ require "hive/gh"
 require "hive/lock"
 require "hive/modules/migration/evidence_store"
 require "hive/modules/migration/patrols"
+require "hive/patrol/token_budget"
 require "hive/refactor_patrol/canonical_action_catalog"
 require "hive/refactor_patrol/caps"
 require "hive/refactor_patrol/family_store"
@@ -52,7 +53,6 @@ module Hive
       RETRY_BACKOFF_SEC = ActionClaimTransitions::RETRY_BACKOFF_SEC
       AUTHORITY_RECHECK_SEC = 3600
       AUTHORITY_RECHECK_REASONS = %w[authority_revoked discovery_revoked].freeze
-
       attr_reader :fixer, :pr_opener, :issue_filer
 
       def initialize(project_root, cfg:, hive_state_path: nil, job_store: nil, family_store: nil,
@@ -792,7 +792,12 @@ module Hive
           token,
           outcome: adapter_result.outcome,
           receipts: result_receipts,
-          terminal: adapter_result.terminal == true
+          terminal: adapter_result.terminal == true,
+          backoff_sec: backoff_sec_for(
+            adapter_result.outcome,
+            details: adapter_result.respond_to?(:details) ?
+              adapter_result.details : nil
+          )
         )
         aggregate
       end
@@ -837,13 +842,14 @@ module Hive
         )
       end
 
-      def settle_action_transition!(token, outcome:, receipts:, terminal:)
+      def settle_action_transition!(token, outcome:, receipts:, terminal:,
+                                    backoff_sec: nil)
         action_transitions.settle(
           token,
           outcome: outcome,
           receipts: receipts,
           terminal: terminal,
-          backoff_sec: backoff_sec_for(outcome),
+          backoff_sec: backoff_sec.nil? ? backoff_sec_for(outcome) : backoff_sec,
           now: now
         )
       end
@@ -1748,10 +1754,18 @@ module Hive
         )
       end
 
-      def backoff_sec_for(reason)
+      def backoff_sec_for(reason, details: nil)
         return @authority_backoff_sec if AUTHORITY_RECHECK_REASONS.include?(reason.to_s)
 
-        @backoff_sec
+        exhaustion = if details.is_a?(Hash)
+          details["resource_exhaustion"] || details[:resource_exhaustion]
+        end
+        exhaustion_reason = if exhaustion.is_a?(Hash)
+          exhaustion["reason"] || exhaustion[:reason]
+        end
+        Hive::Patrol::TokenBudget.resource_exhaustion_backoff_sec(
+          exhaustion_reason, now: now, fallback: @backoff_sec
+        )
       end
 
       def event(outcome, **details)

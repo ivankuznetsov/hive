@@ -1,5 +1,6 @@
 require "json"
 require "json_schemer"
+require "digest"
 require "pathname"
 require "securerandom"
 require "shellwords"
@@ -21,6 +22,8 @@ require "hive/refactor_patrol/repository_ownership"
 require "hive/modules/event_publisher"
 require "hive/modules/migration/evidence_store"
 require "hive/modules/migration/patrols"
+require "hive/patrol/token_budget"
+require "hive/workflow_package/canonical_json"
 
 module Hive
   module Daemon
@@ -33,6 +36,7 @@ module Hive
       RETRY_BACKOFF_SEC = 60
       ACTION_RETRY_BACKOFF_SEC =
         Hive::RefactorPatrol::ActionClaimTransitions::RETRY_BACKOFF_SEC
+      EFFECT_CAPACITY_RESERVE = 1
       SUPPORTED_REPORT_SCHEMA_VERSIONS = [
         Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol")
       ].freeze
@@ -170,6 +174,11 @@ module Hive
           work = due_by_project.fetch(project)
           work.filter_map do |item|
             aggregate = item.fetch(:aggregate)
+            if item.fetch(:phase) == :action &&
+               (capacity = effect_capacity_exhaustion(store_for(entry), aggregate))
+              stop_at_effect_capacity(entry, aggregate, capacity, now)
+              next
+            end
             ownership = repository_ownership_decision(
               entry, aggregate, phase: item.fetch(:phase),
               ownership_resolver: ownership_snapshot
@@ -263,7 +272,8 @@ module Hive
             reservation_id: capture.occurrence_id,
             occurrence_id: capture.occurrence_id,
             migration_owner: migration.fetch("owner"),
-            migration_epoch: migration.fetch("epoch")
+            migration_epoch: migration.fetch("epoch"),
+            job_digest: job_digest(aggregate)
           }
           return candidate.merge(
             slug: "#{PATROL_SLUG_PREFIX}-#{aggregate.fetch('job_id')}-actions",
@@ -621,6 +631,45 @@ module Hive
         @events << { status: :blocked, project: entry.fetch("name"), reason: reason, error: e.message }
       end
 
+      def effect_capacity_exhaustion(store, aggregate)
+        occurrence = store.occurrence_for_job(aggregate.fetch("job_id"))
+        return unless occurrence
+
+        count = occurrence.fetch("effects").size
+        limit = Hive::Modules::Migration::PatrolEvidence::MAX_EFFECTS_PER_OCCURRENCE
+        return if count < limit - EFFECT_CAPACITY_RESERVE
+
+        {
+          "occurrence_id" => occurrence.fetch("occurrence_id"),
+          "effect_count" => count,
+          "effect_limit" => limit,
+          "reserved_effects" => EFFECT_CAPACITY_RESERVE
+        }
+      end
+
+      def stop_at_effect_capacity(entry, aggregate, evidence, now)
+        if evidence.fetch("effect_count") < evidence.fetch("effect_limit")
+          block(
+            entry, aggregate,
+            reason: "effect_capacity_exhausted",
+            evidence: evidence,
+            now: now,
+            phase: :action
+          )
+          return
+        end
+
+        @events << {
+          status: :blocked,
+          project: entry.fetch("name"),
+          job_id: aggregate.fetch("job_id"),
+          pr_number: aggregate.dig("source", "number"),
+          pr_url: aggregate.dig("source", "url"),
+          reason: "effect_capacity_exhausted",
+          evidence: evidence
+        }
+      end
+
       def assert_manifest_matches!(path, aggregate)
         manifest = Hive::RefactorPatrol::PrManifest.load!(
           path,
@@ -663,15 +712,11 @@ module Hive
         reasons = errors.filter_map do |error|
           error.dig("details", "resource_exhaustion", "reason") if error.is_a?(Hash)
         end
-        daily = %w[
-          daily_agent_spawn_limit daily_architecture_unmetered_spawn_limit
-          daily_architecture_review_spawn_limit
-          daily_token_headroom daily_token_limit
-        ]
-        return RETRY_BACKOFF_SEC unless errors.any? && reasons.size == errors.size && (reasons - daily).empty?
+        return RETRY_BACKOFF_SEC unless reasons.size == errors.size
 
-        next_day = Time.utc(now.utc.year, now.utc.month, now.utc.day) + 86_400
-        [ (next_day - now).ceil, RETRY_BACKOFF_SEC ].max
+        Hive::Patrol::TokenBudget.resource_exhaustion_backoff_sec(
+          reasons, now: now, fallback: RETRY_BACKOFF_SEC
+        )
       end
 
       def complete_action(token, exit_code, envelope, now)
@@ -685,8 +730,17 @@ module Hive
                 envelope["source_pr"] == aggregate.fetch("source") &&
                 envelope["analysis_sha"] == aggregate.fetch("analysis_sha") &&
                 envelope["complete"] == aggregate.fetch("complete")
-        status = if valid
-          aggregate.fetch("complete") ? :closed : :action_pending
+        status = if valid && aggregate.fetch("complete")
+          :closed
+        elsif valid && action_progressed?(token, aggregate)
+          :action_pending
+        elsif valid
+          aggregate = block_through_gateway!(
+            entry, store, aggregate, phase: :action,
+            reason: "action_no_progress", evidence: {}, now: now,
+            backoff_sec: ACTION_RETRY_BACKOFF_SEC
+          )
+          :retry
         else
           aggregate = block_through_gateway!(
             entry, store, aggregate, phase: :action,
@@ -709,6 +763,17 @@ module Hive
         return "action_missing_envelope" if envelope.nil?
 
         "action_malformed_or_mismatched_envelope"
+      end
+
+      def action_progressed?(token, aggregate)
+        baseline = token[:job_digest] || token["job_digest"]
+        baseline.nil? || baseline != job_digest(aggregate)
+      end
+
+      def job_digest(aggregate)
+        Digest::SHA256.hexdigest(
+          Hive::WorkflowPackage::CanonicalJSON.generate(aggregate)
+        )
       end
 
       def retry_backoff_sec(phase)

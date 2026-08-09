@@ -210,6 +210,21 @@ class FixGuardrailTest < Minitest::Test
     end
   end
 
+  def test_password_prose_does_not_trip_the_secret_guardrail
+    with_two_commits(
+      file: "config/brakeman/checks/check_auth_rate_limit_exemption.rb",
+      content: "# Rate limits apply to password resets, confirmations, and sign-ins.\n"
+    ) do |dir, base, head|
+      result = Hive::Stages::Review::FixGuardrail.run!(
+        cfg: cfg, ctx: make_ctx(dir),
+        base_sha: base, head_sha: head
+      )
+
+      assert_equal :clean, result.status
+      assert_empty result.matches
+    end
+  end
+
   # --- dotenv_edit -----------------------------------------------------
 
   def test_trips_on_dotenv_edit

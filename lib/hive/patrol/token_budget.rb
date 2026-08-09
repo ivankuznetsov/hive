@@ -12,6 +12,12 @@ module Hive
     # per-cycle envelope, but merged-PR demand is not discarded by the
     # ordinary patrol launch-count ceiling.
     class TokenBudget
+      DAILY_EXHAUSTION_REASONS = %w[
+        daily_agent_spawn_limit daily_architecture_unmetered_spawn_limit
+        daily_architecture_review_spawn_limit daily_token_headroom
+        daily_token_limit
+      ].freeze
+
       DEFAULT_LIMITS = {
         "max_tokens_per_cycle" => 200_000,
         "max_tokens_per_day" => 600_000,
@@ -26,6 +32,16 @@ module Hive
       }.freeze
 
       attr_reader :last_exhaustion
+
+      def self.resource_exhaustion_backoff_sec(reasons, now:, fallback:)
+        reasons = Array(reasons).map(&:to_s)
+        return fallback unless reasons.any? &&
+                               (reasons - DAILY_EXHAUSTION_REASONS).empty?
+
+        current = now.utc
+        next_day = Time.utc(current.year, current.month, current.day) + 86_400
+        [ (next_day - current).ceil, fallback ].max
+      end
 
       def initialize(project_root, cfg:, usage_db: Hive::UsageDb, clock: -> { Time.now.utc })
         @project_root = File.expand_path(project_root)

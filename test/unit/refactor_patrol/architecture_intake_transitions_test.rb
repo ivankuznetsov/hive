@@ -180,6 +180,40 @@ class RefactorPatrolArchitectureIntakeTransitionsTest < Minitest::Test
     end
   end
 
+  def test_duplicate_intake_after_rollover_does_not_write_a_second_effect
+    gateways = []
+    store = Store.new
+    transitions = transitions_for(
+      gateway_factory: lambda do |**options|
+        Gateway.new(**options).tap { |gateway| gateways << gateway }
+      end
+    )
+    initial = transitions.enqueue(
+      entry: entry,
+      store: store,
+      manifest: manifest,
+      policy: {},
+      now: NOW
+    )
+    successor_id = "occ-#{'e' * 64}"
+    store.aggregate = initial.merge(
+      "occurrence_id" => successor_id
+    )
+
+    replay = transitions.enqueue(
+      entry: entry,
+      store: store,
+      manifest: manifest,
+      policy: {},
+      now: NOW + 60,
+      required_occurrence_id: successor_id
+    )
+
+    assert_equal successor_id, replay.fetch("occurrence_id")
+    assert_equal 1, store.reservations.size
+    assert_equal 1, gateways.size
+  end
+
   def test_invalid_migration_snapshot_uses_the_callers_typed_error
     transitions = transitions_for(
       migration_snapshot: ->(_entry) {

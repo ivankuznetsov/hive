@@ -196,6 +196,30 @@ module Hive
         inconsistent!("complete job aggregate is write-once", path) if existing.fetch("complete") && existing != replacement
       end
 
+      # Occurrence rollover is the sole exception to the immutable current
+      # occurrence pointer. The caller has already proved every transition in
+      # the predecessor terminal; this validator confines the durable write to
+      # advancing that pointer and its timestamp.
+      def validate_occurrence_rollover!(existing, replacement, path,
+                                        from:, to:)
+        unless existing.fetch("occurrence_id") == from.to_s &&
+               replacement.fetch("occurrence_id") == to.to_s
+          inconsistent!("job occurrence rollover fence is stale", path)
+        end
+        expected = existing.merge(
+          "occurrence_id" => to.to_s,
+          "updated_at" => replacement.fetch("updated_at")
+        )
+        unless replacement == expected
+          inconsistent!(
+            "job occurrence rollover changed aggregate state", path
+          )
+        end
+        inconsistent!("complete job aggregate is write-once", path) if
+          existing.fetch("complete")
+        true
+      end
+
       def validate_transition_semantic!(record, semantic:, path: nil)
         expected = TransitionEvidence.semantic_digest(semantic)
         unless record.is_a?(Hash) &&
@@ -464,12 +488,10 @@ module Hive
               )
             end
             diagnostic_generations[kind] << generation
-            unless attempt.fetch("occurrence_id") == occurrence_id
-              inconsistent!(
-                "diagnostic attempt occurrence does not match its job",
-                path
-              )
-            end
+            attempt_occurrence_id!(
+              attempt, occurrence_id, path,
+              label: "diagnostic attempt", active: false
+            )
             unless attempt.fetch("state") == "blocked"
               inconsistent!("diagnostic attempt state is invalid", path)
             end
@@ -529,12 +551,10 @@ module Hive
                 path
               )
             end
-            unless attempt.fetch("occurrence_id") == occurrence_id
-              inconsistent!(
-                "job transition occurrence does not match its job",
-                path
-              )
-            end
+            attempt_occurrence_id!(
+              attempt, occurrence_id, path,
+              label: "job transition", active: false
+            )
             validate_transition_records!(
               attempt.fetch("transitions"), path,
               generation: generation
@@ -562,12 +582,13 @@ module Hive
             inconsistent!("discovery attempt generation must be a positive integer", path)
           end
           generations << generation
-          unless attempt.fetch("occurrence_id") == occurrence_id
-            inconsistent!(
-              "discovery attempt occurrence does not match its job",
-              path
+          attempt_occurrence_id!(
+            attempt, occurrence_id, path,
+            label: "discovery attempt",
+            active: constant(:ACTIVE_CLAIM_STATES).include?(
+              attempt.fetch("state")
             )
-          end
+          )
           validate_transition_records!(
             attempt.fetch("transitions"), path,
             generation: generation
@@ -583,7 +604,9 @@ module Hive
             timestamp!(attempt["next_eligible_at"], "discovery attempt next_eligible_at", path)
           end
           validate_action_process_identity!(attempt, path, label: "discovery attempt")
-          active += 1 if constant(:ACTIVE_ACTION_CLAIM_STATES).include?(attempt.fetch("state"))
+          active += 1 if constant(:ACTIVE_CLAIM_STATES).include?(
+            attempt.fetch("state")
+          )
         end
         unless generations == generations.uniq.sort
           inconsistent!("discovery attempt generations must be strictly increasing", path)
@@ -618,12 +641,13 @@ module Hive
             inconsistent!("action claim generation must be a positive integer", path)
           end
           generations << generation
-          unless claim.fetch("occurrence_id") == occurrence_id
-            inconsistent!(
-              "action claim occurrence does not match its job",
-              path
+          attempt_occurrence_id!(
+            claim, occurrence_id, path,
+            label: "action claim",
+            active: constant(:ACTIVE_ACTION_CLAIM_STATES).include?(
+              claim.fetch("state")
             )
-          end
+          )
           unless %w[claimed running released superseded complete].include?(claim.fetch("state"))
             inconsistent!("action claim state is invalid", path)
           end
@@ -672,12 +696,7 @@ module Hive
         values = array_of_hashes!(
           records, "effect transitions", path
         )
-        if values.size > constant(:MAX_TRANSITIONS_PER_GENERATION)
-          inconsistent!(
-            "effect transition history exceeds the bounded limit",
-            path
-          )
-        end
+        transitions_per_generation = Hash.new(0)
         intent_ids = values.map do |record|
           strict_hash!(
             record,
@@ -702,6 +721,14 @@ module Hive
                  (!generation || transition_generation == generation)
             inconsistent!(
               "effect transition generation is invalid",
+              path
+            )
+          end
+          transitions_per_generation[transition_generation] += 1
+          if transitions_per_generation[transition_generation] >
+             constant(:MAX_TRANSITIONS_PER_GENERATION)
+            inconsistent!(
+              "effect transition history exceeds the bounded limit",
               path
             )
           end
@@ -792,7 +819,7 @@ module Hive
           end
           if old_attempt["kind"] ==
                constant(:DISCOVERY_ATTEMPT_KIND) &&
-             constant(:ACTIVE_ACTION_CLAIM_STATES).include?(
+             constant(:ACTIVE_CLAIM_STATES).include?(
                old_attempt.fetch("state")
              )
             validate_transition_history!(
@@ -1015,6 +1042,18 @@ module Hive
         Array(action["claims"]).reverse_each.find do |claim|
           constant(:ACTIVE_ACTION_CLAIM_STATES).include?(claim["state"])
         end
+      end
+
+      def attempt_occurrence_id!(record, current_occurrence_id, path,
+                                 label:, active:)
+        value = record.fetch("occurrence_id")
+        occurrence_id!(value, "#{label} occurrence_id", path)
+        if active && value != current_occurrence_id
+          inconsistent!(
+            "active #{label} occurrence does not match its job", path
+          )
+        end
+        value
       end
 
       def array_of_hashes!(value, label, path)

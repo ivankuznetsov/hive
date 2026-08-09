@@ -182,10 +182,11 @@ class RefactorPatrolJobStoreCollaboratorsTest < Minitest::Test
     assert_invalid_attempt(
       diagnostic.merge("generation" => 0), occurrence_id, path
     )
-    assert_invalid_attempt(
-      diagnostic.merge("occurrence_id" => "occ-#{'f' * 64}"),
-      occurrence_id,
-      path
+    validator.send(
+      :validate_discovery_attempts!,
+      [ diagnostic.merge("occurrence_id" => "occ-#{'f' * 64}") ],
+      path,
+      occurrence_id: occurrence_id
     )
     assert_invalid_attempt(
       diagnostic.merge("state" => "complete"), occurrence_id, path
@@ -201,13 +202,23 @@ class RefactorPatrolJobStoreCollaboratorsTest < Minitest::Test
     assert_invalid_attempt(
       job_transition.merge("generation" => 0), occurrence_id, path
     )
-    assert_invalid_attempt(
-      job_transition.merge("occurrence_id" => "occ-#{'f' * 64}"),
-      occurrence_id,
-      path
+    validator.send(
+      :validate_discovery_attempts!,
+      [ job_transition.merge("occurrence_id" => "occ-#{'f' * 64}") ],
+      path,
+      occurrence_id: occurrence_id
+    )
+    validator.send(
+      :validate_discovery_attempts!,
+      [ discovery.merge("occurrence_id" => "occ-#{'f' * 64}") ],
+      path,
+      occurrence_id: occurrence_id
     )
     assert_invalid_attempt(
-      discovery.merge("occurrence_id" => "occ-#{'f' * 64}"),
+      discovery.merge(
+        "state" => "claimed",
+        "occurrence_id" => "occ-#{'f' * 64}"
+      ),
       occurrence_id,
       path
     )
@@ -253,10 +264,27 @@ class RefactorPatrolJobStoreCollaboratorsTest < Minitest::Test
         generation: 1
       )
     end
+    prior_generation = Array.new(
+      Hive::RefactorPatrol::JobStore::MAX_TRANSITIONS_PER_GENERATION
+    ) do |index|
+      transition.merge(
+        "intent_id" => "intent-#{format('%064x', index)}"
+      )
+    end
+    validator.send(
+      :validate_transition_records!,
+      prior_generation + [
+        transition.merge(
+          "intent_id" => "intent-#{'f' * 64}",
+          "generation" => 2
+        )
+      ],
+      path
+    )
 
     action = accepted_job.fetch("actions").first
     action["claims"] = [
-      action_claim(1, "released").merge(
+      action_claim(1, "claimed").merge(
         "occurrence_id" => "occ-#{'f' * 64}"
       )
     ]
@@ -298,6 +326,50 @@ class RefactorPatrolJobStoreCollaboratorsTest < Minitest::Test
         transition, semantic: {}, path: path
       )
     end
+  end
+
+  def test_record_validator_fences_occurrence_rollover_to_the_pointer_only
+    path = "/tmp/job.json"
+    existing = valid_job
+    successor_id = "occ-#{'f' * 64}"
+    replacement = deep_copy(existing).merge(
+      "occurrence_id" => successor_id,
+      "updated_at" => (T0 + 1).iso8601
+    )
+
+    assert validator.send(
+      :validate_occurrence_rollover!,
+      existing,
+      replacement,
+      path,
+      from: existing.fetch("occurrence_id"),
+      to: successor_id
+    )
+
+    stale = assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+      validator.send(
+        :validate_occurrence_rollover!,
+        existing,
+        replacement,
+        path,
+        from: "occ-#{'e' * 64}",
+        to: successor_id
+      )
+    end
+    assert_match(/rollover fence is stale/, stale.message)
+
+    changed = deep_copy(replacement).merge("state" => "analyzing")
+    drift = assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+      validator.send(
+        :validate_occurrence_rollover!,
+        existing,
+        changed,
+        path,
+        from: existing.fetch("occurrence_id"),
+        to: successor_id
+      )
+    end
+    assert_match(/changed aggregate state/, drift.message)
   end
 
   def test_record_validator_rejects_a_well_formed_but_mismatched_semantic_digest

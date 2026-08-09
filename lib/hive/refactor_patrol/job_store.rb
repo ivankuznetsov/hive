@@ -103,9 +103,6 @@ module Hive
       TRANSITION_OUTCOMES = %w[applied rejected].freeze
       MAX_TRANSITIONS_PER_GENERATION = 256
       ACTIVE_ACTION_CLAIM_STATES = %w[claimed running].freeze
-      NON_RETRYABLE_ACTION_BLOCK_REASONS = %w[
-        effect_capacity_exhausted
-      ].freeze
 
       class Error < StandardError
         attr_reader :path
@@ -230,13 +227,16 @@ module Hive
         )
       end
 
-      # Architecture Patrol owns one durable occurrence per immutable job.
-      # Discovery claims and every later action generation reuse this identity;
-      # action claim generations remain authorization fences, not effect IDs.
+      # Architecture Patrol owns one current durable occurrence segment per
+      # job. A saturated segment is finalized before this pointer advances;
+      # finished claims retain their historical occurrence identity while all
+      # active work is fenced to the current segment.
       extend Forwardable
       def_delegators :@occurrence_lifecycle,
                     :reserve_manifest_occurrence!, :reserve_occurrence!,
-                    :occurrence_for_job, :occurrence_capture,
+                    :reserve_successor_occurrence!, :occurrence_for_job,
+                    :occurrence, :occurrence_capture,
+                    :occurrence_terminalized?,
                     :each_recovery_active_occurrence, :recovery_active?,
                     :rebuild_recovery_index!, :recovery_backoff,
                     :record_recovery_failure!,
@@ -248,6 +248,34 @@ module Hive
                     :reset_effect_prepared!, :settle_effect!, :deny_effect!,
                     :effect_receipt, :terminal_effect_receipt_ids,
                     :finalize_occurrence!, :drain_occurrence_outbox!
+
+      def rollover_occurrence!(job_id, from:, to:, now: Time.now)
+        from_id = from.to_s
+        to_id = to.to_s
+        mutate_job(
+          job_id,
+          occurrence_rollover: { from: from_id, to: to_id }
+        ) do |aggregate, path|
+          unless aggregate.fetch("occurrence_id") == from_id
+            raise InconsistentRecord.new(
+              "refactor patrol occurrence rollover fence is stale",
+              path: path
+            )
+          end
+          if active_discovery_attempt(aggregate) ||
+             aggregate.fetch("actions").any? do |action|
+               active_action_claim(action)
+             end
+            raise InconsistentRecord.new(
+              "refactor patrol occurrence cannot roll with an active claim",
+              path: path
+            )
+          end
+          aggregate["occurrence_id"] = to_id
+          aggregate["updated_at"] = now.utc.iso8601
+          aggregate
+        end
+      end
 
       def record_job_transition_rejection!(job_id, operation:, generation:,
                                            transition:, now: Time.now)
@@ -306,12 +334,10 @@ module Hive
                 )
                 raise InconsistentRecord.new("refactor patrol intake source is immutable", path: path)
               end
-              unless existing.fetch("occurrence_id") ==
-                     aggregate.fetch("occurrence_id") &&
-                     existing.fetch("intake_transition_id") ==
+              unless existing.fetch("intake_transition_id") ==
                        aggregate.fetch("intake_transition_id")
                 raise InconsistentRecord.new(
-                  "refactor patrol intake occurrence identity is immutable",
+                  "refactor patrol intake transition identity is immutable",
                   path: path
                 )
               end
@@ -401,12 +427,12 @@ module Hive
 
       def action_phase_backoff_active?(aggregate, now: Time.now)
         attempt = aggregate.fetch("attempts").reverse_each.find do |item|
-          item["kind"] == "action_block"
+          item["kind"] == "action_block" &&
+            item["occurrence_id"] == aggregate.fetch("occurrence_id")
         end
-        return true if attempt && NON_RETRYABLE_ACTION_BLOCK_REASONS.include?(
-          attempt["reason"]
-        )
-
+        return false if attempt &&
+                        attempt["reason"] ==
+                          "effect_capacity_exhausted"
         deadline = attempt && attempt["next_eligible_at"]
         !deadline.nil? && Time.iso8601(deadline) > now
       rescue ArgumentError, KeyError => e
@@ -1871,7 +1897,10 @@ module Hive
           end
           return existing
         end
-        if records.size >= MAX_TRANSITIONS_PER_GENERATION
+        generation = transition.fetch("generation")
+        if records.count do |record|
+             record.fetch("generation") == generation
+           end >= MAX_TRANSITIONS_PER_GENERATION
           raise InconsistentRecord,
                 "refactor patrol transition history exceeds the bounded limit"
         end
@@ -1928,7 +1957,7 @@ module Hive
         raise InconsistentRecord, "refactor patrol claim has invalid evidence (#{e.message})"
       end
 
-      def mutate_job(job_id)
+      def mutate_job(job_id, occurrence_rollover: nil)
         prepare_current_namespace!
         id = validate_id!(job_id)
         path = job_path(id)
@@ -1949,7 +1978,18 @@ module Hive
             result = yield aggregate, path
             replacement, return_value = result.is_a?(Array) ? result : [ result, result ]
             validate_job!(replacement, path: path)
-            validate_transition!(existing, replacement, path, action_api: true)
+            if occurrence_rollover
+              @record_validator.validate_occurrence_rollover!(
+                existing,
+                replacement,
+                path,
+                **occurrence_rollover
+              )
+            else
+              validate_transition!(
+                existing, replacement, path, action_api: true
+              )
+            end
             atomic_write(path, replacement) unless replacement == existing
             return_value
           end

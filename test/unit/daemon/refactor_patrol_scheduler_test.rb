@@ -1703,9 +1703,38 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
-  def test_effect_capacity_is_durably_blocked_before_the_last_journal_cell
+  def test_effect_capacity_rolls_to_a_fresh_terminally_fenced_occurrence
     with_project do |dir, entry, store|
       write_action_job(dir, store)
+      scheduler = scheduler(entry, store)
+      predecessor = store.occurrence_capture("action-job")
+
+      with_constant(
+        Hive::Modules::Migration::PatrolEvidence,
+        :MAX_EFFECTS_PER_OCCURRENCE,
+        2
+      ) do
+        candidates = scheduler.candidates(now: T0)
+        assert_equal [ "action-job" ],
+                     candidates.map { |item| item.fetch(:job_id) }
+        aggregate = store.read_job("action-job")
+        refute_equal predecessor.occurrence_id,
+                     aggregate.fetch("occurrence_id")
+        assert store.occurrence_terminalized?(predecessor)
+        assert_empty store.occurrence_for_job(
+          "action-job"
+        ).fetch("effects")
+        event = scheduler.drain_events.fetch(0)
+        assert_equal :recovered, event.fetch(:status)
+        assert_equal "effect_capacity_rolled_over", event.fetch(:reason)
+      end
+    end
+  end
+
+  def test_discovery_capacity_rolls_before_claiming_another_worker
+    with_project do |_dir, entry, store|
+      enqueue(store)
+      predecessor = store.occurrence_capture("job-7")
       scheduler = scheduler(entry, store)
 
       with_constant(
@@ -1713,19 +1742,87 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
         :MAX_EFFECTS_PER_OCCURRENCE,
         2
       ) do
-        assert_empty scheduler.candidates(now: T0)
-        aggregate = store.read_job("action-job")
-        blocker = aggregate.fetch("attempts").last
-        assert_equal "effect_capacity_exhausted", blocker.fetch("reason")
-        assert store.action_phase_backoff_active?(aggregate, now: T0 + 86_400)
-        assert_empty scheduler.candidates(now: T0 + 86_400)
-        assert_equal 2,
-                     store.occurrence_for_job("action-job").fetch("effects").size
+        candidates = scheduler.candidates(now: T0)
+
+        assert_equal [ "job-7" ],
+                     candidates.map { |item| item.fetch(:job_id) }
+        assert_equal :discovery,
+                     candidates.fetch(0).fetch(:action_phase)
+        refute_equal predecessor.occurrence_id,
+                     store.read_job("job-7").fetch("occurrence_id")
+        assert store.occurrence_terminalized?(predecessor)
       end
     end
   end
 
-  def test_full_effect_capacity_is_reported_without_another_journal_write
+  def test_saturated_occurrence_lets_expired_claim_recovery_run_before_rollover
+    with_project do |_dir, entry, store|
+      enqueue(store)
+      predecessor = store.occurrence_capture("job-7")
+      expired = store.claim_discovery!(
+        "job-7",
+        owner: "daemon-crashed",
+        analysis_sha: "head",
+        now: T0,
+        lease_sec: 60,
+        owner_pid: 4242,
+        owner_process_start_time: "boot-dead"
+      )
+      scheduler = scheduler(entry, store)
+
+      with_constant(
+        Hive::Modules::Migration::PatrolEvidence,
+        :MAX_EFFECTS_PER_OCCURRENCE,
+        8
+      ) do
+        candidates = scheduler.candidates(now: T0 + 120)
+
+        assert_equal [ "job-7" ],
+                     candidates.map { |item| item.fetch(:job_id) }
+        assert_equal predecessor.occurrence_id,
+                     store.read_job("job-7").fetch("occurrence_id")
+        dispatch = scheduler.reserve(
+          candidates.fetch(0), now: T0 + 120
+        )
+        assert_equal expired.fetch(:generation) + 1,
+                     dispatch.dig(:dispatch_token, :generation)
+      end
+    end
+  end
+
+  def test_rollover_rechecks_migration_ownership_inside_the_shared_fence
+    with_project do |dir, entry, store|
+      write_action_job(dir, store)
+      predecessor = store.occurrence_capture("action-job")
+      ownership_checks = 0
+      scheduler = scheduler(entry, store)
+      scheduler.instance_variable_set(
+        :@migration_ownership,
+        lambda do |*|
+          ownership_checks += 1
+          ownership_checks == 1
+        end
+      )
+
+      with_constant(
+        Hive::Modules::Migration::PatrolEvidence,
+        :MAX_EFFECTS_PER_OCCURRENCE,
+        2
+      ) do
+        assert_empty scheduler.candidates(now: T0)
+
+        assert_equal predecessor.occurrence_id,
+                     store.read_job("action-job").fetch("occurrence_id")
+        event = scheduler.drain_events.fetch(0)
+        assert_equal "effect_capacity_rollover_failed",
+                     event.fetch(:reason)
+        assert_match(/migration ownership changed/,
+                     event.dig(:evidence, "error"))
+      end
+    end
+  end
+
+  def test_full_effect_capacity_rolls_without_a_257th_effect
     with_project do |dir, entry, store|
       write_action_job(dir, store)
       occurrence = store.occurrence_for_job("action-job")
@@ -1758,14 +1855,47 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       ) do
         scheduler = scheduler(entry, store)
 
-        assert_empty scheduler.candidates(now: T0 + 2)
+        candidates = scheduler.candidates(now: T0 + 2)
+        assert_equal [ "action-job" ],
+                     candidates.map { |item| item.fetch(:job_id) }
         event = scheduler.drain_events.fetch(0)
-        assert_equal :blocked, event.fetch(:status)
-        assert_equal "effect_capacity_exhausted", event.fetch(:reason)
+        assert_equal :recovered, event.fetch(:status)
+        assert_equal "effect_capacity_rolled_over", event.fetch(:reason)
         assert_equal 2, event.dig(:evidence, "effect_count")
-        assert_equal 2,
-                     store.occurrence_for_job("action-job").fetch("effects").size
+        assert_empty store.occurrence_for_job(
+          "action-job"
+        ).fetch("effects")
       end
+    end
+  end
+
+  def test_recovery_finishes_a_successor_reserved_before_pointer_advance
+    with_project do |dir, entry, store|
+      write_action_job(dir, store)
+      scheduler = scheduler(entry, store)
+      lifecycle = scheduler.instance_variable_get(
+        :@occurrence_lifecycle
+      )
+      predecessor = store.occurrence_capture("action-job")
+      successor = lifecycle.send(
+        :successor_capture, predecessor, now: T0 + 1
+      )
+      store.reserve_successor_occurrence!(
+        "action-job",
+        predecessor: predecessor,
+        capture: successor,
+        now: T0 + 1
+      )
+
+      assert_equal predecessor.occurrence_id,
+                   store.read_job("action-job").fetch("occurrence_id")
+      candidates = scheduler.candidates(now: T0 + 2)
+
+      assert_equal successor.occurrence_id,
+                   store.read_job("action-job").fetch("occurrence_id")
+      assert store.occurrence_terminalized?(predecessor)
+      assert_equal [ "action-job" ],
+                   candidates.map { |item| item.fetch(:job_id) }
     end
   end
 

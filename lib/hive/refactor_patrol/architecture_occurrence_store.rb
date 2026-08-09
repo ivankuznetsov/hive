@@ -8,8 +8,9 @@ module Hive
     # Architecture Patrol's product adapter over the shared occurrence journal.
     #
     # The journal remains the sole owner of occurrence/effect state. JobStore
-    # owns the immutable occurrence pointer; this adapter validates that
-    # architecture effects belong to that aggregate.
+    # owns the current occurrence pointer; this adapter validates that live
+    # architecture effects belong to that segment and that a successor is the
+    # exact next generation of its predecessor.
     class ArchitectureOccurrenceStore
       MODULE_NAME = "architecture-patrol".freeze
 
@@ -75,6 +76,47 @@ module Hive
         @journal.reserve!(capture, now: now)
       rescue Hive::ConfigError => e
         raise @inconsistent_record, e.message
+      end
+
+      def reserve_successor!(job_id, predecessor:, capture:,
+                             now: Time.now.utc)
+        id = validate_id!(job_id)
+        predecessor = capture_value(predecessor)
+        capture = capture_value(capture)
+        aggregate = @job_reader.call(id)
+        predecessor_record = @journal.fetch(
+          predecessor.occurrence_id
+        )
+        valid = aggregate.fetch("occurrence_id") ==
+                  predecessor.occurrence_id &&
+                predecessor_record&.fetch("phase") == "reserved" &&
+                predecessor_record.fetch("provisional_capture") ==
+                  predecessor.to_h &&
+                architecture_job_id(predecessor) == id &&
+                architecture_job_id(capture) == id &&
+                successor_generation?(predecessor, capture) &&
+                successor_identity_fields(predecessor) ==
+                  successor_identity_fields(capture)
+        unless valid
+          raise @inconsistent_record,
+                "architecture patrol successor occurrence is malformed"
+        end
+
+        @journal.reserve!(capture, now: now)
+      rescue Hive::ConfigError => e
+        raise @inconsistent_record, e.message
+      end
+
+      def fetch(occurrence_id)
+        @journal.fetch(occurrence_id)
+      rescue Hive::ConfigError => e
+        raise @corrupt_record, e.message
+      end
+
+      def terminalized?(capture)
+        @journal.terminalized?(capture_value(capture))
+      rescue Hive::ConfigError => e
+        raise @corrupt_record, e.message
       end
 
       def fetch_for_job(job_id)
@@ -246,8 +288,9 @@ module Hive
         raise @corrupt_record, e.message
       end
 
-      def finalize!(capture:, event:, now: Time.now.utc)
-        bytes = Hive::WorkflowPackage::CanonicalJSON.generate(event)
+      def finalize!(capture:, event: nil, now: Time.now.utc)
+        bytes = event &&
+                Hive::WorkflowPackage::CanonicalJSON.generate(event)
         @journal.finalize!(capture, event_bytes: bytes, now: now)
       rescue Hive::ConfigError => e
         raise @inconsistent_record, e.message
@@ -278,6 +321,38 @@ module Hive
       end
 
       private
+
+      def architecture_job_id(capture)
+        reservation = capture.reservation
+        return reservation["job_id"] if
+          reservation["kind"] == "architecture"
+
+        nil
+      end
+
+      def successor_generation?(predecessor, successor)
+        predecessor.reservation.fetch("attempt_generation") + 1 ==
+          successor.reservation.fetch("attempt_generation")
+      rescue KeyError, NoMethodError
+        false
+      end
+
+      def successor_identity_fields(capture)
+        reservation = capture.reservation.reject do |key, _value|
+          key == "attempt_generation"
+        end
+        [
+          capture.module_name,
+          capture.project,
+          capture.trigger,
+          reservation,
+          capture.owner,
+          capture.owner_epoch,
+          capture.selection_input,
+          capture.selection,
+          capture.occurred_at
+        ]
+      end
 
       def repository_matches_source?(capture_repository, source,
                                      allow_legacy: false)

@@ -375,9 +375,14 @@ dispatching the same inert child on every scheduler tick. Fix-agent resource
 exhaustion retains its structured reason; daily token or launch ceilings wait
 until the next UTC day, while other transient failures keep the hourly retry.
 When an occurrence reaches its reserved effect-capacity boundary, the daemon
-records `effect_capacity_exhausted` in the last available cell and stops action
-dispatch. Records already at the hard limit are also excluded from dispatch
-and reported as blocked rather than entering another child loop.
+rolls the job into the exact next occurrence generation. It first requires all
+predecessor transitions to be terminal, publishes that segment's capture and
+receipts, and only then advances the current pointer. A successor reserved just
+before a crash is completed by ordinary occurrence recovery. Historical
+capacity blockers belong to their predecessor segment and do not suppress the
+fresh generation. Rollover rechecks migration ownership inside the shared
+fence. If the saturated segment still owns an expired claim, normal fenced
+claim recovery runs first and rollover follows on the next scheduler pass.
 
 ## Fix and issue routing
 

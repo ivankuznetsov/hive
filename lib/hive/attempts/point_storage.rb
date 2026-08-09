@@ -13,11 +13,15 @@ module Hive
 
       def relative(kind, key)
         kind = component(kind)
-        digest = Digest::SHA256.hexdigest(dump(
-          "kind" => kind,
+        digest = digest(kind, key)
+        File.join(kind, digest[0, 2], "#{digest}.json")
+      end
+
+      def digest(kind, key)
+        Digest::SHA256.hexdigest(dump(
+          "kind" => component(kind),
           "key" => normalize(key)
         ))
-        File.join(kind, digest[0, 2], "#{digest}.json")
       end
 
       def dump(value)
@@ -103,10 +107,7 @@ module Hive
       end
 
       def synchronize(kind, key)
-        digest = Digest::SHA256.hexdigest(StorageKey.dump(
-          "kind" => StorageKey.component(kind),
-          "key" => StorageKey.normalize(key)
-        ))
+        digest = StorageKey.digest(kind, key)
         @directory.with_lock(File.join("locks", digest[0, 2], "#{digest}.lock")) do
           yield
         end

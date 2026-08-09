@@ -50,8 +50,7 @@ module Hive
         )
       end
 
-      def self.build_from_live_reservations(store:, scan:, reservations:, now: Time.now)
-        historical = build(store: store, scan: scan, now: now)
+      def self.build_from_live_reservations(scan:, reservations:, daily_counts:)
         per_project = Hash.new(0)
         per_task = Hash.new(0)
         reservations.each_value do |reservation|
@@ -73,7 +72,7 @@ module Hive
           global_count: reservations.size + unindexed_invalid_count,
           per_project: per_project.to_h.freeze,
           per_task: per_task.to_h.freeze,
-          daily_counts: historical.daily_counts,
+          daily_counts: daily_counts.freeze,
           reserved_attempt_ids: reservation_ids.freeze,
           invalid_count: scan.invalid_records.size
         )
@@ -119,6 +118,7 @@ module Hive
         @store = store
         @hot_scan = hot_scan
         @records = hot_scan.records.to_h { |record| [ record.attempt_id, record ] }
+        @indexed_versions = {}
         synchronize_indexes!(@records.values)
       end
 
@@ -133,25 +133,26 @@ module Hive
       # can retain its one hot scan while still observing admissions made by
       # another Store instance after that scan.
       def refresh_for_admission
-        previous = @records.values
-        previous.each { |record| synchronize_live_reservation!(record) }
+        reservations = mutable_live_reservations
+        merge_observed_reservations!(reservations, @records.values)
         refresh_known_records!(unreadable: :forget)
+        hydrate_reserved_records!(reservations)
+        merge_observed_reservations!(reservations, @records.values)
+        release_converged_reservations!(reservations)
+        decision_index.replace_live_reservations(reservations)
         synchronize_indexes!(@records.values)
-        @records.values.each { |record| synchronize_live_reservation!(record) }
-        reconcile_live_reservations!
         @records.values.freeze
       end
 
       def capacity(now:, records: nil)
         current = records || self.records
         CapacitySnapshot.build_from_live_reservations(
-          store: @store,
           scan: Scan.new(
             records: current.freeze,
             invalid_records: hot_scan.invalid_records
           ),
           reservations: decision_index.live_reservations,
-          now: now
+          daily_counts: decision_index.daily_counts(date: now.utc.to_date)
         )
       end
 
@@ -239,73 +240,83 @@ module Hive
         end
       end
 
-      def synchronize_live_reservation!(record)
-        if CapacitySnapshot.reserves_capacity?(record, outcome_store: outcome_store)
-          decision_index.confirm_live(
-            attempt_id: record.attempt_id,
-            project: record["project"],
-            task_slug: record["task_slug"]
-          )
-        else
-          decision_index.release_live(attempt_id: record.attempt_id)
+      def mutable_live_reservations
+        decision_index.live_reservations.transform_values(&:dup)
+      end
+
+      def merge_observed_reservations!(reservations, records)
+        records.each do |record|
+          if CapacitySnapshot.reserves_capacity?(record, outcome_store: outcome_store)
+            reservations[record.attempt_id] = {
+              "project" => record["project"],
+              "task_slug" => record["task_slug"],
+              "phase" => "active"
+            }
+          else
+            reservations.delete(record.attempt_id)
+          end
         end
       end
 
-      def reconcile_live_reservations!
-        decision_index.live_reservations.each do |attempt_id, reservation|
-          record = @records[attempt_id]
-          unless record
-            record = @store.fetch_hot(attempt_id)
-            self.record(record) if record
-          end
+      def hydrate_reserved_records!(reservations)
+        reservations.each_key do |attempt_id|
+          next if @records.key?(attempt_id)
 
-          if record
-            synchronize_live_reservation!(record)
-          elsif reservation.fetch("phase") == "pending"
-            # The creator released the admission lock without persisting the
-            # reserved ID. No concurrent creator can still be between reserve
-            # and create while this lock holder is running.
-            decision_index.release_live(attempt_id: attempt_id)
-          else
-            release_from_terminal_proof!(attempt_id)
-          end
+          record = @store.fetch_hot(attempt_id)
+          @records[attempt_id] = record if record
         rescue StoreError
-          # An unreadable/missing active record is deliberately retained. Only
-          # a validated durable terminal proof can release active capacity.
+          # Keep the reservation fail-closed; the invalid hot record remains
+          # represented by the reservation even though it cannot be indexed.
           next
         end
       end
 
-      def release_from_terminal_proof!(attempt_id)
-        proof = @store.fetch(attempt_id)
-        return unless proof&.state == "terminal"
+      def release_converged_reservations!(reservations)
+        reservations.delete_if do |attempt_id, reservation|
+          next false if @records.key?(attempt_id)
+          next true if reservation.fetch("phase") == "pending"
 
-        self.record(proof)
-        decision_index.release_live(attempt_id: attempt_id)
+          proof = @store.fetch(attempt_id)
+          if proof&.state == "terminal"
+            synchronize_indexes!([ proof ])
+            true
+          else
+            false
+          end
+        rescue StoreError
+          # Missing or unreadable active state remains capacity-fail-closed.
+          false
+        end
       end
 
       def synchronize_indexes!(records)
-        records.each { |record| decision_index.record_acceptance(record) }
-        records.select { |record| record.state == "lost" }.each do |record|
-          successor_id = decision_index.successor_attempt_id(
-            predecessor_attempt_id: record.attempt_id
-          )
-          decision_index.record_unresolved_loss(record) unless successor_id
-        end
-        records.select { |record| record["predecessor_attempt_id"] }.each do |record|
-          existing_id = decision_index.successor_attempt_id(
-            predecessor_attempt_id: record["predecessor_attempt_id"]
-          )
-          if existing_id && existing_id != record.attempt_id
-            raise StoreError, "attempt predecessor has conflicting successors"
+        records.each do |record|
+          version = [ record.lease_version, record.state ]
+          next if @indexed_versions[record.attempt_id] == version
+
+          decision_index.record_acceptance(record)
+          if record.state == "lost"
+            successor_id = decision_index.successor_attempt_id(
+              predecessor_attempt_id: record.attempt_id
+            )
+            decision_index.record_unresolved_loss(record) unless successor_id
           end
-          decision_index.record_successor(record) unless existing_id
-        end
-        records.select { |record| record.state == "terminal" }.each do |record|
-          decision_index.record_terminal(record)
-          if record.receipt["exit_status"] == Hive::ExitCodes::TEMPFAIL
-            decision_index.refund_tempfail(record)
+          if record["predecessor_attempt_id"]
+            existing_id = decision_index.successor_attempt_id(
+              predecessor_attempt_id: record["predecessor_attempt_id"]
+            )
+            if existing_id && existing_id != record.attempt_id
+              raise StoreError, "attempt predecessor has conflicting successors"
+            end
+            decision_index.record_successor(record) unless existing_id
           end
+          if record.state == "terminal"
+            decision_index.record_terminal(record)
+            if record.receipt["exit_status"] == Hive::ExitCodes::TEMPFAIL
+              decision_index.refund_tempfail(record)
+            end
+          end
+          @indexed_versions[record.attempt_id] = version
         end
       end
     end

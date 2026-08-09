@@ -130,12 +130,13 @@ module Hive
       def record_acceptance(record)
         record!(record)
         date = accepted_date(record)
-        key = accounting_key(record["project"], date)
+        key = accounting_key(date)
         update_entry(DAILY_ACCOUNTING, key) do |current|
           attempts = current ? current.fetch("value").fetch("attempts").dup : {}
           existing = attempts[record.attempt_id]
           candidate = {
             "accepted_at" => record["accepted_at"],
+            "project" => record["project"],
             "refunded" => false
           }
           if existing && existing != candidate && existing != candidate.merge("refunded" => true)
@@ -156,7 +157,7 @@ module Hive
           raise StoreError, "daily accounting refund requires a TEMPFAIL receipt"
         end
 
-        key = accounting_key(record["project"], accepted_date(record))
+        key = accounting_key(accepted_date(record))
         update_entry(DAILY_ACCOUNTING, key) do |current|
           unless current
             raise StoreError, "daily accounting acceptance is missing"
@@ -164,7 +165,8 @@ module Hive
 
           attempts = current.fetch("value").fetch("attempts").dup
           acceptance = attempts[record.attempt_id]
-          unless acceptance && acceptance["accepted_at"] == record["accepted_at"]
+          unless acceptance && acceptance["accepted_at"] == record["accepted_at"] &&
+                 acceptance["project"] == record["project"]
             raise StoreError, "daily accounting acceptance is missing"
           end
           attempts[record.attempt_id] = acceptance.merge("refunded" => true)
@@ -174,15 +176,19 @@ module Hive
       end
 
       def daily_count(project:, date:)
-        value = read_value(
-          DAILY_ACCOUNTING,
-          accounting_key(project, date_value(date))
-        )
-        return 0 unless value
+        daily_counts(date: date).fetch([ StorageKey.string(project), date_value(date) ], 0)
+      end
 
-        value.fetch("attempts").count do |_attempt_id, acceptance|
-          acceptance["refunded"] == false
+      def daily_counts(date:)
+        utc_date = date_value(date)
+        value = read_value(DAILY_ACCOUNTING, accounting_key(utc_date))
+        return {}.freeze unless value
+
+        counts = Hash.new(0)
+        value.fetch("attempts").each_value do |acceptance|
+          counts[[ acceptance.fetch("project"), utc_date ]] += 1 unless acceptance["refunded"]
         end
+        counts.to_h.freeze
       end
 
       # The host-wide admission lock is the transaction boundary for these
@@ -235,6 +241,21 @@ module Hive
         reservations.to_h do |attempt_id, reservation|
           [ attempt_id.dup.freeze, reservation.dup.freeze ]
         end.freeze
+      end
+
+      def replace_live_reservations(reservations)
+        replacements = reservations.to_h do |attempt_id, reservation|
+          value = live_reservation(
+            project: reservation.fetch("project"),
+            task_slug: reservation.fetch("task_slug"),
+            phase: reservation.fetch("phase")
+          )
+          [ StorageKey.string(attempt_id), value ]
+        end
+        update_live_reservations { replacements }
+        replacements.freeze
+      rescue KeyError
+        raise StoreError, "live capacity reservation is invalid"
       end
 
       def path_for(kind, key)
@@ -334,11 +355,12 @@ module Hive
           attempts.each do |attempt_id, acceptance|
             StorageKey.string(attempt_id)
             valid = acceptance.is_a?(Hash) &&
-              acceptance.keys.sort == %w[accepted_at refunded] &&
+              acceptance.keys.sort == %w[accepted_at project refunded] &&
               (acceptance["refunded"] == true || acceptance["refunded"] == false)
             raise StoreError unless valid
 
             Time.iso8601(acceptance.fetch("accepted_at"))
+            StorageKey.string(acceptance.fetch("project"))
           end
         when LIVE_CAPACITY
           reservations = value["reservations"]
@@ -388,16 +410,14 @@ module Hive
         }
       end
 
-      def accounting_key(project, date)
-        {
-          "project" => StorageKey.string(project),
-          "utc_date" => date_value(date).iso8601
-        }
-      end
+      def accounting_key(date) = { "utc_date" => date_value(date).iso8601 }
 
       def live_capacity_key = { "scope" => "host" }
 
       def live_reservation(project:, task_slug:, phase:)
+        unless %w[pending active].include?(phase)
+          raise StoreError, "live capacity reservation phase is invalid"
+        end
         {
           "project" => StorageKey.string(project),
           "task_slug" => StorageKey.string(task_slug),

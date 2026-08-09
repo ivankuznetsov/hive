@@ -167,6 +167,22 @@ class AttemptsStorageFoundationTest < Minitest::Test
       )
       2.times { index.record_acceptance(tempfail) }
       assert_equal 1, index.daily_count(project: "demo", date: NOW.to_date)
+
+      other_project = terminal_record(
+        source,
+        attempt_id: "other-project-attempt",
+        request_id: "other-project-request",
+        now: NOW + 10
+      ).with("project" => "other")
+      index.record_acceptance(other_project)
+      assert_equal(
+        {
+          [ "demo", NOW.to_date ] => 1,
+          [ "other", NOW.to_date ] => 1
+        },
+        index.daily_counts(date: NOW.to_date)
+      )
+
       2.times { index.refund_tempfail(tempfail) }
       assert_equal 0, index.daily_count(project: "demo", date: NOW.to_date)
     end

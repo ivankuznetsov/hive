@@ -534,7 +534,13 @@ module Hive
         profile = fix_profile
         launch = Hive::Patrol::AgentLaunch.prepare(profile: profile, prompt: prompt, role: :fix)
         unless @token_budget.acquire(stage: STAGE, minimum_tokens: launch.fetch(:minimum_tokens))
-          return { status: :error, error_message: @token_budget.exhaustion_message }
+          exhaustion = @token_budget.resource_exhaustion if
+            @token_budget.respond_to?(:resource_exhaustion)
+          return {
+            status: :error,
+            error_message: @token_budget.exhaustion_message,
+            resource_exhaustion: exhaustion
+          }.compact
         end
         started_at = Time.now.utc
         result = nil
@@ -636,9 +642,16 @@ module Hive
 
       def transient(outcome, branch, worktree, result)
         cleanup(worktree)
+        details = {
+          "error" => result.is_a?(Hash) ? result[:error_message].to_s : ""
+        }
+        if result.is_a?(Hash) && result[:resource_exhaustion].is_a?(Hash)
+          details["resource_exhaustion"] =
+            result.fetch(:resource_exhaustion).transform_keys(&:to_s)
+        end
         Result.new(
           outcome: outcome, terminal: false, branch: branch, worktree_path: worktree.path,
-          details: { "error" => result.is_a?(Hash) ? result[:error_message].to_s : "" }
+          details: details
         )
       end
 

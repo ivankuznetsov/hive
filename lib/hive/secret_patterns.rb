@@ -35,10 +35,13 @@ module Hive
       # first via PATTERNS-iteration so complete PEMs are replaced
       # before this fallback can see them. Resolves issue #88.
       pem_private_key_header: /-----BEGIN (?:RSA |OPENSSH |EC |DSA |PGP )?PRIVATE KEY( BLOCK)?-----[\s\S]*\z/,
-      # `password=`, `passwd=`, `PASSWORD=` style assignments. Same
-      # token-boundary shape as generic_api_key so unquoted shell/env
-      # values trip without running past the secret.
-      password_assignment:   /\b(?:password|passwd|pwd)\b['"]?[\s:=]{0,3}['"]?[^\s'"]{6,}['"]?(?=[\s,;}\]]|$)/i,
+      # `password=`, `passwd=`, `PASSWORD=` style assignments. Require
+      # the assignment delimiter so prose such as "password resets" is
+      # not mistaken for a credential.
+      password_assignment:   /\b(?:password|passwd|pwd)\b['"]?\s*[:=]\s*['"]?[^\s'"]{6,}['"]?(?=[\s,;}\]]|$)/i,
+      password_sql:          /\bPASSWORD\s+['"][^\s'"]{6,}['"]/i,
+      password_xml:          /<password>\s*[^<\s]{6,}\s*<\/password>/i,
+      password_cli:          /--password\s+['"]?[^\s'"]{6,}['"]?(?=\s|$)/i,
       # HTTP Authorization headers with Bearer / Basic / Token scheme.
       # Catches the header value regardless of surrounding format
       # (curl output, header dumps, framework log lines).

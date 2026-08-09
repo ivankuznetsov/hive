@@ -103,6 +103,9 @@ module Hive
       TRANSITION_OUTCOMES = %w[applied rejected].freeze
       MAX_TRANSITIONS_PER_GENERATION = 256
       ACTIVE_ACTION_CLAIM_STATES = %w[claimed running].freeze
+      NON_RETRYABLE_ACTION_BLOCK_REASONS = %w[
+        effect_capacity_exhausted
+      ].freeze
 
       class Error < StandardError
         attr_reader :path
@@ -400,6 +403,10 @@ module Hive
         attempt = aggregate.fetch("attempts").reverse_each.find do |item|
           item["kind"] == "action_block"
         end
+        return true if attempt && NON_RETRYABLE_ACTION_BLOCK_REASONS.include?(
+          attempt["reason"]
+        )
+
         deadline = attempt && attempt["next_eligible_at"]
         !deadline.nil? && Time.iso8601(deadline) > now
       rescue ArgumentError, KeyError => e

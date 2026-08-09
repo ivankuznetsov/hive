@@ -608,6 +608,41 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     end
   end
 
+  def test_daily_fix_budget_exhaustion_retries_at_the_next_utc_day
+    with_tmp_dir do |dir|
+      store = write_classified_job(
+        dir,
+        policy: snapshot_policy("auto_fix" => true),
+        dispositions: dispositions(
+          accepted: [ disposition(thesis(id: "daily-budget")) ]
+        )
+      )
+      exhausted = Hive::RefactorPatrol::Fixer::Result.new(
+        outcome: "fix_agent_failed", terminal: false,
+        analysis_sha: "c" * 40,
+        details: {
+          "error" => "daily budget exhausted",
+          "resource_exhaustion" => {
+            "reason" => "daily_token_limit",
+            "limit" => 600_000,
+            "observed" => 700_000
+          }
+        }
+      )
+      runner = build_runner(
+        dir, store: store, fixer: FakeFixer.new(exhausted),
+        clock: -> { T0 }
+      )
+
+      first = runner.run(job_id: "job-1")
+      claim = first.actions.find { |action| action.fetch("kind") == "fix" }
+                   .fetch("claims").last
+
+      assert_equal Time.utc(2026, 7, 11).iso8601,
+                   claim.fetch("next_eligible_at")
+    end
+  end
+
   def test_closed_unmerged_refactor_pr_routes_the_accepted_thesis_to_an_issue
     with_tmp_dir do |dir|
       item = thesis(id: "closed-pr")

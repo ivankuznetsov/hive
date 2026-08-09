@@ -18,7 +18,7 @@ module Hive
         # episode as well as its claim/release pairs. Ordinary feature maps
         # are persisted as one batch effect, so repository size no longer
         # consumes this safety envelope one feature at a time.
-        MAX_EFFECTS_PER_OCCURRENCE = 192
+        MAX_EFFECTS_PER_OCCURRENCE = 256
         MAX_JSON_DEPTH = 32
         MAX_JSON_NODES = 8_192
         MAX_STRING_BYTES = 32 * 1024

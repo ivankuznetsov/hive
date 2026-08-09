@@ -785,6 +785,15 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_action_progress_digest_ignores_hash_insertion_order
+    with_project do |_dir, entry, store|
+      instance = scheduler(entry, store)
+
+      assert_equal instance.send(:job_digest, { "b" => 2, "a" => { "d" => 4, "c" => 3 } }),
+                   instance.send(:job_digest, { "a" => { "c" => 3, "d" => 4 }, "b" => 2 })
+    end
+  end
+
   def test_dry_run_leaves_authoritative_job_bytes_unchanged
     with_project do |dir, entry, store|
       enqueue(store)
@@ -1636,19 +1645,83 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
-  def test_valid_incomplete_action_envelope_reports_action_pending
+  def test_valid_incomplete_action_envelope_without_job_progress_is_cooled_down
     with_project do |dir, entry, store|
       write_action_job(dir, store)
-      aggregate = store.read_job("action-job")
       scheduler = scheduler(entry, store)
-      token = { registration: "demo", job_id: "action-job", phase: :action }
+      dispatch = scheduler.reserve(
+        scheduler.candidates(now: T0).find do |candidate|
+          candidate.fetch(:job_id) == "action-job"
+        end,
+        now: T0
+      )
+      aggregate = store.read_job("action-job")
       envelope = action_envelope(entry, aggregate)
 
       result = scheduler.complete(
-        dispatch_token: token, exit_code: 0, envelope: envelope, now: T0
+        dispatch_token: dispatch.fetch(:dispatch_token),
+        exit_code: 0, envelope: envelope, now: T0 + 1
+      )
+
+      assert_equal :retry, result.fetch(:status)
+      blocked = store.read_job("action-job")
+      assert_equal "action_no_progress",
+                   blocked.fetch("attempts").last.fetch("reason")
+      assert_empty scheduler.candidates(now: T0 + 3600)
+      assert_equal [ "action-job" ],
+                   scheduler.candidates(now: T0 + 3601).map { |item| item.fetch(:job_id) }
+    end
+  end
+
+  def test_valid_incomplete_action_envelope_with_job_progress_remains_pending
+    with_project do |dir, entry, store|
+      write_action_job(dir, store)
+      scheduler = scheduler(entry, store)
+      dispatch = scheduler.reserve(
+        scheduler.candidates(now: T0).find do |candidate|
+          candidate.fetch(:job_id) == "action-job"
+        end,
+        now: T0
+      )
+      store.initialize_actions!(
+        "action-job",
+        specifications: [ { "thesis_id" => "accepted", "kind" => "fix" } ],
+        now: T0 + 1
+      )
+      aggregate = store.read_job("action-job")
+
+      result = scheduler.complete(
+        dispatch_token: dispatch.fetch(:dispatch_token),
+        exit_code: 0,
+        envelope: action_envelope(entry, aggregate),
+        now: T0 + 2
       )
 
       assert_equal :action_pending, result.fetch(:status)
+      refute_equal "action_no_progress",
+                   store.read_job("action-job").fetch("attempts").last&.fetch("reason", nil)
+    end
+  end
+
+  def test_effect_capacity_is_durably_blocked_before_the_last_journal_cell
+    with_project do |dir, entry, store|
+      write_action_job(dir, store)
+      scheduler = scheduler(entry, store)
+
+      with_constant(
+        Hive::Modules::Migration::PatrolEvidence,
+        :MAX_EFFECTS_PER_OCCURRENCE,
+        2
+      ) do
+        assert_empty scheduler.candidates(now: T0)
+        aggregate = store.read_job("action-job")
+        blocker = aggregate.fetch("attempts").last
+        assert_equal "effect_capacity_exhausted", blocker.fetch("reason")
+        assert store.action_phase_backoff_active?(aggregate, now: T0 + 86_400)
+        assert_empty scheduler.candidates(now: T0 + 86_400)
+        assert_equal 2,
+                     store.occurrence_for_job("action-job").fetch("effects").size
+      end
     end
   end
 

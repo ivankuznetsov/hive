@@ -1725,6 +1725,50 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_full_effect_capacity_is_reported_without_another_journal_write
+    with_project do |dir, entry, store|
+      write_action_job(dir, store)
+      occurrence = store.occurrence_for_job("action-job")
+      intent = Hive::Modules::Migration::EffectIntent.build(
+        module_name: "architecture-patrol",
+        occurrence_id: occurrence.fetch("occurrence_id"),
+        authority: "legacy",
+        owner_epoch: 1,
+        sink: "job",
+        target: "action-job",
+        idempotency_key: "action-job:capacity-test",
+        capability: "filesystem_write",
+        claim_generation: 1,
+        scope: { "job_id" => "action-job" },
+        created_at: T0 + 1
+      )
+      store.prepare_effect!(intent, now: T0 + 1)
+      store.mark_dispatch_uncertain!(intent, now: T0 + 1)
+      store.settle_effect!(
+        intent,
+        status: "committed",
+        outcome: { "transition_status" => "applied" },
+        now: T0 + 1
+      )
+
+      with_constant(
+        Hive::Modules::Migration::PatrolEvidence,
+        :MAX_EFFECTS_PER_OCCURRENCE,
+        2
+      ) do
+        scheduler = scheduler(entry, store)
+
+        assert_empty scheduler.candidates(now: T0 + 2)
+        event = scheduler.drain_events.fetch(0)
+        assert_equal :blocked, event.fetch(:status)
+        assert_equal "effect_capacity_exhausted", event.fetch(:reason)
+        assert_equal 2, event.dig(:evidence, "effect_count")
+        assert_equal 2,
+                     store.occurrence_for_job("action-job").fetch("effects").size
+      end
+    end
+  end
+
   def test_valid_complete_action_envelope_reports_closed_and_store_errors_retry
     with_project do |dir, entry, store|
       write_action_job(dir, store)

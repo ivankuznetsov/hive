@@ -29,6 +29,9 @@ module Hive
         @logs_root = File.join(@root, "logs")
         @outputs_root = File.join(@root, "outputs")
         @generation_locks_root = File.join(@root, "generation-locks")
+        @proof_root = File.join(@root, "proof")
+        @decision_indexes_root = File.join(@root, "decision-indexes")
+        @pending_finalization_root = File.join(@root, "pending-finalization")
         ensure_private_directories! if create_directories
       end
 
@@ -50,6 +53,42 @@ module Hive
 
       def generation_locks_root
         managed_directory_path(@generation_locks_root, label: "generation-locks")
+      end
+
+      def proof_root
+        managed_directory_path(@proof_root, label: "proof")
+      end
+
+      def decision_indexes_root
+        managed_directory_path(@decision_indexes_root, label: "decision-indexes")
+      end
+
+      def pending_finalization_root
+        managed_directory_path(@pending_finalization_root, label: "pending-finalization")
+      end
+
+      def permanent_proofs
+        require "hive/attempts/permanent_proof_store"
+        @permanent_proofs ||= PermanentProofStore.new(
+          root: @proof_root,
+          create_directories: @create_directories
+        )
+      end
+
+      def decision_index
+        require "hive/attempts/decision_index"
+        @decision_index ||= DecisionIndex.new(
+          root: @decision_indexes_root,
+          create_directories: @create_directories
+        )
+      end
+
+      def pending_finalizations
+        require "hive/attempts/pending_finalization_store"
+        @pending_finalizations ||= PendingFinalizationStore.new(
+          root: @pending_finalization_root,
+          create_directories: @create_directories
+        )
       end
 
       def output_directory(attempt_id, *segments, create: false)
@@ -114,6 +153,13 @@ module Hive
       end
 
       def fetch(attempt_id)
+        hot = fetch_hot(attempt_id)
+        return hot if hot
+
+        permanent_proofs.fetch(attempt_id)
+      end
+
+      def fetch_hot(attempt_id)
         path = record_path(attempt_id)
         validate_regular_file!(path, label: "attempt record")
         Record.new(JSON.parse(File.binread(path)))
@@ -399,7 +445,10 @@ module Hive
           "records" => @records_root,
           "logs" => @logs_root,
           "outputs" => @outputs_root,
-          "generation-locks" => @generation_locks_root
+          "generation-locks" => @generation_locks_root,
+          "proof" => @proof_root,
+          "decision-indexes" => @decision_indexes_root,
+          "pending-finalization" => @pending_finalization_root
         }
       end
 

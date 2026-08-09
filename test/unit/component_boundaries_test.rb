@@ -43,11 +43,14 @@ class ComponentBoundariesTest < Minitest::Test
       Hive::Attempts::CapacitySnapshot
       Hive::Attempts::Client
       Hive::Attempts::ConfiguredDispatcher
+      Hive::Attempts::DecisionIndex
       Hive::Attempts::DetachedLauncher
       Hive::Attempts::Dispatcher
       Hive::Attempts::Entrypoint
       Hive::Attempts::LostOutcomeProcessor
       Hive::Attempts::LostOutcomeStore
+      Hive::Attempts::PendingFinalizationStore
+      Hive::Attempts::PermanentProofStore
       Hive::Attempts::ProcessIdentity
       Hive::Attempts::Reconciler
       Hive::Attempts::Store

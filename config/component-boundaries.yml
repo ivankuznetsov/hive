@@ -320,6 +320,7 @@ components:
       - hive/config
       - hive/dependency_snapshot
       - hive/lock
+      - hive/managed_directory
       - hive/markers
       - hive/paths
       - hive/stringify_keys
@@ -338,6 +339,9 @@ components:
       - Hive::Attempts::CapacitySnapshot
       - Hive::Attempts::LostOutcomeStore
       - Hive::Attempts::LostOutcomeProcessor
+      - Hive::Attempts::PermanentProofStore
+      - Hive::Attempts::DecisionIndex
+      - Hive::Attempts::PendingFinalizationStore
     forbidden_constructions:
       - Hive::Attempts::Entrypoint
       - Hive::Attempts::ConfiguredDispatcher
@@ -351,6 +355,9 @@ components:
       - Hive::Attempts::CapacitySnapshot
       - Hive::Attempts::LostOutcomeStore
       - Hive::Attempts::LostOutcomeProcessor
+      - Hive::Attempts::PermanentProofStore
+      - Hive::Attempts::DecisionIndex
+      - Hive::Attempts::PendingFinalizationStore
     authorized_internal_constructions:
       - constant: Hive::Attempts::Store
         files:

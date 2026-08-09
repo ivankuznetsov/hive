@@ -37,15 +37,20 @@ module Hive
           )
         end
 
+        if (existing = existing_enqueue(store, manifest))
+          assert_required_occurrence!(
+            existing.fetch("occurrence_id"), required_occurrence_id
+          )
+          return existing
+        end
+
         migration = current_migration_snapshot!(entry)
         capture = capture_for(
           entry, store, manifest, migration: migration, now: now
         )
-        if required_occurrence_id &&
-           capture.occurrence_id != required_occurrence_id
-          raise Hive::ConfigError,
-                "refactor patrol occurrence does not match command dispatch"
-        end
+        assert_required_occurrence!(
+          capture.occurrence_id, required_occurrence_id
+        )
 
         perform_enqueue!(
           entry, store, manifest, policy: policy, capture: capture,
@@ -54,6 +59,25 @@ module Hive
       end
 
       private
+
+      def assert_required_occurrence!(actual, required)
+        return unless required && actual != required
+
+        raise Hive::ConfigError,
+              "refactor patrol occurrence does not match command dispatch"
+      end
+
+      def existing_enqueue(store, manifest)
+        aggregate = store.read_job(manifest.fetch("job_id"))
+        return unless aggregate
+        return aggregate if aggregate.key?("occurrence_id") &&
+                            aggregate.fetch("source") ==
+                              manifest_source(manifest)
+
+        nil
+      rescue JobStore::RecordNotFound
+        nil
+      end
 
       def gateway_supported?(store)
         store.respond_to?(:reserve_manifest_occurrence!) &&

@@ -139,6 +139,7 @@ module Hive
       def candidates(now: Time.now)
         @events.clear
         managed = managed_entries
+        stores_by_project = {}
         block_configuration_errors(now)
         due_by_project = managed.to_h do |entry|
           store = begin
@@ -148,6 +149,7 @@ module Hive
             nil
           end
           next [ entry.fetch("name"), [] ] unless store
+          stores_by_project[entry.fetch("name")] = store
 
           unless recover_occurrences(store, entry, now)
             next [ entry.fetch("name"), [] ]
@@ -172,12 +174,18 @@ module Hive
         managed.flat_map do |entry|
           project = entry.fetch("name")
           work = due_by_project.fetch(project)
+          next [] if work.empty?
+
+          store = stores_by_project.fetch(project)
           work.filter_map do |item|
             aggregate = item.fetch(:aggregate)
-            if item.fetch(:phase) == :action &&
-               (capacity = effect_capacity_exhaustion(store_for(entry), aggregate))
-              stop_at_effect_capacity(entry, aggregate, capacity, now)
-              next
+            if (capacity = effect_capacity_exhaustion(
+              store, aggregate
+            ))
+              aggregate = rollover_effect_capacity(
+                entry, store, aggregate, capacity, now
+              )
+              next unless aggregate
             end
             ownership = repository_ownership_decision(
               entry, aggregate, phase: item.fetch(:phase),
@@ -634,6 +642,9 @@ module Hive
       def effect_capacity_exhaustion(store, aggregate)
         occurrence = store.occurrence_for_job(aggregate.fetch("job_id"))
         return unless occurrence
+        return if active_claim_for_occurrence?(
+          aggregate, occurrence.fetch("occurrence_id")
+        )
 
         count = occurrence.fetch("effects").size
         limit = Hive::Modules::Migration::PatrolEvidence::MAX_EFFECTS_PER_OCCURRENCE
@@ -647,27 +658,86 @@ module Hive
         }
       end
 
-      def stop_at_effect_capacity(entry, aggregate, evidence, now)
-        if evidence.fetch("effect_count") < evidence.fetch("effect_limit")
-          block(
-            entry, aggregate,
-            reason: "effect_capacity_exhausted",
-            evidence: evidence,
-            now: now,
-            phase: :action
+      def rollover_effect_capacity(entry, store, aggregate, evidence, now)
+        updated = Hive::Modules::Migration::Patrols.with_migration_lock(
+          entry.fetch("path"),
+          hive_state_path: entry["hive_state_path"],
+          shared: true
+        ) do
+          assert_rollover_admission!(entry, store, aggregate)
+          @occurrence_lifecycle.rollover(
+            store: store,
+            entry: entry,
+            aggregate: aggregate,
+            now: now
           )
-          return
         end
-
+        @events << {
+          status: :recovered,
+          project: entry.fetch("name"),
+          job_id: aggregate.fetch("job_id"),
+          pr_number: aggregate.dig("source", "number"),
+          pr_url: aggregate.dig("source", "url"),
+          reason: "effect_capacity_rolled_over",
+          evidence: evidence.merge(
+            "successor_occurrence_id" =>
+              updated.fetch("occurrence_id")
+          )
+        }
+        updated
+      rescue Hive::ConfigError,
+             Hive::RefactorPatrol::JobStore::Error => e
         @events << {
           status: :blocked,
           project: entry.fetch("name"),
           job_id: aggregate.fetch("job_id"),
           pr_number: aggregate.dig("source", "number"),
           pr_url: aggregate.dig("source", "url"),
-          reason: "effect_capacity_exhausted",
-          evidence: evidence
+          reason: "effect_capacity_rollover_failed",
+          evidence: evidence.merge(
+            "error" => "#{e.class}: #{e.message}"
+          )
         }
+        nil
+      end
+
+      def active_claim_for_occurrence?(aggregate, occurrence_id)
+        discovery = aggregate.fetch("attempts").any? do |attempt|
+          attempt["kind"] ==
+            Hive::RefactorPatrol::JobStore::DISCOVERY_ATTEMPT_KIND &&
+            attempt["occurrence_id"] == occurrence_id &&
+            Hive::RefactorPatrol::JobStore::ACTIVE_CLAIM_STATES.include?(
+              attempt["state"]
+            )
+        end
+        return true if discovery
+
+        aggregate.fetch("actions").any? do |action|
+          Array(action["claims"]).any? do |claim|
+            claim["occurrence_id"] == occurrence_id &&
+              Hive::RefactorPatrol::JobStore::
+                ACTIVE_ACTION_CLAIM_STATES.include?(claim["state"])
+          end
+        end
+      end
+
+      def assert_rollover_admission!(entry, store, aggregate)
+        migration = @migration_snapshot.call(
+          entry, "architecture-patrol"
+        )
+        capture = store.occurrence_capture(aggregate.fetch("job_id"))
+        admitted = @migration_ownership.call(
+          entry, "architecture-patrol", @migration_authority
+        ) && migration.is_a?(Hash) &&
+          migration["owner"] == @migration_authority.to_s &&
+          migration["admission"] == true &&
+          migration["epoch"].to_i.positive? && capture &&
+          capture.owner == migration.fetch("owner") &&
+          capture.owner_epoch == migration.fetch("epoch")
+        return true if admitted
+
+        raise Hive::ConfigError,
+              "architecture patrol migration ownership changed"
       end
 
       def assert_manifest_matches!(path, aggregate)

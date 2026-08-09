@@ -10,8 +10,11 @@ module Hive
       FORWARDED_METHODS = {
         reserve_manifest_occurrence!: :reserve_manifest!,
         reserve_occurrence!: :reserve!,
+        reserve_successor_occurrence!: :reserve_successor!,
         occurrence_for_job: :fetch_for_job,
+        occurrence: :fetch,
         occurrence_capture: :capture_for_job,
+        occurrence_terminalized?: :terminalized?,
         each_recovery_active_occurrence: :each_recovery_active,
         recovery_active?: :recovery_active?,
         rebuild_recovery_index!: :rebuild_recovery_index!,
@@ -34,6 +37,7 @@ module Hive
       MUTATING_METHODS = %i[
         reserve_manifest_occurrence!
         reserve_occurrence!
+        reserve_successor_occurrence!
         each_recovery_active_occurrence
         recovery_active?
         rebuild_recovery_index!
@@ -75,7 +79,7 @@ module Hive
       def unsettled_recorded_transitions(job)
         aggregate = aggregate_for(job)
         occurrence_id = aggregate.fetch("occurrence_id")
-        transitions = collect_recorded_effect_transitions(aggregate)
+        transitions = current_recorded_effect_transitions(aggregate)
         snapshot = occurrence_store.effect_recovery_snapshot(
           occurrence_id,
           intent_ids: transitions.map do |transition|
@@ -133,6 +137,40 @@ module Hive
         entries = [ intake ]
         aggregate.fetch("attempts").each { |attempt| entries.concat(Array(attempt["transitions"])) }
         aggregate.fetch("actions").each { |action| entries.concat(action.fetch("transitions")) }
+        unique_transitions(entries)
+      end
+
+      def current_recorded_effect_transitions(aggregate)
+        occurrence_id = aggregate.fetch("occurrence_id")
+        entries = []
+        occurrence = occurrence_store.fetch(occurrence_id)
+        current_effects = occurrence ? occurrence.fetch("effects") : {}
+        generation = occurrence&.dig(
+          "provisional_capture", "reservation", "attempt_generation"
+        ) || 1
+        if generation == 1
+          entries << {
+            "intent_id" => aggregate.fetch("intake_transition_id"),
+            "outcome" => "applied",
+            "error_code" => nil
+          }
+        end
+        aggregate.fetch("attempts").each do |attempt|
+          next unless attempt["occurrence_id"] == occurrence_id
+
+          entries.concat(Array(attempt["transitions"]))
+        end
+        aggregate.fetch("actions").each do |action|
+          action.fetch("transitions").each do |transition|
+            next unless current_effects.key?(transition.fetch("intent_id"))
+
+            entries << transition
+          end
+        end
+        unique_transitions(entries)
+      end
+
+      def unique_transitions(entries)
         entries.each_with_object({}) do |entry, unique|
           intent_id = entry.fetch("intent_id")
           existing = unique[intent_id]

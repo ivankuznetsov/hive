@@ -561,10 +561,18 @@ minting a new claim/release generation. A structured daily resource ceiling
 waits until the next UTC day, and a valid action child that changed no job
 state receives the same one-hour durable cooldown instead of immediate
 redispatch. Existing 192-effect records remain valid and have bounded recovery
-headroom. The scheduler reserves the final effect cell for a durable
-`effect_capacity_exhausted` action blocker. A record already at the hard limit
-is omitted from dispatch and surfaced as blocked, so bounded storage exhaustion
-cannot restart the child on every daemon tick.
+headroom. At the reserved boundary, Architecture Patrol verifies that every
+predecessor transition is terminal, reserves the exact next attempt generation,
+finalizes and projects the predecessor capture and receipts, then advances the
+job's current occurrence pointer. The successor starts with an empty effect set
+while finished claim history retains its predecessor identity. A crash after
+successor reservation is recovered by deriving and terminalizing its exact
+predecessor before pointer advance, so rollover cannot duplicate a transition
+or restart a child on every daemon tick. The rollover mutation holds the shared
+migration fence and revalidates owner, epoch, and admission. An expired active
+claim is resolved before rollover, using the reserved headroom, and transition
+history remains bounded per claim generation rather than across the lifetime
+of a multi-segment action.
 
 - scheduled ordinary attempts, module events, and Architecture Patrol jobs use
   canonical window/generation identities with bounded high-water entries and a

@@ -1738,7 +1738,14 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       end
       refute_nil active_token
 
-      invalid_backoff = job("attempts" => [ { "kind" => "action_block", "next_eligible_at" => "never" } ])
+      invalid_backoff = job(
+        "attempts" => [ {
+          "kind" => "action_block",
+          "occurrence_id" => "occ-#{'1' * 64}",
+          "reason" => "retry",
+          "next_eligible_at" => "never"
+        } ]
+      )
       assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
         store.action_phase_backoff_active?(invalid_backoff, now: T0)
       end
@@ -2635,11 +2642,18 @@ class RefactorPatrolJobStoreTest < Minitest::Test
         :MAX_TRANSITIONS_PER_GENERATION,
         1
       ) do
+        next_generation = transition.merge(
+          "intent_id" => "intent-2", "generation" => 2
+        )
+        assert_same next_generation,
+                    store.send(
+                      :append_transition!, records, next_generation
+                    )
         assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
           store.send(
             :append_transition!,
             records,
-            transition.merge("intent_id" => "intent-2")
+            next_generation.merge("intent_id" => "intent-3")
           )
         end
       end

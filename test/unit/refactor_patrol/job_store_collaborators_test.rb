@@ -328,6 +328,50 @@ class RefactorPatrolJobStoreCollaboratorsTest < Minitest::Test
     end
   end
 
+  def test_record_validator_fences_occurrence_rollover_to_the_pointer_only
+    path = "/tmp/job.json"
+    existing = valid_job
+    successor_id = "occ-#{'f' * 64}"
+    replacement = deep_copy(existing).merge(
+      "occurrence_id" => successor_id,
+      "updated_at" => (T0 + 1).iso8601
+    )
+
+    assert validator.send(
+      :validate_occurrence_rollover!,
+      existing,
+      replacement,
+      path,
+      from: existing.fetch("occurrence_id"),
+      to: successor_id
+    )
+
+    stale = assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+      validator.send(
+        :validate_occurrence_rollover!,
+        existing,
+        replacement,
+        path,
+        from: "occ-#{'e' * 64}",
+        to: successor_id
+      )
+    end
+    assert_match(/rollover fence is stale/, stale.message)
+
+    changed = deep_copy(replacement).merge("state" => "analyzing")
+    drift = assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+      validator.send(
+        :validate_occurrence_rollover!,
+        existing,
+        changed,
+        path,
+        from: existing.fetch("occurrence_id"),
+        to: successor_id
+      )
+    end
+    assert_match(/changed aggregate state/, drift.message)
+  end
+
   def test_record_validator_rejects_a_well_formed_but_mismatched_semantic_digest
     semantic = {
       "intent_id" => "intent-#{"1" * 64}",

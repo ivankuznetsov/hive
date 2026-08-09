@@ -12,7 +12,7 @@ class RefactorPatrolArchitectureOccurrenceStoreTest < Minitest::Test
     METHODS = %i[
       prepare_effect! effect_state effect_intent mark_dispatch_uncertain!
       reset_effect_prepared! settle_effect! deny_effect! receipt
-      effect_receipt_ids finalize!
+      effect_receipt_ids finalize! terminalized?
     ].freeze
 
     attr_accessor :record, :outbox, :failure
@@ -243,6 +243,114 @@ class RefactorPatrolArchitectureOccurrenceStoreTest < Minitest::Test
       )
     end
     assert_equal "fetch failed", error.message
+  end
+
+  def test_successor_reservation_rejects_bad_fences_and_translates_journal_errors
+    predecessor = capture_for(
+      manifest,
+      reservation: {
+        "kind" => "architecture", "id" => "job-7", "job_id" => "job-7",
+        "attempt_generation" => 1, "window_started_at" => NOW.iso8601(6)
+      }
+    )
+    successor = capture_for(
+      manifest,
+      reservation: predecessor.reservation.merge("attempt_generation" => 2)
+    )
+    journal = Journal.new
+    journal.record = {
+      "phase" => "reserved",
+      "provisional_capture" => predecessor.to_h
+    }
+    store = occurrence_store(
+      journal: journal,
+      job_reader: ->(_job_id) {
+        job.merge("occurrence_id" => predecessor.occurrence_id)
+      }
+    )
+
+    assert_equal successor.occurrence_id,
+                 store.reserve_successor!(
+                   "job-7", predecessor: predecessor,
+                   capture: successor, now: NOW
+                 ).fetch("occurrence_id")
+
+    wrong_generation = capture_for(
+      manifest,
+      reservation: predecessor.reservation.merge("attempt_generation" => 3)
+    )
+    journal.record = {
+      "phase" => "reserved",
+      "provisional_capture" => predecessor.to_h
+    }
+    assert_raises(InconsistentRecord) do
+      store.reserve_successor!(
+        "job-7", predecessor: predecessor,
+        capture: wrong_generation, now: NOW
+      )
+    end
+
+    missing_generation = capture_for(manifest)
+    missing_journal = Journal.new
+    missing_journal.record = {
+      "phase" => "reserved",
+      "provisional_capture" => missing_generation.to_h
+    }
+    missing_store = occurrence_store(
+      journal: missing_journal,
+      job_reader: ->(_job_id) {
+        job.merge("occurrence_id" => missing_generation.occurrence_id)
+      }
+    )
+    assert_raises(InconsistentRecord) do
+      missing_store.reserve_successor!(
+        "job-7", predecessor: missing_generation,
+        capture: missing_generation, now: NOW
+      )
+    end
+
+    ordinary = capture_for(
+      manifest,
+      reservation: { "kind" => "ordinary", "id" => "job-7" }
+    )
+    ordinary_journal = Journal.new
+    ordinary_journal.record = {
+      "phase" => "reserved",
+      "provisional_capture" => ordinary.to_h
+    }
+    ordinary_store = occurrence_store(
+      journal: ordinary_journal,
+      job_reader: ->(_job_id) {
+        job.merge("occurrence_id" => ordinary.occurrence_id)
+      }
+    )
+    assert_raises(InconsistentRecord) do
+      ordinary_store.reserve_successor!(
+        "job-7", predecessor: ordinary, capture: ordinary, now: NOW
+      )
+    end
+
+    journal.record = {
+      "phase" => "reserved",
+      "provisional_capture" => predecessor.to_h
+    }
+    journal.failure = :reserve!
+    assert_raises(InconsistentRecord) do
+      store.reserve_successor!(
+        "job-7", predecessor: predecessor, capture: successor, now: NOW
+      )
+    end
+  end
+
+  def test_direct_occurrence_reads_translate_journal_corruption
+    journal = Journal.new
+    store = occurrence_store(journal: journal)
+
+    journal.failure = :fetch
+    assert_raises(CorruptRecord) { store.fetch(capture.occurrence_id) }
+
+    journal.failure = :terminalized?
+    assert_raises(CorruptRecord) { store.terminalized?(capture) }
   end
 
   def test_manifest_repository_target_binds_the_pr_url_host_and_slug

@@ -2458,6 +2458,58 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     end
   end
 
+  def test_occurrence_rollover_rejects_stale_fences_and_active_claims
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(File.join(dir, "idle"))
+      aggregate = classified_job
+      store.write_job!(aggregate)
+      from = aggregate.fetch("occurrence_id")
+      successor = "occ-#{'f' * 64}"
+
+      assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        store.rollover_occurrence!(
+          "job-1", from: "occ-#{'e' * 64}", to: successor, now: T0
+        )
+      end
+      assert_equal successor,
+                   store.rollover_occurrence!(
+                     "job-1", from: from, to: successor, now: T0
+                   ).fetch("occurrence_id")
+
+      discovery = Hive::RefactorPatrol::JobStore.new(
+        File.join(dir, "discovery")
+      )
+      enqueue_manifest(discovery, manifest, policy: intake_policy, now: T0)
+      discovery.claim_discovery!(
+        "pr-7-stable", owner: "runner", analysis_sha: "c" * 40,
+        now: T0
+      )
+      discovery_job = discovery.read_job("pr-7-stable")
+      assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        discovery.rollover_occurrence!(
+          "pr-7-stable",
+          from: discovery_job.fetch("occurrence_id"),
+          to: "occ-#{'d' * 64}",
+          now: T0
+        )
+      end
+
+      acting = initialized_store(File.join(dir, "action"))
+      acting.claim_action!(
+        "job-1", fix_action_id(acting), owner: "runner", now: T0
+      )
+      action_job = acting.read_job("job-1")
+      assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        acting.rollover_occurrence!(
+          "job-1",
+          from: action_job.fetch("occurrence_id"),
+          to: "occ-#{'c' * 64}",
+          now: T0
+        )
+      end
+    end
+  end
+
   def test_new_job_capacity_is_rejected_without_orphan_job_or_index_state
     with_tmp_dir do |dir|
       with_constant(

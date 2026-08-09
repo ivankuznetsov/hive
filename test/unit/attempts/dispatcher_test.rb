@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/attempts/dispatcher"
+require "hive/attempts/reconciler"
 
 class AttemptsDispatcherTest < Minitest::Test
   include HiveTestHelper
@@ -644,6 +645,314 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
+  def test_shared_admission_view_applies_multi_admission_capacity_delta_without_rescanning
+    with_dispatcher(limits: { max_global: 2, max_per_project: 2, max_daily: 2 }) do |dispatcher, launcher, task, store|
+      scans = 0
+      original_scan = store.method(:scan)
+      store.define_singleton_method(:scan) do
+        scans += 1
+        original_scan.call
+      end
+      proof_reads = 0
+      proofs = store.permanent_proofs
+      original_fetch = proofs.method(:fetch)
+      proofs.define_singleton_method(:fetch) do |attempt_id|
+        proof_reads += 1
+        original_fetch.call(attempt_id)
+      end
+      admission_view = Hive::Attempts::Reconciler.new(store: store).reconcile(now: NOW).admission_view
+      second_task = task.dup
+      second_task.id = 43
+      second_task.slug = "durable-task-two"
+      second_task.state_file = File.join(File.dirname(task.state_file), "task-two.md")
+      File.write(second_task.state_file, "task two\n<!-- WAITING -->\n")
+      third_task = task.dup
+      third_task.id = 44
+      third_task.slug = "durable-task-three"
+      third_task.state_file = File.join(File.dirname(task.state_file), "task-three.md")
+      File.write(third_task.state_file, "task three\n<!-- WAITING -->\n")
+
+      first = dispatch(
+        dispatcher, task, request_id: "request-one", admission_view: admission_view
+      )
+      second = dispatch(
+        dispatcher, second_task, request_id: "request-two", admission_view: admission_view
+      )
+      blocked = dispatch(
+        dispatcher, third_task, request_id: "request-three", admission_view: admission_view
+      )
+
+      assert_equal [ :accepted, :accepted, :deferred ], [ first.status, second.status, blocked.status ]
+      assert_equal "capacity", blocked.reason
+      assert_equal 2, launcher.launched.size
+      assert_equal 1, scans
+      assert_equal 0, proof_reads
+    end
+  end
+
+  def test_stale_tick_view_observes_external_dispatch_through_live_capacity_cell
+    with_tmp_dir do |root|
+      attempt_root = File.join(root, "attempts")
+      tick_store = Hive::Attempts::Store.new(root: attempt_root)
+      external_store = Hive::Attempts::Store.new(root: attempt_root)
+      tick_scans = 0
+      external_scans = 0
+      tick_scan = tick_store.method(:scan)
+      external_scan = external_store.method(:scan)
+      tick_store.define_singleton_method(:scan) do
+        tick_scans += 1
+        tick_scan.call
+      end
+      external_store.define_singleton_method(:scan) do
+        external_scans += 1
+        external_scan.call
+      end
+      admission_view = Hive::Attempts::Reconciler.new(store: tick_store)
+                                                  .reconcile(now: NOW)
+                                                  .admission_view
+      assert_equal 1, tick_scans
+      assert_equal 0, external_scans
+
+      external_task = task_fixture(root, id: 41, slug: "external-task")
+      daemon_task = task_fixture(root, id: 42, slug: "daemon-task")
+      limits = { max_global: 1, max_per_project: 1, max_daily: 50 }
+      external = Hive::Attempts::Dispatcher.new(
+        store: external_store, launcher: FakeLauncher.new, limits: limits,
+        id_generator: -> { "external-attempt" },
+        capability_generator: -> { CLAIM_CAPABILITY }
+      )
+      daemon = Hive::Attempts::Dispatcher.new(
+        store: tick_store, launcher: FakeLauncher.new, limits: limits,
+        id_generator: -> { "daemon-attempt" },
+        capability_generator: -> { CLAIM_CAPABILITY }
+      )
+
+      external_result = external.dispatch(
+        task: external_task, project: "external", intended_stage: "4-execute",
+        argv: [ "hive", "run", external_task.slug ], request_id: "external-request",
+        provider: "codex", now: NOW + 1
+      )
+      assert_equal :accepted, external_result.status
+      assert_equal 1, external_scans
+
+      daemon_result = daemon.dispatch(
+        task: daemon_task, project: "daemon", intended_stage: "4-execute",
+        argv: [ "hive", "run", daemon_task.slug ], request_id: "daemon-request",
+        provider: "codex", now: NOW + 2, admission_view: admission_view
+      )
+
+      assert_equal :deferred, daemon_result.status
+      assert_equal "capacity", daemon_result.reason
+      assert_equal 1, tick_scans,
+                   "the daemon must not rescan its stale tick view"
+      assert_equal 1, external_scans,
+                   "the direct dispatcher owns its separate admission scan"
+    end
+  end
+
+  def test_pending_live_capacity_reservation_without_a_record_converges_under_admission_lock
+    with_dispatcher(limits: { max_global: 1, max_per_project: 1, max_daily: 50 }) do |dispatcher, _launcher, task, store|
+      store.with_admission_lock do
+        store.decision_index.reserve_live(
+          attempt_id: "crashed-before-create", project: "demo", task_slug: "missing-task"
+        )
+      end
+      admission_view = Hive::Attempts::Reconciler.new(store: store)
+                                                  .reconcile(now: NOW)
+                                                  .admission_view
+
+      result = dispatch(
+        dispatcher, task, request_id: "request-one",
+        admission_view: admission_view
+      )
+
+      assert_equal :accepted, result.status
+      assert_equal [ result.attempt.attempt_id ],
+                   store.decision_index.live_reservations.keys
+    end
+  end
+
+  def test_cold_terminal_proof_releases_active_capacity_but_missing_active_record_fails_closed
+    with_dispatcher(limits: { max_global: 1, max_per_project: 1, max_daily: 50 }) do |dispatcher, launcher, task, store|
+      first = dispatch(dispatcher, task, request_id: "request-one")
+      terminal = terminalize_attempt(
+        store, launcher, first, outcome: "failed", exit_status: 1,
+        now: NOW + 3
+      )
+      store.permanent_proofs.publish(terminal)
+      File.unlink(store.record_path(terminal.attempt_id))
+      other_task = task_fixture(File.dirname(task.state_file), id: 43, slug: "other-task")
+      admission_view = Hive::Attempts::Reconciler.new(store: store)
+                                                  .reconcile(now: NOW + 4)
+                                                  .admission_view
+
+      result = dispatch(
+        dispatcher, other_task, request_id: "request-two",
+        admission_view: admission_view
+      )
+
+      assert_equal :accepted, result.status
+    end
+
+    with_dispatcher(limits: { max_global: 1, max_per_project: 1, max_daily: 50 }) do |dispatcher, _launcher, task, store|
+      store.with_admission_lock do
+        store.decision_index.reserve_live(
+          attempt_id: "missing-active", project: "other", task_slug: "missing-task"
+        )
+        store.decision_index.confirm_live(
+          attempt_id: "missing-active", project: "other", task_slug: "missing-task"
+        )
+      end
+      admission_view = Hive::Attempts::Reconciler.new(store: store)
+                                                  .reconcile(now: NOW)
+                                                  .admission_view
+
+      result = dispatch(
+        dispatcher, task, request_id: "request-one",
+        admission_view: admission_view
+      )
+
+      assert_equal :deferred, result.status
+      assert_equal "capacity", result.reason
+    end
+  end
+
+  def test_shared_admission_view_revalidates_terminal_replay_and_loss_successor_semantics
+    with_dispatcher do |dispatcher, launcher, task, store|
+      admission_view = Hive::Attempts::Reconciler.new(store: store).reconcile(now: NOW).admission_view
+      first = dispatch(
+        dispatcher, task, request_id: "request-one", admission_view: admission_view
+      )
+      failed = terminalize_attempt(
+        store, launcher, first, outcome: "failed", exit_status: 1, now: NOW + 3
+      )
+
+      replay = dispatch(
+        dispatcher, task, request_id: "request-one", admission_view: admission_view
+      )
+      retry_result = dispatch(
+        dispatcher, task, request_id: "request-two", admission_view: admission_view
+      )
+      lost = store.mark_lost(retry_result.attempt, reason: "owner_gone", now: NOW + 4)
+      blocked = dispatch(
+        dispatcher, task, request_id: "request-three", admission_view: admission_view
+      )
+      successor = dispatcher.dispatch_successor(
+        predecessor: lost, task: task, project: "demo",
+        argv: [ "hive", "run", task.slug ], request_id: "request-four",
+        provider: "codex", retry_charge: 1, now: NOW + 5,
+        admission_view: admission_view
+      )
+
+      assert_equal :terminal_replay, replay.status
+      assert_equal failed.receipt, replay.receipt
+      assert_equal :accepted, retry_result.status
+      assert_equal "attempt_lost", blocked.reason
+      assert_equal :accepted, successor.status
+      assert_equal lost.attempt_id, successor.attempt["predecessor_attempt_id"]
+      assert_equal 1, successor.attempt["retry_charge"]
+    end
+  end
+
+  def test_admission_point_fetches_cold_terminal_request_and_successful_owner_proofs
+    with_dispatcher do |dispatcher, launcher, task, store|
+      failed_result = dispatch(dispatcher, task, request_id: "request-one")
+      failed = terminalize_attempt(
+        store, launcher, failed_result, outcome: "failed", exit_status: 1,
+        now: NOW + 3
+      )
+      successful_result = dispatch(dispatcher, task, request_id: "request-two")
+      successful = terminalize_attempt(
+        store, launcher, successful_result, outcome: "succeeded", exit_status: 0,
+        now: NOW + 6
+      )
+      [ failed, successful ].each do |record|
+        store.decision_index.record_terminal(record)
+        store.permanent_proofs.publish(record)
+        File.unlink(store.record_path(record.attempt_id))
+      end
+      admission_view = Hive::Attempts::Reconciler.new(store: store)
+                                                  .reconcile(now: NOW + 7)
+                                                  .admission_view
+
+      exact_request = dispatch(
+        dispatcher, task, request_id: "request-one", admission_view: admission_view
+      )
+      semantic_success = dispatch(
+        dispatcher, task, request_id: "request-three", admission_view: admission_view
+      )
+
+      assert_equal :terminal_replay, exact_request.status
+      assert_equal failed.receipt, exact_request.receipt
+      assert_equal :terminal_replay, semantic_success.status
+      assert_equal successful.receipt, semantic_success.receipt
+      assert_equal 2, launcher.launched.size
+    end
+  end
+
+  def test_cold_daily_index_enforces_utc_capacity_and_tempfail_refund
+    with_dispatcher(limits: { max_global: 3, max_per_project: 3, max_daily: 1 }) do |dispatcher, launcher, task, store|
+      first = dispatch(dispatcher, task, request_id: "request-one")
+      failed = terminalize_attempt(
+        store, launcher, first, outcome: "failed", exit_status: 1,
+        now: NOW + 3
+      )
+      Hive::Attempts::Reconciler.new(store: store).reconcile(now: NOW + 4)
+      store.permanent_proofs.publish(failed)
+      File.unlink(store.record_path(failed.attempt_id))
+      admission_view = Hive::Attempts::Reconciler.new(store: store)
+                                                  .reconcile(now: NOW + 5)
+                                                  .admission_view
+      other_task = task.dup
+      other_task.id = 43
+      other_task.slug = "other-task"
+      other_task.state_file = File.join(File.dirname(task.state_file), "other.md")
+      File.write(other_task.state_file, "other\n<!-- WAITING -->\n")
+
+      blocked = dispatch(
+        dispatcher, other_task, request_id: "request-two",
+        admission_view: admission_view,
+        now: Time.new(2026, 7, 17, 1, 0, 0, "+14:00")
+      )
+
+      assert_equal :deferred, blocked.status
+      assert_equal "capacity", blocked.reason
+    end
+
+    with_dispatcher(limits: { max_global: 3, max_per_project: 3, max_daily: 1 }) do |dispatcher, launcher, task, store|
+      first = dispatch(dispatcher, task, request_id: "request-one")
+      tempfail = terminalize_attempt(
+        store, launcher, first, outcome: "failed",
+        exit_status: Hive::ExitCodes::TEMPFAIL, now: NOW + 3
+      )
+      2.times { Hive::Attempts::Reconciler.new(store: store).reconcile(now: NOW + 4) }
+      store.permanent_proofs.publish(tempfail)
+      File.unlink(store.record_path(tempfail.attempt_id))
+      admission_view = Hive::Attempts::Reconciler.new(store: store)
+                                                  .reconcile(now: NOW + 5)
+                                                  .admission_view
+      other_task = task.dup
+      other_task.id = 43
+      other_task.slug = "other-task"
+      other_task.state_file = File.join(File.dirname(task.state_file), "other.md")
+      File.write(other_task.state_file, "other\n<!-- WAITING -->\n")
+
+      accepted = dispatch(
+        dispatcher, other_task, request_id: "request-two",
+        admission_view: admission_view,
+        now: Time.new(2026, 7, 17, 1, 0, 0, "+14:00")
+      )
+
+      assert_equal :accepted, accepted.status
+      assert_equal 0, store.decision_index.daily_count(
+        project: "demo", date: Date.new(2026, 7, 17)
+      )
+      assert_equal 1, store.decision_index.daily_count(
+        project: "demo", date: NOW.utc.to_date
+      )
+    end
+  end
+
   private
 
   def with_dispatcher(limits: { max_global: 3, max_per_project: 2, max_daily: 50 })
@@ -663,12 +972,22 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
+  def task_fixture(root, id:, slug:)
+    state_file = File.join(root, "#{slug}.md")
+    File.write(state_file, "#{slug}\n<!-- WAITING -->\n")
+    FakeTask.new(
+      id: id, slug: slug, state_file: state_file,
+      stage_index: 4, stage_name: "execute"
+    )
+  end
+
   def dispatch(dispatcher, task, request_id:, interactive: false, intended_stage: "4-execute",
-               generation: nil)
+               generation: nil, admission_view: nil, now: NOW)
     dispatcher.dispatch(
       task: task, project: "demo", intended_stage: intended_stage,
       argv: [ "hive", "run", task.slug ], request_id: request_id,
-      provider: "codex", interactive: interactive, generation: generation, now: NOW
+      provider: "codex", interactive: interactive, generation: generation, now: now,
+      admission_view: admission_view
     )
   end
 

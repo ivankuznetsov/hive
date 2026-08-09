@@ -98,6 +98,22 @@ class AttemptsCapacitySnapshotTest < Minitest::Test
     assert_equal 0, snapshot.daily_count("demo", NOW.to_date)
   end
 
+  def test_supplied_hot_scan_is_reused_without_store_rescan
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Store.new(root: root)
+      create(store, attempt_id: "live", project: "p1", task_slug: "s1")
+      hot_scan = store.scan
+      store.define_singleton_method(:scan) { raise "unexpected rescan" }
+
+      snapshot = Hive::Attempts::CapacitySnapshot.build(
+        store: store, scan: hot_scan, now: NOW
+      )
+
+      assert_equal 1, snapshot.global_count
+      assert_equal 1, snapshot.daily_count("p1", NOW.to_date)
+    end
+  end
+
   private
 
   def create(store, attempt_id:, project:, task_slug:, generation: "g1")

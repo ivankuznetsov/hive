@@ -9,8 +9,14 @@ module Hive
     ReconciledAttempt = Data.define(:attempt, :classification, :owner_status, :evidence)
     ReconciliationSnapshot = Data.define(
       :capacity, :attempts, :lost_attempts, :newly_lost_attempts,
-      :terminal_attempts, :invalid_records
-    )
+      :terminal_attempts, :invalid_records, :hot_scan, :admission_view
+    ) do
+      def initialize(capacity:, attempts:, lost_attempts:, newly_lost_attempts:,
+                     terminal_attempts:, invalid_records:, hot_scan: nil,
+                     admission_view: nil)
+        super
+      end
+    end
 
     # Restart-safe observer. It adopts by identity, never wait2, and preserves
     # stale-but-matching owners as capacity-reserving suspects.
@@ -44,6 +50,7 @@ module Hive
         newly_lost = []
         all_lost = []
         terminals = []
+        effective_records = []
 
         scan.records.each do |record|
           reconciled = reconcile_record(record, now: now)
@@ -52,21 +59,34 @@ module Hive
           newly_lost << reconciled.attempt if reconciled.classification == :lost
           all_lost << reconciled.attempt if reconciled.attempt.state == "lost"
           terminals << reconciled.attempt if reconciled.classification == :terminal
+          effective_records << reconciled.attempt
           log_reconciliation(reconciled)
         rescue CompareAndSwapFailed
           # Another wrapper/reconciler won the transition. Re-read on the next
-          # scan; no duplicate loss/terminal outcome is emitted by this loser.
+          # point lookup; no duplicate loss/terminal outcome is emitted by
+          # this loser, and no second historical scan is needed for capacity.
+          current = @store.fetch_hot(record.attempt_id)
+          effective_records << current if current
           next
         end
         log_invalid_records(scan.invalid_records)
 
+        hot_scan = Scan.new(
+          records: effective_records.freeze,
+          invalid_records: scan.invalid_records.freeze
+        )
+        admission_view = AdmissionView.new(store: @store, hot_scan: hot_scan)
+        capacity = CapacitySnapshot.build(store: @store, scan: hot_scan, now: now)
+
         ReconciliationSnapshot.new(
-          capacity: CapacitySnapshot.build(store: @store, now: now),
+          capacity: capacity,
           attempts: statuses.freeze,
           lost_attempts: all_lost.freeze,
           newly_lost_attempts: newly_lost.freeze,
           terminal_attempts: terminals.freeze,
-          invalid_records: scan.invalid_records.freeze
+          invalid_records: scan.invalid_records.freeze,
+          hot_scan: hot_scan,
+          admission_view: admission_view
         )
       end
 

@@ -14,11 +14,13 @@ module Hive
       SCHEMA_VERSION = 1
       MAX_ENTRY_BYTES = 2 * 1024 * 1024
       MAX_DAILY_ATTEMPTS = 10_000
+      MAX_LIVE_RESERVATIONS = 1_024
       TERMINAL_REQUEST = "terminal-request".freeze
       SUCCESSFUL_OWNER = "successful-owner".freeze
       UNRESOLVED_LOSS = "unresolved-loss".freeze
       SUCCESSOR = "successor".freeze
       DAILY_ACCOUNTING = "daily-accounting".freeze
+      LIVE_CAPACITY = "live-capacity".freeze
       ENTRY_KEYS = %w[kind key schema schema_version value].freeze
 
       attr_reader :root
@@ -183,6 +185,58 @@ module Hive
         end
       end
 
+      # The host-wide admission lock is the transaction boundary for these
+      # methods. This single bounded cell contains current reservations only;
+      # it is not attempt history. Pending-before-create makes a crash
+      # conservative, and the next lock holder can remove a pending entry only
+      # after observing that no hot record was created.
+      def reserve_live(attempt_id:, project:, task_slug:)
+        update_live_reservations do |reservations|
+          id = StorageKey.string(attempt_id)
+          candidate = live_reservation(
+            project: project, task_slug: task_slug, phase: "pending"
+          )
+          existing = reservations[id]
+          if existing && existing.reject { |key, _| key == "phase" } !=
+                         candidate.reject { |key, _| key == "phase" }
+            raise StoreError, "live capacity reservation conflicts with attempt identity"
+          end
+          reservations[id] ||= candidate
+          reservations
+        end
+      end
+
+      def confirm_live(attempt_id:, project:, task_slug:)
+        update_live_reservations do |reservations|
+          id = StorageKey.string(attempt_id)
+          candidate = live_reservation(
+            project: project, task_slug: task_slug, phase: "active"
+          )
+          existing = reservations[id]
+          if existing && existing.reject { |key, _| key == "phase" } !=
+                         candidate.reject { |key, _| key == "phase" }
+            raise StoreError, "live capacity reservation conflicts with attempt identity"
+          end
+          reservations[id] = candidate
+          reservations
+        end
+      end
+
+      def release_live(attempt_id:)
+        update_live_reservations do |reservations|
+          reservations.delete(StorageKey.string(attempt_id))
+          reservations
+        end
+      end
+
+      def live_reservations
+        value = read_value(LIVE_CAPACITY, live_capacity_key)
+        reservations = value ? value.fetch("reservations") : {}
+        reservations.to_h do |attempt_id, reservation|
+          [ attempt_id.dup.freeze, reservation.dup.freeze ]
+        end.freeze
+      end
+
       def path_for(kind, key)
         @storage.path_for(kind, StorageKey.normalize(key))
       end
@@ -286,6 +340,21 @@ module Hive
 
             Time.iso8601(acceptance.fetch("accepted_at"))
           end
+        when LIVE_CAPACITY
+          reservations = value["reservations"]
+          raise StoreError unless value.keys == [ "reservations" ] && reservations.is_a?(Hash)
+          raise StoreError if reservations.size > MAX_LIVE_RESERVATIONS
+
+          reservations.each do |attempt_id, reservation|
+            StorageKey.string(attempt_id)
+            valid = reservation.is_a?(Hash) &&
+              reservation.keys.sort == %w[phase project task_slug] &&
+              %w[pending active].include?(reservation["phase"])
+            raise StoreError unless valid
+
+            StorageKey.string(reservation.fetch("project"))
+            StorageKey.string(reservation.fetch("task_slug"))
+          end
         else
           raise StoreError
         end
@@ -324,6 +393,28 @@ module Hive
           "project" => StorageKey.string(project),
           "utc_date" => date_value(date).iso8601
         }
+      end
+
+      def live_capacity_key = { "scope" => "host" }
+
+      def live_reservation(project:, task_slug:, phase:)
+        {
+          "project" => StorageKey.string(project),
+          "task_slug" => StorageKey.string(task_slug),
+          "phase" => phase
+        }
+      end
+
+      def update_live_reservations
+        update_entry(LIVE_CAPACITY, live_capacity_key) do |current|
+          reservations = current ?
+            current.fetch("value").fetch("reservations").transform_values(&:dup) : {}
+          reservations = yield(reservations)
+          if reservations.size > MAX_LIVE_RESERVATIONS
+            raise StoreError, "live capacity index exceeds its bounded reservation set"
+          end
+          { "reservations" => reservations }
+        end
       end
 
       def date_value(value)

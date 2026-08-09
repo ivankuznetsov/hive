@@ -172,6 +172,37 @@ class AttemptsStorageFoundationTest < Minitest::Test
     end
   end
 
+  def test_live_capacity_reservations_are_bounded_idempotent_and_identity_checked
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
+      index = store.decision_index
+
+      store.with_admission_lock do
+        2.times do
+          index.reserve_live(
+            attempt_id: "attempt-1", project: "demo", task_slug: "durable-task"
+          )
+        end
+        assert_equal "pending", index.live_reservations.dig("attempt-1", "phase")
+
+        2.times do
+          index.confirm_live(
+            attempt_id: "attempt-1", project: "demo", task_slug: "durable-task"
+          )
+        end
+        assert_equal "active", index.live_reservations.dig("attempt-1", "phase")
+        assert_raises(Hive::Attempts::StoreError) do
+          index.reserve_live(
+            attempt_id: "attempt-1", project: "other", task_slug: "durable-task"
+          )
+        end
+
+        2.times { index.release_live(attempt_id: "attempt-1") }
+        assert_empty index.live_reservations
+      end
+    end
+  end
+
   def test_decision_index_verifies_embedded_compound_key_and_refuses_symlinks
     with_tmp_dir do |root|
       source = Hive::Attempts::Store.new(root: File.join(root, "source"))

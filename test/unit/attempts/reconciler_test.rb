@@ -311,6 +311,37 @@ class AttemptsReconcilerTest < Minitest::Test
     end
   end
 
+  def test_reconciliation_builds_capacity_and_admission_view_from_one_hot_scan
+    with_store do |store|
+      create(store)
+      scans = 0
+      original_scan = store.method(:scan)
+      store.define_singleton_method(:scan) do
+        scans += 1
+        original_scan.call
+      end
+      proof_reads = 0
+      proofs = store.permanent_proofs
+      original_fetch = proofs.method(:fetch)
+      proofs.define_singleton_method(:fetch) do |attempt_id|
+        proof_reads += 1
+        original_fetch.call(attempt_id)
+      end
+
+      snapshot = reconciler(store, :matching).reconcile(now: NOW + 1)
+
+      assert_equal 1, scans
+      assert_equal 0, proof_reads
+      assert_equal [ "attempt-1" ], snapshot.hot_scan.records.map(&:attempt_id)
+      assert_same snapshot.hot_scan, snapshot.admission_view.hot_scan
+      indexed_capacity = store.with_admission_lock do
+        records = snapshot.admission_view.refresh_for_admission
+        snapshot.admission_view.capacity(now: NOW + 1, records: records)
+      end
+      assert_equal snapshot.capacity, indexed_capacity
+    end
+  end
+
   private
 
   def with_store

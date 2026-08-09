@@ -108,7 +108,7 @@ module Hive
       # Lease-backed loss is processed independently of legacy marker rows.
       # The durable retry charge and predecessor link survive daemon restart,
       # while the outcome sidecar makes repeated ticks idempotent.
-      def heal_attempt_losses(attempts, now: Time.now.utc)
+      def heal_attempt_losses(attempts, now: Time.now.utc, admission_view: nil)
         return unless admission_open?
         return unless @auto_retry_enabled
         return unless @attempt_store && @attempt_dispatcher &&
@@ -117,9 +117,13 @@ module Hive
         attempts = Array(attempts)
         return if attempts.empty?
 
-        successors = @attempt_store.scan.records.each_with_object({}) do |candidate, index|
-          predecessor_id = candidate["predecessor_attempt_id"]
-          index[predecessor_id] ||= candidate if predecessor_id
+        successors = if admission_view
+          {}
+        else
+          @attempt_store.scan.records.each_with_object({}) do |candidate, index|
+            predecessor_id = candidate["predecessor_attempt_id"]
+            index[predecessor_id] ||= candidate if predecessor_id
+          end
         end
 
         attempts.each do |attempt|
@@ -129,7 +133,17 @@ module Hive
           outcome = @lost_outcome_processor.process(attempt, now: now)
           next unless outcome["status"] == "ready"
 
-          existing = successors[attempt.attempt_id]
+          existing = if admission_view
+            successor_id = @attempt_store.decision_index.successor_attempt_id(
+              predecessor_attempt_id: attempt.attempt_id
+            )
+            if successor_id
+              admission_view.respond_to?(:find) ? admission_view.find(successor_id) :
+                @attempt_store.fetch(successor_id)
+            end
+          else
+            successors[attempt.attempt_id]
+          end
           if existing
             @lost_outcome_store.update(
               attempt, now: now, status: "successor_dispatched",
@@ -172,7 +186,8 @@ module Hive
             inherited_outputs: (attempt["inherited_outputs"] + attempt["current_outputs"]).uniq,
             retry_charge: attempt["retry_charge"] + 1,
             interactive: false,
-            now: now
+            now: now,
+            admission_view: admission_view
           )
           if result.status == :deferred
             @lost_outcome_store.update(

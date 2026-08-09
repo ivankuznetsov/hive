@@ -262,7 +262,10 @@ module Hive
         return unless admission_open?
 
         begin
-          @stale_agent_healer.heal_attempt_losses(@attempt_snapshot&.lost_attempts || [], now: now)
+          @stale_agent_healer.heal_attempt_losses(
+            @attempt_snapshot&.lost_attempts || [], now: now,
+            admission_view: @attempt_snapshot&.admission_view
+          )
           reconcile_lost_attempt_deliveries(now: now)
         rescue StandardError => e
           @logger.event(:fatal,
@@ -2347,7 +2350,8 @@ module Hive
         end
         if @attempt_dispatcher && durable_task_request?(req)
           result = Hive::Daemon::DispatchRequestQueue.dispatch(
-            req, dispatcher: @attempt_dispatcher, interactive: false, now: now
+            req, dispatcher: @attempt_dispatcher, interactive: false, now: now,
+            admission_view: @attempt_snapshot&.admission_view
           )
           log_attempt_admission(result)
           if result.status == :deferred
@@ -2903,7 +2907,10 @@ module Hive
         )
         return :shutdown unless admission_open?
 
-        result = @attempt_dispatcher.dispatch_request(request, interactive: false, now: now)
+        result = @attempt_dispatcher.dispatch_request(
+          request, interactive: false, now: now,
+          admission_view: @attempt_snapshot&.admission_view
+        )
         log_attempt_admission(result)
         if result.status == :accepted
           @logger.event(

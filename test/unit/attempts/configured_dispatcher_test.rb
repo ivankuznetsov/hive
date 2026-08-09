@@ -13,8 +13,8 @@ class AttemptsConfiguredDispatcherTest < Minitest::Test
     launcher_options = nil
     dispatcher_options = nil
     downstream = Object.new
-    downstream.define_singleton_method(:dispatch_request) do |_request, interactive:, now:|
-      [ interactive, now ]
+    downstream.define_singleton_method(:dispatch_request) do |_request, interactive:, now:, admission_view:|
+      [ interactive, now, admission_view ]
     end
     launcher_class = Class.new
     launcher_class.define_singleton_method(:new) do |**options|
@@ -49,10 +49,10 @@ class AttemptsConfiguredDispatcherTest < Minitest::Test
     )
 
     with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*_args, **_kwargs) { resolver }) do
-      assert_equal [ false, Time.at(0) ],
+      assert_equal [ false, Time.at(0), :tick ],
                    adapter.dispatch_request(
                      FakeRequest.new(slug: "task", project: "demo", argv: %w[hive review task]),
-                     now: Time.at(0)
+                     now: Time.at(0), admission_view: :tick
                    )
     end
 
@@ -88,10 +88,12 @@ class AttemptsConfiguredDispatcherTest < Minitest::Test
 
     assert_equal :accepted,
                  adapter.dispatch_successor(
-                   task: task, predecessor: :lost, argv: %w[hive develop task]
+                   task: task, predecessor: :lost, argv: %w[hive develop task],
+                   admission_view: :tick
                  )
     assert_equal task, call.fetch(:task)
     assert_equal :lost, call.fetch(:predecessor)
+    assert_equal :tick, call.fetch(:admission_view)
   end
 
   def test_fresh_launch_uses_reloaded_timeouts_and_capacity_limits

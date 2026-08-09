@@ -4462,12 +4462,14 @@ end
 
   def test_attempt_reconciliation_precedes_status_healers_and_admission
     order = []
+    admission_view = Object.new
     capacity = Struct.new(:per_project, :global_count, :daily_counts) do
       def task_reserved?(project:, task_slug:) = false
     end.new({}, 0, {})
     snapshot = Hive::Attempts::ReconciliationSnapshot.new(
       capacity: capacity, attempts: [], lost_attempts: [],
-      newly_lost_attempts: [], terminal_attempts: [], invalid_records: []
+      newly_lost_attempts: [], terminal_attempts: [], invalid_records: [],
+      admission_view: admission_view
     )
     reconciler = Object.new
     reconciler.define_singleton_method(:reconcile) { |now:| order << :reconcile; snapshot }
@@ -4478,15 +4480,47 @@ end
     end
     dispatcher.instance_variable_get(:@stale_agent_healer)
               .define_singleton_method(:heal) { |*_args, **_kwargs| order << :stale_healer }
+    tick_view = admission_view
+    seen_view = nil
     dispatcher.instance_variable_get(:@stale_agent_healer)
-              .define_singleton_method(:heal_attempt_losses) { |*_args, **_kwargs| order << :attempt_loss_healer }
+              .define_singleton_method(:heal_attempt_losses) do |*_args, admission_view:, **_kwargs|
+      seen_view = admission_view
+      order << :attempt_loss_healer
+    end
     dispatcher.tick(now: T0)
 
+    assert_same tick_view, seen_view
     assert_equal :reconcile, order.first
     assert_operator order.index(:reconcile), :<, order.index(:attempt_loss_healer)
     assert_operator order.index(:attempt_loss_healer), :<, order.index(:status)
     assert_operator order.index(:reconcile), :<, order.index(:status)
     assert_operator order.index(:reconcile), :<, order.index(:stale_healer)
+  end
+
+  def test_one_daemon_tick_performs_one_hot_attempt_scan_and_no_cold_proof_reads
+    Dir.mktmpdir("hive-attempt-tick") do |root|
+      store = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
+      scans = 0
+      original_scan = store.method(:scan)
+      store.define_singleton_method(:scan) do
+        scans += 1
+        original_scan.call
+      end
+      proof_reads = 0
+      proofs = store.permanent_proofs
+      original_fetch = proofs.method(:fetch)
+      proofs.define_singleton_method(:fetch) do |attempt_id|
+        proof_reads += 1
+        original_fetch.call(attempt_id)
+      end
+      reconciler = Hive::Attempts::Reconciler.new(store: store)
+      dispatcher, = make_dispatcher(rows: [], attempt_reconciler: reconciler)
+
+      dispatcher.tick(now: T0)
+
+      assert_equal 1, scans
+      assert_equal 0, proof_reads
+    end
   end
 
   def test_lease_backed_status_row_is_not_double_counted_as_legacy_capacity

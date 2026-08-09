@@ -13,11 +13,11 @@ module Hive
     ) do
       SAFE_LOST_CLEANUPS = %w[absent terminated no_worker].freeze
 
-      def self.build(store:, now: Time.now)
-        scan = store.scan
+      def self.build(store:, scan: nil, now: Time.now)
+        scan ||= store.scan
         outcome_store = LostOutcomeStore.new(store: store)
         reserved = scan.records.select do |record|
-          record.live? || lost_worker_reserves_capacity?(record, outcome_store)
+          reserves_capacity?(record, outcome_store: outcome_store)
         end
         per_project = Hash.new(0)
         per_task = Hash.new(0)
@@ -31,7 +31,7 @@ module Hive
           receipt = record.receipt
           next if receipt && receipt["exit_status"] == Hive::ExitCodes::TEMPFAIL
 
-          date = Time.iso8601(record["accepted_at"]).to_date
+          date = Time.iso8601(record["accepted_at"]).utc.to_date
           daily[[ record["project"], date ]] += 1
         rescue ArgumentError
           # Record validation already checked the timestamp. Preserve the
@@ -50,6 +50,39 @@ module Hive
         )
       end
 
+      def self.build_from_live_reservations(store:, scan:, reservations:, now: Time.now)
+        historical = build(store: store, scan: scan, now: now)
+        per_project = Hash.new(0)
+        per_task = Hash.new(0)
+        reservations.each_value do |reservation|
+          project = reservation.fetch("project")
+          task_slug = reservation.fetch("task_slug")
+          per_project[project] += 1
+          per_task[[ project, task_slug ]] += 1
+        end
+        reservation_ids = reservations.keys
+        invalid_ids = scan.invalid_records.filter_map do |invalid|
+          basename = File.basename(invalid.path.to_s)
+          basename.delete_suffix(".json") if basename.end_with?(".json")
+        end
+        unindexed_invalid_count = invalid_ids.count do |attempt_id|
+          !reservations.key?(attempt_id)
+        end
+
+        new(
+          global_count: reservations.size + unindexed_invalid_count,
+          per_project: per_project.to_h.freeze,
+          per_task: per_task.to_h.freeze,
+          daily_counts: historical.daily_counts,
+          reserved_attempt_ids: reservation_ids.freeze,
+          invalid_count: scan.invalid_records.size
+        )
+      end
+
+      def self.reserves_capacity?(record, outcome_store:)
+        record.live? || lost_worker_reserves_capacity?(record, outcome_store)
+      end
+
       def self.lost_worker_reserves_capacity?(record, outcome_store)
         return false unless record.respond_to?(:state) && record.state == "lost" && record.worker
 
@@ -65,11 +98,215 @@ module Hive
       def daily_count(project, date) = daily_counts.fetch([ project, date ], 0)
       def task_reserved?(project:, task_slug:) = task_count(project: project, task_slug: task_slug).positive?
 
-      def at_limit?(project:, task_slug:, date:, max_global:, max_per_project:, max_daily:)
+      def at_limit?(project:, task_slug:, date:, max_global:, max_per_project:,
+                    max_daily:, indexed_daily_count: nil)
         global_count >= max_global ||
           project_count(project) >= max_per_project ||
           task_reserved?(project: project, task_slug: task_slug) ||
-          daily_count(project, date) >= max_daily
+          (indexed_daily_count || daily_count(project, date)) >= max_daily
+      end
+    end
+
+    # One daemon-tick view of bounded hot records. The initial scan never
+    # changes; admissions add an in-memory delta, while each admission-lock
+    # decision point-refreshes known hot IDs and repairs the point indexes.
+    # It deliberately uses fetch_hot so ordinary scheduler work never opens
+    # permanent proof storage.
+    class AdmissionView
+      attr_reader :hot_scan
+
+      def initialize(store:, hot_scan:)
+        @store = store
+        @hot_scan = hot_scan
+        @records = hot_scan.records.to_h { |record| [ record.attempt_id, record ] }
+        synchronize_indexes!(@records.values)
+      end
+
+      def records
+        refresh_known_records!
+        synchronize_indexes!(@records.values)
+        @records.values.freeze
+      end
+
+      # Call only while the store's host-wide admission lock is held. The
+      # point-addressed live-capacity cell is reconciled here so a daemon tick
+      # can retain its one hot scan while still observing admissions made by
+      # another Store instance after that scan.
+      def refresh_for_admission
+        previous = @records.values
+        previous.each { |record| synchronize_live_reservation!(record) }
+        refresh_known_records!(unreadable: :forget)
+        synchronize_indexes!(@records.values)
+        @records.values.each { |record| synchronize_live_reservation!(record) }
+        reconcile_live_reservations!
+        @records.values.freeze
+      end
+
+      def capacity(now:, records: nil)
+        current = records || self.records
+        CapacitySnapshot.build_from_live_reservations(
+          store: @store,
+          scan: Scan.new(
+            records: current.freeze,
+            invalid_records: hot_scan.invalid_records
+          ),
+          reservations: decision_index.live_reservations,
+          now: now
+        )
+      end
+
+      # These mutations share the admission lock held by Dispatcher#admit.
+      def reserve_live(attempt_id:, project:, task_slug:)
+        decision_index.reserve_live(
+          attempt_id: attempt_id, project: project, task_slug: task_slug
+        )
+      end
+
+      def confirm_live(record)
+        decision_index.confirm_live(
+          attempt_id: record.attempt_id,
+          project: record["project"],
+          task_slug: record["task_slug"]
+        )
+      end
+
+      def record(record)
+        @records[record.attempt_id] = record
+        synchronize_indexes!([ record ])
+        record
+      end
+
+      def find(attempt_id)
+        return nil if attempt_id.to_s.empty?
+
+        record = @store.fetch(attempt_id)
+        record ? self.record(record) : @records.delete(attempt_id)
+      end
+
+      def terminal_attempt(request_id:)
+        find(decision_index.terminal_attempt_id(request_id: request_id))
+      end
+
+      def successful_attempt(task_generation:, subject:)
+        find(
+          decision_index.successful_attempt_id(
+            task_generation: task_generation, subject: subject
+          )
+        )
+      end
+
+      def unresolved_loss(task_generation:, subject:)
+        find(
+          decision_index.unresolved_loss_attempt_id(
+            task_generation: task_generation, subject: subject
+          )
+        )
+      end
+
+      def successor(predecessor_attempt_id:)
+        find(
+          decision_index.successor_attempt_id(
+            predecessor_attempt_id: predecessor_attempt_id
+          )
+        )
+      end
+
+      def daily_count(project:, date:)
+        decision_index.daily_count(project: project, date: date)
+      end
+
+      private
+
+      def decision_index
+        @decision_index ||= @store.decision_index
+      end
+
+      def outcome_store
+        @outcome_store ||= LostOutcomeStore.new(store: @store)
+      end
+
+      def refresh_known_records!(unreadable: :raise)
+        @records.keys.each do |attempt_id|
+          record = @store.fetch_hot(attempt_id)
+          record ? @records[attempt_id] = record : @records.delete(attempt_id)
+        rescue StoreError
+          raise if unreadable == :raise
+
+          # The live-capacity cell was synchronized from the last valid
+          # observation before this refresh, so forgetting the unreadable
+          # semantic record remains capacity-fail-closed.
+          @records.delete(attempt_id)
+        end
+      end
+
+      def synchronize_live_reservation!(record)
+        if CapacitySnapshot.reserves_capacity?(record, outcome_store: outcome_store)
+          decision_index.confirm_live(
+            attempt_id: record.attempt_id,
+            project: record["project"],
+            task_slug: record["task_slug"]
+          )
+        else
+          decision_index.release_live(attempt_id: record.attempt_id)
+        end
+      end
+
+      def reconcile_live_reservations!
+        decision_index.live_reservations.each do |attempt_id, reservation|
+          record = @records[attempt_id]
+          unless record
+            record = @store.fetch_hot(attempt_id)
+            self.record(record) if record
+          end
+
+          if record
+            synchronize_live_reservation!(record)
+          elsif reservation.fetch("phase") == "pending"
+            # The creator released the admission lock without persisting the
+            # reserved ID. No concurrent creator can still be between reserve
+            # and create while this lock holder is running.
+            decision_index.release_live(attempt_id: attempt_id)
+          else
+            release_from_terminal_proof!(attempt_id)
+          end
+        rescue StoreError
+          # An unreadable/missing active record is deliberately retained. Only
+          # a validated durable terminal proof can release active capacity.
+          next
+        end
+      end
+
+      def release_from_terminal_proof!(attempt_id)
+        proof = @store.fetch(attempt_id)
+        return unless proof&.state == "terminal"
+
+        self.record(proof)
+        decision_index.release_live(attempt_id: attempt_id)
+      end
+
+      def synchronize_indexes!(records)
+        records.each { |record| decision_index.record_acceptance(record) }
+        records.select { |record| record.state == "lost" }.each do |record|
+          successor_id = decision_index.successor_attempt_id(
+            predecessor_attempt_id: record.attempt_id
+          )
+          decision_index.record_unresolved_loss(record) unless successor_id
+        end
+        records.select { |record| record["predecessor_attempt_id"] }.each do |record|
+          existing_id = decision_index.successor_attempt_id(
+            predecessor_attempt_id: record["predecessor_attempt_id"]
+          )
+          if existing_id && existing_id != record.attempt_id
+            raise StoreError, "attempt predecessor has conflicting successors"
+          end
+          decision_index.record_successor(record) unless existing_id
+        end
+        records.select { |record| record.state == "terminal" }.each do |record|
+          decision_index.record_terminal(record)
+          if record.receipt["exit_status"] == Hive::ExitCodes::TEMPFAIL
+            decision_index.refund_tempfail(record)
+          end
+        end
       end
     end
   end

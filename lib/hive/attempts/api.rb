@@ -27,18 +27,23 @@ module Hive
         )
       end
 
-      def dispatch_request(request, interactive: false, now: Time.now.utc)
-        daemon.dispatch_request(request, interactive: interactive, now: now)
+      def dispatch_request(request, interactive: false, now: Time.now.utc,
+                           admission_view: nil)
+        daemon.dispatch_request(
+          request, interactive: interactive, now: now,
+          admission_view: admission_view
+        )
       end
 
       def dispatch_successor(predecessor:, task:, project:, argv:, request_id:,
                              provider:, inherited_outputs: nil, retry_charge: nil,
-                             interactive: false, now: Time.now.utc)
+                             interactive: false, now: Time.now.utc,
+                             admission_view: nil)
         daemon.dispatch_successor(
           predecessor: predecessor, task: task, project: project, argv: argv,
           request_id: request_id, provider: provider,
           inherited_outputs: inherited_outputs, retry_charge: retry_charge,
-          interactive: interactive, now: now
+          interactive: interactive, now: now, admission_view: admission_view
         )
       end
 

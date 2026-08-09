@@ -57,12 +57,15 @@ class AttemptsAPITest < Minitest::Test
     end
     api = Hive::Attempts::API.new(foreground: Object.new, daemon: daemon)
 
-    result = api.dispatch_request(:request, interactive: false, now: Time.at(1).utc)
+    result = api.dispatch_request(
+      :request, interactive: false, now: Time.at(1).utc, admission_view: :tick
+    )
 
     assert_equal :accepted, result
     assert_equal :request, call.first
     assert_equal false, call.last.fetch(:interactive)
     assert_equal Time.at(1).utc, call.last.fetch(:now)
+    assert_equal :tick, call.last.fetch(:admission_view)
   end
 
   def test_dispatch_successor_delegates_recovery_admission
@@ -80,7 +83,8 @@ class AttemptsAPITest < Minitest::Test
       project: "demo",
       argv: %w[hive run task],
       request_id: "request-2",
-      provider: "codex"
+      provider: "codex",
+      admission_view: :tick
     )
 
     assert_equal :accepted, result
@@ -90,6 +94,7 @@ class AttemptsAPITest < Minitest::Test
     assert_equal %w[hive run task], call.fetch(:argv)
     assert_equal "request-2", call.fetch(:request_id)
     assert_equal "codex", call.fetch(:provider)
+    assert_equal :tick, call.fetch(:admission_view)
   end
 
   def test_dispatch_module_hook_delegates_daemon_admission

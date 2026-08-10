@@ -1197,6 +1197,55 @@ class HiveDaemonDispatcherTest < Minitest::Test
     end
   end
 
+  def test_durable_dispatch_publishes_the_exact_provider_routing_decision
+    route = Hive::ProviderRouting::Route.new(
+      id: "account-a/model-a", account: "account-a", adapter: "codex",
+      launch_binding: "default", model: "model-a", effort: "high", order: 0,
+      capabilities: Hive::ProviderRouting::DEFAULT_CAPABILITIES
+    )
+    policy = Hive::ProviderRouting::Policy.explicit(
+      stage: "execute", routes: [ route ], requirements: Hive::ProviderRouting::Requirements.empty,
+      pin: nil,
+      account_policy: {
+        "account-a" => {
+          "adapter" => "codex", "launch_binding" => "default",
+          "models" => [ "model-a" ], "max_concurrent" => 2,
+          "cooldown_sec" => Hive::ProviderRouting::DEFAULT_COOLDOWN_SEC
+        }
+      }
+    )
+    request = Hive::ProviderRouting::Request.new(
+      policy: policy, task_generation: "generation-1"
+    )
+    decision = Hive::ProviderRouting::Decision.selected(
+      request: request, route: route, considered: [ route ],
+      decision_id: "decision-1", decided_at: T0
+    )
+    attempt = Struct.new(:attempt_id, :task_generation, :state)
+                    .new("attempt-1", "generation-1", "running")
+    result = Hive::Attempts::DispatchResult.new(
+      status: :accepted, attempt: attempt, receipt: nil,
+      attach_descriptor: nil, reason: nil, decision: decision
+    )
+    attempt_dispatcher = Object.new
+    attempt_dispatcher.define_singleton_method(:dispatch_request) { |*_args, **_options| result }
+    snapshot = FakeOperationalSnapshot.new
+    dispatcher, = make_dispatcher(
+      rows: [], attempt_dispatcher: attempt_dispatcher, operational_snapshot: snapshot
+    )
+    observed = row(
+      stage: "4-execute", action: "ready_to_run", command: "hive run s1 --json"
+    )
+
+    outcome = dispatcher.send(:dispatch_or_block, observed, now: T0)
+    dispatcher.send(:observe_dispatch_outcome, observed, outcome)
+
+    disposition = snapshot.calls.last.last
+    assert_equal "decision-1", disposition.dig(:routing, "decision_id")
+    assert_equal "account-a/model-a", disposition.dig(:routing, "selected_route")
+    assert_equal "attempt", disposition.dig(:routing, "next_action_owner")
+  end
+
   def test_handled_status_failure_publishes_failed_without_authoritative_tasks
     snapshot = FakeOperationalSnapshot.new
     failed = Hive::Daemon::StatusConsumer::Result.new(

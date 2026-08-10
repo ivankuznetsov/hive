@@ -161,6 +161,12 @@ authoritative after a change between the completed daemon tick and a later
 status read. The record also carries daemon generation/PID/start identity,
 sequence and validity window, capacity, queue counters, provider holds,
 coordinator recovery receipts, and per-task owner/reason.
+An explicit admission also contributes its exact sanitized routing decision to
+that row's in-memory disposition. The completed snapshot keeps that value only
+when the same coherence checks pass; operational status renders it directly
+and never reruns the selector. A markerless or later recovery no-route request
+projects its durable `admission_observation` through the same field. Legacy
+rows carry no routing value and keep their prior rendering.
 Retry dispositions additionally carry the exact marker-age `retry_at`,
 whether the boundary is due, the current safety verdict, and its reason.
 `retry_cooldown` is scheduler-owned, `retry_in_flight` is agent-owned, and

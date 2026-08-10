@@ -66,6 +66,9 @@ module Hive
     # Small adapter around ManagedDirectory that translates its custody errors
     # into the Attempts storage contract and supplies per-cell serialization.
     class PointStorage
+      SHA256_FILE = /\A[0-9a-f]{64}\.json\z/
+      SHARD = /\A[0-9a-f]{2}\z/
+
       attr_reader :root
 
       def initialize(root:, label:, create_directories: true)
@@ -123,6 +126,41 @@ module Hive
           expected_digest: expected_bytes && Digest::SHA256.hexdigest(expected_bytes),
           max_bytes: max_bytes
         )
+      rescue Hive::ManagedDirectory::UnsafeError,
+             SystemCallError, IOError, ArgumentError, TypeError => error
+        unavailable!(error)
+      end
+
+      # Bounded descriptor-relative enumeration for operator projections.
+      # Admission and reconciliation stay point-addressed; callers must name
+      # one kind and a hard maximum before any entries are read.
+      def each_entry(kind, max_entries:, max_bytes:)
+        return enum_for(
+          __method__, kind, max_entries: max_entries, max_bytes: max_bytes
+        ) unless block_given?
+
+        component = StorageKey.component(kind)
+        maximum = Integer(max_entries)
+        raise StoreError, "attempt point-storage enumeration bound is invalid" unless maximum.positive?
+
+        entries = []
+        @directory.each_child(component, missing: true) do |shard|
+          unavailable!(ArgumentError.new("invalid point-storage shard")) unless SHARD.match?(shard)
+          unless @directory.entry_type(File.join(component, shard)) == :directory
+            unavailable!(ArgumentError.new("point-storage shard is not a directory"))
+          end
+          @directory.each_child(File.join(component, shard)) do |name|
+            unavailable!(ArgumentError.new("invalid point-storage entry")) unless SHA256_FILE.match?(name)
+            entries << File.join(component, shard, name)
+            if entries.length > maximum
+              raise StoreError, "attempt point-storage enumeration exceeds its bounded projection"
+            end
+          end
+        end
+        entries.sort.each do |relative|
+          yield @directory.read(relative, max_bytes: max_bytes)
+        end
+        nil
       rescue Hive::ManagedDirectory::UnsafeError,
              SystemCallError, IOError, ArgumentError, TypeError => error
         unavailable!(error)

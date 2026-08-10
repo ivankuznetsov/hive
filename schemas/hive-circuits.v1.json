@@ -1,0 +1,320 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-circuits.v1.json",
+  "title": "hive circuits output (v1)",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "Identifier": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "Sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "Scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "provider_account_id", "model"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["provider_account", "model"] },
+        "provider_account_id": { "$ref": "#/$defs/Identifier" },
+        "model": { "type": ["string", "null"], "minLength": 1, "maxLength": 128 }
+      }
+    },
+    "Reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "size", "sha256"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "size": { "type": "integer", "minimum": 0 },
+        "sha256": { "$ref": "#/$defs/Sha256" }
+      }
+    },
+    "CorruptionToken": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "journal_epoch", "corruption_fingerprint", "last_verified_generation"],
+      "properties": {
+        "scope": { "$ref": "#/$defs/Scope" },
+        "journal_epoch": { "type": "integer", "minimum": 0 },
+        "corruption_fingerprint": { "$ref": "#/$defs/Sha256" },
+        "last_verified_generation": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "Probe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "journal_epoch", "observed_generation", "claim_generation", "attempt_id", "task_generation", "ownership_fence"],
+      "properties": {
+        "scope": { "$ref": "#/$defs/Scope" },
+        "journal_epoch": { "type": "integer", "minimum": 0 },
+        "observed_generation": { "type": "integer", "minimum": 0 },
+        "claim_generation": { "type": "integer", "minimum": 1 },
+        "attempt_id": { "$ref": "#/$defs/Identifier" },
+        "task_generation": { "$ref": "#/$defs/Identifier" },
+        "ownership_fence": { "$ref": "#/$defs/Identifier" }
+      }
+    },
+    "Circuit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status", "scope", "state", "automatic_state", "reason", "generation",
+        "journal_epoch", "eligible_at", "manual_block", "probe_owner", "evidence",
+        "corruption_token", "artifact_reference"
+      ],
+      "properties": {
+        "status": { "type": "string", "enum": ["available", "unavailable"] },
+        "scope": { "$ref": "#/$defs/Scope" },
+        "state": { "type": "string", "enum": ["closed", "open", "half_open", "manual_block", "probe_owned", "health_state_unavailable"] },
+        "automatic_state": { "type": ["string", "null"], "enum": ["closed", "open", null] },
+        "reason": { "type": ["string", "null"] },
+        "generation": { "type": "integer", "minimum": 0 },
+        "journal_epoch": { "type": "integer", "minimum": 0 },
+        "eligible_at": { "type": ["string", "null"], "format": "date-time" },
+        "manual_block": { "type": ["object", "null"], "additionalProperties": false, "required": ["actor", "reason", "blocked_at"], "properties": { "actor": { "type": "string" }, "reason": { "type": "string" }, "blocked_at": { "type": "string", "format": "date-time" } } },
+        "probe_owner": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/Probe" }] },
+        "evidence": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["failure_class", "provenance", "fingerprint", "source_reference"],
+              "properties": {
+                "failure_class": { "type": "string" },
+                "provenance": { "type": "string" },
+                "fingerprint": { "$ref": "#/$defs/Sha256" },
+                "source_reference": { "$ref": "#/$defs/Reference" }
+              }
+            }
+          ]
+        },
+        "corruption_token": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/CorruptionToken" }] },
+        "artifact_reference": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/Reference" }] }
+      }
+    },
+    "Account": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider_account_id", "adapter", "launch_binding_id", "capacity", "circuit", "models"],
+      "properties": {
+        "provider_account_id": { "$ref": "#/$defs/Identifier" },
+        "adapter": { "$ref": "#/$defs/Identifier" },
+        "launch_binding_id": { "$ref": "#/$defs/Identifier" },
+        "capacity": { "type": "object", "additionalProperties": false, "required": ["observed", "max"], "properties": { "observed": { "type": "integer", "minimum": 0 }, "max": { "type": "integer", "minimum": 1 } } },
+        "circuit": { "$ref": "#/$defs/Circuit" },
+        "models": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["model", "route_id", "circuit"],
+            "properties": { "model": { "$ref": "#/$defs/Identifier" }, "route_id": { "$ref": "#/$defs/Identifier" }, "circuit": { "$ref": "#/$defs/Circuit" } }
+          }
+        }
+      }
+    },
+    "Decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identity", "decision"],
+      "properties": {
+        "identity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["project", "attempt_id", "task_id", "task_slug", "intended_stage", "subject_kind"],
+          "properties": {
+            "project": { "type": "string" },
+            "attempt_id": { "type": ["string", "null"] },
+            "task_id": { "type": ["string", "null"] },
+            "task_slug": { "type": ["string", "null"] },
+            "intended_stage": { "type": ["string", "null"] },
+            "subject_kind": { "type": ["string", "null"] }
+          }
+        },
+        "decision": { "$ref": "#/$defs/RoutingDecision" }
+      }
+    },
+    "Pin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "model"],
+      "properties": {
+        "provider": { "$ref": "#/$defs/Identifier" },
+        "model": { "type": ["string", "null"] }
+      }
+    },
+    "Requirements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["context", "quality", "tools", "permissions"],
+      "properties": {
+        "context": { "type": ["string", "null"] },
+        "quality": { "type": ["string", "null"] },
+        "tools": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "permissions": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+      }
+    },
+    "Observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "generation": { "type": "integer", "minimum": 0 },
+        "journal_epoch": { "type": "integer", "minimum": 0 },
+        "observed": { "type": "integer", "minimum": 0 },
+        "max": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "Exclusion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["route_id", "reason", "detail", "scope", "observation"],
+      "properties": {
+        "route_id": { "$ref": "#/$defs/Identifier" },
+        "reason": { "$ref": "#/$defs/Identifier" },
+        "detail": { "type": ["string", "null"] },
+        "scope": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/Scope" }] },
+        "observation": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/Observation" }] }
+      }
+    },
+    "CircuitObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "status", "generation", "journal_epoch", "state", "manual_block", "eligible_at", "probe_owner"],
+      "properties": {
+        "scope": { "$ref": "#/$defs/Scope" },
+        "status": { "type": "string", "enum": ["available", "unavailable"] },
+        "generation": { "type": "integer", "minimum": 0 },
+        "journal_epoch": { "type": "integer", "minimum": 0 },
+        "state": { "type": ["string", "null"], "enum": ["closed", "open", null] },
+        "manual_block": { "type": ["boolean", "null"] },
+        "eligible_at": { "type": ["string", "null"], "format": "date-time" },
+        "probe_owner": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/Probe" }] }
+      }
+    },
+    "Candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["route_id", "provider_account_id", "adapter", "model", "effort", "eligible", "exclusions", "capacity", "circuits"],
+      "properties": {
+        "route_id": { "$ref": "#/$defs/Identifier" },
+        "provider_account_id": { "$ref": "#/$defs/Identifier" },
+        "adapter": { "$ref": "#/$defs/Identifier" },
+        "model": { "$ref": "#/$defs/Identifier" },
+        "effort": { "type": ["string", "null"] },
+        "eligible": { "type": "boolean" },
+        "exclusions": { "type": "array", "maxItems": 2, "items": { "$ref": "#/$defs/Exclusion" } },
+        "capacity": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "object", "additionalProperties": false, "required": ["observed", "max"], "properties": { "observed": { "type": "integer", "minimum": 0 }, "max": { "type": "integer", "minimum": 1 } } }
+          ]
+        },
+        "circuits": { "type": "array", "maxItems": 2, "items": { "$ref": "#/$defs/CircuitObservation" } }
+      }
+    },
+    "CircuitGeneration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "journal_epoch", "observed_generation"],
+      "properties": {
+        "scope": { "$ref": "#/$defs/Scope" },
+        "journal_epoch": { "type": "integer", "minimum": 0 },
+        "observed_generation": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "RoutingDecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decision_id", "decided_at", "task_generation", "policy_digest", "status", "reason", "next_action_owner", "policy", "selected_route", "candidates", "exclusions", "circuit_generations", "probe_requirements"],
+      "properties": {
+        "decision_id": { "$ref": "#/$defs/Identifier" },
+        "decided_at": { "type": "string", "format": "date-time" },
+        "task_generation": { "$ref": "#/$defs/Identifier" },
+        "policy_digest": { "$ref": "#/$defs/Sha256" },
+        "status": { "type": "string", "enum": ["selected", "capacity_saturated", "no_route"] },
+        "reason": { "type": "string" },
+        "next_action_owner": { "type": "string", "enum": ["attempt", "scheduler", "retry_authority", "operator"] },
+        "policy": { "type": "object", "additionalProperties": false, "required": ["stage", "pin", "requirements"], "properties": { "stage": { "type": "string" }, "pin": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/Pin" }] }, "requirements": { "$ref": "#/$defs/Requirements" } } },
+        "selected_route": { "type": ["string", "null"] },
+        "candidates": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/Candidate" } },
+        "exclusions": { "type": "array", "maxItems": 2048, "items": { "$ref": "#/$defs/Exclusion" } },
+        "circuit_generations": { "type": "array", "maxItems": 2, "items": { "$ref": "#/$defs/CircuitGeneration" } },
+        "probe_requirements": { "type": "array", "maxItems": 2, "items": { "$ref": "#/$defs/CircuitGeneration" } }
+      }
+    },
+    "AuditState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["automatic_state", "manual_blocked", "probe_owned", "generation", "journal_epoch"],
+      "properties": {
+        "automatic_state": { "type": "string", "enum": ["closed", "open"] },
+        "manual_blocked": { "type": "boolean" },
+        "probe_owned": { "type": "boolean" },
+        "generation": { "type": "integer", "minimum": 0 },
+        "journal_epoch": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "Audit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["actor", "reason", "target", "action", "occurred_at", "previous_state", "new_state", "generation", "event_id", "artifact_reference"],
+      "properties": {
+        "actor": { "type": "string", "minLength": 1 },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "target": { "$ref": "#/$defs/Scope" },
+        "action": { "type": "string", "enum": ["block", "unblock", "reset"] },
+        "occurred_at": { "type": "string", "format": "date-time" },
+        "previous_state": { "$ref": "#/$defs/AuditState" },
+        "new_state": { "$ref": "#/$defs/AuditState" },
+        "generation": { "type": "integer", "minimum": 0 },
+        "event_id": { "$ref": "#/$defs/Identifier" },
+        "artifact_reference": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/Reference" }] }
+      }
+    },
+    "Mutation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "status", "reason", "target", "generation", "event_id", "audit"],
+      "properties": {
+        "action": { "type": "string", "enum": ["block", "unblock", "reset"] },
+        "status": { "type": "string" },
+        "reason": { "type": "string" },
+        "target": { "$ref": "#/$defs/Scope" },
+        "generation": { "type": "integer", "minimum": 0 },
+        "event_id": { "type": ["string", "null"] },
+        "audit": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/Audit" }] }
+      }
+    },
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "generated_at", "status", "issues", "accounts", "decisions", "mutation"],
+      "properties": {
+        "schema": { "const": "hive-circuits" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "generated_at": { "type": "string", "format": "date-time" },
+        "status": { "type": "string", "enum": ["available", "degraded", "not_configured"] },
+        "issues": { "type": "array", "items": { "type": "string" } },
+        "accounts": { "type": "array", "items": { "$ref": "#/$defs/Account" } },
+        "decisions": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/Decision" } },
+        "mutation": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/Mutation" }] }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"],
+      "properties": {
+        "schema": { "const": "hive-circuits" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_class": { "type": "string" },
+        "error_kind": { "type": "string", "enum": ["usage", "consent_required", "stale_generation", "unavailable", "config", "internal"] },
+        "exit_code": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}

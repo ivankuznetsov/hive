@@ -453,7 +453,7 @@ module Hive
           parse_time(decision["decided_at"], label: "routing decision time", error_class: InvalidRecord)
 
           exclusions = decision["exclusions"]
-          unless exclusions.is_a?(Array) && exclusions.length <= 128
+          unless exclusions.is_a?(Array) && exclusions.length <= 1_024
             raise InvalidRecord, "routing decision exclusions must be a bounded array"
           end
           route_ids = exclusions.map do |exclusion|

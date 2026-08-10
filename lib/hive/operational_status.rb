@@ -386,6 +386,7 @@ module Hive
         "reason" => reasons.first.fetch("message"),
         "reasons" => reasons,
         "provider" => provider_payload(row),
+        "routing" => routing_payload(scheduler_disposition, row),
         "retry" => retry_payload(scheduler_disposition),
         "recovery" => recovery_payload(row, scheduler_disposition, scheduler_freshness),
         "closure" => closure_payload(project, row),
@@ -589,6 +590,61 @@ module Hive
         "safe" => disposition["retry_safe"] == true,
         "safety_reason" => disposition["safety_reason"]
       }
+    end
+
+    def routing_payload(disposition, _row)
+      raw = disposition["routing"] if disposition.is_a?(Hash)
+      return nil unless raw.is_a?(Hash)
+      return nil unless routing_value_safe?(raw)
+
+      keys = %w[
+        candidates circuit_generations decided_at decision_id exclusions next_action_owner
+        policy policy_digest probe_requirements reason selected_route status task_generation
+      ]
+      return nil unless raw.keys.sort == keys.sort
+      core = %w[
+        decision_id decided_at task_generation policy_digest status reason next_action_owner
+      ]
+      return nil unless core.all? { |key| !raw[key].to_s.empty? }
+
+      {
+        "decision_id" => raw.fetch("decision_id"),
+        "decided_at" => raw.fetch("decided_at"),
+        "task_generation" => raw.fetch("task_generation"),
+        "policy_digest" => raw.fetch("policy_digest"),
+        "status" => raw.fetch("status"),
+        "reason" => raw.fetch("reason"),
+        "next_action_owner" => raw.fetch("next_action_owner"),
+        "policy" => raw["policy"],
+        "selected_route" => raw["selected_route"],
+        "candidates" => Array(raw["candidates"]),
+        "exclusions" => Array(raw["exclusions"]),
+        "circuit_generations" => Array(raw["circuit_generations"]),
+        "probe_requirements" => Array(raw["probe_requirements"])
+      }
+    rescue KeyError
+      nil
+    end
+
+    def routing_value_safe?(value, depth = 0)
+      return false if depth > 12
+
+      case value
+      when Hash
+        return false if value.size > 128
+        forbidden = /(?:credential|prompt|raw|stderr|stdout|token|tool_output|message)/i
+        value.all? do |key, child|
+          key.is_a?(String) && !key.match?(forbidden) && routing_value_safe?(child, depth + 1)
+        end
+      when Array
+        value.length <= 1_024 && value.all? { |child| routing_value_safe?(child, depth + 1) }
+      when String
+        value.valid_encoding? && value.bytesize <= 4_096 && !value.match?(/[\u0000-\u001f\u007f]/)
+      when Integer, TrueClass, FalseClass, NilClass
+        true
+      else
+        false
+      end
     end
 
     def recovery_payload(row, disposition, scheduler_freshness)

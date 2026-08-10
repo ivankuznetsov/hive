@@ -905,34 +905,7 @@ module Hive
       end
 
       def admission_observation(decision)
-        {
-          "decision_id" => decision.decision_id,
-          "decided_at" => decision.decided_at,
-          "policy_digest" => decision.policy_digest,
-          "status" => decision.status.to_s,
-          "reason" => decision.reason,
-          "next_action_owner" => decision.next_action_owner,
-          "candidates" => decision.candidates.map do |candidate|
-            {
-              "route_id" => candidate.route.id,
-              "exclusions" => candidate.exclusions.map do |exclusion|
-                {
-                  "route_id" => exclusion.route_id,
-                  "reason" => exclusion.reason,
-                  "detail" => exclusion.detail,
-                  "scope" => exclusion.scope,
-                  "observation" => exclusion.observation&.slice(
-                    "generation", "journal_epoch", "observed", "max"
-                  )
-                }
-              end,
-              "capacity" => candidate.observed_concurrency.nil? ? nil : {
-                "observed" => candidate.observed_concurrency,
-                "max" => candidate.max_concurrency
-              }
-            }
-          end
-        }
+        Hive::ProviderRouting.deep_copy(decision.to_h)
       end
 
       def resolve_admission_task(project:, slug:)

@@ -248,11 +248,14 @@ module Hive
         )
       end
 
-      def record_routing_decision(decision:, task_generation:, subject:)
+      def record_routing_decision(decision:, task_generation:, subject:, project:,
+                                  attempt_id: nil)
         decision_index.record_routing_decision(
           decision: decision,
           task_generation: task_generation,
-          subject: subject
+          subject: subject,
+          project: project,
+          attempt_id: attempt_id
         )
       end
 

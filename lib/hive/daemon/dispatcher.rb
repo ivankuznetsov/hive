@@ -227,6 +227,10 @@ module Hive
         # remain blocked for many polls; only state changes are useful in the
         # append-only daemon log.
         @dispatch_request_log_signatures = {}
+        # Per-tick exact provider-routing decisions keyed by the status row
+        # they evaluated. The completed operational snapshot consumes these;
+        # no selector is rerun for status rendering.
+        @routing_observations = {}
       end
 
       # Single tick: reap, fetch, dispatch. Pure dispatcher — no signal
@@ -243,6 +247,7 @@ module Hive
         # cache populated on first sight stuck for the daemon's
         # lifetime and the only way to honour a disable was SIGHUP.
         @enabled_cache.clear
+        @routing_observations.clear
         @logger.event(:tick_begin, now: now.utc.iso8601)
         reset_active_agent_snapshot
 
@@ -1489,6 +1494,7 @@ module Hive
           now: now,
           trigger: trigger
         )
+        remember_routing_observation(row, dispatch_result)
         outcome = dispatch_outcome(dispatch_result)
         if outcome == :attempt_terminal_replay
           # A successful durable attempt already consumed this exact task
@@ -1570,7 +1576,20 @@ module Hive
         else
           [ "unknown", "dispatch outcome is not recognized" ]
         end
-        observe_operational_disposition(row, decision: outcome, owner: owner, reason: reason)
+        details = {}
+        routing = @routing_observations.delete([ row.project.to_s, row.slug.to_s ])
+        details[:routing] = routing if routing
+        observe_operational_disposition(
+          row, decision: outcome, owner: owner, reason: reason, **details
+        )
+      end
+
+      def remember_routing_observation(row, result)
+        return unless result.is_a?(Hive::Attempts::DispatchResult)
+        return unless result.decision.is_a?(Hive::ProviderRouting::Decision)
+        return if result.decision.legacy?
+
+        @routing_observations[[ row.project.to_s, row.slug.to_s ]] = result.decision.to_h
       end
 
       def observe_operational_disposition(row, decision:, owner:, reason:, **details)
@@ -1721,6 +1740,7 @@ module Hive
               "recovery_phase" => request.recovery["phase"],
               "expected_marker_name" => request.expected_marker_name,
               "expected_marker_attrs" => request.recovery["expected_marker_attrs"],
+              "routing" => request.recovery["admission_observation"],
               "receipt" => receipt.to_h
             }
           rescue StandardError => e

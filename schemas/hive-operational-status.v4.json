@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:hive:schema:operational-status:v3",
-  "title": "hive operational status output (v3)",
+  "$id": "urn:hive:schema:operational-status:v4",
+  "title": "hive operational status output (v4)",
   "oneOf": [
     { "$ref": "#/$defs/SuccessPayload" },
     { "$ref": "#/$defs/ErrorPayload" }
@@ -16,7 +16,7 @@
       ],
       "properties": {
     "schema": { "const": "hive-operational-status" },
-    "schema_version": { "const": 3 },
+    "schema_version": { "const": 4 },
     "ok": { "const": true },
     "generated_at": { "type": "string", "format": "date-time" },
     "completeness": { "$ref": "#/$defs/Completeness" },
@@ -134,7 +134,7 @@
       "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"],
       "properties": {
         "schema": { "const": "hive-operational-status" },
-        "schema_version": { "const": 3 },
+        "schema_version": { "const": 4 },
         "ok": { "const": false },
         "error_class": { "type": "string" },
         "error_kind": { "type": "string", "enum": ["config", "internal", "error"] },
@@ -270,7 +270,7 @@
       "additionalProperties": false,
       "required": [
         "identity", "workflow", "position", "liveness", "state", "blocker_owner",
-        "reason", "reasons", "provider", "retry", "recovery", "closure",
+        "reason", "reasons", "provider", "routing", "retry", "recovery", "closure",
         "dependency", "freshness", "evidence", "action"
       ],
       "properties": {
@@ -330,6 +330,12 @@
                 "retry_after": { "type": ["string", "null"], "format": "date-time" }
               }
             }
+          ]
+        },
+        "routing": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/RoutingDecision" }
           ]
         },
         "retry": {
@@ -394,6 +400,148 @@
             { "$ref": "#/$defs/Action" }
           ]
         }
+      }
+    },
+    "RoutingIdentifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "RoutingScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "provider_account_id", "model"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["provider_account", "model"] },
+        "provider_account_id": { "$ref": "#/$defs/RoutingIdentifier" },
+        "model": { "type": ["string", "null"] }
+      }
+    },
+    "RoutingProbe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "journal_epoch", "observed_generation", "claim_generation", "attempt_id", "task_generation", "ownership_fence"],
+      "properties": {
+        "scope": { "$ref": "#/$defs/RoutingScope" },
+        "journal_epoch": { "type": "integer", "minimum": 0 },
+        "observed_generation": { "type": "integer", "minimum": 0 },
+        "claim_generation": { "type": "integer", "minimum": 1 },
+        "attempt_id": { "$ref": "#/$defs/RoutingIdentifier" },
+        "task_generation": { "$ref": "#/$defs/RoutingIdentifier" },
+        "ownership_fence": { "$ref": "#/$defs/RoutingIdentifier" }
+      }
+    },
+    "RoutingPin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "model"],
+      "properties": {
+        "provider": { "$ref": "#/$defs/RoutingIdentifier" },
+        "model": { "type": ["string", "null"] }
+      }
+    },
+    "RoutingRequirements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["context", "quality", "tools", "permissions"],
+      "properties": {
+        "context": { "type": ["string", "null"] },
+        "quality": { "type": ["string", "null"] },
+        "tools": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "permissions": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+      }
+    },
+    "RoutingObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "generation": { "type": "integer", "minimum": 0 },
+        "journal_epoch": { "type": "integer", "minimum": 0 },
+        "observed": { "type": "integer", "minimum": 0 },
+        "max": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "RoutingExclusion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["route_id", "reason", "detail", "scope", "observation"],
+      "properties": {
+        "route_id": { "$ref": "#/$defs/RoutingIdentifier" },
+        "reason": { "$ref": "#/$defs/RoutingIdentifier" },
+        "detail": { "type": ["string", "null"] },
+        "scope": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/RoutingScope" }] },
+        "observation": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/RoutingObservation" }] }
+      }
+    },
+    "RoutingCircuitObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "status", "generation", "journal_epoch", "state", "manual_block", "eligible_at", "probe_owner"],
+      "properties": {
+        "scope": { "$ref": "#/$defs/RoutingScope" },
+        "status": { "type": "string", "enum": ["available", "unavailable"] },
+        "generation": { "type": "integer", "minimum": 0 },
+        "journal_epoch": { "type": "integer", "minimum": 0 },
+        "state": { "type": ["string", "null"], "enum": ["closed", "open", null] },
+        "manual_block": { "type": ["boolean", "null"] },
+        "eligible_at": { "type": ["string", "null"], "format": "date-time" },
+        "probe_owner": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/RoutingProbe" }] }
+      }
+    },
+    "RoutingCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["route_id", "provider_account_id", "adapter", "model", "effort", "eligible", "exclusions", "capacity", "circuits"],
+      "properties": {
+        "route_id": { "$ref": "#/$defs/RoutingIdentifier" },
+        "provider_account_id": { "$ref": "#/$defs/RoutingIdentifier" },
+        "adapter": { "$ref": "#/$defs/RoutingIdentifier" },
+        "model": { "$ref": "#/$defs/RoutingIdentifier" },
+        "effort": { "type": ["string", "null"] },
+        "eligible": { "type": "boolean" },
+        "exclusions": { "type": "array", "maxItems": 2, "items": { "$ref": "#/$defs/RoutingExclusion" } },
+        "capacity": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "object", "additionalProperties": false, "required": ["observed", "max"], "properties": { "observed": { "type": "integer", "minimum": 0 }, "max": { "type": "integer", "minimum": 1 } } }
+          ]
+        },
+        "circuits": { "type": "array", "maxItems": 2, "items": { "$ref": "#/$defs/RoutingCircuitObservation" } }
+      }
+    },
+    "RoutingCircuitGeneration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "journal_epoch", "observed_generation"],
+      "properties": {
+        "scope": { "$ref": "#/$defs/RoutingScope" },
+        "journal_epoch": { "type": "integer", "minimum": 0 },
+        "observed_generation": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "RoutingDecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decision_id", "decided_at", "task_generation", "policy_digest",
+        "status", "reason", "next_action_owner", "policy", "selected_route",
+        "candidates", "exclusions", "circuit_generations", "probe_requirements"
+      ],
+      "properties": {
+        "decision_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "decided_at": { "type": "string", "format": "date-time" },
+        "task_generation": { "$ref": "#/$defs/RoutingIdentifier" },
+        "policy_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "status": { "type": "string", "enum": ["selected", "capacity_saturated", "no_route"] },
+        "reason": { "type": "string" },
+        "next_action_owner": { "type": "string", "enum": ["attempt", "scheduler", "retry_authority", "operator"] },
+        "policy": { "type": "object", "additionalProperties": false, "required": ["stage", "pin", "requirements"], "properties": { "stage": { "type": "string" }, "pin": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/RoutingPin" }] }, "requirements": { "$ref": "#/$defs/RoutingRequirements" } } },
+        "selected_route": { "type": ["string", "null"] },
+        "candidates": { "type": "array", "maxItems": 1024, "items": { "$ref": "#/$defs/RoutingCandidate" } },
+        "exclusions": { "type": "array", "maxItems": 2048, "items": { "$ref": "#/$defs/RoutingExclusion" } },
+        "circuit_generations": { "type": "array", "maxItems": 2, "items": { "$ref": "#/$defs/RoutingCircuitGeneration" } },
+        "probe_requirements": { "type": "array", "maxItems": 2, "items": { "$ref": "#/$defs/RoutingCircuitGeneration" } }
       }
     },
     "HumanOutcome": {

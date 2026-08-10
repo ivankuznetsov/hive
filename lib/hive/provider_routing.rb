@@ -35,6 +35,7 @@ module Hive
     }.freeze
     MIN_COOLDOWN_SEC = 1
     MAX_COOLDOWN_SEC = 7 * 24 * 60 * 60
+    MAX_IDENTIFIER_BYTES = 128
 
     DEFAULT_CAPABILITIES = {
       "context" => "standard",
@@ -107,6 +108,8 @@ module Hive
     autoload :Policy, File.expand_path("provider_routing/policy.rb", __dir__)
     autoload :Request, File.expand_path("provider_routing/request.rb", __dir__)
     autoload :Decision, File.expand_path("provider_routing/decision.rb", __dir__)
+    autoload :OperationalProjection,
+             File.expand_path("provider_routing/operational_projection.rb", __dir__)
     autoload :Route, File.expand_path("provider_routing/route.rb", __dir__)
     autoload :Router, File.expand_path("provider_routing/router.rb", __dir__)
 

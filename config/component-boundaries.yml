@@ -72,6 +72,8 @@ components:
       - lib/hive/paths.rb
       - lib/hive/attempts/dispatcher.rb
       - lib/hive/attempts/finalization_maintenance.rb
+      - lib/hive/commands/circuits.rb
+      - lib/hive/provider_routing/operational_projection.rb
     mutation_authority: "Scoped provider-health journals, rebuildable projections, probe intents, quarantine artifacts, and their typed audit receipts only."
     recovery_surface: "Conservative eligibility and attempt-fenced probe reconciliation only; RecoveryCoordinator remains the sole retry, charge, deadline, successor, and dispatch owner."
     wiki_page: wiki/modules/provider_health.md
@@ -146,7 +148,9 @@ components:
       - lib/hive/attempts/dispatcher.rb
       - lib/hive/attempts/entrypoint.rb
       - lib/hive/attempts/store.rb
+      - lib/hive/commands/circuits.rb
       - lib/hive/implementation_identity/resolver.rb
+      - lib/hive/provider_routing/operational_projection.rb
     mutation_authority: "None; configuration normalization and decisions are pure immutable values."
     recovery_surface: "No retry or recovery surface; invalid configuration fails before dispatch and legacy mode bypasses the domain."
     wiki_page: wiki/modules/provider_routing.md
@@ -157,6 +161,56 @@ components:
       - test/unit/provider_routing/value_objects_test.rb
       - test/unit/model_routing_test.rb
       - test/unit/implementation_identity/resolver_test.rb
+    migration_exceptions: []
+
+  - id: provider-routing-operations
+    name: Provider Routing Operations
+    state: candidate
+    entrypoint:
+      file: lib/hive/provider_routing/operational_projection.rb
+      require: hive/provider_routing/operational_projection
+      constant: Hive::ProviderRouting::OperationalProjection
+    public_contract:
+      values:
+        - Hive::ProviderRouting::OperationalProjection
+      errors:
+        - Hive::ConfigError
+        - Hive::Attempts::StoreError
+    owned_paths:
+      - lib/hive/provider_routing/operational_projection.rb
+    state_contracts:
+      - "Inspection reads the bounded durable decision projection, attempt-derived account capacity, and scoped health journals without rerunning route selection"
+      - "An empty account registry returns not_configured before opening attempt or health storage"
+      - "The projection owns no task, attempt, recovery, dispatch, or provider-health mutation"
+    schema_contracts:
+      - "The projection contains typed routing and health metadata only; raw prompts, messages, stdout, stderr, tool output, tokens, and credentials are excluded"
+      - "Decision enumeration is hard-bounded and preserves the durable project, task-generation, subject, and optional admitted-attempt identity"
+    lock_contracts:
+      - "Inspection performs bounded owner-store reads only and acquires no admission or task-generation lock"
+      - "Provider-health inspection remains serialized by the health store and never nests an earlier admission lock"
+    component_dependencies:
+      - attempts
+      - provider-health
+      - provider-routing-policy
+    allowed_hive_dependencies:
+      - hive/attempts/capacity_snapshot
+      - hive/attempts/store
+      - hive/provider_health
+      - hive/provider_routing
+    internal_collaborators:
+      - Hive::Attempts::CapacitySnapshot
+      - Hive::Attempts::Store
+      - Hive::ProviderHealth::Store
+    forbidden_constructions: []
+    authorized_internal_constructions: []
+    hive_consumers:
+      - lib/hive/commands/circuits.rb
+    mutation_authority: "None; this is a read-only durable operational projection."
+    recovery_surface: "Reports the authoritative next-action owner but cannot request, charge, schedule, or dispatch recovery."
+    wiki_page: wiki/modules/provider_routing.md
+    focused_tests:
+      - test/unit/provider_routing/operational_projection_test.rb
+      - test/unit/commands/circuits_test.rb
     migration_exceptions: []
 
   - id: patrol-effects
@@ -533,11 +587,14 @@ components:
       - constant: Hive::Attempts::Store
         files:
           - lib/hive/commands/attempt_supervise.rb
+          - lib/hive/commands/circuits.rb
           - lib/hive/commands/daemon.rb
           - lib/hive/commands/module/dry_run.rb
           - lib/hive/conditions/execute_boundary.rb
           - lib/hive/implementation_identity/store.rb
           - lib/hive/modules/inspector.rb
+          - lib/hive/provider_routing/operational_projection.rb
+          - lib/hive/daemon/recovery_coordinator.rb
           - lib/hive/recovery/migration.rb
           - lib/hive/task_closure.rb
           - lib/hive/task_projection/store.rb
@@ -565,6 +622,7 @@ components:
       - constant: Hive::Attempts::FinalizationMaintenance
         files:
           - lib/hive/commands/daemon.rb
+          - lib/hive/recovery/migration.rb
         reason: "The runtime factory and daemon composition root own finalization wiring; callers receive the composed service."
       - constant: Hive::Attempts::StorageHealth
         files:

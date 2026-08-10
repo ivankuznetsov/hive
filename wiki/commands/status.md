@@ -3,14 +3,14 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb
 created: 2026-04-25
-updated: 2026-08-02
+updated: 2026-08-10
 tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, terminal-outcomes, dependencies, scheduler]
 ---
 
 **TLDR**: `hive status` now defaults to a compact operational snapshot for
 humans: closed state bands, counts, exact blocker ownership/reasons, and at
 most five representative rows per band. `hive status --operational --json`
-emits the agent contract `hive-operational-status.v3`. The complete task graph
+emits the agent contract `hive-operational-status.v4`. The complete task graph
 is available as `hive status --json` (`hive-status.v7`), and
 `hive status --full` keeps the former detailed human
 table.
@@ -21,7 +21,7 @@ table.
 |---|---|
 | `hive status` | Concise human operational snapshot. |
 | `hive status --operational` | Explicit alias for the same concise human view. |
-| `hive status --operational --json` | `hive-operational-status.v3` agent document. The closure rollout migrated every in-repository consumer and removed v1/v2. |
+| `hive status --operational --json` | `hive-operational-status.v4` agent document. V4 adds a required nullable exact routing decision; superseded v1-v3 are removed after coordinated in-repository migration. |
 | `hive status --json` | Complete `hive-status.v7` graph for daemon, bot, TUI, and current consumers. |
 | `hive status --full` | Former grouped detailed human table. |
 | `hive status --diagnose ...` | Existing task diagnostic surface; incompatible with `--operational`/`--full`. |
@@ -39,7 +39,10 @@ idle; it caps each band at five rows and reports overflow with `hive status
 --full`. The human view prints active/archive counts, exact project/slug
 identity, stage/marker, blocker owner, reason, and source issues. The JSON
 document additionally carries project counts, daemon/scheduler identity and
-freshness, and structured provider/retry evidence.
+freshness, structured provider/retry evidence, and the exact durable routing
+decision when an explicit pool was evaluated. The human row adds either the
+selected route or the no-selection reason only when that routing data exists;
+legacy rows render unchanged.
 
 A benign dependency-blocked row is always
 `waiting_on_provider_or_scheduler`, with `blocker_owner: scheduler` and
@@ -76,12 +79,17 @@ an idle verdict. Unclassifiable rows remain `unknown`; a partial snapshot may
 still report a stronger directly observed active state, but never claims idle
 from missing evidence.
 
-`hive-operational-status.v3` includes summary/state counts, daemon identity and
+`hive-operational-status.v4` includes summary/state counts, daemon identity and
 phase, scheduler capacity/queue/provider holds, archive counts, typed issues,
 the required bounded `attempt_storage` cell, per-task liveness/freshness,
 blocker ownership and reasons, nullable retry
 evidence (`due`, `retry_at`, `safe`, `safety_reason`), and an optional closed
-action descriptor plus the canonical durable recovery receipt. It never embeds
+action descriptor, the canonical durable recovery receipt, and a required
+nullable sanitized routing decision. That routing object includes policy/task
+generation, digest, pin/requirements summary, ordered candidates and exclusions,
+circuit generations, probe requirements, selected route or no-route reason,
+and next-action owner. The daemon publishes the exact admission result into its
+coherent snapshot; status never reruns selection. It never embeds
 a shell command or argv. A routine,
 confirmation-free recommendation carries `action_id`, exact `project:slug`, an
 observation token, risk class, and provenance; execute it only with:

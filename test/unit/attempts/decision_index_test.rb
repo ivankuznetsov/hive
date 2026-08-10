@@ -20,7 +20,9 @@ class AttemptsDecisionIndexTest < Minitest::Test
     recorded = @index.record_routing_decision(
       decision: decision,
       task_generation: "generation-1",
-      subject: subject
+      subject: subject,
+      project: "demo",
+      attempt_id: "attempt-1"
     )
     restarted = Hive::Attempts::DecisionIndex.new(root: @root)
 
@@ -29,6 +31,15 @@ class AttemptsDecisionIndexTest < Minitest::Test
       task_generation: "generation-1",
       subject: subject
     )
+    assert_equal [
+      {
+        "task_generation" => "generation-1",
+        "subject" => subject,
+        "project" => "demo",
+        "attempt_id" => "attempt-1",
+        "decision" => decision.to_h
+      }
+    ], restarted.routing_decisions
     refute_includes all_bytes, "stdout"
     refute_includes all_bytes, "credential"
   end
@@ -37,7 +48,9 @@ class AttemptsDecisionIndexTest < Minitest::Test
     @index.record_routing_decision(
       decision: selected_decision("decision-1"),
       task_generation: "generation-1",
-      subject: subject
+      subject: subject,
+      project: "demo",
+      attempt_id: "attempt-1"
     )
     latest = Hive::ProviderRouting::Decision.no_route(
       request: request,
@@ -55,7 +68,8 @@ class AttemptsDecisionIndexTest < Minitest::Test
     @index.record_routing_decision(
       decision: latest,
       task_generation: "generation-1",
-      subject: subject
+      subject: subject,
+      project: "demo"
     )
 
     assert_equal latest.to_h, @index.routing_decision(
@@ -68,7 +82,9 @@ class AttemptsDecisionIndexTest < Minitest::Test
     @index.record_routing_decision(
       decision: selected_decision("decision-1"),
       task_generation: "generation-1",
-      subject: subject
+      subject: subject,
+      project: "demo",
+      attempt_id: "attempt-1"
     )
     key = { "task_generation" => "generation-1", "subject" => subject }
     File.write(@index.path_for("routing-decision", key), "{}\n")

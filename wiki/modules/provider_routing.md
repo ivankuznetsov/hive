@@ -131,6 +131,24 @@ to revalidate the selected route's complete generation vector. Any concurrent
 health mutation causes a bounded re-selection; only a still-current decision
 may be persisted with a launching attempt.
 
+## Durable operational projection
+
+`OperationalProjection` is a separate read-only catalog component layered over
+routing policy, Attempts, and Provider Health. It joins bounded current
+decision cells, durable live-attempt account counts, and authoritative scoped
+health inspection. It does not call `Router`, select a route, or acquire an
+admission/task-generation lock.
+
+Each decision cell durably retains the project, task generation, strict subject,
+optional admitted attempt ID, and complete sanitized `Decision#to_h`. This
+preserves identity for a first no-route/capacity result even when no attempt
+exists, and preserves the admitted attempt for a selected result after restart.
+Enumeration is available only through a hard-bounded operator projection;
+admission and reconciliation remain digest-addressed point reads and writes.
+
+`hive circuits` renders this projection directly in human or closed
+`hive-circuits.v1` JSON form. See [[commands/circuits]].
+
 Sanitized adapter-channel inventory lives under
 `test/fixtures/provider_errors/`. The allowlisted files are explicitly marked
 as sanitized adapter-contract fixtures, not upstream captures. Only those

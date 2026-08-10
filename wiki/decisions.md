@@ -639,7 +639,8 @@ projection, not another compatibility layer beside the earlier mechanisms.
 
 **Decision:** Migrate every in-repository producer and consumer in one change,
 then publish only the current `hive-status.v7`,
-`hive-operational-status.v3`, and `hive-act.v2` contracts. Remove their
+`hive-operational-status.v4`, and `hive-act.v2` contracts. Operational-status
+v4 adds the coordinated required nullable exact-routing projection. Remove their
 superseded schema files and compatibility assertions instead of accepting or
 translating older recovery/status documents. Older persisted task state is
 migrated at the task/state layer; wire-schema compatibility is not a second

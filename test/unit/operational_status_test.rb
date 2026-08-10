@@ -881,6 +881,49 @@ class OperationalStatusTest < Minitest::Test
     assert schema.valid?(result), schema.validate(result).map { |error| error.fetch("error") }.inspect
   end
 
+  def test_exact_daemon_routing_decision_projects_without_reselection
+    source = task(action: "ready_to_run", slug: "routed", stage: "4-execute")
+    source["task_generation"] = "generation-1"
+    scheduler = scheduler_snapshot_for(
+      source, decision: "dispatched", reason: "child dispatch was accepted"
+    )
+    scheduler.dig("tasks", 0, "disposition")["routing"] = routing_decision
+
+    result = project(
+      status_payload(source),
+      project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: scheduler
+    )
+    routing = result.dig("tasks", 0, "routing")
+
+    assert_equal "decision-1", routing.fetch("decision_id")
+    assert_equal "account-a/model-a", routing.fetch("selected_route")
+    assert_equal "attempt", routing.fetch("next_action_owner")
+    assert_equal({ "observed" => 1, "max" => 2 }, routing.dig("candidates", 0, "capacity"))
+    schema = JSONSchemer.schema(
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-operational-status")))
+    )
+    assert_empty schema.validate(result).to_a
+  end
+
+  def test_untyped_or_raw_routing_metadata_is_dropped_without_leaking
+    source = task(action: "ready_to_run", slug: "routed", stage: "4-execute")
+    scheduler = scheduler_snapshot_for(
+      source, decision: "dispatched", reason: "child dispatch was accepted"
+    )
+    unsafe = routing_decision.merge("stdout" => "secret-canary")
+    scheduler.dig("tasks", 0, "disposition")["routing"] = unsafe
+
+    result = project(
+      status_payload(source),
+      project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: scheduler
+    )
+
+    assert_nil result.dig("tasks", 0, "routing")
+    refute_includes JSON.generate(result), "secret-canary"
+  end
+
   def test_invalid_hidden_archive_count_is_rejected_at_the_projection_boundary
     payload = status_payload(
       task(action: "ready_to_plan", slug: "invalid-hidden"),
@@ -944,6 +987,32 @@ class OperationalStatusTest < Minitest::Test
           "owner" => "scheduler", "reason" => reason
         }
       } ]
+    }
+  end
+
+  def routing_decision
+    {
+      "decision_id" => "decision-1",
+      "decided_at" => "2026-07-20T10:00:01.000000Z",
+      "task_generation" => "generation-1",
+      "policy_digest" => "d" * 64,
+      "status" => "selected",
+      "reason" => "selected",
+      "next_action_owner" => "attempt",
+      "policy" => {
+        "stage" => "execute", "pin" => nil,
+        "requirements" => { "context" => nil, "quality" => nil, "tools" => [], "permissions" => [] }
+      },
+      "selected_route" => "account-a/model-a",
+      "candidates" => [ {
+        "route_id" => "account-a/model-a", "provider_account_id" => "account-a",
+        "adapter" => "codex", "model" => "model-a", "effort" => "high",
+        "eligible" => true, "exclusions" => [],
+        "capacity" => { "observed" => 1, "max" => 2 }, "circuits" => []
+      } ],
+      "exclusions" => [],
+      "circuit_generations" => [],
+      "probe_requirements" => []
     }
   end
 

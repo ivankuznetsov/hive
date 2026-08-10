@@ -71,6 +71,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       assembler.observe(
         observed, decision: "global_cap", owner: "scheduler",
         reason: "global dispatch capacity is exhausted",
+        routing: { "decision_id" => "route-decision-1", "reason" => "capacity_saturated" },
         retry_at: (T0 + 3_600).iso8601(6),
         retry_due: false,
         retry_safe: true,
@@ -93,6 +94,8 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
                    snapshot.dig("tasks", 0, "disposition", "retry_at")
       assert_equal false, snapshot.dig("tasks", 0, "disposition", "retry_due")
       assert_equal true, snapshot.dig("tasks", 0, "disposition", "retry_safe")
+      assert_equal "route-decision-1",
+                   snapshot.dig("tasks", 0, "disposition", "routing", "decision_id")
       assert_equal 2, snapshot.dig("attempt_storage", "hot", "records")
       assert_equal "complete", snapshot.dig("attempt_storage", "layout", "migration")
       assert_equal 2, snapshot.fetch("hidden_archived_task_count")

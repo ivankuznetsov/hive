@@ -2733,7 +2733,7 @@ class SchemaFilesTest < Minitest::Test
   def test_recovery_status_contracts_keep_only_the_current_schema
     {
       "hive-status" => 7,
-      "hive-operational-status" => 3,
+      "hive-operational-status" => 4,
       "hive-act" => 2
     }.each do |name, expected_version|
       path = Hive::Schemas.schema_path(name)

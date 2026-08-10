@@ -351,7 +351,7 @@ class WorkflowCreatorExecutionTest < Minitest::Test
       when ["run", #{SLUG.inspect}] then puts "ran"
       when ["status", "--operational", "--json"]
         puts JSON.generate(
-          "schema" => "hive-operational-status", "schema_version" => 3, "ok" => true,
+          "schema" => "hive-operational-status", "schema_version" => 4, "ok" => true,
           "tasks" => [
             { "identity" => { "slug" => #{SLUG.inspect} }, "workflow" => "editorial",
               "position" => { "stage" => "1-research" } }

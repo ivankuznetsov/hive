@@ -160,6 +160,26 @@ class ProviderRoutingConfigurationTest < Minitest::Test
     assert accounts.frozen?
   end
 
+  def test_route_identity_is_bounded_before_policy_persistence
+    model = "m" * 120
+    cfg = Hive::Config.merge_defaults(
+      "execute" => { "routing" => { "pool" => [ route("codex-primary", model: model) ] } }
+    )
+    cfg[Hive::ProviderRouting::PROVIDER_ACCOUNTS_KEY] =
+      Hive::ProviderRouting::Configuration.normalize_accounts(
+        {
+          "codex-primary" => account("codex", binding: "default", models: [ model ])
+        },
+        source: "global providers"
+      )
+
+    error = assert_raises(Hive::ConfigError) do
+      Hive::ProviderRouting::Configuration.from(cfg: cfg, stage_name: "execute")
+    end
+
+    assert_match(/route identifier longer than 128 bytes/, error.message)
+  end
+
   def test_policy_digest_is_stable_and_covers_every_selection_input
     first = configuration_for(
       pool: [ route("codex-primary", model: "gpt-5.6-sol") ],
@@ -260,14 +280,17 @@ class ProviderRoutingConfigurationTest < Minitest::Test
 
     assert_equal %w[claude codex grok pi], inventory.fetch("adapters").keys.sort
     inventory.fetch("adapters").each do |adapter, entry|
-      capture = JSON.parse(File.read(File.join(root, entry.fetch("fixture"))))
+      contract = JSON.parse(File.read(File.join(root, entry.fetch("fixture"))))
+      capture = JSON.parse(File.read(File.join(root, entry.fetch("real_capture"))))
 
       assert_equal adapter, capture.fetch("adapter")
       assert_equal "real_capture_pending", capture.fetch("capture_status")
       assert_equal "task_local", capture.fetch("classification")
       assert_nil capture.fetch("trusted_scope")
-      assert_empty entry.fetch("stable_explicit_scopes")
-      refute_match(/token|credential|prompt|stderr|stdout/i, JSON.generate(capture))
+      assert_equal %w[provider_account model], entry.fetch("stable_explicit_scopes")
+      [ contract, capture ].each do |fixture|
+        refute_match(/token|credential|prompt|stderr|stdout/i, JSON.generate(fixture))
+      end
     end
   end
 

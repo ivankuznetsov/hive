@@ -202,10 +202,16 @@ module Hive
             raise ConfigError,
                   "#{path}.model #{model.inspect} is not configured for provider account #{account_id.inspect}"
           end
+          route_id = "#{account_id}/#{model}"
+          if model.bytesize > MAX_IDENTIFIER_BYTES || route_id.bytesize > MAX_IDENTIFIER_BYTES
+            raise ConfigError,
+                  "#{path}.model produces a route identifier longer than " \
+                  "#{MAX_IDENTIFIER_BYTES} bytes"
+          end
 
           capabilities = normalize_capabilities(entry["capabilities"], "#{path}.capabilities")
           Route.new(
-            id: "#{account_id}/#{model}",
+            id: route_id,
             account: account_id,
             adapter: account.adapter,
             launch_binding: account.launch_binding,

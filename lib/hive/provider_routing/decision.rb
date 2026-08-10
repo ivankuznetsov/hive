@@ -174,6 +174,11 @@ module Hive
           "status" => status.to_s,
           "reason" => reason,
           "next_action_owner" => next_action_owner,
+          "policy" => {
+            "stage" => request.policy.stage,
+            "pin" => request.policy.pin&.to_h,
+            "requirements" => request.policy.requirements.to_h
+          },
           "selected_route" => route&.id,
           "candidates" => candidates.map { |candidate| candidate.respond_to?(:to_h) ? candidate.to_h : candidate },
           "exclusions" => exclusions.map(&:to_h),

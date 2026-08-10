@@ -362,7 +362,8 @@ module Hive
               }.fetch(status, "recovery_unavailable"),
               "owner" => receipt["owner"] || "hive",
               "reason" => receipt["reason"] || status.tr("_", " "),
-              "recovery" => receipt
+              "recovery" => receipt,
+              "routing" => entry["routing"]
             }
           end
         end

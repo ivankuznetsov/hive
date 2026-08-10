@@ -718,6 +718,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       assert_nil persisted.expected_marker_name
       assert_empty persisted.recovery.fetch("expected_marker_attrs")
       assert_equal decision.policy_digest, persisted.recovery.fetch("policy_digest")
+      assert_equal decision.to_h, persisted.recovery.fetch("admission_observation")
       assert_equal "waiting", Hive::Markers.current(row.state_file).name.to_s
 
       resumed = coordinator.resume(
@@ -760,8 +761,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       assert_equal 1, observed.retry_count
       assert_equal 1, Q.pending(state_home: state_home).size
       assert_equal "cleared", updated.recovery.fetch("phase")
-      assert_equal later.decision_id,
-                   updated.recovery.dig("admission_observation", "decision_id")
+      assert_equal later.to_h, updated.recovery.fetch("admission_observation")
     end
   end
 
@@ -787,6 +787,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       assert_equal 1, updated.recovery.fetch("retry_count")
       assert_equal "capacity_saturated",
                    updated.recovery.dig("admission_observation", "reason")
+      assert_equal capacity.to_h, updated.recovery.fetch("admission_observation")
       assert_nil updated.recovery.fetch("blocked_reason")
     end
   end

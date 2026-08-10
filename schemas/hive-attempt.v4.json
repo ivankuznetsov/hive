@@ -150,7 +150,7 @@
         "policy_digest": { "$ref": "#/$defs/Sha256" },
         "decided_at": { "type": "string", "format": "date-time" },
         "exclusions": {
-          "type": "array", "maxItems": 128,
+          "type": "array", "maxItems": 1024,
           "items": { "$ref": "#/$defs/RoutingDecisionExclusion" }
         }
       }

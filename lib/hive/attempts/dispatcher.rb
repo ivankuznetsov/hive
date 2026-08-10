@@ -238,7 +238,8 @@ module Hive
                   view.record_routing_decision(
                     decision: route_decision,
                     task_generation: generation.task_generation,
-                    subject: durable_subject
+                    subject: durable_subject,
+                    project: generation.project
                   )
                   result = DispatchResult.new(
                     status: route_decision.capacity_saturated? ? :deferred : :no_route,
@@ -289,7 +290,9 @@ module Hive
                 view.record_routing_decision(
                   decision: route_decision,
                   task_generation: generation.task_generation,
-                  subject: durable_subject
+                  subject: durable_subject,
+                  project: generation.project,
+                  attempt_id: created.attempt_id
                 )
                 break
               rescue Hive::ProviderHealth::StaleGeneration

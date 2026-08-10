@@ -120,3 +120,19 @@ no-op. Operator generation changes, stale epochs, late receipts, and fenced
 attempts cannot close, reopen, or release another attempt's probe. A valid
 task-local or absent signal still receives the named finalization
 acknowledgement without changing a generation, preventing recovery deadlock.
+
+## Operator controls
+
+`hive circuits` is the only public administration surface for provider health.
+Provider-account and exact-model `block`, `unblock`, and `reset` require
+explicit `--yes`, a bounded validated reason, trusted local actor identity, and
+either the fresh healthy generation or the complete scoped corruption token.
+The mutation and typed audit receipt are one journal operation.
+
+Unblock removes only the manual block. Ordinary reset clears automatic health
+and stale probe state while preserving the manual block. Corrupt reset
+quarantines exact bytes into a new epoch and likewise preserves the last
+verified block. All accepted actions advance the target generation; stale
+inputs do nothing. None of these actions touches attempts, markers, recovery
+receipts, retry counts, deadlines, successors, or dispatch. See
+[[commands/circuits]].

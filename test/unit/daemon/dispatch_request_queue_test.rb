@@ -34,6 +34,47 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
     }
   end
 
+  def admission_observation
+    exclusion = {
+      "route_id" => "account-a/model-a", "reason" => "manual_block",
+      "detail" => nil,
+      "scope" => {
+        "kind" => "provider_account", "provider_account_id" => "account-a",
+        "model" => nil
+      },
+      "observation" => { "generation" => 2, "journal_epoch" => 0 }
+    }
+    {
+      "decision_id" => "d" * 64,
+      "decided_at" => Time.utc(2026, 8, 10, 12).iso8601(6),
+      "task_generation" => "c" * 64,
+      "policy_digest" => "e" * 64,
+      "status" => "no_route",
+      "reason" => "no_eligible_provider_route",
+      "next_action_owner" => "retry_authority",
+      "policy" => {
+        "stage" => "execute", "pin" => nil,
+        "requirements" => {
+          "context" => nil, "quality" => nil, "tools" => [], "permissions" => []
+        }
+      },
+      "selected_route" => nil,
+      "candidates" => [
+        {
+          "route_id" => "account-a/model-a",
+          "provider_account_id" => "account-a",
+          "adapter" => "codex", "model" => "model-a", "effort" => "high",
+          "eligible" => false,
+          "capacity" => { "observed" => 0, "max" => 1 },
+          "circuits" => [], "exclusions" => [ exclusion ]
+        }
+      ],
+      "exclusions" => [ exclusion ],
+      "circuit_generations" => [],
+      "probe_requirements" => []
+    }
+  end
+
   def write_request(state_home, request_id:, created_at:, argv: [ "hive", "run", "slug-x", "--json" ],
                     project: "hive", slug: "slug-x", requestor: "bot", chat_id: 42,
                     update_id: 99, trigger: "answer_complete", schema_version: Q::SCHEMA_VERSION,
@@ -277,31 +318,7 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
 
   def test_v5_markerless_admission_recovery_round_trips_and_has_exact_lookup
     Dir.mktmpdir("hive-dispatch-queue") do |dir|
-      observation = {
-        "decision_id" => "d" * 64,
-        "decided_at" => Time.utc(2026, 8, 10, 12).iso8601(6),
-        "policy_digest" => "e" * 64,
-        "status" => "no_route",
-        "reason" => "no_eligible_provider_route",
-        "next_action_owner" => "retry_authority",
-        "candidates" => [
-          {
-            "route_id" => "account-a/model-a",
-            "capacity" => { "observed" => 0, "max" => 1 },
-            "exclusions" => [
-              {
-                "route_id" => "account-a/model-a", "reason" => "manual_block",
-                "detail" => nil,
-                "scope" => {
-                  "kind" => "provider_account",
-                  "provider_account_id" => "account-a", "model" => nil
-                },
-                "observation" => { "generation" => 2, "journal_epoch" => 0 }
-              }
-            ]
-          }
-        ]
-      }
+      observation = admission_observation
       recovery = recovery_payload.merge(
         "variant" => "admission_failure",
         "observed_marker_generation" => nil,
@@ -343,16 +360,7 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
       "observed_marker_generation" => nil,
       "expected_marker_attrs" => {},
       "policy_digest" => "e" * 64,
-      "admission_observation" => {
-        "decision_id" => "d" * 64,
-        "decided_at" => Time.utc(2026, 8, 10, 12).iso8601(6),
-        "policy_digest" => "e" * 64,
-        "status" => "no_route", "reason" => "no_eligible_provider_route",
-        "next_action_owner" => "retry_authority",
-        "candidates" => [
-          { "route_id" => "account/model", "capacity" => nil, "exclusions" => [] }
-        ]
-      }
+      "admission_observation" => admission_observation
     )
     invalid = [
       admission.merge("observed_marker_generation" => "a" * 64),

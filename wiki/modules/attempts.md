@@ -147,6 +147,14 @@ migration and maintenance deltas (`promoted`, `deleted`, and `cold_examined`),
 not lifetime totals, and a failed write/read becomes one concise degraded
 warning. Status never scans proof or cold-log history.
 
+The current explicit-routing decision cell is the one bounded exception for
+operator inspection. It retains project, task generation, strict subject,
+optional admitted attempt ID, and the complete sanitized route decision. The
+selected form therefore identifies its attempt, while first no-route/capacity
+forms remain explainable despite creating no attempt. `hive circuits` may
+enumerate at most the fixed projection bound; admission, recovery, and
+reconciliation continue to use point-addressed decision reads and writes.
+
 The record carries attempt/request/predecessor IDs, task and generation
 identity, the exact admitted worker argv, a SHA-256 digest of a random launch
 capability, adapter/profile provider, immutable routing identity, retry charge,

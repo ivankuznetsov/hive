@@ -19,6 +19,7 @@ class ExitCodesTest < Minitest::Test
   def test_error_subclasses_map_to_their_contract_code
     assert_equal Hive::ExitCodes::GENERIC,             Hive::Error.new("x").exit_code
     assert_equal Hive::ExitCodes::USAGE,               Hive::InvalidTaskPath.new("x").exit_code
+    assert_equal Hive::ExitCodes::USAGE,               Hive::UsageError.new("x").exit_code
     assert_equal Hive::ExitCodes::TEMPFAIL,            Hive::ConcurrentRunError.new("x").exit_code
     assert_equal Hive::ExitCodes::SOFTWARE,            Hive::GitError.new("x").exit_code
     assert_equal Hive::ExitCodes::SOFTWARE,            Hive::WorktreeError.new("x").exit_code
@@ -38,6 +39,8 @@ class ExitCodesTest < Minitest::Test
     assert_equal Hive::ExitCodes::SOFTWARE,            Hive::InternalError.new("x").exit_code
     assert_equal Hive::ExitCodes::USAGE,               Hive::DaemonInstallDriftError.new("x").exit_code
     assert_equal Hive::ExitCodes::SOFTWARE,            Hive::DaemonInstallFailed.new("x").exit_code
+    assert_equal Hive::ExitCodes::USAGE,               Hive::BabysitterInstallDriftError.new("x").exit_code
+    assert_equal Hive::ExitCodes::SOFTWARE,            Hive::BabysitterInstallFailed.new("x").exit_code
     assert_equal Hive::ExitCodes::GENERIC,             Hive::RollbackFailed.new("x").exit_code
     assert_equal Hive::ExitCodes::USAGE,               Hive::Workflows::UnknownWorkflow.new("x").exit_code
   end

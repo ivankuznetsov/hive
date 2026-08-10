@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hivecli.sh/schemas/hive-module-manifest.v1.json",
+  "title": "Hive module manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "name", "version", "description", "type", "author", "license",
+    "hive_min_version", "source", "workflows", "hooks", "settings", "permissions",
+    "templates", "docs", "files", "release_sha256"
+  ],
+  "properties": {
+    "schema": {"const": "hive-module/v1"},
+    "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"},
+    "version": {"type": "string", "minLength": 5},
+    "description": {"type": "string", "minLength": 1},
+    "type": {"enum": ["workflow", "patrol", "architecture-patrol"]},
+    "author": {
+      "type": "object", "additionalProperties": false, "required": ["name", "url"],
+      "properties": {"name": {"type": "string", "minLength": 1}, "url": {"type": "string", "format": "uri"}}
+    },
+    "license": {"type": "string", "minLength": 1},
+    "hive_min_version": {"type": "string", "minLength": 5},
+    "source": {
+      "type": "object", "additionalProperties": false, "required": ["url", "revision"],
+      "properties": {
+        "url": {"type": "string", "format": "uri"},
+        "revision": {"type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"}
+      }
+    },
+    "workflows": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false, "required": ["id", "descriptor"],
+        "properties": {"id": {"type": "string"}, "descriptor": {"type": "string"}}
+      }
+    },
+    "hooks": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["id", "target", "default_enabled", "schedules", "events", "concurrency"],
+        "properties": {
+          "id": {"type": "string"},
+          "target": {
+            "type": "object", "additionalProperties": false, "required": ["kind", "id"],
+            "properties": {"kind": {"enum": ["workflow", "entrypoint", "command"]}, "id": {"type": "string"}}
+          },
+          "default_enabled": {"type": "boolean"},
+          "schedules": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+          "events": {
+            "type": "array", "uniqueItems": true,
+            "items": {"enum": ["task.completed", "pull_request.merged", "project.registered"]}
+          },
+          "concurrency": {"enum": ["allow", "drop", "replace"]}
+        }
+      }
+    },
+    "settings": {"type": "array", "items": {"type": "object"}},
+    "permissions": {
+      "type": "object", "additionalProperties": false,
+      "required": ["repository_write", "github_mutations", "external_commands", "network_hosts", "filesystem_read", "filesystem_write", "secrets"],
+      "properties": {
+        "repository_write": {"type": "boolean"},
+        "github_mutations": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+        "external_commands": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+        "network_hosts": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+        "filesystem_read": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+        "filesystem_write": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+        "secrets": {"type": "array", "uniqueItems": true, "items": {"type": "string"}}
+      }
+    },
+    "templates": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+    "docs": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+    "files": {
+      "type": "object", "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+    },
+    "release_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

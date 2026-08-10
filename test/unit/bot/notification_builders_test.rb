@@ -70,6 +70,16 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     assert_nil notification.keyboard
   end
 
+  def test_closure_callback_encoder_rejects_unknown_prefix
+    error = assert_raises(ArgumentError) do
+      Hive::Bot::NotificationBuilders.encode_closure_callback(
+        "delete_task", "slug" => "task"
+      )
+    end
+
+    assert_equal "unsupported closure callback", error.message
+  end
+
   def test_legacy_stage_dirs_notification_renders_singular_and_command_fallback
     notification = Hive::Bot::NotificationBuilders.build(legacy_stage_dirs(task_count: 1, command: nil))
 
@@ -689,20 +699,17 @@ class HiveBotNotificationBuildersTest < Minitest::Test
           attrs: { "phase" => "triage", "pass" => "1" })
     )
 
-    assert_includes text, "Open on a laptop to advance."
+    assert_includes text, "Hive will keep retrying this error automatically"
     refute_includes text, "no automatic recovery"
   end
 
-  def test_details_reply_for_dirty_worktree_error_renders_actionable_git_hint
-    # The actionable manual-recovery hint must reach the Show-details surface,
-    # not only RecoverySequence: a dirty_worktree error row degrades to the
-    # git-repair hint, never the generic "open it on a laptop" arm.
+  def test_details_reply_for_dirty_worktree_error_explains_continuing_retry
     text = Hive::Bot::NotificationBuilders.details_reply(
       row(action: "error", marker: "error", stage: "8-finalize",
           attrs: { "reason" => "dirty_worktree" })
     )
 
-    assert_includes text, "Hive can't auto-recover a dirty worktree. Open the worktree and commit or discard the changes, then tap Autofix."
+    assert_includes text, "Hive will keep retrying this error automatically; tap Autofix to retry now."
     refute_includes text, "Hive has no automatic recovery for this state - open it on a laptop."
   end
 
@@ -721,7 +728,7 @@ class HiveBotNotificationBuildersTest < Minitest::Test
 
     refute_nil notification
     assert_includes notification.text, "⚠ Execute stuck"
-    assert_includes notification.text, "Tap Show details to see what needs manual intervention."
+    assert_includes notification.text, "Tap Autofix to retry the stage cleanly."
   end
 
   def test_recover_actions_still_build_recovery_notifications
@@ -794,7 +801,7 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     assert_match(/fix guardrail/i, notification.text)
     labels = notification.keyboard.flatten.map { |button| button[:text] }
     refute_includes labels, "Clear and retry",
-                    "REVIEW_WAITING is not a clearable marker — must not surface a clear_retry button"
+                    "REVIEW_WAITING is not recoverable — must not surface an Autofix button"
     refute_includes labels, "Open laptop",
                     "Open laptop was retired — operators are on Telegram and the button has no payload"
     assert_includes labels, "Show details"
@@ -818,12 +825,28 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     assert_equal [ [ "Accept all", "Reject all" ], [ "Show details" ] ], row_labels
   end
 
-  def test_recovery_match_attr_review_stale_uses_pass_reason
-    attrs = { "pass" => "3", "reason" => "timeout" }
+  def test_recovery_match_attr_review_stale_uses_marker_generation
+    attrs = {
+      "pass" => "3", "reason" => "timeout",
+      "marker_id" => "review-stale-generation-3"
+    }
     r = row(action: "recover_review", marker: "review_stale", attrs: attrs)
     autofix = Hive::Bot::NotificationBuilders.autofix_callback(r)
-    assert_match(/:pass=3\z/, autofix,
-                 "review_stale must drive recovery_match_attr toward the pass=<n> key")
+    assert_match(/:marker_id=review-stale-generation-3,reason=timeout\z/, autofix)
+  end
+
+  def test_recovery_match_attr_review_error_prefers_marker_generation
+    attrs = {
+      "pass" => "3", "phase" => "integrity", "reason" => "timeout",
+      "marker_id" => "review-generation-3"
+    }
+    r = row(action: "recover_review", marker: "review_error", attrs: attrs)
+    autofix = Hive::Bot::NotificationBuilders.autofix_callback(r)
+
+    assert_match(/:marker_id=review-generation-3,reason=timeout\z/, autofix,
+                 "review-error recovery must guard the exact marker generation")
+    refute_match(/:pass=3\z/, autofix,
+                 "a reused pass must not supersede the marker generation guard")
   end
 
   def test_recovery_match_attr_error_encodes_marker_id_and_reason
@@ -831,10 +854,8 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     r = row(action: "error", marker: "error", attrs: attrs)
     autofix = Hive::Bot::NotificationBuilders.autofix_callback(r)
     # F1: when a marker_id is present, encode `marker_id=<hex>,reason=<r>` as
-    # a comma-separated pair so the callback handler's attrs_from_match_attr
-    # round-trip reconstructs both keys. manual_only? gates on `reason` to
-    # refuse dirty_worktree / ensure_clean_on_exit_failed retries on the
-    # inline-button path. marker_id stays the LEADING token so AlertStore's
+    # a comma-separated pair so callbacks retain the reason as an additional
+    # guarded assertion. marker_id stays the LEADING token so AlertStore's
     # first-token guard (parse_match_attr) keeps using it as the race-safe
     # invalidation key.
     assert_match(/:marker_id=err-137,reason=exit_code\z/, autofix,
@@ -842,12 +863,11 @@ class HiveBotNotificationBuildersTest < Minitest::Test
                  "(manual-only routing key), leading with marker_id")
   end
 
-  def test_recovery_match_attr_error_legacy_falls_back_to_observed_attrs
+  def test_recovery_match_attr_error_does_not_synthesize_legacy_identity
     attrs = { "reason" => "exit_code", "exit_code" => "137" }
     r = row(action: "error", marker: "error", attrs: attrs)
     autofix = Hive::Bot::NotificationBuilders.autofix_callback(r)
-    assert_match(/:reason=exit_code,exit_code=137\z/, autofix,
-                 "legacy `error` marker must use observed reason and exit_code together")
+    refute_match(/reason=exit_code|exit_code=137/, autofix)
   end
 
   def test_recovery_match_attr_unknown_marker_omits_match_attr_suffix
@@ -885,7 +905,8 @@ class HiveBotNotificationBuildersTest < Minitest::Test
 
   def test_recovery_keyboard_is_single_autofix_button
     notification = Hive::Bot::NotificationBuilders.build(
-      row(action: "recover_review", marker: "review_error", attrs: { "pass" => "2" },
+      row(action: "recover_review", marker: "review_error",
+          attrs: { "pass" => "2", "marker_id" => "review-generation-2" },
           slug: "we-need-to-improve-this-260522-db23", stage: "6-review",
           diagnostic: retry_diagnostic)
     )
@@ -894,7 +915,8 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     assert_equal 1, notification.keyboard.first.length
     button = notification.keyboard.first.first
     assert_equal "🔧 Autofix", button[:text]
-    assert_equal "autofix:hive:we-need-to-improve-this-260522-db23:6-review:review_error:pass=2",
+    assert_equal "autofix:hive:we-need-to-improve-this-260522-db23:6-review:" \
+                 "review_error:marker_id=review-generation-2",
                  Hive::Bot::NotificationBuilders.resolve_callback(button[:callback_data])
   end
 
@@ -911,7 +933,7 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     refute_includes labels, "🔧 Autofix"
   end
 
-  def test_fix_tampered_review_error_does_not_offer_autofix
+  def test_fix_tampered_review_error_offers_autofix
     notification = Hive::Bot::NotificationBuilders.build(
       row(action: "recover_review", marker: "review_error",
           attrs: { "phase" => "fix", "reason" => "fix_tampered" },
@@ -919,38 +941,22 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     )
 
     labels = notification.keyboard.flatten.map { |button| button[:text] }
-    refute_includes labels, "🔧 Autofix"
+    assert_includes labels, "🔧 Autofix"
     refute_includes labels, "Open laptop",
                     "Open laptop button retired everywhere"
-    assert_includes labels, "Show details"
+    refute_includes labels, "Show details"
   end
 
-  def test_fix_status_check_failed_review_error_does_not_offer_autofix
+  def test_fix_status_check_failed_review_error_offers_autofix
     notification = Hive::Bot::NotificationBuilders.build(
       row(action: "recover_review", marker: "review_error",
           attrs: { "phase" => "fix", "reason" => "fix_status_check_failed", "pass" => "1" },
           stage: "6-review", diagnostic: retry_diagnostic)
     )
 
-    assert_includes notification.text, "Tap Show details to see what needs manual intervention."
+    assert_includes notification.text, "Tap Autofix to retry the stage cleanly."
     labels = notification.keyboard.flatten.map { |button| button[:text] }
-    refute_includes labels, "🔧 Autofix"
-    assert_equal [ "Show details" ], labels
-  end
-
-  def test_managed_handoff_manual_recovery_replies_name_the_preserved_state
-    expected = {
-      Hive::DraftPrReceipt::RECOVERABLE_REASON => "preserved the validated branch",
-      Hive::DraftPrReceipt::QUARANTINE_REASON => "prohibited local content",
-      Hive::DraftPrReceipt::IDENTITY_REASON => "repository, branch, or PR identity changed",
-      Hive::DraftPrReceipt::AGENT_BLOCKED_REASON => "repair agent reported a blocked outcome"
-    }
-    expected.each do |reason, text|
-      reply = Hive::Bot::NotificationBuilders.send(
-        :manual_only_reply, marker: "error", attrs: { "reason" => reason }
-      )
-      assert_includes reply, text
-    end
+    assert_equal [ "🔧 Autofix" ], labels
   end
 
   def test_cause_sentence_for_review_error_reviewer_partial_failure

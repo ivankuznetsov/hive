@@ -69,6 +69,7 @@ class HiveBotScenarioBrainstormTest < Minitest::Test
     request_files = Dir.glob(File.join(@home, "dispatch_requests", "*.json"))
     assert_equal 1, request_files.size, "exactly one dispatch request must have landed in the queue"
     payload = JSON.parse(File.read(request_files.first))
+    assert_match(/\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z/, payload["request_id"])
     assert_equal [ "hive", "run", slug, "--json" ], payload["argv"]
     assert_equal "hive", payload["project"]
     assert_equal slug, payload["slug"]

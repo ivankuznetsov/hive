@@ -1,0 +1,5 @@
+#!/usr/bin/env ruby
+
+require "agent_cli_runtime"
+
+exit AgentCliRuntime::CLI.run(ARGV)

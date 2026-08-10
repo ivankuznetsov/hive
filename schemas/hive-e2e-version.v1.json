@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-e2e-version.v1.json",
+  "title": "hive-e2e version output (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "version"],
+  "properties": {
+    "schema": { "const": "hive-e2e-version" },
+    "schema_version": { "const": 1 },
+    "version": { "type": "string", "minLength": 1 }
+  }
+}

@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hive-patrol-evidence-receipt.v1.json",
+  "title": "Hive Patrol Evidence Receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "receipt_id",
+    "run_id",
+    "candidate_sha",
+    "catalog_digest",
+    "source_digest",
+    "manifest_digest",
+    "configuration_digest",
+    "scenario_manifest_digest",
+    "repository",
+    "capture",
+    "module_projection",
+    "decision_class",
+    "effects",
+    "fault_steps",
+    "artifacts",
+    "reviewer",
+    "generated_at",
+    "reviewed_at"
+  ],
+  "properties": {
+    "schema": {"const": "hive-patrol-evidence-receipt"},
+    "schema_version": {"const": 1},
+    "receipt_id": {"type": "string", "pattern": "^evidence-[0-9a-f]{64}$"},
+    "run_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "candidate_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "catalog_digest": {"$ref": "#/$defs/digest"},
+    "source_digest": {"$ref": "#/$defs/digest"},
+    "manifest_digest": {"$ref": "#/$defs/digest"},
+    "configuration_digest": {"$ref": "#/$defs/digest"},
+    "scenario_manifest_digest": {"$ref": "#/$defs/digest"},
+    "repository": {"$ref": "#/$defs/repository"},
+    "capture": {"$ref": "hive-patrol-capture.v1.json"},
+    "module_projection": {"$ref": "hive-patrol-decision-projection.v1.json"},
+    "decision_class": {"type": "string", "minLength": 1, "maxLength": 256},
+    "effects": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {"$ref": "hive-patrol-effect-receipt.v1.json"}
+    },
+    "fault_steps": {
+      "type": "array",
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "maxLength": 256}
+    },
+    "artifacts": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {"$ref": "#/$defs/artifact"}
+    },
+    "reviewer": {"type": "string", "minLength": 1, "maxLength": 1024},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "reviewed_at": {"type": "string", "format": "date-time"}
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "sha", "change_window"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "maxLength": 1024},
+        "sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "change_window": {"type": "string", "minLength": 1, "maxLength": 1024}
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "digest"],
+      "properties": {
+        "kind": {"type": "string", "minLength": 1, "maxLength": 256},
+        "digest": {"$ref": "#/$defs/digest"}
+      }
+    }
+  }
+}

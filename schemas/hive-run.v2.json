@@ -115,6 +115,11 @@
             "type": "string"
           }
         },
+        "allowed_outcomes": {
+          "description": "Descriptor-declared outcomes when the current stage requires a human decision.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/HumanOutcome" }
+        },
         "rebase": {
           "description": "Outcome of the auto-rebase pre-step (Hive::Rebase). Always present. `attempted` is true only when the rebase machinery ran past the disabled/no-worktree guards. `succeeded` is true on clean rebase (or no-op when commits_behind==0). `reason` is null on success and a string (snake_case) naming the skip-or-failure cause otherwise. `post_rebase_warnings` carries non-fatal warnings produced after a successful rebase (e.g., `worktree.yml` execute_base_head write failure); always an array, empty when none.",
           "type": "object",
@@ -163,6 +168,7 @@
                 "disabled",
                 "cli_override",
                 "manual_steering",
+                "human_stage",
                 "no_worktree",
                 "pre_existing_rebase",
                 "dirty_worktree",
@@ -187,6 +193,17 @@
             }
           }
         }
+      }
+    },
+    "HumanOutcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "complete", "artifact", "to"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+        "complete": { "type": "boolean" },
+        "artifact": { "type": ["string", "null"] },
+        "to": { "type": ["string", "null"], "pattern": "^[a-z0-9][a-z0-9-]*$" }
       }
     },
     "ErrorPayload": {

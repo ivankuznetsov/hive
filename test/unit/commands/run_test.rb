@@ -6,7 +6,7 @@ class CommandsRunTest < Minitest::Test
   TaskDouble = Struct.new(
     :slug, :stage_name, :stage_index, :folder, :state_file,
     :hive_state_path, :project_root, :project_name, :worktree_path,
-    :workflow,
+    :workflow, :action_workflow,
     keyword_init: true
   )
   MarkerDouble = Struct.new(:name, :attrs, keyword_init: true)
@@ -54,12 +54,59 @@ class CommandsRunTest < Minitest::Test
       project_root: "/tmp/project",
       project_name: "project",
       worktree_path: "/tmp/worktree",
-      workflow: workflow
+      workflow: workflow,
+      action_workflow: workflow
     )
   end
 
   def marker(name, attrs = {})
     MarkerDouble.new(name: name, attrs: attrs)
+  end
+
+  def active_terminal_workflow
+    Hive::Workflow.new(
+      id: :publishing,
+      stages: [
+        Hive::Workflow::Stage.new(
+          name: "publish", index: 1, state_file: "report.md", kind: :agent,
+          deliverable: "report.md"
+        )
+      ]
+    )
+  end
+
+  def semantic_terminal_workflow
+    Hive::Workflow.new(
+      id: :repair,
+      stages: [
+        Hive::Workflow::Stage.new(
+          name: "repair", index: 1, state_file: "repair-certificate.md", kind: :agent,
+          skill: "/repair", deliverable: "repair-certificate.md",
+          terminal_outcomes: Hive::Workflow::TerminalOutcomes.new(
+            complete: [ "verified", "not-reproduced" ], blocked: [ "blocked" ]
+          )
+        )
+      ]
+    )
+  end
+
+  def with_terminal_run(task, runner:, git_ops:)
+    run = command
+    completed_rebase = rebase_result
+    reported = []
+    run.define_singleton_method(:resolve_task) { task }
+    run.define_singleton_method(:perform_rebase) { |*| completed_rebase }
+    run.define_singleton_method(:pick_runner) { |_task| runner }
+    run.define_singleton_method(:legacy_completed_at_before_run) { |*| nil }
+    run.define_singleton_method(:report) { |_task, result| reported << result }
+
+    with_replaced_singleton_method(Hive::DependencySnapshot, :enforce_admission!, ->(*) { }) do
+      with_replaced_singleton_method(Hive::Config, :load, ->(*) { {} }) do
+        with_replaced_singleton_method(Hive::GitOps, :new, ->(*) { git_ops }) do
+          yield run, reported
+        end
+      end
+    end
   end
 
   def rebase_result(**overrides)
@@ -132,6 +179,437 @@ class CommandsRunTest < Minitest::Test
         assert_equal File.join(folder, "notes.md"), t.state_file
         assert_equal Hive::Stages::Agent.method(:run!), runner
       end
+    end
+  end
+
+  def test_active_terminal_completion_is_stamped_before_commit
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "1-publish", "some-slug")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "report.md")
+      File.write(state_file, "# Report\n<!-- COMPLETE -->\n")
+      Hive::TaskMeta.write(folder, id: 1, slug: "some-slug", display_name: nil)
+      t = task(
+        folder: folder, state_file: state_file,
+        hive_state_path: File.join(dir, ".hive-state"),
+        stage_name: "publish", stage_index: 1, workflow: active_terminal_workflow
+      )
+      observed = nil
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:hive_commit) do |**|
+        observed = Hive::TaskMeta.read(folder)[:completed_at]
+      end
+      run = command(clock: -> { Time.utc(2026, 7, 22, 11, 0, 0) })
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(_root) { fake_ops }) do
+        run.send(:commit_after, t, { commit: "complete" }, config: {})
+      end
+
+      assert_equal "2026-07-22T11:00:00Z", observed
+      assert_equal observed, Hive::TaskMeta.read(folder)[:completed_at]
+    end
+  end
+
+  def test_active_terminal_commit_failure_restores_prior_metadata
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "1-publish", "some-slug")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "report.md")
+      File.write(state_file, "# Report\n<!-- COMPLETE -->\n")
+      Hive::TaskMeta.write(folder, id: 1, slug: "some-slug", display_name: nil)
+      t = task(
+        folder: folder, state_file: state_file,
+        hive_state_path: File.join(dir, ".hive-state"),
+        stage_name: "publish", stage_index: 1, workflow: active_terminal_workflow
+      )
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:hive_commit) { |**| raise Hive::GitError, "commit failed" }
+      fake_ops.define_singleton_method(:run_git!) { |*| nil }
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(_root) { fake_ops }) do
+        assert_raises(Hive::GitError) do
+          command.send(:commit_after, t, { commit: "complete" }, config: {})
+        end
+      end
+
+      refute Hive::TaskMeta.read(folder).key?(:completed_at)
+    end
+  end
+
+  def test_active_terminal_commit_failure_restores_marker_deliverable_and_new_files
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "1-publish", "some-slug")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "report.md")
+      File.write(state_file, "# Before\n")
+      Hive::TaskMeta.write(folder, id: 1, slug: "some-slug", display_name: nil)
+      snapshot = Hive::Commands::Run::TerminalStateSnapshot.capture(folder)
+      File.write(state_file, "# Final\n<!-- COMPLETE -->\n")
+      File.write(File.join(folder, "generated.txt"), "runner output\n")
+      t = task(
+        folder: folder, state_file: state_file,
+        hive_state_path: File.join(dir, ".hive-state"),
+        stage_name: "publish", stage_index: 1, workflow: active_terminal_workflow
+      )
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:hive_commit) { |**| raise Hive::GitError, "commit failed" }
+      fake_ops.define_singleton_method(:run_git!) { |*| nil }
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(_root) { fake_ops }) do
+        assert_raises(Hive::GitError) do
+          command.send(
+            :commit_after, t, { commit: "complete" }, config: {},
+            terminal_snapshot: snapshot
+          )
+        end
+      end
+
+      assert_equal "# Before\n", File.read(state_file)
+      refute File.exist?(File.join(folder, "generated.txt"))
+      refute Hive::TaskMeta.read(folder).key?(:completed_at)
+    ensure
+      snapshot&.close
+    end
+  end
+
+  def test_active_terminal_interrupt_restores_marker_deliverable_and_new_files
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "1-publish", "some-slug")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "report.md")
+      File.write(state_file, "# Before\n")
+      Hive::TaskMeta.write(folder, id: 1, slug: "some-slug", display_name: nil)
+      snapshot = Hive::Commands::Run::TerminalStateSnapshot.capture(folder)
+      File.write(state_file, "# Interrupted\n<!-- COMPLETE -->\n")
+      File.write(File.join(folder, "partial.txt"), "partial runner output\n")
+      t = task(
+        folder: folder, state_file: state_file,
+        hive_state_path: File.join(dir, ".hive-state"),
+        stage_name: "publish", stage_index: 1, workflow: active_terminal_workflow
+      )
+      staged = []
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:run_git!) { |*args| staged << args }
+
+      assert_raises(Interrupt) do
+        command.send(:rollback_terminal_state!, t, snapshot, fake_ops, Interrupt.new)
+      end
+
+      assert_equal "# Before\n", File.read(state_file)
+      refute File.exist?(File.join(folder, "partial.txt"))
+      assert_equal "stages/1-publish/some-slug", staged.dig(0, -1)
+    ensure
+      snapshot&.close
+    end
+  end
+
+  def test_nonterminal_commit_failure_propagates_without_terminal_rollback
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "2-brainstorm", "some-slug")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "brainstorm.md")
+      File.write(state_file, "<!-- COMPLETE -->\n")
+      t = task(
+        folder: folder, state_file: state_file,
+        hive_state_path: File.join(dir, ".hive-state")
+      )
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:hive_commit) do |**|
+        raise Hive::GitError, "commit failed"
+      end
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(*) { fake_ops }) do
+        assert_raises(Hive::GitError) do
+          command.send(:commit_after, t, { commit: "complete" }, config: {})
+        end
+      end
+    end
+  end
+
+  def test_terminal_rollback_failure_reports_both_errors
+    snapshot = Object.new
+    snapshot.define_singleton_method(:restore) { raise IOError, "restore failed" }
+    original = Hive::GitError.new("commit failed")
+
+    error = assert_raises(Hive::RollbackFailed) do
+      command.send(
+        :rollback_terminal_state!, task, snapshot, Object.new, original
+      )
+    end
+
+    assert_includes error.message, "commit error: Hive::GitError: commit failed"
+    assert_includes error.message, "rollback error: IOError: restore failed"
+  end
+
+  def test_terminal_runner_failure_restores_all_runner_mutations
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "1-publish", "some-slug")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "report.md")
+      File.write(state_file, "# Before\n")
+      Hive::TaskMeta.write(folder, id: 1, slug: "some-slug", display_name: nil)
+      workflow = active_terminal_workflow
+      current = task(
+        folder: folder, state_file: state_file,
+        hive_state_path: File.join(dir, ".hive-state"),
+        stage_name: "publish", stage_index: 1, workflow: workflow
+      )
+      current.project_root = dir
+      runner_error = Class.new(Exception)
+      runner = lambda do |_task, _config|
+        File.write(state_file, "# Partial\n<!-- COMPLETE -->\n")
+        File.write(File.join(folder, "partial.txt"), "partial\n")
+        raise runner_error, "runner exploded"
+      end
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:run_git!) { |*| nil }
+      run = command
+      completed_rebase = rebase_result
+      run.define_singleton_method(:resolve_task) { current }
+      run.define_singleton_method(:perform_rebase) { |*| completed_rebase }
+      run.define_singleton_method(:pick_runner) { |_task| runner }
+      run.define_singleton_method(:legacy_completed_at_before_run) { |*| nil }
+
+      error = with_replaced_singleton_method(Hive::DependencySnapshot, :enforce_admission!, ->(*) { }) do
+        with_replaced_singleton_method(Hive::Config, :load, ->(*) { {} }) do
+          with_replaced_singleton_method(Hive::GitOps, :new, ->(*) { fake_ops }) do
+            assert_raises(Hive::Error) { run.send(:do_call) }
+          end
+        end
+      end
+
+      assert_includes error.message, "runner exploded"
+      assert_equal "# Before\n", File.read(state_file)
+      refute File.exist?(File.join(folder, "partial.txt"))
+    end
+  end
+
+  def test_declared_blocked_terminal_result_is_normalized_before_commit_and_never_completed
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "1-repair", "some-slug")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "repair-certificate.md")
+      File.write(state_file, "# Before\n")
+      Hive::TaskMeta.write(folder, id: 1, slug: "some-slug", display_name: nil)
+      workflow = semantic_terminal_workflow
+      current = task(
+        folder: folder, state_file: state_file,
+        hive_state_path: File.join(dir, ".hive-state"),
+        stage_name: "repair", stage_index: 1, workflow: workflow
+      )
+      current.project_root = dir
+      runner = lambda do |_task, _config|
+        File.write(state_file, "Outcome: blocked\nprovider unavailable\n<!-- COMPLETE -->\n")
+        { commit: "complete", status: :complete }
+      end
+      commits = []
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:hive_commit) { |**kwargs| commits << kwargs }
+
+      with_terminal_run(current, runner: runner, git_ops: fake_ops) do |run, reported|
+        run.send(:do_call)
+
+        marker = Hive::Markers.current(state_file)
+        assert_equal :error, marker.name
+        assert_equal "terminal_outcome_blocked", marker.attrs.fetch("reason")
+        assert_equal "blocked", marker.attrs.fetch("outcome")
+        assert_equal [ { commit: "error", status: :error } ], reported
+      end
+
+      assert_equal "error", commits.fetch(0).fetch(:action)
+      refute Hive::TaskMeta.read(folder).key?(:completed_at)
+      assert_includes File.read(state_file), "provider unavailable"
+      events = File.readlines(File.join(folder, "events.jsonl"), chomp: true).map { |line| JSON.parse(line) }
+      assert events.any? { |event| event["event_type"] == "error" && event["message"].include?("terminal_outcome_blocked") }
+      exits = events.select { |event| event["event_type"] == "stage_exit" }
+      assert_equal [ "status=error reason=terminal_outcome_blocked" ], exits.map { |event| event["message"] }
+      refute events.any? { |event| event["message"] == "status=complete" }
+    end
+  end
+
+  def test_terminal_outcome_write_failure_restores_pre_run_snapshot
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "1-repair", "some-slug")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "repair-certificate.md")
+      File.write(state_file, "# Before\n")
+      Hive::TaskMeta.write(folder, id: 1, slug: "some-slug", display_name: nil)
+      current = task(
+        folder: folder, state_file: state_file,
+        hive_state_path: File.join(dir, ".hive-state"),
+        stage_name: "repair", stage_index: 1, workflow: semantic_terminal_workflow
+      )
+      current.project_root = dir
+      runner = lambda do |_task, _config|
+        File.write(state_file, "Outcome: blocked\n<!-- COMPLETE -->\n")
+        File.write(File.join(folder, "generated.txt"), "partial\n")
+        { commit: "complete", status: :complete }
+      end
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:run_git!) { |*| nil }
+      original_set = Hive::Markers.method(:set)
+      failing_set = lambda do |*args, **kwargs|
+        if args[0] == state_file && args[1].to_s == "error"
+          raise IOError, "marker write failed"
+        end
+
+        original_set.call(*args, **kwargs)
+      end
+
+      error = with_replaced_singleton_method(Hive::Markers, :set, failing_set) do
+        with_terminal_run(current, runner: runner, git_ops: fake_ops) do |run, _reported|
+          assert_raises(Hive::Error) { run.send(:do_call) }
+        end
+      end
+
+      assert_includes error.message, "terminal task state rolled back"
+      assert_equal "# Before\n", File.read(state_file)
+      refute File.exist?(File.join(folder, "generated.txt"))
+      refute File.exist?(File.join(folder, "events.jsonl"))
+    end
+  end
+
+  def test_declared_complete_terminal_result_keeps_completion_semantics
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "1-repair", "some-slug")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "repair-certificate.md")
+      File.write(state_file, "# Before\n")
+      Hive::TaskMeta.write(folder, id: 1, slug: "some-slug", display_name: nil)
+      workflow = semantic_terminal_workflow
+      current = task(
+        folder: folder, state_file: state_file,
+        hive_state_path: File.join(dir, ".hive-state"),
+        stage_name: "repair", stage_index: 1, workflow: workflow
+      )
+      current.project_root = dir
+      runner = lambda do |_task, _config|
+        File.write(state_file, "Outcome: verified\nproof\n<!-- COMPLETE -->\n")
+        { commit: "complete", status: :complete }
+      end
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:hive_commit) { |**| nil }
+
+      with_terminal_run(current, runner: runner, git_ops: fake_ops) do |run, reported|
+        run.send(:do_call)
+        assert_equal [ { commit: "complete", status: :complete } ], reported
+      end
+
+      assert_equal :complete, Hive::Markers.current(state_file).name
+      assert Hive::TaskMeta.read(folder).key?(:completed_at)
+    end
+  end
+
+  def test_normalized_terminal_commit_failure_restores_pre_run_snapshot
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "1-repair", "some-slug")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "repair-certificate.md")
+      File.write(state_file, "# Before\n")
+      Hive::TaskMeta.write(folder, id: 1, slug: "some-slug", display_name: nil)
+      workflow = semantic_terminal_workflow
+      current = task(
+        folder: folder, state_file: state_file,
+        hive_state_path: File.join(dir, ".hive-state"),
+        stage_name: "repair", stage_index: 1, workflow: workflow
+      )
+      current.project_root = dir
+      runner = lambda do |_task, _config|
+        File.write(state_file, "Outcome: blocked\n<!-- COMPLETE -->\n")
+        File.write(File.join(folder, "generated.txt"), "partial\n")
+        { commit: "complete", status: :complete }
+      end
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:hive_commit) { |**| raise Hive::GitError, "commit failed" }
+      fake_ops.define_singleton_method(:run_git!) { |*| nil }
+
+      with_terminal_run(current, runner: runner, git_ops: fake_ops) do |run, _reported|
+        assert_raises(Hive::GitError) { run.send(:do_call) }
+      end
+
+      assert_equal "# Before\n", File.read(state_file)
+      refute File.exist?(File.join(folder, "generated.txt"))
+      refute Hive::TaskMeta.read(folder).key?(:completed_at)
+    end
+  end
+
+  def test_terminal_snapshot_capture_removes_partial_backup_when_copy_fails
+    with_tmp_dir do |dir|
+      folder = File.join(dir, "task")
+      root = File.join(dir, "snapshot")
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "state.md"), "state\n")
+
+      with_replaced_singleton_method(Dir, :mktmpdir, ->(*) { FileUtils.mkdir_p(root); root }) do
+        with_replaced_singleton_method(FileUtils, :copy_entry, ->(*) { raise IOError, "copy failed" }) do
+          assert_raises(IOError) { Hive::Commands::Run::TerminalStateSnapshot.capture(folder) }
+        end
+      end
+
+      refute File.exist?(root)
+    end
+  end
+
+  def test_malformed_completed_at_aborts_terminal_commit_and_restores_snapshot
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "1-publish", "some-slug")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "report.md")
+      File.write(state_file, "# Before\n")
+      File.write(File.join(folder, "meta.yml"), "slug: some-slug\ncompleted_at: yesterday\n")
+      snapshot = Hive::Commands::Run::TerminalStateSnapshot.capture(folder)
+      File.write(state_file, "# Final\n<!-- COMPLETE -->\n")
+      current = task(
+        folder: folder, state_file: state_file,
+        hive_state_path: File.join(dir, ".hive-state"),
+        stage_name: "publish", stage_index: 1, workflow: active_terminal_workflow
+      )
+      committed = false
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:hive_commit) { |**| committed = true }
+      fake_ops.define_singleton_method(:run_git!) { |*| nil }
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(*) { fake_ops }) do
+        assert_raises(Hive::Error) do
+          command.send(
+            :commit_after, current, { commit: "complete" }, config: {},
+            terminal_snapshot: snapshot
+          )
+        end
+      end
+
+      refute committed
+      assert_equal "# Before\n", File.read(state_file)
+      assert_includes File.read(File.join(folder, "meta.yml")), "completed_at: yesterday"
+    ensure
+      snapshot&.close
+    end
+  end
+
+  def test_legacy_terminal_completion_uses_discovered_time_before_current_clock
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "1-publish", "some-slug")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "report.md")
+      File.write(state_file, "# Final\n<!-- COMPLETE -->\n")
+      Hive::TaskMeta.write(folder, id: 1, slug: "some-slug", display_name: nil)
+      t = task(
+        folder: folder, state_file: state_file,
+        hive_state_path: File.join(dir, ".hive-state"),
+        stage_name: "publish", stage_index: 1, workflow: active_terminal_workflow
+      )
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:hive_commit) { |**| nil }
+      discovered = Time.utc(2026, 7, 1, 8, 0, 0)
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(_root) { fake_ops }) do
+        command(clock: -> { Time.utc(2026, 7, 24) }).send(
+          :commit_after, t, { commit: "complete" }, config: {},
+          completion_time: discovered
+        )
+      end
+
+      assert_equal discovered.iso8601, Hive::TaskMeta.read(folder)[:completed_at]
     end
   end
 
@@ -221,7 +699,8 @@ class CommandsRunTest < Minitest::Test
     assert_equal "/tmp/task-folder/reviews/errors-04.md", partial.fetch("target")
     assert_equal "reviewer_partial_failure", partial.fetch("reason")
     assert_equal "reviewers", partial.fetch("phase")
-    assert_match(/partial coverage/, partial.fetch("instructions"))
+    assert_match(/one or more reviewers failed/, partial.fetch("instructions"))
+    assert_match(/workflow\.retry/, partial.fetch("instructions"))
     assert_equal Hive::Schemas::NextActionKind::EDIT, scope_failure.fetch("kind")
     assert_equal "/tmp/task-folder/reviews/auto-commit-scope-01.md", scope_failure.fetch("target")
     assert_match(/scope artifact/, scope_failure.fetch("instructions"))
@@ -339,13 +818,37 @@ class CommandsRunTest < Minitest::Test
     assert_equal [ "wiki/notes.md", "lib/foo.rb" ], clean_exit_failure.fetch("residue_paths")
     assert_equal [ "error" ], clean_exit_failure.fetch("markers_to_clear")
     assert_match(/commit or discard/, clean_exit_failure.fetch("instructions"))
-    assert_match(/reason=ensure_clean_on_exit_failed/, clean_exit_failure.fetch("instructions"))
+    assert_match(/workflow\.retry/, clean_exit_failure.fetch("instructions"))
     assert clean_exit_failure.key?("rerun_with"),
            "ensure_clean_on_exit_failed must include rerun_with so agents have a copy-paste verb"
 
     # Other :error reasons keep the generic NO_OP shape.
     assert_equal Hive::Schemas::NextActionKind::NO_OP, other_error.fetch("kind")
     assert_equal({ "reason" => "git_status_failed", "marker_id" => "abc123" }, other_error.fetch("error"))
+  end
+
+  def test_semantic_terminal_errors_explain_guarded_retry_discovery
+    run = command
+    t = task
+
+    %w[terminal_outcome_blocked terminal_outcome_invalid].each do |reason|
+      attrs = { "reason" => reason, "outcome" => "blocked", "marker_id" => "semantic-1" }
+      action = run.send(:json_next_action, t, marker(:error, attrs))
+
+      assert_equal Hive::Schemas::NextActionKind::NO_OP, action.fetch("kind")
+      assert_equal reason, action.fetch("reason")
+      assert_equal attrs, action.fetch("error")
+      assert_includes action.fetch("instructions"), "status --operational --json"
+      assert_includes action.fetch("instructions"), "workflow.retry"
+
+      _out, err = capture_io do
+        assert_raises(Hive::TaskInErrorState) do
+          run.send(:report_text, t, {}, marker(:error, attrs))
+        end
+      end
+      assert_includes err, "reason: #{reason}"
+      assert_includes err, "guarded workflow.retry"
+    end
   end
 
   def test_report_text_covers_manual_and_stale_guidance
@@ -359,6 +862,33 @@ class CommandsRunTest < Minitest::Test
 
     assert_includes out, "remove EXECUTE_STALE marker"
     assert_includes out, "manual steering active"
+  end
+
+  def test_report_text_human_stage_lists_decision_outcomes
+    outcomes = {
+      "approve" => Hive::Workflow::Outcome.new(name: "approve", complete: true, artifact: "draft.md"),
+      "reject" => Hive::Workflow::Outcome.new(name: "reject", to: "draft")
+    }.freeze
+    workflow = Hive::Workflow.new(
+      id: :editorial,
+      stages: [
+        Hive::Workflow::Stage.new(
+          name: "draft", index: 1, state_file: "draft.md", kind: :agent
+        ),
+        Hive::Workflow::Stage.new(
+          name: "approval", index: 2, state_file: "approval.md", kind: :human,
+          outcomes: outcomes
+        )
+      ]
+    )
+    t = task(stage_name: "approval", stage_index: 2, workflow: workflow)
+
+    out, = capture_io do
+      command.send(:report_text, t, {}, marker(:waiting))
+    end
+
+    assert_includes out, "outcomes: approve, reject"
+    assert_includes out, "hive decide some-slug <outcome> --from approval --decision-id"
   end
 
   def test_report_text_review_error_prints_phase_and_reason_before_raising
@@ -427,12 +957,14 @@ class CommandsRunTest < Minitest::Test
     entrypoint = Object.new
     calls = []
     entrypoint.define_singleton_method(:dispatch) { |**kwargs| calls << kwargs; result }
-    run = command(durable: true, json: true, no_rebase: true, attempt_entrypoint: entrypoint)
+    run = command(durable: true, json: true, no_rebase: true)
     resolved = task(folder: "/tmp/task-folder", stage_name: "execute", stage_index: 4)
     run.define_singleton_method(:resolve_task) { resolved }
     run.define_singleton_method(:do_call) { flunk "durable caller executed worker body" }
 
-    assert_same result, run.call
+    with_replaced_singleton_method(Hive::Attempts::API, :new, -> { entrypoint }) do
+      assert_same result, run.call
+    end
     assert_equal 1, calls.length
     assert_equal "4-execute", calls.first.fetch(:intended_stage)
     assert_equal [ "hive", "run", "/tmp/task-folder", "--json", "--no-rebase" ],
@@ -505,6 +1037,28 @@ class CommandsRunTest < Minitest::Test
     assert_equal "internal", payload.fetch("error_kind")
     assert_equal Hive::ExitCodes::SOFTWARE, payload.fetch("exit_code")
     assert_includes payload.fetch("message"), "attempt-empty"
+  end
+
+  def test_successful_durable_json_replay_with_expired_output_emits_error_document
+    result = Hive::Attempts::ClientResult.new(
+      status: :terminal, exit_status: 0, outcome: "succeeded",
+      receipt: {}, attempt_id: "attempt-expired", stdout_bytes: 0,
+      output_status: :expired
+    )
+    entrypoint = Object.new
+    entrypoint.define_singleton_method(:dispatch) { |**_kwargs| result }
+    run = command(durable: true, json: true, attempt_entrypoint: entrypoint)
+    resolved = task(folder: "/tmp/task-folder", stage_name: "execute", stage_index: 4)
+    run.define_singleton_method(:resolve_task) { resolved }
+
+    out, = capture_io do
+      assert_raises(Hive::ConcurrentRunError) { run.call }
+    end
+
+    payload = JSON.parse(out)
+    assert_equal "hive-run", payload.fetch("schema")
+    assert_equal "concurrent_run", payload.fetch("error_kind")
+    assert_includes payload.fetch("message"), "attempt-expired"
   end
 
   def test_failed_durable_json_attempt_with_worker_stdout_does_not_duplicate_it

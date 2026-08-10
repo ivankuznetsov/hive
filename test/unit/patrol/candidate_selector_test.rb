@@ -477,4 +477,55 @@ class HivePatrolCandidateSelectorTest < Minitest::Test
     assert_equal "low_confidence", skipped_reason(skipped, "uncertain")
     assert_equal "low_severity", skipped_reason(skipped, "minor")
   end
+
+  def test_terminal_recurrence_bypasses_the_old_terminal_semantic_ledger
+    recurrence = finding(
+      id: "recurrence",
+      fingerprint: "resolved-fp",
+      target_sha: "b" * 40,
+      lifecycle_state: "active",
+      lifecycle_reason: "recurrence_after_terminal"
+    )
+    fingerprints = {
+      "resolved-fp" => {
+        "state" => "merged",
+        "target_sha" => "a" * 40,
+        "category" => "bug",
+        "title_tokens" => Hive::Patrol::Fingerprint.title_tokens(recurrence),
+        "root_cause_tokens" => Hive::Patrol::Fingerprint.semantic_tokens(recurrence)
+      }
+    }
+    dismissed = { "resolved-fp" => fingerprints.fetch("resolved-fp") }
+
+    candidates, skipped = selector(
+      fingerprints: fingerprints,
+      dismissed: dismissed
+    ).call([ recurrence ])
+
+    assert_equal [ recurrence ], candidates
+    assert_empty skipped
+  end
+
+  def test_terminal_recurrence_is_blocked_after_its_current_target_has_an_open_pr
+    recurrence = finding(
+      id: "recurrence",
+      fingerprint: "resolved-fp",
+      target_sha: "b" * 40,
+      lifecycle_state: "active",
+      lifecycle_reason: "recurrence_after_terminal"
+    )
+    fingerprints = {
+      "resolved-fp" => {
+        "state" => "open",
+        "target_sha" => "b" * 40,
+        "category" => "bug",
+        "title_tokens" => Hive::Patrol::Fingerprint.title_tokens(recurrence)
+      }
+    }
+
+    candidates, skipped = selector(fingerprints: fingerprints).call([ recurrence ])
+
+    assert_empty candidates
+    assert_equal "existing_pr", skipped_reason(skipped, recurrence.id)
+  end
 end

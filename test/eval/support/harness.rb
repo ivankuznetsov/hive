@@ -42,7 +42,10 @@ module Hive
           bot_config: @bot_config,
           logger: @logger,
           conversation_store: @conversation_store,
-          idea_draft_store: @idea_draft_store
+          idea_draft_store: @idea_draft_store,
+          # Mirror Supervisor#build_router: recovery callbacks re-resolve the
+          # row from the latest successful status tick before admission.
+          status_snapshot_provider: -> { @supervisor&.latest_status_rows }
         )
         @notification_dispatcher = notification_dispatcher ||
           Hive::Bot::NotificationDispatcher.new(
@@ -143,7 +146,7 @@ module Hive
           "notification_dedupe_window_sec" => 300,
           "shutdown_grace_sec" => 1,
           "last_seen_state_file" => nil,
-          "clear_retry_grace_sec" => 1,
+          "command_sequence_grace_sec" => 1,
           "log_file" => File.join(Dir.tmpdir, "hive-eval-bot.log"),
           "log_max_bytes" => 10_485_760,
           "log_max_files" => 5

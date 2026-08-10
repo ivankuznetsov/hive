@@ -73,14 +73,20 @@ module Hive
         end
 
         def render_systemd
-          render_systemd_from(
+          rendered = render_systemd_from(
             File.expand_path("../../../../examples/systemd/hive-daemon.service", __dir__),
             "daemon start"
           )
+          render_systemd_runtime_environment(rendered)
         end
 
         def render_launchd
-          render_launchd_from(File.expand_path("../../../../examples/launchd/hive-daemon.plist", __dir__))
+          rendered = render_launchd_from(
+            File.expand_path(
+              "../../../../examples/launchd/hive-daemon.plist", __dir__
+            )
+          )
+          render_launchd_runtime_environment(rendered)
         end
       end
     end

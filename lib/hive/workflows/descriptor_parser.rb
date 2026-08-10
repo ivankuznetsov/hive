@@ -1,5 +1,6 @@
 require "yaml"
 require "hive/agent_profiles"
+require "hive/conditions/policy"
 require "hive/permission_scope"
 require "hive/workflow"
 
@@ -12,7 +13,7 @@ module Hive
     # mid-flight) stay as arguments because they vary within a single parse.
     class DescriptorParser
       SAFE_SLUG = /\A[a-z0-9][a-z0-9-]*\z/
-      TOP_LEVEL_KEYS = %w[id stages].freeze
+      TOP_LEVEL_KEYS = %w[id archive_visibility_retention_days stages x-hive].freeze
       STAGE_KEYS = %w[
         name
         kind
@@ -35,7 +36,11 @@ module Hive
         permissions
         mapping_role
         mapping_contract
+        terminal_outcomes
+        outcomes
       ].freeze
+      OUTCOME_KEYS = %w[complete artifact to].freeze
+      TERMINAL_OUTCOME_KEYS = %w[complete blocked].freeze
       REVIEWER_KEYS = %w[
         name
         agent
@@ -93,12 +98,14 @@ module Hive
         reject_unknown_keys!(descriptor, TOP_LEVEL_KEYS, label: "descriptor")
         id = parse_id(descriptor["id"])
         validate_filename_id!(id)
+        archive_visibility_retention_days = parse_archive_visibility_retention(descriptor, id: id)
         stages = parse_stages(descriptor["stages"], id: id)
         validate_terminal_last_stage!(stages)
         validate_workspace_handoff!(stages)
+        validate_terminal_outcomes!(stages)
         validate_deliverable_position!(stages)
 
-        build_workflow(id, stages)
+        build_workflow(id, stages, archive_visibility_retention_days)
       end
 
       private
@@ -110,10 +117,10 @@ module Hive
         return if stages.empty?
 
         last = stages.last
-        return if [ :inert, :agent, :council ].include?(last.kind)
+        return if [ :inert, :agent, :council, :human ].include?(last.kind)
 
         raise descriptor_error(
-          "last stage #{last.name.inspect} must be terminal, agent, or council"
+          "last stage #{last.name.inspect} must be terminal, agent, council, or human"
         )
       end
 
@@ -128,6 +135,39 @@ module Hive
 
           raise descriptor_error(
             "stage #{stage.name.inspect} deliverable is only consumed on the last stage"
+          )
+        end
+      end
+
+      def validate_terminal_outcomes!(stages)
+        last_index = stages.length - 1
+        stages.each_with_index do |stage, index|
+          next unless stage.terminal_outcomes
+
+          unless stage.kind == :agent
+            raise descriptor_error(
+              "stage #{stage.name.inspect} terminal_outcomes is only valid on an agent stage"
+            )
+          end
+          unless index == last_index
+            raise descriptor_error(
+              "stage #{stage.name.inspect} terminal_outcomes is only valid on the last stage"
+            )
+          end
+          unless stage.deliverable
+            raise descriptor_error(
+              "stage #{stage.name.inspect} terminal_outcomes requires an explicit deliverable"
+            )
+          end
+          unless stage.deliverable == stage.state_file
+            raise descriptor_error(
+              "stage #{stage.name.inspect} terminal_outcomes deliverable must equal state_file"
+            )
+          end
+          next unless stage.workspace || stage.handoff
+
+          raise descriptor_error(
+            "stage #{stage.name.inspect} terminal_outcomes is incompatible with workspace or handoff"
           )
         end
       end
@@ -192,10 +232,28 @@ module Hive
       # Wrapping the whole parse body (as before) would mislabel an unrelated
       # wrong-kwarg bug in a future Stage.new/Workflow.new signature change as a
       # descriptor error, hiding a genuine code bug from the maintainer.
-      def build_workflow(id, stages)
-        Hive::Workflow.new(id: id.to_sym, stages: stages)
+      def build_workflow(id, stages, archive_visibility_retention_days)
+        Hive::Workflow.new(
+          id: id.to_sym,
+          stages: stages,
+          archive_visibility_retention_days: archive_visibility_retention_days
+        )
       rescue ArgumentError => e
         raise descriptor_error(e.message)
+      end
+
+      def parse_archive_visibility_retention(descriptor, id:)
+        field = "archive_visibility_retention_days"
+        return Hive::Workflow::DEFAULT_ARCHIVE_VISIBILITY_RETENTION_DAYS unless descriptor.key?(field)
+
+        value = descriptor[field]
+        return value if value.is_a?(Integer) && value.positive?
+        return Hive::Workflow::NEVER_ARCHIVE_VISIBILITY_RETENTION if value == "never"
+
+        raise descriptor_error(
+          "workflow #{id.inspect} field #{field} received #{value.inspect}; " \
+          "expected a positive integer or `never`"
+        )
       end
 
       def parse_id(value)
@@ -246,17 +304,22 @@ module Hive
         permissions = parse_permissions(stage, id: id, stage_name: name, label: label)
         input = optional_string(stage["input"], label: "#{label} input")
         deliverable = parse_deliverable(stage["deliverable"], label: label)
+        state_file = parse_state_file(stage["state_file"], label: label)
+        terminal_outcomes = parse_terminal_outcomes(
+          stage["terminal_outcomes"], label: label
+        ) if stage.key?("terminal_outcomes")
         workspace = parse_closed_enum(stage["workspace"], WORKSPACES, label: "#{label} workspace")
         handoff = parse_closed_enum(stage["handoff"], HANDOFFS, label: "#{label} handoff")
         condition_policy = parse_condition_policy(stage["conditions"], label: label)
         reviewers = parse_reviewers(stage["reviewers"], id: id, label: label) if kind == :council
         council = parse_council(stage["council"], id: id, label: label, reviewer_count: reviewers&.length) if kind == :council
+        outcomes = parse_outcomes(stage["outcomes"], stage_name: name, label: label) if kind == :human
         validate_agent_instruction!(skill: skill, instruction: instruction, label: label) if kind == :agent
 
         Hive::Workflow::Stage.new(
           name: name,
           index: index,
-          state_file: parse_state_file(stage["state_file"], label: label),
+          state_file: state_file,
           advance_verb: parse_advance_verb(stage, name: name, index: index, label: label),
           kind: kind,
           skill: skill,
@@ -270,12 +333,14 @@ module Hive
           reviewers: reviewers,
           council: council,
           deliverable: deliverable,
+          terminal_outcomes: terminal_outcomes,
           workspace: workspace,
           handoff: handoff,
           condition_policy: condition_policy,
           permissions: permissions,
           mapping_role: parse_mapping_role(stage["mapping_role"], label: label),
-          mapping_contract: optional_string(stage["mapping_contract"], label: "#{label} mapping_contract")
+          mapping_contract: optional_string(stage["mapping_contract"], label: "#{label} mapping_contract"),
+          outcomes: outcomes
         )
       end
 
@@ -300,11 +365,15 @@ module Hive
       # the rest of the runner assumes and removes the nested-dir fragility in the
       # agent runner's output path.
       def parse_state_file(value, label:)
-        file = required_string(value, label: "#{label} state_file")
+        parse_task_file(value, label: "#{label} state_file")
+      end
+
+      def parse_task_file(value, label:)
+        file = required_string(value, label: label)
         return file if file == File.basename(file) && ![ ".", ".." ].include?(file)
 
         raise descriptor_error(
-          "#{label} state_file #{file.inspect} must be a bare filename inside the task folder " \
+          "#{label} #{file.inspect} must be a bare filename inside the task folder " \
           "(no '/' path separator, not '.' or '..'); built-in stages use basenames like 'idea.md'"
         )
       end
@@ -314,10 +383,66 @@ module Hive
         case raw
         when "agent" then :agent
         when "council" then :council
+        when "human" then :human
         when "terminal" then :inert
         else
-          raise descriptor_error("#{label} kind #{raw.inspect} must be agent, council, or terminal")
+          raise descriptor_error("#{label} kind #{raw.inspect} must be agent, council, human, or terminal")
         end
+      end
+
+      def parse_outcomes(data, stage_name:, label:)
+        unless data.is_a?(Hash) && !data.empty?
+          raise descriptor_error("#{label} human stage must declare at least one outcome")
+        end
+
+        outcomes = stringify_hash(data, label: "#{label} #{stage_name.inspect} outcomes")
+        outcomes.each_with_object({}) do |(name, raw), parsed|
+          unless SAFE_SLUG.match?(name)
+            raise descriptor_error(
+              "#{label} #{stage_name.inspect} outcome name #{name.inspect} must match #{SAFE_SLUG.source}"
+            )
+          end
+
+          outcome_label = "#{label} #{stage_name.inspect} outcome #{name.inspect}"
+          value = stringify_hash(raw, label: outcome_label)
+          reject_unknown_keys!(value, OUTCOME_KEYS, label: outcome_label)
+          action_keys = %w[complete to].select { |key| value.key?(key) }
+          unless action_keys.one?
+            raise descriptor_error("#{outcome_label} must declare exactly one of complete or to")
+          end
+
+          if value.key?("complete")
+            unless value["complete"] == true
+              raise descriptor_error("#{outcome_label} complete must be true")
+            end
+            artifact = parse_task_file(value["artifact"], label: "#{outcome_label} artifact")
+            parsed[name] = Hive::Workflow::Outcome.new(
+              name: name, complete: true, artifact: artifact
+            )
+          else
+            if value.key?("artifact")
+              raise descriptor_error("#{outcome_label} artifact is only valid on a completing outcome")
+            end
+            target = parse_stage_name(value["to"], label: "#{outcome_label} target")
+            parsed[name] = Hive::Workflow::Outcome.new(name: name, to: target)
+          end
+        end.freeze
+      end
+
+      def parse_terminal_outcomes(data, label:)
+        outcome_label = "#{label} terminal_outcomes"
+        value = stringify_hash(data, label: outcome_label)
+        reject_unknown_keys!(value, TERMINAL_OUTCOME_KEYS, label: outcome_label)
+        missing = TERMINAL_OUTCOME_KEYS - value.keys
+        unless missing.empty?
+          raise descriptor_error("#{outcome_label} is missing required key(s) #{missing.inspect}")
+        end
+
+        Hive::Workflow::TerminalOutcomes.new(
+          complete: value["complete"], blocked: value["blocked"]
+        )
+      rescue ArgumentError => e
+        raise descriptor_error("#{outcome_label} #{e.message.delete_prefix('terminal_outcomes ')}")
       end
 
       def parse_instruction(value, label:)
@@ -559,7 +684,17 @@ module Hive
       def reject_agent_only_fields!(stage, kind:, label:)
         return if [ :agent, :council ].include?(kind)
 
-        present = %w[skill instruction agent model effort budget_usd timeout_sec input reviewers council deliverable workspace handoff permissions mapping_role mapping_contract]
+        if kind == :human
+          present = %w[skill instruction agent model effort budget_usd timeout_sec reviewers council deliverable workspace handoff conditions permissions mapping_role mapping_contract terminal_outcomes]
+                    .select { |key| stage.key?(key) }
+          return if present.empty?
+
+          raise descriptor_error(
+            "#{label} #{present.inspect} #{present.one? ? 'is' : 'are'} not valid on a human stage"
+          )
+        end
+
+        present = %w[skill instruction agent model effort budget_usd timeout_sec input reviewers council deliverable workspace handoff permissions mapping_role mapping_contract terminal_outcomes]
                   .select { |key| stage.key?(key) }
         return if present.empty?
 
@@ -582,9 +717,13 @@ module Hive
       # `permissions` are shared and stay valid on both. Reject the mismatches
       # here (fail-fast, same contract as reject_agent_only_fields!).
       COUNCIL_ONLY_FIELDS = %w[input reviewers council].freeze
-      AGENT_ONLY_FIELDS = %w[skill instruction workspace handoff].freeze
+      AGENT_ONLY_FIELDS = %w[skill instruction workspace handoff terminal_outcomes].freeze
 
       def reject_wrong_kind_fields!(stage, kind:, label:)
+        if kind != :human && stage.key?("outcomes")
+          raise descriptor_error("#{label} outcomes is only valid on a human stage")
+        end
+
         case kind
         when :agent
           reject_fields_for_kind!(stage, COUNCIL_ONLY_FIELDS, kind: :agent, other: "council", label: label)

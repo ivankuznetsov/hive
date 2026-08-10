@@ -122,6 +122,21 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
     end
   end
 
+  def test_unregistered_state_path_falls_back_to_the_project_local_root
+    with_tmp_dir do |dir|
+      intake = Hive::Daemon::RefactorPatrolMergeReconciler.new(
+        registry: -> { [] },
+        gh: FakeGh.new,
+        github_gateway: FakeGh.new
+      )
+
+      assert_equal(
+        File.join(File.expand_path(dir), ".hive-state"),
+        intake.send(:hive_state_path_for, dir)
+      )
+    end
+  end
+
   def test_first_enable_seeds_paginated_baseline_without_historical_jobs
     with_tmp_dir do |dir|
       gh = FakeGh.new
@@ -147,6 +162,18 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
     end
   end
 
+  def test_non_coding_default_workflow_never_starts_merge_intake
+    with_tmp_dir do |dir|
+      gh = FakeGh.new
+      cfg = enabled_cfg.merge("default_workflow" => "content")
+
+      assert_empty reconciler(dir, gh, cfg: cfg).tick(now: T0)
+      assert_empty gh.identity_calls
+      assert_empty gh.page_calls
+      refute File.exist?(state_path(dir))
+    end
+  end
+
   def test_first_enable_blocks_when_active_overlap_itself_exceeds_search_cap
     with_tmp_dir do |dir|
       gh = FakeGh.new
@@ -166,7 +193,7 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
     with_tmp_dir do |dir|
       gh = FakeGh.new
       gh.pages = { nil => page([ summary(1, at: T0) ]) }
-      entry = { "name" => "demo", "path" => dir, "hive_state_path" => File.join(dir, ".hive-state") }
+      entry = entry_for(dir)
       intake = Hive::Daemon::RefactorPatrolMergeReconciler.new(
         registry: -> { [ entry ] },
         config_loader: ->(_path) { enabled_cfg },
@@ -397,8 +424,8 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
         gh = MultiProjectGh.new(identities: identities, clock: clock)
         gh.slow_repository = "acme/slow"
         entries = [
-          { "name" => "slow", "path" => slow_dir },
-          { "name" => "fast", "path" => fast_dir }
+          entry_for(slow_dir, name: "slow"),
+          entry_for(fast_dir, name: "fast")
         ]
         intake = Hive::Daemon::RefactorPatrolMergeReconciler.new(
           registry: -> { entries }, config_loader: ->(*) { enabled_cfg },
@@ -605,6 +632,38 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
     end
   end
 
+  def test_immutable_manifest_is_published_to_module_events_after_durable_enqueue
+    with_tmp_dir do |dir|
+      gh = FakeGh.new
+      gh.details = { 2 => details(2, at: T0) }
+      calls = []
+      store = job_store(dir)
+      publisher = Object.new
+      publisher.define_singleton_method(:pull_request_merged) do |entry, manifest|
+        calls << {
+          entry: entry,
+          manifest: manifest,
+          durable_jobs_at_publish: store.jobs.map { |job| job.fetch("job_id") }
+        }
+      end
+
+      aggregate = reconciler(dir, gh, module_event_publisher: publisher).ingest(
+        project: "demo", pr: "https://github.com/acme/demo/pull/2", now: T0
+      )
+
+      assert_equal 1, calls.size
+      published = calls.fetch(0)
+      assert_equal aggregate.fetch("job_id"), published.fetch(:manifest).fetch("job_id")
+      assert_equal(
+        [ aggregate.fetch("job_id") ],
+        published.fetch(:durable_jobs_at_publish),
+        "module publication must observe the already-enqueued authoritative job"
+      )
+      manifests = Dir.glob(File.join(dir, ".hive-state", "refactor_patrol", "v2", "manifests", "*.json"))
+      assert_equal 1, manifests.size
+    end
+  end
+
   def test_intake_snapshots_the_complete_action_policy
     with_tmp_dir do |dir|
       gh = FakeGh.new
@@ -781,7 +840,7 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
 
   def test_tick_isolates_registry_config_failures_and_default_loader_is_constructible
     with_tmp_dir do |dir|
-      entry = { "name" => "demo", "path" => dir }
+      entry = entry_for(dir)
       intake = Hive::Daemon::RefactorPatrolMergeReconciler.new(
         registry: -> { [ entry ] },
         config_loader: ->(_path) { raise Hive::ConfigError, "broken config" },
@@ -813,7 +872,7 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
       clock = FakeMonotonic.new
       gh = FakeGh.new
       gh.pages = { nil => page([]) }
-      entry = { "name" => "demo", "path" => dir }
+      entry = entry_for(dir)
       intake = Hive::Daemon::RefactorPatrolMergeReconciler.new(
         registry: -> { [ entry ] },
         config_loader: lambda { |_path|
@@ -835,7 +894,7 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
 
   def test_watcher_timeout_falls_back_when_enabled_project_config_fails
     with_tmp_dir do |dir|
-      entry = { "name" => "demo", "path" => dir }
+      entry = entry_for(dir)
       intake = Hive::Daemon::RefactorPatrolMergeReconciler.new(
         registry: -> { [ entry ] },
         config_loader: ->(_path) { raise Hive::ConfigError, "broken" },
@@ -953,7 +1012,7 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
       )
       error = assert_raises(Hive::Daemon::RefactorPatrolMergeReconciler::GithubFailure) do
         intake.send(
-          :scan_page_step, { "name" => "demo", "path" => dir }, enabled_cfg,
+          :scan_page_step, entry_for(dir), enabled_cfg,
           nil, progress, now: T0, timeout_sec: 1
         )
       end
@@ -986,7 +1045,7 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
         default_branch: "main", previous: nil,
         merged_since: T0 - 3600, now: T0
       )
-      entry = { "name" => "demo", "path" => dir }
+      entry = entry_for(dir)
 
       assert_raises(Hive::Daemon::RefactorPatrolMergeReconciler::ScanInvalidated) do
         intake.send(
@@ -1125,7 +1184,7 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
   private
 
   def reconciler(dir, gh, cfg: enabled_cfg, name: "demo", **options)
-    entry = { "name" => name, "path" => dir, "hive_state_path" => File.join(dir, ".hive-state") }
+    entry = entry_for(dir, name: name)
     Hive::Daemon::RefactorPatrolMergeReconciler.new(
       registry: -> { [ entry ] },
       config_loader: ->(_path) { cfg },
@@ -1200,6 +1259,15 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
 
   def job_store(dir)
     Hive::RefactorPatrol::JobStore.new(dir)
+  end
+
+  def entry_for(dir, name: "demo")
+    {
+      "name" => name,
+      "path" => dir,
+      "hive_state_path" => File.join(dir, ".hive-state"),
+      "project_id" => "project-#{name}"
+    }
   end
 
   def quarantine_paths(dir)

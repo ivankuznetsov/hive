@@ -1,6 +1,7 @@
 require "json"
 require "time"
 require "hive/bot/child_supervisor"
+require "hive/daemon/recovery_coordinator"
 
 module Hive
   module Eval
@@ -165,12 +166,13 @@ module Hive
       Request = Struct.new(:project, :slug, :argv, :chat_id, :update_id, :trigger, :request_id, keyword_init: true)
       Sequence = Struct.new(:request_id, :remaining_argvs, keyword_init: true)
 
-      attr_reader :writes, :sequences, :discarded_sequences
+      attr_reader :writes, :sequences, :discarded_sequences, :recoveries
 
       def initialize
         @writes = []
         @sequences = []
         @discarded_sequences = []
+        @recoveries = []
         @next_id = 0
       end
 
@@ -204,6 +206,20 @@ module Hive
 
       def discard_sequence!(request_id:)
         @discarded_sequences << request_id
+      end
+
+      def recover!(row:, project:, requestor:, chat_id: nil, update_id: nil, **_options)
+        request_id = generate_request_id
+        @recoveries << {
+          row: row, project: project, requestor: requestor,
+          chat_id: chat_id, update_id: update_id, request_id: request_id
+        }
+        Hive::Daemon::RecoveryCoordinator::Receipt.new(
+          status: "queued", request_id: request_id, attempt_id: nil,
+          phase: "admitted", failure_origin: "eval_failure",
+          next_eligible_at: nil, owner: "scheduler", reason: nil,
+          remediation: nil, retry_count: 1, provider_hint: nil
+        )
       end
 
       def commands

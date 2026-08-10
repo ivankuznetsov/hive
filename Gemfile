@@ -11,8 +11,8 @@ ruby "~> 3.4"
 # minor bump may rename or remove those, silently breaking paste handling.
 # `PasteAwareRunner` ships a boot-time assertion that re-checks
 # `Bubbletea::VERSION` on load, but the lock-down at the dependency layer
-# is the first line of defence. See
-# `docs/plans/2026-04-27-003-refactor-hive-tui-charm-bubbletea-plan.md`.
+# is the first line of defence. See `lib/hive/tui/paste_aware_runner.rb` and
+# the dependency rationale in `wiki/architecture.md`.
 gemspec
 
 group :development, :test do

@@ -1,0 +1,11 @@
+{
+  "upstream_source": "test/safe_yaml_test.rb",
+  "cases": {
+    "valid_json_values": "name: example\nenabled: true\ncount: 2\nvalues:\n  - null\n  - \"text\"\n",
+    "duplicate_key": "name: one\nname: two\n",
+    "alias": "one: &value x\ntwo: *value\n",
+    "custom_tag": "value: !ruby/object:Object {}\n",
+    "non_string_key": "1: numeric\n",
+    "non_finite": "value: .nan\n"
+  }
+}

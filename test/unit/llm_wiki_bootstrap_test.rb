@@ -35,4 +35,35 @@ class LlmWikiBootstrapTest < Minitest::Test
     assert_match(/cannot resolve primary Git worktree/, error.message)
     assert_match(/not a Git repository/, error.message)
   end
+
+  def test_managed_path_validation_rejects_a_regular_file_parent
+    with_tmp_dir do |root|
+      parent = File.join(root, ".llm-wiki")
+      File.write(parent, "not a directory\n")
+
+      error = assert_raises(Hive::ConfigError) do
+        Hive::LlmWikiBootstrap.validate_project_managed_paths!(root)
+      end
+
+      assert_includes error.message, "managed parent"
+      assert_includes error.message, "must be a directory"
+      assert_equal "not a directory\n", File.read(parent)
+    end
+  end
+
+  def test_managed_file_write_translates_nofollow_errors
+    with_tmp_dir do |root|
+      path = File.join(root, ".llm-wiki", "config.json")
+
+      with_replaced_singleton_method(
+        File, :open, ->(*_args) { raise Errno::ELOOP, path }
+      ) do
+        error = assert_raises(Hive::ConfigError) do
+          Hive::LlmWikiBootstrap.write_file(path, "{}\n")
+        end
+        assert_includes error.message, "managed file"
+        assert_includes error.message, "must not be a symlink"
+      end
+    end
+  end
 end

@@ -92,13 +92,6 @@ module Hive
         []
       end
 
-      # Public view of how `send_message` would split `text` into
-      # Telegram-sized chunks, so callers that need per-chunk delivery
-      # visibility (e.g. the digest sender) can drive the loop themselves.
-      def message_chunks(text)
-        split_message(text)
-      end
-
       def send_message(chat_id:, text:, reply_markup: nil, parse_mode: nil)
         chunks = split_message(text)
         chunks.map.with_index do |chunk, idx|
@@ -113,6 +106,12 @@ module Hive
         params = { chat_id: chat_id, message_id: message_id }
         params[:reply_markup] = inline_keyboard(reply_markup) if reply_markup
         client.api.edit_message_reply_markup(params)
+      end
+
+      def edit_message_text(chat_id:, message_id:, text:, reply_markup: nil)
+        params = { chat_id: chat_id, message_id: message_id, text: text }
+        params[:reply_markup] = inline_keyboard(reply_markup) if reply_markup
+        client.api.edit_message_text(params)
       end
 
       # Dismisses the spinner on a tapped inline button. Required by the

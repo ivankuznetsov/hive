@@ -54,4 +54,117 @@ class ImplementationIdentityTest < Minitest::Test
       end
     end
   end
+
+  def test_routing_metadata_accepts_symbol_keys_and_reconstructs_resolution
+    metadata = {
+      stage: "review_fix",
+      model: "gpt-5.6-sol",
+      effort: "high",
+      provenance: {
+        model: { kind: "exact", key: "review_fix" },
+        effort: { kind: "coarse", key: "review" }
+      }
+    }
+
+    normalized = Hive::ImplementationIdentity.normalize_routing_metadata(metadata)
+    resolution = Hive::ImplementationIdentity.routing_resolution_from_metadata(
+      normalized, provider: "codex"
+    )
+
+    assert_equal "review_fix", normalized.fetch("stage")
+    assert_equal :exact, resolution.provenance.fetch(:model).kind
+    assert_equal :coarse, resolution.provenance.fetch(:effort).kind
+    assert_equal "codex", resolution.provider
+  end
+
+  def test_routing_metadata_rejects_malformed_or_inconsistent_shapes
+    valid = {
+      "stage" => "review_fix",
+      "model" => "gpt-5.6-sol",
+      "effort" => "high",
+      "provenance" => {
+        "model" => { "kind" => "exact", "key" => "review_fix" },
+        "effort" => { "kind" => "coarse", "key" => "review" }
+      }
+    }
+    invalid = [
+      "not-a-mapping",
+      valid.merge("stage" => "unknown"),
+      valid.merge("provenance" => []),
+      valid.merge("provenance" => valid.fetch("provenance").except("model")),
+      valid.merge(
+        "provenance" => valid.fetch("provenance").merge(
+          "model" => { "kind" => "invented" }
+        )
+      ),
+      valid.merge(
+        "provenance" => valid.fetch("provenance").merge(
+          "model" => { "kind" => "exact", "key" => "review_ci" }
+        )
+      ),
+      valid.merge(
+        "provenance" => valid.fetch("provenance").merge(
+          "model" => { "kind" => "current", "key" => "review_fix" }
+        )
+      ),
+      valid.merge(
+        "provenance" => {
+          "model" => { "kind" => "current" },
+          "effort" => { "kind" => "absent" }
+        }
+      )
+    ]
+
+    invalid.each do |metadata|
+      assert_raises(Hive::ImplementationIdentity::InvalidIdentity) do
+        Hive::ImplementationIdentity.normalize_routing_metadata(metadata)
+      end
+    end
+  end
+
+  def test_selection_requires_routing_values_to_match_durable_values
+    metadata = {
+      "stage" => "execute_implementation",
+      "model" => "gpt-5.6-sol",
+      "effort" => "xhigh",
+      "provenance" => {
+        "model" => { "kind" => "exact", "key" => "execute_implementation" },
+        "effort" => { "kind" => "coarse", "key" => "execute" }
+      }
+    }
+
+    assert_raises(Hive::ImplementationIdentity::InvalidIdentity) do
+      selection(model: "gpt-5.6-terra", effort: "xhigh", routing: metadata)
+    end
+    assert_raises(Hive::ImplementationIdentity::InvalidIdentity) do
+      selection(model: "gpt-5.6-sol", effort: "high", routing: metadata)
+    end
+
+    legacy = selection(model: "gpt-5.6-sol", effort: "xhigh")
+    assert_nil legacy.routing_resolution
+    assert_nil legacy.routing_arguments(Hive::AgentProfiles.lookup(:codex))
+    refute_includes legacy.to_h, "routing"
+    assert_nil Hive::ImplementationIdentity.routing_metadata(nil)
+  end
+
+  private
+
+  def selection(model:, effort:, routing: nil)
+    Hive::ImplementationIdentity::Selection.new(
+      stage: "execute",
+      provider: "codex",
+      model: model,
+      profile_name: "codex",
+      launcher_identity: "codex-cli/v1",
+      source: "persisted_execute",
+      generation: 1,
+      originating_attempt: "execute-1",
+      requested_effort: effort,
+      effective_effort: effort,
+      effort_supported: true,
+      model_pinned: true,
+      native_arguments: [ "--model", model ],
+      routing: routing
+    )
+  end
 end

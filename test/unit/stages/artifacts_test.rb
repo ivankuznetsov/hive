@@ -14,8 +14,10 @@ class StagesArtifactsTest < Minitest::Test
       FileUtils.mkdir_p(folder)
       task = Hive::Task.new(folder)
 
-      calls = with_stubbed_artifacts_spawn do
-        Hive::Stages::Artifacts.run!(task, {})
+      calls = with_not_applicable_capture do
+        with_stubbed_artifacts_spawn do
+          Hive::Stages::Artifacts.run!(task, {})
+        end
       end
       result = calls.fetch(:result)
 
@@ -33,8 +35,72 @@ class StagesArtifactsTest < Minitest::Test
       task = Hive::Task.new(folder)
       Hive::Markers.set(task.state_file, :complete)
 
-      assert_equal({ commit: nil, status: :complete }, Hive::Stages::Artifacts.run!(task, {}))
+      result = with_not_applicable_capture { Hive::Stages::Artifacts.run!(task, {}) }
+
+      assert_equal({ commit: nil, status: :complete }, result)
       assert_equal :complete, Hive::Markers.current(task.state_file).name
+    end
+  end
+
+  def test_complete_marker_returns_to_error_when_required_capture_is_missing
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      Hive::Markers.set(task.state_file, :complete)
+      requirement = {
+        "result" => "required",
+        "rationale" => "Visual implementation changed",
+        "task_generation" => "generation-1"
+      }
+      policy = Struct.new(:requirement) do
+        def ensure! = requirement
+        def capture_satisfied? = false
+      end.new(requirement)
+
+      replacement = ->(_task, project:, **) { policy }
+      result = with_replaced_singleton_method(
+        Hive::Artifacts::CapturePolicy, :for_task, replacement
+      ) do
+        Hive::Stages::Artifacts.run!(task, {})
+      end
+
+      assert_equal({ commit: "error", status: :error }, result)
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, marker.name
+      assert_equal "required_capture_missing", marker.attrs.fetch("reason")
+    end
+  end
+
+  def test_required_capture_failure_keeps_stage_in_error_with_actionable_reason
+    Dir.mktmpdir("hive-artifacts-stage") do |dir|
+      task = make_artifacts_task(dir)
+      requirement = {
+        "result" => "required",
+        "rationale" => "User-visible path changed: web/app/views/tasks/show.html.erb",
+        "task_generation" => "generation-1"
+      }
+      policy = Struct.new(:requirement) do
+        def ensure! = requirement
+        def capture_satisfied? = false
+      end.new(requirement)
+
+      projects = []
+      replacement = ->(_task, project:, **) {
+        projects << project
+        policy
+      }
+      with_replaced_singleton_method(Hive::Artifacts::CapturePolicy, :for_task, replacement) do
+        calls = with_stubbed_artifacts_spawn do
+          Hive::Stages::Artifacts.run!(task, {})
+        end
+
+        assert_equal({ commit: "error", status: :error }, calls.fetch(:result))
+        assert_equal [ File.basename(task.project_root) ], projects
+        assert_equal 1, calls.fetch(:spawns).length
+        assert_includes calls.dig(:spawns, 0, :prompt), "Capture requirement: required"
+        marker = Hive::Markers.current(task.state_file)
+        assert_equal :error, marker.name
+        assert_equal "required_capture_missing", marker.attrs.fetch("reason")
+      end
     end
   end
 
@@ -321,8 +387,12 @@ class StagesArtifactsTest < Minitest::Test
         { status: :complete }
       end
 
-      result = with_env("HIVE_HOME" => File.join(dir, "home")) do
-        Hive::Stages::Artifacts.run!(task, {})
+      hive_home = File.join(dir, "home")
+      FileUtils.mkdir_p(hive_home)
+      result = with_not_applicable_capture do
+        with_env("HIVE_HOME" => hive_home) do
+          Hive::Stages::Artifacts.run!(task, {})
+        end
       end
 
       assert_equal({ commit: "artifacts_collected", status: :complete }, result)
@@ -381,6 +451,22 @@ class StagesArtifactsTest < Minitest::Test
     media_dir = File.join(task.folder, "media")
     FileUtils.mkdir_p(media_dir)
     File.write(media_manifest_path(task), "#{JSON.pretty_generate(manifest)}\n")
+  end
+
+  def with_not_applicable_capture
+    receipt = {
+      "result" => "not_applicable",
+      "rationale" => "Test fixture has deterministic nonvisual scope.",
+      "task_generation" => "test-generation"
+    }
+    policy = Struct.new(:receipt) do
+      def ensure! = receipt
+      def capture_satisfied? = true
+    end.new(receipt)
+    replacement = ->(_task, project:, **) { policy }
+    with_replaced_singleton_method(Hive::Artifacts::CapturePolicy, :for_task, replacement) do
+      yield
+    end
   end
 
   def with_stubbed_artifacts_spawn

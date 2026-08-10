@@ -599,6 +599,17 @@ class ProcessKillTest < Minitest::Test
     end
   end
 
+  def test_wait_until_dead_polls_until_a_live_process_exits
+    alive = [ true, false ]
+    with_replaced_singleton_method(Hive::ProcessKill, :reap_if_child_exited, ->(_pid) { false }) do
+      with_replaced_singleton_method(Hive::ProcessKill, :pid_alive?, ->(_pid) { alive.shift }) do
+        assert Hive::ProcessKill.wait_until_dead(1234, 1)
+      end
+    end
+
+    assert_empty alive
+  end
+
   def test_reap_if_child_exited_returns_false_for_non_child
     refute Hive::ProcessKill.reap_if_child_exited(999_999)
   end

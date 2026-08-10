@@ -2,6 +2,7 @@ require "rbconfig"
 require "json"
 require "shellwords"
 require "fileutils"
+require_relative "artifact_paths"
 require_relative "asciinema_driver"
 require_relative "paths"
 require_relative "sandbox_env"
@@ -26,7 +27,7 @@ module Hive
         @run_id = run_id
         @scenario_dir = scenario_dir
         @context = context
-        @tui_log_dir = File.join(@scenario_dir, "tui-subprocess-live")
+        @tui_log_dir = File.join(@scenario_dir, ArtifactPaths::LIVE_TUI_LOG_DIRNAME)
         @tmux = nil
         @asciinema = nil
       end

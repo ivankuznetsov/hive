@@ -1,0 +1,17 @@
+{
+  "malicious_rules": [
+    "deny.pipe-to-shell",
+    "network.undeclared-host",
+    "permission.broad-declaration",
+    "secret.anthropic-key",
+    "secret.openai-key"
+  ],
+  "safe_yaml_cases": {
+    "alias": "instruction.malformed-yaml",
+    "custom_tag": "instruction.malformed-yaml",
+    "duplicate_key": "instruction.malformed-yaml",
+    "non_finite": "instruction.malformed-yaml",
+    "non_string_key": "instruction.malformed-yaml",
+    "valid_json_values": null
+  }
+}

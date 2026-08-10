@@ -1,0 +1,46 @@
+{
+  "schema": "hive-patrol-reduced-qualification-catalog",
+  "schema_version": 1,
+  "expectations": {
+    "patrol": {
+      "decision_count": 10,
+      "decision_classes": ["disabled", "due", "not_due"],
+      "repository_sha_count": 2,
+      "change_window_count": 10
+    },
+    "architecture-patrol": {
+      "decision_count": 10,
+      "decision_classes": ["manual_complete", "manual_recovered"],
+      "repository_sha_count": 10,
+      "change_window_count": 10
+    }
+  },
+  "cases": [
+    {"id": "ordinary-01", "module": "patrol", "decision_class": "due", "fault": "none", "proof_kind": "e2e"},
+    {"id": "ordinary-02", "module": "patrol", "decision_class": "due", "fault": "provider_failure", "proof_kind": "e2e"},
+    {"id": "ordinary-03", "module": "patrol", "decision_class": "due", "fault": "post_reservation_capture_decision_restart", "proof_kind": "e2e"},
+    {"id": "ordinary-04", "module": "patrol", "decision_class": "disabled", "fault": "none", "proof_kind": "e2e"},
+    {"id": "ordinary-05", "module": "patrol", "decision_class": "not_due", "fault": "none", "proof_kind": "e2e"},
+    {"id": "ordinary-06", "module": "patrol", "decision_class": "due", "fault": "none", "proof_kind": "e2e"},
+    {"id": "ordinary-07", "module": "patrol", "decision_class": "disabled", "fault": "none", "proof_kind": "e2e"},
+    {"id": "ordinary-08", "module": "patrol", "decision_class": "not_due", "fault": "none", "proof_kind": "e2e"},
+    {"id": "ordinary-09", "module": "patrol", "decision_class": "due", "fault": "none", "proof_kind": "e2e"},
+    {"id": "ordinary-10", "module": "patrol", "decision_class": "not_due", "fault": "none", "proof_kind": "e2e"},
+    {"id": "architecture-01", "module": "architecture-patrol", "decision_class": "manual_complete", "fault": "none", "proof_kind": "e2e"},
+    {"id": "architecture-02", "module": "architecture-patrol", "decision_class": "manual_complete", "fault": "cli_failure", "proof_kind": "e2e"},
+    {"id": "architecture-03", "module": "architecture-patrol", "decision_class": "manual_recovered", "fault": "released_attempt_retry", "proof_kind": "e2e"},
+    {"id": "architecture-04", "module": "architecture-patrol", "decision_class": "manual_complete", "fault": "finalized_outbox_reconciliation_recovery", "proof_kind": "e2e"},
+    {"id": "architecture-05", "module": "architecture-patrol", "decision_class": "manual_complete", "fault": "none", "proof_kind": "e2e"},
+    {"id": "architecture-06", "module": "architecture-patrol", "decision_class": "manual_recovered", "fault": "released_attempt_retry", "proof_kind": "e2e"},
+    {"id": "architecture-07", "module": "architecture-patrol", "decision_class": "manual_complete", "fault": "none", "proof_kind": "e2e"},
+    {"id": "architecture-08", "module": "architecture-patrol", "decision_class": "manual_recovered", "fault": "released_attempt_retry", "proof_kind": "e2e"},
+    {"id": "architecture-09", "module": "architecture-patrol", "decision_class": "manual_complete", "fault": "none", "proof_kind": "e2e"},
+    {"id": "architecture-10", "module": "architecture-patrol", "decision_class": "manual_recovered", "fault": "released_attempt_retry", "proof_kind": "e2e"}
+  ],
+  "contracts": [
+    {"id": "capture-decision-persistence", "proof_kind": "focused_test", "test_file": "test/unit/modules/migration/occurrence_journal_test.rb", "test_method": "test_finalization_replay_uses_exact_capture_and_event_bytes"},
+    {"id": "module-projection-persistence", "proof_kind": "focused_test", "test_file": "test/unit/daemon/patrol_scheduler_test.rb", "test_method": "test_projection_recovery_drains_every_pending_occurrence_before_ownership_gate"},
+    {"id": "effect-intent-uncertain-dispatch", "proof_kind": "focused_test", "test_file": "test/unit/refactor_patrol/effect_gateway_test.rb", "test_method": "test_crashed_uncertainty_requires_exact_reconciliation"},
+    {"id": "github-shim-barrier", "proof_kind": "focused_test", "test_file": "test/e2e/lib/gh_stub_test.rb", "test_method": "test_absent_mismatched_and_exhausted_scripts_fail_closed_without_fallback"}
+  ]
+}

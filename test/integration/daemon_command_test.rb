@@ -1412,7 +1412,8 @@ class HiveDaemonCommandTest < Minitest::Test
       "trigger" => "autofix",
       "task_generation" => nil,
       "predecessor_attempt_id" => nil,
-      "inherited_outputs" => []
+      "inherited_outputs" => [],
+      "recovery" => nil
     }
     File.write(File.join(dir, "#{created_at.tr(':', '')}-#{request_id}.json"),
                JSON.generate(payload))

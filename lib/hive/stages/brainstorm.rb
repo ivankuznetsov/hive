@@ -1,6 +1,8 @@
 require "hive/stages/base"
 require "hive/config"
 require "hive/claude_launcher"
+require "hive/markers"
+require "hive/brainstorm_parser"
 
 module Hive
   module Stages
@@ -49,6 +51,7 @@ module Hive
 
       def run_headless!(task, cfg, profile: nil)
         profile ||= Hive::Stages::Base.stage_profile(cfg, "brainstorm")
+        artifact_before = artifact_snapshot(task.state_file)
         prompt = render_prompt(task, cfg, profile: profile)
         scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
           cfg, "brainstorm", task, profile,
@@ -64,7 +67,7 @@ module Hive
         # (Claude-on-tmux is now routed through `run_claude!`; this method
         # only covers codex / pi — both run with their own profile
         # permissions, not Claude's `--dangerously-skip-permissions`.)
-        Hive::Stages::Base.spawn_agent(
+        result = Hive::Stages::Base.spawn_agent(
           task,
           prompt: prompt,
           add_dirs: scope.fetch(:add_dirs),
@@ -73,6 +76,10 @@ module Hive
           timeout_sec: cfg.dig("timeout_sec", "brainstorm"),
           log_label: "brainstorm",
           profile: profile,
+          routing_arguments: Hive::Stages::Base.model_routing_arguments(
+            cfg, "brainstorm", profile,
+            current: Hive::Stages::Base.model_routing_current(cfg["brainstorm"])
+          ),
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           # Pin the status-detection mode regardless of which profile the
           # user picked: brainstorm's lifecycle contract is "agent writes
@@ -81,18 +88,18 @@ module Hive
           # :output_file_exists, which would never satisfy this stage.
           status_mode: :state_file_marker
         )
-        marker = Hive::Markers.current(task.state_file)
-        { commit: action_for(marker.name), status: marker.name }
+        result_for_spawn(task, result, artifact_before)
       end
 
       def run_claude!(task, cfg, profile: nil)
         profile ||= Hive::Stages::Base.stage_profile(cfg, "brainstorm")
+        artifact_before = artifact_snapshot(task.state_file)
         prompt = render_prompt(task, cfg, profile: profile)
         scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
           cfg, "brainstorm", task, profile,
           default_allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
         )
-        Hive::Stages::Base.spawn_claude_with_tmux_marker!(
+        result = Hive::Stages::Base.spawn_claude_with_tmux_marker!(
           task,
           cfg,
           prompt: prompt,
@@ -102,12 +109,102 @@ module Hive
           timeout_sec: cfg.dig("timeout_sec", "brainstorm"),
           log_label: "brainstorm",
           profile: profile,
+          routing_arguments: Hive::Stages::Base.model_routing_arguments(
+            cfg, "brainstorm", profile,
+            current: Hive::Stages::Base.model_routing_current(cfg["brainstorm"])
+          ),
           session_name: Hive::ClaudeLauncher.tmux_session_name("2-brainstorm", task), # coding-scoped: coding brainstorm stage tmux session
           status_mode: :state_file_marker,
           **Hive::Stages::Base.tool_scope_kwargs(scope)
         )
+        result_for_spawn(task, result, artifact_before)
+      end
+
+      def result_for_spawn(task, result, artifact_before)
+        marker = Hive::Markers.current(task.state_file)
+        valid_artifact = artifact_valid?(task.state_file)
+        artifact_changed = artifact_snapshot(task.state_file) != artifact_before
+        spawn_status = result.is_a?(Hash) ? result[:status]&.to_sym : nil
+
+        if valid_artifact &&
+           (%i[waiting complete terminal_replay].include?(spawn_status) ||
+            (artifact_changed && spawn_status == :error))
+          return { commit: action_for(marker.name), status: marker.name }
+        end
+
+        # Preserve a specific marker written by the launcher/agent. It already
+        # carries the current attempt projection and is stronger evidence than
+        # a synthesized Brainstorm fallback.
+        if marker.name == :error
+          return { commit: action_for(marker.name), status: marker.name }
+        end
+
+        if valid_artifact
+          stamp_spawn_error(task, result)
+        elsif %i[waiting complete terminal_replay].include?(spawn_status)
+          Hive::Markers.set(
+            task.state_file, :error,
+            reason: "brainstorm_artifact_invalid",
+            message: "brainstorm.md is missing a valid Round or Requirements artifact"
+          )
+        else
+          stamp_spawn_error(task, result)
+        end
+
         marker = Hive::Markers.current(task.state_file)
         { commit: action_for(marker.name), status: marker.name }
+      end
+
+      # A Brainstorm success is a durable artifact, not merely a process exit
+      # or terminal receipt. Keep the validation intentionally structural:
+      # WAITING requires a numbered Round section; COMPLETE requires a
+      # non-empty Requirements section. Marker-only and unrelated markdown are
+      # never sufficient.
+      def artifact_valid?(path)
+        return false unless File.file?(path) && File.size(path).positive?
+
+        body = File.read(path, encoding: "UTF-8").scrub
+        marker = Hive::Markers.current(path)
+        case marker.name
+        when :waiting
+          body.each_line.any? { |line| Hive::BrainstormParser::ROUND_RE.match?(line) }
+        when :complete
+          requirements = body.split(/^##\s+Requirements\b.*$/i, 2)[1]
+          requirements = requirements&.split(/^##\s+/, 2)&.first
+          requirements && requirements.gsub(Hive::Markers::MARKER_RE, "").strip != ""
+        else
+          false
+        end
+      rescue SystemCallError, IOError
+        false
+      end
+
+      def artifact_snapshot(path)
+        return nil unless File.file?(path)
+
+        File.read(path, mode: "rb")
+      rescue SystemCallError, IOError
+        nil
+      end
+
+      def stamp_spawn_error(task, result)
+        result = {} unless result.is_a?(Hash)
+        details = result[:failure_details].is_a?(Hash) ? result[:failure_details] : {}
+        reason = result[:failure_origin].to_s
+        reason = "brainstorm_agent_failed" if reason.empty?
+        message = result[:error_message].to_s
+        message = details[:diagnostic].to_s if message.empty?
+        message = "brainstorm agent did not produce a valid artifact" if message.empty?
+        attrs = {
+          reason: reason,
+          provider: details[:provider],
+          subtype: details[:subtype],
+          max_budget_usd: details[:configured_cap_usd],
+          observed_cost_usd: details[:observed_cost_usd],
+          remedy: details[:remedy],
+          message: message.byteslice(0, 200).to_s.scrub
+        }.compact
+        Hive::Markers.set(task.state_file, :error, **attrs)
       end
 
       # Returns a new cfg Hash with `claude.mode` overridden, leaving the

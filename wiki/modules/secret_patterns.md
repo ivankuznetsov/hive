@@ -3,11 +3,15 @@ title: Hive::SecretPatterns
 type: module
 source: lib/hive/secret_patterns.rb
 created: 2026-04-26
-updated: 2026-07-21
+updated: 2026-07-26
 tags: [security, secrets, regex, secret-scan, redact]
 ---
 
-**TLDR**: Shared regex set for credential / secret detection. One Hash, `scan(text)` returns `[{name:, snippet:}, …]`, `redact(text)` returns the string with each match replaced by `[REDACTED:<name>]`. Consumers include `Stages::OpenPr` / `Stages::Finalize` PR-body scans, review PR-comment publishing, `Stages::Review::FixGuardrail`'s post-fix diff scan, and (since PR #84) `TaskAction#diagnostic` / `DiagnosisAgent#artifact_body` redaction. New patterns must come with at least one test in `test/unit/secret_patterns_test.rb`.
+**TLDR**: Shared regex set for credential / secret detection. One Hash,
+`scan(text)` returns `[{name:, snippet:}, …]`; `redact(text)` returns the string
+with each match replaced by `[REDACTED:<name>]`. It remains lower-level shared
+Hive infrastructure consumed by the Agent ABI and Agent Artifact Firewall,
+not state owned by either component. New patterns require focused tests.
 
 ## API
 
@@ -49,6 +53,13 @@ record for every hit. `redact` coerces binary input to UTF-8 with invalid bytes 
 - `Hive::TaskAction#diagnostic` — calls `SecretPatterns.redact` on the bounded summary / detail before emission to JSON consumers (TUI, bot, daemon).
 - `Hive::DiagnosisAgent#artifact_body` — calls `SecretPatterns.redact` on the agent-produced body before writing `diagnostics/red-status.md`.
 - `Hive::Stages::DraftPrHandoff` — scans the exact new commit/object range, final changed files, repair report, and projected PR title/body before any publication; quarantined reports are redacted before Hive appends its marker.
+- `Hive::ArtifactFirewall` — uses `SecretPatterns.redact` as the default
+  injectable redactor for violation labels, paths, restoration errors, and
+  report diagnostics. Redaction runs before the 512-byte diagnostic cap; a
+  custom redactor that raises fails closed as `[REDACTION_FAILED]` rather than
+  echoing the original input.
+- `Hive::AgentRuntime` — redacts bounded provider probe/compilation/result
+  diagnostics without transferring stage or artifact policy into the ABI.
 
 ## Tests
 
@@ -56,5 +67,6 @@ record for every hit. `redact` coerces binary input to UTF-8 with invalid bytes 
 
 ## Backlinks
 
+- [[modules/protected_files]] · [[modules/agent_profile]]
 - [[stages/open-pr]] · [[stages/finalize]] · [[stages/review]]
 - [[decisions]] (ADR-008 / ADR-020)

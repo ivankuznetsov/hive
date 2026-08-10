@@ -5,13 +5,35 @@ $LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
 require "hive"
 require "hive/llm_wiki_bootstrap"
 
+# The workflow creator owns two strict observation routes. They must stay
+# byte-for-byte no-write even when an upgraded binary would otherwise repair
+# scheduler units during process startup.
+init_index = ARGV.index("init")
+workflow_index = ARGV.index("workflow")
+strict_no_write_route =
+  if init_index && (!workflow_index || init_index < workflow_index)
+    ARGV.drop(init_index + 1).any? do |arg|
+      arg == "--preview" || arg.match?(/\A--preview=true\z/i)
+    end
+  elsif workflow_index
+    workflow_subcommands = %w[new validate commit install list update remove publish].freeze
+    workflow_subcommand = ARGV.drop(workflow_index + 1).find do |arg|
+      workflow_subcommands.include?(arg)
+    end
+    workflow_subcommand == "validate"
+  else
+    false
+  end
+
 # Repair legacy path-keyed LLM-wiki timers as soon as an upgraded Hive binary
 # is invoked, including `hive --version`. The reconciliation is idempotent and
 # touches only Hive-managed units.
-begin
-  Hive::LlmWikiBootstrap::Scheduler.reconcile_existing!
-rescue StandardError => e
-  warn "hive: warning: could not reconcile LLM-wiki scheduler units: #{e.message}"
+unless strict_no_write_route
+  begin
+    Hive::LlmWikiBootstrap::Scheduler.reconcile_existing!
+  rescue StandardError => e
+    warn "hive: warning: could not reconcile LLM-wiki scheduler units: #{e.message}"
+  end
 end
 
 if ENV["HIVE_ATTEMPT_INTERNAL"] == "1"
@@ -25,6 +47,7 @@ if ENV["HIVE_ATTEMPT_INTERNAL"] == "1"
 end
 
 require "hive/cli"
+require "hive/cli_json_options"
 require "hive/refactor_patrol/reporter"
 require "json"
 
@@ -41,16 +64,30 @@ if ARGV.first == "__attempt-supervise"
   end
 end
 
+# Private module-hook worker route. Only the durable attempt supervisor emits
+# this argv after admission; keeping it ahead of Thor prevents a public bypass
+# around previewed installation and hook state.
+if ARGV.first == "__module-hook"
+  require "hive/commands/module_hook"
+  begin
+    unless Hive::Attempts::Context.active?
+      raise Hive::ConfigError, "module hook requires authenticated durable attempt context"
+    end
+    exit Hive::Commands::ModuleHook.from_argv(ARGV.drop(1)).call
+  rescue Hive::Error => e
+    warn "hive: #{e.message}"
+    exit e.exit_code
+  end
+end
+
 if ARGV == [ "--version" ] || ARGV == [ "-v" ]
   puts Hive::VERSION
   exit 0
 end
 
-JSON_TRUE_OPTIONS = %w[--json --json=true --json=TRUE --json=t --json=T].freeze
-JSON_FALSE_OPTIONS = %w[--no-json --skip-json --json=false --json=FALSE --json=f --json=F].freeze
-JSON_BOOLEAN_OPTIONS = (JSON_TRUE_OPTIONS + JSON_FALSE_OPTIONS).freeze
+JSON_BOOLEAN_OPTIONS = Hive::CliJsonOptions::BOOLEAN_OPTIONS
 STAGE_ACTION_USAGE_COMMANDS = %w[brainstorm plan develop open-pr review artifacts finalize archive].freeze
-NEW_VALUE_OPTIONS = %w[--base --depends-on --workflow].freeze
+NEW_VALUE_OPTIONS = %w[--base --depends-on --workflow --idempotency-key].freeze
 JSON_USAGE_ERROR_CONTRACTS = {
   "run" => { schema: "hive-run", error_kind: "invalid_task_path" },
   "rebase-status" => { schema: "hive-rebase-status", schema_version: 1, error_kind: "invalid_task_path" },
@@ -87,6 +124,7 @@ JSON_USAGE_ERROR_CONTRACTS = {
   # (for example too many positionals) must ride the same JSON envelope as the
   # command's own UsageError. Bare `hive workflow` is handled in-command.
   "workflow" => { schema: "hive-workflow-new", error_kind: "usage" },
+  "module" => { schema: "hive-module-lifecycle", error_kind: "usage" },
   "pr" => {
     schema: "hive-stage-action",
     error_kind: "invalid_task_path",
@@ -99,7 +137,7 @@ JSON_USAGE_ERROR_CONTRACTS = {
 ).freeze
 
 def wrapper_option_argv(argv)
-  argv.take(argv.index("--") || argv.length)
+  Hive::CliJsonOptions.option_argv(argv)
 end
 
 # Thor treats a class option before the subcommand as input to its help path.
@@ -237,8 +275,7 @@ def lift_new_options!(argv)
 end
 
 def json_requested?(argv)
-  options = wrapper_option_argv(argv)
-  JSON_TRUE_OPTIONS.include?(options.reverse.find { |arg| JSON_BOOLEAN_OPTIONS.include?(arg) })
+  Hive::CliJsonOptions.requested?(argv)
 end
 
 def reject_invalid_argv_encoding!(argv)
@@ -250,45 +287,14 @@ end
 
 def reject_unsupported_json_assignments!(argv)
   text_start_idx = new_text_start_index(argv)
-  arg = wrapper_option_argv(argv).each_with_index.find do |candidate, idx|
-    next false if text_start_idx && idx >= text_start_idx
-
-    candidate.start_with?("--json=") && !JSON_BOOLEAN_OPTIONS.include?(candidate)
-  end&.first
+  arg = Hive::CliJsonOptions.unsupported_assignment(argv, before_index: text_start_idx)
   return unless arg
 
   raise Thor::MalformattedArgumentError, "invalid boolean value for --json: #{arg.split('=', 2).last.inspect}"
 end
 
-DIGEST_MERGED_PRS_SOURCE = "merged-prs".freeze
-
 def json_usage_option_region(argv, command_index)
   argv.drop(command_index + 1).take_while { |arg| arg != "--" }
-end
-
-# Mirror Commands::Digest#normalized_source at the argv level: the merged-PR
-# path is selected by `--source merged-prs` or by any `--repo` with no other
-# --source. A Thor usage error there (e.g. `hive digest --source merged-prs
-# --bad --json`) is raised before the command runs, so the resolver must select
-# `hive-merged-pr-digest` instead of the shipped-digest `hive-digest` schema.
-def digest_merged_pr_argv?(argv)
-  source = nil
-  repo = false
-  argv.each_with_index do |arg, idx|
-    next unless arg.valid_encoding?
-
-    if arg == "--source"
-      value = argv[idx + 1]
-      source = value.to_s if value&.valid_encoding?
-    elsif arg.start_with?("--source=")
-      source = arg.split("=", 2).last
-    elsif arg == "--repo" || arg.start_with?("--repo=")
-      repo = true
-    end
-  end
-  return true if source && source.strip == DIGEST_MERGED_PRS_SOURCE
-
-  source.to_s.strip.empty? && repo
 end
 
 def json_usage_subcommand(argv, command_index, value_options: [])
@@ -383,9 +389,8 @@ def json_usage_error_contract(argv)
     subcommand = json_usage_subcommand(argv, command_index)
     schema = subcommand == "approve" ? "hive-pairing-approve" : "hive-pairing-list"
     return { schema: schema, error_kind: "invalid_arguments" }
-  when "digest"
-    schema = digest_merged_pr_argv?(option_argv) ? "hive-merged-pr-digest" : "hive-digest"
-    return { schema: schema, error_kind: "usage" }
+  when "decide"
+    return { schema: "hive-decide", error_kind: "invalid_task_path" }
   when "refactor-patrol"
     if (jobs = refactor_patrol_jobs_argv(option_argv))
       return {
@@ -401,9 +406,41 @@ def json_usage_error_contract(argv)
     when "remove" then "hive-workflow-remove"
     when "update" then "hive-workflow-update"
     when "publish" then "hive-workflow-publish"
+    when "validate" then "hive-workflow-validate"
     else "hive-workflow-new"
     end
-    return { schema: schema, error_kind: "usage" } if Hive::Schemas::SCHEMA_VERSIONS.key?(schema)
+    if Hive::Schemas::SCHEMA_VERSIONS.key?(schema)
+      extras = if subcommand == "validate"
+        id = json_usage_positionals(argv, command_index).fetch(1, "")
+        { "valid" => false, "id" => id }
+      else
+        {}
+      end
+      return { schema: schema, error_kind: "usage", extras: extras }
+    end
+  when "module"
+    subcommand = json_usage_subcommand(
+      argv, command_index,
+      value_options: %w[
+        --receipt --setting --hook --grant --mapping --input-binding
+        --event --schedule --occurred-at
+      ]
+    )
+    schema = case subcommand
+    when "list" then "hive-module-list"
+    when "inspect", "status" then "hive-module-status"
+    when "doctor" then "hive-module-doctor"
+    when "dry-run" then "hive-module-dry-run"
+    when "migration"
+      migration_action = json_usage_subcommand(
+        argv, argv.index("migration") || command_index,
+        value_options: %w[--reviewer]
+      )
+      %w[report deterministic-qualification].include?(migration_action) ?
+        "hive-module-migration-report" : "hive-module-migration"
+    else "hive-module-lifecycle"
+    end
+    return { schema: schema, error_kind: "usage" }
   end
 
   JSON_USAGE_ERROR_CONTRACTS[command]
@@ -516,6 +553,9 @@ def json_usage_error_payload(contract, error, argv: [])
       error_kind: error_kind,
       extras: extras
     )
+    if schema == "hive-workflow-validate"
+      payload["diagnostics"] = [ { "message" => error.message } ]
+    end
     payload.delete("error_class") if contract[:omit_error_class]
     return payload
   end
@@ -541,8 +581,20 @@ def emit_json_usage_error(argv, error)
 
   puts JSON.generate(json_usage_error_payload(contract, error, argv: argv))
   true
-rescue Errno::EPIPE, JSON::GeneratorError
+rescue Errno::EPIPE
   true
+rescue JSON::GeneratorError
+  false
+end
+
+def thor_usage_error(argv, error)
+  contract = json_usage_error_contract(argv)
+  klass = if contract&.fetch(:error_kind, nil) == "invalid_task_path"
+    Hive::InvalidTaskPath
+  else
+    Hive::UsageError
+  end
+  klass.new(error.message)
 end
 
 original_argv = ARGV.dup
@@ -555,7 +607,7 @@ begin
   lift_new_options!(ARGV)
   Hive::CLI.start(ARGV, debug: true)
 rescue Thor::Error => e
-  error = Hive::InvalidTaskPath.new(e.message)
+  error = thor_usage_error(original_argv, e)
   emitted_json = emit_json_usage_error(original_argv, error)
   warn(emitted_json ? "hive: #{error.message}" : error.message)
   exit(error.exit_code)

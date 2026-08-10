@@ -34,17 +34,19 @@ module Hive
         @inflight.add(key)
         started = Time.now
 
-        if fork_pr?
-          skip_fork_pr(started)
-          return :fork_pr
-        end
-
         # The early-green precheck runs `pr_status_rollup` against the project
         # root, not the worktree, because no PR worktree exists yet (materialize
         # happens below). gh resolves the same repo from either cwd's git
         # config, and the result is threaded into ContextBuilder so the second
         # call reuses this rollup rather than re-fetching.
         status = Hive::Gh.pr_status_rollup(@project.fetch("path"), number, cfg: @cfg)
+        return handle_green(status, started) if already_green?(status) && !behind?(status)
+
+        if fork_pr?
+          skip_fork_pr(started)
+          return :fork_pr
+        end
+
         return handle_green(status, started) if already_green?(status)
 
         worktree = Hive::Babysitter::Worktree.materialize(@project, @pr)
@@ -213,7 +215,10 @@ module Hive
 
       def spawn_agent(worktree_path, context)
         task = babysitter_task(worktree_path)
-        profile = Hive::AgentProfiles.lookup(@cfg.dig("execute", "agent") || "claude", cfg: @cfg)
+        profile = Hive::AgentProfiles.lookup(
+          @cfg.dig("babysitter", "agent") || @cfg.dig("execute", "agent") || "claude",
+          cfg: @cfg
+        )
         prompt = render_prompt(worktree_path, context)
         spawn = lambda do
           Hive::Stages::Base.spawn_agent(
@@ -225,6 +230,11 @@ module Hive
             cwd: worktree_path,
             log_label: "babysitter-pr-#{number}",
             profile: profile,
+            cfg: @cfg,
+            routing_arguments: Hive::Stages::Base.model_routing_arguments(
+              @cfg, "babysitter", profile,
+              current: Hive::Stages::Base.model_routing_current(@cfg["babysitter"])
+            ),
             status_mode: :exit_code_only
           )
         end
@@ -313,11 +323,13 @@ module Hive
           cfg: @cfg,
           dry_run: @dry_run
         )
+        label_error = [ label_result.stderr, label_result.stdout ].map { |value| value.to_s.strip }.find { |value| !value.empty? }
         Hive::Babysitter::Events.emit(
           project: @project,
           pr: number,
           action: "label-apply",
-          outcome: @dry_run ? "dry_run" : (label_result.success? ? "success" : "failure")
+          outcome: @dry_run ? "dry_run" : (label_result.success? ? "success" : "failure"),
+          message: label_result.success? ? nil : label_error&.byteslice(0, 500)
         )
 
         comment_result = Hive::Babysitter::GhOps.post_pr_comment(

@@ -18,6 +18,35 @@ class HiveCommandsDaemonTest < Minitest::Test
     end
   end
 
+  class FakeActivationLock
+    attr_reader :events, :release_attempts
+
+    def initialize
+      @events = []
+      @release_attempts = 0
+      @held = false
+    end
+
+    def acquire!
+      raise "activation lock acquired twice" if @held
+
+      @held = true
+      @events << :acquire
+      self
+    end
+
+    def release!
+      @release_attempts += 1
+      return false unless @held
+
+      @held = false
+      @events << :release
+      true
+    end
+
+    def held? = @held
+  end
+
   FakeInstaller = Struct.new(:target_path, :last_backup_path, :last_restart_invoked,
                              :envelope_platform, :messages, keyword_init: true)
 
@@ -69,14 +98,6 @@ class HiveCommandsDaemonTest < Minitest::Test
     { "check" => true, "auto" => true }
   end
 
-  def default_digest_config
-    {
-      "enabled" => false,
-      "agent" => nil,
-      "max_catchup_days" => Hive::Daemon::DigestScheduler::DEFAULT_MAX_CATCHUP_DAYS
-    }
-  end
-
   def default_answer_digest_config
     {
       "enabled" => false,
@@ -85,14 +106,11 @@ class HiveCommandsDaemonTest < Minitest::Test
   end
 
   def with_global_start_config(config, update_config: default_update_config,
-                               digest_config: default_digest_config,
                                answer_digest_config: default_answer_digest_config)
     with_replaced_singleton_method(Hive::Config, :load_global_daemon, -> { config }) do
       with_replaced_singleton_method(Hive::Config, :load_global_update, -> { update_config }) do
-        with_replaced_singleton_method(Hive::Config, :load_global_digest_block, -> { digest_config }) do
-          with_replaced_singleton_method(Hive::Config, :load_global_answer_digest_block, -> { answer_digest_config }) do
-            yield
-          end
+        with_replaced_singleton_method(Hive::Config, :load_global_answer_digest_block, -> { answer_digest_config }) do
+          yield
         end
       end
     end
@@ -106,13 +124,11 @@ class HiveCommandsDaemonTest < Minitest::Test
     captured = nil
 
     update_config = default_update_config
-    digest_config = default_digest_config
     answer_digest_config = default_answer_digest_config
     with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(pid) { "start-#{pid}" }) do
       with_global_start_config(
         config,
         update_config: update_config,
-        digest_config: digest_config,
         answer_digest_config: answer_digest_config
       ) do
         with_replaced_singleton_method(Hive::Daemon::Dispatcher, :new, lambda { |**kwargs|
@@ -129,20 +145,64 @@ class HiveCommandsDaemonTest < Minitest::Test
       {
         "daemon" => config,
         "update" => update_config,
-        "digest" => digest_config,
         "answer_digest" => answer_digest_config
       },
       captured.fetch(:config)
     )
     assert_equal true, captured.fetch(:dry_run)
-    assert_instance_of Hive::Daemon::DigestScheduler, captured.fetch(:digest_scheduler)
     assert_instance_of Hive::Daemon::AnswerDigestScheduler, captured.fetch(:answer_digest_scheduler)
+    attempts_api = captured.fetch(:attempt_dispatcher)
+    assert_instance_of Hive::Attempts::API, attempts_api
+    assert_equal(
+      File.join(@home, "attempts", "v3"),
+      attempts_api.instance_variable_get(:@store).root
+    )
+    assert File.file?(File.join(@home, "attempts", "v2")),
+           "daemon default opener must publish the old-binary fence"
     reconciler = captured.fetch(:refactor_patrol_merge_reconciler)
     assert_instance_of Hive::Daemon::RefactorPatrolMergeReconciler, reconciler
     assert_same reconciler, captured.fetch(:merge_watcher).instance_variable_get(:@merge_intake),
                 "immediate watcher and catch-up must share one intake boundary"
     assert_equal true, reconciler.instance_variable_get(:@dry_run)
     refute File.exist?(command.pid_file), "clean shutdown must remove the YAML PID file it wrote"
+  end
+
+  def test_start_holds_activation_lock_until_runtime_readiness_is_published
+    activation_lock = FakeActivationLock.new
+    command = daemon(
+      "start", dry_run: true,
+      activation_lock: activation_lock
+    )
+    captured = nil
+    test_case = self
+    dispatcher = FakeDispatcher.new([])
+    dispatcher.define_singleton_method(:run_forever) do
+      calls << :run_forever
+      captured.fetch(:runtime_ready_callback).call
+    end
+
+    with_replaced_singleton_method(
+      Hive::Lock, :process_start_time,
+      ->(pid) { "start-#{pid}" }
+    ) do
+      with_global_start_config(daemon_config) do
+        with_replaced_singleton_method(
+          Hive::Daemon::Dispatcher, :new,
+          lambda { |**kwargs|
+            test_case.assert activation_lock.held?
+            captured = kwargs
+            dispatcher
+          }
+        ) do
+          command.call
+        end
+      end
+    end
+
+    assert_equal [ :run_forever ], dispatcher.calls
+    assert_equal %i[acquire release], activation_lock.events
+    assert_equal 2, activation_lock.release_attempts,
+                 "outer cleanup may retry the idempotent release"
   end
 
   def test_manual_daemon_start_pins_children_to_the_invoked_hive_binary
@@ -453,6 +513,44 @@ class HiveCommandsDaemonTest < Minitest::Test
     assert_empty schema.validate(doc).map { |error| error["error"] }
   end
 
+  def test_status_probe_uses_explicit_runtime_hive_bin_instead_of_private_path_wrapper
+    stable_hive = File.join(@home, ".local", "bin", "hive")
+    private_hive = File.join(@home, "web-gems", "bin", "hive")
+    report = Hive::Daemon::StatusReport.new(
+      hive_home: @home,
+      environment: {
+        "HIVE_BIN" => stable_hive,
+        "PATH" => File.dirname(private_hive)
+      }
+    )
+    captured = nil
+    fake = Struct.new(:stable_hive) do
+      def service_state
+        {
+          "service_installed" => true,
+          "service_enabled" => true,
+          "unit_path" => "/home/u/.config/systemd/user/hive-daemon.service"
+        }
+      end
+
+      def installed_exec_binary = stable_hive
+      def expected_binary = stable_hive
+    end.new(stable_hive)
+
+    require "hive/commands/daemon/service_installer"
+    state = with_replaced_singleton_method(
+      Hive::Commands::Daemon::ServiceInstaller, :new,
+      lambda { |**kwargs|
+        captured = kwargs
+        fake
+      }
+    ) { report.send(:probe_service_state) }
+
+    assert_equal stable_hive, captured.fetch(:binary_path),
+                 "the managed web process must honor the unit's explicit HIVE_BIN"
+    assert_equal stable_hive, state.fetch("expected_binary")
+  end
+
   def test_status_json_degrades_service_fields_to_null_when_probe_raises
     command = daemon("status", json: true)
     write_pid_payload(pid: 1234)
@@ -518,6 +616,28 @@ class HiveCommandsDaemonTest < Minitest::Test
                            version: Hive::VERSION)
   end
 
+  def test_binary_drift_none_when_installed_symlink_targets_expected_binary
+    expected = File.join(@home, "deployments", "hive", "bin", "hive")
+    installed = File.join(@home, ".local", "bin", "hive")
+    FileUtils.mkdir_p(File.dirname(expected))
+    FileUtils.mkdir_p(File.dirname(installed))
+    File.write(expected, "#!/bin/sh\n")
+    File.symlink(expected, installed)
+
+    assert_equal "none",
+                 drift_for({ "service_installed" => true,
+                             "installed_binary" => installed, "expected_binary" => expected },
+                           version: Hive::VERSION)
+  end
+
+  def test_binary_drift_path_when_file_identity_probe_fails
+    with_replaced_singleton_method(File, :identical?, ->(*) { raise Errno::EIO, "identity unavailable" }) do
+      assert_equal "path",
+                   drift_for({ "service_installed" => true,
+                               "installed_binary" => "/old/hive", "expected_binary" => "/new/hive" })
+    end
+  end
+
   def test_binary_drift_unreadable_when_version_probe_fails_at_expected_path
     # Unit present, path matches, but `--version` returns nil (wedged binary):
     # surfaced as actionable "unreadable" drift, not a healthy "none".
@@ -578,6 +698,68 @@ class HiveCommandsDaemonTest < Minitest::Test
     assert_equal false, payload.fetch("ok")
     assert_equal false, payload.fetch("running")
     assert_equal "probe exploded", payload.fetch("message")
+  end
+
+  def test_status_payload_reads_legacy_registry_without_mutating_disk
+    with_tmp_dir do |root|
+      home = File.join(root, "home")
+      project = File.join(root, "project")
+      legacy = File.join(home, "Dev", "hive", "config.yml")
+      xdg_config = File.join(root, "config")
+      current = File.join(xdg_config, "hive", "config.yml")
+      state_home = File.join(root, "state", "hive")
+      stale_tmp = File.join(state_home, ".update_check.json.1.1.tmp")
+      FileUtils.mkdir_p([
+        File.dirname(legacy),
+        project,
+        state_home
+      ])
+      File.write(
+        legacy,
+        {
+          "registered_projects" => [
+            {
+              "name" => "legacy",
+              "path" => project,
+              "project_id" => "11111111-1111-4111-a111-111111111111"
+            }
+          ]
+        }.to_yaml
+      )
+      File.write(stale_tmp, "old")
+      File.utime(Time.now - 300, Time.now - 300, stale_tmp)
+
+      with_env(
+        "HOME" => home,
+        "HIVE_HOME" => nil,
+        "XDG_CONFIG_HOME" => xdg_config,
+        "XDG_STATE_HOME" => File.join(root, "state")
+      ) do
+        report = Hive::Daemon::StatusReport.new(hive_home: state_home)
+        report.define_singleton_method(:probe_service_state) do
+          {
+            "service_installed" => false,
+            "service_enabled" => false,
+            "unit_path" => nil,
+            "installed_binary" => nil,
+            "expected_binary" => nil
+          }
+        end
+
+        payload = report.payload
+
+        refute payload.key?("job_store_resets")
+        assert File.file?(legacy),
+               "status must preserve the legacy registry at its exact path"
+        refute File.exist?(current),
+               "status must not run the legacy registry migration"
+        refute File.exist?(
+          File.join(File.dirname(current), ".migrated-from")
+        )
+        assert File.file?(stale_tmp),
+               "status must not perform update-state tmp cleanup"
+      end
+    end
   end
 
   def test_status_text_reports_running_daemon

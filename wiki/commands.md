@@ -1,7 +1,7 @@
 ---
 title: Interaction Surface
 type: commands
-source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/, skills/hive/, lib/hive/agent_skills/, config/agent-skills.yml, lib/hive/digest/, lib/hive/web/, public/, hive.gemspec, packaging/, .github/workflows/{live-agent-skills,release}.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
+source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/, skills/hive/, lib/hive/agent_skills/, config/agent-skills.yml, lib/hive/web/, web/, public/, hive.gemspec, packaging/, .github/workflows/{live-agent-skills,release}.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
 updated: 2026-07-22
 tags: [commands, api, skills, agents, operational, provisioning]
@@ -11,7 +11,7 @@ tags: [commands, api, skills, agents, operational, provisioning]
 `hv` fallback launcher), the opt-in e2e harness, the Hive web command/routes
 documented in [[commands/web]], `hive connect screenote` as the Screenote OAuth
 setup surface for artifacts MCP uploads, `hive bench submit` as the hive-bench
-corpus producer, `hive digest` as the daily Europe/London PR changelist producer,
+corpus producer,
 `hive pairing` as the Telegram first-contact approval surface, the read-only
 agent-first `hive status --operational --json`, bounded `hive watch`, closed
 `hive act`, the `hive doctor` / consent-safe setup split for one canonical Hive
@@ -31,10 +31,7 @@ one ClawHub listing per Hive verb.
 - `lib/hive/commands/connect.rb`
 - `lib/hive/commands/disconnect.rb`
 - `lib/hive/commands/bench_submit.rb`
-- `lib/hive/commands/digest.rb`
 - `lib/hive/commands/pairing.rb`
-- `lib/hive/commands/module.rb`
-- `lib/hive/commands/module/`
 - `lib/hive/commands/setup_agents.rb`
 - `lib/hive/commands/watch.rb`
 - `lib/hive/commands/act.rb`
@@ -43,8 +40,6 @@ one ClawHub listing per Hive verb.
 - `skills/hive/`
 - `lib/hive/agent_skills/**/*.rb`
 - `config/agent-skills.yml`
-- `lib/hive/digest.rb`
-- `lib/hive/digest/**/*.rb`
 - `lib/hive/web/**/*.rb`
 - `web/app/views/**`
 - `web/app/assets/**`
@@ -70,7 +65,7 @@ one ClawHub listing per Hive verb.
 GitHub PR, project workflow authoring via [[commands/workflow]], daemon/bot/babysitter
 lifecycle commands, diagnostics, markers, findings, metrics, update/uninstall,
 registry maintenance, Screenote connect/disconnect, the `hive bench submit`
-corpus-submission producer, the `hive digest` merged-PR changelist producer,
+corpus-submission producer,
 the [[commands/pairing]] Telegram pairing approval surface,
 [[commands/refactor-patrol]] as the architecture refactor thesis scanner (only
 its legacy on-demand v1 mode is reporting-only; merged-PR v2 can take separately
@@ -125,21 +120,6 @@ separate hive-bench corpus. It resolves a `9-done` task from registered
 projects, runs a local secret-token preflight, delegates extraction to
 hive-bench's checkout-local `harness/extract.rb`, then opens a GitHub PR from
 the hive-bench checkout. See [[commands/bench-submit]].
-
-`hive digest` is the CLI bridge to `Hive::Digest`: it builds the complete
-changelist for PRs merged during one Europe/London day across registered
-GitHub repositories. Repeatable `--repo` values filter that registered scope;
-Hive task/stage state and pairing state are not read. Dry-run and real delivery
-share the same MarkdownV2 result, and JSON uses only `hive-digest` v2. The
-daemon can schedule it as a global, non-project-scoped child. See
-[[commands/digest]] and [[modules/digest]].
-
-Queued branch head `071d0d71` also adds `hive module`: preview-bound
-install/update/enable/disable/uninstall plus shared redacted
-list/inspect/status, no-repair doctor, and write-free event evaluation. This
-surface is not integrated into the refresh branch's current default source;
-see [[commands/module]] for the exact branch-qualified command and JSON
-contracts.
 
 `hive setup` is the local workstation provisioning bridge for installs that
 `hive setup` is the normal native workstation provisioning bridge: it first
@@ -228,11 +208,9 @@ CLI/bot/daemon stack; it does not introduce a separate workflow engine. GitHub
 device-flow auth can either use a pre-pinned `web.github.owner` or first-login
 claim on an ownerless box. Production Action Cable accepts same-origin-as-host,
 with `web.origin` / `HIVE_WEB_ORIGIN` only as an extra allow for split-origin
-deploys. On queued Rails resource commit `153bed1d` (patch-equivalent to
-`96b06792` / `2fef1f47`), Task Drop is deliberately
-not daemon-queued: the web handler calls filesystem-backed `Task#drop!`, which
-runs `Commands::Drop` in-process with the rendered `from` stage as a stale-page
-guard. Repo setup clones through `gh`,
+deploys. Task Drop is deliberately not daemon-queued: the web handler calls
+`Task#drop!`, which runs `Commands::Drop` in-process with the
+rendered `from` stage as a stale-page guard. Repo setup clones through `gh`,
 normalizes GitHub SSH origins to https, and relies on the Docker image's
 `gh auth git-credential` helper for GitHub push auth; the Agents page now starts
 the `gh auth login` PTY relay for that credential. Docker packaging adds the
@@ -283,5 +261,4 @@ exit `78`; JSON mode distinguishes them as `missing_repro` and
 - [[e2e]]
 - [[commands/web]]
 - [[commands/setup]]
-- [[commands/digest]]
 - [[commands/screenote]]

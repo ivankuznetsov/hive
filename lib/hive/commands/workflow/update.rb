@@ -3,8 +3,6 @@ require "hive/commands/workflow/base"
 require "hive/commands/workflow/configuration_resolver"
 require "hive/workflow_package/registry_client"
 require "hive/workflow_package/semantic_diff"
-require "hive/workflow_package/validator"
-require "hive/workflows/project"
 
 module Hive
   module Commands
@@ -35,15 +33,16 @@ module Hive
           end
 
           Dir.mktmpdir("hive-workflow-update-") do |candidate_root|
-            candidate = @registry_client.fetch("honeycomb/#{@name}", destination: candidate_root)
+            compatibility_candidate = workflow_compatibility.fetch(
+              source: "honeycomb/#{@name}", destination: candidate_root,
+              registry_client: @registry_client
+            )
+            candidate = compatibility_candidate.resolution
             old_manifest = store.manifest(@name, current.fetch("source_commit"), current.fetch("manifest_digest"))
             previous_configuration = store.configuration(
               @name, current.fetch("configuration_digest"), cfg: project_config
             )
-            validated = Hive::WorkflowPackage::Validator.validate!(
-              candidate_root, expected_name: candidate.name,
-              expected_manifest_digest: candidate.manifest_digest
-            )
+            validated = compatibility_candidate.validated
             diff = Hive::WorkflowPackage::SemanticDiff.compare(old_manifest, validated.manifest)
             resolver = ConfigurationResolver.new(
               validated: validated, resolution: candidate, cfg: project_config,
@@ -59,7 +58,7 @@ module Hive
                 *optional_input_disclosure(report.fetch("optional_inputs"))
               ])
             end
-            admit_runtime!(
+            workflow_compatibility.admit_runtime!(
               validated.workflow, candidate_root, configuration: resolver.configuration
             )
             report = payload("dry_run", current, candidate, diff, resolver)
@@ -76,24 +75,19 @@ module Hive
                           human_lines: [ "hive: escalation declined; the previous selection is unchanged" ])
             end
 
-            store.place_generation(candidate_root, candidate)
-            begin
-              store.activate(
-                candidate,
-                configuration: resolver.configuration,
-                cfg: project_config,
-                expected_current: current,
-                commit: -> { commit_state(@name, "updated") }
-              )
-            rescue StandardError => e
-              cleanup_after_failed_activation(@name, e)
-            end
+            workflow_compatibility.activate!(
+              candidate: compatibility_candidate,
+              configuration: resolver.configuration,
+              expected_current: current,
+              commit: -> { commit_state(@name, "updated") },
+              admit: false
+            )
             warnings = []
             retained = post_commit_step(warnings, "unreferenced generation cleanup") do
-              store.cleanup_unreferenced(@name)
+              workflow_compatibility.cleanup_unreferenced(@name)
             end
             post_commit_step(warnings, "cleanup state commit") { commit_state(@name, "cleaned") } if retained
-            post_commit_step(warnings, "workflow cache refresh") { Hive::Workflows::Project.reset! }
+            post_commit_step(warnings, "workflow cache refresh") { workflow_compatibility.reset_cache! }
             report = report.merge("status" => "updated")
             report["retained_commits"] = retained if retained
             report["warnings"] = warnings unless warnings.empty?

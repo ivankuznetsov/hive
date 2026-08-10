@@ -4,8 +4,10 @@ require "open3"
 require "time"
 require "yaml"
 
+require "hive/agent_runtime"
 require "hive/agent_profiles"
 require "hive/agent_limit"
+require "hive/artifact_firewall"
 require "hive/config"
 require "hive/lock"
 require "hive/markers"
@@ -153,18 +155,22 @@ module Hive
                 allowed_tools: nil,
                 disallowed_tools: nil,
                 permission_mode: nil, mcp_config_path: nil,
-                strict_mcp_config: false, identity_arguments: nil, runtime_policy: nil)
+                strict_mcp_config: false, identity_arguments: nil,
+                routing_arguments: nil, runtime_policy: nil)
       profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
       ensure_claude_profile!(profile)
       permission_mode ||= Hive::Config.claude_permission_mode(cfg)
-      cli_flags = identity_arguments || (cfg ? Hive::Config.claude_cli_flags(cfg) : [])
+      profile.validate_routing_arguments!(routing_arguments) if routing_arguments
+      routed_flags = routing_arguments&.native_arguments
+      cli_flags = routed_flags || identity_arguments || (cfg ? Hive::Config.claude_cli_flags(cfg) : [])
       launch_mode = Hive::Config.claude_mode(cfg)
 
       if launch_mode == :headless
         require "hive/stages/base"
         # mcp_flags is only consumed on this headless branch — the tmux path
         # recomputes them inside wrapper_command — so compute it here.
-        headless_flags = cli_flags + (runtime_policy ? [] : mcp_cli_flags(mcp_config_path, strict_mcp_config))
+        headless_flags = (routing_arguments ? [] : cli_flags) +
+                         (runtime_policy ? [] : mcp_cli_flags(mcp_config_path, strict_mcp_config))
         return Hive::Stages::Base.spawn_agent(
           task,
           prompt: prompt,
@@ -181,6 +187,7 @@ module Hive
           disallowed_tools: disallowed_tools,
           cli_flags: headless_flags,
           identity_arguments: identity_arguments,
+          routing_arguments: routing_arguments,
           runtime_policy: runtime_policy
         )
       end
@@ -433,7 +440,7 @@ module Hive
 
     def preflight!(profile, runner)
       preflight_tmux!
-      profile.check_version!
+      Hive::AgentRuntime.prepare!(profile)
       if runner.session_exists?
         raise Hive::AgentError,
               "tmux session #{runner.name} already exists; attach with `tmux attach -t #{runner.name}` " \
@@ -801,8 +808,11 @@ module Hive
       deadline = Time.now + timeout
       tmux_error_streak = 0
       last_tmux_error_msg = nil
+      output_manifest = expected_output_manifest(expected_output)
       loop do
-        output_available = expected_output_available?(expected_output)
+        output_available = expected_output_available?(
+          expected_output, manifest: output_manifest
+        )
         pane_tail = capture_limit_tail(runner)
         if (limit_context = Hive::AgentLimit.live_limit_context(pane_tail))
           limit_line = limit_context.each_line.first.to_s.strip
@@ -856,8 +866,26 @@ module Hive
       end
     end
 
-    def expected_output_available?(expected_output)
-      File.exist?(expected_output.to_s) && File.size(expected_output.to_s).positive?
+    def expected_output_available?(expected_output, manifest: nil)
+      manifest ||= expected_output_manifest(expected_output)
+      return false unless manifest
+
+      Hive::ArtifactFirewall.validate_required_outputs(manifest).valid?
+    rescue Hive::ArtifactFirewall::Error
+      false
+    end
+
+    def expected_output_manifest(expected_output)
+      return nil if expected_output.nil? || expected_output.to_s.empty?
+
+      path = File.expand_path(expected_output.to_s)
+      root = File.dirname(path)
+      Hive::ArtifactFirewall::Manifest.new(
+        root: root,
+        protected_anchors: {},
+        permitted_writable_roots: [ root ],
+        required_outputs: { File.basename(path) => path }
+      )
     end
 
     def expected_output_session_alive?(runner)

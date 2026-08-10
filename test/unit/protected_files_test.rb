@@ -10,7 +10,7 @@ class ProtectedFilesTest < Minitest::Test
   include HiveTestHelper
 
   def test_orchestrator_owned_lists_canonical_state_and_identity_files
-    assert_equal %w[plan.md worktree.yml task.md task-journal.jsonl task-projection.json],
+    assert_equal %w[plan.md worktree.yml handoff.yml task.md task-journal.jsonl task-projection.json],
                  Hive::ProtectedFiles::ORCHESTRATOR_OWNED,
                  "ORCHESTRATOR_OWNED is the single source of truth for the protected set"
   end
@@ -19,6 +19,7 @@ class ProtectedFilesTest < Minitest::Test
     with_tmp_dir do |dir|
       File.write(File.join(dir, "plan.md"), "plan body\n")
       File.write(File.join(dir, "worktree.yml"), "path: /x\n")
+      File.write(File.join(dir, "handoff.yml"), "phase: worktree_created\n")
       File.write(File.join(dir, "task.md"), "## task\n")
       File.write(File.join(dir, "task-journal.jsonl"), "{}\n")
       File.write(File.join(dir, "task-projection.json"), "{}\n")
@@ -49,6 +50,7 @@ class ProtectedFilesTest < Minitest::Test
                  "missing file records nil so a later add yields a diff"
       assert_nil snap["worktree.yml"],
                  "missing file records nil so a later add yields a diff"
+      assert_nil snap["handoff.yml"]
       assert_nil snap["task-journal.jsonl"]
       assert_nil snap["task-projection.json"]
     end
@@ -120,6 +122,165 @@ class ProtectedFilesTest < Minitest::Test
       after = Hive::ProtectedFiles.snapshot_paths("repository config" => config)
 
       assert_equal [ "repository config" ], Hive::ProtectedFiles.diff(before, after)
+    end
+  end
+
+  def test_capture_restores_changed_deleted_and_new_files
+    with_tmp_dir do |dir|
+      File.write(File.join(dir, "plan.md"), "trusted plan\n")
+      File.write(File.join(dir, "task.md"), "trusted task\n")
+      captured = Hive::ProtectedFiles.capture(
+        dir, %w[plan.md task.md worktree.yml]
+      )
+
+      File.write(File.join(dir, "plan.md"), "tampered\n")
+      FileUtils.rm_f(File.join(dir, "task.md"))
+      File.write(File.join(dir, "worktree.yml"), "path: /attacker\n")
+
+      restored, error = Hive::ProtectedFiles.restore_safely(
+        dir, captured, %w[plan.md task.md worktree.yml]
+      )
+
+      assert_equal true, restored
+      assert_nil error
+      assert_equal "trusted plan\n", File.read(File.join(dir, "plan.md"))
+      assert_equal "trusted task\n", File.read(File.join(dir, "task.md"))
+      refute File.exist?(File.join(dir, "worktree.yml"))
+    end
+  end
+
+  def test_restore_fails_closed_for_agent_created_directory
+    with_tmp_dir do |dir|
+      captured = Hive::ProtectedFiles.capture(dir, [ "plan.md" ])
+      FileUtils.mkdir_p(File.join(dir, "plan.md", "nested"))
+
+      restored, error = Hive::ProtectedFiles.restore_safely(
+        dir, captured, [ "plan.md" ]
+      )
+
+      assert_equal false, restored
+      assert_includes error, "refusing to replace protected path directory"
+      assert File.directory?(File.join(dir, "plan.md"))
+    end
+  end
+
+  def test_restore_paths_safely_reports_absolute_control_path_failure
+    with_tmp_dir do |dir|
+      path = File.join(dir, "config")
+      paths = { "repository config" => path }
+      captured = Hive::ProtectedFiles.capture_paths(paths)
+      FileUtils.mkdir_p(path)
+
+      restored, error = Hive::ProtectedFiles.restore_paths_safely(
+        paths, captured, [ "repository config" ]
+      )
+
+      assert_equal false, restored
+      assert_includes error, "refusing to replace protected path directory"
+    end
+  end
+
+  def test_restore_rejects_unreconstructable_and_unknown_capture_types
+    with_tmp_dir do |dir|
+      target = File.join(dir, "target")
+      File.write(target, "outside\n")
+      File.symlink(target, File.join(dir, "plan.md"))
+      captured = Hive::ProtectedFiles.capture(dir, [ "plan.md" ])
+
+      restored, error = Hive::ProtectedFiles.restore_safely(
+        dir, captured, [ "plan.md" ]
+      )
+      assert_equal false, restored
+      assert_includes error, "non-file path cannot be reconstructed"
+
+      unknown = {
+        "task.md" => { kind: :future_capture_type, fingerprint: nil }
+      }
+      restored, error = Hive::ProtectedFiles.restore_safely(
+        dir, unknown, [ "task.md" ]
+      )
+      assert_equal false, restored
+      assert_includes error, "unknown protected capture type"
+    end
+  end
+
+  def test_capture_rejects_parent_traversal
+    with_tmp_dir do |dir|
+      error = assert_raises(ArgumentError) do
+        Hive::ProtectedFiles.capture(dir, [ "../outside" ])
+      end
+
+      assert_includes error.message, "must stay relative"
+    end
+  end
+
+  def test_capture_and_observe_bind_the_opened_descriptor_type
+    with_tmp_dir do |dir|
+      path = File.join(dir, "anchor")
+      File.write(path, "trusted\n")
+      opened_stat = Struct.new(:file?, :ftype, :mode).new(false, "directory", 0o40755)
+      opened_file = Struct.new(:stat).new(opened_stat)
+      original_open = File.method(:open)
+      descriptor_substitution = lambda do |candidate, *args, **kwargs, &block|
+        if candidate == path
+          block.call(opened_file)
+        else
+          original_open.call(candidate, *args, **kwargs, &block)
+        end
+      end
+
+      with_replaced_singleton_method(File, :open, descriptor_substitution) do
+        captured = Hive::ProtectedFiles.capture_paths("anchor" => path)
+        observed = Hive::ProtectedFiles.observe_paths("anchor" => path)
+
+        assert_equal :unrestorable, captured.fetch("anchor").fetch(:kind)
+        assert_equal :directory,
+                     captured.fetch("anchor").fetch(:identity).fetch(:kind)
+        assert_equal :directory, observed.fetch("anchor").fetch(:kind)
+      end
+    end
+  end
+
+  def test_observe_classifies_other_and_unreadable_file_types
+    path = "/synthetic-control"
+    original_lstat = File.method(:lstat)
+    fifo_stat = Struct.new(:ftype, :mode).new("fifo", 0o10600)
+    with_replaced_singleton_method(
+      File,
+      :lstat,
+      ->(candidate) { candidate == path ? fifo_stat : original_lstat.call(candidate) }
+    ) do
+      observed = Hive::ProtectedFiles.observe_paths("control" => path)
+      assert_equal :fifo, observed.fetch("control").fetch(:kind)
+    end
+
+    with_replaced_singleton_method(
+      File,
+      :lstat,
+      lambda { |candidate|
+        raise Errno::EACCES, candidate if candidate == path
+
+        original_lstat.call(candidate)
+      }
+    ) do
+      observed = Hive::ProtectedFiles.observe_paths("control" => path)
+      assert_equal :unreadable, observed.fetch("control").fetch(:kind)
+      assert_equal "Errno::EACCES",
+                   observed.fetch("control").fetch(:error_class)
+    end
+  end
+
+  def test_restore_accepts_legacy_capture_without_structured_identity
+    with_tmp_dir do |dir|
+      path = File.join(dir, "missing")
+      restored = Hive::ProtectedFiles.restore_paths(
+        { "missing" => path },
+        { "missing" => { kind: :missing, fingerprint: nil } },
+        [ "missing" ]
+      )
+
+      assert_equal true, restored
+      refute_path_exists path
     end
   end
 end

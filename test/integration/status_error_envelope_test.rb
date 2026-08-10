@@ -6,7 +6,7 @@ require "hive/commands/status"
 # Pin the agent-callable error contract emitted by `hive status --json`.
 # Status's producer surface is narrow: ConfigError (e.g., HIVE_HOME unreadable)
 # and InternalError (StandardError wrap). Both must produce a parseable
-# ErrorPayload validating against schemas/hive-status.v1.json.
+# ErrorPayload validating against the sole current hive-status schema.
 class StatusErrorEnvelopeTest < Minitest::Test
   include HiveTestHelper
 

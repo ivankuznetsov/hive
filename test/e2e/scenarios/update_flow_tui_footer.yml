@@ -5,6 +5,9 @@ description: >
   independently) renders "update <ver>: <command>" in its footer.
   (tui-tagged: runs where a tmux/TTY is available, like the other tui scenarios.)
 tags: [update, tui]
+coverage:
+  primary: update.tui_footer
+  supporting: []
 steps:
   - kind: write_file
     path: "{run_home}/install-channel"

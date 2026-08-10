@@ -129,7 +129,7 @@ class CommandsStageActionTest < Minitest::Test
     end
   end
 
-  def test_durable_call_dispatches_stage_worker_without_promoting_in_caller
+  def test_durable_call_uses_attempts_api_without_promoting_in_caller
     task = Struct.new(:folder).new("/tmp/task-folder")
     result = Hive::Attempts::ClientResult.new(
       status: :terminal, exit_status: 0, outcome: "succeeded",
@@ -139,27 +139,17 @@ class CommandsStageActionTest < Minitest::Test
     entrypoint = Object.new
     entrypoint.define_singleton_method(:dispatch) { |**kwargs| calls << kwargs; result }
     command = Hive::Commands::StageAction.new(
-      "plan", "some-slug", from: "2-brainstorm", json: true,
-      durable: true, attempt_entrypoint: entrypoint
+      "plan", "some-slug", from: "2-brainstorm", json: true, durable: true
     )
     command.define_singleton_method(:resolve_task) { task }
     command.define_singleton_method(:do_call) { flunk "durable caller promoted task" }
 
-    assert_same result, command.call
+    with_replaced_singleton_method(Hive::Attempts::API, :new, -> { entrypoint }) do
+      assert_same result, command.call
+    end
     assert_equal "3-plan", calls.first.fetch(:intended_stage)
     assert_equal [ "hive", "plan", "/tmp/task-folder", "--from", "2-brainstorm", "--json" ],
                  calls.first.fetch(:argv)
-  end
-
-  def test_durable_worker_argv_preserves_recovery_reason
-    task = Struct.new(:folder).new("/tmp/task-folder")
-    command = Hive::Commands::StageAction.new(
-      "plan", "some-slug", recover_merged_error_reason: "ci_failed"
-    )
-    assert_equal [
-      "hive", "plan", "/tmp/task-folder",
-      "--recover-merged-error-reason", "ci_failed"
-    ], command.send(:durable_worker_argv, task)
   end
 
   def test_lost_durable_attempt_emits_versioned_json_error_envelope
@@ -256,6 +246,30 @@ class CommandsStageActionTest < Minitest::Test
     assert_includes payload.fetch("message"), "attempt-empty"
   end
 
+  def test_successful_durable_json_replay_with_expired_output_emits_error_document
+    task = Struct.new(:folder).new("/tmp/task-folder")
+    result = Hive::Attempts::ClientResult.new(
+      status: :terminal, exit_status: 0, outcome: "succeeded",
+      receipt: {}, attempt_id: "attempt-expired", stdout_bytes: 0,
+      output_status: :expired
+    )
+    entrypoint = Object.new
+    entrypoint.define_singleton_method(:dispatch) { |**_kwargs| result }
+    command = Hive::Commands::StageAction.new(
+      "plan", "some-slug", json: true, durable: true, attempt_entrypoint: entrypoint
+    )
+    command.define_singleton_method(:resolve_task) { task }
+
+    out, = capture_io do
+      assert_raises(Hive::ConcurrentRunError) { command.call }
+    end
+
+    payload = JSON.parse(out)
+    assert_equal "hive-stage-action", payload.fetch("schema")
+    assert_equal "error", payload.fetch("error_kind")
+    assert_includes payload.fetch("message"), "attempt-expired"
+  end
+
   def test_lost_durable_json_attempt_with_worker_stdout_does_not_duplicate_it
     task = Struct.new(:folder).new("/tmp/task-folder")
     result = Hive::Attempts::ClientResult.new(
@@ -314,5 +328,47 @@ class CommandsStageActionTest < Minitest::Test
       assert_equal 7, exit_error.status
     end
     assert_empty out
+  end
+
+  def test_closure_receipt_authorizes_only_archive_and_resumes_markerless_terminal_task
+    with_tmp_dir do |dir|
+      state_file = File.join(dir, "task.md")
+      File.write(state_file, "# task\n")
+      task = Struct.new(:folder, :state_file, :slug).new(
+        dir, state_file, "task"
+      )
+      wrong_verb = Hive::Commands::StageAction.new(
+        "plan", task.folder, closure_receipt_digest: "a" * 64
+      )
+      assert_raises(Hive::TaskClosure::InvalidReceipt) do
+        wrong_verb.send(
+          :close_with_receipt, task, "4-execute", Hive::Stages::DIRS.last
+        )
+      end
+
+      archive = Hive::Commands::StageAction.new(
+        "archive", task.folder, closure_receipt_digest: "a" * 64
+      )
+      runs = []
+      archive.define_singleton_method(:publish_task_completed) do |completed|
+        runs << [ :published, completed ]
+      end
+      archive.define_singleton_method(:run_at) do |folder, observation_guard:, no_rebase:|
+        runs << [ folder, observation_guard, no_rebase ]
+      end
+      with_replaced_singleton_method(
+        Hive::Conditions::TransitionGuard, :validate_closure!, ->(*) { true }
+      ) do
+        with_replaced_singleton_method(Hive::Task, :new, ->(*) { task }) do
+          archive.send(
+            :close_with_receipt,
+            task,
+            Hive::Stages::DIRS.last,
+            Hive::Stages::DIRS.last
+          )
+        end
+      end
+      assert_equal [ [ task.folder, nil, true ], [ :published, task ] ], runs
+    end
   end
 end

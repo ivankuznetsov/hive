@@ -3,7 +3,7 @@ title: Operating Hive
 type: operating
 source: README.md, bin/hv, install.sh, skills/hive/, lib/hive/commands/{setup,setup_agents,daemon,babysit,bot}.rb, examples/systemd/, examples/launchd/, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-07
-updated: 2026-07-22
+updated: 2026-07-25
 tags: [operating, daemon, bot, systemd, launchd, install, skills]
 ---
 
@@ -77,6 +77,15 @@ bash "$tmpdir/hive-install.sh"
 | `HIVE_QMD_NPM_PACKAGE` | Override the npm package spec used for QMD install; defaults to `@tobilu/qmd`. |
 | `HIVE_QMD_BIN` | Runtime override read by generated wiki scripts and `hive doctor`; points at an executable `qmd` when PATH or the managed install path is not enough. |
 
+On upgrade, the installer recognizes only Hive-managed wrappers and snapshots
+the existing `hive`, `hv`, and RubyGems shim launchers before RubyGems writes a
+new executable. It stages the replacement shim and wrappers beside their final
+paths, verifies their modes, wrapper marker, and shell syntax, then activates
+them with same-filesystem renames. Recovery stays armed through activation and
+verification, so a gem failure, missing binstub, write/chmod error, or partial
+launcher swap restores the previous bytes and executable modes. Unrecognized
+files at the install path are not treated as managed wrappers.
+
 For an agent-assisted install, paste the repository-root `install.md` into
 Claude Code, Codex, or Pi. It detects the host platform, chooses the channel,
 installs or repairs the QMD wiki indexer when npm is available, verifies
@@ -95,18 +104,6 @@ Fresh installs use XDG locations:
 | Cache | `~/.cache/hive/` |
 | User binary symlink | `~/.local/bin/hive` |
 
-On a repeat `install.sh` run, RubyGems must replace the installer-generated
-GEM_HOME-aware `hive` wrapper with a fresh binstub before Hive wraps it again.
-The exact three-launcher transaction below is queued at `05784893`.
-The installer recognizes only Hive-managed launchers and snapshots the
-existing `hive`, `hv`, and RubyGems shim paths before installation. It stages
-the new shim and wrappers beside their final paths, verifies modes, wrapper
-marker, and shell syntax, then activates them with same-filesystem renames.
-Recovery remains armed through activation and final verification, so gem,
-missing-binstub, write, chmod, or partial-swap failures restore the prior
-bytes, executable modes, and symlink shape. Unrecognized files at the install
-path are left for RubyGems to reject rather than being overwritten by Hive.
-
 `HIVE_HOME` remains a legacy/test override. Project state stays at
 `<project>/.hive-state/`; install and uninstall do not move completed pipeline
 work.
@@ -115,7 +112,13 @@ Apache Hive collision: the Homebrew formula installs an `hv` symlink. The bash
 installer always writes a working `${data_home}/gems/bin/hv` wrapper that
 delegates to its GEM_HOME-aware `hive` wrapper, and exposes it under the user
 bin directory when another `hive` is already earlier on PATH or when it is
-refreshing an existing owned symlink. The in-tree `bin/hv` fallback probes only
+reusing an existing owned symlink. User-bin publication leaves an
+already-correct managed symlink in place and never force-replaces a
+destination. A concurrent destination creator makes publication fail closed
+into the fallback path. An unrelated `hive` or `hv` file/symlink is preserved;
+Hive uses the unoccupied fallback name when possible and otherwise leaves both
+managed wrappers available under
+`${data_home}/gems/bin`. The in-tree `bin/hv` fallback probes only
 `HIVE_BIN_OVERRIDE`,
 `${XDG_BIN_HOME:-$HOME/.local/bin}/hive`, `${HOMEBREW_PREFIX:-/opt/homebrew}/bin/hive`,
 and `/usr/local/bin/hive`; it intentionally does not fall through to
@@ -129,7 +132,7 @@ before fallback aliasing is possible.
 
 The daemon installer remains idempotent install-time infrastructure, while
 `hive setup` is the normal post-install first run. On supported Linux/macOS it
-installs/enables/starts both the daemon and Hive web services, optionally
+installs/enables/starts the daemon, PR babysitter, and Hive web services, optionally
 enrolls the current project, and returns distinct web installed, enabled,
 running, manager-available, and ready state. Package hooks cannot reliably
 start a per-user service on every host, so Homebrew/AUR caveats direct users to
@@ -196,9 +199,10 @@ aggregate-changelog verification path and tells agents to reserve mutating
 `hive wiki compile-log` runs for merge/rebase cleanup or explicit user requests.
 Its marker-recovery guidance mirrors [[modules/daemon]]: inspect first with
 `hive status --operational --json` and `hive daemon status --json`, wait for known
-healer-managed cooldown/retry signatures, start a stopped daemon with
-`hive daemon start --detach`, and treat manual `hive markers clear` as guarded
-mutation under the skill's Safety Boundaries.
+coordinator cooldown/retry receipts, start a stopped daemon with
+`hive daemon start --detach`, run `hive migrate` when an old marker lacks an
+identity, and use the guarded `workflow.retry` action instead of composing
+marker-clear and stage-run commands.
 Host mutations remain reviewable: package-manager confirmation is never
 suppressed; direct installed-runtime patches and service-manager override
 writes are prohibited; Hive-native diagnosis, dry-run, preview, and repair
@@ -285,8 +289,8 @@ Once per workstation:
   `hive run` children as the interactive CLI; agent invocation is
   unchanged. Verify: `claude --version`.
 - **`gh` authenticated.** The daemon's PR-merge watcher (ADR-024)
-  polls `gh pr view --json state` to detect `MERGED` and auto-archive
-  8-finalize → 9-done. Verify: `gh auth status`.
+  verifies task-bound PRs and reachable merge facts before auto-closing
+  eligible coding tasks in stages 5–8. Verify: `gh auth status`.
 - **`/proc` mounted OR `ps` available.** The daemon refuses to start
   if it can't read its own `process_start_time` (PID-reuse defense).
   Verify: `ls /proc/$$ >/dev/null && echo OK` or `command -v ps`.
@@ -338,11 +342,17 @@ Existing projects can opt in by adding or editing this block in
 babysitter:
   enabled: true
   interval: 10m
+  agent: claude
   max_concurrent_prs: 2
   labels_ignore: [wip, do-not-merge, draft]
   dry_run: false
   budget_minutes: 30
   budget_usd: 50
+
+models:
+  babysitter:
+    model: claude-opus-5
+    effort: max
 ```
 
 Run a read-only shakedown before live use:
@@ -362,14 +372,18 @@ results look right, stop the dry-run process and start live mode:
 hive babysit restart --detach
 ```
 
+For persistent supervision, normal `hive setup` installs and starts the
+platform-native per-user service. Existing installations can repair it
+directly with `hive babysit install --force`. The service is global but remains
+idle for projects without `babysitter.enabled: true`.
+
 `hive babysit reload` refreshes config/log settings only; the detached
 Ruby process keeps the source code it loaded at start. After pulling a
 new checkout or upgrading Hive, run `hive babysit status` and restart if
 it reports that the process predates the current source checkout.
 
 Kill switch: set `babysitter.enabled: false`; the dispatcher reloads
-project config each tick. v1 has no launchd/systemd install command for
-the babysitter.
+project config each tick.
 
 ## First run: the mandatory `--dry-run` shakedown
 
@@ -410,7 +424,7 @@ hive daemon start --detach
 
 ## Autostart
 
-`hive setup` writes and enables the platform daemon and Hive web units by
+`hive setup` writes and enables the platform daemon, babysitter, and Hive web units by
 default (see ADR-024). On Linux they land under
 `~/.config/systemd/user/`; on macOS under `~/Library/LaunchAgents/`.
 `hive init` also idempotently ensures
@@ -433,13 +447,6 @@ systemctl --user enable --now hive-daemon
 journalctl --user -u hive-daemon -f
 ```
 
-Queued head `05784893` removes `After=default.target` from the sample user
-unit while retaining `WantedBy=default.target`. Enabling the unit creates the
-target dependency; ordering the wanted service after that same target forms a
-cycle, while `WantedBy` is sufficient to start it with the user default
-target. The refresh branch's current sample still has the `After` line, so this
-is pending integration rather than installed-unit guidance.
-
 If you log out and want the daemon to keep running:
 
 ```bash
@@ -450,7 +457,9 @@ The unit declares `Type=simple` and runs `hive daemon start` in the
 foreground — systemd is the supervisor. `Restart=on-failure` brings
 the daemon back after a crash; the daemon's own SIGTERM handler does
 the graceful drain (`daemon.shutdown_grace_sec`, default 600 s). The shipped
-unit uses `KillMode=process`, so a service stop or restart signals only the
+unit is wanted by `default.target` but does not order itself after that same
+target; adding `After=default.target` would create an ordering cycle when the
+target pulls the service in. It uses `KillMode=process`, so a service stop or restart signals only the
 daemon process. Durable attempt wrapper/worker processes survive daemon
 replacement and remain lease-owned until the new daemon adopts or reconciles
 them. Existing installs whose unit still says `KillMode=mixed` should run
@@ -690,11 +699,16 @@ the launchd `~/Library/Logs/hive-daemon.err.log` (macOS) for the
 crash reason.
 
 **The daemon ran my project but didn't auto-archive after I merged.**
-The PR-merge watcher polls every `pr_merge_poll_interval_sec`
-(default 5 min). If `gh auth` lapsed, the watcher logs `:gh_error`
-and after 5 consecutive failures drops the entry. Re-authenticate
-with `gh auth login`, then either restart the daemon or run the
-archive manually: `hive archive <slug>`.
+Task-bound reconciliation polls every `pr_merge_poll_interval_sec`
+(default 5 min). Inspect
+`<project>/.hive-state/daemon/pr-merge-reconciliation.json`: the candidate
+retains its remote, hold, retry, architecture-intake, archive, and bounded
+error state across daemon restarts. GitHub failures never exhaust or drop the
+candidate. Re-authenticate with `gh auth login` when needed, repair the
+reported repository/generation/worktree/admission blocker, and let the next
+eligible tick resume. Corrupt or identity-drifted ledgers are preserved under
+`<project>/.hive-state/daemon/quarantine/pr-merge-reconciliation/`; do not
+delete that evidence to force archive.
 
 **A task is stuck but you want to finish it yourself.**
 Open `hive tui`, focus the row, and press `s`. Hive marks the task

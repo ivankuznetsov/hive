@@ -1,10 +1,10 @@
 ---
 title: Agentic E2E Suite
 type: reference
-source: test/e2e/, bin/hive-e2e, Rakefile
+source: test/e2e/, bin/hive-e2e, schemas/hive-e2e-{coverage,selection}.v1.json, Rakefile
 created: 2026-04-29
-updated: 2026-07-22
-tags: [test, e2e, tui, incidents, artifacts]
+updated: 2026-08-04
+tags: [test, e2e, tui, incidents, modules, artifacts]
 ---
 
 **TLDR**: `test/e2e/` is the outer test layer. It drives the real `bin/hive` binary in a copied Ruby sample project, uses tmux for TUI scenarios, validates JSON output against published schemas, and writes versioned run artifacts for later debugging. The `bin/hive-e2e` Thor executable is also a small public harness surface with pinned exit codes and JSON error envelopes for wrapper/CI callers.
@@ -13,15 +13,72 @@ tags: [test, e2e, tui, incidents, artifacts]
 
 ```bash
 bundle exec rake e2e:lib_test   # harness library tests
+bundle exec rake e2e:patrol_qualification_reduced # opt-in prepared-project smoke
 bin/hive-e2e list               # scenario inventory
 bin/hive-e2e run                # all scenarios
 bin/hive-e2e run --filter tui   # tag filter
 bin/hive-e2e run --filter incident-regression --json
+bin/hive-e2e coverage --match "provider retry"
+bin/hive-e2e run --coverage workflow.full_pipeline
+bin/hive-e2e run --profile release
 test/e2e/check_incident_budget.rb test/e2e/runs
 bin/hive-e2e clean              # old run cleanup
 ```
 
 `rake e2e` delegates to `bin/hive-e2e run`. The default `rake test` suite does not run e2e scenarios.
+
+The reduced Patrol qualification smoke is also excluded from `rake e2e`, the
+default suite, coverage, and hosted CI. It requires four explicit absolute-path
+environment inputs for a disposable project, its isolated Hive home, a
+read-only observation document, and retained evidence. The controller archives
+the clean full candidate `HEAD`, builds and privately installs that gem, creates
+a local Git module catalogue from those archived bytes, and redirects only the
+catalogue URL through `GIT_CONFIG_*`. It then invokes only the installed
+`bin/hive` from the project directory for module installation and the internal
+deterministic receipt/qualification process facade.
+
+This is a prepared-record public-process smoke, not the full Patrol U3b matrix:
+it does not run the schedulers that produced the supplied records, and its
+catalogue and controls live at the same candidate head. Successful output
+therefore proves neither independent-control authority nor installed/live U3c
+coverage. Its retained proof includes exact E2E/focused counts and a compact
+ID-sorted record of every case's module, fault label, and typed process
+outcomes.
+
+## Semantic coverage
+
+`test/e2e/coverage.yml` is the canonical stable-ID taxonomy for the 24 scenario
+files. Each scenario retains its steps, pending state, incident metadata, and
+filename as execution authority while declaring one `coverage.primary` and an
+initially empty `coverage.supporting` list. The catalog owns titles,
+descriptions, `required` / `advisory` / `planned` maturity, release-profile
+membership, constraints, and root-confined documentation/code references.
+The release profile includes four module proofs for install, event replay,
+disable/uninstall watermarks, and update rollback.
+
+`bin/hive-e2e coverage --match QUERY [--profile release] [--json]` searches the
+joined catalog and scenario metadata. Exact IDs win; substring results use
+stable lexical ID order. Only an active, non-planned primary receives an exact
+`run --coverage ID` command. Supporting scenarios are supplemental discovery
+results and pending/planned matches remain visible without a runnable command.
+
+`bin/hive-e2e run --profile release` selects the active primary for each
+required release ID before constructing a runner. Unknown mappings, duplicate
+primary owners, invalid catalog vocabulary/references/profiles, and a required
+profile gap fail preflight before run or sandbox creation. Semantic runs write
+`selection.json` (`hive-e2e-selection.v1`) beside the unchanged
+`report.json` (`hive-e2e-report.v1`); discovery uses
+`hive-e2e-coverage.v1`. Plain run, pattern/filter selection, list output, and
+the ordinary CI invocation retain their prior contracts.
+
+The published `schemas/hive-e2e-coverage.v1.json` contract binds discovery to
+the catalog digest, query/profile, maturity and constraints, primary/supporting
+scenario metadata, root-confined references, and optional runnable command.
+`schemas/hive-e2e-selection.v1.json` binds a semantic run to its catalog
+digest, profile, required coverage IDs, concrete scenarios,
+pending/advisory/planned IDs, and replay command. `coverage` is read-only
+discovery; `run --coverage` and `run --profile` create the normal run directory
+and are the only modes that add `selection.json`.
 
 ## Binary contract
 
@@ -35,11 +92,8 @@ bin/hive-e2e clean              # old run cleanup
 | `78` | preflight/config failure: malformed scenario YAML/definitions, missing `tmux`, missing replay repro artifact, or a replay `repro.sh` that is not a regular executable file |
 
 `asciinema` is optional. When it is missing, too old, or cannot start, TUI
-scenarios continue without cast capture; degraded artifact coverage is not an
-exit 78 preflight failure.
-
-The optional-asciinema, `version --json`, and retention-precedence clauses on
-this page describe queued head `05784893` until current-default integration.
+scenarios continue without cast capture; that degraded artifact coverage is not
+an exit `78` preflight failure.
 
 Thor is started exactly once with `debug: true` so `Thor::Error` re-raises into the executable's outer rescue instead of taking Thor's built-in human path; a second `Binary.start` call would rerun successful commands and emit duplicate JSON envelopes. That outer rescue maps both human and `--json` usage failures to `64`. With `--json`, usage and preflight failures emit a `hive-e2e-error` envelope on stdout with `ok: false`, `error_kind`, `message`, and `exit_code`; human mode prefixes prose errors with `hive-e2e:` on stderr and exits with the same code. Scenario parse/config failures from both `run` and `list` use `error_kind: "preflight"` and exit `78`, before any scenario executes. Replay artifact failures are split: a missing `repro.sh` emits `error_kind: "missing_repro"`, while an existing but non-executable `repro.sh` emits `error_kind: "unusable_repro"`; both exit `78`. Top-level `--version` / `-v` is intercepted before Thor dispatch so prose callers get only `Hive::VERSION`; `version --json` emits the versioned `hive-e2e-version` envelope.
 Successful `--json` commands emit exactly one top-level JSON document on stdout, including `list --json`, `clean --json`, and `version --json`, so wrapper callers can parse stdout directly.
@@ -83,27 +137,28 @@ normal `hive-e2e-error` envelope with `error_kind: "usage"`.
 `--retain-failed-days` values before Thor dispatch. A bare retention flag, or
 one followed by another option such as `--json` or `--dry-run`, is a usage
 error (`64`) and never reaches artifact cleanup; Thor cannot silently reuse the
-configured retention default for a malformed destructive invocation.
-
-Queued head `05784893` resolves `clean` retention in this order: explicit CLI
-option, `HIVE_E2E_RUNS_RETAIN_DAYS` /
-`HIVE_E2E_RUNS_RETAIN_FAILED_DAYS`, legacy `RUNS_RETAIN_DAYS` /
-`RUNS_RETAIN_FAILED_DAYS`, then the 7-day passing / 14-day failing defaults.
-Using a legacy variable prints a deprecation warning on stderr, including JSON
-mode, while a namespaced value wins when both are present. This is not yet the
-current-default binary contract.
+configured retention default for a malformed destructive invocation. Default
+retention overrides are namespaced as `HIVE_E2E_RUNS_RETAIN_DAYS` and
+`HIVE_E2E_RUNS_RETAIN_FAILED_DAYS`. The legacy generic
+`RUNS_RETAIN_DAYS` / `RUNS_RETAIN_FAILED_DAYS` names remain a compatibility
+fallback only when the corresponding namespaced variable and CLI option are
+absent; using one prints a deprecation warning on stderr, including in JSON
+mode, so stdout remains exactly one parseable document. A namespaced value is
+authoritative when both forms are present, preventing a generic process
+variable from silently overriding the harness-specific cleanup policy.
 
 ## Layout
 
 | Path | Purpose |
 |------|---------|
 | `test/e2e/lib/` | Harness library: sandbox bootstrap, CLI driver, tmux driver, parser, executor, artifact capture, report writer. |
+| `test/e2e/coverage.yml` | Stable semantic coverage taxonomy and release-profile membership. |
 | `test/e2e/scenarios/*.yml` | Agent-authorable scenarios using the locked YAML vocabulary. |
 | `test/e2e/scenarios/README.md` | Incident metadata, activation lifecycle, sibling index, GitHub scripting, and process-isolation contract. |
 | `test/e2e/fixtures/gh` | Run-global, default-deny GitHub CLI shim with no host-binary fallback. |
 | `test/e2e/sample-project/` | Tiny Ruby fixture copied into each scenario sandbox. Vendored gems keep bootstrap offline. |
 | `test/e2e/runs/` | Gitignored run artifacts. Each run has `report.json` and per-scenario artifact directories. |
-| `test/e2e/check_incident_budget.rb` | Report-driven below-5s-per-incident and below-30s-aggregate CI gate. |
+| `test/e2e/check_incident_budget.rb` | Report-integrity gate plus below-10s-per-incident and below-30s-aggregate advisory check. |
 | `bin/hive-e2e` | Thor shell for run/list/replay/clean. |
 
 ## Scenario DSL
@@ -214,14 +269,6 @@ On failure, the harness writes a scenario bundle containing:
 - `manifest.json` with size and SHA-256 per artifact
 - TUI failures also include keystroke captures, run-scoped TUI subprocess marker/capture logs under `tui-subprocess/` (including the current shared marker log and its single `.log.1` rotation), plus `pane-before.txt` (snapshot taken just before the most recent `tui_keys`) and `pane-after.txt`. Cast recording is implemented by `AsciinemaDriver`, but depends on local `asciinema >= 2.4`.
 
-Queued commit `9c4b4d69` centralizes the live diagnostic directory name as
-`ArtifactPaths::LIVE_TUI_LOG_DIRNAME`. Artifact cleanup removes that live
-directory only when its expanded path is contained by the scenario artifact
-root, leaving an externally supplied directory untouched. Its
-`sandbox-tree.txt` capture also omits nested `.git` directory entries as well
-as their descendants. These containment rules are branch-only until the
-queued commit is integrated.
-
 ## Current Scenarios
 
 | Scenario | Coverage |
@@ -252,16 +299,20 @@ The harness prepends repo `bin/` to the tmux environment PATH because TUI rows d
 `CliDriver` starts CLI subprocesses in their own process group and applies the step timeout to both the direct child and stdout/stderr reader threads, so descendants that inherit the capture pipes cannot hold an e2e step open after their parent exits.
 
 Routine pull-request CI runs `e2e:lib_test` and `rake e2e` in a separate job,
-retains the run directory even after failure, and then reads enabled incident
-durations from `report.json`. Durations include sandbox bootstrap; each enabled
-incident must be below five seconds and the group below thirty seconds. This job does not fold e2e into the default
-`rake test` task.
+retains the run directory even after failure, and feeds that functional job
+into the protected `rake test (Ruby 3.4)` aggregate. A downstream advisory job
+downloads the artifact and reads enabled incident durations from `report.json`.
+Durations include sandbox bootstrap; each enabled incident targets below ten
+seconds and the group targets below thirty seconds. Timing failures remain
+visible without blocking a merge. Missing enabled results, duplicate
+metadata/results, and invalid durations remain functional failures in the E2E
+job. Neither job folds e2e into the local default `rake test` task.
 
 `tmux` is required for TUI scenarios. `asciinema` is test-time optional: when
-it is unavailable or too old, TUI scenarios run without cast capture while
-other failure artifacts are still recorded. A corrupt produced cast is
-reported in the artifact bundle instead of crashing unrelated CLI scenarios.
-If `asciinema` is installed outside PATH, set
+it is unavailable or too old, TUI scenarios run without cast capture while the
+other failure artifacts are still recorded. A corrupt produced cast is reported
+in the artifact bundle instead of crashing unrelated CLI scenarios. If
+`asciinema` is installed outside PATH, set
 `HIVE_ASCIINEMA_BIN=/absolute/path/to/asciinema`.
 
 ## Backlinks

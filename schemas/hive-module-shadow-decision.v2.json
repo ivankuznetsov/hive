@@ -1,0 +1,834 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hivecli.sh/schemas/hive-module-shadow-decision.v2.json",
+  "title": "Hive module shadow decision v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "module",
+    "decision_id",
+    "semantic_digest",
+    "trigger",
+    "trigger_digest",
+    "occurred_at",
+    "recorded_at",
+    "evidence_source",
+    "configuration_digest",
+    "comparable",
+    "legacy_capture",
+    "module_decision",
+    "explained_differences",
+    "unexplained_differences",
+    "legacy_effects",
+    "module_effects",
+    "duplicate_effects",
+    "migration"
+  ],
+  "properties": {
+    "schema": {"const": "hive-module-shadow-decision"},
+    "schema_version": {"const": 2},
+    "module": {"enum": ["patrol", "architecture-patrol"]},
+    "decision_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "semantic_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "trigger": {"$ref": "#/$defs/shadow_trigger"},
+    "trigger_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "occurred_at": {"type": "string", "format": "date-time"},
+    "recorded_at": {"type": "string", "format": "date-time"},
+    "evidence_source": {
+      "enum": ["legacy_mutator_capture", "archived_v1", null]
+    },
+    "configuration_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "comparable": {"type": "boolean"},
+    "legacy_capture": {
+      "anyOf": [
+        {"$ref": "#/$defs/capture"},
+        {"type": "null"}
+      ]
+    },
+    "module_decision": {},
+    "explained_differences": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/difference"}
+    },
+    "unexplained_differences": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/difference"}
+    },
+    "legacy_effects": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/effect_receipt"}
+    },
+    "module_effects": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/effect_receipt"}
+    },
+    "duplicate_effects": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^intent-[0-9a-f]{64}$"}
+    },
+    "migration": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source_digest", "source_schema_version", "status"],
+          "properties": {
+            "source_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "source_schema_version": {"const": 1},
+            "status": {"const": "archived_non_comparable"}
+          }
+        },
+        {"type": "null"}
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "allOf": [
+          {
+            "properties": {"module": {"const": "patrol"}},
+            "required": ["module"]
+          },
+          {
+            "properties": {"migration": {"type": "null"}},
+            "required": ["migration"]
+          }
+        ]
+      },
+      "then": {
+        "properties": {
+          "legacy_capture": {
+            "anyOf": [
+              {"type": "null"},
+              {
+                "allOf": [
+                  {"$ref": "#/$defs/capture"},
+                  {"properties": {"module": {"const": "patrol"}}}
+                ]
+              }
+            ]
+          },
+          "module_decision": {"$ref": "#/$defs/patrol_projection"}
+        }
+      }
+    },
+    {
+      "if": {
+        "allOf": [
+          {
+            "properties": {
+              "module": {"const": "architecture-patrol"}
+            },
+            "required": ["module"]
+          },
+          {
+            "properties": {"migration": {"type": "null"}},
+            "required": ["migration"]
+          }
+        ]
+      },
+      "then": {
+        "properties": {
+          "legacy_capture": {
+            "anyOf": [
+              {"type": "null"},
+              {
+                "allOf": [
+                  {"$ref": "#/$defs/capture"},
+                  {
+                    "properties": {
+                      "module": {"const": "architecture-patrol"}
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "module_decision": {
+            "$ref": "#/$defs/architecture_projection"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "shadow_trigger": {
+      "oneOf": [
+        {"$ref": "#/$defs/runtime_trigger"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "archived_v1_trigger_digest"],
+          "properties": {
+            "kind": {"const": "archived_v1"},
+            "archived_v1_trigger_digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        }
+      ]
+    },
+    "runtime_trigger": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "id"],
+          "properties": {
+            "kind": {"enum": ["manual", "direct"]},
+            "id": {"type": "string", "minLength": 1}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "id", "schedule", "occurred_at"],
+          "properties": {
+            "kind": {"const": "schedule"},
+            "id": {"type": "string", "minLength": 1},
+            "schedule": {"type": "string", "minLength": 1},
+            "occurred_at": {"type": "string", "format": "date-time"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "id", "event_name", "occurred_at"],
+          "properties": {
+            "kind": {"const": "module_event"},
+            "id": {"type": "string", "minLength": 1},
+            "event_name": {"type": "string", "minLength": 1},
+            "occurred_at": {"type": "string", "format": "date-time"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "id", "manifest_digest", "merge_sha"],
+          "properties": {
+            "kind": {"const": "pull_request.merged"},
+            "id": {"type": "string", "minLength": 1},
+            "manifest_digest": {"type": "string", "minLength": 1},
+            "merge_sha": {"type": "string", "minLength": 1}
+          }
+        }
+      ]
+    },
+    "reservation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "id"],
+          "properties": {
+            "kind": {"const": "ordinary"},
+            "id": {"type": "string", "minLength": 1}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id",
+            "window_started_at",
+            "attempt_generation"
+          ],
+          "properties": {
+            "kind": {"enum": ["ordinary", "module_hook"]},
+            "id": {"type": "string", "minLength": 1},
+            "window_started_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "attempt_generation": {"type": "integer", "minimum": 1}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "id", "job_id"],
+          "properties": {
+            "kind": {"const": "architecture"},
+            "id": {"type": "string", "minLength": 1},
+            "job_id": {"type": "string", "minLength": 1}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id",
+            "job_id",
+            "window_started_at",
+            "attempt_generation"
+          ],
+          "properties": {
+            "kind": {"const": "architecture"},
+            "id": {"type": "string", "minLength": 1},
+            "job_id": {"type": "string", "minLength": 1},
+            "window_started_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "attempt_generation": {"type": "integer", "minimum": 1}
+          }
+        }
+      ]
+    },
+    "capture_outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "rationale": {"type": "string"},
+        "ok": {"type": "boolean"},
+        "exit_code": {"type": ["integer", "null"]},
+        "features_mapped": {"type": "integer", "minimum": 0},
+        "features_reviewed": {"type": "integer", "minimum": 0},
+        "findings": {"type": "integer", "minimum": 0},
+        "fixes_attempted": {"type": "integer", "minimum": 0},
+        "prs_opened": {"type": "integer", "minimum": 0},
+        "review_complete": {"type": "boolean"},
+        "last_scanned_sha": {"type": ["string", "null"]},
+        "finding_ids": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1}
+        },
+        "job_id": {"type": "string", "minLength": 1},
+        "state": {"type": "string"},
+        "complete": {"type": "boolean"},
+        "zero_reason": {"type": ["string", "null"]},
+        "action_count": {"type": "integer", "minimum": 0},
+        "action_outcomes": {
+          "type": "object",
+          "propertyNames": {"minLength": 1},
+          "additionalProperties": {"type": "string"}
+        },
+        "completion_status": {"type": "string"}
+      },
+      "anyOf": [
+        {"required": ["rationale"]},
+        {"required": ["job_id", "state", "complete"]}
+      ]
+    },
+    "effect_scope": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "maxProperties": 0
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["fingerprint"],
+          "properties": {
+            "fingerprint": {"type": "string", "minLength": 1}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["job_id"],
+          "properties": {
+            "job_id": {"type": "string", "minLength": 1}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["job_id", "operation"],
+          "properties": {
+            "job_id": {"type": "string", "minLength": 1},
+            "operation": {"type": "string", "minLength": 1}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["job_id", "canonical_action_id"],
+          "properties": {
+            "job_id": {"type": "string", "minLength": 1},
+            "canonical_action_id": {"type": "string", "minLength": 1}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "patch_id",
+            "worktree_path",
+            "base_sha",
+            "head_sha",
+            "fingerprint",
+            "branch"
+          ],
+          "properties": {
+            "patch_id": {"type": "string", "minLength": 1},
+            "worktree_path": {"type": "string", "minLength": 1},
+            "base_sha": {"type": "string", "minLength": 1},
+            "head_sha": {"type": "string", "minLength": 1},
+            "fingerprint": {"type": "string", "minLength": 1},
+            "branch": {"type": "string", "minLength": 1}
+          }
+        }
+      ]
+    },
+    "effect_outcome": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "maxProperties": 0
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["attempted", "reason"],
+          "properties": {
+            "attempted": {"const": true},
+            "reason": {"type": "string"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["reason"],
+          "properties": {"reason": {"type": "string"}}
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["content_digest"],
+          "properties": {"content_digest": {"type": "string"}}
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["finding_id"],
+          "properties": {"finding_id": {"type": "string"}}
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["patch_id"],
+          "properties": {"patch_id": {"type": "string", "minLength": 1}}
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["remote_oid"],
+          "properties": {"remote_oid": {"type": ["string", "null"]}}
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["pr_url"],
+          "properties": {"pr_url": {"type": "string"}}
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["pr_url", "state", "head_oid", "base_oid"],
+          "properties": {
+            "pr_url": {"type": "string"},
+            "state": {"type": "string"},
+            "head_oid": {"type": "string"},
+            "base_oid": {"type": "string"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["issue_url"],
+          "properties": {"issue_url": {"type": "string"}}
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["task_path"],
+          "properties": {"task_path": {"type": "string"}}
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["transition_status"],
+          "properties": {"transition_status": {"type": "string"}}
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["transition_status", "transition_digest"],
+          "properties": {
+            "transition_status": {"type": "string"},
+            "transition_digest": {"type": "string"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "transition_status",
+            "transition_digest",
+            "error_code"
+          ],
+          "properties": {
+            "transition_status": {"type": "string"},
+            "transition_digest": {"type": "string"},
+            "error_code": {"type": "string"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["transition_status", "migration"],
+          "properties": {
+            "transition_status": {"type": "string"},
+            "migration": {"type": "string"}
+          }
+        }
+      ]
+    },
+    "patrol_selection_input": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "enabled", "trigger", "timer_due", "branch_changed"],
+          "properties": {
+            "kind": {"const": "schedule"},
+            "enabled": {"type": "boolean"},
+            "trigger": {"enum": ["continuous", "timer", "new_commits"]},
+            "timer_due": {"type": ["boolean", "null"]},
+            "branch_changed": {"type": ["boolean", "null"]}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "event_id"],
+          "properties": {
+            "kind": {"const": "module_event"},
+            "event_id": {"type": "string", "minLength": 1}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "operation"],
+          "properties": {
+            "kind": {"const": "operation"},
+            "operation": {"type": "string", "minLength": 1}
+          }
+        }
+      ]
+    },
+    "architecture_selection_input": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "job_id", "phase"],
+          "properties": {
+            "kind": {"const": "candidate"},
+            "job_id": {"type": "string", "minLength": 1},
+            "phase": {"enum": ["discovery", "action"]}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "job_id", "phase", "operation"],
+          "properties": {
+            "kind": {"const": "operation"},
+            "job_id": {"type": "string", "minLength": 1},
+            "phase": {"enum": ["discovery", "action"]},
+            "operation": {"type": "string", "minLength": 1}
+          }
+        }
+      ]
+    },
+    "patrol_projection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["module", "rationale", "job_id", "phase"],
+      "properties": {
+        "module": {"const": "patrol"},
+        "rationale": {"enum": ["disabled", "not_due", "due"]},
+        "job_id": {"type": "null"},
+        "phase": {"type": "null"}
+      }
+    },
+    "architecture_projection": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["module", "rationale", "job_id", "phase"],
+          "properties": {
+            "module": {"const": "architecture-patrol"},
+            "rationale": {"const": "due"},
+            "job_id": {"type": "string", "minLength": 1},
+            "phase": {"enum": ["discovery", "action"]}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["module", "rationale", "job_id", "phase"],
+          "properties": {
+            "module": {"const": "architecture-patrol"},
+            "rationale": {"const": "not_due"},
+            "job_id": {"type": "null"},
+            "phase": {"type": "null"}
+          }
+        }
+      ]
+    },
+    "decision_projection": {
+      "oneOf": [
+        {"$ref": "#/$defs/patrol_projection"},
+        {"$ref": "#/$defs/architecture_projection"}
+      ]
+    },
+    "capture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "capture_id",
+        "module",
+        "occurrence_id",
+        "project",
+        "trigger",
+        "reservation",
+        "owner",
+        "owner_epoch",
+        "selection_input",
+        "selection",
+        "outcome_class",
+        "outcome",
+        "effect_ids",
+        "occurred_at",
+        "recorded_at"
+      ],
+      "properties": {
+        "schema": {"const": "hive-patrol-capture"},
+        "schema_version": {"const": 1},
+        "capture_id": {
+          "type": "string",
+          "pattern": "^cap-[0-9a-f]{64}$"
+        },
+        "module": {"enum": ["patrol", "architecture-patrol"]},
+        "occurrence_id": {
+          "type": "string",
+          "pattern": "^occ-[0-9a-f]{64}$"
+        },
+        "project": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["project_id", "name", "repository"],
+          "properties": {
+            "project_id": {"type": "string", "minLength": 1},
+            "name": {"type": "string", "minLength": 1},
+            "repository": {
+              "anyOf": [
+                {"type": "string", "minLength": 1},
+                {"type": "null"}
+              ]
+            }
+          }
+        },
+        "trigger": {"$ref": "#/$defs/runtime_trigger"},
+        "reservation": {"$ref": "#/$defs/reservation"},
+        "owner": {"enum": ["legacy", "module"]},
+        "owner_epoch": {"type": "integer", "minimum": 1},
+        "selection_input": {"type": "object"},
+        "selection": {"$ref": "#/$defs/decision_projection"},
+        "outcome_class": {
+          "anyOf": [
+            {
+              "enum": [
+                "complete",
+                "completed",
+                "failed",
+                "not_dispatched"
+              ]
+            },
+            {"type": "null"}
+          ]
+        },
+        "outcome": {
+          "anyOf": [
+            {"$ref": "#/$defs/capture_outcome"},
+            {"type": "null"}
+          ]
+        },
+        "effect_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 128,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "occurred_at": {"type": "string", "format": "date-time"},
+        "recorded_at": {"type": "string", "format": "date-time"}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"module": {"const": "patrol"}},
+            "required": ["module"]
+          },
+          "then": {
+            "properties": {
+              "selection_input": {
+                "$ref": "#/$defs/patrol_selection_input"
+              },
+              "selection": {"$ref": "#/$defs/patrol_projection"}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "module": {"const": "architecture-patrol"}
+            },
+            "required": ["module"]
+          },
+          "then": {
+            "properties": {
+              "selection_input": {
+                "$ref": "#/$defs/architecture_selection_input"
+              },
+              "selection": {
+                "$ref": "#/$defs/architecture_projection"
+              }
+            }
+          }
+        },
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "outcome_class": {"type": "null"},
+                "outcome": {"type": "null"}
+              },
+              "required": ["outcome_class", "outcome"]
+            },
+            {
+              "properties": {
+                "outcome_class": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "outcome": {"type": "object"}
+              },
+              "required": ["outcome_class", "outcome"]
+            }
+          ]
+        }
+      ]
+    },
+    "difference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "legacy", "module"],
+      "properties": {
+        "path": {"type": "string"},
+        "legacy": {},
+        "module": {}
+      }
+    },
+    "effect_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "receipt_id",
+        "intent",
+        "status",
+        "outcome",
+        "recorded_at"
+      ],
+      "properties": {
+        "schema": {"const": "hive-patrol-effect-receipt"},
+        "schema_version": {"const": 1},
+        "receipt_id": {"type": "string", "pattern": "^receipt-[0-9a-f]{64}$"},
+        "intent": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "intent_id",
+            "module",
+            "occurrence_id",
+            "authority",
+            "authorization_digest",
+            "owner_epoch",
+            "sink",
+            "target",
+            "idempotency_key",
+            "capability",
+            "claim_generation",
+            "scope",
+            "created_at"
+          ],
+          "properties": {
+            "intent_id": {"type": "string", "pattern": "^intent-[0-9a-f]{64}$"},
+            "module": {"enum": ["patrol", "architecture-patrol"]},
+            "occurrence_id": {"type": "string", "pattern": "^occ-[0-9a-f]{64}$"},
+            "authority": {"enum": ["legacy", "module", "shadow"]},
+            "authorization_digest": {
+              "type": "string",
+              "pattern": "^auth-[0-9a-f]{64}$"
+            },
+            "owner_epoch": {"type": "integer", "minimum": 1},
+            "sink": {
+              "enum": [
+                "attempt",
+                "state",
+                "finding",
+                "branch",
+                "pull_request",
+                "review_handoff",
+                "job",
+                "discovery",
+                "action",
+                "issue"
+              ]
+            },
+            "target": {"type": "string", "minLength": 1},
+            "idempotency_key": {"type": "string", "minLength": 1},
+            "capability": {"type": "string", "minLength": 1},
+            "claim_generation": {
+              "type": ["integer", "null"],
+              "minimum": 0
+            },
+            "scope": {"$ref": "#/$defs/effect_scope"},
+            "created_at": {"type": "string", "format": "date-time"}
+          }
+        },
+        "status": {
+          "enum": [
+            "attempted",
+            "denied",
+            "known_not_sent",
+            "unknown",
+            "committed",
+            "reconciled",
+            "failed"
+          ]
+        },
+        "outcome": {"$ref": "#/$defs/effect_outcome"},
+        "recorded_at": {"type": "string", "format": "date-time"}
+      }
+    }
+  }
+}

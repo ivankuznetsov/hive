@@ -32,6 +32,7 @@ through the progressive setup reference:
 /hive setup
 /hive status
 /hive watch <project>:<slug>
+/hive create a three-stage editorial workflow that researches, drafts, and requires approval before publishing
 ```
 
 Guided setup explains the selected platform channel and asks before changing
@@ -45,6 +46,13 @@ OpenClaw installation remains ClawHub-owned:
 launching OpenClaw and points missing or stale installations to
 `openclaw skills install/update @ivankuznetsov/hive-cli`;
 `hive setup-agents` never writes OpenClaw state.
+
+Natural-language workflow creation is a focused capability inside this same
+`/hive` skill, not another ClawHub listing. It inspects the installed Hive
+version and project workflow IDs before mutation, uses Hive's scaffold and
+validation commands, and creates no task by default. A fresh directory first
+receives the machine-readable minimal-init preview and changes only after one
+explicit confirmation.
 
 On supported Linux/macOS, the approved guided setup reports the loopback URL
 and distinct installed, enabled, running, and ready state for the default

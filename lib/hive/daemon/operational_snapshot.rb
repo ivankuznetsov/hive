@@ -6,8 +6,10 @@ require "yaml"
 
 require "hive/agent_limit"
 require "hive/atomic_file"
+require "hive/attempts/storage_health"
 require "hive/lock"
 require "hive/paths"
+require "hive/recovery"
 
 module Hive
   module Daemon
@@ -106,6 +108,8 @@ module Hive
           @tick_sequence = 0
           @started_at = nil
           @observations = {}
+          @runtime_ready = false
+          @attempt_storage = Hive::Attempts::StorageHealth.unknown_snapshot
         end
 
         def reconfigure(poll_interval_sec:)
@@ -120,13 +124,33 @@ module Hive
           tick_sequence
         end
 
-        def observe(row, decision:, owner:, reason:)
+        # Generation-bound acknowledgement that the daemon finished runtime
+        # construction, installed signal handlers, and reconciled inherited
+        # dispatch claims. The flag remains on later tick/shutdown records so
+        # a short-lived ready record cannot be missed by a waiting maintainer.
+        def runtime_ready(now: Time.now.utc)
+          @runtime_ready = true
+          @store.write(
+            base_record(phase: "complete", now: now).merge(
+              "reason" => nil,
+              "capacity" => {}, "queue" => {},
+              "provider_holds" => [], "recoveries" => {},
+              "tasks" => []
+            )
+          )
+        end
+
+        def observe(row, decision:, owner:, reason:, **details)
           @observations[row_key(row)] = {
             "status" => "available",
             "decision" => decision.to_s,
             "owner" => owner.to_s,
             "reason" => reason.to_s
-          }
+          }.merge(details.transform_keys(&:to_s))
+        end
+
+        def update_attempt_storage(status)
+          @attempt_storage = status
         end
 
         def fail(reason:, now: Time.now.utc)
@@ -142,9 +166,18 @@ module Hive
           )
         end
 
-        def complete(initial_rows:, final_rows:, controller:, queue:, recoveries:, now: Time.now.utc)
+        def complete(initial_rows:, final_rows:, controller:, queue:, recoveries:,
+                     initial_hidden_archived_task_count: 0,
+                     final_hidden_archived_task_count: 0,
+                     now: Time.now.utc)
           initial_rows = Array(initial_rows)
           final_rows = Array(final_rows)
+          validate_hidden_count!(
+            initial_hidden_archived_task_count, label: "initial_hidden_archived_task_count"
+          )
+          validate_hidden_count!(
+            final_hidden_archived_task_count, label: "final_hidden_archived_task_count"
+          )
           duplicate_keys = duplicate_row_keys(initial_rows) | duplicate_row_keys(final_rows)
           unless duplicate_keys.empty?
             identities = duplicate_keys.sort.map { |project, slug| "#{project}:#{slug}" }
@@ -156,16 +189,36 @@ module Hive
             [ [ task.dig("identity", "project"), task.dig("identity", "slug") ], task ]
           end
           holds = provider_holds(final_rows)
-          overlay_recovery_dispositions!(task_index, recoveries || {})
           overlay_provider_dispositions!(task_index, holds)
+          overlay_recovery_dispositions!(task_index, recoveries || {})
           @store.write(
             base_record(phase: "complete", now: now).merge(
               "reason" => nil,
+              "hidden_archived_task_count" => final_hidden_archived_task_count,
               "capacity" => controller || {},
               "queue" => queue || {},
               "provider_holds" => holds,
               "recoveries" => recoveries || {},
               "tasks" => tasks
+            )
+          )
+        end
+
+        # Written only by Dispatcher after it has stopped admitting work and
+        # its existing ChildSupervisor has drained every tracked child. It is
+        # a generation-bound receipt for an updater that must verify shutdown
+        # after the daemon PID has exited.
+        def shutdown(admission_closed:, child_inventory:, drained:, now: Time.now.utc)
+          @store.write(
+            base_record(phase: "complete", now: now).merge(
+              "reason" => nil,
+              "capacity" => {}, "queue" => {}, "provider_holds" => [],
+              "recoveries" => {}, "tasks" => [],
+              "shutdown" => {
+                "admission_closed" => admission_closed == true,
+                "drained" => drained == true,
+                "child_inventory" => Array(child_inventory)
+              }
             )
           )
         end
@@ -178,6 +231,7 @@ module Hive
             "schema" => SCHEMA,
             "schema_version" => SCHEMA_VERSION,
             "phase" => phase,
+            "runtime_ready" => @runtime_ready == true,
             "tick_sequence" => tick_sequence,
             "daemon" => @daemon_identity,
             "observed_at" => instant.iso8601(6),
@@ -185,8 +239,16 @@ module Hive
             "source_window" => {
               "started_at" => (@started_at || instant).utc.iso8601(6),
               "completed_at" => phase == "started" ? nil : instant.iso8601(6)
-            }
+            },
+            "hidden_archived_task_count" => nil,
+            "attempt_storage" => @attempt_storage
           }
+        end
+
+        def validate_hidden_count!(value, label:)
+          return if value.is_a?(Integer) && value >= 0
+
+          raise ArgumentError, "#{label} must be a non-negative integer"
         end
 
         def revalidated_tasks(initial_rows, final_rows)
@@ -279,20 +341,28 @@ module Hive
         end
 
         def overlay_recovery_dispositions!(task_index, recoveries)
-          stale = recoveries.fetch("stale_agent", {})
-          generic = recoveries.fetch("recoverable_error", {})
-          exhausted = Array(stale["error_exhausted"]) +
-                      Array(stale["review_exhausted"]) +
-                      Array(generic["exhausted"])
-          exhausted.each do |entry|
-            task = find_task(task_index, entry)
-            next unless task && task.dig("disposition", "status") == "available"
+          coordinator = recoveries.fetch("coordinator", {})
+          Array(coordinator["receipts"]).each do |entry|
+            task = find_recovery_task(task_index, entry)
+            next unless task
 
+            receipt = entry["receipt"]
+            next unless receipt.is_a?(Hash)
+
+            status = receipt["status"].to_s
             task["disposition"] = {
               "status" => "available",
-              "decision" => "recovery_exhausted",
-              "owner" => "operator",
-              "reason" => "automatic recovery budget is exhausted"
+              "decision" => {
+                "queued" => "retry_pending",
+                "cooldown" => "retry_cooldown",
+                "running" => "retry_in_flight",
+                "blocked" => "retry_safety_blocked",
+                "terminal" => "attempt_terminal_replay",
+                "unavailable" => "recovery_unavailable"
+              }.fetch(status, "recovery_unavailable"),
+              "owner" => receipt["owner"] || "hive",
+              "reason" => receipt["reason"] || status.tr("_", " "),
+              "recovery" => receipt
             }
           end
         end
@@ -320,6 +390,43 @@ module Hive
           return unless identity["stage"].to_s.empty? || task["stage"] == identity["stage"].to_s
           return unless identity["reason"].to_s.empty? ||
                         task.dig("marker_attrs", "reason").to_s == identity["reason"].to_s
+
+          task
+        end
+
+        def find_recovery_task(task_index, identity)
+          task = find_task(task_index, identity)
+          return unless task
+
+          phase = identity["recovery_phase"].to_s
+          if phase == "admitted"
+            return unless task["marker"].to_s == identity["expected_marker_name"].to_s
+
+            expected = identity["expected_marker_attrs"]
+            if expected.is_a?(Hash)
+              return unless expected.all? do |key, value|
+                task.dig("marker_attrs", key.to_s).to_s == value.to_s
+              end
+            end
+          elsif %w[cleared dispatched].include?(phase)
+            # Once the original marker is gone, a fresh ERROR/REVIEW_ERROR is
+            # a new recovery generation. Do not let an older terminal receipt
+            # hide that generation's cooldown/action.
+            return unless %w[none agent_working].include?(task["marker"].to_s)
+          elsif phase == "terminal"
+            # A completed attempt normally leaves a meaningful workflow marker
+            # (WAITING, COMPLETE, REVIEW_COMPLETE, and similar). Preserve its
+            # terminal receipt unless a fresh recoverable failure or a
+            # different live attempt now owns the task.
+            return if Hive::Recovery.recoverable_marker?(task["marker"])
+
+            receipt_attempt_id = identity.dig("receipt", "attempt_id").to_s
+            current_attempt_id = task["attempt_id"].to_s
+            if !receipt_attempt_id.empty? && !current_attempt_id.empty? &&
+                receipt_attempt_id != current_attempt_id
+              return
+            end
+          end
 
           task
         end
@@ -402,6 +509,52 @@ module Hive
           unavailable("snapshot_unreadable", nil, "#{e.class}: #{e.message}")
         end
 
+        # Unlike #read this remains usable after the daemon has exited. The
+        # expected generation is captured from the verified live PID before
+        # shutdown, so a stale receipt cannot authorize package replacement.
+        def shutdown_acknowledgement(expected_daemon:, now: Time.now.utc)
+          validate_path!
+          record = JSON.parse(File.read(@path))
+          validate_record!(record)
+          return nil unless daemon_matches?(record, expected_daemon)
+          return nil unless record["phase"] == "complete"
+          return nil if Time.parse(record.fetch("valid_until")) < now
+
+          shutdown = record["shutdown"]
+          return nil unless shutdown.is_a?(Hash) &&
+                            shutdown["admission_closed"] == true &&
+                            shutdown["drained"] == true &&
+                            shutdown_inventory?(shutdown["child_inventory"])
+
+          shutdown
+        rescue Errno::ENOENT, SecurityError, JSON::ParserError,
+               ArgumentError, TypeError, KeyError, SystemCallError, IOError
+          nil
+        end
+
+        # Unlike #read, readiness accepts a currently-running tick's `started`
+        # phase. `runtime_ready=true` can only be published after construction
+        # and is retained on every later record for the same daemon identity.
+        def runtime_readiness(expected_daemon: AUTO_DAEMON,
+                              now: Time.now.utc)
+          expected = expected_daemon.equal?(AUTO_DAEMON) ?
+            self.expected_daemon : expected_daemon
+          return nil if expected == :unavailable
+
+          validate_path!
+          record = JSON.parse(File.read(@path))
+          validate_record!(record)
+          return nil unless daemon_matches?(record, expected)
+          return nil unless record["runtime_ready"] == true
+          return nil if record.key?("shutdown")
+          return nil if Time.parse(record.fetch("valid_until")) < now
+
+          record
+        rescue Errno::ENOENT, SecurityError, JSON::ParserError,
+               ArgumentError, TypeError, KeyError, SystemCallError, IOError
+          nil
+        end
+
         private
 
         def expected_daemon
@@ -461,6 +614,14 @@ module Hive
 
           %w[generation pid process_start_time].all? do |key|
             record.dig("daemon", key).to_s == expected[key].to_s
+          end
+        end
+
+        def shutdown_inventory?(inventory)
+          inventory.is_a?(Array) && inventory.all? do |target|
+            target.is_a?(Hash) && target["pid"].is_a?(Integer) && target["pid"] > 1 &&
+              target["pgid"].is_a?(Integer) && target["pgid"] > 1 &&
+              !target["start_time"].to_s.empty?
           end
         end
 

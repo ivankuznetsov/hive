@@ -30,6 +30,17 @@ class TaskActionTest < Minitest::Test
     Marker.new(name: name, attrs: attrs, raw: nil)
   end
 
+  def assert_recovery_action_command(command, task)
+    parts = Shellwords.split(command)
+    assert_equal(
+      [ "hive", "act", "workflow.retry", "#{task.project_name}:#{task.slug}", "--observation" ],
+      parts.first(5)
+    )
+    assert_match(/\A[0-9a-f]{64}\z/, parts.fetch(5))
+    refute_includes parts, "markers"
+    parts
+  end
+
   # The diagnostics concern lives in Hive::TaskAction::Diagnostic. Build it the
   # way the classifier does so the predicate context it receives matches
   # production exactly.
@@ -460,7 +471,7 @@ class TaskActionTest < Minitest::Test
     end
   end
 
-  def test_finalize_missing_metadata_error_is_manual_fix_not_retry
+  def test_finalize_missing_metadata_error_is_retryable
     Dir.mktmpdir("task-action-finalize") do |dir|
       folder = File.join(dir, ".hive-state", "stages", "8-finalize", "demo-260426-aaaa")
       FileUtils.mkdir_p(folder)
@@ -478,8 +489,8 @@ class TaskActionTest < Minitest::Test
         diagnostic = Hive::TaskAction.for(task, marker(:error, "reason" => reason)).diagnostic
         suggested = diagnostic.fetch("suggested_next_action")
 
-        assert_equal "manual_fix", suggested.fetch("kind"), "reason=#{reason}"
-        assert_nil suggested["command"], "reason=#{reason}"
+        assert_equal "retry", suggested.fetch("kind"), "reason=#{reason}"
+        assert_recovery_action_command(suggested.fetch("command"), task)
       end
     end
   end
@@ -719,7 +730,7 @@ class TaskActionTest < Minitest::Test
   def test_payload_has_expected_keys
     task = fake_task(stage_name: "brainstorm", stage_index: 2)
     payload = Hive::TaskAction.for(task, marker(:complete)).payload
-    assert_equal %w[command key label next_action].sort, payload.keys.sort
+    assert_equal %w[command key label next_action outcomes].sort, payload.keys.sort
     assert_equal "ready_to_plan", payload["key"]
   end
 
@@ -1523,7 +1534,7 @@ class TaskActionTest < Minitest::Test
     end
   end
 
-  def test_auto_commit_scope_failure_diagnostic_is_manual_fix
+  def test_auto_commit_scope_failure_diagnostic_is_retryable
     with_tmp_dir do |dir|
       task = fake_task(stage_name: "review", stage_index: 6, project_root: dir)
       FileUtils.mkdir_p(File.join(task.folder, "reviews"))
@@ -1543,8 +1554,10 @@ class TaskActionTest < Minitest::Test
         )
       ).diagnostic
 
-      assert_equal "manual_fix", diagnostic.fetch("suggested_next_action").fetch("kind")
-      assert_nil diagnostic.fetch("suggested_next_action")["command"]
+      assert_equal "retry", diagnostic.fetch("suggested_next_action").fetch("kind")
+      assert_recovery_action_command(
+        diagnostic.fetch("suggested_next_action").fetch("command"), task
+      )
       assert_includes diagnostic.fetch("artifact_paths"), artifact
       assert_match(/\A#{Regexp.escape(artifact)}:/, diagnostic.fetch("detail"))
       assert_match(/bin\/pwn/, diagnostic.fetch("detail"))
@@ -1563,16 +1576,7 @@ class TaskActionTest < Minitest::Test
     end
   end
 
-  # CleanExit `:error reason=ensure_clean_on_exit_failed` is the
-  # stage-exit invariant refusing to auto-commit residue. Mirror the
-  # `auto_commit_*_failed` REVIEW_ERROR routing: never emit a retry
-  # command, since operator inspection is required. Without this
-  # branch, `suggested_next_action_payload` would fall through to
-  # `retry_command_string` and emit a clear+rerun recipe — the bot's
-  # manual-only routing already refuses to dispatch it, so consumers
-  # would see contradictory signals between the bot reply and the
-  # CLI envelope.
-  def test_clean_exit_failed_is_manual_fix_with_null_command
+  def test_clean_exit_failed_is_retryable_with_generation_guard
     with_tmp_dir do |dir|
       task = fake_task(stage_name: "finalize", stage_index: 8, project_root: dir)
 
@@ -1584,13 +1588,13 @@ class TaskActionTest < Minitest::Test
                "marker_id" => "abc123")
       ).diagnostic.fetch("suggested_next_action")
 
-      assert_equal "manual_fix", payload.fetch("kind")
-      assert_nil payload["command"],
-                 "ensure_clean_on_exit_failed must carry no shell recipe — operator inspection required"
+      assert_equal "retry", payload.fetch("kind")
+      parts = assert_recovery_action_command(payload.fetch("command"), task)
+      refute parts.any? { |part| part.include?("marker_id") }
     end
   end
 
-  def test_auto_commit_signing_failures_are_manual_fix
+  def test_auto_commit_signing_failures_are_retryable
     with_tmp_dir do |dir|
       task = fake_task(stage_name: "review", stage_index: 6, project_root: dir)
 
@@ -1600,8 +1604,10 @@ class TaskActionTest < Minitest::Test
           marker(:review_error, "phase" => "fix", "reason" => reason, "pass" => "1")
         ).diagnostic
 
-        assert_equal "manual_fix", diagnostic.fetch("suggested_next_action").fetch("kind")
-        assert_nil diagnostic.fetch("suggested_next_action")["command"]
+        assert_equal "retry", diagnostic.fetch("suggested_next_action").fetch("kind")
+        assert_recovery_action_command(
+          diagnostic.fetch("suggested_next_action").fetch("command"), task
+        )
         assert_match(/signing/, diagnostic.fetch("detail"))
         assert_match(/review\.fix\.auto_commit\.sign_policy/, diagnostic.fetch("detail"))
         assert_match(/commit or revert/, diagnostic.fetch("detail"))
@@ -1609,7 +1615,7 @@ class TaskActionTest < Minitest::Test
     end
   end
 
-  def test_fix_status_check_failure_is_manual_fix
+  def test_fix_status_check_failure_is_retryable
     with_tmp_dir do |dir|
       task = fake_task(stage_name: "review", stage_index: 6, project_root: dir)
 
@@ -1624,14 +1630,16 @@ class TaskActionTest < Minitest::Test
         )
       ).diagnostic
 
-      assert_equal "manual_fix", diagnostic.fetch("suggested_next_action").fetch("kind")
-      assert_nil diagnostic.fetch("suggested_next_action")["command"]
+      assert_equal "retry", diagnostic.fetch("suggested_next_action").fetch("kind")
+      assert_recovery_action_command(
+        diagnostic.fetch("suggested_next_action").fetch("command"), task
+      )
       assert_match(/could not read the task worktree Git status/, diagnostic.fetch("detail"))
       assert_match(/Repair the worktree/, diagnostic.fetch("detail"))
     end
   end
 
-  def test_review_stale_and_error_retry_commands_include_priority_match_attrs
+  def test_review_stale_and_error_retry_commands_use_guarded_operational_actions
     review_task = fake_task(stage_name: "review", stage_index: 6)
     review_suggested = Hive::TaskAction.for(
       review_task,
@@ -1639,11 +1647,7 @@ class TaskActionTest < Minitest::Test
     ).diagnostic.fetch("suggested_next_action")
 
     assert_equal "retry", review_suggested.fetch("kind")
-    review_parts = Shellwords.split(review_suggested.fetch("command"))
-    assert_includes review_parts, "--name"
-    assert_includes review_parts, "REVIEW_STALE"
-    assert_includes review_parts, "--match-attr"
-    assert_includes review_parts, "pass=2"
+    review_parts = assert_recovery_action_command(review_suggested.fetch("command"), review_task)
 
     error_task = fake_task(stage_name: "execute", stage_index: 4)
     error_action = Hive::TaskAction.for(
@@ -1654,31 +1658,22 @@ class TaskActionTest < Minitest::Test
     error_suggested = error_diagnostic.fetch("suggested_next_action")
 
     assert_equal "retry", error_suggested.fetch("kind")
-    # F1: `error_recovery_match_attr` now encodes `marker_id` + `reason` as a
-    # comma-separated pair so the bot's inline-button callback path can route
-    # `manual_only?` on `reason` without re-reading the state file. The
-    # markers-clear CLI handles comma-separated pairs natively (parse_match_attrs
-    # in lib/hive/commands/markers.rb), so the encoded form is consumer-safe.
-    assert_equal [
-      "hive", "markers", "clear", error_task.folder,
-      "--name", "ERROR", "--match-attr", "marker_id=err-70,reason=agent_failed",
-      "&&", "hive", "run", error_task.folder
-    ], Shellwords.split(error_suggested.fetch("command"))
+    error_parts = assert_recovery_action_command(error_suggested.fetch("command"), error_task)
     refute_includes error_diagnostic.fetch("summary"), "marker_id"
     refute_includes error_diagnostic.fetch("detail"), "marker_id"
-    assert_includes Shellwords.split(error_suggested.fetch("command")),
-                    "marker_id=err-70,reason=agent_failed"
+    refute error_parts.any? { |part| part.include?("marker_id") }
 
     legacy_error_suggested = Hive::TaskAction.for(
       error_task,
       marker(:error, "exit_code" => "70", "reason" => "agent_failed")
     ).diagnostic.fetch("suggested_next_action")
 
-    assert_equal [
-      "hive", "markers", "clear", error_task.folder,
-      "--name", "ERROR", "--match-attr", "reason=agent_failed,exit_code=70",
-      "&&", "hive", "run", error_task.folder
-    ], Shellwords.split(legacy_error_suggested.fetch("command"))
+    legacy_parts = assert_recovery_action_command(
+      legacy_error_suggested.fetch("command"), error_task
+    )
+    refute_equal error_parts.fetch(5), legacy_parts.fetch(5),
+                 "marker identity changes must rotate the observation token"
+    refute_equal review_parts.fetch(5), error_parts.fetch(5)
   end
 
   def test_incomplete_plan_retry_command_includes_project_when_needed

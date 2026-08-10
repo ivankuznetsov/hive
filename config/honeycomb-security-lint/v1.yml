@@ -1,0 +1,61 @@
+schema: hive.honeycomb-security-lint-contract/v1
+version: v1
+upstream_commit: ada805d0d8c94dc236a0673a22232a0440843cf0
+upstream_policy_sha256: abb0d43bf30e683413e38060f5416e9ece370b98eba9c836a7c56ebbcdd765fa
+fixture_corpus_sha256: bfc864815663dd61f75043da7c24e954364220c9d7eeb85ba73b298d824c268d
+expected_output_sha256: 549ca5ec602fbc7ee7618a0c44f2ef48b10b3bb57f91aee3b7c73b21f1d63fb6
+baseline_network_hosts:
+  - api.github.com
+  - github.com
+  - raw.githubusercontent.com
+limits:
+  max_file_bytes: 1048576
+  max_total_bytes: 10485760
+  max_files: 1000
+  max_commands: 1000
+  max_observations: 1000
+  max_findings: 1000
+known_rules:
+  - deny.credential-read
+  - deny.download-then-execute
+  - deny.encoded-exfiltration
+  - deny.environment-dump
+  - deny.path-traversal
+  - deny.pipe-to-shell
+  - instruction.malformed-yaml
+  - manifest.invalid-security-extension
+  - network.dynamic-destination
+  - network.ip-literal
+  - network.missing-reason
+  - network.undeclared-host
+  - permission.absolute-path
+  - permission.broad-declaration
+  - permission.filesystem-read
+  - permission.filesystem-write
+  - permission.network
+  - permission.secret
+  - permission.shell
+  - pii.email
+  - pii.government-id
+  - pii.payment-card
+  - pii.phone
+  - policy.command-limit
+  - policy.file-limit
+  - policy.finding-limit
+  - policy.invalid-encoding
+  - policy.invalid-file
+  - policy.observation-limit
+  - policy.scanner-error
+  - policy.total-limit
+  - policy.unknown-rule
+  - secret.anthropic-key
+  - secret.aws-access-key
+  - secret.bearer
+  - secret.generic-assignment
+  - secret.github-token
+  - secret.google-api-key
+  - secret.jwt
+  - secret.openai-key
+  - secret.private-key
+  - secret.slack-token
+  - suppression.orphaned-request

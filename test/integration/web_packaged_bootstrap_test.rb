@@ -1,5 +1,6 @@
 require "test_helper"
 require "digest"
+require "fileutils"
 require "json"
 require "open3"
 require "rbconfig"
@@ -58,23 +59,45 @@ class WebPackagedBootstrapTest < Minitest::Test
       assert_equal tracked_files.sort, archive_entries.keys.sort,
                    "the release archive must contain every tracked web file exactly once"
 
+      # `gem install hive-cli` installs this exact runtime dependency into the
+      # managed gem home. This fixture keeps the rest of Hive's dependencies
+      # in the parent test bundle, so expose that bundle's gem home explicitly
+      # while still hiding every executable wrapper from PATH.
+      bundler_gem_home = File.expand_path(
+        "../..", Gem.loaded_specs.fetch("bundler").full_gem_path
+      )
       env = {
         "GEM_HOME" => gem_home,
-        "GEM_PATH" => [ gem_home, *Gem.path ].join(File::PATH_SEPARATOR),
+        "GEM_PATH" => [ gem_home, bundler_gem_home, *Gem.path ].uniq.join(File::PATH_SEPARATOR),
         **clean_bundler_environment
       }
 
       preload = File.join(tmp, "setup-fixtures.rb")
       capture = File.join(tmp, "setup-capture")
       setup_home = File.join(tmp, "setup-home")
+      agent_home = File.join(tmp, "agent-home")
+      FileUtils.mkdir_p(agent_home)
+      # Installed agent CLIs may create their config root even for a version
+      # probe. Real authenticated homes already have these roots; pre-create
+      # them so the fixture does not mistake probe initialization for an
+      # external path-identity change between preview and planning.
+      %w[.claude .codex .grok].each do |relative|
+        FileUtils.mkdir_p(File.join(agent_home, relative))
+      end
+      FileUtils.mkdir_p(File.join(agent_home, ".pi", "agent"))
       File.write(preload, setup_fixture_source)
       setup_env = env.merge(
+        "HOME" => agent_home,
         "HIVE_HOME" => setup_home,
         "HIVE_WEB_BUNDLE_URL" => archive,
         "HIVE_WEB_BUNDLE_SHA256" => Digest::SHA256.file(archive).hexdigest,
         "HIVE_EXPECTED_CLI_ROOT" => installed_root,
         "HIVE_PACKAGE_CAPTURE" => capture,
-        "HIVE_SETUP_FIXTURE" => preload
+        "HIVE_SETUP_FIXTURE" => preload,
+        # A managed install must not depend on the `bundle` wrapper being on
+        # PATH. The CLI already runs under the intended Ruby and resolves its
+        # exact runtime Bundler from the authenticated lockfile.
+        "PATH" => "/usr/bin:/bin"
       )
       stdout, setup_stderr, setup_status = Open3.capture3(
         setup_env, File.join(gem_home, "bin", "hive"), "setup", "--no-init", "--yes", "--json",
@@ -85,11 +108,11 @@ class WebPackagedBootstrapTest < Minitest::Test
       payload = JSON.parse(stdout)
       assert_equal "managed_service", payload.fetch("mode")
       assert_equal true, payload.fetch("ok")
-      assert_equal %w[diagnostics agent_skills web_bundle daemon_service web_service web],
+      assert_equal %w[diagnostics agent_skills web_bundle daemon_service babysitter_service web_service web],
                    payload.fetch("phases").map { |phase| phase.fetch("name") }
       agent_skills = payload.fetch("phases").find { |phase| phase.fetch("name") == "agent_skills" }
       refute_equal "consent_required", agent_skills.fetch("classification")
-      assert_equal [ installed_root, "daemon", "web" ], File.readlines(capture, chomp: true)
+      assert_equal [ installed_root, "daemon", "babysitter", "web" ], File.readlines(capture, chomp: true)
       assert File.file?(File.join(setup_home, "web", "config", "application.rb"))
       assert File.file?(File.join(setup_home, "web", ".hive-web-version"))
       assert Dir.exist?(File.join(setup_home, "web-gems")),
@@ -132,6 +155,7 @@ class WebPackagedBootstrapTest < Minitest::Test
     <<~'RUBY'
       require "hive"
       require "hive/commands/setup"
+      require "hive/commands/babysit/service_installer"
       require "hive/commands/daemon/service_installer"
       require "hive/commands/web/service_installer"
 
@@ -179,6 +203,9 @@ class WebPackagedBootstrapTest < Minitest::Test
       end
 
       Hive::Setup::Diagnostics.define_singleton_method(:new) { PackagedSetupDiagnostics.new }
+      Hive::Commands::Babysit::ServiceInstaller.define_singleton_method(:new) do |**|
+        PackagedSetupInstaller.new("babysitter")
+      end
       Hive::Commands::Daemon::ServiceInstaller.define_singleton_method(:new) do |**|
         PackagedSetupInstaller.new("daemon")
       end

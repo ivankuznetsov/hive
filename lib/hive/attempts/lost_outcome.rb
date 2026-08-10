@@ -1,10 +1,9 @@
 require "digest"
-require "fileutils"
 require "json"
 require "time"
 require "hive/atomic_file"
+require "hive/agent_limit"
 require "hive/attempts/dirty_state_capture"
-require "hive/markers"
 require "hive/task_resolver"
 
 module Hive
@@ -14,7 +13,8 @@ module Hive
     # cleanup/preservation progress so daemon restarts cannot repeat signals
     # or mint another successor.
     class LostOutcomeStore
-      FINAL_STATUSES = %w[manual successor_dispatched exhausted].freeze
+      FINAL_STATUSES = %w[successor_dispatched].freeze
+      SAFE_CLEANUPS = %w[absent terminated no_worker].freeze
 
       def initialize(store:)
         @store = store
@@ -37,6 +37,8 @@ module Hive
             "capture_references" => [],
             "cleanup" => nil,
             "successor_attempt_id" => nil,
+            "last_cleanup_at" => nil,
+            "last_retry_at" => nil,
             "diagnostic" => nil
           })
         end
@@ -72,15 +74,17 @@ module Hive
       end
 
       def path(attempt_id)
-        File.join(@store.outputs_root, attempt_id, "lost-outcome.json")
+        @store.output_path(attempt_id, "lost-outcome.json")
       end
 
       def persist(attempt, data)
-        output_dir = File.join(@store.outputs_root, attempt.attempt_id)
-        FileUtils.mkdir_p(output_dir, mode: 0o700)
-        File.chmod(0o700, output_dir)
-        Hive::AtomicFile.write(path(attempt.attempt_id), JSON.generate(data) + "\n", mode: 0o600)
-        File.chmod(0o600, path(attempt.attempt_id))
+        output_path = @store.output_path(
+          attempt.attempt_id,
+          "lost-outcome.json",
+          create_directory: true
+        )
+        Hive::AtomicFile.write(output_path, JSON.generate(data) + "\n", mode: 0o600)
+        File.chmod(0o600, output_path)
         data
       rescue SystemCallError, IOError => e
         raise StoreError, "lost outcome could not be persisted: #{e.message}"
@@ -91,9 +95,10 @@ module Hive
       end
     end
 
-    # Performs the one-time cleanup and observational worktree capture that
-    # must precede successor policy. Unsafe process identity is a durable
-    # manual outcome, never a best-effort signal.
+    # Performs cleanup and observational worktree capture before successor
+    # policy. Unsafe process identity remains pending: a later observation may
+    # prove the old process gone, so this error must not become a permanent
+    # durable retry state.
     class LostOutcomeProcessor
       def initialize(store:, outcome_store:, process_identity:, dirty_capture: nil,
                      task_resolver: nil, orphan_grace_sec: 2)
@@ -109,12 +114,15 @@ module Hive
         outcome = @outcome_store.ensure_for(attempt, now: now)
         return outcome if LostOutcomeStore::FINAL_STATUSES.include?(outcome["status"])
         return outcome if outcome["status"] == "ready"
+        return outcome unless cleanup_retry_due?(outcome, now: now)
 
         cleanup = cleanup_orphan(attempt)
-        unless %w[absent terminated no_worker].include?(cleanup)
+        unless LostOutcomeStore::SAFE_CLEANUPS.include?(cleanup)
+          diagnostic = "worker group identity is not safe to terminate yet; retrying"
           return @outcome_store.update(
-            attempt, now: now, status: "manual", cleanup: cleanup,
-            diagnostic: "worker group identity could not be safely terminated"
+            attempt, now: now, status: "pending", cleanup: cleanup,
+            last_cleanup_at: now.utc.iso8601(6),
+            diagnostic: diagnostic
           )
         end
 
@@ -130,18 +138,24 @@ module Hive
           }.compact,
           now: now
         )
-        ready = @outcome_store.update(
+        @outcome_store.update(
           annotated, now: now, status: "ready", cleanup: cleanup,
           task_folder: task&.folder,
-          capture_references: capture&.references || []
+          capture_references: capture&.references || [],
+          diagnostic: nil
         )
-        project_marker(task, annotated)
-        ready
       rescue CompareAndSwapFailed
         @outcome_store.fetch(attempt.attempt_id) || raise
       end
 
       private
+
+      def cleanup_retry_due?(outcome, now:)
+        last_cleanup_at = Time.parse(outcome["last_cleanup_at"].to_s)
+        Hive::AgentLimit.retry_due?(limited_at: last_cleanup_at, now: now)
+      rescue ArgumentError, TypeError
+        true
+      end
 
       def cleanup_orphan(attempt)
         return "no_worker" unless attempt.worker
@@ -158,23 +172,6 @@ module Hive
         return nil unless worktree && File.directory?(worktree)
 
         @dirty_capture.capture(attempt: attempt, worktree: worktree, now: now)
-      end
-
-      def project_marker(task, attempt)
-        return unless task
-
-        Hive::Markers.set(
-          task.state_file, :error,
-          reason: "attempt_lost",
-          attempt_id: attempt.attempt_id,
-          task_generation: attempt.task_generation,
-          checkpoint: attempt["checkpoint"]["revision"]
-        )
-      rescue SystemCallError, IOError
-        # The ready outcome and lost lease are authoritative. A later daemon
-        # tick can still dispatch the successor if this compatibility
-        # projection could not be written.
-        nil
       end
 
       def resolve_task(attempt)

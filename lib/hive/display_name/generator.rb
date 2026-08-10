@@ -2,6 +2,7 @@ require "erb"
 require "fileutils"
 require "tempfile"
 require "time"
+require "hive/agent_runtime"
 require "hive/agent/message_extractor"
 require "hive/config"
 require "hive/display_name/sanitizer"
@@ -50,30 +51,29 @@ module Hive
 
       def run_agent(profile)
         prompt = render_prompt
-        cmd = build_cmd(profile, prompt)
+        invocation = compiled_invocation(profile, prompt)
+        cmd = invocation.argv
         log_path = File.join(@task.log_dir, "display-name-#{Time.now.utc.strftime('%Y%m%dT%H%M%SZ')}.log")
         FileUtils.mkdir_p(File.dirname(log_path))
 
         r, w = IO.pipe
-        stdin_file = prompt_stdin_file(profile, prompt)
+        stdin_file = prompt_stdin_file(invocation)
         spawn_opts = { chdir: @task.project_root, pgroup: true, out: w, err: w }
         spawn_opts[:in] = stdin_file if stdin_file
         pid = Process.spawn(*cmd, **spawn_opts)
         w.close
         pgid = process_group(pid)
-        final_message = nil
-        plain_tail = +""
+        messages = Hive::Agent::MessageExtractor::Accumulator.new(
+          max_bytes: TAIL_BYTES,
+          structured_output_protocol: profile.structured_output_protocol
+        )
         reader = Thread.new do
           File.open(log_path, "a") do |log|
             r.each_line do |line|
               log.write(line)
               log.write("\n") unless line.end_with?("\n")
-              if (message = Hive::Agent::MessageExtractor.extract(line))
-                final_message = message
-              elsif Hive::Agent::MessageExtractor.parse_json_line(line).nil?
-                plain_tail << line
-                plain_tail = plain_tail.byteslice(-TAIL_BYTES, TAIL_BYTES) || plain_tail
-              end
+              json = Hive::Agent::MessageExtractor.parse_json_line(line)
+              messages.observe(json, raw_line: line)
             end
           end
         ensure
@@ -87,7 +87,8 @@ module Hive
 
         {
           exit_code: exit_code(status),
-          final_message: final_message || plain_tail.strip
+          final_message: messages.value,
+          final_message_truncated: messages.truncated?
         }
       ensure
         stdin_file&.close
@@ -96,26 +97,23 @@ module Hive
         r&.close unless r&.closed?
       end
 
-      def build_cmd(profile, prompt)
-        cmd = [ profile.bin ]
-        cmd << profile.headless_flag if profile.headless_flag
-        cmd.concat(profile.permission_flags(Hive::Config.claude_permission_mode(@cfg)))
-        cmd.concat(profile.output_format_flags)
-        cmd << (prompt_via_stdin?(profile) ? "-" : prompt)
-        cmd
-      end
-
-      def prompt_via_stdin?(profile)
-        profile.name == :codex
-      end
-
-      def prompt_stdin_file(profile, prompt)
-        return nil unless prompt_via_stdin?(profile)
+      def prompt_stdin_file(invocation)
+        return nil unless invocation.stdin_data
 
         file = Tempfile.new([ "hive-display-name-prompt-", ".txt" ])
-        file.write(prompt)
+        file.write(invocation.stdin_data)
         file.rewind
         file
+      end
+
+      def compiled_invocation(profile, prompt)
+        Hive::AgentRuntime.compile(
+          Hive::AgentRuntime::Request.new(
+            profile: profile,
+            prompt: prompt,
+            permission_mode: Hive::Config.claude_permission_mode(@cfg)
+          )
+        )
       end
 
       def wait_with_timeout(pid, pgid)

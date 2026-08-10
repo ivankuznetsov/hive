@@ -171,7 +171,7 @@ class TaskProjectionTest < Minitest::Test
     refute projection.send(:attempt_descends_from?, "attempt-a", "attempt-c")
   end
 
-  def test_implementation_identity_projection_retains_generations_and_latest_stage_launches
+  def test_implementation_identity_projection_retains_generations_and_first_stage_selection
     execute_one = event(
       event_type: "implementation_identity_captured", event_id: "identity-1",
       task_generation: 1, commit_generation: 0,
@@ -182,19 +182,55 @@ class TaskProjectionTest < Minitest::Test
       task_generation: 1, commit_generation: 0,
       payload: { "identity" => identity_payload("open_pr", "codex", "gpt-5.6-terra", 1) }
     )
+    open_pr_retry = event(
+      event_type: "implementation_stage_resolved", event_id: "open-pr-retry",
+      task_generation: 1, commit_generation: 0,
+      payload: { "identity" => identity_payload("open_pr", "codex", "gpt-5.6-drift", 1) }
+    )
     execute_two = event(
       event_type: "implementation_identity_captured", event_id: "identity-2",
       task_generation: 2, commit_generation: 0,
       payload: { "identity" => identity_payload("execute", "claude", "claude-fable-5", 2) }
     )
 
-    projection = Hive::TaskProjection.project(records: [ execute_one, open_pr_one, execute_two ])
+    generation_one = Hive::TaskProjection.project(
+      records: [ execute_one, open_pr_one, open_pr_retry ]
+    )
+    projection = Hive::TaskProjection.project(
+      records: [ execute_one, open_pr_one, open_pr_retry, execute_two ]
+    )
     identity = projection["implementation_identity"]
 
+    assert_equal "gpt-5.6-terra",
+                 generation_one["implementation_identity"].dig("stages", "open_pr", "model")
     assert_equal 2, identity.fetch("generation")
     assert_equal "claude", identity.dig("execute", "provider")
     assert_equal %w[codex claude], identity.fetch("history").map { |entry| entry["provider"] }
     assert_equal({}, identity.fetch("stages"))
+  end
+
+  def test_validated_closure_overlay_preserves_condition_and_attempt_truth
+    projection = Hive::TaskProjection.project(
+      records: [
+        condition_event(
+          "AgentHealthy", state: "satisfied", event_id: "healthy",
+          evidence: attempt_evidence(1)
+        )
+      ]
+    )
+    receipt = {
+      "schema" => "hive-task-closure",
+      "schema_version" => 1,
+      "reason" => "already_delivered",
+      "receipt_digest" => "d" * 64
+    }
+
+    overlaid = projection.with_closure(receipt)
+
+    assert_nil projection.to_h["closure"], "the replay projection must remain immutable"
+    assert_equal receipt, overlaid.to_h.fetch("closure")
+    assert_equal projection.to_h.fetch("identity"), overlaid.to_h.fetch("identity")
+    assert_equal projection.to_h.fetch("conditions"), overlaid.to_h.fetch("conditions")
   end
 
   private

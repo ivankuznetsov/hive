@@ -1,5 +1,6 @@
 require "set"
 require "hive/patrol/fingerprint"
+require "hive/patrol/validator"
 
 module Hive
   module Patrol
@@ -10,7 +11,8 @@ module Hive
       DEFAULT_FEATURE_LIMIT = 1
       SKIP_REASONS = %w[
         dismissed existing_pr similar_to_existing low_confidence low_severity
-        non_production low_alpha active_feature duplicate_in_run feature_limit
+        non_production invalid_validation low_alpha active_feature
+        duplicate_in_run feature_limit semantic_duplicate
       ].freeze
       # The corpus showed model-authored severity/confidence labels did not
       # predict whether a finding delivered. Treat them as admission gates and
@@ -81,16 +83,53 @@ module Hive
 
       def base_skip_reason(finding)
         return "non_production" unless AUTO_FIX_CATEGORIES.include?(finding.category.to_s)
-        return "dismissed" if Fingerprint.dismissed?(@dismissed, finding.fingerprint)
-        return "existing_pr" if Fingerprint.known_active?(@fingerprints, finding.fingerprint)
-        if Fingerprint.similar_known?(@fingerprints, @dismissed, finding, index: @similarity_index)
+        dismissal = @dismissed[finding.fingerprint]
+        if dismissal && history_applies?(dismissal, finding)
+          return "dismissed"
+        end
+        fingerprint = @fingerprints[finding.fingerprint]
+        if Fingerprint.known_active?(@fingerprints, finding.fingerprint) && history_applies?(fingerprint, finding)
+          return "existing_pr"
+        end
+        if Fingerprint.similar_known?(
+          @fingerprints, @dismissed, finding, index: applicable_similarity_index(finding)
+        )
           return "similar_to_existing"
         end
         return "low_confidence" unless Fingerprint.fixable_confidence?(finding, config_value("min_confidence_to_fix", "medium"))
         return "low_severity" unless FIXABLE_SEVERITIES.include?(finding.severity.to_s)
+        return "invalid_validation" unless valid_validation_key?(finding)
         return "active_feature" if active_feature?(finding)
 
         nil
+      end
+
+      def terminal_recurrence?(finding)
+        finding.lifecycle_state.to_s == "active" &&
+          finding.lifecycle_reason.to_s == "recurrence_after_terminal"
+      end
+
+      def history_applies?(entry, finding)
+        return true unless terminal_recurrence?(finding)
+
+        target_sha = entry.is_a?(Hash) ? (entry["target_sha"] || entry[:target_sha]).to_s : ""
+        !target_sha.empty? && target_sha.casecmp?(finding.target_sha.to_s)
+      end
+
+      def applicable_similarity_index(finding)
+        category = finding.category.to_s
+        entries = @similarity_index.fetch(category, []).select do |entry|
+          history_applies?(entry, finding)
+        end
+        { category => entries }
+      end
+
+      def valid_validation_key?(finding)
+        commands = @cfg["commands"] || @cfg[:commands] || {}
+        configured = Validator.configured_names(commands)
+        return true if configured.empty?
+
+        configured.include?(finding.validation_key.to_s)
       end
 
       def select_ranked(scored, skipped)

@@ -150,6 +150,177 @@ class ImplementationIdentityResolverTest < Minitest::Test
     assert_equal %w[--model claude-fable-5 --effort medium], selection.native_arguments
   end
 
+  def test_execute_composes_exact_model_and_coarse_effort_into_frozen_routing
+    cfg = config(
+      execute: {
+        "agent" => "codex", "model" => "gpt-5.6-terra", "effort" => "low"
+      },
+      models: {
+        "execute" => { "effort" => "xhigh" },
+        "execute_implementation" => { "model" => "gpt-5.6-sol" }
+      }
+    )
+
+    selection = resolver(cfg).resolve_execute(generation: 2, attempt_id: "exec-routed")
+    arguments = selection.routing_arguments(Hive::AgentProfiles.lookup(:codex))
+
+    assert_equal "codex", selection.provider
+    assert_equal "gpt-5.6-sol", selection.model
+    assert_equal "xhigh", selection.requested_effort
+    assert_empty selection.native_arguments
+    assert_equal [ "--model", "gpt-5.6-sol", "-c", "model_reasoning_effort=xhigh" ],
+                 arguments.global_arguments
+    assert_empty arguments.subcommand_arguments
+    assert_equal "execute_implementation", selection.routing.fetch("stage")
+    assert_equal(
+      { "kind" => "exact", "key" => "execute_implementation" },
+      selection.routing.dig("provenance", "model")
+    )
+    assert_equal(
+      { "kind" => "coarse", "key" => "execute" },
+      selection.routing.dig("provenance", "effort")
+    )
+  end
+
+  def test_downstream_composes_public_routes_over_existing_policy_fallbacks
+    cfg = config(
+      models: {
+        "open_pr" => { "effort" => "xhigh" },
+        "review" => { "effort" => "low" },
+        "review_fix" => { "model" => "gpt-5.6-fix" },
+        "review_ci" => { "model" => "gpt-5.6-ci" }
+      }
+    )
+    execute = resolver(config).resolve_execute(generation: 3, attempt_id: "exec")
+    subject = resolver(cfg)
+
+    open_pr = subject.resolve_stage("open_pr", execute_identity: execute)
+    fix = subject.resolve_stage("review.fix", execute_identity: execute)
+    ci = subject.resolve_stage("review.ci", execute_identity: execute)
+
+    assert_equal [ "codex", "gpt-5.6-terra", "xhigh" ],
+                 [ open_pr.provider, open_pr.model, open_pr.requested_effort ]
+    assert_equal [ "codex", "gpt-5.6-fix", "low" ],
+                 [ fix.provider, fix.model, fix.requested_effort ]
+    assert_equal [ "codex", "gpt-5.6-ci", "low" ],
+                 [ ci.provider, ci.model, ci.requested_effort ]
+    assert_equal "open_pr", open_pr.routing.fetch("stage")
+    assert_equal "review_fix", fix.routing.fetch("stage")
+    assert_equal "review_ci", ci.routing.fetch("stage")
+    assert_equal "current", open_pr.routing.dig("provenance", "model", "kind")
+    assert_equal "coarse", fix.routing.dig("provenance", "effort", "kind")
+  end
+
+  def test_routed_model_sentinel_is_concretized_before_durable_capture
+    with_tmp_dir do |root|
+      FileUtils.mkdir_p(File.join(root, ".codex"))
+      File.write(
+        File.join(root, ".codex", "config.toml"),
+        "model = \"gpt-5.6-native\"\n"
+      )
+      cfg = config(
+        execute: { "agent" => "codex", "model" => "gpt-5.6-sol" },
+        project_root: root,
+        models: {
+          "execute_implementation" => { "model" => "inherit" }
+        }
+      )
+
+      selection = resolver(cfg).resolve_execute(generation: 4, attempt_id: "exec")
+      arguments = selection.routing_arguments(Hive::AgentProfiles.lookup(:codex))
+
+      assert_equal "gpt-5.6-native", selection.model
+      assert_equal "gpt-5.6-native", selection.routing.fetch("model")
+      assert_equal [ "--model", "gpt-5.6-native" ], arguments.global_arguments
+      assert_equal "exact", selection.routing.dig("provenance", "model", "kind")
+    end
+  end
+
+  def test_routed_effort_is_validated_by_selected_provider
+    cfg = config(
+      execute: { "agent" => "pi", "model" => "provider/model-v1" },
+      models: {
+        "execute_implementation" => { "effort" => "high" }
+      }
+    )
+
+    error = assert_raises(Hive::ConfigError) do
+      resolver(cfg).resolve_execute(generation: 1, attempt_id: "pi-exec")
+    end
+
+    assert_match(/models\.execute_implementation\.effort/, error.message)
+    assert_match(/profile :pi/, error.message)
+  end
+
+  def test_grok_routed_effort_is_persisted_and_rendered_natively
+    cfg = config(
+      execute: { "agent" => "grok", "model" => "grok-code-fast-1" },
+      models: {
+        "execute_implementation" => { "effort" => "high" }
+      }
+    )
+
+    selection = resolver(cfg).resolve_execute(generation: 1, attempt_id: "grok-exec")
+    arguments = selection.routing_arguments(Hive::AgentProfiles.lookup(:grok))
+
+    assert_equal "high", selection.requested_effort
+    assert_equal "high", selection.routing.fetch("effort")
+    assert_equal [ "--model", "grok-code-fast-1", "--reasoning-effort", "high" ],
+                 arguments.subcommand_arguments
+  end
+
+  def test_exact_downstream_model_does_not_resolve_a_shadowed_provider_default
+    cfg = config(
+      execute: { "agent" => "pi", "model" => "provider/execute-model" },
+      models: {
+        "open_pr" => { "model" => "provider/routed-model" }
+      }
+    )
+    execute = resolver(cfg).resolve_execute(generation: 1, attempt_id: "pi-exec")
+
+    selection = resolver(cfg).resolve_stage("open_pr", execute_identity: execute)
+    arguments = selection.routing_arguments(Hive::AgentProfiles.lookup(:pi))
+
+    assert_equal "provider/routed-model", selection.model
+    assert selection.model_pinned
+    assert_equal [ "--model", "provider/routed-model" ], arguments.subcommand_arguments
+  end
+
+  def test_exact_execute_model_does_not_resolve_a_shadowed_provider_default
+    cfg = config(
+      execute: { "agent" => "pi" },
+      models: {
+        "execute_implementation" => { "model" => "provider/routed-model" }
+      }
+    )
+
+    selection = resolver(cfg).resolve_execute(generation: 1, attempt_id: "pi-exec")
+    arguments = selection.routing_arguments(Hive::AgentProfiles.lookup(:pi))
+
+    assert_equal "provider/routed-model", selection.model
+    assert selection.model_pinned
+    assert_equal [ "--model", "provider/routed-model" ], arguments.subcommand_arguments
+  end
+
+  def test_downstream_route_preserves_explicit_provider_selection
+    cfg = config(
+      review_fix: { "agent" => "claude" },
+      models: {
+        "review_fix" => { "model" => "claude-opus-4-6", "effort" => "high" }
+      }
+    )
+    execute = resolver(config).resolve_execute(generation: 1, attempt_id: "exec")
+
+    selection = resolver(cfg).resolve_stage("review.fix", execute_identity: execute)
+    arguments = selection.routing_arguments(Hive::AgentProfiles.lookup(:claude))
+
+    assert_equal "claude", selection.provider
+    assert_equal "claude-opus-4-6", selection.model
+    assert_equal %w[--model claude-opus-4-6 --effort high],
+                 arguments.subcommand_arguments
+    assert_empty arguments.global_arguments
+  end
+
   private
 
   def resolver(cfg)
@@ -157,19 +328,22 @@ class ImplementationIdentityResolverTest < Minitest::Test
   end
 
   def config(execute: { "agent" => "codex", "model" => "gpt-5.6-sol" },
-             open_pr: {}, review_fix: {}, review_ci: {}, project_root: nil)
+             open_pr: {}, review_fix: {}, review_ci: {}, project_root: nil,
+             models: nil)
     fields = {
       "execute" => execute.dup.freeze,
       "open_pr" => open_pr.dup.freeze,
       "review.fix" => review_fix.dup.freeze,
       "review.ci" => review_ci.dup.freeze
     }.freeze
-    {
+    value = {
       "project_root" => project_root,
       "execute" => execute.dup,
       "open_pr" => open_pr.dup,
       "review" => { "fix" => review_fix.dup, "ci" => review_ci.dup },
       Hive::Config::IMPLEMENTATION_IDENTITY_PROVENANCE_KEY => fields
     }
+    value["models"] = models if models
+    value
   end
 end

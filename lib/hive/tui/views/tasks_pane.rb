@@ -7,6 +7,7 @@ require "hive/tui/styles"
 require "hive/tui/text"
 require "hive/tui/views/format"
 require "hive/tui/views/hyperlink"
+require "hive/terminal_outcome"
 
 module Hive
   module Tui
@@ -111,6 +112,13 @@ module Hive
           end
 
           visible = visible_snapshot(model)
+          hidden_count = model.snapshot.hidden_archived_task_count(scope: model.scope)
+          if hidden_count.positive?
+            lines << Styles::HINT.render(
+              truncate(hidden_archived_summary(hidden_count), inner_width)
+            )
+            lines << ""
+          end
           if visible.nil? || visible.projects.all? { |p| p.rows.empty? }
             lines << Styles::HINT.render(EMPTY_PLACEHOLDER)
             return fit_lines(lines, inner_height).join("\n")
@@ -156,6 +164,11 @@ module Hive
           return nil if snap.nil?
 
           snap.visible_projection(scope: model.scope, filter: model.filter)
+        end
+
+        def hidden_archived_summary(count)
+          noun = count == 1 ? "task" : "tasks"
+          "… and #{count} older archived #{noun} (hive archive to view)"
         end
 
         # Below `inner_width = ICON+ID+PR+STAGE+STATUS+AGE+SEPARATORS+NAME_MIN_WIDTH`
@@ -323,6 +336,10 @@ module Hive
         def error_status(row)
           attrs = row.attrs || {}
           return Hive::AgentLimit.held_label(attrs) if Hive::AgentLimit.held?(row.marker, attrs)
+          if Hive::TerminalOutcome.blocked_error?(attrs)
+            outcome = Hive::Tui::Text.sanitize(attrs["outcome"])
+            return outcome.empty? ? "Blocked" : "Blocked (#{outcome})"
+          end
 
           exit_code = Hive::Tui::Text.sanitize(attrs["exit_code"])
           reason = Hive::Tui::Text.sanitize(attrs["reason"])

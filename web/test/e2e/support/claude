@@ -18,13 +18,13 @@ case "$cwd" in
     # agent runs — "round 1" means no questions exist yet, not no file.
     if ! grep -q '^### Q1' brainstorm.md 2>/dev/null; then
       # Round 1: ask the operator something and wait.
-      printf '### Q1. Ship the sample feature?\n\n### A1.\n\n<!-- WAITING -->\n' > brainstorm.md
+      printf '## Round 1\n\n### Q1. Ship the sample feature?\n\n### A1.\n\n<!-- WAITING -->\n' > brainstorm.md
     else
       # Resume: complete the round only when A1 carries a real answer.
       answered="$(awk '/^### A1\./{f=1;next} /^###|^<!--/{f=0} f && NF {print "yes"; exit}' brainstorm.md)"
       if [[ "$answered" == "yes" ]]; then
         grep -v '<!--' brainstorm.md > brainstorm.md.tmp
-        printf '\n<!-- COMPLETE -->\n' >> brainstorm.md.tmp
+        printf '\n## Requirements\n\nShip the sample feature approved by the operator.\n\n<!-- COMPLETE -->\n' >> brainstorm.md.tmp
         mv brainstorm.md.tmp brainstorm.md
       fi
     fi

@@ -3,12 +3,18 @@
 ## Choose the status surface
 
 - Use `hive status` for a concise human snapshot.
-- Use `hive status --operational --json` for agent decisions. It emits `hive-operational-status.v1`.
-- Use `hive status --json` only when a consumer needs the compatibility `hive-status.v6` full graph.
+- Use `hive status --operational --json` for agent decisions. It emits `hive-operational-status.v3`.
+- Use `hive status --json` only when a consumer needs the complete `hive-status.v7` task graph.
 - Use `hive status --full` for the detailed human table.
 - Use `hive daemon status --json` for daemon process health. Do not substitute daemon health for task or scheduler truth.
 
 Operational status is a projection over one full task graph. A current daemon observation may add scheduler ownership, capacity, queue, provider-hold, cooldown, and recovery facts. Only a complete, unexpired observation from the live daemon generation is current. Missing, stale, invalid, or mismatched scheduler evidence lowers completeness and must not become a confident blocker claim.
+
+Always inspect the required `attempt_storage` cell. If it is `degraded`, report
+its `degraded_reason` and last error operation as a Hive-owned migration or
+maintenance fault; do not call the pipeline healthy merely because task rows
+are advancing. `unknown` means the bounded health cell has not yet established
+a successful migration or maintenance result.
 
 ## Report a useful snapshot
 

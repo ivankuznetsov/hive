@@ -16,8 +16,11 @@ module Hive
     module Schemas
       VERSIONS = {
         "hive-e2e-error"        => 1,
+        "hive-e2e-version"      => 1,
         "hive-e2e-scenarios"    => 1,
         "hive-e2e-clean"        => 1,
+        "hive-e2e-coverage"     => 1,
+        "hive-e2e-selection"    => 1,
         "hive-e2e-report"       => 1,
         "hive-e2e-env-snapshot" => 1,
         "hive-e2e-manifest"     => 1

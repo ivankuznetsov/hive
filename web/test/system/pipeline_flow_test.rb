@@ -9,7 +9,6 @@ class PipelineFlowTest < ApplicationSystemTestCase
   setup do
     @project = create_hive_project!
     configure_owner!
-    StatusBroadcaster.start!
   end
 
   teardown do
@@ -20,8 +19,8 @@ class PipelineFlowTest < ApplicationSystemTestCase
 
   def compose_idea(text)
     fill_in "New idea", with: text
-    # Explicit project choice: the sandbox accumulates projects across tests
-    # in one process, so the single-project preselect cannot be relied on.
+    # Explicit project choice: individual examples may register multiple
+    # projects, so the single-project preselect cannot always be relied on.
     find(".composer select[name='project']").find("option[value='#{@project}']").select_option
   end
 
@@ -124,6 +123,7 @@ class PipelineFlowTest < ApplicationSystemTestCase
     # Live update: a task created OUTSIDE the browser (CLI path) must appear
     # in the open grid via Turbo Streams — no reload, no polling JS.
     row_count_before = all(".task-row").size
+    wait_for_live_status
     create_task!(@project, "Streamed from the CLI")
     assert_selector ".task-row", text: /streamed from the cli/i, wait: 10
     assert_operator all(".task-row").size, :>, row_count_before,
@@ -135,6 +135,7 @@ class PipelineFlowTest < ApplicationSystemTestCase
     assert_selector ".task-row a[href='#{task_href}']", text: "Browser test idea", wait: 5
     visit task_href
     assert_selector "h1", text: "Browser test idea", wait: 5
+    wait_for_live_status
     # The state machine drives the buttons: an unmarked stage offers no
     # doomed Approve as a headline action — the Force override lives in the
     # Advanced section at the bottom, confirm-gated.
@@ -164,6 +165,54 @@ class PipelineFlowTest < ApplicationSystemTestCase
     assert_equal 1, page.evaluate_script(
       "document.querySelector('[data-composer-target=files]').files.length"
     ), "a 422 must leave the upload transport retryable"
+  end
+
+  test "composer bounds a batch to the server image limits" do
+    sign_in!
+    compose_idea "Bound this upload batch"
+    composer = find("#composer", visible: :all)
+    assert_equal IdeasController::MAX_IMAGES.to_s, composer["data-composer-max-files-value"]
+    assert_equal IdeasController::MAX_IMAGE_BYTES.to_s, composer["data-composer-max-file-bytes-value"]
+
+    pick_composer_files(Array.new(9, 1) + [ IdeasController::MAX_IMAGE_BYTES + 1 ])
+
+    assert_selector ".chip", count: IdeasController::MAX_IMAGES
+    assert_no_selector ".chip img", wait: 0
+    assert_no_selector ".chip", text: "image9", wait: 0
+    assert_selector ".composer-feedback[role='status'][aria-atomic='true']:not([hidden])"
+    assert_text "1 image exceeded the 10 MB limit"
+    assert_text "Only 8 images can be attached; 1 image not added"
+    assert_equal IdeasController::MAX_IMAGES, page.evaluate_script(
+      "document.querySelector('[data-composer-target=files]').files.length"
+    )
+    assert_equal (1..IdeasController::MAX_IMAGES).map { |index| "image#{index}.png" },
+                 page.evaluate_script(
+                   "Array.from(document.querySelector('[data-composer-target=files]').files, file => file.name)"
+                 )
+    assert_equal (1..IdeasController::MAX_IMAGES).map { |index| "[image#{index}]" },
+                 find("textarea[aria-label='New idea']").value.scan(/\[image\d+\]/)
+
+    execute_script(<<~JS)
+      const controller = window.Stimulus.getControllerForElementAndIdentifier(
+        document.querySelector("#composer"), "composer"
+      )
+      window.testBatchInspections = 0
+      const enormousBatch = new Proxy({ length: 1_000_000 }, {
+        get(target, property) {
+          if (typeof property === "string" && /^\d+$/.test(property)) {
+            window.testBatchInspections += 1
+            return new File(["x"], `${property}.png`, { type: "image/png" })
+          }
+          return Reflect.get(target, property)
+        }
+      })
+      controller.addFiles(enormousBatch)
+    JS
+    assert_operator page.evaluate_script("window.testBatchInspections"), :<=, 16
+    assert_text "Additional files were not inspected"
+    assert_equal IdeasController::MAX_IMAGES, page.evaluate_script(
+      "document.querySelector('[data-composer-target=files]').files.length"
+    )
   end
 
   test "a successful response clears the permanent composer before Turbo renders" do
@@ -203,10 +252,17 @@ class PipelineFlowTest < ApplicationSystemTestCase
       form.remove()
       requestAnimationFrame(() => {
         marker.after(form)
-        requestAnimationFrame(() => { form.dataset.testReconnected = "true" })
+        requestAnimationFrame(() => {
+          form.dataset.testReconnected = "true"
+          setTimeout(() => { document.body.dataset.attachmentCleanupSettled = "true" }, 150)
+        })
       })
     JS
     assert_selector "#composer[data-test-reconnected='true']", wait: 5
+    assert_selector "body[data-attachment-cleanup-settled='true']", visible: :all, wait: 5
+    assert_equal 1, page.evaluate_script(
+      "document.querySelector('[data-composer-target=files]').files.length"
+    ), "a Turbo-permanent move must cancel deferred attachment cleanup"
 
     attach_composer_image fixture_image
 
@@ -226,6 +282,27 @@ class PipelineFlowTest < ApplicationSystemTestCase
     assert folder.join("assets", "image2.png").file?
   end
 
+  test "composer releases staged files after a true disconnect" do
+    sign_in!
+    compose_idea "Release this staged file"
+    attach_composer_image fixture_image
+    assert_selector ".chip", text: "image1", count: 1
+
+    execute_script(<<~JS)
+      const controller = window.Stimulus.getControllerForElementAndIdentifier(
+        document.querySelector("#composer"), "composer"
+      )
+      document.querySelector("#composer").remove()
+      setTimeout(() => {
+        document.body.dataset.detachedAttachmentCount = String(controller.attachments.size)
+        document.body.dataset.detachedFileCount = String(controller.filesTarget.files.length)
+      }, 150)
+    JS
+
+    assert_selector "body[data-detached-attachment-count='0'][data-detached-file-count='0']",
+                    visible: :all, wait: 5
+  end
+
   test "an ownerless Hive web instance offers the claim flow, not config-editing homework" do
     # No web config at all: the shipped client_id default makes the instance
     # immediately claimable — the first sign-in becomes the owner.
@@ -241,7 +318,8 @@ class PipelineFlowTest < ApplicationSystemTestCase
   end
 
   test "the project rail filters the grid and survives live updates" do
-    filtered = create_hive_project!("rail-filter-app")
+    # A JSON-looking name proves Stimulus does not type-coerce the identifier.
+    filtered = create_hive_project!("123")
     active = create_hive_project!("rail-active-app")
     create_task!(filtered, "Filter task one")
     create_task!(active, "Active task one")
@@ -249,6 +327,26 @@ class PipelineFlowTest < ApplicationSystemTestCase
     visit grid_path
     assert_selector ".project-section[data-project-name='#{filtered}']"
     assert_selector ".project-section[data-project-name='#{active}']"
+
+    fill_in "New idea", with: "Filter navigation draft"
+    attach_composer_image fixture_image
+    find(".composer select[name='project']").find("option[value='#{active}']").select_option
+
+    # Opening a project in another tab must not retarget this tab's unfinished
+    # composer. Prevent the synthetic link's default action after Stimulus sees
+    # the real modified click.
+    execute_script(<<~JS, filtered)
+      const name = arguments[0]
+      const link = Array.from(document.querySelectorAll(".project-nav a:not(.project-nav-add)"))
+        .find((candidate) => candidate.dataset.projectFilterNameParam === name)
+      document.addEventListener("click", (event) => event.preventDefault(), { once: true })
+      link.dispatchEvent(new MouseEvent("click", {
+        bubbles: true, cancelable: true, button: 0, ctrlKey: true
+      }))
+    JS
+    assert_current_path grid_path
+    assert_equal active, composer_project,
+                 "a modified link click must not retarget the current tab's composer"
 
     click_project_filter(filtered)
     assert_selector ".project-section[data-project-name='#{filtered}']"
@@ -258,17 +356,25 @@ class PipelineFlowTest < ApplicationSystemTestCase
                     "the choice must reach the URL so reloads land filtered"
     assert_equal filtered, composer_project,
                  "filtering is a context switch — new ideas should land in that project"
+    assert_equal "Filter navigation draft [image1]", find("textarea[aria-label='New idea']").value
+    assert_selector ".chip", text: "image1", count: 1
+    assert_equal [ "image1.png" ], page.evaluate_script(
+      "Array.from(document.querySelector('[data-composer-target=files]').files, file => file.name)"
+    ), "the real staged FileList must survive the Turbo project navigation"
 
-    # The broadcast morphs the page, so the filter must re-apply itself to the
-    # refreshed project sections.
+    # The broadcast refreshes the current filtered URL, so unrelated project
+    # markup never enters the document.
+    wait_for_live_status
     create_task!(active, "Active task two")
-    assert_selector ".project-section[data-project-name='#{active}'][hidden]",
-                    visible: :hidden, wait: 10
-    assert_selector ".task-row", text: "Active task two", visible: :hidden, wait: 10
+    assert_selector ".project-nav a[data-project-filter-name-param='#{active}'] ~ " \
+                    "a[data-project-filter-name-param='#{filtered}']",
+                    wait: 10
+    assert_no_selector ".project-section[data-project-name='#{active}']", visible: :all, wait: 5
+    assert_no_selector ".task-row", text: "Active task two", visible: :all, wait: 5
     assert_selector ".task-row", text: "Filter task one",
                     count: 1
     rail_projects = page.evaluate_script(
-      "Array.from(document.querySelectorAll('.project-nav button'), node => node.textContent.trim())"
+      "Array.from(document.querySelectorAll('.project-nav a:not(.project-nav-add)'), node => node.textContent.trim())"
     )
     assert_operator rail_projects.index(active), :<, rail_projects.index(filtered),
                     "the rail must adopt the live activity order"
@@ -286,6 +392,13 @@ class PipelineFlowTest < ApplicationSystemTestCase
     assert_selector ".task-row", text: "Active task two"
     assert_equal filtered, composer_project,
                  "widening the view must not discard the composer's project choice"
+
+    submit_idea
+    assert_selector ".flash-notice", text: "Idea added", wait: 5
+    folder = stage_dir(filtered, "1-inbox").children
+                                            .find { |child| child.basename.to_s.start_with?("filter-navigation-draft") }
+    assert folder&.join("assets", "image1.png")&.file?,
+           "the attachment preserved across filtering must remain submittable"
 
     click_link "+ Add project"
     assert_current_path "/repos"
@@ -313,12 +426,44 @@ class PipelineFlowTest < ApplicationSystemTestCase
                     "the dead filter must not survive in the URL"
   end
 
+  test "browser history keeps a filtered page and composer project aligned" do
+    first = create_hive_project!("history-first-app")
+    second = create_hive_project!("history-second-app")
+    create_task!(first, "First history task")
+    create_task!(second, "Second history task")
+    sign_in!
+    visit grid_path
+
+    click_project_filter(first)
+    assert_selector ".project-nav a.active[data-project-filter-name-param='#{first}']"
+    assert_no_selector ".project-section[data-project-name='#{second}']", visible: :all
+    assert_equal first, composer_project
+
+    click_project_filter(second)
+    assert_selector ".project-nav a.active[data-project-filter-name-param='#{second}']"
+    assert_no_selector ".project-section[data-project-name='#{first}']", visible: :all
+    assert_equal second, composer_project
+
+    page.go_back
+    assert_selector ".project-nav a.active[data-project-filter-name-param='#{first}']"
+    assert_no_selector ".project-section[data-project-name='#{second}']", visible: :all
+    assert_equal first, composer_project,
+                 "Back must not leave the permanent composer targeting the later project"
+
+    page.go_forward
+    assert_selector ".project-nav a.active[data-project-filter-name-param='#{second}']"
+    assert_no_selector ".project-section[data-project-name='#{first}']", visible: :all
+    assert_equal second, composer_project,
+                 "Forward must restore the filtered project's submission target"
+  end
+
   test "grid updates preserve scroll position and composer state" do
     # Enough rows to overflow the viewport so window scroll is meaningful.
     30.times { |n| create_task!(@project, "Filler idea number #{n}") }
     sign_in!
     visit grid_path
     assert_selector ".task-row", text: "Filler idea number 29", wait: 10
+    wait_for_live_status
     fill_in "New idea", with: "half-typed thought"
 
     # Window scroll is unobservable through user-facing APIs — the sanctioned
@@ -350,6 +495,36 @@ class PipelineFlowTest < ApplicationSystemTestCase
     # The controller stamps data-following once it pins — the explicit wait
     # for "Stimulus has booted and taken over", instead of racing it.
     assert_selector "pre[data-tail-follow][data-following]", wait: 5
+
+    # A slow in-flight frame request owns the next render. Timer ticks remain
+    # observable, but must not restart/cancel that navigation until Turbo
+    # clears its busy state.
+    execute_script(<<~JS)
+      const frame = document.querySelector("#task-log")
+      document.body.dataset.busyPollRequests = "0"
+      document.addEventListener("turbo:before-fetch-request", (event) => {
+        if (event.target !== frame) return
+
+        const count = Number(document.body.dataset.busyPollRequests) + 1
+        document.body.dataset.busyPollRequests = String(count)
+        document.body.dataset.busyPollResumed = "true"
+      })
+      frame.addEventListener("turbo:frame-load", () => {
+        document.body.dataset.busyPollLoaded = "true"
+      }, { once: true })
+      frame.setAttribute("busy", "")
+      frame.setAttribute("aria-busy", "true")
+    JS
+    busy_ticks = page.evaluate_script("Number(document.querySelector('#task-log').dataset.pollTicks || 0)")
+    assert_selector "#task-log[data-poll-ticks='#{busy_ticks + 2}']", wait: 10
+    assert_selector "body[data-busy-poll-requests='0']", visible: :all
+    execute_script(<<~JS)
+      const frame = document.querySelector("#task-log")
+      frame.removeAttribute("busy")
+      frame.removeAttribute("aria-busy")
+    JS
+    assert_selector "body[data-busy-poll-resumed='true']", visible: :all, wait: 5
+    assert_selector "body[data-busy-poll-loaded='true']", visible: :all, wait: 5
 
     # Scroll geometry is unobservable through user-facing APIs, and
     # capybara-playwright cannot wheel-scroll an inner pane — the sanctioned
@@ -396,6 +571,7 @@ class PipelineFlowTest < ApplicationSystemTestCase
     sign_in!
     visit "/tasks/#{@project}/#{slug}"
     second = find("details[data-artifact-name='brainstorm.md']", wait: 5)
+    wait_for_live_status
     refute second[:open], "only the first artifact starts open"
     second.find("summary").click
     assert second[:open], "clicking the summary must expand the artifact"
@@ -452,6 +628,7 @@ class PipelineFlowTest < ApplicationSystemTestCase
     sign_in!
     visit "/tasks/#{@project}/#{folder.basename}"
     assert_selector "form[id='qa-form-1']", wait: 5
+    wait_for_live_status
 
     # The agent answers Q1 and asks Q2 — the open set changes [1] → [2].
     folder.join("brainstorm.md").write(
@@ -474,6 +651,7 @@ class PipelineFlowTest < ApplicationSystemTestCase
     visit "/tasks/#{@project}/#{folder.basename}"
 
     field = find("textarea[name='answers[1]']", wait: 5)
+    wait_for_live_status
     field.fill_in with: "typing slowly"
     # Change the task's OWN visible content, then force a broadcast → morph.
     # Waiting for the updated question text is the sync point proving the
@@ -518,19 +696,19 @@ class PipelineFlowTest < ApplicationSystemTestCase
 
   private
 
-  # StatusBroadcaster replaces the project rail and composer select while this
-  # test is using them. Query and click/read in one JavaScript turn so Turbo
-  # cannot detach a Capybara node between lookup and Playwright's action.
+  # Turbo refreshes the project rail and composer select while this test is
+  # using them. Query and click in one JavaScript turn so a refresh cannot
+  # detach a Capybara node between lookup and Playwright's action.
   def click_project_filter(name, timeout: 5)
     target = name.to_s.to_json
     deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
     loop do
       clicked = page.evaluate_script(<<~JS)
         (() => {
-          const button = Array.from(document.querySelectorAll(".project-nav button"))
+          const link = Array.from(document.querySelectorAll(".project-nav a:not(.project-nav-add)"))
             .find((node) => node.dataset.projectFilterNameParam === #{target})
-          if (!button) return false
-          button.click()
+          if (!link) return false
+          link.click()
           return true
         })()
       JS
@@ -539,6 +717,19 @@ class PipelineFlowTest < ApplicationSystemTestCase
 
       sleep 0.05
     end
+  end
+
+  def pick_composer_files(sizes)
+    execute_script(<<~JS, sizes)
+      const transfer = new DataTransfer()
+      arguments[0].forEach((size, index) => {
+        const bytes = new Uint8Array(size)
+        transfer.items.add(new File([bytes], `upload-${index + 1}.png`, { type: "image/png" }))
+      })
+      const picker = document.querySelector("[data-composer-target=picker]")
+      picker.files = transfer.files
+      picker.dispatchEvent(new Event("change", { bubbles: true }))
+    JS
   end
 
   def composer_project

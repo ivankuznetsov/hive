@@ -4,6 +4,7 @@ require "tempfile"
 require "hive/gh"
 require "hive/reviewers"
 require "hive/secret_patterns"
+require "hive/worktree"
 
 module Hive
   module Stages
@@ -23,11 +24,15 @@ module Hive
           # report". `publish_escalations` already has the same guard.
           return :no_findings unless file_body =~ /^\s*-\s+\[[ xX]\]\s+/
 
-          pr_url = Hive::Gh.pr_frontmatter(File.join(task.folder, "pr.md"))["pr_url"].to_s
-          if pr_url.empty?
-            warn "hive: review GitHub publish skipped; no pr_url in #{File.join(task.folder, 'pr.md')}"
+          pr_path = File.join(task.folder, "pr.md")
+          pr_frontmatter = Hive::Gh.pr_frontmatter(pr_path)
+          if pr_frontmatter["pr_url"].to_s.empty?
+            warn "hive: review GitHub publish skipped; no pr_url in #{pr_path}"
             return :missing_pr
           end
+
+          pr_url = validated_pr_url(task, cfg) { [ pr_path, pr_frontmatter ] }
+          return :invalid_pr unless pr_url
 
           header = "### Reviewer: #{reviewer_name} - Pass #{format('%02d', pass)}"
           body = "#{header}\n\n#{file_body}"
@@ -72,6 +77,66 @@ module Hive
         def attempts(cfg)
           value = cfg.dig("review", "github_publish", "max_attempts").to_i
           value.positive? ? value : 2
+        end
+
+        # Reviewer output is local authority; publishing is optional remote
+        # projection. Bind the target to the task repository and a fresh,
+        # repository-scoped PR observation before even reading comments.
+        # Agent-authored or subsequently tampered pr.md URLs therefore remain
+        # inert instead of becoming `gh pr view/comment <arbitrary-url>`.
+        def validated_pr_url(task, cfg)
+          path, frontmatter = if block_given?
+            yield
+          else
+            path = File.join(task.folder, "pr.md")
+            [ path, Hive::Gh.pr_frontmatter(path) ]
+          end
+          parsed = Hive::Gh.parse_pull_request_url(frontmatter["pr_url"])
+          unless parsed
+            warn "hive: review GitHub publish skipped; pr_url is missing or invalid in #{path}"
+            return nil
+          end
+
+          root = Hive::Worktree.canonical_root(task.project_root)
+          pointer = Hive::Worktree.read_owned_pointer(
+            task.folder,
+            project_root: task.project_root,
+            slug: task.slug,
+            expected_root: root
+          )
+          worktree_path = pointer.fetch("path")
+          branch = pointer.fetch("branch")
+          persisted_head = frontmatter["head_oid"].to_s.downcase
+          unless persisted_head.match?(/\A[a-f0-9]{40,64}\z/)
+            warn "hive: review GitHub publish skipped; pr.md has no exact controller head identity"
+            return nil
+          end
+
+          identity = Hive::Gh.repository_identity(worktree_path, cfg: cfg)
+          unless parsed.fetch("host") == identity.fetch("host").downcase &&
+                 parsed.fetch("repository") == identity.fetch("repository").downcase
+            warn "hive: review GitHub publish skipped; pr_url is outside the task repository"
+            return nil
+          end
+
+          exact_match = Hive::Gh.lookup_prs_for_branch(
+            worktree_path, branch, cfg: cfg
+          ).one? do |candidate|
+            candidate["state"].to_s.upcase == "OPEN" &&
+              candidate["headRefName"].to_s == branch &&
+              candidate["headRefOid"].to_s.downcase == persisted_head &&
+              candidate["number"].to_i == parsed.fetch("number") &&
+              Hive::Gh.parse_pull_request_url(candidate["url"]) == parsed
+          end
+          unless exact_match
+            warn "hive: review GitHub publish skipped; pull-request identity is stale or mismatched"
+            return nil
+          end
+
+          parsed.fetch("url")
+        rescue Hive::GhError, Hive::WorktreeError, SystemCallError, IOError => e
+          warn "hive: review GitHub publish skipped; pull-request identity could not be proven (#{e.class}: #{e.message})"
+          nil
         end
 
         # Per-comment line-anchored match, NOT a substring scan over

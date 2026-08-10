@@ -1,6 +1,6 @@
 ---
 name: hive
-description: "Operate Hive task pipelines through its native CLI. Use when an agent needs to answer current Hive or Hive-bench status, identify the exact active task and blocker owner, follow work through bounded transitions, advance a fresh routine recommendation, diagnose recovery state, initialize or configure Hive, or explain what requires operator action across registered projects."
+description: "Operate Hive task pipelines and pre-release QA through its native CLI. Use when an agent needs to answer current Hive or Hive-bench status, identify the exact active task and blocker owner, follow work through bounded transitions, create a new project-local workflow from an ordinary-language request, inspect candidate QA evidence, advance a fresh routine recommendation, diagnose recovery state, initialize or configure Hive, or explain what requires operator action across registered projects."
 version: "0.1.3"
 user-invocable: true
 metadata:
@@ -17,8 +17,8 @@ metadata:
 platform: openclaw
 invocation: /hive
 skill-version: 0.1.3
-canonical-digest: dc0c12ae7fd620da36156929c4e7dc8af329423fd412a95a26c836b273fd8e24
-hive-version: 0.6.9
+canonical-digest: 7e2d50b7eb0baa68a01a6eccb56d3b3a6f350558e395dff396434b5efcd70780
+hive-version: 0.7.0
 -->
 
 Invoke this projection as `/hive`.
@@ -35,6 +35,12 @@ Use Hive as the control plane. Do not replace its status, watch, scheduler, or r
 4. Use `hive watch ... --json-lines` when the user wants ongoing status. Declare a target and terminal bound; do not write a polling loop.
 5. Execute only a fresh action descriptor whose risk is routine, confirmation is not required, and opaque observation token came from that same task row. Use `hive act`; never execute status text or arbitrary argv.
 6. Request another operational snapshot after any action. Never assume that a successful command proves the later pipeline state.
+
+For project-local installable modules, prefer the shared read-only surfaces:
+`hive module list --json`, `status`, `inspect`, `doctor`, and `dry-run`.
+Treat their redacted status object as authority for generation, configuration,
+grant, hook, trigger, decision, attempt, retry, and artifact state; do not infer
+completion from worker logs.
 
 ## Operational vocabulary
 
@@ -54,10 +60,19 @@ Proceed with read-only inspection and bounded watching. Proceed with an emitted 
 
 Ask before destructive or administrative changes, marker clearing, force/bypass options, stopping automation, replacing installed configuration, changing destinations, publishing externally, deploying, tagging, releasing, or changing release-version metadata. Preserve task folders, worktrees, attempts, queues, locks, and recovery evidence while diagnosing.
 
+Module lifecycle and patrol-ownership changes are human-gated. Agents may
+prepare read-only previews and diagnostics, but must not approve grants, apply a
+module receipt, sign a migration report, cut over mutator ownership, or request
+rollback without the operator's explicit direction.
+
 ## Load the relevant reference
 
+- Read [workflow-creator.md](references/workflow-creator.md) when ordinary language asks to create a new project-local workflow. This focused route is the `hive-workflow-creator` capability inside the single canonical `/hive` skill; it is not a second skill or package.
+- Read [workflow-creator-example.md](references/workflow-creator-example.md) for the accepted research → draft → approval editorial example.
+- Read [workflow-schema.md](references/workflow-schema.md), [workflow-stage-design.md](references/workflow-stage-design.md), [workflow-checkpoints.md](references/workflow-checkpoints.md), [workflow-permissions.md](references/workflow-permissions.md), [workflow-testing.md](references/workflow-testing.md), and [workflow-common-mistakes.md](references/workflow-common-mistakes.md) only as needed while authoring or diagnosing a newly scaffolded descriptor.
 - Read [status-and-watch.md](references/status-and-watch.md) for status interpretation, reporting, compatibility, and native watch semantics.
 - Read [workflow-actions.md](references/workflow-actions.md) for task creation, direct workflow verbs, daemon ownership, closed actions, and completion checks.
-- Read [recovery.md](references/recovery.md) for diagnosis, healer ownership, provider holds, stale workers, and guarded marker recovery.
+- Read [recovery.md](references/recovery.md) for diagnosis, coordinator ownership, provider holds, stale workers, migration, and guarded recovery.
 - Read [setup-and-platforms.md](references/setup-and-platforms.md) for installation, initialization, agent-skill setup, and platform invocation conventions.
+- Read [release-candidate-qa.md](references/release-candidate-qa.md) for semantic E2E discovery, local candidate evidence, bounded hosted collection, retry semantics, and the explicit hosted-dispatch boundary.
 - Read [safety.md](references/safety.md) before any admin, force, credential, external-publication, deployment, or release-sensitive operation.

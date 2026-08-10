@@ -1,0 +1,1088 @@
+schema_version: 1
+
+# Architecture metadata for Hive-first reusable components. This catalog and
+# its test-only contract enforce declared source boundaries; they are not a
+# runtime security sandbox and cannot prevent reflection or monkeypatching.
+components:
+  - id: patrol-effects
+    name: Patrol Effect Evidence
+    state: candidate
+    entrypoint:
+      file: lib/hive/modules/migration/patrol_evidence.rb
+      require: hive/modules/migration/patrol_evidence
+      constant: Hive::Modules::Migration::PatrolEvidence
+    public_contract:
+      values:
+        - Hive::Modules::Migration::PatrolCapture
+        - Hive::Modules::Migration::EffectIntent
+        - Hive::Modules::Migration::EffectReceipt
+        - Hive::Modules::Migration::PatrolEvidenceReceipt
+        - Hive::Modules::Migration::PatrolEvidenceVerifier
+        - Hive::Modules::Migration::PatrolEffectIndex
+        - Hive::Modules::Migration::PatrolQualification
+        - Hive::Modules::Migration::ReportProjection
+        - Hive::Modules::Migration::ReportMigration
+      errors:
+        - Hive::ConfigError
+    owned_paths:
+      - lib/hive/modules/migration/patrol_evidence.rb
+      - lib/hive/modules/migration/evidence_store.rb
+      - lib/hive/modules/migration/effect_admission.rb
+      - lib/hive/modules/migration/effect_delivery.rb
+      - lib/hive/modules/migration/effect_receipt_ledger.rb
+      - lib/hive/modules/migration/effect_sender.rb
+      - lib/hive/modules/migration/occurrence_effects.rb
+      - lib/hive/modules/migration/occurrence_journal.rb
+      - lib/hive/modules/migration/occurrence_journal_state.rb
+      - lib/hive/modules/migration/occurrence_outbox.rb
+      - lib/hive/modules/migration/occurrence_recovery_index.rb
+      - lib/hive/modules/migration/occurrence_record_store.rb
+      - lib/hive/modules/migration/occurrence_record_validator.rb
+      - lib/hive/modules/migration/patrol_effect_index.rb
+      - lib/hive/modules/migration/stable_process_lock.rb
+      - lib/hive/modules/migration/patrol_evidence_receipt.rb
+      - lib/hive/modules/migration/patrol_evidence_verifier.rb
+      - lib/hive/modules/migration/patrol_qualification.rb
+      - lib/hive/modules/migration/report_migration.rb
+      - lib/hive/modules/migration/report_projection.rb
+      - lib/hive/patrol/effect_gateway.rb
+      - lib/hive/refactor_patrol/action_claim_transitions.rb
+      - lib/hive/refactor_patrol/action_plan_transitions.rb
+      - lib/hive/refactor_patrol/action_transition_context.rb
+      - lib/hive/refactor_patrol/action_transitions.rb
+      - lib/hive/refactor_patrol/architecture_intake_transitions.rb
+      - lib/hive/refactor_patrol/architecture_occurrence_lifecycle.rb
+      - lib/hive/refactor_patrol/architecture_occurrence_store.rb
+      - lib/hive/refactor_patrol/claim_maintenance_transitions.rb
+      - lib/hive/refactor_patrol/discovery_block_transitions.rb
+      - lib/hive/refactor_patrol/discovery_claim_transitions.rb
+      - lib/hive/refactor_patrol/discovery_transition_context.rb
+      - lib/hive/refactor_patrol/discovery_transitions.rb
+      - lib/hive/refactor_patrol/effect_errors.rb
+      - lib/hive/refactor_patrol/effect_gateway.rb
+      - lib/hive/refactor_patrol/job_query_index.rb
+      - lib/hive/refactor_patrol/job_store_files.rb
+      - lib/hive/refactor_patrol/transition_evidence.rb
+      - lib/hive/refactor_patrol/transition_gateway.rb
+    state_contracts:
+      - "StateStore and JobStore expose the only product recovery APIs over one OccurrenceJournal facade; OccurrenceRecordStore is the sole occurrence-cell lock/read/write owner"
+      - "JobStore v3 owns the immutable job-to-occurrence and intake-transition identities; discovery attempts, actions, and diagnostic episodes append exact transition identities"
+      - "Canonical occurrence records atomically bind prepared or uncertain delivery, terminal outcomes, and ordered projection outbox bytes; persisted sender leases and PID authority do not exist"
+      - "A committed or reconciled ordinary Patrol pull request atomically appends its exact terminal receipt bytes as a typed publication outbox entry; StateStore alone projects that entry to one immutable publication_binding before tuple acknowledgement"
+      - "EvidenceStore is an append-only bounded observational projection under module-runtime/migration/patrol-evidence and is never consulted for retry"
+      - "PatrolEvidenceReceipt is the canonical immutable qualification input; PatrolEvidenceVerifier compares the full fault-step and typed-artifact values plus every authority-sensitive identity with independently supplied expected bindings before creating its non-public verified token"
+      - "PatrolEffectIndex is a bounded pure run-wide duplicate projection, and PatrolQualification counts unique trigger/repository/SHA/change-window decision identities and derives immutable completeness and diversity findings without executing scenarios or recovering effects"
+      - "ReportProjection merges deterministic and installed-live qualifications without mutation authority, except that an exact superseding contradiction may invalidate its qualified lane; ReportMigration alone converts the complete released v1 report shape while validating and crash-repairing immutable source, archive, and receipt provenance"
+      - "ActionRunner and RefactorPatrolScheduler decide product work; composed action/discovery transition coordinators own durable transition identities, claim fences, and replay"
+      - "JobStoreFiles is the sole descriptor-confined physical I/O port for live v3 jobs, query indexes, quarantine evidence, and action locks; JobQueryIndex owns only their bounded logical projection"
+      - "JobStore authority is fixed at refactor_patrol/v3; construction and read-only queries do not create state, while the first mutation lazily creates only v3 and never inspects v2/jobs"
+    schema_contracts:
+      - "hive-patrol-capture v1 and hive-patrol-effect-receipt v1 are strict canonical observation records"
+      - "hive-patrol-evidence-receipt v1 binds candidate, scenario, repository, artifact, capture, effect, fault-step, reviewer, and configuration identities"
+      - "hive-module-migration-report v2 is the strict two-lane projection over unique comparable decision identities, decision-class, repository-SHA, and change-window diversity; an explicitly migrated empty projection records evidence_required rather than qualification"
+      - "hive-refactor-patrol-job v3 is the sole runtime JobStore schema; released v2 jobs have no compatibility reader or converter"
+      - "hive-patrol-occurrence-recovery-index v1 is a bounded rebuildable active-ID projection tied to the journal-state recovery generation; occurrence records remain authoritative"
+    lock_contracts:
+      - "Persist intent before shared migration admission; under live owner, epoch, config, module-generation, capability, and claim checks, one process-local keyed mutex plus one stable mode-0600 flock serializes each sender"
+      - "Dispatch uncertainty is reconciliation-only; exact absence must settle before a retry-safe local sink may resend, while remote absence never grants resend authority"
+      - "Architecture manifest reservation and the JobStore occurrence pointer serialize before the enqueue transition; command and daemon intake share the same coordinator"
+      - "Every live JobStore read, write, enumeration, quarantine publication, index publication, and action/job lock resolves through one verified ManagedDirectory anchor"
+      - "Report, report migration, and Patrols adoption share one descriptor-confined .mutation.lock authority; forward, reverse, and contradiction replacement use digest CAS, interrupted receipt publication is repaired only under that lock, and no linked authority file is followed"
+      - "The stable profile activation lock excludes daemon startup; reset drains the exact daemon generation before taking the existing Patrol effect lock exclusively, then holds that effect lock, the stable generation lock, and the independent PID/start-time writer fence across opaque v2 archive, empty-v3 admission, and receipt publication"
+    component_dependencies: []
+    allowed_hive_dependencies:
+      - hive/atomic_file
+      - hive/config
+      - hive/errors
+      - hive/lock
+      - hive/managed_directory
+      - hive/module_package/managed_store
+      - hive/modules/capability_context
+      - hive/modules/migration/patrols
+      - hive/modules/migration/report
+      - hive/paths
+      - hive/pid_file
+      - hive/refactor_patrol/job_store
+      - hive/refactor_patrol/pr_manifest
+      - hive/refactor_patrol/publication_attempt
+      - hive/workflow_package/canonical_json
+    internal_collaborators:
+      - Hive::Modules::Migration::EffectAdmission
+      - Hive::Modules::Migration::EffectDelivery
+      - Hive::Modules::Migration::EffectReceiptLedger
+      - Hive::Modules::Migration::EffectSender
+      - Hive::Modules::Migration::EvidenceStore
+      - Hive::Modules::Migration::OccurrenceEffects
+      - Hive::Modules::Migration::OccurrenceJournal
+      - Hive::Modules::Migration::OccurrenceOutbox
+      - Hive::Modules::Migration::OccurrenceRecoveryIndex
+      - Hive::Modules::Migration::OccurrenceRecordStore
+      - Hive::Modules::Migration::OccurrenceRecordValidator
+      - Hive::Modules::Migration::StableProcessLock
+      - Hive::Patrol::EffectGateway
+      - Hive::RefactorPatrol::ActionClaimTransitions
+      - Hive::RefactorPatrol::ActionPlanTransitions
+      - Hive::RefactorPatrol::ActionTransitionContext
+      - Hive::RefactorPatrol::ActionTransitions
+      - Hive::RefactorPatrol::ArchitectureIntakeTransitions
+      - Hive::RefactorPatrol::ArchitectureOccurrenceLifecycle
+      - Hive::RefactorPatrol::ArchitectureOccurrenceStore
+      - Hive::RefactorPatrol::ClaimMaintenanceTransitions
+      - Hive::RefactorPatrol::DiscoveryBlockTransitions
+      - Hive::RefactorPatrol::DiscoveryClaimTransitions
+      - Hive::RefactorPatrol::DiscoveryTransitionContext
+      - Hive::RefactorPatrol::DiscoveryTransitions
+      - Hive::RefactorPatrol::EffectGateway
+      - Hive::RefactorPatrol::JobQueryIndex
+      - Hive::RefactorPatrol::JobStore
+      - Hive::RefactorPatrol::JobStoreFiles
+      - Hive::RefactorPatrol::TransitionEvidence
+      - Hive::RefactorPatrol::TransitionGateway
+    forbidden_constructions:
+      - Hive::Modules::Migration::EffectAdmission
+      - Hive::Modules::Migration::EffectDelivery
+      - Hive::Modules::Migration::EffectReceiptLedger
+      - Hive::Modules::Migration::EffectSender
+      - Hive::Modules::Migration::EvidenceStore
+      - Hive::Modules::Migration::OccurrenceJournal
+      - Hive::Modules::Migration::OccurrenceRecoveryIndex
+      - Hive::Modules::Migration::OccurrenceRecordStore
+      - Hive::Modules::Migration::OccurrenceRecordValidator
+      - Hive::Modules::Migration::StableProcessLock
+      - Hive::Patrol::EffectGateway
+      - Hive::RefactorPatrol::ActionClaimTransitions
+      - Hive::RefactorPatrol::ActionPlanTransitions
+      - Hive::RefactorPatrol::ActionTransitionContext
+      - Hive::RefactorPatrol::ActionTransitions
+      - Hive::RefactorPatrol::ArchitectureIntakeTransitions
+      - Hive::RefactorPatrol::ArchitectureOccurrenceLifecycle
+      - Hive::RefactorPatrol::ArchitectureOccurrenceStore
+      - Hive::RefactorPatrol::ClaimMaintenanceTransitions
+      - Hive::RefactorPatrol::DiscoveryBlockTransitions
+      - Hive::RefactorPatrol::DiscoveryClaimTransitions
+      - Hive::RefactorPatrol::DiscoveryTransitionContext
+      - Hive::RefactorPatrol::DiscoveryTransitions
+      - Hive::RefactorPatrol::EffectGateway
+      - Hive::RefactorPatrol::JobQueryIndex
+      - Hive::RefactorPatrol::JobStore
+      - Hive::RefactorPatrol::JobStoreFiles
+      - Hive::RefactorPatrol::TransitionGateway
+    authorized_internal_constructions:
+      - constant: Hive::Modules::Migration::EvidenceStore
+        files:
+          - lib/hive/commands/patrol.rb
+          - lib/hive/daemon/patrol_scheduler.rb
+          - lib/hive/daemon/refactor_patrol_merge_reconciler.rb
+          - lib/hive/daemon/refactor_patrol_scheduler.rb
+          - lib/hive/modules/adapters/architecture_patrol.rb
+          - lib/hive/modules/adapters/patrol.rb
+          - lib/hive/refactor_patrol/action_runner.rb
+        reason: "Product composition roots and observational adapters project the append-only evidence facade; they cannot use it as retry authority."
+      - constant: Hive::Modules::Migration::OccurrenceJournal
+        files:
+          - lib/hive/patrol/state_store.rb
+        reason: "Ordinary Patrol StateStore is the sole product facade over the shared occurrence journal."
+      - constant: Hive::Patrol::EffectGateway
+        files:
+          - lib/hive/patrol/state_store.rb
+        reason: "Ordinary Patrol StateStore is the sole composition root for its product gateway."
+      - constant: Hive::RefactorPatrol::ActionTransitions
+        files:
+          - lib/hive/refactor_patrol/action_runner.rb
+        reason: "ActionRunner is the sole composition root for action transition coordinators."
+      - constant: Hive::RefactorPatrol::ArchitectureIntakeTransitions
+        files:
+          - lib/hive/commands/refactor_patrol.rb
+          - lib/hive/daemon/refactor_patrol_merge_reconciler.rb
+        reason: "Manual and daemon merge intake share the one architecture intake facade."
+      - constant: Hive::RefactorPatrol::ArchitectureOccurrenceLifecycle
+        files:
+          - lib/hive/daemon/refactor_patrol_scheduler.rb
+        reason: "The architecture scheduler owns occurrence reservation, recovery, finalization, and projection composition."
+      - constant: Hive::RefactorPatrol::ArchitectureOccurrenceStore
+        files:
+          - lib/hive/refactor_patrol/job_store.rb
+        reason: "JobStore is the public aggregate facade and privately composes the occurrence-recovery collaborator it exposes."
+      - constant: Hive::RefactorPatrol::ClaimMaintenanceTransitions
+        files:
+          - lib/hive/commands/refactor_patrol.rb
+          - lib/hive/daemon/refactor_patrol_scheduler.rb
+        reason: "Manual workers and the scheduler route non-outcome claim attachment and heartbeats through one generation-fenced operational port."
+      - constant: Hive::RefactorPatrol::DiscoveryTransitions
+        files:
+          - lib/hive/commands/refactor_patrol.rb
+          - lib/hive/daemon/refactor_patrol_scheduler.rb
+        reason: "Manual and daemon discovery paths compose the same discovery transition facade."
+      - constant: Hive::RefactorPatrol::EffectGateway
+        files:
+          - lib/hive/refactor_patrol/action_runner.rb
+        reason: "ActionRunner composes the architecture product gateway for hosted action effects."
+      - constant: Hive::RefactorPatrol::JobStore
+        files:
+          - lib/hive/commands/refactor_patrol.rb
+          - lib/hive/daemon/refactor_patrol_merge_reconciler.rb
+          - lib/hive/daemon/refactor_patrol_scheduler.rb
+          - lib/hive/modules/migration/coordinator.rb
+          - lib/hive/refactor_patrol/action_runner.rb
+          - lib/hive/refactor_patrol/canonical_action_catalog.rb
+          - lib/hive/refactor_patrol/family_store.rb
+          - lib/hive/refactor_patrol/repository_ownership.rb
+        reason: "Explicit command, scheduler, migration, action, catalog, family, and ownership composition roots construct the public architecture aggregate facade; lexical aliases are enforced too."
+      - constant: Hive::RefactorPatrol::JobQueryIndex
+        files:
+          - lib/hive/refactor_patrol/job_store.rb
+        reason: "JobStore privately composes the bounded logical listing projection."
+      - constant: Hive::RefactorPatrol::JobStoreFiles
+        files:
+          - lib/hive/refactor_patrol/job_store.rb
+        reason: "JobStore privately composes the descriptor-confined physical storage port."
+    hive_consumers:
+      - lib/hive/commands/patrol.rb
+      - lib/hive/commands/refactor_patrol.rb
+      - lib/hive/daemon/patrol_scheduler.rb
+      - lib/hive/daemon/refactor_patrol_merge_reconciler.rb
+      - lib/hive/daemon/refactor_patrol_scheduler.rb
+      - lib/hive/daemon/status_report.rb
+      - lib/hive/modules/adapters/architecture_patrol.rb
+      - lib/hive/modules/adapters/patrol.rb
+      - lib/hive/modules/migration/patrols.rb
+      - lib/hive/modules/migration/report.rb
+      - lib/hive/patrol/pr_opener.rb
+      - lib/hive/patrol/state_store.rb
+      - lib/hive/refactor_patrol/action_runner.rb
+      - lib/hive/refactor_patrol/job_store.rb
+    mutation_authority: "The separate ordinary and architecture gateways authorize product sinks; ordinary Patrol StateStore is the sole non-admitted projector of an already-authorized pull-request publication receipt, explicit intake, discovery, and action transition facades are the only semantic JobStore mutator call sites, and shared values, OccurrenceJournal, EvidenceStore, verification, duplicate indexing, qualification, and report projection contain no product policy or execution authority."
+    recovery_surface: "StateStore and JobStore are the only product recovery authorities over the single OccurrenceJournal mechanic; ordinary Patrol drains typed publication entries before suppression reads and acknowledges only after an exact binding write or no-op, while EvidenceStore remains observation-only and ReportMigration is confined to one-off project-local report schema conversion."
+    wiki_page: wiki/modules/patrol.md
+    focused_tests:
+      - test/unit/modules/migration/evidence_store_test.rb
+      - test/unit/modules/migration/effect_delivery_collaborators_test.rb
+      - test/unit/modules/migration/occurrence_journal_test.rb
+      - test/unit/modules/migration/occurrence_recovery_index_test.rb
+      - test/unit/modules/migration/patrol_evidence_test.rb
+      - test/unit/modules/migration/patrol_evidence_receipt_test.rb
+      - test/unit/modules/migration/patrol_evidence_verifier_test.rb
+      - test/unit/modules/migration/patrol_effect_index_test.rb
+      - test/unit/modules/migration/patrol_qualification_test.rb
+      - test/unit/modules/migration/report_projection_test.rb
+      - test/unit/modules/migration/report_migration_test.rb
+      - test/unit/modules/migration/report_test.rb
+      - test/unit/modules/migration/patrols_test.rb
+      - test/unit/modules/migration/shadow_comparator_test.rb
+      - test/unit/daemon/refactor_patrol_scheduler_test.rb
+      - test/unit/daemon/activation_lock_test.rb
+      - test/unit/daemon/operational_snapshot_test.rb
+      - test/unit/patrol/effect_gateway_test.rb
+      - test/unit/patrol/fixer_test.rb
+      - test/unit/patrol/pr_opener_test.rb
+      - test/unit/patrol/state_store_effect_intents_test.rb
+      - test/unit/refactor_patrol/action_runner_test.rb
+      - test/unit/refactor_patrol/action_transitions_test.rb
+      - test/unit/refactor_patrol/architecture_intake_transitions_test.rb
+      - test/unit/refactor_patrol/architecture_occurrence_store_test.rb
+      - test/unit/refactor_patrol/claim_maintenance_transitions_test.rb
+      - test/unit/refactor_patrol/discovery_transitions_test.rb
+      - test/unit/refactor_patrol/effect_gateway_test.rb
+      - test/unit/refactor_patrol/job_store_test.rb
+      - test/unit/refactor_patrol/job_store_files_test.rb
+      - test/unit/refactor_patrol/transition_gateway_test.rb
+      - test/integration/refactor_patrol_command_test.rb
+    migration_exceptions:
+      - reason: "U3a supplies the bounded pure protocol and report conversion; U3b deterministic public-path execution and U3c independently authorized installed/live qualification remain before promotion."
+        removal_unit: U3
+
+  - id: attempts
+    name: Attempts admission / future RunReceipt
+    state: candidate
+    entrypoint:
+      file: lib/hive/attempts/api.rb
+      require: hive/attempts/api
+      constant: Hive::Attempts::API
+    public_contract:
+      values:
+        - Hive::Attempts::ClientResult
+        - Hive::Attempts::DispatchResult
+      errors:
+        - Hive::Attempts::UnsupportedDetachment
+    owned_paths:
+      - lib/hive/attempts
+    state_contracts:
+      - "$HIVE_HOME/attempts/v3 bounded hot records, permanent proofs and indexes, framed logs, outputs, generation locks, and finalization state"
+    schema_contracts:
+      - "hive-attempt v3 is the only runtime reader/writer; Hive::Recovery::Migration owns the one-off cutover"
+    lock_contracts:
+      - "admission lock before generation lock; record transitions use guarded CAS"
+    component_dependencies: []
+    allowed_hive_dependencies:
+      - hive/agent_limit
+      - hive/atomic_file
+      - hive/conditions/generation_tracker
+      - hive/config
+      - hive/dependency_snapshot
+      - hive/lock
+      - hive/managed_directory
+      - hive/markers
+      - hive/paths
+      - hive/stringify_keys
+      - hive/task
+      - hive/task_resolver
+    internal_collaborators:
+      - Hive::Attempts::Entrypoint
+      - Hive::Attempts::ConfiguredDispatcher
+      - Hive::Attempts::Dispatcher
+      - Hive::Attempts::DetachedLauncher
+      - Hive::Attempts::Client
+      - Hive::Attempts::Store
+      - Hive::Attempts::Supervisor
+      - Hive::Attempts::Reconciler
+      - Hive::Attempts::ProcessIdentity
+      - Hive::Attempts::CapacitySnapshot
+      - Hive::Attempts::LostOutcomeStore
+      - Hive::Attempts::LostOutcomeProcessor
+      - Hive::Attempts::PermanentProofStore
+      - Hive::Attempts::DecisionIndex
+      - Hive::Attempts::PendingFinalizationStore
+      - Hive::Attempts::FinalizationMaintenance
+      - Hive::Attempts::LogArchive
+      - Hive::Attempts::StorageHealth
+      - Hive::Attempts::PointStorage
+      - Hive::Attempts::AdmissionView
+    forbidden_constructions:
+      - Hive::Attempts::Entrypoint
+      - Hive::Attempts::ConfiguredDispatcher
+      - Hive::Attempts::Dispatcher
+      - Hive::Attempts::DetachedLauncher
+      - Hive::Attempts::Client
+      - Hive::Attempts::Store
+      - Hive::Attempts::Supervisor
+      - Hive::Attempts::Reconciler
+      - Hive::Attempts::ProcessIdentity
+      - Hive::Attempts::CapacitySnapshot
+      - Hive::Attempts::LostOutcomeStore
+      - Hive::Attempts::LostOutcomeProcessor
+      - Hive::Attempts::PermanentProofStore
+      - Hive::Attempts::DecisionIndex
+      - Hive::Attempts::PendingFinalizationStore
+      - Hive::Attempts::FinalizationMaintenance
+      - Hive::Attempts::LogArchive
+      - Hive::Attempts::StorageHealth
+      - Hive::Attempts::PointStorage
+      - Hive::Attempts::AdmissionView
+    authorized_internal_constructions:
+      - constant: Hive::Attempts::Store
+        files:
+          - lib/hive/commands/attempt_supervise.rb
+          - lib/hive/commands/daemon.rb
+          - lib/hive/commands/module/dry_run.rb
+          - lib/hive/conditions/execute_boundary.rb
+          - lib/hive/implementation_identity/store.rb
+          - lib/hive/modules/inspector.rb
+          - lib/hive/recovery/migration.rb
+          - lib/hive/task_closure.rb
+          - lib/hive/task_projection/store.rb
+        reason: "Existing Hive composition, read-only consumers and previews, execution-boundary checks, and closure verification share the canonical durable store; they are not alternate admission producers."
+      - constant: Hive::Attempts::Supervisor
+        files:
+          - lib/hive/commands/attempt_supervise.rb
+        reason: "The private supervisor argv adapter is the process handoff owned by DetachedLauncher."
+      - constant: Hive::Attempts::Reconciler
+        files:
+          - lib/hive/commands/daemon.rb
+        reason: "The daemon composition root injects reconciliation into its scheduler without exposing lifecycle operations through the admission facade."
+      - constant: Hive::Attempts::ProcessIdentity
+        files:
+          - lib/hive/commands/daemon.rb
+        reason: "The daemon composition root shares one process-identity verifier across reconciliation and loss handling."
+      - constant: Hive::Attempts::LostOutcomeStore
+        files:
+          - lib/hive/commands/daemon.rb
+        reason: "The daemon composition root owns internal loss evidence persistence and injection."
+      - constant: Hive::Attempts::LostOutcomeProcessor
+        files:
+          - lib/hive/commands/daemon.rb
+        reason: "The daemon composition root owns internal loss-policy wiring; it is not a public recovery operation."
+      - constant: Hive::Attempts::FinalizationMaintenance
+        files:
+          - lib/hive/commands/daemon.rb
+        reason: "The runtime factory and daemon composition root own finalization wiring; callers receive the composed service."
+      - constant: Hive::Attempts::StorageHealth
+        files:
+          - lib/hive/recovery/migration.rb
+        reason: "Store and the one-off migration publish the bounded storage-health cell."
+      - constant: Hive::Attempts::AdmissionView
+        files:
+          - lib/hive/recovery/migration.rb
+        reason: "Admission, reconciliation, and one-off migration are the only builders of the bounded decision view."
+    hive_consumers:
+      - lib/hive/commands/run.rb
+      - lib/hive/commands/stage_action.rb
+      - lib/hive/commands/daemon.rb
+      - lib/hive/bot/dispatch_request_writer.rb
+    mutation_authority: "The facade accepts explicit admission requests; named Hive composition sites wire internal stores and supervisors that retain durable transition authority."
+    recovery_surface: "The facade admits successors; reconciliation, healing, cancellation, export, and generic lifecycle policy remain internal."
+    wiki_page: wiki/modules/attempts.md
+    focused_tests:
+      - test/unit/attempts/api_test.rb
+    migration_exceptions: []
+
+  - id: user-service
+    name: UserService
+    state: boundary-ready
+    entrypoint:
+      file: lib/hive/user_service.rb
+      require: hive/user_service
+      constant: Hive::UserService
+    public_contract:
+      values:
+        - Hive::UserService::Definition
+        - Hive::UserService::Plan
+        - Hive::UserService::Status
+        - Hive::UserService::Result
+      errors:
+        - ArgumentError
+    owned_paths:
+      - lib/hive/user_service.rb
+      - lib/hive/user_service
+    state_contracts:
+      - "Per-user systemd unit or launchd plist, manager observations, and timestamped backups"
+    schema_contracts:
+      - "Definition, Plan, Status, and Result are platform-neutral; Hive command JSON and messages remain adapter-owned"
+    lock_contracts:
+      - "No cross-manager transaction; apply and remove revalidate the exact observed file and manager state before mutation"
+    component_dependencies: []
+    allowed_hive_dependencies:
+      - hive/atomic_file
+    internal_collaborators:
+      - Hive::UserService::Manager
+    forbidden_constructions:
+      - Hive::UserService::Manager
+    authorized_internal_constructions: []
+    hive_consumers:
+      - lib/hive/commands/service_installer/base.rb
+      - lib/hive/commands/daemon/service_installer.rb
+      - lib/hive/commands/bot/service_installer.rb
+      - lib/hive/commands/web/service_installer.rb
+      - lib/hive/commands/daemon.rb
+      - lib/hive/commands/bot.rb
+      - lib/hive/commands/web.rb
+      - lib/hive/commands/setup.rb
+      - lib/hive/commands/init.rb
+      - lib/hive/commands/uninstall.rb
+      - lib/hive/web/service_status.rb
+    mutation_authority: "Hive command adapters authorize install, force replacement, restart, and remove."
+    recovery_surface: "Typed outcomes report backup paths, final observed state, and partial manager/file failures."
+    wiki_page: wiki/modules/user_service.md
+    focused_tests:
+      - test/unit/user_service/user_service_test.rb
+      - test/unit/commands/service_installer/base_test.rb
+      - test/unit/commands/daemon/service_installer_test.rb
+      - test/unit/commands/bot/service_installer_test.rb
+      - test/unit/commands/web/service_installer_test.rb
+      - test/unit/commands/uninstall_test.rb
+    migration_exceptions: []
+
+  - id: agent-abi
+    name: Agent ABI
+    state: boundary-ready
+    entrypoint:
+      file: lib/hive/agent_runtime.rb
+      require: hive/agent_runtime
+      constant: Hive::AgentRuntime
+    public_contract:
+      values:
+        - Hive::AgentRuntime::Request
+        - Hive::AgentRuntime::CompiledInvocation
+        - Hive::AgentRuntime::CapabilityEvidence
+        - Hive::AgentRuntime::ProbeResult
+        - Hive::AgentRuntime::ObservableResult
+        - Hive::AgentProfile
+        - Hive::AgentProfiles
+      errors:
+        - Hive::AgentError
+        - Hive::AgentRuntime::UnsupportedCapability
+        - Hive::AgentRuntime::ProbeError
+        - Hive::AgentRuntime::CompilationError
+    owned_paths:
+      - lib/hive/agent_runtime.rb
+      - lib/hive/agent_profile.rb
+      - lib/hive/agent_profiles.rb
+      - lib/hive/agent_profiles
+    state_contracts:
+      - "Provider executable, version, capability, and observable result evidence"
+    schema_contracts:
+      - "Provider profile constructor and registry extension point remain compatible"
+    lock_contracts:
+      - "Version/capability probes are bounded and reap descendant process groups"
+    component_dependencies: []
+    allowed_hive_dependencies:
+      - hive/implementation_identity
+      - hive/permission_scope
+      - hive/secret_patterns
+      - hive/skill_check
+    internal_collaborators:
+      - Hive::AgentProfiles::UsageExtractors
+    forbidden_constructions: []
+    authorized_internal_constructions: []
+    hive_consumers:
+      - lib/hive/agent.rb
+      - lib/hive/claude_launcher.rb
+      - lib/hive/diagnosis_agent.rb
+      - lib/hive/display_name/generator.rb
+      - lib/hive/patrol/agent_launch.rb
+      - lib/hive/reviewers/codex_review.rb
+      - lib/hive/stages/base.rb
+      - lib/hive/tui/bubble_model.rb
+    mutation_authority: "Hive orchestration selects profiles and permission policy; adapters only compile and observe."
+    recovery_surface: "Probe and invocation failures return bounded evidence; workflow retry policy stays in Hive."
+    wiki_page: wiki/modules/agent_profile.md
+    focused_tests:
+      - test/unit/agent_runtime_test.rb
+      - test/unit/agent_profile_test.rb
+      - test/unit/agent_profiles_test.rb
+      - test/unit/agent_profile_modes_test.rb
+      - test/unit/agent_test.rb
+    migration_exceptions: []
+
+  - id: agent-artifact-firewall
+    name: Agent Artifact Firewall
+    state: boundary-ready
+    entrypoint:
+      file: lib/hive/artifact_firewall.rb
+      require: hive/artifact_firewall
+      constant: Hive::ArtifactFirewall
+    public_contract:
+      values:
+        - Hive::ArtifactFirewall::Manifest
+        - Hive::ArtifactFirewall::Snapshot
+        - Hive::ArtifactFirewall::Violation
+        - Hive::ArtifactFirewall::Restoration
+        - Hive::ArtifactFirewall::Report
+      errors:
+        - Hive::ArtifactFirewall::Error
+        - Hive::ArtifactFirewall::InvalidManifest
+        - Hive::ArtifactFirewall::CaptureError
+        - Hive::ArtifactFirewall::InvalidSnapshot
+    owned_paths:
+      - lib/hive/artifact_firewall.rb
+      - lib/hive/protected_files.rb
+    state_contracts:
+      - "In-memory no-follow protected-anchor capture plus bounded post-spawn custody report"
+    schema_contracts:
+      - "Manifest, Snapshot, Violation, Restoration, and Report schema v1; stage markers and outcomes remain Hive-owned"
+    lock_contracts:
+      - "No-follow identity checks and atomic per-file restore; same-user application custody only, with no sandbox or filesystem transaction claim"
+    component_dependencies: []
+    allowed_hive_dependencies:
+      - hive/atomic_file
+      - hive/secret_patterns
+    internal_collaborators:
+      - Hive::ProtectedFiles
+    forbidden_constructions: []
+    authorized_internal_constructions: []
+    hive_consumers:
+      - lib/hive/agent.rb
+      - lib/hive/claude_launcher.rb
+      - lib/hive/stages/execute.rb
+      - lib/hive/stages/finalize.rb
+      - lib/hive/stages/open_pr.rb
+      - lib/hive/stages/review.rb
+      - lib/hive/stages/review/ci_fix.rb
+      - lib/hive/stages/review/triage.rb
+      - lib/hive/stages/agent_worktree.rb
+    mutation_authority: "Hive stage adapters declare protected, allowed, and required paths."
+    recovery_surface: "Typed reports distinguish tampering, output rejection, verified restoration, and restoration failure with bounded redacted diagnostics."
+    wiki_page: wiki/modules/protected_files.md
+    focused_tests:
+      - test/unit/artifact_firewall_test.rb
+      - test/unit/agent_profile_modes_test.rb
+      - test/unit/claude_launcher_test.rb
+      - test/unit/protected_files_test.rb
+      - test/unit/secret_patterns_test.rb
+      - test/unit/stages/agent_test.rb
+      - test/unit/stages/execute_test.rb
+      - test/unit/stages/open_pr_test.rb
+      - test/unit/stages/review/ci_fix_test.rb
+      - test/unit/stages/review/triage_test.rb
+    migration_exceptions: []
+
+  - id: skillpack
+    name: Skillpack
+    state: boundary-ready
+    entrypoint:
+      file: lib/hive/agent_skills.rb
+      require: hive/agent_skills
+      constant: Hive::AgentSkills
+    public_contract:
+      values:
+        - Hive::AgentSkills::Plan
+        - Hive::AgentSkills::Projection
+        - Hive::AgentSkills::ProjectionReport
+      errors:
+        - Hive::AgentSkills::Error
+        - Hive::AgentSkills::ForeignContent
+        - Hive::AgentSkills::StalePlan
+        - Hive::AgentSkills::UnsafePath
+        - Hive::AgentSkills::ValidationError
+    owned_paths:
+      - lib/hive/agent_skills.rb
+      - lib/hive/agent_skills
+      - config/agent-skills.yml
+    state_contracts:
+      - "Canonical skill source and projected agent-home directories"
+    schema_contracts:
+      - "config/agent-skills.yml manifest and projection provenance"
+    lock_contracts:
+      - "Private staging and complete-directory atomic publication"
+    component_dependencies:
+      - agent-abi
+    allowed_hive_dependencies:
+      - hive/atomic_file
+      - hive/config
+      - hive/errors
+      - hive/skill_check
+      - hive/version
+    internal_collaborators:
+      - Hive::AgentSkills::Adapters::Registry
+      - Hive::AgentSkills::CanonicalSkill
+      - Hive::AgentSkills::CommandRunner
+      - Hive::AgentSkills::DirectoryPublisher
+      - Hive::AgentSkills::Inspector
+      - Hive::AgentSkills::Manifest
+      - Hive::AgentSkills::Provisioner
+      - Hive::AgentSkills::TargetResolver
+    forbidden_constructions:
+      - Hive::AgentSkills::Adapters::Registry
+      - Hive::AgentSkills::CanonicalSkill
+      - Hive::AgentSkills::CommandRunner
+      - Hive::AgentSkills::DirectoryPublisher
+      - Hive::AgentSkills::Inspector
+      - Hive::AgentSkills::Manifest
+      - Hive::AgentSkills::Provisioner
+      - Hive::AgentSkills::TargetResolver
+    authorized_internal_constructions: []
+    hive_consumers:
+      - lib/hive/commands/doctor.rb
+      - lib/hive/commands/init.rb
+      - lib/hive/commands/setup_agents.rb
+      - lib/hive/web/agent_skills.rb
+    mutation_authority: "Hive adapters choose canonical sources and trusted agent-home roots; the facade applies only its revalidated projection plan."
+    recovery_surface: "Typed refusal and stale-plan errors preserve foreign trees; atomic publication preserves or restores the prior managed directory on failure."
+    wiki_page: wiki/commands/setup-agents.md
+    focused_tests:
+      - test/unit/agent_skills/facade_test.rb
+      - test/unit/agent_skills/canonical_skill_test.rb
+      - test/unit/agent_skills/directory_publisher_test.rb
+      - test/unit/agent_skills/inspector_test.rb
+      - test/unit/agent_skills/manifest_test.rb
+      - test/unit/agent_skills/provisioner_test.rb
+      - test/unit/agent_skills/bundled_skill_test.rb
+      - test/unit/agent_skills/openclaw_test.rb
+      - test/unit/commands/setup_agents_test.rb
+      - test/integration/agent_skill_adapters_test.rb
+      - test/integration/setup_agents_test.rb
+    migration_exceptions: []
+
+  - id: safe-agent-git-gate
+    name: Safe Agent Git Gate
+    state: boundary-ready
+    entrypoint:
+      file: lib/hive/agent_git_gate.rb
+      require: hive/agent_git_gate
+      constant: Hive::AgentGitGate
+    public_contract:
+      values:
+        - Hive::AgentGitGate::ReadResult
+        - Hive::AgentGitGate::RemoteObservation
+        - Hive::AgentGitGate::MaterializationReceipt
+        - Hive::AgentGitGate::PublicationReceipt
+      errors:
+        - Hive::AgentGitGate::InvalidRequest
+        - Hive::AgentGitGate::UnsupportedOperation
+        - Hive::AgentGitGate::CommandFailed
+        - Hive::AgentGitGate::RemoteConflict
+        - Hive::AgentGitGate::MaterializationFailed
+        - Hive::AgentGitGate::PublicationFailed
+    owned_paths:
+      - lib/hive/agent_git_gate.rb
+      - lib/hive/managed_git.rb
+    state_contracts:
+      - "Repository objects, refs, worktrees, and publication receipts"
+    schema_contracts:
+      - "Expected remote object identity and before/after publication receipt"
+    lock_contracts:
+      - "Expected-OID lease is revalidated at publication"
+    component_dependencies: []
+    allowed_hive_dependencies:
+      - hive/errors
+      - hive/git_ref
+    internal_collaborators:
+      - Hive::ManagedGit
+    forbidden_constructions: []
+    authorized_internal_constructions: []
+    hive_consumers:
+      - lib/hive/gh.rb
+      - lib/hive/worktree.rb
+      - lib/hive/stages/agent_report.rb
+      - lib/hive/stages/draft_pr_handoff.rb
+      - lib/hive/refactor_patrol/pr_opener.rb
+    mutation_authority: "Hive injects credential, transport, branch, PR, and operator-approval policy."
+    recovery_surface: "Receipts preserve observed identities; publication failure remains explicit and retryable."
+    wiki_page: wiki/modules/agent_git_gate.md
+    focused_tests:
+      - test/unit/agent_git_gate_test.rb
+      - test/unit/managed_git_test.rb
+      - test/unit/gh_test.rb
+      - test/unit/worktree_test.rb
+      - test/unit/stages/agent_report_test.rb
+      - test/unit/stages/draft_pr_handoff_test.rb
+      - test/unit/refactor_patrol/pr_opener_test.rb
+    migration_exceptions: []
+
+  - id: work-ledger
+    name: WorkLedger
+    state: boundary-ready
+    entrypoint:
+      file: lib/hive/work_ledger.rb
+      require: hive/work_ledger
+      constant: Hive::WorkLedger
+    public_contract:
+      values:
+        - Hive::WorkLedger::AppendReceipt
+        - Hive::WorkLedger::DescriptorReceipt
+        - Hive::WorkLedger::JournalHandle
+        - Hive::WorkLedger::ReplayReceipt
+      errors:
+        - Hive::WorkLedger::AppendFailed
+        - Hive::WorkLedger::Conflict
+        - Hive::WorkLedger::InvalidDescriptor
+        - Hive::WorkLedger::InvalidRecord
+        - Hive::WorkLedger::InvalidRequest
+        - Hive::WorkLedger::ReplayFailed
+    owned_paths:
+      - lib/hive/work_ledger.rb
+      - lib/hive/work_ledger
+    state_contracts:
+      - "Caller-owned append-only JSONL records and ordered structural descriptors"
+    schema_contracts:
+      - "No WorkLedger disk schema; callers inject record identity and validation while Hive owns journal/projection compatibility"
+    lock_contracts:
+      - "JSONL appends take one caller-named exclusive lock, write complete batches, fsync, and roll back to the prior durable byte boundary on failure"
+    component_dependencies: []
+    allowed_hive_dependencies:
+      - hive/atomic_file
+      - hive/errors
+    internal_collaborators:
+      - Hive::WorkLedger::DescriptorValidator
+      - Hive::WorkLedger::Journal
+      - Hive::WorkLedger::Replay
+    forbidden_constructions:
+      - Hive::WorkLedger::DescriptorValidator
+      - Hive::WorkLedger::Journal
+      - Hive::WorkLedger::Replay
+    authorized_internal_constructions: []
+    hive_consumers:
+      - lib/hive/task_journal.rb
+      - lib/hive/task_projection.rb
+      - lib/hive/workflow.rb
+    mutation_authority: "Callers supply the exact ledger and lock paths plus validated records; Hive event, condition, task-path, transition, Git, and migration policy remains above the seam."
+    recovery_surface: "Typed receipts bind exact cursor/hash/identity; replay preserves source bytes, duplicate identities fail closed, and partial appends roll back."
+    wiki_page: wiki/state-model.md
+    focused_tests:
+      - test/unit/work_ledger_test.rb
+      - test/unit/task_journal_test.rb
+      - test/unit/task_projection/store_test.rb
+      - test/unit/task_projection_test.rb
+      - test/unit/workflow_test.rb
+    migration_exceptions: []
+
+  - id: workflow-creator-values
+    name: Workflow Creator Values
+    state: boundary-ready
+    entrypoint:
+      file: packaging/live_agent_skills/workflow_creator_text_safety.rb
+      require: ./packaging/live_agent_skills/workflow_creator_text_safety
+      constant: HiveLiveAgentProof::WorkflowCreator::TextSafety
+    public_contract:
+      values:
+        - HiveLiveAgentProof::WorkflowCreator::Values.capture
+        - anonymous immutable workflow-creator value snapshot
+        - HiveLiveAgentProof::WorkflowCreator::TextSafety.text
+        - HiveLiveAgentProof::WorkflowCreator::TextSafety.safe_relative_path?
+        - HiveLiveAgentProof::WorkflowCreator::TextSafety.secret_findings
+        - HiveLiveAgentProof::WorkflowCreator::TextSafety.redact
+      errors:
+        - HiveLiveAgentProof::WorkflowCreator::Values::Error
+        - HiveLiveAgentProof::WorkflowCreator::TextSafety::Error
+    owned_paths:
+      - packaging/live_agent_skills/workflow_creator_values.rb
+      - packaging/live_agent_skills/workflow_creator_text_safety.rb
+    state_contracts:
+      - "One capture owns fresh recursively frozen JSON-shaped values and their compact canonical UTF-8 bytes"
+      - "Text projection accepts exact frozen plain Values shapes as an internal contract, not origin authentication"
+      - "Text, path checks, secret findings, and redaction are deterministic and bounded to 4096-byte inputs"
+    schema_contracts:
+      - "Canonical bytes preserve JSON scalar type, sort normalized UTF-8 object keys by owned bytes, and end with one newline"
+      - "Secret findings preserve exact-secret indexes before fixed pattern labels, and overlapping ranges redact once"
+    lock_contracts:
+      - "No locks or durable state; concurrent caller mutation is outside the capture contract"
+    component_dependencies: []
+    allowed_hive_dependencies: []
+    internal_collaborators:
+      - HiveLiveAgentProof::WorkflowCreator::Values
+      - HiveLiveAgentProof::WorkflowCreator::TextSafety
+    forbidden_constructions: []
+    authorized_internal_constructions: []
+    hive_consumers:
+      - packaging/live_agent_skills/workflow_creator.rb
+    mutation_authority: "No external mutation authority; capture and projection allocate only fresh in-memory values and text."
+    recovery_surface: "Capture and projection fail closed with fixed secret-free errors and expose no retry or recovery state."
+    wiki_page: wiki/component-boundaries.md
+    focused_tests:
+      - test/unit/packaging/workflow_creator_values_test.rb
+      - test/unit/packaging/workflow_creator_text_safety_test.rb
+    migration_exceptions: []
+
+  - id: workflow-creator-core
+    name: Workflow Creator
+    state: boundary-ready
+    entrypoint:
+      file: packaging/live_agent_skills/workflow_creator_evidence.rb
+      require: ./packaging/live_agent_skills/workflow_creator_evidence
+      constant: HiveLiveAgentProof::WorkflowCreatorEvidence
+    public_contract:
+      values:
+        - HiveLiveAgentProof::WorkflowCreator::Vocabulary
+        - HiveLiveAgentProof::WorkflowCreator.commands_for
+        - HiveLiveAgentProof::WorkflowCreator.failure
+        - HiveLiveAgentProof::WorkflowCreator.validate_nonpassing!
+        - HiveLiveAgentProof::WorkflowCreator.validate_primary!
+        - HiveLiveAgentProof::WorkflowCreator.validate_installation!
+        - HiveLiveAgentProof::WorkflowCreator.validate_execution!
+        - HiveLiveAgentProof::WorkflowCreatorBundle.source
+        - HiveLiveAgentProof::WorkflowCreatorBundle.retained
+        - HiveLiveAgentProof::WorkflowCreatorEvidence.initialize!
+        - HiveLiveAgentProof::WorkflowCreatorEvidence.replace_nonpassing!
+        - HiveLiveAgentProof::WorkflowCreatorEvidence.replace_primary!
+        - HiveLiveAgentProof::WorkflowCreatorEvidence.replace_primary_with_failure!
+      errors:
+        - HiveLiveAgentProof::Error
+        - HiveLiveAgentProof::WorkflowCreator::Error
+        - HiveLiveAgentProof::WorkflowCreatorEvidence::Conflict
+        - HiveLiveAgentProof::WorkflowCreatorEvidence::UnsafeStorage
+        - HiveLiveAgentProof::WorkflowCreatorEvidence::Unavailable
+    owned_paths:
+      - packaging/live_agent_skills/workflow_creator.rb
+      - packaging/live_agent_skills/workflow_creator_contract.rb
+      - packaging/live_agent_skills/workflow_creator_execution_contract.rb
+      - packaging/live_agent_skills/workflow_creator_bundle.rb
+      - packaging/live_agent_skills/workflow_creator_evidence.rb
+      - packaging/live_agent_skills/workflow_creator_receipt_publisher.rb
+    state_contracts:
+      - "Each public input is captured once before semantic validation, and the admitted primary snapshot is returned"
+      - "Failure construction captures stable caller inputs and detail once, then captures only its constructed result"
+      - "The semantic core is declarative and owns no retention, publication, process, provider, or credential state"
+      - "The bundle owner reads one exact four-file source bundle and independently revalidates retained proof bytes"
+      - "The evidence facade alone initializes and compare-and-swap replaces the vocabulary-fixed primary receipt, including typed primary-to-failure finalization"
+      - "Publication converges exact retries and bounded transient recovery without clobbering conflicting bytes"
+    schema_contracts:
+      - "Vocabulary and failed, primary, installation, and execution schema-v1 fields are exact and deeply immutable"
+      - "Installed closures, ordered commands, capture digests, classifications, and receipt summaries are cross-bound"
+      - "Source and retained bundle members are canonical JSON whose exact bytes bind the primary, installations, and receipt"
+      - "Published non-passing receipts are exact canonical bytes admitted by the merged creator semantic contract"
+    lock_contracts:
+      - "Semantic validation is pure; the publication state machine owns only the fixed primary receipt and bounded-prefix staging links"
+      - "Held directory descriptors and native no-follow openat/linkat/renameat/unlinkat calls bind publication and cleanup"
+      - "A bounded cooperative native lock on the held target-directory descriptor serializes complete initialization and replacement transitions"
+    component_dependencies:
+      - workflow-creator-values
+    allowed_hive_dependencies: []
+    internal_collaborators:
+      - HiveLiveAgentProof::WorkflowCreator::Contract
+      - HiveLiveAgentProof::WorkflowCreator::ExecutionContract
+      - HiveLiveAgentProof::WorkflowCreatorBundle
+      - HiveLiveAgentProof::WorkflowCreatorReceiptPublisher
+    forbidden_constructions:
+      - HiveLiveAgentProof::WorkflowCreatorReceiptPublisher
+    authorized_internal_constructions:
+      - constant: HiveLiveAgentProof::WorkflowCreatorReceiptPublisher
+        files:
+          - packaging/live_agent_skills/workflow_creator_evidence.rb
+          - packaging/live_agent_skills/workflow_creator_execution.rb
+        reason: "The typed evidence facade owns the primary receipt, while the execution facade may construct the same private publisher only for the three vocabulary-fixed support members"
+    construction_scan_paths:
+      - packaging
+    hive_consumers:
+      - packaging/live_agent_skills/proof.rb
+      - test/smoke/live_hive_workflow_creator_smoke_test.rb
+    mutation_authority: "Only the evidence facade publishes the vocabulary-fixed primary receipt; it cannot choose filenames, execute commands, acquire or select credentials, or issue a live-success claim."
+    recovery_surface: "Exact retries and bounded one-link or same-inode two-link recovery converge; ambiguous links, changed parents, unsafe entries, conflicts, and native failures fail through typed creator evidence errors."
+    wiki_page: wiki/component-boundaries.md
+    focused_tests:
+      - test/unit/packaging/workflow_creator_core_test.rb
+      - test/unit/packaging/workflow_creator_evidence_test.rb
+      - test/unit/packaging/live_agent_proof_test.rb
+    migration_exceptions: []
+
+  - id: workflow-creator-live
+    name: Workflow Creator Live Orchestration
+    state: boundary-ready
+    entrypoint:
+      file: packaging/live_agent_skills/workflow_creator_live_setup.rb
+      require: ./packaging/live_agent_skills/workflow_creator_live_setup
+      constant: HiveLiveAgentProof::WorkflowCreatorLiveSetup
+    public_contract:
+      values:
+        - HiveLiveAgentProof::WorkflowCreatorLiveSetup.prepare!
+        - HiveLiveAgentProof::WorkflowCreatorLiveRunner.initialize_evidence!
+        - HiveLiveAgentProof::WorkflowCreatorLiveRunner.fail!
+        - HiveLiveAgentProof::WorkflowCreatorLiveRunner.finalize_bootstrap_failure!
+        - HiveLiveAgentProof::WorkflowCreatorLiveRunner.run!
+        - HiveLiveAgentProof::WorkflowCreatorLiveRunner::Result
+        - HiveLiveAgentProof::WorkflowCreatorOpenClawRuntime.capture!
+        - HiveLiveAgentProof::WorkflowCreatorOpenClawRuntime.verify!
+      errors:
+        - HiveLiveAgentProof::WorkflowCreatorLiveSetup::Error
+        - HiveLiveAgentProof::WorkflowCreatorLiveRunner::Error
+        - HiveLiveAgentProof::WorkflowCreatorOpenClawRuntime::Error
+    owned_paths:
+      - packaging/live_agent_skills/workflow_creator_live_setup.rb
+      - packaging/live_agent_skills/workflow_creator_live_runner.rb
+      - packaging/live_agent_skills/workflow_creator_openclaw_runtime.rb
+      - packaging/live_agent_skills/openclaw/package.json
+      - packaging/live_agent_skills/openclaw/package-lock.json
+    state_contracts:
+      - "One setup result binds the exact candidate artifacts, installed candidate and OpenClaw runtimes, immutable dependency identities, projected skill, private workspace preparation, and independent external-action observation"
+      - "One runner derives the provider from the exact model prefix, exposes only its selected credential to the two outer OpenClaw launches, and strips provider and repository authority from every downstream tool process"
+      - "Native OpenClaw skill discovery, the exact final operational task row, and the authored graph/task effects are all required retained inputs to a passing primary"
+      - "The initial typed non-passing receipt exists before setup or credential preflight; each ordinary exit compare-and-swap finalizes it through Workflow Creator Core as exactly one passing or typed non-passing primary, while the bootstrap finalizer preserves any more specific failure"
+      - "The smoke test and workflow select fixtures and paths only; orchestration, policy, evidence translation, and cleanup remain inside this component"
+    schema_contracts:
+      - "The configuration record binds candidate SHA, model/provider/transport, exact OpenClaw lock and package identity, reviewed lifecycle scripts, runtime tree seal, shell sanitizer, and projected skill manifest"
+      - "OpenClaw configuration admits only workspace-scoped primitive file tools plus the exact U14 gateway path, and the SQLite-backed approvals policy must read back with exact security, ask, fallback, and allowlist fields before model execution"
+      - "Passing primary evidence comes only from the exact authored editorial graph, zero-task creation observation, one authorized task and deterministic first-stage fixture, exact nine candidate commands, two authenticated outer loops, and independently observed zero external actions"
+    lock_contracts:
+      - "Setup keeps Git metadata, candidate homes, and OpenClaw state/config/approvals in an owner-private control root outside the model workspace; U14 keeps its socket in the owner-private workspace parent, and exact control and skill identities are checked at every candidate command and around both model loops"
+      - "The U14 execution session remains the sole candidate gateway and process-custody owner; live orchestration exposes no generic command runner or evidence filename"
+    component_dependencies:
+      - workflow-creator-core
+      - workflow-creator-execution
+    allowed_hive_dependencies: []
+    internal_collaborators:
+      - HiveLiveAgentProof::WorkflowCreatorLiveRunner
+      - HiveLiveAgentProof::WorkflowCreatorOpenClawRuntime
+      - HiveLiveAgentProof::WorkflowCreatorLiveSetup::WorkspacePreparer
+      - HiveLiveAgentProof::WorkflowCreatorLiveSetup::ExternalActionsObserver
+    forbidden_constructions:
+      - HiveLiveAgentProof::WorkflowCreatorLiveSetup::WorkspacePreparer
+      - HiveLiveAgentProof::WorkflowCreatorLiveSetup::ExternalActionsObserver
+    authorized_internal_constructions:
+      - constant: HiveLiveAgentProof::WorkflowCreatorLiveSetup::WorkspacePreparer
+        files:
+          - packaging/live_agent_skills/workflow_creator_live_setup.rb
+        reason: "The setup facade alone constructs the fixed workspace-preparation callable"
+      - constant: HiveLiveAgentProof::WorkflowCreatorLiveSetup::ExternalActionsObserver
+        files:
+          - packaging/live_agent_skills/workflow_creator_live_setup.rb
+        reason: "The setup facade alone constructs the fixed external-action observation callable"
+    construction_scan_paths:
+      - packaging
+    hive_consumers:
+      - test/smoke/live_hive_workflow_creator_smoke_test.rb
+    mutation_authority: "The setup may materialize only its exact immutable closures and one disposable proof workspace; the runner may invoke only the two vocabulary-fixed OpenClaw loops through U14, publish only through Workflow Creator Core, and delete only U14-owned disposable state. Neither may choose a dependency version, release, repository effect, or provider endpoint outside its committed records."
+    recovery_surface: "Missing credentials or prerequisites remain typed blocked evidence; invalid/tampered closures, policy drift, transport overrides, tool authority, model/process failures, incomplete observations, publication conflicts, and cleanup failures remain typed non-passing evidence. A head change invalidates authenticated evidence and requires fresh authorization."
+    wiki_page: wiki/component-boundaries.md
+    focused_tests:
+      - test/unit/packaging/workflow_creator_live_setup_test.rb
+      - test/unit/packaging/workflow_creator_live_runner_test.rb
+      - test/unit/packaging/workflow_creator_openclaw_runtime_test.rb
+      - test/smoke/live_hive_workflow_creator_smoke_test.rb
+      - test/unit/release_contract_test.rb
+    migration_exceptions: []
+
+  - id: workflow-creator-execution
+    name: Workflow Creator Execution
+    state: boundary-ready
+    entrypoint:
+      file: packaging/live_agent_skills/workflow_creator_execution.rb
+      require: ./packaging/live_agent_skills/workflow_creator_execution
+      constant: HiveLiveAgentProof::WorkflowCreatorExecution
+    public_contract:
+      values:
+        - HiveLiveAgentProof::WorkflowCreatorExecution.start!
+        - HiveLiveAgentProof::WorkflowCreatorExecution::Draft
+        - HiveLiveAgentProof::WorkflowCreatorExecution::Result
+        - HiveLiveAgentProof::WorkflowCreatorExecution#gateway_path
+        - HiveLiveAgentProof::WorkflowCreatorExecution#workspace_path
+        - HiveLiveAgentProof::WorkflowCreatorExecution#run_outer_workflow_creator
+        - HiveLiveAgentProof::WorkflowCreatorExecution#run_outer_authorized_work
+        - HiveLiveAgentProof::WorkflowCreatorExecution#draft!
+        - HiveLiveAgentProof::WorkflowCreatorExecution#finish!
+        - HiveLiveAgentProof::WorkflowCreatorExecution#result
+        - HiveLiveAgentProof::WorkflowCreatorExecution#close
+      errors:
+        - HiveLiveAgentProof::WorkflowCreatorExecution::Error
+        - HiveLiveAgentProof::WorkflowCreatorExecution::Conflict
+        - HiveLiveAgentProof::WorkflowCreatorExecution::Unavailable
+    owned_paths:
+      - packaging/live_agent_skills/workflow_creator_execution.rb
+      - packaging/live_agent_skills/workflow_creator_installation.rb
+      - packaging/live_agent_skills/workflow_creator_gateway.rb
+      - packaging/live_agent_skills/workflow_creator_archive.rb
+      - packaging/live_agent_skills/workflow_creator_process_supervisor.rb
+      - packaging/live_agent_skills/workflow_creator_capture.rb
+    state_contracts:
+      - "One typed session owns the proof workspace, fixed gateway and private sibling socket, installed closures, archive admissions, bounded captures, supervisor receipts, draft support bytes, fixed final support publication, and final result"
+      - "Linux child-subreaper custody covers the nine vocabulary-defined candidate commands and exactly two outer model-loop labels; zero launches remains not_started and each launch requires one complete teardown receipt"
+      - "The session exposes only its fixed gateway/workspace paths, two closed outer launches, draft, finish, result, and idempotent close lifecycle; it exposes no generic process, archive, installation, publisher, or cleanup primitive"
+      - "U14 is a deterministic stable substrate for U15 orchestration, not evidence that an authenticated provider run or live Workflow Creator proof occurred"
+    schema_contracts:
+      - "Command positions and labels come from the Workflow Creator Vocabulary and bind exact argv, created task slug, capture digest, teardown, archive, installation, and receipt identities"
+      - "Archive admission accepts only regular owner-controlled candidate-package and openclaw-package members under fixed entry, byte, ratio, path, and elapsed-time ceilings"
+      - "Installation closure binds exact caller-supplied roots, manifests, inventory bytes, required role paths, candidate identity, and OpenClaw version without selecting any of them"
+      - "Publication targets exactly candidate-installed-manifest.json, openclaw-installed-manifest.json, and execution-receipt.json from the vocabulary; the primary openclaw-workflow-creator.json remains owned by WorkflowCreatorEvidence"
+    lock_contracts:
+      - "The gateway serializes one sequence-bound local-socket transaction and poisons the session on changed command, candidate, wrapper, socket, workspace, or credential-environment evidence"
+      - "The supervisor retains Linux process-tree custody through containment, caller-loss handling, TERM/KILL escalation, drain, and reaping before a teardown receipt can pass"
+      - "Fixed support publication reuses the private descriptor-relative publisher and its cooperative directory lock; cleanup removes only a session-created path whose current device and inode match its ownership row"
+    component_dependencies:
+      - workflow-creator-core
+    allowed_hive_dependencies: []
+    internal_collaborators:
+      - HiveLiveAgentProof::WorkflowCreatorArchive
+      - HiveLiveAgentProof::WorkflowCreatorInstallation
+      - HiveLiveAgentProof::WorkflowCreatorGateway
+      - HiveLiveAgentProof::WorkflowCreator::ProcessSupervisor
+      - HiveLiveAgentProof::WorkflowCreator::Capture
+    forbidden_constructions:
+      - HiveLiveAgentProof::WorkflowCreatorGateway
+      - HiveLiveAgentProof::WorkflowCreator::ProcessSupervisor
+      - HiveLiveAgentProof::WorkflowCreator::Capture
+    authorized_internal_constructions:
+      - constant: HiveLiveAgentProof::WorkflowCreatorGateway
+        files:
+          - packaging/live_agent_skills/workflow_creator_execution.rb
+        reason: "WorkflowCreatorExecution is the sole fixed audit-gateway composition root"
+      - constant: HiveLiveAgentProof::WorkflowCreator::ProcessSupervisor
+        files:
+          - packaging/live_agent_skills/workflow_creator_execution.rb
+        reason: "WorkflowCreatorExecution is the sole Linux process-custody composition root"
+      - constant: HiveLiveAgentProof::WorkflowCreator::Capture
+        files:
+          - packaging/live_agent_skills/workflow_creator_process_supervisor.rb
+        reason: "ProcessSupervisor alone constructs bounded capture inside its private custody child"
+    construction_scan_paths:
+      - packaging
+    hive_consumers:
+      - packaging/live_agent_skills/proof.rb
+    mutation_authority: "The session may create and identity-bound-clean one proof workspace plus one temporary gateway socket in its owner-private parent, execute only the eleven closed labels through its private Linux supervisor, inspect the two fixed archive kinds and caller-selected installed closures, and publish only the three vocabulary-fixed support members. It cannot publish the primary receipt or choose a provider, model, credential, installation version, workflow policy, or live-success classification."
+    recovery_surface: "Caller loss, timeouts, descendant teardown, partial capture, poisoned gateway state, changed filesystem/process identities, unsafe archives/installations, support-file conflicts, and close-before-finish fail closed with bounded receipts or fixed errors. Arbitrary coherent same-UID compromise and externally SIGKILLing the trusted custody root itself are outside the claim."
+    wiki_page: wiki/component-boundaries.md
+    focused_tests:
+      - test/unit/packaging/workflow_creator_execution_test.rb
+      - test/unit/packaging/workflow_creator_archive_test.rb
+      - test/unit/packaging/workflow_creator_installation_test.rb
+      - test/unit/packaging/workflow_creator_capture_test.rb
+      - test/unit/packaging/workflow_creator_process_supervisor_test.rb
+      - test/unit/packaging/workflow_creator_gateway_test.rb
+      - test/unit/packaging/live_agent_proof_test.rb
+    migration_exceptions: []

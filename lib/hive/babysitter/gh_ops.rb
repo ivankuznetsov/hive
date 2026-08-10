@@ -5,6 +5,8 @@ module Hive
   module Babysitter
     module GhOps
       GIVE_UP_LABEL = "babysitter/needs-human".freeze
+      GIVE_UP_LABEL_COLOR = "D73A4A".freeze
+      GIVE_UP_LABEL_DESCRIPTION = "Hive babysitter requires human intervention".freeze
 
       # Outcome of an auto-rebase attempt. `status` is one of :success
       # (fetch + rebase clean), :conflict (rebase failed and was aborted —
@@ -105,12 +107,60 @@ module Hive
         return result(true, "[dry-run] gh pr edit --add-label skipped", "") if dry_run
         return result(true, "already labelled", "") if pr_has_label?(worktree, pr_number, label, cfg: cfg)
 
+        if label.to_s.casecmp(GIVE_UP_LABEL).zero?
+          provisioned = ensure_give_up_label(worktree, cfg: cfg)
+          return provisioned unless provisioned.success?
+        end
+
         out, err, status = Hive::Gh.capture3(
           "gh", "pr", "edit", pr_number.to_s, "--add-label", label,
           chdir: worktree,
           cfg: cfg
         )
         result(status.success?, out, err)
+      rescue Hive::GhError => e
+        result(false, "", e.message)
+      end
+
+      def ensure_give_up_label(worktree, cfg:)
+        exists, lookup_error = give_up_label_exists(worktree, cfg: cfg)
+        return lookup_error if lookup_error
+        return result(true, "repository label already exists", "") if exists
+
+        out, err, status = Hive::Gh.capture3(
+          "gh", "label", "create", GIVE_UP_LABEL,
+          "--color", GIVE_UP_LABEL_COLOR,
+          "--description", GIVE_UP_LABEL_DESCRIPTION,
+          chdir: worktree,
+          cfg: cfg
+        )
+        return result(true, out, err) if status.success?
+
+        exists, = give_up_label_exists(worktree, cfg: cfg)
+        return result(true, "repository label was created concurrently", "") if exists
+
+        result(false, out, err)
+      end
+
+      def give_up_label_exists(worktree, cfg:)
+        out, err, status = Hive::Gh.capture3(
+          "gh", "label", "list", "--search", GIVE_UP_LABEL, "--limit", "100", "--json", "name",
+          chdir: worktree,
+          cfg: cfg
+        )
+        return [ nil, result(false, out, err) ] unless status.success?
+
+        labels = out.to_s.strip.empty? ? [] : JSON.parse(out)
+        unless labels.is_a?(Array)
+          return [ nil, result(false, out, "gh label list returned an unexpected response") ]
+        end
+
+        exists = labels.any? do |entry|
+          entry.is_a?(Hash) && entry["name"].to_s.casecmp(GIVE_UP_LABEL).zero?
+        end
+        [ exists, nil ]
+      rescue JSON::ParserError => e
+        [ nil, result(false, out, "invalid gh label list response: #{e.message}") ]
       end
 
       def post_pr_comment(worktree, pr_number, body, cfg:, dry_run:)

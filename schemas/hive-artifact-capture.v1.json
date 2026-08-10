@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-artifact-capture.v1.json",
+  "title": "Hive retained local artifact capture (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schema_version", "status", "task", "source_sha", "lock_digests",
+    "cache_key", "command", "environment_keys", "fixture_ids", "started_at",
+    "finished_at", "viewport", "accessibility_assertions", "artifacts",
+    "cleanup", "diagnostic"
+  ],
+  "properties": {
+    "schema": { "const": "hive-artifact-capture" },
+    "schema_version": { "const": 1 },
+    "status": { "enum": ["captured", "failed"] },
+    "task": { "type": "string", "minLength": 1 },
+    "source_sha": { "type": "string", "pattern": "^[0-9a-f]{40,64}$" },
+    "lock_digests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root", "web"],
+      "properties": {
+        "root": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "web": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "cache_key": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "command": { "type": "array", "items": { "type": "string" } },
+    "environment_keys": {
+      "type": "array", "uniqueItems": true, "items": { "type": "string" }
+    },
+    "fixture_ids": {
+      "type": "array", "uniqueItems": true, "items": { "type": "string" }
+    },
+    "started_at": { "type": "string", "format": "date-time" },
+    "finished_at": { "type": "string", "format": "date-time" },
+    "viewport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["width", "height"],
+      "properties": {
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "accessibility_assertions": { "type": "array", "items": { "type": "string" } },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["file", "bytes", "sha256"],
+        "properties": {
+          "file": { "type": "string", "minLength": 1 },
+          "bytes": { "type": "integer", "minimum": 1 },
+          "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        }
+      }
+    },
+    "cleanup": { "type": "object" },
+    "diagnostic": { "type": ["string", "null"], "maxLength": 16384 }
+  }
+}

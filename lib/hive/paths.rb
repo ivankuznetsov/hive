@@ -34,11 +34,10 @@ module Hive
       File.join(root, "operational", "daemon-snapshot.json")
     end
 
-    # Owner-private, versioned durable task-attempt state. Keeping the
-    # version in the directory name lets a future on-disk migration inspect
-    # old records without teaching older binaries to rewrite them.
+    # Owner-private, versioned durable task-attempt state. RecoveryMigration
+    # moves the physical v2 tree here before current readers may open it.
     def attempts_root
-      File.join(state_home, "attempts", "v1")
+      File.join(state_home, "attempts", "v3")
     end
 
     def attempt_records_root
@@ -55,6 +54,38 @@ module Hive
 
     def attempt_generation_locks_root
       File.join(attempts_root, "generation-locks")
+    end
+
+    def attempt_proof_root
+      File.join(attempts_root, "proof")
+    end
+
+    def attempt_decision_indexes_root
+      File.join(attempts_root, "decision-indexes")
+    end
+
+    def attempt_pending_finalization_root
+      File.join(attempts_root, "pending-finalization")
+    end
+
+    def workflow_publish_root
+      File.join(state_home, "workflow-publish", "v1")
+    end
+
+    def workflow_publish_receipts_root
+      File.join(workflow_publish_root, "receipts")
+    end
+
+    def workflow_publish_bundles_root
+      File.join(workflow_publish_root, "bundles")
+    end
+
+    def workflow_publish_locks_root
+      File.join(workflow_publish_root, "locks")
+    end
+
+    def workflow_publish_objects_root
+      File.join(workflow_publish_root, "objects")
     end
 
     def bin_home

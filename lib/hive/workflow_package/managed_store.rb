@@ -126,6 +126,15 @@ module Hive
         result
       end
 
+      # Validation and other strict no-write probes cannot use #selected:
+      # with_stable_read creates the mutation lock and reconciles an interrupted
+      # transaction before taking its shared read. This variant validates the
+      # selected pointer and configuration without creating, restoring, or
+      # clearing any managed-state path.
+      def selected_read_only(name, cfg: {}, &legacy_cfg_loader)
+        selected_unlocked(name, cfg: cfg, &legacy_cfg_loader)
+      end
+
       def selections(cfg: {})
         result = []
         with_stable_read do
@@ -138,6 +147,22 @@ module Hive
           end
         end
         result
+      end
+
+      # Read-only inspection mirrors the module store's diagnostic boundary:
+      # atomically published lock/configuration bytes may be inspected without
+      # reconciling an interrupted mutation or creating lock files.
+      def inspect_selected(name, cfg: {})
+        selected_unlocked(name, cfg: cfg)
+      end
+
+      def inspect_selections(cfg: {})
+        return [] unless File.directory?(workflows_dir)
+
+        Dir.glob(File.join(workflows_dir, "*", LOCK_FILE)).sort.filter_map do |path|
+          name = File.basename(File.dirname(path))
+          selected_unlocked(name, cfg: cfg)
+        end
       end
 
       def generation_path(name, commit)
@@ -201,6 +226,10 @@ module Hive
 
       def task_references(name = nil)
         MutationLock.with_lock(workflows_dir, shared: true) { task_references_unlocked(name) }
+      end
+
+      def inspect_task_references(name = nil)
+        task_references_unlocked(name)
       end
 
       # Task creation uses this boundary to make a legacy v1 lock's derived

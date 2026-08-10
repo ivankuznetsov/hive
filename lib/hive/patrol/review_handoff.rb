@@ -42,6 +42,38 @@ module Hive
         end
       end
 
+      # Read-only exact reconciliation for an outer effect gateway. Incomplete,
+      # conflicting, or duplicate candidates are ambiguous: only #enqueue may
+      # quarantine/rebuild them while holding the same fingerprint lock.
+      def reconcile(finding:, patch:, pr_url:, mandatory: false, context: nil)
+        expected = expected_metadata(
+          finding, patch, pr_url, context, mandatory: mandatory
+        )
+        with_fingerprint_lock(expected.fetch("fingerprint")) do
+          candidates = existing_task_folders.select do |folder|
+            folder_fingerprints(folder).include?(expected.fetch("fingerprint"))
+          end
+          return { "status" => "absent", "outcome" => {} } if candidates.empty?
+
+          inspections = candidates.map do |folder|
+            [ folder, inspect_existing(folder, expected) ]
+          end
+          complete = inspections.select do |_folder, inspection|
+            inspection.first == :complete
+          end
+          if complete.one? && inspections.one?
+            return {
+              "status" => "matched",
+              "outcome" => { "task_path" => complete.first.first }
+            }
+          end
+
+          { "status" => "ambiguous", "outcome" => {} }
+        end
+      rescue ArgumentError, Conflict, SystemCallError, IOError
+        { "status" => "ambiguous", "outcome" => {} }
+      end
+
       private
 
       def expected_metadata(finding, patch, pr_url, context, mandatory:)

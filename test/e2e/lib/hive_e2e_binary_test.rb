@@ -2,7 +2,9 @@ require_relative "../../test_helper"
 require "fileutils"
 require "json"
 require "open3"
+require "psych"
 require "rbconfig"
+require "json_schemer"
 require_relative "paths"
 
 class E2EBinaryTest < Minitest::Test
@@ -16,12 +18,46 @@ class E2EBinaryTest < Minitest::Test
     flunk "expected exactly one parseable JSON document on stdout: #{e.message}"
   end
 
-  def with_temp_scenario(name, body)
+  def with_temp_scenario(name, body, catalog: true)
     path = File.join(Hive::E2E::Paths.scenarios_dir, "#{name}.yml")
-    File.write(path, body)
+    coverage_id = "test.#{name}"
+    coverage_path = File.join(Hive::E2E::Paths.e2e_root, "coverage.yml")
+    original_catalog = File.binread(coverage_path)
+    scenario_body = body
+    unless body.match?(/^coverage:/)
+      scenario_body = "#{body.rstrip}\ncoverage:\n  primary: #{coverage_id}\n  supporting: []\n"
+    end
+    File.write(path, scenario_body)
+    if catalog
+      catalog_data = Psych.safe_load(original_catalog, aliases: false)
+      catalog_data.fetch("coverage") << {
+        "id" => coverage_id,
+        "title" => "Synthetic binary contract",
+        "description" => "Temporary binary-level scenario used by the focused harness tests.",
+        "maturity" => "required",
+        "profiles" => [ "release" ],
+        "constraints" => { "platforms" => [], "providers" => [] },
+        "docs" => [ "wiki/e2e.md" ],
+        "code" => [ "test/e2e/scenarios/#{name}.yml" ]
+      }
+      File.write(coverage_path, Psych.dump(catalog_data))
+    end
     yield
   ensure
+    File.binwrite(coverage_path, original_catalog) if original_catalog
     FileUtils.rm_f(path) if path
+  end
+
+  def create_retention_run(runs_dir, failed: 0, age_days: 1)
+    run_dir = File.join(runs_dir, "2026-07-22T10-00-00Z-1234-abcd")
+    FileUtils.mkdir_p(run_dir)
+    File.write(
+      File.join(run_dir, "report.json"),
+      JSON.generate("status" => "complete", "summary" => { "failed" => failed })
+    )
+    old = Time.now - (age_days * 86_400)
+    File.utime(old, old, run_dir)
+    run_dir
   end
 
   def test_list_json_emits_parseable_envelope_with_schema_version_1
@@ -44,6 +80,100 @@ class E2EBinaryTest < Minitest::Test
     assert incident
     assert_match(/\A#\d+\z/, incident.fetch("sibling_task_id"))
     assert_includes [ true, false ], incident.fetch("pending")
+  end
+
+  def test_coverage_json_exact_match_is_schema_valid_and_has_one_safe_command
+    out, err, status = Open3.capture3(
+      hive_e2e, "coverage", "--match", "workflow.full_pipeline", "--json"
+    )
+
+    assert status.success?, err
+    payload = parse_single_json_document(out)
+    assert_equal "hive-e2e-coverage", payload.fetch("schema")
+    assert_equal [ "workflow.full_pipeline" ],
+                 payload.fetch("matches").map { |match| match.fetch("id") }
+    assert_equal "bin/hive-e2e run --coverage workflow.full_pipeline",
+                 payload.dig("matches", 0, "runnable_command")
+    schema = JSONSchemer.schema(JSON.parse(File.read(
+      File.join(Hive::E2E::Paths.repo_root, "schemas", "hive-e2e-coverage.v1.json")
+    )))
+    assert_empty schema.validate(payload).to_a
+  end
+
+  def test_coverage_substring_order_human_output_and_no_match_contract
+    out, err, status = Open3.capture3(hive_e2e, "coverage", "--match", "update", "--json")
+    assert status.success?, err
+    ids = JSON.parse(out).fetch("matches").map { |match| match.fetch("id") }
+    assert_equal ids.sort, ids
+
+    out, err, status = Open3.capture3(
+      hive_e2e, "coverage", "--match", "recovery.provider_limit"
+    )
+    assert status.success?, err
+    assert_includes out, "recovery.provider_limit"
+    refute_includes out, "bin/hive-e2e run --coverage recovery.provider_limit"
+
+    out, err, status = Open3.capture3(
+      hive_e2e, "coverage", "--match", "definitely-no-coverage", "--json"
+    )
+    assert_equal 64, status.exitstatus
+    assert_empty err
+    assert_equal "no_scenarios", JSON.parse(out).fetch("error_kind")
+  end
+
+  def test_run_coverage_executes_only_primary_and_writes_selection_companion
+    Dir.mktmpdir("e2e-semantic-run") do |runs_dir|
+      out, err, status = Open3.capture3(
+        { "HIVE_E2E_RUNS_DIR" => runs_dir },
+        hive_e2e, "run", "--coverage", "runtime.error_envelope", "--json"
+      )
+
+      assert status.success?, err
+      report = JSON.parse(out)
+      assert_equal [ "run_error_envelope" ],
+                   report.fetch("scenario_metadata").map { |row| row.fetch("name") }
+      run_dir = Dir[File.join(runs_dir, "*")].first
+      selection = JSON.parse(File.read(File.join(run_dir, "selection.json")))
+      assert_equal [ "runtime.error_envelope" ], selection.fetch("coverage_ids")
+      assert_equal [ "run_error_envelope" ], selection.fetch("scenarios")
+    end
+  end
+
+  def test_run_pending_or_planned_coverage_has_no_runnable_scenario
+    out, err, status = Open3.capture3(
+      hive_e2e, "run", "--coverage", "recovery.provider_limit", "--json"
+    )
+
+    assert_equal 64, status.exitstatus
+    assert_empty err
+    payload = JSON.parse(out)
+    assert_equal "no_scenarios", payload.fetch("error_kind")
+    assert_match(/no runnable scenario/, payload.fetch("message"))
+  end
+
+  def test_unknown_scenario_mapping_fails_before_run_creation
+    name = "unknown_coverage_mapping_#{Process.pid}"
+    with_temp_scenario(name, <<~YAML, catalog: false) do
+      name: #{name}
+      coverage:
+        primary: test.not_in_catalog
+        supporting: []
+      steps:
+        - kind: cli
+          args: [version]
+    YAML
+      Dir.mktmpdir("e2e-preflight-runs") do |runs_dir|
+        out, err, status = Open3.capture3(
+          { "HIVE_E2E_RUNS_DIR" => runs_dir },
+          hive_e2e, "run", name, "--json"
+        )
+
+        assert_equal 78, status.exitstatus
+        assert_empty err
+        assert_match(/unknown coverage ID/, JSON.parse(out).fetch("message"))
+        assert_empty Dir.children(runs_dir), "catalog preflight must not create a run directory"
+      end
+    end
   end
 
   def test_incident_inventory_reports_enabled_results_and_pending_metadata
@@ -130,6 +260,98 @@ class E2EBinaryTest < Minitest::Test
     end
   end
 
+  def test_clean_accepts_legacy_retention_environment_with_deprecation_warning
+    Dir.mktmpdir("e2e-clean-test") do |tmp_runs_dir|
+      create_retention_run(tmp_runs_dir)
+
+      out, err, status = Open3.capture3(
+        {
+          "HIVE_E2E_RUNS_DIR" => tmp_runs_dir,
+          "HIVE_E2E_RUNS_RETAIN_DAYS" => nil,
+          "RUNS_RETAIN_DAYS" => "2"
+        },
+        hive_e2e, "clean", "--json"
+      )
+
+      assert status.success?, err
+      payload = parse_single_json_document(out)
+      assert_equal 0, payload.fetch("deleted")
+      assert_equal 1, payload.fetch("kept")
+      assert_equal 2, payload.dig("kept_runs", 0, "retain_days")
+      assert_match(/RUNS_RETAIN_DAYS is deprecated; use HIVE_E2E_RUNS_RETAIN_DAYS instead/, err)
+    end
+  end
+
+  def test_clean_prefers_namespaced_retention_environment_when_both_are_set
+    Dir.mktmpdir("e2e-clean-test") do |tmp_runs_dir|
+      create_retention_run(tmp_runs_dir)
+
+      out, err, status = Open3.capture3(
+        {
+          "HIVE_E2E_RUNS_DIR" => tmp_runs_dir,
+          "RUNS_RETAIN_DAYS" => "0",
+          "HIVE_E2E_RUNS_RETAIN_DAYS" => "2"
+        },
+        hive_e2e, "clean", "--json", "--dry-run"
+      )
+
+      assert status.success?, err
+      payload = JSON.parse(out)
+      assert_equal 0, payload.fetch("deleted")
+      assert_equal 1, payload.fetch("kept")
+      assert_equal 2, payload.dig("kept_runs", 0, "retain_days")
+      refute_match(/deprecated/, err)
+    end
+  end
+
+  def test_clean_prefers_namespaced_failed_retention_environment_when_legacy_conflicts
+    Dir.mktmpdir("e2e-clean-test") do |tmp_runs_dir|
+      create_retention_run(tmp_runs_dir, failed: 1)
+
+      out, err, status = Open3.capture3(
+        {
+          "HIVE_E2E_RUNS_DIR" => tmp_runs_dir,
+          "RUNS_RETAIN_FAILED_DAYS" => "0",
+          "HIVE_E2E_RUNS_RETAIN_FAILED_DAYS" => "2"
+        },
+        hive_e2e, "clean", "--json", "--dry-run"
+      )
+
+      assert status.success?, err
+      payload = parse_single_json_document(out)
+      assert_equal 0, payload.fetch("deleted")
+      assert_equal 1, payload.fetch("kept")
+      assert_equal 2, payload.dig("kept_runs", 0, "retain_days")
+      refute_match(/deprecated/, err)
+    end
+  end
+
+  def test_clean_dry_run_json_reports_legacy_retention_days_without_deleting
+    Dir.mktmpdir("e2e-clean-test") do |tmp_runs_dir|
+      run_dir = create_retention_run(tmp_runs_dir)
+
+      out, err, status = Open3.capture3(
+        {
+          "HIVE_E2E_RUNS_DIR" => tmp_runs_dir,
+          "HIVE_E2E_RUNS_RETAIN_DAYS" => nil,
+          "RUNS_RETAIN_DAYS" => "0"
+        },
+        hive_e2e, "clean", "--json", "--dry-run"
+      )
+
+      assert status.success?, err
+      assert_equal 1, out.scan(/^\{/).count
+      payload = parse_single_json_document(out)
+      assert_equal true, payload.fetch("dry_run")
+      assert_equal 1, payload.fetch("deleted")
+      assert_equal 0, payload.fetch("kept")
+      assert_equal "would_delete", payload.dig("deleted_runs", 0, "reason")
+      assert_equal 0, payload.dig("deleted_runs", 0, "retain_days")
+      assert_path_exists run_dir
+      assert_match(/RUNS_RETAIN_DAYS is deprecated; use HIVE_E2E_RUNS_RETAIN_DAYS instead/, err)
+    end
+  end
+
   def test_leading_json_clean_dispatches_to_clean
     Dir.mktmpdir("e2e-clean-test") do |tmp_runs_dir|
       out, err, status = Open3.capture3(
@@ -188,6 +410,19 @@ class E2EBinaryTest < Minitest::Test
     end
   end
 
+  def test_version_subcommand_json_emits_one_versioned_document
+    [ %w[version --json], %w[--json version] ].each do |argv|
+      out, err, status = Open3.capture3(hive_e2e, *argv)
+
+      assert status.success?, "#{argv.inspect}: #{err}"
+      assert_empty err
+      payload = parse_single_json_document(out)
+      assert_equal "hive-e2e-version", payload["schema"]
+      assert_equal 1, payload["schema_version"]
+      assert_equal Hive::VERSION, payload["version"]
+    end
+  end
+
   # Thor's default for unknown commands is to print a deprecation warning
   # and exit 0; we override `exit_on_failure?` to true so wrappers / CI
   # see a non-zero status instead. Pin the contract here.
@@ -208,6 +443,14 @@ class E2EBinaryTest < Minitest::Test
     assert status.success?, "bin/hive-e2e run --help should exit 0, stderr was: #{err}"
     assert_includes out, "Run e2e scenarios"
     refute_includes err, "no scenarios match"
+  end
+
+  def test_pattern_help_shows_run_help
+    out, err, status = Open3.capture3(hive_e2e, "some-pattern", "--help")
+
+    assert status.success?, err
+    assert_includes out, "hive-e2e run [PATTERN]"
+    assert_includes out, "Run e2e scenarios"
   end
 
   def test_leading_json_top_level_help_shows_usage
@@ -313,6 +556,50 @@ class E2EBinaryTest < Minitest::Test
     assert_equal false, payload["ok"]
     assert_equal "missing_repro", payload["error_kind"]
     assert_equal 78, payload["exit_code"]
+    assert_equal "replay", payload["command"]
+  end
+
+  def test_run_error_envelope_names_run_command
+    out, err, status = Open3.capture3(hive_e2e, "run", "definitely-no-scenario", "--json")
+
+    assert_equal 64, status.exitstatus
+    assert_empty err
+    assert_equal "run", JSON.parse(out)["command"]
+  end
+
+  def test_binary_run_contract_covers_success_and_scenario_failure
+    Dir.mktmpdir("e2e-binary-contract-runs") do |runs_dir|
+      passing = "binary_contract_pass_#{Process.pid}"
+      with_temp_scenario(passing, <<~YAML) do
+        name: #{passing}
+        steps:
+          - kind: write_file
+            path: "{sandbox}/created.txt"
+            content: ok
+      YAML
+        out, err, status = Open3.capture3(
+          { "HIVE_E2E_RUNS_DIR" => runs_dir }, hive_e2e, "run", passing, "--json"
+        )
+        assert status.success?, err
+        assert_equal "complete", JSON.parse(out)["status"]
+      end
+
+      failing = "binary_contract_fail_#{Process.pid}"
+      with_temp_scenario(failing, <<~YAML) do
+        name: #{failing}
+        steps:
+          - kind: state_assert
+            path: "{sandbox}/missing.txt"
+      YAML
+        out, err, status = Open3.capture3(
+          { "HIVE_E2E_RUNS_DIR" => runs_dir }, hive_e2e, "run", failing, "--json"
+        )
+        assert_equal 1, status.exitstatus, err
+        report = JSON.parse(out)
+        assert_equal 1, report.dig("summary", "failed")
+        assert_equal "failed", report.fetch("scenarios").first.fetch("status")
+      end
+    end
   end
 
   def test_replay_non_executable_repro_emits_json_artifact_error_when_requested
@@ -639,7 +926,7 @@ class E2EBinaryTest < Minitest::Test
 
       payload = JSON.parse(out)
       assert_equal "usage", payload["error_kind"]
-      assert_match(/retain_days must be a non-negative integer/, payload["message"])
+      assert_match(/retain_days must be >= 0/, payload["message"])
     end
   end
 

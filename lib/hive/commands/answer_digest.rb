@@ -8,9 +8,8 @@ require "hive/bot/telegram"
 require "hive/bot/title_formatter"
 require "hive/bot/waiting_rows"
 require "hive/config"
-require "hive/digest/sender"
-require "hive/digest/window"
 require "hive/env_file"
+require "hive/local_date_window"
 require "hive/pr"
 
 module Hive
@@ -140,7 +139,7 @@ module Hive
 
       def initialize(date: nil, dry_run: false, json: false, output: $stdout, cfg: nil,
                      status_watcher: nil, telegram_factory: nil, env_loader: Hive::EnvFile,
-                     config_loader: -> { Hive::Config.load_global_digest_config },
+                     config_loader: -> { { "bot" => Hive::Config.load_global_bot } },
                      logger: nil, now: -> { Time.now })
         @date = date
         @dry_run = dry_run
@@ -223,13 +222,13 @@ module Hive
 
       def parse_date
         raw = @date.to_s
-        return Hive::Digest::Window.local_today(now: @now.call) if raw.empty?
+        return Hive::LocalDateWindow.local_today(now: @now.call) if raw.empty?
 
         unless raw.match?(/\A\d{4}-\d{2}-\d{2}\z/)
           raise Hive::ConfigError, "hive answer-digest: --date must be YYYY-MM-DD; got #{@date.inspect}"
         end
 
-        Hive::Digest::Window.parse_date(raw)
+        Hive::LocalDateWindow.parse_date(raw)
       rescue ArgumentError
         raise Hive::ConfigError, "hive answer-digest: --date must be YYYY-MM-DD; got #{@date.inspect}"
       end
@@ -258,7 +257,7 @@ module Hive
                             chat_id: nil, reason: "dry_run", dry_run: true, count: rows.size, tasks: tasks)
         end
 
-        chat_id = Hive::Digest::Sender.resolve_chat_id(cfg)
+        chat_id = Hive::Config.telegram_chat_id!(cfg.fetch("bot", {}))
         # Validate the Result (chat_id, counts, task types) BEFORE the
         # irreversible send, so a representable-but-invalid state can't surface
         # only AFTER the digest is delivered — which would re-raise and make the

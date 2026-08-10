@@ -5,9 +5,43 @@
   "description": "Stable success contract emitted by `hive init --json`. V2 adds the explicit fresh-project architecture patrol discovery choice while leaving auto-fix and issue-filing policy in project config.",
   "oneOf": [
     { "$ref": "#/$defs/SuccessPayload" },
-    { "$ref": "#/$defs/AlreadyInitializedPayload" }
+    { "$ref": "#/$defs/AlreadyInitializedPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
   ],
   "$defs": {
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "ok", "error_class", "error_kind", "exit_code",
+        "message", "minimal", "preview", "project", "path", "workflow"
+      ],
+      "properties": {
+        "schema": { "const": "hive-init" },
+        "schema_version": { "const": 2 },
+        "ok": { "const": false },
+        "error_class": { "type": "string" },
+        "error_kind": {
+          "enum": [
+            "usage", "already_initialized", "project_name_collision",
+            "not_git_repository", "main_checkout_required", "dirty_worktree",
+            "concurrent_run", "config", "git", "internal", "error"
+          ]
+        },
+        "exit_code": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "message": { "type": "string" },
+        "minimal": { "const": true },
+        "preview": { "const": false },
+        "project": { "type": "string" },
+        "path": { "type": "string" },
+        "workflow": { "type": "string" },
+        "value": { "type": "string" },
+        "suggested_id": { "type": "string" },
+        "existing_path": { "type": "string" },
+        "holder": { "type": "object", "additionalProperties": true },
+        "lock_path": { "type": "string" }
+      }
+    },
     "AlreadyInitializedPayload": {
       "type": "object",
       "additionalProperties": false,
@@ -31,6 +65,7 @@
         "hive_state_path": { "type": "string" },
         "descriptor_path": { "type": "string" },
         "instruction_path": { "type": "string" },
+        "minimal": { "const": true },
         "workflow": { "type": "string" }
       }
     },
@@ -168,6 +203,7 @@
         "hive_state_path": { "type": "string" },
         "descriptor_path": { "type": "string" },
         "instruction_path": { "type": "string" },
+        "minimal": { "const": true },
         "workflow": { "type": "string" },
         "hints": {
           "type": "array",

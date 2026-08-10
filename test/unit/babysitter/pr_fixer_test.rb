@@ -56,6 +56,29 @@ class BabysitterPrFixerTest < Minitest::Test
     end
   end
 
+  def test_already_green_fork_pr_noops_without_needs_human_label
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      status = {
+        "mergeable" => "MERGEABLE", "mergeStateStatus" => "CLEAN",
+        "statusCheckRollup" => [ { "name" => "ci", "conclusion" => "SUCCESS" } ]
+      }
+      labels = []
+
+      with_replaced_singleton_method(Hive::Gh, :pr_status_rollup, ->(*_args, **_kwargs) { status }) do
+        with_replaced_singleton_method(Hive::Babysitter::GhOps, :add_label, ->(*args, **_kwargs) { labels << args }) do
+          outcome = Hive::Babysitter::PrFixer.run(
+            pr.merge("isCrossRepository" => true), project, cfg,
+            dry_run: false, logger: nil, inflight: Set.new
+          )
+          assert_equal :already_green, outcome
+        end
+      end
+
+      assert_empty labels
+    end
+  end
+
   def test_agent_success_emits_success_and_clears_inflight
     with_tmp_dir do |dir|
       project = project_entry(dir)
@@ -76,7 +99,73 @@ class BabysitterPrFixerTest < Minitest::Test
     end
   end
 
-  def test_agent_failure_labels_comments_and_gives_up
+  def test_agent_spawn_receives_babysitter_route
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      worktree_path = File.join(dir, "wt")
+      FileUtils.mkdir_p(worktree_path)
+      routed_cfg = cfg.merge(
+        "execute" => { "agent" => "codex" },
+        "models" => {
+          "babysitter" => { "model" => "gpt-5.6-sol", "effort" => "xhigh" }
+        }
+      )
+      captured = nil
+
+      stub_non_green_context(project, worktree_path) do
+        with_replaced_singleton_method(
+          Hive::Stages::Base,
+          :spawn_agent,
+          lambda { |_task, **kwargs| captured = kwargs; { status: :ok } }
+        ) do
+          outcome = Hive::Babysitter::PrFixer.run(
+            pr, project, routed_cfg, dry_run: false, logger: nil, inflight: Set.new
+          )
+          assert_equal :success, outcome
+        end
+      end
+
+      assert_equal :codex, captured.fetch(:profile).name
+      assert_equal [
+        "--model", "gpt-5.6-sol", "-c", "model_reasoning_effort=xhigh"
+      ], captured.fetch(:routing_arguments).global_arguments
+    end
+  end
+
+  def test_agent_spawn_honors_babysitter_provider_override
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      worktree_path = File.join(dir, "wt")
+      FileUtils.mkdir_p(worktree_path)
+      routed_cfg = cfg.merge(
+        "execute" => { "agent" => "codex" },
+        "babysitter" => cfg.fetch("babysitter").merge("agent" => "claude"),
+        "models" => {
+          "babysitter" => { "model" => "claude-opus-5", "effort" => "max" }
+        }
+      )
+      captured = nil
+
+      stub_non_green_context(project, worktree_path) do
+        with_replaced_singleton_method(
+          Hive::Stages::Base,
+          :spawn_agent,
+          lambda { |_task, **kwargs| captured = kwargs; { status: :ok } }
+        ) do
+          outcome = Hive::Babysitter::PrFixer.run(
+            pr, project, routed_cfg, dry_run: false, logger: nil, inflight: Set.new
+          )
+          assert_equal :success, outcome
+        end
+      end
+
+      assert_equal :claude, captured.fetch(:profile).name
+      assert_equal [ "--model", "claude-opus-5", "--effort", "max" ],
+                   captured.fetch(:routing_arguments).subcommand_arguments
+    end
+  end
+
+  def test_agent_failure_comments_and_gives_up_when_label_fails
     with_tmp_dir do |dir|
       project = project_entry(dir)
       worktree_path = File.join(dir, "wt")
@@ -88,7 +177,7 @@ class BabysitterPrFixerTest < Minitest::Test
         with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, ->(*_args, **_kwargs) { { status: :error, final_message: "tests failed" } }) do
           with_replaced_singleton_method(Hive::Babysitter::GhOps, :add_label, lambda { |*args, **_kwargs|
             label_calls << args
-            Hive::Gh::PushResult.new(success: true, stdout: "", stderr: "")
+            Hive::Gh::PushResult.new(success: false, stdout: "", stderr: "label unavailable")
           }) do
             with_replaced_singleton_method(Hive::Babysitter::GhOps, :post_pr_comment, lambda { |*args, **_kwargs|
               comment_calls << args
@@ -105,6 +194,11 @@ class BabysitterPrFixerTest < Minitest::Test
       assert_equal 1, comment_calls.size
       assert_includes comment_calls.first[2], "tests failed"
       events = File.readlines(File.join(project.fetch("hive_state_path"), "babysitter", "events.jsonl")).map { |line| JSON.parse(line) }
+      assert events.any? do |event|
+        event["action"] == "label-apply" && event["outcome"] == "failure" &&
+          event["message"] == "label unavailable"
+      end
+      assert events.any? { |event| event["action"] == "pr-comment" && event["outcome"] == "success" }
       assert events.any? { |event| event["action"] == "give-up" && event["outcome"] == "failure" }
     end
   end

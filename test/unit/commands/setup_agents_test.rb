@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/commands/setup_agents"
+require "hive/agent_skills/provisioner"
 
 class SetupAgentsCommandTest < Minitest::Test
   class TtyInput < StringIO

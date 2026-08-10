@@ -1,0 +1,47 @@
+<% content_for(:title, "#{web_product_name} — #{@agent_login.agent} login") %>
+<h1>Agent login</h1>
+
+<%# Keep polling while there is no URL yet, or for an operator-ward agent
+    whose CLI is still running. This resource renders only one login snapshot;
+    the two-second frame request never rebuilds the Agents inventory/skills.
+    A frame response must not echo its own src: Turbo rejects that recursive
+    response. The poll controller belongs to replaceable inner content so the
+    final server response disconnects it and stops the timer. %>
+<% polling = @agent_login.polling? %>
+<%= turbo_frame_tag "agent-login",
+      src: (polling && !turbo_frame_request? ? agent_login_status_path(@agent_login.agent, @agent_login.id) : nil) do %>
+  <div class="card" <%= tag.attributes(data: { controller: "poll", poll_interval_value: 2000 }) if polling %>>
+    <h2><%= @agent_login.agent %> login</h2>
+    <% if @agent_login.done? %>
+      <% if @agent_login.error %>
+        <p>Login failed: <%= @agent_login.error %></p>
+      <% else %>
+        <p><%= @agent_login.agent %> is now logged in.</p>
+      <% end %>
+      <p><%= link_to "Back to agents", agents_path, data: { turbo_frame: "_top" } %></p>
+    <% elsif @agent_login.url %>
+      <p>Open the provider page and authorize:</p>
+      <p><%= link_to @agent_login.url, @agent_login.url, target: "_blank", rel: "noopener" %></p>
+      <% if @agent_login.operator_ward? %>
+        <p class="muted">Enter the one-time code shown in the CLI output below at the provider page. This page updates automatically when login completes.</p>
+      <% else %>
+        <%= form_with url: agent_login_complete_path(@agent_login.agent, @agent_login.id),
+              class: "form-grid", data: { turbo_frame: "_top" } do |f| %>
+          <div class="form-row">
+            <%= f.label :code, "Paste the code (or full callback URL) the provider returned" %>
+            <%= f.text_field :code, required: true %>
+          </div>
+          <p><%= f.submit "Complete login", data: { turbo_submits_with: "Completing…" } %></p>
+        <% end %>
+      <% end %>
+    <% else %>
+      <p class="muted">Waiting for the login URL from the CLI…</p>
+    <% end %>
+    <% if @agent_login.output.present? %>
+      <details class="login-output">
+        <summary class="muted">CLI output</summary>
+        <pre><%= @agent_login.output %></pre>
+      </details>
+    <% end %>
+  </div>
+<% end %>

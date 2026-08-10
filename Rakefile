@@ -3,13 +3,58 @@ require "fileutils"
 require "securerandom"
 require_relative "test/support/coverage"
 
-# Default suite — everything under test/{unit,integration}. Self-contained,
-# uses fake-claude / fake-gh, no network or paid API calls.
+# These expensive outer proofs are intentionally separate from the normal local
+# suite. CI runs them as named merge gates.
+HIVE_CI_GATE_TESTS = {
+  "test:packaged_web_bootstrap" => "test/integration/web_packaged_bootstrap_test.rb",
+  "test:tui_reactivity_perf" => "test/integration/tui_reactivity_perf_test.rb",
+  "test:setup_agents_integration" => "test/integration/setup_agents_test.rb",
+  "test:babysitter_dry_run_security_matrix" =>
+    "test/unit/babysitter/dry_run_security_matrix_test.rb"
+}.freeze
+HIVE_CI_GATE_TEST_OPTIONS = {
+  "test:babysitter_dry_run_security_matrix" =>
+    "--include=test_stubs_skip_unknown_and_mutating_commands_but_allow_read_only_commands"
+}.freeze
+HIVE_DEFAULT_TEST_FILES = FileList[
+  "test/{unit,integration,babysitter}/**/*_test.rb"
+].exclude(*HIVE_CI_GATE_TESTS.values).to_a.freeze
+HIVE_HOSTILE_TEST_FILES = FileList[
+  "test/unit/packaging/workflow_creator_values_test.rb",
+  "test/unit/packaging/patrol_evidence_candidate_test.rb",
+  "test/unit/packaging/patrol_evidence_sandbox_test.rb"
+].to_a.freeze
+
+# Default local suite. Self-contained, uses fake-claude / fake-gh, and makes no
+# network or paid API calls. Expensive outer proofs run only through their
+# explicit CI-gate tasks below.
 Rake::TestTask.new do |t|
   t.libs << "test"
   t.libs << "lib"
-  t.test_files = FileList["test/{unit,integration,babysitter}/**/*_test.rb"]
+  t.test_files = HIVE_DEFAULT_TEST_FILES
   t.warning = false
+end
+
+Rake::TestTask.new("test:agent_cli_runtime") do |t|
+  t.libs << "components/agent-cli-runtime/test"
+  t.libs << "components/agent-cli-runtime/lib"
+  t.test_files = FileList["components/agent-cli-runtime/test/**/*_test.rb"]
+  t.warning = false
+  t.description = "Run the standalone Agent CLI Runtime package tests"
+end
+
+Rake::Task[:test].enhance([ "test:agent_cli_runtime" ])
+
+task "test:enable_hostile" do
+  ENV["HIVE_HOSTILE_TESTS"] = "1"
+end
+
+Rake::TestTask.new("test:hostile" => "test:enable_hostile") do |t|
+  t.libs << "test"
+  t.libs << "lib"
+  t.test_files = HIVE_HOSTILE_TEST_FILES
+  t.warning = false
+  t.description = "Run opt-in hostile/property campaigns outside default CI"
 end
 
 desc "Run the default suite with merged stdlib Coverage reporting and a 100% line threshold"
@@ -54,7 +99,11 @@ end
 #
 # Per project CLAUDE.md (Ivan's rule "use real APIs, make real requests"):
 # this is the test bed where claude actually gets called.
-Rake::TestTask.new(:smoke) do |t|
+task "test:allow_real_user_environment" do
+  ENV["HIVE_TEST_ALLOW_REAL_USER_ENV"] = "1"
+end
+
+Rake::TestTask.new(smoke: "test:allow_real_user_environment") do |t|
   t.libs << "test"
   t.libs << "lib"
   t.test_files = FileList["test/smoke/**/*_test.rb"]
@@ -74,6 +123,31 @@ namespace :e2e do
   desc "Remove old e2e run artifacts"
   task :clean do
     ruby "bin/hive-e2e", "clean"
+  end
+
+  Rake::TestTask.new(:patrol_qualification_reduced) do |t|
+    t.libs << "test"
+    t.libs << "lib"
+    t.test_files = FileList[
+      "test/e2e/qualification/patrol_qualification_test.rb"
+    ]
+    t.warning = false
+    t.description = "Run the opt-in reduced installed-CLI Patrol qualification smoke"
+  end
+end
+
+task "test:require_nonempty_ci_gate" do
+  ENV["HIVE_REQUIRE_TEST_RUNS"] = "1"
+end
+
+HIVE_CI_GATE_TESTS.each do |qualified_name, test_file|
+  Rake::TestTask.new(qualified_name => "test:require_nonempty_ci_gate") do |t|
+    t.libs << "test"
+    t.libs << "lib"
+    t.test_files = FileList[test_file]
+    t.options = HIVE_CI_GATE_TEST_OPTIONS[qualified_name]
+    t.warning = false
+    t.description = "Run the #{qualified_name.delete_prefix("test:").tr("_", " ")} merge gate"
   end
 end
 

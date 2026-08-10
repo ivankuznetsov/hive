@@ -5,8 +5,8 @@ module Hive
   module AgentLimit
     # How long to wait, after a `limits_reached` marker is written, before
     # the daemon healer is allowed to auto-retry the parked task. A usage /
-    # credit window may have changed by then, so the marker self-heals instead
-    # of staying red until a human runs `hive markers clear`. Provider reset
+    # credit window may have changed by then, so the daemon submits the marker
+    # to the shared recovery coordinator. Provider reset
     # hints remain useful for display, but never gate daemon scheduling: credits
     # can be added, usage can be reset, or the active account can change early.
     # Overridable per-process via HIVE_LIMITS_RETRY_COOLDOWN_SEC (a positive
@@ -249,8 +249,8 @@ module Hive
       "every #{seconds} seconds"
     end
 
-    # Machine-readable `held` object for the JSON status payload (schema:
-    # hive-status.v4.json#held). The vocabulary switch is deliberate: the
+    # Machine-readable `held` object for the current hive-status schema. The
+    # vocabulary switch is deliberate: the
     # on-disk marker uses `reason="limits_reached"`, but the JSON contract
     # exposes the held state as `reason="quota"` so consumers key off a
     # stable noun rather than the internal marker verb. `provider` /

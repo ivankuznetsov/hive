@@ -34,6 +34,10 @@ class HivePatrolValueObjectsTest < Minitest::Test
       "reproduction" => "Call the route with an unknown user id.",
       "validation" => "Run the route regression and the request suite.",
       "alpha_score" => 87,
+      "validation_key" => "test",
+      "target_sha" => "a" * 40,
+      "lifecycle_state" => "active",
+      "lifecycle_reason" => "admitted",
       "evidence" => [ { "file" => "app.rb" } ],
       "fingerprint" => "fp"
     )
@@ -41,6 +45,8 @@ class HivePatrolValueObjectsTest < Minitest::Test
     assert_equal "fp", finding.fingerprint
     assert_equal "cross_feature", finding.scope
     assert_equal 87, finding.alpha_score
+    assert_equal "test", finding.validation_key
+    assert_equal "active", finding.lifecycle_state
     assert_equal "Requests must not dereference a missing user.", finding.to_h.fetch("contract")
   end
 

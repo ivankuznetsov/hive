@@ -15,14 +15,17 @@ permissions:
 
 jobs:
   test:
-    name: rake test (Ruby ${{ matrix.ruby }})
+    name: coverage (Ruby ${{ matrix.ruby }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         ruby: ["3.4"]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Baseline-catalog tests verify reviewed dependency locks at release tags.
+          fetch-depth: 0
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
         with:
@@ -33,11 +36,57 @@ jobs:
           HIVE_COVERAGE_MIN_LINE: "100"
         run: bundle exec rake coverage
 
+  expensive-test-gates:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: packaged Hive web bootstrap
+            task: test:packaged_web_bootstrap
+          - name: TUI reactivity performance
+            task: test:tui_reactivity_perf
+          - name: multi-agent setup integration
+            task: test:setup_agents_integration
+          - name: babysitter dry-run security matrix
+            task: test:babysitter_dry_run_security_matrix
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+      - name: Run merge gate
+        env:
+          HIVE_CI_GATE_TASK: ${{ matrix.task }}
+        run: bundle exec rake "$HIVE_CI_GATE_TASK"
+
+  required-test-gate:
+    name: rake test (Ruby 3.4)
+    if: ${{ always() }}
+    needs:
+      - test
+      - expensive-test-gates
+      - e2e
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require coverage, functional e2e, and expensive proof gates
+        shell: bash
+        env:
+          HIVE_COVERAGE_RESULT: ${{ needs.test.result }}
+          HIVE_EXPENSIVE_GATES_RESULT: ${{ needs.expensive-test-gates.result }}
+          HIVE_E2E_RESULT: ${{ needs.e2e.result }}
+        run: |
+          test "$HIVE_COVERAGE_RESULT" = "success"
+          test "$HIVE_EXPENSIVE_GATES_RESULT" = "success"
+          test "$HIVE_E2E_RESULT" = "success"
+
   e2e:
     name: real CLI scenario harness
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.4"
@@ -52,19 +101,39 @@ jobs:
         env:
           HIVE_E2E_RUNS_DIR: ${{ runner.temp }}/hive-e2e-runs
         run: bundle exec rake e2e
-      - name: Enforce incident duration budgets
+      - name: Validate incident report integrity
         env:
           HIVE_E2E_RUNS_DIR: ${{ runner.temp }}/hive-e2e-runs
-        run: bundle exec ruby test/e2e/check_incident_budget.rb "$HIVE_E2E_RUNS_DIR"
+        run: ruby test/e2e/check_incident_budget.rb "$HIVE_E2E_RUNS_DIR" --integrity-only
       - name: Retain e2e reports and failure evidence
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: hive-e2e-report
           path: ${{ runner.temp }}/hive-e2e-runs
           include-hidden-files: true
           if-no-files-found: warn
           retention-days: 14
+
+  incident-duration-budget:
+    name: incident duration budget (advisory)
+    needs: e2e
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+      - name: Download e2e report
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: hive-e2e-report
+          path: ${{ runner.temp }}/hive-e2e-runs
+      - name: Check incident duration budgets
+        env:
+          HIVE_E2E_RUNS_DIR: ${{ runner.temp }}/hive-e2e-runs
+        run: ruby test/e2e/check_incident_budget.rb "$HIVE_E2E_RUNS_DIR" --timing-only
 
   web:
     name: Hive web (Rails tests + system)
@@ -73,7 +142,7 @@ jobs:
       run:
         working-directory: web
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.4"
@@ -110,7 +179,7 @@ jobs:
     name: hivebox installer (Windows PowerShell)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Syntax-check both installers
         shell: pwsh
         run: |
@@ -125,7 +194,7 @@ jobs:
     name: rubocop (37signals omakase)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.4"
@@ -136,18 +205,18 @@ jobs:
     name: brakeman
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.4"
           bundler-cache: true
-      - run: bundle exec brakeman --force --no-pager --quiet --format github --ignore-config config/brakeman.ignore
+      - run: bundle exec brakeman --gemfile web/Gemfile --force --no-pager --quiet --format github --ignore-config config/brakeman.ignore
 
   bundler-audit:
     name: bundler-audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.4"
@@ -160,17 +229,22 @@ jobs:
   # tests can only stub launchctl. This job exercises the real round-trip on a
   # hosted macOS runner (which runs the user in a GUI session, so user-agent
   # `launchctl load` works). Scope is the install mechanics — not that the
-  # service stays up (that needs the web bundle / a bound port). No untrusted
-  # workflow input is used in any run step.
+  # service stays up (that needs the web bundle / a bound port). One focused
+  # creator-evidence happy path also executes its native syscalls on Darwin.
+  # No untrusted workflow input is used in any run step.
   launchd-macos:
     name: launchd service install (macOS)
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.4"
           bundler-cache: true
+      - name: workflow creator native publication happy path
+        run: >-
+          bundle exec ruby -Itest test/unit/packaging/workflow_creator_evidence_test.rb
+          --name test_replacement_is_compare_and_swap_and_post_rename_retry_is_exact
       - name: daemon launchd install round-trip
         run: |
           set -euo pipefail

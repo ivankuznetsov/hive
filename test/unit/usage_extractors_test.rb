@@ -101,10 +101,10 @@ class UsageExtractorsTest < Minitest::Test
     assert_equal({ input: 1000, output: 200, cached: 300, model: "gpt-5-codex" }, result)
   end
 
-  def test_codex_final_event_without_usage_zero_fills
+  def test_codex_final_event_without_usage_remains_unknown
     result = CODEX.call(event("type" => "turn.completed", "model" => "gpt-5-codex"))
 
-    assert_equal({ input: 0, output: 0, cached: 0, model: "gpt-5-codex" }, result)
+    assert_nil result
   end
 
   def test_pi_usage_shape
@@ -121,9 +121,9 @@ class UsageExtractorsTest < Minitest::Test
     assert_equal({ input: 40, output: 20, cached: 10, model: "pi-model" }, result)
   end
 
-  def test_pi_final_event_without_usage_zero_fills
+  def test_pi_final_event_without_usage_remains_unknown
     result = PI.call(event("type" => "task.completed"))
 
-    assert_equal({ input: 0, output: 0, cached: 0, model: nil }, result)
+    assert_nil result
   end
 end

@@ -8,15 +8,17 @@ module Hive
       end
 
       def build_discovery(attempts:, kind:, owner:, owner_pid:, owner_process_start_time:,
-                          now:, lease_sec:)
+                          occurrence_id:, now:, lease_sec:)
         timestamp = now.utc.iso8601
         {
           "kind" => kind,
           "owner" => owner.to_s,
           "owner_pid" => owner_pid,
           "owner_process_start_time" => owner_process_start_time,
+          "occurrence_id" => occurrence_id,
           "generation" => next_generation(attempts),
           "state" => "claimed",
+          "transitions" => [],
           "claimed_at" => timestamp,
           "heartbeat_at" => timestamp,
           "expires_at" => (now + lease_sec.to_i).utc.iso8601,
@@ -30,12 +32,13 @@ module Hive
       end
 
       def build_action(claims:, owner:, owner_pid:, owner_process_start_time:,
-                       authority:, now:, lease_sec:)
+                       occurrence_id:, authority:, now:, lease_sec:)
         timestamp = now.utc.iso8601
         {
           "owner" => owner.to_s,
           "owner_pid" => owner_pid,
           "owner_process_start_time" => owner_process_start_time,
+          "occurrence_id" => occurrence_id,
           "generation" => next_generation(claims),
           "state" => "claimed",
           "authority" => authority,

@@ -98,6 +98,79 @@ class AttemptsCapacitySnapshotTest < Minitest::Test
     assert_equal 0, snapshot.daily_count("demo", NOW.to_date)
   end
 
+  def test_supplied_hot_scan_is_reused_without_store_rescan
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Store.new(root: root)
+      create(store, attempt_id: "live", project: "p1", task_slug: "s1")
+      hot_scan = store.scan
+      store.define_singleton_method(:scan) { raise "unexpected rescan" }
+
+      snapshot = Hive::Attempts::CapacitySnapshot.build(
+        store: store, scan: hot_scan, now: NOW
+      )
+
+      assert_equal 1, snapshot.global_count
+      assert_equal 1, snapshot.daily_count("p1", NOW.to_date)
+    end
+  end
+
+  def test_find_forgets_a_cached_record_when_point_authority_is_missing
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Store.new(root: root)
+      record = create(store, attempt_id: "gone", project: "p1", task_slug: "s1")
+      view = Hive::Attempts::AdmissionView.new(store: store, hot_scan: store.scan)
+      File.unlink(store.record_path(record.attempt_id))
+
+      assert_nil view.find(record.attempt_id)
+      assert_nil view.find(record.attempt_id)
+    end
+  end
+
+  def test_records_refreshes_cached_records_and_indexes_the_latest_state
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Store.new(root: root)
+      record = create(store, attempt_id: "live", project: "p1", task_slug: "s1")
+      view = Hive::Attempts::AdmissionView.new(store: store, hot_scan: store.scan)
+      claimed = store.claim(
+        record, owner: owner, claim_capability: CLAIM_CAPABILITY,
+        first_heartbeat_timeout_sec: 30, now: NOW + 1
+      )
+
+      refreshed = view.records.fetch(0)
+
+      assert_equal claimed.lease_version, refreshed.lease_version
+      assert_equal claimed.state, refreshed.state
+      assert_equal 1, store.decision_index.daily_count(project: "p1", date: NOW.to_date)
+    end
+  end
+
+  def test_records_raise_when_a_cached_record_becomes_unreadable
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Store.new(root: root)
+      record = create(store, attempt_id: "corrupt", project: "p1", task_slug: "s1")
+      view = Hive::Attempts::AdmissionView.new(store: store, hot_scan: store.scan)
+      File.write(store.record_path(record.attempt_id), "{")
+
+      assert_raises(Hive::Attempts::StoreError) { view.records }
+    end
+  end
+
+  def test_admission_refresh_keeps_an_unreadable_active_reservation_fail_closed
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Store.new(root: root)
+      record = create(store, attempt_id: "corrupt", project: "p1", task_slug: "s1")
+      view = Hive::Attempts::AdmissionView.new(store: store, hot_scan: store.scan)
+      File.write(store.record_path(record.attempt_id), "{")
+
+      records = store.with_admission_lock { view.refresh_for_admission }
+
+      assert_empty records
+      reservation = store.decision_index.live_reservations.fetch(record.attempt_id)
+      assert_equal "active", reservation.fetch("phase")
+      assert_equal "p1", reservation.fetch("project")
+    end
+  end
+
   private
 
   def create(store, attempt_id:, project:, task_slug:, generation: "g1")

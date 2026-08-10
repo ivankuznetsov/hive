@@ -22,6 +22,11 @@ class TuiSnapshotTest < Minitest::Test
       "folder" => "/tmp/hive/#{slug}",
       "state_file" => "/tmp/hive/#{slug}/idea.md",
       "pr_url" => nil,
+      "closure" => {
+        "status" => "complete",
+        "reason" => "already_delivered",
+        "receipt_digest" => "a" * 64
+      },
       "marker" => marker,
       "attrs" => {},
       "mtime" => "2026-04-27T12:00:00Z",
@@ -83,6 +88,7 @@ class TuiSnapshotTest < Minitest::Test
     assert_equal "/tmp/hive/first-task", first.folder
     assert_equal "/tmp/hive/first-task/idea.md", first.state_file
     assert_nil first.pr_url
+    assert_equal "already_delivered", first.closure.fetch("reason")
     assert_equal "waiting", first.marker
     assert_equal({}, first.attrs)
     assert_equal "2026-04-27T12:00:00Z", first.mtime
@@ -521,7 +527,7 @@ class TuiSnapshotTest < Minitest::Test
                  "unknown labels keep their JSON order against each other"
   end
 
-  def test_without_old_archived_drops_old_archived_rows_by_task_mtime
+  def test_snapshot_uses_producer_rows_and_hidden_count_without_reclassifying_mtime
     now = Time.utc(2026, 6, 4, 12, 0, 0)
     old_archived = sample_task(slug: "old-archived", stage: "9-done", marker: "complete")
     old_archived["action"] = "archived"
@@ -535,12 +541,6 @@ class TuiSnapshotTest < Minitest::Test
     recent_archived["mtime"] = (now - 86_400).utc.iso8601
     recent_archived["folder_mtime"] = (now - 86_400).utc.iso8601
 
-    errored_archived = sample_task(slug: "errored-archived", stage: "9-done", marker: "error")
-    errored_archived["action"] = "error"
-    errored_archived["action_label"] = "Error"
-    errored_archived["mtime"] = (now - (10 * 86_400)).utc.iso8601
-    errored_archived["folder_mtime"] = (now - (10 * 86_400)).utc.iso8601
-
     old_execute = sample_task(slug: "old-execute", stage: "4-execute", marker: "execute_complete")
     old_execute["mtime"] = (now - (99 * 86_400)).utc.iso8601
     old_execute["folder_mtime"] = (now - (99 * 86_400)).utc.iso8601
@@ -553,41 +553,65 @@ class TuiSnapshotTest < Minitest::Test
                                                                    "tasks" => [
                                                                      old_archived,
                                                                      recent_archived,
-                                                                     errored_archived,
                                                                      old_execute
-                                                                   ]
+                                                                   ],
+                                                                   "hidden_archived_task_count" => 2
                                                                  }
                                                                ]))
 
-    filtered = snapshot.without_old_archived(now: now)
+    visible = snapshot.visible_projection(scope: 0, filter: nil, now: now)
 
-    refute_includes filtered.rows.map(&:slug), "old-archived"
-    assert_includes filtered.rows.map(&:slug), "recent-archived"
-    refute_includes filtered.rows.map(&:slug), "errored-archived"
-    assert_includes filtered.rows.map(&:slug), "old-execute"
-    assert_equal 2, snapshot.hidden_old_archived_count(now: now)
+    assert_equal snapshot.rows, visible.rows
+    assert_includes visible.rows.map(&:slug), "old-archived",
+                    "Snapshot must not re-evaluate producer rows from task mtime"
+    assert_equal 2, snapshot.hidden_archived_task_count
+    refute_includes Hive::Tui::Snapshot::Row.members, :hidden_archived_task_count
   end
 
-  def test_without_old_archived_tolerates_blank_or_invalid_mtime
-    now = Time.utc(2026, 6, 4, 12, 0, 0)
-    blank = sample_task(slug: "blank-mtime", stage: "9-done", marker: "complete")
-    blank["mtime"] = ""
-    blank["folder_mtime"] = ""
-    invalid = sample_task(slug: "invalid-mtime", stage: "9-done", marker: "complete")
-    invalid["mtime"] = "not-a-time"
-    invalid["folder_mtime"] = "not-a-time"
+  def test_snapshot_keeps_dedicated_archive_rows_separate_from_ordinary_rows
+    old_archived = sample_task(slug: "old-archived", stage: "9-done", marker: "complete")
+    old_archived["action"] = "archived"
+    old_archived["action_label"] = "Archived"
+    recent_archived = sample_task(slug: "recent-archived", stage: "9-done", marker: "complete")
+    recent_archived["action"] = "archived"
+    recent_archived["action_label"] = "Archived"
+    active = sample_task(slug: "active")
+
+    ordinary = sample_payload([
+      {
+        "name" => "alpha",
+        "path" => "/tmp/alpha",
+        "hive_state_path" => "/tmp/alpha/.hive-state",
+        "tasks" => [ recent_archived, active ],
+        "hidden_archived_task_count" => 1
+      }
+    ])
+    archive = sample_payload([
+      {
+        "name" => "alpha",
+        "path" => "/tmp/alpha",
+        "hive_state_path" => "/tmp/alpha/.hive-state",
+        "tasks" => [ old_archived, recent_archived ]
+      }
+    ])
+
+    snapshot = Hive::Tui::Snapshot.from_payload(ordinary, archive_payload: archive)
+
+    assert_equal [ "recent-archived", "active" ].sort, snapshot.rows.map(&:slug).sort
+    assert_equal [ "old-archived", "recent-archived" ].sort,
+                 snapshot.archive_rows.map(&:slug).sort
+    assert_equal 1, snapshot.hidden_archived_task_count
+  end
+
+  def test_hidden_archived_count_respects_project_scope
     snapshot = Hive::Tui::Snapshot.from_payload(sample_payload([
-                                                                 {
-                                                                   "name" => "alpha",
-                                                                   "path" => "/tmp/alpha",
-                                                                   "hive_state_path" => "/tmp/alpha/.hive-state",
-                                                                   "tasks" => [ blank, invalid ]
-                                                                 }
-                                                               ]))
+      { "name" => "alpha", "tasks" => [], "hidden_archived_task_count" => 1 },
+      { "name" => "beta", "tasks" => [], "hidden_archived_task_count" => 2 }
+    ]))
 
-    filtered = snapshot.without_old_archived(now: now)
-
-    assert_equal [ "blank-mtime", "invalid-mtime" ], filtered.rows.map(&:slug)
-    assert_equal 0, snapshot.hidden_old_archived_count(now: now)
+    assert_equal 3, snapshot.hidden_archived_task_count
+    assert_equal 1, snapshot.hidden_archived_task_count(scope: 1)
+    assert_equal 2, snapshot.hidden_archived_task_count(scope: 2)
+    assert_equal 0, snapshot.hidden_archived_task_count(scope: 99)
   end
 end

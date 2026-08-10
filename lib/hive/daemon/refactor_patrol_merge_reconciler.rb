@@ -7,10 +7,14 @@ require "hive/atomic_file"
 require "hive/config"
 require "hive/gh"
 require "hive/daemon/refactor_patrol_merge_progress_store"
+require "hive/modules/migration/evidence_store"
+require "hive/modules/migration/patrols"
+require "hive/refactor_patrol/architecture_intake_transitions"
 require "hive/refactor_patrol/job_store"
 require "hive/refactor_patrol/github_gateway"
 require "hive/refactor_patrol/policy"
 require "hive/refactor_patrol/pr_manifest_resolver"
+require "hive/workflows"
 
 module Hive
   module Daemon
@@ -60,7 +64,9 @@ module Hive
                      max_call_timeout_sec: DEFAULT_MAX_CALL_TIMEOUT_SEC,
                      backoff_base_sec: DEFAULT_BACKOFF_BASE_SEC,
                      backoff_max_sec: DEFAULT_BACKOFF_MAX_SEC,
-                     monotonic_clock: nil, jitter: nil, progress_store: nil)
+                     monotonic_clock: nil, jitter: nil, progress_store: nil,
+                     module_event_publisher: nil, migration_snapshot: nil,
+                     evidence_store_factory: nil)
         @registry = registry
         @config_loader = config_loader
         @gh = gh
@@ -81,8 +87,31 @@ module Hive
           backoff_max_sec: backoff_max_sec, jitter: jitter
         )
         @resolver_factory = resolver_factory || method(:build_resolver)
-        @job_store_factory = job_store_factory || ->(root) { Hive::RefactorPatrol::JobStore.new(root) }
+        @job_store_factory = job_store_factory
         @dry_run = dry_run
+        @module_event_publisher = module_event_publisher
+        @migration_snapshot = migration_snapshot || lambda do |entry|
+          Hive::Modules::Migration::Patrols.ownership_snapshot(
+            entry.fetch("path"), "architecture-patrol",
+            hive_state_path: entry["hive_state_path"]
+          )
+        end
+        @evidence_store_factory = evidence_store_factory || lambda do |entry|
+          state = entry["hive_state_path"] ||
+                  File.join(entry.fetch("path"), ".hive-state")
+          Hive::Modules::Migration::EvidenceStore.new(
+            root: File.join(
+              state, "module-runtime", "migration", "patrol-evidence"
+            )
+          )
+        end
+        @architecture_intake_transitions =
+          Hive::RefactorPatrol::ArchitectureIntakeTransitions.new(
+            config_loader: @config_loader,
+            migration_snapshot: @migration_snapshot,
+            evidence_store_factory: @evidence_store_factory,
+            admission_error: Blocked
+          )
         @next_poll_at = nil
         @rotation_offset = 0
       end
@@ -174,7 +203,9 @@ module Hive
       end
 
       def state_path(project_root)
-        File.join(project_root, ".hive-state", "refactor_patrol", "v2", "reconciler.json")
+        File.join(
+          hive_state_path_for(project_root), "refactor_patrol", "v2", "reconciler.json"
+        )
       end
 
       def progress_path(project_root)
@@ -201,6 +232,16 @@ module Hive
       end
 
       private
+
+      def hive_state_path_for(project_root)
+        expanded = File.expand_path(project_root)
+        entry = Array(@registry.call).find do |candidate|
+          File.expand_path(candidate.fetch("path")) == expanded
+        end
+        return entry.fetch("hive_state_path") if entry && entry["hive_state_path"]
+
+        File.join(expanded, ".hive-state")
+      end
 
       def reconcile_step(entry, cfg, now:, timeout_sec:)
         project_root = entry.fetch("path")
@@ -299,12 +340,17 @@ module Hive
         resolver = @resolver_factory.call(entry, cfg, @github_gateway, @dry_run)
         manifest = resolver.resolve(pr, timeout_sec: timeout_sec)
         assert_manifest_matches!(manifest, expected) if expected
-        @job_store_factory.call(entry.fetch("path")).enqueue_manifest!(
-          manifest,
+        store = job_store_for(entry)
+        result = @architecture_intake_transitions.enqueue(
+          entry: entry,
+          store: store,
+          manifest: manifest,
           policy: policy_snapshot(cfg, now),
           now: now,
           dry_run: @dry_run
         )
+        @module_event_publisher&.pull_request_merged(entry, manifest) unless @dry_run
+        result
       end
 
       def build_resolver(entry, cfg, github_gateway, dry_run)
@@ -315,6 +361,15 @@ module Hive
           cfg: cfg,
           github_gateway: github_gateway,
           dry_run: dry_run
+        )
+      end
+
+      def job_store_for(entry)
+        return @job_store_factory.call(entry.fetch("path")) if @job_store_factory
+
+        Hive::RefactorPatrol::JobStore.new(
+          entry.fetch("path"),
+          hive_state_path: entry.fetch("hive_state_path")
         )
       end
 
@@ -581,7 +636,9 @@ module Hive
       end
 
       def intake_enabled?(cfg)
-        cfg.dig("daemon", "enabled") == true && cfg.dig("refactor_patrol", "enabled") == true
+        cfg.dig("daemon", "enabled") == true &&
+          Hive::Workflows.coding_id?(cfg["default_workflow"]) &&
+          cfg.dig("refactor_patrol", "enabled") == true
       end
 
       def default_branch(cfg)

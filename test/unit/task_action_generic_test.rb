@@ -86,6 +86,50 @@ class TaskActionGenericTest < Minitest::Test
     assert_nil errored.command
   end
 
+  def test_semantic_terminal_block_stays_active_and_exposes_stage_local_retry_guidance
+    action = action_for(
+      "report", :error,
+      {
+        "reason" => "terminal_outcome_blocked",
+        "outcome" => "needs-human",
+        "marker_id" => "semantic-block-1"
+      }
+    )
+
+    assert_equal "error", action.key
+    assert_equal "Blocked", action.label
+    assert_nil action.command
+
+    diagnostic = action.diagnostic
+    assert_equal "marker", diagnostic.fetch("source")
+    assert_includes diagnostic.fetch("detail"), "needs-human"
+    assert_includes diagnostic.fetch("detail"), "current terminal stage"
+    assert_includes diagnostic.fetch("detail"), "fresh task"
+    assert_equal "retry", diagnostic.dig("suggested_next_action", "kind")
+    assert_includes diagnostic.dig("suggested_next_action", "command"), "hive act workflow.retry"
+  end
+
+  def test_invalid_terminal_outcome_stays_active_with_marker_backed_retry_guidance
+    action = action_for(
+      "report", :error,
+      {
+        "reason" => "terminal_outcome_invalid",
+        "outcome" => "malformed",
+        "marker_id" => "semantic-invalid-1"
+      }
+    )
+
+    assert_equal "error", action.key
+    assert_equal "Error", action.label
+    assert_nil action.command
+    diagnostic = action.diagnostic
+    assert_equal "marker", diagnostic.fetch("source")
+    assert_includes diagnostic.fetch("detail"), "invalid outcome contract"
+    assert_includes diagnostic.fetch("detail"), "malformed"
+    assert_equal "retry", diagnostic.dig("suggested_next_action", "kind")
+    assert_includes diagnostic.dig("suggested_next_action", "command"), "hive act workflow.retry"
+  end
+
   def test_council_marker_to_action_matrix
     fresh = action_for("review", :none, descriptor: council_workflow)
     assert_equal "ready_to_run", fresh.key
@@ -98,6 +142,24 @@ class TaskActionGenericTest < Minitest::Test
     complete_middle = action_for("review", :complete, descriptor: council_workflow)
     assert_equal "ready_to_advance", complete_middle.key
     assert_equal "hive approve #{SLUG} --from 2-review", complete_middle.command
+  end
+
+  def test_human_stage_waits_for_a_named_decision_and_never_dispatches
+    action = action_for("approval", :waiting, { "decision_id" => "a" * 16 }, descriptor: human_workflow)
+
+    assert_equal "needs_input", action.key
+    assert_equal "Awaiting human decision", action.label
+    assert_nil action.command
+    assert_equal [
+      { "name" => "approve", "complete" => true, "artifact" => "draft.md", "to" => nil },
+      { "name" => "reject", "complete" => false, "artifact" => nil, "to" => "draft" }
+    ], action.allowed_outcomes
+    assert_equal :skip, policy_decision(action)
+
+    completed = action_for("approval", :complete, descriptor: human_workflow)
+    assert_equal "archived", completed.key
+    assert_equal "Archived", completed.label
+    assert_nil completed.command
   end
 
   def test_terminal_agent_complete_requires_non_empty_deliverable
@@ -318,6 +380,22 @@ class TaskActionGenericTest < Minitest::Test
           council: Hive::Workflow::Council.new(quorum: 1)
         ),
         Hive::Workflow::Stage.new(name: "done", index: 3, state_file: "done.md", kind: :inert)
+      ]
+    )
+  end
+
+  def human_workflow
+    Hive::Workflow.new(
+      id: :human_status,
+      stages: [
+        Hive::Workflow::Stage.new(name: "draft", index: 1, state_file: "draft.md", kind: :agent, skill: "/draft"),
+        Hive::Workflow::Stage.new(
+          name: "approval", index: 2, state_file: "approval.md", kind: :human,
+          outcomes: {
+            "approve" => Hive::Workflow::Outcome.new(name: "approve", complete: true, artifact: "draft.md"),
+            "reject" => Hive::Workflow::Outcome.new(name: "reject", to: "draft")
+          }.freeze
+        )
       ]
     )
   end

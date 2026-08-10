@@ -56,12 +56,30 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       observed = row
 
       assembler.begin_tick(now: T0)
+      assembler.update_attempt_storage(
+        "status" => "healthy",
+        "layout" => { "generation" => 3, "migration" => "complete" },
+        "hot" => { "records" => 2, "invalid" => 0 },
+        "maintenance" => {
+          "last_started_at" => T0.iso8601(6),
+          "last_completed_at" => T0.iso8601(6),
+          "last_result" => { "promoted" => 1, "deleted" => 2, "cold_examined" => 2 }
+        },
+        "last_error" => nil,
+        "degraded_reason" => nil
+      )
       assembler.observe(
         observed, decision: "global_cap", owner: "scheduler",
-        reason: "global dispatch capacity is exhausted"
+        reason: "global dispatch capacity is exhausted",
+        retry_at: (T0 + 3_600).iso8601(6),
+        retry_due: false,
+        retry_safe: true,
+        safety_reason: "worktree clean"
       )
       assembler.complete(
         initial_rows: [ observed ], final_rows: [ observed ],
+        initial_hidden_archived_task_count: 2,
+        final_hidden_archived_task_count: 2,
         controller: { "limits" => { "global" => 2 }, "in_flight" => 2 },
         queue: { "pending" => 1 }, recoveries: {}, now: T0 + 1
       )
@@ -71,9 +89,137 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       assert_equal "current", snapshot.fetch("status")
       assert_equal "complete", snapshot.fetch("phase")
       assert_equal "global_cap", snapshot.dig("tasks", 0, "disposition", "decision")
+      assert_equal (T0 + 3_600).iso8601(6),
+                   snapshot.dig("tasks", 0, "disposition", "retry_at")
+      assert_equal false, snapshot.dig("tasks", 0, "disposition", "retry_due")
+      assert_equal true, snapshot.dig("tasks", 0, "disposition", "retry_safe")
+      assert_equal 2, snapshot.dig("attempt_storage", "hot", "records")
+      assert_equal "complete", snapshot.dig("attempt_storage", "layout", "migration")
+      assert_equal 2, snapshot.fetch("hidden_archived_task_count")
       assert_equal 0o700, File.stat(File.dirname(path)).mode & 0o777
       assert_equal 0o600, File.stat(path).mode & 0o777
       assert_empty Dir.glob(File.join(File.dirname(path), ".*tmp*"))
+    end
+  end
+
+  def test_hidden_archive_count_change_is_published_from_revalidated_snapshot
+    with_tmp_dir do |dir|
+      path = File.join(dir, "private", "operational-snapshot.json")
+      _store, assembler, reader = build(path)
+      observed = row
+
+      assembler.begin_tick(now: T0)
+      assembler.complete(
+        initial_rows: [ observed ], final_rows: [ observed ],
+        initial_hidden_archived_task_count: 1,
+        final_hidden_archived_task_count: 2,
+        controller: {}, queue: {}, recoveries: {}, now: T0 + 1
+      )
+
+      snapshot = reader.read(now: T0 + 2)
+      assert_equal "current", snapshot.fetch("status")
+      assert_equal 2, snapshot.fetch("hidden_archived_task_count")
+    end
+  end
+
+  def test_shutdown_acknowledgement_is_generation_bound_and_read_only
+    with_tmp_dir do |dir|
+      path = File.join(dir, "private", "operational-snapshot.json")
+      _store, assembler, reader = build(path)
+      assembler.begin_tick(now: T0)
+      assembler.shutdown(
+        admission_closed: true, drained: true,
+        child_inventory: [ { pid: 77, pgid: 77, start_time: "child-start" } ],
+        now: T0 + 1
+      )
+      before = File.binread(path)
+
+      acknowledgement = reader.shutdown_acknowledgement(
+        expected_daemon: IDENTITY, now: T0 + 2
+      )
+
+      assert_equal before, File.binread(path)
+      assert_equal true, acknowledgement.fetch("admission_closed")
+      assert_equal [ 77 ], acknowledgement.fetch("child_inventory").map { |entry| entry.fetch("pid") }
+      assert_nil reader.shutdown_acknowledgement(
+        expected_daemon: IDENTITY.merge("generation" => "other"), now: T0 + 2
+      )
+    end
+  end
+
+  def test_shutdown_acknowledgement_degrades_unavailable_storage_to_nil
+    with_tmp_dir do |dir|
+      reader = Hive::Daemon::OperationalSnapshot::Reader.new(
+        path: File.join(dir, "missing", "snapshot.json"),
+        expected_daemon: IDENTITY
+      )
+
+      assert_nil reader.shutdown_acknowledgement(
+        expected_daemon: IDENTITY,
+        now: T0
+      )
+    end
+  end
+
+  def test_runtime_readiness_is_generation_bound_retained_and_read_only
+    with_tmp_dir do |dir|
+      path = File.join(
+        dir, "private", "operational-snapshot.json"
+      )
+      _store, assembler, reader = build(path)
+      assembler.runtime_ready(now: T0)
+      ready_bytes = File.binread(path)
+
+      readiness = reader.runtime_readiness(
+        expected_daemon: IDENTITY, now: T0 + 1
+      )
+
+      assert_equal ready_bytes, File.binread(path)
+      assert_equal true, readiness.fetch("runtime_ready")
+      assert_equal "complete", readiness.fetch("phase")
+      assert_nil reader.runtime_readiness(
+        expected_daemon:
+          IDENTITY.merge("generation" => "other"),
+        now: T0 + 1
+      )
+
+      assembler.begin_tick(now: T0 + 2)
+      assert_equal "started", reader.runtime_readiness(
+        expected_daemon: IDENTITY, now: T0 + 3
+      ).fetch("phase")
+      assert_nil reader.runtime_readiness(
+        expected_daemon: IDENTITY, now: T0 + 100
+      )
+
+      assembler.shutdown(
+        admission_closed: true, drained: true,
+        child_inventory: [], now: T0 + 4
+      )
+      assert_nil reader.runtime_readiness(
+        expected_daemon: IDENTITY, now: T0 + 5
+      )
+    end
+  end
+
+  def test_runtime_readiness_auto_identity_degrades_missing_storage_to_nil
+    with_tmp_dir do |dir|
+      private_dir = File.join(dir, "private")
+      FileUtils.mkdir_p(private_dir, mode: 0o700)
+      pid_path = File.join(dir, ".daemon.pid")
+      process_start_time = Hive::Lock.process_start_time(Process.pid)
+      File.write(
+        pid_path,
+        {
+          "pid" => Process.pid,
+          "process_start_time" => process_start_time
+        }.to_yaml
+      )
+      reader = Hive::Daemon::OperationalSnapshot::Reader.new(
+        path: File.join(private_dir, "missing.json"),
+        pid_path: pid_path
+      )
+
+      assert_nil reader.runtime_readiness(now: T0)
     end
   end
 
@@ -99,36 +245,86 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
     end
   end
 
-  def test_recovery_exhaustion_matches_current_stage_and_marker_reason
+  def test_terminal_recovery_does_not_hide_a_fresh_failure_marker
     with_tmp_dir do |dir|
       path = File.join(dir, "private", "operational-snapshot.json")
       _store, assembler, reader = build(path)
-      stage_changed = row(
-        slug: "stage-changed", stage: "5-open-pr", marker: "error",
-        marker_attrs: { "reason" => "old_failure" }
+      fresh = row(
+        marker: "error",
+        marker_attrs: { "reason" => "timeout", "marker_id" => "marker-2" }
       )
-      reason_changed = row(
-        slug: "reason-changed", stage: "4-execute", marker: "error",
-        marker_attrs: { "reason" => "current_failure" }
-      )
-      matching = row(
-        slug: "matching", stage: "4-execute", marker: "error",
-        marker_attrs: { "reason" => "old_failure" }
-      )
+      receipt = {
+        "status" => "terminal",
+        "request_id" => "recovery-1",
+        "attempt_id" => "attempt-1",
+        "phase" => "terminal",
+        "terminal_outcome" => "failed"
+      }
       recoveries = {
-        "recoverable_error" => {
-          "exhausted" => [
+        "coordinator" => {
+          "receipts" => [
             {
-              "project" => "demo", "slug" => "stage-changed",
-              "stage" => "4-execute", "reason" => "old_failure"
-            },
+              "project" => "demo",
+              "slug" => "ship-it",
+              "stage" => "4-execute",
+              "recovery_phase" => "terminal",
+              "expected_marker_name" => "error",
+              "expected_marker_attrs" => {
+                "reason" => "timeout",
+                "marker_id" => "marker-1"
+              },
+              "receipt" => receipt
+            }
+          ]
+        }
+      }
+
+      assembler.begin_tick(now: T0)
+      assembler.observe(
+        fresh,
+        decision: "retry_cooldown",
+        owner: "scheduler",
+        reason: "new marker is cooling down",
+        retry_at: (T0 + 3_600).iso8601(6)
+      )
+      assembler.complete(
+        initial_rows: [ fresh ],
+        final_rows: [ fresh ],
+        controller: {},
+        queue: {},
+        recoveries: recoveries,
+        now: T0 + 1
+      )
+
+      disposition = reader.read(now: T0 + 2).dig("tasks", 0, "disposition")
+      assert_equal "retry_cooldown", disposition.fetch("decision")
+      refute disposition.key?("recovery")
+    end
+  end
+
+  def test_terminal_recovery_remains_visible_with_successful_workflow_marker
+    with_tmp_dir do |dir|
+      path = File.join(dir, "private", "operational-snapshot.json")
+      _store, assembler, reader = build(path)
+      completed = row(marker: "waiting", marker_attrs: {})
+      receipt = {
+        "status" => "terminal",
+        "request_id" => "recovery-1",
+        "attempt_id" => "attempt-1",
+        "phase" => "terminal",
+        "terminal_outcome" => "succeeded"
+      }
+      recoveries = {
+        "coordinator" => {
+          "receipts" => [
             {
-              "project" => "demo", "slug" => "reason-changed",
-              "stage" => "4-execute", "reason" => "old_failure"
-            },
-            {
-              "project" => "demo", "slug" => "matching",
-              "stage" => "4-execute", "reason" => "old_failure"
+              "project" => "demo",
+              "slug" => "ship-it",
+              "stage" => "4-execute",
+              "recovery_phase" => "terminal",
+              "expected_marker_name" => "error",
+              "expected_marker_attrs" => { "reason" => "timeout" },
+              "receipt" => receipt
             }
           ]
         }
@@ -136,17 +332,99 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
 
       assembler.begin_tick(now: T0)
       assembler.complete(
-        initial_rows: [ stage_changed, reason_changed, matching ],
-        final_rows: [ stage_changed, reason_changed, matching ],
+        initial_rows: [ completed ], final_rows: [ completed ],
         controller: {}, queue: {}, recoveries: recoveries, now: T0 + 1
       )
 
-      decisions = reader.read(now: T0 + 2).fetch("tasks").to_h do |task|
-        [ task.dig("identity", "slug"), task.dig("disposition", "decision") ]
-      end
-      assert_equal "not_evaluated", decisions.fetch("stage-changed")
-      assert_equal "not_evaluated", decisions.fetch("reason-changed")
-      assert_equal "recovery_exhausted", decisions.fetch("matching")
+      disposition = reader.read(now: T0 + 2).dig("tasks", 0, "disposition")
+      assert_equal "attempt_terminal_replay", disposition.fetch("decision")
+      assert_equal receipt, disposition.fetch("recovery")
+    end
+  end
+
+  def test_terminal_recovery_does_not_overlay_a_different_live_attempt
+    with_tmp_dir do |dir|
+      path = File.join(dir, "private", "operational-snapshot.json")
+      _store, assembler, reader = build(path)
+      live = row(marker: "agent_working", marker_attrs: {})
+      live.attempt_id = "attempt-2"
+      receipt = {
+        "status" => "terminal",
+        "request_id" => "recovery-1",
+        "attempt_id" => "attempt-1",
+        "phase" => "terminal",
+        "terminal_outcome" => "failed"
+      }
+      recoveries = {
+        "coordinator" => {
+          "receipts" => [
+            {
+              "project" => "demo",
+              "slug" => "ship-it",
+              "stage" => "4-execute",
+              "recovery_phase" => "terminal",
+              "expected_marker_name" => "error",
+              "expected_marker_attrs" => { "reason" => "timeout" },
+              "receipt" => receipt
+            }
+          ]
+        }
+      }
+
+      assembler.begin_tick(now: T0)
+      assembler.observe(
+        live, decision: "in_flight", owner: "agent",
+        reason: "a newer durable attempt is running"
+      )
+      assembler.complete(
+        initial_rows: [ live ], final_rows: [ live ],
+        controller: {}, queue: {}, recoveries: recoveries, now: T0 + 1
+      )
+
+      disposition = reader.read(now: T0 + 2).dig("tasks", 0, "disposition")
+      assert_equal "in_flight", disposition.fetch("decision")
+      refute disposition.key?("recovery")
+    end
+  end
+
+  def test_recovery_overlay_matches_the_exact_marker_generation_and_post_clear_state
+    with_tmp_dir do |dir|
+      _store, assembler, _reader = build(File.join(dir, "snapshot.json"))
+      task = {
+        "stage" => "4-execute",
+        "marker" => "error",
+        "marker_attrs" => { "marker_id" => "marker-1", "reason" => "timeout" }
+      }
+      index = { [ "demo", "ship-it" ] => task }
+      admitted = {
+        "project" => "demo",
+        "slug" => "ship-it",
+        "recovery_phase" => "admitted",
+        "expected_marker_name" => "error",
+        "expected_marker_attrs" => {
+          "marker_id" => "marker-1", "reason" => "timeout"
+        }
+      }
+
+      assert_same task, assembler.send(:find_recovery_task, index, admitted)
+      assert_nil assembler.send(
+        :find_recovery_task, index,
+        admitted.merge("expected_marker_name" => "review_error")
+      )
+      assert_nil assembler.send(
+        :find_recovery_task, index,
+        admitted.merge(
+          "expected_marker_attrs" => {
+            "marker_id" => "marker-2", "reason" => "timeout"
+          }
+        )
+      )
+
+      cleared = admitted.merge("recovery_phase" => "cleared")
+      task["marker"] = "none"
+      assert_same task, assembler.send(:find_recovery_task, index, cleared)
+      task["marker"] = "error"
+      assert_nil assembler.send(:find_recovery_task, index, cleared)
     end
   end
 
@@ -421,6 +699,25 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
         reader.send(:expected_daemon)
       end
       assert_equal :unavailable, gone
+    end
+  end
+
+  def test_complete_rejects_invalid_hidden_archive_counts
+    with_tmp_dir do |dir|
+      _store, assembler, _reader = build(File.join(dir, "snapshot.json"))
+      assembler.begin_tick(now: T0)
+
+      error = assert_raises(ArgumentError) do
+        assembler.complete(
+          initial_rows: [], final_rows: [],
+          initial_hidden_archived_task_count: -1,
+          final_hidden_archived_task_count: 0,
+          controller: {}, queue: {}, recoveries: {}, now: T0 + 1
+        )
+      end
+
+      assert_includes error.message, "initial_hidden_archived_task_count"
+      assert_includes error.message, "non-negative integer"
     end
   end
 end

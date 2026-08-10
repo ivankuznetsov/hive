@@ -91,6 +91,17 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
     assert_equal [], sup.reap_all
   end
 
+  def test_in_flight_filters_by_exact_project_and_stage
+    supervisor = make(dry_run: true)
+    supervisor.spawn(
+      command_string: "hive patrol demo --json", project: "demo", slug: "patrol", stage: "patrol"
+    )
+
+    assert supervisor.in_flight?(project: "demo", stage: "patrol")
+    refute supervisor.in_flight?(project: "other", stage: "patrol")
+    refute supervisor.in_flight?(project: "demo", stage: "refactor-patrol")
+  end
+
   def test_spawn_with_invalid_json_stdout_returns_nil_envelope
     with_tmp_dir do |dir|
       sup = make(log_dir: dir)
@@ -187,6 +198,33 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
       project: "p1", slug: "a", stage: "6-review", dry_run: true
     )
     assert pid < 0
+  end
+
+  def test_terminate_all_proves_an_empty_supervisor_is_drained
+    supervisor = make
+
+    assert_empty supervisor.terminate_all
+    assert_equal(
+      { drained: true, child_inventory: [] },
+      supervisor.shutdown_proof
+    )
+  end
+
+  def test_terminate_all_reaps_only_dry_run_children_without_signalling
+    supervisor = make(dry_run: true)
+    pid = supervisor.spawn(
+      command_string: "hive run dry --exit-code 0",
+      project: "p1", slug: "dry", stage: "6-review"
+    )
+
+    completed = supervisor.terminate_all
+
+    assert_equal [ pid ], completed.map(&:pid)
+    assert_equal [ 0 ], completed.map(&:exit_code)
+    assert_equal(
+      { drained: true, child_inventory: [] },
+      supervisor.shutdown_proof
+    )
   end
 
   # ── refuses non-hive commands ─────────────────────────────────────────
@@ -287,72 +325,141 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
   def test_terminate_all_escalates_survivors_to_kill
     sup = make
     sup.instance_variable_set(:@running, {
-      123 => { project: "p1", slug: "a", stage: "6-review", command: "hive run a" },
-      456 => { project: "p1", slug: "b", stage: "6-review", command: "hive run b" }
+      123 => {
+        project: "p1", slug: "a", stage: "6-review", command: "hive run a",
+        dry_run: false
+      }
     })
     kills = []
-    reap_calls = 0
+    exit_entry = Hive::Daemon::ChildSupervisor::ChildExit.new(
+      pid: 123, exit_code: nil, project: "p1", slug: "a", stage: "6-review",
+      command: "hive run a", started_at: Time.now, finished_at: Time.now
+    )
 
-    sup.define_singleton_method(:collect_pgids) { [ 99 ] }
+    sup.define_singleton_method(:capture_shutdown_targets) do
+      { 123 => { pgid: 99, tree: nil } }
+    end
+    sup.define_singleton_method(:process_group_alive?) { |_pgid| true }
     sup.define_singleton_method(:safe_kill) { |signal, target| kills << [ signal, target ] }
     sup.define_singleton_method(:reap_all) do
-      reap_calls += 1
-      []
+      next [] if instance_variable_get(:@running).empty?
+
+      instance_variable_get(:@running).clear
+      [ exit_entry ]
     end
 
-    with_replaced_singleton_method(Process, :getpgid, lambda { |pid|
-      raise Errno::ESRCH if pid == 456
+    completed = sup.terminate_all(grace_sec: 0)
 
-      1000 + pid
-    }) do
-      sup.terminate_all(grace_sec: 0)
-    end
-
-    assert_equal [ [ :TERM, -99 ], [ :KILL, -1123 ], [ :KILL, -456 ] ], kills
-    assert_equal 1, reap_calls
+    assert_equal [ [ :TERM, -99 ], [ :KILL, -99 ] ], kills
+    assert_empty completed,
+                 "an unverifiable process tree must keep its scheduler claim fenced"
   end
 
   def test_terminate_all_wait_loop_reaps_before_deadline
     sup = make
     sup.instance_variable_set(:@running, {
-      123 => { project: "p1", slug: "a", stage: "6-review", command: "hive run a" }
+      123 => {
+        project: "p1", slug: "a", stage: "6-review", command: "hive run a",
+        dry_run: false
+      }
     })
     reap_calls = 0
-    kills = []
+    tree = [ { pid: 123, ppid: 1, pgid: 99, start_time: "start", depth: 0 } ]
+    exit_entry = Hive::Daemon::ChildSupervisor::ChildExit.new(
+      pid: 123, exit_code: nil, project: "p1", slug: "a", stage: "6-review",
+      command: "hive run a", started_at: Time.now, finished_at: Time.now
+    )
 
-    sup.define_singleton_method(:collect_pgids) { [] }
-    sup.define_singleton_method(:safe_kill) { |signal, target| kills << [ signal, target ] }
+    sup.define_singleton_method(:capture_shutdown_targets) do
+      { 123 => { pgid: 99, tree: tree } }
+    end
+    sup.define_singleton_method(:signal_shutdown_targets) { |_signal, _targets, **| nil }
+    sup.define_singleton_method(:process_group_alive?) { |_pgid| false }
     sup.define_singleton_method(:reap_all) do
       reap_calls += 1
       if reap_calls == 1
-        [ Object.new ]
-      else
         instance_variable_get(:@running).clear
+        [ exit_entry ]
+      else
         []
       end
     end
 
-    sup.terminate_all(grace_sec: 1)
+    with_replaced_singleton_method(
+      Hive::ProcessKill, :captured_process_alive?, ->(_process) { false }
+    ) do
+      completed = sup.terminate_all(grace_sec: 1)
 
-    assert_equal 2, reap_calls
-    assert_empty kills
-    assert_equal 0, sup.in_flight_count
+      assert_equal [ exit_entry ], completed
+    end
+    assert_equal 1, reap_calls
   end
 
-  def test_collect_pgids_deduplicates_and_ignores_exited_children
+  def test_terminate_all_retains_a_child_that_appears_after_the_initial_tree_snapshot
     sup = make
     sup.instance_variable_set(:@running, {
-      111 => { project: "p1", slug: "a", stage: "6-review", command: "hive run a" },
-      222 => { project: "p1", slug: "b", stage: "6-review", command: "hive run b" },
-      333 => { project: "p1", slug: "gone", stage: "6-review", command: "hive run gone" }
+      123 => {
+        project: "p1", slug: "a", stage: "6-review", command: "hive run a",
+        dry_run: false, pgid: 99
+      }
     })
+    initial = [ { pid: 123, ppid: 1, pgid: 99, start_time: "root", depth: 0 } ]
+    late_child = { pid: 124, ppid: 123, pgid: 124, start_time: "late", depth: 1 }
+    snapshots = [
+      { 123 => { pgid: 99, tree: initial } },
+      { 123 => { pgid: 99, tree: initial } },
+      { 123 => { pgid: 99, tree: initial + [ late_child ] } }
+    ]
+    exit_entry = Hive::Daemon::ChildSupervisor::ChildExit.new(
+      pid: 123, exit_code: nil, project: "p1", slug: "a", stage: "6-review",
+      command: "hive run a", started_at: Time.now, finished_at: Time.now
+    )
+    sup.define_singleton_method(:capture_shutdown_targets) { snapshots.shift || {} }
+    sup.define_singleton_method(:signal_shutdown_targets) { |_signal, _targets, **| nil }
+    sup.define_singleton_method(:process_group_alive?) { |_pgid| false }
+    sup.define_singleton_method(:reap_all) do
+      next [] if instance_variable_get(:@reaped)
 
-    with_replaced_singleton_method(Process, :getpgid, lambda { |pid|
-      raise Errno::ESRCH if pid == 333
+      instance_variable_set(:@reaped, true)
+      instance_variable_get(:@running).clear
+      [ exit_entry ]
+    end
 
-      42
-    }) do
-      assert_equal [ 42 ], sup.send(:collect_pgids)
+    with_replaced_singleton_method(
+      Hive::ProcessKill, :captured_process_alive?, ->(_process) { false }
+    ) do
+      assert_equal [ exit_entry ], sup.terminate_all(grace_sec: 1)
+    end
+
+    proof = sup.shutdown_proof
+    assert_equal true, proof.fetch(:drained)
+    assert_equal [ 123, 124 ], proof.fetch(:child_inventory).map { |entry| entry.fetch(:pid) }.sort
+  end
+
+  def test_capture_shutdown_targets_requires_a_stable_full_tree
+    sup = make
+    sup.instance_variable_set(:@running, {
+      111 => {
+        project: "p1", slug: "a", stage: "6-review", command: "hive run a",
+        dry_run: false, pgid: 111
+      }
+    })
+    original = [
+      { pid: 222, ppid: 111, pgid: 222, start_time: "child", depth: 1 },
+      { pid: 111, ppid: 1, pgid: 111, start_time: "root", depth: 0 }
+    ]
+    partial = [ original.last ]
+
+    with_replaced_singleton_method(
+      Hive::ProcessKill, :process_tree_snapshot, ->(_pid) { original }
+    ) do
+      with_replaced_singleton_method(
+        Hive::ProcessKill, :confirm_process_tree_snapshot, ->(_pid, _targets) { partial }
+      ) do
+        captured = sup.send(:capture_shutdown_targets)
+        assert_nil captured.fetch(111).fetch(:tree),
+                   "a descendant disappearing between snapshots must fail closed"
+      end
     end
   end
 
@@ -370,6 +477,15 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
     assert_equal [ [ :TERM, -123 ] ], calls
   end
 
+  def test_process_group_alive_treats_permission_denied_as_alive
+    sup = make
+
+    with_replaced_singleton_method(Process, :kill, ->(*_args) { raise Errno::EPERM }) do
+      assert sup.send(:process_group_alive?, 123),
+             "a group we cannot signal must remain fenced as potentially alive"
+    end
+  end
+
   def test_terminate_all_signals_running_children
     skip "skipping signal test under CI containers" if ENV["CI"] == "true"
 
@@ -380,8 +496,39 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
                 project: "p1", slug: "a", stage: "6-review")
       assert_equal 1, sup.in_flight_count
 
-      sup.terminate_all(grace_sec: 2)
+      completed = sup.terminate_all(grace_sec: 2)
       assert_equal 0, sup.in_flight_count, "TERM (with grace) must reap all running children"
+      assert_equal 1, completed.size
+      refute_equal Hive::ExitCodes::SUCCESS, completed.first.exit_code,
+                   "a shutdown-interrupted child must not masquerade as success"
+      assert_equal "a", completed.first.slug
+    end
+  end
+
+  def test_terminate_all_kills_nested_descendant_before_returning_parent_exit
+    with_tmp_dir do |dir|
+      sup = make(log_dir: dir)
+      descendant_path = File.join(dir, "descendant.pid")
+      root_pid = sup.spawn(
+        command_string: "hive run a --descendant-pid-file #{Shellwords.escape(descendant_path)} --sleep 30",
+        project: "p1", slug: "a", stage: "refactor-patrol",
+        dispatch_token: { kind: :architecture_patrol, job_id: "job-7" }
+      )
+      deadline = Time.now + 5
+      sleep 0.01 until File.file?(descendant_path) || Time.now >= deadline
+      assert File.file?(descendant_path), "fixture descendant did not start"
+      descendant_pid = Integer(File.read(descendant_path))
+      assert_equal descendant_pid, Process.getpgid(descendant_pid),
+                   "fixture descendant must escape into its own process group"
+
+      completed = sup.terminate_all(grace_sec: 0.2)
+
+      assert_equal 1, completed.size
+      assert_equal root_pid, completed.first.pid
+      refute Hive::ProcessKill.pid_alive?(descendant_pid),
+             "claim completion must wait until the nested descendant is gone"
+    ensure
+      Process.kill("KILL", descendant_pid) if descendant_pid && Hive::ProcessKill.pid_alive?(descendant_pid)
     end
   end
 
@@ -559,6 +706,20 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
     with_replaced_singleton_method(Process, :wait2, ->(*_args) { raise Errno::ECHILD }) do
       assert_nil sup.send(:wait_for_child, 999_999, 0)
     end
+  end
+
+  def test_wait_for_child_polls_until_its_bounded_deadline
+    sup = make
+    polls = 0
+    with_replaced_singleton_method(
+      Process, :wait2, lambda { |*_args|
+        polls += 1
+        [ nil, nil ]
+      }
+    ) do
+      assert_nil sup.send(:wait_for_child, 999_999, 0.025)
+    end
+    assert_operator polls, :>=, 2
   end
 
   def test_completion_envelope_reads_and_removes_job_bound_result_file

@@ -18,8 +18,9 @@ Rails.application.routes.draw do
   root "status#index"
   get "board" => "status#index", defaults: { view: "board" }, as: :board
   get "grid" => "status#index", defaults: { view: "grid" }, as: :grid
+  get "archive" => "status#archive", as: :archive
   resource :status_view_preference, only: :create
-  post "daemon/repair" => "daemon#repair", as: :daemon_repair
+  resource :daemon_repair, only: :create, path: "daemon/repair"
 
   post "ideas" => "ideas#create", as: :ideas
 
@@ -38,6 +39,14 @@ Rails.application.routes.draw do
   post "workflows/remove" => "workflows/changes#create",
        defaults: { operation: "remove" }, as: :remove_workflow
 
+  get "modules" => "modules#index", as: :modules
+  %w[install update enable disable uninstall].each do |module_operation|
+    post "modules/#{module_operation}/preview" => "modules/previews#create",
+         defaults: { operation: module_operation }, as: "preview_module_#{module_operation}"
+    post "modules/#{module_operation}" => "modules/changes#create",
+         defaults: { operation: module_operation }, as: "apply_module_#{module_operation}"
+  end
+
   # Task pages are addressed by project name + task slug, mirroring the CLI.
   scope "tasks/:project/:slug", constraints: { slug: /[a-z][a-z0-9-]{0,62}[a-z0-9]/, project: %r{[^/]+} } do
     get  "" => "tasks#show", as: :task
@@ -45,12 +54,14 @@ Rails.application.routes.draw do
     get  "log" => "tasks/logs#show", as: :task_log
     get  "media/:filename" => "tasks/media#show", as: :task_media,
          format: false,
-         constraints: { filename: /[\w.-]+\.(?:png|jpe?g|gif)/i }
+         constraints: { filename: /[\w.-]+\.(?:png|jpe?g|gif|webp|webm|mp4)/i }
     post "approve" => "tasks/approvals#create", as: :task_approve
     post "reject" => "tasks/rejections#create", as: :task_reject
     post "drop" => "tasks/drops#create", as: :task_drop
     post "run" => "tasks/runs#create", as: :task_run
     post "recover" => "tasks/recoveries#create", as: :task_recover
+    get  "closure" => "tasks/closures#new", as: :new_task_closure
+    post "closure" => "tasks/closures#create", as: :task_closure
     post "intervene" => "tasks/interventions#create", as: :task_intervene
     post "answers" => "tasks/answers#create", as: :task_answers
   end
@@ -61,11 +72,11 @@ Rails.application.routes.draw do
 
   get  "agents" => "agents#index", as: :agents
   post "agents/skills/repair" => "agents#repair_skills", as: :agent_skills_repair
-  post "agents/:agent/login" => "agents#start_login", as: :agent_login,
+  post "agents/:agent/login" => "agents/logins#create", as: :agent_login,
        constraints: { agent: /claude|codex|grok|gh/ }
-  get  "agents/:agent/login/:session_id" => "agents#login_status", as: :agent_login_status,
+  get  "agents/:agent/login/:session_id" => "agents/logins#show", as: :agent_login_status,
        constraints: { agent: /claude|codex|grok|gh/ }
-  post "agents/:agent/login/:session_id/complete" => "agents#complete_login", as: :agent_login_complete,
+  post "agents/:agent/login/:session_id/complete" => "agents/login_completions#create", as: :agent_login_complete,
        constraints: { agent: /claude|codex|grok|gh/ }
   post "agents/pi_token" => "agents#save_pi_token", as: :agent_pi_token
 

@@ -50,19 +50,21 @@ class RunFinalizeTest < Minitest::Test
   def setup_finalize_task(dir)
     capture_io { Hive::Commands::Init.new(dir).call }
     set_project_claude_mode(dir, "headless")
+    cfg_path = File.join(dir, ".hive-state", "config.yml")
+    cfg = YAML.safe_load(File.read(cfg_path))
+    worktree_root = Dir.mktmpdir("finalize-wt-root-")
+    @worktree_paths ||= []
+    @worktree_paths << worktree_root
+    cfg["worktree_root"] = worktree_root
+    File.write(cfg_path, cfg.to_yaml)
     slug = "fix-bug-260424-aaaa"
     task_dir = File.join(dir, ".hive-state", "stages", "8-finalize", slug)
     FileUtils.mkdir_p(task_dir)
     File.write(File.join(task_dir, "plan.md"), "plan content")
     FileUtils.mkdir_p(File.join(task_dir, "reviews"))
     File.write(File.join(task_dir, "reviews", "codex-01.md"), "- [x] fixed\n")
-    worktree_path = Dir.mktmpdir("wt-#{slug}-")
-    @worktree_paths ||= []
-    @worktree_paths << worktree_path
-    run!("git", "-C", worktree_path, "init", "-b", slug, "--quiet")
-    run!("git", "-C", worktree_path, "config", "user.email", "t@t")
-    run!("git", "-C", worktree_path, "config", "user.name", "t")
-    run!("git", "-C", worktree_path, "config", "commit.gpgsign", "false")
+    worktree_path = File.join(worktree_root, slug)
+    run!("git", "-C", dir, "worktree", "add", "--quiet", "-b", slug, worktree_path, "HEAD")
     File.write(File.join(worktree_path, "f"), "x")
     run!("git", "-C", worktree_path, "add", ".")
     run!("git", "-C", worktree_path, "commit", "-m", "wt", "--quiet")
@@ -76,14 +78,14 @@ class RunFinalizeTest < Minitest::Test
     pr_md = File.join(task_dir, "pr.md")
     File.write(pr_md, <<~MD)
       ---
-      pr_url: https://example.com/pr/9
+      pr_url: https://github.com/acme/app/pull/9
       pr_number: 9
       ---
 
       ## Summary
       draft
 
-      <!-- COMPLETE pr_url=https://example.com/pr/9 is_draft=true -->
+      <!-- COMPLETE pr_url=https://github.com/acme/app/pull/9 is_draft=true -->
     MD
     [ task_dir, worktree_path, pr_md ]
   end
@@ -116,14 +118,14 @@ class RunFinalizeTest < Minitest::Test
         ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = pr_md
         ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = <<~MD
           ---
-          pr_url: https://example.com/pr/9
+          pr_url: https://github.com/acme/app/pull/9
           pr_number: 9
           ---
 
           ## Summary
           final
 
-          <!-- COMPLETE pr_url=https://example.com/pr/9 is_draft=false -->
+          <!-- COMPLETE pr_url=https://github.com/acme/app/pull/9 is_draft=false -->
         MD
 
         capture_io { Hive::Commands::Run.new(task_dir).call }
@@ -136,12 +138,12 @@ class RunFinalizeTest < Minitest::Test
         assert_equal "false", marker.attrs["is_draft"],
                      "finalize must require is_draft=false marker, not the open-pr is_draft=true"
         assert File.exist?(File.join(task_dir, "summary.md"))
-        assert_includes File.read(File.join(task_dir, "summary.md")), "https://example.com/pr/9"
+        assert_includes File.read(File.join(task_dir, "summary.md")), "https://github.com/acme/app/pull/9"
 
         # AC4: runner OWNS `gh pr ready`. Argv log must show it was
         # invoked with the PR URL. A regression that drops this call
         # would silently leave the PR in draft state after finalize.
-        assert_match(/arg=ready\n.*arg=https:\/\/example\.com\/pr\/9/m, gh_argv_log,
+        assert_match(/arg=ready\n.*arg=https:\/\/github\.com\/acme\/app\/pull\/9/m, gh_argv_log,
                      "finalize runner must invoke `gh pr ready <pr_url>`")
       end
     end
@@ -169,14 +171,14 @@ class RunFinalizeTest < Minitest::Test
         ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = pr_md
         ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = <<~MD
           ---
-          pr_url: https://example.com/pr/9
+          pr_url: https://github.com/acme/app/pull/9
           pr_number: 9
           ---
 
           ## Summary
           final
 
-          <!-- COMPLETE pr_url=https://example.com/pr/9 is_draft=false -->
+          <!-- COMPLETE pr_url=https://github.com/acme/app/pull/9 is_draft=false -->
         MD
 
         capture_io { Hive::Commands::Run.new(task_dir).call }
@@ -265,14 +267,14 @@ class RunFinalizeTest < Minitest::Test
         ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = pr_md
         ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = <<~MD
           ---
-          pr_url: https://example.com/pr/9
+          pr_url: https://github.com/acme/app/pull/9
           pr_number: 9
           ---
 
           ## Summary
           final
 
-          <!-- COMPLETE pr_url=https://example.com/pr/9 is_draft=false -->
+          <!-- COMPLETE pr_url=https://github.com/acme/app/pull/9 is_draft=false -->
         MD
 
         capture_io { Hive::Commands::Run.new(task_dir).call }
@@ -422,14 +424,14 @@ class RunFinalizeTest < Minitest::Test
         ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = pr_md
         ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = <<~MD
           ---
-          pr_url: https://example.com/pr/9
+          pr_url: https://github.com/acme/app/pull/9
           pr_number: 9
           ---
 
           ## Summary
           api_key sk-ant-#{"a" * 30}
 
-          <!-- COMPLETE pr_url=https://example.com/pr/9 is_draft=false -->
+          <!-- COMPLETE pr_url=https://github.com/acme/app/pull/9 is_draft=false -->
         MD
 
         _out, _err, status = with_captured_exit { Hive::Commands::Run.new(task_dir).call }
@@ -441,7 +443,7 @@ class RunFinalizeTest < Minitest::Test
         # redact) must have been invoked.
         log = gh_argv_log
         refute_match(/arg=ready\n/, log, "ready must NOT fire when secret detected")
-        assert_match(/arg=edit\n.*arg=https:\/\/example\.com\/pr\/9/m, log,
+        assert_match(/arg=edit\n.*arg=https:\/\/github\.com\/acme\/app\/pull\/9/m, log,
                      "finalize must redact the secret-bearing PR body")
         # The argv log carries `arg=<value>` one line per gh argv; the
         # redact payload's `--body` argument is the literal placeholder.
@@ -459,6 +461,87 @@ class RunFinalizeTest < Minitest::Test
     end
   end
 
+  def test_finalize_blocks_a_preexisting_local_secret_before_agent_or_github_mutation
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        task_dir, _worktree_path, pr_md = setup_finalize_task(dir)
+        File.write(pr_md, <<~MD)
+          ---
+          pr_url: https://github.com/acme/app/pull/9
+          pr_number: 9
+          ---
+
+          ## Summary
+          leaked token sk-ant-#{"b" * 30}
+
+          <!-- COMPLETE pr_url=https://github.com/acme/app/pull/9 is_draft=true -->
+        MD
+
+        _out, _err, status = with_captured_exit do
+          Hive::Commands::Run.new(task_dir).call
+        end
+
+        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        marker = Hive::Markers.current(pr_md)
+        assert_equal :error, marker.name
+        assert_equal "secret_in_pr_body", marker.attrs.fetch("reason")
+        assert_includes marker.attrs.fetch("patterns"), "anthropic"
+        assert_match(/arg=edit\n.*arg=https:\/\/github\.com\/acme\/app\/pull\/9/m, gh_argv_log)
+        refute_match(/arg=ready\n/, gh_argv_log)
+      end
+    end
+  end
+
+  def test_finalize_records_a_remote_scan_failure_after_agent_completion
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        task_dir, _worktree_path, pr_md = setup_finalize_task(dir)
+        ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = pr_md
+        ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = <<~MD
+          ---
+          pr_url: https://github.com/acme/app/pull/9
+          pr_number: 9
+          ---
+
+          ## Summary
+          refreshed
+
+          <!-- COMPLETE pr_url=https://github.com/acme/app/pull/9 is_draft=false -->
+        MD
+        scans = [
+          Hive::Gh::ScanResult.new(
+            hits: [], fetch_failed: false, fetch_error: nil
+          ),
+          Hive::Gh::ScanResult.new(
+            hits: [ { name: "anthropic_api_key" } ],
+            fetch_failed: true,
+            fetch_error: "remote body unavailable"
+          )
+        ]
+
+        with_stubbed_singleton_method(
+          Hive::Gh,
+          :scan_pr_for_secrets,
+          ->(**_kwargs) { scans.shift || raise("unexpected third scan") }
+        ) do
+          _out, _err, status = with_captured_exit do
+            Hive::Commands::Run.new(task_dir).call
+          end
+
+          assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        end
+
+        assert_empty scans
+        marker = Hive::Markers.current(pr_md)
+        assert_equal :error, marker.name
+        assert_equal "secret_scan_fetch_failed", marker.attrs.fetch("reason")
+        assert_equal "remote body unavailable", marker.attrs.fetch("detail")
+        assert_includes marker.attrs.fetch("patterns"), "anthropic_api_key"
+        refute_match(/arg=ready\n/, gh_argv_log)
+      end
+    end
+  end
+
   # plan U6 idempotency: a second `hive run` on a task whose summary.md
   # already exists must short-circuit (no agent spawn, no `gh pr ready`).
   def test_finalize_already_complete_short_circuits
@@ -467,7 +550,7 @@ class RunFinalizeTest < Minitest::Test
         task_dir, _worktree_path, pr_md = setup_finalize_task(dir)
         File.write(File.join(task_dir, "summary.md"), "previously written summary\n")
         # Re-mark pr.md as already-complete so warn includes the URL.
-        Hive::Markers.set(pr_md, :complete, pr_url: "https://example.com/pr/9", is_draft: "false")
+        Hive::Markers.set(pr_md, :complete, pr_url: "https://github.com/acme/app/pull/9", is_draft: "false")
 
         _out, err = capture_io { Hive::Commands::Run.new(task_dir).call }
         assert_match(/already complete/, err)
@@ -519,14 +602,14 @@ class RunFinalizeTest < Minitest::Test
         ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = pr_md
         ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = <<~MD
           ---
-          pr_url: https://example.com/pr/9
+          pr_url: https://github.com/acme/app/pull/9
           pr_number: 9
           ---
 
           ## Summary
           final
 
-          <!-- COMPLETE pr_url=https://example.com/pr/9 is_draft=false -->
+          <!-- COMPLETE pr_url=https://github.com/acme/app/pull/9 is_draft=false -->
         MD
 
         capture_io { Hive::Commands::Run.new(task_dir).call }
@@ -563,6 +646,7 @@ class RunFinalizeTest < Minitest::Test
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         task_dir, _worktree_path, pr_md = setup_finalize_task(dir)
+        original_plan = File.binread(File.join(task_dir, "plan.md"))
         ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = File.join(task_dir, "plan.md")
         ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "tampered plan\n"
 
@@ -573,6 +657,8 @@ class RunFinalizeTest < Minitest::Test
         assert_equal :error, marker.name
         assert_equal "finalize_tampered", marker.attrs["reason"]
         assert_equal "plan.md", marker.attrs["files"]
+        assert_equal "true", marker.attrs["restored"]
+        assert_equal original_plan, File.binread(File.join(task_dir, "plan.md"))
         refute File.exist?(File.join(task_dir, "summary.md"))
       end
     end
@@ -582,27 +668,34 @@ class RunFinalizeTest < Minitest::Test
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         task_dir, _worktree_path, pr_md = setup_finalize_task(dir)
-        ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = pr_md
-        ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = <<~MD
+        File.write(pr_md, <<~MD)
           ---
-          pr_url: https://example.com/pr/9
+          pr_url: https://github.com/acme/app/pull/9
           pr_number: 9
           ---
 
           ## Summary
           api_key sk-ant-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
-          <!-- COMPLETE pr_url=https://example.com/pr/9 is_draft=false -->
+          <!-- COMPLETE pr_url=https://github.com/acme/app/pull/9 is_draft=true -->
         MD
         ENV["HIVE_FAKE_GH_VIEW_EXIT"] = "1"
 
-        _out, _err, status = with_captured_exit { Hive::Commands::Run.new(task_dir).call }
+        _out = _err = status = nil
+        with_stubbed_singleton_method(
+          Hive::Stages::Finalize,
+          :validate_pr_reference!,
+          ->(_task, _worktree, url, _cfg) { [ url, nil ] }
+        ) do
+          _out, _err, status = with_captured_exit { Hive::Commands::Run.new(task_dir).call }
+        end
 
         assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
         marker = Hive::Markers.current(pr_md)
         assert_equal :error, marker.name
         assert_equal "secret_scan_fetch_failed", marker.attrs["reason"]
-        refute_empty marker.attrs["patterns"].to_s
+        assert_includes marker.attrs["patterns"].to_s, "anthropic_api_key",
+                        "local hits must remain visible when the remote fetch also fails"
         refute_match(/arg=ready\n/, gh_argv_log)
       end
     end
@@ -620,9 +713,12 @@ class RunFinalizeTest < Minitest::Test
         end
 
         assert_equal 1, status
-        assert_match(/no worktree pointer/, err)
+        assert_match(/worktree ownership validation failed: worktree.yml is missing/, err)
 
-        File.write(File.join(task_dir, "worktree.yml"), { "path" => worktree_path }.to_yaml)
+        File.write(
+          File.join(task_dir, "worktree.yml"),
+          { "path" => worktree_path, "branch" => task.slug }.to_yaml
+        )
         FileUtils.rm_rf(worktree_path)
 
         _out, err, status = with_captured_exit do
@@ -630,7 +726,7 @@ class RunFinalizeTest < Minitest::Test
         end
 
         assert_equal 1, status
-        assert_match(/worktree pointer .* no longer exists/, err)
+        assert_match(/worktree ownership validation failed: worktree .* is missing/, err)
       end
     end
   end
@@ -657,7 +753,7 @@ class RunFinalizeTest < Minitest::Test
       with_tmp_git_repo do |dir|
         task_dir, _worktree_path, pr_md = setup_finalize_task(dir)
         task = Hive::Task.new(task_dir)
-        expected_url = "https://example.com/pr/9"
+        expected_url = "https://github.com/acme/app/pull/9"
 
         File.write(pr_md, "---\npr_url: https://example.com/pr/wrong\n---\n\nbody\n")
         Hive::Markers.set(pr_md, :complete, pr_url: expected_url, is_draft: "false")
@@ -686,12 +782,130 @@ class RunFinalizeTest < Minitest::Test
     end
   end
 
+  def test_finalize_refresh_pr_identity_fails_closed_for_url_head_and_transport_errors
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        task_dir, worktree_path, pr_md = setup_finalize_task(dir)
+        task = Hive::Task.new(task_dir)
+
+        result = Hive::Stages::Finalize.refresh_pr_identity!(
+          task, worktree_path, "not-a-pr", {}
+        )
+        assert_equal(
+          { commit: "finalize_pr_url_invalid", status: :error },
+          result
+        )
+        assert_equal "finalize_pr_url_invalid",
+                     Hive::Markers.current(pr_md).attrs.fetch("reason")
+
+        status = Hive::Gh::CommandStatus.new(exitstatus: 0)
+        metadata = Hive::Gh::PrMetadata.new(
+          number: 9,
+          url: "https://github.com/acme/app/pull/9",
+          base_ref_name: "main",
+          head_ref_oid: "b" * 40,
+          is_cross_repository: false,
+          state: "OPEN"
+        )
+        with_stubbed_singleton_method(
+          Hive::Stages::Finalize,
+          :capture_git,
+          ->(*) { [ "a" * 40, status ] }
+        ) do
+          with_stubbed_singleton_method(
+            Hive::Gh, :pr_metadata, ->(*, **) { metadata }
+          ) do
+            result = Hive::Stages::Finalize.refresh_pr_identity!(
+              task,
+              worktree_path,
+              "https://github.com/acme/app/pull/9",
+              {}
+            )
+            assert_equal(
+              { commit: "finalize_pr_head_mismatch", status: :error },
+              result
+            )
+            marker = Hive::Markers.current(pr_md)
+            assert_equal "finalize_pr_head_mismatch",
+                         marker.attrs.fetch("reason")
+            assert_equal "a" * 40, marker.attrs.fetch("local_head")
+            assert_equal "b" * 40, marker.attrs.fetch("remote_head")
+          end
+        end
+
+        with_stubbed_singleton_method(
+          Hive::Stages::Finalize,
+          :capture_git,
+          ->(*) { raise Hive::GhError, "metadata offline" }
+        ) do
+          result = Hive::Stages::Finalize.refresh_pr_identity!(
+            task,
+            worktree_path,
+            "https://github.com/acme/app/pull/9",
+            {}
+          )
+          assert_equal(
+            { commit: "finalize_pr_identity_refresh_failed", status: :error },
+            result
+          )
+          marker = Hive::Markers.current(pr_md)
+          assert_equal "finalize_pr_identity_refresh_failed",
+                       marker.attrs.fetch("reason")
+          assert_equal "metadata offline", marker.attrs.fetch("detail")
+        end
+      end
+    end
+  end
+
+  def test_finalize_validates_pr_reference_before_remote_effects
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        task_dir, worktree_path, pr_md = setup_finalize_task(dir)
+        task = Hive::Task.new(task_dir)
+
+        result = Hive::Stages::Finalize.validate_pr_reference!(
+          task, worktree_path, "not-a-pr", {}
+        )
+        assert_equal({ commit: "finalize_pr_url_invalid", status: :error }, result.last)
+        assert_equal "finalize_pr_url_invalid", Hive::Markers.current(pr_md).attrs.fetch("reason")
+
+        metadata = Hive::Gh::PrMetadata.new(
+          number: 9,
+          url: "https://github.com/acme/other/pull/9",
+          base_ref_name: "main",
+          head_ref_oid: "a" * 40,
+          is_cross_repository: false,
+          state: "OPEN"
+        )
+        with_stubbed_singleton_method(Hive::Gh, :pr_metadata, ->(*, **) { metadata }) do
+          result = Hive::Stages::Finalize.validate_pr_reference!(
+            task, worktree_path, "https://github.com/acme/app/pull/9", {}
+          )
+          assert_equal({ commit: "finalize_pr_identity_mismatch", status: :error }, result.last)
+          assert_equal "finalize_pr_identity_mismatch", Hive::Markers.current(pr_md).attrs.fetch("reason")
+        end
+
+        with_stubbed_singleton_method(
+          Hive::Gh, :pr_metadata, ->(*, **) { raise Hive::GhError, "metadata offline" }
+        ) do
+          result = Hive::Stages::Finalize.validate_pr_reference!(
+            task, worktree_path, "https://github.com/acme/app/pull/9", {}
+          )
+          assert_equal({ commit: "finalize_pr_identity_refresh_failed", status: :error }, result.last)
+          marker = Hive::Markers.current(pr_md)
+          assert_equal "finalize_pr_identity_refresh_failed", marker.attrs.fetch("reason")
+          assert_equal "metadata offline", marker.attrs.fetch("detail")
+        end
+      end
+    end
+  end
+
   def test_finalize_mark_pr_ready_error_paths
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         task_dir, _worktree_path, pr_md = setup_finalize_task(dir)
         task = Hive::Task.new(task_dir)
-        pr_url = "https://example.com/pr/9"
+        pr_url = "https://github.com/acme/app/pull/9"
         ENV["HIVE_FAKE_GH_READY_EXIT"] = "1"
         ENV["HIVE_FAKE_GH_READY_STDERR"] = "Pull request is already ready for review"
 
@@ -721,7 +935,7 @@ class RunFinalizeTest < Minitest::Test
     ENV["HIVE_FAKE_GH_EDIT_STDERR"] = "edit denied"
     result = nil
     _out, err = capture_io do
-      result = Hive::Stages::Finalize.redact_pr_body!("https://example.com/pr/9", {})
+      result = Hive::Stages::Finalize.redact_pr_body!("https://github.com/acme/app/pull/9", {})
     end
     assert_equal :failed, result
     assert_match(/failed to redact PR body/, err)
@@ -732,7 +946,7 @@ class RunFinalizeTest < Minitest::Test
     }) do
       result = nil
       _out, err = capture_io do
-        result = Hive::Stages::Finalize.redact_pr_body!("https://example.com/pr/9", {})
+        result = Hive::Stages::Finalize.redact_pr_body!("https://github.com/acme/app/pull/9", {})
       end
       assert_equal :failed, result
       assert_match(/redact_pr_body raised RuntimeError: boom/, err)
@@ -805,15 +1019,154 @@ class RunFinalizeTest < Minitest::Test
     end
   end
 
+  def test_finalize_validates_pr_identity_before_any_url_bound_remote_read
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        task_dir, worktree_path, _pr_md = setup_finalize_task(dir)
+        task = Hive::Task.new(task_dir)
+        calls = []
+        invalid = {
+          commit: "finalize_pr_identity_refresh_failed",
+          status: :error
+        }
+        clean = Hive::Gh::ScanResult.new(
+          hits: [], fetch_failed: false, fetch_error: nil
+        )
+
+        with_stubbed_singleton_method(
+          Hive::Stages::Finalize,
+          :validate_pr_reference!,
+          ->(*_args) { calls << :identity; [ nil, invalid ] }
+        ) do
+          with_stubbed_singleton_method(
+            Hive::Gh,
+            :scan_pr_for_secrets,
+            ->(**_kwargs) { calls << :scan; clean }
+          ) do
+            with_stubbed_singleton_method(
+              Hive::Stages::Finalize,
+              :pr_already_merged?,
+              ->(*_args) { calls << :merged_state; false }
+            ) do
+              with_stubbed_singleton_method(
+                Hive::Gh, :ensure_authenticated!, ->(*_args) { }
+              ) do
+                with_stubbed_singleton_method(
+                  Hive::Stages::Finalize,
+                  :verify_state!,
+                  ->(*_args) { nil }
+                ) do
+                  result = Hive::Stages::Finalize.run!(task, {})
+
+                  assert_equal invalid, result
+                  assert_equal(
+                    [ :identity ],
+                    calls,
+                    "unvalidated pr_url must not reach secret scan or lifecycle lookup"
+                  )
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
+  def test_finalize_revalidates_pr_identity_after_the_agent_before_readying
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        task_dir, _worktree_path, pr_md = setup_finalize_task(dir)
+        task = Hive::Task.new(task_dir)
+        pr_url = "https://github.com/acme/app/pull/9"
+        ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = pr_md
+        ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = <<~MD
+          ---
+          pr_url: #{pr_url}
+          pr_number: 9
+          ---
+
+          ## Summary
+          final
+
+          <!-- COMPLETE pr_url=#{pr_url} is_draft=false -->
+        MD
+        clean = Hive::Gh::ScanResult.new(
+          hits: [], fetch_failed: false, fetch_error: nil
+        )
+        scans = 0
+        refreshes = 0
+        drift = { commit: "finalize_pr_head_mismatch", status: :error }
+
+        with_stubbed_singleton_method(
+          Hive::Stages::Finalize,
+          :validate_pr_reference!,
+          ->(*_args) { [ pr_url, nil ] }
+        ) do
+          with_stubbed_singleton_method(
+            Hive::Gh,
+            :scan_pr_for_secrets,
+            lambda { |**_kwargs|
+              scans += 1
+              clean
+            }
+          ) do
+            with_stubbed_singleton_method(
+              Hive::Stages::Finalize,
+              :pr_already_merged?,
+              ->(*_args) { false }
+            ) do
+              with_stubbed_singleton_method(
+                Hive::Gh, :ensure_authenticated!, ->(*_args) { }
+              ) do
+                with_stubbed_singleton_method(
+                  Hive::Stages::Finalize, :verify_state!, ->(*_args) { nil }
+                ) do
+                  with_stubbed_singleton_method(
+                    Hive::Stages::Finalize,
+                    :refresh_pr_identity!,
+                    lambda do |*_args|
+                      refreshes += 1
+                      refreshes == 1 ? nil : drift
+                    end
+                  ) do
+                    with_stubbed_singleton_method(
+                      Hive::Stages::Finalize,
+                      :spawn_finalize_agent,
+                      lambda do |spawned_task, *_args|
+                        File.write(
+                          spawned_task.state_file,
+                          ENV.fetch("HIVE_FAKE_CLAUDE_WRITE_CONTENT")
+                        )
+                      end
+                    ) do
+                      result = Hive::Stages::Finalize.run!(task, {})
+
+                      assert_equal drift, result
+                      assert_equal 2, refreshes
+                      assert_equal 1, scans,
+                                   "post-agent identity drift must stop the second scan"
+                      refute_match(/arg=ready/, gh_argv_log)
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
   def test_pr_already_merged_classifies_state_and_falls_through_on_error
     with_stubbed_singleton_method(Hive::Gh, :pr_state, ->(*_a, **_k) { "MERGED" }) do
-      assert Hive::Stages::Finalize.pr_already_merged?("https://example.com/pr/9", {})
+      assert Hive::Stages::Finalize.pr_already_merged?("https://github.com/acme/app/pull/9", {})
     end
     with_stubbed_singleton_method(Hive::Gh, :pr_state, ->(*_a, **_k) { "OPEN" }) do
-      refute Hive::Stages::Finalize.pr_already_merged?("https://example.com/pr/9", {})
+      refute Hive::Stages::Finalize.pr_already_merged?("https://github.com/acme/app/pull/9", {})
     end
     with_stubbed_singleton_method(Hive::Gh, :pr_state, ->(*_a, **_k) { raise Hive::GhError, "boom" }) do
-      refute Hive::Stages::Finalize.pr_already_merged?("https://example.com/pr/9", {}),
+      refute Hive::Stages::Finalize.pr_already_merged?("https://github.com/acme/app/pull/9", {}),
              "a GhError on the state lookup must fall through to the normal finalize path"
     end
   end

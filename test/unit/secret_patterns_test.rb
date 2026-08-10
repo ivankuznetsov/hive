@@ -40,6 +40,13 @@ class SecretPatternsTest < Minitest::Test
     assert_match_name("API_KEY=abcdefghijklmnopqrstuvwxyz", :generic_api_key)
   end
 
+  def test_generic_api_key_before_json_delimiter_is_detected
+    assert_match_name(
+      '{"api_key":"abcdefghijklmnopqrstuvwxyz"}',
+      :generic_api_key
+    )
+  end
+
   def test_short_api_key_value_does_not_match
     refute_match_any("api_key = 'short'")
   end
@@ -94,6 +101,28 @@ class SecretPatternsTest < Minitest::Test
     assert_includes redacted, "noisy log tail"
   end
 
+  def test_long_private_key_bodies_are_fully_redacted
+    complete_body = "A" * 8_000
+    complete = <<~PEM
+      -----BEGIN PRIVATE KEY-----
+      #{complete_body}
+      -----END PRIVATE KEY-----
+    PEM
+    complete_redacted = Hive::SecretPatterns.redact(complete)
+    refute_includes complete_redacted, complete_body
+    assert_includes complete_redacted, "[REDACTED:pem_private_key]"
+
+    truncated_body = "B" * 8_000
+    truncated =
+      "-----BEGIN OPENSSH PRIVATE KEY-----\n#{truncated_body}"
+    truncated_redacted = Hive::SecretPatterns.redact(truncated)
+    refute_includes truncated_redacted, truncated_body
+    assert_includes(
+      truncated_redacted,
+      "[REDACTED:pem_private_key_header]"
+    )
+  end
+
   def test_truncated_pem_header_alone_with_no_body_is_redacted
     # Edge case: truncation cut at the BEGIN line itself, leaving no
     # body. Still redact — the header signal alone is meaningful and
@@ -129,8 +158,31 @@ class SecretPatternsTest < Minitest::Test
     assert_match_name("password: s3cretpassphrase42", :password_assignment)
   end
 
+  def test_password_before_json_delimiter_is_detected
+    assert_match_name(
+      '{"password":"s3cretpassphrase42"}',
+      :password_assignment
+    )
+  end
+
   def test_short_password_value_does_not_match
     refute_match_any("password=abc")
+  end
+
+  def test_password_prose_does_not_match_an_assignment
+    refute_match_any("Rate limits apply to password resets, confirmations, and sign-ins.")
+  end
+
+  def test_high_signal_password_forms_remain_protected
+    samples = {
+      "ALTER USER app PASSWORD 's3cretpassphrase42';" => :password_sql,
+      "<password>s3cretpassphrase42</password>" => :password_xml,
+      "deploy --password s3cretpassphrase42" => :password_cli
+    }
+
+    samples.each do |value, pattern|
+      assert_match_name(value, pattern)
+    end
   end
 
   def test_authorization_bearer_token_is_detected
@@ -225,6 +277,17 @@ class SecretPatternsTest < Minitest::Test
     redacted = Hive::SecretPatterns.redact(binary)
     assert_equal Encoding::UTF_8, redacted.encoding
     assert_includes redacted, "[REDACTED:aws_access_key]"
+  end
+
+  def test_redact_preserves_valid_utf8_bytes_tagged_as_binary
+    token = "ghp_#{'u' * 36}"
+    binary = "日本語 #{token}".b
+    redacted = Hive::SecretPatterns.redact(binary)
+
+    assert_equal Encoding::UTF_8, redacted.encoding
+    assert_includes redacted, "日本語"
+    assert_includes redacted, "[REDACTED:github_token]"
+    refute_includes redacted, "???"
   end
 
   def test_long_secret_is_truncated_in_snippet_per_eighty_char_rule

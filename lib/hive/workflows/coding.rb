@@ -1,3 +1,4 @@
+require "hive/conditions/policy"
 require "hive/workflow"
 
 module Hive
@@ -39,6 +40,7 @@ module Hive
 
       DESCRIPTOR = Hive::Workflow.new(
         id: :coding,
+        archive_visibility_retention_days: 3,
         stages: [
           Hive::Workflow::Stage.new(
             name: "inbox",

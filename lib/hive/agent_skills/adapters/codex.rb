@@ -8,6 +8,11 @@ module Hive
       class Codex < Base
         AGENT = "codex"
 
+        def plan(inspections)
+          @successful_config_snapshots = {}
+          super
+        end
+
         protected
 
         def ownership_conflicts(native_spec, _rows)
@@ -94,6 +99,12 @@ module Hive
           exact = current["exists"] == expected["exists"] && current["digest"] == expected["digest"]
           return nil if exact
 
+          dependency_match = operation.depends_on.any? do |dependency|
+            snapshot = @successful_config_snapshots&.fetch(dependency, nil)
+            snapshot && current["exists"] == snapshot["exists"] && current["digest"] == snapshot["digest"]
+          end
+          return nil if dependency_match
+
           native_spec = operation.metadata.fetch("native_spec")
           if !operation.depends_on.empty? &&
              unrelated_digest(current.fetch("content"), native_spec) == unrelated_digest(expected.fetch("content"), native_spec)
@@ -114,7 +125,12 @@ module Hive
           if unrelated_digest(after.fetch("content"), native_spec) != unrelated_digest(before.fetch("content"), native_spec)
             return "Codex changed comments or unrelated config while applying #{operation.kind}"
           end
-          File.chmod(before["mode"], path) if before["mode"] && after["mode"] != before["mode"]
+          if before["mode"] && after["mode"] != before["mode"]
+            File.chmod(before["mode"], path)
+            after["mode"] = before["mode"]
+          end
+          @successful_config_snapshots ||= {}
+          @successful_config_snapshots[operation.id] = after
           nil
         end
 

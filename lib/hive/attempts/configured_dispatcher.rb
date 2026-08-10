@@ -6,10 +6,11 @@ require "hive/attempts/launch_policy"
 
 module Hive
   module Attempts
-    # Daemon adapter that resolves attempt timers, execution timeout, and
-    # project-specific lease timers plus global execution/capacity policy for
-    # every admission. A long-lived daemon therefore applies config reloads to
-    # fresh attempts without replacing the adapter or mutating running wrappers.
+    # Internal daemon adapter behind Attempts::API. It resolves attempt timers,
+    # execution timeout, and project-specific lease timers plus global
+    # execution/capacity policy for every admission. A long-lived daemon
+    # therefore applies config reloads to fresh attempts without replacing the
+    # adapter or mutating running wrappers.
     class ConfiguredDispatcher
       def initialize(store:, config_loader: Hive::Config.method(:load),
                      daemon_config_loader: Hive::Config.method(:load_global_daemon),
@@ -21,12 +22,14 @@ module Hive
         @dispatcher_class = dispatcher_class
       end
 
-      def dispatch_request(request, interactive: false, now: Time.now.utc)
+      def dispatch_request(request, interactive: false, now: Time.now.utc,
+                           admission_view: nil)
         task = Hive::TaskResolver.new(
           request.slug, project_filter: request.project
         ).resolve
         dispatcher_for(task, argv: request.argv).dispatch_request(
-          request, interactive: interactive, now: now
+          request, interactive: interactive, now: now,
+          admission_view: admission_view
         )
       end
 
@@ -36,10 +39,23 @@ module Hive
         )
       end
 
+      def dispatch_module_hook(project_root:, argv:, **attributes)
+        dispatcher_for_project(project_root, argv: argv).dispatch_module_hook(
+          argv: argv, **attributes
+        )
+      end
+
       private
 
       def dispatcher_for(task, argv:)
-        cfg = @config_loader.call(task.project_root)
+        dispatcher_for_project(
+          task.project_root, argv: argv,
+          task_resolver: ->(_request) { task }
+        )
+      end
+
+      def dispatcher_for_project(project_root, argv:, task_resolver: nil)
+        cfg = @config_loader.call(project_root)
         daemon = @daemon_config_loader.call
         launcher = @launcher_class.new(
           store: @store,
@@ -54,7 +70,7 @@ module Hive
           launcher: launcher,
           limits: LaunchPolicy.limits(daemon: daemon),
           launch_timeout_sec: cfg.fetch("attempt_launch_timeout_sec"),
-          task_resolver: ->(_request) { task }
+          task_resolver: task_resolver
         )
       end
     end

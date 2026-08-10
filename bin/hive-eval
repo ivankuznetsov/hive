@@ -28,7 +28,7 @@ parser = OptionParser.new do |opts|
   opts.on("--scenario NAME", "Run one scenario by basename, e.g. s1_status") do |value|
     options[:scenario] = value
   end
-  opts.on("--report PATH", "Write JSON report to PATH") do |value|
+  opts.on("--report PATH", "Write JSON report to PATH (relative to the repository root)") do |value|
     options[:report] = value
   end
   opts.on("--no-judge", "Skip Codex judge assertions") do
@@ -41,6 +41,8 @@ parser = OptionParser.new do |opts|
     puts opts
     exit
   end
+  opts.separator ""
+  opts.separator "Relative --report paths and HIVE_EVAL_SCENARIO_ROOT resolve against the repository root."
 end
 # Reject abbreviated long options (e.g. --rep for --report). OptionParser accepts
 # unambiguous prefixes by default, but the exact-only manual scan in
@@ -270,6 +272,10 @@ env["HIVE_EVAL_REPORT"] = run_report_path
 
 begin
   ok = system(env, "bundle", "exec", "rake", "test:eval", chdir: root)
+  if ok.nil?
+    warn "hive-eval: could not launch `bundle exec rake test:eval`; ensure Bundler is installed and on PATH"
+    exit 127
+  end
   child_exit = $CHILD_STATUS&.exitstatus || (ok ? 0 : 1)
   if child_exit.zero?
     validate_report!(run_report_path, path, require_passing: true)

@@ -357,6 +357,22 @@ class RefactorPatrolRepositoryOwnershipTest < Minitest::Test
     end
   end
 
+  def test_non_coding_registration_cannot_continue_architecture_patrol
+    with_tmp_dir do |dir|
+      guard = guard_for(
+        [ entry("demo", dir) ], identities: { dir => identity("acme/demo", "github.com") }
+      )
+      cfg = config(enabled: true).merge("default_workflow" => "content")
+
+      decision = guard.call(
+        entry: entry("demo", dir), cfg: cfg, continuation: true
+      )
+
+      assert decision.blocked?
+      assert_equal "architecture_patrol_disabled", decision.reason
+    end
+  end
+
   def test_unexpected_authority_evaluation_failure_is_reported
     with_tmp_dir do |dir|
       target = entry("demo", dir)
@@ -394,7 +410,11 @@ class RefactorPatrolRepositoryOwnershipTest < Minitest::Test
       )
       fake_store = Object.new
       fake_store.define_singleton_method(:each_job) { [ aggregate ] }
-      replacement = ->(_path) { fake_store }
+      captured_store_arguments = nil
+      replacement = lambda do |path, **options|
+        captured_store_arguments = [ path, options ]
+        fake_store
+      end
 
       with_replaced_singleton_method(Hive::RefactorPatrol::JobStore, :new, replacement) do
         guard = Hive::RefactorPatrol::RepositoryOwnership.new(
@@ -402,6 +422,8 @@ class RefactorPatrolRepositoryOwnershipTest < Minitest::Test
         )
         assert_equal [ identity("acme/demo", "github.com") ],
                      guard.send(:stored_continuation_identities, target, config(enabled: false))
+        assert_equal target.fetch("path"), captured_store_arguments.fetch(0)
+        assert_nil captured_store_arguments.fetch(1).fetch(:hive_state_path)
       end
     end
   end
@@ -499,7 +521,11 @@ class RefactorPatrolRepositoryOwnershipTest < Minitest::Test
   end
 
   def entry(name, path)
-    { "name" => name, "path" => path }
+    {
+      "name" => name,
+      "path" => path,
+      "project_id" => "#{name}-project-id"
+    }
   end
 
   def identity(repository, host)

@@ -4,6 +4,8 @@ require "fileutils"
 require "json"
 require "digest"
 require "hive/commands/doctor"
+require "hive/agent_skills/inspector"
+require "hive/agent_skills/target_resolver"
 
 class HiveCommandsDoctorTest < Minitest::Test
   include HiveTestHelper

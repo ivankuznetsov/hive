@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/commands/init"
+require "hive/agent_skills/inspector"
 
 class InitAgentSkillsTest < Minitest::Test
   include HiveTestHelper
@@ -135,6 +136,27 @@ class InitAgentSkillsTest < Minitest::Test
     assert_raises(ArgumentError) do
       Hive::Commands::Init.new(Dir.pwd, agent_skill_preflight: :sometimes)
     end
+  end
+
+  def test_in_process_minitest_default_suppresses_post_init_skill_preflight
+    command = Hive::Commands::Init.new(Dir.pwd)
+
+    assert_equal false, command.instance_variable_get(:@agent_skill_preflight)
+    assert_equal true, Hive::Commands::Init.new(
+      Dir.pwd, agent_skill_preflight: true
+    ).instance_variable_get(:@agent_skill_preflight)
+  end
+
+  def test_non_minitest_process_keeps_production_preflight_default
+    code = <<~'RUBY'
+      require "hive/commands/init"
+      print Hive::Commands::Init.new(Dir.pwd).instance_variable_get(:@agent_skill_preflight)
+    RUBY
+
+    stdout, stderr, status = Open3.capture3(RbConfig.ruby, "-Ilib", "-e", code)
+
+    assert status.success?, stderr
+    assert_equal "true", stdout
   end
 
   def test_closed_tty_probe_falls_back_to_warnings

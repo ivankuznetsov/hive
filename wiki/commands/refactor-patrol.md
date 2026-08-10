@@ -3,13 +3,13 @@ title: hive refactor-patrol
 type: command
 source: lib/hive/commands/refactor_patrol.rb, lib/hive/refactor_patrol/*
 created: 2026-07-02
-updated: 2026-07-22
+updated: 2026-08-09
 tags: [command, refactor-patrol, architecture, json, daemon]
 ---
 
 **TLDR**: `hive refactor-patrol` is Hive's language-neutral architecture
 patrol. The original on-demand v1 report remains available, while merged-PR
-mode emits the current v3 report over a durable v2 job lifecycle: immutable PR
+mode emits the current v3 report over a durable v3 job lifecycle: immutable PR
 scope, read-only discovery,
 exhaustive dispositions, and separately authorized isolated fixes or
 deduplicated issues. It is not Ruby- or Hive-specific: discovery maps generic
@@ -24,7 +24,7 @@ stays report/issue-only with `public_contract_safety_unavailable`.
 hive refactor-patrol my-project --json
 hive refactor-patrol my-project --feature route-home --changed-since origin/main
 
-# Explicit merged-PR replay (v2)
+# Explicit merged-PR replay (v3)
 hive refactor-patrol my-project --pr 123 --json
 hive refactor-patrol my-project --pr https://github.com/acme/app/pull/123 --json
 
@@ -49,6 +49,11 @@ discovery-only configs do not inherit external-effect authority. Fresh headless
 init can resolve the whole architecture-patrol choice before any project-state write
 with `hive init --refactor-patrol` or `hive init --no-refactor-patrol`;
 omitting both keeps the enabled default.
+
+Execution and merged-PR intake additionally require the project's resolved
+`default_workflow` to be `coding`. Non-coding defaults cannot discover or act
+even when stale configuration leaves `refactor_patrol.enabled: true`; read-only
+`--list` and `--show` history queries remain available.
 
 ```yaml
 refactor_patrol:
@@ -254,7 +259,7 @@ fingerprint is stale and the next tick removes it. Earlier crashes resume the
 page/intake cursor; write-once manifest/job intake makes replay idempotent.
 Malformed or identity-drifted progress is quarantined and blocks.
 
-The v2 job lifecycle is `queued → analyzing → classified → acting → complete`.
+The v3 job lifecycle is `queued → analyzing → classified → acting → complete`.
 Discovery and actions use generation-fenced claims renewed by exact
 PID/process-start heartbeats; workers without verifiable process identity do
 not claim work. `JobStore` remains the sole aggregate lock/read/write facade,
@@ -263,6 +268,11 @@ but delegates deterministic responsibilities to three collaborators:
 `ClaimTransitions` constructs, renews, and finishes in-memory discovery/action
 claims, and `JobIndexes` projects rebuildable fingerprint/action indexes from
 terminal aggregates. None of those collaborators persists independently.
+Every production `job`, `discovery`, and `action` mutation enters JobStore
+through the persistence-free `TransitionGateway`, which applies the separate
+Architecture Patrol authorization gateway and the job-bound occurrence sender
+CAS before invoking the transition. JobStore still owns the aggregate and
+replay decision; the gateway adds no state file or recovery path.
 `PatrolArbiter` gives
 ordinary and architecture scans the same per-project patrol-scan budget and
 alternates kinds across ticks; architecture occurrences are oldest-first.
@@ -308,7 +318,7 @@ an action or family identity.
 
 ## Read-only job inspection
 
-`--list` and `--show JOB_ID` query the authoritative v2 `JobStore` in the CLI
+`--list` and `--show JOB_ID` query the authoritative v3 `JobStore` in the CLI
 process. They do not enqueue, claim, replay, resume, or otherwise mutate a job,
 and they remain available for a registered project even when architecture
 discovery is currently disabled. `--list` returns jobs in their immutable
@@ -320,7 +330,7 @@ snapshot, so jobs arriving later, equal timestamps, and wall-clock rollback
 cannot skip or enter that pagination run. `count` and `page.total` report that
 snapshot's total while `page.returned` is the current page size.
 
-The sequence projection lives under `v2/indexes/job-query/` as immutable
+The sequence projection lives under `v3/indexes/job-query/` as immutable
 per-sequence sidecars plus an O(1) high-water record. Writer paths publish it
 only after the authoritative job exists. A list query reads the high-water
 once, opens at most `limit + 1` membership records, and parses only the selected
@@ -363,6 +373,22 @@ lifecycle blocker, independent of wall-clock rollback or same-second writes.
 Legacy blocks without the snapshot use a conservative strictly-later timestamp
 fallback, so ambiguous equality keeps the blocker visible.
 
+Action dispatch also binds a digest of the job aggregate observed at
+reservation. A schema-valid child result that leaves that digest unchanged is
+`action_no_progress`: the daemon persists a one-hour action block instead of
+dispatching the same inert child on every scheduler tick. Fix-agent resource
+exhaustion retains its structured reason; daily token or launch ceilings wait
+until the next UTC day, while other transient failures keep the hourly retry.
+When an occurrence reaches its reserved effect-capacity boundary, the daemon
+rolls the job into the exact next occurrence generation. It first requires all
+predecessor transitions to be terminal, publishes that segment's capture and
+receipts, and only then advances the current pointer. A successor reserved just
+before a crash is completed by ordinary occurrence recovery. Historical
+capacity blockers belong to their predecessor segment and do not suppress the
+fresh generation. Rollover rechecks migration ownership inside the shared
+fence. If the saturated segment still owns an expired claim, normal fenced
+claim recovery runs first and rollover follows on the next scheduler pass.
+
 ## Fix and issue routing
 
 Current accepted, unflagged theses can reach `Fixer`. For upgrade recovery,
@@ -375,7 +401,10 @@ identity; legacy provider-only snapshots retain provider-only comparison. The
 current config may revoke or narrow that
 snapshot; it cannot relax captured contract/dependency guards, lower
 confidence/leverage thresholds, add a validation command, switch identities, or
-otherwise broaden an old job.
+otherwise broaden an old job. A revoked action remains nonterminal so restored
+authority can resume it, but Hive probes that durable hold at most hourly
+instead of launching an action child every daemon minute. Other transient
+action failures retain the ordinary one-minute retry cadence.
 
 Fixes inherit the resolved refactor identity by default and may independently
 override `refactor_patrol.auto_fix.agent`, `.model`, and `.effort`. The selected
@@ -467,6 +496,15 @@ repository ownership. Continuation-only claims may reconcile an existing
 request (or record completion of an already-intended push), but cannot create a
 replacement patch or begin a new push/PR phase.
 
+The Git mechanism for those reads and writes is the boundary-ready
+`Hive::AgentGitGate`. `PrOpener` requests managed URL/OID observations and its
+push compatibility call resolves the local branch once, publishes the
+immutable commit under the ledger-selected exact lease, and independently
+observes the remote afterward. The resulting component receipt records
+expected/before/published/after OIDs and a non-secret transport fingerprint.
+The component cannot invent replacement authority: the append-only patrol
+ledger above it remains the only source for the expected old OID.
+
 After `gh pr create`, an
 exact-host/repository `gh pr view` must prove the returned URL/number, OPEN
 non-draft state, head repository/branch/OID, and the exact base branch/OID from
@@ -519,24 +557,47 @@ partial discovery pins its analysis SHA, the job preserves completed slices,
 reuses the original SHA, and rematerializes the same detached exact worktree
 for only the incomplete slices. Hive never mixes snapshots or resets trunk.
 
+## Module compatibility
+
+`hive refactor-patrol` remains the frozen 0.x serializer and recovery protocol
+for the first-party `architecture-patrol` module adapter. All public and
+daemon-internal modes use v3 jobs, immutable merge
+manifests, claims, progress, quarantine, result transport, publication
+attempts, and global terminal proofs. Module scheduling and
+`pull_request.merged` admission do not add a second GitHub poller; the current
+merge reconciler is the sole event producer.
+
+Architecture Patrol shares the durable shadow/cutover ownership epoch with
+ordinary Patrol. A rollback changes ownership and module pointers only; it
+does not copy state or replay merged-PR history.
+
 ## State and JSON
 
-Legacy state remains under `.hive-state/refactor_patrol/`. It shares directory,
+On-demand state remains under `.hive-state/refactor_patrol/`. It shares directory,
 atomic JSON-write, tolerant-read, and run-artifact mechanics with ordinary
 patrol through `Hive::Patrol::BaseStateStore`, while retaining its own namespace
-and thesis schema. V2 uses a separate namespace:
+and thesis schema. Scheduled JobStore state uses a split namespace:
 
 ```text
-.hive-state/refactor_patrol/v2/
-  reconciler.json               # exact-host catch-up checkpoint, schema v2
-  reconciler-progress.json      # identity-bound page/intake cursor, schema v1
-  manifests/<job-id>.json       # write-once source occurrence
-  jobs/<job-id>.json            # authoritative aggregate + claims/receipts
-  families/<family-id>.json     # rebuildable semantic-family projection
-  indexes/                      # rebuildable fingerprint/action indexes
-  results/<dispatch-id>.json    # daemon completion channel; removed on reap
-  runs/ and logs/               # agent evidence
+.hive-state/refactor_patrol/
+  v2/
+    reconciler.json              # exact-host catch-up checkpoint, schema v2
+    reconciler-progress.json     # identity-bound page/intake cursor, schema v1
+    manifests/<job-id>.json      # write-once source occurrence
+    families/<family-id>.json    # rebuildable semantic-family projection
+    results/<dispatch-id>.json   # daemon completion channel; removed on reap
+    runs/ and logs/              # agent evidence
+  v3/
+    jobs/<job-id>.json           # sole aggregate authority
+    occurrences/records/occ-*.json # prepared/uncertain/terminal effects + outbox
+    indexes/                     # rebuildable job/action/query projections
 ```
+
+JobStore authority is fixed at v3. Construction and `--list`/`--show` do not
+create state, while the first mutation lazily creates only v3. Runtime never
+probes, reads, hashes, moves, deletes, or interprets an obsolete `v2/jobs`
+entry; arbitrary v2 bytes are ignored and an existing v3 store always wins.
+Every non-JobStore v2 owner above remains live and unchanged.
 
 Terminal remote-effect proof is repository-global rather than registration
 local:

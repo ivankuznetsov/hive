@@ -6,7 +6,8 @@
 #                    override with HIVE_FAKE_CODEX_VERSION, e.g. "0.1.0"
 #                    to simulate a too-old binary below min_version).
 #
-#   review [...]     logs argv to HIVE_FAKE_CODEX_ARGV_LOG (if set), then
+#   [global flags] review [...]
+#                    logs argv to HIVE_FAKE_CODEX_ARGV_LOG (if set), then
 #                    prints HIVE_FAKE_CODEX_STDOUT (default: a valid
 #                    GFM-checkbox findings block) and exits with
 #                    HIVE_FAKE_CODEX_EXIT (default 0). HIVE_FAKE_CODEX_HANG
@@ -20,12 +21,36 @@
 #                    of stopping at the cap and wedging the child.
 set -u
 
+has_arg() {
+  local needle="$1"
+  shift
+  local arg
+  for arg in "$@"; do
+    [[ "$arg" == "$needle" ]] && return 0
+  done
+  return 1
+}
+
 if [[ "${1:-}" == "--version" ]]; then
   printf 'codex-cli %s\n' "${HIVE_FAKE_CODEX_VERSION:-0.139.0}"
   exit 0
 fi
 
-if [[ "${1:-}" == "review" ]]; then
+if has_arg "exec" "$@"; then
+  if [[ -n "${HIVE_FAKE_CODEX_ARGV_LOG:-}" ]]; then
+    mkdir -p "$(dirname "${HIVE_FAKE_CODEX_ARGV_LOG}")"
+    {
+      echo "---"
+      echo "cwd=$(pwd)"
+      for a in "$@"; do
+        printf 'arg=%s\n' "$a"
+      done
+    } >> "${HIVE_FAKE_CODEX_ARGV_LOG}"
+  fi
+  exit "${HIVE_FAKE_CODEX_EXIT:-0}"
+fi
+
+if has_arg "review" "$@"; then
   if [[ -n "${HIVE_FAKE_CODEX_ARGV_LOG:-}" ]]; then
     mkdir -p "$(dirname "${HIVE_FAKE_CODEX_ARGV_LOG}")"
     {

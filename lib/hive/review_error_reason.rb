@@ -97,7 +97,7 @@ module Hive
 
     # Classify only residual, non-limit triage/fix agent failures. Provider
     # quota/rate walls are handled by AgentLimit first so they keep the
-    # cooldown-based auto-heal path.
+    # coordinator-owned cooldown path.
     #
     # Input contract: this classifies whatever text the caller hands it — it
     # never reaches for raw agent output on its own. The specific buckets fire

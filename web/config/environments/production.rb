@@ -1,6 +1,5 @@
 require "active_support/core_ext/integer/time"
 require "hive/web/environment"
-require "hive/web/host_authorization"
 
 Rails.application.configure do
   # Settings specified here will take precedence over those in config/application.rb.
@@ -19,6 +18,11 @@ Rails.application.configure do
 
   # Cache assets for far-future expiry since they are all digest stamped.
   config.public_file_server.headers = { "cache-control" => "public, max-age=#{1.year.to_i}" }
+
+  # Capture compiles into a private output directory outside public/assets so
+  # the exact source worktree stays clean. Let Propshaft serve that isolated
+  # asset set only inside the explicitly marked capture runtime.
+  config.assets.server = true unless ENV["HIVE_WEB_ASSETS_DIR"].to_s.strip.empty?
 
   # Enable serving of images, stylesheets, and JavaScripts from an asset server.
   # config.asset_host = "http://assets.example.com"
@@ -84,13 +88,11 @@ Rails.application.configure do
   # Only use :id for inspections in production.
   config.active_record.attributes_for_inspect = [ :id ]
 
-  # Enable the narrow Host allowlist only for the native loopback bypass. A
-  # deliberately non-loopback, GitHub-authenticated service must accept its
-  # machine IP / LAN hostname before the controller-level login gate runs.
+  # Accept every syntactically valid Host so arbitrary reverse proxies and
+  # tunnels reach the controller-level GitHub owner gate. The local no-auth
+  # boundary independently requires both a loopback socket peer and loopback
+  # Host, so accepting a proxy hostname here does not grant local access.
   configured_origin = Hive::Web::Environment.value("HIVE_WEB_ORIGIN")
-  if (allowed_hosts = Hive::Web::HostAuthorization.allowed_hosts)
-    config.hosts = allowed_hosts
-  end
 
   # Turbo Streams connect over Action Cable. Same-origin-as-host covers the
   # normal case with ZERO config — browse the box at any address and the

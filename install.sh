@@ -394,6 +394,8 @@ checksums_url="${release_base}/SHA256SUMS"
 sig_url="${release_base}/SHA256SUMS.sig"
 cert_url="${release_base}/SHA256SUMS.pem"
 installed_bin="${gem_home}/bin/hive"
+hv_installed_bin="${gem_home}/bin/hv"
+installed_shim="${gem_home}/shims/hive"
 link_path="${bin_home}/hive"
 hv_path="${bin_home}/hv"
 
@@ -425,7 +427,47 @@ ruby_preflight
 command -v cosign >/dev/null 2>&1 || die "missing installer prerequisite 'cosign'"
 
 tmpdir="$(mktemp -d)"
-trap 'rm -rf "$tmpdir"' EXIT
+launcher_rollback_armed=0
+launcher_wrapper_had_original=0
+launcher_hv_had_original=0
+launcher_shim_had_original=0
+launcher_wrapper_backup="${tmpdir}/launcher-hive.backup"
+launcher_hv_backup="${tmpdir}/launcher-hv.backup"
+launcher_shim_backup="${tmpdir}/launcher-shim.backup"
+staged_wrapper=""
+staged_hv=""
+staged_shim=""
+
+restore_launcher_path() {
+  local path="$1" had_original="$2" backup="$3"
+
+  rm -f "$path"
+  if [[ "$had_original" -eq 1 ]]; then
+    cp -pP "$backup" "$path"
+  fi
+}
+
+cleanup() {
+  local rc=$?
+
+  # Keep recovery armed until all three launcher files are installed and
+  # verified. A failure in gem install, shim staging, wrapper construction,
+  # chmod, or activation restores the exact pre-install bytes and modes.
+  if [[ "$launcher_rollback_armed" -eq 1 ]]; then
+    set +e
+    restore_launcher_path "$installed_bin" "$launcher_wrapper_had_original" "$launcher_wrapper_backup"
+    restore_launcher_path "$hv_installed_bin" "$launcher_hv_had_original" "$launcher_hv_backup"
+    restore_launcher_path "$installed_shim" "$launcher_shim_had_original" "$launcher_shim_backup"
+    rm -f "$staged_wrapper" "$staged_hv" "$staged_shim"
+    warn "launcher update failed; restored the previous wrapper and shim state"
+  fi
+
+  rm -rf "$tmpdir"
+  trap - EXIT
+  exit "$rc"
+}
+
+trap cleanup EXIT
 
 download_with_status "$gem_url" "${tmpdir}/${gem_file}" "release gem"
 download_with_status "$checksums_url" "${tmpdir}/SHA256SUMS" "SHA256SUMS"
@@ -438,10 +480,10 @@ download_with_status "$cert_url" "${tmpdir}/SHA256SUMS.pem" "SHA256SUMS.pem"
 cosign verify-blob \
   --certificate "${tmpdir}/SHA256SUMS.pem" \
   --signature "${tmpdir}/SHA256SUMS.sig" \
-  --certificate-identity-regexp "^https://github\\.com/${REPO_OWNER}/${REPO_NAME}/\\.github/workflows/release\\.yml@refs/tags/${VERSION}$" \
+  --certificate-identity-regexp "^https://github\\.com/${REPO_OWNER}/${REPO_NAME}/\\.github/workflows/release\\.yml@refs/tags/${version}$" \
   --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
   "${tmpdir}/SHA256SUMS" \
-  || die "cosign verify-blob failed for SHA256SUMS (identity must match ${REPO_OWNER}/${REPO_NAME} release workflow at ${VERSION})"
+  || die "cosign verify-blob failed for SHA256SUMS (identity must match ${REPO_OWNER}/${REPO_NAME} release workflow at ${version})"
 
 # Strict line match: optional `./` prefix, sha digest, two-space sep,
 # exact gem_file, optional CR. `|| true` so a no-match under `set -e`
@@ -456,19 +498,48 @@ expected="$(printf '%s\n' "$expected_line" | awk '{print $1}')"
 
 mkdir -p "$bin_home" "$gem_home"
 
+# RubyGems refuses to overwrite the managed bash wrapper left by an earlier
+# installer run. Snapshot every launcher path before the first mutation, then
+# remove only a wrapper we can identify as ours from the bindir. The EXIT trap
+# restores these snapshots until the new wrapper and shim set is verified.
+mkdir -p "${gem_home}/bin" "${gem_home}/shims"
+if [[ -e "$installed_bin" || -L "$installed_bin" ]]; then
+  cp -pP "$installed_bin" "$launcher_wrapper_backup"
+  launcher_wrapper_had_original=1
+fi
+if [[ -e "$hv_installed_bin" || -L "$hv_installed_bin" ]]; then
+  cp -pP "$hv_installed_bin" "$launcher_hv_backup"
+  launcher_hv_had_original=1
+fi
+if [[ -e "$installed_shim" || -L "$installed_shim" ]]; then
+  cp -pP "$installed_shim" "$launcher_shim_backup"
+  launcher_shim_had_original=1
+fi
+launcher_rollback_armed=1
+
+if [[ -f "$installed_bin" ]] && {
+  grep -Fq "hive-managed: install-wrapper/v1" "$installed_bin" ||
+    { grep -Fq 'export HIVE_INVOKED_BIN=' "$installed_bin" && grep -Fq '/shims/hive' "$installed_bin"; }
+}; then
+  rm -f "$installed_bin"
+fi
+
 # Install into a dedicated GEM_HOME under ${data_home}/gems. Runtime
 # deps (bubbletea, lipgloss, thor, telegram-bot-ruby) are pulled from
 # rubygems.org with platform-correct precompiled binaries. --no-document
 # skips rdoc/ri generation (saves ~30s on first install).
-GEM_HOME="$gem_home" gem install \
+if ! GEM_HOME="$gem_home" gem install \
   "${tmpdir}/${gem_file}" \
   --install-dir "$gem_home" \
   --bindir "${gem_home}/bin" \
   --no-document \
-  --source https://rubygems.org \
-  || die "gem install failed for ${gem_file}"
+  --source https://rubygems.org; then
+  die "gem install failed for ${gem_file}"
+fi
 
-[[ -x "$installed_bin" ]] || die "gem install completed but no executable at ${installed_bin}"
+if [[ ! -x "$installed_bin" ]]; then
+  die "gem install completed but no executable at ${installed_bin}"
+fi
 
 # Write a wrapper at ${gem_home}/bin/hive that sets GEM_HOME/GEM_PATH
 # before delegating to the real ruby script. The shim that
@@ -477,24 +548,45 @@ GEM_HOME="$gem_home" gem install \
 # include $gem_home (which is our common case under XDG_DATA_HOME/hive).
 # We replace the shim with a tiny bash wrapper that exports the right
 # GEM_PATH before exec'ing the ruby shim under a sub-bindir. This
-# keeps the gem-installed scripts intact for `hive update` to refresh.
-mkdir -p "${gem_home}/shims"
-mv "${gem_home}/bin/hive" "${gem_home}/shims/hive"
-cat > "${gem_home}/bin/hive" <<WRAPPER
+# keeps the gem-installed scripts intact for `hive update` to refresh. Build
+# every replacement beside its destination, then atomically rename it into
+# place. Recovery remains armed until the activated set passes verification.
+staged_wrapper="${gem_home}/bin/.hive-wrapper.$$"
+staged_hv="${gem_home}/bin/.hv-wrapper.$$"
+staged_shim="${gem_home}/shims/.hive-shim.$$"
+mv "${gem_home}/bin/hive" "$staged_shim"
+cat > "$staged_wrapper" <<WRAPPER
 #!/usr/bin/env bash
+# hive-managed: install-wrapper/v1
 export GEM_HOME="${gem_home}"
 export GEM_PATH="\${GEM_HOME}\${GEM_PATH:+:\$GEM_PATH}"
 export HIVE_INVOKED_BIN="\${HIVE_INVOKED_BIN:-\$0}"
 exec "${gem_home}/shims/hive" "\$@"
 WRAPPER
-cat > "${gem_home}/bin/hv" <<WRAPPER
+cat > "$staged_hv" <<WRAPPER
 #!/usr/bin/env bash
 export GEM_HOME="${gem_home}"
 export GEM_PATH="\${GEM_HOME}\${GEM_PATH:+:\$GEM_PATH}"
 export HIVE_INVOKED_BIN="\${HIVE_INVOKED_BIN:-\$0}"
 exec "${gem_home}/bin/hive" "\$@"
 WRAPPER
-chmod +x "${gem_home}/bin/hive" "${gem_home}/bin/hv"
+chmod +x "$staged_shim" "$staged_wrapper" "$staged_hv"
+bash -n "$staged_wrapper" "$staged_hv"
+grep -Fq "hive-managed: install-wrapper/v1" "$staged_wrapper"
+
+mv -f "$staged_shim" "$installed_shim"
+staged_shim=""
+mv -f "$staged_wrapper" "$installed_bin"
+staged_wrapper=""
+mv -f "$staged_hv" "$hv_installed_bin"
+staged_hv=""
+
+[[ -x "$installed_shim" ]] || die "installed hive shim is not executable at ${installed_shim}"
+[[ -x "$installed_bin" ]] || die "installed hive wrapper is not executable at ${installed_bin}"
+[[ -x "$hv_installed_bin" ]] || die "installed hv wrapper is not executable at ${hv_installed_bin}"
+bash -n "$installed_bin" "$hv_installed_bin"
+grep -Fq "hive-managed: install-wrapper/v1" "$installed_bin"
+launcher_rollback_armed=0
 
 install_qmd
 
@@ -503,10 +595,30 @@ existing_canon=""
 if [[ -n "$existing_hive" ]]; then
   existing_canon="$(readlink -f "$existing_hive" 2>/dev/null || true)"
 fi
-link_canon=""
-if [[ -e "$link_path" ]]; then
-  link_canon="$(readlink -f "$link_path" 2>/dev/null || true)"
-fi
+
+# Publish a user-facing launcher only when the destination is absent or is the
+# exact absolute symlink this installer previously created. `ln -sfn` removes
+# an existing regular file (and can replace an unrelated symlink), so using it
+# without this ownership check would destroy an operator's launcher before the
+# Apache-Hive collision fallback had a chance to select `hv`.
+publish_managed_link() {
+  local path="$1" target="$2" name="$3" current_target
+
+  if [[ ! -e "$path" && ! -L "$path" ]]; then
+    ln -s "$target" "$path" || return 1
+    return 0
+  fi
+
+  if [[ -L "$path" ]]; then
+    current_target="$(readlink "$path" 2>/dev/null || true)"
+    if [[ "$current_target" == "$target" ]]; then
+      return 0
+    fi
+  fi
+
+  warn "existing ${name} at ${path}; leaving it unchanged"
+  return 1
+}
 
 # Write marker BEFORE swapping the symlink so any concurrent `hive`
 # invocation reads the new channel rather than falling through to
@@ -527,16 +639,30 @@ if [[ -n "$PREFIX" ]]; then
     printf '%s\n' "$PREFIX" > "${xdg_data_home}/install-prefix"
   fi
 fi
-ln -sfn "${gem_home}/bin/hive" "$link_path"
 
-if [[ -n "$existing_hive" ]] && [[ -n "$existing_canon" ]] && [[ "$existing_canon" != "$link_canon" ]] && [[ "$existing_canon" != "$(readlink -f "${gem_home}/bin/hive" 2>/dev/null || echo "${gem_home}/bin/hive")" ]]; then
-  ln -sfn "${gem_home}/bin/hv" "$hv_path"
-  warn "existing hive on PATH at ${existing_hive}; installed hv fallback at ${hv_path}"
+managed_hive_canon="$(readlink -f "${gem_home}/bin/hive" 2>/dev/null || echo "${gem_home}/bin/hive")"
+hive_link_published=0
+if publish_managed_link "$link_path" "${gem_home}/bin/hive" "hive"; then
+  hive_link_published=1
+fi
+
+if [[ "$hive_link_published" -ne 1 ]] ||
+   { [[ -n "$existing_hive" ]] && [[ -n "$existing_canon" ]] &&
+     [[ "$existing_canon" != "$managed_hive_canon" ]]; }; then
+  if publish_managed_link "$hv_path" "${gem_home}/bin/hv" "hv"; then
+    if [[ "$hive_link_published" -ne 1 ]]; then
+      warn "installed hv fallback at ${hv_path}; ${link_path} remains operator-owned"
+    else
+      warn "existing hive on PATH at ${existing_hive}; installed hv fallback at ${hv_path}"
+    fi
+  else
+    warn "Hive launchers remain available under ${gem_home}/bin"
+  fi
 else
   # Always refresh hv when we already own it so stale symlinks from
   # earlier installs don't dangle.
-  if [[ -L "$hv_path" ]]; then
-    ln -sfn "${gem_home}/bin/hv" "$hv_path"
+  if [[ -L "$hv_path" ]] && [[ "$(readlink "$hv_path" 2>/dev/null || true)" == "${gem_home}/bin/hv" ]]; then
+    publish_managed_link "$hv_path" "${gem_home}/bin/hv" "hv"
   fi
 fi
 

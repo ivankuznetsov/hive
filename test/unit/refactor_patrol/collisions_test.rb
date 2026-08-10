@@ -24,7 +24,7 @@ class RefactorPatrolCollisionsTest < Minitest::Test
       result = Hive::RefactorPatrol::Collisions.new(
         dir,
         state: Hive::RefactorPatrol::StateStore.new(dir),
-        v2_fingerprints: { "v2-fp" => { "job_id" => "pr-7" } }
+        terminal_fingerprints: { "v2-fp" => { "job_id" => "pr-7" } }
       ).check(thesis)
 
       assert result.suppressed

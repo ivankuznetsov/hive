@@ -4,7 +4,8 @@ module Hive
       :id, :feature_id, :category, :severity, :confidence, :title,
       :description, :recommendation, :scope, :contract, :impact,
       :root_cause, :reproduction, :validation, :evidence, :alpha_score,
-      :fingerprint,
+      :fingerprint, :validation_key, :target_sha, :lifecycle_state,
+      :lifecycle_reason, :lifecycle_updated_at, :superseded_by,
       keyword_init: true
     ) do
       def to_h
@@ -25,7 +26,13 @@ module Hive
           "validation" => validation,
           "evidence" => Array(evidence),
           "alpha_score" => alpha_score,
-          "fingerprint" => fingerprint
+          "fingerprint" => fingerprint,
+          "validation_key" => validation_key,
+          "target_sha" => target_sha,
+          "lifecycle_state" => lifecycle_state,
+          "lifecycle_reason" => lifecycle_reason,
+          "lifecycle_updated_at" => lifecycle_updated_at,
+          "superseded_by" => superseded_by
         }.compact
       end
 
@@ -47,9 +54,16 @@ module Hive
           validation: hash["validation"],
           evidence: Array(hash["evidence"]),
           alpha_score: hash["alpha_score"],
-          fingerprint: hash["fingerprint"]
+          fingerprint: hash["fingerprint"],
+          validation_key: hash["validation_key"],
+          target_sha: hash["target_sha"],
+          lifecycle_state: hash["lifecycle_state"] || "active",
+          lifecycle_reason: hash["lifecycle_reason"],
+          lifecycle_updated_at: hash["lifecycle_updated_at"],
+          superseded_by: hash["superseded_by"]
         )
       end
     end
+    Finding.const_set(:LIFECYCLE_STATES, %w[active resolved rejected superseded].freeze)
   end
 end

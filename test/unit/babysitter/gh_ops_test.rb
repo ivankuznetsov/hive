@@ -71,6 +71,165 @@ class BabysitterGhOpsTest < Minitest::Test
     assert_equal 1, calls.size
   end
 
+  def test_add_give_up_label_provisions_repository_label_when_missing
+    ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    missing = Hive::Gh::CommandStatus.new(exitstatus: 1)
+    created = false
+    commands = []
+
+    with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **_kwargs|
+      commands << cmd
+      case cmd[0, 3]
+      when %w[gh label list]
+        [ "", "", ok ]
+      when %w[gh label create]
+        created = true
+        [ "created", "", ok ]
+      when %w[gh pr view]
+        [ '{"labels":[]}', "", ok ]
+      when %w[gh pr edit]
+        created ? [ "labelled", "", ok ] : [ "", "label not found", missing ]
+      else
+        flunk "unexpected command: #{cmd.inspect}"
+      end
+    }) do
+      result = Hive::Babysitter::GhOps.add_label(
+        "/tmp/wt",
+        42,
+        Hive::Babysitter::GhOps::GIVE_UP_LABEL,
+        cfg: {},
+        dry_run: false
+      )
+      assert result.success?
+    end
+
+    assert_includes commands,
+                    [
+                      "gh", "label", "list", "--search", "babysitter/needs-human",
+                      "--limit", "100", "--json", "name"
+                    ]
+    assert_includes commands,
+                    [
+                      "gh", "label", "create", "babysitter/needs-human",
+                      "--color", "D73A4A",
+                      "--description", "Hive babysitter requires human intervention"
+                    ]
+  end
+
+  def test_add_give_up_label_preserves_existing_repository_label
+    ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    commands = []
+    with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **_kwargs|
+      commands << cmd
+      case cmd[0, 3]
+      when %w[gh pr view]
+        [ '{"labels":[]}', "", ok ]
+      when %w[gh label list]
+        [ '[{"name":"Babysitter/Needs-Human"}]', "", ok ]
+      when %w[gh pr edit]
+        [ "labelled", "", ok ]
+      else
+        flunk "unexpected command: #{cmd.inspect}"
+      end
+    }) do
+      result = Hive::Babysitter::GhOps.add_label(
+        "/tmp/wt", 42, Hive::Babysitter::GhOps::GIVE_UP_LABEL, cfg: {}, dry_run: false
+      )
+      assert result.success?
+    end
+    refute commands.any? { |cmd| cmd[0, 3] == %w[gh label create] }
+  end
+
+  def test_add_give_up_label_stops_when_provisioning_fails
+    ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    failed = Hive::Gh::CommandStatus.new(exitstatus: 1)
+    commands = []
+    with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **_kwargs|
+      commands << cmd
+      case cmd[0, 3]
+      when %w[gh pr view]
+        [ '{"labels":[]}', "", ok ]
+      when %w[gh label list]
+        [ "[]", "", ok ]
+      else
+        [ "", "forbidden", failed ]
+      end
+    }) do
+      result = Hive::Babysitter::GhOps.add_label(
+        "/tmp/wt", 42, Hive::Babysitter::GhOps::GIVE_UP_LABEL, cfg: {}, dry_run: false
+      )
+      refute result.success?
+      assert_equal "forbidden", result.stderr
+    end
+    refute commands.any? { |cmd| cmd[0, 3] == %w[gh pr edit] }
+  end
+
+  def test_add_give_up_label_preserves_a_concurrently_created_label
+    ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    failed = Hive::Gh::CommandStatus.new(exitstatus: 1)
+    list_calls = 0
+    commands = []
+    with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **_kwargs|
+      commands << cmd
+      case cmd[0, 3]
+      when %w[gh pr view]
+        [ '{"labels":[]}', "", ok ]
+      when %w[gh label list]
+        list_calls += 1
+        labels = list_calls == 1 ? "[]" : '[{"name":"babysitter/needs-human"}]'
+        [ labels, "", ok ]
+      when %w[gh label create]
+        [ "", "label already exists", failed ]
+      when %w[gh pr edit]
+        [ "labelled", "", ok ]
+      else
+        flunk "unexpected command: #{cmd.inspect}"
+      end
+    }) do
+      result = Hive::Babysitter::GhOps.add_label(
+        "/tmp/wt", 42, Hive::Babysitter::GhOps::GIVE_UP_LABEL, cfg: {}, dry_run: false
+      )
+      assert result.success?
+    end
+    assert_equal 2, list_calls
+    refute commands.flatten.include?("--force")
+  end
+
+  def test_add_give_up_label_returns_failure_when_provisioning_raises
+    ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **_kwargs|
+      next [ '{"labels":[]}', "", ok ] if cmd[0, 3] == %w[gh pr view]
+
+      raise Hive::GhError, "network operation timed out"
+    }) do
+      result = Hive::Babysitter::GhOps.add_label(
+        "/tmp/wt", 42, Hive::Babysitter::GhOps::GIVE_UP_LABEL, cfg: {}, dry_run: false
+      )
+      refute result.success?
+      assert_equal "network operation timed out", result.stderr
+    end
+  end
+
+  def test_ensure_give_up_label_rejects_invalid_catalogue_responses
+    ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    failed = Hive::Gh::CommandStatus.new(exitstatus: 1)
+    scenarios = [
+      [ "", "forbidden", failed, /forbidden/ ],
+      [ "{}", "", ok, /unexpected response/ ],
+      [ "not json", "", ok, /invalid gh label list response/ ]
+    ]
+
+    scenarios.each do |stdout, stderr, status, expected_error|
+      with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*_cmd, **_kwargs|
+        [ stdout, stderr, status ]
+      }) do
+        result = Hive::Babysitter::GhOps.ensure_give_up_label("/tmp/wt", cfg: {})
+        refute result.success?
+        assert_match expected_error, result.stderr
+      end
+    end
+  end
+
   def test_post_pr_comment_dry_run_skips_gh
     called = false
     with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_cmd, **_kwargs) { called = true }) do

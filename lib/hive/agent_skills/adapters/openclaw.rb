@@ -2,8 +2,6 @@ require "digest"
 require "json"
 
 require "hive/agent_skills"
-require "hive/agent_skills/canonical_skill"
-require "hive/agent_skills/directory_publisher"
 
 module Hive
   module AgentSkills
@@ -20,7 +18,7 @@ module Hive
 
         def initialize(environment: ENV)
           @environment = environment
-          @projection = CanonicalSkill.new.render("openclaw")
+          @projection = Hive::AgentSkills.render("openclaw")
         end
 
         def inspect
@@ -163,11 +161,12 @@ module Hive
 
         def projection_report(root:, relative:, allowed_extra_files: [])
           relocated = @projection.with(destination_relative: relative)
-          DirectoryPublisher.new(
+          Hive::AgentSkills.inspect(
             root: root,
             trusted_root: @environment["HOME"] || Dir.home,
-            projection: relocated
-          ).report(allowed_extra_files: allowed_extra_files)
+            projection: relocated,
+            allowed_extra_files: allowed_extra_files
+          )
         end
 
         def finish_projection(expected:, native:, resolution:, issues:, report:, clawhub:)

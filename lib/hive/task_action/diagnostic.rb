@@ -5,8 +5,10 @@ require "yaml"
 require "hive/execute_waiting_action"
 require "hive/conditions/recovery_action"
 require "hive/markers"
+require "hive/operational_action"
 require "hive/secret_patterns"
 require "hive/diagnostic_helpers"
+require "hive/terminal_outcome"
 
 module Hive
   class TaskAction
@@ -38,18 +40,14 @@ module Hive
       # frontmatter.
       FRONTMATTER_SCAN_BYTES = Hive::DiagnosticHelpers::FRONTMATTER_SCAN_BYTES
 
-      AUTO_COMMIT_MANUAL_FAILURE_REASONS = %w[
-        fix_auto_commit_scope_failed
-        fix_auto_commit_sign_policy_failed
-        fix_auto_commit_signing_failed
-      ].freeze
-      FIX_STATUS_CHECK_MANUAL_FAILURE_REASON = "fix_status_check_failed".freeze
+      FIX_STATUS_CHECK_REASON = "fix_status_check_failed".freeze
 
       def initialize(task:, marker:, action_key:, rerun_command:,
                      incomplete_plan_artifact:, finalize_missing_pr_md:,
                      finalize_missing_pr_url:, finalize_pr_url_mismatch:,
                      legacy_execute_findings:, stale_agent_reason:,
                      condition_gate: nil,
+                     projection: nil,
                      state_file_mtime: nil,
                      project_name: nil, project_count: 1)
         @task = task
@@ -63,6 +61,7 @@ module Hive
         @legacy_execute_findings = legacy_execute_findings
         @stale_agent_reason = stale_agent_reason
         @condition_gate = condition_gate
+        @projection = projection
         @state_file_mtime = state_file_mtime
         @project_name = project_name
         @project_count = project_count
@@ -74,7 +73,11 @@ module Hive
         return nil unless diagnostic_action?
 
         artifacts = diagnostic_artifacts.select { |path| safe_diagnostic_artifact?(path) }
-        primary = incomplete_plan_artifact? ? nil : artifacts.first
+        primary = if incomplete_plan_artifact? || Hive::TerminalOutcome.semantic_error?(marker.attrs)
+          nil
+        else
+          artifacts.first
+        end
         updated_at = diagnostic_updated_at(primary)
         detail = primary ? artifact_detail(primary) : marker_detail
 
@@ -324,6 +327,21 @@ module Hive
       end
 
       def marker_detail
+        if Hive::TerminalOutcome.semantic_error?(marker.attrs)
+          outcome = marker.attrs["outcome"].to_s
+          description = if Hive::TerminalOutcome.blocked_error?(marker.attrs)
+            "The terminal stage declared the configured blocked outcome #{outcome.inspect}."
+          else
+            "The terminal stage produced an invalid outcome contract result #{outcome.inspect}."
+          end
+          return [
+            marker_summary,
+            description,
+            "workflow.retry reruns only the current terminal stage. If this result was propagated " \
+              "from an already completed upstream stage, start a fresh task after correcting the blocker."
+          ].join("\n")
+        end
+
         if incomplete_plan_artifact?
           return [
             "PLAN_MISSING_OUTPUT",
@@ -360,7 +378,7 @@ module Hive
           return [
             marker_summary,
             "Hive rejected the fix-agent fallback commit because staged paths were outside review.fix.auto_commit.scope_check.",
-            "Inspect the listed files, remove or revert rejected worktree changes, or adjust review.fix.auto_commit.scope_check before clearing REVIEW_ERROR."
+            "Inspect the listed files, remove or revert rejected worktree changes, or adjust review.fix.auto_commit.scope_check, then use the current workflow.retry operational action."
           ].join("\n")
         end
 
@@ -368,7 +386,7 @@ module Hive
           return [
             marker_summary,
             "Hive could not create the fix-agent fallback commit because commit signing policy or signing execution blocked it.",
-            "Inspect the worktree changes, manually commit or revert remaining changes, fix signing config or set review.fix.auto_commit.sign_policy to inherit/bypass/fail as appropriate, then clear REVIEW_ERROR and re-run."
+            "Inspect the worktree changes, manually commit or revert remaining changes, fix signing config or set review.fix.auto_commit.sign_policy to inherit/bypass/fail as appropriate, then use the current workflow.retry operational action."
           ].join("\n")
         end
 
@@ -376,7 +394,7 @@ module Hive
           return [
             marker_summary,
             "Hive could not read the task worktree Git status before or after running the review fix agent.",
-            "Repair the worktree or repository state, then clear REVIEW_ERROR and re-run the review."
+            "Repair the worktree or repository state, then use the current workflow.retry operational action."
           ].join("\n")
         end
 
@@ -454,6 +472,16 @@ module Hive
 
         return { "kind" => "retry", "command" => workflow_command("plan") } if incomplete_plan_artifact?
 
+        # ERROR and REVIEW_ERROR are durable retry states, not permanent
+        # workflow terminals. Their generated marker_id makes the command
+        # generation-safe even for reasons that used to be described as
+        # manual-only; the rerun re-evaluates files, configuration, identity,
+        # and publication guards from current state.
+        if %i[error review_error].include?(marker.name)
+          cmd = retry_command_string or return nil
+          return { "kind" => "retry", "command" => cmd }
+        end
+
         return manual_fix if finalize_missing_pr_md? || finalize_missing_metadata_error?
         return manual_fix if finalize_missing_pr_url? || finalize_pr_url_mismatch?
         return manual_fix if max_passes_review_stale_with_escalations?
@@ -465,18 +493,6 @@ module Hive
         # explicit "do not auto-retry" signal rather than the absence of data.
         # See PR #84 review finding #9.
         return manual_fix if marker.name == :execute_stale || legacy_execute_findings?
-        return manual_fix if fix_status_check_failure?
-        return manual_fix if auto_commit_manual_failure?
-
-        # CleanExit's `ensure_clean_on_exit_failed` is operator-resolves-the-
-        # worktree territory: scope-violating or signing-failed residue needs
-        # human inspection. Emit `manual_fix` with `command:null` so polling
-        # agents see the explicit "do not auto-retry" signal (the bot's
-        # manual-only routing in `RecoverySequence` already refuses to dispatch
-        # a retry verb for this reason; the JSON payload mirrors that decision
-        # so CLI-driven consumers don't try to construct one themselves).
-        return manual_fix if clean_exit_manual_failure?
-
         cmd = retry_command_string or return nil
 
         { "kind" => "retry", "command" => cmd }
@@ -492,38 +508,42 @@ module Hive
         )
       end
 
-      # `hive markers clear` accepts --match-attr KEY=VALUE or comma-separated
-      # KEY=VALUE pairs; pick the most-identifying guard per marker shape. The
-      # recipe stays a copy-pasteable one-liner so external agents and humans
-      # can run it from a shell unchanged.
+      # Recovery commands always carry the exact observation token from the
+      # current operational action. The coordinator re-resolves that same row
+      # under lock; diagnostics never publish a marker-clear shortcut.
       def retry_command_string
-        attrs = marker.attrs || {}
-        case marker.name
-        when :review_error, :review_ci_stale
-          attr_pair = priority_match_attr(attrs, %w[pass phase reason])
-          clear_argv = [ "hive", "markers", "clear", task.folder,
-                         "--name", marker.name.to_s.upcase, *attr_pair ]
-          "#{clear_argv.shelljoin} && #{[ 'hive', 'run', task.folder ].shelljoin}"
-        when :review_stale
-          attr_pair = priority_match_attr(attrs, %w[pass reason])
-          clear_argv = [ "hive", "markers", "clear", task.folder,
-                         "--name", "REVIEW_STALE", *attr_pair ]
-          "#{clear_argv.shelljoin} && #{[ 'hive', 'run', task.folder ].shelljoin}"
-        when :error
-          match_attr = Hive::Markers.error_recovery_match_attr(attrs)
-          attr_pair = match_attr ? [ "--match-attr", match_attr ] : []
-          clear_argv = [ "hive", "markers", "clear", task.folder,
-                         "--name", "ERROR", *attr_pair ]
-          "#{clear_argv.shelljoin} && #{[ 'hive', 'run', task.folder ].shelljoin}"
-        end
-      end
+        return unless Hive::Recovery.recoverable_marker?(marker.name)
 
-      def priority_match_attr(attrs, keys)
-        keys.each do |key|
-          value = attrs[key]
-          return [ "--match-attr", "#{key}=#{value}" ] if value && !value.to_s.empty?
+        project = @project_name || (task.project_name if task.respond_to?(:project_name))
+        return if project.to_s.empty?
+
+        action_id = Hive::OperationalAction::RETRY_ACTION_ID
+        target = "#{project}:#{task.slug}"
+        projection = @projection.respond_to?(:to_h) ? @projection.to_h : @projection
+        projection = {} unless projection.is_a?(Hash)
+        identity = projection.fetch("identity", {})
+        observed_mtime = @state_file_mtime
+        if observed_mtime.nil? && task.respond_to?(:state_file) && File.file?(task.state_file)
+          observed_mtime = File.mtime(task.state_file).utc
         end
-        []
+        token = Hive::Recovery::API.observation_token(
+          {
+            "project" => project,
+            "slug" => task.slug,
+            "folder" => task.folder,
+            "state_file" => task.state_file,
+            "stage" => stage_dir,
+            "marker" => marker.name.to_s,
+            "marker_attrs" => marker.attrs,
+            "state_file_mtime" => observed_mtime,
+            "task_generation" => identity["task_generation"],
+            "attempt_id" => identity["attempt_id"]
+          }
+        )
+
+        [
+          "hive", "act", action_id, target, "--observation", token
+        ].shelljoin
       end
 
       def workflow_command(verb)
@@ -601,22 +621,9 @@ module Hive
         ].include?(marker.attrs["reason"].to_s)
       end
 
-      def auto_commit_manual_failure?
-        marker.name == :review_error && AUTO_COMMIT_MANUAL_FAILURE_REASONS.include?(marker.attrs["reason"].to_s)
-      end
-
       def fix_status_check_failure?
         marker.name == :review_error &&
-          marker.attrs["reason"].to_s == FIX_STATUS_CHECK_MANUAL_FAILURE_REASON
-      end
-
-      # `:error reason=ensure_clean_on_exit_failed` is the CleanExit invariant
-      # refusing to auto-commit residue: either the staged paths fell outside
-      # `review.fix.auto_commit.scope_check`, or `git add` / `git commit` /
-      # `git status` failed or timed out. Operator must inspect the worktree
-      # before any retry; there is no safe automated command to dispatch.
-      def clean_exit_manual_failure?
-        marker.name == :error && marker.attrs["reason"].to_s == "ensure_clean_on_exit_failed"
+          marker.attrs["reason"].to_s == FIX_STATUS_CHECK_REASON
       end
 
       def finalize_missing_metadata_error?

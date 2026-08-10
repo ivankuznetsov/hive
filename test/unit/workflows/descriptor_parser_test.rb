@@ -3,6 +3,50 @@ require "securerandom"
 require "hive/workflows/descriptor_parser"
 
 class WorkflowsDescriptorParserTest < Minitest::Test
+  def test_archive_visibility_retention_accepts_omission_positive_integer_and_never
+    base = {
+      "id" => "retention",
+      "stages" => [ { "name" => "done", "kind" => "terminal", "state_file" => "done.md" } ]
+    }
+
+    omitted = Hive::Workflows::DescriptorParser.parse_hash(base, path: "/tmp/retention.yml")
+    explicit = Hive::Workflows::DescriptorParser.parse_hash(
+      base.merge("archive_visibility_retention_days" => 3), path: "/tmp/retention.yml"
+    )
+    seven = Hive::Workflows::DescriptorParser.parse_hash(
+      base.merge("archive_visibility_retention_days" => 7), path: "/tmp/retention.yml"
+    )
+    never = Hive::Workflows::DescriptorParser.parse_hash(
+      base.merge("archive_visibility_retention_days" => "never"), path: "/tmp/retention.yml"
+    )
+
+    assert_equal 3, omitted.archive_visibility_retention_days
+    assert_equal omitted.archive_visibility_retention_days, explicit.archive_visibility_retention_days
+    assert_equal 7, seven.archive_visibility_retention_days
+    assert_equal :never, never.archive_visibility_retention_days
+  end
+
+  def test_archive_visibility_retention_rejects_every_other_form_with_actionable_error
+    base = {
+      "id" => "retention",
+      "stages" => [ { "name" => "done", "kind" => "terminal", "state_file" => "done.md" } ]
+    }
+
+    [ nil, 0, -1, 1.5, "3", true, false, "Never", "NEVER", "forever" ].each do |value|
+      error = assert_raises(Hive::ConfigError) do
+        Hive::Workflows::DescriptorParser.parse_hash(
+          base.merge("archive_visibility_retention_days" => value), path: "/tmp/retention.yml"
+        )
+      end
+
+      assert_includes error.message, "/tmp/retention.yml"
+      assert_includes error.message, 'workflow "retention"'
+      assert_includes error.message, "archive_visibility_retention_days"
+      assert_includes error.message, value.inspect
+      assert_includes error.message, "a positive integer or `never`"
+    end
+  end
+
   def test_package_descriptor_binds_workflow_yml_to_expected_package_name
     with_tmp_dir do |dir|
       path = File.join(dir, "workflow.yml")
@@ -134,6 +178,124 @@ class WorkflowsDescriptorParserTest < Minitest::Test
     )
 
     assert_equal "/ship", workflow.stage_named("work").skill
+  end
+
+  def test_editorial_human_stage_parses_closed_outcomes
+    workflow = Hive::Workflows::DescriptorParser.parse_hash(
+      {
+        "id" => "editorial",
+        "stages" => [
+          { "name" => "research", "kind" => "agent", "state_file" => "research.md", "skill" => "/research" },
+          { "name" => "draft", "kind" => "agent", "state_file" => "draft.md", "skill" => "/draft" },
+          {
+            "name" => "approval",
+            "kind" => "human",
+            "state_file" => "approval.md",
+            "input" => "draft.md",
+            "outcomes" => {
+              "approve" => { "complete" => true, "artifact" => "draft.md" },
+              "reject" => { "to" => "draft" }
+            }
+          }
+        ]
+      },
+      path: "/tmp/editorial.yml"
+    )
+
+    assert_equal %w[research draft approval], workflow.stage_names
+    approval = workflow.stage_named("approval")
+    assert_equal :human, approval.kind
+    assert_equal "draft.md", approval.input
+    assert_equal %w[approve reject], approval.outcomes.keys
+    assert_equal true, approval.outcomes.fetch("approve").complete
+    assert_equal "draft.md", approval.outcomes.fetch("approve").artifact
+    assert_equal "draft", approval.outcomes.fetch("reject").to
+    assert approval.outcomes.frozen?
+  end
+
+  def test_human_outcomes_reject_invalid_shapes_and_targets
+    invalid = [
+      [ { "approve" => { "complete" => true, "to" => "draft", "artifact" => "draft.md" } }, "exactly one" ],
+      [ { "approve" => { "artifact" => "draft.md" } }, "exactly one" ],
+      [ { "approve" => { "complete" => false, "artifact" => "draft.md" } }, "complete must be true" ],
+      [ { "approve" => { "complete" => true } }, "artifact must be a non-empty string" ],
+      [ { "reject" => { "to" => "draft", "artifact" => "draft.md" } }, "artifact is only valid" ],
+      [ { "bad name" => { "to" => "draft" } }, "outcome name" ],
+      [ { "reject" => { "to" => "missing" } }, "targets unknown stage" ],
+      [ { "reject" => { "to" => "draft", "command" => "publish" } }, "unknown key" ]
+    ]
+
+    invalid.each do |outcomes, message|
+      error = assert_config_error(
+        {
+          "id" => "bad",
+          "stages" => [
+            { "name" => "draft", "kind" => "agent", "state_file" => "draft.md", "skill" => "/draft" },
+            {
+              "name" => "approval", "kind" => "human", "state_file" => "approval.md",
+              "input" => "draft.md", "outcomes" => outcomes
+            }
+          ]
+        },
+        path: "/tmp/bad.yml"
+      )
+
+      assert_includes error.message, message, "expected #{outcomes.inspect} to report #{message.inspect}"
+      assert_includes error.message, "approval"
+    end
+  end
+
+  def test_human_stage_rejects_agent_settings_and_non_human_outcomes
+    %w[agent model permissions instruction skill effort budget_usd timeout_sec reviewers council deliverable workspace handoff conditions mapping_role mapping_contract].each do |field|
+      value =
+        case field
+        when "budget_usd", "timeout_sec" then 1
+        when "reviewers" then []
+        when "council", "conditions" then {}
+        else "value"
+        end
+      error = assert_config_error(
+        {
+          "id" => "bad",
+          "stages" => [
+            {
+              "name" => "approval", "kind" => "human", "state_file" => "approval.md",
+              "outcomes" => { "approve" => { "complete" => true, "artifact" => "draft.md" } },
+              field => value
+            }
+          ]
+        },
+        path: "/tmp/bad.yml"
+      )
+      assert_includes error.message, field
+      assert_includes error.message, "human stage"
+    end
+
+    error = assert_config_error(
+      {
+        "id" => "bad",
+        "stages" => [
+          {
+            "name" => "draft", "kind" => "agent", "state_file" => "draft.md", "skill" => "/draft",
+            "outcomes" => { "approve" => { "complete" => true, "artifact" => "draft.md" } }
+          }
+        ]
+      },
+      path: "/tmp/bad.yml"
+    )
+    assert_includes error.message, "outcomes is only valid on a human stage"
+  end
+
+  def test_human_stage_requires_at_least_one_outcome
+    [ nil, {} ].each do |outcomes|
+      stage = { "name" => "approval", "kind" => "human", "state_file" => "approval.md" }
+      stage["outcomes"] = outcomes unless outcomes.nil?
+      error = assert_config_error(
+        { "id" => "bad", "stages" => [ stage ] },
+        path: "/tmp/bad.yml"
+      )
+      assert_includes error.message, "human stage must declare at least one outcome"
+    end
   end
 
   def test_stage_conditions_select_registered_semantics_only
@@ -356,6 +518,119 @@ class WorkflowsDescriptorParserTest < Minitest::Test
     assert_equal :worktree, fix.workspace
     assert_equal :draft_pr, fix.handoff
     assert fix.frozen?
+  end
+
+  def test_terminal_agent_parses_closed_terminal_outcomes_in_declaration_order
+    workflow = Hive::Workflows::DescriptorParser.parse_hash(
+      {
+        "id" => "repair",
+        "stages" => [
+          { "name" => "inbox", "kind" => "terminal", "state_file" => "idea.md" },
+          {
+            "name" => "repair",
+            "kind" => "agent",
+            "state_file" => "repair.md",
+            "skill" => "/repair",
+            "deliverable" => "repair.md",
+            "terminal_outcomes" => {
+              "complete" => [ "fixed", "not-reproduced" ],
+              "blocked" => [ "blocked", "needs-input" ]
+            }
+          }
+        ]
+      },
+      path: "/tmp/repair.yml"
+    )
+
+    outcomes = workflow.stages.last.terminal_outcomes
+    assert_instance_of Hive::Workflow::TerminalOutcomes, outcomes
+    assert_equal [ "fixed", "not-reproduced" ], outcomes.complete
+    assert_equal [ "blocked", "needs-input" ], outcomes.blocked
+    assert outcomes.complete.frozen?
+    assert outcomes.blocked.frozen?
+  end
+
+  def test_terminal_outcomes_reject_invalid_shapes_and_placement_with_path
+    valid_stage = lambda do
+      {
+        "name" => "repair",
+        "kind" => "agent",
+        "state_file" => "repair.md",
+        "skill" => "/repair",
+        "deliverable" => "repair.md",
+        "terminal_outcomes" => {
+          "complete" => [ "fixed" ],
+          "blocked" => [ "blocked" ]
+        }
+      }
+    end
+    cases = [
+      [ -> { valid_stage.call.tap { |stage| stage["terminal_outcomes"] = [] } }, "must be a map" ],
+      [ -> { valid_stage.call.tap { |stage| stage["terminal_outcomes"].delete("complete") } }, "complete" ],
+      [ -> { valid_stage.call.tap { |stage| stage["terminal_outcomes"]["unknown"] = [] } }, "unknown key" ],
+      [ -> { valid_stage.call.tap { |stage| stage["terminal_outcomes"]["complete"] = [] } }, "non-empty" ],
+      [ -> { valid_stage.call.tap { |stage| stage["terminal_outcomes"]["blocked"] = "blocked" } }, "array" ],
+      [ -> { valid_stage.call.tap { |stage| stage["terminal_outcomes"]["complete"] = [ "fixed", "fixed" ] } }, "unique" ],
+      [ -> { valid_stage.call.tap { |stage| stage["terminal_outcomes"]["blocked"] = [ "fixed" ] } }, "disjoint" ],
+      [ -> { valid_stage.call.tap { |stage| stage["terminal_outcomes"]["complete"] = [ "bad--slug" ] } }, "safe slug" ],
+      [ -> { valid_stage.call.tap { |stage| stage["terminal_outcomes"]["complete"] = [ "a" * 41 ] } }, "at most 40" ],
+      [ -> { valid_stage.call.tap { |stage| stage["kind"] = "terminal"; stage.delete("skill") } }, "agent stage" ],
+      [ -> { valid_stage.call.tap { |stage| stage.delete("deliverable") } }, "deliverable" ],
+      [ -> { valid_stage.call.tap { |stage| stage["deliverable"] = "other.md" } }, "must equal state_file" ],
+      [
+        -> do
+          valid_stage.call.tap do |stage|
+            stage["state_file"] = "fix-report.md"
+            stage["deliverable"] = "fix-report.md"
+            stage["workspace"] = "worktree"
+            stage["handoff"] = "draft_pr"
+          end
+        end,
+        "incompatible with workspace or handoff"
+      ]
+    ]
+
+    cases.each do |stage_builder, message|
+      error = assert_config_error(
+        { "id" => "repair", "stages" => [ stage_builder.call ] },
+        path: "/tmp/repair.yml"
+      )
+      assert_includes error.message, "/tmp/repair.yml"
+      assert_includes error.message, "terminal_outcomes"
+      assert_includes error.message, message
+    end
+
+    intermediate = valid_stage.call
+    error = assert_config_error(
+      {
+        "id" => "repair",
+        "stages" => [
+          intermediate,
+          { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
+        ]
+      },
+      path: "/tmp/repair.yml"
+    )
+    assert_includes error.message, "/tmp/repair.yml"
+    assert_includes error.message, "terminal_outcomes"
+    assert_includes error.message, "last stage"
+  end
+
+  def test_terminal_outcomes_runtime_validation_rejects_a_non_agent_stage
+    outcomes = Hive::Workflow::TerminalOutcomes.new(
+      complete: [ "verified" ], blocked: [ "blocked" ]
+    )
+    stage = Hive::Workflow::Stage.new(
+      name: "done", index: 1, state_file: "done.md", kind: :inert,
+      deliverable: "done.md", terminal_outcomes: outcomes
+    )
+    parser = Hive::Workflows::DescriptorParser.new("/tmp/repair.yml")
+
+    error = assert_raises(Hive::ConfigError) do
+      parser.send(:validate_terminal_outcomes!, [ stage ])
+    end
+
+    assert_includes error.message, "terminal_outcomes is only valid on an agent stage"
   end
 
   def test_workspace_and_handoff_reject_unknown_enum_values
@@ -773,7 +1048,7 @@ class WorkflowsDescriptorParserTest < Minitest::Test
       parser.send(:validate_terminal_last_stage!, [ stage ])
     end
 
-    assert_includes error.message, 'last stage "execute" must be terminal, agent, or council'
+    assert_includes error.message, 'last stage "execute" must be terminal, agent, council, or human'
   end
 
   def test_council_stage_requires_reviewers
@@ -944,7 +1219,7 @@ class WorkflowsDescriptorParserTest < Minitest::Test
       path: "/tmp/bad.yml"
     )
 
-    assert_includes error.message, 'stage 1 kind "marker" must be agent, council, or terminal'
+    assert_includes error.message, 'stage 1 kind "marker" must be agent, council, human, or terminal'
 
     # The coding runtime kinds (execute/review_council/finalize) are Ruby-only:
     # only Workflows::Coding declares them via Stage.new, and parse_kind must keep
@@ -960,7 +1235,7 @@ class WorkflowsDescriptorParserTest < Minitest::Test
         path: "/tmp/bad.yml"
       )
 
-      assert_includes runtime_error.message, %(stage 1 kind "#{coding_runtime_kind}" must be agent, council, or terminal),
+      assert_includes runtime_error.message, %(stage 1 kind "#{coding_runtime_kind}" must be agent, council, human, or terminal),
                       "YAML descriptors must not be able to declare Ruby-only coding runtime kind " \
                       "#{coding_runtime_kind.inspect}"
     end

@@ -1,18 +1,33 @@
 <div class="task-actions<%= " task-actions-compact" if local_assigns[:compact] %>">
-  <% if task.recovery_action? %>
-    <%= button_to "Retry stage", task_recover_path(task.project.name, task.slug),
-          data: { turbo_submits_with: "Queueing…" } %>
+  <% mutations_enabled = local_assigns.fetch(:mutations_enabled, true) %>
+  <% if task.recovery_action_visible? %>
+    <%= button_to "Retry stage",
+          task_recover_path(task.project.name, task.slug, source: @task_source),
+          disabled: !mutations_enabled || !task.recovery_action_enabled?,
+          aria: { disabled: (!mutations_enabled || !task.recovery_action_enabled?).to_s },
+          data: { turbo_submits_with: "Checking…" } %>
   <% end %>
   <% if task.passable? %>
-    <%= button_to "Approve", task_approve_path(task.project.name, task.slug),
+    <%= button_to "Approve",
+          task_approve_path(task.project.name, task.slug, source: @task_source),
+          disabled: !mutations_enabled, aria: { disabled: (!mutations_enabled).to_s },
           params: { from: task["stage"] }, data: { turbo_submits_with: "Approving…" } %>
   <% end %>
   <% if !daemon_enabled && (dispatch_action = task.dispatch_action) %>
-    <%= button_to "Run #{task.run_verb}", task_run_path(task.project.name, task.slug),
+    <%= button_to "Run #{task.run_verb}",
+          task_run_path(task.project.name, task.slug, source: @task_source),
+          disabled: !mutations_enabled, aria: { disabled: (!mutations_enabled).to_s },
           params: { action_name: dispatch_action, stage: task["stage"] }, class: "btn-secondary",
           data: { turbo_submits_with: "Queueing…" } %>
   <% end %>
   <% if task.worktree? %>
-    <%= link_to "Diff", task_diff_path(task.project.name, task.slug), class: "btn btn-secondary" %>
+    <%= link_to "Diff",
+          task_diff_path(task.project.name, task.slug, source: @task_source),
+          class: "btn btn-secondary" %>
+  <% end %>
+  <% unless task.terminal? %>
+    <%= link_to "Close with evidence",
+          new_task_closure_path(task.project.name, task.slug),
+          class: "btn btn-secondary" %>
   <% end %>
 </div>

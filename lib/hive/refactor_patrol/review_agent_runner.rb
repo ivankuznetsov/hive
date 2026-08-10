@@ -75,7 +75,7 @@ module Hive
             expected_output: @read_only ? nil : output_path,
             status_mode: @read_only ? :exit_code_only : :output_file_exists,
             cli_flags: launch.fetch(:cli_flags),
-            identity_arguments: @review_identity.native_arguments,
+            **Hive::Stages::Base.implementation_launch_arguments(@review_identity, profile),
             **scope
           ).run!
           if @read_only && resource_limited_with_final_message?(result)

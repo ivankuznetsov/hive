@@ -17,6 +17,67 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_registry_assigns_and_preserves_project_and_registration_identity
+    with_tmp_global_config do
+      first = Hive::Config.register_project(name: "sample", path: "/tmp/first")
+      second = Hive::Config.register_project(name: "sample", path: "/tmp/second")
+
+      assert_match(Hive::Config::PROJECT_UUID, first.fetch("project_id"))
+      assert_equal first.fetch("project_id"), second.fetch("project_id")
+      assert_equal first.fetch("registration_id"), second.fetch("registration_id")
+      assert_equal first.fetch("registered_at"), second.fetch("registered_at")
+    end
+  end
+
+  def test_legacy_registry_identity_backfill_is_explicit_and_emits_no_event
+    with_tmp_global_config do |home|
+      path = File.join(home, "config.yml")
+      File.write(path, { "registered_projects" => [ { "name" => "old", "path" => "/tmp/old" } ] }.to_yaml)
+
+      assert Hive::Config.ensure_project_identities!(now: Time.utc(2026, 7, 22))
+      row = YAML.safe_load(File.read(path)).fetch("registered_projects").first
+      assert_match(Hive::Config::PROJECT_UUID, row.fetch("project_id"))
+      before_backfill = Hive::Config.send(:registry_project_id, {
+        "name" => "old", "path" => "/tmp/old"
+      })
+      assert_equal before_backfill, row.fetch("project_id")
+      assert_equal "legacy:#{row.fetch('project_id')}", row.fetch("registration_id")
+      assert_equal false, Hive::Config.ensure_project_identities!(now: Time.utc(2026, 7, 23))
+    end
+  end
+
+  def test_registry_backfill_adds_canonical_path_even_when_project_id_exists
+    with_tmp_global_config do |home|
+      project = Dir.mktmpdir("hive-registry-real-path")
+      path = File.join(home, "config.yml")
+      project_id = SecureRandom.uuid
+      File.write(
+        path,
+        {
+          "registered_projects" => [
+            {
+              "name" => "old",
+              "path" => project,
+              "project_id" => project_id
+            }
+          ]
+        }.to_yaml
+      )
+
+      assert Hive::Config.ensure_project_identities!
+      row = YAML.safe_load(
+        File.read(path)
+      ).fetch("registered_projects").first
+      assert_equal project_id, row.fetch("project_id")
+      assert_equal File.realpath(project), row.fetch("real_path")
+      assert_equal File.realpath(project),
+                   Hive::Config.registered_projects.first
+                               .fetch("real_path")
+    ensure
+      FileUtils.rm_rf(project) if project
+    end
+  end
+
   include HiveTestHelper
 
   def test_load_returns_defaults_when_no_config_file
@@ -31,8 +92,8 @@ class ConfigTest < Minitest::Test
                  "deprecated execute_review key must be absent from DEFAULTS"
       assert_equal 100, cfg["budget_usd"]["patrol"]
       assert_equal 3600, cfg["timeout_sec"]["patrol"]
-      assert_equal 50, cfg["budget_usd"]["digest"]
-      assert_equal 1800, cfg["timeout_sec"]["digest"]
+      refute cfg["budget_usd"].key?("digest")
+      refute cfg["timeout_sec"].key?("digest")
       assert_equal "8-finalize", cfg["dependency_gate_stage"]
       assert_equal "coding", cfg["default_workflow"]
       assert_equal true, cfg.dig("daemon", "auto_retry", "enabled")
@@ -45,30 +106,274 @@ class ConfigTest < Minitest::Test
       assert_nil cfg.dig("open_pr", "agent")
       assert_nil cfg.dig("review", "ci", "agent")
       assert_nil cfg.dig("review", "fix", "agent")
+      refute cfg.key?("models"),
+             "an absent models map must not change the serialized config shape"
       assert_equal dir, cfg["project_root"]
     end
   end
 
-  def test_load_rejects_top_level_reviewers_for_every_yaml_value_with_migration_guidance
-    values = [
-      [ { "name" => "legacy" } ],
-      [],
-      nil,
-      {},
-      "",
-      7
-    ]
+  def test_load_parses_project_owned_models_without_collapsing_absent_fields
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, <<~YAML)
+        models:
+          plan:
+            model: " gpt-5.6-sol "
+          review:
+            effort: xhigh
+      YAML
 
-    values.each do |value|
+      cfg = Hive::Config.load(dir)
+
+      assert_equal({ "model" => "gpt-5.6-sol" }, cfg.dig("models", "plan"))
+      assert_equal({ "effort" => "xhigh" }, cfg.dig("models", "review"))
+      refute cfg.dig("models", "plan").key?("effort")
+      refute cfg.dig("models", "review").key?("model")
+    end
+  end
+
+  def test_load_rejects_project_models_before_emitting_legacy_config_warning
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, <<~YAML)
+        reviewers: []
+        models:
+          plan:
+            agent: codex
+      YAML
+
+      _out, err = capture_io do
+        error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+        assert_match(/models\.plan.*unknown field.*agent/i, error.message)
+      end
+
+      assert_empty err, "structural model validation must run before warnings"
+    end
+  end
+
+  def test_load_rejects_removed_digest_model_route
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, <<~YAML)
+        models:
+          digest:
+            model: gpt-5.6-sol
+      YAML
+
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_match(/models\.digest.*unknown/i, error.message)
+      assert_includes error.message, config_path
+    end
+  end
+
+  def test_load_rejects_reachable_unsupported_model_control_before_warnings
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, <<~YAML)
+        reviewers: []
+        plan:
+          agent: pi
+        models:
+          plan:
+            effort: high
+      YAML
+
+      _out, err = capture_io do
+        error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+        assert_match(/models\.plan\.effort/i, error.message)
+        assert_match(/agent profile :pi.*does not support reasoning effort/i, error.message)
+      end
+
+      assert_empty err, "capability validation must run before legacy warnings"
+    end
+  end
+
+  def test_load_skips_capability_validation_for_disabled_patrol
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, <<~YAML)
+        patrol:
+          enabled: false
+          agent: pi
+        models:
+          patrol:
+            effort: high
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal "high", cfg.dig("models", "patrol", "effort")
+    end
+  end
+
+  def test_load_validates_enabled_patrol_profile
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, <<~YAML)
+        patrol:
+          enabled: true
+          agent: pi
+        models:
+          patrol:
+            effort: high
+      YAML
+
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_match(/models\.patrol\.effort.*effective for patrol_review/i, error.message)
+      assert_match(/agent profile :pi.*does not support reasoning effort/i, error.message)
+    end
+  end
+
+  def test_load_accepts_incompatible_coarse_field_fully_shadowed_for_reachable_calls
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, <<~YAML)
+        models:
+          review:
+            effort: minimal
+          review_triage:
+            effort: high
+          review_fix:
+            effort: high
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal "minimal", cfg.dig("models", "review", "effort")
+    end
+  end
+
+  def test_load_rejects_incompatible_coarse_field_when_one_reachable_call_is_unshadowed
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, <<~YAML)
+        models:
+          review:
+            effort: minimal
+          review_triage:
+            effort: high
+      YAML
+
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_match(/models\.review\.effort.*effective for review_fix/i, error.message)
+      assert_match(/agent profile :claude/i, error.message)
+    end
+  end
+
+  def test_load_treats_string_and_argv_review_ci_commands_as_reachable
+    [ "bundle exec rake test", [ "bundle", "exec", "rake", "test" ] ].each do |command|
+      with_tmp_dir do |dir|
+        config_path = File.join(dir, ".hive-state", "config.yml")
+        FileUtils.mkdir_p(File.dirname(config_path))
+        File.write(
+          config_path,
+          {
+            "review" => {
+              "ci" => {
+                "agent" => "pi",
+                "command" => command
+              }
+            },
+            "models" => {
+              "review_ci" => {
+                "effort" => "high"
+              }
+            }
+          }.to_yaml
+        )
+
+        error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+        assert_match(/models\.review_ci\.effort/i, error.message)
+        assert_match(/agent profile :pi.*does not support reasoning effort/i, error.message)
+      end
+    end
+  end
+
+  def test_load_promotes_top_level_reviewers_for_upgrade_compatibility_and_warns_once
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      reviewer = {
+        "name" => "legacy",
+        "kind" => "agent",
+        "agent" => "codex",
+        "skill" => "ce-code-review",
+        "output_basename" => "legacy",
+        "prompt_template" => "reviewer_codex_ce_code_review.md.erb"
+      }
+      File.write(config_path, { "reviewers" => [ reviewer ] }.to_yaml)
+
+      cfg = nil
+      _out, err = capture_io do
+        cfg = Hive::Config.load(dir)
+        Hive::Config.load(dir)
+      end
+
+      assert_equal [ reviewer ], cfg.dig("review", "reviewers")
+      refute cfg.key?("reviewers")
+      assert_equal 1, err.scan(/top-level `reviewers`/).length
+      assert_includes err, "run `hive migrate`"
+      assert_includes err, config_path
+    end
+  end
+
+  def test_load_rejects_conflicting_legacy_and_canonical_reviewers
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, {
+        "review" => { "reviewers" => [] },
+        "reviewers" => []
+      }.to_yaml)
+
+      error = assert_raises(Hive::UnsupportedProjectConfigError) { Hive::Config.load(dir) }
+
+      assert_includes error.message, "both top-level `reviewers` and `review.reviewers`"
+      assert_includes error.message, "choose which value to keep"
+      assert_includes error.message, config_path
+    end
+  end
+
+  def test_load_rejects_legacy_reviewers_when_review_is_not_a_mapping
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, {
+        "review" => "invalid",
+        "reviewers" => []
+      }.to_yaml)
+
+      error = assert_raises(Hive::UnsupportedProjectConfigError) { Hive::Config.load(dir) }
+
+      assert_includes error.message, "cannot be migrated because `review` is String"
+      assert_includes error.message, "make `review` a mapping"
+    end
+  end
+
+  def test_load_validates_reviewers_after_promoting_the_legacy_key
+    [ nil, {}, "", 7 ].each do |value|
       with_tmp_dir do |dir|
         config_path = File.join(dir, ".hive-state", "config.yml")
         FileUtils.mkdir_p(File.dirname(config_path))
         File.write(config_path, { "reviewers" => value }.to_yaml)
 
-        error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+        error = assert_raises(Hive::ConfigError) do
+          capture_io { Hive::Config.load(dir) }
+        end
 
-        assert_includes error.message,
-                        "Unknown top-level key `reviewers`; move it to `review.reviewers`."
+        assert_includes error.message, "review.reviewers"
         assert_includes error.message, config_path
       end
     end
@@ -85,10 +390,11 @@ class ConfigTest < Minitest::Test
           "unknown_stage_typo" => {}
         }.to_yaml)
 
-        error = assert_raises(Hive::UnsupportedProjectConfigError) { Hive::Config.load(dir) }
+        error = nil
+        capture_io do
+          error = assert_raises(Hive::UnsupportedProjectConfigError) { Hive::Config.load(dir) }
+        end
 
-        assert_includes error.message, "Unknown top-level key `reviewers`"
-        assert_includes error.message, "move it to `review.reviewers`"
         assert_includes error.message, "Unknown top-level key `unknown_stage_typo`"
       end
     end
@@ -100,7 +406,6 @@ class ConfigTest < Minitest::Test
       FileUtils.mkdir_p(File.dirname(config_path))
       File.write(config_path, <<~YAML)
         zeta_typo: true
-        reviewers:
         17: numeric
         alpha_typo: true
       YAML
@@ -109,7 +414,6 @@ class ConfigTest < Minitest::Test
 
       expected_findings = [
         "Unknown top-level key `alpha_typo`.",
-        "Unknown top-level key `reviewers`; move it to `review.reviewers`.",
         "Unknown top-level key `zeta_typo`.",
         "Unknown top-level key 17."
       ]
@@ -1156,6 +1460,103 @@ class ConfigTest < Minitest::Test
                    "artifacts timeout must default to 3600 seconds per plan U1"
       assert_equal "claude", cfg.dig("artifacts", "agent"),
                    "artifacts agent must default to claude per plan U1"
+      assert_nil cfg.dig("artifacts", "capture", "provider")
+    end
+  end
+
+  def test_load_accepts_a_closed_project_capture_provider_declaration
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        artifacts:
+          capture:
+            provider:
+              name: rails
+              command: [bin/hive-capture, --format, hive-v1]
+              timeout_sec: 90
+      YAML
+
+      provider = Hive::Config.load(dir).dig("artifacts", "capture", "provider")
+
+      assert_equal "rails", provider.fetch("name")
+      assert_equal [ "bin/hive-capture", "--format", "hive-v1" ], provider.fetch("command")
+      assert_equal 90, provider.fetch("timeout_sec")
+    end
+  end
+
+  def test_load_rejects_malformed_or_open_ended_capture_provider_declarations
+    cases = {
+      "capture must be a mapping" => "artifacts:\n  capture: provider",
+      "capture keys are closed" => "artifacts:\n  capture:\n    mystery: true",
+      "provider must be a mapping" => "artifacts:\n  capture:\n    provider: bin/capture",
+      "provider keys are closed" => <<~YAML,
+        artifacts:
+          capture:
+            provider:
+              name: rails
+              command: [bin/capture]
+              shell: true
+      YAML
+      "name is required" => <<~YAML,
+        artifacts:
+          capture:
+            provider:
+              command: [bin/capture]
+      YAML
+      "command must be argv" => <<~YAML,
+        artifacts:
+          capture:
+            provider:
+              name: rails
+              command: bin/capture --unsafe
+      YAML
+      "executable cannot traverse" => <<~YAML,
+        artifacts:
+          capture:
+            provider:
+              name: rails
+              command: [../bin/capture]
+      YAML
+      "timeout is bounded" => <<~YAML
+        artifacts:
+          capture:
+            provider:
+              name: rails
+              command: [bin/capture]
+              timeout_sec: 0
+      YAML
+    }
+
+    cases.each do |label, yaml|
+      with_tmp_dir do |dir|
+        FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+        File.write(File.join(dir, ".hive-state", "config.yml"), yaml)
+
+        assert_raises(Hive::ConfigError, label) { Hive::Config.load(dir) }
+      end
+    end
+  end
+
+  def test_load_rejects_capture_provider_argv_over_the_total_budget
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(
+        File.join(dir, ".hive-state", "config.yml"),
+        {
+          "artifacts" => {
+            "capture" => {
+              "provider" => {
+                "name" => "rails",
+                "command" => [ "bin/capture", *Array.new(4, "x" * 4096) ]
+              }
+            }
+          }
+        }.to_yaml
+      )
+
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_match(/total argv.*16384 bytes/, error.message)
     end
   end
 
@@ -1738,6 +2139,128 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_registered_projects_normalizes_relative_and_empty_state_paths
+    with_tmp_global_config do |home|
+      relative_root = File.join(home, "relative-project")
+      default_root = File.join(home, "default-project")
+      FileUtils.mkdir_p([ relative_root, default_root ])
+      File.write(
+        Hive::Config.global_config_path,
+        {
+          "registered_projects" => [
+            { "name" => "relative", "path" => relative_root, "hive_state_path" => "state" },
+            { "name" => "default", "path" => default_root, "hive_state_path" => "" }
+          ]
+        }.to_yaml
+      )
+
+      projects = Hive::Config.registered_projects.to_h { |project| [ project.fetch("name"), project ] }
+
+      assert_equal File.join(relative_root, "state"), projects.fetch("relative").fetch("hive_state_path")
+      assert_equal File.join(default_root, ".hive-state"), projects.fetch("default").fetch("hive_state_path")
+    end
+  end
+
+  def test_registered_projects_read_only_reads_legacy_registry_in_place
+    with_tmp_dir do |root|
+      home = File.join(root, "home")
+      project = File.join(root, "project")
+      legacy = File.join(home, "Dev", "hive", "config.yml")
+      current = File.join(root, "config", "hive", "config.yml")
+      FileUtils.mkdir_p([ File.dirname(legacy), project ])
+      File.write(
+        legacy,
+        {
+          "registered_projects" => [
+            {
+              "name" => "legacy",
+              "path" => project,
+              "project_id" => "11111111-1111-4111-a111-111111111111"
+            }
+          ]
+        }.to_yaml
+      )
+
+      with_env(
+        "HOME" => home,
+        "HIVE_HOME" => nil,
+        "XDG_CONFIG_HOME" => File.join(root, "config")
+      ) do
+        projects = Hive::Config.registered_projects_read_only
+
+        assert_equal [ "legacy" ], projects.map { |entry| entry.fetch("name") }
+        assert File.file?(legacy),
+               "an observation-only registry read must preserve the legacy file"
+        refute File.exist?(current),
+               "an observation-only registry read must not migrate into XDG config"
+        refute File.exist?(File.join(File.dirname(current), ".migrated-from"))
+      end
+    end
+  end
+
+  def test_registration_state_identity_fails_closed_and_skips_malformed_legacy_rows
+    with_tmp_dir do |root|
+      candidate = {
+        "name" => "candidate",
+        "path" => root,
+        "hive_state_path" => root,
+        "project_id" => "11111111-1111-4111-a111-111111111111"
+      }
+      malformed = {
+        "name" => "malformed",
+        "path" => "\0",
+        "project_id" => "22222222-2222-4222-a222-222222222222"
+      }
+      registrations = [ malformed ]
+
+      assert_same registrations, Hive::Config.send(
+        :assert_registration_state_root_available!,
+        candidate,
+        registrations,
+        replacing: nil
+      )
+
+      socket_path = File.join(root, "state.sock")
+      socket = UNIXServer.new(socket_path)
+      unsafe = assert_raises(Hive::ConfigError) do
+        Hive::Config.send(
+          :canonical_registration_state_path, socket_path
+        )
+      end
+      assert_match(/unsafe Hive state path/, unsafe.message)
+    ensure
+      socket&.close
+      FileUtils.rm_f(socket_path) if socket_path
+    end
+
+    missing = with_replaced_singleton_method(
+      File,
+      :realpath,
+      ->(_path) { raise Errno::ENOENT }
+    ) do
+      assert_raises(Hive::ConfigError) do
+        Hive::Config.send(
+          :canonical_registration_state_path, "/never-resolves"
+        )
+      end
+    end
+    assert_match(/cannot establish the Hive state path identity/,
+                 missing.message)
+
+    unavailable = with_replaced_singleton_method(
+      File,
+      :realpath,
+      ->(_path) { raise Errno::EACCES }
+    ) do
+      assert_raises(Hive::ConfigError) do
+        Hive::Config.send(
+          :canonical_registration_state_path, "/unavailable"
+        )
+      end
+    end
+    assert_match(/Errno::EACCES/, unavailable.message)
+  end
+
   def test_project_for_path_resolves_registered_repo_from_cwd
     with_tmp_global_config do
       with_tmp_dir do |repo|
@@ -1844,6 +2367,29 @@ class ConfigTest < Minitest::Test
       projects = Hive::Config.registered_projects
       assert_equal 1, projects.size
       assert_equal "/tmp/new", projects.first["path"]
+    end
+  end
+
+  def test_register_project_rejects_distinct_identities_sharing_state_root
+    with_tmp_global_config do |home|
+      project = File.join(home, "project")
+      project_alias = File.join(home, "project-alias")
+      FileUtils.mkdir_p(project)
+      File.symlink(project, project_alias)
+      Hive::Config.register_project(name: "primary", path: project)
+
+      error = assert_raises(
+        Hive::Config::ProjectRegistrationCollision
+      ) do
+        Hive::Config.register_project(
+          name: "alias", path: project_alias
+        )
+      end
+
+      assert_match(/would share Hive state/, error.message)
+      assert_equal project, error.existing_path
+      assert_equal [ "primary" ],
+                   Hive::Config.registered_projects.map { |row| row["name"] }
     end
   end
 
@@ -3539,10 +4085,9 @@ class ConfigTest < Minitest::Test
       # R-02 per-child timeout knobs.
       assert_equal 0,     cfg.dig("daemon", "child_timeout_sec")
       assert_equal 30,    cfg.dig("daemon", "child_kill_grace_sec")
-      # The digest and answer-digest verbs ship a non-zero default cap so a
-      # wedged child can't pin the single global digest slot forever; every
-      # other verb stays at the (disabled) child_timeout_sec default.
-      assert_equal({ "digest" => 3600, "answer-digest" => 3600 },
+      # Answer-digest ships a non-zero default cap so a wedged child cannot
+      # pin the single global digest slot forever.
+      assert_equal({ "answer-digest" => 3600 },
                    cfg.dig("daemon", "child_verb_timeouts"))
     end
   end
@@ -3571,10 +4116,8 @@ class ConfigTest < Minitest::Test
       cfg = Hive::Config.load(dir)
       assert_equal 10800, cfg.dig("daemon", "child_verb_timeouts", "review")
       assert_equal 5400,  cfg.dig("daemon", "child_verb_timeouts", "develop")
-      # A user override deep-merges with the seeded default, so the digest
-      # wedge backstop survives an operator setting other verb timeouts.
-      assert_equal 3600,  cfg.dig("daemon", "child_verb_timeouts", "digest"),
-                   "an operator override must not wipe the default digest verb timeout"
+      # A user override deep-merges with the seeded default.
+      assert_equal 3600, cfg.dig("daemon", "child_verb_timeouts", "answer-digest")
     end
   end
 
@@ -4006,15 +4549,13 @@ class ConfigTest < Minitest::Test
     end
   end
 
-  # ── Daily digest global settings ─────────────────────────────────────
+  # ── Answer digest global settings ────────────────────────────────────
 
-  def test_load_returns_documented_digest_defaults_when_key_absent
+  def test_load_returns_documented_answer_digest_defaults_when_key_absent
     with_tmp_dir do |dir|
       cfg = Hive::Config.load(dir)
 
-      assert_equal false, cfg.dig("digest", "enabled")
-      assert_nil cfg.dig("digest", "agent")
-      assert_equal 7, cfg.dig("digest", "max_catchup_days")
+      refute cfg.key?("digest")
       assert_equal false, cfg.dig("answer_digest", "enabled")
       assert_equal 9, cfg.dig("answer_digest", "hour")
     end
@@ -4075,192 +4616,38 @@ class ConfigTest < Minitest::Test
     end
   end
 
-  def test_load_global_digest_block_honors_overrides
+  def test_load_rejects_removed_digest_configuration
     with_tmp_global_config do |home|
       File.write(File.join(home, "config.yml"), <<~YAML)
         registered_projects: []
         digest:
           enabled: true
-          agent: codex
-          max_catchup_days: 3
       YAML
 
-      cfg = Hive::Config.load_global_digest_block
-
-      assert_equal true, cfg["enabled"]
-      assert_equal "codex", cfg["agent"]
-      assert_equal 3, cfg["max_catchup_days"]
-    end
-  end
-
-  def test_load_global_digest_block_defaults_enabled_on_when_bot_configured
-    with_tmp_global_config do |home|
-      File.write(File.join(home, "config.yml"), <<~YAML)
-        registered_projects: []
-        bot:
-          enabled: true
-          chat_id_allowlist:
-            - 60499527
-      YAML
-
-      cfg = Hive::Config.load_global_digest_block
-
-      assert_equal true, cfg["enabled"],
-                   "digest should auto-enable when the Telegram bot is configured with a chat"
-    end
-  end
-
-  def test_load_global_digest_block_honors_explicit_disable_even_with_bot
-    with_tmp_global_config do |home|
-      File.write(File.join(home, "config.yml"), <<~YAML)
-        registered_projects: []
-        digest:
-          enabled: false
-        bot:
-          enabled: true
-          chat_id_allowlist:
-            - 60499527
-      YAML
-
-      cfg = Hive::Config.load_global_digest_block
-
-      assert_equal false, cfg["enabled"],
-                   "an explicit digest.enabled: false must always be honored as an opt-out"
-    end
-  end
-
-  def test_load_global_digest_block_stays_off_without_a_deliverable_bot
-    with_tmp_global_config do |home|
-      # Bot enabled but no chat to deliver to: auto-enabling would only
-      # dispatch a paid categorizer that then fails at send time.
-      File.write(File.join(home, "config.yml"), <<~YAML)
-        registered_projects: []
-        bot:
-          enabled: true
-          chat_id_allowlist: []
-      YAML
-
-      assert_equal false, Hive::Config.load_global_digest_block["enabled"],
-                   "no allowlisted chat means no deliverable digest, so stay off"
-    end
-
-    with_tmp_global_config do |home|
-      # Chat present but bot disabled: the user has not turned Telegram on.
-      File.write(File.join(home, "config.yml"), <<~YAML)
-        registered_projects: []
-        bot:
-          enabled: false
-          chat_id_allowlist:
-            - 60499527
-      YAML
-
-      assert_equal false, Hive::Config.load_global_digest_block["enabled"],
-                   "a disabled bot means Telegram is not set up, so stay off"
-    end
-  end
-
-  def test_load_global_digest_block_allows_zero_max_catchup_days_as_unbounded
-    with_tmp_global_config do |home|
-      File.write(File.join(home, "config.yml"), <<~YAML)
-        registered_projects: []
-        digest:
-          max_catchup_days: 0
-      YAML
-
-      cfg = Hive::Config.load_global_digest_block
-
-      assert_equal 0, cfg["max_catchup_days"]
-    end
-  end
-
-  def test_load_global_digest_block_rejects_bad_shapes_and_values
-    with_tmp_global_config do |home|
-      File.write(File.join(home, "config.yml"), <<~YAML)
-        registered_projects: []
-        digest: enabled
-      YAML
-
-      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest_block }
-      assert_match(/digest.*must be a Hash/, err.message)
-
-      File.write(File.join(home, "config.yml"), <<~YAML)
-        registered_projects: []
-        digest:
-          enabled: sometimes
-      YAML
-
-      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest_block }
-      assert_match(/digest\.enabled.*must be a boolean/, err.message)
-
-      File.write(File.join(home, "config.yml"), <<~YAML)
-        registered_projects: []
-        digest:
-          max_catchup_days: -1
-      YAML
-
-      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest_block }
-      assert_match(/digest\.max_catchup_days.*>= 0/, err.message)
-    end
-  end
-
-  def test_load_global_digest_config_merges_bot_and_agent_limits
-    with_tmp_global_config do |home|
-      File.write(File.join(home, "config.yml"), <<~YAML)
-        registered_projects: []
-        digest:
-          enabled: true
-        budget_usd:
-          digest: 12
-        timeout_sec:
-          digest: 34
-        bot:
-          chat_id_allowlist:
-            - 12345
-      YAML
-
-      cfg = Hive::Config.load_global_digest_config
-
-      assert_equal true, cfg.dig("digest", "enabled")
-      assert_equal 12, cfg.dig("budget_usd", "digest")
-      assert_equal 34, cfg.dig("timeout_sec", "digest")
-      assert_equal [ 12_345 ], cfg.dig("bot", "chat_id_allowlist")
-      assert_equal File.join(home, "logs", "bot.log"), cfg.dig("bot", "log_file")
-    end
-  end
-
-  def test_load_global_digest_config_rejects_non_positive_budget_and_timeout
-    {
-      "budget_usd" => "budget_usd.digest",
-      "timeout_sec" => "timeout_sec.digest"
-    }.each do |group, label|
-      with_tmp_global_config do |home|
-        File.write(File.join(home, "config.yml"), <<~YAML)
-          registered_projects: []
-          digest:
-            enabled: true
-          #{group}:
-            digest: 0
-        YAML
-
-        err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest_config }
-        assert_match(/#{Regexp.escape(label)}.*positive number/, err.message,
-                     "a non-positive #{label} must be rejected at config load, not crash the categorizer")
-      end
-
-      with_tmp_global_config do |home|
-        File.write(File.join(home, "config.yml"), <<~YAML)
-          registered_projects: []
-          #{group}:
-            digest: "lots"
-        YAML
-
-        err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest_config }
-        assert_match(/#{Regexp.escape(label)}.*positive number/, err.message)
-      end
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load_global_daemon }
+      assert_match(/digest configuration is no longer supported/, error.message)
+      assert_match(/prdigest prose --deliver/, error.message)
+      assert_match(/prdigest facts/, error.message)
     end
   end
 
   # ── Telegram bot global settings ──────────────────────────────────────
+
+  def test_telegram_recipient_uses_first_allowlisted_chat
+    assert_equal 123, Hive::Config.telegram_chat_id!("chat_id_allowlist" => [ 123, 456 ])
+
+    error = assert_raises(Hive::ConfigError) do
+      Hive::Config.telegram_chat_id!("chat_id_allowlist" => [])
+    end
+    assert_match(/chat_id_allowlist\[0\]/, error.message)
+  end
+
+  def test_telegram_token_can_be_resolved_from_an_explicit_environment
+    assert_equal "secret", Hive::Config.telegram_bot_token!(
+      env: { "HIVE_TELEGRAM_BOT_TOKEN" => "secret" }
+    )
+    assert_raises(Hive::ConfigError) { Hive::Config.telegram_bot_token!(env: {}) }
+  end
 
   def test_load_returns_documented_bot_defaults_when_key_absent
     with_tmp_dir do |dir|

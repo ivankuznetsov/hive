@@ -1,6 +1,9 @@
+require "time"
 require "hive/paths"
 require "hive/daemon/dispatch_request_queue"
-require "hive/attempts/entrypoint"
+require "hive/attempts/api"
+require "hive/recovery/api"
+require "hive/task"
 require "hive/task_resolver"
 require "hive/workflows"
 
@@ -48,7 +51,7 @@ module Hive
       def dispatch!(project:, slug:, argv:, chat_id: nil, update_id: nil,
                     trigger: nil, request_id: generate_request_id,
                     state_home: Hive::Paths.state_home, now: Time.now,
-                    entrypoint: Hive::Attempts::Entrypoint.new)
+                    entrypoint: nil)
         write!(
           project: project, slug: slug, argv: argv,
           chat_id: chat_id, update_id: update_id, trigger: trigger,
@@ -57,7 +60,7 @@ module Hive
 
         task = resolve_task(project: project, slug: slug, argv: argv)
         intended_stage = intended_stage_for(argv, task)
-        result = entrypoint.dispatch(
+        result = (entrypoint || Hive::Attempts::API.new).dispatch(
           task: task,
           intended_stage: intended_stage,
           argv: argv,
@@ -92,6 +95,21 @@ module Hive
           request_id, state_home: state_home
         )
         raise
+      end
+
+      # All ERROR / REVIEW_ERROR callers cross this boundary. Surface-specific
+      # rows are normalized once, then the coordinator owns cooldown, lock,
+      # safety, marker generation, durable admission, and lifecycle truth.
+      def recover!(row:, project: nil, requestor: "bot", chat_id: nil,
+                   update_id: nil, request_id: nil, observation_token: nil,
+                   state_home: Hive::Paths.state_home, now: Time.now,
+                   coordinator: nil)
+        Hive::Recovery::API.recover!(
+          row: row, project: project, requestor: requestor,
+          chat_id: chat_id, update_id: update_id, request_id: request_id,
+          observation_token: observation_token, state_home: state_home,
+          now: now, coordinator: coordinator
+        )
       end
 
       def write_sequence!(request_id:, remaining_argvs:, state_home: Hive::Paths.state_home)

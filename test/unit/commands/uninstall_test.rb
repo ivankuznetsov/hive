@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/commands/uninstall"
+require "hive/user_service"
 
 class UninstallCommandTest < Minitest::Test
   include HiveTestHelper
@@ -53,7 +54,10 @@ class UninstallCommandTest < Minitest::Test
         host_os: "darwin"
       ).call
 
-      assert_equal [ [ "launchctl", "unload", plist ] ], calls
+      mutations = calls.reject { |argv| argv == %w[launchctl list local.hive-daemon] }
+      assert_equal [ [ "launchctl", "unload", plist ] ], mutations
+      assert calls.any? { |argv| argv == %w[launchctl list local.hive-daemon] },
+             "removal should observe launchd before mutating it"
       refute File.exist?(plist)
     end
   end
@@ -97,9 +101,14 @@ class UninstallCommandTest < Minitest::Test
     with_xdg_home do
       bin = Hive::Paths.bin_home
       FileUtils.mkdir_p(bin)
-      target = File.join(bin, "hive-real")
-      File.write(target, "bin\n")
-      %w[hive hv].each { |name| File.symlink(target, File.join(bin, name)) }
+      managed_bin = File.join(Hive::Paths.data_home, "gems", "bin")
+      FileUtils.mkdir_p(managed_bin)
+      File.write(File.join(Hive::Paths.data_home, "install-channel"), "bash\n")
+      %w[hive hv].each do |name|
+        target = File.join(managed_bin, name)
+        File.write(target, "bin\n")
+        File.symlink(target, File.join(bin, name))
+      end
 
       Hive::Commands::Uninstall.new(output: StringIO.new).send(:remove_user_symlinks)
 
@@ -112,12 +121,15 @@ class UninstallCommandTest < Minitest::Test
     with_xdg_home do
       bin = Hive::Paths.bin_home
       FileUtils.mkdir_p(bin)
-      target = File.join(bin, "hive-real")
+      managed_bin = File.join(Hive::Paths.data_home, "gems", "bin")
+      FileUtils.mkdir_p(managed_bin)
+      File.write(File.join(Hive::Paths.data_home, "install-channel"), "bash\n")
+      target = File.join(managed_bin, "hive")
       link = File.join(bin, "hive")
       File.write(target, "bin\n")
       File.symlink(target, link)
 
-      with_replaced_singleton_method(File, :unlink, ->(_path) { raise Errno::ENOENT }) do
+      with_replaced_singleton_method(File, :rename, ->(*_paths) { raise Errno::ENOENT }) do
         Hive::Commands::Uninstall.new(output: StringIO.new).send(:remove_user_symlinks)
       end
 
@@ -125,11 +137,216 @@ class UninstallCommandTest < Minitest::Test
     end
   end
 
-  def test_safe_unlink_tolerates_disappearing_file
-    with_xdg_home do |dir|
-      missing = File.join(dir, "already-gone")
+  def test_remove_user_symlinks_restores_a_concurrent_replacement
+    with_xdg_home do
+      bin = Hive::Paths.bin_home
+      FileUtils.mkdir_p(bin)
+      managed_bin = File.join(Hive::Paths.data_home, "gems", "bin")
+      FileUtils.mkdir_p(managed_bin)
+      File.write(File.join(Hive::Paths.data_home, "install-channel"), "bash\n")
+      managed = File.join(managed_bin, "hive")
+      operator = File.join(bin, "operator-hive")
+      link = File.join(bin, "hive")
+      File.write(managed, "managed\n")
+      File.write(operator, "operator\n")
+      File.symlink(managed, link)
+      original_rename = File.method(:rename)
+      calls = 0
+      replacement_race = lambda do |source, destination|
+        calls += 1
+        if calls == 1
+          File.unlink(source)
+          File.symlink(operator, source)
+        end
+        original_rename.call(source, destination)
+      end
+      output = StringIO.new
 
-      Hive::Commands::Uninstall.new(output: StringIO.new).send(:safe_unlink, missing)
+      with_replaced_singleton_method(File, :rename, replacement_race) do
+        Hive::Commands::Uninstall.new(output: output).send(:remove_user_symlinks)
+      end
+
+      assert File.symlink?(link)
+      assert_equal operator, File.readlink(link)
+      assert_match(/changed during uninstall; restored/, output.string)
+      assert_empty Dir.glob(File.join(bin, ".hive-uninstall-*"))
+    end
+  end
+
+  def test_remove_user_symlinks_preserves_a_replacement_that_arrives_after_quarantine
+    with_xdg_home do
+      bin = Hive::Paths.bin_home
+      FileUtils.mkdir_p(bin)
+      managed_bin = File.join(Hive::Paths.data_home, "gems", "bin")
+      FileUtils.mkdir_p(managed_bin)
+      File.write(File.join(Hive::Paths.data_home, "install-channel"), "bash\n")
+      managed = File.join(managed_bin, "hive")
+      operator = File.join(bin, "operator-hive")
+      link = File.join(bin, "hive")
+      File.write(managed, "managed\n")
+      File.write(operator, "operator\n")
+      File.symlink(managed, link)
+      original_rename = File.method(:rename)
+      original_readlink = File.method(:readlink)
+      moved = false
+      output = StringIO.new
+
+      replacement_race = lambda do |source, destination|
+        original_rename.call(source, destination)
+        unless moved
+          moved = true
+          File.symlink(operator, source)
+        end
+      end
+      swapped_quarantine = lambda do |path|
+        if moved && File.basename(path).start_with?(".hive-uninstall-hive-")
+          File.unlink(path)
+          File.symlink(operator, path)
+        end
+        original_readlink.call(path)
+      end
+
+      with_replaced_singleton_method(File, :rename, replacement_race) do
+        with_replaced_singleton_method(File, :readlink, swapped_quarantine) do
+          Hive::Commands::Uninstall.new(output: output).send(:remove_user_symlinks)
+        end
+      end
+
+      assert_equal operator, File.readlink(link)
+      assert_match(/changed during uninstall; preserved it at/, output.string)
+      assert_equal 1, Dir.glob(File.join(bin, ".hive-uninstall-*")).length
+    end
+  end
+
+  def test_managed_launcher_check_fails_closed_when_link_disappears_during_inspection
+    with_xdg_home do
+      bin = Hive::Paths.bin_home
+      managed_bin = File.join(Hive::Paths.data_home, "gems", "bin")
+      FileUtils.mkdir_p([ bin, managed_bin ])
+      File.write(File.join(Hive::Paths.data_home, "install-channel"), "bash\n")
+      target = File.join(managed_bin, "hive")
+      link = File.join(bin, "hive")
+      File.write(target, "managed\n")
+      File.symlink(target, link)
+
+      with_replaced_singleton_method(File, :readlink, ->(_path) { raise Errno::ENOENT }) do
+        refute Hive::Commands::Uninstall.new(output: StringIO.new).send(:managed_bash_launcher_link?, link, "hive")
+      end
+    end
+  end
+
+  def test_restore_replaced_launcher_keeps_quarantine_when_restore_fails
+    with_xdg_home do
+      bin = Hive::Paths.bin_home
+      FileUtils.mkdir_p(bin)
+      quarantine = File.join(bin, ".hive-uninstall-hive-test")
+      link = File.join(bin, "hive")
+      File.write(quarantine, "operator\n")
+      output = StringIO.new
+
+      with_replaced_singleton_method(File, :rename, ->(*_paths) { raise Errno::EPERM, "operation not permitted" }) do
+        Hive::Commands::Uninstall.new(output: output).send(:restore_replaced_launcher, quarantine, link)
+      end
+
+      assert File.exist?(quarantine)
+      assert_match(/could not restore changed launcher/, output.string)
+    end
+  end
+
+  def test_remove_user_symlinks_preserves_unowned_links
+    with_xdg_home do
+      bin = Hive::Paths.bin_home
+      FileUtils.mkdir_p(bin)
+      target = File.join(bin, "operator-hive")
+      File.write(target, "operator\n")
+      %w[hive hv].each { |name| File.symlink(target, File.join(bin, name)) }
+
+      Hive::Commands::Uninstall.new(output: StringIO.new).send(:remove_user_symlinks)
+
+      assert File.symlink?(File.join(bin, "hive"))
+      assert File.symlink?(File.join(bin, "hv"))
+      assert_equal "operator\n", File.read(target)
+    end
+  end
+
+  def test_remove_user_symlinks_preserves_a_same_shape_lookalike_install
+    with_xdg_home do |dir|
+      bin = Hive::Paths.bin_home
+      FileUtils.mkdir_p(bin)
+      lookalike_home = File.join(dir, "operator", "hive")
+      target = File.join(lookalike_home, "gems", "bin", "hive")
+      FileUtils.mkdir_p(File.dirname(target))
+      File.write(target, "operator\n")
+      File.write(File.join(lookalike_home, "install-channel"), "bash\n")
+      link = File.join(bin, "hive")
+      File.symlink(target, link)
+
+      Hive::Commands::Uninstall.new(output: StringIO.new).send(:remove_user_symlinks)
+
+      assert File.symlink?(link)
+      assert_equal "operator\n", File.read(target)
+    end
+  end
+
+  def test_remove_user_symlinks_removes_a_recorded_prefix_install
+    with_xdg_home do |dir|
+      bin = Hive::Paths.bin_home
+      FileUtils.mkdir_p(bin)
+      prefix = File.join(dir, "prefix")
+      prefixed_data_home = File.join(prefix, "hive")
+      target = File.join(prefixed_data_home, "gems", "bin", "hive")
+      FileUtils.mkdir_p(File.dirname(target))
+      FileUtils.mkdir_p(Hive::Paths.data_home)
+      File.write(target, "managed\n")
+      File.write(File.join(prefixed_data_home, "install-channel"), "bash\n")
+      File.write(File.join(Hive::Paths.data_home, "install-prefix"), "#{prefix}\n")
+      link = File.join(bin, "hive")
+      File.symlink(target, link)
+
+      Hive::Commands::Uninstall.new(output: StringIO.new).send(:remove_user_symlinks)
+
+      refute File.symlink?(link)
+    end
+  end
+
+  def test_remove_user_symlinks_treats_a_malformed_prefix_as_unowned
+    with_xdg_home do |dir|
+      bin = Hive::Paths.bin_home
+      FileUtils.mkdir_p(bin)
+      FileUtils.mkdir_p(Hive::Paths.data_home)
+      File.write(File.join(Hive::Paths.data_home, "install-prefix"), "/tmp/bad\0prefix\n")
+      lookalike_home = File.join(dir, "operator", "hive")
+      target = File.join(lookalike_home, "gems", "bin", "hive")
+      FileUtils.mkdir_p(File.dirname(target))
+      File.write(target, "operator\n")
+      File.write(File.join(lookalike_home, "install-channel"), "bash\n")
+      link = File.join(bin, "hive")
+      File.symlink(target, link)
+
+      Hive::Commands::Uninstall.new(output: StringIO.new).send(:remove_user_symlinks)
+
+      assert File.symlink?(link)
+      assert_equal "operator\n", File.read(target)
+    end
+  end
+
+  def test_remove_user_symlinks_rejects_a_symlinked_channel_marker
+    with_xdg_home do |dir|
+      bin = Hive::Paths.bin_home
+      managed_bin = File.join(Hive::Paths.data_home, "gems", "bin")
+      FileUtils.mkdir_p(bin)
+      FileUtils.mkdir_p(managed_bin)
+      target = File.join(managed_bin, "hive")
+      File.write(target, "bin\n")
+      File.symlink(target, File.join(bin, "hive"))
+      external_marker = File.join(dir, "operator-marker")
+      File.write(external_marker, "bash\n")
+      File.symlink(external_marker, File.join(Hive::Paths.data_home, "install-channel"))
+
+      Hive::Commands::Uninstall.new(output: StringIO.new).send(:remove_user_symlinks)
+
+      assert File.symlink?(File.join(bin, "hive"))
+      assert_equal "bash\n", File.read(external_marker)
     end
   end
 
@@ -183,6 +400,146 @@ class UninstallCommandTest < Minitest::Test
 
       assert_includes calls, %w[systemctl --user disable --now hive-bot]
       refute File.exist?(unit), "bot unit must be removed after a successful disable"
+    end
+  end
+
+  def test_linux_babysitter_unit_disable_removes_unit
+    with_xdg_home do
+      unit = File.expand_path("~/.config/systemd/user/hive-babysitter.service")
+      FileUtils.mkdir_p(File.dirname(unit))
+      File.write(unit, "unit\n")
+      calls = []
+
+      Hive::Commands::Uninstall.new(
+        purge: true, output: StringIO.new,
+        runner: ->(argv) { calls << argv; true }, host_os: "linux"
+      ).call
+
+      assert_includes calls, %w[systemctl --user disable --now hive-babysitter]
+      refute File.exist?(unit), "babysitter unit must be removed after a successful disable"
+    end
+  end
+
+  def test_stop_foreground_babysitter_reuses_safe_stop_lifecycle
+    with_xdg_home do
+      captured = nil
+      stopper = Object.new
+      stopper.define_singleton_method(:call) { true }
+      with_replaced_singleton_method(Hive::Commands::Babysit, :new, lambda { |subcommand, **kwargs|
+        captured = [ subcommand, kwargs ]
+        stopper
+      }) do
+        Hive::Commands::Uninstall.new(output: StringIO.new).send(
+          :stop_foreground_babysitter
+        )
+      end
+
+      assert_equal "stop", captured.first
+      assert_equal Hive::Paths.state_home, captured.last.fetch(:hive_home)
+      assert_equal true, captured.last.fetch(:quiet)
+    end
+  end
+
+  def test_unreadable_babysitter_pid_aborts_before_any_uninstall_mutation
+    with_xdg_home do
+      FileUtils.mkdir_p(Hive::Paths.state_home)
+      pid_file = File.join(Hive::Paths.state_home, ".babysitter.pid")
+      File.write(pid_file, "unreadable")
+      unit = File.expand_path("~/.config/systemd/user/hive-babysitter.service")
+      FileUtils.mkdir_p(File.dirname(unit))
+      File.write(unit, "unit\n")
+      calls = []
+      original_read = File.method(:read)
+
+      error = with_replaced_singleton_method(File, :read, lambda { |path, *args|
+        raise Errno::EACCES, path if path == pid_file
+
+        original_read.call(path, *args)
+      }) do
+        assert_raises(Hive::Error) do
+          Hive::Commands::Uninstall.new(
+            purge: true,
+            output: StringIO.new,
+            runner: ->(argv) { calls << argv; true },
+            host_os: "linux"
+          ).call
+        end
+      end
+
+      assert_includes error.message, "no services or data were removed"
+      assert File.exist?(unit)
+      assert_empty calls
+    end
+  end
+
+  def test_linux_web_unit_disable_removes_unit
+    with_xdg_home do
+      unit = File.expand_path("~/.config/systemd/user/hive-web.service")
+      FileUtils.mkdir_p(File.dirname(unit))
+      File.write(unit, "unit\n")
+      calls = []
+
+      Hive::Commands::Uninstall.new(
+        purge: true, output: StringIO.new,
+        runner: ->(argv) { calls << argv; true }, host_os: "linux"
+      ).call
+
+      assert_includes calls, %w[systemctl --user disable --now hive-web]
+      refute File.exist?(unit), "web unit must be removed after a successful disable"
+    end
+  end
+
+  def test_linux_web_deregistration_ignores_malformed_web_config_and_failure_does_not_abort_cleanup
+    with_xdg_home do
+      unit = File.expand_path("~/.config/systemd/user/hive-web.service")
+      FileUtils.mkdir_p(File.dirname(unit))
+      File.write(unit, "unit\n")
+      FileUtils.mkdir_p(Hive::Paths.cache_home)
+      File.write(File.join(Hive::Paths.cache_home, "remove-me"), "cached\n")
+      out = StringIO.new
+
+      with_replaced_singleton_method(Hive::Config, :load_global_web, lambda {
+        raise Hive::ConfigError, "malformed web config"
+      }) do
+        status = Hive::Commands::Uninstall.new(
+          purge: true, output: out,
+          runner: ->(_argv) { false }, host_os: "linux"
+        ).call
+
+        assert_equal 0, status
+      end
+
+      assert File.exist?(unit), "a failed systemd deregistration must preserve the web unit"
+      refute File.exist?(Hive::Paths.cache_home), "later uninstall cleanup must still run"
+      assert_match(/systemctl --user disable failed for hive-web/, out.string)
+      assert_match(/core uninstall cleanup complete/, out.string)
+    end
+  end
+
+  def test_macos_web_deregistration_ignores_malformed_web_config_and_failure_does_not_abort_cleanup
+    with_xdg_home do
+      plist = File.expand_path("~/Library/LaunchAgents/local.hive-web.plist")
+      FileUtils.mkdir_p(File.dirname(plist))
+      File.write(plist, "plist\n")
+      FileUtils.mkdir_p(Hive::Paths.cache_home)
+      File.write(File.join(Hive::Paths.cache_home, "remove-me"), "cached\n")
+      out = StringIO.new
+
+      with_replaced_singleton_method(Hive::Config, :load_global_web, lambda {
+        raise Hive::ConfigError, "malformed web config"
+      }) do
+        status = Hive::Commands::Uninstall.new(
+          purge: true, output: out,
+          runner: ->(_argv) { false }, host_os: "darwin"
+        ).call
+
+        assert_equal 0, status
+      end
+
+      assert File.exist?(plist), "a failed launchd deregistration must preserve the web plist"
+      refute File.exist?(Hive::Paths.cache_home), "later uninstall cleanup must still run"
+      assert_match(/launchctl unload failed for #{Regexp.escape(plist)}/, out.string)
+      assert_match(/core uninstall cleanup complete/, out.string)
     end
   end
 
@@ -533,18 +890,47 @@ class UninstallCommandTest < Minitest::Test
       unit = File.expand_path("~/.config/systemd/user/hive-daemon.service")
       FileUtils.mkdir_p(File.dirname(unit))
       File.write(unit, "unit\n")
-      calls = 0
+      calls = []
       out = StringIO.new
 
       Hive::Commands::Uninstall.new(
         purge: true,
         output: out,
-        runner: ->(_argv) { calls += 1; calls == 1 },
+        runner: lambda do |argv|
+          calls << argv
+          argv != %w[systemctl --user daemon-reload]
+        end,
         host_os: "linux"
       ).call
 
       refute File.exist?(unit)
+      assert_includes calls, %w[systemctl --user daemon-reload]
       assert_match(/daemon-reload failed/, out.string)
     end
+  end
+
+  def test_deregister_unit_renders_stale_and_generic_boundary_failures
+    out = StringIO.new
+    command = Hive::Commands::Uninstall.new(output: out)
+    installer = Object.new
+    installer.define_singleton_method(:target_path) { "/tmp/hive-test.service" }
+    results = [
+      Hive::UserService::Result.new(
+        :partial,
+        operation: :remove,
+        diagnostics: [ :stale_after_manager_change ]
+      ),
+      Hive::UserService::Result.new(
+        :failed,
+        operation: :remove,
+        diagnostics: [ :remove_failed ]
+      )
+    ]
+    installer.define_singleton_method(:remove!) { results.shift }
+
+    2.times { command.send(:deregister_unit, installer) }
+
+    assert_match(/changed while its service was being disabled/, out.string)
+    assert_match(/could not remove .* leaving it in place/, out.string)
   end
 end

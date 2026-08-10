@@ -3,7 +3,7 @@ title: hive generate-name
 type: command
 source: lib/hive/commands/generate_name.rb, lib/hive/display_name/generator.rb, lib/hive/display_name/sanitizer.rb, templates/display_name_prompt.md.erb
 created: 2026-06-03
-updated: 2026-06-08
+updated: 2026-07-22
 tags: [command, display-name, task-id]
 ---
 
@@ -37,7 +37,7 @@ There is no `--json` payload for this command. On success it prints the generate
 
 The subprocess command is built from the profile binary, headless flag, Claude permission flags, output-format flags, and the prompt. Codex receives the prompt on stdin (`-`); other profiles receive it as an argv prompt. Output is written to `<task.log_dir>/display-name-<UTC>.log`.
 
-`Hive::Agent::MessageExtractor` parses structured agent streams and extracts the final assistant/result text from Claude/Codex-shaped JSON lines. If no structured final message is found, the generator falls back to the last 64 KiB of plain output.
+`Hive::Agent::MessageExtractor` parses structured agent streams and extracts the final assistant/result text from Claude/Codex-shaped JSON lines. Streaming text deltas are accumulated in order; a later complete result replaces the accumulated stream. If no structured final message is found, the generator falls back to the last 64 KiB of plain output.
 
 `Hive::DisplayName::Sanitizer` removes markdown/code fences, trims quotes/punctuation, collapses whitespace, and caps the title at 60 characters without splitting the last word when possible. Empty sanitized output is ignored.
 

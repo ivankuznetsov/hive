@@ -7,6 +7,8 @@ require "hive/commands/bench_submit"
 # preflight are seams, so no real gh/extract/network is touched; the test
 # proves the orchestration: resolve the 9-done task, preflight, extract, PR.
 class BenchSubmitCommandTest < Minitest::Test
+  include HiveTestHelper
+
   def setup
     @root = Dir.mktmpdir("bench-submit")
     @bench = File.join(@root, "hive-bench")
@@ -117,6 +119,44 @@ class BenchSubmitCommandTest < Minitest::Test
     ENV["PATH"] = old
   end
 
+  def with_stub_gh(exit_status: 0)
+    bin = File.join(@root, "gh-bin")
+    FileUtils.mkdir_p(bin)
+    File.write(File.join(bin, "gh"), "#!/bin/sh\necho https://example.test/pr/1\nexit #{exit_status}\n")
+    FileUtils.chmod(0o755, File.join(bin, "gh"))
+    with_env("PATH" => "#{bin}:#{ENV.fetch('PATH')}") { yield }
+  end
+
+  def prepare_submission_repo(detached: false)
+    remote = File.join(@root, "hive-bench.git")
+    system("git", "init", "--bare", "-q", remote, exception: true)
+    system("git", "-C", @bench, "init", "-q", "-b", "main", exception: true)
+    system("git", "-C", @bench, "config", "user.email", "test@example.com", exception: true)
+    system("git", "-C", @bench, "config", "user.name", "Hive Test", exception: true)
+    File.write(File.join(@bench, "README.md"), "main\n")
+    system("git", "-C", @bench, "add", "README.md", exception: true)
+    system("git", "-C", @bench, "commit", "-qm", "main", exception: true)
+    system("git", "-C", @bench, "remote", "add", "origin", remote, exception: true)
+    system("git", "-C", @bench, "push", "-qu", "origin", "main", exception: true)
+    system("git", "-C", @bench, "checkout", "-qb", "operator-work", exception: true)
+    File.write(File.join(@bench, "operator.txt"), "not for submission\n")
+    system("git", "-C", @bench, "add", "operator.txt", exception: true)
+    system("git", "-C", @bench, "commit", "-qm", "operator work", exception: true)
+    original_head = git_value("rev-parse", "HEAD")
+    system("git", "-C", @bench, "checkout", "--detach", "-q", original_head, exception: true) if detached
+
+    entry = File.join(@bench, "corpus", "fix-thing-260601-aa11")
+    FileUtils.mkdir_p(entry)
+    File.write(File.join(entry, "spec.yml"), "slug: fix-thing\n")
+    { entry: entry, head: original_head, branch: detached ? "" : "operator-work" }
+  end
+
+  def git_value(*args)
+    out, status = Open3.capture2("git", "-C", @bench, *args)
+    assert status.success?, "git #{args.join(' ')} succeeds"
+    out.strip
+  end
+
   def cmd = Hive::Commands::BenchSubmit.new("fix-thing-260601-aa11", bench_path: @bench, projects: projects)
 
   # A minimal-but-real HiveBench::SecretScan in the fixture bench checkout. The
@@ -177,7 +217,10 @@ class BenchSubmitCommandTest < Minitest::Test
   end
 
   def test_report_json_and_text
-    out_json, = capture_io { Hive::Commands::BenchSubmit.new("s", bench_path: @bench, json: true).send(:report, "/e", "http://pr/1") }
+    entry = File.join(@bench, "corpus", "e")
+    out_json, = capture_io do
+      Hive::Commands::BenchSubmit.new("s", bench_path: @bench, json: true).send(:report, entry, "http://pr/1")
+    end
     assert_includes out_json, "\"pr_url\""
     out_txt, = capture_io { cmd.send(:report, "/e", "http://pr/2") }
     assert_includes out_txt, "Submitted"
@@ -214,9 +257,66 @@ class BenchSubmitCommandTest < Minitest::Test
 
   def test_open_pr_via_gh_with_stub_binaries
     with_stub_path do
-      url = cmd.send(:open_pr_via_gh, bench_path: @bench, entry_dir: File.join(@bench, "corpus", "x"), slug: "fix-thing-260601-aa11")
-      assert_equal "https://github.com/ivankuznetsov/hive-bench/pull/9", url
+      submission = cmd.send(:open_pr_via_gh, bench_path: @bench, entry_dir: File.join(@bench, "corpus", "x"), slug: "fix-thing-260601-aa11")
+      assert_equal "https://github.com/ivankuznetsov/hive-bench/pull/9", submission.fetch("pr_url")
     end
+  end
+
+  def test_open_pr_branches_from_remote_default_restores_branch_and_reports_durable_locator
+    original = prepare_submission_repo
+    submission = with_stub_gh do
+      cmd.send(:open_pr_via_gh, bench_path: @bench, entry_dir: original[:entry], slug: "fix-thing-260601-aa11")
+    end
+
+    assert_equal original[:branch], git_value("branch", "--show-current")
+    assert_equal original[:head], git_value("rev-parse", "HEAD")
+    refute system("git", "-C", @bench, "cat-file", "-e", "submit-fix-thing-260601-aa11:operator.txt",
+                  out: File::NULL, err: File::NULL),
+           "the submission branch must start at origin/main, not the caller's HEAD"
+    refute File.exist?(original[:entry]), "restored checkout does not claim the submission entry exists locally"
+
+    reporter = Hive::Commands::BenchSubmit.new("fix-thing-260601-aa11", bench_path: @bench, json: true)
+    out, = capture_io { reporter.send(:report, original[:entry], submission) }
+    payload = JSON.parse(out)
+    assert_equal "corpus/fix-thing-260601-aa11", payload.fetch("entry")
+    assert_equal "refs/heads/submit-fix-thing-260601-aa11", payload.fetch("submission_ref")
+    assert_equal payload.fetch("commit_sha"), git_value("rev-parse", payload.fetch("submission_ref"))
+    assert system("git", "-C", @bench, "cat-file", "-e",
+                  "#{payload.fetch('commit_sha')}:#{payload.fetch('entry')}/spec.yml")
+  end
+
+  def test_open_pr_gh_failure_restores_original_branch_and_head
+    original = prepare_submission_repo
+    with_stub_gh(exit_status: 1) do
+      assert_raises(Hive::Commands::BenchSubmit::UsageError) do
+        cmd.send(:open_pr_via_gh, bench_path: @bench, entry_dir: original[:entry], slug: "fix-thing-260601-aa11")
+      end
+    end
+
+    assert_equal original[:branch], git_value("branch", "--show-current")
+    assert_equal original[:head], git_value("rev-parse", "HEAD")
+  end
+
+  def test_open_pr_success_restores_exact_detached_head
+    original = prepare_submission_repo(detached: true)
+    with_stub_gh do
+      cmd.send(:open_pr_via_gh, bench_path: @bench, entry_dir: original[:entry], slug: "fix-thing-260601-aa11")
+    end
+
+    assert_empty git_value("branch", "--show-current")
+    assert_equal original[:head], git_value("rev-parse", "HEAD")
+  end
+
+  def test_open_pr_gh_failure_restores_exact_detached_head
+    original = prepare_submission_repo(detached: true)
+    with_stub_gh(exit_status: 1) do
+      assert_raises(Hive::Commands::BenchSubmit::UsageError) do
+        cmd.send(:open_pr_via_gh, bench_path: @bench, entry_dir: original[:entry], slug: "fix-thing-260601-aa11")
+      end
+    end
+
+    assert_empty git_value("branch", "--show-current")
+    assert_equal original[:head], git_value("rev-parse", "HEAD")
   end
 
   def test_open_pr_via_gh_raises_when_gh_fails

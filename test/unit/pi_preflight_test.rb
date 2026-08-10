@@ -64,20 +64,16 @@ class PiPreflightTest < Minitest::Test
   end
 
   def test_translates_home_resolution_failure_to_agent_error
-    original_expand_path = File.method(:expand_path)
-    File.define_singleton_method(:expand_path) do |target, *args|
-      if target == "~/.pi/agent/auth.json"
-        raise ArgumentError, "could not find home directory"
-      end
-
-      original_expand_path.call(target, *args)
+    original_resolver = Hive::SkillCheck::Pi.method(:resolve_agent_dir)
+    Hive::SkillCheck::Pi.define_singleton_method(:resolve_agent_dir) do |_environment|
+      raise ArgumentError, "could not find home directory"
     end
 
     err = assert_raises(Hive::AgentError) { Hive::AgentProfiles::PI_PREFLIGHT.call }
     assert_match(/cannot resolve home directory/, err.message)
     assert_match(/Set \$HOME/, err.message)
   ensure
-    File.define_singleton_method(:expand_path, original_expand_path) if original_expand_path
+    Hive::SkillCheck::Pi.define_singleton_method(:resolve_agent_dir, original_resolver) if original_resolver
   end
 
   def test_translates_unreadable_auth_file_to_agent_error

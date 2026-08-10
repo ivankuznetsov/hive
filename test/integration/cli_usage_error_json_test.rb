@@ -35,7 +35,8 @@ class CliUsageErrorJsonTest < Minitest::Test
     if schema == "hive-metrics-rollback-rate"
       refute payload.key?("error_class"), "the metrics v1 error schema has no error_class field"
     else
-      assert_equal "InvalidTaskPath", payload["error_class"]
+      expected_class = error_kind == "invalid_task_path" ? "InvalidTaskPath" : "UsageError"
+      assert_equal expected_class, payload["error_class"]
     end
     assert_equal error_kind, payload["error_kind"]
     assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
@@ -54,6 +55,7 @@ class CliUsageErrorJsonTest < Minitest::Test
     cases = [
       [ %w[run --json], "hive-run", {} ],
       [ %w[approve --json], "hive-approve", {} ],
+      [ %w[decide task approve --json], "hive-decide", {} ],
       [ %w[markers clear --json], "hive-markers-clear", {} ],
       [ %w[drop --json], "hive-drop", {} ],
       [ %w[findings --json], "hive-findings", {} ],
@@ -120,7 +122,7 @@ class CliUsageErrorJsonTest < Minitest::Test
       assert_equal Hive::ExitCodes::USAGE, status.exitstatus
       payload = JSON.parse(out)
       assert_equal "hive-status", payload.fetch("schema")
-      assert_equal 6, payload.fetch("schema_version")
+      assert_equal 7, payload.fetch("schema_version")
       assert_equal false, payload.fetch("ok")
       assert_match(/--full cannot be combined with --json/, payload.fetch("message"))
 
@@ -158,38 +160,12 @@ class CliUsageErrorJsonTest < Minitest::Test
         payload = JSON.parse(out)
         assert_equal false, payload["ok"]
         assert_equal "screenote", payload["service"]
-        assert_equal "InvalidTaskPath", payload["error_class"]
+        assert_equal "UsageError", payload["error_class"]
         assert_equal "usage", payload["error_kind"]
         assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
         assert_match message_pattern, payload["message"]
         refute payload.key?("schema"), "Screenote connect/disconnect JSON failures are unversioned"
         assert_match(/^hive: ERROR: /, err.lines.first)
-      end
-    end
-  end
-
-  def test_merged_pr_digest_json_usage_errors_use_merged_pr_schema
-    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-merged-pr-digest"))))
-    cases = [
-      %w[digest --source merged-prs --bad --json],
-      %w[digest --repo owner/repo --bad --json]
-    ]
-
-    with_tmp_global_config do |home|
-      cases.each do |argv|
-        out, _err, status = run_hive(home, *argv)
-
-        refute status.success?, "#{argv.join(' ')} should fail"
-        assert_equal Hive::ExitCodes::USAGE, status.exitstatus
-        payload = JSON.parse(out)
-        assert_equal "hive-merged-pr-digest", payload["schema"]
-        assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-merged-pr-digest"), payload["schema_version"]
-        assert_equal false, payload["ok"]
-        assert_equal "InvalidTaskPath", payload["error_class"]
-        assert_equal "usage", payload["error_kind"]
-        assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
-        assert_empty schemer.validate(payload).map { |e| e["error"] },
-                     "#{argv.join(' ')} envelope must validate against hive-merged-pr-digest schema"
       end
     end
   end
@@ -204,7 +180,7 @@ class CliUsageErrorJsonTest < Minitest::Test
       assert_equal "hive-setup", payload["schema"]
       assert_equal 1, payload["schema_version"]
       assert_equal false, payload["ok"]
-      assert_equal "InvalidTaskPath", payload["error_class"]
+      assert_equal "UsageError", payload["error_class"]
       assert_equal "usage", payload["error_kind"]
       assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
       assert_match(/Usage: "hive setup"/, payload["message"])
@@ -236,8 +212,8 @@ class CliUsageErrorJsonTest < Minitest::Test
       assert_equal "UsageError", payload["error_class"]
       assert_equal "usage", payload["error_kind"]
       assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
-      assert_equal "missing SUBCOMMAND (expected: new, install, list, update, remove, publish)", payload["message"]
-      assert_equal %w[new install list update remove publish], payload["expected"]
+      assert_equal "missing SUBCOMMAND (expected: new, validate, commit, install, list, update, remove, publish)", payload["message"]
+      assert_equal %w[new validate commit install list update remove publish], payload["expected"]
     end
   end
 
@@ -248,7 +224,7 @@ class CliUsageErrorJsonTest < Minitest::Test
       refute status.success?
       assert_equal Hive::ExitCodes::USAGE, status.exitstatus
       assert_empty out
-      assert_equal "hive workflow: missing SUBCOMMAND (expected: new, install, list, update, remove, publish)\n", err
+      assert_equal "hive workflow: missing SUBCOMMAND (expected: new, validate, commit, install, list, update, remove, publish)\n", err
     end
   end
 
@@ -256,7 +232,7 @@ class CliUsageErrorJsonTest < Minitest::Test
   # command dispatch, so it never reaches the command's own UsageError. With
   # --json it must still ride the hive-workflow-new envelope via the bin/hive
   # "workflow" usage-error contract (error_kind "usage", exit 64,
-  # error_class "InvalidTaskPath") — not plain Thor arity prose on stderr.
+  # error_class "UsageError") — not plain Thor arity prose on stderr.
   # This is the sole reason the "workflow" entry exists in
   # JSON_USAGE_ERROR_CONTRACTS; without this assertion a regression dropping
   # the contract entry would silently revert to bare stderr with no failing test.
@@ -270,7 +246,7 @@ class CliUsageErrorJsonTest < Minitest::Test
       assert_equal "hive-workflow-new", payload["schema"]
       assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-workflow-new"), payload["schema_version"]
       assert_equal false, payload["ok"]
-      assert_equal "InvalidTaskPath", payload["error_class"]
+      assert_equal "UsageError", payload["error_class"]
       assert_equal "usage", payload["error_kind"]
       assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
       assert_equal THOR_WORKFLOW_ARITY_PROSE.chomp, payload["message"]
@@ -280,6 +256,17 @@ class CliUsageErrorJsonTest < Minitest::Test
       # contract that wraps Thor's arity error.
       refute payload.key?("expected"), "Thor arity errors must not carry `expected`"
       refute payload.key?("value"), "Thor arity errors must not carry `value`"
+    end
+  end
+
+  def test_workflow_validate_arity_error_uses_validate_envelope
+    with_tmp_global_config do |home|
+      assert_pre_dispatch_error(
+        home,
+        %w[workflow validate editorial extra --json],
+        schema: "hive-workflow-validate",
+        error_kind: "usage"
+      )
     end
   end
 
@@ -299,6 +286,30 @@ class CliUsageErrorJsonTest < Minitest::Test
     end
   end
 
+  def test_json_generator_failure_falls_back_to_human_usage_error
+    with_tmp_global_config do |home|
+      with_tmp_dir do |dir|
+        patch = File.join(dir, "break-json-generate.rb")
+        File.write(patch, <<~RUBY)
+          require "json"
+          def JSON.generate(*)
+            raise JSON::GeneratorError, "forced generator failure"
+          end
+        RUBY
+
+        out, err, status = Open3.capture3(
+          { "HIVE_HOME" => home, "RUBYOPT" => "-r#{patch}" },
+          RbConfig.ruby, "-Ilib", HIVE_BIN, "connect", "--json"
+        )
+
+        assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+        assert_empty out, "a failed serializer must not claim that a JSON envelope was emitted"
+        assert_match(/Usage: "hive connect SERVICE"/, err)
+        refute_match(/forced generator failure/, err)
+      end
+    end
+  end
+
   def test_patrol_missing_project_json_usage_error_uses_patrol_envelope
     with_tmp_global_config do |home|
       out, _err, status = run_hive(home, "patrol", "--json")
@@ -309,7 +320,7 @@ class CliUsageErrorJsonTest < Minitest::Test
       assert_equal "hive-patrol", payload["schema"]
       assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-patrol"), payload["schema_version"]
       assert_equal false, payload["ok"]
-      assert_equal "InvalidTaskPath", payload["error_class"]
+      assert_equal "UsageError", payload["error_class"]
       assert_equal "error", payload["error_kind"]
       assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
     end
@@ -373,7 +384,7 @@ class CliUsageErrorJsonTest < Minitest::Test
   # rejected by Thor *before* `Hive::Commands::Bot#call` runs — bypassing the
   # command-level usage-error emitters. With --json it must still ride the
   # hive-bot-status envelope via the bin/hive "bot" usage-error contract
-  # (error_kind "extra_arguments", error_class "InvalidTaskPath", exit 64), not
+  # (error_kind "extra_arguments", error_class "UsageError", exit 64), not
   # bare Thor arity prose on stderr. This is the sole reason the resolver has a
   # dedicated `bot` branch in json_usage_error_contract.
   def test_bot_extra_positional_json_usage_error_rides_bot_status_envelope
@@ -388,7 +399,7 @@ class CliUsageErrorJsonTest < Minitest::Test
         assert_equal "hive-bot-status", payload["schema"]
         assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-bot-status"), payload["schema_version"]
         assert_equal false, payload["ok"]
-        assert_equal "InvalidTaskPath", payload["error_class"]
+        assert_equal "UsageError", payload["error_class"]
         assert_equal "extra_arguments", payload["error_kind"]
         assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
         assert_match(/was called with arguments/, payload["message"])
@@ -423,10 +434,7 @@ class CliUsageErrorJsonTest < Minitest::Test
       [ %w[metrics rollback-rate extra --json], "hive-metrics-rollback-rate", "error" ],
       [ %w[web status extra --json], "hive-web-status", "invalid_task_path" ],
       [ %w[web install extra --json], "hive-web-install", "invalid_task_path" ],
-      [ %w[web --bind install status extra --json], "hive-web-status", "invalid_task_path" ],
-      [ %w[digest extra --json], "hive-digest", "usage" ],
-      [ %w[digest --json -- extra --source merged-prs], "hive-digest", "usage" ],
-      [ %w[digest --source merged-prs extra --json], "hive-merged-pr-digest", "usage" ]
+      [ %w[web --bind install status extra --json], "hive-web-status", "invalid_task_path" ]
     ]
 
     with_tmp_global_config do |home|
@@ -494,11 +502,7 @@ class CliUsageErrorJsonTest < Minitest::Test
       [ [ "pairing", "unknown", "approve", "--json", invalid ],
         "hive-pairing-list", "invalid_arguments" ],
       [ [ "pairing", "approve", "telegram", "CODE", "--json", invalid ],
-        "hive-pairing-approve", "invalid_arguments" ],
-      [ [ "digest", "--json", invalid ], "hive-digest", "usage" ],
-      [ [ "digest", "--source", invalid, "--json" ], "hive-digest", "usage" ],
-      [ [ "digest", "--source", "merged-prs", "--json", invalid ],
-        "hive-merged-pr-digest", "usage" ]
+        "hive-pairing-approve", "invalid_arguments" ]
     ]
 
     with_tmp_global_config do |home|

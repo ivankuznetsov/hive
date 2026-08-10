@@ -4,6 +4,9 @@ description: >
   daemon's check finds nothing behind — no nudge is written and
   `hive daemon status --json` reports update_nudge null.
 tags: [update, daemon]
+coverage:
+  primary: update.up_to_date
+  supporting: []
 steps:
   - kind: write_file
     path: "{run_home}/install-channel"

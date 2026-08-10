@@ -1,0 +1,6 @@
+refactor_patrol:
+  enabled: true
+  auto_fix:
+    enabled: true
+  issue_filing:
+    enabled: true

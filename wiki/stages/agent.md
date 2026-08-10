@@ -1,10 +1,10 @@
 ---
 title: Generic Agent Stage Runner
 type: stage
-source: lib/hive/stages/agent.rb, lib/hive/stages/agent_worktree.rb, lib/hive/stages/agent_report.rb, lib/hive/managed_git.rb, templates/agent_prompt.md.erb, templates/agent_worktree_prompt.md.erb
+source: lib/hive/stages/agent.rb, lib/hive/stages/agent_worktree.rb, lib/hive/stages/agent_report.rb, lib/hive/terminal_outcome.rb, lib/hive/managed_git.rb, templates/agent_prompt.md.erb, templates/agent_worktree_prompt.md.erb
 created: 2026-06-19
-updated: 2026-07-22
-tags: [stage, agent, workflow]
+updated: 2026-08-02
+tags: [stage, agent, workflow, terminal-outcomes, blocked]
 ---
 
 **TLDR**: `Hive::Stages::Agent` is the shared headless runner for descriptor
@@ -25,6 +25,9 @@ resumes the exact-origin worktree, launches the configured stage mapping once
 with that worktree as `cwd`, and uses exit-code-only completion. The agent may
 write repository changes plus task-root `fix-report.md`; it cannot author the
 terminal Hive outcome.
+Because that report starts with `Decision:` and has a separate controller
+receipt protocol, `terminal_outcomes` cannot be combined with `workspace` or
+`handoff`; descriptor validation rejects the combination before execution.
 
 ## Runtime Contract
 
@@ -59,6 +62,20 @@ terminal Hive outcome.
    unmatched by any loaded permission rule is denied without hanging the
    headless stage. Loaded Claude setting sources can add broader trusted
    operator allow rules; the descriptor does not erase them.
+   A bounded managed Codex or Grok mapping takes a provider-portable path
+   instead: the runner receives only declared read roots, runs read-only, and
+   returns schema-constrained file content. Hive validates that every requested
+   path is covered by a path-qualified `Edit(...)` rule and atomically
+   materializes the exact output set. This lets a multi-file terminal stage
+   produce both its deliverable and verification artifact without granting the
+   provider direct task writes. Invalid, truncated, empty, or extra-file output
+   becomes `ERROR reason=managed_output_invalid`. Controller-trusted
+   `base_add_dirs` remain read-only roots in this portable path: Codex receives
+   them in its named filesystem policy and Grok receives them as bubblewrap
+   `--ro-bind` mounts. This is how a managed `workspace: worktree` actor can
+   inspect its repository checkout. Each root must resolve to an existing
+   directory or compilation fails closed, and these roots never expand the
+   task-confined host output authorization.
 8. Re-read `stage.state_file` and map markers: `WAITING` → `round_waiting`,
    `COMPLETE` → `complete`, `ERROR` → `error`, `NONE` → `nil` (an explicit arm —
    a markerless run has nothing to commit, so `commit_after` skips the commit),
@@ -69,6 +86,20 @@ terminal Hive outcome.
    runner writes the equivalent marker with the selected profile as `provider`.
    Both paths return `commit=limits_reached` and retain a `retry_after` stamp so
    the daemon cooldown healer can requeue the generic stage.
+9. For a final agent stage with `terminal_outcomes`, the prompt enumerates the
+   exact complete and blocked values and requires `Outcome: <value>` as the
+   artifact's first line. After the runner returns `COMPLETE`, but before
+   archive classification or the Hive-state commit, `Hive::TerminalOutcome`
+   reads only a no-follow 513-byte window, accepts at most 512 first-line bytes,
+   requires a regular file and strict UTF-8, and matches the line exactly.
+   Declared complete values retain `COMPLETE`; declared blocked values become
+   `ERROR reason=terminal_outcome_blocked outcome=<value>`. Missing, malformed,
+   unknown, unreadable, non-regular, overlong, or invalid-UTF-8 results become
+   `ERROR reason=terminal_outcome_invalid outcome=<bounded-detail>`. The error
+   commit and stage-exit event are transactional with the terminal snapshot,
+   and never stamp `completed_at`. A missing `COMPLETE` marker is invalid even
+   when the first-line outcome is declared. Descriptors without this opt-in
+   keep the legacy marker path.
 
 An error envelope does not by itself prove that the spawn wrote no marker.
 `Hive::Agent` writes specific state-file errors for provider limits, timeouts,
@@ -133,7 +164,8 @@ name-first resolver precedence preserves the current coding runtime.
   branch/ancestry verification, and `ready` / `no-fix` / `blocked` repository
   invariants. Worktree-stage cases in `agent_test.rb` cover one exact-cwd
   mapping spawn, trusted prompt identity, task/Git control-file tampering,
-  symlink-safe error projection, and provider/timeout/runtime failure markers.
+  symlink-safe error projection, portable repository read-root propagation,
+  and provider/timeout/runtime failure markers.
 - `test/unit/managed_git_test.rb` proves fsmonitor and attribute-selected
   external-diff helpers cannot execute after the agent exits.
 

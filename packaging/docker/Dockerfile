@@ -12,7 +12,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     RAILS_ENV=production
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      asciinema build-essential ca-certificates curl ffmpeg git gh jq libyaml-dev nodejs npm tini tmux \
+      asciinema build-essential ca-certificates curl ffmpeg git gh jq libffi-dev libyaml-dev nodejs npm tini tmux \
     && rm -rf /var/lib/apt/lists/*
 
 # Agent CLIs in their own early layer: they are the largest download and

@@ -95,6 +95,15 @@ module Hive
                           reason: "babysitter_disabled")
             next
           end
+          repository_reason = unsupported_repository_reason(project)
+          if repository_reason
+            @logger.event(
+              :project_skipped,
+              project: project["name"],
+              reason: repository_reason
+            )
+            next
+          end
 
           { project: project, cfg: cfg }
         rescue Hive::ConfigError => e
@@ -111,6 +120,14 @@ module Hive
         return projects unless @project_name
 
         projects.select { |entry| entry["name"] == @project_name }
+      end
+
+      def unsupported_repository_reason(project)
+        identity = project["repository_identity"].to_s
+        return "repository_identity_unresolved" if identity.empty?
+        return "repository_local" if identity.start_with?("local:")
+
+        nil
       end
 
       def next_interval(configs)

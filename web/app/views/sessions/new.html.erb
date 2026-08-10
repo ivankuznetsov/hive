@@ -1,6 +1,6 @@
-<% content_for(:title, "#{web_product_name} — #{local_web_mode? ? "connect GitHub" : "sign in"}") %>
+<% content_for(:title, "#{web_product_name} — #{local_loopback_request? ? "connect GitHub" : "sign in"}") %>
 <div class="card auth-card">
-  <% if local_web_mode? %>
+  <% if local_loopback_request? %>
     <h1>Connect GitHub</h1>
     <% if @configured %>
       <p>Optional — Hive already works with your existing local projects and workflows.</p>

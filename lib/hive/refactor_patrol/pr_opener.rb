@@ -5,6 +5,7 @@ require "uri"
 require "hive/gh"
 require "hive/patrol/finding"
 require "hive/patrol/review_handoff"
+require "hive/refactor_patrol/effect_errors"
 require "hive/refactor_patrol/github_gateway"
 require "hive/secret_patterns"
 
@@ -82,6 +83,8 @@ module Hive
                publication_state: nil,
                authorize_push: -> { true }, authorize_create: -> { true },
                authorize_handoff: -> { true },
+               execute_effect: ->(phase:, payload:, &effect) { effect.call },
+               execute_handoff: ->(phase:, payload:, &effect) { effect.call },
                superseded_patch_commits: [])
         request_phase = nil
         return result("patch_not_publishable", true) unless patch.publishable?
@@ -100,20 +103,23 @@ module Hive
         )
         reconciliation = reconcile_remote_set(
           existing, thesis, patch, job_id, canonical_action_id, source,
-          authorize_handoff
+          authorize_handoff, execute_handoff
         )
         return reconciliation if reconciliation
 
         return result("remote_outcome_unknown", false) if publication.key?(PR_CREATE_INTENT)
 
-        remote_url = @gh.origin_push_url(patch.worktree_path, cfg: @cfg)
+        remote_url = @gh.origin_push_url(
+          patch.worktree_path, cfg: @cfg, managed: true
+        )
         identity = @gh.repository_identity_from_remote(remote_url)
         unless identity["repository"].to_s.casecmp?(repository.to_s) &&
                identity["host"].to_s.casecmp?(host.to_s)
           return result("repository_identity_drift", false)
         end
         remote_oid = @gh.remote_branch_oid(
-          patch.worktree_path, patch.branch, cfg: @cfg, remote: remote_url
+          patch.worktree_path, patch.branch, cfg: @cfg, remote: remote_url,
+          managed: true
         )
         replaceable_oids = normalized_superseded_patch_commits(superseded_patch_commits)
         expected_oid = publication.dig(PUSH_INTENT, "expected_remote_oid")
@@ -169,12 +175,14 @@ module Hive
           return result("authority_revoked", false) unless authorize_push.call.equal?(true)
 
           request_phase = PUSH_INTENT
-          @gh.push_branch!(
-            patch.worktree_path, patch.branch, cfg: @cfg,
-            expected_remote_oid: remote_oid,
-            expected_remote_absent: remote_oid.nil?, remote: remote_url,
-            set_upstream: false
-          )
+          execute_effect.call(phase: PUSH_INTENT, payload: push_intent) do
+            @gh.push_branch!(
+              patch.worktree_path, patch.branch, cfg: @cfg,
+              expected_remote_oid: remote_oid,
+              expected_remote_absent: remote_oid.nil?, remote: remote_url,
+              set_upstream: false
+            )
+          end
           persisted = persist_publication(
             record_intent, PUSH_COMPLETE,
             self.class.push_complete_payload(
@@ -216,7 +224,11 @@ module Hive
         end
 
         request_phase = PR_CREATE_INTENT
-        pr_url = create_pr(patch, source, title_for(thesis), body)
+        pr_url = execute_effect.call(
+          phase: PR_CREATE_INTENT, payload: create_intent
+        ) do
+          create_pr(patch, source, title_for(thesis), body)
+        end
         @github_gateway.verify_pr_identity!(
           pr_url,
           repository: repository,
@@ -229,7 +241,15 @@ module Hive
         )
         handoff(
           thesis, patch, pr_url, job_id, canonical_action_id, source,
-          authorize_handoff: authorize_handoff
+          authorize_handoff: authorize_handoff,
+          execute_handoff: execute_handoff
+        )
+      rescue Hive::RefactorPatrol::EffectDenied
+        result("authority_revoked", false)
+      rescue Hive::RefactorPatrol::EffectReconciliationRequired => e
+        result(
+          "remote_outcome_unknown", false,
+          receipts: { "error" => e.message }
         )
       rescue Hive::GhError => e
         outcome = request_phase ? "remote_outcome_unknown" : "gh_error"
@@ -246,7 +266,7 @@ module Hive
       private
 
       def reconcile_remote_set(prs, thesis, patch, job_id, action_id, source,
-                               authorize_handoff)
+                               authorize_handoff, execute_handoff)
         return nil if prs.empty?
 
         classified = prs.map do |pr|
@@ -256,7 +276,7 @@ module Hive
         if matches.one?
           return reconcile_existing(
             matches.first.fetch(:record), thesis, patch, job_id, action_id, source,
-            authorize_handoff
+            authorize_handoff, execute_handoff
           )
         end
         if matches.size > 1
@@ -280,18 +300,20 @@ module Hive
       end
 
       def reconcile_existing(pr, thesis, patch, job_id, action_id, source,
-                             authorize_handoff)
+                             authorize_handoff, execute_handoff)
         url = pr.fetch("url")
         case pr.fetch("state")
         when "OPEN"
           handoff(
             thesis, patch, url, job_id, action_id, source,
-            authorize_handoff: authorize_handoff
+            authorize_handoff: authorize_handoff,
+            execute_handoff: execute_handoff
           )
         when "MERGED"
           handoff(
             thesis, patch, url, job_id, action_id, source,
             authorize_handoff: authorize_handoff,
+            execute_handoff: execute_handoff,
             success_outcome: "merged", failure_outcome: "merged_without_review_handoff"
           )
         else
@@ -304,6 +326,7 @@ module Hive
 
       def handoff(thesis, patch, pr_url, job_id, action_id, source,
                   authorize_handoff:,
+                  execute_handoff:,
                   success_outcome: "pr_opened", failure_outcome: "review_handoff_pending")
         unless authorize_handoff.call.equal?(true)
           return result(
@@ -312,10 +335,21 @@ module Hive
           )
         end
         finding = finding_for(thesis, job_id)
-        task_path = @review_handoff.enqueue(
-          finding: finding, patch: patch, pr_url: pr_url, now: Time.now, mandatory: true,
-          context: handoff_context(thesis, patch, job_id, action_id, source)
-        )
+        payload = {
+          "pr_url" => pr_url,
+          "job_id" => job_id,
+          "canonical_action_id" => action_id,
+          "commit_sha" => patch.commit_sha
+        }
+        task_path = execute_handoff.call(
+          phase: "review_handoff", payload: payload
+        ) do
+          @review_handoff.enqueue(
+            finding: finding, patch: patch, pr_url: pr_url,
+            now: Time.now, mandatory: true,
+            context: handoff_context(thesis, patch, job_id, action_id, source)
+          )
+        end
         unless task_path
           return result(
             failure_outcome, false, pr_url: pr_url,
@@ -325,6 +359,12 @@ module Hive
         result(
           success_outcome, true, pr_url: pr_url, review_task_path: task_path,
           receipts: { "pr_url" => pr_url, "review_task_path" => task_path }
+        )
+      rescue Hive::RefactorPatrol::EffectDenied,
+             Hive::RefactorPatrol::EffectReconciliationRequired => e
+        result(
+          failure_outcome, false, pr_url: pr_url,
+          receipts: { "pr_url" => pr_url, "handoff_error" => e.message }
         )
       rescue Hive::Patrol::ReviewHandoff::Conflict, ArgumentError => e
         # Permanent failures: ReviewHandoff raises ArgumentError for
@@ -369,7 +409,8 @@ module Hive
 
       def exact_remote_head?(patch, remote_url)
         @gh.remote_branch_oid(
-          patch.worktree_path, patch.branch, cfg: @cfg, remote: remote_url
+          patch.worktree_path, patch.branch, cfg: @cfg, remote: remote_url,
+          managed: true
         ) == patch.commit_sha
       end
 

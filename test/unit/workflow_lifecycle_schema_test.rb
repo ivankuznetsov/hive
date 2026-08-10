@@ -13,13 +13,61 @@ class WorkflowLifecycleSchemaTest < Minitest::Test
     end
 
     SCHEMAS.each do |name|
-      payload = {
+      payload = if name == "hive-workflow-publish"
+        {
+          "schema" => name, "schema_version" => 2, "ok" => false,
+          "error_class" => "PublishOfflineError", "error_kind" => "offline",
+          "exit_code" => 69, "message" => "unavailable", "retryable" => true,
+          "package_digest" => "a" * 64, "release_digest" => "b" * 64,
+          "last_completed_step" => "validated"
+        }
+      else
+        {
         "schema" => name, "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch(name), "ok" => false,
         "error_class" => "RegistryError", "error_kind" => "registry",
         "exit_code" => 69, "message" => "unavailable"
-      }
+        }
+      end
       assert schemer(name).valid?(payload), "#{name} must accept the shared error envelope"
     end
+  end
+
+  def test_publish_error_arms_bind_kind_exit_code_retryability_and_recovery_fields
+    valid = [
+      [ "validation", 64, false, {} ],
+      [ "authentication", 78, false, {} ],
+      [ "configuration", 78, false, {} ],
+      [ "offline", 69, true, recovery_identity ],
+      [ "immutable_conflict", 1, false, {} ],
+      [ "remote_ambiguous", 75, true, recovery_identity ],
+      [ "internal", 70, false, {} ]
+    ]
+
+    valid.each do |kind, exit_code, retryable, extras|
+      payload = publish_error(kind, exit_code, retryable).merge(extras)
+      assert schemer("hive-workflow-publish").valid?(payload), "#{kind} must validate"
+
+      refute schemer("hive-workflow-publish").valid?(payload.merge("exit_code" => 1_000)),
+             "#{kind} must bind its process exit code"
+      refute schemer("hive-workflow-publish").valid?(payload.merge("retryable" => !retryable)),
+             "#{kind} must bind retryability"
+    end
+  end
+
+  def test_publish_schema_rejects_invalid_semver_and_accepts_structured_lint_evidence
+    payload = Marshal.load(Marshal.dump(success_payloads.fetch("hive-workflow-publish")))
+    payload["version"] = "01.0.0"
+    refute schemer("hive-workflow-publish").valid?(payload)
+
+    payload["version"] = "1.0.0"
+    payload["warnings"] = [ {
+      "rule_id" => "permission.broad-declaration",
+      "severity" => "warning", "path" => "manifest.yml",
+      "line" => 1, "column" => 1, "message" => "review required",
+      "review_required" => true, "suppression_allowed" => true,
+      "fingerprint" => "f" * 64, "suppression_requested" => false
+    } ]
+    assert schemer("hive-workflow-publish").valid?(payload)
   end
 
   def test_lifecycle_schemas_reject_incomplete_and_open_envelopes
@@ -134,10 +182,12 @@ class WorkflowLifecycleSchemaTest < Minitest::Test
         "warnings" => [ "cleanup failed after selection changed" ]
       },
       "hive-workflow-publish" => {
-        "schema" => "hive-workflow-publish", "schema_version" => 1, "ok" => true,
-        "status" => "pending_review", "name" => "demo", "version" => "1.0.0",
-        "manifest_digest" => "c" * 64, "warnings" => [],
-        "pr_url" => "https://example.test/pull/1", "listed" => false
+        "schema" => "hive-workflow-publish", "schema_version" => 2, "ok" => true,
+        "state" => "pending_review", "freshness" => "current",
+        "name" => "demo", "version" => "1.0.0",
+        "package_digest" => "b" * 64, "release_digest" => "c" * 64, "warnings" => [],
+        "observed_at" => "2026-07-21T12:00:00Z",
+        "pr_url" => "https://github.com/honeycomb-registry/workflows/pull/1"
       }
     }
   end
@@ -148,5 +198,21 @@ class WorkflowLifecycleSchemaTest < Minitest::Test
       "agent" => "claude", "model" => nil, "effort" => nil,
       "profile_fingerprint" => "e" * 64, "policy_fingerprint" => "f" * 64
     }
+  end
+
+  def publish_error(kind, exit_code, retryable)
+    {
+      "schema" => "hive-workflow-publish", "schema_version" => 2, "ok" => false,
+      "error_class" => "PublishError", "error_kind" => kind,
+      "exit_code" => exit_code, "message" => "failed", "retryable" => retryable
+    }
+  end
+
+  def digest_identity
+    { "package_digest" => "a" * 64, "release_digest" => "b" * 64 }
+  end
+
+  def recovery_identity
+    digest_identity.merge("last_completed_step" => "validated")
   end
 end

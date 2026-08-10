@@ -1,6 +1,4 @@
 require "hive"
-require "time"
-require "hive/archive_filter"
 require "hive/commands/status"
 
 module Hive
@@ -24,14 +22,17 @@ module Hive
       # ("hive migrate" when legacy_stage_dirs is non-empty; nil
       # otherwise) — agent-facing parity of the text recovery hint.
       ProjectView = Data.define(:name, :path, :hive_state_path, :error, :rows,
-                                :legacy_stage_dirs, :legacy_migrate_command) do
+                                :legacy_stage_dirs, :legacy_migrate_command,
+                                :hidden_archived_task_count) do
         # `legacy_stage_dirs` defaults to `[]` and `legacy_migrate_command`
         # to nil so existing test factories (predating the fields) can keep
         # building ProjectView with the original 5-keyword shape.
         # Production callers in this file always pass them explicitly.
-        def initialize(legacy_stage_dirs: [].freeze, legacy_migrate_command: nil, **rest)
+        def initialize(legacy_stage_dirs: [].freeze, legacy_migrate_command: nil,
+                       hidden_archived_task_count: 0, **rest)
           super(legacy_stage_dirs: legacy_stage_dirs,
-                legacy_migrate_command: legacy_migrate_command, **rest)
+                legacy_migrate_command: legacy_migrate_command,
+                hidden_archived_task_count: hidden_archived_task_count, **rest)
         end
       end
 
@@ -64,6 +65,7 @@ module Hive
         :conditions,
         :condition_history,
         :evidence,
+        :closure,
         :condition_overrides,
         :condition_gate,
         :condition_migration,
@@ -89,6 +91,7 @@ module Hive
         :action_label,
         :suggested_command,
         :next_action,
+        :outcomes,
         :diagnostic,
         :live_task_lock,
         :task_lock_pid,
@@ -110,16 +113,19 @@ module Hive
         # unanswered_questions defaults to 0 so payloads / test factories
         # that predate issue #270 keep working; production payloads always
         # emit the integer explicitly.
+        # outcomes defaults to [] for pre-human-stage payloads and factories;
+        # current status payloads always emit the descriptor-derived array.
         def initialize(id: nil, display_name: nil, workflow: nil, worktree_path: nil,
                        pr_url: nil, attempt_id: nil, task_generation: nil,
                        condition_task_generation: nil, commit_generation: nil,
                        current_attempt: nil, conditions: [], condition_history: [],
-                       evidence: [], condition_overrides: [], condition_gate: nil, condition_migration: nil,
+                       evidence: [], closure: nil, condition_overrides: [],
+                       condition_gate: nil, condition_migration: nil,
                        condition_provenance: {}, shadow_audit: {}, condition_warning: nil,
                        observation_mtime: nil, folder_mtime: nil, live_task_lock: false,
                        task_lock_pid: nil, task_lock_process_start_time: nil, task_lock_id: nil,
                        implementation_identity: nil,
-                       unanswered_questions: 0, depends_on: nil,
+                       unanswered_questions: 0, outcomes: [], depends_on: nil,
                        blocked_by: nil, dependency_stage: nil,
                        blocked: false, admission_error: nil, held: nil, **rest)
           super(id: id, display_name: display_name,
@@ -139,6 +145,7 @@ module Hive
                 conditions: conditions,
                 condition_history: condition_history,
                 evidence: evidence,
+                closure: closure,
                 condition_overrides: condition_overrides,
                 condition_gate: condition_gate,
                 condition_migration: condition_migration,
@@ -153,25 +160,35 @@ module Hive
                 task_lock_process_start_time: task_lock_process_start_time,
                 task_lock_id: task_lock_id,
                 implementation_identity: implementation_identity,
-                unanswered_questions: unanswered_questions, **rest)
+                unanswered_questions: unanswered_questions,
+                outcomes: outcomes, **rest)
         end
       end
 
-      attr_reader :generated_at, :projects
+      attr_reader :generated_at, :projects, :archive_projects
 
-      def initialize(generated_at:, projects:)
+      def initialize(generated_at:, projects:, archive_projects: [].freeze)
         @generated_at = generated_at
         @projects = projects.freeze
+        @archive_projects = archive_projects.freeze
         freeze
       end
 
       # Tolerant constructor: missing keys default to nil; unknown keys
       # ignored. `generated_at` is preserved verbatim (string from JSON).
-      def self.from_payload(payload)
+      def self.from_payload(payload = nil, archive_payload: nil, **payload_keywords)
+        payload = payload_keywords if payload.nil? && !payload_keywords.empty?
         payload ||= {}
         project_payloads = Array(payload["projects"])
         projects = project_payloads.map { |p| build_project_view(p) }
-        new(generated_at: payload["generated_at"], projects: projects)
+        archive_projects = Array(archive_payload && archive_payload["projects"]).map do |project|
+          build_project_view(project)
+        end
+        new(
+          generated_at: payload["generated_at"],
+          projects: projects,
+          archive_projects: archive_projects
+        )
       end
 
       # Rows are sorted by `Status::ACTION_LABEL_ORDER` at construction so
@@ -198,8 +215,15 @@ module Hive
           error: payload["error"],
           rows: sorted.freeze,
           legacy_stage_dirs: Array(payload["legacy_stage_dirs"]).freeze,
-          legacy_migrate_command: payload["legacy_migrate_command"]
+          legacy_migrate_command: payload["legacy_migrate_command"],
+          hidden_archived_task_count: normalized_hidden_count(
+            payload["hidden_archived_task_count"]
+          )
         ).freeze
+      end
+
+      def self.normalized_hidden_count(value)
+        value.is_a?(Integer) && value >= 0 ? value : 0
       end
 
       def self.build_row(payload, project_name)
@@ -228,6 +252,7 @@ module Hive
           conditions: Array(payload["conditions"]).freeze,
           condition_history: Array(payload["condition_history"]).freeze,
           evidence: Array(payload["evidence"]).freeze,
+          closure: payload["closure"],
           condition_overrides: Array(payload["condition_overrides"]).freeze,
           condition_gate: payload["condition_gate"],
           condition_migration: payload["condition_migration"],
@@ -247,6 +272,7 @@ module Hive
           action_label: payload["action_label"],
           suggested_command: payload["suggested_command"],
           next_action: payload["next_action"],
+          outcomes: Array(payload["outcomes"]).freeze,
           diagnostic: payload["diagnostic"],
           live_task_lock: payload["live_task_lock"] == true,
           task_lock_pid: payload["task_lock_pid"],
@@ -261,6 +287,24 @@ module Hive
       # JSON row order. The grid view consumes this directly.
       def rows
         @projects.flat_map(&:rows)
+      end
+
+      # Dedicated archive rows come from an explicitly unfiltered archive
+      # payload. They never participate in ordinary cursor/filter behavior.
+      def archive_rows
+        @archive_projects.flat_map(&:rows)
+      end
+
+      def hidden_archived_task_count(scope: 0)
+        scoped =
+          if scope.zero?
+            @projects
+          elsif scope.between?(1, @projects.size)
+            [ @projects[scope - 1] ]
+          else
+            []
+          end
+        scoped.sum(&:hidden_archived_task_count)
       end
 
       # Case-insensitive substring filter on each row's slug, display name,
@@ -287,22 +331,15 @@ module Hive
             error: project.error,
             rows: matched.freeze,
             legacy_stage_dirs: project.legacy_stage_dirs,
-            legacy_migrate_command: project.legacy_migrate_command
+            legacy_migrate_command: project.legacy_migrate_command,
+            hidden_archived_task_count: project.hidden_archived_task_count
           ).freeze
         end
-        self.class.new(generated_at: @generated_at, projects: filtered)
-      end
-
-      def without_old_archived(now: Time.now)
-        filtered = @projects.map do |project|
-          rows = project.rows.reject { |row| old_archived_row?(row, now: now) }
-          project.with(rows: rows.freeze)
-        end
-        self.class.new(generated_at: @generated_at, projects: filtered)
-      end
-
-      def hidden_old_archived_count(now: Time.now)
-        rows.count { |row| old_archived_row?(row, now: now) }
+        self.class.new(
+          generated_at: @generated_at,
+          projects: filtered,
+          archive_projects: @archive_projects
+        )
       end
 
       # `n == 0` is "all projects" (returns self). `n` between 1 and
@@ -313,21 +350,23 @@ module Hive
         return self if n.zero?
 
         if n.between?(1, @projects.size)
-          self.class.new(generated_at: @generated_at, projects: [ @projects[n - 1] ])
+          self.class.new(
+            generated_at: @generated_at,
+            projects: [ @projects[n - 1] ],
+            archive_projects: [ @archive_projects[n - 1] ].compact
+          )
         else
-          self.class.new(generated_at: @generated_at, projects: [])
+          self.class.new(generated_at: @generated_at, projects: [], archive_projects: [])
         end
       end
 
       # The canonical "what the operator can see and act on" projection:
-      # scope to the focused project, apply the slug filter, then drop
-      # old archived rows. Centralised so every cursor/render site shares
-      # one definition — a projection that forgets `.without_old_archived`
-      # would let the cursor act on a hidden row.
-      def visible_projection(scope:, filter:, now: Time.now)
+      # scope to the focused project, then apply the slug filter. Archive
+      # retention has already been applied by Status; Snapshot never derives
+      # visibility from row mtimes.
+      def visible_projection(scope:, filter:, now: nil)
         scope_to_project_index(scope)
           .filter_by_slug(filter)
-          .without_old_archived(now: now)
       end
 
       # `cursor` is `[project_idx, row_idx]` (both 0-based) or nil. Returns
@@ -344,29 +383,6 @@ module Hive
         return nil unless row_idx.between?(0, project_rows.size - 1)
 
         project_rows[row_idx]
-      end
-
-      private
-
-      def old_archived_row?(row, now:)
-        Hive::ArchiveFilter.hide?(
-          stage: row.stage,
-          mtime: parse_time(row.mtime),
-          folder_mtime: parse_folder_mtime(row.folder_mtime),
-          now: now
-        )
-      end
-
-      def parse_folder_mtime(value)
-        parse_time(value)
-      end
-
-      def parse_time(value)
-        return nil if value.nil? || value.to_s.strip.empty?
-
-        Time.iso8601(value.to_s)
-      rescue ArgumentError
-        nil
       end
     end
   end

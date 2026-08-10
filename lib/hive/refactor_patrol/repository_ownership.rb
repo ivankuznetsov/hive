@@ -2,6 +2,7 @@ require "hive/config"
 require "hive/gh"
 require "hive/refactor_patrol/job_store"
 require "hive/refactor_patrol/publication_attempt"
+require "hive/workflows"
 require "uri"
 
 module Hive
@@ -150,7 +151,9 @@ module Hive
           )
         end
 
-        if cfg.dig("refactor_patrol", "enabled") == true
+        if !Hive::Workflows.coding_id?(cfg.dig("default_workflow"))
+          decision(:blocked, "architecture_patrol_disabled")
+        elsif cfg.dig("refactor_patrol", "enabled") == true
           decision(:full)
         elsif continuation
           decision(:continuation_only, "architecture_patrol_disabled")
@@ -210,7 +213,10 @@ module Hive
           unresolved << registration_evidence(entry).merge("error" => "#{e.class}: #{e.message}")
           nil
         end
-        enabled = configured.select { |_entry, cfg| cfg.dig("refactor_patrol", "enabled") == true }
+        enabled = configured.select do |_entry, cfg|
+          Hive::Workflows.coding_id?(cfg.dig("default_workflow")) &&
+            cfg.dig("refactor_patrol", "enabled") == true
+        end
         [ enabled, unresolved, registered, configured ]
       rescue StandardError => e
         unresolved << registration_evidence(target).merge("error" => "#{e.class}: #{e.message}")
@@ -237,17 +243,20 @@ module Hive
       end
 
       def stored_continuation_identities(entry, _cfg)
-        JobStore.new(entry.fetch("path")).each_job.filter_map do |aggregate|
+        JobStore.new(
+          entry.fetch("path"),
+          hive_state_path: entry["hive_state_path"]
+        ).each_job.filter_map do |aggregate|
           self.class.identity_from_source(aggregate.fetch("source")) if
             self.class.remote_continuation_evidence?(aggregate)
         end.uniq
       end
 
       def normalized_entry(entry)
-        {
+        entry.merge(
           "name" => entry.fetch("name").to_s,
           "path" => File.expand_path(entry.fetch("path"))
-        }
+        )
       end
 
       def entry_key(entry)

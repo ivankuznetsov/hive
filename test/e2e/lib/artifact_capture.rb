@@ -173,7 +173,12 @@ module Hive
       end
 
       def remove_live_tui_subprocess_diagnostics
-        live_dir = File.join(@scenario_dir, "tui-subprocess-live")
+        return unless @tui_log_dir
+
+        scenario_root = "#{File.expand_path(@scenario_dir)}#{File::SEPARATOR}"
+        live_dir = File.expand_path(@tui_log_dir)
+        return unless live_dir.start_with?(scenario_root)
+
         FileUtils.rm_rf(live_dir)
       end
 
@@ -216,7 +221,7 @@ module Hive
           Dir.glob("**/*", File::FNM_DOTMATCH)
             .reject do |path|
               path == "." || path == ".." || path == ".git" ||
-                path.start_with?(".git/") || path.include?("/.git/")
+              path.start_with?(".git/") || path.include?("/.git/") || path.end_with?("/.git")
             end
             .sort
             .join("\n") + "\n"
@@ -302,7 +307,7 @@ module Hive
         {
           "path" => relative,
           "size" => File.size(path),
-          "sha256" => Digest::SHA256.file(path).hexdigest
+          "sha256" => ::Digest::SHA256.file(path).hexdigest
         }
       rescue StandardError => e
         @capture_errors << { "label" => "manifest:#{relative || path}", "error" => "#{e.class}: #{e.message}" }

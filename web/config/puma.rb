@@ -1,6 +1,8 @@
 # This configuration file will be evaluated by Puma. The top-level methods that
 # are invoked here are part of Puma's configuration DSL. For more information
 # about methods provided by the DSL, see https://puma.io/puma/Puma/DSL.html.
+require "hive/web/request_limits"
+require "hive/web/puma_request_limits"
 #
 # Puma starts a configurable number of processes (workers) and each process
 # serves each request in a thread from an internal thread pool.
@@ -27,6 +29,13 @@
 # threads. This includes Active Record's `pool` parameter in `database.yml`.
 threads_count = ENV.fetch("RAILS_MAX_THREADS", 3)
 threads threads_count, threads_count
+
+# Reject oversized bodies in Puma, before Rack parses/spools multipart params
+# or assigns a Rails request thread. The bound admits the complete valid idea
+# envelope (8 × 10 MiB images plus multipart/text overhead). Browser forms use
+# Content-Length; unbounded chunked bodies are rejected at the header boundary.
+http_content_length_limit Hive::Web::RequestLimits::MAX_BODY_BYTES
+Hive::Web::PumaRequestLimits.install!
 
 # Specifies the `port` that Puma will listen on to receive requests; default is 3000.
 port ENV.fetch("PORT", 3000)

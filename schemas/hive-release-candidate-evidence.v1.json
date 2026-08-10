@@ -1,0 +1,295 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://hivecli.dev/schemas/hive-release-candidate-evidence.v1.json",
+  "title": "Hive release candidate evidence v1",
+  "oneOf": [
+    { "$ref": "#/definitions/local_evidence" },
+    { "$ref": "#/definitions/trusted_remote_evidence" }
+  ],
+  "definitions": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "candidate_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "gate_status": {
+      "enum": ["pending", "running", "passed", "failed", "skipped", "unavailable"]
+    },
+    "next_action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "argv"],
+      "properties": {
+        "kind": { "type": "string" },
+        "argv": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "gate_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "class", "status", "attempt_id", "reason", "evidence_path", "details"],
+      "properties": {
+        "name": { "type": "string" },
+        "class": { "enum": ["blocking", "advisory"] },
+        "status": { "$ref": "#/definitions/gate_status" },
+        "attempt_id": { "type": "string" },
+        "reason": { "type": ["string", "null"] },
+        "evidence_path": { "type": ["string", "null"] },
+        "details": { "type": ["object", "null"] }
+      }
+    },
+    "local_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "candidate_sha",
+        "attempt_id",
+        "predecessor_attempt_id",
+        "selection",
+        "identity",
+        "trust_scope",
+        "scope_status",
+        "qa_status",
+        "blockers",
+        "candidate_version",
+        "baseline_version",
+        "dirty_checkout",
+        "started_at",
+        "finished_at",
+        "gates",
+        "effective_gate_set",
+        "gate_registry",
+        "artifacts",
+        "coverage_selection",
+        "baseline_catalog",
+        "environment",
+        "trusted_remote",
+        "summary",
+        "next_action"
+      ],
+      "properties": {
+        "schema": { "const": "hive-release-candidate-evidence" },
+        "schema_version": { "const": 1 },
+        "candidate_sha": { "$ref": "#/definitions/candidate_sha" },
+        "attempt_id": {
+          "type": "string",
+          "pattern": "^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$"
+        },
+        "predecessor_attempt_id": {
+          "anyOf": [
+            { "type": "null" },
+            {
+              "type": "string",
+              "pattern": "^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}$"
+            }
+          ]
+        },
+        "selection": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "selected_gates", "rejected_gates"],
+          "properties": {
+            "mode": { "type": "string" },
+            "selected_gates": {
+              "type": "array",
+              "items": { "type": "string" },
+              "uniqueItems": true
+            },
+            "rejected_gates": {
+              "type": "array",
+              "items": { "type": "string" },
+              "uniqueItems": true
+            }
+          }
+        },
+        "identity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "candidate_sha",
+            "artifact_manifest",
+            "coverage_catalog",
+            "baseline_catalog",
+            "baseline_dependency_closure",
+            "baseline_cache",
+            "action_lock",
+            "workflow",
+            "tool",
+            "schema",
+            "fingerprint"
+          ],
+          "properties": {
+            "candidate_sha": { "$ref": "#/definitions/candidate_sha" },
+            "artifact_manifest": { "$ref": "#/definitions/sha256" },
+            "coverage_catalog": { "$ref": "#/definitions/sha256" },
+            "baseline_catalog": { "$ref": "#/definitions/sha256" },
+            "baseline_dependency_closure": { "$ref": "#/definitions/sha256" },
+            "baseline_cache": { "$ref": "#/definitions/sha256" },
+            "action_lock": { "$ref": "#/definitions/sha256" },
+            "workflow": { "$ref": "#/definitions/sha256" },
+            "tool": { "$ref": "#/definitions/sha256" },
+            "schema": { "$ref": "#/definitions/sha256" },
+            "fingerprint": { "$ref": "#/definitions/sha256" }
+          }
+        },
+        "trust_scope": { "const": "local" },
+        "scope_status": { "enum": ["passed", "failed", "partial", "unavailable"] },
+        "qa_status": { "enum": ["qa_blocked", "partial"] },
+        "blockers": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
+        "candidate_version": { "type": "string", "minLength": 1 },
+        "baseline_version": {
+          "anyOf": [
+            { "type": "null" },
+            { "type": "string", "minLength": 1 }
+          ]
+        },
+        "dirty_checkout": { "type": "boolean" },
+        "started_at": { "type": "string", "format": "date-time" },
+        "finished_at": { "type": "string", "format": "date-time" },
+        "gates": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/gate_result" }
+        },
+        "effective_gate_set": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "attempt_id", "status"],
+            "properties": {
+              "name": { "type": "string" },
+              "attempt_id": { "type": "string" },
+              "status": { "$ref": "#/definitions/gate_status" }
+            }
+          }
+        },
+        "gate_registry": { "type": "array", "items": { "type": "object" } },
+        "artifacts": { "type": "array", "items": { "type": "object" } },
+        "coverage_selection": { "type": "object" },
+        "baseline_catalog": { "type": "object" },
+        "environment": {
+          "type": "object",
+          "required": ["ruby", "platform"],
+          "properties": {
+            "ruby": { "type": "string" },
+            "platform": { "type": "string" }
+          }
+        },
+        "trusted_remote": { "type": "null" },
+        "summary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["requested", "effective", "passed", "failed", "unavailable", "partial"],
+          "properties": {
+            "requested": { "type": "integer", "minimum": 0 },
+            "effective": { "type": "integer", "minimum": 0 },
+            "passed": { "type": "integer", "minimum": 0 },
+            "failed": { "type": "integer", "minimum": 0 },
+            "unavailable": { "type": "integer", "minimum": 0 },
+            "partial": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "next_action": { "$ref": "#/definitions/next_action" }
+      }
+    },
+    "trusted_remote_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "trust_scope",
+        "repository",
+        "request_id",
+        "candidate_sha",
+        "workflow_sha",
+        "run_id",
+        "run_attempt",
+        "action_lock_sha256",
+        "artifact",
+        "scope_status",
+        "qa_status",
+        "blockers",
+        "effective_gate_set",
+        "ordinary_ci",
+        "advisory",
+        "provenance",
+        "summary",
+        "next_action"
+      ],
+      "properties": {
+        "schema": { "const": "hive-release-candidate-evidence" },
+        "schema_version": { "const": 1 },
+        "trust_scope": { "const": "trusted_remote" },
+        "repository": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+        },
+        "request_id": { "type": "string", "minLength": 1 },
+        "candidate_sha": { "$ref": "#/definitions/candidate_sha" },
+        "workflow_sha": { "$ref": "#/definitions/candidate_sha" },
+        "run_id": { "type": "integer", "minimum": 1 },
+        "run_attempt": { "type": "integer", "minimum": 1 },
+        "action_lock_sha256": { "$ref": "#/definitions/sha256" },
+        "artifact": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "digest",
+            "name",
+            "producer_run_id",
+            "producer_run_attempt"
+          ],
+          "properties": {
+            "id": { "type": "integer", "minimum": 1 },
+            "digest": {
+              "type": "string",
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            },
+            "name": { "type": "string", "minLength": 1 },
+            "producer_run_id": { "type": "integer", "minimum": 1 },
+            "producer_run_attempt": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "scope_status": { "enum": ["passed", "failed"] },
+        "qa_status": { "enum": ["qa_ready", "qa_blocked"] },
+        "blockers": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
+        "effective_gate_set": {
+          "type": "array",
+          "items": { "type": "object" }
+        },
+        "ordinary_ci": {
+          "anyOf": [
+            { "type": "null" },
+            { "type": "object" }
+          ]
+        },
+        "advisory": {
+          "type": "array",
+          "items": { "type": "object" }
+        },
+        "provenance": { "type": "object" },
+        "summary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["required", "passed", "failed", "advisory"],
+          "properties": {
+            "required": { "type": "integer", "minimum": 0 },
+            "passed": { "type": "integer", "minimum": 0 },
+            "failed": { "type": "integer", "minimum": 0 },
+            "advisory": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "next_action": { "$ref": "#/definitions/next_action" }
+      }
+    }
+  }
+}

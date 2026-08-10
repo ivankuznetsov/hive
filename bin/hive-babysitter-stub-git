@@ -73,7 +73,7 @@ GREP_VALUE_TAKING_LONG = %w[
 ].freeze
 HELP_DISPATCH_OPTIONS = %w[--help --man --web --html --info].freeze
 SIGNATURE_FORMAT_SUBCOMMANDS = %w[log show rev-list].freeze
-SHOW_SIGNATURE_SUBCOMMANDS = %w[log show].freeze
+SHOW_SIGNATURE_SUBCOMMANDS = %w[log show rev-list].freeze
 REMERGE_DIFF_FORMATS = %w[remerge r].freeze
 
 # Walk command arguments in the same order git parses them: a `--` token only becomes the
@@ -145,12 +145,9 @@ def unsafe_read_option?(subcommand, arg, next_arg = nil)
   return true if help_dispatch_option?(arg)
   # `--ext-diff` runs external diff drivers — an exec seam on any subcommand that honors it.
   return true if arg == "--ext-diff"
-  # `--textconv` runs the repo-local `diff.<driver>.textconv` command. Git accepts any
-  # unambiguous prefix of a long option, so `--text`, `--textc`, `--textco`, ... all reach
-  # `--textconv` (e.g. `git cat-file --text`, `git grep --textc`). Default-deny every prefix
-  # form down to `--t`, not just the spelled-out flag. `--no-textconv` is safe and is not a
-  # prefix of `--textconv`, so it stays allowed.
-  return true if textconv_abbreviation?(arg)
+  # `--textconv` runs the repo-local `diff.<driver>.textconv` command. Git accepts
+  # unambiguous long-option prefixes, except where a command owns an exact --text option.
+  return true if textconv_abbreviation?(subcommand, arg)
   # Verbose status renders a diff and can therefore run a repository-configured textconv
   # helper. Reject the repeated/clustered short flag and every long abbreviation Git accepts.
   return true if verbose_status_option?(subcommand, arg)
@@ -230,10 +227,12 @@ def submodule_diff_option?(arg, next_arg)
     (arg == "--submodule" && next_arg.to_s == "diff")
 end
 
-def textconv_abbreviation?(arg)
-  # `--t`, `--te`, `--tex`, `--text`, `--textc`, ... `--textconv` are all prefixes git accepts
-  # as the `--textconv` long option. start_with?("--t") pins this to the textconv branch (min
-  # length `--t`); start_with?(arg) confirms arg is itself a prefix of `--textconv`.
+def textconv_abbreviation?(subcommand, arg)
+  # diff/log/show define exact `--text` (`-a`), so Git does not resolve that
+  # spelling to --textconv there. Longer prefixes such as --textc still reach
+  # textconv, while cat-file/grep have no exact --text and remain blocked.
+  return false if arg == "--text" && %w[diff log show].include?(subcommand)
+
   arg.start_with?("--t") && "--textconv".start_with?(arg)
 end
 
@@ -284,10 +283,6 @@ end
 
 def env_set?(name)
   !ENV.fetch(name, "").empty?
-end
-
-def scrub_dynamic_loader_env!
-  ENV.keys.grep(/\A(?:LD|DYLD)_/).each { |key| ENV.delete(key) }
 end
 
 def read_only_remote?(rest)
@@ -404,8 +399,7 @@ end
 unsafe_global, rest = split_global_options(argv)
 
 if unsafe_global || unsafe_command_options?(rest) || unsafe_env? || !read_only?(rest)
-  log_skip("git", argv)
-  warn "[dry-run] git #{escaped_argv(argv)} skipped"
+  warn log_skip("git", argv)
   exit 0
 end
 
@@ -424,7 +418,7 @@ end
 # screening structurally cannot see them. Scrub the whole side-effect-capable
 # family before handing off, then install only our hermetic config controls.
 scrub_dynamic_loader_env!
-%w[GIT_ASKPASS GIT_EXEC_PATH GIT_EXTERNAL_DIFF GIT_PAGER GIT_SSH GIT_SSH_COMMAND PAGER SSH_ASKPASS].each { |key| ENV.delete(key) }
+%w[GIT_ASKPASS GIT_EXEC_PATH GIT_EXTERNAL_DIFF GIT_PAGER GIT_PROXY_COMMAND GIT_SSH GIT_SSH_COMMAND PAGER SSH_ASKPASS].each { |key| ENV.delete(key) }
 ENV.keys.grep(/\AGIT_CONFIG/).each { |key| ENV.delete(key) }
 ENV.keys.grep(/\AGIT_TRACE/).each { |key| ENV.delete(key) }
 ENV["HOME"] = File::NULL

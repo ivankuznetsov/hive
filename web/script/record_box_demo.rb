@@ -17,6 +17,7 @@ require "timeout"
 require "socket"
 require "tmpdir"
 require "yaml"
+require_relative "support/capture_server"
 
 WEB_ROOT = File.expand_path("..", __dir__)
 REPO_ROOT = File.expand_path("../..", __dir__)
@@ -167,29 +168,17 @@ cfg["worktree_root"] = File.join(sandbox, "worktrees")
 File.write(project_cfg, cfg.to_yaml)
 
 puts "==> booting rails + daemon"
-port = TCPServer.open(0) { |s| s.addr[1] }
-storage = File.join(sandbox, "storage")
-server_env = env_base.merge("HIVE_WEB_STORAGE_DIR" => storage, "RAILS_ENV" => "development",
-                            "BUNDLE_GEMFILE" => File.join(WEB_ROOT, "Gemfile"))
-run!(server_env, "bin/rails", "db:prepare", chdir: WEB_ROOT)
-server_pid = Process.spawn(server_env, "bin/rails", "server", "-p", port.to_s,
-                           "-P", File.join(sandbox, "server.pid"),
-                           chdir: WEB_ROOT, out: File.join(sandbox, "server.log"),
-                           err: File.join(sandbox, "server.log"))
+capture_server = HiveDemo::CaptureServer.start(
+  source_root: REPO_ROOT,
+  runtime_root: File.join(sandbox, "capture-runtime"),
+  log_path: File.join(sandbox, "server.log")
+)
 daemon_pid = Process.spawn(env_base, "bundle", "exec", "ruby", "-Ilib", "bin/hive",
                            "daemon", "start", "--foreground",
                            chdir: REPO_ROOT, out: File.join(sandbox, "daemon.log"),
                            err: File.join(sandbox, "daemon.log"))
 
-base = "http://127.0.0.1:#{port}"
-healthy = false
-60.times do
-  healthy = (Net::HTTP.get_response(URI("#{base}/health")).is_a?(Net::HTTPSuccess) rescue false)
-  break if healthy
-
-  sleep 1
-end
-raise "rails server never became healthy — #{File.join(sandbox, 'server.log')}" unless healthy
+base = capture_server.base_url
 
 daemon_events = File.join(hive_home, "logs", "daemon.log")
 
@@ -213,7 +202,9 @@ end
 
 video = nil
 begin
-  Playwright.create(playwright_cli_executable_path: "npx playwright") do |pw|
+  HiveDemo::BrowserTools.media_tools!
+  playwright_cli = HiveDemo::BrowserTools.playwright_cli!(WEB_ROOT)
+  Playwright.create(playwright_cli_executable_path: playwright_cli) do |pw|
     browser = pw.chromium.launch(headless: true)
     context = browser.new_context(
       viewport: { width: 1280, height: 800 },
@@ -225,7 +216,7 @@ begin
 
     puts "==> recording"
     $stdout.flush
-    page.goto("#{base}/dev_login?as=ivan")
+    page.goto(base)
     page.wait_for_selector(".composer textarea")
     sleep 3.0
 
@@ -303,7 +294,7 @@ begin
       record_video_size: { width: 1280, height: 800 }
     )
     page = context.new_page
-    page.goto("#{base}/dev_login?as=ivan")
+    page.goto(base)
     page.wait_for_selector(".composer textarea")
     page.goto("#{base}/tasks/demo-app/#{slug}")
     page.wait_for_selector(".stage-badge:has-text('open-pr')", timeout: 15_000)
@@ -318,8 +309,8 @@ begin
   end
 ensure
   Process.kill("TERM", daemon_pid) if daemon_pid
-  Process.kill("TERM", server_pid) if server_pid
-  Process.wait(server_pid) rescue nil
+  Process.wait(daemon_pid) rescue nil
+  capture_server&.stop
 end
 
 video_b = @video_b

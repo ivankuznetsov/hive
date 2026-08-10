@@ -1,10 +1,12 @@
 require "open3"
 require "fileutils"
+require "securerandom"
 require "yaml"
 require "hive/config"
 require "hive/git_ref"
 require "hive/git_ops"
 require "hive/atomic_file"
+require "hive/agent_git_gate"
 
 module Hive
   class Worktree
@@ -199,6 +201,7 @@ module Hive
       expected = self.class.run_materialize_git!(
         @project_root, "rev-parse", "--verify", "#{base_sha}^{commit}"
       ).strip
+      recover_broken_exact_registration!
 
       if exists?
         checked_out = self.class.run_materialize_git!(path, "branch", "--show-current").strip
@@ -227,30 +230,15 @@ module Hive
     # detached, clean, and pinned to the same commit.
     def create_detached_exact!(base_sha:)
       FileUtils.mkdir_p(File.dirname(path))
-      expected = self.class.run_materialize_git!(
-        @project_root, "rev-parse", "--verify", "#{base_sha}^{commit}"
-      ).strip
-
-      if exists?
-        assert_detached_exact!(base_sha: expected)
-        return :existing
-      end
-
-      # A killed remove or an external directory cleanup can leave Git's
-      # administrative record behind after the worktree path disappears.
-      # The deterministic analysis slug would otherwise fail every retry with
-      # "already registered" until an operator pruned it manually.
-      if !File.directory?(path) && list_worktree_paths.include?(path)
-        self.class.run_materialize_git!(
-          @project_root, "worktree", "prune", "--expire", "now"
-        )
-      end
-
-      self.class.run_materialize_git!(
-        @project_root, "worktree", "add", "--detach", path, expected
+      receipt = Hive::AgentGitGate.materialize(
+        repository_path: @project_root,
+        oid: base_sha,
+        destination: path,
+        destination_root: File.dirname(path)
       )
-      assert_detached_exact!(base_sha: expected)
-      :created
+      receipt.disposition
+    rescue Hive::AgentGitGate::Error => e
+      raise WorktreeError, e.message
     end
 
     def assert_detached_exact!(base_sha:)
@@ -274,6 +262,60 @@ module Hive
 
       true
     end
+
+    # A killed cleanup or external filesystem repair can leave Git's
+    # registration pointing at a directory whose .git pointer is gone. Such
+    # a path is neither reusable nor addable. Preserve every remaining byte
+    # in a sibling quarantine, prune only the now-missing registration, and
+    # let create_exact! reattach the already-validated branch.
+    def recover_broken_exact_registration!
+      return unless list_worktree_paths.include?(path)
+      return if usable_git_worktree?
+
+      if File.symlink?(path)
+        raise WorktreeError,
+              "broken exact worktree path is a symlink and cannot be recovered: #{path}"
+      end
+      if File.exist?(path)
+        quarantine_root = File.join(File.dirname(path), ".hive-quarantine")
+        FileUtils.mkdir_p(quarantine_root)
+        existing = Dir.glob(
+          File.join(quarantine_root, "#{File.basename(path)}-*")
+        )
+        unless existing.empty?
+          raise WorktreeError,
+                "broken exact worktree has an unresolved prior quarantine: #{existing.min}"
+        end
+        quarantine = File.join(
+          quarantine_root,
+          "#{File.basename(path)}-#{Time.now.utc.strftime('%Y%m%dT%H%M%S')}-#{SecureRandom.hex(4)}"
+        )
+        FileUtils.mv(path, quarantine)
+        warn "[hive] preserved broken exact worktree at #{quarantine}"
+      end
+
+      self.class.run_materialize_git!(
+        @project_root, "worktree", "remove", "--force", path
+      )
+      if list_worktree_paths.include?(path)
+        raise WorktreeError,
+              "broken exact worktree registration could not be removed: #{path}"
+      end
+      true
+    rescue SystemCallError => e
+      raise WorktreeError,
+            "broken exact worktree could not be preserved: #{e.message}"
+    end
+
+    def usable_git_worktree?
+      return false unless File.directory?(path)
+
+      top_level, _err, status = Open3.capture3(
+        "git", "-C", path, "rev-parse", "--show-toplevel"
+      )
+      status.success? && File.expand_path(top_level.strip) == File.expand_path(path)
+    end
+    private :recover_broken_exact_registration!, :usable_git_worktree?
 
     def remove!(path: self.path, force: false)
       args = [ "worktree", "remove" ]
@@ -434,6 +476,64 @@ module Hive
       raise WorktreeError, "worktree.yml is invalid YAML: #{e.message}"
     end
 
+    # Coding-workflow pointer validation for legacy and current tasks. Unlike
+    # read_pointer, this treats the pointer as a trust boundary: it must be a
+    # regular file, resolve to this task's deterministic path and branch, be a
+    # registered worktree of the task's project repository, and actually have
+    # that branch checked out. Older coding pointers do not carry the strict
+    # draft-PR receipt fields, so these live repository checks provide the
+    # equivalent ownership proof without breaking their recovery.
+    def self.read_owned_pointer(task_folder, project_root:, slug:, expected_root:)
+      pointer_path = File.join(task_folder, "worktree.yml")
+      source = File.open(pointer_path, File::RDONLY | File::NOFOLLOW) do |file|
+        raise WorktreeError, "worktree.yml must be a regular file" unless file.stat.file?
+
+        value = file.read(STRICT_POINTER_MAX_BYTES + 1)
+        raise WorktreeError, "worktree.yml exceeds #{STRICT_POINTER_MAX_BYTES} bytes" if value.bytesize > STRICT_POINTER_MAX_BYTES
+
+        value
+      end
+      keys = source.lines.filter_map { |line| line[/\A([A-Za-z_][A-Za-z0-9_]*):(?:\s|$)/, 1] }
+      duplicates = keys.tally.select { |_key, count| count > 1 }.keys
+      raise WorktreeError, "worktree.yml contains duplicate keys: #{duplicates.join(', ')}" unless duplicates.empty?
+
+      raw = YAML.safe_load(source, permitted_classes: [], permitted_symbols: [], aliases: false)
+      raise WorktreeError, "worktree.yml must be a hash" unless raw.is_a?(Hash)
+      missing = %w[path branch].reject { |key| raw.key?(key) && !raw[key].to_s.empty? }
+      raise WorktreeError, "worktree.yml is missing keys: #{missing.join(', ')}" unless missing.empty?
+
+      root = realpath_or_expand(expected_root)
+      expected_path = realpath_or_expand(File.join(root, slug.to_s))
+      path = validate_pointer_path(raw["path"], root)
+      branch = validate_branch_name!(raw["branch"])
+      raise WorktreeError, "worktree.yml path does not belong to task #{slug}" unless path == expected_path
+      raise WorktreeError, "worktree.yml branch does not belong to task #{slug}" unless branch == slug.to_s
+      raise WorktreeError, "worktree #{path} is missing" unless File.directory?(path)
+
+      registered = run_materialize_git!(project_root, "worktree", "list", "--porcelain")
+                   .lines
+                   .filter_map { |line| line.delete_prefix("worktree ").strip if line.start_with?("worktree ") }
+                   .map { |candidate| realpath_or_expand(candidate) }
+      raise WorktreeError, "worktree #{path} is not registered for this project" unless registered.include?(path)
+
+      checked_out = run_materialize_git!(path, "branch", "--show-current").strip
+      raise WorktreeError, "worktree #{path} is on branch #{checked_out.inspect}, expected #{branch}" unless checked_out == branch
+
+      project_common = git_common_dir(project_root)
+      worktree_common = git_common_dir(path)
+      unless project_common == worktree_common
+        raise WorktreeError, "worktree #{path} belongs to a different repository"
+      end
+
+      raw.merge("path" => path, "branch" => branch)
+    rescue Errno::ENOENT
+      raise WorktreeError, "worktree.yml is missing"
+    rescue Errno::ELOOP
+      raise WorktreeError, "worktree.yml must be a regular file, not a symlink"
+    rescue Psych::Exception => e
+      raise WorktreeError, "worktree.yml is invalid YAML: #{e.message}"
+    end
+
     # Base dir under which per-project worktree roots live by default
     # (`<base>/<project>.worktrees`). Overridable via HIVE_WORKTREE_BASE so
     # tests (and relocated setups) never seed the developer's real ~/Dev.
@@ -575,6 +675,12 @@ module Hive
       # Path doesn't exist yet (init pass before mkdir); fall back to lexical.
       File.expand_path(path)
     end
+
+    def self.git_common_dir(path)
+      value = run_materialize_git!(path, "rev-parse", "--git-common-dir").strip
+      realpath_or_expand(File.expand_path(value, path))
+    end
+    private_class_method :git_common_dir
 
     # Run one `git -C <dir>` command for the materialize path and return its
     # stdout. `dir` is the directory git runs in — the repo root for fetch /

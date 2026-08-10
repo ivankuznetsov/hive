@@ -190,6 +190,28 @@ class NewWrapperArgvTest < Minitest::Test
     end
   end
 
+  def test_idempotency_key_after_project_enables_machine_readable_retry
+    with_workflow_project do |home, project_root, project|
+      argv = [
+        "new", project, "--workflow", WORKFLOW_ID,
+        "--idempotency-key", "creator:wrapper:v1", "--json", "idempotent wrapper task"
+      ]
+      first_out, first_err, first_status = run_hive(home, *argv, chdir: project_root)
+      retry_out, retry_err, retry_status = run_hive(home, *argv, chdir: project_root)
+
+      assert first_status.success?, first_err
+      assert retry_status.success?, retry_err
+      first = JSON.parse(first_out)
+      retry_payload = JSON.parse(retry_out)
+      assert_equal true, first.fetch("created")
+      assert_equal false, retry_payload.fetch("created")
+      assert_equal first.fetch("slug"), retry_payload.fetch("slug")
+      folder = only_task_folder(project_root)
+      assert_equal "creator:wrapper:v1", Hive::TaskMeta.read(folder).fetch(:idempotency_key)
+      refute_includes File.read(File.join(folder, "idea.md")), "--idempotency-key"
+    end
+  end
+
   def test_missing_text_after_lifted_workflow_fails_without_creating_task
     with_workflow_project do |home, project_root, project|
       _out, err, status = run_hive(home, "new", project, "--workflow", WORKFLOW_ID, chdir: project_root)

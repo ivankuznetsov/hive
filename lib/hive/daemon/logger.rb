@@ -30,8 +30,10 @@ module Hive
         status_warning
         operational_snapshot_publish_failed
         dispatched
+        completed
         skipped
         debouncing
+        markerless_stalled
         blocked
         child_exited
         child_terminated
@@ -41,22 +43,13 @@ module Hive
         transient_retry
         quarantined
         dry_run
-        merge_watcher_enqueued
-        merge_watcher_polled
-        merge_watcher_dispatched
-        merge_watcher_dropped
-        gh_error
         marker_healed
-        heal_requeued
-        heal_requeue_failed
         marker_heal_failed
-        marker_heal_exhausted
-        marker_heal_observer_missing
-        auto_retry
-        auto_retry_skipped
-        auto_retry_exhausted
-        auto_retry_failed
+        recovery_requested
+        recovery_blocked
         display_name_backfill
+        task_id_backfill
+        task_id_backfill_commit_skipped
         update_available
         update_check_no_result
         update_check_error
@@ -71,12 +64,15 @@ module Hive
         daemon_dispatch_baselines_newer_schema_suspended
         dispatch_request_observed
         dispatch_request_dispatched
+        dispatch_request_attached
+        dispatch_request_terminal_replay
         dispatch_request_completed
         dispatch_request_rejected
         dispatch_request_blocked
         dispatch_request_expired
         dispatch_request_recovered
         dispatch_result_written
+        dispatch_sequence_promotion_failed
         attempt_accepted
         attempt_claimed
         attempt_running
@@ -85,17 +81,18 @@ module Hive
         attempt_terminal
         attempt_lost
         attempt_duplicate
+        attempt_terminal_replay
         attempt_capacity_deferred
         attempt_legacy_backfilled
-        digest_catchup_skipped
-        digest_failure_backoff
-        digest_state_unreadable
         answer_digest_failure_backoff
         answer_digest_state_unreadable
         architecture_patrol_opened
         architecture_patrol_progress
         architecture_patrol_closed
         architecture_patrol_blocked
+        patrol_recovery_blocked
+        module_migration
+        module_runtime
         fatal
       ].freeze
 

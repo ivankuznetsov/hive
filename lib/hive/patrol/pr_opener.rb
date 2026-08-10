@@ -2,6 +2,7 @@ require "tempfile"
 require "time"
 require "hive/gh"
 require "hive/git_ops"
+require "hive/patrol/effect_gateway"
 require "hive/patrol/fingerprint"
 require "hive/patrol/review_handoff"
 require "hive/patrol/state_store"
@@ -37,21 +38,29 @@ module Hive
         end
       end
 
-      def initialize(project_root, cfg:, state: StateStore.new(project_root), gh: Hive::Gh, review_handoff: nil)
+      def initialize(project_root, cfg:, state:, capture:, gh: Hive::Gh,
+                     review_handoff: nil)
         @project_root = File.expand_path(project_root)
         @cfg = cfg
         @state = state
         @gh = gh
         @review_handoff = review_handoff || ReviewHandoff.new(@project_root, cfg: cfg, state: state)
+        @capture = capture
       end
 
       def open(finding, patch, now: Time.now)
-        preserve_worktree = false
+        @state.with_cycle_lock do
+          open_locked(finding, patch, now: now)
+        end
+      end
+
+      def open_locked(finding, patch, now:)
         return Result.new(status: :skipped, reason: "validation_failed") unless patch.passed
 
         assert_local_patch_identity!(patch)
+        gateway = effect_gateway
+        @state.recover_pending_fingerprint_effects!
         pending = reconciliation_pending_entry(finding, patch)
-        preserve_worktree = !pending.nil?
 
         # Authenticate first: `lookup_prs_for_branch` shells out to `gh`
         # and raises GhError on an unauthenticated host, which surfaces a
@@ -76,15 +85,27 @@ module Hive
             patch,
             require_base_oid: !pending.nil? || handoff_open_pr
           )
+          unless pending
+            reconciliation = reconcile_pull_request_effect!(
+              gateway, finding, patch, observed_prs: branch_prs
+            )
+            drain_publication!(reconciliation)
+            pending = reconciliation_pending_entry(finding, patch)
+          end
           if review_prs_enabled? && existing["state"] == "OPEN"
             assert_local_patch_identity!(patch)
             assert_remote_patch_identity!(patch)
-            review_task_path = enqueue_review_task(finding, patch, existing["url"], now)
+            review_task_path = enqueue_review_task(
+              gateway, finding, patch, existing["url"], now
+            )
             unless review_task_path
               # Preserve the exact validated worktree. Fixer reuses its
               # durable patch receipt on the next cycle, allowing handoff
               # recovery without rebuilding a different commit.
-              record_mapping(finding, patch, existing["url"], "review_handoff_failed", now)
+              record_mapping(
+                finding, patch, existing["url"],
+                "review_handoff_failed", now
+              )
               return Result.new(
                 status: :skipped,
                 pr_url: existing["url"],
@@ -92,7 +113,10 @@ module Hive
               )
             end
 
-            record_mapping(finding, patch, existing["url"], existing["state"].downcase, now)
+            record_mapping(
+              finding, patch, existing["url"],
+              existing["state"].downcase, now
+            )
             return Result.new(
               status: :skipped,
               pr_url: existing["url"],
@@ -101,7 +125,10 @@ module Hive
             )
           end
 
-          record_mapping(finding, patch, existing["url"], existing["state"].downcase, now)
+          record_mapping(
+            finding, patch, existing["url"],
+            existing["state"].downcase, now
+          )
           # The branch already has a PR; this validated worktree is now
           # dead weight. Remove it so `.patrol/` doesn't accumulate one
           # leaked checkout per cycle.
@@ -110,9 +137,6 @@ module Hive
         end
 
         assert_remote_base_identity!(patch)
-        expected_remote_oid = @gh.remote_branch_oid(
-          patch.worktree_path, patch.branch, cfg: @cfg
-        )
         title = title_for(finding)
         body = body_for(finding, patch)
         secret_hits = Hive::SecretPatterns.scan(title) +
@@ -126,36 +150,28 @@ module Hive
         end
 
         assert_local_patch_identity!(patch)
-        @gh.push_branch!(
-          patch.worktree_path,
-          patch.branch,
-          cfg: @cfg,
-          expected_remote_oid: expected_remote_oid,
-          expected_remote_absent: expected_remote_oid.nil?
-        )
+        perform_branch_effect!(gateway, finding, patch)
         assert_local_patch_identity!(patch)
         assert_remote_patch_identity!(patch)
         assert_remote_base_identity!(patch)
-        pr_url = create_pr(patch, body)
-        # The PR now exists on the remote, but it is not active until exact
-        # identity reconciliation and mandatory review handoff settle. Keep
-        # the validated patch receipt retryable across read-after-write lag.
-        record_mapping(finding, patch, pr_url, "reconciliation_pending", now)
-        preserve_worktree = true
+        publication = perform_pull_request_effect!(
+          gateway, finding, patch, body, observed_prs: branch_prs
+        )
+        pr_url = publication.outcome.fetch("pr_url")
+        drain_publication!(publication)
+        reconciliation_pending_entry(finding, patch)
         assert_local_patch_identity!(patch)
         assert_remote_patch_identity!(patch)
-        created_pr = @gh.lookup_prs_for_branch(patch.worktree_path, patch.branch).find do |pr|
-          pr["url"] == pr_url
+        review_task_path = if review_prs_enabled?
+          enqueue_review_task(gateway, finding, patch, pr_url, now)
         end
-        raise Hive::GhError, "created patrol PR #{pr_url} could not be reconciled" unless created_pr
-
-        assert_existing_pr_identity!(created_pr, patch, require_base_oid: true)
-        review_task_path = enqueue_review_task(finding, patch, pr_url, now)
         if !review_task_path && review_prs_enabled?
           # Preserve the exact validated worktree and patch receipt so the
           # next cycle can retry only the failed review handoff. Rebuilding
           # from a newer base would produce a different commit than the PR.
-          record_mapping(finding, patch, pr_url, "review_handoff_failed", now)
+          record_mapping(
+            finding, patch, pr_url, "review_handoff_failed", now
+          )
           return Result.new(
             status: :opened_review_handoff_failed,
             pr_url: pr_url,
@@ -163,7 +179,6 @@ module Hive
           )
         end
         record_mapping(finding, patch, pr_url, "open", now)
-        preserve_worktree = false
         if !review_task_path && !review_prs_enabled?
           # The branch is pushed; the local worktree is no longer needed
           # only when patrol is not handing the PR to 6-review.
@@ -176,9 +191,11 @@ module Hive
         # validation-failure path removes it). Clean it up and surface a
         # structured error so one bad `gh` call doesn't accumulate
         # `.patrol` worktrees or sink the rest of the scan.
-        cleanup_worktree(patch) unless preserve_worktree
+        cleanup_worktree(patch) unless
+          retain_publication_worktree?(finding, patch)
         Result.new(status: :error, reason: "gh_error", detail: e.message)
       end
+      private :open_locked
 
       private
 
@@ -190,7 +207,7 @@ module Hive
         nil
       end
 
-      def enqueue_review_task(finding, patch, pr_url, now)
+      def enqueue_review_task(gateway, finding, patch, pr_url, now)
         # This is the last guard before the task folder is published. Hosted
         # PR reconciliation alone is not enough: the default branch may move
         # after that lookup, and a handoff retry must never enqueue an old-base
@@ -198,7 +215,32 @@ module Hive
         assert_local_patch_identity!(patch)
         assert_remote_patch_identity!(patch)
         assert_remote_base_identity!(patch)
-        @review_handoff.enqueue(finding: finding, patch: patch, pr_url: pr_url, now: now)
+        result = perform_effect do
+          gateway.perform!(
+            sink: "review_handoff",
+            target: pr_url,
+            idempotency_key: "#{finding.fingerprint}:#{patch.id}:review_handoff",
+            capability: "review_handoff",
+            scope: effect_scope(finding, patch),
+            reconcile: lambda do |_intent|
+              if @review_handoff.respond_to?(:reconcile)
+                @review_handoff.reconcile(
+                  finding: finding, patch: patch, pr_url: pr_url
+                )
+              else
+                { "status" => "absent", "outcome" => {} }
+              end
+            end
+          ) do
+            task_path = @review_handoff.enqueue(
+              finding: finding, patch: patch, pr_url: pr_url, now: now
+            )
+            raise Hive::ConfigError, "patrol review handoff was not published" unless task_path
+
+            { "task_path" => task_path }
+          end
+        end
+        result.outcome.fetch("task_path")
       rescue Hive::GhError
         raise
       rescue StandardError => e
@@ -406,56 +448,309 @@ module Hive
       end
 
       def record_mapping(finding, patch, pr_url, state, now)
-        fingerprints = @state.fingerprints
+        fingerprint = finding.fingerprint
+        current = @state.fingerprints[fingerprint]
+        projected = {
+          fingerprint =>
+            current.is_a?(Hash) ?
+              JSON.parse(JSON.generate(current)) : {}
+        }
         Fingerprint.record_seen(
-          fingerprints,
-          finding.fingerprint,
+          projected,
+          fingerprint,
           branch: patch.branch,
           pr_url: pr_url,
           state: state,
           finding: finding,
           now: now
         )
-        entry = fingerprints.fetch(finding.fingerprint)
-        if state == "reconciliation_pending"
-          entry["publication_receipt"] = publication_receipt_for(patch)
-        else
-          entry.delete("publication_receipt")
+        expected = projected.fetch(fingerprint)
+        perform_effect do
+          @state.mutate_fingerprints!(
+            fingerprint: fingerprint,
+            idempotency_key:
+              "#{fingerprint}:#{patch.id}:" \
+              "fingerprint-publication:#{state}",
+            capability: "filesystem_write",
+            scope: effect_scope(finding, patch),
+            set: expected,
+            deleted: [],
+            replace: true
+          )
         end
-        @state.write_fingerprints(fingerprints)
+      end
+
+      def effect_gateway
+        @state.configured_effect_gateway!(capture: @capture)
+      end
+
+      def perform_branch_effect!(gateway, finding, patch)
+        desired_oid = validated_oid!(patch.head_sha, "validated patch head")
+        target = "#{effect_repository(gateway)}:#{patch.branch}"
+        perform_effect do
+          gateway.perform!(
+            sink: "branch",
+            target: target,
+            idempotency_key: "#{finding.fingerprint}:#{patch.id}:branch",
+            capability: "repository_write",
+            scope: effect_scope(finding, patch),
+            reconcile: lambda do |_intent|
+              observed = @gh.remote_branch_oid(
+                patch.worktree_path, patch.branch, cfg: @cfg
+              )
+              if observed == desired_oid
+                {
+                  "status" => "matched",
+                  "outcome" => { "remote_oid" => observed }
+                }
+              else
+                {
+                  "status" => "absent",
+                  "outcome" => { "observed_oid" => observed }
+                }
+              end
+            end
+          ) do
+            expected_remote_oid = @gh.remote_branch_oid(
+              patch.worktree_path, patch.branch, cfg: @cfg
+            )
+            @gh.push_branch!(
+              patch.worktree_path,
+              patch.branch,
+              cfg: @cfg,
+              expected_remote_oid: expected_remote_oid,
+              expected_remote_absent: expected_remote_oid.nil?
+            )
+            { "remote_oid" => desired_oid }
+          end
+        end
+      end
+
+      def perform_pull_request_effect!(gateway, finding, patch, body, observed_prs:)
+        result = perform_effect do
+          gateway.perform!(
+            sink: "pull_request",
+            target: "#{effect_repository(gateway)}:#{patch.branch}",
+            idempotency_key: "#{finding.fingerprint}:#{patch.id}:pull_request",
+            capability: "github_pull_requests",
+            scope: publication_scope(finding, patch, gateway),
+            reconcile: lambda do |_intent|
+              pull_request_reconciliation(patch, observed_prs: observed_prs)
+            end
+          ) do
+            created_url = create_pr(patch, body)
+            reconciliation = pull_request_reconciliation(patch)
+            unless reconciliation.fetch("status") == "matched" &&
+                   reconciliation.dig("outcome", "pr_url") ==
+                     created_url
+              raise Hive::GhError,
+                    "created patrol PR #{created_url} could not be reconciled"
+            end
+            reconciliation.fetch("outcome")
+          end
+        end
+        result
+      end
+
+      def reconcile_pull_request_effect!(gateway, finding, patch, observed_prs:)
+        perform_effect do
+          gateway.reconcile!(
+            sink: "pull_request",
+            target: "#{effect_repository(gateway)}:#{patch.branch}",
+            idempotency_key: "#{finding.fingerprint}:#{patch.id}:pull_request",
+            capability: "github_pull_requests",
+            scope: publication_scope(finding, patch, gateway)
+          ) do |_intent|
+              pull_request_reconciliation(patch, observed_prs: observed_prs)
+          end
+        end
+      end
+
+      def pull_request_reconciliation(patch, observed_prs: nil)
+        candidates = observed_prs || @gh.lookup_prs_for_branch(
+          patch.worktree_path, patch.branch
+        )
+        matches = candidates.select do |pr|
+          %w[OPEN MERGED].include?(pr["state"]) &&
+            exact_pr_identity?(pr, patch)
+        end
+        return { "status" => "absent", "outcome" => {} } if matches.empty?
+        return { "status" => "ambiguous", "outcome" => {} } unless matches.one?
+
+        pr = matches.fetch(0)
+        {
+          "status" => "matched",
+          "outcome" => {
+            "pr_url" => pr.fetch("url"),
+            "state" => pr.fetch("state"),
+            "head_oid" => pr.fetch("headRefOid"),
+            "base_oid" => pr.fetch("baseRefOid")
+          }
+        }
+      end
+
+      def exact_pr_identity?(pr, patch)
+        pr["headRefOid"] == validated_oid!(patch.head_sha, "validated patch head") &&
+          pr["baseRefOid"] == validated_oid!(patch.base_sha, "validated patch base") &&
+          pr["baseRefName"] == default_branch
+      end
+
+      def effect_repository(_gateway)
+        repository =
+          @capture&.project&.fetch("repository", nil).to_s
+        if repository.empty?
+          raise Hive::GhError,
+                "patrol PR publication requires an exact repository identity"
+        end
+        repository
+      end
+
+      def effect_scope(finding, patch)
+        patch_identity_for(patch).merge(
+          "fingerprint" => finding.fingerprint,
+          "branch" => patch.branch
+        )
+      end
+
+      def publication_scope(finding, patch, gateway)
+        effect_scope(finding, patch).merge(
+          "repository" => effect_repository(gateway),
+          "base_branch" => default_branch,
+          "finding_projection" =>
+            Hive::Modules::Migration::PatrolEvidence.canonical(
+              "category" => finding.category.to_s,
+              "feature_id" => finding.feature_id.to_s,
+              "target_sha" => finding.target_sha.to_s,
+              "title_tokens" => Fingerprint.title_tokens(finding),
+              "root_cause_tokens" =>
+                Fingerprint.semantic_tokens(finding)
+            )
+        )
+      end
+
+      def perform_effect
+        yield
+      rescue Hive::Patrol::EffectGateway::Denied,
+             Hive::Patrol::EffectGateway::ReconciliationRequired => e
+        raise Hive::GhError, e.message
       end
 
       def reconciliation_pending_entry(finding, patch)
         entry = @state.fingerprints[finding.fingerprint]
         return unless entry.is_a?(Hash) && entry["state"] == "reconciliation_pending"
 
-        receipt = entry["publication_receipt"]
-        unless receipt.is_a?(Hash)
-          raise Hive::GhError, "pending patrol PR is missing its publication receipt"
+        binding = entry["publication_binding"]
+        unless binding.is_a?(Hash)
+          raise Hive::GhError,
+                "pending patrol PR is missing its publication binding"
         end
 
-        expected = publication_receipt_for(patch)
+        expected = patch_identity_for(patch).merge(
+          "repository" => effect_repository(nil),
+          "branch" => patch.branch,
+          "base_branch" => default_branch
+        )
         mismatches = expected.filter_map do |field, value|
-          "#{field}=#{receipt[field].inspect}, expected #{value.inspect}" unless receipt[field] == value
+          "#{field}=#{binding[field].inspect}, expected #{value.inspect}" unless binding[field] == value
         end
         unless mismatches.empty?
           raise Hive::GhError,
-                "pending patrol PR publication receipt mismatch: #{mismatches.join('; ')}"
+                "pending patrol PR publication binding mismatch: #{mismatches.join('; ')}"
         end
-        if entry["branch"] != patch.branch || entry["pr_url"].to_s.empty?
+        unless binding.keys.sort ==
+                 StateStore::PUBLICATION_BINDING_KEYS.sort &&
+               binding["receipt_id"].to_s.match?(
+                 /\Areceipt-[0-9a-f]{64}\z/
+               ) &&
+               binding["intent_id"].to_s.match?(
+                 /\Aintent-[0-9a-f]{64}\z/
+               ) &&
+               binding["occurrence_id"].to_s.match?(
+                 /\Aocc-[0-9a-f]{64}\z/
+               )
+          raise Hive::GhError,
+                "pending patrol PR publication binding is malformed"
+        end
+        if entry["branch"] != binding["branch"] ||
+           entry["pr_url"] != binding["pr_url"] ||
+           entry["pr_url"].to_s.empty?
           raise Hive::GhError, "pending patrol PR is missing its exact branch or URL identity"
         end
 
         entry
       end
 
-      def publication_receipt_for(patch)
+      def patch_identity_for(patch)
         {
           "patch_id" => patch.id,
           "worktree_path" => patch.worktree_path,
           "base_sha" => validated_oid!(patch.base_sha, "validated patch base"),
           "head_sha" => validated_oid!(patch.head_sha, "validated patch head")
         }
+      end
+
+      def drain_publication!(result)
+        receipt = result.receipt
+        @state.drain_publication_outbox!(
+          receipt.intent.occurrence_id
+        )
+      rescue Hive::ConfigError => error
+        raise Hive::GhError,
+              "patrol PR publication projection failed: #{error.message}"
+      end
+
+      def retain_publication_worktree?(finding, patch)
+        entry = @state.fingerprints[finding.fingerprint]
+        if entry.is_a?(Hash) &&
+           Fingerprint::RETRYABLE_PUBLICATION_STATES.include?(
+             entry["state"]
+           )
+          return true
+        end
+
+        record = @state.occurrence(@capture.occurrence_id)
+        return false unless record.is_a?(Hash)
+
+        expected_scope = publication_scope(
+          finding, patch, effect_gateway
+        )
+        cell = record.fetch("effects").values.find do |candidate|
+          semantic = candidate["semantic"]
+          semantic.is_a?(Hash) &&
+            semantic["sink"] == "pull_request" &&
+            semantic["scope"] == expected_scope
+        end
+        return false unless cell
+        return true if %w[prepared dispatch_uncertain].include?(
+          cell["state"]
+        )
+        return false unless %w[committed reconciled].include?(
+          cell["state"]
+        )
+
+        terminal_id = cell["terminal_receipt_id"]
+        publication_pending = record.fetch("outbox").any? do |entry|
+          entry["kind"] == "publication" &&
+            entry["id"] == terminal_id &&
+            entry["acknowledged"] == false
+        end
+        return true if publication_pending
+
+        entry = @state.fingerprints[finding.fingerprint]
+        binding = entry.is_a?(Hash) &&
+          entry["publication_binding"]
+        return true unless binding.is_a?(Hash)
+
+        expected = @state.publication_binding_for_receipt(
+          terminal_id, occurrence_id: @capture.occurrence_id
+        )
+        return true unless patch_identity_for(patch).all? do |field, value|
+          expected[field] == value
+        end
+
+        binding != expected
+      rescue StandardError
+        true
       end
     end
   end

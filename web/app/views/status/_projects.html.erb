@@ -11,6 +11,12 @@
           <h2><%= project.name %></h2>
           <span class="muted"><%= project.active_tasks.size %> active</span>
         </div>
+        <% if project.hidden_archived_task_count.positive? %>
+          <p class="archive-summary">
+            <%= link_to hidden_archive_summary(project.hidden_archived_task_count),
+                  archive_path(project: project.name) %>
+          </p>
+        <% end %>
         <% if project["error"].present? %>
           <div class="state-banner state-banner-error" role="status">
             Project status unavailable: <%= project["error"].humanize.downcase %>.

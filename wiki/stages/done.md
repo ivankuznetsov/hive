@@ -3,11 +3,17 @@ title: 9-done stage
 type: stage
 source: lib/hive/stages/done.rb
 created: 2026-04-25
-updated: 2026-04-25
+updated: 2026-08-06
 tags: [stage, done, archive]
 ---
 
 **TLDR**: Archive stage. `hive run` here does not spawn an agent; it prints the manual cleanup commands (`git worktree remove`, `git branch -d`) and stamps `<!-- COMPLETE -->` on the state file.
+
+Receipt-backed delivered or superseded closure invokes this runner with
+auto-rebase disabled. Closure has already verified immutable delivery and this
+stage never reads the feature worktree, so rebasing an obsolete branch would
+only add latency and conflict-agent work. Ordinary workflow dispatch keeps its
+existing rebase policy.
 
 ## State file
 

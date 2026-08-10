@@ -19,6 +19,29 @@ hive archive SLUG --project PROJECT --json
 
 Hive can also run project-authored workflows. Inspect them with `hive workflow list --json`; do not assume every task uses the coding stage names.
 
+Reviewed project-local modules use one shared status and lifecycle contract:
+
+```bash
+hive module list --json
+hive module status --json
+hive module inspect NAME --json
+hive module doctor NAME --json
+hive module dry-run NAME --event schedule --schedule '*/10 * * * *' --json
+```
+
+These commands are read-only. Module dry-run evaluates the production trigger
+logic without persisting an event, decision, attempt, cursor, claim, artifact,
+or worker. That is intentionally different from the legacy Patrol commands
+described below.
+
+Installation and change are preview-bound. First run the exact lifecycle
+command with `--dry-run --json`, review every setting, hook, binding, and
+individual grant, then apply only with the matching receipt and explicit human
+approval. Never infer a missing non-interactive choice or grant.
+`hive module migration status --json` is the exact read-only migration
+diagnostic; `migration report`, `cutover`, and `rollback`
+are administrative, human-only transitions and are not `hive act` actions.
+
 For reviewed Honeycomb workflows, preview the exact no-write operation first:
 
 ```bash
@@ -31,6 +54,33 @@ Only after the user approves that output, run the matching operation with
 `--yes --json`. Permission growth or another high-risk change requires separate
 approval before `--allow-escalation`; ordinary install/update consent does not
 authorize escalation.
+
+Publishing an authored workflow has a stronger digest-bound confirmation
+boundary. First run the complete local preflight with no remote or receipt
+effects:
+
+```bash
+hive workflow publish NAME --version VERSION --dry-run --json
+```
+
+Require `ok: true`, `state: validated`, `freshness: not_checked`, and retain the
+exact `name`, `version`, and `release_digest` fields. Explain that the confirmed
+operation may create a fork, an immutable deterministic branch, and a public
+non-draft review PR, but never merges or lists the package. Obtain explicit
+confirmation for that exact identity, then bind the real call to those bytes:
+
+```bash
+hive workflow publish NAME --version VERSION \
+  --expected-release-digest RELEASE_DIGEST --json
+```
+
+If local bytes change, stop and repeat preflight and confirmation. Parse only
+schema-v2 fields: lifecycle `state` is `pending_review`,
+`merged_pending_listing`, `listed`, or `closed_unmerged`; `freshness` is
+`current` or visibly `cached`, with the original `observed_at`. Retry only the
+same confirmed name/version/release digest after a retryable offline or
+remote-ambiguous result. Never infer success from prose, create a second branch,
+force-push, merge, approve, close, delete remote state, or edit the catalogue.
 
 Patrol is different: `hive patrol ... --dry-run` and
 `hive refactor-patrol ... --dry-run` still launch agents, consume provider

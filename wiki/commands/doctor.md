@@ -3,7 +3,7 @@ title: hive doctor
 type: command
 source: skills/hive/, lib/hive/commands/doctor.rb, lib/hive/agent_skills/{inspector,filesystem_inventory}.rb, lib/hive/agent_skills/adapters/openclaw.rb, lib/hive/skill_check.rb
 created: 2026-05-07
-updated: 2026-07-20
+updated: 2026-07-30
 tags: [command, preflight, skills, hive, openclaw, tmux, provisioning]
 ---
 
@@ -44,9 +44,12 @@ The CLI loads the project through the shared `Hive::Config.load` boundary
 before constructing the doctor inspector. Unsupported project root keys
 therefore stop the command with exit 78 before any tmux, QMD, agent, or skill
 probe runs and before a success table/JSON report is emitted. The error names
-the config path and every unsupported key; a root-level `reviewers` key gives
-the direct correction to move it under `review.reviewers`. This is the same
-configuration failure other project commands receive, not a doctor-only check.
+the config path and every unsupported key. During the reviewers migration
+window, a valid root-level `reviewers` value is promoted to
+`review.reviewers` with a `hive migrate` warning; an invalid promoted value or
+a conflict with an already-authored `review.reviewers` still exits 78 before
+probes. This is the same configuration boundary other project commands
+receive, not a doctor-only check.
 
 ## Managed target and health model
 
@@ -67,6 +70,12 @@ real stage execution. It honors `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, and
 `PI_CODING_AGENT_DIR`, then applies `Hive::SkillCheck`'s project-before-home
 resolution rules. A native inventory claim is insufficient when the runtime
 resolver cannot load the declared probe.
+
+The Doctor command owns the ordered summary keys and reaches the inspector
+through the supported `Hive::AgentSkills.hive_inspector` facade. Direct Ruby
+callers may therefore inject a compatible inspector and request the v2 JSON
+summary without relying on a previous command or test to have loaded an
+internal skillpack class.
 
 In `native`, `inventory_source: "filesystem"`, `commands: []`, and a null
 `cli_version` make that evidence boundary explicit. Setup uses live native
@@ -167,6 +176,8 @@ project.
   dependency rows. `doctor_managed_skills_test.rb` covers managed remediation,
   non-blocking unavailable agents, OpenClaw ownership, and byte-identical homes
   even when every available agent runner would mutate if called.
+  `doctor_web_alias_test.rb` also runs independently and covers injected
+  inspectors with human and JSON warning output.
 - `test/unit/skill_check_test.rb` covers exact Claude `/hive`, Codex `$hive`,
   and Pi `/skill:hive` resolution, escaping, Pi jails, and the write-free
   global npm-root probe.

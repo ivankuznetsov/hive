@@ -115,6 +115,16 @@ class HiveCommandsInitTest < Minitest::Test
     assert_match(/adhoc:\n    reviewers: null\n    fix: true/, enabled)
   end
 
+  def test_project_config_can_render_optional_grok_native_reviewer
+    answers = project_config_answers.merge("enabled_reviewers" => [ "grok-ce-code-review" ])
+    rendered = render_fresh_config(:coding, answers: answers)
+
+    assert_match(/name: grok-ce-code-review/, rendered)
+    assert_match(/agent: grok/, rendered)
+    assert_match(/skill: ce-code-review/, rendered)
+    assert_match(/prompt_template: reviewer_grok_ce_code_review\.md\.erb/, rendered)
+  end
+
   def test_project_config_renders_refactor_patrol_policy_from_choice
     enabled = render_fresh_config(
       :coding,

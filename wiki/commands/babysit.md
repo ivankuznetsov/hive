@@ -1,10 +1,10 @@
 ---
 title: hive babysit
 type: command
-source: lib/hive/cli.rb, lib/hive/commands/babysit.rb, bin/hive-babysitter-stub-git, bin/hive-babysitter-stub-gh
+source: lib/hive/cli.rb, lib/hive/commands/babysit.rb, bin/hive-babysitter-stub-git, bin/hive-babysitter-stub-gh.rb
 created: 2026-05-26
-updated: 2026-07-22
-tags: [command, babysitter, daemon, github]
+updated: 2026-08-07
+tags: [command, babysitter, daemon, github, systemd, launchd]
 ---
 
 **TLDR**: `hive babysit` manages the experimental PR babysitter. It is a separate process from `hive daemon`: it polls open PRs for projects with `babysitter.enabled: true`, skips ignored labels, and asks the configured development agent to repair conflicts or red CI in an isolated PR worktree.
@@ -18,11 +18,26 @@ hive babysit restart [--detach] [--dry-run]
 hive babysit status
 hive babysit reload
 hive babysit tail
+hive babysit install [--force]
 hive babysit --once PROJECT [--dry-run]
 hive babysit --once --all [--dry-run]
 ```
 
 The command is bare-text in v1; it does not emit a `--json` envelope.
+
+`install` writes and starts the supervised per-user service through
+`Hive::UserService`: `hive-babysitter.service` on Linux systemd-user or
+`local.hive-babysitter.plist` on macOS launchd. It runs `hive babysit start`
+in the foreground; project-level `babysitter.enabled` remains the mutation
+gate. `--force` backs up and replaces a drifted unit. Service definitions keep
+custom `HIVE_HOME`/XDG filesystem roots but never persist provider credentials.
+`hive setup` installs this service by default, while `hive uninstall` removes
+it. When a detached babysitter is already running, install first reuses the
+ownership-aware bounded stop path before the service manager starts its
+replacement. Uninstall uses the same stop path before removing any service or
+data, and aborts without teardown when PID ownership cannot be read or verified.
+`install --dry-run` is rejected because installing a service is a real host
+mutation.
 
 ## Lifecycle
 
@@ -42,15 +57,21 @@ Per-project config lives in `<project>/.hive-state/config.yml`:
 babysitter:
   enabled: true
   interval: 10m
+  agent: claude
   max_concurrent_prs: 2
   labels_ignore: [wip, do-not-merge, draft]
   dry_run: false
   auto_rebase: true
   budget_minutes: 30
   budget_usd: 50
+
+models:
+  babysitter:
+    model: claude-opus-5
+    effort: max
 ```
 
-`ProjectTick` reloads the project config on every tick, so changing `babysitter.enabled: false` is the kill switch and takes effect within one poll interval. `interval` accepts integer seconds or strings like `10m`, `30s`, and `1h`. `auto_rebase` (default `true`; `false` disables) controls auto-rebasing green-but-`BEHIND` PRs — see PR Processing below.
+`ProjectTick` reloads the project config on every tick, so changing `babysitter.enabled: false` is the kill switch and takes effect within one poll interval. `interval` accepts integer seconds or strings like `10m`, `30s`, and `1h`. `agent` optionally selects a registered provider for PR repair and falls back to `execute.agent`; the top-level `models.babysitter` route controls that provider's model and effort. `auto_rebase` (default `true`; `false` disables) controls auto-rebasing green-but-`BEHIND` PRs — see PR Processing below.
 
 ## PR Processing
 
@@ -63,9 +84,26 @@ For each enabled project, the babysitter:
 5. Sorts by actionability (`DIRTY`/`BLOCKED`/`UNSTABLE`, then `BEHIND`/`UNKNOWN`, then neutral) with `updatedAt` as the tie-breaker, and truncates to `max_concurrent_prs`.
 6. Runs `Hive::Babysitter::PrFixer` on each selected PR.
 
-`PrFixer` first checks `gh pr view --json mergeable,mergeStateStatus,statusCheckRollup`. If the PR is mergeable and checks are successful or queued (green), it normally records a `noop`/`already-green` event and does not spawn an agent. The exception: a green PR whose `mergeStateStatus` is `BEHIND` cannot merge under strict "branch must be up-to-date" protection. When `auto_rebase` is enabled (default), `PrFixer#handle_green` materializes the PR worktree, runs `GhOps.rebase_onto_base` (resolve `git remote get-url --push origin`, fetch `<base>` from that source with fallback to `origin`, then `git rebase FETCH_HEAD`), and on a clean rebase force-pushes the rebased HEAD to the PR's **real head branch** (`headRefName`, not the internal `hive-babysitter/pr-<n>` worktree branch) with an explicit `--force-with-lease=<headRefName>:<headRefOid>` so the PR becomes `CLEAN`/mergeable (emits `rebase`/`success`, counted as `fixed`). A rebase that conflicts is aborted and left for a human: no force-push, no fix agent, no label (emits `rebase`/`conflict`, counted as `needs_human`); it is re-evaluated cheaply on the next tick. With `auto_rebase: false` a green-but-`BEHIND` PR just `noop`s. If the PR is not green, `PrFixer` materializes the worktree, gathers failing-job logs plus diff stats, renders `templates/babysitter_pr_fix_prompt.md.erb`, and spawns the configured `execute.agent` through `Hive::Stages::Base.spawn_agent` with `status_mode: :exit_code_only`.
+`PrFixer` first checks `gh pr view --json mergeable,mergeStateStatus,statusCheckRollup`. If the PR is mergeable and checks are successful or queued (green), it normally records a `noop`/`already-green` event and does not spawn an agent. The exception: a green PR whose `mergeStateStatus` is `BEHIND` cannot merge under strict "branch must be up-to-date" protection. When `auto_rebase` is enabled (default), `PrFixer#handle_green` materializes the PR worktree, runs `GhOps.rebase_onto_base` (resolve `git remote get-url --push origin`, fetch `<base>` from that source with fallback to `origin`, then `git rebase FETCH_HEAD`), and on a clean rebase force-pushes the rebased HEAD to the PR's **real head branch** (`headRefName`, not the internal `hive-babysitter/pr-<n>` worktree branch) with an explicit `--force-with-lease=<headRefName>:<headRefOid>` so the PR becomes `CLEAN`/mergeable (emits `rebase`/`success`, counted as `fixed`). A rebase that conflicts is aborted and left for a human: no force-push, no fix agent, no label (emits `rebase`/`conflict`, counted as `needs_human`); it is re-evaluated cheaply on the next tick. With `auto_rebase: false` a green-but-`BEHIND` PR just `noop`s. If the PR is not green, `PrFixer` materializes the worktree, gathers failing-job logs plus diff stats, renders `templates/babysitter_pr_fix_prompt.md.erb`, and spawns `babysitter.agent` (falling back to `execute.agent`) through `Hive::Stages::Base.spawn_agent` with `status_mode: :exit_code_only`.
 
-On success, the babysitter is silent on the PR. On failure, timeout, or budget exhaustion it applies `babysitter/needs-human` and posts one give-up comment per PR per UTC hour.
+Materialization replaces the prior `.hive-state/babysitter/worktrees/<pr>/`
+checkout before fetching the exact PR head. If a container or interrupted tool
+left files that the Hive user cannot delete, the surviving directory is moved
+to `.hive-state/babysitter/quarantine/worktrees/` and reported on stderr. Git
+administrative state is then pruned immediately with `--expire now`. Failure to
+quarantine or prune aborts the pass explicitly; it cannot leave the same opaque
+`worktree add` error repeating on every tick.
+
+On success, the babysitter is silent on the PR. On failure, timeout, or budget
+exhaustion it applies `babysitter/needs-human` and posts one give-up comment per
+PR per UTC hour. The first label application idempotently provisions the
+repository label with `gh label create`, so operators do not need to create it
+during repository setup. Hive searches for the exact label instead of scanning
+the repository catalogue. A concurrent creation is accepted only after Hive
+verifies that the label now exists, without overwriting its metadata. If
+provisioning is denied, label application fails closed, records the reason in
+the babysitter event, and lets the independent give-up comment preserve the
+repair blocker.
 
 ## Dry Run
 
@@ -77,7 +115,7 @@ default-denied because clean/process filters can execute repository code. Allowe
 require Git 2.45+ and use `--no-lazy-fetch`; creation or replacement races on the skip log are
 rejected and warned rather than retried.
 
-`--dry-run` sets the dispatcher dry-run flag. The agent prompt tells the agent to write `.babysitter-dry-run-plan.md` instead of mutating GitHub, spells out the read-only `git`/`gh` allowlist, and warns that a blocked command returns synthetic success: stderr is the primary signal, while the skip log is best-effort and may be absent when its target is unsafe or unavailable. `Hive::Babysitter::DryRunEnv` prepends a PATH overlay where `git` and `gh` point at babysitter wrapper launchers. The launchers pin absolute realpaths for the parent-resolved real binaries and the worktree-root skip-log path before invoking the shared stubs, and inherited dynamic-loader env (`LD_*` / `DYLD_*`) is scrubbed before overlay handoff, so command-local `HIVE_BABYSITTER_REAL_GIT` / `HIVE_BABYSITTER_REAL_GH` or `HIVE_BABYSITTER_DRY_RUN_LOG` overrides cannot redirect allowlisted passthrough or skipped-command audit records. They also cover direct `gh` stub execution: the installed `gh` stub is a shell launcher that clears Ruby/Bundler/Gem startup env and common dynamic-loader env before loading `bin/hive-babysitter-stub-gh.rb`, and the Ruby guard repeats that scrub before execing real `gh`. The shared stubs exit 127 when the real-binary handoff is unset or non-absolute, so a relative `bin/git` or `bin/gh` value cannot be re-resolved inside the PR worktree. Before an allowlisted `gh` passthrough, the shared stub deletes command-local config/home/host env plus the private config handoff env, pins `PATH=/usr/bin:/bin`, then points both `HOME` and `GH_CONFIG_DIR` at a fresh empty temp dir so the real `gh` has a writable state location without reading caller/user config or resolving child `git` helpers from caller-controlled directories. The stubs are default-deny: they strip safe leading global path/repo options, reject unsafe global options, pass through only known read-only commands, screen exec/write-capable options in the regions where the real CLI honors them, and skip anything mutating or unknown while attempting to append the skipped invocation to `.babysitter-dry-run-skipped.log`. For `gh`, only bare `OWNER/REPO` selectors (`-R`, `--repo`, `--repo=...`) are stripped before allowlist classification; host-qualified repo selectors, URL/scp-style selectors, `--hostname` selectors anywhere in argv, and host-carrying `repo view` / PR URL positionals are logged/skipped.
+`--dry-run` sets the dispatcher dry-run flag. The agent prompt tells the agent to write `.babysitter-dry-run-plan.md` instead of mutating GitHub, spells out the read-only `git`/`gh` allowlist, and warns that a blocked command returns synthetic success: stderr is the primary signal, while the skip log is best-effort and may be absent when its target is unsafe or unavailable. `Hive::Babysitter::DryRunEnv` prepends a PATH overlay where `git` and `gh` point at generated wrapper launchers. One `StubEnvironment` definition supplies the Ruby/Bundler/Gem and dynamic-loader variables scrubbed by the parent, launchers, and stubs. The generated `gh` launcher invokes `bin/hive-babysitter-stub-gh.rb` directly; there is no separately packaged shell wrapper. The launchers pin absolute realpaths for the parent-resolved real binaries and the worktree-root skip-log path, so command-local `HIVE_BABYSITTER_REAL_GIT` / `HIVE_BABYSITTER_REAL_GH` or `HIVE_BABYSITTER_DRY_RUN_LOG` overrides cannot redirect allowlisted passthrough or skipped-command audit records. The shared stubs exit 127 when the real-binary handoff is unset or non-absolute, so a relative `bin/git` or `bin/gh` value cannot be re-resolved inside the PR worktree. Before an allowlisted `gh` passthrough, the shared stub deletes command-local config/home/host env plus the private config handoff env, pins `PATH=/usr/bin:/bin`, then points both `HOME` and `GH_CONFIG_DIR` at a fresh empty temp dir so the real `gh` has a writable state location without reading caller/user config or resolving child `git` helpers from caller-controlled directories. The stubs are default-deny: they strip safe leading global path/repo options, reject unsafe global options, pass through only known read-only commands, screen exec/write-capable options in the regions where the real CLI honors them, and skip anything mutating or unknown while attempting to append the skipped invocation to `.babysitter-dry-run-skipped.log`. For `gh`, only bare `OWNER/REPO` selectors (`-R`, `--repo`, `--repo=...`) are stripped before allowlist classification; host-qualified repo selectors, URL/scp-style selectors, `--hostname` selectors anywhere in argv, and host-carrying `repo view` / PR URL positionals are logged/skipped.
 
 Skip logging itself is guarded: `DryRunEnv` first creates the worktree-root audit log as an owned private regular file before any agent command can become a concurrent first writer; an existing target is never modified during setup and remains subject to the stubs' checks. Both stubs preflight an existing `HIVE_BABYSITTER_DRY_RUN_LOG` target (or the default `.babysitter-dry-run-skipped.log`) with `File.lstat`, reject non-regular/non-owned targets before opening, then open with `File::NOFOLLOW` and `File::NONBLOCK`, verify that the opened descriptor has the preflighted device/inode, and re-check it before writing. A direct stub invocation with a genuinely missing log still creates it as mode `0600` with `File::EXCL`; creation or replacement races remain rejected and warned. FIFOs, symlinks, devices, hard links, ownership mismatches, and pathname swaps warn instead of blocking or writing. The skipped command still exits successfully after that warning so dry-run behavior remains default-deny even when the audit sink is unsafe or unavailable. Logged and stderr-rendered argv is scanned byte-by-byte: ASCII control bytes are escaped as `\xHH`, invalid/non-UTF-8 bytes do not crash `log_skip`, and high bytes pass through unchanged, so a skipped argument containing a newline cannot forge extra log lines. Escaped argv is capped at 4 KiB with a truncation marker. An exclusive lock serializes each append and its 64 KiB size check; when the next complete record would exceed the cap, the existing audit history is preserved and the usual best-effort write warning is emitted. Lock acquisition uses a short monotonic deadline so a stalled writer cannot hang a denied command.
 
@@ -98,28 +136,11 @@ checks reject any file with group or world permission bits. The blocked command
 still returns synthetic success and emits the stderr marker plus an audit-write
 warning, but the permissive file is left untouched and receives no new argv.
 
-### Queued dry-run launcher consolidation
-
-Queued commit `9c4b4d69` on `fix/all-worthy-patrol-findings` removes the
-separately packaged `bin/hive-babysitter-stub-gh` shell file. Its generated
-overlay invokes `bin/hive-babysitter-stub-gh.rb` directly through the resolved
-Ruby executable, while `Hive::Babysitter::StubEnvironment` supplies the shared
-Ruby/Bundler startup list and a catch-all `LD_*` / `DYLD_*` scrub to the parent,
-generated launchers, Ruby stubs, and real-command passthrough. The skip logger
-returns the single escaped message used for both audit output and stderr, and
-allowlisted git passthrough additionally clears `GIT_PROXY_COMMAND`.
-
-The queued git classifier also blocks `rev-list --show-signature`. Exact
-`--text` remains a read option for `diff`, `log`, and `show`, while textconv
-abbreviations and `cat-file`/`grep --text` stay denied at this boundary. The
-current default still packages the shell launcher, so this subsection is a
-branch projection rather than the installed command contract.
-
 ## Tests
 
 - `test/unit/commands/babysit_test.rb` covers CLI flag validation, lifecycle helpers, foreground `restart`, detached restart re-exec into `start --detach`, stale-runtime status recommendations, stale-runtime reload warnings, refused-stop failures, PID-file cleanup races, and bounded PID-lock behavior.
 - `test/unit/babysitter/dry_run_env_test.rb` includes a PTY-backed `git log` regression with `PAGER`, `GIT_PAGER`, and repo-local `core.pager` pointed at a marker-writing helper; the marker must not be created because dry-run passthrough forces `--no-pager`. It also configures a repo-local `man.viewer` helper and asserts `git status --help` is skipped before that helper can run.
-- `test/unit/babysitter/*_test.rb` covers interval parsing, dispatcher ticks, PR filtering, context building, PR fixing, GitHub ops, worktree materialization, and dry-run PATH wrappers, including command-local `HIVE_BABYSITTER_REAL_*` and `HIVE_BABYSITTER_DRY_RUN_LOG` override resistance, `gh` passthrough `HOME`/`GH_CONFIG_DIR` tempdir isolation against command-local `HOME` / `GH_CONFIG_DIR` / `XDG_CONFIG_HOME` / `HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR`, argv-wide and positional `gh` host-override skips, `GH_HOST` / `GH_REPO` / enterprise-token env scrubbing, the `gh api` implicit-POST payload flag guard, explicit-GET file/cache guards, non-token host-default `gh auth status` passthrough with token and hostname flag skips, browser-launch flag skips plus `w` inside value-taking `gh` read options, git executable/write-option skips, plain `git remote show <remote>` skipping before configured transport helpers can run, exact read-only `git branch` forms versus mixed branch mutation flags, subcommand `-p` passthrough, grep/`ls-files` read-option exceptions, grep pager `--open-files-in-pager` abbreviations and `-O` forms including clustered `-nO<cmd>`, value-taking grep short options such as `-eTODO` / `-fNEEDLEFILE.txt`, `--textconv` abbreviation and `cat-file --filters` skips, remerge-diff option skips plus `log.diffMerges=separate` passthrough hardening against merge-driver execution, signature-verification skips and `log.showSignature` passthrough override, pathspec separator handling, env config/command seams such as `GIT_EXTERNAL_DIFF`, `GIT_SSH_COMMAND`, `GIT_SSH`, `GIT_PROXY_COMMAND`, `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`, `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, `GIT_EXEC_PATH`, `GIT_ASKPASS`, and `SSH_ASKPASS`, HOME/XDG/local `.git/config` hardening for allowed git reads, symlinked skip-log refusal, FIFO skip-log refusal without blocking, and ASCII control-character escaping in skip logs and stderr. It does not currently pass deliberately invalid/non-UTF-8 argv bytes into either stub.
+- `test/unit/babysitter/*_test.rb` covers interval parsing, dispatcher ticks, PR filtering, context building, PR fixing, GitHub ops, worktree materialization including undeletable-residue quarantine and prune failures, shared stub environment scrubbing, dry-run PATH wrappers, and deliberately invalid/non-UTF-8 skipped argv, plus the default-deny command/env/log boundaries described above.
 - `test/babysitter/run.rb` runs the acceptance smoke suite for early-green, ignored-label, dry-run, and give-up paths.
 
 ## Backlinks

@@ -53,11 +53,13 @@ module Hive
         )
       end
 
-      def self.artifact_token(task)
+      def self.artifact_token(task, state_file_content: nil)
         digest = ::Digest::SHA256.new
         digest << "hive-progress-v2\0"
         digest << task.state_file.to_s
-        if File.file?(task.state_file)
+        if !state_file_content.nil?
+          digest << state_file_content.to_s
+        elsif File.file?(task.state_file)
           File.open(task.state_file, "rb") do |file|
             digest << file.read(64 * 1024) until file.eof?
           end
@@ -99,10 +101,9 @@ module Hive
 
       def self.default_attempt_store
         root = ENV["HIVE_ATTEMPT_STORE_ROOT"].to_s
-        Hive::Attempts::Store.new(
-          root: root.empty? ? Hive::Paths.attempts_root : root,
-          create_directories: false
-        )
+        return Hive::Attempts::Store.new(create_directories: false) if root.empty?
+
+        Hive::Attempts::Store.new(root: root, create_directories: false)
       end
     end
   end

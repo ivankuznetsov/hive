@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hivecli.sh/schemas/hive-module-doctor.v1.json",
+  "title": "Hive module doctor v1",
+  "oneOf": [
+    {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "status", "healthy", "checks"],
+      "properties": {
+        "schema": {"const": "hive-module-doctor"}, "schema_version": {"const": 1},
+        "ok": {"const": true}, "status": {"type": "object"}, "healthy": {"type": "boolean"},
+        "checks": {
+          "type": "array", "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["code", "status", "subject"],
+            "properties": {
+              "code": {"type": "string"}, "status": {"enum": ["ok", "warning", "error"]},
+              "subject": {"type": ["string", "null"]}
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object", "required": ["schema", "schema_version", "ok", "error_kind", "exit_code", "message"],
+      "properties": {
+        "schema": {"const": "hive-module-doctor"}, "schema_version": {"const": 1}, "ok": {"const": false},
+        "error_kind": {"type": "string"}, "exit_code": {"type": "integer"}, "message": {"type": "string"}
+      }
+    }
+  ]
+}

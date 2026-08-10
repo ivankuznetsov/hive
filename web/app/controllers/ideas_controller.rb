@@ -1,6 +1,8 @@
+require "hive/web/request_limits"
+
 class IdeasController < ApplicationController
-  MAX_IMAGES = 8
-  MAX_IMAGE_BYTES = 10 * 1024 * 1024
+  MAX_IMAGES = Hive::Web::RequestLimits::IDEA_IMAGE_COUNT
+  MAX_IMAGE_BYTES = Hive::Web::RequestLimits::IDEA_IMAGE_BYTES
 
   # Creates a task in 1-inbox via the same Commands::New the CLI and TUI
   # use. Images arrive as multipart uploads named like the [imageN]
@@ -8,18 +10,11 @@ class IdeasController < ApplicationController
   # task's assets/ dir (the TUI's exact contract).
   def create
     project = find_project!(params.require(:project))
-    text = params.require(:text).to_s.strip
-    raise Hive::Error, "idea text is empty" if text.empty?
-
-    dispatcher.new_idea(project: project.name, text: text, attachments: staged_attachments)
+    project.add_idea!(params.require(:text), attachments: staged_attachments)
     redirect_back_or_to root_path, allow_other_host: false, notice: "Idea added to #{project.name}"
   end
 
   private
-
-  def dispatcher
-    Hive::Web::Dispatcher.new
-  end
 
   # Uploaded files come as images[] with original filenames already set to
   # their placeholder names (image1.png, ...) by the composer Stimulus

@@ -1,5 +1,6 @@
 require "fileutils"
 require "rbconfig"
+require "securerandom"
 require "yaml"
 require "hive/config"
 require "hive/paths"
@@ -19,8 +20,13 @@ module Hive
 
       def call
         projects = registered_projects
+        # Stop the babysitter before any service or data mutation. It can be
+        # inside a live repair, and unreadable ownership evidence must fail
+        # closed instead of leaving a partial uninstall.
+        deregister_babysitter
         deregister_daemon
         deregister_bot
+        deregister_web
         remove_user_config_and_cache
         remove_data_versions
         remove_user_symlinks
@@ -43,7 +49,7 @@ module Hive
       def deregister_daemon
         stop_foreground_daemon
         require "hive/commands/daemon/service_installer"
-        deregister_unit(Hive::Commands::Daemon::ServiceInstaller.new(host_os: @host_os))
+        deregister_unit(Hive::Commands::Daemon::ServiceInstaller.new(**service_installer_options))
       end
 
       # Mirror of deregister_daemon for the opt-in bot autostart service
@@ -51,38 +57,60 @@ module Hive
       def deregister_bot
         stop_foreground_bot
         require "hive/commands/bot/service_installer"
-        deregister_unit(Hive::Commands::Bot::ServiceInstaller.new(host_os: @host_os))
+        deregister_unit(Hive::Commands::Bot::ServiceInstaller.new(**service_installer_options))
       end
 
-      # Deregister a per-user autostart unit using the installer's OWN
-      # identity (`target_path` / `service_name`) as the single source of
-      # truth, so install and uninstall can never drift on paths or names —
-      # if `hive bot install` ever changes where it writes the unit, this
-      # follows automatically. Warn-and-continue on any service-manager
-      # failure so one stuck manager never aborts the rest of the uninstall.
+      def deregister_babysitter
+        stop_foreground_babysitter
+        require "hive/commands/babysit/service_installer"
+        deregister_unit(
+          Hive::Commands::Babysit::ServiceInstaller.new(**service_installer_options)
+        )
+      end
+
+      def deregister_web
+        require "hive/commands/web/service_installer"
+        # Uninstall only needs the installer's platform-derived identity.
+        # Supplying an inert config keeps malformed global web settings from
+        # aborting teardown before the unit can be deregistered and the later
+        # config/cache/data cleanup can run.
+        deregister_unit(
+          Hive::Commands::Web::ServiceInstaller.new(config: {}, **service_installer_options)
+        )
+      end
+
+      # Keep command ordering and presentation here while delegating the
+      # platform-neutral disable/remove/reload transaction to UserService.
       def deregister_unit(installer)
         path = installer.target_path
-        return unless path && File.exist?(path)
+        return unless path
 
-        case @host_os
-        when /darwin/i
-          ok = @runner.call([ "launchctl", "unload", path ])
-          unless ok
+        result = installer.remove!
+        if result.diagnostics.include?(:unsafe_unit_path)
+          @output.puts "hive: refusing to follow symlink at #{path}; remove it manually"
+        elsif result.diagnostics.include?(:manager_disable_failed)
+          if installer.envelope_platform == "macos"
             @output.puts "hive: warning: launchctl unload failed for #{path}; leaving it in place. Fix launchd state and re-run `hive uninstall`."
-            return
-          end
-          safe_unlink(path)
-        when /linux/i
-          service = installer.service_name
-          ok = @runner.call([ "systemctl", "--user", "disable", "--now", service ])
-          unless ok
+          else
+            service = installer.service_name
             @output.puts "hive: warning: systemctl --user disable failed for #{service}; leaving #{path} in place. Fix systemd state and re-run `hive uninstall`."
-            return
           end
-          safe_unlink(path)
-          ok_reload = @runner.call(%w[systemctl --user daemon-reload])
-          @output.puts "hive: warning: systemctl --user daemon-reload failed after removing #{path}; run it manually" unless ok_reload
+        elsif result.diagnostics.include?(:stale_after_manager_change)
+          @output.puts "hive: warning: #{path} changed while its service was being disabled; leaving it in place. Re-run `hive uninstall`."
+        elsif result.diagnostics.include?(:daemon_reload_failed)
+          @output.puts "hive: warning: systemctl --user daemon-reload failed after removing #{path}; run it manually"
+        elsif result.failed?
+          @output.puts "hive: warning: could not remove #{path}; leaving it in place and continuing"
         end
+      end
+
+      def service_installer_options
+        {
+          host_os: @host_os,
+          runner: @runner,
+          systemctl_available: @host_os.match?(/linux/i),
+          launchctl_available: @host_os.match?(/darwin/i)
+        }
       end
 
       def stop_foreground_bot
@@ -115,18 +143,17 @@ module Hive
         nil
       end
 
-      # Refuse to delete via a symlink: an attacker who pre-plants
-      # `~/Library/LaunchAgents/local.hive-daemon.plist -> /etc/passwd`
-      # would otherwise get an arbitrary user-writable file unlinked.
-      def safe_unlink(path)
-        stat = File.lstat(path)
-        if stat.symlink?
-          @output.puts "hive: refusing to follow symlink at #{path}; remove it manually"
-          return
-        end
-        FileUtils.rm_f(path)
-      rescue Errno::ENOENT
-        nil
+      def stop_foreground_babysitter
+        require "hive/commands/babysit"
+        Hive::Commands::Babysit.new(
+          "stop",
+          hive_home: Hive::Paths.state_home,
+          quiet: true
+        ).call
+      rescue Hive::Error, SystemCallError, IOError, Psych::Exception => e
+        raise Hive::Error,
+              "hive uninstall: could not safely stop babysitter (#{e.class}: #{e.message}); " \
+              "no services or data were removed"
       end
 
       def remove_user_config_and_cache
@@ -159,12 +186,95 @@ module Hive
         bin_home = Hive::Paths.bin_home
         %w[hive hv].each do |name|
           link = File.join(bin_home, name)
-          next unless File.symlink?(link)
+          next unless managed_bash_launcher_link?(link, name)
 
-          File.unlink(link)
+          quarantine = File.join(
+            bin_home,
+            ".hive-uninstall-#{name}-#{Process.pid}-#{SecureRandom.hex(6)}"
+          )
+          File.rename(link, quarantine)
+          if managed_bash_launcher_link?(quarantine, name)
+            File.unlink(quarantine)
+          else
+            restore_replaced_launcher(quarantine, link)
+          end
         rescue Errno::ENOENT
           next
         end
+      end
+
+      def restore_replaced_launcher(quarantine, link)
+        if !File.exist?(link) && !File.symlink?(link)
+          File.rename(quarantine, link)
+          @output.puts "hive: warning: launcher changed during uninstall; restored #{link}"
+        else
+          @output.puts "hive: warning: launcher changed during uninstall; preserved it at #{quarantine}"
+        end
+      rescue SystemCallError => e
+        @output.puts "hive: warning: could not restore changed launcher #{link}: #{e.message}; preserved it at #{quarantine}"
+      end
+
+      # `install.sh` publishes absolute user-bin symlinks to wrappers under an
+      # authenticated bash-channel data home. Basename alone is not ownership:
+      # an operator may already have an unrelated `hive` or `hv` symlink.
+      # Require the exact managed layout, current-UID regular wrapper, and a
+      # stable current-UID bash marker before removing the launcher.
+      def managed_bash_launcher_link?(link, name)
+        return false unless File.symlink?(link)
+
+        target = File.expand_path(File.readlink(link), File.dirname(link))
+        bin_dir = File.dirname(target)
+        gems_dir = File.dirname(bin_dir)
+        data_home = File.dirname(gems_dir)
+        return false unless File.basename(target) == name
+        return false unless File.basename(bin_dir) == "bin"
+        return false unless File.basename(gems_dir) == "gems"
+        return false unless File.basename(data_home) == "hive"
+        return false unless managed_bash_data_home?(data_home)
+
+        target_stat = File.lstat(target)
+        return false unless target_stat.file? && target_stat.uid == Process.uid
+
+        marker = File.join(data_home, "install-channel")
+        stable_owned_file_content(marker, max_bytes: 16)&.strip == "bash"
+      rescue SystemCallError
+        false
+      end
+
+      def managed_bash_data_home?(candidate)
+        expanded_candidate = File.expand_path(candidate)
+        return true if expanded_candidate == File.expand_path(Hive::Paths.data_home)
+
+        prefix = stable_owned_file_content(
+          File.join(Hive::Paths.data_home, "install-prefix"),
+          max_bytes: 4_096
+        )&.strip
+        return false if prefix.to_s.empty?
+
+        expanded_candidate == File.join(File.expand_path(prefix), "hive")
+      rescue ArgumentError
+        false
+      end
+
+      def stable_owned_file_content(path, max_bytes:)
+        before = File.lstat(path)
+        return nil unless before.file? &&
+                          before.uid == Process.uid &&
+                          before.nlink == 1 &&
+                          before.size <= max_bytes
+
+        flags = File::RDONLY | File::NONBLOCK
+        flags |= File::NOFOLLOW if defined?(File::NOFOLLOW)
+        File.open(path, flags) do |file|
+          opened = file.stat
+          return nil unless opened.dev == before.dev &&
+                            opened.ino == before.ino &&
+                            opened.size == before.size
+
+          file.read(max_bytes)
+        end
+      rescue SystemCallError
+        nil
       end
 
       def cleanup_project_state(projects)

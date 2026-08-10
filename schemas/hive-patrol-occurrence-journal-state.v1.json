@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hive.local/schemas/hive-patrol-occurrence-journal-state.v1.json",
+  "title": "Hive Patrol Occurrence Journal State v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "module",
+    "sequence_closed_through",
+    "sequence_high_waters",
+    "retired_occurrence_digests",
+    "recovery_generation",
+    "recovery_failure"
+  ],
+  "properties": {
+    "schema": {"const": "hive-patrol-occurrence-journal-state"},
+    "schema_version": {"const": 1},
+    "module": {"enum": ["patrol", "architecture-patrol"]},
+    "sequence_closed_through": {
+      "anyOf": [
+        {"type": "string", "format": "date-time"},
+        {"type": "null"}
+      ]
+    },
+    "sequence_high_waters": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "identity_digest",
+          "window_started_at",
+          "high_water",
+          "closed"
+        ],
+        "properties": {
+          "identity_digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "window_started_at": {"type": "string", "format": "date-time"},
+          "high_water": {"type": "integer", "minimum": 1},
+          "closed": {"type": "boolean"}
+        }
+      }
+    },
+    "retired_occurrence_digests": {
+      "type": "array",
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+      }
+    },
+    "recovery_generation": {"type": "integer", "minimum": 0},
+    "recovery_failure": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "generation",
+            "operation",
+            "occurrence_id",
+            "job_id",
+            "failure_count",
+            "failed_at",
+            "next_eligible_at",
+            "error_class",
+            "error_message",
+            "error_digest"
+          ],
+          "properties": {
+            "generation": {"type": "integer", "minimum": 1},
+            "operation": {"type": "string", "minLength": 1},
+            "occurrence_id": {
+              "anyOf": [
+                {"type": "string", "minLength": 1},
+                {"type": "null"}
+              ]
+            },
+            "job_id": {
+              "anyOf": [
+                {"type": "string", "minLength": 1},
+                {"type": "null"}
+              ]
+            },
+            "failure_count": {"type": "integer", "minimum": 1},
+            "failed_at": {"type": "string", "format": "date-time"},
+            "next_eligible_at": {"type": "string", "format": "date-time"},
+            "error_class": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "error_message": {"type": "string", "maxLength": 512},
+            "error_digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        },
+        {"type": "null"}
+      ]
+    }
+  }
+}

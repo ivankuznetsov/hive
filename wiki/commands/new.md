@@ -3,8 +3,8 @@ title: hive new
 type: command
 source: bin/hive, lib/hive/commands/new.rb, templates/idea.md.erb
 created: 2026-04-25
-updated: 2026-07-21
-tags: [command, capture, slug, task-id, commit-lock, workflow, dependencies, base-branch]
+updated: 2026-07-24
+tags: [command, capture, slug, task-id, idempotency, json, commit-lock, workflow, dependencies, base-branch]
 ---
 
 **TLDR**: `hive new PROJECT TEXT...` captures an idea: derives a slug, resolves the effective workflow (`--workflow` override, project `default_workflow`, then `coding`), scaffolds the descriptor's entry-stage folder plus state file and `meta.yml`, commits it on the `hive/state` branch, and best-effort starts display-name generation after the commit.
@@ -123,6 +123,8 @@ slug: add-inbox-filter-260603-abcd
 display_name:
 depends_on: api:base-task-260716-abcd
 base_branch: main
+idempotency_key: workflow-creator:editorial:stable
+input_fingerprint: 3f...
 ```
 
 `id` comes from the process-global counter at `Hive::Paths.task_counter_path` (`<state_home>/task-counter.yml`), protected by `<state_home>/.task-counter.lock`. `display_name` starts nil; `Hive::Task#display_label` falls back to the slug until name generation succeeds. `depends_on` is omitted when not supplied and remains the authoritative scheduling declaration when present. `workflow:` is omitted for plain coding captures, but set for explicit overrides and non-coding project defaults. `base_branch:` is omitted outside draft-PR workflows and is authoritative when present.
@@ -132,6 +134,41 @@ base_branch: main
 - `test/integration/new_test.rb` covers slug derivation, dependency slug/numeric/`project:slug` grammar, reserved-slug rejection, collisions, rich capture, workflow pinning, counter-lock fallback, commit locking, and the captured commit.
 - `test/integration/new_wrapper_argv_test.rb` drives the real `bin/hive` subprocess and pins wrapper-only argv behavior: canonical `PROJECT --workflow ID "text"`, before-project and trailing options, `--workflow=ID`, combined dependency/workflow flags, literal `--workflow` substrings, lifted-but-plain `--json`, missing text after lifted options, and unrecognized options as task text.
 - `test/integration/tui_new_idea_attachments_test.rb` covers the TUI-internal rich submit path.
+
+## Idempotent machine-readable creation
+
+Automation may add `--idempotency-key KEY --json`. Hive stores the opaque key
+with a fingerprint of the normalized input, resolved workflow, dependency, and
+base branch. Idempotent attachments are copied once into a private temporary
+snapshot; the fingerprint and task asset both use those bytes, and the final
+copy is digest-verified. A pathname replacement or source edit between lookup
+and task creation therefore cannot make metadata describe different captured
+content. For owner-authored workflows the fingerprint also covers the
+descriptor and complete instruction tree, so changed owner content conflicts
+instead of reusing an older task. Hive rechecks that authored digest inside the
+commit boundary before lookup reuse and again before metadata publication; a
+mid-creation edit aborts and removes the candidate instead of binding a stale
+fingerprint to a different graph. Metadata admission fails closed if any
+candidate task metadata is malformed or unreadable. The managed-workflow
+mutation lock is acquired before the state commit lock, matching lifecycle
+writers. One commit lock now covers the state-wide key lookup, exclusive
+task-directory creation, metadata write, and commit. Same-slug contenders
+therefore cannot share a candidate directory, report two creations, overwrite
+one another, or remove a directory they did not create. A matching retry
+returns the original slug with `created: false` even after the task has moved;
+reuse for different input/workflow fails without a second task, and duplicate
+metadata is a fail-closed repair error.
+
+If a capture commit fails after staging, both idempotent and legacy paths
+remove the owned candidate and reset its exact state-index pathspec. Failures
+raised after directory ownership, including `EEXIST`, likewise remove only the
+owned candidate before propagating the original error.
+
+The `hive-new.v1` success payload contains `created`, `slug`, `workflow`,
+`current_stage`, `task_folder`, and a structured `next_action`. Callers without
+an idempotency key retain the existing capture behavior. The workflow creator
+uses this surface only when task creation was explicit in the original request;
+creation-only workflow authoring never invokes `hive new`.
 
 ## Backlinks
 

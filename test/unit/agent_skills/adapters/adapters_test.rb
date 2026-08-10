@@ -1,5 +1,5 @@
 require "test_helper"
-require "hive/digest"
+require "digest"
 require "hive/agent_skills/adapters/registry"
 
 class AgentSkillAdaptersTest < Minitest::Test
@@ -104,6 +104,72 @@ class AgentSkillAdaptersTest < Minitest::Test
     end
   end
 
+  def test_grok_uses_native_plugin_install_enable_and_update_commands
+    with_tmp_dir do |dir|
+      missing = inspection(
+        agent: "grok", capability: "ce-code-review", package: "compound-engineering",
+        health: "missing", bin: "/fake/grok"
+      )
+      install = adapter(Hive::AgentSkills::Adapters::Grok, dir: dir).plan([ missing ]).operations.fetch(0)
+      assert_equal [
+        "/fake/grok", "plugin", "install", "EveryInc/compound-engineering-plugin", "--trust"
+      ], install.argv
+
+      disabled = inspection(
+        agent: "grok", capability: "ce-code-review", package: "compound-engineering",
+        health: "missing", bin: "/fake/grok",
+        native_package: {
+          "id" => "compound-engineering", "version" => "3.20.0", "enabled" => false
+        }
+      )
+      enable = adapter(Hive::AgentSkills::Adapters::Grok, dir: dir).plan([ disabled ]).operations.fetch(0)
+      assert_equal [ "/fake/grok", "plugin", "enable", "compound-engineering" ], enable.argv
+
+      stale = inspection(
+        agent: "grok", capability: "ce-code-review", package: "compound-engineering",
+        health: "stale", bin: "/fake/grok",
+        native_package: {
+          "id" => "compound-engineering", "version" => "2.9.0", "enabled" => true
+        }
+      )
+      update = adapter(Hive::AgentSkills::Adapters::Grok, dir: dir).plan([ stale ]).operations.fetch(0)
+      assert_equal [ "/fake/grok", "plugin", "update", "compound-engineering" ], update.argv
+
+      stale_and_disabled = inspection(
+        agent: "grok", capability: "ce-code-review", package: "compound-engineering",
+        health: "stale", bin: "/fake/grok",
+        native_package: {
+          "id" => "compound-engineering", "version" => "2.9.0", "enabled" => false
+        }
+      )
+      combined = adapter(
+        Hive::AgentSkills::Adapters::Grok, dir: dir
+      ).plan([ stale_and_disabled ]).operations
+      assert_equal %w[plugin_update plugin_enable], combined.map(&:kind)
+      assert_equal [ combined.first.id ], combined.last.depends_on
+
+      unresolved = inspection(
+        agent: "grok", capability: "ce-code-review", package: "compound-engineering",
+        health: "missing", bin: "/fake/grok",
+        native_package: {
+          "id" => "compound-engineering", "version" => "3.20.0", "enabled" => true
+        }
+      )
+      repair = adapter(Hive::AgentSkills::Adapters::Grok, dir: dir).plan([ unresolved ]).operations.fetch(0)
+      assert_equal [ "/fake/grok", "plugin", "update", "compound-engineering" ], repair.argv
+    end
+  end
+
+  def test_registry_exposes_grok_adapter
+    with_tmp_dir do |dir|
+      registry = Hive::AgentSkills::Adapters::Registry.new(
+        config: Hive::Config::DEFAULTS, project_root: dir, environment: { "HOME" => dir }
+      )
+
+      assert_instance_of Hive::AgentSkills::Adapters::Grok, registry.fetch("grok")
+    end
+  end
+
   def test_claude_plan_alias_is_atomic_and_depends_on_plugin_install
     with_tmp_dir do |dir|
       row = inspection(agent: "claude", capability: "wiki-plan", package: "llm-wiki",
@@ -201,6 +267,38 @@ class AgentSkillAdaptersTest < Minitest::Test
     end
   end
 
+  def test_codex_executes_dependent_packages_against_the_advancing_config
+    with_tmp_dir do |dir|
+      codex_home = File.join(dir, "codex")
+      config_path = File.join(codex_home, "config.toml")
+      FileUtils.mkdir_p(codex_home)
+      runner = FakeRunner.new do |argv, _env, _timeout|
+        section = if argv[2] == "marketplace"
+          name = argv[-2].include?("EveryInc") ? "compound-engineering-plugin" : "aikuznetsov-marketplace"
+          "[marketplaces.#{name}]\nsource = \"#{argv[-2]}\"\n"
+        else
+          "[plugins.\"#{argv[3]}\"]\nenabled = true\n"
+        end
+        File.open(config_path, "a") { |file| file.write(section) }
+        command_result
+      end
+      rows = [
+        inspection(agent: "codex", capability: "ce-brainstorm", package: "compound-engineering",
+                   health: "missing", bin: "/fake/codex"),
+        inspection(agent: "codex", capability: "wiki-plan", package: "llm-wiki",
+                   health: "missing", bin: "/fake/codex")
+      ]
+      instance = adapter(Hive::AgentSkills::Adapters::Codex, dir: dir, runner: runner,
+                         environment: { "CODEX_HOME" => codex_home })
+
+      outcomes = instance.plan(rows).operations.map { |operation| instance.execute(operation) }
+
+      assert_equal %w[succeeded succeeded succeeded succeeded], outcomes.map(&:status),
+                   outcomes.map(&:message).inspect
+      assert_equal 4, runner.calls.size
+    end
+  end
+
   def test_codex_conflicting_marketplace_owner_is_preserved
     with_tmp_dir do |dir|
       codex_home = File.join(dir, "codex")
@@ -250,6 +348,29 @@ class AgentSkillAdaptersTest < Minitest::Test
     end
   end
 
+  def test_codex_dependent_operation_accepts_owned_config_drift_without_a_recorded_snapshot
+    with_tmp_dir do |dir|
+      codex_home = File.join(dir, "codex")
+      config_path = File.join(codex_home, "config.toml")
+      FileUtils.mkdir_p(codex_home)
+      File.write(config_path, "")
+      row = inspection(
+        agent: "codex", capability: "ce-brainstorm", package: "compound-engineering",
+        health: "missing", bin: "/fake/codex",
+        marketplace: nil
+      )
+      codex = adapter(
+        Hive::AgentSkills::Adapters::Codex, dir: dir,
+        environment: { "CODEX_HOME" => codex_home }
+      )
+      operation = codex.plan([ row ]).operations.find { |item| item.kind == "plugin_install" }
+      package = operation.metadata.fetch("native_package")
+      File.write(config_path, "[plugins.\"#{package}\"]\nenabled = true\n")
+
+      assert_nil codex.send(:validate_preconditions, operation)
+    end
+  end
+
   def test_codex_success_preserves_comments_unrelated_content_and_mode
     with_tmp_dir do |dir|
       codex_home = File.join(dir, "codex")
@@ -260,6 +381,7 @@ class AgentSkillAdaptersTest < Minitest::Test
       File.chmod(0o600, config_path)
       runner = FakeRunner.new do |_argv, _env, _timeout|
         File.open(config_path, "a") { |file| file.write("[plugins.\"compound-engineering@compound-engineering-plugin\"]\nenabled = true\n") }
+        File.chmod(0o644, config_path)
         command_result
       end
       row = inspection(

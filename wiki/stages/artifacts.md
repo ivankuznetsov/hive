@@ -3,11 +3,17 @@ title: 7-artifacts stage
 type: stage
 source: lib/hive/stages/artifacts.rb
 created: 2026-05-22
-updated: 2026-06-22
+updated: 2026-08-03
 tags: [stage, artifacts, release]
 ---
 
-**TLDR**: Artifact collection is the agent-backed handoff between autonomous review and PR finalization. It asks the configured `artifacts.agent` to write `artifact.md`, ending with `<!-- COMPLETE -->`, and asks the agent to produce best-effort visual proof under `media/` when the task has an observable UI/TUI/CLI surface. Screenote is now agent-driven: when a valid OAuth credential exists, Claude-backed artifacts runs receive a strict Screenote MCP config and the prompt tells the agent to upload PNG/JPEG stills through `create_screenshot_upload`; when Screenote is missing/expired/unusable, the agent still captures local media and records `screenote_skipped_reason`. The Ruby REST uploader is gone.
+**TLDR**: Artifact collection is the agent-backed handoff between autonomous
+review and PR finalization. Before spawn, Hive writes a deterministic,
+generation-bound `capture-requirement.json`. Visual work must retain a valid
+task-local `media/capture-manifest.json`; a bootstrap, provider, or recorder failure keeps
+the stage in `ERROR reason=required_capture_missing`. Nonvisual work records
+`not_applicable`. Autonomous artifact collection never reads or injects
+Screenote credentials: external upload is a separate operator-confirmed action.
 
 ## Preconditions
 
@@ -17,18 +23,63 @@ tags: [stage, artifacts, release]
 ## Steps performed (`Stages::Artifacts.run!`)
 
 1. Touch `artifact.md` if it does not exist.
-2. If the current marker is already `COMPLETE`, return without a new commit action.
-3. Resolve the Screenote connection state from `~/.config/hive/screenote.json` (or `HIVE_HOME/screenote.json`) plus any per-task `screenote.project_id` override, then render `templates/artifacts_prompt.md.erb` with the task folder, worktree path, target artifact file, and connected/disconnected Screenote context.
-4. Resolve `artifacts.agent` through `Hive::Stages::Base.stage_profile`.
-5. If the profile is Claude and Screenote is connected, write a mode-0600 ephemeral `.mcp.json` under `Hive::Paths.cache_home`, pass it to Claude with `--mcp-config` and `--strict-mcp-config`, and add the Screenote MCP tools to `--allowedTools`. If disconnected or the profile is not Claude, spawn without Screenote MCP injection.
-6. Re-read the terminal marker from `artifact.md`.
-7. Return `{commit: "artifacts_collected", status: :complete}` on `COMPLETE`, or the marker-specific action otherwise. The stage no longer mutates `media/manifest.json` after the agent exits.
-
-Screenote processing remains fail-soft, but the fail-soft behavior now lives in the prompt and MCP injection boundary rather than in a Ruby post-processing loop. A missing credential, expired token, missing project, or invalid credential produces a disconnected prompt context; the agent still captures local media and records the reason in `screenote_skipped_reason`. A revoked token can still fail individual MCP calls inside the agent run; the prompt instructs the agent to leave `screenote_url` null and write a concise skip reason instead of failing the stage.
+2. Classify applicability from the exact implementation base/head, changed-path
+   digest, visual path rules, and explicit requested outcome, then atomically
+   write `capture-requirement.json`. If Hive cannot prove the owned worktree,
+   base/head, or changed-path evidence, classification fails closed to
+   `required`; absence of evidence is never treated as `not_applicable`.
+3. If the marker is already `COMPLETE`, accept it only when the requirement is
+   `not_applicable` or a matching retained capture manifest exists.
+4. Resolve `artifacts.agent`, render the generation-bound local-capture
+   contract, and spawn without external-upload credentials or MCP tools.
+5. Re-read the marker and validate required capture again. Missing/invalid
+   required evidence is replaced with
+   `ERROR reason=required_capture_missing` and remediation.
 
 ## Media manifest
 
-The agent writes `<task>/media/manifest.json`:
+Required capture writes `<task>/media/capture-manifest.json` using
+`hive-artifact-capture` v2. Its provider-neutral envelope binds the task slug,
+clean source SHA, recorder identity and argv, disclosed environment-key names,
+artifact byte sizes and SHA-256 hashes, timestamps, diagnostic, and teardown
+outcome. Built-in Hivebox evidence keeps its lock digests, immutable cache key,
+fixture ids, viewport, and accessibility assertions inside the typed `evidence`
+block; project recorders use `evidence.type: project_provider` and bounded
+provider-specific `details`. A `captured` receipt must contain at least one
+retained artifact and match the requirement's implementation head.
+
+New producers reserve headroom by rejecting the complete serialized receipt
+above 240 KiB before publishing any provider media or manifest. Policy and Hive
+Web share a 256 KiB consumer ceiling and reject larger files before parsing.
+The environment-key disclosure is always nonempty, and failed-provider blank
+diagnostics are normalized to an actionable fallback. Project-provider capture
+is Linux-only because its custody guarantee depends on child-subreaper support.
+Before and after invoking a provider, Hive rejects Git `assume-unchanged` and
+`skip-worktree` index entries and revalidates the complete source snapshot. Git
+attestation helpers and the provider share bounded output, one monotonic
+source-custody deadline, and complete descendant cleanup. Each command runs
+beneath a freshly forked subreaper custody root, so caller children outside that
+command subtree are never enumerated, signalled, or reaped. Configured commands
+always use Ruby's direct executable/argv form, including one-item commands, so
+shell punctuation in a tracked executable name remains literal.
+
+Project media must decode as its declared image/video type. Its published name
+contains both source and artifact digests, so an identical recapture is reused
+while changed bytes at the same source SHA publish under a new name; superseded
+task-owned provider media is removed only after the replacement manifest is
+durable.
+
+The policy continues to validate retained `hive-artifact-capture` v1 manifests
+against the v1 schema and built-in-recorder requirements. New captures emit v2;
+the Web reader validates v2 receipts against the complete shared strict schema,
+renders valid v1 and v2 receipts, and hides unknown future versions. This is a
+read-compatible migration: existing task evidence does not need rewriting.
+Syntactically valid non-object receipts fail closed as unsatisfied, and provider
+recapture ignores a retained receipt unless both its root and `recorder` are
+objects with the expected provider identity.
+
+The older `<task>/media/manifest.json` remains a display compatibility format
+for existing tasks:
 
 ```json
 {
@@ -48,13 +99,21 @@ The agent writes `<task>/media/manifest.json`:
 }
 ```
 
-`status: "skipped"` means the task has no observable surface. `status: "failed"` means boot, driving, or capture tooling failed; hivebox renders the reason as a Demo warning banner. `status: "captured"` renders committed PNG/JPEG/GIF files inline in hivebox through the task media route. `screenote_url` remains the display contract read by hivebox; `screenote_skipped_reason` is an optional writer-side diagnostic. See [[commands/web]] and [[commands/screenote]].
+For new work, applicability is not agent-authored: `not_applicable` is the
+classifier result, while required capture failure is a stage error. Promotion
+is unrestricted; demotion requires a confirmed generation-bound operator and
+rationale. See [[commands/web]].
 
 ## Marker -> next action
 
 - Markerless or non-complete `7-artifacts` rows surface as `ready_to_artifacts` with `hive artifacts <slug> --from 7-artifacts`.
 - `:complete` rows surface as `ready_to_finalize` with `hive finalize <slug> --from 7-artifacts`.
-- `ERROR reason=tmux_session_terminated` and `ERROR reason=agent_orphaned` are daemon-retryable when no live task lock exists. `ERROR reason=timeout` is also retryable for this stage, but only once: if a tmux-backed artifacts agent wrote or can safely rewrite `artifact.md` yet failed to stamp `<!-- COMPLETE -->` before the wait timed out, `Hive::Daemon::StaleAgentHealer` clears the marker with the shared marker-id guard and the timeout-specific one-shot budget, then the normal daemon dispatch reruns artifact collection. Other timeout stages stay manual unless separately documented.
+- Every persisted `ERROR` other than exact operator-owned semantic terminal
+  errors, including `tmux_session_terminated`,
+  `agent_orphaned`, and `timeout`, follows the universal recovery lifecycle.
+  After the shared cooldown and safety checks, `RecoveryCoordinator` admits the
+  exact marker generation and reruns artifact collection. There is no
+  artifacts-only timeout budget or healer clear path.
 
 ## Backlinks
 

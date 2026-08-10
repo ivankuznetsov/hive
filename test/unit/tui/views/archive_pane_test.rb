@@ -4,7 +4,7 @@ require "hive/tui/snapshot"
 require "hive/tui/views/archive_pane"
 
 class HiveTuiViewsArchivePaneTest < Minitest::Test
-  def task(slug:, stage:, project: "demo", marker: "complete", age: 120)
+  def task(slug:, stage:, project: "demo", marker: "complete", age: 120, archived: false)
     {
       "stage" => stage,
       "slug" => slug,
@@ -17,16 +17,22 @@ class HiveTuiViewsArchivePaneTest < Minitest::Test
       "age_seconds" => age,
       "claude_pid" => nil,
       "claude_pid_alive" => nil,
-      "action" => stage == "9-done" ? "archived" : "ready_to_plan",
-      "action_label" => stage == "9-done" ? "Archived" : "Ready to plan",
+      "action" => archived ? "archived" : "ready_to_plan",
+      "action_label" => archived ? "Archived" : "Ready to plan",
       "suggested_command" => nil
     }
   end
 
-  def snapshot(projects)
+  def snapshot(projects, archive_projects: [])
     Hive::Tui::Snapshot.from_payload(
-      "generated_at" => "2026-06-04T12:00:00Z",
-      "projects" => projects
+      {
+        "generated_at" => "2026-06-04T12:00:00Z",
+        "projects" => projects
+      },
+      archive_payload: {
+        "generated_at" => "2026-06-04T12:00:00Z",
+        "projects" => archive_projects
+      }
     )
   end
 
@@ -35,15 +41,24 @@ class HiveTuiViewsArchivePaneTest < Minitest::Test
   end
 
   def test_renders_all_done_rows_and_excludes_other_stages
-    snap = snapshot([
+    ordinary = [
+      {
+        "name" => "alpha",
+        "path" => "/tmp/alpha",
+        "hive_state_path" => "/tmp/alpha/.hive-state",
+        "tasks" => [ task(slug: "active-task", stage: "4-execute", project: "alpha") ]
+      }
+    ]
+    archive = [
                       {
                         "name" => "alpha",
                         "path" => "/tmp/alpha",
                         "hive_state_path" => "/tmp/alpha/.hive-state",
                         "tasks" => [
-                          task(slug: "old-archived", stage: "9-done", project: "alpha", age: 5 * 86_400),
-                          task(slug: "recent-archived", stage: "9-done", project: "alpha", age: 3600),
-                          task(slug: "active-task", stage: "4-execute", project: "alpha")
+                          task(slug: "old-archived", stage: "9-done", project: "alpha",
+                               age: 5 * 86_400, archived: true),
+                          task(slug: "recent-archived", stage: "9-done", project: "alpha",
+                               age: 3600, archived: true)
                         ]
                       },
                       {
@@ -51,10 +66,12 @@ class HiveTuiViewsArchivePaneTest < Minitest::Test
                         "path" => "/tmp/beta",
                         "hive_state_path" => "/tmp/beta/.hive-state",
                         "tasks" => [
-                          task(slug: "beta-archived", stage: "9-done", project: "beta", age: 86_400)
+                          task(slug: "beta-archived", stage: "4-published", project: "beta",
+                               age: 86_400, archived: true)
                         ]
                       }
-                    ])
+                    ]
+    snap = snapshot(ordinary, archive_projects: archive)
 
     out = Hive::Tui::Views::ArchivePane.render(model(snap), width: 100)
 

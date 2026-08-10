@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hivecli.sh/schemas/honeycomb-catalog.v3.json",
+  "title": "Honeycomb reviewed module catalog v3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "entries"],
+  "properties": {
+    "schema": {"const": "honeycomb-catalog/v3"},
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["name", "version", "latest_version", "type", "description", "state", "discoverable", "source_sha", "manifest_sha256", "package_path"],
+        "properties": {
+          "name": {"type": "string"}, "version": {"type": "string"},
+          "latest_version": {"type": ["string", "null"]},
+          "type": {"enum": ["workflow", "patrol", "architecture-patrol"]},
+          "description": {"type": "string"},
+          "state": {"enum": ["listed", "soft_hidden", "yanked", "revoked"]},
+          "discoverable": {"type": "boolean"},
+          "source_sha": {"type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"},
+          "manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "package_path": {"type": "string", "pattern": "^modules/[a-z0-9][a-z0-9-]*/[^/]+$"}
+        }
+      }
+    }
+  }
+}

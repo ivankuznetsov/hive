@@ -14,7 +14,10 @@ class BabysitterAcceptanceWipLabelTest < Minitest::Test
       spawned = false
 
       with_replaced_singleton_method(Hive::Gh, :list_open_prs, ->(_path, **_kwargs) { prs }) do
-        with_replaced_singleton_method(Hive::Babysitter::PrFixer, :run, ->(*_args, **_kwargs) { spawned = true }) do
+        with_replaced_singleton_method(Hive::Babysitter::PrFixer, :run, lambda { |*_args, **_kwargs|
+          spawned = true
+          :untouched
+        }) do
           summary = Hive::Babysitter::ProjectTick.run(
             project,
             dry_run: true,

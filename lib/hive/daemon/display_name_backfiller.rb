@@ -51,11 +51,13 @@ module Hive
       # still be running.
       MAX_INFLIGHT_AGE_SEC = 120
 
-      def initialize(logger:, dry_run: false, spawn: nil, max_per_tick: DEFAULT_MAX_PER_TICK)
+      def initialize(logger:, dry_run: false, spawn: nil, max_per_tick: DEFAULT_MAX_PER_TICK,
+                     admission_open: -> { true })
         @logger = logger
         @dry_run = dry_run
         @spawn = spawn || method(:spawn_name_generator)
         @max_per_tick = max_per_tick
+        @admission_open = admission_open
         @inflight = {}
       end
 
@@ -65,8 +67,11 @@ module Hive
       # other daemon component so a single tick observes one frozen clock.
       def backfill(rows, now: Time.now)
         reap_inflight(now)
+        return unless admission_open?
+
         spawned = 0
         rows.each do |row|
+          break unless admission_open?
           break if spawned >= @max_per_tick
 
           spawned += 1 if consider_row(row, now)
@@ -82,6 +87,12 @@ module Hive
       end
 
       private
+
+      def admission_open?
+        @admission_open.call == true
+      rescue StandardError
+        false
+      end
 
       # Returns true only when a fresh spawn was started this tick (so
       # the caller can count it against max_per_tick). A single bad row
@@ -160,6 +171,8 @@ module Hive
       end
 
       def backfill_row(row, folder, now)
+        return false unless admission_open?
+
         if @dry_run
           @logger.event(:display_name_backfill,
                         project: row.project,
@@ -169,6 +182,8 @@ module Hive
                         dry_run: true)
           return false
         end
+
+        return false unless admission_open?
 
         pid = @spawn.call(folder)
         return false if pid.nil?

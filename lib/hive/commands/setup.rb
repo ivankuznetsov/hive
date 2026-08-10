@@ -5,6 +5,7 @@ require "hive/config"
 require "hive/invoked_binary"
 require "hive/paths"
 require "hive/setup/diagnostics"
+require "hive/setup/qmd_probe"
 require "hive/web/app_bundle"
 require "hive/commands/setup_agents"
 require "hive/web/environment"
@@ -44,7 +45,7 @@ module Hive
         add_phase("diagnostics", diagnostics.ok?, diagnostics.to_h)
 
         # `--no-bootstrap` is diagnose-only (U6): it must provision NOTHING —
-        # not the qmd/web bundles, and not the daemon/web services or project
+        # not the qmd/web bundles, and not the daemon/babysitter/web services or project
         # enrollment either. Otherwise a "diagnose" run silently force-installs
         # the daemon and enrolls the cwd.
         unless @no_bootstrap
@@ -53,6 +54,7 @@ module Hive
             bootstrap_qmd_if_missing(diagnostics)
             web_bundle = bootstrap_web_bundle
             install_daemon
+            install_babysitter
             enroll_project unless @no_init
             if @service
               if web_bundle["ok"]
@@ -150,8 +152,24 @@ module Hive
           # automation to act on.
           _out, err, status = Open3.capture3("npm", "install", "--global", "--prefix", prefix, "@tobilu/qmd")
           data = { "prefix" => prefix }
-          data["message"] = err.strip unless status.success?
-          [ status.success?, data ]
+          unless status.success?
+            data["message"] = err.strip
+            next [ false, data ]
+          end
+
+          qmd = File.join(prefix, "bin", "qmd")
+          unless File.executable?(qmd)
+            data["message"] = "npm install succeeded but no executable was found at #{qmd}"
+            next [ false, data ]
+          end
+
+          qmd_out, qmd_err, qmd_status = Hive::Setup::QmdProbe.call(qmd)
+          unless qmd_status.success?
+            detail = Hive::Setup::QmdProbe.diagnostic(qmd_err, qmd_out)
+            data["message"] = "qmd was installed but failed to start" \
+                              "#{detail.empty? ? "" : ": #{detail}"}"
+          end
+          [ qmd_status.success?, data ]
         end
       end
 
@@ -169,6 +187,23 @@ module Hive
         phase("daemon_service") do
           require "hive/commands/daemon/service_installer"
           installer = Hive::Commands::Daemon::ServiceInstaller.new(binary_path: Hive::InvokedBinary.path)
+          outcome = installer.install!(autostart: true, force: true)
+          [ outcome.success?, {
+            "outcome" => outcome.wire_outcome,
+            "target_path" => installer.target_path,
+            "messages" => installer.messages
+          } ]
+        end
+      end
+
+      def install_babysitter
+        phase("babysitter_service") do
+          require "hive/commands/babysit"
+          require "hive/commands/babysit/service_installer"
+          installer = Hive::Commands::Babysit::ServiceInstaller.new(
+            binary_path: Hive::InvokedBinary.path
+          )
+          Hive::Commands::Babysit.prepare_service_takeover!(installer: installer)
           outcome = installer.install!(autostart: true, force: true)
           [ outcome.success?, {
             "outcome" => outcome.wire_outcome,

@@ -1,7 +1,7 @@
 require "json"
 require "stringio"
 
-require "hive/agent_skills/inspector"
+require "hive/agent_skills"
 require "hive/commands/setup_agents"
 require "hive/config"
 
@@ -12,7 +12,7 @@ module Hive
     # registered project at a time so opening the Agents page never inventories
     # every installed CLI, and repair carries an explicit web-consent origin.
     class AgentSkills
-      def initialize(inspector_class: Hive::AgentSkills::Inspector,
+      def initialize(inspector_class: nil,
                      setup_command_class: Hive::Commands::SetupAgents)
         @inspector_class = inspector_class
         @setup_command_class = setup_command_class
@@ -20,7 +20,12 @@ module Hive
 
       def health(project)
         project_root, config = project_context(project)
-        @inspector_class.new(config: config, project_root: project_root).inspect.map(&:to_h)
+        inspector = if @inspector_class
+          @inspector_class.new(config: config, project_root: project_root)
+        else
+          Hive::AgentSkills.hive_inspector(config: config, project_root: project_root)
+        end
+        inspector.inspect.map(&:to_h)
       end
 
       def repair(project)

@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/config"
+require "hive/gh"
 require "hive/git_ops"
 require "hive/worktree"
 
@@ -243,6 +244,21 @@ class WorktreeTest < Minitest::Test
     end
   end
 
+  def test_create_detached_exact_translates_gate_failures
+    with_initialized_project do |dir, root|
+      wt = Hive::Worktree.new(dir, "analysis-failed", worktree_root: root)
+      with_replaced_singleton_method(
+        Hive::AgentGitGate, :materialize,
+        ->(**) { raise Hive::AgentGitGate::MaterializationFailed, "materialization refused" }
+      ) do
+        error = assert_raises(Hive::WorktreeError) do
+          wt.create_detached_exact!(base_sha: "a" * 40)
+        end
+        assert_includes error.message, "materialization refused"
+      end
+    end
+  end
+
   def test_create_detached_exact_prunes_orphaned_registration_before_retry
     with_initialized_project do |dir, root|
       pinned = run!("git", "-C", dir, "rev-parse", "HEAD").strip
@@ -306,6 +322,144 @@ class WorktreeTest < Minitest::Test
 
       assert_equal :created, wt.create_exact!(branch, base_sha: pinned)
       assert_equal descendant, run!("git", "-C", wt.path, "rev-parse", "HEAD").strip
+    end
+  end
+
+  def test_create_exact_quarantines_a_registered_worktree_with_a_missing_git_pointer
+    with_initialized_project do |dir, root|
+      pinned = run!("git", "-C", dir, "rev-parse", "HEAD").strip
+      branch = "hive-refactor/exact-broken"
+      wt = Hive::Worktree.new(dir, "exact-broken", worktree_root: root)
+      wt.create_exact!(branch, base_sha: pinned)
+      File.write(File.join(wt.path, "untracked-recovery.txt"), "preserve me\n")
+      FileUtils.rm_f(File.join(wt.path, ".git"))
+
+      result = nil
+      _out, err = capture_io do
+        result = wt.create_exact!(branch, base_sha: pinned)
+      end
+
+      assert_equal :created, result
+      assert_equal branch,
+                   run!("git", "-C", wt.path, "branch", "--show-current").strip
+      assert_equal pinned, run!("git", "-C", wt.path, "rev-parse", "HEAD").strip
+      quarantined = Dir.glob(
+        File.join(root, ".hive-quarantine", "exact-broken-*")
+      )
+      assert_equal 1, quarantined.size
+      assert_equal "preserve me\n",
+                   File.read(File.join(quarantined.first, "untracked-recovery.txt"))
+      assert_includes err, "preserved broken exact worktree"
+    end
+  end
+
+  def test_create_exact_does_not_mistake_an_enclosing_checkout_for_the_worktree
+    with_tmp_git_repo do |dir|
+      root = File.join(dir, ".nested-worktrees")
+      FileUtils.mkdir_p(root)
+      pinned = run!("git", "-C", dir, "rev-parse", "HEAD").strip
+      branch = "hive-refactor/exact-nested-broken"
+      wt = Hive::Worktree.new(dir, "exact-nested-broken", worktree_root: root)
+      wt.create_exact!(branch, base_sha: pinned)
+      FileUtils.rm_f(File.join(wt.path, ".git"))
+
+      result = nil
+      capture_io do
+        result = wt.create_exact!(branch, base_sha: pinned)
+      end
+
+      assert_equal :created, result
+      assert_equal branch,
+                   run!("git", "-C", wt.path, "branch", "--show-current").strip
+      assert File.file?(File.join(wt.path, ".git"))
+      assert_equal 1, Dir.glob(
+        File.join(root, ".hive-quarantine", "exact-nested-broken-*")
+      ).size
+    end
+  end
+
+  def test_create_exact_refuses_to_accumulate_repeated_quarantines
+    with_initialized_project do |dir, root|
+      pinned = run!("git", "-C", dir, "rev-parse", "HEAD").strip
+      branch = "hive-refactor/exact-repeated-broken"
+      wt = Hive::Worktree.new(dir, "exact-repeated-broken", worktree_root: root)
+      wt.create_exact!(branch, base_sha: pinned)
+      FileUtils.rm_f(File.join(wt.path, ".git"))
+      capture_io { wt.create_exact!(branch, base_sha: pinned) }
+      File.write(File.join(wt.path, "second-recovery.txt"), "keep here\n")
+      FileUtils.rm_f(File.join(wt.path, ".git"))
+
+      error = assert_raises(Hive::WorktreeError) do
+        capture_io { wt.create_exact!(branch, base_sha: pinned) }
+      end
+
+      assert_includes error.message, "unresolved prior quarantine"
+      assert_equal "keep here\n", File.read(File.join(wt.path, "second-recovery.txt"))
+      assert_equal 1, Dir.glob(
+        File.join(root, ".hive-quarantine", "exact-repeated-broken-*")
+      ).size
+    end
+  end
+
+  def test_broken_exact_registration_rejects_a_symlink_path
+    with_tmp_dir do |dir|
+      root = File.join(dir, "worktrees")
+      FileUtils.mkdir_p(root)
+      wt = Hive::Worktree.new(dir, "symlinked", worktree_root: root)
+      File.symlink(dir, wt.path)
+      wt.define_singleton_method(:list_worktree_paths) { [ path ] }
+      wt.define_singleton_method(:usable_git_worktree?) { false }
+
+      error = assert_raises(Hive::WorktreeError) do
+        wt.send(:recover_broken_exact_registration!)
+      end
+
+      assert_includes error.message, "is a symlink and cannot be recovered"
+      assert File.symlink?(wt.path)
+    end
+  end
+
+  def test_broken_exact_registration_requires_removal_to_clear_the_exact_path
+    with_tmp_dir do |dir|
+      root = File.join(dir, "worktrees")
+      FileUtils.mkdir_p(root)
+      wt = Hive::Worktree.new(dir, "still-registered", worktree_root: root)
+      wt.define_singleton_method(:list_worktree_paths) { [ path ] }
+      wt.define_singleton_method(:usable_git_worktree?) { false }
+
+      with_replaced_singleton_method(
+        Hive::Worktree, :run_materialize_git!, ->(*) { "" }
+      ) do
+        error = assert_raises(Hive::WorktreeError) do
+          wt.send(:recover_broken_exact_registration!)
+        end
+
+        assert_includes error.message,
+                        "registration could not be removed"
+      end
+    end
+  end
+
+  def test_broken_exact_registration_translates_preservation_failures
+    with_tmp_dir do |dir|
+      root = File.join(dir, "worktrees")
+      FileUtils.mkdir_p(root)
+      wt = Hive::Worktree.new(dir, "unmovable", worktree_root: root)
+      FileUtils.mkdir_p(wt.path)
+      wt.define_singleton_method(:list_worktree_paths) { [ path ] }
+      wt.define_singleton_method(:usable_git_worktree?) { false }
+
+      with_replaced_singleton_method(
+        FileUtils, :mv,
+        ->(*) { raise Errno::EACCES, wt.path }
+      ) do
+        error = assert_raises(Hive::WorktreeError) do
+          wt.send(:recover_broken_exact_registration!)
+        end
+
+        assert_includes error.message,
+                        "broken exact worktree could not be preserved"
+      end
     end
   end
 
@@ -1349,6 +1503,143 @@ class WorktreeTest < Minitest::Test
         )
       end
       assert_includes error.message, "contradicts saved task state"
+    end
+  end
+
+  def test_owned_pointer_accepts_only_the_registered_deterministic_task_worktree
+    with_initialized_project do |dir, root|
+      slug = "owned-task"
+      task_folder = File.join(
+        dir, ".hive-state", "stages", "4-execute", slug
+      )
+      FileUtils.mkdir_p(task_folder)
+      worktree = Hive::Worktree.new(dir, slug, worktree_root: root)
+      worktree.create!(slug, default_branch: "master")
+      pointer_path = File.join(task_folder, "worktree.yml")
+      File.write(pointer_path, { "path" => worktree.path, "branch" => slug }.to_yaml)
+
+      pointer = Hive::Worktree.read_owned_pointer(
+        task_folder,
+        project_root: dir,
+        slug: slug,
+        expected_root: root
+      )
+
+      assert_equal File.realpath(worktree.path), pointer.fetch("path")
+      assert_equal slug, pointer.fetch("branch")
+
+      common_dir_calls = 0
+      with_replaced_singleton_method(
+        Hive::Worktree, :git_common_dir, lambda { |_path|
+          common_dir_calls += 1
+          common_dir_calls == 1 ? "/trusted/common" : "/foreign/common"
+        }
+      ) do
+        repository_error = assert_raises(Hive::WorktreeError) do
+          Hive::Worktree.read_owned_pointer(
+            task_folder,
+            project_root: dir,
+            slug: slug,
+            expected_root: root
+          )
+        end
+        assert_includes repository_error.message, "different repository"
+      end
+      Hive::Worktree.singleton_class.send(:private, :git_common_dir)
+
+      sibling = Hive::Worktree.new(dir, "sibling-task", worktree_root: root)
+      sibling.create!("sibling-task", default_branch: "master")
+      File.write(
+        pointer_path,
+        { "path" => sibling.path, "branch" => "sibling-task" }.to_yaml
+      )
+      sibling_error = assert_raises(Hive::WorktreeError) do
+        Hive::Worktree.read_owned_pointer(
+          task_folder,
+          project_root: dir,
+          slug: slug,
+          expected_root: root
+        )
+      end
+      assert_includes sibling_error.message, "does not belong to task"
+
+      File.write(
+        pointer_path,
+        { "path" => worktree.path, "branch" => "sibling-task" }.to_yaml
+      )
+      branch_error = assert_raises(Hive::WorktreeError) do
+        Hive::Worktree.read_owned_pointer(
+          task_folder,
+          project_root: dir,
+          slug: slug,
+          expected_root: root
+        )
+      end
+      assert_includes branch_error.message, "branch does not belong to task"
+    end
+  end
+
+  def test_owned_pointer_rejects_a_same_slug_worktree_from_another_repository
+    with_initialized_project do |project, _project_root|
+      with_initialized_project do |other_project, other_root|
+        slug = "foreign-task"
+        task_folder = File.join(
+          project, ".hive-state", "stages", "4-execute", slug
+        )
+        FileUtils.mkdir_p(task_folder)
+        foreign = Hive::Worktree.new(
+          other_project, slug, worktree_root: other_root
+        )
+        foreign.create!(slug, default_branch: "master")
+        File.write(
+          File.join(task_folder, "worktree.yml"),
+          { "path" => foreign.path, "branch" => slug }.to_yaml
+        )
+
+        error = assert_raises(Hive::WorktreeError) do
+          Hive::Worktree.read_owned_pointer(
+            task_folder,
+            project_root: project,
+            slug: slug,
+            expected_root: other_root
+          )
+        end
+        assert_includes error.message, "not registered for this project"
+      end
+    end
+  end
+
+  def test_owned_pointer_rejects_symlink_and_malformed_yaml
+    with_tmp_dir do |root|
+      task_folder = File.join(root, "task")
+      worktree_root = File.join(root, "worktrees")
+      FileUtils.mkdir_p(task_folder)
+      pointer_path = File.join(task_folder, "worktree.yml")
+      target = File.join(root, "pointer-target.yml")
+      File.write(target, "path: /tmp/worktree\nbranch: task\n")
+      File.symlink(target, pointer_path)
+
+      symlink_error = assert_raises(Hive::WorktreeError) do
+        Hive::Worktree.read_owned_pointer(
+          task_folder,
+          project_root: root,
+          slug: "task",
+          expected_root: worktree_root
+        )
+      end
+      assert_includes symlink_error.message, "must be a regular file, not a symlink"
+
+      FileUtils.rm_f(pointer_path)
+      File.write(pointer_path, "path: [unterminated\n")
+      yaml_error = assert_raises(Hive::WorktreeError) do
+        Hive::Worktree.read_owned_pointer(
+          task_folder,
+          project_root: root,
+          slug: "task",
+          expected_root: worktree_root
+        )
+      end
+      assert_includes yaml_error.message, "invalid YAML"
     end
   end
 

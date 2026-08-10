@@ -41,6 +41,19 @@ module HiveLiveAgentProof
 
   class Error < StandardError; end
 
+  require_relative "workflow_creator_evidence"
+
+  creator_vocabulary = WorkflowCreator::Vocabulary
+  WORKFLOW_CREATOR_REQUEST = creator_vocabulary.fetch("request")
+  WORKFLOW_CREATOR_PROMPT = creator_vocabulary.fetch("prompt")
+  WORKFLOW_CREATOR_TASK_REQUEST = creator_vocabulary.fetch("task_request")
+  WORKFLOW_CREATOR_TASK_KEY = creator_vocabulary.fetch("task_key")
+  WORKFLOW_CREATOR_TASK_SLUG = creator_vocabulary.fetch("task_slug")
+  WORKFLOW_CREATOR_TASK_PROMPT = creator_vocabulary.fetch("task_prompt")
+  WORKFLOW_CREATOR_TASK_NEW_ARGV = creator_vocabulary.fetch("task_new_argv")
+  WORKFLOW_CREATOR_COMMANDS = WorkflowCreator.commands_for(task_slug: WORKFLOW_CREATOR_TASK_SLUG).value
+  WORKFLOW_CREATOR_FILES = creator_vocabulary.fetch("files")
+
   module_function
 
   def read_json(path)
@@ -312,7 +325,7 @@ module HiveLiveAgentProof
 
   class Attestor
     def initialize(candidate_sha:, workflow_revision:, repository:, run_id:, run_attempt:,
-                   artifact_dir:, evidence_dir:, output_dir:)
+                   artifact_dir:, evidence_dir:, creator_evidence_dir:, output_dir:)
       @candidate_sha = HiveLiveAgentProof.validate_sha!(candidate_sha, "candidate_sha")
       @workflow_revision = HiveLiveAgentProof.validate_sha!(workflow_revision, "workflow_revision")
       @repository = HiveLiveAgentProof.validate_repository!(repository)
@@ -320,6 +333,7 @@ module HiveLiveAgentProof
       @run_attempt = Integer(run_attempt, 10)
       @artifact_dir = File.expand_path(artifact_dir)
       @evidence_dir = File.expand_path(evidence_dir)
+      @creator_evidence_dir = File.expand_path(creator_evidence_dir)
       @output_dir = File.expand_path(output_dir)
       raise Error, "run_id and run_attempt must be positive" unless @run_id.positive? && @run_attempt.positive?
     rescue ArgumentError
@@ -329,20 +343,38 @@ module HiveLiveAgentProof
     def call
       manifest = validate_artifacts!
       evidence = validate_evidence!(manifest)
+      creator_bundle = validate_creator_evidence!(manifest)
       raise Error, "proof output already exists: #{@output_dir}" if File.exist?(@output_dir)
       FileUtils.mkdir_p(File.join(@output_dir, "artifacts"), mode: 0o700)
       FileUtils.mkdir_p(File.join(@output_dir, "evidence"), mode: 0o700)
+      retain_artifacts!(manifest)
+      retain_evidence!(evidence, creator_bundle)
+      write_attestation!(attestation(manifest, evidence, creator_bundle))
+    end
 
+    private
+
+    def retain_artifacts!(manifest)
       manifest.fetch("files").each_key do |name|
         FileUtils.cp(File.join(@artifact_dir, name), File.join(@output_dir, "artifacts", name), preserve: false)
       end
       FileUtils.cp(File.join(@artifact_dir, "artifact-manifest.json"),
                    File.join(@output_dir, "artifacts", "artifact-manifest.json"), preserve: false)
+    end
+
+    def retain_evidence!(evidence, creator_bundle)
       evidence.each do |platform, row|
         HiveLiveAgentProof.write_json(File.join(@output_dir, "evidence", "#{platform}.json"), row)
       end
+      creator_bundle.bytes.each do |name, bytes|
+        File.open(File.join(@output_dir, "evidence", name), File::WRONLY | File::CREAT | File::EXCL, 0o600) do |file|
+          file.write(bytes)
+        end
+      end
+    end
 
-      attestation = {
+    def attestation(manifest, evidence, creator_bundle)
+      {
         "schema" => "hive-live-agent-skills-attestation",
         "schema_version" => SCHEMA_VERSION,
         "candidate_sha" => @candidate_sha,
@@ -356,12 +388,16 @@ module HiveLiveAgentProof
         },
         "artifacts" => manifest,
         "platforms" => PLATFORMS.to_h { |platform| [ platform, evidence.fetch(platform) ] },
+        "workflow_creator" => creator_bundle.primary,
         "secret_scan" => {
           "status" => "passed",
           "scanner" => "hive-live-agent-proof/v1",
-          "files_scanned" => PLATFORMS.length + 1
+          "files_scanned" => PLATFORMS.length + creator_bundle.bytes.length + 1
         }
       }
+    end
+
+    def write_attestation!(attestation)
       attestation_path = File.join(@output_dir, "attestation.json")
       HiveLiveAgentProof.write_json(attestation_path, attestation)
       findings = HiveLiveAgentProof.secret_findings(File.read(attestation_path))
@@ -371,8 +407,6 @@ module HiveLiveAgentProof
       File.write(File.join(@output_dir, "attestation.sha256"), "#{digest}  attestation.json\n", mode: "w", perm: 0o600)
       { "attestation" => attestation, "sha256" => digest, "path" => attestation_path }
     end
-
-    private
 
     def validate_artifacts!
       path = File.join(@artifact_dir, "artifact-manifest.json")
@@ -429,6 +463,19 @@ module HiveLiveAgentProof
               "#{platform} must use exactly one operational status and one bounded native watch"
       end
     end
+
+    def validate_creator_evidence!(manifest)
+      bundle = WorkflowCreatorBundle.source(
+        directory: @creator_evidence_dir, manifest:, candidate_sha: @candidate_sha
+      )
+      bundle.bytes.each do |name, bytes|
+        findings = HiveLiveAgentProof.secret_findings(bytes)
+        unless findings.empty?
+          raise Error, "#{name} workflow-creator evidence secret scan failed: #{findings.join(', ')}"
+        end
+      end
+      bundle
+    end
   end
 
   class Verifier
@@ -462,6 +509,7 @@ module HiveLiveAgentProof
         HiveLiveAgentProof.verify_file_record!(artifact_root, name, record)
       end
       validate_platforms!(manifest)
+      validate_workflow_creator!(manifest)
       findings = HiveLiveAgentProof.secret_findings(File.read(path))
       raise Error, "proof secret scan failed: #{findings.join(', ')}" unless findings.empty?
 
@@ -508,6 +556,14 @@ module HiveLiveAgentProof
           raise Error, "#{platform} attested native activation evidence is invalid"
         end
       end
+    end
+
+    def validate_workflow_creator!(manifest)
+      WorkflowCreatorBundle.retained(
+        directory: File.join(@proof_dir, "evidence"),
+        expected_primary: @attestation.fetch("workflow_creator", nil),
+        manifest:, candidate_sha: @candidate_sha
+      )
     end
   end
 end

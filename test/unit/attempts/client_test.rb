@@ -73,6 +73,90 @@ class AttemptsClientTest < Minitest::Test
     refute result.stdout_emitted?
   end
 
+  def test_terminal_transition_drains_frames_published_during_receipt_fetch
+    with_tmp_dir do |root|
+      logs_root = File.join(root, "logs")
+      attempt_id = "attempt-tail"
+      log = Hive::Attempts::StreamLog.new(File.join(logs_root, "#{attempt_id}.frames"))
+      log.append("stdout", "before-")
+      terminal = Struct.new(:state, :receipt).new(
+        "terminal", { "exit_status" => 0, "outcome" => "succeeded" }
+      )
+      store = Object.new
+      store.define_singleton_method(:logs_root) { logs_root }
+      store.define_singleton_method(:fetch) do |_id|
+        log.append("stdout", "terminal")
+        log.close
+        terminal
+      end
+      stdout = StringIO.new
+
+      result = Hive::Attempts::Client.new(store: store, poll_interval: 0).attach(
+        attempt_id, stdout: stdout, stderr: StringIO.new
+      )
+
+      assert_equal "before-terminal", stdout.string
+      assert_equal "before-terminal".bytesize, result.stdout_bytes
+    ensure
+      log&.close unless log&.closed?
+    end
+  end
+
+  def test_expired_output_preserves_terminal_receipt_without_launching
+    with_terminal_attempt do |store, terminal|
+      store.log_archive.archive(terminal.attempt_id)
+      store.log_archive.expire(terminal.attempt_id, now: Time.now.utc)
+      store.define_singleton_method(:create_launching) do |**|
+        raise "client must not launch to recreate expired output"
+      end
+
+      stdout = StringIO.new
+      stderr = StringIO.new
+      result = Hive::Attempts::Client.new(store: store, poll_interval: 0).attach(
+        terminal.attempt_id, stdout: stdout, stderr: stderr
+      )
+
+      assert_equal :terminal, result.status
+      assert_equal :expired, result.output_status
+      assert_equal terminal.receipt, result.receipt
+      assert_empty stdout.string
+      assert_includes stderr.string, "preserved receipt without rerunning"
+    end
+  end
+
+  def test_lost_transition_drains_frames_published_during_record_fetch
+    with_tmp_dir do |root|
+      logs_root = File.join(root, "logs")
+      attempt_id = "attempt-lost-tail"
+      log = Hive::Attempts::StreamLog.new(File.join(logs_root, "#{attempt_id}.frames"))
+      log.append("stdout", "before-")
+      log.append("stderr", "warning-")
+      lost = Struct.new(:state).new("lost")
+      store = Object.new
+      store.define_singleton_method(:logs_root) { logs_root }
+      store.define_singleton_method(:fetch) do |_id|
+        log.append("stdout", "lost")
+        log.append("stderr", "tail")
+        log.close
+        lost
+      end
+      stdout = StringIO.new
+      stderr = StringIO.new
+
+      result = Hive::Attempts::Client.new(store: store, poll_interval: 0).attach(
+        attempt_id, stdout: stdout, stderr: stderr
+      )
+
+      assert_equal :lost, result.status
+      assert_equal "before-lost", stdout.string
+      assert_equal "warning-tail", stderr.string
+      assert_equal stdout.string.bytesize, result.stdout_bytes
+      assert_equal "before-".bytesize + "lost".bytesize, result.stdout_bytes
+    ensure
+      log&.close unless log&.closed?
+    end
+  end
+
   private
 
   def with_terminal_attempt

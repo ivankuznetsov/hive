@@ -30,7 +30,10 @@ module Hive
         File.join(Hive::Paths.state_home, "update_check.json")
       end
 
-      def initialize(path: self.class.default_path, logger: nil)
+      def initialize(
+        path: self.class.default_path, logger: nil,
+        cleanup_orphans: true
+      )
         @path = path ? File.expand_path(path) : nil
         @logger = logger
         @mutex = Mutex.new
@@ -39,7 +42,7 @@ module Hive
         # this process understands: read what we recognize, but never write
         # back (overwriting would downgrade a newer process's state).
         @suspend_writes = false
-        clean_orphaned_tmp_files!
+        clean_orphaned_tmp_files! if cleanup_orphans
         load!
       end
 

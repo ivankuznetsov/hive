@@ -515,6 +515,27 @@ def test_production_spawn_path_checks_profile_version_and_preflight
   assert_equal %i[check_version preflight], profile.calls
 end
 
+def test_diagnosis_resolves_route_before_injected_spawn
+  File.write(
+    File.join(@project_root, ".hive-state", "config.yml"),
+    YAML.dump(
+      "execute" => { "agent" => "codex" },
+      "models" => {
+        "diagnose" => { "model" => "gpt-5.6-sol", "effort" => "xhigh" }
+      }
+    )
+  )
+  agent = Hive::DiagnosisAgent.new(task: @task, spawn: spy_spawn)
+
+  agent.run!
+
+  routing = agent.instance_variable_get(:@routing_arguments)
+  assert_equal :codex, routing.profile_name
+  assert_equal [
+    "--model", "gpt-5.6-sol", "-c", "model_reasoning_effort=xhigh"
+  ], routing.global_arguments
+end
+
 def test_diagnose_lock_warns_when_unlock_fails_but_closes_file
   agent = Hive::DiagnosisAgent.new(task: @task, spawn: spy_spawn)
   lock_path = File.join(@folder, "diagnostics", Hive::DiagnosisAgent::LOCK_FILENAME)

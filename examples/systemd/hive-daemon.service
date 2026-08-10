@@ -39,7 +39,9 @@
 
 [Unit]
 Description=Hive auto-advancing dispatcher (ADR-024)
-After=default.target
+# Do not order this unit after default.target: enabling it adds the inverse
+# target dependency, and the two edges form an ordering cycle. WantedBy below
+# is sufficient to start the daemon with the user default target.
 # Hard cap on the auto-restart loop. If `hive daemon start` exits non-zero
 # 3 times within 5 minutes, systemd marks the unit `failed` instead of
 # respawning forever. This is the safety net for a misconfigured ExecStart=

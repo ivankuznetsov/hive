@@ -1,6 +1,7 @@
 require "test_helper"
 require "json"
 require "hive/refactor_patrol/job_query_index"
+require "hive/refactor_patrol/job_store_files"
 
 class RefactorPatrolJobQueryIndexTest < Minitest::Test
   include HiveTestHelper
@@ -132,25 +133,30 @@ class RefactorPatrolJobQueryIndexTest < Minitest::Test
     end
   end
 
-  def test_fresh_generation_ancestors_are_fsynced_before_active_publication
+  def test_descriptor_managed_membership_is_published_before_active_state
     with_index do |index, root|
-      fsynced = []
-      original = Hive::AtomicFile.method(:fsync_directory)
-      with_replaced_singleton_method(Hive::AtomicFile, :fsync_directory, lambda { |path|
-        fsynced << path
-        original.call(path)
+      directory = index.instance_variable_get(:@files).directory
+      writes = []
+      original = directory.method(:atomic_write)
+      with_replaced_singleton_method(directory, :atomic_write, lambda { |path, content, **options|
+        writes << path
+        original.call(path, content, **options)
       }) do
         register(index, root, "job-1")
       end
 
       generation = index.page(limit: 10).fetch("generation")
-      query_root = index_root(root)
-      generation_root = File.join(query_root, "generations", generation)
-      assert_includes fsynced, query_root
-      assert_includes fsynced, File.join(query_root, "generations")
-      assert_includes fsynced, generation_root
-      assert_includes fsynced, File.join(generation_root, "entries")
-      assert_includes fsynced, File.join(generation_root, "by-job")
+      entry = File.join(
+        "indexes", "job-query", "generations", generation,
+        "entries", "00000000000000000001.json"
+      )
+      pointer = File.join(
+        "indexes", "job-query", "generations", generation,
+        "by-job", "job-1.json"
+      )
+      active = File.join("indexes", "job-query", "active.json")
+      assert_operator writes.index(entry), :<, writes.rindex(active)
+      assert_operator writes.index(pointer), :<, writes.rindex(active)
     end
   end
 
@@ -248,26 +254,92 @@ class RefactorPatrolJobQueryIndexTest < Minitest::Test
     end
   end
 
+  def test_registration_cannot_allocate_beyond_the_bounded_index
+    with_index(max_entries: 1) do |index, root|
+      register(index, root, "job-1")
+
+      yielded = false
+      assert_raises(InconsistentRecord) do
+        index.with_registration(
+          "job-2",
+          existing: false,
+          migration_job_ids: -> { job_ids(root) }
+        ) do
+          yielded = true
+          write_job(root, "job-2")
+        end
+      end
+
+      refute yielded
+      refute_path_exists File.join(root, "jobs", "job-2.json")
+      assert_equal [ "job-1" ], index.page(limit: 10).fetch("job_ids")
+    end
+  end
+
+  def test_capacity_must_be_a_positive_integer
+    [ 0, -1, nil, "invalid" ].each do |capacity|
+      error = assert_raises(ArgumentError) do
+        with_index(max_entries: capacity) { flunk("invalid index was built") }
+      end
+      assert_match(/capacity must be positive/, error.message)
+    end
+  end
+
+  def test_full_unpublished_allocation_rebuilds_before_allocating_next_job
+    with_index(max_entries: 1) do |index, root|
+      assert_raises(IOError) do
+        index.with_registration(
+          "job-abandoned",
+          existing: false,
+          migration_job_ids: -> { [] }
+        ) do
+          raise IOError, "writer stopped before the job write"
+        end
+      end
+
+      register(index, root, "job-live")
+
+      assert_equal [ "job-live" ], index.page(limit: 10).fetch("job_ids")
+    end
+  end
+
   private
 
-  def with_index
+  def with_index(max_entries: 8_192)
     with_tmp_dir do |dir|
       root = File.join(dir, "v2")
-      index = Hive::RefactorPatrol::JobQueryIndex.new(
+      files = Hive::RefactorPatrol::JobStoreFiles.new(
         root: root,
-        id_pattern: /\A[a-z0-9-]+\z/,
+        anchor: dir,
         corrupt_record: CorruptRecord,
         inconsistent_record: InconsistentRecord
+      )
+      index = Hive::RefactorPatrol::JobQueryIndex.new(
+        files: files,
+        id_pattern: /\A[a-z0-9-]+\z/,
+        corrupt_record: CorruptRecord,
+        inconsistent_record: InconsistentRecord,
+        max_entries: max_entries
       )
       yield index, root
     end
   end
 
   def register(index, root, job_id)
-    index.with_registration(job_id, existing: false, migration_job_ids: -> { [] }) do
+    index.with_registration(
+      job_id,
+      existing: false,
+      migration_job_ids: -> { job_ids(root) }
+    ) do
       write_job(root, job_id)
       job_id
     end
+  end
+
+  def job_ids(root)
+    Dir.glob(File.join(root, "jobs", "*.json")).map do |path|
+      File.basename(path, ".json")
+    end.sort
   end
 
   def write_job(root, job_id)

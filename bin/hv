@@ -121,6 +121,8 @@ candidates=(
   "/usr/local/bin/hive"
 )
 
+invalid_candidates=()
+
 for candidate in "${candidates[@]}"; do
   [[ -n "$candidate" ]] || continue
   [[ -x "$candidate" ]] || continue
@@ -129,13 +131,25 @@ for candidate in "${candidates[@]}"; do
   # Guard against `hv -> hv` chains: never exec into our own script.
   [[ "$resolved" != "$self" ]] || continue
 
-  if ! version="$(probe_version "$candidate")" || [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  if ! version="$(probe_version "$candidate")"; then
+    invalid_candidates+=("$candidate (version probe failed)")
+    continue
+  fi
+  if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z][0-9A-Za-z.-]*)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+    version="${version%%$'\n'*}"
+    invalid_candidates+=("$candidate (reported ${version:-no version})")
     continue
   fi
 
   exec "$candidate" "$@"
 done
 
+if [[ "${#invalid_candidates[@]}" -gt 0 ]]; then
+  echo "hv: hive candidate(s) were found but did not report a supported bare semantic version:" >&2
+  for invalid_candidate in "${invalid_candidates[@]}"; do
+    echo "hv:   $invalid_candidate" >&2
+  done
+fi
 echo "hv: hive binary not found in ${xdg_bin_home:-<unset XDG_BIN_HOME/HOME>}, ${HOMEBREW_PREFIX:-/opt/homebrew}/bin, or /usr/local/bin" >&2
 echo "hv: set HIVE_BIN_OVERRIDE=<path> to point at a custom install location" >&2
 echo "hv: install with 'brew install ivankuznetsov/hive/hive', 'yay -S hive-bin', or the pinned install.sh from install.md" >&2

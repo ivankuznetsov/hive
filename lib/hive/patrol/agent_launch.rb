@@ -1,3 +1,5 @@
+require "hive/agent_runtime"
+
 module Hive
   module Patrol
     # Builds the provider-specific safety envelope used by every patrol spawn.
@@ -18,7 +20,9 @@ module Hive
       def minimal_context_flags(profile, role)
         return [] unless profile.respond_to?(:name) && profile.name == :claude
 
-        profile.require_cli_capability!("patrol_#{role}_context".to_sym)
+        Hive::AgentRuntime.require_capability!(
+          profile, "patrol_#{role}_context".to_sym
+        ).arguments.dup
       end
       private_class_method :minimal_context_flags
 

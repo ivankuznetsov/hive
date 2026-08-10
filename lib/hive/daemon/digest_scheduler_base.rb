@@ -2,7 +2,7 @@ require "date"
 require "json"
 require "shellwords"
 require "hive/atomic_file"
-require "hive/digest/window"
+require "hive/local_date_window"
 
 module Hive
   module Daemon
@@ -33,7 +33,7 @@ module Hive
       private
 
       def digest_date(date)
-        Hive::Digest::Window.parse_date(date).iso8601
+        Hive::LocalDateWindow.parse_date(date).iso8601
       end
 
       def backed_off?(now)

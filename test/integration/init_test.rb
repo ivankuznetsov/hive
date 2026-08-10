@@ -2036,6 +2036,7 @@ class InitTest < Minitest::Test
         polluted_env.merge!(
           "PATH" => [ fake_bin, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR),
           "HIVE_TEST_HOOK_ENV_LOG" => File.join(dir, "hook-env.log"),
+          "XDG_RUNTIME_DIR" => File.join(dir, "runtime"),
           "GIT_INDEX_FILE" => File.join(dir, "foreign.index"),
           "GIT_DIR" => File.join(dir, ".git"),
           "GIT_WORK_TREE" => dir,
@@ -2045,6 +2046,7 @@ class InitTest < Minitest::Test
           "GIT_CONFIG_PARAMETERS" => "'core.bare=false'",
           "GIT_REPLACE_REF_BASE" => "refs/replace/"
         )
+        FileUtils.mkdir_p(polluted_env.fetch("XDG_RUNTIME_DIR"))
 
         log_path = polluted_env.fetch("HIVE_TEST_HOOK_ENV_LOG")
         with_env(polluted_env) do

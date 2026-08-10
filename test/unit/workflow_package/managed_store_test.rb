@@ -20,6 +20,8 @@ class WorkflowPackageManagedStoreTest < Minitest::Test
 
       assert_equal generation, store.generation_path("demo", resolution.source_commit)
       assert_equal resolution.source_commit, store.selected("demo").fetch("source_commit")
+      assert_equal [ "demo" ],
+                   store.inspect_selections.map { |selection| selection.fetch("name") }
       assert_equal :demo, store.workflow("demo", resolution.source_commit, resolution.manifest_digest).id
       assert store.verify_generation("demo", resolution.source_commit, resolution.manifest_digest).valid?
       assert_equal 0o444, File.stat(File.join(generation, "README.md")).mode & 0o777
@@ -316,6 +318,36 @@ class WorkflowPackageManagedStoreTest < Minitest::Test
       }
       File.write(path, JSON.generate(valid_shape))
       assert_raises(Hive::ConfigError) { store.selected("demo") }
+    end
+  end
+
+  def test_read_only_selection_does_not_create_a_lock_or_reconcile_a_journal
+    with_tmp_dir do |dir|
+      store = Hive::WorkflowPackage::ManagedStore.new(File.join(dir, ".hive-state"))
+      package = File.join(dir, "package")
+      resolution = write_package(package, "a" * 40)
+      store.place_generation(package, resolution)
+      store.activate(resolution)
+
+      mutation_lock = File.join(store.workflows_dir, ".mutation.lock")
+      FileUtils.rm_f(mutation_lock)
+      lock_bytes = File.binread(store.lock_path("demo"))
+      journal = Hive::WorkflowPackage::TransactionJournal.new(store.workflows_dir)
+      journal.write(
+        "schema_version" => 1,
+        "phase" => "prepared",
+        "lock_path" => store.lock_path("demo"),
+        "old_lock" => nil,
+        "new_lock" => lock_bytes
+      )
+      journal_bytes = File.binread(journal.path)
+
+      selection = store.selected_read_only("demo")
+
+      assert_equal "demo", selection.fetch("name")
+      refute File.exist?(mutation_lock)
+      assert_equal lock_bytes, File.binread(store.lock_path("demo"))
+      assert_equal journal_bytes, File.binread(journal.path)
     end
   end
 

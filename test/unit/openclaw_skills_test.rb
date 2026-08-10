@@ -46,6 +46,8 @@ class OpenClawSkillsTest < Minitest::Test
     assert_includes text, "hive watch PROJECT:SLUG"
     assert_includes text, "--json-lines"
     assert_includes text, "hive act ACTION_ID"
+    assert_includes text, "hive module status --json"
+    assert_includes text, "hive module dry-run NAME"
     assert_includes text, "hive setup-agents --yes --json"
     assert_includes text, "OpenClaw: `/hive`"
     assert_includes text, "Pi: `/skill:hive`"
@@ -57,16 +59,61 @@ class OpenClawSkillsTest < Minitest::Test
     refute_match(/pgrep\s+-af|kill\s+-0|while\s+:/, text)
   end
 
+  def test_projection_routes_natural_language_workflow_creation_inside_hive
+    root = ROOT.join("hive")
+    creator_references = %w[
+      workflow-creator.md
+      workflow-creator-example.md
+      workflow-schema.md
+      workflow-stage-design.md
+      workflow-checkpoints.md
+      workflow-permissions.md
+      workflow-testing.md
+      workflow-common-mistakes.md
+    ]
+
+    creator_references.each do |name|
+      assert root.join("references", name).file?, name
+    end
+
+    text = projection_text
+    assert_includes text, "hive-workflow-creator"
+    assert_includes text, "hive workflow validate ID --json"
+    assert_includes text, "No task by default"
+    assert_includes text, "Never publish externally"
+  end
+
   def test_projection_keeps_recovery_and_release_authority_guarded
     text = projection_text
+    normalized_text = text.gsub(/\s+/, " ")
 
     %w[markers\ clear approve\ --force daemon\ stop].each do |escaped|
       assert_includes text, escaped.tr("\\", "")
     end
+    assert_includes text, "hive act workflow.retry"
+    assert_includes text, "hive migrate PROJECT_PATH"
+    assert_includes text, "RecoveryCoordinator"
+    assert_includes normalized_text, "not a retry recipe"
     assert_includes text, "obtain explicit confirmation"
     assert_includes text, "separate explicit release request"
     assert_includes text, "Do not create or push a tag"
     assert_includes text, "Do not print, copy wholesale, or persist agent credentials"
+  end
+
+  def test_projection_binds_workflow_publication_to_confirmed_dry_run_bytes
+    text = projection_text
+
+    assert_includes text, "hive workflow publish NAME --version VERSION --dry-run --json"
+    assert_includes text, "--expected-release-digest RELEASE_DIGEST --json"
+    assert_includes text, "state: validated"
+    assert_includes text, "freshness: not_checked"
+    assert_includes text, "pending_review"
+    assert_includes text, "merged_pending_listing"
+    assert_includes text, "closed_unmerged"
+    assert_includes text, "Retry only the"
+    assert_includes text, "same confirmed name/version/release digest"
+    assert_includes text, "Never infer success from prose"
+    assert_includes text, "force-push"
   end
 
   def test_projection_preserves_consent_safe_setup_from_canonical_source

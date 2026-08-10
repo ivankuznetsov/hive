@@ -45,7 +45,7 @@ module Hive
         record = @store.fetch(@attempt_id)
         return fail_before_start("attempt_not_launching") unless record&.state == "launching"
 
-        log = StreamLog.new(log_path(record.attempt_id), clock: @clock)
+        log = @store.log_archive.open_writer(record.attempt_id, clock: @clock)
         now = @clock.call
         record = @store.claim(
           record, owner: process_identity(Process.pid),
@@ -333,10 +333,6 @@ module Hive
         Capability.valid_secret?(value) ? value : nil
       rescue IOError, SystemCallError
         nil
-      end
-
-      def log_path(attempt_id)
-        File.join(@store.logs_root, "#{attempt_id}.frames")
       end
 
       def install_signal_handlers!

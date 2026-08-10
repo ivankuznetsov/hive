@@ -2,12 +2,18 @@ require "securerandom"
 require "fileutils"
 require "time"
 require "erb"
+require "digest"
+require "json"
+require "tmpdir"
 require "hive/config"
 require "hive/git_ops"
 require "hive/lock"
 require "hive/paths"
 require "hive/task_counter"
 require "hive/task_meta"
+require "hive/task"
+require "hive/task_action"
+require "hive/markers"
 require "hive/workflows"
 require "hive/workflow_selection"
 require "hive/workflow_package/managed_store"
@@ -19,6 +25,9 @@ require "hive/worktree"
 module Hive
   module Commands
     class New
+      include Hive::Schemas::EnvelopeEmitter
+
+      SCHEMA = "hive-new".freeze
       RESERVED_SLUGS = %w[
         head fetch_head orig_head merge_head
         master main origin hive hive-state hive_state state
@@ -70,9 +79,13 @@ module Hive
       # config.yml (mirroring UnregisteredProjectWorkflow) instead of crashing
       # with a raw Psych backtrace that escapes call's rescue list.
       class ProjectConfigUnreadable < TypedValueError; end
+      class IdempotencyConflict < TypedValueError
+        def exit_code = Hive::ExitCodes::USAGE
+      end
+      PreparedAttachment = Data.define(:snapshot_path, :destination, :name, :sha256)
 
       def initialize(project_name, text, slug_override: nil, body_override: nil, attachments: [], base: nil,
-                     depends_on: nil, workflow: nil)
+                     depends_on: nil, workflow: nil, idempotency_key: nil, json: false)
         @project_name = project_name
         @text = text.to_s
         @slug_override = slug_override
@@ -81,6 +94,11 @@ module Hive
         @base = base
         @depends_on = depends_on
         @workflow_name = workflow
+        @idempotency_key_raw = idempotency_key
+        # Machine-readable creation was added for idempotent automation.
+        # Preserve the legacy plain-text contract for a bare `hive new --json`
+        # whose caller did not opt into that side-effect boundary.
+        @json = json && !idempotency_key.nil?
       end
 
       class << self
@@ -103,19 +121,37 @@ module Hive
       # raising so they can rescue typed errors without losing the alt
       # screen.
       def call
-        call!
-      rescue ProjectNotFound, InvalidSlugError, InvalidDependencyError, InvalidBaseError,
-             InvalidDraftPrCombination, InvalidAttachmentError,
-             SlugCollisionError, UnregisteredProjectWorkflow, ProjectConfigUnreadable,
-             Hive::Workflows::UnknownWorkflow, Hive::UnsupportedProjectConfigError,
-             SystemCallError, IOError => e
-        warn "hive: #{e.message}"
+        call_with_envelope { call! }
+      rescue Hive::Error, SystemCallError, IOError => e
+        warn "hive: #{e.message}" unless @json
         # Honor each typed error's contract exit code (e.g. UnknownWorkflow →
         # USAGE 64 so an agent can tell "typo'd --workflow, fix the flag" from a
         # transient GENERIC failure); fall back to 1 for the untyped
         # SystemCallError/IOError arms.
         exit(e.respond_to?(:exit_code) ? e.exit_code : 1)
       end
+
+      def envelope_schema = SCHEMA
+
+      def envelope_error_kind(error)
+        case error
+        when IdempotencyConflict, InvalidBaseError, InvalidDraftPrCombination,
+             Hive::Workflows::UnknownWorkflow then "usage"
+        when Hive::ConfigError, ProjectConfigUnreadable, UnregisteredProjectWorkflow then "config"
+        when Hive::ConcurrentRunError then "concurrent_run"
+        when Hive::InternalError then "internal"
+        else "error"
+        end
+      end
+
+      def envelope_extras_for(error)
+        extras = {}
+        extras["value"] = error.value if error.respond_to?(:value) && !error.value.nil?
+        extras["idempotency_key"] = @idempotency_key if @idempotency_key
+        extras
+      end
+
+      def envelope_serialization_failure_policy = :raise
 
       def call!
         project = Hive::Config.find_project(@project_name)
@@ -126,8 +162,8 @@ module Hive
           )
         end
 
-        slug = @slug_override || derive_slug(@text)
-        validate_slug!(slug)
+        @idempotency_key = validate_idempotency_key!
+        prepare_idempotent_attachments! if @idempotency_key
         depends_on = normalize_optional(@depends_on)
         depends_on = validate_dependency!(depends_on) if depends_on
         workflow_info = resolve_workflow(project)
@@ -147,51 +183,211 @@ module Hive
         end
         base_branch = effective_base_branch(project, workflow)
         entry_stage = workflow.stages.first
-
         hive_state = project["hive_state_path"]
+        fingerprint = input_fingerprint(
+          workflow_info, depends_on: depends_on, base_branch: base_branch
+        ) if @idempotency_key
+        slug = @slug_override || derive_slug(@text)
+        validate_slug!(slug)
         task_dir = File.join(hive_state, "stages", entry_stage.dir, slug)
-        if File.exist?(task_dir)
-          raise SlugCollisionError.new(
-            "slug collision at #{task_dir} (rare; retry the command)",
-            value: slug
-          )
-        end
-        FileUtils.mkdir_p(task_dir)
+        ops = Hive::GitOps.new(project["path"])
 
+        if @idempotency_key
+          result = with_stable_workflow_selection(workflow_info, hive_state) do |stable_selection|
+            Hive::Lock.with_commit_lock(hive_state) do
+              validate_stable_authored_workflow!(workflow_info, hive_state)
+              existing = find_idempotent_task!(hive_state, @idempotency_key, fingerprint)
+              validate_stable_authored_workflow!(workflow_info, hive_state)
+              next { folder: existing.fetch(:folder), created: false } if existing
+
+              create_task_candidate!(
+                task_dir, slug: slug, entry_stage: entry_stage, workflow: workflow,
+                depends_on: depends_on, base_branch: base_branch,
+                workflow_info: workflow_info, hive_state: hive_state,
+                idempotency_key: @idempotency_key, input_fingerprint: fingerprint,
+                stable_selection: stable_selection
+              )
+              begin
+                ops.hive_commit(stage_name: entry_stage.dir, slug: slug, action: "captured")
+              rescue StandardError, Interrupt
+                cleanup_failed_task_commit!(ops, hive_state, task_dir)
+                raise
+              end
+              { folder: task_dir, created: true }
+            end
+          end
+          unless result.fetch(:created)
+            return emit_task_result(result.fetch(:folder), workflow, created: false)
+          end
+
+          spawn_name_generator(task_dir)
+          return emit_task_result(task_dir, workflow, created: true)
+        end
+
+        create_task_candidate!(
+          task_dir, slug: slug, entry_stage: entry_stage, workflow: workflow,
+          depends_on: depends_on, base_branch: base_branch,
+          workflow_info: workflow_info, hive_state: hive_state,
+          idempotency_key: nil, input_fingerprint: nil
+        )
+        Hive::Lock.with_commit_lock(hive_state) do
+          begin
+            ops.hive_commit(stage_name: entry_stage.dir, slug: slug, action: "captured")
+          rescue StandardError, Interrupt
+            cleanup_failed_task_commit!(ops, hive_state, task_dir)
+            raise
+          end
+        end
+        spawn_name_generator(task_dir)
+        emit_task_result(task_dir, workflow, created: true)
+      ensure
+        cleanup_prepared_attachments!
+      end
+
+      def create_task_candidate!(task_dir, slug:, entry_stage:, workflow:, depends_on:, base_branch:,
+                                 workflow_info:, hive_state:, idempotency_key:, input_fingerprint:,
+                                 stable_selection: :unlocked)
+        created = false
+        FileUtils.mkdir_p(File.dirname(task_dir))
+        Dir.mkdir(task_dir)
+        created = true
         idea_path = File.join(task_dir, entry_stage.state_file)
-        id = nil
-        begin
-          File.write(idea_path, render_initial_state(slug, @text, body_override: @body_override, workflow: workflow))
-          copy_attachments!(task_dir)
-          id = Hive::TaskCounter.next_or_nil
-          write_task_meta(task_dir, id: id, slug: slug, depends_on: depends_on,
-                          base_branch: base_branch, workflow: workflow,
-                          workflow_info: workflow_info, hive_state: hive_state)
-        rescue StandardError
-          # An idea.md or attachment write failure leaves an orphan
-          # uncommitted task on disk that the snapshot would surface as a
-          # broken entry under the workflow's entry stage dir (`entry_stage.dir`
-          # — `1-inbox` for coding, but different for other workflows). Roll the
-          # directory back so the capture is atomic — either the task is
-          # committed or it never existed.
+        File.write(
+          idea_path,
+          render_initial_state(slug, @text, body_override: @body_override, workflow: workflow)
+        )
+        if entry_stage.kind == :human
+          Hive::Markers.set(idea_path, :waiting, "decision_id" => SecureRandom.hex(8))
+        end
+        copy_attachments!(task_dir)
+        validate_stable_authored_workflow!(workflow_info, hive_state)
+        id = Hive::TaskCounter.next_or_nil
+        write_task_meta(
+          task_dir, id: id, slug: slug, depends_on: depends_on,
+          base_branch: base_branch, workflow: workflow,
+          workflow_info: workflow_info, hive_state: hive_state,
+          idempotency_key: idempotency_key, input_fingerprint: input_fingerprint,
+          stable_selection: stable_selection
+        )
+      rescue Errno::EEXIST
+        if created
           FileUtils.rm_rf(task_dir)
           raise
         end
 
-        ops = Hive::GitOps.new(project["path"])
-        Hive::Lock.with_commit_lock(hive_state) do
-          ops.hive_commit(stage_name: entry_stage.dir, slug: slug, action: "captured")
-        end
-        spawn_name_generator(task_dir)
+        raise SlugCollisionError.new(
+          "slug collision at #{task_dir} (rare; retry the command)",
+          value: slug
+        )
+      rescue StandardError, Interrupt
+        # Once this invocation owns the directory, any idea, attachment, or
+        # metadata failure must remove its uncommitted candidate. An EEXIST
+        # contender never owns the directory and therefore never removes it.
+        FileUtils.rm_rf(task_dir) if created
+        raise
+      end
 
-        puts "hive: captured #{idea_path}"
-        target_hint = id ? id.to_s : slug
-        next_stage = workflow.next_stage_after(entry_stage.name)
-        if next_stage
-          puts "next: mv #{task_dir} #{File.join(hive_state, 'stages', "#{next_stage.dir}/")} && hive run #{target_hint}"
-        else
-          puts "next: hive run #{target_hint}"
+      def validate_idempotency_key!
+        return nil if @idempotency_key_raw.nil?
+
+        key = @idempotency_key_raw.to_s.strip
+        unless !key.empty? && key.valid_encoding? && key.bytesize <= 512
+          raise IdempotencyConflict.new(
+            "idempotency key must be non-empty UTF-8 text no longer than 512 bytes",
+            value: @idempotency_key_raw.to_s
+          )
         end
+        key
+      end
+
+      def input_fingerprint(workflow_info, depends_on:, base_branch:)
+        managed = workflow_info.fetch(:managed)
+        attachments = @prepared_attachments.map do |attachment|
+          {
+            "destination" => attachment.destination,
+            "sha256" => attachment.sha256
+          }
+        end
+        input = {
+          "text" => @text,
+          "body" => @body_override,
+          "attachments" => attachments,
+          "depends_on" => depends_on,
+          "base_branch" => base_branch,
+          "workflow" => workflow_info.fetch(:descriptor).id.to_s,
+          "workflow_commit" => managed&.fetch("source_commit"),
+          "workflow_configuration_digest" => managed&.fetch("configuration_digest"),
+          "workflow_content_digest" => workflow_info[:authored_digest]
+        }
+        ::Digest::SHA256.hexdigest(JSON.generate(input))
+      end
+
+      def find_idempotent_task!(hive_state, key, fingerprint)
+        matches = Dir.glob(File.join(hive_state, "stages", "*", "*", Hive::TaskMeta::FILENAME)).filter_map do |path|
+          folder = File.dirname(path)
+          read = Hive::TaskMeta.read_for_admission(folder)
+          unless read.status == :ok
+            raise IdempotencyConflict.new(
+              "cannot prove idempotency while task metadata is unreadable at #{path}: " \
+              "#{read.error || read.status}",
+              value: key
+            )
+          end
+          meta = read.data
+          { folder: folder, meta: meta } if meta[:idempotency_key] == key
+        end
+        return nil if matches.empty?
+        if matches.length > 1
+          raise IdempotencyConflict.new(
+            "idempotency key #{key.inspect} is already attached to multiple tasks; repair metadata before retrying",
+            value: key
+          )
+        end
+
+        match = matches.first
+        return match if match.dig(:meta, :input_fingerprint) == fingerprint
+
+        raise IdempotencyConflict.new(
+          "idempotency key #{key.inspect} was already used for different input or workflow",
+          value: key
+        )
+      end
+
+      def emit_task_result(task_folder, workflow, created:)
+        task = Hive::Task.new(task_folder)
+        action = Hive::TaskAction.for(task, Hive::Markers.current(task.state_file))
+        payload = {
+          "schema" => SCHEMA,
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch(SCHEMA),
+          "ok" => true,
+          "created" => created,
+          "slug" => task.slug,
+          "workflow" => workflow.id.to_s,
+          "current_stage" => "#{task.stage_index}-#{task.stage_name}",
+          "task_folder" => task.folder,
+          "next_action" => {
+            "kind" => action.key,
+            "command" => action.command,
+            "outcomes" => action.allowed_outcomes
+          }
+        }
+        if @json
+          puts JSON.generate(payload)
+        elsif created
+          puts "hive: captured #{task.state_file}"
+          target_hint = task.id ? task.id.to_s : task.slug
+          next_stage = workflow.next_stage_after(task.stage_name)
+          if next_stage
+            destination = File.join(task.hive_state_path, "stages", "#{next_stage.dir}/")
+            puts "next: mv #{task.folder} #{destination} && hive run #{target_hint}"
+          else
+            puts "next: hive run #{target_hint}"
+          end
+        else
+          puts "hive: idempotent task already exists at #{task.folder}"
+          puts "next: #{action.command}" if action.command
+        end
+        payload
       end
 
       def resolve_workflow(project)
@@ -218,31 +414,88 @@ module Hive
         managed = store.selected(descriptor.id.to_s) { cfg = managed_project_config(project) }
         {
           descriptor: descriptor, pin: pin,
-          managed: managed, managed_cfg: cfg
+          managed: managed, managed_cfg: cfg,
+          authored_digest: authored_workflow_digest(project.fetch("hive_state_path"), descriptor)
         }
       end
 
-      def write_task_meta(task_dir, id:, slug:, depends_on:, base_branch:, workflow:, workflow_info:, hive_state:)
+      def write_task_meta(task_dir, id:, slug:, depends_on:, base_branch:, workflow:, workflow_info:, hive_state:,
+                          idempotency_key: nil, input_fingerprint: nil, stable_selection: :unlocked)
         managed = workflow_info.fetch(:managed)
         managed_cfg = workflow_info.fetch(:managed_cfg, {})
         store = Hive::WorkflowPackage::ManagedStore.new(hive_state)
-        store.with_stable_selection(workflow.id.to_s, cfg: managed_cfg) do |current|
-          if managed
-            unless current && current.fetch("source_commit") == managed.fetch("source_commit") &&
-                   current.fetch("manifest_digest") == managed.fetch("manifest_digest") &&
-                   current.fetch("configuration_digest") == managed.fetch("configuration_digest")
-              raise Hive::ConcurrentRunError.new("managed workflow selection changed while creating the task")
-            end
-          end
+        writer = lambda do |current|
+          validate_stable_selection!(managed, current)
           Hive::TaskMeta.write(
             task_dir, id: id, slug: slug, display_name: nil, depends_on: depends_on,
             base_branch: base_branch,
             workflow: workflow_info.fetch(:pin) ? workflow.id.to_s : nil,
             workflow_commit: managed&.fetch("source_commit"),
             workflow_manifest_digest: managed&.fetch("manifest_digest"),
-            workflow_configuration_digest: managed&.fetch("configuration_digest")
+            workflow_configuration_digest: managed&.fetch("configuration_digest"),
+            idempotency_key: idempotency_key,
+            input_fingerprint: input_fingerprint
           )
         end
+        return writer.call(stable_selection) unless stable_selection == :unlocked
+
+        store.with_stable_selection(workflow.id.to_s, cfg: managed_cfg, &writer)
+      end
+
+      def with_stable_workflow_selection(workflow_info, hive_state)
+        workflow = workflow_info.fetch(:descriptor)
+        store = Hive::WorkflowPackage::ManagedStore.new(hive_state)
+        store.with_stable_selection(
+          workflow.id.to_s, cfg: workflow_info.fetch(:managed_cfg, {})
+        ) do |current|
+          validate_stable_selection!(workflow_info.fetch(:managed), current)
+          yield current
+        end
+      end
+
+      def validate_stable_selection!(managed, current)
+        return unless managed
+        return if current && current.fetch("source_commit") == managed.fetch("source_commit") &&
+          current.fetch("manifest_digest") == managed.fetch("manifest_digest") &&
+          current.fetch("configuration_digest") == managed.fetch("configuration_digest")
+
+        raise Hive::ConcurrentRunError.new("managed workflow selection changed while creating the task")
+      end
+
+      def validate_stable_authored_workflow!(workflow_info, hive_state)
+        expected = workflow_info[:authored_digest]
+        return unless expected
+
+        actual = authored_workflow_digest(hive_state, workflow_info.fetch(:descriptor))
+        return if actual == expected
+
+        raise Hive::ConcurrentRunError,
+              "owner-authored workflow changed while creating the task; retry against the current descriptor"
+      end
+
+      def authored_workflow_digest(hive_state, descriptor)
+        workflows = File.join(hive_state, "workflows")
+        descriptor_path = File.join(workflows, "#{descriptor.id}.yml")
+        return nil unless File.file?(descriptor_path)
+
+        instruction_root = File.join(workflows, descriptor.id.to_s)
+        paths = [ descriptor_path ]
+        if File.directory?(instruction_root)
+          paths.concat(
+            Dir.glob(File.join(instruction_root, "**", "*"), File::FNM_DOTMATCH)
+               .select { |path| File.file?(path) }
+          )
+        end
+        entries = paths.sort.map do |path|
+          [ path.delete_prefix("#{workflows}/"), ::Digest::SHA256.file(path).hexdigest ]
+        end
+        ::Digest::SHA256.hexdigest(JSON.generate(entries))
+      end
+
+      def cleanup_failed_task_commit!(ops, hive_state, task_dir)
+        FileUtils.rm_rf(task_dir)
+        relative = task_dir.delete_prefix("#{File.expand_path(hive_state)}/")
+        ops.run_git!("-C", hive_state, "reset", "-q", "HEAD", "--", relative)
       end
 
       def managed_project_config(project)
@@ -408,25 +661,72 @@ module Hive
 
         assets_dir = File.join(task_dir, "assets")
         FileUtils.mkdir_p(assets_dir)
-        @attachments.each do |src, dest_name|
-          name = Hive::Tui::Text.sanitize(dest_name.to_s)
-          # `name != File.basename(name)` rejects directory separators
-          # and the like, but `File.basename(".") == "."` and
-          # `File.basename("..") == ".."` — both would otherwise slip
-          # through and either overwrite `assets/` itself or escape it
-          # via FileUtils.cp's path-join. Reject them explicitly.
-          if name.empty? || name == "." || name == ".." || name != File.basename(name)
-            raise InvalidAttachmentError.new("invalid attachment filename '#{name}'", value: name)
+        if @prepared_attachments
+          @prepared_attachments.each do |attachment|
+            destination = File.join(assets_dir, attachment.name)
+            FileUtils.cp(attachment.snapshot_path, destination)
+            next if ::Digest::SHA256.file(destination).hexdigest == attachment.sha256
+
+            raise InvalidAttachmentError.new(
+              "attachment snapshot changed while creating the task",
+              value: attachment.destination
+            )
           end
-
-          # `attachments:` is a programmatic contract used by the TUI and
-          # tests; callers may pass any absolute source path they captured.
-          # Keep the destination guard strict, but let FileUtils surface
-          # source readability/existence failures directly.
-          src_path = File.expand_path(src.to_s)
-
-          FileUtils.cp(src_path, File.join(assets_dir, name))
+        else
+          @attachments.each do |src, dest_name|
+            name = attachment_name!(dest_name)
+            # `attachments:` is a programmatic contract used by the TUI and
+            # tests; callers may pass any absolute source path they captured.
+            # Keep the destination guard strict, but let FileUtils surface
+            # source readability/existence failures directly.
+            src_path = File.expand_path(src.to_s)
+            FileUtils.cp(src_path, File.join(assets_dir, name))
+          end
         end
+      end
+
+      def prepare_idempotent_attachments!
+        if @attachments.empty?
+          @prepared_attachments = []
+          return
+        end
+
+        @attachment_snapshot_dir = Dir.mktmpdir("hive-new-attachments")
+        @prepared_attachments = @attachments.each_with_index.map do |(source, destination), index|
+          name = attachment_name!(destination)
+          snapshot_path = File.join(@attachment_snapshot_dir, index.to_s)
+          FileUtils.cp(File.expand_path(source.to_s), snapshot_path)
+          PreparedAttachment.new(
+            snapshot_path: snapshot_path,
+            destination: destination.to_s,
+            name: name,
+            sha256: ::Digest::SHA256.file(snapshot_path).hexdigest
+          )
+        end
+      end
+
+      def cleanup_prepared_attachments!
+        return unless @attachment_snapshot_dir
+
+        FileUtils.remove_entry_secure(@attachment_snapshot_dir)
+      rescue Errno::ENOENT
+        nil
+      ensure
+        @attachment_snapshot_dir = nil
+        @prepared_attachments = nil
+      end
+
+      def attachment_name!(destination)
+        name = Hive::Tui::Text.sanitize(destination.to_s)
+        # `name != File.basename(name)` rejects directory separators and the
+        # like, but `File.basename(".") == "."` and `File.basename("..") ==
+        # ".."` — both would otherwise slip through and overwrite or escape
+        # `assets/`.
+        if name.empty? || name == "." || name == ".." || name != File.basename(name)
+          raise InvalidAttachmentError.new("invalid attachment filename '#{name}'", value: name)
+        end
+
+        name
       end
 
       def spawn_name_generator(task_dir)

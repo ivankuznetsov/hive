@@ -2,6 +2,16 @@ require "test_helper"
 require "hive/patrol/validator"
 
 class HivePatrolValidatorTest < Minitest::Test
+  def test_configured_names_and_command_for_share_string_and_symbol_key_selection
+    commands = { "lint" => "bundle exec rubocop", test: "bundle exec rake test", "docs" => " " }
+    validator = Hive::Patrol::Validator.new(commands)
+
+    assert_equal %w[lint test], validator.configured_names
+    assert_equal "bundle exec rubocop", validator.command_for("lint")
+    assert_equal "bundle exec rake test", validator.command_for(:test)
+    assert_nil validator.command_for("docs")
+  end
+
   include HiveTestHelper
 
   def test_no_commands_is_not_validatable

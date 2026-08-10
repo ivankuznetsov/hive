@@ -37,12 +37,12 @@ The result Hive built in that reel lives at [ivankuznetsov/shipped](https://gith
 
 ## Install
 
-Hive ships as a rubygem (`hive-cli`) plus a managed Hive web bundle attached to each GitHub Release. A cosign-signed checksum manifest authenticates both artifacts before installation or extraction. Each native channel installs the same gem; the normal `hive setup` then installs Hive-owned dependencies, the daemon, and the managed loopback web service. Project initialization still controls daemon enrollment independently.
+Hive ships as a rubygem (`hive-cli`) plus a managed Hive web bundle attached to each GitHub Release. A cosign-signed checksum manifest authenticates both artifacts before installation or extraction. Each native channel installs the same gem; the normal `hive setup` then installs Hive-owned dependencies, the daemon, the PR babysitter, and the managed loopback web service. Project initialization still controls daemon and babysitter enrollment independently.
 
 | Platform | Channel |
 |----------|---------|
 | macOS arm64 | [`brew install ivankuznetsov/hive/hive`](https://github.com/ivankuznetsov/homebrew-hive) |
-| Ubuntu 22.04+ / glibc Linux x86_64/aarch64 | <code>tmpdir="$(mktemp -d)" && trap 'rm -rf "$tmpdir"' EXIT && curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.6.9/install.sh -o "$tmpdir/hive-install.sh" && bash "$tmpdir/hive-install.sh"</code> |
+| Ubuntu 22.04+ / glibc Linux x86_64/aarch64 | <code>tmpdir="$(mktemp -d)" && trap 'rm -rf "$tmpdir"' EXIT && curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.7.0/install.sh -o "$tmpdir/hive-install.sh" && bash "$tmpdir/hive-install.sh"</code> |
 | Arch Linux x86_64/aarch64 | [`yay -S hive-bin`](https://aur.archlinux.org/packages/hive-bin) |
 
 Prerequisites: **Ruby 3.4** (the gem and its runtime deps install against this), git ≥ 2.40, authenticated `claude` ≥ 2.1.118, `codex` ≥ 0.125.0 for the default execute agent, `grok` ≥ 0.2.90 when selected, authenticated `gh`, `tmux` ≥ 3.0 when the project uses the default `claude.mode: tmux`, `cosign` for release identity verification, and Node.js/npm for managed QMD install/repair. The bash installer reports its own installer-side prereqs (`curl`, `jq`, `cosign`, `gem`, checksum tool) on first run; if npm is missing, Hive still installs and `hive doctor` reports the QMD gap non-fatally.
@@ -74,7 +74,7 @@ hive setup
 `hive setup` checks Ruby 3.4, git, tmux, `gh`, Claude, Codex, Node/npm,
 QMD, SQLite, and the Rails bundle. Before other mutations it previews and
 provisions Hive's operating skill for Claude, Codex, and Pi. It then installs
-the Hive-owned pieces it can manage, installs the daemon and Hive web services,
+the Hive-owned pieces it can manage, installs the daemon, PR babysitter, and Hive web services,
 enrolls the current project, and reports the effective URL plus installed,
 enabled, running, and readiness state. Interactive setup confirms once; JSON
 or non-TTY setup must pass `--yes` or it makes no changes. The untouched
@@ -85,11 +85,18 @@ in the foreground. Explicit repair remains `hive web install --force`.
 
 Bare `hive web` uses loopback-only no-auth mode over the same local project
 registry and workflow state as the TUI. GitHub is an optional connection for
-repository browsing and cloning, not a prerequisite or ownership claim. A
-local reverse proxy such as Tailscale Serve remains part of the access boundary
-because Hive sees its loopback connection; authenticate and restrict its
-clients, and never expose an unrestricted forwarder. Set
-`web.local_loopback: false` to require GitHub login even there. See
+repository browsing and cloning, not a prerequisite or ownership claim.
+Access through any non-loopback hostname is accepted without per-host
+configuration and uses Hive's GitHub device-flow owner gate, even when a
+reverse proxy connects to Hive over loopback. Only a request with both a
+loopback socket peer and a literal loopback Host receives local no-auth access.
+The trust check reads the actual Host header and ignores `X-Forwarded-Host`.
+Proxies should preserve the browser-facing Host; a proxy or TCP forwarder that
+allows an untrusted client to send `Host: localhost` becomes part of the local
+trust boundary. An ownerless instance reached through a non-loopback Host is
+claimable, so the first successful GitHub login becomes its owner; sign in with
+the intended owner before sharing that URL. Set
+`web.local_loopback: false` to require GitHub login even on literal loopback. See
 [wiki/commands/web.md](wiki/commands/web.md).
 
 Windows users should run the native path inside WSL with systemd enabled, or
@@ -128,7 +135,12 @@ readiness state alongside the daemon outcome. Project enrollment is a separate
 babysitter defaults can be reviewed before confirmation. After setup, pass Hive
 CLI commands through `/hive ...`, for example
 `/hive status --operational --json`, `/hive watch <project>:<task>`,
-`/hive new . "build this feature"`, and `/hive review <task-slug>`.
+`/hive new . "build this feature"`, and `/hive review <task-slug>`. The same
+canonical skill can create a new project-local workflow from natural language:
+`/hive create a three-stage editorial workflow that researches, drafts, and
+requires approval before publishing`. It scaffolds through Hive, validates the
+result, reports every inferred default, and creates no task unless the request
+explicitly asks for one.
 
 For local checkout testing, run `openclaw skills install ./openclaw/skills/hive
 --as hive`. See [openclaw/README.md](openclaw/README.md) for the publish
@@ -190,18 +202,12 @@ The normal Hive loop is simple: the daemon advances ready tasks, and the TUI is 
 
 That is enough to understand what Hive does: it turns a rough idea into durable stage files, then keeps advancing the same task toward code, a pull request, review, and archive. Manual TUI keys still exist for power users who want to steer a specific stage themselves; the happy path is daemon-first. See [wiki/commands/tui.md](wiki/commands/tui.md) for the full dashboard reference.
 
-## Digest Reports
+## PR Digests
 
-`hive digest` sends the daily shipped-task digest for the local day that just ended. It scans completed `9-done` tasks, uses the configured digest agent for summaries when there is work to report, and delivers through Telegram.
-
-For a read-only GitHub report of pull requests merged on a local day, use:
-
-```bash
-hive digest --source merged-prs --dry-run
-hive digest --source merged-prs --date 2026-06-13 --repo owner/name --json
-```
-
-The merged-PR source never mutates Hive state and does not run an LLM; it groups merged PRs by repo with mechanical MarkdownV2 output. See [wiki/commands/digest.md](wiki/commands/digest.md) for the full contract and JSON schema details.
+[PRDigest](https://github.com/ivankuznetsov/prdigest) is a separate tool. Use
+`prdigest facts` when an agent will write the final message, or schedule
+`prdigest prose --deliver` for a standalone daily Telegram digest. Hive does
+not configure, schedule, or deliver PR digests.
 
 ## Manage Hive From Telegram in 2 Minutes
 
@@ -268,7 +274,7 @@ Useful prompt shapes once Hive is installed:
 - *Watch a long-running task:* `Run hive watch <project>:<slug> --json-lines and stop on its final event.`
 - *Take a safe next step:* `Read a fresh operational action descriptor, then run hive act <action_id> <target> --observation <token> --json.`
 
-For commands that emit JSON, the schema is versioned under [schemas/](schemas/), so agent prompts can rely on field shapes without scraping. `hive status --json` deliberately remains the complete compatibility graph for daemon/bot/TUI consumers; agents should prefer the additive operational view. `hive watch` is a stream and therefore uses `--json-lines`, not the global `--json` document mode. `hive tui` remains human-only. For installation via an agent, point it at [install.md](install.md).
+For commands that emit JSON, the schema is versioned under [schemas/](schemas/), so agent prompts can rely on field shapes without scraping. `hive status --json` is the ordinary visibility projection used by daemon, bot, TUI, and web consumers; each project also reports `hidden_archived_task_count`. Use `hive archive --json` for the complete, retention-unfiltered terminal record. Agents should prefer the additive operational view for day-to-day control. `hive watch` is a stream and therefore uses `--json-lines`, not the global `--json` document mode. `hive tui` remains human-only. For installation via an agent, point it at [install.md](install.md).
 
 ## Custom Workflows
 
@@ -289,6 +295,16 @@ hive workflow install honeycomb/writing --yes
 hive workflow install honeycomb/seo-content --yes --allow-escalation
 ```
 
+Authors can preflight and submit a new immutable package without a separate
+status command. The real call is bound to the exact locally validated release
+digest; it opens or resumes a non-draft review PR and never merges or lists it:
+
+```bash
+hive workflow publish my-flow --version 1.0.0 --dry-run --json
+hive workflow publish my-flow --version 1.0.0 \
+  --expected-release-digest <confirmed-release-digest> --json
+```
+
 Scaffold one from a sample and run it:
 
 ```bash
@@ -305,6 +321,7 @@ A descriptor is short enough to read top to bottom — an entry gate, agent stag
 
 ```yaml
 id: "writing"
+archive_visibility_retention_days: 3
 stages:
   - { name: inbox,    kind: terminal, state_file: idea.md }
   - { name: research, kind: agent,    state_file: research.md, instruction: ./writing/research.md }
@@ -313,24 +330,40 @@ stages:
   - { name: done,     kind: terminal, state_file: done.md }
 ```
 
-Three commands cover authoring: `hive workflow new ID` (scaffold a blank starter in an existing project), `hive workflow new ID --template research` (seed from the multi-stage research sample), and `hive init --new-workflow ID` (bootstrap a project and bind the workflow as its default in one go). Custom workflows are discovered from `.hive-state/workflows/*.yml` and run through the same surfaces as the built-ins — `hive new --workflow`, `status`, `run`, `approve`, and the daemon.
+`archive_visibility_retention_days` controls how long completed tasks remain in
+ordinary status, TUI, and web views. It accepts a positive integer number of
+full 24-hour periods or the exact lowercase value `never`; omission remains
+compatible and means `3`. This changes visibility only—`hive archive` remains
+the complete record, and no task folders are deleted or moved by retention.
+
+Ask the canonical `/hive` skill to create a workflow in natural language when
+you do not want to author YAML. It uses the same three CLI primitives:
+`hive workflow new ID` (scaffold a blank starter in an existing project),
+`hive workflow new ID --template research` (seed from the multi-stage research
+sample), and `hive init --new-workflow ID` (bootstrap a project and bind the
+workflow as its default in one go). Validate edits with
+`hive workflow validate ID --json`. Custom workflows are discovered from
+`.hive-state/workflows/*.yml` and run through the same surfaces as the
+built-ins — `hive new --workflow`, `status`, `run`, `approve`, `decide`, and
+the daemon.
 
 **Full walkthrough** — mental model, descriptor anatomy, writing stage instructions, advanced options (terminal approval gates, `skill:` stages, per-stage permissions), and gotchas: **[hivecli.sh/docs/custom-workflows](https://hivecli.sh/docs/custom-workflows/)** (also in-repo at [docs/workflows.md](docs/workflows.md)).
 
 ## Power-User / Scripting CLI
 
-The TUI is the recommended human interface and an agent-driven CLI is the recommended automation surface, but the workflow commands are also available directly on `bin/hive` (or the `hv` shim when Apache Hive shadows the name) for scripting, debugging, and recovery. Stage-driving verbs support `--json` and return typed envelopes; `hive new` remains plain text and prints the captured task path plus the next-step hint.
+The TUI is the recommended human interface and an agent-driven CLI is the recommended automation surface, but the workflow commands are also available directly on `bin/hive` (or the `hv` shim when Apache Hive shadows the name) for scripting, debugging, and recovery. Stage-driving verbs support `--json` and return typed envelopes. `hive new` keeps its existing text output by default and adds an opt-in JSON contract for idempotent automation.
 
 | Group | Verbs | What it's for |
 |---|---|---|
 | Native setup & web | `hive setup`, `hive web`, `hive web status/install/start/stop` | Provision the default loopback Hive web service, run the foreground server, or observe/repair the managed unit. `--no-service` opts out of web-service mutation. See [docs/cli.md#day-to-day-workflow](docs/cli.md#day-to-day-workflow). |
-| Workflow | `hive new`, `hive brainstorm`, `hive plan`, `hive develop`, `hive open-pr`, `hive review`, `hive artifacts`, `hive finalize`, `hive archive`, `hive run`, `hive approve` | Drive a single stage of a single task by hand. `--from <stage>` lets you re-run a stage in place. See [docs/cli.md#day-to-day-workflow](docs/cli.md#day-to-day-workflow). |
-| Workflow authoring | `hive workflow new` | Scaffold a project-local workflow descriptor under `.hive-state/workflows/` (`--template research` seeds from a sample). See [Custom Workflows](#custom-workflows) and [docs/workflows.md](docs/workflows.md). |
+| Workflow | `hive new`, `hive brainstorm`, `hive plan`, `hive develop`, `hive open-pr`, `hive review`, `hive artifacts`, `hive finalize`, `hive archive`, `hive run`, `hive approve`, `hive decide` | Drive a single stage of a single task by hand. `--from <stage>` makes advances retry-safe; human decisions also require the visit-specific `--decision-id`. See [docs/cli.md#day-to-day-workflow](docs/cli.md#day-to-day-workflow). |
+| Workflow authoring | `hive workflow new`, `hive workflow validate` | Scaffold and read-only validate a project-local workflow descriptor under `.hive-state/workflows/` (`--template research` seeds from a sample). See [Custom Workflows](#custom-workflows) and [docs/workflows.md](docs/workflows.md). |
 | Review findings | `hive findings`, `hive accept-finding`, `hive reject-finding` | Inspect GFM-checkbox findings from the latest review pass and tick which ones should feed the next fix pass. See [docs/cli.md#findings-triage](docs/cli.md#findings-triage). |
 | Patrol | `hive patrol` | Run one opt-in repository patrol cycle: map feature slices, review them, validate fixes, and open PRs for passed fixes only. See [docs/cli.md#patrol](docs/cli.md#patrol). |
 | Daemon | `hive daemon install/enable/start/status/tail/stop/disable` | Manage the global daemon service plus per-project enrollment. The service polls `hive status --json` and dispatches workflow verbs for enrolled projects. Read [wiki/operating.md](wiki/operating.md) before going live. See [docs/cli.md#daemon](docs/cli.md#daemon). |
+| PR babysitter | `hive babysit install/start/status/tail/stop` | Supervise opt-in repair of conflicted or red GitHub PRs. Normal `hive setup` installs the global service; each project remains gated by `babysitter.enabled`. |
 | Diagnostics & agent setup | `hive status [--operational|--full]`, `hive watch`, `hive act`, `hive doctor`, `hive setup-agents`, `hive rebase-status`, `hive markers clear`, `hive metrics rollback-rate` | Inspect compact or full task state, observe semantic transitions, execute a fresh closed routine action, diagnose configured skills without writes, consent to provision managed built-ins, or use the explicit recovery diagnostics. See [docs/cli.md#diagnostics](docs/cli.md#diagnostics). |
-| Registry & lifecycle | `hive init`, `hive update`, `hive uninstall`, `hive forget`, `hive prune`, `hive migrate`, `hive tree` | Attach Hive to a project, upgrade to the latest release, remove the installed CLI, prune the global registry, rename old stage folders, or print the Thor command tree. See [docs/cli.md#lower-level-surface](docs/cli.md#lower-level-surface). |
+| Registry & lifecycle | `hive init`, `hive update`, `hive uninstall`, `hive forget`, `hive prune`, `hive migrate`, `hive tree` | Attach Hive to a project, upgrade the installed CLI, remove it, prune the global registry, migrate legacy project state, or print the Thor command tree. See [docs/cli.md#lower-level-surface](docs/cli.md#lower-level-surface). |
 
 Full per-command reference, every flag, every envelope field, and every exit code lives in [docs/cli.md](docs/cli.md).
 

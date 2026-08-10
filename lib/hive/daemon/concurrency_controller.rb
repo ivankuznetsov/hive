@@ -195,11 +195,13 @@ module Hive
       end
 
       # Update the recorded mtime without consuming a dispatch slot.
-      # Used by the Dispatcher in two flows: (a) when Policy returns
+      # Used by the Dispatcher in three flows: (a) when Policy returns
       # `:record_baseline` on a first-sight `kind: edit` row, the
       # dispatcher seeds the controller with the current mtime so the
-      # next tick has something to compare against; (b) post-child-
-      # completion, the dispatcher refreshes the recorded mtime to the
+      # next tick has something to compare against; (b) when durable
+      # admission returns a successful terminal replay, the dispatcher
+      # records the generation's consumed mtime; (c) post-child-completion,
+      # the dispatcher refreshes the recorded mtime to the
       # current state-file mtime so the agent's own `_WAITING`-marker
       # write (which moves mtime past the at-dispatch value) doesn't
       # trigger a redundant re-dispatch on the next tick.

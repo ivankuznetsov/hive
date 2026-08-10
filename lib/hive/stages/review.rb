@@ -4,10 +4,10 @@ require "json"
 require "open3"
 require "time"
 require "yaml"
+require "hive/artifact_firewall"
 require "hive/events"
 require "hive/claude_completion_fallback"
 require "hive/config"
-require "hive/protected_files"
 require "hive/claude_launcher"
 require "hive/stages/base"
 require "hive/stages/auto_commit"
@@ -60,7 +60,7 @@ module Hive
       # phase=fix reason=fix_tampered. Same pattern as ADR-013 for
       # 4-execute, narrowed to the orchestrator-owned files plus the
       # current pass's escalations doc (which only Triage may write).
-      FIX_PROTECTED_FILES = Hive::ProtectedFiles::ORCHESTRATOR_OWNED
+      FIX_PROTECTED_FILES = Hive::ArtifactFirewall::ORCHESTRATOR_OWNED
 
       # Filenames in `reviews/` that the orchestrator (not a reviewer)
       # writes are listed in `Hive::Stages::Review::ORCHESTRATOR_OWNED_PREFIXES`
@@ -118,6 +118,7 @@ module Hive
       end
 
       def run!(task, cfg)
+        pre_effect_routing_validation = false
         # Track the current phase in a module-instance variable so the
         # top-level rescue at the end of this method can record it on
         # REVIEW_ERROR. The hive runner is single-task per process, so
@@ -140,16 +141,15 @@ module Hive
           return { commit: nil, status: :review_complete }
         when :review_ci_stale
           warn "hive: REVIEW_CI_STALE — fix CI failures, edit reviews/ci-blocked.md, then run " \
-               "`hive markers clear #{task.folder} --name REVIEW_CI_STALE` and re-run `hive run`"
+               "`hive status --operational --json` and invoke this task's `workflow.retry` action with `hive act`"
           return { commit: nil, status: :review_ci_stale }
         when :review_stale
-          warn "hive: REVIEW_STALE — if the highest pass has reviewer files but no escalations-NN.md, clear " \
-               "the marker and re-run to retry it; otherwise edit/rename highest-pass review files, then run " \
-               "`hive markers clear #{task.folder} --name REVIEW_STALE` and re-run `hive run`"
+          warn "hive: REVIEW_STALE — inspect or edit the highest-pass review files, then run " \
+               "`hive status --operational --json` and invoke this task's `workflow.retry` action with `hive act`"
           return { commit: nil, status: :review_stale }
         when :review_error
           warn "hive: REVIEW_ERROR (#{marker.attrs.inspect}) — investigate, then run " \
-               "`hive markers clear #{task.folder} --name REVIEW_ERROR` and re-run `hive run`"
+               "`hive status --operational --json` and invoke this task's `workflow.retry` action with `hive act`"
           return { commit: nil, status: :review_error }
         end
 
@@ -159,14 +159,8 @@ module Hive
           exit 1
         end
 
-        worktree_root = canonical_worktree_root(task, cfg)
-        pointer = Hive::Worktree.read_pointer(task.folder)
-        worktree_path = pointer["path"]
-        Hive::Worktree.validate_pointer_path(worktree_path, worktree_root)
-        unless File.directory?(worktree_path)
-          warn "hive: worktree pointer present but worktree missing at #{worktree_path}; recover with `git -C <root> worktree prune`, fix worktree.yml, then re-run"
-          exit 1
-        end
+        pointer = Hive::Stages::Base.worktree_pointer_or_exit(task)
+        worktree_path = pointer.fetch("path")
 
         ops = Hive::GitOps.new(worktree_path)
         default_branch = reviewer_compare_ref(cfg, ops)
@@ -409,7 +403,8 @@ module Hive
                 attrs[:message] = "all reviewers hit a usage/credit limit"
                 # Stamp the cooldown so the daemon healer can self-heal once
                 # the usage window has plausibly reset (see AgentLimit). Only
-                # the limit marker gets a retry_after — `all_failed` stays manual.
+                # the limit marker gets a retry_after for display; both errors
+                # follow the daemon's shared cooldown retry policy.
                 attrs[:retry_after] = Hive::AgentLimit.retry_after_for(reviewer_limit_texts)
               end
               Hive::Markers.set(task.state_file, :review_error, attrs)
@@ -447,10 +442,22 @@ module Hive
               when :tampered
                 Hive::Markers.set(task.state_file, :review_error,
                                   phase: :triage, reason: "triage_tampered",
-                                  files: triage_result.tampered_files.join(","), pass: pass)
+                                  files: triage_result.tampered_files.join(","), pass: pass,
+                                  restored: true)
                 return { commit: "triage_tampered_pass_#{format('%02d', pass)}",
                          status: :review_error }
               when :error
+                if triage_result.tampered_files.any?
+                  Hive::Markers.set(
+                    task.state_file, :review_error,
+                    phase: :triage, reason: "triage_tampered",
+                    files: triage_result.tampered_files.join(","), pass: pass,
+                    restored: false,
+                    restore_error: triage_result.error_message.to_s[0, 200]
+                  )
+                  return { commit: "triage_tampered_pass_#{format('%02d', pass)}",
+                           status: :review_error }
+                end
                 limited = mark_review_phase_failure(
                   task, phase: :triage, pass: pass,
                   error_message: triage_result.error_message,
@@ -487,8 +494,8 @@ module Hive
             # NOT proof that the worktree is clean — it only proves
             # the reviewers that ran found nothing. Surface as a
             # recoverable REVIEW_ERROR rather than REVIEW_WAITING:
-            # no user answer is required; the right default action is
-            # clearing the error marker and rerunning reviewers.
+            # no user answer is required; the right default action is a
+            # durable workflow.retry through RecoveryCoordinator.
             errors_path = File.join(
               ctx_pass.task_folder,
               "reviews",
@@ -535,6 +542,9 @@ module Hive
           end
 
           # --- Phase 4: fix ---
+          pre_effect_routing_validation = true
+          fix_identity = Hive::Stages::Base.implementation_stage_identity(task, cfg, "review.fix")
+          pre_effect_routing_validation = false
           @current_phase = :fix
           mark_working(task, phase: :fix, pass: pass)
           pre_fix_status = prepare_worktree_for_fix(task, cfg, worktree_path)
@@ -586,20 +596,31 @@ module Hive
             "reviews/suppressed.md",
             fix_success_relative_path(pass)
           ]
-          fix_identity = Hive::Stages::Base.implementation_stage_identity(task, cfg, "review.fix")
-          before_fix_sha = Hive::ProtectedFiles.snapshot(task.folder, protected_set)
+          custody_manifest = Hive::ArtifactFirewall::Manifest.new(
+            root: task.folder,
+            protected_anchors: protected_set,
+            permitted_writable_roots: [ task.folder, worktree_path ]
+          )
+          custody_snapshot = Hive::ArtifactFirewall.capture(custody_manifest)
           before_fix_head = git_head(worktree_path)
 
-          fix_result = spawn_fix_agent(
-            task, cfg, ctx_pass, accepted: accepted, identity: fix_identity
-          )
-          after_fix_sha = Hive::ProtectedFiles.snapshot(task.folder, protected_set)
+          begin
+            fix_result = spawn_fix_agent(
+              task, cfg, ctx_pass, accepted: accepted, identity: fix_identity
+            )
+          ensure
+            custody_report = Hive::ArtifactFirewall.validate_and_restore(
+              custody_manifest, custody_snapshot
+            )
+          end
           after_fix_head = git_head(worktree_path)
 
-          if (tampered = Hive::ProtectedFiles.diff(before_fix_sha, after_fix_sha)).any?
+          if custody_report.tampered?
             Hive::Markers.set(task.state_file, :review_error,
                               phase: :fix, reason: "fix_tampered",
-                              files: tampered.join(","), pass: pass)
+                              files: custody_report.tampered_labels.join(","), pass: pass,
+                              restored: custody_report.restored?,
+                              restore_error: custody_report.restore_diagnostic.to_s[0, 200])
             return { commit: "fix_tampered_pass_#{format('%02d', pass)}",
                      status: :review_error }
           end
@@ -726,6 +747,8 @@ module Hive
         # `reason=runner_exception exception_class=Hive::ConfigError`,
         # discarding the message. Surface it as a config-phase error
         # marker that preserves the message in the `reason` attr.
+        raise if pre_effect_routing_validation
+
         Hive::Markers.set(task.state_file, :review_error,
                           phase: @current_phase || :pre_flight,
                           reason: "config_error",
@@ -1124,7 +1147,7 @@ module Hive
       # phase already does — not sit terminally red until a human retries.
       # When the captured error text reads as a limit, stamp
       # `reason: limits_reached` plus a `retry_after` cooldown the daemon
-      # healer honors (StaleAgentHealer#auto_recoverable_review_error?);
+      # healer honors through the shared coordinator assessment;
       # otherwise write a closed-enum terminal reason classified from the
       # captured output (`unknown` when no specific signal is present).
       # A timeout (no limit text) stays terminal — only an actual limit
@@ -1504,12 +1527,14 @@ module Hive
 
           shared_reviewer_groups(cfg, claude_specs).each_with_index do |group, group_idx|
             scope = shared_reviewer_permission_scope(cfg, ctx, task, group.first)
+            routing_arguments = shared_reviewer_routing_arguments(cfg, group.first)
             Hive::ClaudeLauncher.with_shared_session(
               task: task,
               cfg: cfg,
               session_name: shared_reviewer_session_name(task, ctx.pass, group_idx),
               cwd: ctx.worktree_path,
               add_dirs: scope.fetch(:add_dirs),
+              cli_flags: routing_arguments&.native_arguments,
               **Hive::Stages::Base.tool_scope_kwargs(scope)
             ) do |handle|
               group.each do |spec|
@@ -1617,17 +1642,32 @@ module Hive
         :source_unknown
       end
 
-      # Group reviewers that share an effective permission scope so they can
-      # share one tmux session. The group key is the RESOLVED spec — an
+      # Group reviewers that share an effective permission scope and routed
+      # launch identity so they can share one tmux session. The permission
+      # part of the key is the RESOLVED spec — an
       # explicit `permissions:` value, or the project/stage default when the
       # key is omitted — so a reviewer spelling out `permissions: yolo` and
       # one inheriting the default yolo land in the SAME group (identical
       # effective scope → one session) instead of two sessions keyed on
-      # present-vs-absent. Each group's scope is built from group.first, which
-      # is sound because every member resolves to the same effective spec.
+      # present-vs-absent. RoutingArguments are immutable value objects, so
+      # equal effective model/effort controls coalesce while different ones
+      # cannot leak through a previously established Claude process. Each
+      # group's scope and route are built from group.first, which is sound
+      # because every member resolves to the same effective key.
       def shared_reviewer_groups(cfg, specs)
         default = Hive::Config.permission_spec(cfg || {}, "review.reviewers")
-        specs.group_by { |spec| spec.key?("permissions") ? spec["permissions"] : default }.values
+        specs.group_by do |spec|
+          permission = spec.key?("permissions") ? spec["permissions"] : default
+          [ permission, shared_reviewer_routing_arguments(cfg, spec) ]
+        end.values
+      end
+
+      def shared_reviewer_routing_arguments(cfg, spec)
+        profile = Hive::AgentProfiles.lookup(:claude, cfg: cfg)
+        Hive::Stages::Base.model_routing_arguments(
+          cfg || {}, "review_reviewers", profile,
+          current: Hive::Stages::Base.model_routing_current(spec)
+        )
       end
 
       def shared_reviewer_session_name(task, pass, group_idx)
@@ -2091,7 +2131,7 @@ module Hive
           profile: profile,
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :exit_code_only,
-          identity_arguments: identity&.native_arguments
+          **Hive::Stages::Base.implementation_launch_arguments(identity, profile)
         }
         if profile.name == :claude
           Hive::Stages::Base.spawn_claude!(

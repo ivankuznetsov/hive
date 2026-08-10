@@ -6,7 +6,60 @@ class E2EScenarioParserTest < Minitest::Test
     scenario = Hive::E2E::ScenarioParser.parse(File.expand_path("../scenarios/_template.yml", __dir__))
 
     assert_equal "template", scenario.name
+    assert_equal "capability.stable_id", scenario.coverage.primary
+    assert_empty scenario.coverage.supporting
     assert scenario.steps.any? { |step| step.kind == "ruby_block" }
+  end
+
+  def test_coverage_metadata_parses_without_changing_execution_fields
+    Dir.mktmpdir("scenario") do |dir|
+      path = File.join(dir, "covered.yml")
+      File.write(path, <<~YAML)
+        name: covered
+        coverage:
+          primary: workflow.full_pipeline
+          supporting: [runtime.error_envelope]
+        steps:
+          - kind: cli
+            args: [version]
+      YAML
+
+      scenario = Hive::E2E::ScenarioParser.parse(path)
+
+      assert_equal "workflow.full_pipeline", scenario.coverage.primary
+      assert_equal [ "runtime.error_envelope" ], scenario.coverage.supporting
+      assert_equal "cli", scenario.steps.first.kind
+    end
+  end
+
+  def test_coverage_metadata_rejects_invalid_shapes_and_duplicate_supporting_ids
+    invalid = [
+      [ "coverage must be a map", "coverage: nope" ],
+      [ "coverage.primary must be a string", "coverage:\n  primary: [bad]\n  supporting: []" ],
+      [ "coverage.supporting must be an array", "coverage:\n  primary: test.valid\n  supporting: nope" ],
+      [ "coverage.supporting IDs must be unique",
+        "coverage:\n  primary: test.valid\n  supporting: [test.other, test.other]" ],
+      [ "coverage.primary cannot also be supporting",
+        "coverage:\n  primary: test.valid\n  supporting: [test.valid]" ]
+    ]
+
+    invalid.each do |message, coverage|
+      Dir.mktmpdir("scenario") do |dir|
+        path = File.join(dir, "bad.yml")
+        File.write(path, <<~YAML)
+          name: bad
+          #{coverage}
+          steps:
+            - kind: cli
+              args: [version]
+        YAML
+
+        error = assert_raises(Hive::E2E::ScenarioParser::InvalidScenario) do
+          Hive::E2E::ScenarioParser.parse(path)
+        end
+        assert_includes error.message, message
+      end
+    end
   end
 
   def test_unknown_step_kind_reports_line

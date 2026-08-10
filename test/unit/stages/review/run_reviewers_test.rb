@@ -764,6 +764,46 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
+  def test_shared_claude_sessions_receive_their_group_route
+    with_tmp_dir do |dir|
+      cfg = {
+        "claude" => { "mode" => "tmux" },
+        "models" => {
+          "review_reviewers" => { "effort" => "high" }
+        },
+        "review" => {
+          "reviewers" => [
+            {
+              "name" => "opus", "output_basename" => "opus",
+              "kind" => "agent", "agent" => "claude", "model" => "opus"
+            },
+            {
+              "name" => "sonnet", "output_basename" => "sonnet",
+              "kind" => "agent", "agent" => "claude", "model" => "sonnet"
+            }
+          ]
+        }
+      }
+      ctx = make_ctx(dir)
+      adapters = cfg["review"]["reviewers"].map { |spec| SharedSessionReviewer.new(spec, ctx) }
+
+      with_stubbed_dispatch(adapters) do
+        with_stubbed_claude_session do |sessions|
+          result = Hive::Stages::Review.run_reviewers(
+            cfg, ctx, Task.new(dir, File.join(dir, "task.md"))
+          )
+
+          assert_equal :ok, result
+          assert_equal 2, sessions.length
+          assert_equal [
+            [ "--model", "opus", "--effort", "high" ],
+            [ "--model", "sonnet", "--effort", "high" ]
+          ], sessions.map { |session| session[:kwargs].fetch(:cli_flags) }
+        end
+      end
+    end
+  end
+
   def test_shared_session_reviewers_each_get_full_remaining_budget
     with_tmp_dir do |dir|
       cfg = {
@@ -1469,8 +1509,14 @@ class RunReviewersTest < Minitest::Test
                              error_message: "fresh failure")
       ]
 
-      with_stubbed_dispatch(adapters) do
-        Hive::Stages::Review.run_reviewers(cfg, make_ctx(dir), Task.new(dir, File.join(dir, "task.md")))
+      with_replaced_singleton_method(
+        Hive::Stages::Review::GithubPublisher,
+        :validated_pr_url,
+        ->(_task, _cfg) { "https://example.com/pr/77" }
+      ) do
+        with_stubbed_dispatch(adapters) do
+          Hive::Stages::Review.run_reviewers(cfg, make_ctx(dir), Task.new(dir, File.join(dir, "task.md")))
+        end
       end
 
       contents = File.read(stale_path)
@@ -2110,8 +2156,14 @@ class RunReviewersTest < Minitest::Test
         OkReviewer.new(cfg["review"]["reviewers"][1], make_ctx(dir))
       ]
 
-      with_stubbed_dispatch(adapters) do
-        Hive::Stages::Review.run_reviewers(cfg, make_ctx(dir), Task.new(dir, File.join(dir, "task.md")))
+      with_replaced_singleton_method(
+        Hive::Stages::Review::GithubPublisher,
+        :validated_pr_url,
+        ->(_task, _cfg) { "https://example.com/pr/77" }
+      ) do
+        with_stubbed_dispatch(adapters) do
+          Hive::Stages::Review.run_reviewers(cfg, make_ctx(dir), Task.new(dir, File.join(dir, "task.md")))
+        end
       end
 
       log_path = File.join(log_dir, "fake-gh-argv.log")
@@ -2211,6 +2263,26 @@ class RunReviewersTest < Minitest::Test
                "explicit yolo and inherited-default yolo must land in the SAME group"
     read_only_group = groups.find { |g| g.map { |s| s["name"] } == %w[read-only] }
     refute_nil read_only_group, "the read-only reviewer must be its own group"
+  end
+
+  def test_shared_reviewer_groups_split_different_effective_routes
+    cfg = {
+      "permissions" => "yolo",
+      "models" => {
+        "review_reviewers" => { "effort" => "high" }
+      }
+    }
+    specs = [
+      { "name" => "opus-a", "model" => "opus" },
+      { "name" => "opus-b", "model" => "opus" },
+      { "name" => "sonnet", "model" => "sonnet" }
+    ]
+
+    groups = Hive::Stages::Review.shared_reviewer_groups(cfg, specs)
+
+    assert_equal 2, groups.length
+    assert groups.any? { |group| group.map { |spec| spec["name"] }.sort == %w[opus-a opus-b] }
+    assert groups.any? { |group| group.map { |spec| spec["name"] } == %w[sonnet] }
   end
 
   # Only the first group reuses the base session name; each subsequent

@@ -1,6 +1,9 @@
 require "stringio"
+require "hive/commands/new"
 
 class Project
+  class IdeaCaptureError < Hive::Error; end
+
   attr_reader :attributes
 
   def self.all
@@ -50,10 +53,17 @@ class Project
     raise
   end
 
-  def active_tasks
-    @active_tasks ||= attributes.fetch("tasks", []).map do |task_attributes|
+  def tasks
+    @tasks ||= attributes.fetch("tasks", []).map do |task_attributes|
       Task.new(project: self, attributes: task_attributes)
     end
+  end
+
+  alias active_tasks tasks
+  alias archived_tasks tasks
+
+  def hidden_archived_task_count
+    attributes.fetch("hidden_archived_task_count", 0)
   end
 
   def default_workflow
@@ -82,5 +92,20 @@ class Project
       provisioning_error:
     ).call
     provisioning_error.string.strip.presence
+  end
+
+  def add_idea!(text, attachments: [])
+    text = text.to_s.strip
+    raise Hive::Error, "idea text is empty" if text.empty?
+
+    Hive::Commands::New.new(name, text, attachments:).call!
+  rescue SystemCallError, IOError => e
+    # Commands::New#call! deliberately leaves I/O errors raising for
+    # in-process adapters to present in their native UI. Normalize them here
+    # so Rails renders its typed 422 page, while preserving the original class
+    # for diagnostics and redacting any absolute path from the response.
+    raise IdeaCaptureError.new(
+      "could not add idea because an I/O operation failed (#{e.class})"
+    ), cause: e
   end
 end

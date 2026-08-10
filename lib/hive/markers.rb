@@ -1,5 +1,7 @@
 require "securerandom"
+require "tempfile"
 require "hive/attempts/context"
+require "hive/recovery"
 
 module Hive
   module Markers
@@ -33,22 +35,10 @@ module Hive
     # consumer picks it up.
     TERMINAL_MARKER_NAMES = %i[complete execute_complete review_complete].freeze
 
-    # POSIX exit codes produced by signal kills (130 = SIGINT, 137 =
-    # SIGKILL, 143 = SIGTERM). Only ERROR markers shaped as
-    # `reason=exit_code exit_code=<kill-class>` are treated as
-    # interrupted, not "broken" — the file-system state is intact and
-    # the marker is stale. The numeric list is shared by
-    # `Hive::Tui::BubbleModel#auto_heal_kill_class_errors` (background
-    # heal that clears those explicit signal-kill markers) and
-    # `Hive::Tui::KeyMap.error_message` (routes Enter on those rows to
-    # OpenLogTail rather than RecoverError so Enter doesn't race the
-    # auto-healer for the same markers-lock). Adding a new kill-class
-    # code here updates both consumers; previously each module had its
-    # own private copy and would drift on edit.
-    KILL_CLASS_EXIT_CODES = %w[130 137 143].freeze
     INTERNAL_ATTR_KEYS = %w[
       marker_id attempt_id task_generation ownership_generation task_input_epoch
     ].freeze
+    MAX_MARKER_SCAN_BYTES = 1024 * 1024
 
     State = Struct.new(:name, :attrs, :raw, keyword_init: true) do
       def none?
@@ -59,11 +49,23 @@ module Hive
     module_function
 
     def current(state_file_path)
-      return State.new(name: :none, attrs: {}, raw: nil) unless File.exist?(state_file_path)
+      content = read_regular_body(
+        state_file_path, max_bytes: MAX_MARKER_SCAN_BYTES, tail: true
+      )
+      return State.new(name: :none, attrs: {}, raw: nil) unless content
 
-      content = File.read(state_file_path, encoding: "UTF-8")
+      current_from_content(content)
+    end
+
+    def current_from_content(content)
       last = nil
-      content.scan(MARKER_RE) do
+      # Agent-authored artifacts are not trusted to be valid UTF-8. Marker
+      # syntax is ASCII, so scan a binary view: an invalid certificate can
+      # still expose its trailing COMPLETE marker to the bounded terminal
+      # outcome classifier instead of crashing before normalization.
+      binary_content = content.to_s
+      binary_content = binary_content.b unless binary_content.encoding == Encoding::BINARY
+      binary_content.scan(MARKER_RE) do
         match = Regexp.last_match
         last = match
       end
@@ -90,7 +92,10 @@ module Hive
       new_marker = build_marker(marker_name, attrs)
       ensure_dir(state_file_path)
       with_markers_lock(state_file_path) do
-        body = File.exist?(state_file_path) ? File.read(state_file_path, encoding: "UTF-8") : ""
+        # The state path is agent-controlled. A FIFO, device, or symlink must
+        # never be opened while the controller owns the task lock. Treat such
+        # nodes as an empty artifact and replace the directory entry atomically.
+        body = read_regular_body(state_file_path) || "".b
         replaced, count = replace_last_marker(body, new_marker)
         body = if count.positive?
                  replaced
@@ -101,6 +106,31 @@ module Hive
         write_atomic(state_file_path, body)
       end
       new_marker
+    end
+
+    # One-off recovery migration compare-and-swap. The caller supplies the
+    # exact id-less marker it observed; after taking the same sidecar lock used
+    # by every marker writer, we re-read and upgrade only if that exact marker
+    # is still current. A concurrent agent/operator write therefore wins
+    # instead of being overwritten by a stale migration read.
+    def upgrade_recovery_marker_id(state_file_path, observed:)
+      with_markers_lock(state_file_path) do
+        current_marker = current(state_file_path)
+        return false unless current_marker.raw == observed&.raw
+        return false unless Hive::Recovery.recoverable_marker?(current_marker.name)
+        return false unless current_marker.attrs["marker_id"].to_s.empty?
+
+        marker_name = current_marker.name.to_s.upcase
+        attrs = attrs_with_recovery_marker_id(marker_name, current_marker.attrs)
+        new_marker = build_marker(marker_name, attrs)
+        body = read_regular_body(state_file_path)
+        return false unless body
+        replaced, count = replace_last_marker(body, new_marker)
+        return false unless count == 1
+
+        write_atomic(state_file_path, replaced)
+        true
+      end
     end
 
     def clear_current(state_file_path, expected_name:, match_attrs: {}, purge_history: false)
@@ -118,6 +148,15 @@ module Hive
         end
         true
       end
+    end
+
+    # Return the exact body that `clear_current(..., purge_history: true)`
+    # would persist. Recovery code uses this before the clear to derive the
+    # post-clear durable attempt generation, so a queued continuation can be
+    # bound to the artifact it will actually execute without creating a
+    # markerless crash window first.
+    def without_markers(body)
+      body.to_s.b.gsub(MARKER_RE, "")
     end
 
     # Serialize concurrent state-file writers via a sidecar `.markers-lock`
@@ -145,24 +184,48 @@ module Hive
 
     def write_atomic(path, body)
       dir = File.dirname(path)
-      tmp = File.join(dir, ".#{File.basename(path)}.tmp.#{Process.pid}")
-      File.open(tmp, File::WRONLY | File::CREAT | File::TRUNC, 0o644, encoding: "UTF-8") do |f|
-        f.write(body)
-        f.flush
-        begin
-          f.fsync
-        rescue StandardError
-          nil
-        end
+      tmp_file = Tempfile.create([ ".#{File.basename(path)}.tmp.", "" ], dir)
+      tmp = tmp_file.path
+      # Preserve the artifact byte-for-byte around the marker. An opted-in
+      # terminal classifier may need to replace COMPLETE with ERROR precisely
+      # because the producer wrote invalid UTF-8; transcoding here would make
+      # that fail-closed normalization impossible.
+      tmp_file.binmode
+      tmp_file.chmod(0o644)
+      tmp_file.write(body)
+      tmp_file.flush
+      begin
+        tmp_file.fsync
+      rescue StandardError
+        nil
       end
+
+      opened = tmp_file.stat
+      current = File.lstat(tmp)
+      unless opened.file? && !current.symlink? &&
+             opened.dev == current.dev && opened.ino == current.ino
+        raise IOError, "marker temporary file identity changed before rename"
+      end
+
       File.rename(tmp, path)
+      installed = File.lstat(path)
+      unless installed.file? && opened.dev == installed.dev && opened.ino == installed.ino
+        raise IOError, "marker file identity changed during atomic rename"
+      end
     ensure
-      File.delete(tmp) if tmp && File.exist?(tmp)
+      tmp_file&.close
+      begin
+        File.unlink(tmp) if tmp
+      rescue Errno::ENOENT
+        nil
+      end
     end
 
     def attrs_with_recovery_marker_id(marker_name, attrs)
       attrs = attrs ? attrs.to_h : {}
-      return attrs unless %w[ERROR REVIEW_ERROR REVIEW_WORKING].include?(marker_name)
+      needs_id = marker_name == "REVIEW_WORKING" ||
+                 Hive::Recovery.recoverable_marker?(marker_name)
+      return attrs unless needs_id
       return attrs unless attrs["marker_id"].to_s.empty? && attrs[:marker_id].to_s.empty?
 
       attrs.merge("marker_id" => SecureRandom.hex(8))
@@ -189,32 +252,19 @@ module Hive
       attrs.empty? ? marker_name : "#{marker_name} #{attrs}"
     end
 
-    def error_recovery_match_attr(attrs)
+    def recovery_match_attr(attrs)
       attrs = attrs ? attrs.to_h.transform_keys(&:to_s) : {}
       marker_id = attrs["marker_id"].to_s
       reason = attrs["reason"].to_s
       # When a `marker_id` is present, callers want it as the primary
       # `--match-attr` guard so race-y recoveries can't clear a newer
-      # marker by accident. But the inline-button callback path needs
-      # the `reason` too — `manual_only?` checks `attrs["reason"]` on
-      # the reconstructed attrs hash to route
-      # `ensure_clean_on_exit_failed` / `dirty_worktree` into the
-      # operator-only reply. Encode both as a comma-separated pair so
-      # `RecoverySequence.attrs_from_match_attr` reconstructs both
-      # keys, and `Hive::Bot::AlertStore.parse_match_attr` keeps using
-      # the leading `marker_id=...` token as the canonical guard.
-      if !marker_id.empty?
-        return "marker_id=#{marker_id}" if reason.empty?
+      # marker by accident. Keep `reason` as a secondary assertion and audit
+      # breadcrumb. `AlertStore.parse_match_attr` continues to use the leading
+      # marker_id token as its canonical alert-generation guard.
+      return nil if marker_id.empty?
+      return "marker_id=#{marker_id}" if reason.empty?
 
-        return "marker_id=#{marker_id},reason=#{reason}"
-      end
-
-      parts = []
-      %w[reason exit_code].each do |key|
-        value = attrs[key].to_s
-        parts << "#{key}=#{value}" unless value.empty?
-      end
-      parts.empty? ? nil : parts.join(",")
+      "marker_id=#{marker_id},reason=#{reason}"
     end
 
     def build_marker(name, attrs)
@@ -246,19 +296,26 @@ module Hive
     end
 
     def replace_last_marker(body, new_marker)
-      matches = body.to_enum(:scan, MARKER_RE).map { Regexp.last_match }
+      binary_body = body.to_s.b
+      matches = binary_body.to_enum(:scan, MARKER_RE).map { Regexp.last_match }
       return [ body, 0 ] if matches.empty?
 
       last = matches.last
-      [ body[0...last.begin(0)] + new_marker + body[last.end(0)..], 1 ]
+      [ binary_body[0...last.begin(0)] + new_marker.b + binary_body[last.end(0)..], 1 ]
     end
 
     def remove_marker(state_file_path, raw_marker)
-      return unless File.exist?(state_file_path)
       return if raw_marker.to_s.empty?
 
-      body = File.read(state_file_path, encoding: "UTF-8")
-      cleaned = body.sub(/#{Regexp.escape(raw_marker)}\n?/, "")
+      body = read_regular_body(state_file_path)
+      return unless body
+      marker = raw_marker.to_s.b
+      offset = body.index(marker)
+      return unless offset
+
+      suffix = offset + marker.bytesize
+      suffix += 1 if body.getbyte(suffix) == 10
+      cleaned = body.byteslice(0, offset).to_s + body.byteslice(suffix..).to_s
       write_atomic(state_file_path, cleaned)
     end
 
@@ -269,10 +326,34 @@ module Hive
     # current marker would expose that stale history as live state and strand
     # redispatch behind another grace/recovery cycle.
     def remove_all_markers(state_file_path)
-      return unless File.exist?(state_file_path)
+      body = read_regular_body(state_file_path)
+      return unless body
 
-      body = File.read(state_file_path, encoding: "UTF-8")
-      write_atomic(state_file_path, body.gsub(MARKER_RE, ""))
+      write_atomic(state_file_path, without_markers(body))
     end
+
+    def read_regular_body(path, max_bytes: nil, tail: false)
+      flags = File::RDONLY
+      flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+      flags |= File::NONBLOCK if File.const_defined?(:NONBLOCK)
+
+      File.open(path, flags) do |io|
+        opened = io.stat
+        current = File.lstat(path)
+        return nil unless opened.file? && !current.symlink? &&
+                          opened.dev == current.dev && opened.ino == current.ino
+
+        if max_bytes
+          length = [ opened.size, max_bytes ].min
+          io.seek(opened.size - length, IO::SEEK_SET) if tail && opened.size > length
+          io.read(length).to_s.b
+        else
+          io.read.to_s.b
+        end
+      end
+    rescue SystemCallError, IOError
+      nil
+    end
+    private_class_method :read_regular_body
   end
 end

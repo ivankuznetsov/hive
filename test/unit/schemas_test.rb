@@ -7,8 +7,8 @@ require "test_helper"
 #   2. ALL is self-derived from the module's constants, so renaming a
 #      constant without updating ALL is impossible.
 #
-# Producers (Hive::Commands::Run / Hive::Commands::Status) and the schema
-# files (schemas/hive-run.v1.json / schemas/hive-status.v1.json) both
+# Producers (Hive::Commands::Run / Hive::Commands::Status) and their current
+# schema files both
 # reference these constants — a drift between any of those three surfaces
 # fails this test or the schema-drift test in schema_files_test.rb.
 class SchemasTest < Minitest::Test

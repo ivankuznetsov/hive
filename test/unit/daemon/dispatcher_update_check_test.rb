@@ -101,7 +101,7 @@ class HiveDaemonDispatcherUpdateCheckTest < Minitest::Test
     end
   end
 
-  def test_behind_on_brew_sets_nudge_and_logs
+  def test_behind_on_brew_sets_migration_safe_nudge_and_logs
     checker = Checker.new(result(latest: "0.1.7", behind: true))
     dispatcher, logger = build(checker: checker, channel: "brew")
     dispatcher.tick(now: T0)
@@ -110,7 +110,7 @@ class HiveDaemonDispatcherUpdateCheckTest < Minitest::Test
     assert nudge, "expected a nudge to be recorded when behind"
     assert_equal "0.1.7", nudge.latest
     assert_equal "brew", nudge.channel
-    assert_equal "brew upgrade ivankuznetsov/hive/hive", nudge.command
+    assert_equal "hive update", nudge.command
     assert_equal 1, events(logger, :update_available).size
   end
 

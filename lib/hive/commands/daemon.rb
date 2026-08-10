@@ -6,6 +6,7 @@ require "hive/config"
 require "hive/paths"
 require "hive/lock"
 require "hive/pid_file"
+require "hive/daemon/activation_lock"
 require "hive/daemon/dispatcher"
 require "hive/daemon/concurrency_controller"
 require "hive/daemon/dispatch_baselines"
@@ -15,7 +16,6 @@ require "hive/daemon/operational_snapshot"
 require "hive/daemon/pr_merge_watcher"
 require "hive/daemon/refactor_patrol_merge_reconciler"
 require "hive/daemon/patrol_scheduler"
-require "hive/daemon/digest_scheduler"
 require "hive/daemon/answer_digest_scheduler"
 require "hive/daemon/logger"
 require "hive/daemon/dispatch_request_queue"
@@ -23,15 +23,17 @@ require "hive/daemon/status_report"
 require "hive/invoked_binary"
 require "hive/update_check/state"
 require "hive/attempts/store"
-require "hive/attempts/detached_launcher"
-require "hive/attempts/dispatcher"
-require "hive/attempts/configured_dispatcher"
+require "hive/attempts/api"
 require "hive/attempts/process_identity"
-require "hive/attempts/legacy_backfiller"
 require "hive/attempts/reconciler"
 require "hive/attempts/lost_outcome"
+require "hive/attempts/finalization_maintenance"
 require "hive/conditions/attempt_observer"
+require "hive/modules/event_publisher"
+require "hive/modules/daemon_runtime"
+require "hive/modules/migration/coordinator"
 require "hive/commands/service_installer/result_presenter"
+require "hive/recovery/migration"
 
 module Hive
   module Commands
@@ -74,7 +76,8 @@ module Hive
       def initialize(subcommand, target = nil, detach: false, dry_run: false,
                      all: false, json: false, force: false,
                      queue_args: [],
-                     hive_home: Hive::Paths.state_home)
+                     hive_home: Hive::Paths.state_home,
+                     activation_lock: nil)
         @subcommand = subcommand
         @target = target
         @detach = detach
@@ -84,6 +87,7 @@ module Hive
         @force = force
         @queue_args = Array(queue_args)
         @hive_home = hive_home
+        @activation_lock = activation_lock
       end
 
       def call
@@ -126,6 +130,8 @@ module Hive
         warn_unsupported_json_flag if @json
         FileUtils.mkdir_p(@hive_home)
         FileUtils.mkdir_p(File.dirname(log_file))
+        activation_lock = daemon_activation_lock
+        activation_lock.acquire!
 
         # Single-instance check: if a live daemon already owns the PID
         # file, refuse with TEMPFAIL.
@@ -138,6 +144,7 @@ module Hive
 
         # Stale PID file from a prior crash → safe to remove.
         File.delete(pid_file) if File.exist?(pid_file)
+        Hive::Recovery::Migration.ensure!(state_home: @hive_home)
 
         if @detach
           Process.daemon(true, true)
@@ -180,15 +187,10 @@ module Hive
         # etc.) actually take effect. PR-40 review P1 #2: this used to
         # call merge_defaults({}) which discarded the global config.
         daemon_cfg = Hive::Config.load_global_daemon
-        # Read the global digest block directly (mirrors the SIGHUP reload
-        # path in Dispatcher#reload_config!, which also calls the config
-        # method straight) so the two stay symmetric.
-        digest_cfg = Hive::Config.load_global_digest_block
         answer_digest_cfg = Hive::Config.load_global_answer_digest_block
         config = {
           "daemon" => daemon_cfg,
           "update" => Hive::Config.load_global_update,
-          "digest" => digest_cfg,
           "answer_digest" => answer_digest_cfg
         }
 
@@ -223,28 +225,29 @@ module Hive
           )
         )
         status_consumer = Hive::Daemon::StatusConsumer.new
+        Hive::Config.ensure_project_identities!
+        module_event_publisher = Hive::Modules::EventPublisher.new
         refactor_patrol_merge_reconciler = Hive::Daemon::RefactorPatrolMergeReconciler.new(
           poll_interval_sec: daemon_cfg.fetch("pr_merge_poll_interval_sec"),
-          dry_run: @dry_run
+          dry_run: @dry_run, module_event_publisher: module_event_publisher
         )
         merge_watcher = Hive::Daemon::PrMergeWatcher.new(
           poll_interval_sec: daemon_cfg.fetch("pr_merge_poll_interval_sec"),
-          merge_intake: refactor_patrol_merge_reconciler
+          merge_intake: refactor_patrol_merge_reconciler,
+          store: Hive::Daemon::PrMergeReconciliationStore.new(dry_run: @dry_run),
+          dry_run: @dry_run
         )
-        patrol_scheduler = Hive::Daemon::PatrolScheduler.new
-        refactor_patrol_scheduler = Hive::Daemon::RefactorPatrolScheduler.new(dry_run: @dry_run)
+        patrol_scheduler = Hive::Daemon::PatrolScheduler.new(
+          event_publisher: module_event_publisher
+        )
+        refactor_patrol_scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
+          dry_run: @dry_run,
+          event_publisher: module_event_publisher
+        )
         patrol_arbiter = Hive::Daemon::PatrolArbiter.new(
           ordinary_scheduler: patrol_scheduler,
           architecture_scheduler: refactor_patrol_scheduler,
           dry_run: @dry_run
-        )
-        digest_scheduler = Hive::Daemon::DigestScheduler.new(
-          enabled: digest_cfg.fetch("enabled", false),
-          max_catchup_days: digest_cfg.fetch(
-            "max_catchup_days",
-            Hive::Daemon::DigestScheduler::DEFAULT_MAX_CATCHUP_DAYS
-          ),
-          logger: logger
         )
         answer_digest_scheduler = Hive::Daemon::AnswerDigestScheduler.new(
           enabled: answer_digest_cfg.fetch("enabled", false),
@@ -254,23 +257,30 @@ module Hive
           logger: logger
         )
 
-        attempt_store = Hive::Attempts::Store.new
-        attempt_dispatcher = Hive::Attempts::ConfiguredDispatcher.new(
+        attempt_store = Hive::Attempts::Store.open_default(state_home: @hive_home)
+        attempts_api = Hive::Attempts::API.new(
           store: attempt_store
         )
+        module_runtime = Hive::Modules::DaemonRuntime.new(
+          attempt_store: attempt_store, attempt_dispatcher: attempts_api
+        )
+        module_migration_coordinator = Hive::Modules::Migration::Coordinator.new(
+          supervisor: supervisor, attempt_store: attempt_store,
+          dry_run: @dry_run
+        )
         attempt_process_identity = Hive::Attempts::ProcessIdentity.new
-        attempt_backfiller = Hive::Attempts::LegacyBackfiller.new(
-          store: attempt_store,
-          process_identity: attempt_process_identity,
+        condition_observer = Hive::Conditions::AttemptObserver.new(
+          store: attempt_store, logger: logger
+        )
+        finalization_maintenance = Hive::Attempts::FinalizationMaintenance.new(
+          store: attempt_store, condition_observer: condition_observer,
           logger: logger
         )
         attempt_reconciler = Hive::Attempts::Reconciler.new(
           store: attempt_store,
           process_identity: attempt_process_identity,
-          legacy_backfiller: attempt_backfiller,
-          condition_observer: Hive::Conditions::AttemptObserver.new(
-            store: attempt_store, logger: logger
-          ),
+          condition_observer: condition_observer,
+          finalization_maintenance: finalization_maintenance,
           logger: logger
         )
         lost_outcome_store = Hive::Attempts::LostOutcomeStore.new(store: attempt_store)
@@ -297,14 +307,17 @@ module Hive
           patrol_scheduler: patrol_scheduler,
           refactor_patrol_scheduler: refactor_patrol_scheduler,
           patrol_arbiter: patrol_arbiter,
-          digest_scheduler: digest_scheduler, answer_digest_scheduler: answer_digest_scheduler,
+          answer_digest_scheduler: answer_digest_scheduler,
           dry_run: @dry_run,
           update_state: Hive::UpdateCheck::State.new,
-          attempt_dispatcher: attempt_dispatcher,
+          attempt_dispatcher: attempts_api,
           attempt_reconciler: attempt_reconciler,
           lost_outcome_store: lost_outcome_store,
           lost_outcome_processor: lost_outcome_processor,
-          operational_snapshot: operational_snapshot
+          operational_snapshot: operational_snapshot,
+          module_runtime: module_runtime,
+          module_migration_coordinator: module_migration_coordinator,
+          runtime_ready_callback: -> { activation_lock.release! }
         )
 
         reexec_requested = false
@@ -328,6 +341,7 @@ module Hive
 
         reexec_with_fresh_code!
       ensure
+        activation_lock&.release!
         if defined?(runtime_hive_bin_was_set)
           if runtime_hive_bin_was_set
             ENV["HIVE_BIN"] = original_runtime_hive_bin
@@ -335,6 +349,12 @@ module Hive
             ENV.delete("HIVE_BIN")
           end
         end
+      end
+
+      def daemon_activation_lock
+        @activation_lock ||= Hive::Daemon::ActivationLock.new(
+          hive_home: @hive_home
+        )
       end
 
       # Source-file drift detected (e.g. `git pull` bumped a schema

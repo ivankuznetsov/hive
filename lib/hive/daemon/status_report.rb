@@ -27,9 +27,10 @@ module Hive
 
       attr_reader :pid_file, :log_file
 
-      def initialize(hive_home: Hive::Paths.state_home)
+      def initialize(hive_home: Hive::Paths.state_home, environment: ENV)
         @pid_file = File.join(hive_home, ".daemon.pid")
         @log_file = File.join(hive_home, "logs", "daemon.log")
+        @environment = environment
       end
 
       # Liveness snapshot ({running:, pid:, uptime_sec:}) from the PID file.
@@ -94,7 +95,9 @@ module Hive
       # whole report.
       def probe_service_state
         require "hive/commands/daemon/service_installer"
-        installer = Hive::Commands::Daemon::ServiceInstaller.new
+        runtime_binary = @environment["HIVE_BIN"].to_s
+        runtime_binary = nil if runtime_binary.empty?
+        installer = Hive::Commands::Daemon::ServiceInstaller.new(binary_path: runtime_binary)
         installer.service_state.merge(
           "installed_binary" => installer.installed_exec_binary,
           "expected_binary" => installer.expected_binary
@@ -120,7 +123,7 @@ module Hive
             # be parsed — distinct from "no service" so the operator gets a
             # signal that the installed unit is corrupt and needs repair.
             "unparseable"
-          elsif expected.to_s != "" && File.expand_path(installed) != File.expand_path(expected)
+          elsif expected.to_s != "" && !same_binary?(installed, expected)
             "path"
           elsif installed_version.nil?
             # Unit present and the binary is at the expected path, but
@@ -147,6 +150,14 @@ module Hive
         }
       end
 
+      def same_binary?(installed, expected)
+        installed_path = File.expand_path(installed)
+        expected_path = File.expand_path(expected)
+        installed_path == expected_path || File.identical?(installed_path, expected_path)
+      rescue SystemCallError
+        false
+      end
+
       def binary_version(binary)
         return nil if binary.to_s.empty?
 
@@ -165,7 +176,9 @@ module Hive
       # The daemon-written update nudge, as a plain Hash for the envelope
       # (nil when current or unknown). Never raises out of status.
       def update_nudge_payload
-        nudge = Hive::UpdateCheck::State.new.nudge
+        nudge = Hive::UpdateCheck::State.new(
+          cleanup_orphans: false
+        ).nudge
         return nil unless nudge
 
         { "latest" => nudge.latest, "channel" => nudge.channel, "command" => nudge.command }

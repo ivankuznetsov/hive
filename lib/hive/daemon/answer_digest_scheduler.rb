@@ -1,4 +1,5 @@
 require "hive/daemon/digest_scheduler_base"
+require "hive/local_date_window"
 require "hive/paths"
 
 module Hive
@@ -36,7 +37,7 @@ module Hive
         return [] if backed_off?(now)
         return [] if now.getlocal.hour < @hour
 
-        today = Hive::Digest::Window.local_today(now: now)
+        today = Hive::LocalDateWindow.local_today(now: now)
         state = read_state
         last = parse_date(state["last_fired_date"])
         return [] if last && last >= today
@@ -45,8 +46,8 @@ module Hive
         [ dispatch_for(today) ]
       end
 
-      def complete(date:, exit_code:, now: @clock.call)
-        local_date = Hive::Digest::Window.parse_date(date)
+      def complete(date:, exit_code:, envelope: nil, now: @clock.call)
+        local_date = Hive::LocalDateWindow.parse_date(date)
         @pending.delete(local_date.iso8601)
 
         # ChildSupervisor reports a nil exit status for a signalled child
@@ -54,8 +55,7 @@ module Hive
         # so a bare `exit_code.to_i.zero?` would treat a killed digest as a
         # success and silently advance the cursor past that date. Treat a nil
         # (signalled / unknown) exit as a failure so the day is retried.
-        # (Rationale carried verbatim from DigestScheduler#complete, the
-        # deliberate mirror.)
+        # This keeps a signalled child from advancing the daily cursor.
         unless exit_code && exit_code.to_i.zero?
           record_failure(now)
           return

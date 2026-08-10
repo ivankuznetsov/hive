@@ -31,11 +31,12 @@ Gem::Specification.new do |spec|
   spec.files = Dir[
     "bin/hive",
     "bin/hive-babysitter-skip-log.rb",
-    "bin/hive-babysitter-stub-gh",
     "bin/hive-babysitter-stub-gh.rb",
     "bin/hive-babysitter-stub-git",
     "bin/hv",
     "config/agent-skills.yml",
+    "config/honeycomb-security-lint/*.yml",
+    "config/honeycomb-security-lint/**/*",
     "skills/**/*",
     "lib/**/*.rb",
     "lib/hive/scripts/**/*.sh",
@@ -56,7 +57,12 @@ Gem::Specification.new do |spec|
 
   # Runtime dependencies. Dev/test dependencies stay in the Gemfile because
   # they have no business being installed for end users.
+  spec.add_dependency "base64", ">= 0.2"
   spec.add_dependency "bubbletea", "= 0.1.4"
+  # Managed installs isolate GEM_HOME/GEM_PATH from the operator's gems. Keep
+  # the exact web-lock Bundler inside that managed gem home so web bootstrap
+  # can resolve it without relying on a PATH wrapper or a system default gem.
+  spec.add_dependency "bundler", "= 2.7.2"
   # faraday + faraday-multipart are required and used directly by the voice
   # transcriber (Faraday.new, Faraday::Multipart::FilePart). They resolve
   # transitively through telegram-bot-ruby today, but declaring them directly
@@ -69,6 +75,10 @@ Gem::Specification.new do |spec|
   spec.add_dependency "erb", ">= 4.0"
   spec.add_dependency "faraday", ">= 2.14.2", "< 3.0"
   spec.add_dependency "faraday-multipart", "~> 1.0"
+  # Descriptor-relative managed storage calls the POSIX *at family through
+  # Fiddle. Ruby 4 no longer guarantees Fiddle as a default gem, so installed
+  # Hive packages must carry the runtime dependency explicitly.
+  spec.add_dependency "fiddle", ">= 1.1"
   # Architecture-patrol manifests are runtime JSON contracts. The scheduler
   # loads their validator in daemon/web-supervisor processes, so keeping this
   # dependency test-only makes installed gems and hivebox crash on daemon boot.
@@ -82,5 +92,9 @@ Gem::Specification.new do |spec|
   spec.add_dependency "sqlite3", "~> 2.0"
   spec.add_dependency "telegram-bot-ruby", "~> 2.7"
   spec.add_dependency "thor", "~> 1.3"
+  # Local-date windows must remain stable when the host runs in another
+  # timezone. Declare tzinfo directly rather than relying on Rails/ActiveSupport
+  # to provide this runtime dependency transitively.
+  spec.add_dependency "tzinfo", "~> 2.0"
   spec.add_dependency "unicode-display_width", "~> 3.2"
 end

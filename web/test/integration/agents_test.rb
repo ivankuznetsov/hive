@@ -4,21 +4,21 @@ require "test_helper"
 # raw ASCII-8BIT PTY bytes; rendering them into the UTF-8 `<pre>` view raised
 # Encoding::CompatibilityError (a 500 on /agents/<agent>/login/<id>). The lib
 # suite never caught it — its only direct `output_for` test used clean ASCII
-# and the login fakes echoed clean text, and nothing drove the controller +
+# and the login fakes echoed clean text, and nothing drove the Rails resource +
 # view. This exercises the exact layer that broke: a binary-output session
 # rendered through the real view.
 class AgentsTest < ActionDispatch::IntegrationTest
   teardown do
-    # AgentsController.agents_auth is a class-memoized process singleton —
-    # drop it so a seeded session can't leak into another test.
-    AgentsController.instance_variable_set(:@agents_auth, nil)
+    # AgentLogin owns the class-memoized process relay. Drop it so a seeded
+    # PTY session cannot leak into another request example.
+    AgentLogin.reset_auth!
     AgentsController.instance_variable_set(:@agent_skills, nil)
   end
 
   test "login_status renders binary CLI output as 200, not a 500" do
     sign_in!(login: "alice")
 
-    auth = AgentsController.agents_auth
+    auth = AgentLogin.auth
     # Raw PTY bytes: ANSI clear-line, a box glyph, and a lone UTF-8
     # continuation byte (a multibyte char split across a readpartial
     # boundary) — invalid UTF-8, the shape that crashed the <pre> view.
@@ -29,12 +29,17 @@ class AgentsTest < ActionDispatch::IntegrationTest
       output: binary, url: "https://example.com/auth", done: false
     )
     auth.instance_variable_get(:@sessions)["sess-bin"] = session
+    auth.define_singleton_method(:statuses) do
+      raise "a login-status refresh must not rebuild the full Agents inventory"
+    end
 
     get agent_login_status_path("claude", "sess-bin")
 
     assert_response :success
     assert_match "https://example.com/auth", response.body,
                  "the authorize URL must render so the operator can finish login"
+    assert_select ".agent-cards", count: 0
+    assert_select ".managed-skills", count: 0
   end
 
   test "operator-ward agent (codex) keeps polling and shows no paste-back form" do
@@ -51,6 +56,47 @@ class AgentsTest < ActionDispatch::IntegrationTest
                  "a poll-type agent must keep refreshing until the CLI exits"
     assert_no_match(/Complete login/, response.body,
                     "operator-ward agents must not show a paste-the-code form")
+  end
+
+  test "login frame refresh does not return a self-referential source" do
+    sign_in!(login: "alice")
+    seed_session("sess-frame", agent: "codex", url: "https://auth.openai.com/codex/device",
+                 output: "Enter this code: FRAME-CODE", done: false)
+
+    get agent_login_status_path("codex", "sess-frame"),
+        headers: { "Turbo-Frame" => "agent-login" }
+
+    assert_response :success
+    assert_select "turbo-frame#agent-login[src]", { count: 0 },
+                  "Turbo rejects a matching frame whose src points back to the request URL"
+    assert_select "turbo-frame#agent-login [data-controller='poll']", count: 1
+    assert_match "https://auth.openai.com/codex/device", response.body
+  end
+
+  test "login URLs keep their verbs while routing through named resources" do
+    create_route = Rails.application.routes.recognize_path(agent_login_path("codex"), method: :post)
+    show_route = Rails.application.routes.recognize_path(
+      agent_login_status_path("codex", "session-1"), method: :get
+    )
+    completion_route = Rails.application.routes.recognize_path(
+      agent_login_complete_path("codex", "session-1"), method: :post
+    )
+
+    assert_equal({ controller: "agents/logins", action: "create" }, create_route.slice(:controller, :action))
+    assert_equal({ controller: "agents/logins", action: "show" }, show_route.slice(:controller, :action))
+    assert_equal({ controller: "agents/login_completions", action: "create" },
+                 completion_route.slice(:controller, :action))
+  end
+
+  test "login status refuses a session under a different agent URL" do
+    sign_in!(login: "alice")
+    seed_session("sess-claude-agent", agent: "claude", url: "https://claude.ai/device",
+                 output: "paste the code", done: false)
+
+    get agent_login_status_path("codex", "sess-claude-agent")
+
+    assert_response :not_found
+    assert_match "unknown login session", response.body
   end
 
   test "agents page offers the supported Grok device login" do
@@ -97,6 +143,7 @@ class AgentsTest < ActionDispatch::IntegrationTest
     assert_match "is now logged in", response.body
     assert_no_match(/data-controller="poll"/, response.body,
                     "polling must stop once the login is done")
+    assert_select "a[data-turbo-frame='_top'][href='#{agents_path}']", text: "Back to agents"
   end
 
   test "managed skill health is explicit and checked only for the selected project" do
@@ -188,6 +235,7 @@ class AgentsTest < ActionDispatch::IntegrationTest
 
     assert_response :success
     assert_match "Complete login", response.body, "paste-back agents keep the code form"
+    assert_select "form[data-turbo-frame='_top'][action='#{agent_login_complete_path("claude", "sess-claude")}']"
     assert_no_match(/data-controller="poll"/, response.body,
                     "a paste-back agent stops polling once its URL is shown")
   end
@@ -226,6 +274,6 @@ class AgentsTest < ActionDispatch::IntegrationTest
     session = Hive::Web::AgentsAuth::Session.new(
       id: id, agent: agent, url: url, output: +output, done: done, error: error
     )
-    AgentsController.agents_auth.instance_variable_get(:@sessions)[id] = session
+    AgentLogin.auth.instance_variable_get(:@sessions)[id] = session
   end
 end

@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/commands/web"
+require "hive/commands/service_installer/outcome"
 
 class WebCommandTest < Minitest::Test
   include HiveTestHelper
@@ -367,14 +368,29 @@ class WebCommandTest < Minitest::Test
         true
       end
       replacement = ->(env, *argv) { raise ExecCaught.new(env, argv) }
-      caught = with_replaced_singleton_method(Kernel, :exec, replacement) do
-        assert_raises(ExecCaught) { capture_io { command.call } }
+      exact_rails = [
+        "/exact/ruby", "/exact/bundle", "exec", "/exact/ruby",
+        File.join(dir, "bin", "rails")
+      ]
+      rails_argv_calls = []
+      caught = with_replaced_singleton_method(
+        Hive::Web::AppBundle, :rails_argv, ->(actual_dir, *arguments) {
+          rails_argv_calls << [ actual_dir, arguments ]
+          exact_rails
+        }
+      ) do
+        with_replaced_singleton_method(Kernel, :exec, replacement) do
+          assert_raises(ExecCaught) { capture_io { command.call } }
+        end
       end
 
       assert_equal Hive::Web::AppBundle.hive_cli_root, caught.env["HIVE_CLI_ROOT"]
       assert_equal Hive::Web::AppBundle.dependency_dir, caught.env["BUNDLE_PATH"]
-      assert_equal [ %w[bin/rails db:prepare] ], system_calls.map { |call| call.last(2) },
-                   "the validated managed bundle should not recompile assets at every restart"
+      assert_equal [ [ dir, [] ] ], rails_argv_calls
+      assert_equal [ [ *exact_rails, "db:prepare" ] ], system_calls.map { |call| call.drop(1) },
+                   "managed database preparation must run through the locked Bundler"
+      assert_equal [ *exact_rails, "server", "-b", "127.0.0.1", "-p", "4567" ], caught.argv,
+                   "managed Rails server must run through the locked Bundler"
     end
   end
 
@@ -383,10 +399,14 @@ class WebCommandTest < Minitest::Test
   # a drifted unit → InvalidTaskPath (retry with --force), a failed install →
   # Hive::Error, and --json emits the hive-web-install envelope. Swap in a fake
   # installer so the mapping is asserted without touching launchctl/systemctl.
-  def with_fake_web_installer(outcome_kind, state: nil, install_error: nil)
+  def with_fake_web_installer(outcome_kind, state: nil, install_error: nil,
+                              outcome_restarted: false, restart_calls: nil)
     require "hive/commands/web/service_installer"
     require "hive/commands/service_installer/outcome"
-    outcome = Hive::Commands::ServiceInstaller::Outcome.new(outcome_kind)
+    outcome = Hive::Commands::ServiceInstaller::Outcome.new(
+      outcome_kind,
+      restarted: outcome_restarted
+    )
     service_state = state || {
       "platform" => "macos", "unit_path" => "/tmp/local.hive-web.plist",
       "service_installed" => true, "service_enabled" => true,
@@ -399,6 +419,11 @@ class WebCommandTest < Minitest::Test
         raise install_error if install_error
 
         outcome
+      end
+      define_method(:service_lifecycle_state) { service_state }
+      define_method(:restart!) do
+        restart_calls << true if restart_calls
+        true
       end
       define_method(:messages) { [ "installed note" ] }
       define_method(:target_path) { "/tmp/local.hive-web.plist" }
@@ -415,6 +440,34 @@ class WebCommandTest < Minitest::Test
       Hive::Commands::Web.send(:remove_const, :ServiceInstaller)
       Hive::Commands::Web.const_set(:ServiceInstaller, original)
     end
+  end
+
+  def test_install_envelope_allows_a_cold_rails_boot_readiness_window
+    installer = Struct.new(:target_path, :messages).new("/tmp/hive-web.service", [])
+    outcome = Hive::Commands::ServiceInstaller::Outcome.new(:written)
+    observed = nil
+    state = {
+      "platform" => "linux", "unit_path" => installer.target_path,
+      "service_installed" => true, "service_enabled" => true,
+      "service_running" => true, "service_manager_available" => true,
+      "url" => "http://127.0.0.1:4567", "ready" => true, "readiness" => "ready"
+    }
+
+    with_replaced_singleton_method(Hive::Web::ServiceStatus, :snapshot, lambda { |**kwargs|
+      observed = kwargs
+      state
+    }) do
+      envelope = Hive::Commands::Web.new.send(
+        :service_envelope, installer, outcome,
+        config: Hive::Config::DEFAULTS.fetch("web")
+      )
+
+      assert envelope["ok"]
+    end
+
+    assert_equal true, observed.fetch(:wait_for_running)
+    assert_equal Hive::Commands::Web::INSTALL_READINESS_ATTEMPTS, observed.fetch(:attempts)
+    assert_equal Hive::Commands::Web::INSTALL_READINESS_INTERVAL_SEC, observed.fetch(:interval)
   end
 
   def test_install_service_maps_drift_to_invalid_task_path
@@ -437,6 +490,50 @@ class WebCommandTest < Minitest::Test
                            "a failed install is a hard error, not a retry-with-force drift"
       end
     end
+  end
+
+  def test_force_install_forces_managed_bundle_refresh
+    observed = nil
+    restart_calls = []
+    replacement = lambda do |**kwargs|
+      observed = kwargs
+      Hive::Web::AppBundle.app_dir
+    end
+
+    with_tmp_global_config do
+      with_fake_web_installer(:unchanged, restart_calls: restart_calls) do
+        with_replaced_singleton_method(Hive::Web::AppBundle, :ensure!, replacement) do
+          out, = capture_io { Hive::Commands::Web.new("install", force: true, json: true).call }
+          assert_equal true, JSON.parse(out).fetch("restarted")
+        end
+      end
+    end
+
+    assert_equal true, observed.fetch(:force_refresh)
+    assert_equal [ true ], restart_calls
+  end
+
+  def test_force_install_does_not_restart_twice_after_unit_upgrade_restart
+    restart_calls = []
+
+    with_tmp_global_config do
+      with_fake_web_installer(
+        :upgraded,
+        outcome_restarted: true,
+        restart_calls: restart_calls
+      ) do
+        with_replaced_singleton_method(
+          Hive::Web::AppBundle,
+          :ensure!,
+          ->(**) { Hive::Web::AppBundle.app_dir }
+        ) do
+          out, = capture_io { Hive::Commands::Web.new("install", force: true, json: true).call }
+          assert_equal true, JSON.parse(out).fetch("restarted")
+        end
+      end
+    end
+
+    assert_empty restart_calls
   end
 
   def test_install_service_json_envelope_shape

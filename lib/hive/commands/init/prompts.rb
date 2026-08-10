@@ -71,9 +71,19 @@ module Hive
           }.freeze,
           "pr-review-toolkit" => {
             "kind" => "agent", "agent" => "claude", "capability" => "pr-review-toolkit:review-pr"
+          }.freeze,
+          "grok-ce-code-review" => {
+            "kind" => "agent", "agent" => "grok", "capability" => "ce-code-review"
           }.freeze
         }.freeze
-        DEFAULT_REVIEWER_NAMES = REVIEWER_CAPABILITIES.keys.freeze
+        AVAILABLE_REVIEWER_NAMES = REVIEWER_CAPABILITIES.keys.freeze
+        # Keep fresh-project defaults stable: Grok is available when selected,
+        # but does not become a credential/install prerequisite implicitly.
+        DEFAULT_REVIEWER_NAMES = %w[
+          claude-ce-code-review
+          codex-ce-code-review
+          pr-review-toolkit
+        ].freeze
         PATROL_REVIEWER_NAMES = %w[
           codex-native-review
           codex-ce-code-review
@@ -137,6 +147,37 @@ module Hive
           end
         end
 
+        # Neutral non-interactive profile used exclusively by
+        # `hive init --new-workflow ID --minimal`. It keeps the core project,
+        # context hooks, and inherited agent choices while disabling every
+        # optional background or automatic workflow.
+        def self.minimal_defaults
+          {
+            "planning_agent" => DEFAULT_PLANNING_AGENT,
+            "claude_mode" => DEFAULT_CLAUDE_MODE,
+            "claude_permission_mode" => DEFAULT_CLAUDE_PERMISSION_MODE,
+            "claude_model" => DEFAULT_CLAUDE_MODEL,
+            "claude_effort" => DEFAULT_CLAUDE_EFFORT,
+            "development_agent" => DEFAULT_DEVELOPMENT_AGENT,
+            "enabled_reviewers" => [],
+            "patrol_reviewers" => [],
+            "patrol_mode" => "off",
+            "triage_bias" => DEFAULT_TRIAGE_BIAS,
+            "adhoc_auto_fix" => false,
+            "refactor_patrol_enabled" => false,
+            "budgets" => limit_defaults("budget_usd"),
+            "timeouts" => limit_defaults("timeout_sec"),
+            "daemon_enabled" => false,
+            "babysitter_enabled" => false,
+            "daemon_autostart" => false
+          }
+        end
+
+        def self.limit_defaults(section)
+          LIMIT_KEYS.to_h { |key| [ key, Hive::Config::DEFAULTS.fetch(section).fetch(key) ] }
+        end
+        private_class_method :limit_defaults
+
         # Run the prompt flow (or short-circuit to defaults).
         # Returns the answers hash with shape:
         #   {
@@ -144,7 +185,7 @@ module Hive
         #     "claude_mode"      => String,           # tmux | headless
         #     "claude_permission_mode" => String,      # Claude Code permission mode
         #     "development_agent" => String,           # one of @registered_agents
-        #     "enabled_reviewers" => Array<String>,    # subset of DEFAULT_REVIEWER_NAMES
+        #     "enabled_reviewers" => Array<String>,    # subset of AVAILABLE_REVIEWER_NAMES
         #     "patrol_reviewers"  => Array<String>,    # subset of PATROL_REVIEWER_NAMES
         #     "patrol_mode"       => String,           # ultrapatrol | high | medium | low | off
         #     "triage_bias"       => String,           # courageous | safetyist
@@ -417,8 +458,8 @@ module Hive
 
         def prompt_reviewers
           @output.puts ""
-          @output.puts "Review agents — pick numbers/names, comma-separated, blank = all enabled:"
-          DEFAULT_REVIEWER_NAMES.each_with_index { |name, i| @output.puts "  #{i + 1}) #{name}" }
+          @output.puts "Review agents — pick numbers/names, comma-separated; blank = recommended defaults:"
+          AVAILABLE_REVIEWER_NAMES.each_with_index { |name, i| @output.puts "  #{i + 1}) #{name}" }
           loop do
             @output.print "  > "
             @output.flush
@@ -436,8 +477,8 @@ module Hive
         def resolve_reviewer_tokens(answer)
           resolve_reviewer_tokens_from(
             answer,
-            choices: DEFAULT_REVIEWER_NAMES,
-            empty_message: "input had no reviewer tokens; type a name/index list, or blank for all"
+            choices: AVAILABLE_REVIEWER_NAMES,
+            empty_message: "input had no reviewer tokens; type a name/index list, or blank for defaults"
           )
         end
 

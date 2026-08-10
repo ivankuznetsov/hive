@@ -13,6 +13,7 @@ FileUtils.mkdir_p(ENV["HIVE_HOME"])
 
 require_relative "../config/environment"
 require "rails/test_help"
+require "hive/commands/new"
 
 Minitest.after_run do
   root = ENV["HIVE_TEST_HOME_ROOT"]
@@ -46,8 +47,8 @@ module ActiveSupport
       begin
         capture_io { Hive::Commands::Init.new(dir, force: true, json: false).call }
       rescue Hive::AlreadyInitialized
-        # The sandbox HIVE_HOME persists for the process; a later test
-        # re-using the same project name just reuses the registration.
+        # A helper invoked twice for the same project inside one example can
+        # reuse the already initialized repository and registration.
       end
       name
     end
@@ -68,6 +69,13 @@ module ActiveSupport
       end
 
       raise "hive test helper could not identify the task created for #{text.inspect}"
+    end
+
+    # Simulate a completed StatusFeed poll when an integration test needs a
+    # current fleet projection. Production HTTP requests deliberately do not
+    # perform this scan; the accepted Cable subscription owns it instead.
+    def refresh_status_feed!
+      StatusBroadcaster.feed.snapshot_state.payload
     end
 
     def stage_dir(project, stage)

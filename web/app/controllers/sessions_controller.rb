@@ -80,7 +80,7 @@ class SessionsController < ApplicationController
 
   def destroy
     reset_session
-    redirect_to local_web_mode? ? root_path : login_path
+    redirect_to local_loopback_request? ? root_path : login_path
   end
 
   # Dev/test auth seam — the route only exists in local envs, and the action

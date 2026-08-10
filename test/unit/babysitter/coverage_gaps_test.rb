@@ -28,7 +28,12 @@ class BabysitterCoverageGapsTest < Minitest::Test
   end
 
   def project_entry(dir)
-    { "name" => "demo", "path" => dir, "hive_state_path" => File.join(dir, ".hive-state") }
+    {
+      "name" => "demo",
+      "path" => dir,
+      "hive_state_path" => File.join(dir, ".hive-state"),
+      "repository_identity" => "github.com/acme/demo"
+    }
   end
 
   def cfg(overrides = {})
@@ -56,10 +61,10 @@ class BabysitterCoverageGapsTest < Minitest::Test
   end
 
   def test_cli_babysit_rejects_once_subcommand_and_extra_targets_then_dispatches
-    cli = Hive::CLI.new([], { once: true, detach: false, dry_run: false, all: false })
+    cli = Hive::CLI.new([], { once: true, detach: false, dry_run: false, all: false, force: false })
     assert_raises(Hive::InvalidTaskPath) { cli.babysit("start") }
 
-    cli = Hive::CLI.new([], { once: false, detach: false, dry_run: false, all: false })
+    cli = Hive::CLI.new([], { once: false, detach: false, dry_run: false, all: false, force: false })
     assert_raises(Hive::InvalidTaskPath) { cli.babysit("status", "one", "two") }
 
     calls = []
@@ -69,7 +74,18 @@ class BabysitterCoverageGapsTest < Minitest::Test
     }) do
       assert_equal :called, cli.babysit("status")
     end
-    assert_equal [ [ "status", nil ], { detach: false, dry_run: false, once: false, all: false } ], calls.first
+    assert_equal [
+      [ "status", nil ],
+      { detach: false, dry_run: false, once: false, all: false, force: false }
+    ], calls.first
+
+    cli = Hive::CLI.new([], { once: false, detach: false, dry_run: true, all: false, force: false })
+    error = assert_raises(Hive::InvalidTaskPath) { cli.babysit("install") }
+    assert_includes error.message, "--dry-run does not apply"
+
+    cli = Hive::CLI.new([], { once: false, detach: false, dry_run: false, all: false, force: true })
+    error = assert_raises(Hive::InvalidTaskPath) { cli.babysit("status") }
+    assert_includes error.message, "--force only applies"
   end
 
   def test_command_call_routes_known_subcommands_and_rejects_unknown
@@ -527,10 +543,13 @@ class BabysitterCoverageGapsTest < Minitest::Test
         "baseRefName" => "main",
         "isCrossRepository" => true
       }
-      with_replaced_singleton_method(Hive::Babysitter::GhOps, :add_label, ->(*_args, **_kwargs) {
-        Hive::Gh::PushResult.new(success: true, stdout: "", stderr: "")
-      }) do
-        assert_equal :fork_pr, Hive::Babysitter::PrFixer.run(pr, project, cfg, dry_run: true, logger: nil, inflight: Set.new)
+      non_green = { "mergeable" => "CONFLICTING", "statusCheckRollup" => [] }
+      with_replaced_singleton_method(Hive::Gh, :pr_status_rollup, ->(*_args, **_kwargs) { non_green }) do
+        with_replaced_singleton_method(Hive::Babysitter::GhOps, :add_label, ->(*_args, **_kwargs) {
+          Hive::Gh::PushResult.new(success: true, stdout: "", stderr: "")
+        }) do
+          assert_equal :fork_pr, Hive::Babysitter::PrFixer.run(pr, project, cfg, dry_run: true, logger: nil, inflight: Set.new)
+        end
       end
 
       fixer = Hive::Babysitter::PrFixer.new(pr.merge("isCrossRepository" => false), project, cfg, dry_run: true, logger: nil, inflight: Set.new)

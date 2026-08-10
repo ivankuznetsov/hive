@@ -45,7 +45,7 @@ class HiveDaemonDispatchResultQueueTest < Minitest::Test
     end
   end
 
-  def test_pending_continues_to_read_version_one_notices
+  def test_pending_rejects_version_one_notices_written_after_cutover
     Dir.mktmpdir("hive-dispatch-result") do |dir|
       payload = {
         "schema" => "hive-dispatch-result", "schema_version" => 1,
@@ -55,9 +55,12 @@ class HiveDaemonDispatchResultQueueTest < Minitest::Test
       }
       File.write(File.join(Q.directory(state_home: dir), "legacy.json"), JSON.generate(payload))
 
-      notice = Q.pending(state_home: dir).first
-      assert_equal 1, notice.schema_version
-      assert_nil notice.attempt_id
+      reasons = []
+      assert_empty Q.pending(
+        state_home: dir,
+        bad_handler: ->(path:, reason:) { reasons << reason }
+      )
+      assert_equal [ "unknown_schema_version" ], reasons
     end
   end
 
@@ -99,10 +102,11 @@ class HiveDaemonDispatchResultQueueTest < Minitest::Test
     Dir.mktmpdir("hive-dispatch-result") do |dir|
       qdir = Q.directory(state_home: dir)
       payload = {
-        "schema" => "hive-dispatch-result", "schema_version" => 1,
+        "schema" => "hive-dispatch-result", "schema_version" => 2,
         "result_id" => "abcd1234", "created_at" => "not-a-time",
         "chat_id" => 1, "project" => "p", "slug" => "s",
-        "request_id" => "r", "exit_code" => 1, "command" => "hive review s"
+        "request_id" => "r", "exit_code" => 1, "command" => "hive review s",
+        "attempt_id" => nil, "attempt_state" => nil, "receipt" => nil
       }
       File.write(File.join(qdir, "20260528-abcd1234.json"), JSON.generate(payload))
       reasons = []
@@ -116,10 +120,11 @@ class HiveDaemonDispatchResultQueueTest < Minitest::Test
       qdir = Q.directory(state_home: dir)
       # File NAME contains the target id, but body result_id differs.
       payload = {
-        "schema" => "hive-dispatch-result", "schema_version" => 1,
+        "schema" => "hive-dispatch-result", "schema_version" => 2,
         "result_id" => "other999", "created_at" => Time.now.utc.iso8601,
         "chat_id" => 1, "project" => "p", "slug" => "s",
-        "request_id" => "r", "exit_code" => 1, "command" => "hive review s"
+        "request_id" => "r", "exit_code" => 1, "command" => "hive review s",
+        "attempt_id" => nil, "attempt_state" => nil, "receipt" => nil
       }
       File.write(File.join(qdir, "20260528-target01.json"), JSON.generate(payload))
       refute Q.remove("target01", state_home: dir), "must not remove a file whose body id differs"
@@ -156,7 +161,7 @@ class HiveDaemonDispatchResultQueueTest < Minitest::Test
 
       schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-dispatch-result"))))
       errors = schemer.validate(doc).to_a
-      assert_empty errors, "written notice must conform to hive-dispatch-result.v1.json: #{errors.inspect}"
+      assert_empty errors, "written notice must conform to hive-dispatch-result.v2.json: #{errors.inspect}"
     end
   end
 

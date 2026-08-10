@@ -17,11 +17,35 @@ module Hive
     POST_COMMIT_BEGIN = "# BEGIN LLM WIKI POST-COMMIT".freeze
     POST_COMMIT_END = "# END LLM WIKI POST-COMMIT".freeze
     SESSION_HOOK_MARKER = "LLM WIKI SESSION START".freeze
+    PROJECT_MANAGED_PATHS = %w[
+      .llm-wiki
+      .llm-wiki/config.json
+      .llm-wiki/refresh-wiki.sh
+      .llm-wiki/post-commit-refresh.sh
+      .llm-wiki/compile-log.sh
+      .claude
+      .claude/settings.json
+      AGENTS.md
+      CLAUDE.md
+      wiki
+      wiki/log.d
+      wiki/log.d/.gitkeep
+      wiki/index.md
+      wiki/log.md
+      wiki/gaps.md
+      wiki/architecture.md
+      wiki/decisions.md
+      wiki/dependencies.md
+      raw
+      raw/notes
+      raw/notes/.gitkeep
+    ].freeze
 
     module_function
 
     def install!(project_root, post_commit_hook: true, scheduler: true)
       project_root = File.expand_path(project_root)
+      validate_project_managed_paths!(project_root)
       FileUtils.mkdir_p(File.join(project_root, ".llm-wiki"))
 
       ensure_config(project_root)
@@ -33,13 +57,36 @@ module Hive
       Scheduler.install(project_root) if scheduler
     end
 
-    def install_runtime_hooks!(project_root)
+    def install_runtime_hooks!(project_root, scheduler: true)
       project_root = File.expand_path(project_root)
+      validate_project_managed_paths!(project_root)
       ensure_config(project_root)
       ensure_refresh_scripts(project_root)
       ensure_shared_runtime(project_root)
       ensure_post_commit_hook(project_root)
-      Scheduler.install(project_root)
+      Scheduler.install(project_root) if scheduler
+    end
+
+    def validate_project_managed_paths!(project_root)
+      PROJECT_MANAGED_PATHS.each do |relative|
+        current = project_root
+        relative.split(File::SEPARATOR).each_with_index do |component, index|
+          current = File.join(current, component)
+          break unless File.exist?(current) || File.symlink?(current)
+
+          stat = File.lstat(current)
+          if stat.symlink?
+            raise Hive::ConfigError,
+                  "llm-wiki managed path #{current} must not be a symlink"
+          end
+          next if index == relative.split(File::SEPARATOR).length - 1
+          next if stat.directory?
+
+          raise Hive::ConfigError,
+                "llm-wiki managed parent #{current} must be a directory"
+        end
+      end
+      true
     end
 
     def ensure_config(project_root)
@@ -231,7 +278,14 @@ module Hive
 
     def write_file(path, content)
       FileUtils.mkdir_p(File.dirname(path))
-      File.binwrite(path, content)
+      flags = File::WRONLY | File::CREAT | File::TRUNC
+      flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+      File.open(path, flags, 0o644) do |file|
+        file.binmode
+        file.write(content)
+      end
+    rescue Errno::ELOOP, Errno::EMLINK
+      raise Hive::ConfigError, "llm-wiki managed file #{path} must not be a symlink"
     end
   end
 end

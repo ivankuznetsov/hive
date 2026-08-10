@@ -1,6 +1,9 @@
 name: incident_finalize_pr_lifecycle_gate
 description: Proves finalize cannot become archive-ready before the staged pull-request lifecycle is terminal.
 tags: [incident-regression]
+coverage:
+  primary: release.finalize_pr_gate
+  supporting: []
 incident_id: finalize-pr-lifecycle-gate
 sibling_task_id: "#9769"
 pending: true

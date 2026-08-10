@@ -19,7 +19,7 @@ class AttemptsLostOutcomeTest < Minitest::Test
     end
   end
 
-  def test_processes_loss_once_captures_worktree_and_projects_error_marker
+  def test_processes_loss_once_and_captures_worktree_without_projecting_a_marker
     with_task do |task, worktree|
       File.write(File.join(worktree, "partial.txt"), "partial\n")
       with_tmp_dir do |root|
@@ -43,15 +43,13 @@ class AttemptsLostOutcomeTest < Minitest::Test
         assert first.fetch("capture_references").all? do |reference|
           Hive::Attempts::OutputReference.verify(reference, root: root)
         end
-        marker = Hive::Markers.current(task.state_file)
-        assert_equal :error, marker.name
-        assert_equal "attempt_lost", marker.attrs.fetch("reason")
-        assert_equal lost.attempt_id, marker.attrs.fetch("attempt_id")
+        assert Hive::Markers.current(task.state_file).none?,
+               "the attempt ledger owns loss recovery; it must not create a second marker lifecycle"
       end
     end
   end
 
-  def test_unverified_orphan_is_manual_and_is_never_captured
+  def test_unverified_orphan_remains_pending_until_identity_becomes_safe
     with_task do |task, _worktree|
       with_tmp_dir do |root|
         store = Hive::Attempts::Store.new(root: root)
@@ -63,13 +61,28 @@ class AttemptsLostOutcomeTest < Minitest::Test
           task_resolver: ->(_attempt) { task }
         )
 
-        outcome = processor.process(lost, now: NOW + 3)
+        pending = processor.process(lost, now: NOW + 3)
+        pending_again = processor.process(lost, now: NOW + 3.5)
 
-        assert_equal "manual", outcome.fetch("status")
-        assert_empty outcome.fetch("capture_references")
+        assert_equal "pending", pending.fetch("status")
+        assert_equal pending, pending_again,
+                     "an unchanged unsafe identity must wait for the shared cleanup cooldown"
+        assert_empty pending.fetch("capture_references")
         assert_equal 1, identity.calls.size
         assert Hive::Markers.current(task.state_file).none?
-        assert_equal outcome, processor.process(lost, now: NOW + 4)
+
+        identity.result = :absent
+        still_pending = processor.process(
+          lost, now: NOW + Hive::AgentLimit.retry_cooldown_sec
+        )
+        ready = processor.process(
+          lost, now: NOW + Hive::AgentLimit.retry_cooldown_sec + 4
+        )
+
+        assert_equal "pending", still_pending.fetch("status")
+        assert_equal "ready", ready.fetch("status")
+        assert_nil ready.fetch("diagnostic")
+        assert_equal 2, identity.calls.size
       end
     end
   end
@@ -95,6 +108,26 @@ class AttemptsLostOutcomeTest < Minitest::Test
     end
   end
 
+  def test_outcome_store_refuses_a_symlinked_attempt_output_directory
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Store.new(root: root)
+      lost = lost_without_worker(store)
+      outside = File.join(root, "outside")
+      FileUtils.mkdir_p(outside)
+      File.chmod(0o755, outside)
+      File.symlink(outside, File.join(store.outputs_root, lost.attempt_id))
+      outcomes = Hive::Attempts::LostOutcomeStore.new(store: store)
+
+      error = assert_raises(Hive::Attempts::StoreError) do
+        outcomes.ensure_for(lost, now: NOW)
+      end
+
+      assert_match(/output directory.*symlink/, error.message)
+      assert_equal 0o755, File.stat(outside).mode & 0o777
+      assert_empty Dir.children(outside)
+    end
+  end
+
   def test_workerless_loss_without_a_worktree_becomes_ready
     with_tmp_dir do |root|
       store = Hive::Attempts::Store.new(root: root)
@@ -112,7 +145,33 @@ class AttemptsLostOutcomeTest < Minitest::Test
     end
   end
 
-  def test_competing_annotation_and_marker_projection_failures_are_idempotent
+  def test_legacy_manual_and_exhausted_outcomes_upgrade_back_to_ready
+    %w[manual exhausted].each do |legacy_status|
+      with_tmp_dir do |root|
+        store = Hive::Attempts::Store.new(root: root)
+        lost = lost_without_worker(store)
+        outcomes = Hive::Attempts::LostOutcomeStore.new(store: store)
+        outcomes.ensure_for(lost, now: NOW)
+        outcomes.update(
+          lost, now: NOW, status: legacy_status,
+          diagnostic: "legacy terminal outcome"
+        )
+        processor = Hive::Attempts::LostOutcomeProcessor.new(
+          store: store,
+          outcome_store: outcomes,
+          process_identity: FakeIdentity.new(:absent, []),
+          task_resolver: ->(_attempt) { nil }
+        )
+
+        upgraded = processor.process(lost, now: NOW + 1)
+
+        assert_equal "ready", upgraded.fetch("status"), "legacy status=#{legacy_status}"
+        assert_nil upgraded.fetch("diagnostic")
+      end
+    end
+  end
+
+  def test_competing_annotation_is_idempotent
     with_tmp_dir do |root|
       store = Hive::Attempts::Store.new(root: root)
       lost = lost_without_worker(store)
@@ -126,11 +185,6 @@ class AttemptsLostOutcomeTest < Minitest::Test
       end
       pending = processor.process(lost, now: NOW + 1)
       assert_equal "pending", pending.fetch("status")
-
-      task = Struct.new(:state_file).new("/unwritable/task.md")
-      with_replaced_singleton_method(Hive::Markers, :set, ->(*_args, **_kwargs) { raise Errno::EACCES }) do
-        assert_nil processor.send(:project_marker, task, lost)
-      end
     end
   end
 

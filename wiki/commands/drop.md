@@ -1,7 +1,7 @@
 ---
 title: hive drop
 type: command
-source: lib/hive/commands/drop.rb, web/app/models/concerns/task_mutations.rb, web/app/controllers/tasks/drops_controller.rb, web/config/routes.rb
+source: lib/hive/commands/drop.rb, web/app/models/task.rb, web/app/models/concerns/task_mutations.rb, web/app/controllers/tasks/drops_controller.rb, web/config/routes.rb
 created: 2026-05-22
 updated: 2026-07-22
 tags: [command, task, cleanup, json, tui, web]
@@ -116,10 +116,6 @@ Lowercase `x` is intentionally unbound. The archived-row and empty-grid cases fl
 
 ## Web Binding
 
-This binding reflects queued Rails resource commit `153bed1d`
-(patch-equivalent to `96b06792` / `2fef1f47`); current-default integration is
-tracked in [[gaps]].
-
 In [[commands/web]], the task page's Advanced section posts its Drop card to:
 
 ```
@@ -127,9 +123,9 @@ POST /tasks/:project/:slug/drop
 ```
 
 `Tasks::DropsController#create` loads the filesystem-backed `Task` and calls
-`Task#drop!`, which constructs the same `Hive::Commands::Drop` command
-in-process with `project:` and the rendered row stage as `from:`. The `from`
-parameter is load-bearing: a stale page whose
+`Task#drop!`, which constructs the
+same `Hive::Commands::Drop` command in-process with `project:` and the rendered
+row stage as `from:`. The `from` parameter is load-bearing: a stale page whose
 task already moved to another stage raises `Hive::WrongStage`, which the Rails
 error handler renders as 422, leaving the moved task intact. On success the page
 redirects to the status grid because the detail page no longer has a task to

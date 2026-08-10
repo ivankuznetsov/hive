@@ -2,8 +2,6 @@ require "tmpdir"
 require "hive/commands/workflow/base"
 require "hive/commands/workflow/configuration_resolver"
 require "hive/workflow_package/registry_client"
-require "hive/workflow_package/validator"
-require "hive/workflows/project"
 
 module Hive
   module Commands
@@ -26,11 +24,12 @@ module Hive
 
         def call!
           Dir.mktmpdir("hive-workflow-install-") do |package_root|
-            resolution = @registry_client.fetch(@source, destination: package_root)
-            validated = Hive::WorkflowPackage::Validator.validate!(
-              package_root, expected_name: resolution.name,
-              expected_manifest_digest: resolution.manifest_digest
+            candidate = workflow_compatibility.fetch(
+              source: @source, destination: package_root,
+              registry_client: @registry_client
             )
+            resolution = candidate.resolution
+            validated = candidate.validated
             current = store.selected(resolution.name, cfg: project_config)
             same_generation = current && current.fetch("source_commit") == resolution.source_commit
             previous_configuration = if same_generation
@@ -60,7 +59,7 @@ module Hive
                     "honeycomb/#{resolution.name} is already managed at another commit; use `hive workflow update #{resolution.name}`"
             end
 
-            admit_runtime!(
+            workflow_compatibility.admit_runtime!(
               validated.workflow, package_root, configuration: resolver.configuration
             )
             if @dry_run
@@ -75,18 +74,13 @@ module Hive
               return emit(disclosure, human_lines: [ "hive: high-risk install cancelled; no project state changed" ])
             end
 
-            store.place_generation(package_root, resolution)
-            begin
-              store.activate(
-                resolution, configuration: resolver.configuration,
-                cfg: project_config,
-                expected_current: current,
-                commit: -> { commit_state(resolution.name, "installed") }
-              )
-            rescue StandardError => e
-              cleanup_after_failed_activation(resolution.name, e)
-            end
-            Hive::Workflows::Project.reset!
+            workflow_compatibility.activate!(
+              candidate: candidate, configuration: resolver.configuration,
+              expected_current: current,
+              commit: -> { commit_state(resolution.name, "installed") },
+              admit: false
+            )
+            workflow_compatibility.reset_cache!
             emit(payload(resolution, resolver, "installed"), human_lines: human_disclosure(resolution, resolver))
           end
         end

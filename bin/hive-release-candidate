@@ -1,0 +1,7 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require_relative "../packaging/release_candidate/cli"
+
+repo_root = File.expand_path("..", __dir__)
+exit HiveReleaseCandidate::CLI.new(argv: ARGV, repo_root: repo_root).call

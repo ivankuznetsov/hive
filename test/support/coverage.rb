@@ -73,15 +73,21 @@ module HiveTestCoverage
 
   def reload_preloaded_entrypoint!
     old_verbose = $VERBOSE
-    path = File.join(@root, "lib", "hive.rb")
-    return unless $LOADED_FEATURES.include?(path)
+    paths = %w[hive/version.rb hive/errors.rb hive.rb].map do |relative|
+      File.join(@root, "lib", relative)
+    end
+    loaded_paths = paths.select { |path| $LOADED_FEATURES.include?(path) }
+    return if loaded_paths.empty?
 
     # Bundler evaluates the gemspec before RUBYOPT coverage boots, and the
-    # gemspec requires lib/hive.rb for Hive::VERSION. Reload only the entrypoint
-    # under coverage so the unloaded-file gate can stay strict. Filter just the
-    # expected constant redefinition warnings; ordinary warnings still print.
+    # gemspec requires lib/hive.rb for Hive::VERSION. That entrypoint now loads
+    # its clean component-safe version and error contracts before coverage too,
+    # so reload all three in dependency order. Filter just the expected
+    # constant redefinition warnings; ordinary warnings still print.
     $VERBOSE = false
-    without_constant_redefinition_warnings { load path }
+    without_constant_redefinition_warnings do
+      loaded_paths.each { |path| load path }
+    end
   ensure
     $VERBOSE = old_verbose
   end
@@ -101,14 +107,16 @@ module HiveTestCoverage
     Warning.define_singleton_method(:warn, original_warn) if original_warn
   end
 
-  def dump_process_result!
+  def dump_process_result!(sparse: false)
     return unless @started
     return if @dumped
 
     FileUtils.mkdir_p(@resultset_dir)
     path = File.join(@resultset_dir, "#{Process.pid}-#{object_id}.marshal")
     tmp_path = "#{path}.tmp"
-    File.binwrite(tmp_path, Marshal.dump(Coverage.result))
+    result = Coverage.result
+    result = sparse_process_result(result) if sparse
+    File.binwrite(tmp_path, Marshal.dump(result))
     File.rename(tmp_path, path)
     @dumped = true
   rescue RuntimeError => e
@@ -124,6 +132,15 @@ module HiveTestCoverage
     # silently producing a too-low coverage number.
     record_dump_error!(e)
     @dumped = true
+  end
+
+  def sparse_process_result(result)
+    result.select do |_path, entry|
+      Array(entry[:lines]).any? { |count| count.to_i.positive? } ||
+        (entry[:branches] || {}).any? do |_decision, outcomes|
+          outcomes.values.any? { |count| count.to_i.positive? }
+        end
+    end
   end
 
   def record_dump_error!(error)
@@ -415,7 +432,7 @@ module HiveTestCoverage
   end
 
   def coverage_ok?(report)
-    line_percent_for(report) >= minimum_line_percent &&
+    line_coverage_ok?(report, minimum_line_percent) &&
       Array(value(report, :unloaded_files)).empty? &&
       Array(value(report, :result_errors)).empty?
   end
@@ -432,7 +449,7 @@ module HiveTestCoverage
     line_total = numeric_value(report, :line_total)
     minimum = minimum_line_percent
     line_percent = line_percent_for(report)
-    if line_percent < minimum
+    unless line_coverage_ok?(report, minimum)
       lines << format(
         "line coverage %.2f%% (%d/%d) below minimum %.2f%%",
         line_percent,
@@ -528,6 +545,14 @@ module HiveTestCoverage
 
   def numeric_value(hash, key)
     value(hash, key).to_f
+  end
+
+  def line_coverage_ok?(report, minimum)
+    if minimum == 100.0
+      numeric_value(report, :line_covered) == numeric_value(report, :line_total)
+    else
+      line_percent_for(report) >= minimum
+    end
   end
 
   def line_percent_for(report)

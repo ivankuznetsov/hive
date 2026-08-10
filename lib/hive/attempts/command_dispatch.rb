@@ -1,4 +1,4 @@
-require "hive/attempts/entrypoint"
+require "hive/attempts/api"
 
 module Hive
   module Attempts
@@ -11,12 +11,17 @@ module Hive
 
       def dispatch_durable
         task = resolve_task
-        result = (@attempt_entrypoint || Hive::Attempts::Entrypoint.new).dispatch(
+        result = (@attempts_api || Hive::Attempts::API.new).dispatch(
           task: task,
           intended_stage: durable_intended_stage(task),
           argv: durable_worker_argv(task),
           interactive: true
         )
+        if @json && result.output_status == :expired
+          raise Hive::ConcurrentRunError,
+                "raw output for successful durable attempt #{result.attempt_id} expired; " \
+                "the canonical receipt is still available and the attempt was not rerun"
+        end
         handle_durable_failure!(result) unless result.exit_status.zero?
 
         result

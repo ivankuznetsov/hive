@@ -22,54 +22,6 @@
   <% end %>
 </div>
 
-<% if defined?(@login_session) && @login_session %>
-  <%# Keep polling while there is no URL yet, OR for an operator-ward
-      (poll-type) agent whose CLI is still running — the operator enters the
-      code at the provider and we refresh until the child exits. A paste-back
-      agent stops polling once its URL is shown (it waits on the form). The
-      poll controller reload()s the frame's OWN src, so a src is required
-      whenever polling. %>
-  <% poll_login = (defined?(@poll_login) && @poll_login) %>
-  <% polling = !@login_session.done && (@session_url.nil? || poll_login) %>
-  <%= turbo_frame_tag "agent-login",
-        src: (polling ? agent_login_status_path(@login_session.agent, @login_session.id) : nil),
-        data: ({ controller: "poll", poll_interval_value: 2000 } if polling) do %>
-    <div class="card">
-      <h2><%= @login_session.agent %> login</h2>
-      <% if @login_session.done %>
-        <% if @login_session.error %>
-          <p>Login failed: <%= @login_session.error %></p>
-        <% else %>
-          <p><%= @login_session.agent %> is now logged in.</p>
-        <% end %>
-        <p><%= link_to "Back to agents", agents_path %></p>
-      <% elsif @session_url %>
-        <p>Open the provider page and authorize:</p>
-        <p><%= link_to @session_url, @session_url, target: "_blank", rel: "noopener" %></p>
-        <% if poll_login %>
-          <p class="muted">Enter the one-time code shown in the CLI output below at the provider page. This page updates automatically when login completes.</p>
-        <% else %>
-          <%= form_with url: agent_login_complete_path(@login_session.agent, @login_session.id), class: "form-grid" do |f| %>
-            <div class="form-row">
-              <%= f.label :code, "Paste the code (or full callback URL) the provider returned" %>
-              <%= f.text_field :code, required: true %>
-            </div>
-            <p><%= f.submit "Complete login", data: { turbo_submits_with: "Completing…" } %></p>
-          <% end %>
-        <% end %>
-      <% else %>
-        <p class="muted">Waiting for the login URL from the CLI…</p>
-      <% end %>
-      <% if @session_output.present? %>
-        <details class="login-output">
-          <summary class="muted">CLI output</summary>
-          <pre><%= @session_output %></pre>
-        </details>
-      <% end %>
-    </div>
-  <% end %>
-<% end %>
-
 <section class="managed-skills" aria-labelledby="managed-skills-heading">
   <h2 id="managed-skills-heading">Managed skills</h2>
   <p class="muted">Check that each configured pipeline skill resolves through the agent that will run it. Hive checks one project at a time because native CLI inventory can take a few seconds.</p>

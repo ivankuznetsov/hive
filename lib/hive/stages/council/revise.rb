@@ -52,6 +52,7 @@ module Hive
         def run_agent!
           identity = launch_identity
           profile = Hive::Stages::Base.stage_profile(@cfg, @stage.name, explicit_agent: identity.fetch(:agent))
+          resource_limits = Hive::Stages::Base.stage_resource_limits(@cfg, @stage)
           actor_prompt, scope = Hive::Stages::Base.actor_prompt_and_scope(
             @cfg,
             @stage.name,
@@ -59,9 +60,10 @@ module Hive
             profile,
             prompt: prompt(profile),
             managed_slot: "stages.#{@stage.name}.revise",
+            base_add_dirs: Hive::Stages::Base.managed_actor_base_add_dirs(@task),
+            managed_outputs: [ @target_path ],
             **permission_kwargs
           )
-          resource_limits = Hive::Stages::Base.stage_resource_limits(@cfg, @stage)
           result = Hive::Stages::Base.spawn_agent(
             @task,
             prompt: actor_prompt,
@@ -72,6 +74,10 @@ module Hive
             profile: profile,
             model: identity[:model],
             effort: identity[:effort],
+            routing_arguments: Hive::Stages::Base.recognized_model_routing_arguments(
+              @cfg, @stage.name, profile,
+              current: { model: identity[:model], effort: identity[:effort] }.compact
+            ),
             expected_output: @target_path,
             status_mode: :output_file_exists,
             cfg: @cfg,

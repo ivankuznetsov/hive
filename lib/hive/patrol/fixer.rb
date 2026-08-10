@@ -8,7 +8,6 @@ require "hive/git_ops"
 require "hive/patrol/fingerprint"
 require "hive/patrol/runner_task"
 require "hive/patrol/agent_launch"
-require "hive/patrol/state_store"
 require "hive/patrol/token_budget"
 require "hive/patrol/validator"
 require "hive/stages/base"
@@ -22,12 +21,14 @@ module Hive
       MAX_FIX_PROOF_BYTES = 64 * 1024
       MAX_AUDITED_PATHS = 24
       MAX_REGRESSION_PATHS = 12
-      VALIDATION_NAMES = %w[docs format lint public_contract typecheck test].freeze
       FixProofReadError = Class.new(StandardError)
+      PublicationRecoveryError = Class.new(Hive::ConfigError)
       FAILURE_REASONS = %w[
         fix_agent_failed fix_agent_rejected missing_fix_proof no_validation_commands
         invalid_validation_key missing_regression regression_not_reproduced
         targeted_validation_failed fix_guardrail validation_mutated_worktree fix_error
+        stale_target_sha validation_preflight_failed
+        validation_preflight_mutated_worktree
       ].freeze
       HARD_GUARDRAIL_PATTERNS = {
         hive_state_edit: {
@@ -82,12 +83,12 @@ module Hive
         def binding_for_erb = binding
       end
 
-      def initialize(project_root, cfg:, state: StateStore.new(project_root),
+      def initialize(project_root, cfg:, state: nil,
                      validator: nil, worktree_factory: nil, agent_runner: nil,
                      token_budget: nil)
         @project_root = File.expand_path(project_root)
         @cfg = cfg
-        @state = state
+        @state = state || default_state_store
         @validator = validator || Validator.new(
           cfg.dig("patrol", "commands"),
           timeout_sec: cfg.dig("timeout_sec", "patrol") || Validator::DEFAULT_TIMEOUT_SEC
@@ -95,6 +96,7 @@ module Hive
         @worktree_factory = worktree_factory || method(:build_worktree)
         @agent_runner = agent_runner || method(:run_agent)
         @token_budget = token_budget || TokenBudget.new(@project_root, cfg: cfg)
+        @validation_preflights = {}
       end
 
       def attempt(finding)
@@ -110,6 +112,22 @@ module Hive
         unless actual_base == base_sha
           raise Hive::GitError,
                 "patrol worktree started at #{actual_base.inspect}, expected #{base_sha.inspect}"
+        end
+        if !finding.target_sha.to_s.empty? && finding.target_sha.to_s.downcase != base_sha.downcase
+          return failed_attempt_patch(
+            finding, branch, worktree,
+            {
+              "passed" => false,
+              "reason" => "stale_target_sha",
+              "error" => "finding evidence targets #{finding.target_sha}, current default is #{base_sha}"
+            },
+            base_sha: base_sha
+          )
+        end
+        if (preflight_failure = validation_preflight_failure(finding, worktree.path, base_sha))
+          return failed_attempt_patch(
+            finding, branch, worktree, preflight_failure, base_sha: base_sha
+          )
         end
         run_dir = @state.run_dir("fix")
         output_path = File.join(run_dir, "fix.json")
@@ -132,7 +150,7 @@ module Hive
           )
         end
 
-        validation = audit_and_validate(worktree.path, base_sha, proof)
+        validation = audit_and_validate(worktree.path, base_sha, proof, finding: finding)
         unless validation["passed"]
           return failed_attempt_patch(finding, branch, worktree, validation, base_sha: base_sha)
         end
@@ -144,6 +162,12 @@ module Hive
         @state.write_patch(patch.id, patch.to_h)
         worktree.remove!(path: worktree.path, force: true) unless passed
         patch
+      rescue PublicationRecoveryError
+        # A durable publication binding or uncertain-effect seed owns this
+        # exact validated worktree. Never turn missing/corrupt proof into an
+        # ordinary failed patch: that path removes the checkout and permits a
+        # later cycle to mint a different commit for the same remote effect.
+        raise
       rescue StandardError => e
         patch = failed_patch(finding, branch, worktree&.path, base_sha, e)
         @state.write_patch(patch.id, patch.to_h)
@@ -157,21 +181,46 @@ module Hive
 
       private
 
+      def default_state_store
+        require "hive/patrol/state_store"
+        StateStore.new(@project_root)
+      end
+
       def reusable_publication_patch(finding, branch, worktree)
+        @state.recover_pending_publications!
         entry = @state.fingerprints[finding.fingerprint]
-        return unless entry.is_a?(Hash)
-        return unless Fingerprint::RETRYABLE_PUBLICATION_STATES.include?(entry["state"])
-        return unless entry["branch"] == branch
+        retryable = entry.is_a?(Hash) &&
+          Fingerprint::RETRYABLE_PUBLICATION_STATES.include?(
+            entry["state"]
+          )
+        identity =
+          if retryable
+            binding = entry["publication_binding"]
+            unless entry["branch"] == branch &&
+                   binding.is_a?(Hash)
+              raise PublicationRecoveryError,
+                    "patrol publication recovery binding is malformed; " \
+                    "preserving the bound worktree"
+            end
+            binding
+          else
+            @state.retryable_publication_seed(
+              fingerprint: finding.fingerprint,
+              branch: branch
+            )
+          end
+        return unless identity.is_a?(Hash)
 
-        receipt = entry["publication_receipt"]
-        return if entry["state"] == "reconciliation_pending" && !receipt.is_a?(Hash)
-
-        patch_paths(receipt)
+        paths = patch_paths(identity)
+        paths
           .sort_by { |path| -File.mtime(path).to_f }
           .each do |path|
           record = @state.read_json(path)
+          next unless record.is_a?(Hash)
           next unless reusable_patch_record?(record, finding, branch, worktree.path)
-          next if receipt.is_a?(Hash) && !publication_receipt_matches?(receipt, record)
+          next unless publication_identity_matches?(
+            identity, record
+          )
 
           return PatchAttempt.new(
             id: record.fetch("id"), finding: finding, branch: branch,
@@ -180,27 +229,34 @@ module Hive
             base_sha: record.fetch("base_sha"), head_sha: record.fetch("head_sha")
           )
         end
-        nil
-      rescue SystemCallError
-        nil
+        raise PublicationRecoveryError,
+              "patrol publication recovery cannot verify its exact " \
+              "validated patch receipt; preserving the bound worktree"
+      rescue PublicationRecoveryError
+        raise
+      rescue StandardError => error
+        raise PublicationRecoveryError,
+              "patrol publication recovery cannot read its exact validated " \
+              "patch receipt (#{error.class}: #{error.message}); preserving " \
+              "the bound worktree"
       end
 
-      def patch_paths(receipt)
-        return Dir.glob(File.join(@state.root, "patches", "*.json")) unless receipt.is_a?(Hash)
+      def patch_paths(identity)
+        return [] unless identity.is_a?(Hash)
 
-        patch_id = receipt["patch_id"].to_s
+        patch_id = identity["patch_id"].to_s
         return [] unless patch_id.match?(/\Apatch-[a-zA-Z0-9_-]+\z/)
 
         [ File.join(@state.root, "patches", "#{patch_id}.json") ]
       end
 
-      def publication_receipt_matches?(receipt, record)
+      def publication_identity_matches?(identity, record)
         {
           "patch_id" => record["id"],
           "worktree_path" => record["worktree_path"],
           "base_sha" => record["base_sha"],
           "head_sha" => record["head_sha"]
-        }.all? { |field, value| receipt[field] == value }
+        }.all? { |field, value| identity[field] == value }
       end
 
       def reusable_patch_record?(record, finding, branch, expected_path)
@@ -379,7 +435,7 @@ module Hive
               "(is it checked out in another worktree?)"
       end
 
-      def audit_and_validate(worktree_path, base_sha, agent_proof, validation_pass: 0)
+      def audit_and_validate(worktree_path, base_sha, agent_proof, finding:, validation_pass: 0)
         stage_changes!(worktree_path)
         paths = changed_paths(worktree_path, base_sha)
         guarded = guard_validation(worktree_path, base_sha)
@@ -387,7 +443,7 @@ module Hive
 
         staged_before = staged_diff(worktree_path, base_sha)
         receipt, proof_failure = machine_fix_proof(
-          worktree_path, base_sha, paths, agent_proof
+          worktree_path, base_sha, paths, agent_proof, finding
         )
         if proof_failure
           proof_failure["fix_proof"] = receipt if receipt
@@ -416,7 +472,8 @@ module Hive
             }
           end
           return audit_and_validate(
-            worktree_path, base_sha, agent_proof, validation_pass: validation_pass + 1
+            worktree_path, base_sha, agent_proof, finding: finding,
+            validation_pass: validation_pass + 1
           )
         end
 
@@ -424,9 +481,11 @@ module Hive
         validation
       end
 
-      def machine_fix_proof(worktree_path, base_sha, paths, agent_proof)
+      def machine_fix_proof(worktree_path, base_sha, paths, agent_proof, finding)
         key = agent_proof.fetch("validation_key").strip
-        command, selection_error = configured_validation_command(key)
+        command, selection_error = configured_validation_command(
+          key, expected_key: finding.validation_key
+        )
         return [ nil, selection_error ] if selection_error
 
         audited_paths = agent_proof.fetch("audited_paths")
@@ -508,14 +567,15 @@ module Hive
         [ receipt, nil ]
       end
 
-      def configured_validation_command(key)
+      def configured_validation_command(key, expected_key: nil)
         commands = @cfg.dig("patrol", "commands") || {}
-        if commands.values.none? { |command| present_proof_text?(command) }
+        validator = Validator.new(commands)
+        if validator.configured_names.empty?
           return [ nil, proof_validation_failure("no_validation_commands", "no patrol validation commands are configured") ]
         end
 
-        command = commands[key]
-        unless VALIDATION_NAMES.include?(key) && present_proof_text?(command)
+        command = validator.command_for(key)
+        unless command
           return [
             nil,
             proof_validation_failure(
@@ -524,8 +584,51 @@ module Hive
             )
           ]
         end
+        if present_proof_text?(expected_key) && key != expected_key
+          return [
+            nil,
+            proof_validation_failure(
+              "invalid_validation_key",
+              "fix proof selected #{key.inspect}; reviewed finding requires #{expected_key.inspect}"
+            )
+          ]
+        end
 
         [ command, nil ]
+      end
+
+      def validation_preflight_failure(finding, worktree_path, base_sha)
+        key = finding.validation_key.to_s
+        return if key.empty? # Legacy direct callers did not persist a key.
+
+        command, selection_error = configured_validation_command(key, expected_key: key)
+        return selection_error if selection_error
+
+        cache_key = [ base_sha, key, command ]
+        validation = @validation_preflights[cache_key]
+        unless validation
+          validation = @validator.validate(worktree_path, names: [ key ])
+          dirty = !git_output!(worktree_path, "status", "--porcelain=v1", "--untracked-files=all").empty?
+          validation = JSON.parse(JSON.generate(validation))
+          validation["preflight_mutated_worktree"] = dirty
+          @validation_preflights[cache_key] = validation
+        end
+        if validation["preflight_mutated_worktree"]
+          return {
+            "passed" => false,
+            "reason" => "validation_preflight_mutated_worktree",
+            "error" => "configured validation #{key.inspect} modifies a clean default-branch checkout",
+            "commands" => validation["commands"]
+          }
+        end
+        return if validation["passed"] == true
+
+        {
+          "passed" => false,
+          "reason" => "validation_preflight_failed",
+          "error" => "configured validation #{key.inspect} does not pass on the current default branch",
+          "commands" => validation["commands"]
+        }
       end
 
       def machine_receipt(agent_proof, base_sha, key, command, regression_paths, before:, after:)
@@ -706,8 +809,7 @@ module Hive
       end
 
       def configured_validation_keys
-        commands = @cfg.dig("patrol", "commands") || {}
-        VALIDATION_NAMES.select { |name| present_proof_text?(commands[name]) }
+        Validator.configured_names(@cfg.dig("patrol", "commands"))
       end
 
       def run_agent(prompt:, run_dir:, worktree_path:,
@@ -747,7 +849,11 @@ module Hive
             profile: profile,
             expected_output: output_path,
             status_mode: :output_file_exists,
-            cli_flags: launch.fetch(:cli_flags)
+            cli_flags: launch.fetch(:cli_flags),
+            routing_arguments: Hive::Stages::Base.model_routing_arguments(
+              @cfg, "patrol_fix", profile,
+              current: Hive::Stages::Base.model_routing_current(@cfg["patrol"])
+            )
           ).run!
         ensure
           @token_budget.record!(

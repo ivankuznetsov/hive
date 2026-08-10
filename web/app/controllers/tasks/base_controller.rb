@@ -1,5 +1,6 @@
 class Tasks::BaseController < ApplicationController
   before_action :load_project
+  before_action :load_task
 
   private
 
@@ -8,10 +9,23 @@ class Tasks::BaseController < ApplicationController
   end
 
   def load_task
-    @task = Task.find!(project: @project, slug: params[:slug])
-  end
-
-  def dispatcher
-    Hive::Web::Dispatcher.new
+    page_snapshot = StatusBroadcaster.current_page_snapshot
+    @status_version = page_snapshot&.version
+    # With no process-wide fleet snapshot yet, the resolver below still
+    # computes this exact task row directly; that is current enough for task
+    # controls without forcing a fleet scan. An explicit feed failure remains
+    # unavailable/degraded and disables those controls.
+    @status_availability = page_snapshot&.availability || "fresh"
+    @status_last_success_at = page_snapshot&.last_success_at
+    @status_error = page_snapshot&.error
+    @status_fresh = @status_availability == "fresh"
+    @task_source = "archive" if params[:source] == "archive"
+    result = Hive::Web::TaskTargetResolver.new(
+      project: @project.attributes,
+      slug: params[:slug],
+      cached_payload: @task_source ? nil : page_snapshot&.payload,
+      archive: @task_source.present?
+    ).call
+    @task = Task.new(project: @project, attributes: result.attributes)
   end
 end

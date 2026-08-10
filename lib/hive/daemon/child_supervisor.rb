@@ -4,6 +4,7 @@ require "shellwords"
 require "time"
 require "tmpdir"
 require "hive/lock"
+require "hive/process_kill"
 
 module Hive
   module Daemon
@@ -17,6 +18,8 @@ module Hive
     # polling. Failures are isolated per child; a segfault in one
     # `hive run` doesn't take the daemon down.
     class ChildSupervisor
+      attr_reader :shutdown_proof
+
       ChildExit = Struct.new(:pid, :exit_code, :project, :slug, :stage, :command,
                              :state_file_path, :started_at, :finished_at, :json_envelope,
                              :request_id, :dispatch_token,
@@ -59,10 +62,11 @@ module Hive
           acc[verb.to_s] = secs.to_i
         end
         @kill_grace_sec = kill_grace_sec.to_i
-        # pid → { project, slug, stage, command, started_at, log_path,
+        # pid → { project, slug, stage, command, started_at, log_path, pgid,
         #         timeout_sec, terminating_at, killed }
         @running = {}
         @forced_completions = []
+        @shutdown_proof = { drained: true, child_inventory: [] }.freeze
       end
 
       # Resolve the wall-clock timeout (seconds) for a hive verb. A
@@ -138,7 +142,10 @@ module Hive
           project: project, slug: slug, stage: stage,
           command: command_string, state_file_path: state_file_path,
           started_at: Time.now, log_path: log_path, dry_run: false,
-          request_id: request_id, dispatch_token: dispatch_token, timeout_sec: timeout_sec
+          request_id: request_id, dispatch_token: dispatch_token, timeout_sec: timeout_sec,
+          # Process.spawn(pgroup: true) creates a group led by this exact PID.
+          # Persist it before any shutdown race can make getpgid unavailable.
+          pgid: pid
         }
         pid
       end
@@ -221,36 +228,51 @@ module Hive
         completed
       end
 
-      # Send SIGTERM to every tracked child's process group, wait up to
-      # `grace_sec`, then SIGKILL anything still running. Used by the
-      # dispatcher's shutdown path.
+      # Snapshot and terminate every tracked child's verified process tree,
+      # wait up to `grace_sec`, then SIGKILL survivors. Used by the dispatcher's
+      # shutdown path. A reaped direct-child exit is returned only after both
+      # its captured tree and original process group are proven gone. If that
+      # proof is unavailable, the exit is deliberately withheld so the
+      # scheduler's existing durable claim remains fenced for restart recovery.
       def terminate_all(grace_sec: 600)
-        return if @running.empty?
-
-        pgids = collect_pgids
-        pgids.each { |pgid| safe_kill(:TERM, -pgid) }
-
-        deadline = Time.now + grace_sec
-        until @running.empty? || Time.now >= deadline
-          reaped = reap_all
-          break if reaped.empty? && @running.empty?
-
-          sleep 0.1
+        completed = []
+        if @running.empty?
+          @shutdown_proof = { drained: true, child_inventory: [] }.freeze
+          return completed
         end
 
-        return if @running.empty?
-
-        # Anything still alive gets KILL.
-        @running.each_key do |pid|
-          pgid = begin
-            Process.getpgid(pid)
-          rescue Errno::ESRCH
-            pid
-          end
-          safe_kill(:KILL, -pgid)
+        completed.concat(reap_dry_run)
+        if @running.empty?
+          @shutdown_proof = { drained: true, child_inventory: [] }.freeze
+          return completed
         end
-        # One more reap pass to clear out the killed children.
-        reap_all
+
+        targets = capture_shutdown_targets
+        pending = []
+        signal_shutdown_targets(:TERM, targets)
+        merge_shutdown_targets!(targets, capture_shutdown_targets)
+
+        drain_shutdown(
+          targets: targets,
+          pending: pending,
+          completed: completed,
+          deadline: Time.now + grace_sec
+        )
+        if shutdown_drained?(pending)
+          record_shutdown_proof(targets, drained: true)
+          return completed
+        end
+
+        signal_shutdown_targets(:KILL, targets, require_identity: true)
+        drain_shutdown(
+          targets: targets,
+          pending: pending,
+          completed: completed,
+          deadline: Time.now + Hive::ProcessKill::KILL_GRACE_SECONDS
+        )
+
+        record_shutdown_proof(targets, drained: shutdown_drained?(pending))
+        completed
       end
 
       def in_flight_pids
@@ -259,6 +281,13 @@ module Hive
 
       def in_flight_count
         @running.size
+      end
+
+      def in_flight?(project:, stage: nil)
+        @running.values.any? do |entry|
+          entry.fetch(:project).to_s == project.to_s &&
+            (stage.nil? || entry.fetch(:stage).to_s == stage.to_s)
+        end
       end
 
       # Terminate and await one exact child process group. Used when a spawn
@@ -354,6 +383,106 @@ module Hive
         )
       end
 
+      def capture_shutdown_targets
+        @running.each_with_object({}) do |(pid, entry), captured|
+          next if entry[:dry_run]
+
+          snapshot = Hive::ProcessKill.process_tree_snapshot(pid)
+          confirmed = snapshot && Hive::ProcessKill.confirm_process_tree_snapshot(pid, snapshot)
+          tree = if confirmed &&
+                    confirmed.size == snapshot.size &&
+                    confirmed.any? { |target| target.fetch(:pid) == pid }
+            confirmed
+          end
+          captured[pid] = {
+            pgids: ([ entry[:pgid] || pgid_for(pid) ] +
+              Array(tree).filter_map { |target| target[:pgid] }).compact.uniq,
+            tree: tree
+          }
+        end
+      end
+
+      # A child can fork after the initial capture and before it observes
+      # TERM. Retain a second inventory while the direct child is still
+      # tracked, and keep every observed group fenced through the drain.
+      def merge_shutdown_targets!(targets, fresh_targets)
+        fresh_targets.each do |pid, fresh|
+          previous = targets[pid] || { pgids: [], tree: [] }
+          tree = (Array(previous[:tree]) + Array(fresh[:tree])).uniq do |target|
+            [ target[:pid], target[:ppid], target[:pgid], target[:start_time] ]
+          end
+          targets[pid] = {
+            pgids: (target_pgids(previous) + target_pgids(fresh)).uniq,
+            tree: tree.empty? ? nil : tree
+          }
+        end
+      end
+
+      def signal_shutdown_targets(signal, targets, require_identity: false)
+        targets.each_value do |target|
+          tree = target[:tree]
+          Hive::ProcessKill.signal_captured_processes(
+            signal.to_s, tree, require_identity: require_identity
+          ) if tree
+
+          target_pgids(target).each do |pgid|
+            safe_kill(signal, -pgid) if pgid && process_group_alive?(pgid)
+          end
+        end
+      end
+
+      def drain_shutdown(targets:, pending:, completed:, deadline:)
+        loop do
+          merge_shutdown_targets!(
+            targets, capture_shutdown_targets
+          ) unless @running.empty?
+          pending.concat(reap_all)
+          releasable, held = pending.partition do |entry|
+            shutdown_exit_safe?(entry, targets.fetch(entry.pid, nil))
+          end
+          completed.concat(releasable)
+          pending.replace(held)
+
+          break if shutdown_drained?(pending) || Time.now >= deadline
+
+          sleep 0.1
+        end
+      end
+
+      def shutdown_drained?(pending)
+        @running.empty? && pending.empty?
+      end
+
+      def shutdown_exit_safe?(_entry, target)
+        return false unless target && target[:tree]
+        return false if target[:tree].any? { |process| Hive::ProcessKill.captured_process_alive?(process) }
+
+        pgids = target_pgids(target)
+        pgids.any? && pgids.none? { |pgid| process_group_alive?(pgid) }
+      end
+
+      def target_pgids(target)
+        Array(target[:pgids] || target[:pgid])
+      end
+
+      def record_shutdown_proof(targets, drained:)
+        inventory = targets.values.flat_map { |target| Array(target[:tree]) }
+                           .uniq { |entry| [ entry[:pid], entry[:pgid], entry[:start_time] ] }
+                           .map do |entry|
+          { pid: entry.fetch(:pid), pgid: entry.fetch(:pgid), start_time: entry.fetch(:start_time) }
+        end
+        @shutdown_proof = { drained: drained == true, child_inventory: inventory }.freeze
+      end
+
+      def process_group_alive?(pgid)
+        Process.kill(0, -pgid)
+        true
+      rescue Errno::ESRCH
+        false
+      rescue Errno::EPERM
+        true
+      end
+
       def log_path_for(project:, slug:, log_state_path:)
         return @log_dir_for_task.call(project, slug) if @log_dir_for_task
 
@@ -438,17 +567,6 @@ module Hive
         end
       rescue Errno::ENOENT, Errno::EACCES, IOError
         nil
-      end
-
-      def collect_pgids
-        pgids = []
-        @running.each_key do |pid|
-          pgid = Process.getpgid(pid)
-          pgids << pgid
-        rescue Errno::ESRCH
-          # Process already gone; let reap_all clean it up.
-        end
-        pgids.uniq
       end
 
       def safe_kill(signal, target)

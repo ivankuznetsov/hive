@@ -2,6 +2,9 @@ name: tui_new_idea_editing
 description: |
   TUI new-idea prompt supports chunk paste plus cursor navigation before submit.
 tags: [tui, v2, paste]
+coverage:
+  primary: tui.idea_editing
+  supporting: []
 steps:
   - kind: tui_expect
     anchor: "Tasks ·"

@@ -10,11 +10,14 @@ module Hive
     # reporting state. The namespaces and domain records stay separate; only
     # their identical JSON lifecycle lives here.
     class BaseStateStore
-      attr_reader :project_root, :root
+      attr_reader :project_root, :hive_state_path, :root
 
-      def initialize(project_root, state_directory:, collections:)
+      def initialize(project_root, state_directory:, collections:, hive_state_path: nil)
         @project_root = File.expand_path(project_root)
-        @root = File.join(@project_root, ".hive-state", state_directory)
+        @hive_state_path = File.expand_path(
+          hive_state_path || ".hive-state", @project_root
+        )
+        @root = File.join(@hive_state_path, state_directory)
         @collections = collections.freeze
       end
 

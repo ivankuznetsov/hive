@@ -46,6 +46,7 @@ class ConditionsAttemptObserverTest < Minitest::Test
       restarted = Hive::Conditions::AttemptObserver.new(
         store: store, task_locator: ->(_attempt) { task }
       )
+      assert_equal :acknowledged, restarted.observe(status, now: NOW + 5)
       refute restarted.call(status, now: NOW + 5)
       assert_equal before,
                    File.binread(File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME))
@@ -67,6 +68,7 @@ class ConditionsAttemptObserverTest < Minitest::Test
       refute observer.call(status, now: NOW)
       lost = store.mark_lost(live, reason: "launch_timeout", now: NOW + 1)
       lost_status = status.with(attempt: lost, classification: :lost)
+      assert_equal :pending, observer.observe(lost_status, now: NOW + 1)
       refute observer.call(lost_status, now: NOW + 1)
     end
   end

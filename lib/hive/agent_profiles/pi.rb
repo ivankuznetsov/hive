@@ -30,7 +30,7 @@ module Hive
     PI_PREFLIGHT = -> {
       auth_path =
         begin
-          File.expand_path("~/.pi/agent/auth.json")
+          File.join(Hive::SkillCheck::Pi.resolve_agent_dir(ENV), "auth.json")
         rescue ArgumentError => e
           raise Hive::AgentError,
                 "pi profile preflight failed: cannot resolve home directory (#{e.message}). " \
@@ -95,6 +95,9 @@ module Hive
         Hive::ImplementationIdentity::NativeDefaults.resolve(:pi, **kwargs)
       },
       model_argument_builder: ->(model) { [ "--model", model ] },
+      routed_model_argument_builder: ->(model) {
+        %w[default inherit].include?(model) ? [] : [ "--model", model ]
+      },
       launcher_identity: "pi-coding-agent/v1"
     )
 

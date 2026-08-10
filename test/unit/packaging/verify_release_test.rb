@@ -4,6 +4,7 @@ require "open3"
 class PackagingVerifyReleaseTest < Minitest::Test
   SCRIPT = File.expand_path("../../../packaging/verify-release.sh", __dir__).freeze
   HIVEBOX_SMOKE = File.expand_path("../../../packaging/docker/smoke.sh", __dir__).freeze
+  HIVEBOX_DOCKERFILE = File.expand_path("../../../packaging/docker/Dockerfile", __dir__).freeze
   RELEASE_WORKFLOW = File.expand_path("../../../.github/workflows/release.yml", __dir__).freeze
   INSTALL_SMOKE_WORKFLOW = File.expand_path("../../../.github/workflows/install-smoke.yml", __dir__).freeze
   MANAGED_WEB_SETUP = File.expand_path("../../../packaging/verify-managed-web-setup.sh", __dir__).freeze
@@ -47,6 +48,13 @@ class PackagingVerifyReleaseTest < Minitest::Test
     assert_includes body, "for asset_path in $asset_paths"
     assert_includes body, 'smoke_curl -fsS "http://127.0.0.1:${PORT}${asset_path}"'
     assert_includes body, 'Hive::Web::AppBundle.assets_ready?("/app/web")'
+  end
+
+  def test_hivebox_installs_the_native_fiddle_build_dependency
+    body = File.read(HIVEBOX_DOCKERFILE)
+
+    assert_includes body, "libffi-dev"
+    assert_operator body.index("libffi-dev"), :<, body.index("bundle install")
   end
 
   def test_release_promotes_only_the_two_native_smoked_digests

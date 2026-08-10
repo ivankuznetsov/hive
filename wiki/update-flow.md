@@ -3,11 +3,14 @@ title: Update flow (daemon-driven version check + nudge)
 type: feature
 source: lib/hive/update_check.rb, lib/hive/update_check/state.rb, lib/hive/daemon/dispatcher.rb, lib/hive/bot/supervisor.rb, lib/hive/tui/bubble_model.rb
 created: 2026-05-27
-updated: 2026-05-27
+updated: 2026-08-03
 tags: [architecture, daemon, bot, tui, update, decision]
 ---
 
-**TLDR**: During the fast dev-release period the daemon checks the latest GitHub release on a throttled (~daily) cadence and, when the running version is behind, records a nudge (version + exact update command) that the TUI footer renders and the bot pushes once per version. Auto-update is **not** implemented yet — every channel is nudge-only until the bash auto-update spike (U7) lands. See [[commands/update]] and [[decisions]].
+**TLDR**: The daemon checks for releases and publishes an update nudge; it does
+not install unattended. When an operator runs `hive update`, however, the
+channel update and all registered migrations are automatic and visibly
+reported. See [[commands/update]] and [[commands/migrate]].
 
 ## Pieces
 
@@ -23,14 +26,19 @@ tags: [architecture, daemon, bot, tui, update, decision]
 
 ## Channels
 
-- **install.sh (bash)** — nudge-only today (`hive update`). Auto-update (re-run installer + ADR-031 self-re-exec when idle) is deferred to U7.
-- **brew** — nudge `brew upgrade ivankuznetsov/hive/hive`. hive never drives brew.
-- **aur** — nudge `hive update` (the real updater picks `yay` OR `paru` at runtime; a hardcoded `yay …` would fail for paru-only users). hive never drives the AUR helper itself.
+- **install.sh (bash)** — the daemon nudges `hive update`; that command re-runs the installer and then migrates all registered projects. Unattended daemon installation remains deferred to U7.
+- **brew** — the daemon nudges `hive update`; the command runs brew followed by automatic migration.
+- **aur** — the daemon nudges `hive update`; the command picks `yay` or `paru` at runtime and then runs automatic migration.
 - **dev** — git clone; skipped entirely.
 
 ## Deferred (U7)
 
-Bash auto-update from the daemon: drain in-flight work, run `hive update`, re-exec into the new version (idle = active-agent snapshot empty AND `controller.in_flight_count == 0`). Needs a live systemd-user daemon spike because the updater currently `Kernel.exec`s. Non-daemon users are also not nudged in this scope.
+Bash auto-update from the daemon: drain in-flight work, run `hive update`, and
+re-exec into the new version (idle = active-agent snapshot empty AND
+`controller.in_flight_count == 0`). The foreground updater now waits for its
+installer and migration subprocesses, but unattended daemon ownership and
+restart proof still need a live systemd-user spike. Non-daemon users are also
+not nudged in this scope.
 
 ## Backlinks
 

@@ -36,11 +36,12 @@ class GoldenPathE2E < ApplicationSystemTestCase
   end
 
   setup do
+    @web_lock_path = File.join(__dir__, "../../Gemfile.lock")
+    @web_lock_before = File.binread(@web_lock_path)
     configure_owner!(owner: "") # claimable Hive web instance
     speed_up_daemon!
     @project = create_hive_project!("golden-app")
     force_headless_claude!(@project)
-    StatusBroadcaster.start!
     install_github_stub(login: "goldenpath")
     spawn_daemon!
   end
@@ -112,7 +113,8 @@ class GoldenPathE2E < ApplicationSystemTestCase
     fill_in "New idea", with: "Golden path sample idea"
     find(".composer select[name='project']").find("option[value='#{@project}']").select_option
     click_button "Add idea"
-    assert_selector ".task-row", text: "Golden path sample idea", wait: 10
+    slug_prefix = "golden-path-sample-idea-"
+    assert_selector ".task-row .task-slug", text: slug_prefix, wait: 10
 
     # --- The daemon pulls it from the inbox on its own ----------------------
     # No clicking: the golden path is "drop the idea, the pipeline runs".
@@ -122,7 +124,7 @@ class GoldenPathE2E < ApplicationSystemTestCase
     # Turbo may replace the grid row while the daemon advances the task. Read
     # the slug from the current DOM, then navigate directly instead of holding
     # a row element across live updates.
-    slug = task_slug_from_grid!("Golden path sample idea")
+    slug = task_slug_from_grid!(slug_prefix)
     visit "/tasks/#{@project}/#{slug}"
     answer_field = find("textarea[name='answers[1]']", wait: 45)
     assert_text "Ship the sample feature?"
@@ -143,10 +145,11 @@ class GoldenPathE2E < ApplicationSystemTestCase
     wait_for_answer_persisted!(slug, "Yes — ship it.")
 
     # --- The daemon drives brainstorm→plan→execute on its own --------------
-    # Each hop is a real dispatch + real fake-agent run + real stage logic;
-    # the page is push-morphed, so these waits ride live updates, no reloads.
-    assert_selector ".stage-badge", text: "execute", wait: 90
-    assert_selector ".task-meta", text: "Ready to open PR", wait: 90
+    # Each hop is a real dispatch + real fake-agent run + real stage logic.
+    # Wait for the durable PR-gate stage rather than its transient action
+    # label: after promotion a fast daemon may immediately dispatch open-pr,
+    # replacing "Ready to open PR" while the task remains at the same gate.
+    assert_selector ".stage-badge.stage-5", text: "open-pr", wait: 90
 
     # The implementation commit is real and lives in a real worktree.
     worktrees = Dir[File.join(ENV["HIVE_TEST_HOME_ROOT"], "worktrees", "*")]
@@ -154,27 +157,29 @@ class GoldenPathE2E < ApplicationSystemTestCase
     log = `git -C #{worktrees.first} log --oneline -1`
     assert_includes log, "golden path sample implementation",
                     "the fake agent's commit must be a real commit in a real worktree"
+    assert_equal @web_lock_before, File.binread(@web_lock_path),
+                 "the nested root bundle must not rewrite the web lockfile"
   end
 
   private
 
   # The status grid is Turbo-replaced while the daemon advances tasks. Read the
   # slug from a single current-DOM query instead of retaining a Capybara element.
-  def task_slug_from_grid!(title, timeout: 10)
-    title_json = title.to_json
+  def task_slug_from_grid!(identity, timeout: 10)
+    identity_json = identity.to_json
     deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
     loop do
       slug = page.evaluate_script(<<~JS)
         (() => {
           const rows = Array.from(document.querySelectorAll(".task-row"));
-          const row = rows.find((node) => node.textContent.includes(#{title_json}));
+          const row = rows.find((node) => node.textContent.includes(#{identity_json}));
           return row?.querySelector(".task-slug")?.textContent?.trim();
         })()
       JS
       return slug if slug && !slug.empty?
 
       if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
-        raise "task row for #{title.inspect} never exposed a slug"
+        raise "task row for #{identity.inspect} never exposed a slug"
       end
 
       sleep 0.1
@@ -306,6 +311,9 @@ class GoldenPathE2E < ApplicationSystemTestCase
   def spawn_daemon!
     env = {
       "HIVE_HOME" => ENV["HIVE_HOME"],
+      "HIVE_SKIP_LLM_WIKI_SCHEDULER" => ENV["HIVE_SKIP_LLM_WIKI_SCHEDULER"],
+      "HIVE_SKIP_LLM_WIKI_SYSTEMCTL" => ENV["HIVE_SKIP_LLM_WIKI_SYSTEMCTL"],
+      "HIVE_SKIP_LLM_WIKI_POST_COMMIT" => ENV["HIVE_SKIP_LLM_WIKI_POST_COMMIT"],
       # Worktrees must live INSIDE the sandbox — the project-config default
       # would land them in the operator's real ~/Dev.
       "HIVE_WORKTREE_BASE" => File.join(ENV["HIVE_TEST_HOME_ROOT"], "worktrees"),
@@ -323,15 +331,17 @@ class GoldenPathE2E < ApplicationSystemTestCase
     # Fail fast with the REAL error: on CI a broken spawn env produced a
     # daemon that died silently before its first log line, leaving an
     # undiagnosable timeout 90s later.
-    probe_out, probe_err, probe = Open3.capture3(env, "bundle", "exec", "ruby", "-Ilib",
-                                                 "bin/hive", "--version", chdir: REPO_ROOT)
-    unless probe.success?
-      raise "daemon env probe failed (#{probe.exitstatus}): #{probe_err.strip}\n#{probe_out.strip}"
-    end
-
     @daemon_log = ENV.fetch("GOLDEN_E2E_DAEMON_LOG", File.join(ENV["HIVE_TEST_HOME_ROOT"], "golden-daemon.log"))
-    @daemon_pid = Process.spawn(env, "bundle", "exec", "ruby", "-Ilib", "bin/hive",
-                                "daemon", "start", "--foreground",
-                                chdir: REPO_ROOT, out: @daemon_log, err: @daemon_log)
+    Bundler.with_unbundled_env do
+      probe_out, probe_err, probe = Open3.capture3(env, "bundle", "exec", "ruby", "-Ilib",
+                                                   "bin/hive", "--version", chdir: REPO_ROOT)
+      unless probe.success?
+        raise "daemon env probe failed (#{probe.exitstatus}): #{probe_err.strip}\n#{probe_out.strip}"
+      end
+
+      @daemon_pid = Process.spawn(env, "bundle", "exec", "ruby", "-Ilib", "bin/hive",
+                                  "daemon", "start", "--foreground",
+                                  chdir: REPO_ROOT, out: @daemon_log, err: @daemon_log)
+    end
   end
 end

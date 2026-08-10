@@ -82,16 +82,22 @@ class HiveDaemonLoggerTest < Minitest::Test
     end
   end
 
-  def test_auto_retry_events_are_accepted
-    with_log do |logger, path|
-      %i[auto_retry auto_retry_skipped auto_retry_exhausted auto_retry_failed].each do |event|
-        logger.event(event, project: "demo", slug: "task", stage: "4-execute")
-      end
-      logger.close
+  # A production `.event(:foo, ...)` call whose symbol is absent from EVENTS
+  # raises ArgumentError only when that path runs. Permissive fake loggers in
+  # dispatcher tests cannot catch that integration error, so keep every
+  # literal daemon event synchronized with the real closed enum.
+  def test_every_daemon_event_symbol_is_whitelisted
+    daemon_dir = File.expand_path("../../../lib/hive/daemon", __dir__)
+    emitted = Dir[File.join(daemon_dir, "**", "*.rb")].flat_map do |file|
+      File.read(file).scan(/\.event\(:([a-z_][a-z0-9_]*)/).flatten.map(&:to_sym)
+    end.uniq
 
-      events = File.readlines(path, chomp: true).map { |line| JSON.parse(line).fetch("event") }
-      assert_equal %w[auto_retry auto_retry_skipped auto_retry_exhausted auto_retry_failed], events
-    end
+    refute_empty emitted,
+                 "expected to find at least one .event(:symbol) call under lib/hive/daemon/"
+    unknown = emitted - Hive::Daemon::Logger::EVENTS
+    assert_empty unknown,
+                 "these daemon event symbols are emitted but absent from Logger::EVENTS " \
+                 "and would raise ArgumentError at runtime: #{unknown.inspect}"
   end
 
   # ── rotation ──────────────────────────────────────────────────────────

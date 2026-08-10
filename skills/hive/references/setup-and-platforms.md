@@ -106,6 +106,14 @@ the user reviews and approves enrollment, ask them to run `hive init .` in
 their own real terminal so they can change those defaults. Do not run it
 headlessly on their behalf or invent bypass flags.
 
+The workflow-creator route has one narrower fresh-project exception. It must
+first show the no-write `hive init --new-workflow ID --minimal --preview
+--json` payload and receive one explicit confirmation. The matching minimal
+execution disables patrol, architecture patrol, ad-hoc auto-fix, daemon
+dispatch/autostart, babysitting, optional reviewers, and service/timer setup;
+it retains core hive/state, registration, and required context hooks. Do not
+substitute ordinary non-TTY init for this preview/confirmation contract.
+
 OpenClaw installs the public ClawHub projection separately:
 
 ```bash

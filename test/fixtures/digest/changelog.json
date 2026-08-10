@@ -1,0 +1,49 @@
+{
+  "facts": [
+    {
+      "id": "fact-body",
+      "repository": "github.com/owner/repo",
+      "number": 7,
+      "kind": "material",
+      "text": "Introduces the implementation and migration described by the pull request.",
+      "evidence_ids": ["620c3a937ce8-pr7-body-001"]
+    },
+    {
+      "id": "fact-file",
+      "repository": "github.com/owner/repo",
+      "number": 7,
+      "kind": "no_user_facing_change",
+      "text": "The file header only identifies the changed implementation file.",
+      "evidence_ids": ["620c3a937ce8-pr7-file-001"]
+    },
+    {
+      "id": "fact-hunk",
+      "repository": "github.com/owner/repo",
+      "number": 7,
+      "kind": "material",
+      "text": "Updates the implementation to fix the reported behavior.",
+      "evidence_ids": ["620c3a937ce8-pr7-hunk-001-001"]
+    }
+  ],
+  "projects": [
+    {
+      "repository": "github.com/owner/repo",
+      "significance": "This change makes the project safer to operate and upgrade.",
+      "pull_requests": [
+        {
+          "number": 7,
+          "bullets": [
+            {
+              "text": "Adds the implementation and its migration path.",
+              "fact_ids": ["fact-body"]
+            },
+            {
+              "text": "Fixes the behavior in the changed implementation.",
+              "fact_ids": ["fact-hunk"]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

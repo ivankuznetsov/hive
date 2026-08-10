@@ -42,6 +42,15 @@ module Hive
       nil
     end
 
+    def origin_absent?(project_root, timeout_sec: LOOKUP_TIMEOUT_SECONDS)
+      _stdout, status = capture_origin(
+        File.expand_path(project_root), timeout_sec: timeout_sec
+      )
+      status&.exitstatus == 2
+    rescue SystemCallError, IOError
+      false
+    end
+
     def capture_origin(project_root, timeout_sec:)
       stdout_r, stdout_w = IO.pipe
       pid = Process.spawn(

@@ -69,7 +69,7 @@
           ]
         },
         "diagnostic": {
-          "description": "Mirrors the Diagnostic shape under hive-status.v2 `tasks[].diagnostic`. Inlined here so the schema validates standalone (JSONSchemer + most validators reject external URN refs without a registry).",
+          "description": "Mirrors the Diagnostic shape under the current hive-status `tasks[].diagnostic`. Inlined here so the schema validates standalone (JSONSchemer + most validators reject external URN refs without a registry).",
           "oneOf": [
             {
               "$ref": "#/$defs/Diagnostic"

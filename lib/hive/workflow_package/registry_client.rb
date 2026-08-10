@@ -5,6 +5,7 @@ require "timeout"
 require "tmpdir"
 require "hive/workflow_package/canonical_json"
 require "hive/workflow_package/manifest"
+require "hive/workflow_package/publish_receipt"
 require "hive/workflow_package/registry_manifest"
 require "hive/workflow_package/validator"
 
@@ -13,6 +14,8 @@ module Hive
     class RegistryError < Hive::Error
       def exit_code = Hive::ExitCodes::UNAVAILABLE
     end
+
+    class CatalogueUnavailable < RegistryError; end
 
     class RegistryClient
       OFFICIAL_REPOSITORY = "https://github.com/ivankuznetsov/honeycomb.git".freeze
@@ -24,6 +27,7 @@ module Hive
         :name, :version, :source_commit, :catalog_commit,
         :source_revision, :manifest_digest, :hive_min_version, :summary, :permissions
       )
+      CatalogueObservation = Data.define(:listed, :catalog_commit, :entry)
 
       CATALOG_SCHEMA = "honeycomb-catalog/v2".freeze
       ENTRY_KEYS = %w[
@@ -37,8 +41,9 @@ module Hive
       ].freeze
       STATES = %w[listed soft_hidden yanked revoked].freeze
 
-      def initialize(repository: OFFICIAL_REPOSITORY, timeout_sec: TIMEOUT_SEC)
+      def initialize(repository: OFFICIAL_REPOSITORY, branch: nil, timeout_sec: TIMEOUT_SEC)
         @repository = repository
+        @branch = branch
         @timeout_sec = timeout_sec
       end
 
@@ -48,7 +53,7 @@ module Hive
         raise RegistryError, "registry destination must be empty" if File.exist?(destination) && !Dir.empty?(destination)
 
         Dir.mktmpdir("hive-honeycomb-registry-") do |checkout|
-          git!("clone", "--quiet", "--no-checkout", "--", @repository, checkout)
+          clone!(checkout)
           catalog_commit = git!("-C", checkout, "rev-parse", "HEAD").strip
           validate_full_sha!(catalog_commit, "catalog commit")
           catalog_bytes = git!("-C", checkout, "show", "#{catalog_commit}:catalog.json", binary: true)
@@ -71,6 +76,39 @@ module Hive
         raise
       end
 
+      # Observe one immutable catalogue identity without materializing or
+      # executing package content. Absence is a successful current observation;
+      # transport failure is a distinct error so callers may label prior
+      # evidence as cached without hiding malformed catalogue data.
+      def observe(name:, version:, release_digest:)
+        unless RegistryManifest::NAME.match?(name.to_s) && RegistryManifest::SEMVER.match?(version.to_s) &&
+               Manifest::SHA256.match?(release_digest.to_s)
+          raise RegistryError, "catalogue observation identity is malformed"
+        end
+        Dir.mktmpdir("hive-honeycomb-observe-") do |checkout|
+          begin
+            clone!(checkout)
+            commit = git!("-C", checkout, "rev-parse", "HEAD").strip
+            validate_full_sha!(commit, "catalog commit")
+            bytes = git!("-C", checkout, "show", "#{commit}:catalog.json", binary: true)
+          rescue RegistryError => e
+            raise CatalogueUnavailable, e.message
+          end
+          catalog = parse_catalog(bytes)
+          entry = catalog.fetch("entries").find do |candidate|
+            candidate["name"] == name && candidate["version"] == version
+          end
+          return CatalogueObservation.new(listed: false, catalog_commit: commit, entry: nil).freeze unless entry
+          actual = entry.dig("listing_approval", "release_sha256")
+          unless actual == release_digest
+            raise PublishConflict, "catalogue immutable release digest conflicts with the publication"
+          end
+          CatalogueObservation.new(
+            listed: entry["state"] == "listed", catalog_commit: commit, entry: entry.freeze
+          ).freeze
+        end
+      end
+
       def parse_source(source)
         match = SOURCE.match(source.to_s)
         raise RegistryError, "workflow source must be honeycomb/<name>[@version-or-full-sha]" unless match
@@ -79,6 +117,12 @@ module Hive
       end
 
       private
+
+      def clone!(checkout)
+        args = [ "clone", "--quiet", "--no-checkout" ]
+        args.concat([ "--branch", @branch, "--single-branch" ]) if @branch
+        git!(*args, "--", @repository, checkout)
+      end
 
       def bind_catalog_metadata!(resolution, manifest)
         data = manifest.data

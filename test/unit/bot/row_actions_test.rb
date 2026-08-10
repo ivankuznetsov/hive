@@ -225,11 +225,12 @@ class HiveBotRowActionsTest < Minitest::Test
 
   def test_recovery_uses_existing_autofix_and_details_callbacks
     retryable = row(action: "recover_review", marker: "review_error", stage: "6-review",
-                    attrs: { "pass" => "2" }, diagnostic: retry_diagnostic)
+                    attrs: { "pass" => "2", "marker_id" => "review-generation-2" },
+                    diagnostic: retry_diagnostic)
     manual = row(action: "recover_execute", marker: "execute_stale", stage: "4-execute")
 
     assert_equal [ :autofix ], roles(retryable)
-    assert_equal [ "autofix:hive:slug-260624-abcd:6-review:review_error:pass=2" ],
+    assert_equal [ "autofix:hive:slug-260624-abcd:6-review:review_error:marker_id=review-generation-2" ],
                  callbacks(retryable)
     assert_equal [ :details ], roles(manual)
     assert_equal [ "details:hive:slug-260624-abcd:4-execute" ], callbacks(manual)

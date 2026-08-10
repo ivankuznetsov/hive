@@ -1,10 +1,14 @@
 <aside id="project-nav" class="project-nav" aria-label="Project filter">
-  <button type="button" class="project-nav-item" data-project-filter-target="button"
-          data-action="project-filter#choose" data-project-filter-name-param="">All projects</button>
+  <%= link_to "All projects", status_project_filter_path(nil),
+        class: class_names("project-nav-item", "active": selected_project.blank?),
+        aria: { current: ("page" if selected_project.blank?) },
+        data: { action: "project-filter#choose", project_filter_name_param: "" } %>
   <% projects.each do |project| %>
     <% name = project.name %>
-    <button type="button" class="project-nav-item" data-project-filter-target="button"
-            data-action="project-filter#choose" data-project-filter-name-param="<%= name %>"><%= name %></button>
+    <%= link_to name, status_project_filter_path(name),
+          class: class_names("project-nav-item", "active": selected_project == name),
+          aria: { current: ("page" if selected_project == name) },
+          data: { action: "project-filter#choose", project_filter_name_param: name } %>
   <% end %>
   <%= link_to "+ Add project", repos_path, class: "project-nav-item project-nav-add" %>
 </aside>

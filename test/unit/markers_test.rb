@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/markers"
+require "timeout"
 
 class MarkersTest < Minitest::Test
   include HiveTestHelper
@@ -8,6 +9,42 @@ class MarkersTest < Minitest::Test
     with_tmp_dir do |dir|
       state = Hive::Markers.current(File.join(dir, "nope.md"))
       assert state.none?, "missing file should report :none"
+    end
+  end
+
+  def test_current_rejects_symlinks_and_fifos_without_blocking
+    skip "File::NONBLOCK is unavailable" unless File.const_defined?(:NONBLOCK)
+
+    with_tmp_dir do |dir|
+      target = File.join(dir, "target.md")
+      link = File.join(dir, "link.md")
+      fifo = File.join(dir, "fifo.md")
+      File.write(target, "<!-- COMPLETE -->\n")
+      File.symlink(target, link)
+      File.mkfifo(fifo, 0o600)
+
+      states = Timeout.timeout(1) do
+        [ Hive::Markers.current(link), Hive::Markers.current(fifo) ]
+      end
+
+      assert states.all?(&:none?)
+      assert_equal "<!-- COMPLETE -->\n", File.read(target)
+    end
+  end
+
+  def test_current_reads_only_a_bounded_tail_of_a_large_sparse_artifact
+    with_tmp_dir do |dir|
+      file = File.join(dir, "large.md")
+      File.open(file, "wb") do |io|
+        io.write("Outcome: verified\n")
+        io.seek(32 * 1024 * 1024, IO::SEEK_SET)
+        io.write("<!-- COMPLETE -->\n")
+      end
+
+      state = Timeout.timeout(1) { Hive::Markers.current(file) }
+
+      assert_equal :complete, state.name
+      assert_operator File.size(file), :>, Hive::Markers::MAX_MARKER_SCAN_BYTES
     end
   end
 
@@ -166,6 +203,24 @@ class MarkersTest < Minitest::Test
     end
   end
 
+  def test_recovery_marker_id_upgrade_is_compare_and_swap
+    with_tmp_dir do |dir|
+      file = File.join(dir, "x.md")
+      File.write(file, "# Task\n<!-- ERROR reason=timeout -->\n")
+      observed = Hive::Markers.current(file)
+
+      assert Hive::Markers.upgrade_recovery_marker_id(file, observed: observed)
+      upgraded = Hive::Markers.current(file)
+      assert_equal "timeout", upgraded.attrs.fetch("reason")
+      assert_match(/\A[0-9a-f]{16}\z/, upgraded.attrs.fetch("marker_id"))
+
+      File.write(file, "# Task\n<!-- ERROR reason=newer marker_id=newer-id -->\n")
+      refute Hive::Markers.upgrade_recovery_marker_id(file, observed: observed)
+      assert_equal "newer-id", Hive::Markers.current(file).attrs.fetch("marker_id"),
+                   "a migration read must never overwrite a newer marker generation"
+    end
+  end
+
   def test_review_recovery_markers_get_unique_marker_ids
     with_tmp_dir do |dir|
       file = File.join(dir, "x.md")
@@ -184,10 +239,10 @@ class MarkersTest < Minitest::Test
     end
   end
 
-  def test_error_recovery_match_attr_prefers_marker_id_alone_when_no_reason
+  def test_recovery_match_attr_prefers_marker_id_alone_when_no_reason
     attrs = { "exit_code" => "70", "marker_id" => "err-70" }
 
-    assert_equal "marker_id=err-70", Hive::Markers.error_recovery_match_attr(attrs)
+    assert_equal "marker_id=err-70", Hive::Markers.recovery_match_attr(attrs)
   end
 
   # `marker_id` keeps its primary "race-safe clear guard" role, but the
@@ -197,17 +252,17 @@ class MarkersTest < Minitest::Test
   # reply. Encode both as comma-separated pairs; `marker_id` stays the
   # leading token so AlertStore.parse_match_attr's first-token guard
   # still operates on it.
-  def test_error_recovery_match_attr_encodes_marker_id_and_reason_when_both_present
+  def test_recovery_match_attr_encodes_marker_id_and_reason_when_both_present
     attrs = { "reason" => "ensure_clean_on_exit_failed", "marker_id" => "err-70" }
 
     assert_equal "marker_id=err-70,reason=ensure_clean_on_exit_failed",
-                 Hive::Markers.error_recovery_match_attr(attrs)
+                 Hive::Markers.recovery_match_attr(attrs)
   end
 
-  def test_error_recovery_match_attr_falls_back_to_reason_and_exit_code
+  def test_recovery_match_attr_rejects_idless_legacy_marker
     attrs = { "reason" => "agent_failed", "exit_code" => "70" }
 
-    assert_equal "reason=agent_failed,exit_code=70", Hive::Markers.error_recovery_match_attr(attrs)
+    assert_nil Hive::Markers.recovery_match_attr(attrs)
   end
 
   def test_display_attrs_hides_internal_marker_id
@@ -248,25 +303,68 @@ class MarkersTest < Minitest::Test
   def test_set_tolerates_fsync_failure
     with_tmp_dir do |dir|
       file = File.join(dir, "x.md")
-      original_open = File.method(:open)
-      tmp_marker = ".#{File.basename(file)}.tmp."
-
-      File.define_singleton_method(:open) do |path_arg, *args, **kwargs, &block|
-        if path_arg.to_s.include?(tmp_marker) && block
-          original_open.call(path_arg, *args, **kwargs) do |handle|
-            handle.define_singleton_method(:fsync) { raise IOError, "fsync unavailable" }
-            block.call(handle)
-          end
-        else
-          original_open.call(path_arg, *args, **kwargs, &block)
-        end
+      original_create = Tempfile.method(:create)
+      Tempfile.define_singleton_method(:create) do |*args, **kwargs|
+        handle = original_create.call(*args, **kwargs)
+        handle.define_singleton_method(:fsync) { raise IOError, "fsync unavailable" }
+        handle
       end
 
       Hive::Markers.set(file, :waiting)
 
       assert_equal :waiting, Hive::Markers.current(file).name
     ensure
-      File.define_singleton_method(:open, original_open)
+      Tempfile.define_singleton_method(:create, original_create)
+    end
+  end
+
+  def test_set_ignores_preplanted_predictable_temp_symlink
+    with_tmp_dir do |dir|
+      file = File.join(dir, "x.md")
+      outside = File.join(dir, "outside.md")
+      predictable = File.join(dir, ".x.md.tmp.#{Process.pid}")
+      File.write(outside, "outside stays intact\n")
+      File.symlink(outside, predictable)
+
+      Hive::Markers.set(file, :error, reason: "terminal_outcome_blocked")
+
+      assert_equal "outside stays intact\n", File.read(outside)
+      assert File.symlink?(predictable)
+      assert_equal :error, Hive::Markers.current(file).name
+    end
+  end
+
+  def test_set_rejects_temporary_file_identity_substitution_before_rename
+    with_tmp_dir do |dir|
+      file = File.join(dir, "x.md")
+      original = File.method(:lstat)
+      fake = Struct.new(:file?, :symlink?, :dev, :ino).new(true, false, -1, -1)
+      replacement = lambda do |path|
+        File.basename(path).start_with?(".x.md.tmp.") ? fake : original.call(path)
+      end
+
+      error = with_replaced_singleton_method(File, :lstat, replacement) do
+        assert_raises(IOError) { Hive::Markers.set(file, :waiting) }
+      end
+
+      assert_includes error.message, "temporary file identity changed"
+      refute File.exist?(file)
+    end
+  end
+
+  def test_set_rejects_installed_file_identity_substitution_after_rename
+    with_tmp_dir do |dir|
+      file = File.join(dir, "x.md")
+      original = File.method(:lstat)
+      fake = Struct.new(:file?, :symlink?, :dev, :ino).new(true, false, -1, -1)
+      replacement = ->(path) { path == file ? fake : original.call(path) }
+
+      error = with_replaced_singleton_method(File, :lstat, replacement) do
+        assert_raises(IOError) { Hive::Markers.set(file, :waiting) }
+      end
+
+      assert_includes error.message, "identity changed during atomic rename"
+      assert File.file?(file)
     end
   end
 
@@ -356,6 +454,7 @@ class MarkersTest < Minitest::Test
       state = Hive::Markers.current(file)
       assert_equal :review_ci_stale, state.name
       assert_equal "3", state.attrs["attempts"]
+      assert_match(/\A[0-9a-f]{16}\z/, state.attrs.fetch("marker_id"))
     end
   end
 
@@ -366,6 +465,7 @@ class MarkersTest < Minitest::Test
       state = Hive::Markers.current(file)
       assert_equal :review_stale, state.name
       assert_equal "4", state.attrs["pass"]
+      assert_match(/\A[0-9a-f]{16}\z/, state.attrs.fetch("marker_id"))
     end
   end
 
@@ -436,6 +536,30 @@ class MarkersTest < Minitest::Test
       assert_includes File.read(file), "# status history"
       assert_includes File.read(file), "second attempt"
       refute_match Hive::Markers::MARKER_RE, File.read(file)
+    end
+  end
+
+  def test_guarded_clear_without_purge_removes_only_the_current_marker
+    with_tmp_dir do |dir|
+      file = File.join(dir, "task.md")
+      File.write(file, <<~MD)
+        # status history
+
+        <!-- ERROR reason=first marker_id=old -->
+        second attempt
+        <!-- ERROR reason=second marker_id=current -->
+      MD
+
+      cleared = Hive::Markers.clear_current(
+        file,
+        expected_name: :error,
+        match_attrs: { marker_id: "current" }
+      )
+
+      assert cleared
+      assert_equal "old", Hive::Markers.current(file).attrs.fetch("marker_id")
+      assert_includes File.read(file), "second attempt"
+      refute_includes File.read(file), "marker_id=current"
     end
   end
 

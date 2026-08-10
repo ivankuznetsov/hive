@@ -2,7 +2,7 @@ require "test_helper"
 require "hive/stages/review/triage"
 require "hive/reviewers"
 require "hive/agent_profiles"
-require "hive/protected_files"
+require "hive/artifact_firewall"
 
 # Direct coverage for the triage step of the 6-review autonomous loop.
 class TriageTest < Minitest::Test
@@ -231,10 +231,10 @@ class TriageTest < Minitest::Test
 
   # --- SHA-256 protected files ------------------------------------------
 
-  # Parameterized over every file in Hive::ProtectedFiles::ORCHESTRATOR_OWNED
+  # Parameterized over every file in Hive::ArtifactFirewall::ORCHESTRATOR_OWNED
   # (post-LFG-2 refactor). Each protected file's mutation must yield
   # :tampered with that filename surfaced in tampered_files.
-  Hive::ProtectedFiles::ORCHESTRATOR_OWNED.each do |protected_file|
+  Hive::ArtifactFirewall::ORCHESTRATOR_OWNED.each do |protected_file|
     define_method("test_protected_file_tampering_#{protected_file.tr('.', '_')}_yields_tampered_status") do
       with_triage_dir do |dir, task_folder|
         ctx = make_ctx(dir, task_folder)
@@ -264,6 +264,8 @@ class TriageTest < Minitest::Test
         assert_includes result.tampered_files, protected_file,
                         "#{protected_file}: expected in tampered_files=#{result.tampered_files.inspect}"
         assert_match(/protected files/, result.error_message)
+        assert_equal "original #{protected_file} content\n", File.binread(target),
+                     "#{protected_file}: triage must restore the controller-owned bytes"
       end
     end
   end
@@ -304,6 +306,39 @@ class TriageTest < Minitest::Test
       assert_includes result.tampered_files, "reviews/suppressed.md",
                       "expected reviews/suppressed.md in tampered_files=#{result.tampered_files.inspect}"
       assert_match(/protected files/, result.error_message)
+      assert_equal "<!-- HIVE-SUPPRESS v1 base=abc123 -->\n", File.binread(suppressed)
+    end
+  end
+
+  def test_triage_reports_protected_file_restore_failure
+    with_triage_dir do |dir, task_folder|
+      ctx = make_ctx(dir, task_folder)
+      File.write(
+        File.join(task_folder, "reviews", "claude-ce-code-review-01.md"),
+        "## High\n- [ ] finding\n"
+      )
+      task_md = File.join(task_folder, "task.md")
+      File.write(task_md, "trusted task\n")
+      escalations = File.join(task_folder, "reviews", "escalations-01.md")
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = task_md
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "tampered task\n"
+
+      result = nil
+      with_replaced_singleton_method(
+        Hive::ProtectedFiles,
+        :restore_paths_safely,
+        ->(_paths, _captured, _labels) { [ false, "synthetic restore failure" ] }
+      ) do
+        result = Hive::Stages::Review::Triage.run!(
+          cfg: default_cfg,
+          ctx: ctx
+        )
+      end
+
+      assert_equal :error, result.status
+      assert_equal [ "task.md" ], result.tampered_files
+      assert_includes result.error_message, "synthetic restore failure"
+      refute File.exist?(escalations)
     end
   end
 
@@ -329,6 +364,7 @@ class TriageTest < Minitest::Test
       captured = {}
       replacement = lambda do |_task, _cfg, **kwargs|
         captured = kwargs
+        File.write(kwargs.fetch(:expected_output), "# Escalations\n")
         { status: :ok, log_label: "review-triage-pass01" }
       end
 
@@ -354,6 +390,28 @@ class TriageTest < Minitest::Test
 
       assert_equal :error, result.status
       assert_match(/missing or empty/, result.error_message)
+    end
+  end
+
+  def test_successful_spawn_without_escalations_is_rejected_by_firewall
+    with_triage_dir do |dir, task_folder|
+      ctx = make_ctx(dir, task_folder)
+      File.write(
+        File.join(task_folder, "reviews", "claude-ce-code-review-01.md"),
+        "## Nit\n- [ ] x: y\n"
+      )
+      successful_spawn = lambda do |_task, _cfg, **_kwargs|
+        { status: :ok, log_label: "review-triage-pass01" }
+      end
+
+      with_replaced_singleton_method(
+        Hive::Stages::Base, :spawn_claude!, successful_spawn
+      ) do
+        result = Hive::Stages::Review::Triage.run!(cfg: default_cfg, ctx: ctx)
+
+        assert_equal :error, result.status
+        assert_includes result.error_message, "required output"
+      end
     end
   end
 

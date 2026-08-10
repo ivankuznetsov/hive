@@ -8,23 +8,19 @@ require "eval/eval_helper"
 #      marker NOT in ALWAYS_MANUAL_MARKERS) emits a notification whose
 #      keyboard is exactly [["🔧 Autofix"]] — no Show details, no Open
 #      laptop, no other buttons.
-#   2. The Autofix callback_data carries the recovery_match_attr suffix
-#      derived from row attrs (`pass` for review_error rows, per
-#      notification_builders.rb:188).
+#   2. The Autofix callback_data carries the durable marker_id guard.
 #   3. Tapping the button:
 #      - fires answerCallbackQuery exactly once (spinner ack)
 #      - clears the inline keyboard on the originating message
 #        (anti-double-tap)
-#      - dispatches `hive markers clear ... --match-attr ...` FIRST and
-#        the retry verb (`hive review`) SECOND, in that order
-#      - emits NO additional Sent — regression guard for the dispatch
-#        chatter suppression (fdebb64e).
+#      - submits exactly one guarded request to RecoveryCoordinator
+#      - renders the coordinator's canonical queued receipt
 #   4. A row whose marker is in ALWAYS_MANUAL_MARKERS (execute_stale)
 #      gets a "Show details"-only keyboard with no Autofix anywhere.
 class HiveEvalS8AutofixTest < Minitest::Test
   include Hive::Eval::ScenarioSupport
 
-  def test_autofix_keyboard_dispatches_markers_clear_then_retry_in_order
+  def test_autofix_keyboard_submits_one_coordinator_recovery
     given_project(name: "hive", daemon_enabled: true)
 
     when_agent_emits(rows: [
@@ -32,7 +28,10 @@ class HiveEvalS8AutofixTest < Minitest::Test
         slug: "stuck-260525-abcd",
         stage: "6-review",
         marker: "review_error",
-        attrs: { "phase" => "fix", "pass" => "2" },
+        attrs: {
+          "phase" => "fix", "pass" => "2",
+          "marker_id" => "x"
+        },
         action: "recover_review",
         diagnostic: { "suggested_next_action" => { "kind" => "retry" } }
       )
@@ -45,8 +44,11 @@ class HiveEvalS8AutofixTest < Minitest::Test
                  "retryable recovery keyboard must be exactly 🔧 Autofix"
 
     autofix_cb = keyboard.flatten.first[:callback_data]
-    assert_equal "autofix:hive:stuck-260525-abcd:6-review:review_error:pass=2", autofix_cb,
-                 "callback_data must carry recovery_match_attr suffix (pass=2 for review_error)"
+    assert_equal(
+      "autofix:hive:stuck-260525-abcd:6-review:review_error:marker_id=x",
+      autofix_cb,
+      "callback_data must carry the durable recovery generation"
+    )
 
     sent_before_tap = harness.sent.length
 
@@ -55,22 +57,22 @@ class HiveEvalS8AutofixTest < Minitest::Test
     assert_equal 1, harness.telegram.answered_callbacks.length,
                  "tap must fire answerCallbackQuery exactly once"
 
-    assert_equal 1, harness.telegram.edits.length, "tap must clear the originating keyboard exactly once"
+    assert_equal(
+      1,
+      harness.telegram.edits.length,
+      "tap must clear the originating keyboard exactly once; sent=#{harness.sent.map(&:text).inspect}"
+    )
     assert_nil harness.telegram.edits.first.reply_markup,
                "edit_message_reply_markup with nil clears the keyboard"
 
-    argvs = harness.dispatched_commands
-    assert_equal 2, argvs.length, "tap must dispatch exactly two commands: markers clear, then the retry verb"
-    assert_equal [ "hive", "markers", "clear", "stuck-260525-abcd",
-                   "--name", "REVIEW_ERROR", "--project", "hive",
-                   "--match-attr", "pass=2", "--json" ], argvs[0],
-                 "first command must be markers clear with --match-attr from recovery_match_attr"
-    assert_equal [ "hive", "review", "stuck-260525-abcd",
-                   "--from", "6-review", "--project", "hive", "--json" ], argvs[1],
-                 "second command must be the retry verb arriving at 6-review (= review)"
-
-    assert_equal sent_before_tap, harness.sent.length,
-                 "tap must NOT emit a 'Queued command pid=' or 'Command completed' Sent (fdebb64e)"
+    assert_empty harness.dispatched_commands,
+                 "adapters must not clear markers or dispatch a second recovery mechanism"
+    recovery = harness.dispatch_request_writer.recoveries.fetch(0)
+    assert_equal "hive", recovery.fetch(:project)
+    assert_equal "stuck-260525-abcd", recovery.fetch(:row).slug
+    assert_equal "bot", recovery.fetch(:requestor)
+    assert_equal sent_before_tap + 1, harness.sent.length
+    assert_match(/Recovery queued/, harness.last_sent.text)
 
     assert_all_messages_typed
     assert_no_duplicates(window_sec: 300)

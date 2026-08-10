@@ -1,6 +1,9 @@
 name: durable_attempt_1849_replay
 description: A CLI-originated three-commit agent survives attachment termination and completes from its wrapper receipt.
 tags: [durable-attempt, cli-only, acceptance]
+coverage:
+  primary: attempt.terminal_replay
+  supporting: []
 steps:
   - kind: cli
     args: [new, "{project}", "durable attempt replay"]
@@ -14,7 +17,7 @@ steps:
     args: [brainstorm, "{slug}", --from, 1-inbox]
     env:
       HIVE_FAKE_CLAUDE_WRITE_FILE: "{task_dir:2-brainstorm}/brainstorm.md"
-      HIVE_FAKE_CLAUDE_WRITE_CONTENT: "# Brainstorm\n\n<!-- COMPLETE -->\n"
+      HIVE_FAKE_CLAUDE_WRITE_CONTENT: "# Brainstorm\n\n## Requirements\n\nImplement the durable replay.\n\n<!-- COMPLETE -->\n"
   - kind: cli
     args: [plan, "{slug}", --from, 2-brainstorm]
     env:
@@ -35,13 +38,13 @@ steps:
     id: temporary-caller
   - kind: ruby_block
     block: |
-      records = Dir[File.join(run_home, "attempts", "v1", "records", "*.json")].filter_map do |path|
-        candidate = JSON.parse(File.binread(path))
-        candidate if candidate["intended_stage"] == "4-execute"
-      end
+      require "hive/attempts/store"
+      store = Hive::Attempts::Store.open_default(state_home: run_home)
+      records = store.scan.records.select { |candidate| candidate["intended_stage"] == "4-execute" }
       raise "expected one execute attempt, got #{records.size}" unless records.size == 1
       record = records.first
       raise "attempt was not still running after caller termination: #{record['state']}" unless record["state"] == "running"
+      File.write(File.join(run_home, "1849-attempt-id"), "#{record.attempt_id}\n")
       task_folder = File.join(sandbox, ".hive-state", "stages", "4-execute", slug)
       pointer = YAML.safe_load(File.read(File.join(task_folder, "worktree.yml")))
       worktree = pointer.fetch("path")
@@ -55,19 +58,22 @@ steps:
     timeout: 30
   - kind: ruby_block
     block: |
+      require "hive/attempts/store"
+      store = Hive::Attempts::Store.open_default(state_home: run_home)
+      attempt_id = File.read(File.join(run_home, "1849-attempt-id")).strip
       deadline = Time.now + 10
       record = nil
       loop do
-        records = Dir[File.join(run_home, "attempts", "v1", "records", "*.json")].filter_map do |path|
-          candidate = JSON.parse(File.binread(path))
-          candidate if candidate["intended_stage"] == "4-execute"
+        record = store.fetch(attempt_id)
+        raise "execute attempt disappeared" unless record
+        duplicates = store.scan.records.select do |candidate|
+          candidate["intended_stage"] == "4-execute" && candidate.attempt_id != attempt_id
         end
-        raise "duplicate execute attempt appeared: #{records.size}" unless records.size == 1
-        record = records.first
+        raise "duplicate execute attempt appeared: #{duplicates.size}" unless duplicates.empty?
         break if record["state"] == "terminal"
         raise "attempt did not terminalize" if Time.now >= deadline
         sleep 0.05
       end
-      receipt = record.fetch("receipt")
+      receipt = record["receipt"]
       raise "wrapper receipt did not succeed" unless receipt["outcome"] == "succeeded" && receipt["exit_status"] == 0
       raise "receipt identity mismatch" unless receipt["attempt_id"] == record["attempt_id"] && receipt["task_generation"] == record["task_generation"]

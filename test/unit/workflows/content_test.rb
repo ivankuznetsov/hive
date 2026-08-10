@@ -45,10 +45,10 @@ class WorkflowsContentTest < Minitest::Test
   def test_descriptor_pins_agent_skills_budgets_timeouts_and_status_modes
     expected = {
       "research" => [ "/deep-research", 3.0, 1800 ],
-      "outline" => [ "/seo:research", 0.75, 600 ],
-      "draft" => [ "/write:writer", 1.5, 1200 ],
-      "critique" => [ "/write:editor", 1.0, 900 ],
-      "done" => [ "/write:writer", 1.0, 900 ]
+      "outline" => [ "/seo:research", 1.5, 600 ],
+      "draft" => [ "/write:writer", 3.0, 1200 ],
+      "critique" => [ "/write:editor", 2.0, 900 ],
+      "done" => [ "/write:writer", 2.0, 900 ]
     }
 
     expected.each do |name, (skill, budget_usd, timeout_sec)|
@@ -64,6 +64,20 @@ class WorkflowsContentTest < Minitest::Test
     assert_nil inbox.budget_usd
     assert_nil inbox.timeout_sec
     assert_nil inbox.status_mode
+  end
+
+  def test_content_budget_defaults_are_one_authoritative_frozen_fixture
+    expected = {
+      "research" => 3.0,
+      "outline" => 1.5,
+      "draft" => 3.0,
+      "critique" => 2.0,
+      "done" => 2.0
+    }
+
+    assert_equal expected, Hive::Workflows::Content::BUDGET_USD
+    assert Hive::Workflows::Content::BUDGET_USD.frozen?
+    assert_equal expected, expected.to_h { |name, _| [ name, stages_by_name.fetch(name).budget_usd ] }
   end
 
   def test_descriptor_carries_transition_verbs_after_inbox

@@ -99,6 +99,7 @@ module Hive
         if finding
           entry["category"] = finding.category.to_s
           entry["feature_id"] = finding.feature_id.to_s
+          entry["target_sha"] = finding.target_sha.to_s unless finding.target_sha.to_s.empty?
           entry["title_tokens"] = title_tokens(finding)
           root_cause = semantic_tokens(finding)
           entry["root_cause_tokens"] = root_cause unless root_cause.empty?
@@ -136,13 +137,41 @@ module Hive
         entries = (index || similarity_index(fingerprints, dismissed)).fetch(category, [])
         entries.any? do |entry|
           other = Array(entry["title_tokens"]).map(&:to_s)
-          title_match = !other.empty? && overlap_coefficient(tokens, other) >= SIMILARITY_THRESHOLD
           other_root = Array(entry["root_cause_tokens"]).map(&:to_s)
-          root_match = !root_cause.empty? && !other_root.empty? &&
-                       overlap_coefficient(root_cause, other_root) >= SIMILARITY_THRESHOLD
-
-          title_match || root_match
+          semantic_token_match?(tokens, root_cause, other, other_root)
         end
+      end
+
+      # Compare two complete finding records without requiring either one to
+      # have reached the PR/dismissal ledger. Discovery uses this before it
+      # persists a new record, so repeated model wording cannot accumulate as
+      # a second active finding merely because the first item has not shipped.
+      def semantically_same?(left, right)
+        semantically_same_signature?(semantic_signature(left), semantic_signature(right))
+      end
+
+      def semantic_signature(finding)
+        {
+          fingerprint: finding.fingerprint.to_s,
+          category: finding.category.to_s,
+          title: title_tokens(finding).to_set,
+          root: semantic_tokens(finding).to_set
+        }
+      end
+
+      def semantically_same_signature?(left, right)
+        return true if !left.fetch(:fingerprint).empty? && left[:fingerprint] == right[:fingerprint]
+        return false unless left[:category] == right[:category]
+
+        semantic_token_match?(left[:title], left[:root], right[:title], right[:root])
+      end
+
+      def semantic_token_match?(title, root, other_title, other_root)
+        title_match = !title.empty? && !other_title.empty? &&
+                      overlap_coefficient(title, other_title) >= SIMILARITY_THRESHOLD
+        root_match = !root.empty? && !other_root.empty? &&
+                     overlap_coefficient(root, other_root) >= SIMILARITY_THRESHOLD
+        title_match || root_match
       end
 
       def semantic_tokens(finding)

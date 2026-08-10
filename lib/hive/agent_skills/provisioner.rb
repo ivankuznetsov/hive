@@ -2,6 +2,7 @@ require "digest"
 require "json"
 
 require "hive/agent_skills/adapters/registry"
+require "hive/agent_skills/target_resolver"
 
 module Hive
   module AgentSkills

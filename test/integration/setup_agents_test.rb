@@ -213,7 +213,7 @@ class SetupAgentsIntegrationTest < Minitest::Test
   end
 
   def inspect(cfg, dir)
-    Hive::AgentSkills::Inspector.new(config: cfg, project_root: dir).inspect
+    Hive::AgentSkills.hive_inspector(config: cfg, project_root: dir).inspect
   end
 
   def test_fresh_all_agent_setup_converges_and_second_run_is_a_noop

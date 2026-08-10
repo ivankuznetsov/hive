@@ -1,6 +1,7 @@
 require "test_helper"
 require "hive/agent_profile"
 require "hive/implementation_identity"
+require "hive/model_routing"
 
 class AgentProfileTest < Minitest::Test
   def test_policy_capabilities_are_optional_and_frozen
@@ -10,6 +11,28 @@ class AgentProfileTest < Minitest::Test
     capable = make_profile(policy_capabilities: %i[tools settings_isolation])
     assert_equal %i[tools settings_isolation], capable.policy_capabilities
     assert_predicate capable.policy_capabilities, :frozen?
+  end
+
+  def test_runtime_adapter_fields_are_optional_validated_and_frozen
+    profile = make_profile
+    assert_equal({}, profile.tool_scope_flags)
+    refute profile.raw_cli_arguments_supported?
+    assert_nil profile.structured_output_protocol
+
+    capable = make_profile(
+      tool_scope_flags: { allowed: "--allow", disallowed: "--deny" },
+      raw_cli_arguments_supported: true,
+      structured_output_protocol: :grok_end
+    )
+    assert_equal({ allowed: "--allow", disallowed: "--deny" }, capable.tool_scope_flags)
+    assert_predicate capable.tool_scope_flags, :frozen?
+    assert capable.raw_cli_arguments_supported?
+    assert_equal :grok_end, capable.structured_output_protocol
+
+    assert_raises(ArgumentError) { make_profile(tool_scope_flags: []) }
+    assert_raises(ArgumentError) { make_profile(tool_scope_flags: { unknown: "--flag" }) }
+    assert_raises(ArgumentError) { make_profile(tool_scope_flags: { allowed: "" }) }
+    assert_raises(ArgumentError) { make_profile(structured_output_protocol: :unknown) }
   end
 
   include HiveTestHelper
@@ -148,6 +171,281 @@ class AgentProfileTest < Minitest::Test
     assert_match(/cannot pin model/, error.message)
   end
 
+  def test_routed_effort_rejects_profiles_without_native_effort_support
+    %i[pi].each do |name|
+      profile = Hive::AgentProfiles.lookup(name)
+      resolution = Hive::ModelRouting.resolve(
+        models: { "plan" => { "effort" => "high" } },
+        stage: "plan",
+        provider: name,
+        current: { model: "provider/model-v1" }
+      )
+
+      error = assert_raises(Hive::ConfigError) do
+        profile.routing_arguments(resolution)
+      end
+
+      assert_match(/models\.plan\.effort/, error.message)
+      assert_match(/profile :#{name}/, error.message)
+      assert_match(/does not support reasoning effort/, error.message)
+    end
+  end
+
+  def test_builtin_profiles_render_only_their_native_routed_arguments
+    cases = {
+      claude: {
+        model: "opus",
+        effort: "high",
+        global: [],
+        subcommand: [ "--model", "opus", "--effort", "high" ]
+      },
+      codex: {
+        model: "gpt-5.6-sol",
+        effort: "xhigh",
+        global: [ "--model", "gpt-5.6-sol", "-c", "model_reasoning_effort=xhigh" ],
+        subcommand: []
+      },
+      grok: {
+        model: "grok-code-fast-1",
+        effort: "high",
+        global: [],
+        subcommand: [
+          "--model", "grok-code-fast-1",
+          "--reasoning-effort", "high"
+        ]
+      },
+      pi: {
+        model: "openai/gpt-5.6-sol",
+        effort: nil,
+        global: [],
+        subcommand: [ "--model", "openai/gpt-5.6-sol" ]
+      }
+    }
+
+    cases.each do |name, expected|
+      profile = Hive::AgentProfiles.lookup(name)
+      resolution = Hive::ModelRouting.resolve(
+        models: {
+          "plan" => {
+            "model" => expected.fetch(:model),
+            **({ "effort" => expected.fetch(:effort) } if expected.fetch(:effort))
+          }
+        },
+        stage: "plan",
+        provider: name
+      )
+
+      arguments = profile.routing_arguments(resolution)
+
+      assert_equal expected.fetch(:global), arguments.global_arguments, name
+      assert_equal expected.fetch(:subcommand), arguments.subcommand_arguments, name
+      assert_equal name, arguments.profile_name
+      assert_equal "plan", arguments.stage
+    end
+
+    assert_equal(
+      %w[default inherit none minimal low medium high xhigh max],
+      Hive::AgentProfiles.lookup(:grok).routed_effort_values
+    )
+  end
+
+  def test_codex_routed_model_and_effort_can_be_rendered_independently
+    profile = Hive::AgentProfiles.lookup(:codex)
+    only_model = profile.routing_arguments(
+      Hive::ModelRouting.resolve(
+        models: { "plan" => { "model" => "gpt-5.6-sol" } },
+        stage: "plan",
+        provider: :codex
+      )
+    )
+    only_effort = profile.routing_arguments(
+      Hive::ModelRouting.resolve(
+        models: { "plan" => { "effort" => "xhigh" } },
+        stage: "plan",
+        provider: :codex
+      )
+    )
+
+    assert_equal [ "--model", "gpt-5.6-sol" ], only_model.global_arguments
+    assert_equal [ "-c", "model_reasoning_effort=xhigh" ], only_effort.global_arguments
+  end
+
+  def test_routing_resolution_cannot_be_rendered_by_a_different_provider_profile
+    resolution = Hive::ModelRouting.resolve(
+      models: { "plan" => { "model" => "gpt-5.6-sol" } },
+      stage: "plan",
+      provider: :codex
+    )
+
+    error = assert_raises(Hive::ConfigError) do
+      Hive::AgentProfiles.lookup(:claude).routing_arguments(resolution)
+    end
+
+    assert_match(/selected provider :codex/, error.message)
+    assert_match(/profile :claude/, error.message)
+    assert_match(/may not change providers/, error.message)
+  end
+
+  def test_routed_field_renders_fallback_field_with_profile_native_sentinels
+    claude = Hive::AgentProfiles.lookup(:claude)
+    inherited_model = claude.routing_arguments(
+      Hive::ModelRouting.resolve(
+        models: { "plan" => { "effort" => "high" } },
+        stage: "plan",
+        provider: :claude,
+        current: { model: "inherit" }
+      )
+    )
+    default_effort = claude.routing_arguments(
+      Hive::ModelRouting.resolve(
+        models: { "plan" => { "model" => "opus" } },
+        stage: "plan",
+        provider: :claude,
+        current: { effort: "default" }
+      )
+    )
+
+    assert_equal [ "--effort", "high" ], inherited_model.subcommand_arguments
+    assert_equal [ "--model", "opus" ], default_effort.subcommand_arguments
+  end
+
+  def test_routed_effort_uses_each_profile_native_vocabulary
+    codex = Hive::AgentProfiles.lookup(:codex)
+    claude = Hive::AgentProfiles.lookup(:claude)
+
+    codex_error = assert_raises(Hive::ConfigError) do
+      codex.routing_arguments(
+        Hive::ModelRouting.resolve(
+          models: { "plan" => { "effort" => "max" } },
+          stage: "plan",
+          provider: :codex
+        )
+      )
+    end
+    claude_error = assert_raises(Hive::ConfigError) do
+      claude.routing_arguments(
+        Hive::ModelRouting.resolve(
+          models: { "plan" => { "effort" => "minimal" } },
+          stage: "plan",
+          provider: :claude
+        )
+      )
+    end
+
+    assert_match(/must be one of/, codex_error.message)
+    assert_match(/must be one of/, claude_error.message)
+  end
+
+  def test_inactive_routing_does_not_create_a_staged_argument_channel
+    profile = Hive::AgentProfiles.lookup(:codex)
+    resolution = Hive::ModelRouting.resolve(
+      models: {},
+      stage: nil,
+      provider: :codex,
+      current: { model: " untouched ", effort: "legacy-shape" }
+    )
+
+    assert_nil profile.routing_arguments(resolution)
+  end
+
+  def test_custom_profile_routing_metadata_is_optional_and_preserved_by_overrides
+    legacy = make_profile(model_argument_builder: ->(model) { [ "--model", model ] })
+    assert_equal :subcommand, legacy.routing_argument_placement
+
+    global = make_profile(
+      model_argument_builder: ->(model) { [ "--choose-model", model ] },
+      routed_effort_values: %w[low high],
+      routing_argument_placement: :global
+    )
+    overridden = global.with_overrides("min_version" => "9.9.9")
+
+    assert_equal :global, overridden.routing_argument_placement
+    assert_equal %w[low high], overridden.routed_effort_values
+
+    error = assert_raises(ArgumentError) do
+      make_profile(routing_argument_placement: :interleaved)
+    end
+    assert_match(/unknown routing_argument_placement/, error.message)
+  end
+
+  def test_routed_controls_reject_invalid_types_unsupported_fields_and_values
+    profile = make_profile
+    provenance = Hive::ModelRouting::Provenance.new(kind: :exact, key: "plan")
+
+    assert_raises(ArgumentError) do
+      profile.validate_routed_control!(Object.new)
+    end
+
+    unsupported_model = Hive::ModelRouting::EffectiveControl.new(
+      stage: "plan",
+      profile: :test,
+      provider: :test,
+      field: :model,
+      value: "provider/model",
+      provenance: provenance
+    )
+    error = assert_raises(Hive::ConfigError) do
+      profile.validate_routed_control!(unsupported_model)
+    end
+    assert_match(/does not support model selection/, error.message)
+
+    unknown_field = Hive::ModelRouting::EffectiveControl.new(
+      stage: "plan",
+      profile: :test,
+      provider: :test,
+      field: :temperature,
+      value: "high",
+      provenance: provenance
+    )
+    error = assert_raises(ArgumentError) do
+      profile.validate_routed_control!(unknown_field)
+    end
+    assert_match(/unknown routed control field/, error.message)
+
+    non_scalar = Hive::ModelRouting::EffectiveControl.new(
+      stage: "plan",
+      profile: :test,
+      provider: :test,
+      field: :model,
+      value: 42,
+      provenance: provenance
+    )
+    error = assert_raises(Hive::ConfigError) do
+      profile.validate_routed_control!(non_scalar)
+    end
+    assert_match(/must be a non-blank scalar/, error.message)
+  end
+
+  def test_routing_argument_validation_rejects_untyped_cross_profile_and_tampered_values
+    profile = Hive::AgentProfiles.lookup(:codex)
+    arguments = profile.routing_arguments(
+      Hive::ModelRouting.resolve(
+        models: { "plan" => { "model" => "gpt-5.6-sol" } },
+        stage: "plan",
+        provider: :codex
+      )
+    )
+
+    assert_raises(ArgumentError) { profile.routing_arguments(Object.new) }
+    assert_raises(ArgumentError) { profile.validate_routing_arguments!(Object.new) }
+
+    cross_profile = Hive::AgentProfile::RoutingArguments.new(
+      **arguments.to_h.merge(profile_name: :claude)
+    )
+    error = assert_raises(ArgumentError) do
+      profile.validate_routing_arguments!(cross_profile)
+    end
+    assert_match(/cannot be used with :codex/, error.message)
+
+    tampered = Hive::AgentProfile::RoutingArguments.new(
+      **arguments.to_h.merge(global_arguments: arguments.global_arguments + [ "--tampered" ])
+    )
+    error = assert_raises(ArgumentError) do
+      profile.validate_routing_arguments!(tampered)
+    end
+    assert_match(/do not match agent profile :codex native rendering/, error.message)
+  end
+
   def test_bin_uses_env_override_when_set
     profile = make_profile(bin_default: "/nonexistent/claude", env_bin_override_key: "HIVE_CLAUDE_BIN")
     assert_equal FAKE_BIN, profile.bin
@@ -182,6 +480,27 @@ class AgentProfileTest < Minitest::Test
     ENV["HIVE_FAKE_CLAUDE_VERSION"] = "1.0.0"
     err = assert_raises(Hive::AgentError) { profile.check_version! }
     assert_match(/below minimum/, err.message)
+  end
+
+  def test_check_version_rejects_ambiguous_version_output
+    profile = make_profile(min_version: "1.0.0")
+    ENV["HIVE_FAKE_CLAUDE_VERSION"] =
+      "wrapper 9.9.9 delegates to claude 2.0.0"
+
+    err = assert_raises(Hive::AgentError) { profile.check_version! }
+
+    assert_match(/ambiguous/, err.message)
+    assert_match(/9\.9\.9, 2\.0\.0/, err.message)
+  end
+
+  def test_check_version_rejects_output_without_a_version
+    profile = make_profile(min_version: "1.0.0")
+    ENV["HIVE_FAKE_CLAUDE_VERSION"] = "version unavailable"
+
+    err = assert_raises(Hive::AgentError) { profile.check_version! }
+
+    assert_match(/could not parse/, err.message)
+    assert_match(/version unavailable/, err.message)
   end
 
   def test_check_version_raises_when_binary_not_runnable
@@ -500,6 +819,18 @@ class AgentProfileTest < Minitest::Test
     assert_same model_builder, overridden.model_argument_builder
     assert_same effort_builder, overridden.effort_argument_builder
     assert_equal "custom-launcher/v2", overridden.launcher_identity
+  end
+
+  def test_with_overrides_preserves_runtime_adapter_fields
+    profile = make_profile(
+      tool_scope_flags: { allowed: "--allow" },
+      raw_cli_arguments_supported: true
+    )
+
+    overridden = profile.with_overrides("min_version" => "9.9.9")
+
+    assert_equal({ allowed: "--allow" }, overridden.tool_scope_flags)
+    assert overridden.raw_cli_arguments_supported?
   end
 
   # --- with_overrides ---------------------------------------------------

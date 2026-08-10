@@ -3,19 +3,22 @@ require "hive/attempts/client"
 require "hive/attempts/detached_launcher"
 require "hive/attempts/dispatcher"
 require "hive/attempts/launch_policy"
+require "hive/attempts/finalization_maintenance"
 
 module Hive
   module Attempts
-    # Foreground facade shared by CLI commands and local request producers.
-    # It performs durable admission and optionally attaches a read-only client;
-    # the existing command implementation runs later inside the wrapper.
+    # Internal foreground adapter behind Attempts::API. It performs durable
+    # admission and optionally attaches a read-only client; the existing
+    # command implementation runs later inside the wrapper.
     class Entrypoint
       def initialize(store: nil, dispatcher: nil, client: nil,
+                     maintenance: nil,
                      config_loader: Hive::Config.method(:load),
                      daemon_config_loader: Hive::Config.method(:load_global_daemon))
         @store = store
         @dispatcher = dispatcher
         @client = client
+        @maintenance = maintenance
         @config_loader = config_loader
         @daemon_config_loader = daemon_config_loader
       end
@@ -24,6 +27,9 @@ module Hive
                    provider: nil, interactive: true, now: Time.now.utc)
         cfg = @config_loader.call(task.project_root)
         store = @store || Store.new
+        maintenance = @maintenance
+        maintenance ||= foreground_maintenance(store) unless @store
+        run_opportunistic_maintenance(maintenance, now: now)
         dispatcher = @dispatcher || build_dispatcher(
           store, cfg, @daemon_config_loader.call, argv
         )
@@ -48,6 +54,19 @@ module Hive
       end
 
       private
+
+      # Storage upkeep must never become an admission outage. The concrete
+      # maintenance service records degraded health before raising, then the
+      # next due run retries while this request continues to dispatch.
+      def run_opportunistic_maintenance(maintenance, now:)
+        maintenance&.run_if_due(now: now)
+      rescue StandardError
+        nil
+      end
+
+      def foreground_maintenance(store)
+        @maintenance = FinalizationMaintenance.runtime(store: store)
+      end
 
       def build_dispatcher(store, cfg, daemon, argv)
         launcher = DetachedLauncher.new(

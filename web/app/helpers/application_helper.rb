@@ -5,6 +5,7 @@ module ApplicationHelper
     status: ->(c) { c == "status" || c == "tasks" || c == "ideas" },
     repos: ->(c) { c == "repos" },
     workflows: ->(c) { c == "workflows" },
+    modules: ->(c) { c == "modules" },
     agents: ->(c) { c == "agents" },
     telegram: ->(c) { c == "telegram" }
   }.freeze
@@ -19,6 +20,17 @@ module ApplicationHelper
   def stable_dom_id(prefix, *parts)
     digest = Digest::SHA256.hexdigest(JSON.generate(parts.map(&:to_s))).first(24)
     "#{prefix}-#{digest}"
+  end
+
+  # Hive owns the status subscription lifecycle because an accepted channel
+  # also owns the shared fleet poller. turbo-rails 2.0.23 can finish its async
+  # subscription after its element has disconnected; this app-owned source
+  # closes that race while retaining Turbo's signed stream-name contract.
+  def status_stream_source(**attributes)
+    attributes[:channel] = StatusChannel.to_s
+    attributes[:"signed-stream-name"] =
+      Turbo::StreamsChannel.signed_stream_name([ StatusBroadcaster::CHANNEL ])
+    tag.hive_status_stream_source(**attributes)
   end
 
   # Stage dir ("3-plan") → its short name and a stable color class used by
@@ -91,5 +103,10 @@ module ApplicationHelper
     return "#{s / 3600}h ago" if s < 86_400
 
     "#{s / 86_400}d ago"
+  end
+
+  def hidden_archive_summary(count)
+    noun = count == 1 ? "task" : "tasks"
+    "… and #{count} older archived #{noun} (hive archive to view)"
   end
 end

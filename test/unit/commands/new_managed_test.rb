@@ -110,13 +110,13 @@ class NewManagedWorkflowTest < Minitest::Test
     with_tmp_dir do |project|
       hive_state = File.join(project, ".hive-state")
       FileUtils.mkdir_p(hive_state)
-      File.write(File.join(hive_state, "config.yml"), "reviewers: []\n")
+      File.write(File.join(hive_state, "config.yml"), "reviewres: []\n")
       command = Hive::Commands::New.new("project", "idea")
 
       error = assert_raises(Hive::UnsupportedProjectConfigError) do
         command.send(:managed_project_config, { "path" => project, "hive_state_path" => hive_state })
       end
-      assert_includes error.message, "move it to `review.reviewers`"
+      assert_includes error.message, "Unknown top-level key `reviewres`"
     end
   end
 

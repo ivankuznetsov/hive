@@ -75,4 +75,16 @@ class BabysitterEventsTest < Minitest::Test
       assert_includes body, "3 PRs, 1 fixed, 1 untouched, 1 needs-human"
     end
   end
+
+  def test_status_writer_resolves_relative_state_path_from_project_root
+    with_tmp_dir do |dir|
+      project = { "name" => "demo", "path" => dir, "hive_state_path" => "state" }
+
+      Hive::Babysitter::StatusWriter.append(
+        project: project, pr_count: 1, fixed: 0, untouched: 1, needs_human: 0
+      )
+
+      assert File.file?(File.join(dir, "state", "babysitter", "status.md"))
+    end
+  end
 end

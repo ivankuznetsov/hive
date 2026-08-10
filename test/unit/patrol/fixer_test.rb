@@ -2,10 +2,30 @@ require "test_helper"
 require "hive/config"
 require "hive/patrol/fixer"
 require "hive/patrol/finding"
+require "hive/patrol/state_store"
 require "hive/usage_db"
 
 class HivePatrolFixerTest < Minitest::Test
   include HiveTestHelper
+
+  class RecoveryWorktreeSpy
+    attr_reader :path, :calls
+
+    def initialize(path)
+      @path = path
+      @calls = []
+    end
+
+    def create_exact!(*, **)
+      @calls << :create_exact
+      raise "publication recovery must not recreate its worktree"
+    end
+
+    def remove!(*, **)
+      @calls << :remove
+      raise "publication recovery must not remove its worktree"
+    end
+  end
 
   def cfg(repo)
     Hive::Config.deep_merge(
@@ -39,6 +59,25 @@ class HivePatrolFixerTest < Minitest::Test
       evidence: [ { "file" => "app.rb", "line" => 1, "snippet" => "puts" } ],
       fingerprint: "abcdef1234567890"
     )
+  end
+
+  def publication_binding_for(patch, repository:)
+    {
+      "receipt_id" => "receipt-#{'1' * 64}",
+      "intent_id" => "intent-#{'2' * 64}",
+      "occurrence_id" => "occ-#{'3' * 64}",
+      "repository" => repository,
+      "branch" => patch.branch,
+      "base_branch" => "master",
+      "patch_id" => patch.id,
+      "worktree_path" => patch.worktree_path,
+      "base_sha" => patch.base_sha,
+      "head_sha" => patch.head_sha,
+      "pr_url" => "https://example.com/pr/2",
+      "pr_state" => "OPEN",
+      "head_oid" => patch.head_sha,
+      "base_oid" => patch.base_sha
+    }
   end
 
   def write_fix_proof(output_path, status: "fixed",
@@ -129,6 +168,74 @@ class HivePatrolFixerTest < Minitest::Test
       validator = fixer.instance_variable_get(:@validator)
 
       assert_equal 1234.0, validator.instance_variable_get(:@timeout_sec)
+    end
+  end
+
+  def test_stale_evidence_target_is_rejected_before_validation_or_agent_work
+    with_tmp_git_repo do |repo|
+      File.write(File.join(repo, "app.rb"), "puts 'healthy'\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "app", "--quiet")
+      candidate = finding
+      candidate.target_sha = "a" * 40
+      candidate.validation_key = "test"
+      agent_ran = false
+
+      patch = Hive::Patrol::Fixer.new(
+        repo, cfg: cfg(repo),
+        agent_runner: ->(**) { agent_ran = true }
+      ).attempt(candidate)
+
+      refute patch.passed
+      refute agent_ran
+      assert_equal "stale_target_sha", patch.validation.fetch("reason")
+    end
+  end
+
+  def test_failing_validation_preflight_blocks_the_fix_agent
+    with_tmp_git_repo do |repo|
+      File.write(File.join(repo, "app.rb"), "puts 'healthy'\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "app", "--quiet")
+      candidate = finding
+      candidate.target_sha = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      candidate.validation_key = "test"
+      configured = cfg(repo)
+      configured["patrol"]["commands"]["test"] = "exit 9"
+      agent_ran = false
+
+      patch = Hive::Patrol::Fixer.new(
+        repo, cfg: configured,
+        agent_runner: ->(**) { agent_ran = true }
+      ).attempt(candidate)
+
+      refute patch.passed
+      refute agent_ran
+      assert_equal "validation_preflight_failed", patch.validation.fetch("reason")
+      assert_equal 9, patch.validation.dig("commands", 0, "exit_code")
+    end
+  end
+
+  def test_mutating_validation_preflight_blocks_the_fix_agent
+    with_tmp_git_repo do |repo|
+      File.write(File.join(repo, "app.rb"), "puts 'healthy'\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "app", "--quiet")
+      candidate = finding
+      candidate.target_sha = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      candidate.validation_key = "test"
+      configured = cfg(repo)
+      configured["patrol"]["commands"]["test"] = "printf changed > app.rb"
+      agent_ran = false
+
+      patch = Hive::Patrol::Fixer.new(
+        repo, cfg: configured,
+        agent_runner: ->(**) { agent_ran = true }
+      ).attempt(candidate)
+
+      refute patch.passed
+      refute agent_ran
+      assert_equal "validation_preflight_mutated_worktree", patch.validation.fetch("reason")
     end
   end
 
@@ -438,7 +545,7 @@ class HivePatrolFixerTest < Minitest::Test
       assert_includes prompt, '"regression_paths"'
       assert_includes prompt, '"validation_key"'
       assert_includes prompt, "Hive will run that operator-configured command"
-      assert_includes prompt, "Available operator-configured validation keys: test"
+      assert_includes prompt, "Required operator-configured validation key:"
       assert_includes prompt, "These are agent-reported paths"
       refute_includes prompt, '"before"'
       assert_includes prompt, '"status": "rejected"'
@@ -471,6 +578,22 @@ class HivePatrolFixerTest < Minitest::Test
       refute patch.passed
       assert_equal "invalid_validation_key", patch.validation["reason"]
       refute File.exist?(marker), "agent-authored command text must never execute"
+    end
+  end
+
+  def test_fix_proof_validation_key_must_match_the_reviewed_finding
+    with_tmp_dir do |repo|
+      configured = cfg(repo)
+      configured["patrol"]["commands"]["lint"] = "ruby -c app.rb"
+      fixer = Hive::Patrol::Fixer.new(repo, cfg: configured)
+
+      command, error = fixer.send(
+        :configured_validation_command, "lint", expected_key: "test"
+      )
+
+      assert_nil command
+      assert_equal "invalid_validation_key", error.fetch("reason")
+      assert_match(/reviewed finding requires "test"/, error.fetch("error"))
     end
   end
 
@@ -587,7 +710,11 @@ class HivePatrolFixerTest < Minitest::Test
         ledger, finding.fingerprint, branch: first.branch,
         state: "review_handoff_failed", finding: finding
       )
-      state.write_fingerprints(ledger)
+      ledger.fetch(finding.fingerprint)["publication_binding"] =
+        publication_binding_for(
+          first, repository: "owner/demo"
+        )
+      state.send(:raw_write_fingerprints, ledger)
       second = fixer.attempt(finding)
 
       assert first.passed
@@ -599,7 +726,7 @@ class HivePatrolFixerTest < Minitest::Test
     end
   end
 
-  def test_reconciliation_retry_reuses_the_receipted_validated_patch
+  def test_reconciliation_retry_reuses_the_bound_validated_patch
     with_tmp_git_repo do |repo|
       File.write(File.join(repo, "app.rb"), "if\n")
       run!("git", "-C", repo, "add", ".")
@@ -623,13 +750,11 @@ class HivePatrolFixerTest < Minitest::Test
         pr_url: "https://example.com/pr/2",
         state: "reconciliation_pending", finding: finding
       )
-      ledger.fetch(finding.fingerprint)["publication_receipt"] = {
-        "patch_id" => first.id,
-        "worktree_path" => first.worktree_path,
-        "base_sha" => first.base_sha,
-        "head_sha" => first.head_sha
-      }
-      state.write_fingerprints(ledger)
+      ledger.fetch(finding.fingerprint)["publication_binding"] =
+        publication_binding_for(
+          first, repository: "owner/demo"
+        )
+      state.send(:raw_write_fingerprints, ledger)
 
       second = nil
       with_replaced_singleton_method(Dir, :glob, ->(*) { raise "exact receipt must not scan patch history" }) do
@@ -646,11 +771,104 @@ class HivePatrolFixerTest < Minitest::Test
     end
   end
 
-  def test_review_handoff_retry_ignores_missing_and_unreadable_patch_receipts
+  def test_uncertain_publication_reuses_the_complete_intent_seed
+    with_tmp_git_repo do |repo|
+      File.write(File.join(repo, "app.rb"), "if\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "broken app", "--quiet")
+      attempts = 0
+      agent = lambda do |worktree_path:, output_path:, **|
+        attempts += 1
+        raise "fix agent must not rerun after uncertain dispatch" if
+          attempts > 1
+
+        File.write(File.join(worktree_path, "app.rb"), "puts 'fixed'\n")
+        write_regression(worktree_path)
+        write_fix_proof(output_path)
+      end
+      state = Hive::Patrol::StateStore.new(repo)
+      fixer = Hive::Patrol::Fixer.new(
+        repo, cfg: cfg(repo), state: state, agent_runner: agent
+      )
+      first = fixer.attempt(finding)
+      capture = Hive::Modules::Migration::PatrolCapture.build(
+        module_name: "patrol",
+        project: {
+          "project_id" => "fixer-test",
+          "name" => File.basename(repo),
+          "repository" => "owner/demo"
+        },
+        trigger: { "kind" => "manual", "id" => "uncertain-pr" },
+        reservation: {
+          "kind" => "ordinary", "id" => "uncertain-pr"
+        },
+        owner: "legacy",
+        owner_epoch: 1,
+        selection_input: {
+          "kind" => "operation",
+          "operation" => "validated_patch"
+        },
+        selection:
+          Hive::Modules::Migration::PatrolDecisionProjection.build(
+            module_name: "patrol", rationale: "due"
+          ),
+        outcome_class: nil,
+        outcome: nil,
+        occurred_at: Time.at(0).utc,
+        recorded_at: Time.at(0).utc
+      )
+      scope = {
+        "repository" => "owner/demo",
+        "branch" => first.branch,
+        "base_branch" => "master",
+        "finding_projection" =>
+          Hive::Modules::Migration::PatrolEvidence.canonical(
+            "category" => finding.category.to_s,
+            "feature_id" => finding.feature_id.to_s,
+            "root_cause_tokens" =>
+              Hive::Patrol::Fingerprint.semantic_tokens(finding),
+            "target_sha" => finding.target_sha.to_s,
+            "title_tokens" =>
+              Hive::Patrol::Fingerprint.title_tokens(finding)
+          ),
+        "fingerprint" => finding.fingerprint,
+        "patch_id" => first.id,
+        "worktree_path" => first.worktree_path,
+        "base_sha" => first.base_sha,
+        "head_sha" => first.head_sha
+      }
+      intent = Hive::Modules::Migration::EffectIntent.build(
+        module_name: "patrol",
+        occurrence_id: capture.occurrence_id,
+        authority: "legacy",
+        owner_epoch: 1,
+        sink: "pull_request",
+        target: "owner/demo:#{first.branch}",
+        idempotency_key: "#{finding.fingerprint}:#{first.id}:pull_request",
+        capability: "github_pull_requests",
+        scope: scope,
+        created_at: Time.at(0).utc
+      )
+      state.reserve_occurrence!(capture, now: Time.at(0).utc)
+      state.prepare_effect!(intent, now: Time.at(0).utc)
+      state.mark_dispatch_uncertain!(intent, now: Time.at(0).utc)
+
+      second = fixer.attempt(finding)
+
+      assert first.passed
+      assert second.passed
+      assert_equal first.id, second.id
+      assert_equal first.head_sha, second.head_sha
+      assert_equal 1, attempts
+    end
+  end
+
+  def test_review_handoff_retry_fails_closed_without_a_publication_binding
     with_tmp_git_repo do |repo|
       state = Hive::Patrol::StateStore.new(repo)
       branch = "hive-patrol/#{finding.feature_id}-#{finding.fingerprint[0, 8]}"
-      state.write_fingerprints(
+      state.send(
+        :raw_write_fingerprints,
         finding.fingerprint => {
           "state" => "review_handoff_failed",
           "branch" => branch
@@ -659,14 +877,128 @@ class HivePatrolFixerTest < Minitest::Test
       fixer = Hive::Patrol::Fixer.new(repo, cfg: cfg(repo), state: state)
       worktree = Struct.new(:path).new(repo)
 
-      assert_nil fixer.send(:reusable_publication_patch, finding, branch, worktree)
-      with_replaced_singleton_method(Dir, :glob, ->(*) { raise Errno::EACCES, "denied" }) do
-        assert_nil fixer.send(:reusable_publication_patch, finding, branch, worktree)
+      error = nil
+      with_replaced_singleton_method(
+        Dir, :glob,
+        ->(*) { raise "missing bindings must not scan patch history" }
+      ) do
+        error = assert_raises(
+          Hive::Patrol::Fixer::PublicationRecoveryError
+        ) do
+          fixer.send(
+            :reusable_publication_patch, finding, branch, worktree
+          )
+        end
+      end
+      assert_match(/binding is malformed/, error.message)
+    end
+  end
+
+  def test_bound_publication_recovery_never_rebuilds_without_exact_patch_receipt
+    %i[
+      missing_receipt mismatched_receipt unreadable_receipt
+      missing_binding non_hash_binding branch_mismatch
+    ].each do |failure|
+      with_tmp_git_repo do |repo|
+        File.write(File.join(repo, "app.rb"), "if\n")
+        run!("git", "-C", repo, "add", ".")
+        run!(
+          "git", "-C", repo, "commit", "-m", "broken app", "--quiet"
+        )
+        agent_runs = 0
+        agent = lambda do |worktree_path:, output_path:, **|
+          agent_runs += 1
+          raise "publication recovery must not rerun the fixer" if
+            agent_runs > 1
+
+          File.write(
+            File.join(worktree_path, "app.rb"), "puts 'fixed'\n"
+          )
+          write_regression(worktree_path)
+          write_fix_proof(output_path)
+        end
+        state = Hive::Patrol::StateStore.new(repo)
+        first = Hive::Patrol::Fixer.new(
+          repo, cfg: cfg(repo), state: state, agent_runner: agent
+        ).attempt(finding)
+        ledger = state.fingerprints
+        Hive::Patrol::Fingerprint.record_seen(
+          ledger, finding.fingerprint, branch: first.branch,
+          state: "review_handoff_failed", finding: finding
+        )
+        ledger.fetch(
+          finding.fingerprint
+        )["publication_binding"] = publication_binding_for(
+          first, repository: "owner/demo"
+        )
+        state.send(:raw_write_fingerprints, ledger)
+        patch_path = File.join(
+          state.root, "patches", "#{first.id}.json"
+        )
+        case failure
+        when :missing_receipt
+          FileUtils.rm_f(patch_path)
+        when :mismatched_receipt
+          record = JSON.parse(File.binread(patch_path))
+          record["head_sha"] = "c" * 40
+          File.binwrite(patch_path, JSON.generate(record))
+        when :missing_binding
+          ledger.fetch(
+            finding.fingerprint
+          ).delete("publication_binding")
+          state.send(:raw_write_fingerprints, ledger)
+        when :non_hash_binding
+          ledger.fetch(
+            finding.fingerprint
+          )["publication_binding"] = "malformed"
+          state.send(:raw_write_fingerprints, ledger)
+        when :branch_mismatch
+          ledger.fetch(
+            finding.fingerprint
+          )["branch"] = "hive-patrol/unrelated"
+          state.send(:raw_write_fingerprints, ledger)
+        end
+        patch_files_before = Dir.glob(
+          File.join(state.root, "patches", "*.json")
+        ).sort
+        worktree = RecoveryWorktreeSpy.new(first.worktree_path)
+        fixer = Hive::Patrol::Fixer.new(
+          repo,
+          cfg: cfg(repo),
+          state: state,
+          agent_runner: agent,
+          worktree_factory: ->(**) { worktree }
+        )
+        invoke = lambda do
+          assert_raises(
+            Hive::Patrol::Fixer::PublicationRecoveryError,
+            failure.to_s
+          ) { fixer.attempt(finding) }
+        end
+
+        if failure == :unreadable_receipt
+          with_replaced_singleton_method(
+            File, :mtime, ->(*) {
+              raise Errno::EACCES, "synthetic unreadable receipt"
+            }
+          ) { invoke.call }
+        else
+          invoke.call
+        end
+
+        assert_equal 1, agent_runs, failure.to_s
+        assert_empty worktree.calls, failure.to_s
+        assert File.directory?(first.worktree_path), failure.to_s
+        assert_equal(
+          patch_files_before,
+          Dir.glob(File.join(state.root, "patches", "*.json")).sort,
+          failure.to_s
+        )
       end
     end
   end
 
-  def test_review_handoff_receipt_is_not_reused_when_git_state_is_unreadable
+  def test_review_handoff_binding_is_not_reused_when_git_state_is_unreadable
     with_tmp_dir do |dir|
       fixer = Hive::Patrol::Fixer.new(dir, cfg: cfg(dir))
       record = {
@@ -1267,6 +1599,33 @@ class HivePatrolFixerTest < Minitest::Test
     ensure
       profiles_singleton.define_method(:lookup, profiles_lookup) if profiles_lookup
       agent_singleton.define_method(:new, agent_new) if agent_new
+    end
+  end
+
+  def test_run_agent_wrapper_receives_patrol_fix_route
+    with_tmp_git_repo do |repo|
+      routed_cfg = cfg(repo)
+      routed_cfg["patrol"]["agent"] = "codex"
+      routed_cfg["models"] = {
+        "patrol_fix" => { "model" => "gpt-5.6-sol", "effort" => "xhigh" }
+      }
+      fixer = Hive::Patrol::Fixer.new(repo, cfg: routed_cfg)
+      fake_agent = Object.new
+      def fake_agent.run! = { status: :ok }
+      captured = nil
+      original = Hive::Agent.method(:new)
+      Hive::Agent.define_singleton_method(:new) do |**kwargs|
+        captured = kwargs
+        fake_agent
+      end
+
+      fixer.send(:run_agent, prompt: "p", run_dir: repo, worktree_path: repo)
+
+      assert_equal [
+        "--model", "gpt-5.6-sol", "-c", "model_reasoning_effort=xhigh"
+      ], captured.fetch(:routing_arguments).global_arguments
+    ensure
+      Hive::Agent.define_singleton_method(:new, original) if original
     end
   end
 

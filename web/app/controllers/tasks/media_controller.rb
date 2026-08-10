@@ -1,6 +1,4 @@
 class Tasks::MediaController < Tasks::BaseController
-  before_action :load_task
-
   def show
     path = @task.media_path(params[:filename])
     unless path

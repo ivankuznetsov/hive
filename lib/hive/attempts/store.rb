@@ -21,41 +21,190 @@ module Hive
     Scan = Data.define(:records, :invalid_records)
 
     class Store
-      attr_reader :root, :records_root, :logs_root, :outputs_root, :generation_locks_root
+      DEFAULT_ROOT = Object.new.freeze
 
-      def initialize(root: Hive::Paths.attempts_root, create_directories: true)
+      def self.open_default(state_home: Hive::Paths.state_home, create_directories: true)
+        root = prepare_default_root!(state_home)
+        new(root: root, create_directories: create_directories)
+      end
+
+      def self.prepare_default_root!(state_home)
+        require "hive/recovery/migration"
+        Hive::Recovery::Migration.ensure!(state_home: state_home)
+        File.join(File.expand_path(state_home), "attempts", "v3")
+      end
+      private_class_method :prepare_default_root!
+
+      def initialize(root: DEFAULT_ROOT, create_directories: true)
+        root = self.class.send(:prepare_default_root!, Hive::Paths.state_home) if root.equal?(DEFAULT_ROOT)
         @root = File.expand_path(root)
+        @create_directories = create_directories
         @records_root = File.join(@root, "records")
         @logs_root = File.join(@root, "logs")
         @outputs_root = File.join(@root, "outputs")
         @generation_locks_root = File.join(@root, "generation-locks")
+        @proof_root = File.join(@root, "proof")
+        @decision_indexes_root = File.join(@root, "decision-indexes")
+        @pending_finalization_root = File.join(@root, "pending-finalization")
+        @cold_logs_root = File.join(@root, "cold-logs")
+        @log_state_root = File.join(@root, "log-state")
+        @maintenance_root = File.join(@root, "maintenance")
         ensure_private_directories! if create_directories
+      end
+
+      def root
+        managed_directory_path(@root, label: "root")
+      end
+
+      def records_root
+        managed_directory_path(@records_root, label: "records")
+      end
+
+      def logs_root
+        managed_directory_path(@logs_root, label: "logs")
+      end
+
+      def outputs_root
+        managed_directory_path(@outputs_root, label: "outputs")
+      end
+
+      def generation_locks_root
+        managed_directory_path(@generation_locks_root, label: "generation-locks")
+      end
+
+      def proof_root
+        managed_directory_path(@proof_root, label: "proof")
+      end
+
+      def decision_indexes_root
+        managed_directory_path(@decision_indexes_root, label: "decision-indexes")
+      end
+
+      def pending_finalization_root
+        managed_directory_path(@pending_finalization_root, label: "pending-finalization")
+      end
+
+      def cold_logs_root
+        managed_directory_path(@cold_logs_root, label: "cold-logs")
+      end
+
+      def log_state_root
+        managed_directory_path(@log_state_root, label: "log-state")
+      end
+
+      def maintenance_root
+        managed_directory_path(@maintenance_root, label: "maintenance")
+      end
+
+      def log_archive
+        require "hive/attempts/log_archive"
+        @log_archive ||= LogArchive.new(store: self)
+      end
+
+      def permanent_proofs
+        require "hive/attempts/permanent_proof_store"
+        @permanent_proofs ||= PermanentProofStore.new(
+          root: @proof_root,
+          create_directories: @create_directories
+        )
+      end
+
+      def decision_index
+        require "hive/attempts/decision_index"
+        @decision_index ||= DecisionIndex.new(
+          root: @decision_indexes_root,
+          create_directories: @create_directories
+        )
+      end
+
+      def pending_finalizations
+        require "hive/attempts/pending_finalization_store"
+        @pending_finalizations ||= PendingFinalizationStore.new(
+          root: @pending_finalization_root,
+          create_directories: @create_directories
+        )
+      end
+
+      def storage_health
+        require "hive/attempts/storage_health"
+        @storage_health ||= StorageHealth.new(
+          root: @maintenance_root,
+          create_directories: @create_directories
+        )
+      end
+
+      def output_directory(attempt_id, *segments, create: false)
+        components = [ attempt_id, *segments ].map { |segment| safe_id(segment) }
+        path = outputs_root
+        missing_parent = false
+        components.each do |component|
+          path = File.join(path, component)
+          next if missing_parent
+
+          begin
+            status = File.lstat(path)
+          rescue Errno::ENOENT
+            unless create
+              missing_parent = true
+              next
+            end
+
+            begin
+              Dir.mkdir(path, 0o700)
+            rescue Errno::EEXIST
+              # Another legitimate worker may create the same per-attempt
+              # directory after our lstat. Re-observe below and accept only
+              # the exact real-directory shape we would have created.
+            end
+            status = File.lstat(path)
+          end
+          if status.symlink?
+            raise StoreError, "attempt output directory #{component} is a symlink"
+          end
+          unless status.directory?
+            raise StoreError, "attempt output path #{component} is not a directory"
+          end
+
+          validate_output_custody!(path)
+          File.chmod(0o700, path) if create
+        end
+        path
+      rescue SystemCallError => e
+        raise StoreError, "attempt output directory is unavailable: #{e.message}"
+      end
+
+      def output_path(attempt_id, filename, create_directory: false)
+        path = File.join(
+          output_directory(attempt_id, create: create_directory),
+          safe_id(filename)
+        )
+        if (status = optional_lstat(path))
+          raise StoreError, "attempt output file is a symlink" if status.symlink?
+          raise StoreError, "attempt output path is not a regular file" unless status.file?
+        end
+
+        path
       end
 
       def create_launching(**attributes)
         record = Record.launching(**attributes)
-        path = record_path(record.attempt_id)
         with_record_lock(record.attempt_id) do
-          raise StoreError, "attempt #{record.attempt_id} already exists" if File.exist?(path)
-
-          persist(record)
-        end
-        record
-      end
-
-      def create_compatibility_running(**attributes)
-        record = Record.compatibility_running(**attributes)
-        path = record_path(record.attempt_id)
-        with_record_lock(record.attempt_id) do
-          raise StoreError, "attempt #{record.attempt_id} already exists" if File.exist?(path)
-
-          persist(record)
+          persist(record, expected_absent: true)
         end
         record
       end
 
       def fetch(attempt_id)
-        Record.new(JSON.parse(File.binread(record_path(attempt_id))))
+        hot = fetch_hot(attempt_id)
+        return hot if hot
+
+        permanent_proofs.fetch(attempt_id)
+      end
+
+      def fetch_hot(attempt_id)
+        path = record_path(attempt_id)
+        validate_regular_file!(path, label: "attempt record")
+        Record.new(JSON.parse(File.binread(path)))
       rescue Errno::ENOENT
         nil
       rescue JSON::ParserError, InvalidRecord => e
@@ -67,8 +216,9 @@ module Hive
         invalid = []
         Dir.glob(File.join(records_root, "*.json")).sort.each do |path|
           begin
+            validate_regular_file!(path, label: "attempt record")
             records << Record.new(JSON.parse(File.binread(path)))
-          rescue JSON::ParserError, InvalidRecord, SystemCallError => e
+          rescue JSON::ParserError, InvalidRecord, StoreError, SystemCallError, TypeError => e
             invalid << InvalidStoredRecord.new(path: path, error: e.message)
           end
         end
@@ -211,7 +361,7 @@ module Hive
 
       def with_generation_lock(task_generation)
         path = generation_lock_path(task_generation)
-        File.open(path, File::RDWR | File::CREAT, 0o600) do |lock|
+        open_lock(path) do |lock|
           lock.chmod(0o600)
           lock.flock(File::LOCK_EX)
           yield
@@ -228,7 +378,7 @@ module Hive
       # observe the same final capacity slot.
       def with_admission_lock
         path = File.join(generation_locks_root, "admission.lock")
-        File.open(path, File::RDWR | File::CREAT, 0o600) do |lock|
+        open_lock(path) do |lock|
           lock.chmod(0o600)
           lock.flock(File::LOCK_EX)
           yield
@@ -248,11 +398,25 @@ module Hive
         File.join(generation_locks_root, "#{digest}.lock")
       end
 
+      def remove_hot_final(observed)
+        with_generation_lock(observed.task_generation) do
+          current = fetch_hot(observed.attempt_id)
+          return false unless current
+          unless current.final? && current.to_h == observed.to_h
+            raise CompareAndSwapFailed, "attempt changed before hot removal"
+          end
+
+          File.unlink(record_path(current.attempt_id))
+          Hive::AtomicFile.fsync_directory(records_root)
+          true
+        end
+      end
+
       private
 
       def mutate(observed, allowed_states:)
         with_generation_lock(observed.task_generation) do
-          current = fetch(observed.attempt_id)
+          current = fetch_hot(observed.attempt_id)
           verify_cas!(current, observed, allowed_states)
           replacement = Record.new(yield(current.to_h))
           verify_immutable!(current, replacement)
@@ -282,8 +446,14 @@ module Hive
         raise StoreError, "attempt immutable identity changed: #{changed.join(', ')}"
       end
 
-      def persist(record)
+      def persist(record, expected_absent: false)
         path = record_path(record.attempt_id)
+        status = optional_lstat(path)
+        if expected_absent
+          raise StoreError, "attempt #{record.attempt_id} already exists" if status
+        elsif status
+          validate_regular_file!(path, label: "attempt record", status: status)
+        end
         Hive::AtomicFile.write(path, JSON.generate(record.to_h) + "\n", mode: 0o600)
         File.chmod(0o600, path)
         Hive::AtomicFile.fsync_directory(records_root)
@@ -294,7 +464,7 @@ module Hive
 
       def with_record_lock(attempt_id)
         path = File.join(generation_locks_root, "record-#{::Digest::SHA256.hexdigest(attempt_id.to_s)}.lock")
-        File.open(path, File::RDWR | File::CREAT, 0o600) do |lock|
+        open_lock(path) do |lock|
           lock.chmod(0o600)
           lock.flock(File::LOCK_EX)
           yield
@@ -302,12 +472,120 @@ module Hive
       end
 
       def ensure_private_directories!
-        [ root, records_root, logs_root, outputs_root, generation_locks_root ].each do |path|
-          FileUtils.mkdir_p(path, mode: 0o700)
+        managed_directories.each do |label, path|
+          if label != "root" && File.symlink?(path)
+            raise StoreError, "attempt store #{label} directory is a symlink"
+          end
+
+          FileUtils.mkdir_p(path, mode: 0o700) unless File.exist?(path)
+          managed_directory_path(path, label: label)
           File.chmod(0o700, path)
         end
       rescue SystemCallError => e
         raise StoreError, "attempt store is unavailable: #{e.message}"
+      end
+
+      def managed_directories
+        {
+          "root" => @root,
+          "records" => @records_root,
+          "logs" => @logs_root,
+          "outputs" => @outputs_root,
+          "generation-locks" => @generation_locks_root,
+          "proof" => @proof_root,
+          "decision-indexes" => @decision_indexes_root,
+          "pending-finalization" => @pending_finalization_root,
+          "cold-logs" => @cold_logs_root,
+          "log-state" => @log_state_root,
+          "maintenance" => @maintenance_root
+        }
+      end
+
+      def managed_directory_path(path, label:)
+        if path == @root
+          unless File.directory?(path)
+            raise StoreError, "attempt store root path is not a directory"
+          end
+
+          return path
+        end
+
+        status = File.lstat(path)
+        if status.symlink?
+          raise StoreError, "attempt store #{label} directory is a symlink"
+        end
+        unless status.directory?
+          raise StoreError, "attempt store #{label} path is not a directory"
+        end
+
+        validate_root_custody!(path, label: label)
+        path
+      rescue Errno::ENOENT
+        return path unless @create_directories
+
+        raise StoreError, "attempt store #{label} directory is missing"
+      rescue SystemCallError => e
+        raise StoreError, "attempt store #{label} directory is unavailable: #{e.message}"
+      end
+
+      def validate_root_custody!(path, label:)
+        unless File.directory?(@root)
+          raise StoreError, "attempt store root path is not a directory"
+        end
+
+        validate_descendant!(
+          path,
+          root: @root,
+          error: "attempt store #{label} directory escapes the store root"
+        )
+      end
+
+      def validate_regular_file!(path, label:, status: nil)
+        status ||= File.lstat(path)
+        raise StoreError, "#{label} is a symlink" if status.symlink?
+        raise StoreError, "#{label} is not a regular file" unless status.file?
+
+        path
+      end
+
+      def optional_lstat(path)
+        File.lstat(path)
+      rescue Errno::ENOENT
+        nil
+      end
+
+      def validate_output_custody!(path)
+        validate_descendant!(
+          path,
+          root: outputs_root,
+          error: "attempt output directory escapes the outputs root"
+        )
+      end
+
+      def validate_descendant!(path, root:, error:)
+        root_realpath = File.realpath(root)
+        path_realpath = File.realpath(path)
+        OutputReference.ensure_contained!(path_realpath, root_realpath)
+      rescue InvalidOutputReference
+        raise StoreError, error
+      end
+
+      def open_lock(path)
+        flags = File::RDWR | File::CREAT
+        flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+        File.open(path, flags, 0o600) do |lock|
+          opened = lock.stat
+          entry = File.lstat(path)
+          raise StoreError, "attempt lock is a symlink" if entry.symlink?
+          unless opened.file? && entry.file? &&
+                 opened.dev == entry.dev && opened.ino == entry.ino
+            raise StoreError, "attempt lock is not a regular file"
+          end
+
+          yield lock
+        end
+      rescue Errno::ELOOP
+        raise StoreError, "attempt lock is a symlink"
       end
 
       def safe_id(value)

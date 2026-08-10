@@ -352,6 +352,7 @@ class RunExecuteTest < Minitest::Test
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         folder, _slug = setup_execute_task(dir)
+        original_plan = File.binread(File.join(folder, "plan.md"))
         ENV["HIVE_EXEC_DRIVER_TASK_DIR"] = folder
         ENV["HIVE_EXEC_DRIVER_TAMPER"] = "1"
 
@@ -362,6 +363,9 @@ class RunExecuteTest < Minitest::Test
         marker = Hive::Markers.current(File.join(folder, "task.md"))
         assert_equal :error, marker.name
         assert_equal "implementer_tampered", marker.attrs["reason"]
+        assert_equal "true", marker.attrs["restored"]
+        assert_equal original_plan, File.binread(File.join(folder, "plan.md")),
+                     "tampered plan.md must be restored before the retry is admitted"
       ensure
         wt_path = YAML.safe_load(File.read(File.join(folder, "worktree.yml")))["path"]
         FileUtils.rm_rf(wt_path) if wt_path

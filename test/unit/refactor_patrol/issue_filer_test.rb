@@ -645,6 +645,39 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
     assert_empty gh.creates
   end
 
+  def test_effect_gateway_failures_preserve_retryable_publication_outcomes
+    cases = [
+      [
+        Hive::RefactorPatrol::EffectDenied.new("authority revoked", nil),
+        "authority_revoked"
+      ],
+      [
+        Hive::RefactorPatrol::EffectReconciliationRequired.new(
+          "remote outcome unknown", nil
+        ),
+        "remote_outcome_unknown"
+      ]
+    ]
+
+    cases.each do |gateway_error, expected_outcome|
+      result = filer(FakeGh.new).publish(
+        thesis: thesis(flags: [ "public_api_impact" ]),
+        family_id: family_id,
+        canonical_action_id: action_id,
+        job_id: "job-7",
+        source: source,
+        record_intent: successful_intent,
+        execute_effect: ->(**) { raise gateway_error }
+      )
+
+      assert_equal expected_outcome, result.outcome
+      refute result.terminal
+      if gateway_error.is_a?(Hive::RefactorPatrol::EffectReconciliationRequired)
+        assert_includes result.receipts.fetch("error"), "remote outcome unknown"
+      end
+    end
+  end
+
   private
 
   def filer(gh, enabled: true)

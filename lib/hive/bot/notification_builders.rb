@@ -1,11 +1,13 @@
 require "digest"
 require "json"
+require "base64"
 require "shellwords"
 require "hive"
 require "hive/bot/format"
 require "hive/bot/row_actions"
 require "hive/bot/title_formatter"
 require "hive/markers"
+require "hive/recovery"
 require "hive/task_action"
 require "hive/workflows"
 
@@ -46,7 +48,7 @@ module Hive
         #   - agent_running: a live task lock can make status report
         #     agent_running while the state file still carries a stale recovery
         #     marker from the previous run — alerting would announce a failure
-        #     a retry is already clearing.
+        #     the coordinator already owns.
         #   - archived: the task is terminal; there is nothing left to announce.
         if SKIP_ACTIONS.include?(row.action)
           # Only log the live-vs-stale-marker contradiction — a recovery/error
@@ -305,7 +307,7 @@ module Hive
         parts = [ "autofix", row.project, row.slug, row.stage, row.marker ]
         match_attr = recovery_match_attr(row)
         parts << match_attr if match_attr
-        # Thread the workflow id so RecoverySequence routes a generic row to the
+        # Thread the workflow id so RecoveryResultBuilder routes a generic row to the
         # universal `hive run` verb instead of the coding retry-verb table (slash
         # /autofix and web recover already thread it). Coding is the nil default
         # (coding_row? ⟹ true), so it's omitted to save callback bytes; a
@@ -318,6 +320,7 @@ module Hive
 
       def retryable_recovery?(row)
         return false if manual_only_recovery?(row)
+        return true if %w[error review_error].include?(row.marker.to_s.downcase)
 
         suggested = suggested_next_action(row)
         suggested && suggested["kind"].to_s == "retry"
@@ -325,76 +328,43 @@ module Hive
 
       # Markers that are ALWAYS manual-only regardless of attrs. Adding a new
       # marker here automatically narrows both the in-row recovery check
-      # (manual_only_recovery?) and the recover-sequence dispatch guard
-      # (RecoverySequence.build, used by the inline Autofix button and the
+      # (manual_only_recovery?) and the bot result-builder dispatch guard
+      # (RecoveryResultBuilder.build, used by the inline Autofix button and the
       # /autofix slash command) — they share this constant through
       # manual_only? below.
       ALWAYS_MANUAL_MARKERS = %w[execute_stale].freeze
-
-      # Review fix-phase reasons whose recovery requires a human. A retry
-      # would only clear REVIEW_ERROR and re-enter the same unsafe state.
-      REVIEW_ERROR_MANUAL_ONLY_REASONS = %w[fix_status_check_failed fix_tampered].freeze
-
-      # Error-marker reasons whose recovery requires a human (the runner
-      # can't auto-clear them via the standard markers-clear + retry-verb
-      # loop). `dirty_worktree` is the legacy finalize reason — kept
-      # listed so any in-flight error files still get the right routing.
-      # `ensure_clean_on_exit_failed` is the new
-      # `stages.ensure_clean_on_exit` plan reason: residue out of scope,
-      # or the auto-commit itself failed (sign-policy / git error).
-      #
-      # NOTE: this is the OPERATOR-FACING (bot/TUI) classification, kept as
-      # the post-exhaustion backstop. The daemon's StaleAgentHealer retries
-      # `ensure_clean_on_exit_failed` automatically first (bounded, then
-      # parks); only once those retries are spent does an operator see this
-      # "inspect manually" routing — at which point human eyes are warranted.
-      ERROR_MANUAL_ONLY_REASONS = %w[
-        dirty_worktree ensure_clean_on_exit_failed
-      ].concat(Hive::DraftPrReceipt::ERROR_REASONS).freeze
 
       # Single source of truth for "this state has no auto-recovery".
       # Pass attrs: nil from callers that only have the marker name
       # (e.g. callback handlers); pass row.attrs from in-process checks
       # where the full attrs hash is available.
-      def manual_only?(marker:, attrs: nil)
+      def manual_only?(marker:, attrs: nil, folder: nil)
         marker = marker.to_s.downcase
-        return true if ALWAYS_MANUAL_MARKERS.include?(marker)
-        return false if attrs.nil?
-
-        attrs = attrs.to_h.transform_keys(&:to_s)
-        return true if marker == "review_error" && attrs["phase"] == "fix" && REVIEW_ERROR_MANUAL_ONLY_REASONS.include?(attrs["reason"].to_s)
-        return true if marker == "error" && ERROR_MANUAL_ONLY_REASONS.include?(attrs["reason"].to_s)
-
-        false
+        ALWAYS_MANUAL_MARKERS.include?(marker) ||
+          Hive::Recovery.intervention_required?(
+            marker: marker, attrs: attrs || {}, folder: folder
+          )
       end
 
       # Returns the operator-facing reply text for a manual-only state.
-      # The default ("open it on a laptop") covers `execute_stale` and
-      # the rare attrs-gated review_error/fix_tampered case; dirty-
-      # worktree variants get a more actionable hint that names the
-      # right repair step.
-      def manual_only_reply(marker:, attrs: nil)
-        marker = marker.to_s.downcase
-        attrs = attrs ? attrs.to_h.transform_keys(&:to_s) : {}
-        if marker == "review_error" && attrs["reason"].to_s == "fix_status_check_failed"
-          "Hive can't auto-recover a worktree whose Git status cannot be read. Open the worktree, repair Git state, then rerun review."
-        elsif marker == "error" && attrs["reason"].to_s == Hive::DraftPrReceipt::RECOVERABLE_REASON
-          "Hive preserved the validated branch. Run the task manually to reconcile the remote draft-PR handoff."
-        elsif marker == "error" && attrs["reason"].to_s == Hive::DraftPrReceipt::QUARANTINE_REASON
-          "Hive blocked publication after finding prohibited local content. Inspect and securely clean the preserved isolated worktree."
-        elsif marker == "error" && attrs["reason"].to_s == Hive::DraftPrReceipt::IDENTITY_REASON
-          "Hive blocked publication because repository, branch, or PR identity changed. Inspect the preserved local and remote state."
-        elsif marker == "error" && attrs["reason"].to_s == Hive::DraftPrReceipt::AGENT_BLOCKED_REASON
-          "The mapped repair agent reported a blocked outcome. Inspect its preserved report and isolated worktree."
-        elsif marker == "error" && ERROR_MANUAL_ONLY_REASONS.include?(attrs["reason"].to_s)
-          "Hive can't auto-recover a dirty worktree. Open the worktree and commit or discard the changes, then tap Autofix."
-        else
-          "Hive has no automatic recovery for this state - open it on a laptop."
+      # EXECUTE_STALE is always manual; max-pass REVIEW_STALE is manual while
+      # its escalation artifact exists. Row-aware callers supply attrs/folder.
+      def manual_only_reply(marker:, attrs: nil, folder: nil)
+        if Hive::Recovery.intervention_required?(
+          marker: marker, attrs: attrs || {}, folder: folder
+        )
+          return "Edit the current review escalation, then retry from the TUI with `r`."
         end
+
+        "Hive has no automatic recovery for this state - open it on a laptop."
       end
 
       def manual_only_recovery?(row)
-        manual_only?(marker: row.marker, attrs: row.attrs)
+        manual_only?(
+          marker: row.marker,
+          attrs: row.attrs,
+          folder: (row.folder if row.respond_to?(:folder))
+        )
       end
 
       def suggested_next_action(row)
@@ -439,18 +409,9 @@ module Hive
 
       def recovery_match_attr(row)
         attrs = row.attrs.to_h.transform_keys(&:to_s)
-        keys = case row.marker.to_s.downcase
-        when "review_error", "review_ci_stale"
-                 %w[pass phase reason]
-        when "review_stale"
-                 %w[pass reason]
-        when "error"
-                 return Hive::Markers.error_recovery_match_attr(attrs)
-        else
-                 []
-        end
-        key = keys.find { |candidate| !attrs[candidate].to_s.empty? }
-        key ? "#{key}=#{attrs[key]}" : nil
+        return nil unless Hive::Recovery.recoverable_marker?(row.marker)
+
+        Hive::Markers.recovery_match_attr(attrs)
       end
 
       def cause_sentence_for(row)
@@ -516,6 +477,10 @@ module Hive
         return "Open on a laptop to inspect the fix before continuing." if fix_guardrail_review?(row)
 
         return "Reply /answer #{row.slug} to provide input." if brainstorm_qna?(row)
+
+        if %w[error review_error].include?(row.marker.to_s)
+          return "Hive will keep retrying this error automatically; tap Autofix to retry now."
+        end
 
         next_step_hint(row) || "Open on a laptop to advance."
       end
@@ -647,6 +612,14 @@ module Hive
 
       def button(text, callback_data)
         { text: text, callback_data: compact_callback(callback_data) }
+      end
+
+      def encode_closure_callback(prefix, payload)
+        unless %w[closure_preview closure_confirm].include?(prefix.to_s)
+          raise ArgumentError, "unsupported closure callback"
+        end
+
+        "#{prefix}:#{Base64.urlsafe_encode64(JSON.generate(payload), padding: false)}"
       end
 
       def compact_callback(callback_data)

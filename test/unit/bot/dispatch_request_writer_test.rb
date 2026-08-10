@@ -190,4 +190,75 @@ class HiveBotDispatchRequestWriterTest < Minitest::Test
       refute File.exist?(sequence_path)
     end
   end
+
+  def test_recover_normalizes_surface_rows_and_delegates_to_the_shared_coordinator
+    captured = nil
+    coordinator = Object.new
+    coordinator.define_singleton_method(:request) do |**kwargs|
+      captured = kwargs
+      :receipt
+    end
+    observed_at = Time.utc(2026, 7, 25, 9, 0, 0)
+    row = {
+      "slug" => "recover-task",
+      "folder" => "/tmp/recover-task",
+      "state_file" => "/tmp/recover-task/task.md",
+      "stage" => "4-execute",
+      "workflow" => "coding",
+      "marker" => "error",
+      "attrs" => { "reason" => "timeout", "marker_id" => "marker-1" },
+      "mtime" => observed_at.iso8601(6),
+      "attempt_id" => "attempt-old",
+      "task_generation" => "generation-old"
+    }
+
+    result = W.recover!(
+      row: row, project: "demo", requestor: "web",
+      request_id: "recover-request", observation_token: "token",
+      now: observed_at + 3600, coordinator: coordinator
+    )
+
+    assert_equal :receipt, result
+    assert_equal "web", captured.fetch(:requestor)
+    assert_equal "recover-request", captured.fetch(:request_id)
+    assert_equal "token", captured.fetch(:observation_token)
+    observation = captured.fetch(:row)
+    assert_equal "demo", observation.project
+    assert_equal "recover-task", observation.slug
+    assert_equal "error", observation.marker
+    assert_equal({ "reason" => "timeout", "marker_id" => "marker-1" },
+                 observation.marker_attrs)
+    assert_equal observed_at, observation.state_file_mtime
+  end
+
+  def test_recover_derives_observation_token_for_every_surface
+    captured = nil
+    token_observation = nil
+    coordinator = Object.new
+    coordinator.define_singleton_method(:observation_token_for) do |observation|
+      token_observation = observation
+      "derived-token"
+    end
+    coordinator.define_singleton_method(:request) do |**kwargs|
+      captured = kwargs
+      :receipt
+    end
+
+    assert_equal :receipt, W.recover!(
+      row: {
+        "slug" => "recover-task",
+        "folder" => "/tmp/recover-task",
+        "state_file" => "/tmp/recover-task/task.md",
+        "stage" => "4-execute",
+        "workflow" => "coding",
+        "marker" => "error",
+        "attrs" => { "reason" => "timeout", "marker_id" => "marker-1" },
+        "mtime" => Time.utc(2026, 7, 25, 9).iso8601(6)
+      },
+      project: "demo",
+      coordinator: coordinator
+    )
+    assert_equal "recover-task", token_observation.slug
+    assert_equal "derived-token", captured.fetch(:observation_token)
+  end
 end

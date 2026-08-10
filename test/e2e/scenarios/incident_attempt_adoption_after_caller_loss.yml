@@ -1,6 +1,9 @@
 name: incident_attempt_adoption_after_caller_loss
 description: Proves an accepted attempt survives caller loss and is adopted once by exact attempt ID.
 tags: [incident-regression]
+coverage:
+  primary: attempt.caller_loss_adoption
+  supporting: []
 incident_id: accepted-attempt-caller-loss
 sibling_task_id: "#9767"
 pending: true

@@ -35,6 +35,11 @@ class HiveBotTelegramTest < Minitest::Test
       true
     end
 
+    def edit_message_text(params)
+      @calls << [ :edit_message_text, params ]
+      true
+    end
+
     def answer_callback_query(params)
       @calls << [ :answer_callback_query, params ]
       true
@@ -168,19 +173,6 @@ class HiveBotTelegramTest < Minitest::Test
     assert_equal 10, sends.last.last[:text].length
   end
 
-  def test_message_chunks_exposes_the_same_split_used_by_send_message
-    api = FakeApi.new
-    text = "x" * (Hive::Bot::Telegram::MAX_MESSAGE_CHARS + 10)
-
-    chunks = telegram(api).message_chunks(text)
-
-    assert_equal 2, chunks.size,
-                 "message_chunks must expose the per-chunk split so callers (the digest sender) can drive delivery"
-    assert_equal Hive::Bot::Telegram::MAX_MESSAGE_CHARS, chunks.first.length
-    assert_equal 10, chunks.last.length
-    assert_empty api.calls, "message_chunks must only compute the split, never send"
-  end
-
   def test_edit_message_reply_markup
     api = FakeApi.new
 
@@ -192,6 +184,23 @@ class HiveBotTelegramTest < Minitest::Test
 
     _, params = api.calls.last
     assert_equal :edit_message_reply_markup, api.calls.last.first
+    assert_equal 50, params[:message_id]
+    assert_instance_of Telegram::Bot::Types::InlineKeyboardMarkup, params[:reply_markup]
+  end
+
+  def test_edit_message_text_uses_gem_inline_keyboard_shape
+    api = FakeApi.new
+
+    telegram(api).edit_message_text(
+      chat_id: 12345,
+      message_id: 50,
+      text: "Verified closure",
+      reply_markup: [ [ { text: "Confirm", callback_data: "#closure" } ] ]
+    )
+
+    kind, params = api.calls.last
+    assert_equal :edit_message_text, kind
+    assert_equal "Verified closure", params[:text]
     assert_equal 50, params[:message_id]
     assert_instance_of Telegram::Bot::Types::InlineKeyboardMarkup, params[:reply_markup]
   end
@@ -568,7 +577,7 @@ class HiveBotTelegramTest < Minitest::Test
     bot = telegram(api)
 
     bot.send_message(chat_id: 12345, text: "markdown", parse_mode: :markdown)
-    bot.send_message(chat_id: 12345, text: "markdown_v2", parse_mode: :markdown_v2)
+    bot.send_message(chat_id: 12345, text: "markdown v2", parse_mode: :markdown_v2)
     bot.send_message(chat_id: 12345, text: "html", parse_mode: :html)
     bot.send_message(chat_id: 12345, text: "custom", parse_mode: "Custom")
 

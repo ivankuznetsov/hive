@@ -40,6 +40,14 @@ module Hive
         end
       end
 
+      def self.configured_names(commands)
+        commands ||= {}
+        COMMAND_NAMES.select do |name|
+          command = commands[name] || commands[name.to_sym]
+          command.is_a?(String) && !command.strip.empty?
+        end
+      end
+
       def initialize(commands = nil, timeout_sec: DEFAULT_TIMEOUT_SEC,
                      max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES, **command_keywords)
         @commands = (commands || {}).merge(command_keywords)
@@ -49,6 +57,17 @@ module Hive
 
       def configured?(names: nil)
         active_commands(names: names).any?
+      end
+
+      def configured_names
+        self.class.configured_names(@commands)
+      end
+
+      def command_for(name)
+        key = name.to_s
+        return unless configured_names.include?(key)
+
+        @commands[key] || @commands[key.to_sym]
       end
 
       def validate(worktree_path, names: nil)
@@ -66,11 +85,10 @@ module Hive
 
       def active_commands(names: nil)
         selected = names && Array(names).map(&:to_s)
-        COMMAND_NAMES.filter_map do |name|
+        configured_names.filter_map do |name|
           next if selected && !selected.include?(name)
 
-          command = @commands[name]
-          [ name, command ] if command.is_a?(String) && !command.strip.empty?
+          [ name, command_for(name) ]
         end
       end
 

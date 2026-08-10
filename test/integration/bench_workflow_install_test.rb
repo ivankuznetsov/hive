@@ -11,6 +11,16 @@ require "hive/task_meta"
 class BenchWorkflowInstallTest < Minitest::Test
   include HiveTestHelper
 
+  def setup
+    super
+    Hive::Workflows::Project.reset!
+  end
+
+  def teardown
+    Hive::Workflows::Project.reset!
+    super
+  end
+
   def test_init_and_new_select_builtin_bench_without_project_workflow_copy
     with_tmp_global_config do
       with_tmp_git_repo do |project_root|

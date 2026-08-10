@@ -19,7 +19,7 @@ module Hive
     # final answer through stdin only after choosing it.
     class Answer
       SCHEMA = "hive-answer"
-      STAGE_DIR = "2-brainstorm"
+      STAGE_DIR = "2-brainstorm" # coding-scoped: literal answer boundary only accepts coding brainstorm tasks
       BINDING_VERSION = 1
       MAX_BINDING_BYTES = 8 * 1024
       MAX_ANSWER_BYTES = 64 * 1024

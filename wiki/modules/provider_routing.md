@@ -91,6 +91,22 @@ eligible ordered routes. Later admission/health work consumes these values; it
 must not add retries, deadlines, queues, leases, provider-specific fallback, or
 another recovery owner.
 
+Before the first explicit selection for a durable subject generation,
+`ProviderRouting::PolicyStore` records the complete normalized policy under
+`$HIVE_HOME/attempts/v4/routing-policies/v1/`. The cell is point-addressed by
+the opaque ownership generation and strict attempt subject, owner-private, and
+first-writer-wins. Reads reconstruct the policy and recompute its canonical
+digest; schema-valid tampering therefore still fails closed. Only symbolic
+launch-binding identity is stored. Legacy policies return before key validation,
+schema loading, directory creation, or any policy-store I/O.
+
+The selected route remains separate and attempt-scoped. Attempt schema v4
+stores the adapter/profile in its existing `provider` field and stores account,
+launch binding, model, effort, decision, circuit generation vector, and probe
+bindings inside the immutable explicit-routing arm. `Attempts::Context` exposes
+that persisted route to the authenticated worker; mutable project configuration
+cannot replace it after admission.
+
 Shared circuit state is a separate `Hive::ProviderHealth` component described
 in [[modules/provider_health]]. Its account and exact-model journals are
 consulted only for an explicit pool; the structural legacy policy never opens

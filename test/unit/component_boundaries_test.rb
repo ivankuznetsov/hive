@@ -89,6 +89,7 @@ class ComponentBoundariesTest < Minitest::Test
         "Hive::Attempts::FinalizationMaintenance" => [ "lib/hive/commands/daemon.rb" ],
         "Hive::Attempts::LostOutcomeProcessor" => [ "lib/hive/commands/daemon.rb" ],
         "Hive::Attempts::LostOutcomeStore" => [ "lib/hive/commands/daemon.rb" ],
+        "Hive::Attempts::PointStorage" => [ "lib/hive/provider_routing/policy_store.rb" ],
         "Hive::Attempts::ProcessIdentity" => [ "lib/hive/commands/daemon.rb" ],
         "Hive::Attempts::Reconciler" => [ "lib/hive/commands/daemon.rb" ],
         "Hive::Attempts::StorageHealth" => [ "lib/hive/recovery/migration.rb" ],

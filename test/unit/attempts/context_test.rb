@@ -40,6 +40,38 @@ class AttemptsContextTest < Minitest::Test
     refute Hive::Attempts::Context.active?
   end
 
+  def test_explicit_context_exposes_only_the_persisted_admitted_route
+    routing = explicit_routing
+    context = Hive::Attempts::Context.send(
+      :new,
+      attempt_id: "attempt-1",
+      task_generation: 7,
+      ownership_generation: "generation-1",
+      routing: routing
+    )
+    routing.fetch("route")["model"] = "changed-after-admission"
+
+    assert context.explicit_routing?
+    assert_equal "a" * 64, context.routing_policy_digest
+    assert_equal "decision-1", context.routing_decision.fetch("decision_id")
+    assert_equal "codex-account-a", context.provider_account_id
+    assert_equal "codex", context.adapter
+    assert_equal "codex-home-a", context.launch_binding_id
+    assert_equal "gpt-5.6-sol", context.model
+    assert_equal "high", context.effort
+    assert_equal 2, context.circuit_generations.length
+    assert_equal 1, context.probe_bindings.length
+    assert_raises(FrozenError) { context.admitted_route["model"].replace("other") }
+
+    legacy = Hive::Attempts::Context.send(
+      :new, attempt_id: "legacy", task_generation: 0
+    )
+    refute legacy.explicit_routing?
+    assert_nil legacy.admitted_route
+    assert_empty legacy.circuit_generations
+    assert legacy.circuit_generations.frozen?
+  end
+
   def test_environment_context_is_authenticated_bound_and_scrubbed
     with_running_attempt do |store, _record|
       resolver = Struct.new(:task) { def resolve = task }.new(
@@ -268,6 +300,40 @@ class AttemptsContextTest < Minitest::Test
   end
 
   private
+
+  def explicit_routing
+    account_scope = {
+      "kind" => "provider_account", "provider_account_id" => "codex-account-a", "model" => nil
+    }
+    model_scope = {
+      "kind" => "model", "provider_account_id" => "codex-account-a", "model" => "gpt-5.6-sol"
+    }
+    {
+      "mode" => "explicit",
+      "policy_digest" => "a" * 64,
+      "decision" => {
+        "decision_id" => "decision-1", "policy_digest" => "a" * 64,
+        "decided_at" => Time.utc(2026, 8, 10, 12).iso8601(6), "exclusions" => []
+      },
+      "route" => {
+        "route_id" => "codex-account-a/gpt-5.6-sol",
+        "provider_account_id" => "codex-account-a", "adapter" => "codex",
+        "launch_binding_id" => "codex-home-a", "model" => "gpt-5.6-sol", "effort" => "high"
+      },
+      "circuit_generations" => [
+        { "scope" => account_scope, "journal_epoch" => 1, "observed_generation" => 4 },
+        { "scope" => model_scope, "journal_epoch" => 1, "observed_generation" => 7 }
+      ],
+      "probe_bindings" => [
+        {
+          "scope" => model_scope, "journal_epoch" => 1,
+          "observed_generation" => 7, "claim_generation" => 8,
+          "attempt_id" => "attempt-1", "task_generation" => "generation-1",
+          "ownership_fence" => "generation-1"
+        }
+      ]
+    }
+  end
 
   def with_running_attempt
     with_tmp_dir do |root|

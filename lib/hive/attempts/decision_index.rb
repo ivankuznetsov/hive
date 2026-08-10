@@ -66,7 +66,7 @@ module Hive
 
       def record_unresolved_loss(record)
         unless record.is_a?(Record) && record.state == "lost"
-          raise StoreError, "unresolved-loss index requires a lost schema-v3 record"
+          raise StoreError, "unresolved-loss index requires a lost schema-v4 record"
         end
 
         key = semantic_key(record.task_generation, record.subject)
@@ -94,7 +94,7 @@ module Hive
 
       def record_successor(record)
         unless record.is_a?(Record) && !record["predecessor_attempt_id"].to_s.empty?
-          raise StoreError, "successor index requires a predecessor-bound schema-v3 record"
+          raise StoreError, "successor index requires a predecessor-bound schema-v4 record"
         end
 
         predecessor = record["predecessor_attempt_id"]
@@ -458,14 +458,14 @@ module Hive
       def record!(record)
         return record if record.is_a?(Record)
 
-        raise StoreError, "attempt decision index requires a schema-v3 record"
+        raise StoreError, "attempt decision index requires a schema-v4 record"
       end
 
       def terminal!(record)
         record!(record)
         return record if record.state == "terminal"
 
-        raise StoreError, "terminal decision index requires a terminal schema-v3 record"
+        raise StoreError, "terminal decision index requires a terminal schema-v4 record"
       end
     end
   end

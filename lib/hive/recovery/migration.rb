@@ -6,24 +6,27 @@ require "time"
 require "hive/atomic_file"
 require "hive/attempts/capacity_snapshot"
 require "hive/attempts/finalization_maintenance"
+require "hive/attempts/permanent_proof_store"
 require "hive/attempts/record"
+require "hive/attempts/record_migration"
 require "hive/attempts/storage_health"
 require "hive/attempts/store"
 require "hive/paths"
 
 module Hive
   module Recovery
-    # Forward-only recovery cutover. Attempt records remain schema v3; only
-    # their physical layout changes from the scan-only v2 tree to the split v3
-    # store. Runtime code opens v3 only and v2 becomes an old-binary fence.
+    # Forward-only recovery cutover. Historical schema-v3 records are rewritten
+    # to explicit legacy-mode schema-v4 records while their physical store moves
+    # from attempts/v3 to attempts/v4. Runtime code opens v4 only; prior roots
+    # become old-binary fences.
     class Migration
       class Error < Hive::Error; end
 
       RECEIPT_SCHEMA = "hive-recovery-migration".freeze
-      RECEIPT_VERSION = 4
-      RECEIPT_BASENAME = "recovery-migration-v4.json".freeze
+      RECEIPT_VERSION = 5
+      RECEIPT_BASENAME = "recovery-migration-v5.json".freeze
       PRIOR_RECEIPT_BASENAMES = %w[
-        recovery-migration-v2.json recovery-migration-v3.json
+        recovery-migration-v2.json recovery-migration-v3.json recovery-migration-v4.json
       ].freeze
       # Keep the historic lock name: released recovery migrations and this
       # layout cutover must never mutate the same state home concurrently.
@@ -34,11 +37,11 @@ module Hive
       FENCE_PAYLOAD = {
         "schema" => FENCE_SCHEMA,
         "schema_version" => FENCE_VERSION,
-        "target" => "v3"
+        "target" => "v4"
       }.freeze
       CHECKPOINT_SCHEMA = "hive-attempt-layout-cutover".freeze
       CHECKPOINT_VERSION = 1
-      CHECKPOINT_BASENAME = ".v3-cutover.json".freeze
+      CHECKPOINT_BASENAME = ".v4-cutover.json".freeze
       CHECKPOINT_PHASES = { "fenced" => 1, "verified" => 2, "complete" => 3 }.freeze
 
       CURRENT_ATTEMPT_VERSION = Hive::Attempts::Record::SCHEMA_VERSION
@@ -47,7 +50,7 @@ module Hive
       MAX_RECORD_BYTES = 4 * 1024 * 1024
       ATTEMPT_ROOT_ENTRIES = %w[
         records logs outputs generation-locks proof decision-indexes
-        pending-finalization cold-logs log-state maintenance
+        pending-finalization cold-logs log-state maintenance routing-policies
       ].freeze
       RECEIPT_REQUIRED_KEYS = %w[
         completed_at attempts dispatch_requests dispatch_results
@@ -126,7 +129,8 @@ module Hive
         return false unless regular_file?(receipt_path)
 
         validate_attempts_parent!
-        validate_fence!
+        validate_fence!(legacy_attempt_root, allowed_targets: [ "v4" ])
+        validate_fence!(prior_attempt_root, allowed_targets: %w[v3 v4])
         validate_attempt_root_directory!(current_attempt_root)
         read_checkpoint!(minimum_phase: "complete")
         true
@@ -187,58 +191,84 @@ module Hive
 
       def cut_over_layout!
         validate_attempts_parent!
-        old = optional_lstat(legacy_attempt_root)
-        current = optional_lstat(current_attempt_root)
-
-        if old&.directory? && current&.directory?
-          unless remove_empty_old_skeleton!
-            raise Error,
-                  "both attempts/v2 and attempts/v3 contain material state; " \
-                  "preserve both roots and resolve the collision before retrying"
-          end
-          old = nil
-        end
-
-        if old && !old.directory?
-          validate_fence!
-          raise Error, "attempts/v2 fence exists without its attempts/v3 target" unless current&.directory?
-        elsif current && !current.directory?
-          raise Error, "attempts/v3 path is not a real directory"
-        end
-
         checkpoint = read_checkpoint!
         source = checkpoint_source(checkpoint) if checkpoint && !phase_before?(checkpoint, "verified")
-        if old&.directory?
-          with_quiesced_source(legacy_attempt_root) do
-            validate_attempt_tree!(legacy_attempt_root, normalize_modes: true)
-            scan = Hive::Attempts::Store.new(
-              root: legacy_attempt_root, create_directories: false
-            ).scan
+        source_root = select_source_root!
+
+        if source_root
+          with_quiesced_source(source_root) do
+            validate_attempt_tree!(source_root, normalize_modes: true)
+            scan = migration_scan(source_root)
             refuse_live_attempts!(scan)
-            source = corpus_summary(legacy_attempt_root)
-            assert_scan_counts!(source, scan)
-            File.rename(legacy_attempt_root, current_attempt_root)
+            File.rename(source_root, current_attempt_root)
             Hive::AtomicFile.fsync_directory(attempts_parent)
-            publish_fence!
+            publish_all_fences!
+            migrate_attempt_corpus!(current_attempt_root)
           end
-        elsif current&.directory?
-          validate_current_root!(normalize_modes: phase_before?(checkpoint, "verified"))
-          observed = corpus_summary(current_attempt_root) unless source
-          if checkpoint
-            assert_same_corpus!(checkpoint_source(checkpoint), observed) if observed
-            source ||= checkpoint_source(checkpoint)
-          else
-            source = observed
+        elsif File.directory?(current_attempt_root)
+          with_quiesced_source(current_attempt_root) do
+            validate_current_root!(normalize_modes: phase_before?(checkpoint, "verified"))
+            migrate_attempt_corpus!(current_attempt_root) if phase_before?(checkpoint, "verified")
           end
-          publish_fence! unless old
         else
           Dir.mkdir(current_attempt_root, 0o700)
           Hive::AtomicFile.fsync_directory(attempts_parent)
-          source = corpus_summary(current_attempt_root)
-          publish_fence!
+        end
+        publish_all_fences!
+
+        observed = corpus_summary(current_attempt_root) unless source
+        if checkpoint
+          assert_same_corpus!(checkpoint_source(checkpoint), observed) if observed
+          source ||= checkpoint_source(checkpoint)
+        else
+          source = observed
         end
         write_checkpoint!(source.merge("phase" => "fenced")) unless checkpoint
         source
+      end
+
+      def select_source_root!
+        current = optional_lstat(current_attempt_root)
+        if current && !current.directory?
+          raise Error, "attempts/v4 path is not a real directory"
+        end
+
+        legacy = optional_lstat(legacy_attempt_root)
+        prior = optional_lstat(prior_attempt_root)
+        if legacy && !legacy.directory?
+          validate_fence!(legacy_attempt_root, allowed_targets: [ "v4" ])
+          raise Error, "attempts/v3 fence exists without its attempts/v4 target" unless current&.directory?
+          legacy = nil
+        end
+
+        if prior && !prior.directory?
+          validate_fence!(prior_attempt_root, allowed_targets: %w[v3 v4])
+          prior = nil
+        end
+
+        if current&.directory?
+          older = [ prior&.directory? && prior_attempt_root,
+                    legacy&.directory? && legacy_attempt_root ].compact
+          remaining = older.reject { |root| remove_empty_attempt_skeleton!(root) }
+          collision!(remaining + [ current_attempt_root ]) unless remaining.empty?
+          return nil
+        end
+
+        if legacy&.directory?
+          if prior&.directory? && !remove_empty_attempt_skeleton!(prior_attempt_root)
+            collision!([ prior_attempt_root, legacy_attempt_root ])
+          end
+          return legacy_attempt_root
+        end
+
+        prior_attempt_root if prior&.directory?
+      end
+
+      def collision!(roots)
+        versions = roots.map { |root| File.basename(root) }.sort.join(" and attempts/")
+        raise Error,
+              "both attempts/#{versions} contain material state; " \
+              "preserve the roots and resolve the collision before retrying"
       end
 
       def with_quiesced_source(root)
@@ -278,7 +308,111 @@ module Hive
         return unless live
 
         raise Error,
-              "live attempt #{live.attempt_id} in attempts/v2 must finish before cutover"
+              "live attempt #{live.attempt_id} in the prior attempt store must finish before cutover"
+      end
+
+      def migration_scan(root)
+        records = []
+        invalid = []
+        records_root = File.join(root, "records")
+        return Hive::Attempts::Scan.new(records: records.freeze, invalid_records: invalid.freeze) unless File.directory?(records_root)
+
+        Dir.children(records_root).sort.each do |basename|
+          path = File.join(records_root, basename)
+          validate_record_entry!(path, basename: basename)
+          begin
+            data = JSON.parse(bounded_read(path, MAX_RECORD_BYTES))
+            ensure_supported_attempt_object!(data, path: path)
+            converted = Hive::Attempts::RecordMigration.current_or_convert(data)
+            records << Hive::Attempts::Record.new(converted)
+          rescue JSON::ParserError, Hive::Attempts::InvalidRecord, TypeError => error
+            invalid << Hive::Attempts::InvalidStoredRecord.new(path: path, error: error.message)
+          end
+        end
+        Hive::Attempts::Scan.new(records: records.freeze, invalid_records: invalid.freeze)
+      end
+
+      def migrate_attempt_corpus!(root)
+        migrate_hot_records!(root)
+        migrate_permanent_proofs!(root)
+      end
+
+      def migrate_hot_records!(root)
+        records_root = File.join(root, "records")
+        return unless File.directory?(records_root)
+
+        Dir.children(records_root).sort.each do |basename|
+          path = File.join(records_root, basename)
+          validate_record_entry!(path, basename: basename)
+          bytes = bounded_read(path, MAX_RECORD_BYTES)
+          begin
+            data = JSON.parse(bytes)
+            ensure_supported_attempt_object!(data, path: path)
+            next if data["schema_version"] == CURRENT_ATTEMPT_VERSION &&
+                    Hive::Attempts::Record.new(data)
+
+            converted = Hive::Attempts::RecordMigration.convert_v3(data)
+            write_json!(path, converted)
+          rescue JSON::ParserError, Hive::Attempts::InvalidRecord, TypeError
+            # Invalid hot bytes remain byte-for-byte reservations. Store#scan
+            # will keep counting them after cutover instead of manufacturing
+            # room for a duplicate owner.
+            next
+          end
+        end
+      end
+
+      def migrate_permanent_proofs!(root)
+        proof_root = File.join(root, "proof", Hive::Attempts::PermanentProofStore::KIND)
+        return unless File.directory?(proof_root)
+
+        Dir.glob(File.join(proof_root, "**", "*.json")).sort.each do |path|
+          status = File.lstat(path)
+          unless status.file? && !status.symlink?
+            raise Error, "attempt permanent proof contains a non-record entry at #{path}"
+          end
+          data = JSON.parse(bounded_read(path, MAX_RECORD_BYTES))
+          ensure_supported_attempt_object!(data, path: path)
+          converted = Hive::Attempts::RecordMigration.current_or_convert(data)
+          record = Hive::Attempts::Record.new(converted)
+          raise Error, "attempt permanent proof is not final at #{path}" unless record.final?
+
+          expected = File.join(
+            File.join(root, "proof"),
+            Hive::Attempts::StorageKey.relative(
+              Hive::Attempts::PermanentProofStore::KIND,
+              "attempt_id" => record.attempt_id
+            )
+          )
+          unless File.expand_path(path) == File.expand_path(expected)
+            raise Error, "attempt permanent proof key collision at #{path}"
+          end
+          write_json!(path, converted) if data["schema_version"] != CURRENT_ATTEMPT_VERSION
+        rescue JSON::ParserError, Hive::Attempts::InvalidRecord,
+               Hive::Attempts::StoreError, TypeError => error
+          raise Error, "attempt permanent proof is unreadable: #{error.message}"
+        end
+      end
+
+      def validate_record_entry!(path, basename:)
+        status = File.lstat(path)
+        unless status.file? && !status.symlink? && basename.end_with?(".json")
+          raise Error, "attempt records contain a non-record entry at #{path}"
+        end
+      end
+
+      def ensure_supported_attempt_object!(data, path:)
+        unless data.is_a?(Hash)
+          raise Error, "#{path} is valid JSON but not an attempt record object"
+        end
+        return if data["schema"] == Hive::Attempts::Record::SCHEMA &&
+                  [ Hive::Attempts::RecordMigration::LEGACY_VERSION,
+                    CURRENT_ATTEMPT_VERSION ].include?(data["schema_version"])
+
+        raise Error,
+              "#{path} has unsupported attempt schema " \
+              "#{data['schema'].inspect}/#{data['schema_version'].inspect}; " \
+              "only schema v3 can move to attempts/v4"
       end
 
       def promote_historical_finals!(store, now:)
@@ -383,25 +517,20 @@ module Hive
         if File.directory?(records_root)
           Dir.children(records_root).sort.each do |basename|
             path = File.join(records_root, basename)
-            status = File.lstat(path)
-            unless status.file? && !status.symlink? && basename.end_with?(".json")
-              raise Error, "attempt records contain a non-record entry at #{path}"
-            end
+            validate_record_entry!(path, basename: basename)
             bytes = bounded_read(path, MAX_RECORD_BYTES)
             digest << basename << "\0" << bytes.bytesize.to_s << "\0"
             digest << Digest::SHA256.digest(bytes)
             count += 1
             begin
               data = JSON.parse(bytes)
-              unless data.is_a?(Hash)
-                raise Error, "#{path} is valid JSON but not an attempt record object"
-              end
+              ensure_supported_attempt_object!(data, path: path)
               unless data["schema"] == Hive::Attempts::Record::SCHEMA &&
                      data["schema_version"] == CURRENT_ATTEMPT_VERSION
                 raise Error,
                       "#{path} has unsupported attempt schema " \
                       "#{data['schema'].inspect}/#{data['schema_version'].inspect}; " \
-                      "only schema v3 can move to attempts/v3"
+                      "only schema v4 can remain in attempts/v4 after conversion"
               end
               Hive::Attempts::Record.new(data)
               valid += 1
@@ -478,33 +607,49 @@ module Hive
           CHECKPOINT_PHASES.fetch(checkpoint.fetch("phase")) < CHECKPOINT_PHASES.fetch(phase)
       end
 
-      def publish_fence!
-        status = optional_lstat(legacy_attempt_root)
-        return validate_fence! if status
-
-        write_json!(legacy_attempt_root, FENCE_PAYLOAD)
-        Hive::AtomicFile.fsync_directory(attempts_parent)
-        validate_fence!
+      def publish_all_fences!
+        publish_fence!(legacy_attempt_root, target: "v4")
+        status = optional_lstat(prior_attempt_root)
+        if status
+          validate_fence!(prior_attempt_root, allowed_targets: %w[v3 v4])
+        else
+          publish_fence!(prior_attempt_root, target: "v4")
+        end
       end
 
-      def validate_fence!
-        status = File.lstat(legacy_attempt_root)
+      def publish_fence!(path, target:)
+        status = optional_lstat(path)
+        return validate_fence!(path, allowed_targets: [ target ]) if status
+
+        write_json!(path, FENCE_PAYLOAD.merge("target" => target))
+        Hive::AtomicFile.fsync_directory(attempts_parent)
+        validate_fence!(path, allowed_targets: [ target ])
+      end
+
+      def validate_fence!(path, allowed_targets:)
+        version = File.basename(path)
+        status = File.lstat(path)
         if status.symlink? || !status.file?
-          raise Error, "attempts/v2 old-binary fence is not a real regular file"
+          raise Error, "attempts/#{version} old-binary fence is not a real regular file"
         end
-        validate_owner!(status, legacy_attempt_root)
+        validate_owner!(status, path)
         unless (status.mode & 0o777) == 0o600
-          raise Error, "attempts/v2 old-binary fence mode must be 0600"
+          raise Error, "attempts/#{version} old-binary fence mode must be 0600"
         end
-        unless parse_object!(legacy_attempt_root) == FENCE_PAYLOAD
-          raise Error, "attempts/v2 old-binary fence is invalid or colliding"
+        payload = parse_object!(path)
+        valid = payload.keys.sort == FENCE_PAYLOAD.keys.sort &&
+          payload["schema"] == FENCE_SCHEMA &&
+          payload["schema_version"] == FENCE_VERSION &&
+          allowed_targets.include?(payload["target"])
+        unless valid
+          raise Error, "attempts/#{version} old-binary fence is invalid or colliding"
         end
 
         true
       rescue Errno::ENOENT
-        raise Error, "attempts/v2 old-binary fence is missing"
+        raise Error, "attempts/#{version} old-binary fence is missing"
       rescue JSON::ParserError
-        raise Error, "attempts/v2 old-binary fence is invalid or colliding"
+        raise Error, "attempts/#{version} old-binary fence is invalid or colliding"
       end
 
       def validate_attempts_parent!
@@ -564,15 +709,17 @@ module Hive
         entries
       end
 
-      def remove_empty_old_skeleton!
-        validate_attempt_tree!(legacy_attempt_root, normalize_modes: true)
-        directories = safe_tree_entries(legacy_attempt_root).filter_map do |path, status|
+      def remove_empty_attempt_skeleton!(root, keep: false)
+        return false if keep
+
+        validate_attempt_tree!(root, normalize_modes: true)
+        directories = safe_tree_entries(root).filter_map do |path, status|
           return false unless status.directory?
 
           path
         end
         directories.sort_by { |path| -path.count(File::SEPARATOR) }.each { |path| Dir.rmdir(path) }
-        Dir.rmdir(legacy_attempt_root)
+        Dir.rmdir(root)
         Hive::AtomicFile.fsync_directory(attempts_parent)
         true
       rescue Errno::ENOTEMPTY
@@ -600,7 +747,7 @@ module Hive
 
         raise Error,
               "unsupported attempts/v1 state remains at #{obsolete_attempt_root}; " \
-              "this forward-only cutover accepts schema-v3 records from attempts/v2 only"
+              "this forward-only cutover accepts schema-v3 records from attempts/v2 or attempts/v3 only"
       rescue Errno::ENOTEMPTY
         raise Error,
               "unsupported attempts/v1 state changed while it was being checked; retry safely"
@@ -729,8 +876,9 @@ module Hive
 
       def attempts_parent = File.join(state_home, "attempts")
       def obsolete_attempt_root = File.join(attempts_parent, "v1")
-      def legacy_attempt_root = File.join(attempts_parent, "v2")
-      def current_attempt_root = File.join(attempts_parent, "v3")
+      def prior_attempt_root = File.join(attempts_parent, "v2")
+      def legacy_attempt_root = File.join(attempts_parent, "v3")
+      def current_attempt_root = File.join(attempts_parent, "v4")
       def storage_health
         Hive::Attempts::StorageHealth.new(
           root: File.join(current_attempt_root, "maintenance")

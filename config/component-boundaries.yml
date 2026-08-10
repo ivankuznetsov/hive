@@ -94,6 +94,7 @@ components:
         - Hive::ProviderRouting::Decision
         - Hive::ProviderRouting::Pin
         - Hive::ProviderRouting::Policy
+        - Hive::ProviderRouting::PolicyStore
         - Hive::ProviderRouting::Request
         - Hive::ProviderRouting::Requirements
         - Hive::ProviderRouting::Route
@@ -104,12 +105,15 @@ components:
       - lib/hive/provider_routing/configuration.rb
       - lib/hive/provider_routing/decision.rb
       - lib/hive/provider_routing/policy.rb
+      - lib/hive/provider_routing/policy_store.rb
       - lib/hive/provider_routing/request.rb
       - lib/hive/provider_routing/route.rb
+      - schemas/hive-routing-policy.v1.json
     state_contracts:
       - "An absent routing.pool returns a structural legacy policy before global account, health, or capacity state is consulted"
       - "An explicit policy freezes ordered account, adapter, launch-binding, model, effort, capability, requirement, and pin identity"
       - "Provider-account identity is separate from the existing adapter/profile provider identity"
+      - "Explicit policies are first-writer-wins snapshots keyed by ownership generation and durable subject; legacy mode performs no policy-store I/O"
     schema_contracts:
       - "The v1 canonical digest covers every normalized selection input and no credential material"
       - "Account, route, requirements, pin, policy, request, and decision values are deeply immutable"
@@ -120,6 +124,7 @@ components:
     allowed_hive_dependencies:
       - hive
       - hive/agent_profiles
+      - hive/attempts/point_storage
       - hive/implementation_identity
       - hive/model_routing
     internal_collaborators:
@@ -128,12 +133,14 @@ components:
     authorized_internal_constructions: []
     hive_consumers:
       - lib/hive/config.rb
+      - lib/hive/attempts/store.rb
       - lib/hive/implementation_identity/resolver.rb
     mutation_authority: "None; configuration normalization and decisions are pure immutable values."
     recovery_surface: "No retry or recovery surface; invalid configuration fails before dispatch and legacy mode bypasses the domain."
     wiki_page: wiki/modules/provider_routing.md
     focused_tests:
       - test/unit/provider_routing/configuration_test.rb
+      - test/unit/provider_routing/policy_store_test.rb
       - test/unit/provider_routing/value_objects_test.rb
       - test/unit/model_routing_test.rb
       - test/unit/implementation_identity/resolver_test.rb
@@ -442,9 +449,10 @@ components:
     owned_paths:
       - lib/hive/attempts
     state_contracts:
-      - "$HIVE_HOME/attempts/v3 bounded hot records, permanent proofs and indexes, framed logs, outputs, generation locks, and finalization state"
+      - "$HIVE_HOME/attempts/v4 bounded hot records, permanent proofs and indexes, framed logs, outputs, generation locks, routing-policy snapshots, and finalization state"
     schema_contracts:
-      - "hive-attempt v3 is the only runtime reader/writer; Hive::Recovery::Migration owns the one-off cutover"
+      - "hive-attempt v4 is the only runtime reader/writer; Hive::Recovery::Migration exclusively converts schema-v3 state into explicit legacy routing mode"
+      - "hive-routing-policy v1 is the admission-owned first-writer-wins task-generation policy snapshot"
     lock_contracts:
       - "admission lock before generation lock; record transitions use guarded CAS"
     component_dependencies: []
@@ -458,6 +466,7 @@ components:
       - hive/managed_directory
       - hive/markers
       - hive/paths
+      - hive/provider_routing/policy_store
       - hive/stringify_keys
       - hive/task
       - hive/task_resolver
@@ -544,6 +553,10 @@ components:
         files:
           - lib/hive/recovery/migration.rb
         reason: "Store and the one-off migration publish the bounded storage-health cell."
+      - constant: Hive::Attempts::PointStorage
+        files:
+          - lib/hive/provider_routing/policy_store.rb
+        reason: "The admission-owned routing policy store reuses point-addressed owner-private persistence without acquiring attempt lifecycle authority."
       - constant: Hive::Attempts::AdmissionView
         files:
           - lib/hive/recovery/migration.rb

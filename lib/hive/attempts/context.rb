@@ -1,5 +1,6 @@
 require "hive/attempts/capability"
 require "hive/attempts/store"
+require "hive/stringify_keys"
 
 module Hive
   module Attempts
@@ -9,9 +10,10 @@ module Hive
     # fingerprint. Transport environment is scrubbed immediately afterwards.
     class Context
       ENV_PREFIX = "HIVE_ATTEMPT_"
+      EMPTY_ROUTING_VALUES = [].freeze
 
       attr_reader :attempt_id, :task_generation, :ownership_generation,
-                  :project, :task_slug, :intended_stage
+                  :project, :task_slug, :intended_stage, :routing
 
       class << self
         def current
@@ -63,7 +65,8 @@ module Hive
             ownership_generation: record.ownership_generation,
             project: record["project"],
             task_slug: record["task_slug"],
-            intended_stage: record["intended_stage"]
+            intended_stage: record["intended_stage"],
+            routing: record["routing"]
           )
         rescue Hive::Error, SystemCallError, IOError => e
           raise StoreError, "durable attempt context rejected: #{e.message}"
@@ -163,7 +166,8 @@ module Hive
       end
 
       def initialize(attempt_id:, task_generation:, ownership_generation: nil,
-                     project: nil, task_slug: nil, intended_stage: nil)
+                     project: nil, task_slug: nil, intended_stage: nil,
+                     routing: { "mode" => "legacy" })
         @attempt_id = attempt_id.to_s
         @task_generation, bridged_ownership = numeric_generation_or_legacy(task_generation)
         @legacy_opaque_generation = !bridged_ownership.nil? && ownership_generation.nil?
@@ -171,11 +175,24 @@ module Hive
         @project = project&.to_s
         @task_slug = task_slug&.to_s
         @intended_stage = intended_stage&.to_s
+        @routing = deep_freeze(Hive::StringifyKeys.call(routing))
         raise ArgumentError, "attempt context requires an attempt ID" if @attempt_id.empty?
         raise ArgumentError, "attempt context task generation must be non-negative" if @task_generation.negative?
       rescue TypeError
         raise ArgumentError, "attempt context requires a numeric task generation"
       end
+
+      def explicit_routing? = routing["mode"] == "explicit"
+      def routing_policy_digest = explicit_routing? ? routing.fetch("policy_digest") : nil
+      def routing_decision = explicit_routing? ? routing.fetch("decision") : nil
+      def admitted_route = explicit_routing? ? routing.fetch("route") : nil
+      def circuit_generations = explicit_routing? ? routing.fetch("circuit_generations") : EMPTY_ROUTING_VALUES
+      def probe_bindings = explicit_routing? ? routing.fetch("probe_bindings") : EMPTY_ROUTING_VALUES
+      def provider_account_id = admitted_route&.fetch("provider_account_id", nil)
+      def adapter = admitted_route&.fetch("adapter", nil)
+      def launch_binding_id = admitted_route&.fetch("launch_binding_id", nil)
+      def model = admitted_route&.fetch("model", nil)
+      def effort = admitted_route&.fetch("effort", nil)
 
       # Revalidate the admitted generation at the command's locked mutation
       # boundary. A dependency or task artifact may change after dispatch but
@@ -199,6 +216,18 @@ module Hive
       end
 
       private
+
+      def deep_freeze(value)
+        case value
+        when Hash
+          value.each { |key, child| key.freeze; deep_freeze(child) }
+        when Array
+          value.each { |child| deep_freeze(child) }
+        when String
+          value.freeze
+        end
+        value.freeze
+      end
 
       def numeric_generation_or_legacy(value)
         return [ Integer(value), nil ] if value.is_a?(Integer) || value.to_s.match?(/\A\d+\z/)

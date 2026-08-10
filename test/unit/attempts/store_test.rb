@@ -195,10 +195,21 @@ class AttemptsStoreTest < Minitest::Test
     end
   end
 
+  def test_store_exposes_the_lazy_versioned_routing_policy_snapshot_root
+    with_store do |store|
+      policies = store.routing_policies
+
+      assert_instance_of Hive::ProviderRouting::PolicyStore, policies
+      assert_equal File.join(store.routing_policies_root, "v1"), policies.root
+      assert_equal 0o700, File.stat(store.routing_policies_root).mode & 0o777
+      refute File.exist?(policies.root)
+    end
+  end
+
   def test_managed_directories_refuse_symlinks_before_chmod_or_state_access
     %w[
       records logs outputs generation-locks proof decision-indexes
-      pending-finalization cold-logs log-state maintenance
+      pending-finalization cold-logs log-state maintenance routing-policies
     ].each do |managed_name|
       with_tmp_dir do |dir|
         root = File.join(dir, "attempts")

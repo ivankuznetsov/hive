@@ -109,7 +109,9 @@ module Hive
       # chat. See `Hive::Daemon::DispatchResultQueue` (ADV-1).
       "hive-dispatch-result" => 2,
       # Internal source-of-truth record for durable task-stage ownership.
-      "hive-attempt" => 3,
+      "hive-attempt" => 4,
+      # Admission-owned immutable provider-routing policy snapshots.
+      "hive-routing-policy" => 1,
       # Owner-private provider-account and exact-model circuit projection and
       # its authoritative scoped journal events.
       "hive-provider-health" => 1,

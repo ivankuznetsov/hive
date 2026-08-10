@@ -2454,6 +2454,7 @@ class SchemaFilesTest < Minitest::Test
     assert_includes doc.fetch("required"), "claim_capability_digest"
     assert_includes doc.fetch("required"), "ownership_generation"
     assert_includes doc.fetch("required"), "task_input_epoch"
+    assert_includes doc.fetch("required"), "routing"
     refute_includes doc.fetch("required"), "compatibility"
     refute_includes doc.fetch("properties").keys, "compatibility"
     assert_equal 1, doc.fetch("properties").dig("worker_argv", "minItems")
@@ -2461,9 +2462,68 @@ class SchemaFilesTest < Minitest::Test
     assert_includes doc.fetch("required"), "subject"
     assert_equal "^[0-9a-f]{64}$", doc.fetch("properties").dig("claim_capability_digest", "pattern")
     receipt_required = doc.dig("$defs", "Receipt", "required")
-    %w[attempt_id task_generation ownership_generation task_input_epoch outcome exit_status started_at ended_at final_checkpoint output_references log_reference].each do |key|
+    %w[receipt_version terminal_lease_version attempt_id task_generation ownership_generation task_input_epoch outcome exit_status started_at ended_at final_checkpoint output_references log_reference provider_evidence].each do |key|
       assert_includes receipt_required, key
     end
+    assert_equal false, doc.dig("$defs", "ProviderEvidence", "additionalProperties")
+    refute_includes doc.dig("$defs", "ProviderEvidence", "properties").keys, "message"
+    refute_includes doc.dig("$defs", "ProviderEvidence", "properties").keys, "raw_output"
+  end
+
+  def test_internal_attempt_routing_schema_is_a_strict_tagged_union
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-attempt")))
+    schemer = JSONSchemer.schema(
+      {
+        "$schema" => "https://json-schema.org/draft/2020-12/schema",
+        "$ref" => "#/$defs/Routing",
+        "$defs" => doc.fetch("$defs")
+      }
+    )
+    legacy = { "mode" => "legacy" }
+    explicit = {
+      "mode" => "explicit",
+      "policy_digest" => "a" * 64,
+      "decision" => {
+        "decision_id" => "decision-1",
+        "policy_digest" => "a" * 64,
+        "decided_at" => "2026-08-10T12:00:00.000000Z",
+        "exclusions" => [
+          { "route_id" => "route-0", "reason" => "circuit_cooldown", "detail" => nil }
+        ]
+      },
+      "route" => {
+        "route_id" => "route-1", "provider_account_id" => "codex-account-a",
+        "adapter" => "codex", "launch_binding_id" => "codex-home-a",
+        "model" => "gpt-5.6-sol", "effort" => "high"
+      },
+      "circuit_generations" => [
+        {
+          "scope" => {
+            "kind" => "provider_account", "provider_account_id" => "codex-account-a",
+            "model" => nil
+          },
+          "journal_epoch" => 1, "observed_generation" => 4
+        },
+        {
+          "scope" => {
+            "kind" => "model", "provider_account_id" => "codex-account-a",
+            "model" => "gpt-5.6-sol"
+          },
+          "journal_epoch" => 2, "observed_generation" => 7
+        }
+      ],
+      "probe_bindings" => []
+    }
+
+    assert schemer.valid?(legacy)
+    assert schemer.valid?(explicit), schemer.validate(explicit).to_a.inspect
+    refute schemer.valid?(legacy.merge("route" => explicit.fetch("route")))
+    nested_raw = JSON.parse(JSON.generate(explicit))
+    nested_raw.fetch("route")["credentials"] = "secret"
+    refute schemer.valid?(nested_raw)
+    nested_raw = JSON.parse(JSON.generate(explicit))
+    nested_raw.fetch("decision").fetch("exclusions").first["message"] = "raw"
+    refute schemer.valid?(nested_raw)
   end
 
   def test_legacy_recovery_schema_files_are_removed_after_one_off_cutover

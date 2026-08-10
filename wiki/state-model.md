@@ -277,7 +277,7 @@ gesture; ordinary action, web, and bot retry surfaces cannot bypass it.
 
 ## Concurrency files
 
-Durable leases under `$HIVE_HOME/attempts/v3/records/` are the authoritative
+Durable leases under `$HIVE_HOME/attempts/v4/records/` are the authoritative
 execution owner. Records are `launching`, `running`, `terminal`, or `lost`;
 wrapper/worker PID start fingerprints and session/group IDs make adoption and
 cleanup PID-reuse safe. Each record also immutably stores the
@@ -388,7 +388,7 @@ journal.
 
 ## Attempt storage lifecycle
 
-`$HIVE_HOME/attempts/v3/records/` is the bounded hot authority for live,
+`$HIVE_HOME/attempts/v4/records/` is the bounded hot authority for live,
 lost-without-a-safe-successor, and finalization-pending attempts. Reconciliation
 and admission scan this directory once per cycle. A terminal or safely resolved
 lost attempt leaves it only after its immutable proof, decision-index entries,
@@ -403,11 +403,12 @@ per hourly pass and deletes them when the owning task is archived or three days
 after `ended_at`, whichever is earlier, unless recovery remains pinned. This
 retention does not delete permanent proof or referenced output artifacts.
 
-The physical v2-to-v3 migration is forward-only. It quiesces the validated v2
-tree, rejects live attempts, renames it to v3, publishes a 0600 v2 old-binary
-fence, verifies corpus and decision parity, promotes historical finals, and
+The physical v3-to-v4 migration is forward-only and can consume a remaining
+supported v2 source. It quiesces the validated source tree, rejects live
+attempts, renames it to v4, converts valid schema-v3 records and proofs,
+publishes 0600 old-binary fences, verifies corpus and decision parity, promotes historical finals, and
 advances a `fenced → verified → complete` checkpoint before publishing
-`recovery-migration-v4.json`. Runtime has no v2 reader or reverse hydration;
+`recovery-migration-v5.json`. Runtime has no v2/v3 reader or reverse hydration;
 any competing material root or changed corpus fails closed.
 
 One owner-private `maintenance/` status cell caches the latest migration and

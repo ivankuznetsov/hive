@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-08-02
+updated: 2026-08-10
 tags: [command, web, rails, turbo, hivebox-container, archive, retention]
 ---
 
@@ -811,8 +811,10 @@ installer's diagnostics and pull/run argv shape.
 
 Root web assets are served from `web/public/`: `/favicon.ico` (multi-size
 legacy icon), `/icon.svg`, and `/icon.png` (apple-touch). The layout links all
-three so browsers no longer emit a root favicon 404, and the icon mark is the
-terracotta honeycomb hive glyph rather than the old placeholder.
+three so browsers no longer emit a root favicon 404. All formats use the
+canonical linked-cell Hive logo in the public site's yellow (`#f0b429`) on a
+full, opaque black (`#0d1117`) square; the solid square prevents white launcher
+corners and preserves the mark when a platform applies its own icon mask.
 
 ## Task-local reads and degraded status
 

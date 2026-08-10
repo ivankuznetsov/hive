@@ -227,6 +227,10 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
       assert_equal false, second.fetch(:ran)
       assert_nil store.fetch_hot(terminal.attempt_id)
       assert store.fetch(terminal.attempt_id).receipt
+      status = store.storage_health.snapshot(hot_count: 0, invalid_hot_count: 0)
+      assert_equal "healthy", status.fetch("status")
+      assert_equal 1, status.dig("maintenance", "last_result", "promoted")
+      assert_equal 1, status.dig("maintenance", "last_result", "cold_examined")
     end
   end
 

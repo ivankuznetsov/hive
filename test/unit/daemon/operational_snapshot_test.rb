@@ -56,6 +56,18 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       observed = row
 
       assembler.begin_tick(now: T0)
+      assembler.update_attempt_storage(
+        "status" => "healthy",
+        "layout" => { "generation" => 3, "migration" => "complete" },
+        "hot" => { "records" => 2, "invalid" => 0 },
+        "maintenance" => {
+          "last_started_at" => T0.iso8601(6),
+          "last_completed_at" => T0.iso8601(6),
+          "last_result" => { "promoted" => 1, "deleted" => 2, "cold_examined" => 2 }
+        },
+        "last_error" => nil,
+        "degraded_reason" => nil
+      )
       assembler.observe(
         observed, decision: "global_cap", owner: "scheduler",
         reason: "global dispatch capacity is exhausted",
@@ -81,6 +93,8 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
                    snapshot.dig("tasks", 0, "disposition", "retry_at")
       assert_equal false, snapshot.dig("tasks", 0, "disposition", "retry_due")
       assert_equal true, snapshot.dig("tasks", 0, "disposition", "retry_safe")
+      assert_equal 2, snapshot.dig("attempt_storage", "hot", "records")
+      assert_equal "complete", snapshot.dig("attempt_storage", "layout", "migration")
       assert_equal 2, snapshot.fetch("hidden_archived_task_count")
       assert_equal 0o700, File.stat(File.dirname(path)).mode & 0o777
       assert_equal 0o600, File.stat(path).mode & 0o777

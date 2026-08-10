@@ -108,6 +108,7 @@ module Hive
           @started_at = nil
           @observations = {}
           @runtime_ready = false
+          @attempt_storage = unknown_attempt_storage
         end
 
         def reconfigure(poll_interval_sec:)
@@ -145,6 +146,10 @@ module Hive
             "owner" => owner.to_s,
             "reason" => reason.to_s
           }.merge(details.transform_keys(&:to_s))
+        end
+
+        def update_attempt_storage(status)
+          @attempt_storage = status
         end
 
         def fail(reason:, now: Time.now.utc)
@@ -234,7 +239,23 @@ module Hive
               "started_at" => (@started_at || instant).utc.iso8601(6),
               "completed_at" => phase == "started" ? nil : instant.iso8601(6)
             },
-            "hidden_archived_task_count" => nil
+            "hidden_archived_task_count" => nil,
+            "attempt_storage" => @attempt_storage
+          }
+        end
+
+        def unknown_attempt_storage
+          {
+            "status" => "unknown",
+            "layout" => { "generation" => 3, "migration" => "unknown" },
+            "hot" => { "records" => nil, "invalid" => nil },
+            "maintenance" => {
+              "last_started_at" => nil,
+              "last_completed_at" => nil,
+              "last_result" => nil
+            },
+            "last_error" => nil,
+            "degraded_reason" => nil
           }
         end
 

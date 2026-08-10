@@ -125,6 +125,14 @@ module Hive
         )
       end
 
+      def storage_health
+        require "hive/attempts/storage_health"
+        @storage_health ||= StorageHealth.new(
+          root: @maintenance_root,
+          create_directories: @create_directories
+        )
+      end
+
       def output_directory(attempt_id, *segments, create: false)
         components = [ attempt_id, *segments ].map { |segment| safe_id(segment) }
         path = outputs_root

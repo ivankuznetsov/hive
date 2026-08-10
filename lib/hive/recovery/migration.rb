@@ -7,6 +7,7 @@ require "hive/atomic_file"
 require "hive/attempts/capacity_snapshot"
 require "hive/attempts/finalization_maintenance"
 require "hive/attempts/record"
+require "hive/attempts/storage_health"
 require "hive/attempts/store"
 require "hive/paths"
 
@@ -71,12 +72,12 @@ module Hive
 
       def call(now: Time.now.utc)
         prepare_private_directory!(state_home)
-        with_recovery_lock do
+        result = with_recovery_lock do
           reject_obsolete_attempt_root!
-          return read_receipt if complete?
+          next read_receipt if complete?
 
           attempts = migrate_attempts!(now: now.utc)
-          result = {
+          receipt = {
             "schema" => RECEIPT_SCHEMA,
             "schema_version" => RECEIPT_VERSION,
             "completed_at" => now.utc.iso8601(6),
@@ -84,16 +85,24 @@ module Hive
             "dispatch_requests" => migrate_dispatch_requests!,
             "dispatch_results" => migrate_dispatch_results!
           }
-          write_json!(receipt_path, result)
+          write_json!(receipt_path, receipt)
           Hive::AtomicFile.fsync_directory(state_home)
           remove_prior_receipts!
-          result
+          receipt
         end
-      rescue Error
+        storage_health.complete_migration(
+          now: Time.iso8601(result.fetch("completed_at")),
+          result: result.fetch("attempts")
+        )
+        result
+      rescue Error => error
+        record_migration_failure(error, now: now)
         raise
       rescue JSON::ParserError, SystemCallError, IOError,
              Hive::Attempts::InvalidRecord, Hive::Attempts::StoreError => error
-        raise Error, "recovery migration failed: #{error.message}"
+        wrapped = Error.new("recovery migration failed: #{error.message}")
+        record_migration_failure(wrapped, now: now)
+        raise wrapped
       end
 
       private
@@ -712,6 +721,24 @@ module Hive
       def obsolete_attempt_root = File.join(attempts_parent, "v1")
       def legacy_attempt_root = File.join(attempts_parent, "v2")
       def current_attempt_root = File.join(attempts_parent, "v3")
+      def storage_health
+        Hive::Attempts::StorageHealth.new(
+          root: File.join(current_attempt_root, "maintenance")
+        )
+      end
+
+      def record_migration_failure(error, now:)
+        root = File.join(current_attempt_root, "maintenance")
+        return unless File.directory?(root) && !File.symlink?(root)
+
+        Hive::Attempts::StorageHealth.new(
+          root: root,
+          create_directories: false
+        ).fail_migration(error: error, now: now)
+      rescue StandardError
+        nil
+      end
+
       def checkpoint_path = File.join(attempts_parent, CHECKPOINT_BASENAME)
       def dispatch_requests_root = File.join(state_home, "dispatch_requests")
       def dispatch_results_root = File.join(state_home, "dispatch_results")

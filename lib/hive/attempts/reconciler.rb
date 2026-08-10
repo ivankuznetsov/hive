@@ -112,6 +112,14 @@ module Hive
         @finalization_maintenance&.sweep_if_due(now: now)
       end
 
+      def operational_storage_status(snapshot)
+        scan = snapshot&.hot_scan
+        @store.storage_health.snapshot(
+          hot_count: scan&.records&.size,
+          invalid_hot_count: scan&.invalid_records&.size
+        )
+      end
+
       private
 
       def observe_condition(status, now:)

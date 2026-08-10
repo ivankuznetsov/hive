@@ -1061,6 +1061,10 @@ class HiveDaemonDispatcherTest < Minitest::Test
       record(:reconfigure, attributes)
     end
 
+    def update_attempt_storage(status)
+      record(:update_attempt_storage, status)
+    end
+
     private
 
     def record(method, attributes)
@@ -1206,6 +1210,24 @@ class HiveDaemonDispatcherTest < Minitest::Test
         assert failures.all? { |_name, attrs| attrs.fetch(:error).include?(error.class.name) }
       end
     end
+  end
+
+  def test_attempt_storage_snapshot_failure_is_advisory
+    reconciler = Object.new
+    reconciler.define_singleton_method(:operational_storage_status) do |_snapshot|
+      { "status" => "healthy" }
+    end
+    snapshot = FakeOperationalSnapshot.new(fail_on: :update_attempt_storage)
+    dispatcher, _supervisor, _controller, logger = make_dispatcher(
+      rows: [], attempt_reconciler: reconciler, operational_snapshot: snapshot
+    )
+
+    dispatcher.send(:refresh_attempt_storage_snapshot)
+
+    failure = logger.events.find do |name, attrs|
+      name == :operational_snapshot_publish_failed && attrs.fetch(:phase) == "attempt_storage"
+    end
+    refute_nil failure
   end
 
   def test_legacy_layout_row_publishes_operator_disposition_without_dispatch

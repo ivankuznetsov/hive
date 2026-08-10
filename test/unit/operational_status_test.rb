@@ -337,6 +337,43 @@ class OperationalStatusTest < Minitest::Test
     assert_includes result.fetch("issues").map { |issue| issue.fetch("code") }, "scheduler_unavailable"
   end
 
+  def test_attempt_storage_health_is_projected_and_degraded_once
+    source = task(action: "ready_to_plan", slug: "queued")
+    snapshot = scheduler_snapshot_for(
+      source, decision: "not_evaluated", reason: "no dispatch decision was required"
+    )
+    snapshot["attempt_storage"] = {
+      "status" => "degraded",
+      "layout" => { "generation" => 3, "migration" => "complete" },
+      "hot" => { "records" => 1, "invalid" => 0 },
+      "maintenance" => {
+        "last_started_at" => "2026-07-20T09:00:00.000000Z",
+        "last_completed_at" => nil,
+        "last_result" => nil
+      },
+      "last_error" => {
+        "operation" => "maintenance", "class" => "Hive::Attempts::StoreError",
+        "observed_at" => "2026-07-20T09:00:01.000000Z"
+      },
+      "degraded_reason" => "maintenance_failed"
+    }
+
+    result = project(
+      status_payload(source),
+      project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: snapshot
+    )
+
+    assert_equal snapshot.fetch("attempt_storage"), result.fetch("attempt_storage")
+    assert_equal "degraded", result.dig("daemon", "status")
+    warnings = result.fetch("issues").select do |issue|
+      issue.fetch("code") == "attempt_storage_degraded"
+    end
+    assert_equal 1, warnings.size
+    assert_equal "inspect the daemon log, then retry the failed storage operation",
+                 warnings.first.fetch("remediation")
+  end
+
   def test_rejects_an_unsuccessful_status_payload
     payload = status_payload
     payload["ok"] = false

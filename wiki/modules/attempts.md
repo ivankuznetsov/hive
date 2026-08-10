@@ -3,15 +3,16 @@ title: Durable task attempts
 type: module
 source: lib/hive/attempts/
 created: 2026-07-16
-updated: 2026-08-04
-tags: [attempts, ownership, leases, daemon, recovery]
+updated: 2026-08-10
+tags: [attempts, ownership, leases, daemon, recovery, bounded-storage]
 ---
 
 **TLDR**: Every accepted task-stage launch has one immutable attempt ID and
-one versioned JSON lease/receipt under `$HIVE_HOME/attempts/v2/`. A detached
+one versioned JSON lease/receipt under `$HIVE_HOME/attempts/v3/`. A detached
 supervisor wrapper—not the CLI, bot, web process, or daemon—owns the worker
 group, heartbeat, framed output, exit status, and terminal receipt. The daemon
-reconciles and applies policy; it does not own or reap task agents.
+reconciles and applies policy over the bounded hot set; it does not own or reap
+task agents.
 
 ## Module map
 
@@ -19,7 +20,7 @@ reconciles and applies policy; it does not own or reap task agents.
 |--------|----------------|
 | `API` | Provide Hive commands, bot delivery, daemon recovery, and module-hook delivery with the stable admission operations `dispatch`, `dispatch_request`, `dispatch_successor`, and `dispatch_module_hook`, while keeping one injected store shared by its foreground and daemon adapters. |
 | `Contracts` | Define the public `ClientResult`, `DispatchResult`, and `UnsupportedDetachment` values independently of the internal client, dispatcher, and launcher implementations. |
-| `Record`, `Store` | Read and write only v3 records, perform locked guarded transitions with atomic write/fsync/rename persistence, and copy nested record/checkpoint/receipt values through `Hive::StringifyKeys`. The default store fails closed while an old v1 root remains; daemon/bot startup or explicit `hive migrate` owns the one-off mutation. |
+| `Record`, `Store` | Read and write schema-v3 records in the physical v3 layout, scan only hot records, point-fetch hot or permanent proof, perform locked guarded transitions with atomic write/fsync/rename persistence, and copy nested record/checkpoint/receipt values through `Hive::StringifyKeys`. The default store opens only v3 after the forward-only recovery migration. |
 | `Capability`, `Context` | Generate one-time launch authority, authenticate the exact worker process/task/stage, revalidate generation at the mutation boundary, and expose process-local compatibility projections after transport variables are scrubbed. |
 | `Generation` | Bind stable task identity, intended stage, and a workflow progress token into the semantic ownership key. |
 | `Dispatcher` | Resolve receipt replay, live duplicate attachment, loss deferral, capacity, fresh admission, and explicit successors. |
@@ -27,7 +28,7 @@ reconciles and applies policy; it does not own or reap task agents.
 | `Supervisor` | Claim, first-heartbeat, spawn the existing Hive command, heartbeat, frame output, enforce timeout/cancellation, and terminalize. |
 | `Client` | Tail frames read-only and replay a terminal result. It performs one final drain after observing a terminal or lost record so frames published during the decisive record fetch are not dropped. Interrupt means detach; it never signals the owner group. |
 | `CommandDispatch` | Give `hive run` and workflow stage commands one attach-result policy: shared durable dispatch, lost-attempt translation, receipt exit propagation, and single-document JSON fallback when a failed worker emitted no stdout. |
-| `Reconciler`, `ProcessIdentity` | Adopt without `wait2`, detect PID/start/session/group mismatch, preserve suspects, expire launches, and normalize loss. |
+| `Reconciler`, `ProcessIdentity` | Adopt without `wait2`, detect PID/start/session/group mismatch, preserve suspects, expire launches, normalize loss, and publish current hot counts beside cached storage-maintenance health without scanning historical proof or cold logs. |
 | `DirtyStateCapture`, `LostOutcomeStore` | Inventory partial git/untracked/binary work without mutation and make cleanup/successor policy restart-idempotent. |
 
 ## Admission API boundary
@@ -108,12 +109,33 @@ the next dispatch reconstructs the original launch receipt from the exact
 attempt subject.
 
 ```text
-$HIVE_HOME/attempts/v2/
-├── records/<attempt-id>.json
-├── logs/<attempt-id>.frames
+$HIVE_HOME/attempts/v3/
+├── records/<attempt-id>.json              # live and finalization-pending hot set
+├── proof/...                              # permanent point-addressed receipts
+├── decision-indexes/...                   # semantic/request/successor point indexes
+├── pending-finalization/...               # consumer acknowledgements
+├── logs/<attempt-id>.frames               # active raw stream
+├── cold-logs/...                          # finalized raw stream awaiting expiry
+├── log-state/...                          # archive/expiry state
+├── maintenance/...                        # one cached health/status cell
 ├── outputs/<attempt-id>/...
 └── generation-locks/{admission.lock,<sha256>.lock}
 ```
+
+`Store#scan` enumerates `records/` only. It never walks `proof/`, decision
+indexes, or cold logs. `Store#fetch` first checks the hot record and then uses a
+point lookup in permanent proof, so historical consumers do not force a global
+history scan. Final records leave the hot set only after permanent proof,
+decision indexes, and every required consumer acknowledgement are durable.
+Raw logs move cold at promotion and expire when the task is archived or three
+days after the attempt ended, whichever comes first; canonical proof and
+referenced output artifacts are not deleted by raw-log retention.
+
+Operational status reads one bounded maintenance cell plus counts already
+produced by the current hot reconciliation. It reports only the latest
+migration and maintenance deltas (`promoted`, `deleted`, and `cold_examined`),
+not lifetime totals, and a failed write/read becomes one concise degraded
+warning. Status never scans proof or cold-log history.
 
 The record carries attempt/request/predecessor IDs, task and generation
 identity, the exact admitted worker argv, a SHA-256 digest of a random launch
@@ -124,8 +146,8 @@ owner-private referenced files with canonical relative path, byte size, and
 SHA-256.
 
 The configured store root remains the trusted anchor and may itself resolve
-through an operator-selected link. Its managed `records`, `logs`, `outputs`,
-and `generation-locks` children may not: creation and every later access
+through an operator-selected link. Its managed children may not: creation and
+every later access
 revalidate that each child is a real directory, not a symlink, and that its
 resolved path remains below the trusted root before chmod, read, lock, or
 write. Record and lock leaves use no-follow checks; attempt stream readers
@@ -135,7 +157,7 @@ status or TUI replay. Concurrent creation of the same per-attempt output
 directory revalidates the winning entry before use.
 Lost-outcome and dirty-state directories receive the same containment check.
 Corrupt or replacement links therefore fail closed and never redirect attempt
-state or permission changes outside `$HIVE_HOME/attempts/v2`.
+state or permission changes outside `$HIVE_HOME/attempts/v3`.
 
 Record construction/readers and store transitions all use the same
 non-mutating `Hive::StringifyKeys` transform as the task journal and projection.
@@ -161,18 +183,15 @@ it.
 
 Condition projection adds an explicit numeric `task_input_epoch` to attempt
 records/context while retaining the prerequisite's opaque ownership generation
-as `ownership_generation`. `hive-attempt` v3 is the sole runtime shape.
-`Hive::Recovery::Migration` moves the old `attempts/v1` tree once, rewrites v1
-records with `ownership_generation` and epoch 0, projects retained v1/v2 task
-records into the explicit `task_stage` subject, removes the obsolete
-compatibility flag, and leaves a v3 receipt in the state home. Final
-compatibility leases are archived outside the active store. Any live attempt
-in the old tree blocks the rename because its detached old-binary supervisor
-still owns the v1 path; a live compatibility lease is likewise never guessed
-into the new ownership model. If an old reader recreates only empty directories
-beside the current v2 tree, migration prunes them with empty-only `rmdir`; a
-file, symlink, or concurrent writer remains an ambiguous dual root and fails
-closed. Old schema files and in-memory normalization paths are removed. Every
+as `ownership_generation`. `hive-attempt` v3 remains the sole record shape.
+`Hive::Recovery::Migration` performs one physical v2-to-v3 cutover: it refuses
+live writers and attempts, renames the validated tree, publishes the v2
+old-binary fence, verifies the exact source corpus and decision parity, promotes
+historical finals, and writes the v4 recovery receipt only after its durable
+checkpoint reaches `complete`. Runtime code opens v3 only; there is no reverse
+migration and no dual reader. A material v2/v3 collision, obsolete v1 tree,
+unsupported record schema, symlink, ownership mismatch, or changed corpus fails
+closed without choosing an authority. Every
 condition event must name a durable attempt whose task/stage ownership matches
 the record. Retry and adoption reuse the numeric epoch when accepted inputs
 are unchanged.

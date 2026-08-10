@@ -3,8 +3,8 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, bin/hive-patrol-installed-live-smoke, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release-candidate,release}.yml, packaging/{live_agent_skills,release_candidate,patrol_evidence}/, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-08-09
-tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, terminal-outcomes, release-proof]
+updated: 2026-08-10
+tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, terminal-outcomes, release-proof, bounded-storage]
 ---
 
 **TLDR**: Minitest covers unit/integration behavior; opt-in layers cover outer
@@ -126,6 +126,22 @@ Hive/package behavioral parity and the component release workflow contract.
 Parity covers non-default compilation, successful local probes, custom named
 capabilities, nested/missing usage variants, and observable redaction across
 Claude, Codex, Pi, and Grok.
+
+### Bounded attempt-storage gate
+
+`test/unit/attempts/reconciler_test.rb` contains a hard-coded 30,000-entry
+permanent-proof fixture and compares it with an empty history. Both cases must
+perform exactly one hot scan and zero cold opens/scans; the fixture also traps
+`File.open`, `File.binread`, `Dir.glob`, `Dir.children`, and `Dir.each_child`
+under proof and cold-log roots. This is a deterministic structural gate, not a
+wall-clock or RSS threshold.
+
+The focused rollover aggregate also covers forward-only migration and
+checkpoint restart, finalization consumer acknowledgements, raw-log retention,
+cached operational status and its single human warning, request terminal replay
+without rerun, task journal/projection, historical implementation identity,
+and evidence-bound task closure. These regressions keep point-addressed
+historical consumers working after their source attempt leaves the hot set.
 
 ## Component boundary contract
 

@@ -261,8 +261,14 @@ module Hive
 
       def render_operational_issues(issues)
         Array(issues).each do |entry|
-          puts "  ⚠ #{terminal_safe(entry.fetch('message', 'status source is incomplete'))}"
+          message = terminal_safe(entry.fetch("message", "status source is incomplete"))
           remediation = terminal_safe(entry["remediation"])
+          if entry["code"] == "attempt_storage_degraded"
+            puts "  ⚠ #{message}; #{remediation}"
+            next
+          end
+
+          puts "  ⚠ #{message}"
           puts "    #{remediation}" unless remediation.empty?
         end
       end

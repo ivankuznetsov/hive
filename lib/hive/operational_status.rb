@@ -43,6 +43,8 @@ module Hive
       @scheduler_join_issue_keys = {}
       scheduler = scheduler_payload(projects)
       issues.concat(scheduler.fetch("issues"))
+      @attempt_storage = attempt_storage_payload
+      issues.concat(attempt_storage_issues(@attempt_storage))
       tasks = active.map { |project, row| project_row(project, row, scheduler) }
       issues.concat(@scheduler_join_issues)
       completeness = combined_completeness(
@@ -82,6 +84,7 @@ module Hive
           "states" => counts
         },
         "daemon" => daemon_payload(projects, scheduler),
+        "attempt_storage" => @attempt_storage,
         "scheduler" => scheduler.reject { |key, _| key == "issues" },
         "archive" => archive_payload(archived),
         "issues" => issues,
@@ -285,7 +288,7 @@ module Hive
       status = if projects.none? { |project| daemon_enabled?(project["name"]) }
         "not_applicable"
       elsif scheduler.fetch("status") == "current"
-        "healthy"
+        @attempt_storage&.fetch("status", nil) == "degraded" ? "degraded" : "healthy"
       else
         "unknown"
       end
@@ -298,6 +301,37 @@ module Hive
         "phase" => @daemon_snapshot&.fetch("phase", nil),
         "observed_at" => scheduler["observed_at"]
       }
+    end
+
+    def attempt_storage_payload
+      value = @daemon_snapshot.is_a?(Hash) ? @daemon_snapshot["attempt_storage"] : nil
+      return value if value.is_a?(Hash)
+
+      {
+        "status" => "unknown",
+        "layout" => { "generation" => 3, "migration" => "unknown" },
+        "hot" => { "records" => nil, "invalid" => nil },
+        "maintenance" => {
+          "last_started_at" => nil,
+          "last_completed_at" => nil,
+          "last_result" => nil
+        },
+        "last_error" => nil,
+        "degraded_reason" => nil
+      }
+    end
+
+    def attempt_storage_issues(status)
+      return [] unless status["status"] == "degraded"
+
+      reason = status["degraded_reason"].to_s.tr("_", " ")
+      reason = "bounded health metadata is unavailable" if reason.empty?
+      [ issue(
+        code: "attempt_storage_degraded",
+        source: "attempt_storage",
+        message: "attempt storage is degraded: #{reason}",
+        remediation: "inspect the daemon log, then retry the failed storage operation"
+      ) ]
     end
 
     def daemon_enabled?(project_name)

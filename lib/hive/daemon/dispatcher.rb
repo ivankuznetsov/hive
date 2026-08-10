@@ -268,7 +268,8 @@ module Hive
           )
           reconcile_lost_attempt_deliveries(now: now)
           if @attempt_reconciler&.respond_to?(:sweep_finalization_maintenance)
-            @attempt_reconciler.sweep_finalization_maintenance(now: now)
+            result = @attempt_reconciler.sweep_finalization_maintenance(now: now)
+            refresh_attempt_storage_snapshot if result&.fetch(:ran, false)
           end
         rescue StandardError => e
           @logger.event(:fatal,
@@ -2577,6 +2578,7 @@ module Hive
 
         @attempt_snapshot = @attempt_reconciler.reconcile(now: now.utc)
         @controller.set_capacity_snapshot(@attempt_snapshot.capacity)
+        refresh_attempt_storage_snapshot
         reconcile_attempt_deliveries(now: now)
         true
       rescue StandardError => e
@@ -2586,6 +2588,18 @@ module Hive
           keeping_previous: true
         )
         false
+      end
+
+      def refresh_attempt_storage_snapshot
+        return unless @operational_snapshot
+        return unless @attempt_reconciler&.respond_to?(:operational_storage_status)
+
+        @operational_snapshot.update_attempt_storage(
+          @attempt_reconciler.operational_storage_status(@attempt_snapshot)
+        )
+      rescue StandardError => e
+        log_operational_snapshot_failure(phase: "attempt_storage", error: e)
+        nil
       end
 
       def reconcile_attempt_deliveries(now:)

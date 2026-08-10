@@ -17,6 +17,9 @@ class RecoveryMigrationTest < Minitest::Test
         store = Hive::Attempts::Store.new
         assert_equal File.join(state_home, "attempts", "v3"), store.root
         assert File.directory?(store.records_root)
+        status = store.storage_health.snapshot(hot_count: 0, invalid_hot_count: 0)
+        assert_equal "complete", status.dig("layout", "migration")
+        assert_equal 0, status.dig("layout", "last_result", "source_count")
       end
 
       assert_equal fence_payload, read_json(File.join(state_home, "attempts", "v2"))

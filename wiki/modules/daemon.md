@@ -3,8 +3,8 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-08-02
-tags: [daemon, module, automation, dispatcher, operational-status, snapshots, terminal-outcomes, recovery]
+updated: 2026-08-10
+tags: [daemon, module, automation, dispatcher, operational-status, snapshots, terminal-outcomes, recovery, bounded-storage]
 ---
 
 **TLDR**: Small modules under `Hive::Daemon::*` that together form
@@ -79,6 +79,7 @@ hive daemon start
             ├─ Hive::Daemon::Logger              (~/Dev/hive/logs/daemon.log, JSON-line)
             ├─ Hive::Attempts::Reconciler        (adopt/suspect/lost before admission)
             │    └─ Hive::Conditions::AttemptObserver (terminal/lost health journal)
+            ├─ Hive::Attempts::FinalizationMaintenance (promote proof/expire raw logs)
             ├─ Hive::Attempts::Dispatcher        (shared task-generation admission)
             ├─ Hive::Daemon::ConcurrencyController
             ├─ Hive::Daemon::ChildSupervisor     (ancillary jobs only)
@@ -194,6 +195,15 @@ unreadable paths as typed non-authoritative evidence. Snapshot publication is
 advisory: write/assembly failure logs `operational_snapshot_publish_failed` but
 does not stop dispatch. Consumers therefore report partial/unknown status
 rather than either crashing Hive or presenting old scheduler state as current.
+
+After attempt reconciliation, the daemon publishes one `attempt_storage` cell
+from the already-computed hot snapshot and the store's bounded cached health
+record. It never scans permanent proof or cold logs to render status. The
+hourly finalization pass records only its latest promoted/deleted/cold-examined
+deltas and refreshes the snapshot if it ran. Migration or maintenance failure
+degrades daemon status and renders one remediation-bearing human warning;
+failure to publish this advisory cell is logged and cannot stop reconciliation
+or dispatch.
 
 Durable task admissions use `Attempts::API`; its internal daemon adapter
 resolves the task and reloads that project's attempt heartbeat, stale, launch,

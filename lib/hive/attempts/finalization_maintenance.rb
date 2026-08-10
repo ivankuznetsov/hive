@@ -1,5 +1,4 @@
 require "hive/attempts/lost_outcome"
-require "hive/attempts/point_storage"
 require "hive/attempts/store"
 require "json"
 require "psych"
@@ -25,11 +24,7 @@ module Hive
         @delivery_pending = delivery_pending
         @task_archived = task_archived
         @logger = logger
-        @stamp_storage = PointStorage.new(
-          root: store.maintenance_root,
-          label: "attempt finalization maintenance",
-          create_directories: true
-        )
+        @storage_health = store.storage_health
       end
 
       def prepare(record)
@@ -80,7 +75,7 @@ module Hive
       end
 
       def run_if_due(now: Time.now.utc)
-        return { ran: false, promoted: 0, deleted: 0 } unless claim_due(now)
+        return { ran: false, promoted: 0, deleted: 0, cold_examined: 0 } unless claim_due(now)
 
         promoted = 0
         @store.scan.records.each do |record|
@@ -90,19 +85,30 @@ module Hive
           acknowledge(record, :request_delivery) unless delivery_pending?(record)
           promoted += 1 if promote(record)
         end
-        deleted = sweep_logs(now: now).fetch(:deleted)
-        { ran: true, promoted: promoted, deleted: deleted }
+        result = sweep_logs(now: now).merge(ran: true, promoted: promoted)
+        @storage_health.complete_maintenance(now: now, result: result)
+        result
+      rescue StandardError => error
+        @storage_health.fail_maintenance(error: error, now: now)
+        raise
       end
 
       def sweep_if_due(now: Time.now.utc)
-        return { ran: false, deleted: 0 } unless claim_due(now)
+        return { ran: false, promoted: 0, deleted: 0, cold_examined: 0 } unless claim_due(now)
 
-        sweep_logs(now: now).merge(ran: true)
+        result = sweep_logs(now: now).merge(ran: true, promoted: 0)
+        @storage_health.complete_maintenance(now: now, result: result)
+        result
+      rescue StandardError => error
+        @storage_health.fail_maintenance(error: error, now: now)
+        raise
       end
 
       def sweep_logs(now: Time.now.utc)
         deleted = 0
+        cold_examined = 0
         @store.log_archive.each_cold_attempt_id do |attempt_id|
+          cold_examined += 1
           record = @store.fetch(attempt_id)
           next unless record&.final?
           next if recovery_pinned?(record)
@@ -110,7 +116,7 @@ module Hive
 
           deleted += 1 if @store.log_archive.expire(attempt_id, now: now) == :expired
         end
-        { deleted: deleted }
+        { deleted: deleted, cold_examined: cold_examined }
       end
 
       private
@@ -137,34 +143,10 @@ module Hive
       end
 
       def claim_due(now)
-        key = { "scope" => "attempt-storage" }
-        @stamp_storage.synchronize("retention", key) do
-          bytes = @stamp_storage.read("retention", key, max_bytes: 16 * 1024)
-          if bytes
-            data = JSON.parse(bytes)
-            unless data.is_a?(Hash) && data["schema"] == "hive-attempt-maintenance" &&
-                   data["schema_version"] == 1 && data["scope"] == "attempt-storage" &&
-                   bytes == StorageKey.dump(data)
-              raise StoreError, "attempt maintenance stamp is corrupt"
-            end
-            last_started = Time.iso8601(data.fetch("last_started_at"))
-            next false if now.utc < last_started + MAINTENANCE_INTERVAL_SEC
-          end
-
-          replacement = StorageKey.dump(
-            "schema" => "hive-attempt-maintenance",
-            "schema_version" => 1,
-            "scope" => "attempt-storage",
-            "last_started_at" => now.utc.iso8601(6)
-          )
-          @stamp_storage.write(
-            "retention", key, replacement,
-            expected_bytes: bytes, max_existing_bytes: 16 * 1024
-          )
-          true
-        end
-      rescue JSON::ParserError, KeyError, ArgumentError
-        raise StoreError, "attempt maintenance stamp is corrupt"
+        @storage_health.claim_maintenance(
+          now: now,
+          interval_sec: MAINTENANCE_INTERVAL_SEC
+        )
       end
 
       def recovery_pinned?(record)

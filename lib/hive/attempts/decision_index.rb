@@ -373,8 +373,6 @@ module Hive
             StorageKey.string(reservation.fetch("project"))
             StorageKey.string(reservation.fetch("task_slug"))
           end
-        else
-          raise StoreError
         end
         true
       rescue StoreError
@@ -443,8 +441,6 @@ module Hive
 
       def accepted_date(record)
         Time.iso8601(record["accepted_at"]).utc.to_date
-      rescue ArgumentError, TypeError
-        raise StoreError, "attempt accepted_at is invalid"
       end
 
       def ordered_value(record)

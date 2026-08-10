@@ -440,7 +440,7 @@ class AttemptsDispatcherTest < Minitest::Test
       )
       fetches = [ created, terminal ]
       racing_store = Object.new
-      racing_store.define_singleton_method(:fetch) { |_attempt_id| fetches.shift }
+      racing_store.define_singleton_method(:fetch_hot) { |_attempt_id| fetches.shift }
       racing_store.define_singleton_method(:mark_lost) do |*_args, **_kwargs|
         raise Hive::Attempts::CompareAndSwapFailed, "terminalized"
       end

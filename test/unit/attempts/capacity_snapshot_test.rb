@@ -126,6 +126,51 @@ class AttemptsCapacitySnapshotTest < Minitest::Test
     end
   end
 
+  def test_records_refreshes_cached_records_and_indexes_the_latest_state
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Store.new(root: root)
+      record = create(store, attempt_id: "live", project: "p1", task_slug: "s1")
+      view = Hive::Attempts::AdmissionView.new(store: store, hot_scan: store.scan)
+      claimed = store.claim(
+        record, owner: owner, claim_capability: CLAIM_CAPABILITY,
+        first_heartbeat_timeout_sec: 30, now: NOW + 1
+      )
+
+      refreshed = view.records.fetch(0)
+
+      assert_equal claimed.lease_version, refreshed.lease_version
+      assert_equal claimed.state, refreshed.state
+      assert_equal 1, store.decision_index.daily_count(project: "p1", date: NOW.to_date)
+    end
+  end
+
+  def test_records_raise_when_a_cached_record_becomes_unreadable
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Store.new(root: root)
+      record = create(store, attempt_id: "corrupt", project: "p1", task_slug: "s1")
+      view = Hive::Attempts::AdmissionView.new(store: store, hot_scan: store.scan)
+      File.write(store.record_path(record.attempt_id), "{")
+
+      assert_raises(Hive::Attempts::StoreError) { view.records }
+    end
+  end
+
+  def test_admission_refresh_keeps_an_unreadable_active_reservation_fail_closed
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Store.new(root: root)
+      record = create(store, attempt_id: "corrupt", project: "p1", task_slug: "s1")
+      view = Hive::Attempts::AdmissionView.new(store: store, hot_scan: store.scan)
+      File.write(store.record_path(record.attempt_id), "{")
+
+      records = store.with_admission_lock { view.refresh_for_admission }
+
+      assert_empty records
+      reservation = store.decision_index.live_reservations.fetch(record.attempt_id)
+      assert_equal "active", reservation.fetch("phase")
+      assert_equal "p1", reservation.fetch("project")
+    end
+  end
+
   private
 
   def create(store, attempt_id:, project:, task_slug:, generation: "g1")

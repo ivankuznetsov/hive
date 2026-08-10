@@ -116,6 +116,48 @@ class AttemptsEntrypointTest < Minitest::Test
     assert_same result, value
   end
 
+  def test_default_store_builds_runtime_maintenance_before_dispatch
+    task = FakeTask.new(slug: "task", project_root: "/tmp/project", project_name: "demo")
+    result = Hive::Attempts::DispatchResult.new(
+      status: :existing_live, attempt: Struct.new(:attempt_id).new("attempt-1"),
+      receipt: nil, attach_descriptor: nil, reason: nil
+    )
+    store = Object.new
+    events = []
+    maintenance = Object.new
+    maintenance.define_singleton_method(:run_if_due) do |now:|
+      events << [ :maintenance, now ]
+    end
+    dispatcher = Object.new
+    dispatcher.define_singleton_method(:dispatch) do |**_kwargs|
+      events << :dispatch
+      result
+    end
+    now = Time.utc(2026, 8, 10, 12, 0, 0)
+
+    with_replaced_singleton_method(Hive::Attempts::Store, :new, -> { store }) do
+      with_replaced_singleton_method(
+        Hive::Attempts::FinalizationMaintenance, :runtime,
+        lambda { |store:|
+          events << [ :runtime, store ]
+          maintenance
+        }
+      ) do
+        value = Hive::Attempts::Entrypoint.new(
+          dispatcher: dispatcher,
+          config_loader: ->(_root) { Hive::Config.merge_defaults({}) }
+        ).dispatch(
+          task: task, intended_stage: "4-execute", argv: [ "hive", "run", "task" ],
+          interactive: false, now: now
+        )
+
+        assert_same result, value
+      end
+    end
+
+    assert_equal [ [ :runtime, store ], [ :maintenance, now ], :dispatch ], events
+  end
+
   def test_deferred_admission_is_a_retryable_error
     task = FakeTask.new(slug: "task", project_root: "/tmp/project", project_name: "demo")
     result = Hive::Attempts::DispatchResult.new(

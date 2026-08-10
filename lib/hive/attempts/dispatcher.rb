@@ -154,11 +154,10 @@ module Hive
             end
 
             lost = unresolved_lost_attempts(
-              exact, admission_view: view, generation: generation, subject: subject
+              admission_view: view, generation: generation, subject: subject
             )
             predecessor = successor_of &&
-                          (view.find(successor_of) ||
-                           exact.find { |record| record.attempt_id == successor_of })
+                          view.find(successor_of)
             if successor_of && (!predecessor || predecessor.state != "lost")
               result = DispatchResult.new(
                 status: :deferred, attempt: predecessor, receipt: nil,
@@ -314,20 +313,13 @@ module Hive
       # successor exists. Once that descendant terminalizes unsuccessfully, a
       # new error-retry request must not be trapped behind the older resolved
       # loss forever.
-      def unresolved_lost_attempts(records, admission_view: nil, generation: nil,
+      def unresolved_lost_attempts(admission_view:, generation:,
                                    subject: nil)
-        if admission_view
-          unresolved = admission_view.unresolved_loss(
-            task_generation: generation.task_generation,
-            subject: subject || task_subject(generation)
-          )
-          return unresolved ? [ unresolved ] : []
-        end
-
-        resolved = records.filter_map { |record| record["predecessor_attempt_id"] }.to_h do |attempt_id|
-          [ attempt_id, true ]
-        end
-        records.select { |record| record.state == "lost" && !resolved[record.attempt_id] }
+        unresolved = admission_view.unresolved_loss(
+          task_generation: generation.task_generation,
+          subject: subject || task_subject(generation)
+        )
+        unresolved ? [ unresolved ] : []
       end
 
       def task_subject(generation)
@@ -377,7 +369,7 @@ module Hive
 
       def resolve_failed_handoff(created, interactive:, error: nil,
                                  admission_view: nil)
-        current = fetch_admission_record(created.attempt_id, admission_view: admission_view)
+        current = @store.fetch_hot(created.attempt_id)
         admission_view&.record(current) if current
         adopted = result_for_adopted_handoff(current, interactive: interactive)
         return adopted if adopted
@@ -394,17 +386,9 @@ module Hive
         admission_view&.record(lost)
         deferred_handoff_result(lost)
       rescue CompareAndSwapFailed
-        current = fetch_admission_record(created.attempt_id, admission_view: admission_view)
+        current = @store.fetch_hot(created.attempt_id)
         admission_view&.record(current) if current
         result_for_adopted_handoff(current, interactive: interactive) || deferred_handoff_result(current)
-      end
-
-      def fetch_admission_record(attempt_id, admission_view:)
-        if admission_view
-          @store.fetch_hot(attempt_id)
-        else
-          @store.fetch(attempt_id)
-        end
       end
 
       def result_for_adopted_handoff(record, interactive:)

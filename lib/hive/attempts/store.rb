@@ -410,8 +410,6 @@ module Hive
           Hive::AtomicFile.fsync_directory(records_root)
           true
         end
-      rescue SystemCallError, IOError => e
-        raise StoreError, "attempt hot record could not be removed: #{e.message}"
       end
 
       private

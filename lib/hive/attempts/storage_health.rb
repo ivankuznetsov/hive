@@ -61,8 +61,6 @@ module Hive
           )
         end
         claimed
-      rescue ArgumentError, TypeError
-        raise StoreError, "attempt storage health is corrupt"
       end
 
       def complete_maintenance(now:, result:)

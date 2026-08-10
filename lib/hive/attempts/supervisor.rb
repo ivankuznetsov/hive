@@ -335,10 +335,6 @@ module Hive
         nil
       end
 
-      def log_path(attempt_id)
-        File.join(@store.logs_root, "#{attempt_id}.frames")
-      end
-
       def install_signal_handlers!
         %w[TERM INT].each do |signal|
           Signal.trap(signal) { @cancel_reason ||= :signal }

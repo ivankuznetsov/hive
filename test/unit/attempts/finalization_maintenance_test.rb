@@ -1,4 +1,5 @@
 require "test_helper"
+require "hive/daemon/dispatch_request_queue"
 require "hive/attempts/finalization_maintenance"
 require "hive/attempts/log_archive"
 require "hive/task_action"
@@ -290,6 +291,225 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
     end
   end
 
+  def test_runtime_delivery_probe_matches_the_exact_claimed_attempt
+    with_store do |store|
+      terminal = terminal_attempt(store)
+      claims = [
+        Struct.new(:claim).new({ "attempt_id" => "another-attempt" }),
+        Struct.new(:claim).new({ "attempt_id" => terminal.attempt_id })
+      ]
+      observed_state_home = nil
+
+      with_replaced_singleton_method(
+        Hive::Daemon::DispatchRequestQueue, :claimed,
+        lambda { |state_home:|
+          observed_state_home = state_home
+          claims
+        }
+      ) do
+        runtime = Hive::Attempts::FinalizationMaintenance.runtime(
+          store: store, state_home: "/state"
+        )
+
+        assert runtime.send(:delivery_pending?, terminal)
+      end
+
+      assert_equal "/state", observed_state_home
+    end
+  end
+
+  def test_promotion_rejects_a_mismatched_permanent_proof
+    with_store do |store|
+      terminal = terminal_attempt(store)
+      service = Hive::Attempts::FinalizationMaintenance.new(store: store)
+      service.prepare(terminal)
+      service.acknowledge(terminal, :journal)
+      service.acknowledge(terminal, :request_delivery)
+      mismatched = Object.new
+      mismatched.define_singleton_method(:to_h) do
+        terminal.to_h.merge("attempt_id" => "another-attempt")
+      end
+      store.permanent_proofs.define_singleton_method(:fetch) { |_attempt_id| mismatched }
+
+      error = assert_raises(Hive::Attempts::StoreError) { service.promote(terminal) }
+
+      assert_match(/proof does not match/, error.message)
+      assert store.fetch_hot(terminal.attempt_id)
+      assert store.pending_finalizations.fetch(terminal.attempt_id)
+    end
+  end
+
+  def test_promotion_rejects_a_hot_record_changed_after_proof_publication
+    with_store do |store|
+      terminal = terminal_attempt(store)
+      changed = terminal_attempt(
+        store, attempt_id: "attempt-2", request_id: "request-2", now: NOW + 10
+      )
+      service = maintenance(store)
+      service.prepare(terminal)
+      service.acknowledge(terminal, :journal)
+      service.acknowledge(terminal, :request_delivery)
+      store.define_singleton_method(:fetch_hot) { |_attempt_id| changed }
+
+      error = assert_raises(Hive::Attempts::StoreError) { service.promote(terminal) }
+
+      assert_match(/changed after final proof/, error.message)
+      assert store.pending_finalizations.fetch(terminal.attempt_id)
+    end
+  end
+
+  def test_due_sweep_records_a_degraded_health_result_when_archive_scan_fails
+    with_store do |store|
+      store.log_archive.define_singleton_method(:cold_attempt_ids_page) do |**|
+        raise Hive::Attempts::StoreError, "cold archive unavailable"
+      end
+      service = maintenance(store)
+
+      assert_raises(Hive::Attempts::StoreError) do
+        service.sweep_if_due(now: NOW)
+      end
+
+      status = store.storage_health.snapshot(hot_count: 0, invalid_hot_count: 0)
+      assert_equal "degraded", status.fetch("status")
+      assert_equal "maintenance_failed", status.fetch("degraded_reason")
+    end
+  end
+
+  def test_delivery_probe_errors_keep_finalization_pending_for_retry
+    with_store do |store|
+      terminal = terminal_attempt(store)
+      observer = Object.new
+      observer.define_singleton_method(:observe) { |_status, now:| :delivered }
+      service = Hive::Attempts::FinalizationMaintenance.new(
+        store: store,
+        condition_observer: observer,
+        delivery_pending: ->(_record) { raise Hive::Attempts::StoreError, "queue unavailable" },
+        task_archived: ->(_record) { false }
+      )
+
+      refute service.finalize(terminal, now: NOW + 4)
+
+      pending = store.pending_finalizations.fetch(terminal.attempt_id)
+      assert_equal true, pending.dig("consumers", "journal")
+      assert_equal false, pending.dig("consumers", "request_delivery")
+      assert store.fetch_hot(terminal.attempt_id)
+    end
+  end
+
+  def test_incomplete_or_unreadable_pending_state_pins_cold_logs
+    with_store do |store|
+      incomplete = terminal_attempt(store, write_log: true)
+      unreadable = terminal_attempt(
+        store, attempt_id: "attempt-2", request_id: "request-2",
+        now: NOW + 10, write_log: true
+      )
+      service = maintenance(store)
+      service.prepare(incomplete)
+      assert_equal :archived, store.log_archive.archive(incomplete.attempt_id)
+      assert_equal :archived, store.log_archive.archive(unreadable.attempt_id)
+      pending = store.pending_finalizations
+      original_complete = pending.method(:complete?)
+      pending.define_singleton_method(:complete?) do |attempt_id|
+        raise Hive::Attempts::StoreError, "pending state unreadable" if attempt_id == unreadable.attempt_id
+
+        original_complete.call(attempt_id)
+      end
+
+      result = service.sweep_logs(now: NOW + (4 * 86_400))
+
+      assert_equal 0, result.fetch(:deleted)
+      assert_equal :available, store.log_archive.resolve(incomplete.attempt_id).availability
+      assert_equal :available, store.log_archive.resolve(unreadable.attempt_id).availability
+    end
+  end
+
+  def test_invalid_end_time_and_archive_lookup_errors_fail_closed
+    with_store do |store|
+      terminal = terminal_attempt(store)
+      service = Hive::Attempts::FinalizationMaintenance.new(store: store)
+
+      refute service.send(:retention_expired?, { "ended_at" => "not-a-time" }, now: NOW)
+
+      state_root = File.join(File.dirname(store.root), "state")
+      broken_folder = File.join(state_root, "stages", "4-execute", terminal["task_slug"])
+      valid_folder = File.join(state_root, "stages", "9-done", terminal["task_slug"])
+      FileUtils.mkdir_p([ broken_folder, valid_folder ])
+      task = Struct.new(:id, :state_file, :project_root).new(
+        terminal["task_id"], File.join(valid_folder, "task.md"), "/demo"
+      )
+      marker = Struct.new(:name).new(:complete)
+      action = Struct.new(:key).new(Hive::Schemas::TaskActionKind::ARCHIVED)
+      archive_calls = []
+      assert_equal [ broken_folder, valid_folder ].sort,
+                   Dir.glob(File.join(state_root, "stages", "*", terminal["task_slug"])).sort
+
+      with_replaced_singleton_method(
+        Hive::Config, :find_project,
+        lambda { |name|
+          archive_calls << [ :project, name ]
+          { "hive_state_path" => state_root }
+        }
+      ) do
+        with_replaced_singleton_method(
+          Hive::Task, :new,
+          lambda { |folder|
+            archive_calls << [ :task, folder ]
+            raise Hive::InvalidTaskPath if folder == broken_folder
+
+            task
+          }
+        ) do
+          with_replaced_singleton_method(Hive::Markers, :current, ->(_path) { marker }) do
+            with_replaced_singleton_method(Hive::Config, :load, ->(_root) { {} }) do
+              with_replaced_singleton_method(
+                Hive::TaskAction, :for,
+                lambda { |*_args, **_kwargs|
+                  archive_calls << [ :action ]
+                  action
+                }
+              ) do
+                assert service.send(:task_archived?, terminal), archive_calls.inspect
+              end
+            end
+          end
+        end
+      end
+
+      with_replaced_singleton_method(
+        Hive::Config, :find_project, ->(_name) { raise KeyError, "project unavailable" }
+      ) do
+        refute service.send(:task_archived?, terminal)
+      end
+    end
+  end
+
+  def test_tempfail_finalization_refunds_daily_admission_accounting
+    with_store do |store|
+      terminal = terminal_attempt(store, exit_status: Hive::ExitCodes::TEMPFAIL)
+
+      assert maintenance(store).prepare(terminal)
+
+      assert_equal 0,
+                   store.decision_index.daily_count(project: "demo", date: NOW.to_date)
+    end
+  end
+
+  def test_corrupt_loss_outcome_cannot_make_a_lost_attempt_finalizable
+    with_store do |store|
+      lost = store.mark_lost(
+        create_attempt(store), reason: "launch_timeout", now: NOW + 1
+      )
+      outcomes = Hive::Attempts::LostOutcomeStore.new(store: store)
+      outcomes.ensure_for(lost, now: NOW + 2)
+      File.write(outcomes.send(:path, lost.attempt_id), "{")
+
+      refute maintenance(store).prepare(lost)
+
+      assert store.fetch_hot(lost.attempt_id)
+      assert_nil store.permanent_proofs.fetch(lost.attempt_id)
+    end
+  end
+
   private
 
   def with_store
@@ -324,7 +544,7 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
   end
 
   def terminal_attempt(store, attempt_id: "attempt-1", request_id: "request-1",
-                       now: NOW, write_log: false)
+                       now: NOW, write_log: false, exit_status: 0)
     launching = create_attempt(
       store, attempt_id: attempt_id, request_id: request_id, now: now
     )
@@ -340,7 +560,8 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
     )
     running = store.first_heartbeat(claimed, stale_sec: 30, now: now + 2)
     store.terminalize(
-      running, outcome: "succeeded", exit_status: 0,
+      running, outcome: exit_status.zero? ? "succeeded" : "failed",
+      exit_status: exit_status,
       final_checkpoint: running.checkpoint, output_references: [],
       log_reference: {
         "path" => "logs/#{attempt_id}.frames", "size" => 0,

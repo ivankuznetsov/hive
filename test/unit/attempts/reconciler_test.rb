@@ -409,6 +409,23 @@ class AttemptsReconcilerTest < Minitest::Test
     end
   end
 
+  def test_operational_storage_status_uses_the_current_hot_snapshot_counts
+    with_store do |store|
+      create(store)
+      service = reconciler(store, :matching)
+      snapshot = service.reconcile(now: NOW + 1)
+
+      status = service.operational_storage_status(snapshot)
+
+      assert_equal "unknown", status.fetch("status")
+      assert_equal 1, status.dig("hot", "records")
+      assert_equal 0, status.dig("hot", "invalid")
+
+      unavailable = service.operational_storage_status(nil)
+      assert_equal({ "records" => nil, "invalid" => nil }, unavailable.fetch("hot"))
+    end
+  end
+
   private
 
   def with_store

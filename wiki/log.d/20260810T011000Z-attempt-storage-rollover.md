@@ -24,3 +24,6 @@ tags: [attempts, storage, migration, operational-status, performance]
   one fixed-size page and persists its next cursor.
 - The durable CLI ownership replay now follows the public hot-scan and
   point-fetch contract instead of reading a physical attempt-layout path.
+- Coverage now exercises the v3 storage and migration failure boundaries
+  directly; unreachable v2-era scan fallbacks and duplicate rescue paths were
+  removed instead of retained solely for synthetic coverage.

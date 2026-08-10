@@ -4753,6 +4753,52 @@ end
     end
   end
 
+  def test_unclaimed_terminal_and_lost_attempts_acknowledge_before_promotion
+    Dir.mktmpdir("hive-unclaimed-attempt-delivery") do |state_home|
+      terminal = Struct.new(:attempt_id).new("terminal-1")
+      lost = Struct.new(:attempt_id).new("lost-1")
+      calls = []
+      reconciler = Object.new
+      reconciler.define_singleton_method(:acknowledge_finalization) do |attempt, consumer|
+        calls << [ :acknowledge, attempt.attempt_id, consumer ]
+      end
+      reconciler.define_singleton_method(:promote_finalization) do |attempt|
+        calls << [ :promote, attempt.attempt_id ]
+      end
+      dispatcher, = make_dispatcher(
+        rows: [], attempt_reconciler: reconciler,
+        dispatch_request_state_home: state_home,
+        dispatch_result_state_home: state_home
+      )
+
+      dispatcher.instance_variable_set(
+        :@attempt_snapshot,
+        Hive::Attempts::ReconciliationSnapshot.new(
+          capacity: nil, attempts: [], lost_attempts: [],
+          newly_lost_attempts: [], terminal_attempts: [ terminal ], invalid_records: []
+        )
+      )
+      dispatcher.send(:reconcile_attempt_deliveries, now: T0)
+
+      dispatcher.instance_variable_set(:@lost_outcome_store, Object.new)
+      dispatcher.instance_variable_set(
+        :@attempt_snapshot,
+        Hive::Attempts::ReconciliationSnapshot.new(
+          capacity: nil, attempts: [], lost_attempts: [ lost ],
+          newly_lost_attempts: [], terminal_attempts: [], invalid_records: []
+        )
+      )
+      dispatcher.send(:reconcile_lost_attempt_deliveries, now: T0)
+
+      assert_equal [
+        [ :acknowledge, "terminal-1", :request_delivery ],
+        [ :promote, "terminal-1" ],
+        [ :acknowledge, "lost-1", :request_delivery ],
+        [ :promote, "lost-1" ]
+      ], calls
+    end
+  end
+
   def test_queue_delivery_delegates_task_ownership_to_attempt_dispatcher
     Dir.mktmpdir("hive-dispatch-queue") do |state_home|
       attempt = Struct.new(:attempt_id, :task_generation, :state)

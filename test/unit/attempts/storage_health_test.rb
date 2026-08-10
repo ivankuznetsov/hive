@@ -76,4 +76,69 @@ class AttemptsStorageHealthTest < Minitest::Test
       assert_nil recovered.fetch("last_error")
     end
   end
+
+  def test_invalid_counters_and_cursors_fail_closed
+    with_tmp_dir do |root|
+      health = Hive::Attempts::StorageHealth.new(root: root)
+
+      error = assert_raises(Hive::Attempts::StoreError) do
+        health.complete_maintenance(
+          now: NOW + 1,
+          result: { promoted: -1, deleted: 0, cold_examined: 0 }
+        )
+      end
+      assert_match(/counters are invalid/, error.message)
+
+      error = assert_raises(Hive::Attempts::StoreError) do
+        health.advance_cold_sweep({})
+      end
+      assert_match(/cold sweep cursor is invalid/, error.message)
+    end
+  end
+
+  def test_corrupt_health_metadata_returns_a_bounded_degraded_snapshot
+    with_tmp_dir do |root|
+      health = Hive::Attempts::StorageHealth.new(root: root)
+      assert health.claim_maintenance(now: NOW, interval_sec: 3_600)
+      relative = Hive::Attempts::StorageKey.relative(
+        Hive::Attempts::StorageHealth::KIND,
+        Hive::Attempts::StorageHealth::KEY
+      )
+      File.write(File.join(root, relative), "{")
+
+      status = health.snapshot(hot_count: 4, invalid_hot_count: 2)
+
+      assert_equal "degraded", status.fetch("status")
+      assert_equal({ "records" => nil, "invalid" => nil }, status.fetch("hot"))
+      assert_equal "health_metadata_unreadable", status.fetch("degraded_reason")
+      assert_equal(
+        { "operation" => "status", "class" => "StoreError" },
+        status.fetch("last_error")
+      )
+    end
+  end
+
+  def test_fresh_health_is_unknown_until_migration_or_maintenance_completes
+    with_tmp_dir do |root|
+      health = Hive::Attempts::StorageHealth.new(root: root)
+
+      status = health.snapshot(hot_count: 0, invalid_hot_count: 0)
+
+      assert_equal "unknown", status.fetch("status")
+      assert_nil status.dig("maintenance", "last_completed_at")
+      assert_equal({ "records" => 0, "invalid" => 0 }, status.fetch("hot"))
+    end
+  end
+
+  def test_invalid_live_counts_degrade_without_exposing_the_bad_value
+    with_tmp_dir do |root|
+      health = Hive::Attempts::StorageHealth.new(root: root)
+
+      status = health.snapshot(hot_count: -1, invalid_hot_count: 0)
+
+      assert_equal "degraded", status.fetch("status")
+      assert_equal({ "records" => nil, "invalid" => nil }, status.fetch("hot"))
+      assert_equal "health_metadata_unreadable", status.fetch("degraded_reason")
+    end
+  end
 end

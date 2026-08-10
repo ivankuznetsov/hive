@@ -15,7 +15,7 @@ class FaviconTest < ActionDispatch::IntegrationTest
     assert_includes response.body, "<title id=\"title\">Hive web</title>"
     assert_includes response.body, '<rect width="96" height="96" fill="#0d1117"/>'
     assert_includes response.body, 'stroke="#f0b429"'
-    assert_includes response.body, 'M48 8 82 28v40L48 88 14 68V28z'
+    assert_includes response.body, "M48 8 82 28v40L48 88 14 68V28z"
     refute_includes response.body, "#c96442"
     refute_includes response.body, "rx="
 

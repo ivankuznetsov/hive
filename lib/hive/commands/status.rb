@@ -556,12 +556,32 @@ module Hive
           next unless File.directory?(dir)
 
           task_count = Dir.children(dir).count do |child|
-            Hive::Stages.task_slug?(child) && File.directory?(File.join(dir, child))
+            folder = File.join(dir, child)
+            Hive::Stages.task_slug?(child) && File.directory?(folder) &&
+              !managed_historical_task?(folder, workflow_generation: workflow_generation)
           end
           next if task_count.zero?
 
           { "stage_dir" => basename, "task_count" => task_count }
         end.sort_by { |entry| entry["stage_dir"] }
+      end
+
+      # Managed tasks are immutable pins to the exact workflow generation that
+      # created them. A package update may rename its stages while the retained
+      # generation still makes an older task fully loadable. Such a directory
+      # is historical workflow state, not a core layout rename for `hive
+      # migrate` to move. Require complete provenance and a successful Task
+      # load so corrupt or missing retained generations continue to fail closed
+      # as legacy blockers.
+      def managed_historical_task?(folder, workflow_generation: nil)
+        meta = Hive::TaskMeta.read(folder)
+        return false unless meta[:workflow] && meta[:workflow_commit] &&
+                            meta[:workflow_manifest_digest]
+
+        Hive::Task.new(folder, workflow_generation: workflow_generation)
+        true
+      rescue StandardError
+        false
       end
 
       def task_payload(row, now: Time.now.utc)

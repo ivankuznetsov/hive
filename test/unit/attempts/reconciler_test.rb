@@ -311,6 +311,54 @@ class AttemptsReconcilerTest < Minitest::Test
     end
   end
 
+  def test_finalization_prepares_before_observation_and_acks_only_durable_journal_result
+    with_store do |store|
+      running = running_attempt(store, stale_sec: 30)
+      terminal = store.terminalize(
+        running, outcome: "succeeded", exit_status: 0,
+        final_checkpoint: running.checkpoint, output_references: [],
+        log_reference: { "path" => "logs/a", "size" => 0, "sha256" => "0" * 64 },
+        now: NOW + 2
+      )
+      events = []
+      finalization = Object.new
+      finalization.define_singleton_method(:prepare) do |record|
+        events << [ :prepare, record.attempt_id ]
+        true
+      end
+      finalization.define_singleton_method(:acknowledge) do |record, consumer|
+        events << [ :acknowledge, record.attempt_id, consumer ]
+      end
+      observer = Object.new
+      observer.define_singleton_method(:observe) do |status, now:|
+        events << [ :observe, status.attempt.attempt_id, now ]
+        :acknowledged
+      end
+
+      Hive::Attempts::Reconciler.new(
+        store: store, process_identity: FakeIdentity.new(:missing),
+        condition_observer: observer, finalization_maintenance: finalization
+      ).reconcile(now: NOW + 3)
+
+      assert_equal [
+        [ :prepare, terminal.attempt_id ],
+        [ :observe, terminal.attempt_id, NOW + 3 ],
+        [ :acknowledge, terminal.attempt_id, :journal ]
+      ], events
+
+      events.clear
+      observer.define_singleton_method(:observe) do |status, now:|
+        events << [ :observe, status.attempt.attempt_id, now ]
+        :pending
+      end
+      Hive::Attempts::Reconciler.new(
+        store: store, process_identity: FakeIdentity.new(:missing),
+        condition_observer: observer, finalization_maintenance: finalization
+      ).reconcile(now: NOW + 4)
+      refute events.any? { |event| event.first == :acknowledge }
+    end
+  end
+
   def test_reconciliation_builds_capacity_and_admission_view_from_one_hot_scan
     with_store do |store|
       create(store)

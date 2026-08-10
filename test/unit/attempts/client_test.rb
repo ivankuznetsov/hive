@@ -102,6 +102,28 @@ class AttemptsClientTest < Minitest::Test
     end
   end
 
+  def test_expired_output_preserves_terminal_receipt_without_launching
+    with_terminal_attempt do |store, terminal|
+      store.log_archive.archive(terminal.attempt_id)
+      store.log_archive.expire(terminal.attempt_id, now: Time.now.utc)
+      store.define_singleton_method(:create_launching) do |**|
+        raise "client must not launch to recreate expired output"
+      end
+
+      stdout = StringIO.new
+      stderr = StringIO.new
+      result = Hive::Attempts::Client.new(store: store, poll_interval: 0).attach(
+        terminal.attempt_id, stdout: stdout, stderr: stderr
+      )
+
+      assert_equal :terminal, result.status
+      assert_equal :expired, result.output_status
+      assert_equal terminal.receipt, result.receipt
+      assert_empty stdout.string
+      assert_includes stderr.string, "preserved receipt without rerunning"
+    end
+  end
+
   def test_lost_transition_drains_frames_published_during_record_fetch
     with_tmp_dir do |root|
       logs_root = File.join(root, "logs")

@@ -267,6 +267,9 @@ module Hive
             admission_view: @attempt_snapshot&.admission_view
           )
           reconcile_lost_attempt_deliveries(now: now)
+          if @attempt_reconciler&.respond_to?(:sweep_finalization_maintenance)
+            @attempt_reconciler.sweep_finalization_maintenance(now: now)
+          end
         rescue StandardError => e
           @logger.event(:fatal,
                         message: "attempt loss healer raised: #{e.class}: #{e.message}",
@@ -2586,14 +2589,23 @@ module Hive
       end
 
       def reconcile_attempt_deliveries(now:)
-        Hive::Daemon::DispatchRequestQueue.claimed(
+        claimed = Hive::Daemon::DispatchRequestQueue.claimed(
           state_home: dispatch_request_state_home
-        ).each do |delivery|
+        )
+        claimed_attempt_ids = claimed.filter_map do |delivery|
+          attempt_id = delivery.claim["attempt_id"].to_s
+          attempt_id unless attempt_id.empty?
+        end.to_h { |attempt_id| [ attempt_id, true ] }
+
+        claimed.each do |delivery|
           attempt_id = delivery.claim["attempt_id"].to_s
           next if attempt_id.empty?
 
           request = delivery.request
-          next if request.recovery&.fetch("phase", nil) == "terminal"
+          if request.recovery&.fetch("phase", nil) == "terminal"
+            acknowledge_attempt_finalization(attempt_id, :request_delivery)
+            next
+          end
 
           attempt = @attempt_reconciler.fetch(attempt_id)
           next unless attempt&.state == "terminal"
@@ -2640,15 +2652,31 @@ module Hive
             exit_code: receipt["exit_status"],
             outcome: receipt["outcome"]
           )
+          acknowledge_attempt_finalization(attempt, :request_delivery)
+        end
+
+        Array(@attempt_snapshot&.terminal_attempts).each do |attempt|
+          unless claimed_attempt_ids.key?(attempt.attempt_id)
+            acknowledge_attempt_finalization(attempt, :request_delivery)
+          end
+        end
+        Array(@attempt_snapshot&.terminal_attempts).each do |attempt|
+          promote_attempt_finalization(attempt)
         end
       end
 
       def reconcile_lost_attempt_deliveries(now:)
         return unless @lost_outcome_store
 
-        Hive::Daemon::DispatchRequestQueue.claimed(
+        claimed = Hive::Daemon::DispatchRequestQueue.claimed(
           state_home: dispatch_request_state_home
-        ).each do |delivery|
+        )
+        claimed_attempt_ids = claimed.filter_map do |delivery|
+          attempt_id = delivery.claim["attempt_id"].to_s
+          attempt_id unless attempt_id.empty?
+        end.to_h { |attempt_id| [ attempt_id, true ] }
+
+        claimed.each do |delivery|
           attempt_id = delivery.claim["attempt_id"].to_s
           next if attempt_id.empty?
 
@@ -2669,8 +2697,37 @@ module Hive
               state_home: dispatch_request_state_home,
               now: now
             )
+            acknowledge_attempt_finalization(attempt_id, :request_delivery)
           end
         end
+
+        Array(@attempt_snapshot&.lost_attempts).each do |attempt|
+          unless claimed_attempt_ids.key?(attempt.attempt_id)
+            acknowledge_attempt_finalization(attempt, :request_delivery)
+          end
+        end
+        Array(@attempt_snapshot&.lost_attempts).each do |attempt|
+          promote_attempt_finalization(attempt)
+        end
+      end
+
+      def acknowledge_attempt_finalization(attempt_or_id, consumer)
+        return unless @attempt_reconciler&.respond_to?(:acknowledge_finalization)
+
+        attempt = if attempt_or_id.respond_to?(:attempt_id)
+          attempt_or_id
+        else
+          @attempt_reconciler.fetch(attempt_or_id.to_s)
+        end
+        return unless attempt
+
+        @attempt_reconciler.acknowledge_finalization(attempt, consumer)
+      end
+
+      def promote_attempt_finalization(attempt)
+        return unless @attempt_reconciler&.respond_to?(:promote_finalization)
+
+        @attempt_reconciler.promote_finalization(attempt)
       end
 
       def write_attempt_dispatch_result(request, attempt, receipt, now:)

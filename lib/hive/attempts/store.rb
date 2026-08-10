@@ -32,6 +32,9 @@ module Hive
         @proof_root = File.join(@root, "proof")
         @decision_indexes_root = File.join(@root, "decision-indexes")
         @pending_finalization_root = File.join(@root, "pending-finalization")
+        @cold_logs_root = File.join(@root, "cold-logs")
+        @log_state_root = File.join(@root, "log-state")
+        @maintenance_root = File.join(@root, "maintenance")
         ensure_private_directories! if create_directories
       end
 
@@ -65,6 +68,23 @@ module Hive
 
       def pending_finalization_root
         managed_directory_path(@pending_finalization_root, label: "pending-finalization")
+      end
+
+      def cold_logs_root
+        managed_directory_path(@cold_logs_root, label: "cold-logs")
+      end
+
+      def log_state_root
+        managed_directory_path(@log_state_root, label: "log-state")
+      end
+
+      def maintenance_root
+        managed_directory_path(@maintenance_root, label: "maintenance")
+      end
+
+      def log_archive
+        require "hive/attempts/log_archive"
+        @log_archive ||= LogArchive.new(store: self)
       end
 
       def permanent_proofs
@@ -356,6 +376,22 @@ module Hive
         File.join(generation_locks_root, "#{digest}.lock")
       end
 
+      def remove_hot_final(observed)
+        with_generation_lock(observed.task_generation) do
+          current = fetch_hot(observed.attempt_id)
+          return false unless current
+          unless current.final? && current.to_h == observed.to_h
+            raise CompareAndSwapFailed, "attempt changed before hot removal"
+          end
+
+          File.unlink(record_path(current.attempt_id))
+          Hive::AtomicFile.fsync_directory(records_root)
+          true
+        end
+      rescue SystemCallError, IOError => e
+        raise StoreError, "attempt hot record could not be removed: #{e.message}"
+      end
+
       private
 
       def reject_legacy_default_store!
@@ -370,7 +406,7 @@ module Hive
 
       def mutate(observed, allowed_states:)
         with_generation_lock(observed.task_generation) do
-          current = fetch(observed.attempt_id)
+          current = fetch_hot(observed.attempt_id)
           verify_cas!(current, observed, allowed_states)
           replacement = Record.new(yield(current.to_h))
           verify_immutable!(current, replacement)
@@ -448,7 +484,10 @@ module Hive
           "generation-locks" => @generation_locks_root,
           "proof" => @proof_root,
           "decision-indexes" => @decision_indexes_root,
-          "pending-finalization" => @pending_finalization_root
+          "pending-finalization" => @pending_finalization_root,
+          "cold-logs" => @cold_logs_root,
+          "log-state" => @log_state_root,
+          "maintenance" => @maintenance_root
         }
       end
 

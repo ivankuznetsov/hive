@@ -13,7 +13,7 @@ module Hive
     ) do
       SAFE_LOST_CLEANUPS = %w[absent terminated no_worker].freeze
 
-      def self.build(store:, scan: nil, now: Time.now)
+      def self.build(store:, scan: nil, now: Time.now, daily_counts: nil)
         scan ||= store.scan
         outcome_store = LostOutcomeStore.new(store: store)
         reserved = scan.records.select do |record|
@@ -26,17 +26,20 @@ module Hive
           per_task[[ record["project"], record["task_slug"] ]] += 1
         end
 
-        daily = Hash.new(0)
-        scan.records.each do |record|
-          receipt = record.receipt
-          next if receipt && receipt["exit_status"] == Hive::ExitCodes::TEMPFAIL
+        daily = daily_counts || begin
+          counts = Hash.new(0)
+          scan.records.each do |record|
+            receipt = record.receipt
+            next if receipt && receipt["exit_status"] == Hive::ExitCodes::TEMPFAIL
 
-          date = Time.iso8601(record["accepted_at"]).utc.to_date
-          daily[[ record["project"], date ]] += 1
-        rescue ArgumentError
-          # Record validation already checked the timestamp. Preserve the
-          # fail-closed global reservation if a future schema changes it.
-          next
+            date = Time.iso8601(record["accepted_at"]).utc.to_date
+            counts[[ record["project"], date ]] += 1
+          rescue ArgumentError
+            # Record validation already checked the timestamp. Preserve the
+            # fail-closed global reservation if a future schema changes it.
+            next
+          end
+          counts
         end
 
         invalid_count = scan.invalid_records.size

@@ -3,9 +3,11 @@ require "hive"
 module Hive
   module Attempts
     ClientResult = Data.define(
-      :status, :exit_status, :outcome, :receipt, :attempt_id, :stdout_bytes
+      :status, :exit_status, :outcome, :receipt, :attempt_id, :stdout_bytes,
+      :output_status
     ) do
-      def initialize(status:, exit_status:, outcome:, receipt:, attempt_id:, stdout_bytes: 0)
+      def initialize(status:, exit_status:, outcome:, receipt:, attempt_id:, stdout_bytes: 0,
+                     output_status: nil)
         super
       end
 

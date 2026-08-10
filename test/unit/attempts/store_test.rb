@@ -196,7 +196,10 @@ class AttemptsStoreTest < Minitest::Test
   end
 
   def test_managed_directories_refuse_symlinks_before_chmod_or_state_access
-    %w[records logs outputs generation-locks proof decision-indexes pending-finalization].each do |managed_name|
+    %w[
+      records logs outputs generation-locks proof decision-indexes
+      pending-finalization cold-logs log-state maintenance
+    ].each do |managed_name|
       with_tmp_dir do |dir|
         root = File.join(dir, "attempts")
         outside = File.join(dir, "outside")

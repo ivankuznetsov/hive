@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/attempts/reconciler"
+require "hive/attempts/finalization_maintenance"
 require "fileutils"
 require "tmpdir"
 require "hive/markers"
@@ -4588,7 +4589,16 @@ end
         task_generation: "generation-1", state_home: state_home, now: T0
       )
       identity = Struct.new(:unused) { def status(_owner) = :missing }.new
-      reconciler = Hive::Attempts::Reconciler.new(store: store, process_identity: identity)
+      condition_observer = Object.new
+      condition_observer.define_singleton_method(:observe) do |_status, now:|
+        :not_applicable
+      end
+      finalization = Hive::Attempts::FinalizationMaintenance.new(store: store)
+      reconciler = Hive::Attempts::Reconciler.new(
+        store: store, process_identity: identity,
+        condition_observer: condition_observer,
+        finalization_maintenance: finalization
+      )
       dispatcher, supervisor, = make_dispatcher(
         rows: [], dispatch_request_state_home: state_home,
         dispatch_result_state_home: state_home,
@@ -4603,6 +4613,65 @@ end
       assert_equal "attempt-1", notice.attempt_id
       assert_equal "terminal", notice.attempt_state
       assert_equal "succeeded", notice.receipt["outcome"]
+      assert_nil store.fetch_hot("attempt-1")
+      assert_equal "terminal", store.fetch("attempt-1").state
+    end
+  end
+
+  def test_failed_claimed_delivery_leaves_request_ack_pending_and_hot_record_present
+    Dir.mktmpdir("hive-attempt-delivery-failure") do |state_home|
+      store = Hive::Attempts::Store.new(root: File.join(state_home, "attempts"))
+      launching = store.create_launching(
+        attempt_id: "attempt-1", request_id: "request-1", predecessor_attempt_id: nil,
+        task_id: "42", project: "p1", task_slug: "demo-task",
+        intended_stage: "4-execute", task_generation: "generation-1",
+        progress_token: "progress", provider: "codex",
+        worker_argv: [ "hive", "run", "demo-task" ],
+        claim_capability_digest: Hive::Attempts::Capability.digest("c" * 64),
+        starting_revision: nil, retry_charge: 0, inherited_outputs: [],
+        launch_timeout_sec: 30, now: T0
+      )
+      claimed = store.claim(
+        launching, owner: { "pid" => 123 }, claim_capability: "c" * 64,
+        first_heartbeat_timeout_sec: 30, now: T0
+      )
+      running = store.first_heartbeat(claimed, stale_sec: 30, now: T0 + 1)
+      terminal = store.terminalize(
+        running, outcome: "succeeded", exit_status: 0,
+        final_checkpoint: running.checkpoint, output_references: [],
+        log_reference: { "path" => "logs/a.frames", "size" => 0, "sha256" => "0" * 64 },
+        now: T0 + 2
+      )
+      request_id = Q.write_request!(
+        project: "p1", slug: "demo-task", argv: %w[hive run demo-task],
+        chat_id: 42, request_id: "request-1", state_home: state_home, now: T0
+      )
+      Q.claim(
+        request_id, pid: nil, attempt_id: terminal.attempt_id,
+        task_generation: terminal.task_generation, state_home: state_home, now: T0
+      )
+      observer = Object.new
+      observer.define_singleton_method(:observe) { |_status, now:| :not_applicable }
+      finalization = Hive::Attempts::FinalizationMaintenance.new(store: store)
+      reconciler = Hive::Attempts::Reconciler.new(
+        store: store, condition_observer: observer,
+        finalization_maintenance: finalization
+      )
+      dispatcher, = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home,
+        dispatch_result_state_home: state_home, attempt_reconciler: reconciler
+      )
+      dispatcher.define_singleton_method(:write_attempt_dispatch_result) do |*_args, **_kwargs|
+        raise IOError, "injected result delivery failure"
+      end
+
+      dispatcher.tick(now: T0 + 3)
+
+      assert store.fetch_hot(terminal.attempt_id)
+      pending = store.pending_finalizations.fetch(terminal.attempt_id)
+      assert_equal true, pending.dig("consumers", "accounting")
+      assert_equal true, pending.dig("consumers", "journal")
+      assert_equal false, pending.dig("consumers", "request_delivery")
     end
   end
 
@@ -4630,6 +4699,24 @@ end
         dispatch_result_state_home: state_home
       )
       dispatcher.instance_variable_set(:@lost_outcome_store, outcomes)
+      lost = Struct.new(:attempt_id).new("lost-1")
+      finalization_calls = []
+      reconciler = Object.new
+      reconciler.define_singleton_method(:fetch) { |_attempt_id| lost }
+      reconciler.define_singleton_method(:acknowledge_finalization) do |attempt, consumer|
+        finalization_calls << [ :acknowledge, attempt.attempt_id, consumer ]
+      end
+      reconciler.define_singleton_method(:promote_finalization) do |attempt|
+        finalization_calls << [ :promote, attempt.attempt_id ]
+      end
+      dispatcher.instance_variable_set(:@attempt_reconciler, reconciler)
+      dispatcher.instance_variable_set(
+        :@attempt_snapshot,
+        Hive::Attempts::ReconciliationSnapshot.new(
+          capacity: nil, attempts: [], lost_attempts: [ lost ],
+          newly_lost_attempts: [], terminal_attempts: [], invalid_records: []
+        )
+      )
 
       dispatcher.send(:reconcile_lost_attempt_deliveries, now: T0 + 1)
 
@@ -4637,6 +4724,10 @@ end
       assert_equal "successor-1", claim.fetch("attempt_id")
       assert_equal "generation-1", claim.fetch("task_generation")
       assert_empty Hive::Daemon::DispatchResultQueue.pending(state_home: state_home)
+      assert_equal [
+        [ :acknowledge, "lost-1", :request_delivery ],
+        [ :promote, "lost-1" ]
+      ], finalization_calls
     end
   end
 

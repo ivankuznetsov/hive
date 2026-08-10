@@ -3,6 +3,7 @@ require "hive/attempts/client"
 require "hive/attempts/detached_launcher"
 require "hive/attempts/dispatcher"
 require "hive/attempts/launch_policy"
+require "hive/attempts/finalization_maintenance"
 
 module Hive
   module Attempts
@@ -11,11 +12,13 @@ module Hive
     # command implementation runs later inside the wrapper.
     class Entrypoint
       def initialize(store: nil, dispatcher: nil, client: nil,
+                     maintenance: nil,
                      config_loader: Hive::Config.method(:load),
                      daemon_config_loader: Hive::Config.method(:load_global_daemon))
         @store = store
         @dispatcher = dispatcher
         @client = client
+        @maintenance = maintenance
         @config_loader = config_loader
         @daemon_config_loader = daemon_config_loader
       end
@@ -24,6 +27,9 @@ module Hive
                    provider: nil, interactive: true, now: Time.now.utc)
         cfg = @config_loader.call(task.project_root)
         store = @store || Store.new
+        maintenance = @maintenance
+        maintenance ||= foreground_maintenance(store) unless @store
+        maintenance&.run_if_due(now: now)
         dispatcher = @dispatcher || build_dispatcher(
           store, cfg, @daemon_config_loader.call, argv
         )
@@ -48,6 +54,21 @@ module Hive
       end
 
       private
+
+      def foreground_maintenance(store)
+        require "hive/conditions/attempt_observer"
+        require "hive/daemon/dispatch_request_queue"
+        observer = Hive::Conditions::AttemptObserver.new(store: store)
+        @maintenance = FinalizationMaintenance.new(
+          store: store,
+          condition_observer: observer,
+          delivery_pending: lambda do |record|
+            Hive::Daemon::DispatchRequestQueue.claimed.any? do |delivery|
+              delivery.claim["attempt_id"].to_s == record.attempt_id
+            end
+          end
+        )
+      end
 
       def build_dispatcher(store, cfg, daemon, argv)
         launcher = DetachedLauncher.new(

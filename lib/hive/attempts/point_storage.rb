@@ -116,6 +116,18 @@ module Hive
         unavailable!(error)
       end
 
+      def delete(kind, key, expected_bytes:, max_bytes:)
+        @directory.unlink(
+          StorageKey.relative(kind, key),
+          missing: true,
+          expected_digest: expected_bytes && Digest::SHA256.hexdigest(expected_bytes),
+          max_bytes: max_bytes
+        )
+      rescue Hive::ManagedDirectory::UnsafeError,
+             SystemCallError, IOError, ArgumentError, TypeError => error
+        unavailable!(error)
+      end
+
       private
 
       def unavailable!(error)

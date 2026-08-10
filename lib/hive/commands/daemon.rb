@@ -27,6 +27,7 @@ require "hive/attempts/api"
 require "hive/attempts/process_identity"
 require "hive/attempts/reconciler"
 require "hive/attempts/lost_outcome"
+require "hive/attempts/finalization_maintenance"
 require "hive/conditions/attempt_observer"
 require "hive/modules/event_publisher"
 require "hive/modules/daemon_runtime"
@@ -270,12 +271,18 @@ module Hive
           dry_run: @dry_run
         )
         attempt_process_identity = Hive::Attempts::ProcessIdentity.new
+        condition_observer = Hive::Conditions::AttemptObserver.new(
+          store: attempt_store, logger: logger
+        )
+        finalization_maintenance = Hive::Attempts::FinalizationMaintenance.new(
+          store: attempt_store, condition_observer: condition_observer,
+          logger: logger
+        )
         attempt_reconciler = Hive::Attempts::Reconciler.new(
           store: attempt_store,
           process_identity: attempt_process_identity,
-          condition_observer: Hive::Conditions::AttemptObserver.new(
-            store: attempt_store, logger: logger
-          ),
+          condition_observer: condition_observer,
+          finalization_maintenance: finalization_maintenance,
           logger: logger
         )
         lost_outcome_store = Hive::Attempts::LostOutcomeStore.new(store: attempt_store)

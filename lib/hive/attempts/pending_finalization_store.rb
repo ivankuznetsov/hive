@@ -69,6 +69,23 @@ module Hive
         entry && entry.fetch("consumers").values.all?(true) || false
       end
 
+      def remove_complete(attempt_id)
+        id = StorageKey.string(attempt_id)
+        point_key = key(id)
+        @storage.synchronize(KIND, point_key) do
+          bytes = @storage.read(KIND, point_key, max_bytes: MAX_ENTRY_BYTES)
+          next false unless bytes
+
+          entry = parse(bytes, expected_attempt_id: id)
+          unless entry.fetch("consumers").values.all?(true)
+            raise StoreError, "pending finalization is incomplete"
+          end
+          @storage.delete(
+            KIND, point_key, expected_bytes: bytes, max_bytes: MAX_ENTRY_BYTES
+          )
+        end
+      end
+
       def path_for(attempt_id)
         @storage.path_for(KIND, key(StorageKey.string(attempt_id)))
       end

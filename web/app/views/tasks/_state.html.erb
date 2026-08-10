@@ -100,14 +100,15 @@
     <%= form_with url: task_answers_path(
           @project.name, @task["slug"], source: @task_source
         ),
-          id: "qa-form-#{@questions.map(&:n).join("-")}" do |f| %>
+            id: "qa-form-#{@questions.map(&:ordinal).join("-")}" do |f| %>
         <% @questions.each do |question| %>
           <div class="qa-item">
             <%# Single line: qa-question is pre-wrap, so template indentation
                 would render as a first-line indent. %>
             <p class="qa-question"><span class="qa-number">Q<%= question.n %></span><%= question.text %></p>
-            <%= text_area_tag "answers[#{question.n}]", "", placeholder: "Your answer…",
+            <%= text_area_tag "answers[#{question.binding}]", "", placeholder: "Your answer…",
                   disabled: !@status_fresh,
+                  data: { question_number: question.n },
                   aria: { label: "Answer to question #{question.n}" } %>
           </div>
         <% end %>
@@ -125,6 +126,7 @@
             @project.name, @task["slug"], source: @task_source
           ),
             id: "intervene-form" do |f| %>
+        <%= hidden_field_tag :binding, @questions.first.binding %>
         <%= f.text_area :message, required: true, disabled: !@status_fresh,
               placeholder: "Written verbatim as the answer to Q#{@questions.first.n}…" %>
         <p><%= f.submit "Send", disabled: !@status_fresh,

@@ -441,11 +441,13 @@ Honeycomb projections.
   with `hive daemon start --detach` instead of offering a queue action that
   cannot run. The liveness-only probe avoids the service/binary inspection cost
   of the full dashboard envelope. The page also provides per-question
-  brainstorm Q&A (the original idea shown above the form; answers go through
-  BrainstormAnswerWriter; the forms are not `data-turbo-permanent`, and the
-  answers controller snapshots/restores typed text plus caret across morphs,
-  keyed by textarea name, so a new round can replace the old form without
-  carrying stale drafts forward), artifacts rendered as sanitized markdown
+  brainstorm Q&A (the original idea shown above the form; every textarea and
+  free-form intervention carries the opaque slot binding from
+  `Hive::Commands::Answer`, and writes return through that shared identity-bound
+  seam; the forms are not `data-turbo-permanent`, and the answers controller
+  snapshots/restores typed text plus caret across morphs, keyed by binding-bearing
+  textarea name, so a changed question or new round replaces the old field
+  without carrying stale drafts forward), artifacts rendered as sanitized markdown
   (redcarpet, GFM tables/fenced code; raw HTML escaped at render AND
   sanitized after; leading YAML front matter and standalone
   `Hive::Markers::MARKER_RE` comments dropped, while non-marker comments and

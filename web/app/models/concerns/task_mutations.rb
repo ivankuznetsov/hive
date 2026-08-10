@@ -1,6 +1,6 @@
-require "hive/bot/brainstorm_answer_writer"
 require "hive/bot/brainstorm_parser"
 require "hive/bot/dispatch_request_writer"
+require "hive/commands/answer"
 require "hive/commands/approve"
 require "hive/commands/drop"
 require "hive/daemon/dispatch_request_queue"
@@ -109,39 +109,27 @@ module TaskMutations
     )
   end
 
-  def intervene!(message)
+  def intervene!(message, binding:)
     text = message.to_s.strip
     raise Hive::Error, "intervene message is required" if text.empty?
 
-    brainstorm_path = brainstorm_path!
-    question = Hive::Bot::BrainstormParser.next_unanswered_question(
-      Hive::Bot::BrainstormParser.parse(brainstorm_path)
-    )
-    raise Hive::Error, "no unanswered brainstorm question remains for this task" unless question
-
-    write_answer!(brainstorm_path, question.n, text)
-    { ok: true, question_n: question.n }
+    brainstorm_path!
+    receipt = write_bound_answer!(binding, text)
+    { ok: true, question_n: receipt.dig("slot", "question_number") }
   end
 
   def answer_questions!(answers)
-    brainstorm_path = brainstorm_path!(noun: "answers")
+    brainstorm_path!(noun: "answers")
     provided = (answers || {}).to_h
-                              .transform_keys { |key| Integer(key, exception: false) }
+                              .transform_keys(&:to_s)
                               .transform_values { |value| value.to_s.strip }
-                              .reject { |number, text| number.nil? || text.empty? }
+                              .reject { |binding, text| binding.empty? || text.empty? }
     raise Hive::Error, "no answers provided" if provided.empty?
 
-    open_numbers = Hive::Bot::BrainstormParser.unanswered_questions(
-      Hive::Bot::BrainstormParser.parse(brainstorm_path)
-    ).map(&:n)
-    stale = provided.keys - open_numbers
-    if stale.any?
-      raise Hive::Error,
-            "question(s) #{stale.sort.join(", ")} are no longer open — the brainstorm may have moved on; reload the page"
+    answered = provided.map do |binding, text|
+      write_bound_answer!(binding, text).dig("slot", "question_number")
     end
-
-    provided.keys.sort.each { |number| write_answer!(brainstorm_path, number, provided.fetch(number)) }
-    { ok: true, answered: provided.keys.sort }
+    { ok: true, answered: answered }
   end
 
   private
@@ -178,14 +166,16 @@ module TaskMutations
     raise Hive::Error, "#{noun} #{noun == "answers" ? "are" : "is"} only available while a task awaits a brainstorm answer"
   end
 
-  def write_answer!(path, question_number, text)
-    result = Hive::Bot::BrainstormAnswerWriter.append!(
-      brainstorm_path: path,
-      question_n: question_number,
-      answer_text: text
+  def write_bound_answer!(binding, text)
+    receipt = Hive::Commands::Answer.write(
+      slug,
+      project: project.name,
+      binding: binding,
+      answer: text
     )
-    return if result == :written
+    return receipt if %w[written idempotent].include?(receipt.fetch("outcome"))
 
-    raise Hive::Error, "could not record answer to Q#{question_number} (#{result})"
+    raise Hive::Error,
+          "question changed while you were answering it (#{receipt.fetch('reason')}) — reload the page"
   end
 end

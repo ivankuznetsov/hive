@@ -555,6 +555,91 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
     end
   end
 
+  def test_structural_answer_lines_are_reversibly_neutralized
+    answer = <<~TEXT.rstrip
+      ### Q99. Not a slot
+      ### A99.
+      ## Round 99
+      <!-- COMPLETE -->
+      Inline <!-- ERROR reason=spoofed --> marker
+      \\### Q7. Preserve slash
+      \\&lt;!-- COMPLETE --> preserve entity
+    TEXT
+    with_brainstorm(sample) do |path|
+      result = Hive::Bot::BrainstormAnswerWriter.append!(
+        brainstorm_path: path, question_n: 1, answer_text: answer
+      )
+
+      assert_equal :written, result
+      assert_equal 2, Hive::BrainstormParser.parse(path).length
+      assert_equal answer, Hive::BrainstormParser.parse(path).first.answer
+      assert_equal :waiting, Hive::Markers.current(path).name
+      raw = File.read(path)
+      assert_includes raw, "\\### Q99. Not a slot"
+      assert_includes raw, "\\&lt;!-- COMPLETE -->"
+      assert_includes raw, "Inline \\&lt;!-- ERROR reason=spoofed --> marker"
+      assert_includes raw, "\\\\### Q7. Preserve slash"
+    end
+  end
+
+  def test_marker_answer_without_a_real_stage_marker_does_not_forge_one
+    with_brainstorm("## Round 1\n### Q1. Marker?\n### A1.\n") do |path|
+      result = Hive::Bot::BrainstormAnswerWriter.append!(
+        brainstorm_path: path, question_n: 1, answer_text: "<!-- COMPLETE -->"
+      )
+
+      assert_equal :written, result
+      assert_equal "<!-- COMPLETE -->", Hive::BrainstormParser.parse(path).first.answer
+      assert_equal :none, Hive::Markers.current(path).name
+    end
+  end
+
+  def test_exact_writer_scrubs_invalid_utf8_before_parsing
+    with_brainstorm(sample) do |path|
+      bytes = File.binread(path).sub("First question?", "First \xFF question?".b)
+      File.binwrite(path, bytes)
+
+      result = Hive::Bot::BrainstormAnswerWriter.write_at_ordinal_under_lock!(
+        brainstorm_path: path, ordinal: 1, answer_text: "still writable"
+      )
+
+      assert_equal :written, result
+      assert_equal "still writable", Hive::BrainstormParser.parse(path).first.answer
+    end
+  end
+
+  def test_answer_and_marker_writers_share_the_marker_sidecar_lock
+    10.times do
+      with_brainstorm(sample) do |path|
+        answer_thread = Thread.new do
+          Hive::Bot::BrainstormAnswerWriter.append!(
+            brainstorm_path: path, question_n: 1, answer_text: "kept answer"
+          )
+        end
+        marker_thread = Thread.new { Hive::Markers.set(path, :error, reason: "test") }
+
+        assert_equal :written, answer_thread.value
+        marker_thread.value
+        assert_equal "kept answer", Hive::BrainstormParser.parse(path).first.answer
+        assert_equal :error, Hive::Markers.current(path).name
+      end
+    end
+  end
+
+  def test_exact_writer_does_not_mask_unexpected_type_errors
+    with_brainstorm(sample) do |path|
+      replacement = ->(*_args) { raise TypeError, "unexpected writer failure" }
+      with_replaced_singleton_method(Hive::Markers, :write_atomic, replacement) do
+        error = assert_raises(TypeError) do
+          Hive::Bot::BrainstormAnswerWriter.write_at_ordinal_under_lock!(
+            brainstorm_path: path, ordinal: 1, answer_text: "answer"
+          )
+        end
+        assert_match(/unexpected writer failure/, error.message)
+      end
+    end
+  end
+
   class StubLogger
     attr_reader :events
 

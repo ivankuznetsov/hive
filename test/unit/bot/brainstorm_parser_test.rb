@@ -79,6 +79,15 @@ class HiveBotBrainstormParserTest < Minitest::Test
     assert_nil questions.first.answer
   end
 
+  def test_waiting_marker_is_not_part_of_missing_slot_question_text
+    question = Hive::BrainstormParser.parse_text(
+      "## Round 1\n### Q1. Final question?\n<!-- WAITING -->\n"
+    ).first
+
+    assert_equal "Final question?", question.text
+    assert_nil question.answer
+  end
+
   def test_crlf_line_endings_are_supported
     text = "## Round 1\r\n\r\n### Q1. First?\r\n\r\n### A1.\r\nAnswered.\r\n"
 

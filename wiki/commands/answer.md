@@ -72,9 +72,18 @@ then acquires the existing task folder with `create: false` and rechecks:
    question fingerprint.
 
 If the exact ordinal changed, Hive relocates only when the normalized question
-text has exactly one match. Multiple matches are ambiguous; zero matches are
-stale. The shared writer preserves atomic replacement and repairs a missing
-`### A<n>.` header only inside the selected question block.
+text has exactly one **unanswered** match. Answered duplicates do not make that
+open destination ambiguous; multiple unanswered matches are ambiguous, and
+zero matches are stale. The shared writer preserves atomic replacement and
+repairs a missing `### A<n>.` header only inside the selected question block.
+
+Literal answer lines that would otherwise parse as a round, Q/A header, or
+stage marker are reversibly neutralized on disk and restored by the shared
+parser. This preserves the operator's answer in inventories and idempotency
+checks without letting it create slots or forge `WAITING` / `COMPLETE` state.
+The writer scrubs invalid UTF-8 consistently with the parser and serializes its
+read/replace cycle on both the task lock and the state file's marker sidecar
+lock, so a concurrent marker update cannot be lost.
 
 An occupied slot is never overwritten. Repeating the identical canonical
 answer is idempotent success; a different answer is a conflict. Moving the
@@ -110,6 +119,11 @@ changes during its own two observations exits `75` as a stale operational
 observation. Write-level stale and `lock_busy` states are closed exit-zero
 receipts so callers can refresh deterministically.
 
+Bindings enforce the same positive id/round and non-empty folder constraints
+as the public v1 schema. An unreadable or corrupt task journal is reported as
+`invalid_task_path`, while genuinely unexpected failures are wrapped as an
+`internal` error with the software-error exit code.
+
 ## Lifecycle boundary
 
 Completing the final slot changes only `brainstorm.md`. The command does not
@@ -121,8 +135,10 @@ required, and advancing only through its existing completion gate.
 
 The canonical Hive skill layers Guided recommendations and explicit YOLO
 orchestration over this literal command. Native Telegram `/answer` and Hive
-web forms remain literal-answer surfaces; they do not inherit recommendation
-policy merely because the shared parser/writer boundary is used.
+web forms remain literal-answer surfaces; they retain the presented slot's
+opaque binding and use this same inventory/write seam, so a reused question
+number in a replacement round is rejected as stale. They do not inherit
+recommendation policy merely because the shared boundary is used.
 
 ## Backlinks
 

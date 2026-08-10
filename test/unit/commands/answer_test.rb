@@ -127,7 +127,7 @@ class HiveCommandsAnswerTest < Minitest::Test
     end
   end
 
-  def test_unique_renumbered_question_relocates_but_duplicate_and_missing_matches_reject
+  def test_unique_renumbered_question_relocates_using_only_unanswered_matches
     content = "## Round 1\n### Q1. Keep?\n### A1.\n<!-- WAITING -->\n"
     with_project(content) do |_project, _folder, path|
       token = inventory.fetch("slots").first.fetch("binding")
@@ -152,13 +152,12 @@ class HiveCommandsAnswerTest < Minitest::Test
         <!-- WAITING -->
       MARKDOWN
       File.write(path, duplicate)
-      before = File.binread(path)
-
-      rejected = call_answer(binding: token, answer: "unsafe")
-      assert_equal "ambiguous", rejected.fetch("outcome")
-      assert_equal "multiple_matches", rejected.fetch("reason")
-      assert_equal before, File.binread(path)
-      assert_schema(rejected)
+      relocated = call_answer(binding: token, answer: "safe target")
+      assert_equal "written", relocated.fetch("outcome")
+      assert_equal true, relocated.fetch("relocated")
+      assert_equal [ "Already answered", "safe target" ],
+                   Hive::BrainstormParser.parse(path).map(&:answer)
+      assert_schema(relocated)
     end
 
     with_project(content) do |_project, _folder, path|
@@ -303,6 +302,225 @@ class HiveCommandsAnswerTest < Minitest::Test
       assert_equal "written", payload.fetch("outcome")
       assert_equal answer, Hive::BrainstormParser.parse(path).first.answer
       refute File.exist?(side_effect)
+    end
+  end
+
+  def test_structural_answer_lines_are_persisted_safely_and_retry_idempotently
+    content = "## Round 1\n### Q1. Literal markdown?\n### A1.\n<!-- WAITING -->\n"
+    answer = <<~TEXT.rstrip
+      ### Q999. Not a real question
+      ### A999.
+      ## Round 99
+      <!-- COMPLETE -->
+      \\### Q7. Keep my leading slash
+    TEXT
+    with_project(content) do |_project, _folder, path|
+      token = inventory.fetch("slots").first.fetch("binding")
+      written = call_answer(binding: token, answer: answer)
+      retried = call_answer(binding: token, answer: answer)
+
+      assert_equal "written", written.fetch("outcome")
+      assert_equal "idempotent", retried.fetch("outcome")
+      parsed = Hive::BrainstormParser.parse(path)
+      assert_equal 1, parsed.length
+      assert_equal answer, parsed.first.answer
+      assert_equal :waiting, Hive::Markers.current(path).name
+      assert_includes File.read(path), "\\&lt;!-- COMPLETE -->"
+    end
+  end
+
+  def test_crlf_write_preserves_file_newlines
+    content = "## Round 1\r\n### Q1. CRLF?\r\n### A1.\r\n<!-- WAITING -->\r\n"
+    with_project(content) do |_project, _folder, path|
+      token = inventory.fetch("slots").first.fetch("binding")
+      payload = call_answer(binding: token, answer: "first\r\nsecond")
+
+      assert_equal "written", payload.fetch("outcome")
+      assert_equal "first\nsecond", Hive::BrainstormParser.parse(path).first.answer
+      refute_match(/(?<!\r)\n/, File.binread(path))
+    end
+  end
+
+  def test_binding_cannot_be_reused_for_another_invocation
+    with_project do |_project, _folder, path|
+      token = inventory.fetch("slots").first.fetch("binding")
+      before = File.binread(path)
+
+      rejected = call_answer(target: "another-task-260810-beef", binding: token, answer: "wrong task")
+
+      assert_equal "stale", rejected.fetch("outcome")
+      assert_equal "identity_changed", rejected.fetch("reason")
+      assert_equal before, File.binread(path)
+      assert_schema(rejected)
+    end
+  end
+
+  def test_inventory_reobservation_change_emits_stale_error_contract
+    with_project do |_project, _folder, _path|
+      output = StringIO.new
+      command = Hive::Commands::Answer.new(SLUG, project: "demo", json: true, output: output)
+      command.define_singleton_method(:same_task_path?) { |_left, _right| false }
+
+      error = assert_raises(Hive::StaleOperationalObservation) { command.call }
+      payload = JSON.parse(output.string)
+
+      assert_equal Hive::ExitCodes::TEMPFAIL, error.exit_code
+      assert_equal "stale", payload.fetch("error_kind")
+      assert_schema(payload)
+    end
+  end
+
+  def test_public_binding_shape_rejects_nonpositive_ids_rounds_and_empty_folders
+    with_project do |_project, _folder, _path|
+      token = inventory.fetch("slots").first.fetch("binding")
+      payload = JSON.parse(Base64.urlsafe_decode64(token))
+
+      { "task_id" => 0, "round" => 0, "task_folder" => "" }.each do |key, value|
+        invalid = payload.merge(key => value)
+        invalid_token = Base64.urlsafe_encode64(JSON.generate(invalid), padding: false)
+        output = StringIO.new
+        assert_raises(Hive::Commands::Answer::InvalidBinding) do
+          Hive::Commands::Answer.new(
+            SLUG, project: "demo", binding: invalid_token, json: true,
+            input: StringIO.new("answer"), output: output
+          ).call
+        end
+        error_payload = JSON.parse(output.string)
+        assert_equal "invalid_binding", error_payload.fetch("error_kind")
+        assert_schema(error_payload)
+      end
+    end
+  end
+
+  def test_tampered_binding_is_rejected
+    with_project do |_project, _folder, _path|
+      token = inventory.fetch("slots").first.fetch("binding")
+      tampered = token.dup
+      tampered[-1] = tampered[-1] == "A" ? "B" : "A"
+      output = StringIO.new
+
+      assert_raises(Hive::Commands::Answer::InvalidBinding) do
+        Hive::Commands::Answer.new(
+          SLUG, project: "demo", binding: tampered, json: true,
+          input: StringIO.new("answer"), output: output
+        ).call
+      end
+      assert_equal "invalid_binding", JSON.parse(output.string).fetch("error_kind")
+    end
+  end
+
+  def test_corrupt_task_journal_is_an_invalid_task_path_not_generic_internal_error
+    with_project do |_project, _folder, _path|
+      failure = ->(*) { raise Hive::TaskProjection::InvalidJournal, "empty journal" }
+      output = StringIO.new
+      with_replaced_singleton_method(Hive::Attempts::Generation, :current_task_input_epoch, failure) do
+        error = assert_raises(Hive::InvalidTaskPath) do
+          Hive::Commands::Answer.new(SLUG, project: "demo", json: true, output: output).call
+        end
+        assert_equal Hive::ExitCodes::USAGE, error.exit_code
+      end
+      payload = JSON.parse(output.string)
+      assert_equal "invalid_task_path", payload.fetch("error_kind")
+      assert_schema(payload)
+    end
+  end
+
+  def test_prelock_folder_disappearance_is_a_stale_task_moved_outcome
+    with_project do |_project, _folder, _path|
+      token = inventory.fetch("slots").first.fetch("binding")
+      command = Hive::Commands::Answer.new(
+        SLUG, project: "demo", binding: token,
+        input: StringIO.new("answer"), output: StringIO.new
+      )
+      command.define_singleton_method(:canonical_path) { |_path| raise Errno::ENOENT }
+
+      payload = command.call
+      assert_equal "stale", payload.fetch("outcome")
+      assert_equal "task_moved", payload.fetch("reason")
+      assert_schema(payload)
+    end
+  end
+
+  def test_writer_closed_outcomes_are_preserved
+    content = "## Round 1\n### Q1. Race?\n### A1.\n<!-- WAITING -->\n"
+    with_project(content) do |_project, _folder, path|
+      token = inventory.fetch("slots").first.fetch("binding")
+      replacement = lambda do |**_kwargs|
+        File.write(path, content.sub("### A1.\n", "### A1.\nsame\n"))
+        :already_answered
+      end
+      with_replaced_singleton_method(
+        Hive::Bot::BrainstormAnswerWriter, :write_at_ordinal_under_lock!, replacement
+      ) do
+        payload = call_answer(binding: token, answer: "same")
+        assert_equal "idempotent", payload.fetch("outcome")
+        assert_equal "already_answered_same", payload.fetch("reason")
+      end
+    end
+
+    with_project(content) do |_project, _folder, _path|
+      token = inventory.fetch("slots").first.fetch("binding")
+      replacement = ->(**_kwargs) { :answer_slot_missing }
+      with_replaced_singleton_method(
+        Hive::Bot::BrainstormAnswerWriter, :write_at_ordinal_under_lock!, replacement
+      ) do
+        payload = call_answer(binding: token, answer: "same")
+        assert_equal "stale", payload.fetch("outcome")
+        assert_equal "answer_slot_missing", payload.fetch("reason")
+      end
+    end
+  end
+
+  def test_text_mode_emits_inventory_and_write_acknowledgements
+    with_project do |_project, _folder, _path|
+      inventory_output = StringIO.new
+      inventory_payload = Hive::Commands::Answer.new(
+        SLUG, project: "demo", output: inventory_output
+      ).call
+      assert_equal "demo/#{SLUG}: 3/3 unanswered\n", inventory_output.string
+
+      write_output = StringIO.new
+      payload = Hive::Commands::Answer.new(
+        SLUG, project: "demo", binding: inventory_payload.dig("slots", 0, "binding"),
+        input: StringIO.new("plain text"), output: write_output
+      ).call
+      assert_equal "written", payload.fetch("outcome")
+      assert_equal "#{payload.fetch('acknowledgement')}\n", write_output.string
+    end
+  end
+
+  def test_error_kinds_flow_through_json_error_envelopes
+    errors = {
+      "ambiguous_slug" => Hive::AmbiguousSlug.new("ambiguous", slug: SLUG, candidates: []),
+      "invalid_task_path" => Hive::InvalidTaskPath.new("invalid"),
+      "config" => Hive::ConfigError.new("config")
+    }
+
+    errors.each do |kind, error|
+      output = StringIO.new
+      command = Hive::Commands::Answer.new(SLUG, json: true, output: output)
+      command.define_singleton_method(:inventory_payload) { raise error }
+      assert_raises(error.class) { command.call }
+      payload = JSON.parse(output.string)
+      assert_equal kind, payload.fetch("error_kind")
+      assert_schema(payload)
+    end
+  end
+
+  def test_wrong_stage_flows_end_to_end_through_the_error_schema
+    with_project do |_project, folder, _path|
+      destination = folder.sub("2-brainstorm", "3-plan")
+      FileUtils.mkdir_p(File.dirname(destination))
+      File.rename(folder, destination)
+      output = StringIO.new
+
+      error = assert_raises(Hive::WrongStage) do
+        Hive::Commands::Answer.new(SLUG, project: "demo", json: true, output: output).call
+      end
+      payload = JSON.parse(output.string)
+      assert_equal Hive::ExitCodes::WRONG_STAGE, error.exit_code
+      assert_equal "wrong_stage", payload.fetch("error_kind")
+      assert_schema(payload)
     end
   end
 

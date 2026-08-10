@@ -746,8 +746,10 @@ class TasksTest < ActionDispatch::IntegrationTest
     folder = stage_dir(@project, "2-brainstorm").join(@slug)
     brainstorm = folder.join("brainstorm.md")
     brainstorm.write("### Q1. Which option?\n\n### A1.\n\n")
+    binding = Hive::Commands::Answer.inventory(@slug, project: @project).dig("slots", 0, "binding")
 
-    post "/tasks/#{@project}/#{@slug}/intervene", params: { message: "Prefer option B" }
+    post "/tasks/#{@project}/#{@slug}/intervene",
+         params: { message: "Prefer option B", binding: binding }
 
     assert_redirected_to "/tasks/#{@project}/#{@slug}"
     answer = Hive::Bot::BrainstormParser.parse(brainstorm).first.answer.to_s.strip
@@ -814,24 +816,30 @@ class TasksTest < ActionDispatch::IntegrationTest
   end
 
   test "open brainstorm questions render as a per-question Q&A form" do
-    folder = stage_dir(@project, "1-inbox").join(@slug)
+    post "/tasks/#{@project}/#{@slug}/approve", params: { from: "1-inbox", force: "1" }
+    folder = stage_dir(@project, "2-brainstorm").join(@slug)
     folder.join("brainstorm.md").write("### Q1. Scope?\n\n### A1.\n\n### Q2. Acceptance?\n\n### A2.\n\n")
 
     get "/tasks/#{@project}/#{@slug}"
 
     assert_response :success
     assert_select ".qa-item", 2, "each open question must get its own answer field"
-    assert_select "textarea[name='answers[1]']", 1
-    assert_select "textarea[name='answers[2]']", 1
+    assert_select "textarea[data-question-number='1']", 1
+    assert_select "textarea[data-question-number='2']", 1
     assert_match "Scope?", response.body
   end
 
   test "submitted answers land under the right question headers" do
-    folder = stage_dir(@project, "1-inbox").join(@slug)
+    post "/tasks/#{@project}/#{@slug}/approve", params: { from: "1-inbox", force: "1" }
+    folder = stage_dir(@project, "2-brainstorm").join(@slug)
     folder.join("brainstorm.md").write("### Q1. Scope?\n\n### A1.\n\n### Q2. Acceptance?\n\n### A2.\n\n")
+    slots = Hive::Commands::Answer.inventory(@slug, project: @project).fetch("slots")
+    answers = slots.to_h do |slot|
+      [ slot.fetch("binding"), slot.fetch("question_number") == 1 ? "Header only" : "Green tests" ]
+    end
 
     post "/tasks/#{@project}/#{@slug}/answers",
-         params: { answers: { "1" => "Header only", "2" => "Green tests" } }
+         params: { answers: answers }
 
     assert_redirected_to "/tasks/#{@project}/#{@slug}"
     content = folder.join("brainstorm.md").read
@@ -840,13 +848,15 @@ class TasksTest < ActionDispatch::IntegrationTest
   end
 
   test "answering an already-closed question is a readable 422" do
-    folder = stage_dir(@project, "1-inbox").join(@slug)
+    post "/tasks/#{@project}/#{@slug}/approve", params: { from: "1-inbox", force: "1" }
+    folder = stage_dir(@project, "2-brainstorm").join(@slug)
     folder.join("brainstorm.md").write("### Q1. Scope?\n\n### A1.\nDone\n\n")
+    binding = Hive::Commands::Answer.inventory(@slug, project: @project).dig("slots", 0, "binding")
 
-    post "/tasks/#{@project}/#{@slug}/answers", params: { answers: { "1" => "again" } }
+    post "/tasks/#{@project}/#{@slug}/answers", params: { answers: { binding => "again" } }
 
     assert_response :unprocessable_entity
-    assert_match "no longer open", response.body
+    assert_match "reload the page", response.body
   end
 
   test "diff link renders only when the worktree exists" do
@@ -931,7 +941,8 @@ class TasksTest < ActionDispatch::IntegrationTest
   end
 
   test "all-answered brainstorm shows the waiting banner on a push-refreshed page" do
-    folder = stage_dir(@project, "1-inbox").join(@slug)
+    post "/tasks/#{@project}/#{@slug}/approve", params: { from: "1-inbox", force: "1" }
+    folder = stage_dir(@project, "2-brainstorm").join(@slug)
     folder.join("brainstorm.md").write("### Q1. Scope?\n\n### A1.\nDone\n\n<!-- WAITING -->\n")
 
     get "/tasks/#{@project}/#{@slug}"
@@ -949,7 +960,8 @@ class TasksTest < ActionDispatch::IntegrationTest
   end
 
   test "the Q&A form is morph-managed by the answers controller, never permanent" do
-    folder = stage_dir(@project, "1-inbox").join(@slug)
+    post "/tasks/#{@project}/#{@slug}/approve", params: { from: "1-inbox", force: "1" }
+    folder = stage_dir(@project, "2-brainstorm").join(@slug)
     folder.join("brainstorm.md").write("### Q1. Scope?\n\n### A1.\n\n<!-- WAITING -->\n")
 
     get "/tasks/#{@project}/#{@slug}"

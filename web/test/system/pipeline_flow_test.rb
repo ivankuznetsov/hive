@@ -37,6 +37,15 @@ class PipelineFlowTest < ApplicationSystemTestCase
     click_button "Add idea"
   end
 
+  def move_to_brainstorm(slug)
+    source = stage_dir(@project, "1-inbox").join(slug)
+    destination = stage_dir(@project, "2-brainstorm").join(slug)
+    destination.dirname.mkpath
+    FileUtils.mv(source, destination)
+    refresh_status_feed!
+    destination
+  end
+
   # --- tests ---------------------------------------------------------------
 
   test "mobile status keeps composer controls inside the viewport" do
@@ -623,7 +632,7 @@ class PipelineFlowTest < ApplicationSystemTestCase
   end
 
   test "a new question round replaces the Q&A form cleanly" do
-    folder = stage_dir(@project, "1-inbox").join(create_task!(@project, "Round probe"))
+    folder = move_to_brainstorm(create_task!(@project, "Round probe"))
     folder.join("brainstorm.md").write("### Q1. Scope?\n\n### A1.\n\n<!-- WAITING -->\n")
     sign_in!
     visit "/tasks/#{@project}/#{folder.basename}"
@@ -645,25 +654,26 @@ class PipelineFlowTest < ApplicationSystemTestCase
   end
 
   test "typing in the Q&A survives a pushed morph refresh" do
-    folder = stage_dir(@project, "1-inbox").join(create_task!(@project, "Focus probe"))
+    folder = move_to_brainstorm(create_task!(@project, "Focus probe"))
     folder.join("brainstorm.md").write("### Q1. Scope?\n\n### A1.\n\n<!-- WAITING -->\n")
     sign_in!
     visit "/tasks/#{@project}/#{folder.basename}"
 
-    field = find("textarea[name='answers[1]']", wait: 5)
+    field = find("textarea[data-question-number='1']", wait: 5)
     wait_for_live_status
     field.fill_in with: "typing slowly"
-    # Change the task's OWN visible content, then force a broadcast → morph.
-    # Waiting for the updated question text is the sync point proving the
+    # Change the task's OWN visible context without changing the bound question,
+    # then force a broadcast → morph. Waiting for that updated context proves the
     # morph actually landed before we assert survival — without it every
     # assertion could pass against the pre-morph DOM.
-    folder.join("brainstorm.md").write("### Q1. Scope? (clarified)\n\n### A1.\n\n<!-- WAITING -->\n")
+    idea_path = folder.join("idea.md")
+    idea_path.write(idea_path.read.gsub("Focus probe", "Context refreshed"))
     create_task!(@project, "Refresh trigger")
-    assert_selector ".qa-question", text: /clarified/, wait: 10
-    assert_equal "typing slowly", find("textarea[name='answers[1]']").value,
+    assert_selector ".idea-text", text: /Context refreshed/, wait: 10
+    assert_equal "typing slowly", find("textarea[data-question-number='1']").value,
                  "a pushed morph must not discard typed-but-unsent input"
     field.send_keys(" still here")
-    assert_equal "typing slowly still here", find("textarea[name='answers[1]']").value,
+    assert_equal "typing slowly still here", find("textarea[data-question-number='1']").value,
                  "focus must remain in the field across refreshes"
   end
 

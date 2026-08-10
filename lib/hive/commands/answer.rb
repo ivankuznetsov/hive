@@ -3,6 +3,7 @@
 require "base64"
 require "digest"
 require "json"
+require "stringio"
 require "hive/attempts/generation"
 require "hive/bot/brainstorm_answer_writer"
 require "hive/brainstorm_parser"
@@ -30,6 +31,20 @@ module Hive
 
       class InvalidBinding < Hive::UsageError; end
       class InvalidAnswer < Hive::UsageError; end
+
+      def self.inventory(target, project: nil)
+        new(target, project: project, output: StringIO.new).call
+      end
+
+      def self.write(target, project: nil, binding:, answer:)
+        new(
+          target,
+          project: project,
+          binding: binding,
+          input: StringIO.new(answer.to_s),
+          output: StringIO.new
+        ).call
+      end
 
       def initialize(target, project: nil, binding: nil, json: false,
                      input: $stdin, output: $stdout)
@@ -160,7 +175,9 @@ module Hive
           answer_text: answer_text
         )
         unless result == :written
-          return write_outcome(binding, outcome: "stale", reason: "question_missing")
+          return writer_no_write_outcome(
+            binding, result, task, generation, resolution, answer_text
+          )
         end
 
         updated = Hive::BrainstormParser.parse_text(read_brainstorm!(task))
@@ -193,16 +210,20 @@ module Hive
         matches = questions.each_with_index.select do |question, _index|
           question_fingerprint(question) == binding.fetch("question_fingerprint")
         end
-        if matches.length > 1
+        unanswered_matches = matches.reject { |question, _index| question.answered? }
+        if unanswered_matches.length > 1
           return { outcome: "ambiguous", reason: "multiple_matches", relocated: false }
+        end
+        if unanswered_matches.one?
+          question, index = unanswered_matches.first
+          return { write: true, slot: question, ordinal: index + 1, relocated: true }
         end
         if matches.one?
           question, index = matches.first
-          if question.answered?
-            return occupied_resolution(question, index + 1, answer_text, relocated: true)
-          end
-
-          return { write: true, slot: question, ordinal: index + 1, relocated: true }
+          return occupied_resolution(question, index + 1, answer_text, relocated: true)
+        end
+        if matches.length > 1
+          return { outcome: "ambiguous", reason: "multiple_matches", relocated: false }
         end
 
         reason = direct ? "question_changed" : "question_missing"
@@ -221,6 +242,41 @@ module Hive
             slot: question, ordinal: ordinal, relocated: relocated
           }
         end
+      end
+
+      def writer_no_write_outcome(binding, result, task, generation, resolution, answer_text)
+        questions = Hive::BrainstormParser.parse_text(read_brainstorm!(task))
+        ordinal = resolution.fetch(:ordinal)
+        slot = questions[ordinal - 1]
+        if result == :already_answered && slot&.answered?
+          occupied = occupied_resolution(slot, ordinal, answer_text, relocated: resolution.fetch(:relocated))
+          return write_outcome(
+            binding,
+            outcome: occupied.fetch(:outcome),
+            reason: occupied.fetch(:reason),
+            task: task,
+            generation: generation,
+            questions: questions,
+            slot: slot,
+            ordinal: ordinal,
+            relocated: resolution.fetch(:relocated),
+            answer_text: answer_text
+          )
+        end
+
+        reason = result == :answer_slot_missing ? "answer_slot_missing" : "question_missing"
+        return write_outcome(
+          binding,
+          outcome: "stale",
+          reason: reason,
+          task: task,
+          generation: generation,
+          questions: questions,
+          relocated: resolution.fetch(:relocated),
+          answer_text: answer_text
+        ) if %i[answer_slot_missing question_not_found].include?(result)
+
+        raise Hive::InternalError, "brainstorm answer writer returned #{result.inspect}"
       end
 
       def exact_bound_slot?(question, binding)
@@ -243,6 +299,8 @@ module Hive
         { task: task }
       rescue Hive::InvalidTaskPath, Hive::AmbiguousSlug
         { outcome: "stale", reason: "task_missing" }
+      rescue Errno::ENOENT, Errno::ENOTDIR
+        { outcome: "stale", reason: "task_moved" }
       end
 
       def invocation_matches_binding?(binding)
@@ -295,11 +353,13 @@ module Hive
                payload["stage"] == STAGE_DIR &&
                payload["project"].is_a?(String) && !payload["project"].empty? &&
                payload["task_slug"].is_a?(String) && !payload["task_slug"].empty? &&
-               (payload["task_id"].nil? || payload["task_id"].is_a?(Integer)) &&
-               payload["task_folder"].is_a?(String) &&
+               (payload["task_id"].nil? ||
+                 (payload["task_id"].is_a?(Integer) && payload["task_id"].positive?)) &&
+               payload["task_folder"].is_a?(String) && !payload["task_folder"].empty? &&
                payload["task_generation"].to_s.match?(/\A[0-9a-f]{64}\z/) &&
                payload["ordinal"].is_a?(Integer) && payload["ordinal"].positive? &&
-               (payload["round"].nil? || payload["round"].is_a?(Integer)) &&
+               (payload["round"].nil? ||
+                 (payload["round"].is_a?(Integer) && payload["round"].positive?)) &&
                payload["question_number"].is_a?(Integer) && payload["question_number"].positive? &&
                payload["question_fingerprint"].to_s.match?(/\A[0-9a-f]{64}\z/) &&
                encode_binding(payload) == token
@@ -336,7 +396,7 @@ module Hive
           progress_token: incarnation,
           task_input_epoch: input_epoch
         ).ownership_generation
-      rescue SystemCallError, IOError => e
+      rescue Hive::TaskProjection::InvalidJournal, SystemCallError, IOError => e
         raise Hive::InvalidTaskPath,
               "cannot establish stable brainstorm task generation: #{e.class}: #{e.message}"
       end

@@ -88,6 +88,12 @@ module Hive
           next
         end
 
+        # Stage markers delimit the Q/A block but are not part of either the
+        # question presented to an operator or its fingerprint. In particular,
+        # a final question with no A-header must keep the same fingerprint after
+        # the writer repairs its slot immediately before `<!-- WAITING -->`.
+        next if MARKER_RE.match?(line)
+
         case mode
         when :question
           current[:question_lines] << line if current
@@ -166,10 +172,31 @@ module Hive
 
       body_lines = Array(lines).dup
       body_lines.pop while (last = body_lines.last) && (last.strip.empty? || MARKER_RE.match?(last))
-      body = body_lines.join("\n").strip
+      body = body_lines.map { |line| restore_answer_line(line) }.join("\n").strip
       body.empty? ? nil : body
     end
     private_class_method :clean_answer
+
+    # Answer persistence prefixes parser-significant lines with a backslash so
+    # literal user text cannot create Q/A slots, rounds, or stage markers. Undo
+    # that encoding for callers, including a doubled leading backslash used to
+    # preserve an answer that already began with one.
+    def restore_answer_line(line)
+      structural_escape = line.start_with?("\\") && !line.start_with?("\\\\") &&
+                          structural_heading?(line.delete_prefix("\\"))
+      restored = line.gsub(/\\\\|\\&lt;!--/) do |encoded|
+        encoded == "\\\\" ? "\\" : "<!--"
+      end
+      return restored.delete_prefix("\\") if structural_escape
+
+      restored
+    end
+    private_class_method :restore_answer_line
+
+    def structural_heading?(line)
+      ROUND_RE.match?(line) || QUESTION_RE.match?(line) || ANSWER_RE.match?(line)
+    end
+    private_class_method :structural_heading?
 
     def normalize_newlines(text)
       text.to_s.gsub("\r\n", "\n").gsub("\r", "\n")

@@ -173,8 +173,12 @@ module Hive
     # old one — both could enter the critical section. Sticky lockfiles
     # are fine here because they're already gitignored
     # (`.hive-state/stages/*/*/*.markers-lock` in `Hive::GitOps`).
-    def with_markers_lock(state_file_path)
-      ensure_dir(state_file_path)
+    def with_markers_lock(state_file_path, create: true)
+      if create
+        ensure_dir(state_file_path)
+      elsif !Dir.exist?(File.dirname(state_file_path))
+        raise Errno::ENOENT, File.dirname(state_file_path)
+      end
       lock_path = "#{state_file_path}.markers-lock"
       File.open(lock_path, File::RDWR | File::CREAT, 0o644) do |lock|
         lock.flock(File::LOCK_EX)

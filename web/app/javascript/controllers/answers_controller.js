@@ -7,7 +7,8 @@ import { Controller } from "@hotwired/stimulus"
 // the forms morph freely (server HTML renders them empty) and this
 // controller restores the operator's typed-but-unsent text and caret after
 // each morph, keyed by field NAME. A new round renders different names
-// (answers[2] vs answers[1]), so nothing restores onto it: stale drafts die
+// (each field carries its opaque identity binding), so nothing restores onto
+// a changed slot even when a later round reuses the same question number. Stale drafts die
 // with their round, by construction rather than by timing.
 export default class extends Controller {
   connect() {

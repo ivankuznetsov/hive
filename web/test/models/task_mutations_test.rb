@@ -195,33 +195,55 @@ class TaskMutationsTest < ActiveSupport::TestCase
   end
 
   test "records numbered answers and refuses a stale question" do
-    Dir.mktmpdir("task-answers") do |folder|
-      brainstorm = File.join(folder, "brainstorm.md")
-      File.write(brainstorm, "### Q1. Scope?\n\n### A1.\n\n### Q2. Acceptance?\n\n### A2.\n\n")
-      subject = task("folder" => folder)
+    with_seeded_brainstorm_task(
+      "### Q1. Scope?\n\n### A1.\n\n### Q2. Acceptance?\n\n### A2.\n\n"
+    ) do |subject, brainstorm|
+      questions = subject.open_questions
+      answers = questions.to_h do |question|
+        [ question.binding, question.n == 1 ? "Header only" : "Green tests" ]
+      end
 
-      result = subject.answer_questions!("2" => "Green tests", "1" => "Header only", "3" => " ")
+      result = subject.answer_questions!(answers.merge("ignored" => " "))
 
       assert_equal [ 1, 2 ], result[:answered]
       parsed = Hive::Bot::BrainstormParser.parse(brainstorm)
       assert_equal "Header only", parsed.find { |question| question.n == 1 }.answer.to_s.strip
       assert_equal "Green tests", parsed.find { |question| question.n == 2 }.answer.to_s.strip
 
-      error = assert_raises(Hive::Error) { subject.answer_questions!("1" => "again") }
-      assert_match(/no longer open/, error.message)
+      error = assert_raises(Hive::Error) do
+        subject.answer_questions!(questions.first.binding => "again")
+      end
+      assert_match(/reload the page/, error.message)
     end
   end
 
   test "records an intervention as the next brainstorm answer" do
-    Dir.mktmpdir("task-intervention") do |folder|
-      brainstorm = File.join(folder, "brainstorm.md")
-      File.write(brainstorm, "### Q1. What is the goal?\n\n### A1.\n\n")
-      subject = task("folder" => folder)
+    with_seeded_brainstorm_task("### Q1. What is the goal?\n\n### A1.\n\n") do |subject, brainstorm|
+      binding = subject.open_questions.first.binding
 
-      result = subject.intervene!("Ship the box")
+      result = subject.intervene!("Ship the box", binding: binding)
 
       assert_equal 1, result[:question_n]
       assert_equal "Ship the box", Hive::Bot::BrainstormParser.parse(brainstorm).first.answer.to_s.strip
+    end
+  end
+
+  test "rejects a same-number question from a replacement round" do
+    with_seeded_brainstorm_task(
+      "## Round 1\n### Q1. Original scope?\n### A1.\n<!-- WAITING -->\n"
+    ) do |subject, brainstorm|
+      binding = subject.open_questions.first.binding
+      File.write(
+        brainstorm,
+        "## Round 2\n### Q1. Replacement scope?\n### A1.\n<!-- WAITING -->\n"
+      )
+
+      error = assert_raises(Hive::Error) do
+        subject.answer_questions!(binding => "reply to the old question")
+      end
+
+      assert_match(/reload the page/, error.message)
+      assert_nil Hive::BrainstormParser.parse(brainstorm).first.answer
     end
   end
 
@@ -230,7 +252,9 @@ class TaskMutationsTest < ActiveSupport::TestCase
       subject = task("folder" => folder)
 
       answers_error = assert_raises(Hive::Error) { subject.answer_questions!("1" => "x") }
-      intervention_error = assert_raises(Hive::Error) { subject.intervene!("steer") }
+      intervention_error = assert_raises(Hive::Error) do
+        subject.intervene!("steer", binding: "invalid")
+      end
 
       assert_match(/awaits a brainstorm/, answers_error.message)
       assert_match(/awaits a brainstorm/, intervention_error.message)
@@ -258,6 +282,24 @@ class TaskMutationsTest < ActiveSupport::TestCase
     FileUtils.mv(source, destination)
     project = Project.find!(project_name)
     [ project, task({ "slug" => slug, "stage" => stage, "folder" => destination.to_s }, project:) ]
+  end
+
+  def with_seeded_brainstorm_task(content)
+    project_name = create_hive_project!("task-mutations-answers")
+    slug = create_task!(project_name, "brainstorm answer #{SecureRandom.hex(4)}")
+    source = stage_dir(project_name, "1-inbox").join(slug)
+    destination = stage_dir(project_name, "2-brainstorm").join(slug)
+    destination.dirname.mkpath
+    FileUtils.mv(source, destination)
+    brainstorm = destination.join("brainstorm.md")
+    File.write(brainstorm, content)
+    project = Project.find!(project_name)
+    subject = task(
+      { "slug" => slug, "stage" => "2-brainstorm", "folder" => destination.to_s },
+      project: project,
+      slug: slug
+    )
+    yield subject, brainstorm.to_s
   end
 
   def stamp_workflow(folder, workflow)

@@ -269,14 +269,15 @@ class BrainstormAnsweringSkillContractTest < Minitest::Test
         project: "alpha", slug: duplicate.fetch(:slug)
       )).fetch("binding")
       FileUtils.cp(fixture_path("duplicate-fingerprint.md"), duplicate.fetch(:path))
-      before_duplicate = File.binread(duplicate.fetch(:path))
-      ambiguous = write_answer(
+      relocated_unanswered = write_answer(
         project: "alpha", slug: duplicate.fetch(:slug),
-        binding: duplicate_binding, answer: "Do not guess."
+        binding: duplicate_binding, answer: "Use the unanswered match."
       )
-      assert_equal "ambiguous", ambiguous.fetch("outcome")
-      assert_equal "multiple_matches", ambiguous.fetch("reason")
-      assert_equal before_duplicate, File.binread(duplicate.fetch(:path))
+      assert_equal "written", relocated_unanswered.fetch("outcome")
+      assert_equal true, relocated_unanswered.fetch("relocated")
+      assert_equal 8, relocated_unanswered.dig("slot", "question_number")
+      assert_equal [ "Already settled elsewhere.", "Use the unanswered match." ],
+                   parsed_answers(duplicate.fetch(:path))
 
       moved = create_task(
         alpha.fetch(:root), slug: "moved-260810-jjjj", id: 109,

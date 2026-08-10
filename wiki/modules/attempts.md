@@ -23,7 +23,7 @@ task agents.
 | `Record`, `Store` | Read and write schema-v4 records in the physical v4 layout, scan only hot records, point-fetch hot or permanent proof, perform locked guarded transitions with atomic write/fsync/rename persistence, and copy nested record/checkpoint/receipt values through `Hive::StringifyKeys`. The default store opens only v4 after the forward-only recovery migration. |
 | `Capability`, `Context` | Generate one-time launch authority, authenticate the exact worker process/task/stage, revalidate generation at the mutation boundary, and expose the immutable admitted route plus process-local compatibility projections after transport variables are scrubbed. |
 | `Generation` | Bind stable task identity, intended stage, and a workflow progress token into the semantic ownership key. |
-| `Dispatcher` | Resolve receipt replay, live duplicate attachment, loss deferral, capacity, fresh admission, and explicit successors. |
+| `Dispatcher` | Resolve receipt replay, live duplicate attachment, loss deferral, capacity, deterministic explicit-provider routing, fresh admission, and explicit successors. |
 | `DetachedLauncher` | Reject unsupported platforms before handoff, create a POSIX session, and start the private supervisor route. |
 | `Supervisor` | Claim, first-heartbeat, spawn the existing Hive command, heartbeat, frame output, enforce timeout/cancellation, and terminalize. |
 | `Client` | Tail frames read-only and replay a terminal result. It performs one final drain after observing a terminal or lost record so frames published during the decisive record fetch are not dropped. Interrupt means detach; it never signals the owner group. |
@@ -118,7 +118,7 @@ attempt subject.
 $HIVE_HOME/attempts/v4/
 ├── records/<attempt-id>.json              # live and finalization-pending hot set
 ├── proof/...                              # permanent point-addressed receipts
-├── decision-indexes/...                   # semantic/request/successor point indexes
+├── decision-indexes/...                   # semantic/request/successor and routed-decision indexes
 ├── pending-finalization/...               # consumer acknowledgements
 ├── logs/<attempt-id>.frames               # active raw stream
 ├── cold-logs/<digest-shard>/...           # finalized raw stream awaiting expiry
@@ -155,6 +155,25 @@ deadlines, checkpoint, integrity references, diagnostics, and loss or receipt
 fields. The capability itself is never persisted. Large payloads remain
 owner-private referenced files with canonical relative path, byte size, and
 SHA-256.
+
+For an explicit pool, admission freezes the task-generation policy before the
+first decision, including no-route and provider-capacity results. Under the
+fixed admission -> task-generation -> provider-health lock order, it derives
+account usage from live durable attempts, obtains a pure ordered routing
+decision, and revalidates every enclosing circuit generation before creating
+the attempt. Routed attempts count their exact account. A legacy attempt counts
+only toward the single configured `default` account to which its existing
+adapter maps unambiguously; legacy admission itself never consults that cap.
+All-compatible provider saturation creates no attempt or probe and returns a
+scheduler-owned observation.
+
+When a selected route is half-open at one or both scopes, admission persists a
+health intent, creates the launching attempt with every resulting probe
+binding, finalizes each claim, and only then launches. Restart reconciliation
+accepts an intent only when the exact durable attempt contains the matching
+bindings. Closed-route admission uses the same generation-vector CAS without
+creating a probe. A concurrent circuit mutation triggers bounded deterministic
+re-selection rather than committing stale health.
 
 The configured store root remains the trusted anchor and may itself resolve
 through an operator-selected link. Its managed children may not: creation and

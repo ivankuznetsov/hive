@@ -63,7 +63,24 @@ module Hive
       def eligible_routes
         return [].freeze if legacy?
 
-        routes.select { |route| within_pin?(route) && satisfies_requirements?(route) }.freeze
+        routes.select { |route| pin_allows?(route) && requirements_satisfied?(route) }.freeze
+      end
+
+      def pin_allows?(route)
+        return true unless pin
+        return false unless route.account == pin.provider
+
+        pin.model.nil? || route.model == pin.model
+      end
+
+      def requirements_satisfied?(route)
+        context_ok = requirements.context.nil? ||
+                     CONTEXT_RANK.fetch(route.context) >= CONTEXT_RANK.fetch(requirements.context)
+        quality_ok = requirements.quality.nil? ||
+                     QUALITY_RANK.fetch(route.quality) >= QUALITY_RANK.fetch(requirements.quality)
+        tools_ok = (requirements.tools - route.tools).empty?
+        permissions_ok = (requirements.permissions - route.permissions).empty?
+        context_ok && quality_ok && tools_ok && permissions_ok
       end
 
       def to_h
@@ -77,25 +94,6 @@ module Hive
           "pin" => pin&.to_h,
           "accounts" => account_policy
         }
-      end
-
-      private
-
-      def within_pin?(route)
-        return true unless pin
-        return false unless route.account == pin.provider
-
-        pin.model.nil? || route.model == pin.model
-      end
-
-      def satisfies_requirements?(route)
-        context_ok = requirements.context.nil? ||
-                     CONTEXT_RANK.fetch(route.context) >= CONTEXT_RANK.fetch(requirements.context)
-        quality_ok = requirements.quality.nil? ||
-                     QUALITY_RANK.fetch(route.quality) >= QUALITY_RANK.fetch(requirements.quality)
-        tools_ok = (requirements.tools - route.tools).empty?
-        permissions_ok = (requirements.permissions - route.permissions).empty?
-        context_ok && quality_ok && tools_ok && permissions_ok
       end
     end
   end

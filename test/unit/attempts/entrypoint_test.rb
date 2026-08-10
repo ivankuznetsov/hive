@@ -39,6 +39,7 @@ class AttemptsEntrypointTest < Minitest::Test
     assert_equal "demo", calls.first.fetch(:project)
     assert_equal "4-execute", calls.first.fetch(:intended_stage)
     assert_equal true, calls.first.fetch(:interactive)
+    assert calls.first.fetch(:routing_policy).legacy?
   end
 
   def test_noninteractive_dispatch_returns_attempt_reference_without_attaching

@@ -51,7 +51,8 @@ class ComponentBoundariesTest < Minitest::Test
     assert_equal "candidate", attempts.fetch("state")
     assert_equal "hive/attempts/api", attempts.dig("entrypoint", "require")
     assert_equal "Hive::Attempts::API", attempts.dig("entrypoint", "constant")
-    assert_empty attempts.fetch("component_dependencies")
+    assert_equal %w[provider-health provider-routing-policy],
+                 attempts.fetch("component_dependencies")
     assert_empty attempts.fetch("migration_exceptions")
     assert_equal %w[
       Hive::Attempts::ClientResult
@@ -766,6 +767,7 @@ class ComponentBoundariesTest < Minitest::Test
 
     assert_equal(
       {
+        "attempts" => [ "provider-health", "provider-routing-policy" ],
         "skillpack" => [ "agent-abi" ],
         "workflow-creator-core" => [ "workflow-creator-values" ],
         "workflow-creator-live" => [ "workflow-creator-core", "workflow-creator-execution" ],

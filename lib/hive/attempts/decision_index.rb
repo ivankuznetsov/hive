@@ -3,6 +3,7 @@ require "json"
 require "time"
 require "hive/attempts/point_storage"
 require "hive/attempts/record"
+require "hive/provider_routing/decision"
 
 module Hive
   module Attempts
@@ -21,6 +22,7 @@ module Hive
       SUCCESSOR = "successor".freeze
       DAILY_ACCOUNTING = "daily-accounting".freeze
       LIVE_CAPACITY = "live-capacity".freeze
+      ROUTING_DECISION = "routing-decision".freeze
       ENTRY_KEYS = %w[kind key schema schema_version value].freeze
 
       attr_reader :root
@@ -254,6 +256,28 @@ module Hive
         raise StoreError, "live capacity reservation is invalid"
       end
 
+      def record_routing_decision(decision:, task_generation:, subject:)
+        unless decision.is_a?(Hive::ProviderRouting::Decision) && !decision.legacy?
+          raise StoreError, "routing decision index requires an explicit typed decision"
+        end
+        key = semantic_key(task_generation, subject)
+        unless decision.request.task_generation == key.fetch("task_generation")
+          raise StoreError, "routing decision task generation does not match its index key"
+        end
+        candidate = { "decision" => decision.to_h }
+        validate_value!(ROUTING_DECISION, candidate, key: key)
+        update_entry(ROUTING_DECISION, key) { candidate }
+        candidate.fetch("decision")
+      end
+
+      def routing_decision(task_generation:, subject:)
+        value = read_value(
+          ROUTING_DECISION,
+          semantic_key(task_generation, subject)
+        )
+        value && value.fetch("decision")
+      end
+
       def path_for(kind, key)
         @storage.path_for(kind, StorageKey.normalize(key))
       end
@@ -325,14 +349,14 @@ module Hive
           payload["value"].is_a?(Hash)
         raise StoreError, "attempt decision index entry is corrupt or colliding" unless valid
 
-        validate_value!(expected_kind, payload.fetch("value"))
+        validate_value!(expected_kind, payload.fetch("value"), key: expected_key)
 
         payload
       rescue JSON::ParserError, EncodingError, ArgumentError, TypeError, KeyError
         raise StoreError, "attempt decision index entry is corrupt or colliding"
       end
 
-      def validate_value!(kind, value)
+      def validate_value!(kind, value, key: nil)
         case kind
         when TERMINAL_REQUEST
           ordered_value_shape!(value, extra_keys: [ "outcome" ])
@@ -373,12 +397,70 @@ module Hive
             StorageKey.string(reservation.fetch("project"))
             StorageKey.string(reservation.fetch("task_slug"))
           end
+        when ROUTING_DECISION
+          validate_routing_decision_value!(value, key: key)
         end
         true
       rescue StoreError
         raise StoreError, "attempt decision index entry is corrupt or colliding"
       rescue ArgumentError, TypeError, KeyError
         raise StoreError, "attempt decision index entry is corrupt or colliding"
+      end
+
+      def validate_routing_decision_value!(value, key:)
+        raise StoreError unless value.keys == [ "decision" ]
+
+        decision = value.fetch("decision")
+        expected_keys = %w[
+          candidates circuit_generations decided_at decision_id exclusions
+          next_action_owner policy_digest probe_requirements reason
+          selected_route status task_generation
+        ]
+        unless decision.is_a?(Hash) && decision.keys.sort == expected_keys.sort
+          raise StoreError
+        end
+        StorageKey.string(decision.fetch("decision_id"))
+        Time.iso8601(decision.fetch("decided_at"))
+        StorageKey.string(decision.fetch("task_generation"))
+        unless decision.fetch("task_generation") == key.fetch("task_generation")
+          raise StoreError
+        end
+        unless decision.fetch("policy_digest").is_a?(String) &&
+               decision.fetch("policy_digest").match?(Record::SHA256_PATTERN)
+          raise StoreError
+        end
+        unless %w[selected capacity_saturated no_route].include?(decision.fetch("status"))
+          raise StoreError
+        end
+        unless Hive::ProviderRouting::Decision::OWNERS.include?(
+          decision.fetch("next_action_owner")
+        )
+          raise StoreError
+        end
+        StorageKey.string(decision.fetch("reason"))
+        selected_route = decision.fetch("selected_route")
+        StorageKey.string(selected_route) unless selected_route.nil?
+        %w[candidates exclusions circuit_generations probe_requirements].each do |field|
+          entries = decision.fetch(field)
+          raise StoreError unless entries.is_a?(Array) && entries.length <= 128
+        end
+        reject_unsafe_routing_keys!(decision)
+        StorageKey.normalize(decision)
+      end
+
+      def reject_unsafe_routing_keys!(value)
+        forbidden = %w[
+          credential credentials message prompt raw stderr stdout token tokens
+          tool_output
+        ]
+        case value
+        when Hash
+          raise StoreError unless (value.keys & forbidden).empty?
+
+          value.each_value { |child| reject_unsafe_routing_keys!(child) }
+        when Array
+          value.each { |child| reject_unsafe_routing_keys!(child) }
+        end
       end
 
       def ordered_value_shape!(value, extra_keys: [])

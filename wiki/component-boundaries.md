@@ -52,7 +52,7 @@ Every retained entry point has focused clean-process load proof, every
 catalog-owned path and focused test resolves inside this repository, and the
 direct-construction guards pass against all production Ruby sources.
 
-The component dependency graph has five edges:
+The component dependency graph has seven edges:
 
 ```mermaid
 flowchart LR
@@ -62,9 +62,8 @@ flowchart LR
   workflow_live --> workflow_core
   workflow_core[Workflow Creator] --> workflow_values[Workflow Creator Values]
   patrol_effects[Patrol Effect Evidence - candidate]
-  attempts[Attempts admission - candidate]
-  provider_health[Provider Health - candidate]
-  provider_routing[Provider Routing Policy - candidate]
+  attempts[Attempts admission - candidate] --> provider_health[Provider Health - candidate]
+  attempts --> provider_routing[Provider Routing Policy - candidate]
   user_service[UserService]
   artifact_firewall[Agent Artifact Firewall]
   git_gate[Safe Agent Git Gate]

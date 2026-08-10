@@ -4,6 +4,7 @@ require "hive/attempts/detached_launcher"
 require "hive/attempts/dispatcher"
 require "hive/attempts/launch_policy"
 require "hive/attempts/finalization_maintenance"
+require "hive/provider_routing"
 
 module Hive
   module Attempts
@@ -40,6 +41,7 @@ module Hive
           argv: argv,
           request_id: request_id,
           provider: provider || provider_for(cfg, intended_stage),
+          routing_policy: routing_policy_for(cfg, intended_stage),
           interactive: interactive,
           now: now
         )
@@ -47,7 +49,7 @@ module Hive
           raise Hive::ConcurrentRunError,
                 "durable attempt deferred for #{task.slug}: #{result.reason}"
         end
-        return result unless interactive
+        return result unless interactive && result.attempt
 
         attached = (@client || Client.new(store: store)).attach(result.attempt.attempt_id)
         attached
@@ -95,6 +97,14 @@ module Hive
       def provider_for(cfg, intended_stage)
         stage = intended_stage.to_s.sub(/\A\d+-/, "").tr("-", "_")
         cfg.dig(stage, "agent") || Hive::Config::DEFAULTS.dig(stage, "agent") || "claude"
+      end
+
+      def routing_policy_for(cfg, intended_stage)
+        stage = intended_stage.to_s.sub(/\A\d+-/, "").tr("-", "_")
+        Hive::ProviderRouting::Configuration.from(
+          cfg: cfg,
+          stage_name: stage
+        ).policy
       end
     end
   end

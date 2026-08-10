@@ -257,51 +257,41 @@ module Hive
       # Called while Attempts::Dispatcher already owns admission and task-
       # generation locks. The health lock is therefore the innermost lock.
       # The yielded callback must durably persist the launching attempt.
-      def with_probe_intent(intent:)
+      def with_probe_intent(intent:, &block)
         raise InvalidMutation, "probe intent must be typed" unless intent.is_a?(ProbeIntent)
 
         with_mutation_lock do
-          raise InvalidMutation, "probe intent already exists" if intent_exists?(intent.intent_id)
-          intents = load_intents
-          replays = intent.requirements.map do |requirement|
-            if unresolved_intent?(requirement.scope, intents)
-              raise StaleGeneration, "provider-health scope already has an unresolved probe intent"
+          perform_probe_intent(intent, &block)
+        end
+      end
+
+      # Revalidates every enclosing scope and, when needed, claims all probes
+      # while the admission owner persists the matching attempt. This is the
+      # health-side CAS boundary for both ordinary closed routes and half-open
+      # routes; speculative selection alone never reserves eligibility.
+      def with_route_admission(evaluation:, intent: nil, &block)
+        unless evaluation.is_a?(RouteEvaluation) && evaluation.eligible?
+          raise InvalidMutation, "route admission requires an eligible health evaluation"
+        end
+        if intent && !intent.is_a?(ProbeIntent)
+          raise InvalidMutation, "route admission probe intent must be typed"
+        end
+
+        with_mutation_lock do
+          validate_route_evaluation!(evaluation)
+          if intent
+            observed = evaluation.probe_requirements.map(&:to_h)
+            requested = intent.requirements.map(&:to_h)
+            unless observed == requested
+              raise StaleGeneration, "provider-health probe requirements changed"
             end
-            replay = load_replay(requirement.scope, recover_torn: true, publish_projection: true)
-            circuit = replay.circuit
-            unless circuit.journal_epoch == requirement.journal_epoch &&
-                   circuit.generation == requirement.observed_generation &&
-                   circuit.half_open?(now: current_time) && !circuit.probe_owned? && !circuit.blocked?
-              raise StaleGeneration, "provider-health probe observation is stale"
+            perform_probe_intent(intent, &block)
+          else
+            unless evaluation.probe_requirements.empty?
+              raise StaleGeneration, "provider-health route now requires a probe"
             end
-            replay
+            block.call([].freeze)
           end
-          bindings = intent.requirements.map do |requirement|
-            ProbeBinding.new(
-              scope: requirement.scope,
-              journal_epoch: requirement.journal_epoch,
-              observed_generation: requirement.observed_generation,
-              claim_generation: requirement.observed_generation + 1,
-              attempt_id: intent.attempt_id,
-              task_generation: intent.task_generation,
-              ownership_fence: intent.ownership_fence
-            )
-          end.freeze
-          persist_intent(intent, bindings)
-          fault!(:intent_persisted, intent: intent)
-          yielded = yield(bindings)
-          fault!(:attempt_persisted, intent: intent)
-          replays.zip(bindings).each_with_index do |(replay, binding), index|
-            append_transition(
-              replay,
-              kind: "probe_claimed",
-              idempotency_key: probe_claim_key(intent.intent_id, binding),
-              payload: { "probe" => binding.to_h }
-            )
-            fault!(:claim_persisted, intent: intent, index: index)
-          end
-          remove_intent(intent.intent_id)
-          yielded
         end
       end
 
@@ -362,6 +352,81 @@ module Hive
       end
 
       private
+
+      def validate_route_evaluation!(evaluation)
+        intents = load_intents
+        requirements = evaluation.probe_requirements.to_h do |requirement|
+          [ requirement.scope.key, requirement ]
+        end
+        evaluation.inspections.each do |inspection|
+          raise StaleGeneration, "provider-health observation is unavailable" unless inspection.available?
+          if unresolved_intent?(inspection.scope, intents)
+            raise StaleGeneration, "provider-health scope has an unresolved probe intent"
+          end
+
+          replay = load_replay(inspection.scope, recover_torn: true, publish_projection: true)
+          circuit = replay.circuit
+          unless circuit.journal_epoch == inspection.journal_epoch &&
+                 circuit.generation == inspection.generation &&
+                 !circuit.blocked? && !circuit.probe_owned?
+            raise StaleGeneration, "provider-health route observation is stale"
+          end
+          requirement = requirements[inspection.scope.key]
+          if circuit.automatic_state == "open"
+            unless circuit.half_open?(now: current_time) && requirement &&
+                   requirement.journal_epoch == circuit.journal_epoch &&
+                   requirement.observed_generation == circuit.generation
+              raise StaleGeneration, "provider-health route observation is stale"
+            end
+          elsif requirement
+            raise StaleGeneration, "provider-health route probe requirement is stale"
+          end
+        end
+      end
+
+      def perform_probe_intent(intent)
+        raise InvalidMutation, "probe intent already exists" if intent_exists?(intent.intent_id)
+        intents = load_intents
+        replays = intent.requirements.map do |requirement|
+          if unresolved_intent?(requirement.scope, intents)
+            raise StaleGeneration, "provider-health scope already has an unresolved probe intent"
+          end
+          replay = load_replay(requirement.scope, recover_torn: true, publish_projection: true)
+          circuit = replay.circuit
+          unless circuit.journal_epoch == requirement.journal_epoch &&
+                 circuit.generation == requirement.observed_generation &&
+                 circuit.half_open?(now: current_time) && !circuit.probe_owned? && !circuit.blocked?
+            raise StaleGeneration, "provider-health probe observation is stale"
+          end
+          replay
+        end
+        bindings = intent.requirements.map do |requirement|
+          ProbeBinding.new(
+            scope: requirement.scope,
+            journal_epoch: requirement.journal_epoch,
+            observed_generation: requirement.observed_generation,
+            claim_generation: requirement.observed_generation + 1,
+            attempt_id: intent.attempt_id,
+            task_generation: intent.task_generation,
+            ownership_fence: intent.ownership_fence
+          )
+        end.freeze
+        persist_intent(intent, bindings)
+        fault!(:intent_persisted, intent: intent)
+        yielded = yield(bindings)
+        fault!(:attempt_persisted, intent: intent)
+        replays.zip(bindings).each_with_index do |(replay, binding), index|
+          append_transition(
+            replay,
+            kind: "probe_claimed",
+            idempotency_key: probe_claim_key(intent.intent_id, binding),
+            payload: { "probe" => binding.to_h }
+          )
+          fault!(:claim_persisted, intent: intent, index: index)
+        end
+        remove_intent(intent.intent_id)
+        yielded
+      end
 
       def with_mutation_lock(&block)
         @directory.with_lock("mutation.lock", &block)
@@ -993,7 +1058,7 @@ module Hive
         intent = stored.fetch(:intent)
         bindings = stored.fetch(:bindings)
         current = @attempt_reader&.call(intent.attempt_id)
-        exact = attempt_matches_intent?(current, intent)
+        exact = attempt_matches_intent?(current, intent, bindings)
         live = exact && !terminal_attempt?(current)
 
         results = bindings.map do |binding|
@@ -1047,19 +1112,22 @@ module Hive
         results.freeze
       end
 
-      def attempt_matches_intent?(current, intent)
+      def attempt_matches_intent?(current, intent, bindings)
+        expected_bindings = bindings.map(&:to_h)
         return false if current.nil?
         if current.is_a?(AttemptBinding)
           return current.attempt_id == intent.attempt_id &&
             current.task_generation == intent.task_generation &&
-            current.ownership_fence == intent.ownership_fence
+            current.ownership_fence == intent.ownership_fence &&
+            current.probe_bindings.map(&:to_h) == expected_bindings
         end
         return false unless current.is_a?(Hash)
 
         value = current.to_h { |key, child| [ key.to_s, child ] }
         value["attempt_id"] == intent.attempt_id &&
           value["task_generation"] == intent.task_generation &&
-          value["ownership_fence"] == intent.ownership_fence
+          value["ownership_fence"] == intent.ownership_fence &&
+          value["probe_bindings"] == expected_bindings
       end
 
       def terminal_attempt?(current)

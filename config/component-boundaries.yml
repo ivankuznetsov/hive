@@ -68,6 +68,7 @@ components:
     hive_consumers:
       - lib/hive.rb
       - lib/hive/paths.rb
+      - lib/hive/attempts/dispatcher.rb
     mutation_authority: "Scoped provider-health journals, rebuildable projections, probe intents, quarantine artifacts, and their typed audit receipts only."
     recovery_surface: "Conservative eligibility and attempt-fenced probe reconciliation only; RecoveryCoordinator remains the sole retry, charge, deadline, successor, and dispatch owner."
     wiki_page: wiki/modules/provider_health.md
@@ -90,6 +91,7 @@ components:
     public_contract:
       values:
         - Hive::ProviderRouting::Account
+        - Hive::ProviderRouting::Candidate
         - Hive::ProviderRouting::Configuration
         - Hive::ProviderRouting::Decision
         - Hive::ProviderRouting::Pin
@@ -98,16 +100,19 @@ components:
         - Hive::ProviderRouting::Request
         - Hive::ProviderRouting::Requirements
         - Hive::ProviderRouting::Route
+        - Hive::ProviderRouting::Router
       errors:
         - Hive::ConfigError
     owned_paths:
       - lib/hive/provider_routing.rb
       - lib/hive/provider_routing/configuration.rb
+      - lib/hive/provider_routing/candidate.rb
       - lib/hive/provider_routing/decision.rb
       - lib/hive/provider_routing/policy.rb
       - lib/hive/provider_routing/policy_store.rb
       - lib/hive/provider_routing/request.rb
       - lib/hive/provider_routing/route.rb
+      - lib/hive/provider_routing/router.rb
       - schemas/hive-routing-policy.v1.json
     state_contracts:
       - "An absent routing.pool returns a structural legacy policy before global account, health, or capacity state is consulted"
@@ -119,6 +124,7 @@ components:
       - "Account, route, requirements, pin, policy, request, and decision values are deeply immutable"
     lock_contracts:
       - "Policy construction and static compatibility filtering are pure and acquire no lock"
+      - "Router selection consumes immutable health and capacity observations and acquires no lock"
       - "Admission, health, capacity, retry, and recovery locks remain outside this component"
     component_dependencies: []
     allowed_hive_dependencies:
@@ -133,6 +139,9 @@ components:
     authorized_internal_constructions: []
     hive_consumers:
       - lib/hive/config.rb
+      - lib/hive/attempts/configured_dispatcher.rb
+      - lib/hive/attempts/dispatcher.rb
+      - lib/hive/attempts/entrypoint.rb
       - lib/hive/attempts/store.rb
       - lib/hive/implementation_identity/resolver.rb
     mutation_authority: "None; configuration normalization and decisions are pure immutable values."
@@ -141,6 +150,7 @@ components:
     focused_tests:
       - test/unit/provider_routing/configuration_test.rb
       - test/unit/provider_routing/policy_store_test.rb
+      - test/unit/provider_routing/router_test.rb
       - test/unit/provider_routing/value_objects_test.rb
       - test/unit/model_routing_test.rb
       - test/unit/implementation_identity/resolver_test.rb
@@ -449,13 +459,15 @@ components:
     owned_paths:
       - lib/hive/attempts
     state_contracts:
-      - "$HIVE_HOME/attempts/v4 bounded hot records, permanent proofs and indexes, framed logs, outputs, generation locks, routing-policy snapshots, and finalization state"
+      - "$HIVE_HOME/attempts/v4 bounded hot records, permanent proofs and indexes, framed logs, outputs, generation locks, routing-policy snapshots, routing-decision projections, and finalization state"
     schema_contracts:
       - "hive-attempt v4 is the only runtime reader/writer; Hive::Recovery::Migration exclusively converts schema-v3 state into explicit legacy routing mode"
       - "hive-routing-policy v1 is the admission-owned first-writer-wins task-generation policy snapshot"
     lock_contracts:
-      - "admission lock before generation lock; record transitions use guarded CAS"
-    component_dependencies: []
+      - "admission lock before generation lock before the host-global provider-health lock; record transitions use guarded CAS"
+    component_dependencies:
+      - provider-health
+      - provider-routing-policy
     allowed_hive_dependencies:
       - hive/agent_limit
       - hive/atomic_file
@@ -571,6 +583,8 @@ components:
     wiki_page: wiki/modules/attempts.md
     focused_tests:
       - test/unit/attempts/api_test.rb
+      - test/unit/attempts/contracts_test.rb
+      - test/unit/attempts/decision_index_test.rb
     migration_exceptions: []
 
   - id: user-service

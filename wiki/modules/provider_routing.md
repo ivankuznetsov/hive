@@ -7,13 +7,15 @@ updated: 2026-08-10
 tags: [config, provider-accounts, routing, policy, validation]
 ---
 
-**TLDR**: `Hive::ProviderRouting` is the immutable, pure opt-in policy boundary
+**TLDR**: `Hive::ProviderRouting` is the immutable, pure opt-in policy and decision boundary
 for provider-account routing. A stage without `routing.pool` receives a
 structural legacy policy before Hive reads global provider accounts, health, or
 capacity. An explicit pool freezes ordered account, adapter, non-secret launch
 binding, model, effort, compatibility metadata, hard requirements, strict pin,
 and a canonical digest. Health, admission, capacity, attempts, retry, and
-recovery are not owned here.
+recovery are not owned here. `Router` consumes immutable health and durable
+capacity observations and returns an explainable decision without reserving a
+route.
 
 ## Global provider accounts
 
@@ -91,6 +93,16 @@ eligible ordered routes. Later admission/health work consumes these values; it
 must not add retries, deadlines, queues, leases, provider-specific fallback, or
 another recovery owner.
 
+`Router` evaluates every configured candidate in stable order. It applies the
+hard pin and requirements first, then enclosing provider/model health, then the
+provider-account concurrency observation. A saturated preferred account is
+skipped for a later eligible route. If every statically compatible route is
+saturated, the decision is scheduler-owned `capacity_saturated`; health or
+policy exhaustion is `no_eligible_provider_route`, while unavailable health
+fails closed with an operator owner. Decisions retain ordered candidates,
+typed exclusions, observed/max capacity, both circuit generations, optional
+probe requirements, and a caller-supplied observation identity/time.
+
 Before the first explicit selection for a durable subject generation,
 `ProviderRouting::PolicyStore` records the complete normalized policy under
 `$HIVE_HOME/attempts/v4/routing-policies/v1/`. The cell is point-addressed by
@@ -112,6 +124,12 @@ in [[modules/provider_health]]. Its account and exact-model journals are
 consulted only for an explicit pool; the structural legacy policy never opens
 that store. Health cooldown controls half-open route eligibility only and does
 not schedule a retry.
+
+The Attempts dispatcher freezes the policy and invokes this pure router while
+holding its existing admission and task-generation locks. It then asks health
+to revalidate the selected route's complete generation vector. Any concurrent
+health mutation causes a bounded re-selection; only a still-current decision
+may be persisted with a launching attempt.
 
 Sanitized adapter-channel inventory lives under
 `test/fixtures/provider_errors/`. No retained real capture currently proves a

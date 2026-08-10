@@ -96,6 +96,14 @@ missing claims for the exact live attempt, rolls back an intent with no
 admitted attempt, or conservatively reopens claims for terminal/lost/fenced
 ownership. There is no probe timer or second lease store.
 
-`ProviderHealth` is not yet wired into durable admission or terminal attempt
-observation on this unit alone; those consumers must preserve the authority
-and lock contracts above.
+`Store#with_route_admission` is the admission-side CAS seam. It replays and
+checks every enclosing scope against the router's immutable observation while
+the Attempts admission and generation locks are already held. Closed scopes,
+half-open requirements, manual blocks, existing probes, epochs, generations,
+and unresolved intents are all revalidated. The yielded callback persists the
+attempt while the health lock remains innermost; multi-scope claims then use
+the existing intent protocol. A stale observation performs no attempt or
+health mutation and asks the dispatcher to select again.
+
+Terminal attempt observation remains a later integration unit; it must preserve
+the authority and lock contracts above.

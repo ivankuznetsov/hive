@@ -86,8 +86,10 @@ class OpenClawSkillsTest < Minitest::Test
   def test_projection_carries_the_guided_and_yolo_brainstorm_answering_contract
     root = ROOT.join("hive")
     reference = root.join("references", "brainstorm-answering.md")
+    scenarios = root.join("references", "brainstorm-answering-scenarios.md")
 
     assert reference.file?
+    assert scenarios.file?
     assert_equal "0.1.3", Hive::AgentSkills::CanonicalSkill.new.version
 
     text = projection_text
@@ -100,6 +102,9 @@ class OpenClawSkillsTest < Minitest::Test
     assert_includes text, "explicit `continue` may resume the same paused YOLO run"
     assert_includes text, "Never dispatch a stage from this answer flow"
     assert_includes text, "Native Telegram `/answer` and Hive web forms remain literal-answer surfaces"
+    assert_includes text, "S01 — Status-only inventory and preview"
+    assert_includes text, "S09 — YOLO writes safe later slots past ambiguity"
+    assert_includes text, "S12 — 2026-07-25 evidence-backed answers plus one escalation"
   end
 
   def test_projection_keeps_recovery_and_release_authority_guarded

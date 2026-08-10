@@ -5,6 +5,10 @@ recommend, or persist answers for coding tasks waiting at `2-brainstorm`. It is
 transport-neutral: the same behavior applies through OpenClaw, Claude, Codex,
 and Pi when this canonical skill is invoked.
 
+Load `brainstorm-answering-scenarios.md` when validating this behavior or when
+an exact transcript example would clarify a state transition. Its examples
+exercise this policy; they never replace current evidence or fresh bindings.
+
 Native Telegram `/answer` and Hive web forms remain literal-answer surfaces.
 They write the operator's text and do not acquire this recommendation layer.
 Do not add a transport sidecar or treat conversation memory as answer truth;

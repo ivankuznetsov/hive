@@ -17,7 +17,7 @@ class AgentSkillsCanonicalSkillTest < Minitest::Test
     assert_match(/\A[0-9a-f]{64}\z/, skill.canonical_digest)
     assert_equal %w[description name], skill.frontmatter.keys.sort
     assert_operator skill.body.lines.size, :<, 120
-    assert_equal 15, skill.reference_paths.size
+    assert_equal 16, skill.reference_paths.size
     assert skill.reference_paths.all? { |path| path.start_with?("references/") }
     refute_includes skill.rendered_canonical_files.values.join("\n"), "{{HIVE_VERSION}}"
     assert_includes skill.rendered_canonical_files.fetch("references/setup-and-platforms.md"),
@@ -145,6 +145,7 @@ class AgentSkillsCanonicalSkillTest < Minitest::Test
     files = Hive::AgentSkills::CanonicalSkill.new.rendered_canonical_files
     route = files.fetch("SKILL.md")
     policy = files.fetch("references/brainstorm-answering.md")
+    scenarios = files.fetch("references/brainstorm-answering-scenarios.md")
 
     assert_includes route, "waiting brainstorm input"
     assert_includes route, "brainstorm-answering.md"
@@ -180,6 +181,20 @@ class AgentSkillsCanonicalSkillTest < Minitest::Test
     assert_includes policy, "fresh `hive status --json` snapshot after every write"
     assert_includes policy, "Never dispatch a stage from this answer flow"
     assert_includes policy, "Native Telegram `/answer` and Hive web forms remain literal-answer surfaces"
+    assert_includes policy, "brainstorm-answering-scenarios.md"
+    assert_includes scenarios, "Status-only inventory and preview"
+    assert_includes scenarios, "Guided approval writes one bound recommendation"
+    assert_includes scenarios, "YOLO writes safe later slots past ambiguity"
+    assert_includes scenarios, "scanned: 5"
+    assert_includes scenarios, "written: 3"
+    assert_includes scenarios, "escalated: 2"
+    assert_includes scenarios, "Missing `A` header"
+    assert_includes scenarios, "Same number across rounds"
+    assert_includes scenarios, "Final slot proves completion without dispatch"
+    assert_includes scenarios, "2026-07-25"
+    assert_includes scenarios, "OpenClaw, Claude, Codex, and Pi"
+    refute_match(/chat[_ -]?id|message[_ -]?id|username|@[a-z0-9_]+/i,
+                 scenarios[/### S12.*\z/m])
 
     evidence_order = [
       "Current user instructions and settled answers",

@@ -1,4 +1,5 @@
 require "time"
+require "hive/attempts/storage_health"
 require "hive/operational_action"
 require "hive/workflows"
 require "hive/task_closure"
@@ -43,8 +44,8 @@ module Hive
       @scheduler_join_issue_keys = {}
       scheduler = scheduler_payload(projects)
       issues.concat(scheduler.fetch("issues"))
-      @attempt_storage = attempt_storage_payload
-      issues.concat(attempt_storage_issues(@attempt_storage))
+      attempt_storage = attempt_storage_payload
+      issues.concat(attempt_storage_issues(attempt_storage))
       tasks = active.map { |project, row| project_row(project, row, scheduler) }
       issues.concat(@scheduler_join_issues)
       completeness = combined_completeness(
@@ -83,8 +84,8 @@ module Hive
           "projects_healthy" => projects.count { |project| project["error"].nil? },
           "states" => counts
         },
-        "daemon" => daemon_payload(projects, scheduler),
-        "attempt_storage" => @attempt_storage,
+        "daemon" => daemon_payload(projects, scheduler, attempt_storage: attempt_storage),
+        "attempt_storage" => attempt_storage,
         "scheduler" => scheduler.reject { |key, _| key == "issues" },
         "archive" => archive_payload(archived),
         "issues" => issues,
@@ -284,11 +285,11 @@ module Hive
       }
     end
 
-    def daemon_payload(projects, scheduler)
+    def daemon_payload(projects, scheduler, attempt_storage:)
       status = if projects.none? { |project| daemon_enabled?(project["name"]) }
         "not_applicable"
       elsif scheduler.fetch("status") == "current"
-        @attempt_storage&.fetch("status", nil) == "degraded" ? "degraded" : "healthy"
+        attempt_storage.fetch("status", nil) == "degraded" ? "degraded" : "healthy"
       else
         "unknown"
       end
@@ -307,18 +308,7 @@ module Hive
       value = @daemon_snapshot.is_a?(Hash) ? @daemon_snapshot["attempt_storage"] : nil
       return value if value.is_a?(Hash)
 
-      {
-        "status" => "unknown",
-        "layout" => { "generation" => 3, "migration" => "unknown" },
-        "hot" => { "records" => nil, "invalid" => nil },
-        "maintenance" => {
-          "last_started_at" => nil,
-          "last_completed_at" => nil,
-          "last_result" => nil
-        },
-        "last_error" => nil,
-        "degraded_reason" => nil
-      }
+      Hive::Attempts::StorageHealth.unknown_snapshot
     end
 
     def attempt_storage_issues(status)

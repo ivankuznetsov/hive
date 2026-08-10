@@ -12,7 +12,6 @@ module Hive
     class FinalizationMaintenance
       TERMINAL_CONSUMERS = %w[accounting journal request_delivery].freeze
       LOST_CONSUMERS = (TERMINAL_CONSUMERS + [ "loss" ]).freeze
-      SAFE_LOST_CLEANUPS = %w[absent terminated no_worker].freeze
       MAINTENANCE_INTERVAL_SEC = 60 * 60
       LOG_RETENTION_SEC = 3 * 24 * 60 * 60
       MaintenanceStatus = Data.define(:attempt, :classification, :owner_status, :evidence)
@@ -112,7 +111,7 @@ module Hive
           record = @store.fetch(attempt_id)
           next unless record&.final?
           next if recovery_pinned?(record)
-          next unless task_archived?(record) || retention_expired?(record, now: now)
+          next unless retention_expired?(record, now: now) || task_archived?(record)
 
           deleted += 1 if @store.log_archive.expire(attempt_id, now: now) == :expired
         end
@@ -223,8 +222,8 @@ module Hive
 
       def resolved_loss_successor(record)
         outcome = LostOutcomeStore.new(store: @store).fetch(record.attempt_id)
-        return nil unless outcome&.fetch("status", nil) == "successor_dispatched"
-        return nil unless SAFE_LOST_CLEANUPS.include?(outcome["cleanup"])
+        return nil unless LostOutcomeStore::FINAL_STATUSES.include?(outcome&.fetch("status", nil))
+        return nil unless LostOutcomeStore::SAFE_CLEANUPS.include?(outcome["cleanup"])
 
         successor_id = outcome["successor_attempt_id"].to_s
         return nil if successor_id.empty? || successor_id == record.attempt_id

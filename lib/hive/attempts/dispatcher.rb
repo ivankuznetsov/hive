@@ -180,10 +180,7 @@ module Hive
               project: generation.project, task_slug: generation.task_slug, date: utc_date,
               max_global: @limits.fetch(:max_global),
               max_per_project: @limits.fetch(:max_per_project),
-              max_daily: @limits.fetch(:max_daily),
-              indexed_daily_count: view.daily_count(
-                project: generation.project, date: utc_date
-              )
+              max_daily: @limits.fetch(:max_daily)
             )
               result = DispatchResult.new(
                 status: :deferred, attempt: nil, receipt: nil,
@@ -324,12 +321,11 @@ module Hive
       end
 
       def task_subject(generation)
-        {
-          "kind" => "task_stage",
-          "task_id" => generation.task_id&.to_s,
-          "task_slug" => generation.task_slug,
-          "intended_stage" => generation.intended_stage
-        }
+        Record.task_stage_subject(
+          task_id: generation.task_id&.to_s,
+          task_slug: generation.task_slug,
+          intended_stage: generation.intended_stage
+        )
       end
 
       def ordered_records(records)

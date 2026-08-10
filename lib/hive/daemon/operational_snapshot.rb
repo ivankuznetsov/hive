@@ -6,6 +6,7 @@ require "yaml"
 
 require "hive/agent_limit"
 require "hive/atomic_file"
+require "hive/attempts/storage_health"
 require "hive/lock"
 require "hive/paths"
 require "hive/recovery"
@@ -108,7 +109,7 @@ module Hive
           @started_at = nil
           @observations = {}
           @runtime_ready = false
-          @attempt_storage = unknown_attempt_storage
+          @attempt_storage = Hive::Attempts::StorageHealth.unknown_snapshot
         end
 
         def reconfigure(poll_interval_sec:)
@@ -241,21 +242,6 @@ module Hive
             },
             "hidden_archived_task_count" => nil,
             "attempt_storage" => @attempt_storage
-          }
-        end
-
-        def unknown_attempt_storage
-          {
-            "status" => "unknown",
-            "layout" => { "generation" => 3, "migration" => "unknown" },
-            "hot" => { "records" => nil, "invalid" => nil },
-            "maintenance" => {
-              "last_started_at" => nil,
-              "last_completed_at" => nil,
-              "last_result" => nil
-            },
-            "last_error" => nil,
-            "degraded_reason" => nil
           }
         end
 

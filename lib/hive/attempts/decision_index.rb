@@ -203,8 +203,7 @@ module Hive
             project: project, task_slug: task_slug, phase: "pending"
           )
           existing = reservations[id]
-          if existing && existing.reject { |key, _| key == "phase" } !=
-                         candidate.reject { |key, _| key == "phase" }
+          if existing && existing.except("phase") != candidate.except("phase")
             raise StoreError, "live capacity reservation conflicts with attempt identity"
           end
           reservations[id] ||= candidate
@@ -219,8 +218,7 @@ module Hive
             project: project, task_slug: task_slug, phase: "active"
           )
           existing = reservations[id]
-          if existing && existing.reject { |key, _| key == "phase" } !=
-                         candidate.reject { |key, _| key == "phase" }
+          if existing && existing.except("phase") != candidate.except("phase")
             raise StoreError, "live capacity reservation conflicts with attempt identity"
           end
           reservations[id] = candidate

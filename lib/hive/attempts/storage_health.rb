@@ -16,6 +16,26 @@ module Hive
       RESULT_KEYS = %w[promoted deleted cold_examined].freeze
       MIGRATION_RESULT_KEYS = %w[source_count promoted hot invalid].freeze
 
+      def self.unknown_snapshot
+        {
+          "status" => "unknown",
+          "layout" => {
+            "generation" => 3,
+            "migration" => "unknown",
+            "last_migrated_at" => nil,
+            "last_result" => nil
+          },
+          "hot" => { "records" => nil, "invalid" => nil },
+          "maintenance" => {
+            "last_started_at" => nil,
+            "last_completed_at" => nil,
+            "last_result" => nil
+          },
+          "last_error" => nil,
+          "degraded_reason" => nil
+        }
+      end
+
       def initialize(root:, create_directories: true)
         @storage = PointStorage.new(
           root: root,
@@ -172,24 +192,11 @@ module Hive
       end
 
       def default_payload
-        {
+        self.class.unknown_snapshot.except("status", "hot").merge(
           "schema" => SCHEMA,
           "schema_version" => SCHEMA_VERSION,
-          "scope" => "attempt-storage",
-          "layout" => {
-            "generation" => 3,
-            "migration" => "unknown",
-            "last_migrated_at" => nil,
-            "last_result" => nil
-          },
-          "maintenance" => {
-            "last_started_at" => nil,
-            "last_completed_at" => nil,
-            "last_result" => nil
-          },
-          "last_error" => nil,
-          "degraded_reason" => nil
-        }
+          "scope" => "attempt-storage"
+        )
       end
 
       def status_for(payload)

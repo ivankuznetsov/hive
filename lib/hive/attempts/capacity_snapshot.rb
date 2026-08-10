@@ -11,8 +11,6 @@ module Hive
       :global_count, :per_project, :per_task, :daily_counts,
       :reserved_attempt_ids, :invalid_count
     ) do
-      SAFE_LOST_CLEANUPS = %w[absent terminated no_worker].freeze
-
       def self.build(store:, scan: nil, now: Time.now, daily_counts: nil)
         scan ||= store.scan
         outcome_store = LostOutcomeStore.new(store: store)
@@ -89,7 +87,7 @@ module Hive
         return false unless record.respond_to?(:state) && record.state == "lost" && record.worker
 
         outcome = outcome_store.fetch(record.attempt_id)
-        !SAFE_LOST_CLEANUPS.include?(outcome&.fetch("cleanup", nil))
+        !LostOutcomeStore::SAFE_CLEANUPS.include?(outcome&.fetch("cleanup", nil))
       rescue StoreError
         true
       end
@@ -100,12 +98,11 @@ module Hive
       def daily_count(project, date) = daily_counts.fetch([ project, date ], 0)
       def task_reserved?(project:, task_slug:) = task_count(project: project, task_slug: task_slug).positive?
 
-      def at_limit?(project:, task_slug:, date:, max_global:, max_per_project:,
-                    max_daily:, indexed_daily_count: nil)
+      def at_limit?(project:, task_slug:, date:, max_global:, max_per_project:, max_daily:)
         global_count >= max_global ||
           project_count(project) >= max_per_project ||
           task_reserved?(project: project, task_slug: task_slug) ||
-          (indexed_daily_count || daily_count(project, date)) >= max_daily
+          daily_count(project, date) >= max_daily
       end
     end
 
@@ -213,10 +210,6 @@ module Hive
             predecessor_attempt_id: predecessor_attempt_id
           )
         )
-      end
-
-      def daily_count(project:, date:)
-        decision_index.daily_count(project: project, date: date)
       end
 
       private

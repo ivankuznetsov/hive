@@ -14,6 +14,7 @@ module Hive
     # or mint another successor.
     class LostOutcomeStore
       FINAL_STATUSES = %w[successor_dispatched].freeze
+      SAFE_CLEANUPS = %w[absent terminated no_worker].freeze
 
       def initialize(store:)
         @store = store
@@ -116,7 +117,7 @@ module Hive
         return outcome unless cleanup_retry_due?(outcome, now: now)
 
         cleanup = cleanup_orphan(attempt)
-        unless %w[absent terminated no_worker].include?(cleanup)
+        unless LostOutcomeStore::SAFE_CLEANUPS.include?(cleanup)
           diagnostic = "worker group identity is not safe to terminate yet; retrying"
           return @outcome_store.update(
             attempt, now: now, status: "pending", cleanup: cleanup,

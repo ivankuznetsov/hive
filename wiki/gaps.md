@@ -3,11 +3,22 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-08-07
+updated: 2026-08-10
 tags: [gap, todo, release-proof, agent-skills]
 ---
 
 **TLDR**: The wiki has broad domain coverage for the current `lib/`, command, stage, TUI, daemon, bot, native Hive web, Hivebox container, testing/static-analysis, template/prompt, and release surfaces, but the source-file map below is representative rather than an automatically verified one-file-per-source audit. Remaining gaps are mainly live behavioral verification and a few deeper reference pages.
+
+## Provider-routing trusted captures (2026-08-10)
+
+The U1 provider-routing policy includes a sanitized provenance inventory for
+Claude, Codex, Pi, and Grok under `test/fixtures/provider_errors/`, but no
+retained real structured transport or provider-diagnostic capture currently
+proves a stable explicit Hive account or exact-model scope. Accordingly every
+listed provider/model failure class remains task-local. Do not promote prose,
+HTTP-like text, synthetic fixtures, final messages, stdout/stderr, or tool
+output into shared circuit evidence. Close this gap only with reviewed,
+sanitized real captures whose channel and explicit scope are stable.
 
 ## Current release gap
 

@@ -1,0 +1,10 @@
+{
+  "schema": "hive-provider-error-capture/v1",
+  "adapter": "claude",
+  "channel": "stream_json_transport",
+  "capture_status": "real_capture_pending",
+  "trusted_scope": null,
+  "trusted_class": null,
+  "retained_fields": [],
+  "classification": "task_local"
+}

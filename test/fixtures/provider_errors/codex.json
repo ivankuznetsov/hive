@@ -1,0 +1,10 @@
+{
+  "schema": "hive-provider-error-capture/v1",
+  "adapter": "codex",
+  "channel": "jsonl_transport",
+  "capture_status": "real_capture_pending",
+  "trusted_scope": null,
+  "trusted_class": null,
+  "retained_fields": [],
+  "classification": "task_local"
+}

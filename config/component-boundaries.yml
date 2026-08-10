@@ -4,6 +4,65 @@ schema_version: 1
 # its test-only contract enforce declared source boundaries; they are not a
 # runtime security sandbox and cannot prevent reflection or monkeypatching.
 components:
+  - id: provider-routing-policy
+    name: Provider Routing Policy
+    state: candidate
+    entrypoint:
+      file: lib/hive/provider_routing.rb
+      require: hive/provider_routing
+      constant: Hive::ProviderRouting
+    public_contract:
+      values:
+        - Hive::ProviderRouting::Account
+        - Hive::ProviderRouting::Configuration
+        - Hive::ProviderRouting::Decision
+        - Hive::ProviderRouting::Pin
+        - Hive::ProviderRouting::Policy
+        - Hive::ProviderRouting::Request
+        - Hive::ProviderRouting::Requirements
+        - Hive::ProviderRouting::Route
+      errors:
+        - Hive::ConfigError
+    owned_paths:
+      - lib/hive/provider_routing.rb
+      - lib/hive/provider_routing/configuration.rb
+      - lib/hive/provider_routing/decision.rb
+      - lib/hive/provider_routing/policy.rb
+      - lib/hive/provider_routing/request.rb
+      - lib/hive/provider_routing/route.rb
+    state_contracts:
+      - "An absent routing.pool returns a structural legacy policy before global account, health, or capacity state is consulted"
+      - "An explicit policy freezes ordered account, adapter, launch-binding, model, effort, capability, requirement, and pin identity"
+      - "Provider-account identity is separate from the existing adapter/profile provider identity"
+    schema_contracts:
+      - "The v1 canonical digest covers every normalized selection input and no credential material"
+      - "Account, route, requirements, pin, policy, request, and decision values are deeply immutable"
+    lock_contracts:
+      - "Policy construction and static compatibility filtering are pure and acquire no lock"
+      - "Admission, health, capacity, retry, and recovery locks remain outside this component"
+    component_dependencies: []
+    allowed_hive_dependencies:
+      - hive
+      - hive/agent_profiles
+      - hive/implementation_identity
+      - hive/model_routing
+    internal_collaborators:
+      - Hive::ModelRouting
+    forbidden_constructions: []
+    authorized_internal_constructions: []
+    hive_consumers:
+      - lib/hive/config.rb
+      - lib/hive/implementation_identity/resolver.rb
+    mutation_authority: "None; configuration normalization and decisions are pure immutable values."
+    recovery_surface: "No retry or recovery surface; invalid configuration fails before dispatch and legacy mode bypasses the domain."
+    wiki_page: wiki/modules/provider_routing.md
+    focused_tests:
+      - test/unit/provider_routing/configuration_test.rb
+      - test/unit/provider_routing/value_objects_test.rb
+      - test/unit/model_routing_test.rb
+      - test/unit/implementation_identity/resolver_test.rb
+    migration_exceptions: []
+
   - id: patrol-effects
     name: Patrol Effect Evidence
     state: candidate

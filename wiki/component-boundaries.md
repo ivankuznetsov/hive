@@ -17,6 +17,7 @@ the first and primary consumer.
 
 | Component | State | Current entry point | Narrative context |
 |-----------|-------|---------------------|-------------------|
+| Provider Routing Policy | `candidate` | `require "hive/provider_routing"` → `Hive::ProviderRouting` | [[modules/provider_routing]] |
 | Patrol Effect Evidence | `candidate` (U3a protocol complete; reduced installed/live smoke source-pinned; full U3b/U3c proof pending) | `require "hive/modules/migration/patrol_evidence"` → `Hive::Modules::Migration::PatrolEvidence` | [[modules/patrol]] |
 | Attempts admission / future RunReceipt | `candidate` (guarded reference) | `require "hive/attempts/api"` → `Hive::Attempts::API` | [[modules/attempts]] |
 | Workflow Creator Values | `boundary-ready` | `require "./packaging/live_agent_skills/workflow_creator_text_safety"` → `HiveLiveAgentProof::WorkflowCreator::TextSafety` | [[component-boundaries]] |
@@ -38,8 +39,8 @@ has earned a gem, version, repository, or release.
 
 ## Final graph audit
 
-The catalog on 2026-08-04 retains twelve components: ten are
-`boundary-ready`; Attempts and Patrol Effect Evidence remain `candidate`.
+The catalog retains thirteen components: ten are `boundary-ready`; Provider
+Routing Policy, Attempts, and Patrol Effect Evidence remain `candidate`.
 Patrol retains one bounded U3 exception for deterministic public-path and
 independently authorized installed/live proof. Workflow Creator is composed
 through its U1b typed publication facade, Workflow Creator Execution supplies
@@ -60,6 +61,7 @@ flowchart LR
   workflow_core[Workflow Creator] --> workflow_values[Workflow Creator Values]
   patrol_effects[Patrol Effect Evidence - candidate]
   attempts[Attempts admission - candidate]
+  provider_routing[Provider Routing Policy - candidate]
   user_service[UserService]
   artifact_firewall[Agent Artifact Firewall]
   git_gate[Safe Agent Git Gate]
@@ -69,9 +71,9 @@ flowchart LR
 All other cataloged components depend only on explicitly allowed lower-level
 Hive primitives. The source audit found no retained experimental facade outside
 the catalog: each promoted facade is owned by a catalog row and used by Hive,
-while Attempts and Patrol Effect Evidence are deliberately retained as guarded
-candidates rather than being promoted ahead of their remaining lifecycle or
-qualification proof.
+while Provider Routing Policy, Attempts, and Patrol Effect Evidence are
+deliberately retained as guarded candidates rather than being promoted ahead
+of their remaining lifecycle or qualification proof.
 
 This is an internal architecture verdict, not a packaging verdict. None of the
 nine ready components currently has the named non-Hive adopter and independent

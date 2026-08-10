@@ -1,0 +1,27 @@
+schema: hive-provider-error-provenance-inventory/v1
+sanitization: raw prompts, messages, stdout, stderr, tool output, and credentials are excluded
+adapters:
+  claude:
+    fixture: claude.json
+    trusted_channels: [stream_json_transport]
+    stable_explicit_scopes: []
+    task_local_classes: [authentication, billing_configuration, exhausted_credits, account_quota, provider_rate_limit, provider_outage, model_unavailable, model_quota, model_rate, model_capacity]
+    note: No retained real capture proves a stable explicit account or model scope; structured errors remain task-local until one is captured and reviewed.
+  codex:
+    fixture: codex.json
+    trusted_channels: [jsonl_transport]
+    stable_explicit_scopes: []
+    task_local_classes: [authentication, billing_configuration, exhausted_credits, account_quota, provider_rate_limit, provider_outage, model_unavailable, model_quota, model_rate, model_capacity]
+    note: No retained real JSONL capture proves a stable explicit account or model scope; prose limit text is not trusted provenance.
+  pi:
+    fixture: pi.json
+    trusted_channels: [json_transport]
+    stable_explicit_scopes: []
+    task_local_classes: [authentication, billing_configuration, exhausted_credits, account_quota, provider_rate_limit, provider_outage, model_unavailable, model_quota, model_rate, model_capacity]
+    note: Pi may multiplex upstream providers and no retained real capture binds an error to a configured Hive account or exact model.
+  grok:
+    fixture: grok.json
+    trusted_channels: [streaming_json_transport]
+    stable_explicit_scopes: []
+    task_local_classes: [authentication, billing_configuration, exhausted_credits, account_quota, provider_rate_limit, provider_outage, model_unavailable, model_quota, model_rate, model_capacity]
+    note: No retained real streaming-json capture proves a stable explicit account or model scope; HTTP-like prose remains task-local.

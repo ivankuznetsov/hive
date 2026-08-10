@@ -1,6 +1,7 @@
 require "test_helper"
 require "hive/config"
 require "hive/implementation_identity/resolver"
+require "hive/provider_routing/route"
 
 class ImplementationIdentityResolverTest < Minitest::Test
   include HiveTestHelper
@@ -319,6 +320,37 @@ class ImplementationIdentityResolverTest < Minitest::Test
     assert_equal %w[--model claude-opus-4-6 --effort high],
                  arguments.subcommand_arguments
     assert_empty arguments.global_arguments
+  end
+
+  def test_explicit_route_projects_adapter_not_provider_account_into_identity
+    route = Hive::ProviderRouting::Route.new(
+      id: "codex-team/gpt-5.6-sol",
+      account: "codex-team",
+      adapter: "codex",
+      launch_binding: "team",
+      model: "gpt-5.6-sol",
+      effort: "high",
+      order: 0,
+      capabilities: {
+        "context" => "large",
+        "quality" => "high",
+        "tools" => %w[shell filesystem],
+        "permissions" => %w[read write]
+      },
+      model_routing: nil
+    )
+
+    selection = resolver(config).resolve_execute(
+      generation: 8,
+      attempt_id: "route-attempt",
+      route: route
+    )
+
+    assert_equal "codex", selection.provider
+    refute_equal route.account, selection.provider
+    assert_equal "gpt-5.6-sol", selection.model
+    assert_equal "high", selection.requested_effort
+    assert_equal "route-attempt", selection.originating_attempt
   end
 
   private

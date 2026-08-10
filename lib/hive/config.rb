@@ -11,6 +11,7 @@ require "hive/permission_scope"
 require "hive/paths"
 require "hive/repository_identity"
 require "hive/model_routing"
+require "hive/provider_routing"
 require "hive/screenote/oauth_client"
 require "hive/conditions/migration"
 
@@ -817,6 +818,9 @@ module Hive
       merged[EXPLICIT_BRAINSTORM_RUNTIME_KEY] = nested_key?(data, "brainstorm", "runtime")
       merged[EXPLICIT_RESOURCE_LIMITS_KEY] = explicit_resource_limits(data)
       merged[IMPLEMENTATION_IDENTITY_PROVENANCE_KEY] = implementation_identity_provenance(data)
+      if provider_routing_configured?(data)
+        merged[Hive::ProviderRouting::PROVIDER_ACCOUNTS_KEY] = load_global_provider_accounts
+      end
       inject_bot_runtime_path_defaults!(merged)
       validate!(merged, source_path)
       warn_legacy_root_reviewers_once!(source_path) if legacy_reviewers
@@ -1281,6 +1285,26 @@ module Hive
       return default_global_agents if selected.nil?
 
       normalize_global_agents(selected, source: describe_source(path))
+    end
+
+    # Provider accounts are global because their external credential/config
+    # contexts and concurrency are shared across projects. This reader is
+    # intentionally called only after a project declares routing.pool; a
+    # legacy project never consults or validates this opt-in registry.
+    def load_global_provider_accounts
+      Hive::Paths.ensure_migrated!
+      validate_hive_home!
+      path = global_config_path
+      data = File.exist?(path) ? load_global_config(path) : {}
+      raise ConfigError, "global config at #{path} must be a hash" unless data.is_a?(Hash)
+
+      raw = data["providers"]
+      return {}.freeze if raw.nil?
+
+      Hive::ProviderRouting::Configuration.normalize_accounts(
+        raw,
+        source: describe_source(path)
+      )
     end
 
     # Persist a backend selection, writing the normalized (validated,
@@ -2038,6 +2062,7 @@ module Hive
       validate_review_adhoc!(cfg, source_path)
       validate_review_fix_auto_commit!(cfg, source_path)
       validate_role_agent_names!(cfg, source_path)
+      validate_provider_routing!(cfg, source_path)
       validate_claude_mode!(cfg, source_path)
       validate_claude_permission_mode!(cfg, source_path)
       validate_permissions!(cfg, source_path)
@@ -2114,6 +2139,86 @@ module Hive
         source: describe_source(source_path)
       )
     end
+
+    def validate_provider_routing!(cfg, source_path)
+      provider_routing_entries(cfg).each do |entry|
+        next if entry.fetch(:routing).nil?
+
+        Hive::ProviderRouting::Configuration.from(
+          cfg: cfg,
+          stage_name: entry.fetch(:stage),
+          routing: entry.fetch(:routing),
+          source: "#{entry.fetch(:label)}.routing in #{describe_source(source_path)}"
+        )
+      end
+    end
+
+    def provider_routing_configured?(cfg)
+      provider_routing_entries(cfg).any? do |entry|
+        explicit_provider_pool?(entry.fetch(:routing))
+      end
+    end
+
+    def provider_routing_entries(cfg)
+      entries = []
+      {
+        "brainstorm" => "brainstorm",
+        "plan" => "plan",
+        "execute" => "execute",
+        "open_pr" => "open_pr",
+        "artifacts" => "artifacts",
+        "finalize" => "finalize",
+        "rebase" => "rebase",
+        "babysitter" => "babysitter",
+        "patrol" => "patrol"
+      }.each do |label, stage|
+        block = cfg[label]
+        entries << { label: label, stage: stage, routing: block["routing"] } if block.is_a?(Hash)
+      end
+
+      review = cfg["review"]
+      if review.is_a?(Hash)
+        {
+          "ci" => "review.ci",
+          "triage" => "review.triage",
+          "fix" => "review.fix",
+          "browser_test" => "review.browser_test"
+        }.each do |role, stage|
+          block = review[role]
+          if block.is_a?(Hash)
+            entries << { label: "review.#{role}", stage: stage, routing: block["routing"] }
+          end
+        end
+        Array(review["reviewers"]).each_with_index do |block, index|
+          next unless block.is_a?(Hash)
+
+          entries << {
+            label: "review.reviewers[#{index}]",
+            stage: "review.reviewers",
+            routing: block["routing"]
+          }
+        end
+        adhoc = review["adhoc"]
+        if adhoc.is_a?(Hash)
+          Array(adhoc["reviewers"]).each_with_index do |block, index|
+            next unless block.is_a?(Hash)
+
+            entries << {
+              label: "review.adhoc.reviewers[#{index}]",
+              stage: "review.reviewers",
+              routing: block["routing"]
+            }
+          end
+        end
+      end
+      entries.freeze
+    end
+    private_class_method :provider_routing_entries
+
+    def explicit_provider_pool?(routing)
+      routing.is_a?(Hash) && (routing.key?("pool") || routing.key?(:pool))
+    end
+    private_class_method :explicit_provider_pool?
 
     # Validate only routed controls that can reach a concrete built-in launch
     # under this merged project configuration. Structural validation happens

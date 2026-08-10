@@ -3,7 +3,7 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-08-02
+updated: 2026-08-10
 tags: [config, yaml, validation]
 ---
 
@@ -14,6 +14,15 @@ Exact and coarse entries inherit model and effort independently, never select an
 agent, and are absent by default so generated projects keep legacy behavior.
 Arbitrary descriptor stage names remain descriptor-owned and are rejected from
 the closed `models:` vocabulary.
+
+Provider-account routing is a separate opt-in surface. Global `providers:`
+declares named adapter/model/launch-binding/concurrency policy, while a project
+stage's `routing.pool` references those names and freezes an explicit
+[[modules/provider_routing]] policy. `Config.load` does not read or validate the
+global provider registry unless an explicit pool exists, preserving the
+unconfigured legacy path structurally. Candidate entries cannot override their
+account adapter. Pins, route metadata, hard requirements, account/model
+allowlists, binding uniqueness, and policy digests validate before dispatch.
 
 ## Strict project root keys
 

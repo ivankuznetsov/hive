@@ -1,10 +1,14 @@
-<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
-  <title>Hive web</title>
-  <rect width="512" height="512" rx="112" fill="#c96442"/>
-  <g fill="none" stroke="#f5e3db" stroke-width="34" stroke-linejoin="round" stroke-linecap="round">
-    <!-- honeycomb: three hive cells -->
-    <polygon points="256,96 326,136 326,216 256,256 186,216 186,136"/>
-    <polygon points="166,256 236,296 236,376 166,416 96,376 96,296"/>
-    <polygon points="346,256 416,296 416,376 346,416 276,376 276,296"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" role="img" aria-labelledby="title desc">
+  <title id="title">Hive web</title>
+  <desc id="desc">The yellow Hive logo on a solid black background.</desc>
+  <rect width="96" height="96" fill="#0d1117"/>
+  <g transform="translate(5.76 5.76) scale(.88)" fill="none" stroke="#f0b429" stroke-width="5" stroke-linejoin="round" stroke-linecap="round">
+    <path d="M48 8 82 28v40L48 88 14 68V28z"/>
+    <path d="M48 24 64 33v18l-16 9-16-9V33z"/>
+    <path d="M32 33 16 42v18l16 9 16-9"/>
+    <path d="M64 33 80 42v18l-16 9-16-9"/>
+    <circle cx="48" cy="42" r="4" fill="#f0b429" stroke="none"/>
+    <circle cx="32" cy="51" r="4" fill="#f0b429" stroke="none"/>
+    <circle cx="64" cy="51" r="4" fill="#f0b429" stroke="none"/>
   </g>
 </svg>

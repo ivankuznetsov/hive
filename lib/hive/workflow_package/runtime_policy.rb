@@ -197,15 +197,13 @@ module Hive
         # Yolo is already the explicit unbounded trust preset. Preserve the
         # caller's declared project/worktree roots as runner context so agents
         # such as Codex do not mistake an authorized target for an out-of-scope
-        # workspace. Portable non-yolo actors keep these roots read-only below.
+        # workspace. Bounded actors receive only roots declared by their own
+        # permission spec through scope.add_dirs_extra.
         if scope.yolo?
           directories = (directories + trusted_actor_read_roots(base_add_dirs)).uniq
         end
         child_environment = actor_environment(environment)
         if profile.name != :claude && !scope.yolo?
-          directories = (
-            directories + trusted_actor_read_roots(base_add_dirs)
-          ).uniq
           return compile_portable_actor(
             parsed, scope: scope, task_root: task_root,
             directories: directories, profile: profile, environment: child_environment,
@@ -279,6 +277,16 @@ module Hive
         unless %i[codex grok].include?(profile.name)
           raise Hive::ConfigError,
                 "runner #{profile.name.inspect} cannot enforce managed workflow policy"
+        end
+
+        path_read_rules = Array(parsed_spec["tools"]).filter_map do |rule|
+          match = Hive::PermissionScope::TOOL_RULE_PATTERN.match(rule.to_s.strip)
+          rule if match && match[:tool] == "Read" && match[:specifier]
+        end
+        unless path_read_rules.empty?
+          raise Hive::ConfigError,
+                "runner #{profile.name.inspect} cannot enforce path-qualified Read rules " \
+                "#{path_read_rules.inspect}"
         end
 
         tool_names = Array(scope.allowed_tools).flat_map do |rule|

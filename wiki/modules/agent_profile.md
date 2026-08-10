@@ -212,14 +212,19 @@ generation/selection policy and `Reconstructor` retains recovery policy.
   profile. Bounded Claude mappings keep the native tool policy. Bounded Codex
   mappings use a generated named filesystem permission profile with no shell
   network, MCP servers, apps, plugins, memory, hooks, or subagents. Bounded Grok
-  mappings run the static CLI inside bubblewrap with only declared task,
-  package, and extra read roots mounted. For both portable runners, Hive asks
+  mappings run the static CLI inside bubblewrap with only the task, package,
+  and descriptor-declared extra read roots mounted. Caller context does not
+  widen a bounded actor; only explicit `yolo` inherits the owning project root.
+  For both portable runners, Hive asks
   for schema-constrained file content under a read-only policy and atomically
   writes only descriptor-authorized output paths after validating the complete
   response. Managed launches isolate the environment and inject only values
   authorized for the executing stable slot. The strict Claude MCP isolation
   file carries an explicit empty `mcpServers` object so current Claude Code
-  releases accept the schema while exposing no servers.
+  releases accept the schema while exposing no servers. Portable Codex and
+  Grok mappings reject path-qualified `Read(...)` rules because their current
+  sandboxes cannot enforce file-granular reads without exposing the containing
+  task directory; Claude remains eligible for those slots.
 
 ## Managed skill inspection and provisioning
 

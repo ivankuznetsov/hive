@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-08-07
+updated: 2026-08-10
 tags: [gap, todo, release-proof, agent-skills]
 ---
 
@@ -81,6 +81,16 @@ tags: [gap, todo, release-proof, agent-skills]
   opt-in detached-process campaign outside default CI. No real container or
   provider invocation has authenticated this infrastructure yet; that remains a
   separate post-merge exact-head operator authorization, not a source claim.
+  Three queued predecessor branches add useful design provenance without
+  closing that gap: `003d20eab0d78a9eef2befb2c800e56071625b91` moved Patrol
+  diagnostics into an owner-private qualification workspace,
+  `03f6abd13d19ded2b9a5a1e7998b1c765f181054` built a same-head twenty-case
+  deterministic harness, and `00c520efc5a9a5f53a91be7932392e20eee68361`
+  drove a twenty-case public-process campaign. None is an ancestor of this
+  refresh worktree, and the current reduced installed-CLI controller has
+  replaced those harnesses. Treat their results as branch-local predecessor
+  evidence, not as a runnable current-main, hosted, installed-live, or
+  independently controlled qualification.
   Long-lived external resource drift remains a declared U3c live limitation,
   not something elapsed time can prove equivalent. Elapsed telemetry remains
   useful, but neither it nor a seven-day window substitutes for diversity and

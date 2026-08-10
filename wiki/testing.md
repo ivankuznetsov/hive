@@ -979,7 +979,12 @@ registry-laundered filesystem paths. Release-candidate artifact construction
 and baseline materialization use discrete-argv `Open3.capture3` calls; their
 candidate OIDs are validated and their remaining refs and paths are internal
 or loaded from the reviewed, digest-pinned catalog, so the associated command
-injection findings are recorded as scoped false positives. The old
+injection findings are recorded as scoped false positives. The managed Web
+archive's timestamp-normalized variant additionally revalidates the commit
+timestamp as decimal metadata. It passes the validated full hexadecimal OID to
+`git show`, then the derived `OID:web` treeish, `--mtime` option, and
+destination to `git archive` as argv elements; `repo_root` is supplied through
+Open3's separate `chdir:` option, and no shell interprets any of them. The old
 task-log-path ignore from commit
 `83f0a800` is no longer needed: `Tasks::LogsController#show` loads a `Task`
 only after registered-project resolution, and moving the bounded path read to

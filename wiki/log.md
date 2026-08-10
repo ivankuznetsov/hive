@@ -4,6 +4,3975 @@ Append-only log of all wiki operations.
 
 <!-- BEGIN GENERATED WIKI LOG FRAGMENTS -->
 ---
+title: Reconcile queued branch sources with the current wiki
+type: docs
+date: 2026-08-10
+tags: [wiki, patrol, modules, workflows, testing]
+---
+
+- Sources: `003d20eab0d78a9eef2befb2c800e56071625b91`,
+  `00c520efc5a9a5f53a91be7932392e20eee68361`,
+  `02436dd1cc6f36713448f7312762cd33f87cee22`,
+  `02fcd4a4818a5a122c602e7498a9a6197d3f47f9`,
+  `030e783e39d72e9c9c7397ab0ee40de274d23b9e`,
+  `034e77336255cef697070590ace3a5d816243d92`,
+  `036d5b2f1d742f759416581a0b3700088872ecf0`,
+  `03f6abd13d19ded2b9a5a1e7998b1c765f181054`,
+  `0401d678e233b8335a4fe8cebc8e42db079e3954`, and
+  `0515a5890e8210ce960d92c1f9122379cfc429e5`.
+- Audit all ten queued commits through their exact commit diffs and committed
+  path snapshots, while keeping branch-local predecessor evidence distinct
+  from contracts present in the current default-branch worktree.
+- Preserve the current Patrol boundary: the private-workspace, compact
+  deterministic, and public-process campaigns are predecessor designs rather
+  than current release proof; the current wiki continues to describe the
+  reduced installed-CLI smoke, host-qualified deterministic receipt facade,
+  and outstanding independent/live qualification gaps.
+- Confirm that installable-module lifecycle, declarative-target, workflow
+  compatibility, attempt API, durable bot dispatch, Agent ABI, and workflow
+  publication-recovery contracts are already covered by newer current pages.
+  Open publication PRs require an exact live branch, terminal PRs may survive
+  branch deletion, and retained publication checkouts remain owner-private.
+- Keep the newer disposable-`HOME` test isolation contract instead of restoring
+  the predecessor `GIT_CONFIG_GLOBAL` override, and document the exact
+  discrete-argv trust boundary behind the managed Web archive Brakeman ignore.
+- Leave `wiki/index.md` unchanged because this batch adds no page or coverage
+  category.
+
+# Fence bounded managed actors to declared read roots
+
+- Stopped portable bounded Codex and Grok actors from inheriting the managed
+  task's project root through trusted caller context.
+- Kept task/package roots and descriptor `dirs` available, while explicit
+  `yolo` actors retain their intentional project/worktree context.
+- Rejected portable Codex/Grok mappings for file-qualified `Read(...)` scopes
+  their directory-level sandboxes cannot enforce.
+- Added Codex and Grok policy coverage for undeclared and declared roots.
+
+---
+title: Align Hive web icons with the public Hive mark
+type: change
+date: 2026-08-10
+tags: [web, icon, favicon, branding]
+---
+
+Hive web's SVG, PNG, and multi-size favicon now use the canonical linked-cell
+Hive logo and the public site's yellow-on-black palette. The raster icon is a
+fully opaque square, avoiding white corners in launchers that render transparent
+pixels against white. The dormant PWA manifest colors match the black icon
+background, and focused integration assertions pin the SVG geometry, palette,
+and opaque 512px PNG contract.
+
+---
+title: Fence repository patrol to coding workflows
+date: 2026-08-10
+---
+
+- Ordinary Patrol and Architecture Patrol now require the registered project's
+  resolved default workflow to be `coding`, regardless of stale enable flags.
+- The daemon stops before repository inspection or merged-PR intake for
+  non-coding defaults, and reservation-time checks prevent a workflow change
+  from racing a queued dispatch.
+- Manual execution is rejected for non-coding projects, while Architecture
+  Patrol's read-only job queries and ordinary receipt-only recovery remain
+  available.
+- Agent skill provisioning no longer includes Patrol reviewers for a
+  non-coding project.
+
+## 2026-08-10 Bind terminal recovery state to its attempt
+
+- Refresh the persisted edit-resume mtime baseline when a detached durable task attempt becomes terminal, matching the existing local-child completion behavior while preserving edits newer than the attempt's end time.
+- Refuse to overlay an old terminal recovery receipt when the current task row belongs to a different live attempt.
+- Add focused dispatcher and operational-snapshot regressions for both dogfood failures.
+
+---
+title: Patch the JSON dependency advisory
+type: fix
+date: 2026-08-10
+tags: [dependencies, security, ci]
+---
+
+- The locked `json` gem now uses 2.21.2 so the Bundler Audit gate clears
+  CVE-2026-71847 without changing Hive's dependency contract.
+
+---
+title: Bound durable attempt storage
+type: change
+date: 2026-08-10
+tags: [attempts, storage, migration, operational-status, performance]
+---
+
+- Attempt storage now uses a physical v3 layout whose hot `records/` scan is
+  independent of permanent proof and cold-log history.
+- Final attempts move out of the hot set only after permanent proof, decision
+  indexes, and required consumer acknowledgements are durable; point fetches
+  preserve historical replay, projection, identity, and closure behavior.
+- The forward-only v2-to-v3 cutover publishes an old-binary fence, verifies
+  exact corpus and decision parity, checkpoints restartable phases, promotes
+  historical finals, and has no dual reader or reverse hydration path.
+- Raw logs use digest-sharded cold storage and a persisted 512-entry hourly
+  sweep cursor, then expire when the task is archived or three days after
+  completion while canonical proof and referenced artifacts remain durable.
+- Operational status reads one cached health cell plus current hot counts and
+  exposes last-run maintenance deltas with one concise degraded warning.
+- A deterministic 30,000-entry proof fixture asserts one hot scan and zero
+  proof or cold-log opens/scans, without relying on timing or RSS thresholds.
+- A separate deterministic 30,000-log fixture proves maintenance examines only
+  one fixed-size page and persists its next cursor.
+- The durable CLI ownership replay now follows the public hot-scan and
+  point-fetch contract instead of reading a physical attempt-layout path.
+- Coverage now exercises the v3 storage and migration failure boundaries
+  directly; unreachable v2-era scan fallbacks and duplicate rescue paths were
+  removed instead of retained solely for synthetic coverage.
+
+---
+title: Roll over saturated Architecture Patrol occurrences
+type: change
+date: 2026-08-09
+tags: [architecture-patrol, occurrence, journal, recovery]
+---
+
+- Architecture Patrol now finalizes and projects a saturated occurrence
+  segment, then advances the job to an empty next-generation occurrence rather
+  than becoming permanently blocked at the effect limit.
+- Rollover is recovery-safe: a successor reserved before interruption is bound
+  to its derived predecessor, which must become terminal before the job pointer
+  advances.
+- Finished job transitions retain their historical occurrence identity; only
+  the current segment participates in effect recovery, and every active claim
+  must still match that current occurrence.
+- Duplicate merged-PR intake after rollover returns the already-authoritative
+  job without writing a second enqueue effect.
+- The scheduler resolves an expired current-segment claim before rolling and
+  revalidates migration owner, epoch, and admission under the shared fence.
+- Aggregate effect transitions are capped per claim generation, so retained
+  predecessor history cannot exhaust a successor segment's transition budget.
+
+---
+title: Recover Patrol and Architecture Patrol delivery
+type: change
+date: 2026-08-09
+tags: [patrol, architecture-patrol, recovery, validation]
+---
+
+- General password detection now requires an assignment delimiter, preventing
+  harmless prose such as `password resets` from blocking a validated Patrol
+  patch while explicit SQL, XML, and CLI password forms remain protected.
+- Architecture Patrol carries structured fix-budget exhaustion into action
+  scheduling, defers daily ceilings until the next UTC day, and cools down a
+  valid child that made no durable job progress.
+- The occurrence safety envelope is 256 effects. Existing 192-cell records
+  regain headroom; the daemon reserves the last cell for a durable capacity
+  blocker and excludes already-full records from dispatch, so another full
+  journal cannot recreate the child hot loop.
+
+---
+title: Babysitter provisions its needs-human label
+date: 2026-08-08
+tags: [babysitter, github, labels, recovery]
+---
+
+The PR babysitter no longer assumes every registered repository was manually
+seeded with `babysitter/needs-human`. Before its first application to a PR,
+`GhOps` now checks for that Hive-owned label with an exact label search and runs
+`gh label create` only when absent before applying it. A concurrent creation is
+accepted after a second lookup without overwriting existing label metadata. A
+provisioning failure remains bounded to the label result, records its reason in
+the babysitter event, and lets the separate give-up comment preserve the repair
+outcome on the PR.
+
+---
+title: Setup now supervises the PR babysitter
+date: 2026-08-07
+tags: [setup, babysitter, systemd, launchd]
+---
+
+`hive setup` now installs and starts a separate per-user PR babysitter service
+on systemd-user and launchd hosts. `hive babysit install --force` is the direct
+repair surface, and uninstall removes the managed unit. The foreground service
+still acts only on projects with `babysitter.enabled: true`, preserves custom
+Hive/XDG state roots without persisting provider secrets, and uses bounded
+stop/respawn behavior for active repair agents. Setup safely drains an existing
+detached babysitter before manager takeover, while uninstall reuses the same
+ownership-aware drain before any service or data removal.
+Projects can select a dedicated `babysitter.agent` and route it through
+`models.babysitter`; omitting the agent preserves the `execute.agent` fallback.
+
+# Keep web recovery receipts stable through daemon tick start
+
+**Change:** The shared web status command now retains the same daemon
+generation's still-valid completed scheduler snapshot while the next daemon
+tick is in its brief `started` phase.
+
+**Why:** Live dogfood showed the recovery overlay toggling between real
+cooldown receipts and `scheduler_observation_unavailable` on every daemon tick.
+Each toggle changed the semantic page token and caused two unnecessary Turbo
+refresh GETs. Daemon restart, generation drift, expiry, and every non-started
+unavailable state continue to invalidate the retained observation.
+
+**Evidence:** Focused status-feed tests pin both same-generation retention and
+new-generation refusal.
+
+---
+title: Honor runtime HIVE_BIN in daemon status probes
+module: daemon
+tags: [status, web, services, binary-drift]
+---
+
+Managed Hive web prepends its private gem bin directory to `PATH`. That
+directory can contain a second `hive` wrapper, so PATH-only expected-binary
+resolution made the web dashboard report false daemon path drift even while
+`hive daemon status --json` was healthy. `Hive::Daemon::StatusReport` now
+passes the explicit runtime `HIVE_BIN` to the service probe and falls back to
+PATH only when the variable is absent.
+
+---
+title: Keep cold status scans off the HTTP request thread
+module: web
+tags: [status, performance, turbo, action-cable]
+---
+
+The live dogfood status page spent 4.1 seconds in `StatusController#index`
+while its view rendered in only 36 ms; `/health` remained at roughly 1-2 ms and
+the web process idled at 0.1% CPU. `StatusBroadcaster` now renders the latest
+published `StatusFeed` state without scanning. On a cold process it returns the
+existing loading surface immediately, then the first accepted Turbo/Cable
+subscription performs the fleet scan on the broadcaster thread and publishes
+the real snapshot. The loading token stays current until that publication
+succeeds, so confirmed-channel catch-up cannot race it into a refresh loop.
+
+---
+title: Treat the managed Hive symlink as the installed binary
+type: log
+created: 2026-08-07
+---
+
+**Action:** Updated daemon status drift classification to compare the installed
+service executable and expected executable by filesystem identity after exact
+path comparison. A stable `~/.local/bin/hive` symlink that points at the current
+deployment now reports `binary_drift: none`, while paths that resolve to
+different files remain actionable `path` drift.
+
+**Coverage:** Added a focused daemon-status regression using a real symlink and
+refreshed [[modules/daemon]], [[commands/daemon]], and [[testing]].
+
+## Architecture Patrol respects dependent action cooldowns
+
+- Made Architecture Patrol job admission treat a same-family issue as dependent on its nonterminal fix.
+- Prevented queued issue actions from bypassing the fix action's one-hour retry backoff and relaunching an action child every daemon tick.
+- Added a regression covering the mixed fix-and-issue job observed during local dogfooding.
+
+---
+title: Bound Architecture Patrol recovery reads
+type: fix
+date: 2026-08-07
+---
+
+Architecture Patrol recovery now reads and validates one occurrence snapshot
+per job. Recorded transitions whose effect cells are already terminal are
+checked against that snapshot instead of fetching and validating the same
+occurrence once per transition. Nonterminal transitions retain the existing
+fresh intent/state read before replay, preserving concurrent recovery safety.
+
+---
+title: Recover saturated Patrol retry occurrences
+type: change
+date: 2026-08-06
+tags: [patrol, architecture-patrol, recovery, worktree]
+---
+
+- Ordinary feature maps now persist through one digest-bound, retry-safe batch
+  effect instead of one effect per feature.
+- Retryable Architecture Patrol actions use one shared one-hour runner and
+  scheduler cooldown, and the occurrence envelope accepts existing 128-effect
+  records with bounded room to settle and recover.
+- Exact refactor worktrees whose Git registration survived but whose `.git`
+  pointer disappeared are preserved under `.hive-quarantine/`; only their
+  stale registration is removed before reattaching the validated branch, and
+  a second unresolved quarantine fails closed rather than growing disk use.
+
+---
+title: Skip obsolete branch replay during evidence closure
+type: fix
+module: task-closure
+created: 2026-08-06
+tags: [archive, closure, rebase, dogfood]
+---
+
+Receipt-backed `already_delivered` and `superseded` archive transitions now run
+the terminal Done stage with auto-rebase disabled, including restart resume.
+Immutable delivery evidence has already settled the branch outcome and Done
+only records the terminal marker and cleanup instructions, so closure no longer
+launches conflict-resolution agents against obsolete task history. Ordinary
+workflow runs and ordinary archive transitions retain their existing rebase
+behavior.
+
+---
+title: Repair release update identity and installed setup-agents loading
+type: fix
+module: update
+created: 2026-08-06
+tags: [update, installer, cosign, release, setup-agents, packaging]
+---
+
+The bash installer now binds cosign's certificate identity to its resolved
+release tag rather than the optional raw version input. `hive update`, which
+discovers the latest release without setting `HIVE_VERSION`, therefore verifies
+the exact `release.yml@refs/tags/vX.Y.Z` identity instead of constructing an
+empty tag expectation and failing before installation.
+
+The installer fixture now exercises the latest-release API path with no
+explicit version input and captures the exact tag passed to cosign.
+
+The public `setup-agents` route now explicitly loads `Hive::Config` before
+dispatch. An isolated packaged-gem regression builds and installs the gem,
+invokes that route without the source test bundle's implicit requires, and
+proves it reaches the typed configuration-error boundary instead of raising an
+unhandled missing-constant exception.
+
+---
+title: Make the release install gate portable on macOS
+type: fix
+module: release
+created: 2026-08-06
+tags: [release, workflow, macos, portability]
+---
+
+The tag-time native gem-install gate now selects its sole candidate gem with a
+Bash glob array and verifies that entry is non-empty. This replaces a string
+comparison against `wc -l`, whose BSD implementation pads the count with
+leading spaces and stopped the macOS gate before `gem install` despite an exact,
+authenticated artifact.
+
+The Linux ARM behavior and the fail-closed zero/multiple/empty-file checks are
+preserved.
+
+---
+title: Admit canonical Git PAX metadata at tag handoff
+type: fix
+module: release-candidate
+created: 2026-08-06
+tags: [release, release-candidate, archive, pax]
+---
+
+The tag-time release selector now accepts the one canonical PAX global header
+that `git archive` emits for the candidate commit. The candidate builder had
+already authenticated and validated that header, but the later selector
+mistook it for a link or special entry and blocked publication before any
+assets were released.
+
+The selector independently binds the header payload to the exact candidate SHA
+and continues to reject duplicate or malformed global metadata, symlinks, and
+all other special archive entries. Focused fixtures now reproduce the
+production PAX header and retain a hostile source-link regression.
+
+---
+title: Pin UTF-8 in the macOS release-candidate sandbox
+type: change
+module: release-candidate
+created: 2026-08-06
+tags: [release-candidate, workflow, macos, sandbox, encoding]
+---
+
+The macOS release-candidate sandbox now fixes `LANG` and `LC_ALL` to
+`en_US.UTF-8`. Installed baseline and candidate commands therefore retain a
+deterministic UTF-8 external encoding after the host environment is scrubbed,
+instead of falling back to US-ASCII while reading project configuration.
+
+The ordinary install-smoke workflow exercises the same environment and fails
+unless Ruby reports UTF-8 as its default external encoding, keeping this hosted
+runtime prerequisite visible on pull requests.
+
+---
+title: Align the hosted upgrade contract with current migrations
+type: change
+module: release-candidate
+created: 2026-08-06
+tags: [release-candidate, upgrade, migration, macos, sandbox]
+---
+
+The historical v0.4.1 qualification row now recognizes the explicit migrations
+performed by current Hive: bench default binding, registry identity enrichment,
+doctor v2 replacement, and the named additive status-condition projection
+fields. User task identity, contents, stage, dependencies, and markers remain
+protected, and the second migration run still permits no changes.
+
+The macOS deny-default profile now permits writes only to the literal
+`/dev/null` device in addition to its existing run-root write boundary. The
+ordinary macOS install smoke opens that device under the exact profile, covering
+the RubyGems resolver behavior that the full hosted candidate exposed.
+
+---
+title: Repair hosted release-candidate runtime boundaries
+type: change
+module: release-candidate
+created: 2026-08-05
+tags: [release-candidate, workflow, macos, sandbox, encoding]
+---
+
+The macOS upgrade gate now permits read-only `sysctl` calls required to start
+the hosted Ruby runtime while retaining deny-default, deny-network, run-root-only
+writes, and no Mach service lookup. The ordinary macOS install-smoke job runs a
+minimal Ruby process under the same sandbox profile so this prerequisite fails
+on pull requests instead of during release qualification.
+
+Bounded subprocess stdout and stderr are normalized to valid UTF-8 after byte
+truncation. Legacy package warnings and split multibyte tails can therefore be
+retained in JSON receipts without making the hosted upgrade entrypoint fail
+during final serialization.
+
+---
+title: Repair first live 0.7.0 upgrade proof
+type: fix
+module: release-candidate
+created: 2026-08-05
+tags: [release-candidate, upgrade, invariants, channel]
+---
+
+The first full 0.7.0 candidate campaign exercised the real upgrade survivor
+and exposed two deterministic harness defects. Semantic snapshots now ignore
+elapsed task age, candidate-owned managed-skill expectations, and newly added
+empty status defaults while continuing to reject observed Doctor changes and
+non-empty user state. The reviewed channel updater now uses a dedicated empty
+`HIVE_HOME`, preventing the representative phase's channel marker from
+shadowing the simulated install prefix during `hive update`.
+
+Focused regressions cover both boundaries. This repair does not itself provide
+trusted candidate evidence or perform a release action; a fresh exact-main
+hosted campaign is still required.
+
+---
+title: Stabilize the web golden-path PR gate
+type: fix
+module: web
+created: 2026-08-05
+tags: [web, e2e, daemon, ci, open-pr]
+---
+
+The browser golden-path E2E now proves that the task reached the durable
+`5-open-pr` stage instead of waiting for the transient "Ready to open PR"
+action label. An enrolled daemon may replace that label immediately when it
+dispatches the open-PR stage, while the stage identity and the test's real
+implementation commit remain durable evidence that execute completed.
+
+---
+title: Keep Honeycomb digests out of payment-card findings
+type: fix
+module: workflows
+created: 2026-08-05
+tags: [honeycomb, authoring-lint, pii, sha256]
+---
+
+Honeycomb authoring lint no longer classifies a Luhn-valid digit run wholly
+contained inside an exact SHA-256 token as a payment-card number. The 0.7.0
+release manifest exposed the false positive through its generated
+`release_sha256`; ordinary card-number fixtures remain rejected.
+
+---
+title: Repair release-candidate hosted gate harnesses
+type: change
+module: release-candidate
+created: 2026-08-05
+tags: [release-candidate, workflow, upgrade, sandbox, managed-web]
+---
+
+Catalog integrity now checks out full history for reviewed historical-tag
+contracts, and managed-Web verification uses its documented equals-form
+arguments. Hosted upgrade installation validates a closed closure-role set and
+rebinds producer cache roots to the consumer namespace without rewriting
+staged evidence, fixing Linux read-only `/cache` consumption for baseline,
+observer, and candidate dependencies.
+
+The macOS sandbox profile and permissions are unchanged. Same-profile shell
+and Ruby probes plus bounded install, attestation, upgrade, and exit-status
+checkpoints will identify the earliest failing boundary on the next hosted
+run. The precise macOS denial remains unconfirmed; this change does not claim
+trusted candidate evidence and performs no release action.
+
+---
+title: Make Architecture Patrol JobStore directly v3-only
+type: change
+created: 2026-08-05
+tags: [architecture-patrol, jobstore, storage, compatibility]
+---
+
+- Fixed JobStore authority at `refactor_patrol/v3`. Construction and read-only
+  queries create no state; the first authoritative mutation lazily creates
+  only v3.
+- Runtime and module-migration quiescence no longer probe or interpret
+  `v2/jobs`. Arbitrary obsolete v2 bytes remain untouched and cannot block or
+  override an existing v3 store.
+- Removed the unreleased reset command/schema/status projection, fresh-start
+  archive and generation machinery, reset-only writer quiescence/fencing, and
+  the now-unused managed-directory atomic-exchange primitive.
+- Restored `hive-daemon-status.v1` by removing only `job_store_resets`; later
+  valid fields and values, including `binary_drift: unreadable`, remain.
+- Kept all non-JobStore Architecture Patrol v2 owners, the global terminal
+  proofs, and the daemon activation lock unchanged.
+
+---
+title: Prepare Hive v0.7.0 release metadata
+date: 2026-08-05
+tags: [release, version, changelog, installer]
+---
+
+Prepared Hive v0.7.0 with synchronized root and managed-Web path-gem lock
+versions, pinned public installer URLs, refreshed canonical OpenClaw projection
+metadata, and user-facing notes for the workflow authoring, durable-operation,
+Patrol qualification, and trusted pre-tag release work merged since v0.6.9.
+
+The release-candidate documentation now records that v0.7.0 is newer than the
+reviewed v0.6.9 baseline while remaining blocked on fresh trusted remote
+evidence. This metadata preparation does not create a tag, publish artifacts,
+deploy, or perform a release.
+
+---
+title: Bound release-candidate workflow control scripts
+type: change
+module: release-candidate
+created: 2026-08-05
+tags: [release-candidate, workflow, architecture]
+---
+
+The protected release-candidate workflow now delegates dispatch/retry
+validation and attestation input collection to three small committed shell
+scripts. The protected-main bootstrap, candidate and platform execution,
+aggregate construction, and checkout-free Check publisher remain inline. The
+workflow verifies the archived validator against the exact trusted commit, and
+candidate tool identity now covers all three scripts without changing job
+names, permissions, dependencies, matrices, artifacts, or release authority.
+
+Post-U8 campaign `31014105054` and named retry `31015265841` are recorded as
+dogfood evidence: the retry selected exactly one gate and reused the immutable
+predecessor candidate artifact, while known harness findings kept both runs
+`qa_blocked`. No tag, publication, deployment, or release action occurred.
+
+---
+title: Decompose the release-candidate upgrade survivor
+type: change
+module: release-candidate
+created: 2026-08-05
+tags: [release-candidate, upgrade, architecture]
+---
+
+`HiveReleaseCandidate::UpgradeSurvivor` now coordinates focused channel oracle,
+reviewed updater, channel executor, state snapshotter, and phase executor
+collaborators. Public constant names, phase order, command/environment
+contracts, invariant evidence, channel receipts, teardown, blockers, and output
+shape are unchanged. Candidate tool identity now covers every extracted source,
+and a focused contract pins clean leaf loading plus source ownership.
+
+---
+title: Decompose release-candidate orchestration after hosted dogfood
+date: 2026-08-05
+category: architecture
+module: release-candidate
+tags: [release, candidate, u8, orchestration, dogfood]
+---
+
+**Changed:** Reduced `HiveReleaseCandidate::Runner` to the stable public façade
+and composition root over five internal owners: committed repository inputs,
+baseline-cache authorization, gate execution, local-attempt persistence, and
+remote-run orchestration. Existing public verbs, gate/evidence ordering,
+locking, retry lineage, and blocker payloads remain at the façade. The remote
+client also accepts GitHub's exact identical-compare response when
+`head_commit` is omitted, and hosted retry admission binds the candidate SHA
+and signed external evidence identity instead of GitHub's rewritten Check Run
+details URL. Release selection uses the same immutable identity contract, so a
+QA-ready Check remains selectable after that rewrite.
+
+**Evidence:** Protected-main run `31005500332` retained the exact candidate and
+terminal evidence with seven of fourteen required gates passing. Named retry
+run `31006277887` failed closed before gate selection at the obsolete URL
+assertion; a fresh post-merge targeted retry remains required. The campaign's
+additional harness failures and the deliberately deferred hard-crash journal
+are recorded in `wiki/gaps.md`. No tag, publication, deployment, or release
+action occurred.
+
+---
+title: Add the reduced Patrol installed/live smoke boundary
+date: 2026-08-05
+category: architecture
+module: patrol
+tags: [patrol, qualification, installed-live, sandbox, provider, u3c]
+---
+
+**Changed:** Added exactly five `packaging/patrol_evidence` runtime owners and
+one manual command. A clean exact protected-main controller evaluates a
+distinct later candidate, streams and binds its archive and installed closure,
+renders the archive into an independently hashed read-only source tree, treats
+installed gemspecs as opaque bytes, and builds only from a writable sandbox copy.
+Each run binds one canonical one-hour, one-time authorization to the exact
+controller/candidate/image/invocation and the live registered project,
+repository HEAD, state tree, and observation bytes. Transient inputs remain
+outside the result-only retained evidence store. It
+runs the installed candidate and both first-party modules inside one
+digest-pinned networkless/read-only-root resource-bounded container, verifies
+whole-process teardown through one hashed engine executable and closed runtime
+environment, loads only separately mounted read-only trusted
+controller/support bytes rather than the candidate's controller copy, and
+performs one closed host-side authenticated
+provider transport probe. Canonical results use expected-byte atomic
+publication, closed component schemas, and non-destructive owner-checked
+retention cleanup. The detached process campaign is opt-in and excluded from
+default/hosted CI.
+
+**Boundary:** The existing Patrol E2E controller gained only a bounded
+read-only `external_smoke` entry. The path cannot construct production
+qualification, write report v2's `installed_live` lane, call provider-backed
+Patrol decisions, emit operator-ready evidence, or authorize promotion or
+cutover. Full U3b/U3c and `U3-ARCH-006` remain open.
+
+---
+title: Bound reduced U3c to installed and provider custody smoke
+date: 2026-08-05
+category: architecture
+module: patrol
+tags: [patrol, qualification, installed-live, threat-model, u3c]
+---
+
+**Decision:** Documented the proposed reduced U3c threat model and five-owner
+packaging boundary. Because merged U3b uses prepared records, U3c may claim only
+`installed_live_smoke_verified` after a protected-main controller evaluates a
+distinct later candidate and proves exact installed candidate, both-module,
+sandbox/process/resource, artifact, and separate provider-transport custody.
+The infrastructure PR cannot qualify itself. The result cannot populate report
+v2's `installed_live` lane or emit `evidence_ready_for_operator`.
+
+**Gap:** The fresh both-module scheduler/fault matrix, independent controls,
+provider-backed Patrol decisions, credential-expiry/quota-reset lifecycle, and
+the inherited `U3-I06` / `U3-ARCH-006` obligations remain deferred until an
+observed defect or explicit operator readmission justifies that architecture.
+Production mutation remains forbidden until independent reliability/security
+acceptance and explicit operator signoff on the reduced claim.
+
+## 2026-08-05 — Seal Workflow Creator live fixtures independently of ambient umask
+
+**Fix:** Hosted coverage runs Ruby from a toolcache artifact owned by its build
+UID rather than the test process or root, so production correctly rejects that
+foreign-owned executable. The live setup fixture now copies the exact host Ruby
+into its current-user-owned input closure before admission. It also holds umask
+`0077` across all generated inputs and restores the caller's umask afterward.
+A focused regression starts from `0002` and proves the copied interpreter has
+the current UID, one link, and no group/world write bits; production admission
+was not relaxed.
+
+**Evidence:** The exact hosted seed passes all eight setup tests under ambient
+umask `0002` with 50 assertions and no failures, errors, or skips. The optional
+hostile campaign remains outside normal CI and was not run.
+
+## 2026-08-05 — Workflow Creator live proof review hardening
+
+**Change:** Final review moved candidate homes, the Git directory, and OpenClaw
+state/config/approvals into an owner-private control root outside the model-
+writable workspace; U14's socket now lives in the owner-private workspace
+parent. The gateway checks Git/skill
+identity before every candidate command, and the runner checks the complete
+OpenClaw control plane around both model loops.
+Setup performs deterministic Hive initialization while the repository is still
+a main checkout, then atomically moves `.git` into the control root before any
+model process starts; this preserves both Hive's init precondition and the
+model-write isolation boundary.
+The bounded proof also removes Hive init's managed LLM-wiki post-commit hook
+before relocation, leaving no active Git hook in the candidate control plane.
+The smoke now emits the supervisor's admitted hyphenated correlation identity;
+setup rejects incompatible identities before building either closure.
+The installed-runtime probe exercises root-owned toolchain inputs. Setup admits
+only immutable regular inputs owned by UID 0 or the current runner, then copies
+them into the runner-owned identity closure; foreign-user inputs remain denied.
+The existing U14 gateway/execution pair budget moved narrowly from 600 to 615
+lines to retain the external socket, injected boundary verifier, and semantic
+status check without compressed lifecycle code or a seventh runtime owner.
+
+**Evidence:** A passing primary now retains validated native
+`openclaw skills info hive --json` evidence and accepts the final operational
+status only when it names exactly the created editorial task at `1-research`.
+Bootstrap failures replace only the initial `preflight/not_started` receipt;
+more specific typed failures remain unchanged.
+
+**Authorization:** The live workflow requires the repository owner as both the
+dispatching and triggering actor, refuses rerun attempts, and repeats that gate
+inside every credential-bearing job before provider secrets are exposed.
+
+**Proof:** The post-review focused checkpoint passed 117 runs and 4,176
+assertions with zero failures, errors, or skips. Thirteen changed Ruby files
+passed RuboCop, both changed YAML contracts parsed, and the diff whitespace and
+literal-secret scans passed. The optional hostile suite was not run.
+
+## 2026-08-04 — Workflow Creator live orchestration boundary
+
+**Change:** Added the U15 `WorkflowCreatorLiveSetup` and
+`WorkflowCreatorLiveRunner` boundary above U14. Setup admits exact candidate and
+OpenClaw artifacts, immutable installed runtimes, the candidate `/hive`
+projection, one private initialized workspace, and the effective SQLite-backed
+OpenClaw execution policy. The runner owns selected-provider credential routing,
+the two vocabulary-fixed OpenClaw model loops, observed graph/task/effect truth,
+and U1b primary finalization.
+
+**Security:** Only the credential selected by the exact model prefix reaches the
+outer OpenClaw processes. The configured shell strips both provider credentials
+and GitHub/Git/SSH authority before model-invoked tools, and U14 remains the sole
+gateway and process-custody owner. Dependency, transport, runtime, policy, and
+workspace drift fail with typed non-passing evidence.
+
+**Workflow:** The smoke and GitHub workflow are thin adapters. The committed
+`openclaw@2026.7.2-beta.7` / Node `22.23.1` lock is installed with lifecycle
+scripts disabled, production dependencies are audited, and evidence is
+initialized before setup so failures remain uploadable. The U14 private
+shebang gateway is now owner-executable so OpenClaw can invoke its allowlisted
+path without widening ownership. Hostile suites and authenticated provider
+calls remain optional rather than part of normal pull-request CI.
+
+**Proof:** The focused checkpoint passed 137 runs / 1,994 assertions with only
+the expected credential-gated skip. A credential-free installed probe used the
+real beta7 runtime, authenticated the SQLite policy, stopped before model
+execution, retained typed non-passing evidence, and removed its workspace.
+
+**Limit:** A passing live claim still requires an explicitly authorized run on
+the unchanged exact head. Local deterministic proof and ordinary hosted CI do
+not replace that artifact.
+
+## 2026-08-04 — Workflow creator deterministic execution boundary
+
+**Change:** Added the `boundary-ready` Workflow Creator Execution catalog row
+for exactly six U14 runtime owners. Its only component edge points to Workflow
+Creator Core, its clean entry point is `WorkflowCreatorExecution`, and its typed
+session surface is limited to the gateway/workspace paths, two closed outer
+launches, draft/finish/result, and close lifecycle.
+
+**Authority:** U14 may admit the two fixed archives and caller-selected
+installed closures, serialize the nine vocabulary commands, own Linux process
+teardown and bounded capture, create and identity-bound-clean one workspace,
+and publish only the three vocabulary-fixed support members. It has no
+provider, model, credential, installed-version, workflow-policy,
+primary-receipt, or passing/live-proof authority. U15 authenticated
+orchestration remains pending.
+
+**Fences:** Execution alone constructs Gateway and ProcessSupervisor;
+ProcessSupervisor alone constructs Capture. The private receipt publisher
+remains hidden and is authorized from execution only for fixed support-file
+publication. Source closure, command-label vocabulary ownership, clean loading,
+and the 410/495/600 pairwise readable-line budgets are component-tested. The
+gateway/execution projection was corrected from 520 after implementation showed
+that the smaller number encouraged compression across fixed IPC and two-phase
+receipt lifecycle code or omission of disjoint custody-root validation without
+removing a responsibility owner.
+
+**Final review:** The one three-lens exact-head pass closed permanent-poison,
+continuous-output timeout, archive-tail/tree, long exact-secret, external
+gateway-destination, prompt/argv binding, installation-drift, full-bundle
+completion, and catalog-truth gaps. Support publication can remain partially
+complete for retry, but the typed result cannot pass until the independently
+written primary and all three support members revalidate as one retained bundle.
+
+**Limits:** Process custody is Linux-only. Caller-loss teardown is tested, but
+externally SIGKILLing the trusted custody root itself is not claimed, and
+coherent arbitrary same-UID compromise remains outside the guarantee.
+
+---
+title: Bind Workflow Creator execution to the created task slug
+type: change
+created: 2026-08-04
+tags: [workflow-creator, execution, evidence]
+---
+
+The Workflow Creator semantic contract no longer assumes a fixed task slug.
+Its nine-command vocabulary gives every position an exact semantic label and
+represents the run target as `{created_slug}`. Execution receipts must prove
+that argument 1 of command position 7 was bound from the `slug` result field of
+task-creation position 6, and the primary task row must carry the same slug.
+
+Focused core, proof-bundle, and deterministic smoke coverage resolve a realistic
+generated slug before validating exact argv and reject command-label or binding
+substitution.
+
+---
+title: Workflow Creator publication review hardening
+type: change
+created: 2026-08-04
+tags: [workflow-creator, evidence, publication, recovery]
+---
+
+Workflow Creator evidence publication now holds one bounded cooperative directory
+lock across complete initialization and replacement transitions. Exact retries
+recover private one-link pre-publication stages and linked post-publication stages;
+stable different bytes remain typed conflicts. Unlock and descriptor-close cleanup
+preserve the primary outcome, lock waits are bounded, and both held descriptors are
+offered for cleanup.
+
+The protected live adapter creates its evidence directory as owner-only and passes
+the exact provider credential through failure-receipt redaction and validation.
+Construction fencing now keeps the production-wide Ruby scan when a component adds
+packaging scan roots. The existing macOS CI lane executes one native publication
+happy path; the hostile publication matrix remains outside ordinary CI.
+
+## 2026-08-04 — Workflow creator Darwin staging permissions
+
+**Change:** Workflow Creator receipt publication now wraps newly created staging
+descriptors as `File` objects and applies descriptor-bound mode `0600` before
+writing receipt bytes. This matches Hive's established managed-directory
+creation pattern and removes dependence on the platform's initial create mode.
+
+**Proof:** The focused publication suite injects a too-open `0644` created
+descriptor and verifies that initialization publishes the exact canonical bytes
+as a single-link `0600` file. The protected macOS CI path executes the same
+native initialization and replacement flow on Darwin.
+
+## 2026-08-04 — Workflow creator receipt publication boundary
+
+**Change:** Added the typed `WorkflowCreatorEvidence` facade and its private,
+creator-specific receipt publisher. The facade accepts only a bundle directory,
+derives the primary filename from the frozen vocabulary, validates canonical
+non-passing receipts through the merged creator core, and owns descriptor-bound
+initialization, compare-and-swap replacement, bounded recovery, cleanup, and
+durability.
+
+**Safety:** Publication uses held directory descriptors plus native
+`openat`/`linkat`/`renameat`/`unlinkat`, owner-only regular files, no-follow and
+nonblocking opens, file-before-publication fsync, directory-after-cleanup fsync,
+one held-directory-descriptor replacement lock, and fail-closed
+link/path/type/permission checks. The Ripper construction fence
+now recognizes parenthesized and parenthesis-free `.new` calls and permits the
+private publisher only from its public facade.
+
+**Proof:** Focused tests cover exact and conflicting retries, both transient
+cleanup orders, concurrent recovery, interrupted and replacement crash gaps,
+link ambiguity, fsync order and failure, parent rebinding, bounded FIFO/special
+enumeration, typed native errors, cleanup, and Linux/macOS flag tables. Release
+candidate source identity now includes both publication files.
+
+**Authority:** The temporary protected smoke adapter emits only a typed
+non-passing U14 custody gap. It does not select credentials, execute the future
+U14 transaction, or claim U15 live success.
+
+---
+title: Isolate the committed managed-Web builder environment
+type: change
+date: 2026-08-04
+---
+
+- Launched the committed managed-Web helper with a minimal allowlisted
+  path/locale environment instead of inherited Ruby, Bundler, and coverage
+  startup hooks.
+- Added a focused regression for the default-json/locked-json activation
+  conflict that failed the hosted release-candidate artifact test.
+
+---
+title: Workflow Creator bundle custody
+type: change
+date: 2026-08-04
+---
+
+- Cut the incumbent live-agent attestor and verifier over to one exact
+  four-file Workflow Creator bundle with no legacy primary-only fallback.
+- Added bounded no-follow source custody, exact-byte retention, independent
+  retained validation, raw secret scanning for every retained member, and
+  canonical attestation-primary binding through the existing semantic facade.
+- Recorded the first Workflow Creator Core proof consumer and removed the U1a2
+  migration exception while retaining `candidate` state until U1b publication.
+- Bound release-candidate builder identity to the exact committed live-agent
+  builder source closure using stable repository-relative labels, bounded
+  source-archive admission, and isolated execution of the exported managed-Web
+  helper.
+- Kept live Workflow Creator proof explicitly unavailable until U1b/U14/U15
+  produce the complete bundle; no provider, publication, or release claim was
+  added.
+
+---
+title: Workflow Creator semantic core
+type: change
+date: 2026-08-04
+---
+
+- Promoted Workflow Creator Values/Text Safety to `boundary-ready` after adding
+  its first one-way production consumer.
+- Added the `workflow-creator-core` candidate with an immutable vocabulary and
+  failed, primary, installed-closure, and declarative execution validation over
+  Values-owned snapshots.
+- Kept hostile/property campaigns opt-in; the normal focused contract is a
+  compact deterministic suite, and U1a2 retains the sole consumer fence.
+- Applied the approved helper-only budget re-scope without changing public,
+  file, responsibility, dependency, or decision fences.
+
+---
+title: Reduced Patrol installed-CLI qualification smoke
+type: change
+date: 2026-08-04
+tags: [patrol, qualification, e2e, modules]
+---
+
+- Added an opt-in, test-only reduced Patrol qualification controller that
+  archives the exact clean candidate head, installs its gem privately, installs
+  both Patrol modules through the installed CLI and a local Git catalogue rewrite,
+  and invokes its internal deterministic receipt/admission process facade over prepared
+  real shadow records.
+- Added a committed twenty-case catalogue with exact ordinary/architecture
+  semantic and cardinality expectations. Only four externally observable
+  process-boundary fault families are E2E; four interior atomic contracts link
+  to exact existing focused tests.
+- Bounded every child and campaign, killed whole owned process groups, isolated
+  the environment and ambient Git configuration, and retained bounded evidence
+  whose every string is redacted and final bytes scanned through the shared
+  secret matcher. Terminal leaders cannot leave owned descendants, and compact
+  process outcomes now validate exit, signal, and timeout statuses by kind.
+- Pinned and materialized the candidate before loading the catalogue from its
+  archive, digest-matched the executing controller to that archived source, and
+  rechecked candidate HEAD and cleanliness after capture. Shadow inventory and
+  persisted report reads are descriptor-bound, no-follow, count/byte bounded,
+  and covered by the monotonic campaign deadline.
+- Reject duplicate observation rows, require exact module apply/inspect
+  generation readback, and bind the canonical persisted report to this exact
+  candidate, scenario, receipt set, module summaries, and content identities.
+- This does not prove independent same-head controls, fresh scheduler-driven
+  matrix execution, installed/live package channels, full U3b/U3c, catalogue
+  promotion, or mutator cutover.
+
+---
+title: Add bounded Patrol qualification CLI facade
+type: added
+date: 2026-08-04
+---
+
+- Add internal deterministic receipt and qualification migration actions that
+  accept one bounded, strict UTF-8, exact-key JSON object from stdin.
+- Delegate receipt construction and confirmed qualification admission to the
+  existing Patrols facades and emit their existing receipt/report documents.
+- Keep the facade independent of the lifecycle/store base and route
+  qualification failures through the same report-v2 schema as successes.
+- Reject oversized, malformed, non-object, and extra-key requests without
+  adding request files, schemas, stores, runners, or lifecycle authority.
+
+---
+title: Distinguish local Patrol transition generations
+type: fixed
+date: 2026-08-04
+---
+
+- Keep semantic target/scope duplicate detection for externally observable
+  Patrol effects.
+- Key local Architecture Patrol `job`, `discovery`, and `action` JobStore
+  transitions by exact intent and idempotency identity, allowing a fenced
+  recovery generation to repeat a local target/scope without failing
+  qualification as a duplicate effect.
+
+---
+title: Route module hooks through the Attempts facade
+type: change
+date: 2026-08-04
+tags: [attempts, modules, daemon, admission]
+---
+
+- Added `Attempts::API#dispatch_module_hook` so the module daemon reaches the
+  configured durable-attempt adapter through the same stable facade as task
+  admission and recovery.
+- Kept the public keyword contract explicit and closed while adding focused
+  delegation and unknown-key coverage for the complete supported module-hook
+  admission payload.
+
+---
+title: Add bounded Patrol deterministic receipt facade
+type: added
+date: 2026-08-04
+---
+
+- Add one public `Patrols.deterministic_receipt_for!` seam that selects a
+  unique comparable terminal shadow decision by module and trigger identity
+  under the exclusive migration lock, excluding concurrent same-identity
+  writes until receipt construction finishes.
+- Construct the canonical qualification receipt only from descriptor-validated
+  capture, projection, and observational-effect evidence; caller authority is
+  limited to bounded candidate metadata, and its repository must exactly match
+  the nonempty host-qualified repository target captured by the scheduler.
+- Bind Architecture Patrol manifests to the exact host in their PR URL so both
+  Patrol products emit the same `host/owner/name` qualification identity.
+- Preserve only exact replay of already-durable owner/name captures; new
+  captures and qualification receipts require the host-qualified target, even
+  when caller metadata attempts to repeat a hostless replay identity.
+- Fail closed on missing or ambiguous selection and on nonterminal,
+  configuration, effect, projection, or repository identity mismatch.
+
+# Keep daemon event producers inside the logger contract
+
+- Added every production-emitted daemon event missing from the closed
+  `Hive::Daemon::Logger::EVENTS` enum. This prevents successful merged-task
+  archival from being followed by a false `fatal` when the dispatcher emits
+  `completed`, and repairs the same latent crash in module-runtime,
+  markerless-stall, dispatch-sequence, and task-id-backfill paths.
+- Added a source-scan regression test over `lib/hive/daemon/**/*.rb` so a
+  future literal `.event(:symbol)` call fails CI unless the real logger accepts
+  it. Existing fake loggers can no longer mask this integration contract.
+
+---
+title: Complete Patrol qualification final fences
+type: fixed
+date: 2026-08-03
+---
+
+- Keep invalid UTF-8 translation inside U3a receipt and verifier boundaries so
+  the shared U2 evidence semantics remain unchanged.
+- Bind each qualification to its receipt-derived earliest capture time and
+  require both recovery lanes to begin after the latest contradiction.
+- Admit the shared current-version command error envelope in the report-v2
+  schema and reject malformed current report bytes through `Hive::ConfigError`
+  without replacing them.
+- Fence the exact six U3a owners from the deferred U5-U7 managed-store,
+  lifecycle, and dispatcher owners with leaf-local mutation proof.
+
+---
+title: Close Patrol qualification final-review gaps
+type: fixed
+date: 2026-08-03
+---
+
+- Count comparable decisions by trigger, repository, SHA, and change window so
+  fresh capture wrappers cannot inflate qualification diversity.
+- Let digest-CAS admission advance an `evidence_required` lane through a strict
+  same-run receipt superset or a disjoint fresh run, while invalidation recovery
+  requires new runs with disjoint evidence in both lanes.
+- Preserve report migration provenance across every successor and fail closed
+  instead of rebuilding a lost migration receipt from later mutable state.
+- Reject canonical non-object reports, wrong-typed string bindings, and invalid
+  UTF-8 through the declared `Hive::ConfigError` boundary.
+- Keep the six U3a owners fenced from constructing later U5-U7 state owners
+  without adding a generic source analyzer.
+
+# Admit deterministic patrol evidence through one facade
+
+`Hive::Modules::Migration::Patrols` now accepts bounded raw receipt documents
+and independently computed expected bindings, verifies every receipt, builds
+the deterministic qualification, and digest-CAS merges the existing report-v2
+projection. The facade does not run scenarios, collect evidence, or own retry,
+provider, process, cutover, or recovery behavior.
+
+This keeps U3b's deterministic E2E campaign outside production architecture:
+the harness can exercise real Patrol paths and hand observations to one public
+admission boundary without constructing verifier tokens, qualifications, or
+report projections itself.
+
+---
+title: Isolate Patrol PR-opener test state
+date: 2026-08-03
+tags: [testing, patrol, state, recovery]
+---
+
+Patrol PR-opener tests now construct and reserve occurrences only under
+disposable project roots. The shared test helper rejects the live repository
+root before any state write, preventing unit tests from placing synthetic
+captures in the daemon's recovery store.
+
+---
+title: Tighten Patrol qualification and report-v2 transitions
+type: changed
+date: 2026-08-03
+---
+
+- Bind verification to the exact evidence receipt and reject conflicting
+  capture/occurrence wrappers, unsettled effects, and cross-lane configuration
+  drift while preserving explicit replay telemetry.
+- Compose the evidence-receipt schema from the strict U2 values and bound
+  receipt collections before mapping.
+- Enforce monotonic report-v2 CAS transitions, require two fresh lanes after
+  invalidation, restore admissions after interrupted stable upgrades, and keep
+  report-v2 cutover behind its separately authorized lifecycle boundary.
+
+# Make the Workflow Creator hostile campaign opt-in
+
+The normal test and coverage paths continue to exercise the deterministic
+Workflow Creator Values and TextSafety contracts, but skip the expensive
+20,000-case IEEE-754 and randomized canonicalization campaign. Run
+`bundle exec rake test:hostile` to execute that campaign explicitly.
+
+---
+date: 2026-08-03
+title: Add the bounded Patrol qualification protocol and report v2 conversion
+tags: [patrol, migration, evidence, qualification, component-boundaries]
+---
+
+- Added exactly six U3a production owners: a canonical evidence receipt,
+  independent verifier, bounded duplicate index, immutable qualification,
+  two-lane report projection, and one-off report migration. Their fixed
+  dependency graph ends at existing Report storage and adds no scenario runner,
+  provider, process custody, recovery authority, or operator lifecycle owner.
+- Qualification now requires per-module unique comparable
+  trigger/repository/SHA/change-window decision count, decision-class,
+  repository-SHA, and change-window diversity, and stable configuration;
+  timestamp, fault-step, or artifact variants cannot inflate that count and
+  elapsed time is telemetry only. Exact evidence replay is idempotent while
+  distinct terminal semantic/idempotency collisions and unsuperseded
+  contradictions fail closed. The verifier binds complete typed artifacts and
+  fault steps before creating its non-public verified token.
+- Report v2 supports deterministic and installed-live lanes, durable partial
+  reload and completion, and explicit `evidence_required` migration state. The
+  converter accepts every released v1 shape, preserves exact source bytes,
+  validates source/archive/receipt linkage, repairs interrupted receipt
+  publication under the shared authority lock, and uses digest CAS for
+  forward/reverse transitions. An exact superseding contradiction may replace
+  only its qualified lane and still requires report digest CAS to persist.
+- Report and Patrols now share the descriptor-confined `.mutation.lock`.
+  Existing adoption applies report conversion in `shadowing`, `module`, and
+  `rolled_back` states without granting report migration cutover or rollback
+  authority.
+- Added strict receipt/report schemas, focused unit and architecture-topology
+  tests, and documented the remaining U3b deterministic and U3c installed/live
+  temporal, authority, sandbox, custody, and qualification-production gaps.
+
+---
+title: Add bounded Workflow Creator text projection
+type: change
+created: 2026-08-03
+tags: [architecture, component-boundaries, workflow-creator, text-safety]
+---
+
+- Added `HiveLiveAgentProof::WorkflowCreator::TextSafety` as the singular
+  candidate entry point. It real-requires the existing Values leaf and exposes
+  bounded UTF-8 text projection, safe-relative-path checks, ordered exact and
+  patterned secret findings, and overlap-preserving redaction.
+- Kept ownership explicit: public positive proof passes only
+  `Values.capture(...).value`, while exact frozen plain-shape admission remains
+  a documented internal contract rather than origin authentication. TextSafety
+  captures its own private core handles and normalizes failures to one fixed
+  secret-free error with no cause.
+- Added red-first focused proof for byte boundaries, load order, unique secret
+  scans, credential patterns, complete and truncated private-key envelopes,
+  overlapping ranges, captured-handle privacy, and post-load core replacement.
+- Closed the combined R43 proof at 298 lines / 20 callables / 32 decisions for
+  Values, 200 / 14 / 23 for TextSafety, and 498 / 34 / 55 when composed. Both
+  production files pass the per-method and 120-column RuboCop overlay.
+- Expanded the same `workflow-creator-values` catalog row to own both files,
+  kept it `candidate` with no Hive consumers, and moved its sole migration
+  fence from U1a1vt to U1a1c. This change adds no schema, custody, publication,
+  live-provider behavior, or boundary-readiness claim.
+
+---
+date: 2026-08-03
+title: Update now migrates registered projects automatically
+tags: [update, migration, cli]
+---
+
+- `hive update` now waits for its detected channel updater, resolves the newly
+  installed Hive executable, and runs `hive migrate --all` automatically.
+- Added `hive migrate --all` with global-state and per-project progress,
+  continue-after-project-failure behavior, final counts, readable errors, and
+  exact recovery commands.
+- `hive update --dry-run` now previews both the channel update and the
+  post-update migration without executing either phase.
+- Update notices now recommend `hive update` on brew, AUR, and bash so guided
+  upgrades cannot bypass the automatic migration phase.
+- Recovery commands preserve the active `hive` or `hv` wrapper, stale registry
+  rows receive restore/forget/prune guidance, and daemon restart requests are
+  coalesced until the full fleet pass finishes.
+
+---
+title: Stage the Workflow Creator Values candidate
+type: change
+created: 2026-08-03
+tags: [architecture, component-boundaries, workflow-creator, values]
+---
+
+- Added the dependency-free
+  `HiveLiveAgentProof::WorkflowCreator::Values` leaf. Capture imports exact
+  JSON-shaped Ruby values through load-captured core operations into an
+  anonymous, non-copyable, non-marshalable, recursively frozen snapshot and
+  emits owned canonical UTF-8 bytes.
+- Added focused hostile-value proof for caller hooks, post-load core
+  replacement, mutation, cycles, encodings, key collisions, numeric forms,
+  resource ceilings, canonical-byte properties, and the exact R43
+  line/callable/decision and per-method budgets.
+- Kept dependency proof local to the leaf: `Ripper.lex` rejects bare and
+  qualified `require` and `require_relative` identifiers while ignoring
+  comments and strings, and a direct
+  `ruby --disable-gems -I<repository-root>` subprocess proves clean loading.
+  No generic Ruby/path analyzer or component-loader behavior was added.
+- Added one values-only `candidate` catalog row with no consumers,
+  dependencies, or production activation and exactly one
+  `removal_unit: U1a1vt` fence. The shared validator changed only to admit
+  that exact empty-consumer shape and hierarchical removal-unit identifiers.
+- `U1A1VI-ARCH-003` is disposed by removing the misplaced generic analyzer
+  responsibility. The aggregate `U1A1V-R02-ARCH-002` finding remains
+  program-open for U1a1vt; this change does not claim generic require-path
+  canonicalization, boundary readiness, publication, or live behavior.
+
+---
+title: Align managed prompts with target write authority
+---
+
+**Action:** Generic managed workflow prompts now defer target edits to the
+descriptor's stage instructions and runtime permission scope. This removes the
+contradictory task-folder-only sentence that caused a managed `yolo` repair
+actor to refuse edits even though Hive had deliberately supplied the registered
+project root as target context. Ordinary authored agents retain the exact
+task-folder-only prompt boundary.
+
+**Tests:** Extended the managed-yolo agent regression to require target-context
+wording and reject the contradictory constraint, and added an unmanaged control
+that preserves the task-folder-only wording.
+
+---
+date: 2026-08-03
+title: Tighten project capture custody and retained-receipt validation
+tags: [web, capture, artifacts, git, security]
+---
+
+- Configured capture commands now use direct executable argv semantics even for
+  one-item commands, keeping punctuation-bearing tracked filenames literal.
+- Source attestation rejects Git `assume-unchanged` and `skip-worktree` flags at
+  both custody boundaries. Git probes share one monotonic deadline, bounded
+  streams, and descendant cleanup with provider execution. A dedicated
+  subreaper process owns only each command subtree; unrelated caller children
+  are never included in discovery, signalling, or reaping.
+- Project providers fail early with a platform-accurate diagnostic away from
+  Linux, and blank provider diagnostics receive an actionable fallback.
+- New v2 manifests require at least one disclosed environment key. Hive Web now
+  validates retained v2 receipts against the complete shared strict schema while
+  retaining v1 display compatibility.
+
+---
+title: Sparse custody subprocess coverage
+date: 2026-08-03
+tags: [testing, coverage, capture, process-custody]
+---
+
+Coverage-instrumented custody children now flush their observed line and branch
+hits before the production `exit!` boundary. Child result files omit untouched
+sources, while the parent result retains the complete source inventory for the
+100% line-coverage gate.
+
+---
+date: 2026-08-02
+title: Artifact capture selects compatible or project-owned recorders
+tags: [web, capture, artifacts, config, security]
+---
+
+- Capture selects the built-in Hivebox recorder only for a complete compatible
+  source layout; conventional projects can declare a validated
+  `artifacts.capture.provider` executable.
+- Project providers receive an exact JSON request in a deny-default subprocess.
+  Linux child-subreaper custody covers detached descendants, output drains, and
+  abnormal supervisor death from a parent-owned PID/start-time and exit-status
+  boundary. Hive revalidates the complete working-tree snapshot, including
+  ignored paths, after every attempted execution and preserves combined
+  provider/custody failures. Snapshot hashing has explicit 1 GiB cumulative and
+  30-second monotonic bounds.
+- Fiddle is now an explicit runtime dependency for the Linux `prctl` custody
+  call instead of relying on its pre-Ruby-3.5 default-gem status.
+- Hive accepts artifacts only from private staging, then bounds evidence and
+  argv, decodes the declared image/video content, independently hashes it, and
+  publishes a sub-240-KiB manifest last. Content-addressed provider names make
+  changed- and identical-byte recapture deterministic and recoverable.
+- The tracked executable remains ordinary local project tooling, not an OS
+  filesystem sandbox.
+- Added provider-neutral `hive-artifact-capture` v2 manifests while retaining
+  explicit policy and Hive Web read compatibility for v1 evidence. Non-object
+  receipts and recorder envelopes fail closed and can be replaced on recapture.
+- Unsupported projects now receive an actionable provider declaration message
+  instead of a misleading missing Hivebox dependency error.
+
+## [2026-08-02T19:45:00Z] workflows/agent - expose the declared target to managed yolo actors
+
+**Action:** Managed generic agents and council reviewers/revisers now pass the owning project root through the runtime-policy base context. The managed `yolo` compiler preserves those validated roots as explicit runner add-dirs, while portable non-yolo actors retain their read-only projection and ordinary brainstorm/plan stages remain task-only.
+
+**Why:** A live Root Cause Repair run reached diagnosis but Codex refused the repair because its explicit workspace roots contained only the task and immutable workflow package. The descriptor already granted unbounded `yolo` authority over the target; omitting the project from runner context made that declared contract unusable for target mutation.
+
+**Evidence:** Focused runtime-policy, generic-agent, and council tests assert the project/task/package context across all mutating and reviewing actor paths. The external workflow acceptance rerun remains the end-to-end gate.
+
+# Preserve blocked terminal workflow outcomes
+
+- Added an opt-in `terminal_outcomes` descriptor contract for final agent
+  stages, including read-only validation output and strict placement rules.
+- Classified the exact bounded first line before completion commit so declared
+  blocks and invalid output become durable attributed `ERROR` markers rather
+  than archived completion.
+- Kept blocked tasks active, visibly labelled, explicitly retryable, and
+  operator-owned while excluding semantic terminal errors from daemon
+  automatic retry.
+- Hardened marker reads and writes against FIFO hangs, unbounded tails,
+  symlink following, and predictable temporary-path redirection while
+  preserving binary artifact bytes.
+- Normalized semantic outcomes before stage-exit events and inside the terminal
+  rollback boundary, and rejected incompatible managed-worktree descriptors.
+
+# Patch Active Storage for CVE-2026-66066
+
+- Updated the Hive web bundle from Rails 8.1.3 to 8.1.3.1.
+- Recorded the native libvips 8.13 minimum required by the patched Active
+  Storage implementation.
+- Verified the web bundle, Rails boot, and full web test suite locally.
+
+---
+title: Module event drain closes admission during daemon shutdown
+date: 2026-07-31
+tags: [daemon, modules, events, shutdown, attempts]
+---
+
+- The daemon now passes its private process-lifetime admission predicate into
+  `Hive::Modules::DaemonRuntime`.
+- Module retry, setup-outbox, schedule, event, selection, and hook boundaries
+  recheck admission so a signal observed during one hook cannot admit a later
+  hook or project from the same tick.
+- Migration, package-admission, and hook locks carry the same predicate and
+  recheck it immediately before new-hook or retry provider dispatch.
+- A partially drained event retains its prior cursor. On restart the event
+  replays, the decision journal deduplicates hooks admitted before shutdown,
+  and hooks not yet admitted remain eligible.
+
+---
+title: Restore the Hivebox Fiddle build dependency
+date: 2026-07-31
+---
+
+## Hivebox: install libffi headers before bundling
+
+**Action:** Added `libffi-dev` to the Hivebox image's Debian build inputs.
+The exact committed Docker build resolved the explicit Fiddle 1.1.8 runtime
+gem, but `ruby:3.4-slim` did not provide `ffi.h`; the native extension stopped
+the image before Hive or the managed Web app could be installed.
+
+**Coverage:** Added a packaging contract assertion that the libffi headers are
+installed before `bundle install`, then rebuilt and smoke-tested the exact
+candidate image through the existing random-loopback-port Hivebox proof.
+
+---
+title: Pin managed Web archives to the candidate commit timestamp
+date: 2026-07-31
+---
+
+## Release candidate: make managed Web bytes reproducible
+
+**Action:** Fixed exact-SHA managed-Web candidate construction so the subtree
+archive uses the candidate commit timestamp. `git archive <sha>:web` receives a
+tree object and otherwise timestamps entries from the build wall clock, causing
+two candidate builds from one commit to produce different Web archive digests.
+Added a real temporary-repository regression that builds twice across a
+wall-clock boundary and requires byte-identical output.
+
+**Coverage:** `test/unit/packaging/managed_web_archive_test.rb`,
+`wiki/release-candidate.md`, and `wiki/testing.md`.
+
+---
+title: Render Web idea-capture I/O failures as typed errors
+type: change
+created: 2026-07-31
+tags: [web, ideas, errors, storage]
+---
+
+- Normalized `SystemCallError` and `IOError` from the in-process
+  `Hive::Commands::New#call!` adapter at `Project#add_idea!`, so Web renders a
+  readable 422 instead of an opaque 500 when project or attachment I/O fails.
+- Redacted filesystem paths from the browser response while preserving the
+  original exception class and cause for diagnostics.
+- Added a real permission-denied integration regression that proves the
+  response is typed, no partial task is created, the absolute project path is
+  absent, and the test restores the original directory mode.
+
+---
+title: Coding PR effects require exact controller identity
+date: 2026-07-31
+tags: [coding, open-pr, review, finalize, github, security]
+---
+
+# Coding PR effects require exact controller identity
+
+The coding workflow no longer lets an agent-authored or subsequently tampered
+`pr_url` select a controller-owned GitHub effect before identity proof.
+
+- Open PR validates the exact branch, URL, and local/remote head before a
+  post-agent body scan or rejected-PR remediation. An unobserved marker URL is
+  recorded as an error but is never fetched, edited, or closed.
+- Review comment publication binds the target to the owned worktree, exact
+  task branch, persisted controller head, origin repository, and one matching
+  OPEN pull request before comment lookup or posting.
+- Finalize resolves the URL through the task repository before URL-bound
+  scans or lifecycle reads, preserves the existing local-state/push gate for
+  review commits, and then requires exact local/remote head parity before
+  body or ready-state mutation.
+- Finalize repeats that exact head proof after the body-refresh agent and
+  before the post-agent scan or ready mutation, closing agent-interval drift.
+
+Focused regressions cover forged cross-repository URLs, absent controller
+observations, branch/head drift, and ordering before URL-bound effects.
+
+---
+date: 2026-07-30
+summary: Preserve operator launchers and validate managed QMD health during setup
+---
+
+- Made the bash installer publish `hive` and `hv` user-bin symlinks only when
+  their destinations are absent or already point at the exact managed
+  launcher. Occupied operator paths are preserved and the safe fallback is
+  selected without destructive replacement.
+- Left already-correct managed links in place and made a concurrent destination
+  creator fail closed into the fallback path without deleting the replacement.
+- Made uninstall remove only current-user bash-channel launcher symlinks whose
+  exact regular targets are under the active XDG or recorded prefix install
+  root and whose stable install marker proves Hive ownership. Same-shaped
+  operator trees and malformed prefix records are preserved.
+- Quarantined and revalidated a launcher before unlink so a concurrent
+  operator replacement is restored or retained instead of deleted.
+- Made setup diagnostics run a bounded QMD startup probe, distinguish a
+  repairable broken managed install from a broken operator binary, and verify
+  the managed executable after npm reports success. The post-install probe has
+  a 10-second process-group-cleaning timeout; diagnostic detail is
+  secret-redacted and bounded.
+- Kept that process lifecycle and diagnostic policy in the setup-owned
+  `Hive::Setup::QmdProbe`, shared by diagnostics and post-install validation
+  instead of widening the managed-Web verifier.
+- Converted probe timeouts and spawn failures into typed QMD repair results so
+  diagnostics and JSON setup still emit their complete envelope.
+- Added focused regressions for the prior launcher overwrite/removal and false
+  QMD-success cases, plus standalone setup/uninstall test dependency isolation.
+
+---
+title: Honor Ctrl+C across TUI modes
+type: change
+created: 2026-07-30
+tags: [tui, keyboard, signals]
+---
+
+- Routed Bubble Tea's decoded `KEY_CTRL_C` directly to the application
+  termination message before mode-specific key handling. Ctrl+C now exits
+  cleanly from the grid, overlays, and editable prompts while detached workflow
+  agents continue running.
+
+---
+title: Attempt storage now rejects redirected managed paths
+date: 2026-07-30
+tags: [attempts, durability, filesystem, recovery]
+---
+
+The durable-attempt store now revalidates its managed directories before
+access, rejects symlinked record and lock leaves, and preserves root
+containment for per-attempt recovery outputs. Attempt stream readers and
+writers apply the same no-follow policy. Corrupt or replacement links fail
+closed before Hive changes permissions or reads or writes redirected state.
+Malformed stream-log parents, including non-directories and symlink loops, now
+return an empty replay instead of propagating a filesystem read error.
+
+---
+title: Close daemon admission during signal shutdown
+type: fix
+created: 2026-07-30
+tags: [daemon, scheduler, signals, shutdown, concurrency]
+---
+
+TERM and INT now close one daemon-wide admission predicate. It is rechecked
+after blocking reconciliation and capacity work, between multi-candidate
+loops, and at the final durable-attempt, lost-successor, display-name, and
+supervised-child launch boundaries. Shutdown also releases request preclaims
+and patrol/digest reservations that were acquired before the signal. Existing
+accepted children still follow the normal bounded termination-and-drain
+lifecycle.
+
+---
+title: Make Doctor inspector loading deterministic
+type: change
+created: 2026-07-30
+tags: [doctor, cli, json, load-order]
+---
+
+- Made `Hive::Commands::Doctor` own its ordered summary keys and construct the
+  inspector through the supported `Hive::AgentSkills.hive_inspector` facade,
+  instead of depending on an earlier command or test to define an internal
+  constant.
+- Direct Ruby callers can now inject an inspector and render the
+  `hive-doctor.v2` summary in a fresh process without a load-order failure.
+- Made the standalone init Doctor, init-agent-skills, setup-orchestrator, and
+  uninstall test files declare the internal constants they instantiate, so
+  their documented single-file commands are deterministic.
+- Kept production consumers behind the public skillpack facade; the component
+  boundary contract prevents Doctor from requiring inspector internals.
+
+---
+title: Close fresh-start and Patrol publication recovery gaps
+type: change
+created: 2026-07-30
+tags: [architecture-patrol, patrol, jobstore, recovery, publication]
+---
+
+- Removed the last `job_store.schema_v2_import` trigger and
+  `schema_v2_import` outcome from Patrol evidence, shadow comparison, and their
+  published schemas. Released JobStore v2 now has one transition only:
+  explicit opaque archival followed by an empty v3 start.
+- Removed unused managed-directory quarantine/replacement primitives that
+  served the abandoned conversion/restore design. Atomic directory-to-marker
+  exchange remains the reset primitive.
+- Made an existing publication binding or uncertain-effect seed fail closed
+  when its exact validated patch receipt is missing, mismatched, or unreadable.
+  Recovery preserves the checkout and does not reset the branch, rerun the fix
+  agent, write a replacement patch, or mint a new patch identity.
+- Made terminal PR recovery retain its exact worktree while the publication
+  outbox is pending or the durable binding is absent/conflicting. Cleanup is
+  allowed only when the complete binding derived from the terminal receipt
+  matches the attempted patch and is outside the retryable states. A
+  projection-crash restart test proves one push and one PR creation.
+- Made the deterministic v2 archive name part of generation-presence
+  detection. An archive whose public reset marker is missing now blocks status
+  and runtime admission instead of being mistaken for a fresh project.
+- Added crash, replay, malformed-projection, typed-error, lock, daemon
+  readiness, status degradation, and multi-occurrence publication recovery
+  coverage without running a live JobStore reset.
+
+---
+title: Replace JobStore conversion with an opaque explicit fresh start
+type: change
+created: 2026-07-30
+tags: [architecture-patrol, jobstore, reset, recovery, storage]
+---
+
+- Removed the v2 JobStore reader/converter, restore path, installation and
+  all-user coordinators, privileged identity discovery, package hooks, system
+  retry services, compatibility schemas, and their test gates.
+- Added one explicit `hive refactor-patrol-reset PROJECT --confirm` boundary.
+  It binds one registered project, holds the stable profile activation lock,
+  drains and proves the current daemon generation plus its supervised writers
+  stopped, takes the existing Patrol effect lock exclusively, repeats an
+  independent PID/start-time fence, and never runs automatically.
+- The reset atomically exchanges only the released `v2/jobs` directory with a
+  canonical regular marker. Its exact opaque bytes survive under a
+  transaction-bound hidden archive; Hive never enumerates or imports them.
+  Every other v2 owner and the global terminal-proof catalog remain in place.
+- A completed transaction admits an empty v3 JobStore and stores its receipt
+  outside both generations. Interrupted exchange resumes idempotently, while
+  non-empty v3 state, malformed evidence, live writers, or unavailable atomic
+  exchange fail closed.
+- A daemon stopped by reset is restarted only after the new exact generation
+  publishes operational runtime readiness. The reset command emits one
+  schema-validated success or typed error JSON envelope for automation.
+- Daemon JSON status now reports `fresh`, `current`, `reset_required`,
+  `reset_incomplete`, `conflict`, or isolated `error` per registered project
+  without performing the reset, moving a legacy registry, or cleaning update
+  state temporary files.
+
+---
+title: Atomic Patrol publication binding
+module: patrol
+tags: [patrol, recovery, publication, outbox]
+---
+
+Ordinary Patrol now commits the terminal remote-effect receipt and its typed
+publication handoff in one occurrence-record update. StateStore projects the
+immutable repository, PR, base, head, patch, and worktree binding before
+acknowledging the exact outbox tuple, so a crash cannot cause either a second PR
+effect or an orphaned publication. Recovery can reuse the binding from the
+predecessor occurrence that created it while a later patrol cycle finishes the
+same finding.
+
+---
+date: 2026-07-29
+area: patrol, refactor-patrol, migration, storage
+---
+
+# Bound active recovery and confine v3 JobStore custody
+
+- Added one descriptor-confined, 4,096-id active occurrence recovery index.
+  Reservation, retirement, and dirty-generation fencing cover every crash
+  window; missing, malformed, stale, or dirty state receives one bounded
+  authoritative repair, while idle ticks never scan retained terminal history.
+- Routed live v3 jobs, query-index sidecars, quarantine evidence, and action
+  locks through one `JobStoreFiles` port backed by `ManagedDirectory`.
+- Enforced the 8,192-job limit under a store-wide admission lock before a new
+  per-job lock or query membership can exist. Inventory overflow now stops
+  while streaming at the bound instead of materializing arbitrary entries.
+- Established native-v3 admission before architecture recovery backoff/index
+  repair writes, and made semantic-family dry-run authority reads use a
+  read-only JobStore so previews remain state-free.
+
+---
+title: Bound Patrol inventory work and redact durable effect outcomes
+type: change
+created: 2026-07-29
+tags: [patrol, architecture-patrol, recovery, performance, secrets]
+---
+
+- Full `BoundedFileInventory` traversals now take one bounded sorted filename
+  snapshot instead of rescanning the directory once per page; stateless cursor
+  pages retain high-water fingerprint validation.
+- Occurrence journal state now carries a monotonic dirty generation. Reservation
+  marks it before writing product work, and only a generation-matched empty
+  repair clears it, so crashes and concurrent reservations remain recoverable
+  while later idle scheduler ticks skip retained terminal history.
+- `EffectDelivery` recursively redacts every nested string in terminal outcomes
+  before settlement or denial reaches a product store. Journal receipts,
+  projected evidence, shadow comparison, and terminal replay therefore share
+  the same redacted canonical bytes while preserving objects, arrays, numbers,
+  booleans, and nulls.
+- Focused proofs cover one enumeration at the 4,096-entry limit, retained
+  terminal history, a reservation racing a clean repair, and a fake GitHub
+  token absent from journal, evidence, comparison, and replay.
+
+---
+title: Restart-safe Patrol selection and occurrence state
+type: change
+created: 2026-07-29
+tags: [patrol, architecture-patrol, migration, recovery, storage]
+---
+
+- Separated immutable selection from terminal outcome. Ordinary and
+  Architecture Patrol keep distinct strict input projectors and produce one
+  shared `PatrolDecisionProjection`; coercion revalidates even an existing
+  in-memory value, provisional captures cannot contain outcome/effect evidence,
+  and final captures must retain the exact selection.
+- Added one bounded coordination cell to each existing occurrence journal.
+  Scheduled, module-event, and architecture-job identities compact through
+  canonical window/generation high-water and closed-through fences.
+  Non-sequenced manual/direct captures use a bounded exact fence and retain
+  terminal proof rather than replaying when it is full.
+- Persisted normalized recovery failure generations and 60/300/900-second
+  backoff in that cell. It owns no effects, outbox, or product work, and the
+  occurrence journal remains the sole recovery inventory.
+- Streamed the initial bounded occurrence snapshot under the fixed lock order
+  identity → journal state → inventory → occurrence record.
+- Moved managed storage to descriptor-relative no-follow operations for reads,
+  traversal, locks, and atomic replacement. Declared Fiddle as a direct runtime
+  dependency because Ruby 4 no longer guarantees it as a default gem.
+- Strengthened one-off shadow-v1 conversion so its checkpoint binds source,
+  archive, and live-v2 replacement digests, restart adoption verifies all
+  three, and completion re-inventories the live tree. Native v2 remains strict;
+  migrated v1 evidence is archived and non-comparable.
+- Replaced obsolete global `File.open`/`File.lstat` monkeypatch tests with
+  public oversized, malformed, symlink, missing-directory, descriptor-race,
+  and migration-restart proofs. U3 compressed qualification remains open.
+- Reconstructed the discovery transition coordinator in daemon-launched
+  `--job-manifest` children before incremental feature checkpoints. The child
+  does not mint a second claim: it uses only the exact scheduler-attached
+  PID/start-time and generation token.
+- Removed unused ActionRunner registry helpers and the comparator's impossible
+  array-difference arm. Platform flag selection is now a small explicit
+  Linux/macOS mapping so both supported contracts can be proven on one host.
+
+---
+title: Patrol effect sender boundary
+date: 2026-07-28
+tags: [patrol, architecture-patrol, recovery, concurrency]
+---
+
+**Action:** Closed Architecture Refactor U2 review findings F01, F02, F04,
+and F05 at the effect boundary. Replaced persisted sender leases, claim tokens,
+generations, and expiry takeover with a process-local keyed mutex plus a
+stable, never-unlinked `0600` flock file. Persisted effect cells now contain
+only `prepared`, `dispatch_uncertain`, or terminal recovery facts. Exact
+absence permits redispatch only for product-owned local retry-safe sink maps;
+remote branch, pull-request, and issue absence remains unresolved.
+
+`OccurrenceEffects` now constructs each authoritative terminal receipt inside
+the occurrence mutation and returns the exact persisted bytes on replay.
+Finalization rejects every nonterminal or unbound effect, finalized
+occurrences reject new dispatch, and ordinary scheduler retries allocate a
+durable positive attempt generation in the occurrence identity.
+
+**Proof:** Characterization covers forked and threaded sender contention,
+crash uncertainty, unsafe remote absence, retry-safe local reset, repeated
+denial/reconciliation at different clocks, nonterminal finalization,
+finalized-dispatch refusal, and concurrent schedule-attempt allocation.
+
+**Architecture authority:** JobStore accepts schema v3 only and owns the
+immutable occurrence and intake-transition pointers plus append-only
+claim/action/job/diagnostic transition identities. Released v2 jobs have no
+runtime reader or converter. The explicit confirmed fresh-start boundary
+archives only their exact opaque directory and admits an empty v3 namespace.
+
+Publication supersession, terminal-proof materialization, plan/link/block,
+claim-scoped receipt updates, and discovery mutations now pass through explicit
+transition coordinators. Claim process attachment and heartbeat renewal pass
+through one narrow operational port. Durable diagnostic episode generations
+prevent a later identical block from replaying an earlier terminal receipt,
+and restart recovery inventories only active occurrences before reconciling
+exact transition ids.
+
+Fresh architecture intake treats only a missing pre-enrollment job as the
+absence of a reusable occurrence. Corrupt jobs and every other intake failure
+still fail closed; the first intake then reserves its occurrence and writes the
+v3 aggregate through the authoritative transition gateway.
+
+All intake, discovery, plan, and action coordinators now build and reconcile
+the same transition-evidence byte shape through one shared utility. Mutation
+payloads remain bound to the gateway idempotency key without being redundantly
+threaded through the persisted transition record.
+
+**Operations and boundaries:** Ownership cutover/rollback quiescence now
+includes ordinary active occurrences, architecture active occurrences, and
+incomplete jobs. Ordinary and architecture recovery failures emit bounded
+structured identity/error/retry diagnostics with backoff. The component
+catalog forbids direct construction of shared stores, gateways, and transition
+collaborators outside named roots, while a static contract confines semantic
+JobStore mutators to transition ports.
+
+The ordinary occurrence store now uses the shared managed-directory contract
+for its reads, stable locks, and atomic writes. Its scheduler recovery
+inventory streams one record at a time, retaining only bounded occurrence IDs
+and the oldest reservation, and canonical byte-identical replays avoid an
+unnecessary write and directory fsync. No new persisted snapshot or recovery
+state was introduced.
+
+**Additional proof:** The complete command integration surface enrolls fixtures
+through the real v3 intake contract and covers both first intake and existing
+occurrence reuse. Focused ActionRunner, scheduler, dispatcher, migration,
+storage, and component-boundary suites remain green.
+
+---
+title: Bounded patrol migration storage
+type: change
+date: 2026-07-28
+---
+
+**Changed:** Replaced filesystem-cookie receipt repair and eager shadow-history
+materialization with a shared bounded lexicographic inventory. Cursors bind the
+store, count, filename fingerprint, high-water name, and last processed name,
+so restart order is portable and in-snapshot mutations fail closed.
+
+**Safety:** Added `Hive::ManagedDirectory` for component-wise symlink refusal,
+no-follow inode-verified locks and reads, and verified-parent atomic writes.
+EvidenceStore, shadow comparison/reporting, and the one-off v1 migration now
+use it. Existing archive collisions are read with the same no-follow byte cap;
+links, special files, and oversized archives are rejected.
+
+**Proof:** Focused unit coverage includes cursor restart/store binding,
+high-water append behavior, early excess rejection before record reads,
+streaming report consumption, linked directory/file/lock refusal, and
+symlinked v1 archive rejection. The module migration integration path consumes
+the new streaming API.
+
+---
+title: Patrol captures and effect gateways
+type: change
+created: 2026-07-28
+tags: [patrol, architecture-patrol, modules, migration, evidence]
+---
+
+- Ordinary scheduler reservations now persist an immutable occurrence capture
+  and publish that exact identity to the module adapter; module cron targets
+  are suppressed until the module owns mutation.
+- Architecture Patrol keeps merged-PR enqueue provenance and publishes a
+  linked finalized capture only after the authoritative JobStore outcome.
+- Separate ordinary and architecture gateways hold migration admission across
+  live owner/config/capability checks and mutation sinks. StateStore,
+  JobStore, ReviewHandoff, and Safe Agent Git Gate remain recovery owners;
+  append-only evidence is never consulted for retry.
+- Shadow-decision v1 files migrate once into archived non-comparable records;
+  runtime comparison accepts only the structured v2 contract.
+
+---
+title: U2 Patrol effect recovery resolution
+type: change
+created: 2026-07-28
+tags: [patrol, architecture-patrol, migration, recovery, evidence]
+---
+
+- Added one canonical occurrence journal beneath the separate StateStore and
+  JobStore product APIs. It atomically binds sender leases, dispatch
+  uncertainty, terminal outcomes, canonical receipt/capture/event outbox
+  bytes, and projection acknowledgement.
+- Routed ordinary mutation sinks and Architecture Patrol job, discovery,
+  action, GitHub, and review-handoff transitions through their product
+  gateways. Removed the ordinary effect maps and ActionRunner's run-global
+  effect correlation.
+- Kept those boundaries small by composition: both product gateways delegate
+  to separate admission, sender, and receipt-projection collaborators; the
+  occurrence facade delegates to a pure validator, one store owner, outbox, and
+  effect state machine. ActionRunner and the scheduler delegate durable
+  transition orchestration to claim/plan/discovery/occurrence collaborators.
+  Command and daemon intake share one manifest coordinator; a separate
+  immutable binding stores only the architecture job-to-occurrence identity.
+- Expired uncertain deliveries are reconciliation-only. Exact absence must be
+  durable before a fresh sender CAS, while exact terminal duplicates replay
+  the original receipt bytes.
+- Finalized positive and negative ordinary captures and one job-bound
+  architecture occurrence now feed comparison. Evidence reads use bounded
+  occurrence/intent indices with restart-safe bounded repair pages and never
+  participate in recovery.
+- The one-off shadow-decision migration is resumable, quiescence-fenced, and
+  v2-only at runtime. Patrol Effect Evidence remains a catalog candidate until
+  U3 supplies compressed candidate-bound qualification proof.
+
+# Make module safety coverage host-independent and exhaustive
+
+- Removed the module command-target test's dependency on whether the CI host
+  happens to have Bubblewrap installed; the test now isolates host discovery
+  while retaining the fail-closed network-allowlist assertion.
+- Added direct coverage for module lifecycle ownership conflicts, immutable
+  target snapshots, migration admission races, retry reconciliation, corrupt
+  state, legacy cleanup, and patrol capability declarations.
+- Kept the production safety contracts unchanged while making the 100% coverage
+  gate prove their error and recovery arms deterministically on every runner.
+
+**Pages:** [[testing]] [[commands/refactor-patrol]]
+
+# Keep the complete mobile primary navigation visible
+
+- Tightened mobile primary-link insets and responsive type slightly so all six
+  capabilities fit within the 390px content box under both local and Linux
+  Chromium font metrics.
+- Kept the existing system assertion strict: the primary navigation must not
+  begin horizontally clipped, and the page must not overflow the viewport.
+
+**Pages:** [[commands/web]]
+
+# Close module execution and migration evidence safety gaps
+
+- Native module workflow targets again fail closed after validation and
+  snapshotting until task metadata, admission, recovery, and permission
+  intersection can remain pinned to the installed module generation.
+- Patrol schedule adapters no longer manufacture legacy captures from their
+  own decisions. Only an independent occurrence capture can contribute to the
+  migration cutover window; the existing merged-PR reconciler supplies that
+  evidence for Architecture Patrol.
+- Module command output is drained concurrently into bounded memory, including
+  stdout and stderr, and secret prefixes at the truncation boundary are
+  redacted. Filesystem grants reject symlinks that resolve outside the project,
+  and bubblewrap is never resolved through a project-relative `PATH` entry.
+- The four module acceptance scenarios are registered as required semantic E2E
+  coverage so current release-profile preflight can select and run them.
+- Attempt v3 is the sole runtime record shape. The one-off recovery migration
+  rewrites retained v1/v2 task attempts with explicit subjects, replaces the
+  prior migration receipt, and removes the v2 schema and in-memory bridges.
+- Catalog materialization rejects symlink destinations, validates safe,
+  collision-free paths and a complete manifest inventory, then creates the
+  destination tree.
+- Module dry-run receives its read-only Attempts store from the command
+  composition root, and both dry-run and inspection sites are pinned in the
+  component boundary catalog rather than becoming alternate admission paths.
+- If attempt admission wins before decision persistence, replay keeps terminal
+  or lost runs eligible for the daemon's normal finalization/retry pass instead
+  of misclassifying successful work as failed.
+- Capacity- or handoff-deferred module retries wait one hour before another
+  admission attempt instead of spinning on every daemon tick; status retains
+  the bounded pending reason and intended retry charge.
+- Module manifests and the daemon share one bounded UTC cron parser, so every
+  comma branch, range, step, and field domain is rejected before installation
+  instead of failing later in scheduling or status.
+
+**Pages:** [[modules/workflows]], [[modules/patrol]], [[modules/attempts]], [[commands/migrate]], [[e2e]]
+
+# Nested web Gemfile for the root Brakeman scan
+
+**Date:** 2026-07-27
+
+**Change:** CI now passes `--gemfile web/Gemfile` to the repository-root
+Brakeman scan and a focused workflow-contract test pins both the dependency
+source and the absence of `--path web`.
+
+**Why:** Adding the workflow-publication contract updater introduced the first
+top-level `script/` directory without a legacy `script/rails` executable.
+Brakeman 8.0.5 then stopped inferring a Rails generation, selected its legacy
+ERB parser, and failed while mutating Ruby 3.4's frozen generated ERB source.
+Reading the nested Gemfile keeps the existing full-root scan over Hive libraries
+and the nested Rails web application while selecting Brakeman's Erubi path and
+retaining version-aware Rails checks.
+
+**Validation:** The exact root command detected Rails 8.1.3 and completed with
+0 errors, 0 security warnings, and 35 reviewed ignored warnings. The focused CI
+workflow contract test also passed.
+
+## [2026-07-27T22:43:13Z] workflow publish — close fail-closed boundary coverage
+
+- Made bounded safe-file reads return empty bytes for zero-byte regular files,
+  so empty YAML behavior assets produce the intended malformed-YAML finding
+  instead of an internal scanner error.
+- Added deterministic tests for cleanup warnings, file-identity races, strict
+  permission paths and `x-hive` shapes, retained bundle/object integrity,
+  commit-tree drift, and GC-marker failures.
+- Removed unreachable I/O rescue branches already normalized by the shared
+  safe-file boundary.
+
+## [2026-07-27T22:07:22Z] workflow publish — retain terminal lifecycle after branch cleanup
+
+- Kept open publication PRs bound to their live exact branch, while allowing a
+  merged or closed PR to reconcile after GitHub deletes its source branch.
+  A surviving terminal branch still fails closed if it moved from the
+  immutable PR head.
+- Hardened retained publication Git state before clone or reuse: the object
+  root must already satisfy the owner-private no-symlink contract, retained
+  checkouts and `.git` directories must be real current-user directories, and
+  checkout permissions are narrowed to `0700`.
+- Added focused recovery tests for deleted terminal branches, missing open
+  branches, moved surviving branches, linked object roots/checkouts, and
+  non-private object roots.
+
+## 2026-07-27 — Human workflow archive integration
+
+- Routed completed human stages through the shared `archived` action and
+  descriptor retention path instead of maintaining a human-only completion
+  bucket.
+- Stamped `meta.yml completed_at` from the durable decision timestamp and made
+  state plus metadata rollback together on commit failure or interruption.
+- Refused symlinked human decision-state reads with no-follow inode checks.
+- Made strict no-write startup routing select the actual top-level command, so
+  a workflow id named `workflow` cannot trigger scheduler reconciliation during
+  minimal-init preview and option placement cannot hide workflow validation.
+- Bound idempotent attachment fingerprints and task assets to one private byte
+  snapshot, with a final digest check before metadata is committed.
+- Treated a dangling `.hive-state` symlink as an occupied minimal-init target
+  instead of allowing initialization to reach an unsafe path.
+- Made workflow scaffolds claim their instruction directory and descriptor
+  exclusively, and limited rollback to paths the invocation actually created,
+  so a concurrent creator cannot be overwritten or deleted.
+- Extended task creation, workflow scaffolding/commit, and minimal-init rollback
+  boundaries to interrupts as well as ordinary exceptions.
+- Rechecked owner-authored workflow content inside idempotent creation before
+  reuse and metadata publication, aborting raced descriptor/instruction edits.
+
+---
+title: Make Hive web use the full viewport
+date: 2026-07-27
+tags: [web, layout, responsive, kanban]
+---
+
+- Removed the 1040px cap from the shared application and navigation shells.
+  Fluid edge gutters now preserve breathing room without wasting large-screen
+  space.
+- The status project rail scales within a bounded range and leaves all
+  remaining width to the composer, task grid, and board.
+- Kanban tracks keep a comfortable minimum, expand evenly when the viewport
+  has room, and retain their existing contained horizontal scroll on smaller
+  screens.
+- Playwright system coverage pins both the full-width desktop shell and the
+  growing Kanban tracks alongside the existing mobile-containment proof.
+
+---
+date: 2026-07-27
+summary: Route the complete built-in launch surface through one model policy
+---
+
+- Wired model and effort routing into durable implementation identities,
+  reviewers, utility agents, ordinary patrol, Architecture Patrol, and every
+  static core stage without changing provider selection.
+- Added load-time, reachability-aware profile capability validation before
+  warnings or runtime effects, with launch-boundary validation as defense in
+  depth.
+- Grouped shared Claude reviewer sessions by both permission scope and routed
+  identity, and kept Codex model/effort globals before native subcommands.
+- Removed the obsolete digest route after the in-process integration moved to
+  standalone PRDigest, and documented Grok's native reasoning-effort support.
+
+---
+title: Align release-candidate code with static-analysis gates
+type: change
+date: 2026-07-27
+---
+
+## [2026-07-27T17:42:11Z] release - satisfy lint and audit gates
+
+**Action:** Applied the repository's RuboCop layout rules to the release
+candidate implementation, recorded four scoped Brakeman command-injection
+false positives for its discrete-argv subprocess calls, and made the coverage
+job fetch release tags so baseline-catalog tests can inspect reviewed locks.
+
+**Boundary:** The scanner ignores cover only calls whose candidate OIDs are
+validated and whose remaining refs and paths are internal or supplied by the
+reviewed, digest-pinned baseline catalog. No shell parses those arguments, and
+the CI repair does not change release-candidate runtime behavior. Full Git
+history is fetched only for the exhaustive coverage job that runs the
+tag-dependent catalog checks.
+
+# Archive visibility web rebase hardening
+
+- Restacked archive visibility retention on the current resilient web status
+  feed and retained its fresh, degraded, and unavailable publication contract.
+- The bounded `StateSource` adapter now raises an ordinary refresh failure to
+  `StatusFeed` even when a TUI-style latest-good payload exists, preventing
+  stale rows from being republished as fresh.
+- Active task folders now participate in the bounded mtime fingerprint, so
+  artifact creation/removal changes the web semantic token immediately and a
+  reconnect can catch up without waiting for the liveness fallback.
+- The daemon recovery-receipt overlay is now copy-on-write, preserving frozen
+  archived cache rows while still exposing current recovery state.
+- Archive task route coverage now uses a real expired terminal task, the
+  non-scanning current-page snapshot seam, and the typed unavailable-diff
+  response used by current main.
+- Archive-linked task routes now use current main's exact project/stage resolver
+  with retention filtering disabled instead of invoking the lossless fleet
+  archive producer for the shell and every child request. Archived terminal
+  logs also no longer run the live three-second poll.
+- Refreshed the existing task-media Brakeman false-positive fingerprint after
+  the controller dataflow moved to targeted archive resolution; the realpath,
+  basename, extension, and symlink guards are unchanged.
+- Closed the exact coverage-gate gaps with failure-path tests for cursor I/O,
+  history deadlines, terminal rollback, invalid hidden counts, workflow
+  generation faults, and both complete and visible archive caches. The
+  resulting merged gate covers 61,074 of 61,074 executable lines.
+
+---
+title: Archive-aware status refreshes now scale with active work
+date: 2026-07-27
+---
+
+- `StateSource` now keeps authoritative visible archive rows separately and
+  reparses only workflow-active stage directories on steady liveness ticks.
+- TUI mode retains a complete archive cache with a 30-second repair backstop.
+  Hive Web reuses the same source in visible-only mode, uses a five-minute
+  backstop, and leaves complete `/archive` reads on demand.
+- Status supplies a private workflow-aware archive-folder index during the
+  authoritative ordinary scan. StateSource consumes and removes that field
+  before publication, avoiding a second web scan without changing the public
+  `hive-status` schema.
+- Archive-cache publication is generation-fenced so an older background scan
+  cannot overwrite a newer policy, terminal-membership, or retention
+  projection.
+- The 8-project by 200-task scale fixture passed the TUI scaling gate. On the
+  loaded development host, the web adapter measured a 17.48 ms median idle
+  refresh and 177.11 ms median active reparse; the private index did not leak.
+
+---
+title: Document the pre-release QA operating contract
+type: change
+date: 2026-07-27
+---
+
+## [2026-07-27T12:57:37Z] release - document semantic proof and exact-byte authority
+
+**Action:** Documented stable-ID E2E discovery/profile schemas, the candidate
+CLI side-effect boundary, reviewed digested baseline-cache materialization,
+trusted dispatch/collection and provenance-preserving targeted retry, required
+deterministic versus optional live-agent proof, and tag-time exact-byte
+selection without rebuilding.
+
+**Boundary:** The default local runner does not execute the production
+historical lane; real upgrade proof belongs to the trusted hosted workflow.
+Current source v0.6.9 remains blocked by `candidate_not_newer`. No hosted,
+native, or historical candidate run was performed, and no version, tag,
+publication, deployment, or release was authorized.
+
+# 2026-07-27 — Pin github-script v9 for trusted skill checks
+
+**Why:** The live-agent proof workflow moved to github-script v9 but still
+trusted the mutable major tag.
+
+**Change:** The single `actions/github-script` call now pins the immutable
+v9.0.0 commit.
+
+**Boundary:** Hive's script uses only the injected `github` and `context`
+objects. It neither imports the now-ESM-only `@actions/github` package nor
+declares `getOctokit`, so v9's breaking context changes do not affect it.
+
+# 2026-07-27 — Pin download-artifact v8.0.1 across workflows
+
+**Why:** The dependency update advanced every download site but left most
+workflow calls trusting a mutable version tag.
+
+**Change:** All nine `actions/download-artifact` calls now use the immutable
+v8.0.1 commit. Existing artifact names, patterns, merge behavior, and
+destinations are unchanged.
+
+**Boundary:** v8 fails closed on an artifact digest mismatch and understands
+both archived and direct-upload artifacts. Hive currently downloads archived
+artifacts produced by its paired upload steps, so decompression behavior
+remains unchanged. All consumers use GitHub-hosted Node 24-capable runners.
+
+# 2026-07-27 — Align ERB 6.0.6 across both bundles
+
+**Why:** The dependency update advanced the root lockfile but left the
+packaged Rails web bundle on ERB 6.0.4.
+
+**Change:** Root and web lockfiles now both resolve ERB 6.0.6. The gemspec
+keeps its `>= 4.0` downstream compatibility constraint.
+
+**Boundary:** ERB 6.0.6 fixes the standalone `-h` command and documentation;
+Hive's template rendering API and generated output are unchanged.
+
+# 2026-07-27 — Pin setup-node v7 for live skill validation
+
+**Why:** The live-agent workflow dependency moved to setup-node v7 but still
+trusted the mutable major tag.
+
+**Change:** The single `actions/setup-node` call now pins the immutable v7.0.0
+commit. It continues to install Node.js 22 without enabling dependency caching.
+
+**Boundary:** v7's ESM migration and cache-key outputs do not change this
+workflow because it consumes neither action internals nor cache inputs. The
+job runs on GitHub-hosted runners.
+
+# 2026-07-27 — Pin upload-artifact v7.0.1 across workflows
+
+**Why:** The dependency update advanced all upload sites but left most
+workflows trusting a mutable major/minor tag, while the Agent CLI Runtime
+release already used an immutable action commit.
+
+**Change:** All seven `actions/upload-artifact` calls now use the immutable
+v7.0.1 commit. Existing archive, missing-file, hidden-file, and retention
+settings are unchanged.
+
+**Boundary:** v7 uses Node 24 and therefore requires Actions Runner 2.327.1 or
+newer. Hive's upload jobs use GitHub-hosted runners, and the new direct-upload
+mode remains disabled so downstream archive downloads keep their current
+shape.
+
+# 2026-07-27 — Pin checkout v7.0.1 across canonical and mirror workflows
+
+**Why:** The dependency update covered existing Hive workflows but left the
+new Agent CLI Runtime mirror templates on checkout v5, and most updated
+references still trusted a mutable version tag.
+
+**Change:** All Hive workflows and generated mirror workflows now use the
+immutable v7.0.1 commit for `actions/checkout`. Mirror contract tests enforce
+the same pin, and dependency documentation records the security and runner
+compatibility boundary.
+
+**Boundary:** Hive does not use `pull_request_target` or `workflow_run`, so the
+v7 unsafe-fork checkout safeguard does not change current PR semantics. The
+mirror's repository-scoped SSH key flow remains intact.
+
+# 2026-07-27 — Update the Telegram client to Bot API 10.2
+
+**Why:** `telegram-bot-ruby` 2.8.0 covers Telegram Bot API 10.0, 10.1, and
+10.2 while retaining Hive's supported Ruby floor and dependency shape.
+
+**Change:** Root and packaged-web lockfiles now resolve
+`telegram-bot-ruby` 2.8.0. The root resolver also selected current compatible
+patches of `concurrent-ruby`, `faraday-net_http`, `json`, and `zeitwerk`; the
+web resolver changed only the Telegram client because its compatible
+transitives were already independently locked.
+
+**Boundary:** Hive does not yet require a 2.8-only API, so the gemspec keeps its
+existing `~> 2.7` compatibility range. Reproducible development, CI, and
+packaged-web installs use the reviewed 2.8.0 locks.
+
+# 2026-07-27 — Give the Agent CLI Runtime mirror a scoped Git writer
+
+**Why:** Live dogfooding showed that GitHub rejects a mirror sync commit when
+the generated Actions token changes `.github/workflows`, even when the workflow
+has `contents: write`. The package projection and build passed, but the final
+push could not install canonical administration.
+
+**Change:** Both mirror workflows now authenticate their mirror checkout with
+the write-enabled, repository-scoped deploy key stored as
+`MIRROR_DEPLOY_KEY`. Sync reduces its generated token to `contents: read`;
+release keeps that short-lived token only for ruleset inspection and GitHub
+release creation. Tests and operator documentation cover the credential
+boundary.
+
+**Boundary:** The deploy key can clone and push only
+`ivankuznetsov/agent-cli-runtime`; it grants no Hive or RubyGems authority and
+must not be reused. Canonical source, administration, version selection, and
+publication remain in Hive.
+
+# 2026-07-27 — Make Agent CLI Runtime mirror provenance fail closed
+
+**Why:** The first mirror implementation let an unqualified release ref prefer
+a same-named branch, executed a stale mirror-side projector, compared two trees
+produced by that same projector, preserved all stale administration when the
+canonical set disappeared, and relied on a mutable live release tag.
+
+**Change:** Mirror sync now executes the projector from canonical Hive and
+requires the complete canonical administration set before mutation. Mirror
+release checkout uses the fully qualified component tag and the component
+release preflight. Its expected tree comes from an independent Git archive of
+the canonical tag, while the actual tree uses the current canonical projector.
+The workflow also refuses release unless the live mirror has an active
+`refs/tags/v*` ruleset blocking updates, deletion, and non-fast-forward
+movement.
+
+**Boundary:** Hive remains the only projection and release authority. The
+mirror may create a verified tag once, but neither a later workflow run nor a
+repository writer may replace or delete that published snapshot.
+
+---
+title: Harden trusted pre-release execution after adversarial review
+date: 2026-07-27
+tags: [release, candidate, evidence, security, testing]
+---
+
+Adversarial review tightened the pre-release candidate boundary before
+handoff. Blocking hosted jobs now reject candidate-controlled harness drift
+against the protected-main control checkout. Linux historical lanes use pinned
+rootless read-only containers with no network, capabilities, or
+no-new-privileges bypass; macOS keeps a deny-network sandbox and isolated
+control/cache/run roots. The offline runtime closure includes exact Bundler
+bytes, and channel proof drives the installed candidate's real `hive update`
+through reviewed offline Linux and macOS shims.
+
+The evidence contract now has strict local and `trusted_remote` schema
+branches, represents a missing baseline version as JSON `null`, returns a
+nonzero hosted-lane status for failed or unavailable proof, and resumes only
+genuinely incomplete gates. Candidate-version validation loads the reviewed
+catalog dynamically rather than embedding the initial v0.6.9 baseline.
+Candidate planning, artifact verification, and tag-time source verification
+read the rebased canonical version declaration from `lib/hive/version.rb`.
+
+---
+title: Tag releases consume exact trusted candidate bytes
+type: change
+date: 2026-07-27
+---
+
+## [2026-07-27T22:30:00Z] release - consume pre-tag candidate evidence
+
+**Action:** Replaced tag-time gem/source/skill/web candidate construction with
+a pure, fixture-tested trusted-evidence selector. The tag workflow revalidates
+the aggregate Check, workflow/action lock, ordinary CI, retry lineage, terminal
+evidence archive, original candidate artifact, manifest, source/tag version,
+and pinned latest-stable comparison before restaging the exact gem, skill, and
+web bytes for the existing publication graph.
+
+**Safety:** Missing, expired, mixed, stale, or substituted evidence fails
+before publication and cannot trigger a fallback build or candidate dispatch.
+All third-party Actions in the candidate and release workflows are full-SHA
+pinned and checkout credentials are not persisted. No workflow, tag,
+publication, deployment, or release was executed during implementation.
+
+## [2026-07-27T20:30:00Z] release - add trusted exact-SHA candidate workflow
+
+**Action:** Added protected-main candidate dispatch, exact remote identities,
+action-lock enforcement, bounded collection states, authenticated staged
+upgrade inputs, closed blocking aggregation, and a checkout-free final Check
+Run publisher. Candidate and evidence artifacts retain for 30 days; live-agent
+proof remains advisory.
+
+**Safety:** No workflow was dispatched and no historical package, provider
+credential, version choice, tag, publication, deployment, or release action was
+used during implementation.
+
+**Retry:** Targeted retry now resolves named, failed, or missing display names
+from digest-bound predecessor evidence, executes only selected replacements,
+and composes their immutable trusted-control receipts with unchanged
+predecessor rows. Candidate artifact producer identity survives chained
+attempts; failed attempts still retain `qa_blocked` evidence and publish a
+digest-bound failed Check Run.
+
+---
+title: Release candidate upgrade-survivor oracles
+type: change
+date: 2026-07-27
+---
+
+- Added blocking latest-stable and v0.4.1/v0.4.2 historical upgrade gates with
+  authenticated-cache and disposable-sandbox no-start preflight.
+- Added fixed installed-target producer, observer, candidate, after,
+  idempotency, and teardown phases with bounded output and process groups.
+- Added normalized state/health snapshots, explicit migration diffs, exact
+  legacy bench fixture creation, and required collision observation.
+- Added reviewed cloned-prefix Linux bash and macOS local-formula candidate
+  seams with wrapper, sidecar, dependency, digest, and stale-file checks.
+- Kept real historical package and container execution as required hosted
+  evidence; the focused fixture tests do not claim those runs occurred.
+
+---
+date: 2026-07-27
+slug: release-candidate-baselines
+---
+
+- Added the reviewed, non-floating v0.6.9 latest-stable baseline and the
+  v0.4.1 producer/v0.4.2 observer historical baseline with exact release
+  package and checksum/signature/certificate asset identities.
+- Added strict catalog and dependency-closure validation, deterministic
+  tag-scoped missing-cache fetch instructions, authenticated regular-file
+  verification, role-only installed gem/skills targets, a closed target
+  environment, and fail-closed Podman/Docker sandbox invocation contracts.
+- Bound the catalog and dependency-closure policy into immutable candidate
+  identity and added a separate attempt fingerprint plus gate details for the
+  authenticated release assets and verified offline cache. Real historical
+  upgrade execution remains a later lane and is not claimed by these tests.
+
+---
+date: 2026-07-27
+slug: release-candidate-evidence
+---
+
+- Added the committed-SHA local release-candidate builder and safe
+  `plan`/`list`/`run`/`inspect`/`resume`/`rerun` CLI.
+- Added immutable artifact manifests, append-only attempt evidence, effective
+  predecessor gate provenance, local-vs-QA status separation, and explicit
+  unavailable hosted validation seams.
+
+## Semantic E2E coverage catalog and release selection
+
+**Action:** Added the stable `test/e2e/coverage.yml` taxonomy, joined every
+current scenario to one primary coverage ID, and added deterministic semantic
+discovery plus additive `run --coverage` / `run --profile release` selection.
+Semantic runs write a versioned `selection.json` companion while existing
+scenario inventory and report v1 payloads remain unchanged.
+
+**Evidence:** Focused catalog, scenario-parser, runner, binary, schema, and E2E
+harness-library tests cover invalid and duplicate mappings, pending required
+gaps, root-confined references, exact/substring discovery, JSON/prose output,
+unique active-primary execution, and preflight before run creation.
+
+# 2026-07-26 — Add a read-only Agent CLI Runtime distribution mirror
+
+**Why:** `agent-cli-runtime` needs a focused public description, source browser,
+and release history for people who discover the gem independently, while Hive
+must remain the single agent-friendly development workspace and release
+authority.
+
+**Change:** Added fail-closed mirror tooling under
+`components/agent-cli-runtime/mirror/`. A scheduled or manually dispatched
+workflow projects the component onto the mirror's `main` branch and records the
+exact canonical component commit in `.mirror-source.json`. A separate manual
+workflow projects an already approved component tag to an orphan mirror tag,
+requires the exact protected tag on canonical main and present on RubyGems,
+independently reconstructs and compares the complete canonical tree, builds and
+installs the local snapshot, proves the executable version, requires immutable
+mirror release tags, and only then pushes the tag and creates the mirror GitHub
+release. Third-party Actions are commit-pinned. Tests cover stale-file removal,
+symlink rejection before mutation, strict administration completeness, package
+exclusion, workflow YAML parsing, repository scoping, provenance, and
+verification-before-publication ordering.
+
+**Boundary:** `ivankuznetsov/agent-cli-runtime` is a read-only distribution
+surface. It cannot push to Hive or RubyGems, choose a version, or become an
+independent contribution path. Canonical development, issues, pull requests,
+component tags, trusted publication, and security ownership remain in Hive.
+The gem version was not changed or republished for this metadata and
+distribution-only addition.
+
+---
+title: Keep byte-bounded agent output valid UTF-8
+type: fix
+source: lib/hive/agent/message_extractor.rb
+created: 2026-07-26
+tags: [agent, output, utf-8, patrol]
+---
+
+Ordinary patrol found that the bounded fallback tail for unstructured agent
+output could begin in the middle of a multi-byte UTF-8 character. The shared
+message accumulator now drops invalid fragments after byte truncation, so
+agent and display-name fallback messages remain valid text. A focused
+regression test pins the split-character boundary.
+
+---
+title: Consume Grok terminal schema results
+date: 2026-07-26
+---
+
+**Fixed:** Managed Grok actors now normalize the terminal
+`end.structuredOutput` object as their final structured message. Grok streams a
+human-readable rendering before that event; treating the prose as the final
+message caused Hive's host-output validator to reject a valid schema result and
+surface `council_failed`.
+
+**Safety:** Grok opts into this authority through the explicit
+`AgentProfile#structured_output_protocol = :grok_end` capability; custom and
+non-Grok profiles do not inherit the event shape. Parsed and conservatively
+recognized unparseable terminal payloads are omitted from durable logs, plain
+fallback, and quota diagnostics. A managed Grok run treats a non-object or
+unparseable terminal payload as an authority barrier, so schema-looking prose
+cannot bypass the CLI's failed terminal validation. Ordinary unstructured Grok
+runs retain their preceding human-readable stream.
+
+**Verified:** Added real Grok `streaming-json` event-shape regressions for a
+valid object, malformed string/array/null values, syntactically invalid JSON,
+quota-like private payloads, a negative non-Grok profile, and the complete
+managed Agent-to-host-publication boundary.
+
+---
+title: Babysitter quarantines undeletable worktree residue
+type: log
+tags: [babysitter, worktree, recovery, dogfood, bugfix]
+---
+
+# Babysitter quarantines undeletable worktree residue
+
+The current-main dogfood run found Todero PR 46 repeating an opaque
+`git worktree add` failure. An earlier container-backed repair had left
+root-owned cache files under the babysitter checkout. `git worktree remove
+--force` failed, `FileUtils.rm_rf` silently left the residue, and the
+babysitter attempted to recreate the checkout at the still-occupied path on
+every ten-minute tick.
+
+`Hive::Babysitter::Worktree` now preserves any cleanup residue by atomically
+renaming the top-level checkout into the project-local
+`.hive-state/babysitter/quarantine/worktrees/` directory. Because the rename
+stays on the same state filesystem, child ownership does not prevent recovery.
+It then runs `git worktree prune --expire now` before adding the refreshed PR
+head. Quarantine and prune failures raise a focused `Hive::WorktreeError`
+instead of deferring the same ambiguous add failure to the next tick.
+
+Focused regression coverage simulates undeletable container residue, verifies
+its bytes survive in quarantine while the canonical path is cleared, and pins
+both fail-closed error paths.
+
+## 2026-07-26 — Remove Hive's PRDigest delivery adapter
+
+- Removed `hive digest`, the PRDigest adapter, the daily merged-PR scheduler,
+  its cursor/result handling, and the `prdigest` runtime dependency.
+- Hive now rejects stale global `digest:` configuration when the daemon starts
+  and points operators to standalone `prdigest prose --deliver` or agent-owned
+  `prdigest facts`.
+- Kept the unrelated `hive answer-digest` command and its host-local scheduler.
+- Moved the retained scheduler-base contract assertion into a dedicated test so
+  its abstraction remains independently covered after the PRDigest tests leave.
+
+# Harden module admission, execution, and migration recovery
+
+- Authenticated detached module hooks now survive transport-environment
+  scrubbing, bind directly to their module subject, and recover an admitted
+  launch receipt after a crash before decision persistence. The one-off
+  recovery migration projects retained v1/v2 task records into v3 before
+  runtime readers open them.
+- Migration transitions and module admission share one ownership lock,
+  quiescence uses a transition-current attempt scan, and rollback requires a
+  fresh shadow window before another cutover.
+- Command targets validate bubblewrap during activation, expose reviewed
+  filesystem grants instead of the host root, enforce closed or wildcard
+  network modes, and redact granted secret values from bounded output.
+  Packaged workflow targets remain activation-validated but execution-disabled
+  until module-pinned admission and recovery are durable.
+- The event ledger now maintains a recoverable event/schedule index and the
+  daemon persists its drain cursor, avoiding retained-history rescans on idle
+  ticks. The merged-PR producer supplies independent Architecture Patrol
+  capture evidence; schedule-only decisions remain non-comparable.
+- Module activation keeps recovery evidence through the fallible state commit;
+  later cleanup is warning-only. Uninstalled tombstones may be reinstalled
+  with a new watermark, and catalog rejection preserves caller-owned
+  destinations.
+
+**Pages:** [[modules/workflows]], [[modules/events]], [[modules/attempts]],
+[[modules/patrol]]
+
+# 2026-07-26 — PRDigest 0.2.0 published
+
+PRDigest 0.2.0 is publicly installable from RubyGems. Hive now resolves and
+locks that release through its existing deterministic `prdigest run` adapter;
+the additive facts and prose modes remain outside Hive.
+
+The dependency update retains PRDigest 0.1.1's native Octokit `Time`
+normalization, advances the runtime constraint and executable fallback to
+`~> 0.2.0`, and keeps Hive's explicit-date and catch-up ownership unchanged.
+
+Release verification clean-installed the public gem and exercised its versioned
+facts contract before this downstream merge was prepared.
+
+---
+date: 2026-07-26
+slug: patrol-module-review-hardening
+---
+
+- Fenced module mutators behind a durable migration epoch, bound adapter
+  execution to the reviewed configuration snapshot, and held ownership through
+  legacy reservation and child registration.
+- Rebuilt cutover eligibility from current independent shadow evidence, made
+  rollback resumable, and exposed migration blockers through status and doctor.
+- Hardened module activation, hook high-water marks, lifecycle admission,
+  detached-handoff retry, command-target environment/network authority, and
+  authenticated private workers.
+- Stabilized project/event identity and terminal publication while caching
+  immutable decision history with cross-process invalidation.
+- Marked the patrol dogfood report as blocked rather than rollout evidence;
+  production legacy captures, sink-level capability gateways, packaged
+  workflow admission, forwarding aliases, and live seven-day/hosted proof
+  remain open.
+
+---
+title: Forced web install refreshes same-version bundles
+type: log
+tags: [web, install, systemd, dogfood, bugfix]
+---
+
+# Forced web install refreshes same-version bundles
+
+A current-main dogfood deployment exposed an identity gap in managed Hive web:
+the service binary could advance while the web bundle retained the same
+`Hive::VERSION` stamp. `AppBundle.ensure!` then treated healthy compiled assets
+as proof that the older app and lockfile were current, so the replacement
+service booted against stale dependencies.
+
+`hive web install --force` now forces the existing staged dependency and asset
+preparation path before rollback-safe bundle activation, even when version and
+asset checks pass. A persistent parent-directory lock serializes refreshes. The
+prepared generation receives its version stamp before activation, the previous
+generation remains available as a sibling backup until activation succeeds,
+and a failed activation restores it. Ordinary web startup still avoids all
+provisioning work for a healthy current bundle.
+
+If a successful refresh leaves the service unit unchanged, install now restarts
+an already-running service exactly once so it consumes the new bundle. A unit
+upgrade's existing restart is not duplicated. The CLI help discloses both the
+bundle refresh and service-unit overwrite scope. `--no-bootstrap` remains
+authoritative, and the signed-release default fails closed before service
+mutation if download, verification, or preparation fails.
+
+Focused tests pin the no-op/forced split, activation rollback, restart
+coordination, help text, and force propagation. The remaining release proof is
+an installed-main same-version repair on real systemd-user plus equivalent
+launchd coverage.
+
+---
+title: Hive consumes PRDigest v0.1.1
+type: log
+tags: [digest, prdigest, dependency, bugfix]
+---
+
+# Hive consumes PRDigest v0.1.1
+
+Hive's runtime dependency, installed-gem executable fallback, root lockfile,
+managed-web lockfile, focused tests, and operator wiki now target
+`prdigest ~> 0.1.1`.
+
+PRDigest v0.1.1 normalizes native `Time` values returned by Octokit for merged
+pull-request timestamps. That prevents live GitHub results from failing
+PRDigest's response validation while preserving Hive's deterministic
+`prdigest run` invocation and `prdigest-result` v1 pass-through.
+
+The published gem was downloaded from RubyGems and matched the release
+artifact byte-for-byte; a clean remote install reported `prdigest 0.1.1`.
+
+Remaining uncertainty is limited to a retained live Telegram delivery proof.
+Dry-run coverage exercises the fetch, render, chunk, and result path without
+mutating digest state or sending messages.
+
+# 2026-07-26 — Package Agent CLI Runtime inside the Hive monorepo
+
+**Why:** HiveBench duplicates the same provider profile, preflight, argv, and
+stream-decoding mechanisms, giving the boundary-ready Agent ABI a concrete
+non-Hive adopter without justifying a separate repository.
+
+**Change:** Added the self-contained `agent-cli-runtime` 0.1.0 component under
+`components/agent-cli-runtime/`. It exposes `AgentCliRuntime`, the
+`agent_cli_runtime` require path, immutable provider-neutral contracts for
+Claude Code, Codex CLI, Pi, and Grok CLI, and the bounded `agent-runtime probe`
+executable. Package and root parity tests prove clean loading, fail-closed
+capabilities, non-default compile parity, local probes, custom capability
+evidence, nested and absent usage variants, observable redaction, stable
+local-probe output, and that Hive's current dependency graph is unchanged.
+Probe hardening forwards the caller's environment, rejects ambiguous versions,
+and bounds TERM/KILL cleanup for descendant-held pipes. Missing usage remains
+unknown rather than a fabricated zero; Grok API-key auth ignores unused path
+overrides; long and JSON-delimited secrets stay redacted.
+
+**Release:** Added build-once candidate and private-install verification plus a
+disjoint `components/agent-cli-runtime/vX.Y.Z` workflow. Only its
+`agent-cli-runtime-release` environment receives RubyGems OIDC authority, after
+Linux and macOS install the exact retained bytes. The pending publisher identity
+and fix-forward procedure are documented in `docs/RELEASING.md`, together with
+the required component-tag ruleset and release-environment reviewers. Release
+jobs are bounded to 15 minutes and the candidate is retained for 30 days across
+approval delays.
+
+**Boundary:** Hive remains the canonical source repository, primary consumer,
+and current authoritative implementation during the publication window. This
+package-only change does not add a Hive runtime dependency, tag or release
+Hive, publish the gem, merge the later Hive cutover, or make any other catalog
+component package-eligible.
+
+## 2026-07-26 — Legacy custom Claude tool scopes remain compatible
+
+- Preserved `--allowedTools` / `--disallowedTools` for existing custom
+  `AgentProfile` registrations named `claude` that omit the new
+  `tool_scope_flags:` keyword.
+- Kept an explicit empty `tool_scope_flags: {}` as the opt-out for adapters
+  that intentionally do not expose Claude's native tool-scope flags.
+- Added focused runtime coverage for both paths and for the successful
+  immutable `ProbeResult` value contract.
+
+## Stop unchanged terminal attempts from replaying every daemon tick
+
+- When durable dispatch reports that the exact task generation already has a
+  successful terminal attempt, the daemon now records the observed state-file
+  mtime as the persisted dispatch baseline.
+- An unchanged waiting marker is therefore admitted only once after discovery
+  or upgrade instead of querying and logging the same terminal receipt every
+  tick.
+- A later operator or agent edit still has a newer mtime and remains eligible
+  for normal dispatch.
+
+## Resume automatic closure for pre-head-metadata tasks
+
+- The final daemon closure guard now uses the same fail-closed legacy head
+  recovery as merge candidate observation: when `pr.md` predates immutable
+  head metadata, only the HEAD of the task's strictly owned canonical worktree
+  can bind the task to the verified merged PR.
+- Missing, malformed, relocated, or differently headed worktrees still block
+  automatic archive.
+- The real merge-watcher regression now completes the evidence-bound closure
+  transition and verifies that an older task reaches `9-done`, instead of
+  stopping at a fake closure call.
+
+---
+title: Hive prepares the PRDigest v0.2 dependency
+type: log
+tags: [digest, prdigest, dependency, release]
+---
+
+# Hive prepares the PRDigest v0.2 dependency
+
+Hive's runtime dependency, installed-gem executable fallback, root lockfile,
+managed-web lockfile, tests, and operator wiki now target `prdigest ~> 0.2.0`.
+
+PRDigest v0.2.0 adds facts and optional prose modes without changing Hive's
+deterministic `prdigest run` invocation, `prdigest-result` v1 pass-through, or
+exit-code contract. Hive does not invoke the new presentation modes.
+
+This change is prepared against the local exact v0.2.0 package. It must remain
+local until that gem is published because a remote Hive bundle cannot resolve
+an unpublished dependency. No Hive release metadata, tag, publication, merge,
+or deployment is part of this preparation.
+
+---
+title: Isolate the test suite from the operator environment
+type: fix
+date: 2026-07-26
+---
+
+- Route every normal test subprocess through a disposable home before Hive
+  loads, while deleting inherited Hive, XDG, agent, GitHub, and Git global-path
+  overrides. Defaults keep following `HOME` when a test swaps it, and Git
+  global files remain disposable without exposing the babysitter-sensitive
+  `GIT_CONFIG_GLOBAL` override.
+- Prevent old-code tests from recreating `attempts/v1`, managed setup tests from
+  rewriting real agent skills, and Git tests from changing operator controls.
+- Keep authenticated smoke tests as an explicit real-user-environment opt-out.
+- Cover the suite-level sandbox contract and clean it after the test process.
+
+## [2026-07-26T10:40:00Z] web — serve isolated assets during demo capture
+
+**Action:** Enabled Propshaft's server middleware when
+`HIVE_WEB_ASSETS_DIR` selects the private capture asset directory. Capture
+already compiled into that external directory to keep linked source worktrees
+clean, but production Rails otherwise returned 404 for the generated asset
+URLs and recorded a technically valid, unstyled page. The opt-in is confined to
+the credential-free capture runtime; normal production web serving is
+unchanged.
+
+**Tests:** Added a production-Rails subprocess regression that resolves the
+digested application stylesheet and requests it through the real middleware,
+asserting a non-empty CSS 200 response from the isolated output path.
+
+## [2026-07-26T10:30:00Z] daemon — pace revoked architecture actions hourly
+
+**Action:** Kept revoked architecture-patrol actions nonterminal and resumable,
+but changed their policy recheck from the ordinary 60-second transient backoff
+to a one-hour cadence. This prevents a permanently changed validation command
+or disabled action gate from spawning the same no-op action child every daemon
+minute. Restoring compatible authority still makes the action eligible at the
+next hourly probe; unrelated transient action failures remain on their existing
+one-minute retry.
+
+**Tests:** Extended the action-runner revocation regression to assert the exact
+one-hour durable `next_eligible_at` while retaining the no-second-run proof.
+
+---
+title: Graceful daemon shutdown releases ancillary claims
+type: log
+created: 2026-07-26
+---
+
+The ancillary `ChildSupervisor` now returns exits reaped while draining
+children during daemon shutdown. The dispatcher routes those exits through the
+same completion method used during normal ticks before closing its logger.
+
+This reuses the current scheduler lifecycle rather than adding another recovery
+mechanism. Before signalling, the supervisor captures and confirms the full
+descendant tree plus the original process group. It escalates captured
+survivors through KILL and returns the direct-child exit only after both fences
+are proven dead. If tree identity is unavailable or a descendant survives, the
+exit is withheld and the current lease stays fenced.
+
+A safely terminated architecture-patrol child releases its existing
+generation-fenced v2 discovery claim with normal retry backoff; digest,
+controller, ordinary-patrol, and queued-request hooks receive the same truthful
+exit. Signal-derived nil exits now record terminal recovery and ordinary patrol
+as failed rather than raising or clearing failure backoff.
+
+Focused supervisor, dispatcher, and patrol-scheduler regressions cover nested
+TERM-ignoring descendants, unverifiable tree fencing, returned signal exits,
+terminal-recovery failure receipts, ordinary-patrol backoff, and
+architecture-patrol retry completion.
+
+---
+title: Managed web runtime uses locked Bundler
+type: log
+created: 2026-07-26
+---
+
+`hive web` now launches managed `db:prepare` and the long-running Rails server
+through the same exact lockfile-selected Bundler and current Ruby used by web
+bundle provisioning. This closes a live systemd failure where installation and
+asset compilation succeeded under Bundler 2.7.2, then direct `bin/rails`
+startup activated host Bundler 4 and rejected `hive-cli`'s runtime dependency.
+Operator-managed source and Hivebox app overrides retain their existing direct
+Rails launch contract.
+
+Focused command coverage pins both managed runtime commands to the canonical
+locked launcher, while AppBundle coverage continues to pin the same launcher
+for production asset compilation.
+
+# 2026-07-26 — Audit the complete internal component graph
+
+**Verdict:** Hive retains seven cataloged mechanisms. UserService, Agent ABI,
+Agent Artifact Firewall, Skillpack, Safe Agent Git Gate, and WorkLedger are
+`boundary-ready`; Attempts admission remains the sole guarded `candidate`.
+Skillpack to Agent ABI is the only component-to-component dependency, and the
+catalog contains no migration exceptions.
+
+**Audit:** Re-ran catalog schema, repository-path, ownership, dependency-cycle,
+clean-load, forbidden-upward-edge, and direct-internal-construction checks.
+Added an executable agreement check between the catalog, the current component
+table, and the wiki index. The retained facades are catalog-owned and
+Hive-consumed; no abandoned experimental facade or shadow `.context.md`
+documentation was retained.
+
+**Correction:** Updated ADR-038, which still described the former reciprocal
+Attempts/WorkLedger edge and U8-bounded exception after WorkLedger moved
+`TaskProjection::Store` back to explicit Hive adapter ownership.
+
+**Scope:** This is an internal architecture audit only. No package directory,
+gemspec, independent version, tag, release, publication, deployment, or
+repository split was introduced. Standalone packaging remains gated by a named
+non-Hive adopter, independent package proof, and explicit release authority.
+
+---
+title: Managed web bootstrap uses its locked Bundler directly
+category: fixed
+modules:
+  - web
+  - packaging
+---
+
+- Managed `hive web install` no longer depends on a `bundle` wrapper being on
+  `PATH`; it resolves the authenticated web lockfile's Bundler and invokes it
+  through the current Ruby.
+- `hive-cli` now carries that exact Bundler as a runtime dependency, including
+  when its package manager isolates Hive from system gems.
+- Production asset compilation uses locked `bundle exec` over that Ruby,
+  preventing a system Ruby or newer host Bundler from silently taking over.
+- The packaged bootstrap gate now runs with only `/usr/bin:/bin` on `PATH` and
+  still installs the real Rails bundle and compiles its assets.
+
+# 2026-07-26 — Isolate WorkLedger mechanics without publishing a disk format
+
+**Why:** Hive's task journal, projection, and workflow descriptor code mixed
+reusable durability/topology mechanics with Hive-specific conditions, attempts,
+task paths, overlays, transitions, and migration policy.
+
+**Change:** Added the clean `Hive::WorkLedger` facade for ordered descriptor
+topology validation, locked/fsynced JSONL append with complete writes,
+idempotency conflict detection and rollback, and deterministic replay with
+caller-injected record validation. Typed receipts bind descriptor structure or
+the exact cursor, final record identity, and SHA-256; a narrow public
+`JournalHandle` exposes append and idempotent append. `Hive::Workflow`,
+`Hive::TaskJournal`, and `Hive::TaskProjection` now adapt those mechanisms while
+retaining their existing public errors, event envelopes, attempt validation,
+projection semantics, snapshot formats, and historical replay behavior.
+
+**Boundary:** WorkLedger owns only `lib/hive/work_ledger.rb` and
+`lib/hive/work_ledger/`. It defines no public disk schema.
+`TaskProjection::Store` remains Hive-owned composition and may open the
+canonical Attempts store, so the former Attempts/WorkLedger catalog cycle and
+U8 migration exception are removed honestly. Conditions, task paths,
+transitions, overlays, Git, operational status, and all migrations remain
+above the facade.
+
+**Enforcement:** The component catalog marks WorkLedger `boundary-ready`,
+forbids production construction or direct requires of its internal validator,
+journal, and replay classes, and fresh-process loads the facade without
+Attempts, conditions, workflows, commands, stages, or web code. Focused tests
+pin malformed topology, append/fsync/idempotency/rollback, invalid and duplicate
+replay, Hive adapter compatibility, project overlay isolation, and historical
+projection fixtures.
+
+**Scope:** Hive remains the first and primary consumer. No gem, public journal
+or projection format, package version, tag, release, deployment, or repository
+split was introduced.
+
+**Review hardening:** Receipt record trees are now detached, deeply frozen JSON
+snapshots; replay binds its cursor and hash to a private copy of the supplied
+bytes; and idempotent lookup checks every historical key match so a later
+conflicting duplicate cannot be hidden by an earlier matching record.
+
+---
+title: Dogfood recovery resumes owned progress and refreshes workflow pins
+type: fix
+date: 2026-07-26
+tags: [recovery, migrate, workflows, daemon, dogfood]
+---
+
+Current-main dogfood exposed three pipeline blockers after the recovery v2
+cutover.
+
+- Universal execute recovery now resumes the exact task-owned worktree even
+  when the failed agent left uncommitted progress. Ownership and the execute
+  runner's branch, ancestry, cleanliness, and commit completion checks remain
+  authoritative.
+- `hive migrate` preflights and rebinds managed tasks on the selected package
+  generation to its current configuration digest, then cleans unreferenced
+  snapshots and reloads a running daemon. Tasks on another package generation
+  remain unchanged.
+- Task-bound merge reconciliation quietly skips blank and `local:` repository
+  identities, while real GitHub repository identity drift still fails closed.
+
+---
+title: Recovery migration prunes inert post-cutover v1 skeletons
+type: fix
+date: 2026-07-26
+tags: [recovery, migration, attempts, dogfood]
+---
+
+Fresh-main dogfood found that a still-running pre-cutover web reader could
+recreate the empty `attempts/v1` directory skeleton after v2 became
+authoritative. That left no records to migrate, but the dual-root guard still
+blocked daemon startup.
+
+`Hive::Recovery::Migration` now removes a legacy tree only when every entry is
+an empty real directory. It uses bottom-up `rmdir`, so a file, symlink, or
+concurrent writer fails closed and preserves the ambiguous root for operator
+inspection. Regression tests cover successful inert cleanup plus file,
+symlink, and concurrent-write refusal.
+
+## 2026-07-26 — Safe Agent Git Gate boundary
+
+- Promoted `Hive::AgentGitGate` to a boundary-ready, clean-loadable internal
+  facade over hardened Git reads, exact detached materialization, remote
+  observation, and expected-OID publication.
+- Kept raw `Hive::ManagedGit` argv/process execution private and added a
+  production-consumer guard against bypassing the facade.
+- Added immutable read, observation, materialization, and publication values
+  plus typed request, operation, conflict, materialization, and publication
+  errors.
+- Routed managed `Hive::Gh`, AgentReport, draft-PR handoff, refactor-patrol
+  publication, and exact Worktree analysis materialization through the facade.
+- Exact publication now resolves an immutable local OID, requires exact remote
+  OID or absence authority, pushes under that lease, and independently observes
+  the remote before returning a non-secret before/after receipt.
+- Added real bare-remote and hostile-helper tests; no gem, version, tag,
+  release, or standalone publication was added.
+- Review hardening now inspects repository-local config includes and fails
+  closed when inspection fails, refuses repository HTTP policy, alternate-ref
+  commands, and worktree redirection, preserves explicit URL ports while
+  rejecting embedded credentials, and validates/copies every public value so
+  caller-owned buffers cannot rewrite an approved observation or receipt.
+
+---
+title: Recovery v2-only cutover and dogfood runtime follow-ups
+type: change
+date: 2026-07-26
+tags: [recovery, migration, attempts, daemon, babysitter, web]
+---
+
+Hive now has one recovery upgrade path instead of another compatibility layer.
+`Hive::Recovery::Migration` moves the old attempt tree to `attempts/v2`,
+rewrites retained attempt v1 records, archives final compatibility leases,
+upgrades queued request/result documents, and records the completed cutover.
+Explicit `hive migrate` plus daemon/bot startup own that mutation; a foreground
+default store fails closed while v1 remains.
+Runtime attempt and queue readers accept only their current schemas; the old
+schema files, legacy backfiller, compatibility lease constructors, and
+in-memory normalization branches were removed. Any live old-root attempt
+(including compatibility ownership) or ambiguous old/current roots stop the
+cutover safely so an old supervisor cannot recreate v1 after the move.
+
+`hive migrate` also backfills a missing registered repository identity from the
+current origin without overwriting an existing value. The PR babysitter skips
+unresolved and explicitly local repository rows before GitHub polling, so local
+benchmark registrations no longer create `gh` failures.
+
+Managed web installation now gives a cold Rails service 40 health samples at
+250 ms intervals before declaring `active_not_ready`; read-only web status
+remains immediate.
+
+## [2026-07-26T04:46:08Z] Skillpack internal boundary
+
+**Action:** Promoted Skillpack to `boundary-ready` behind
+`require "hive/agent_skills"`. The facade now clean-loads deterministic
+OpenClaw, Claude, Codex, and Pi rendering plus read-only projection inspection,
+frozen preview-bound planning, and stale-safe atomic apply without loading Hive
+configuration, workflows, commands, web code, or native package inventory.
+
+**Hive dogfood:** Bundled skill inspection, setup planning/execution,
+OpenClaw diagnosis, Doctor, Init preflight, setup-agents, and the web adapter
+route through the facade. Hive-only target resolution, manifest parsing, native
+package operations, consent, filtering, messages, and JSON presentation remain
+lazily loaded adapters above the policy-light mechanism.
+
+**Guarantee:** Plans bind path identities and tree digests. Apply refuses
+foreign or unsafe trees, rejects observations that changed after preview,
+stages privately, swaps the complete directory atomically, and preserves or
+restores the previous managed tree on failure. This introduces no gem,
+marketplace, signature system, independent version, or publication decision.
+
+**Enforcement:** The component catalog records the public projection/report/
+plan values and typed errors, validates the clean entry point and Agent ABI
+dependency, and rejects production direct requires or construction of
+Skillpack internals. Added focused facade coverage while retaining exact
+canonical bytes, provenance, rollback, setup, and packaged projection tests.
+The coverage bootstrap now reloads the version and error contracts that the
+gemspec loads before instrumentation, alongside `lib/hive.rb`, so clean
+entry-point splits remain visible to the unchanged 100% executable-line gate.
+
+**Docs:** Updated [[commands/setup-agents]], [[component-boundaries]], and
+[[testing]]. Did not edit compiled [[log]].
+
+**Review hardening:** `Projection` now validates, copies, and deeply freezes
+its rendered path/content mapping and identity strings. A caller cannot mutate
+its own buffers after preview and make apply publish bytes the plan did not
+bind.
+
+---
+date: 2026-07-26
+title: Worktree capture resolves its locked Bundler without PATH shims
+tags: [web, capture, worktree, bundler, reliability]
+---
+
+- `SourceBundle` reads the web lockfile's `BUNDLED WITH` version and resolves
+  that exact Bundler executable through RubyGems.
+- Capture no longer depends on a user-gem `bundle` shim being present on the
+  daemon or agent PATH.
+- Bundle installation, Rails bootstrap/server, and fixture CLI setup all use
+  that same resolved executable inside the deny-default runtime.
+- The server thread owns the readiness writer until exit, and boot failures
+  retain a bounded, redacted server-log diagnostic.
+- Generated workflow marker comments are removed before explicit visual-proof
+  intent classification, preventing `browser=skipped` from requiring capture.
+- A missing or malformed locked Bundler version fails before the private cache
+  is populated.
+
+---
+date: 2026-07-26
+title: Task capture gained one supported end-to-end command
+tags: [web, capture, worktree, artifacts, playwright]
+---
+
+- Added `hive web capture --task-folder ... --source-root ...` as the supported
+  artifacts-stage recorder over the private capture-server lifecycle.
+- Added a lockfile-keyed Playwright and Chromium cache outside linked
+  worktrees, deterministic private fixture seeding, and retained PNG/WebM
+  validation.
+- Capture rechecks the exact clean source HEAD after teardown and publishes the
+  task-local media and `hive-artifact-capture` manifest last.
+
+## [2026-07-26T02:41:08Z] Agent Artifact Firewall boundary
+
+**Action:** Promoted the Agent Artifact Firewall to `boundary-ready` behind
+`require "hive/artifact_firewall"`. Added immutable manifest, snapshot,
+violation, restoration, and report values; typed protected-anchor and
+required-output violations; no-follow content/type/mode identity; immutable
+in-memory capture with descriptor-bound baseline identity; protected-parent
+substitution detection and restoration refusal; realpath-aware output-root
+acceptance; bounded injectable redaction; snapshot binding; and verified
+non-recursive safe restore.
+
+**Hive dogfood:** Execute, open-PR, finalize, review fix/triage/CI-fix, and the
+managed draft-PR worktree now supply stage policy through the facade.
+Headless Agent and interactive Claude `:output_file_exists` polling reject
+symlinks and non-regular artifacts. `Hive::ProtectedFiles` remains the internal
+compatibility engine, and the component contract rejects new production
+bypasses.
+
+**Guarantee:** This is same-user application-level artifact custody, not an OS
+sandbox, write monitor, filesystem transaction, or replacement for the Safe
+Agent Git Gate. Hive still owns path selection, markers, retries, report
+meaning, and stage success.
+
+**Docs:** Updated [[modules/protected_files]], [[modules/secret_patterns]],
+[[component-boundaries]], [[testing]], [[gaps]], and [[index]]. Did not edit
+compiled [[log]].
+
+**Mainline sync:** Replayed the boundary over the delivered-task recovery
+changes from #865. Open-PR and finalize retain current immutable PR identity
+checks and recovery behavior inside the firewall custody wrapper.
+
+**Hosted-CI follow-up:** Managed-worktree Git control paths are expanded and
+deduplicated before manifest construction. This keeps strict duplicate-anchor
+rejection in the public firewall while accepting CI environments where
+`XDG_CONFIG_HOME` or `GIT_CONFIG_GLOBAL` names the same file already derived
+from `HOME`.
+
+**Coverage follow-up:** Added direct contract coverage for bounded and
+duplicate manifest rejection, normalization and internal-error translation,
+capture-time parent instability, descriptor type changes, unreadable paths,
+legacy capture verification, no-op stale restoration, and Agent, Claude, and
+review-triage fail-closed adapters. Production firewall behavior is unchanged.
+
+**Review hardening:** Required-output admission now opens each candidate with
+`NOFOLLOW`, verifies the opened descriptor is regular, and reads a byte.
+Nonempty paths that cannot actually be read therefore produce
+`required_output_unreadable` instead of passing from `lstat` metadata alone.
+
+## 2026-07-26 — Agent ABI promoted below Hive orchestration
+
+- Added `Hive::AgentRuntime` as the supported provider-neutral entry point
+  with immutable request, compiled invocation, capability/probe evidence, and
+  observable-result values.
+- Preserved the optional-keyword `Hive::AgentProfile` constructor and
+  `Hive::AgentProfiles.register` extension point; Claude, Codex, Pi, Grok, and
+  custom profiles remain provider adapters.
+- Routed headless Agent, diagnosis, display-name, patrol capability, stage,
+  reviewer, TUI, and interactive-launcher preparation through the runtime
+  boundary while keeping process lifetime, timeouts, retries, workflow policy,
+  artifact acceptance, and stage success in Hive.
+- Unsupported requested capabilities now fail closed with typed evidence;
+  probe diagnostics are bounded and secret-redacted.
+- Trusted Hive adapters can inject a managed executable, permission argv,
+  sandbox prefix, and policy-owned CLI arguments without reopening the
+  untrusted raw-argument path or moving workflow policy into the runtime.
+- Promoted `agent-abi` to `boundary-ready` in the component catalog. Shared
+  `Hive::SecretPatterns` is no longer claimed as artifact-firewall-owned state.
+
+---
+title: Expose managed worktrees as portable read roots
+date: 2026-07-26
+---
+
+**Changed:** Managed Codex and Grok worktree actors now retain the
+controller-trusted `base_add_dirs` supplied by the stage. Codex adds those
+directories to its named read-only filesystem policy, while Grok mounts them
+read-only through bubblewrap, so both providers can inspect the repository
+checkout used as their working directory.
+
+**Safety:** Trusted caller roots must resolve to existing directories or policy
+compilation fails closed. They affect only provider read visibility; Hive still
+authorizes and materializes host outputs exclusively beneath the task folder
+through path-qualified `Edit(...)` rules.
+
+**Verified:** Focused Codex, Grok, and managed-worktree policy tests plus
+RuboCop on the touched implementation and test files.
+
+---
+title: Bound managed workflow outputs across Codex and Grok
+date: 2026-07-26
+---
+
+**Changed:** Managed Honeycomb actors with bounded read and path-qualified
+`Edit(...)` permissions can now map to Codex or Grok. Hive runs both providers
+read-only, constrains their final response to the exact authorized file set,
+validates it, and atomically materializes the files itself. Codex receives a
+generated named filesystem profile with external tool surfaces disabled and
+ignores user configuration/rules without persisting a session. Grok runs in an
+isolated home inside bubblewrap with only declared read roots and its credential
+file mounted. Output-set publication validates every value first, restores
+earlier targets if a later atomic write fails, and writes the requested
+stage/state artifact last as the completion commit point. Codex executable
+discovery accepts a valid runtime provenance path even when unrelated aggregate
+doctor checks fail, while retaining a dedicated bounded probe. That probe uses
+an ephemeral empty Codex state root rather than scanning the operator's rollout
+archive. Grok mappings also pin normalized reasoning effort via
+`--reasoning-effort`. Typed launches retain normalized model,
+requested/effective effort, model-pin, and effort-support receipts in the
+private spawn log and `agent_start` event without logging prompt-bearing
+provider argv.
+
+**Safety:** Unbounded file rules, undeclared output paths, unsupported tools,
+truncated/invalid/empty structured output, unavailable provider binaries, and a
+missing Grok bubblewrap boundary all fail closed. Ordinary unmanaged stage
+permission behavior and explicit managed `yolo` behavior are unchanged.
+
+**Verified:** Focused runtime-policy, agent argv, profile identity, generic
+stage, and council tests; RuboCop on all changed Ruby/test files; live Codex and
+Grok read-boundary probes; and a dry-run plus activation of the Writing
+workflow mapping with Sol high for writing/grounding and Grok 4.5 high for the
+adversarial editor.
+
+---
+title: Keep Hive catch-up policy out of PRDigest
+type: log
+tags: [digest, prdigest, scheduling, compatibility]
+---
+
+## [2026-07-26T00:17:16Z] digest — keep Hive catch-up policy out of PRDigest
+
+**Action:** Stopped serializing Hive's `digest.max_catchup_days` into the
+temporary PRDigest configuration. Hive always invokes deterministic
+`prdigest run` for one explicit date, while Hive's daemon alone owns catch-up
+scheduling. The adapter does not select PRDigest facts/prose modes or forward
+AI-provider configuration or credentials.
+
+**Coverage:** Added direct adapter coverage for Hive's supported unbounded
+value `0` and an above-PRDigest-range value `31`, pinning the child YAML to
+`timezone`, `github`, `telegram`, `digest`, and `state` only. Existing command
+coverage continues to pin array argv, `prdigest-result` v1 passthrough, child
+exit propagation, dry-run behavior, and private mode-`0600` config.
+
+**Uncertainty:** No new uncertainty. This is a local serialization boundary;
+the existing focused tests exercise both affected settings without network or
+provider access.
+
+# 2026-07-26 — Promote the UserService internal boundary
+
+**Why:** Per-user service mechanics were shared through a Hive command base,
+which made the useful platform-neutral seam depend on command policy and
+presentation.
+
+**Change:** Added `Hive::UserService` with public Definition, Plan, Status, and
+Result values. Inspect and plan are non-mutating. Apply and remove bind to and
+revalidate the exact file and manager observation, refuse stale or unsafe
+paths, replace drift atomically with timestamped backups when forced, and
+report partial systemd-user/launchd outcomes with final observed state.
+
+**Adapters:** Daemon, bot, web, setup, init, status, and uninstall retain Hive
+templates, binary/install-channel resolution, web environment, command
+messages and JSON, the daemon restart warning, prompts, foreground shutdown,
+and global purge sequencing. Uninstall now delegates service teardown to the
+same boundary without rendering install-only web configuration.
+
+**Enforcement:** The component catalog marks UserService `boundary-ready`,
+forbids external construction of its Manager collaborator, permits only the
+downward AtomicFile dependency, and verifies a clean process load without Hive
+commands, stages, or web code. No gem, version, release, publication,
+deployment, or repository split was introduced.
+
+**Review hardening:** Apply and remove reject caller-constructed plans whose
+action or manager-observation flags do not match the bound status. Linux
+autostart treats a present `systemctl` binary with no user manager as
+unavailable without issuing manager mutations, and a failed replacement still
+reports a backup that was successfully written.
+
+## Durable merged-task reconciliation
+
+- Replaced the in-memory finalize-only merge watcher and its fixed failure
+  drop with a project-local `hive-pr-merge-reconciliation.v1` ledger.
+  Candidates bind the exact task generation, repository, PR, observed head,
+  remote facts, architecture receipt, archive receipt, hold, retry time, and
+  uncapped failure count.
+- The daemon now observes PR-bearing coding tasks in stages 5 through 8 before
+  automatic recovery and advances one fair candidate per project. Dependency
+  and admission holds stay durable but ineligible; open, closed-unmerged,
+  unsafe, and failing work remains visible instead of being forgotten.
+- GitHub merge facts and architecture-intake acceptance are checkpointed
+  before the next external side effect. Restart replay therefore skips
+  already accepted phases and uses the same evidence-bound closure transition
+  for fresh and backlog work.
+- Added a private daemon closure channel restricted to the task's own verified
+  same-repository merged PR. It cannot be called through public confirmation,
+  cannot take over an operator receipt, and retains the task-local receipt
+  after the centralized move to `9-done`.
+- Removed the special `--recover-merged-error-reason` dispatch path, fixed
+  watcher event enum, constructor compatibility, and patrol-backoff coupling.
+  Corrupt or identity-drifted reconciliation bytes are preserved under the
+  project daemon quarantine and block only that registration.
+- Automatic closure requires an immutable task-head binding. New open-PR state
+  records the controller-observed `head_oid`; older task metadata may recover
+  it only through a strictly owned registered task worktree. Missing bindings
+  remain durably `ambiguous`, head or PR binding drift is held, and
+  cross-repository/invalid PR observations remain visible instead of being
+  silently discarded.
+- The signed closure evidence retains both PR head and merge OIDs. The
+  closure service compares both with the reconciler's checkpoint immediately
+  before receipt creation, closing the architecture-intake race window.
+- Final archive approval now repeats the task-generation, repository,
+  GitHub-evidence, daemon PR-binding, durable-attempt, and owned-worktree
+  checks while holding the task lock. A verified same-repository PR head may
+  satisfy the clean-worktree ancestry guard, but uncommitted or differently
+  headed work still blocks.
+- Reconciliation records one durable outcome for every scanned coding task,
+  including rejected/no-PR rows and zero-row healthy projects. Corrupt input
+  is content-addressed in quarantine, terminal candidates compact after the
+  retention window, and unresolved/merged/ambiguous candidates fence the
+  universal healer so delivery reconciliation cannot race a provider retry.
+- Consolidated pull-request URL parsing and controller-observed
+  `pr_url`/number/head persistence under `Hive::Gh`; OpenPr and Finalize both
+  atomically bind the same canonical identity and propagate bounded GitHub
+  timeouts through nested closure probes.
+- The operator closure flow now has a real Telegram producer:
+  `/close <id|slug> ...` creates a bounded **Verify evidence** callback, then
+  the existing allowlisted confirm callback performs the separate archive
+  step. JSON CLI closure remains a read-only preview, while interactive CLI
+  and web retain explicit confirmation.
+- Completed the pre-1.0 one-off wire migration: only `hive-status.v7`,
+  `hive-operational-status.v3`, and `hive-act.v2` remain. Superseded schemas
+  and compatibility assertions were removed so recovery is represented by
+  one current contract rather than another legacy branch.
+- Documented the three closure-evidence `gh api` calls as Brakeman false
+  positives: every dynamic value passes the strict repository, host, commit,
+  or branch validator before `Hive::Gh.capture3` gives discrete arguments to
+  `Process.spawn`, so no shell interprets an endpoint.
+
+# 2026-07-25 — Guard Attempts admission as the reference candidate
+
+**Why:** The component catalog needed one enforced Hive-first reference slice
+before later mechanisms could copy its boundary and verification discipline.
+
+**Change:** Kept the existing `Hive::Attempts::API` admission slice as a
+guarded reference `candidate` without adding lifecycle methods. The catalog
+records its downward dependency on WorkLedger plus a U8-bounded exception for
+the reciprocal edge where WorkLedger-owned `lib/hive/task_projection/store.rb`
+requires and constructs `Hive::Attempts::Store`. It also records the complete
+internal admission/lifecycle collaborator set and the exact Hive composition
+or read-only consumer files that must still construct those internals.
+
+**Enforcement:** Internal Attempts classes cannot be constructed from a new
+production file. Existing construction is allowed only for an exact
+file/constant pair with a recorded reason; stale authorizations and newly
+listed files fail the component contract even for a candidate. Authorization
+is file-granular and does not distinguish another call site inside an already
+authorized composition root. A `boundary-ready` component cannot depend on a
+candidate. The focused clean-process API proof, foreground/queue/successor
+delegation, shared-store injection, v2 durable-record coverage, and one-off
+migration tests remain the compatibility evidence.
+
+**Scope:** Reconciliation, supervision, capacity, loss processing,
+cancellation, export, and raw store operations remain internal. No gem,
+package directory, version, tag, release, publication, deployment, or
+repository split was introduced.
+
+**Mainline sync:** Cataloged `TaskClosure` as another read-only canonical-store
+consumer after its active-attempt verification landed on `main`; it does not
+widen the admission facade.
+
+---
+date: 2026-07-25
+title: Ordinary worktrees gained supervised local demo capture
+tags: [web, capture, worktree, artifacts, security]
+---
+
+- Added lockfile-keyed private Ruby bundle caches and an isolated
+  `hive web capture-server` lifecycle with versioned readiness receipts.
+- Recorder children receive a deny-by-default environment and literal-loopback
+  Rails runtime; teardown is process-group and lifecycle-fingerprint guarded.
+- Added generation-bound capture applicability plus exact-SHA retained capture
+  manifests. Required failures keep `7-artifacts` incomplete.
+- Autonomous artifacts runs no longer receive external-upload credentials;
+  Screenote publication is a separate operator-confirmed action.
+
+---
+date: 2026-07-25
+title: Task-local web reads became bounded and fleet-independent
+tags: [web, status, diff, polling, reliability]
+---
+
+- Task routes now resolve one registered target without invoking fleet status.
+- `StatusFeed` owns single-flight scans, latest-good degraded state, stable
+  freshness tokens, and observable scan counts.
+- Task diff validates owned worktrees and returns bounded, redacted, typed
+  committed/staged/unstaged/untracked results.
+- Status and task pages distinguish unavailable/degraded data and disable stale
+  mutation controls; browser polling is abortable, visibility-aware, and
+  single-flight.
+
+## Recovery single-owner cutover
+
+- `Hive::Daemon::RecoveryCoordinator` is the sole production owner of
+  recoverable-marker clearing and retry admission. Every user-facing adapter
+  submits through `Hive::Recovery::API`; `StaleAgentHealer` is the only
+  automatic scheduler.
+- `hive migrate` supplies the one-off random identity for old `ERROR`,
+  `REVIEW_ERROR`, `REVIEW_STALE`, and `REVIEW_CI_STALE` occurrences. Runtime
+  recovery rejects id-less markers, and the public recovery-aware status/action
+  contracts now support v2 only.
+- Removed the TUI kill-code loop, Telegram clear route, healer retry counters
+  and exhaustion state, stage-specific clear/requeue machinery, and the
+  attempt-loss compatibility marker. Retry count now comes from durable
+  recovery-request history.
+- Focused attempt-loss and authority verification currently covers 43 runs and
+  175 assertions; the full recovery and repository checkpoints follow before
+  merge.
+- Hardened the cutover against concurrent migration and scheduler churn:
+  marker-id backfill is now compare-and-swap, post-clear dispatch failure
+  preserves the durable request and reapplies the shared cooldown, queue and
+  recovery projection share one scan per tick, and terminal receipt pruning is
+  paced hourly.
+- Closed recovery projection and input-boundary gaps: requestors are a strict
+  enum including `operator`, id-less rows surface the migration blocker,
+  queued state requires a canonical request id, active custom terminal
+  agent/council stages remain retryable, and max-pass review escalations can
+  resume only through the TUI's explicit post-edit `r` gesture.
+
+# 2026-07-25: Use Grok's native Compound Engineering plugin
+
+- Added Grok as a managed Compound Engineering provider with native plugin
+  install, enable, update, live inventory, and read-only filesystem inventory.
+- Added `Hive::SkillCheck::Grok` so enabled plugin skills resolve from
+  `GROK_HOME` before a stage spawns.
+- Replaced the temporary self-contained Grok review prompt with a real
+  `/ce-code-review` invocation and exposed `grok-ce-code-review` as an opt-in
+  ordinary reviewer without changing fresh-project defaults.
+- Hardened native inspection so it runs from the target project, verifies the
+  exact runtime skill source against a realpath-jailed plugin path, and rejects
+  malformed inventory entries instead of crashing.
+- Made stale, disabled plugins converge in one update-then-enable repair plan,
+  and kept untrusted repository content from triggering external reviewers,
+  network tools, or code egress through the Grok review prompt.
+
+# 2026-07-25 — Establish the component boundary contract
+
+**Why:** Agents needed one current, machine-checkable map of Hive's reusable
+mechanisms before later refactors could safely route consumers through stable
+internal APIs.
+
+**Change:** Added `config/component-boundaries.yml` with the seven retained
+components, their ownership, entry points, public contracts, dependencies,
+state/schema/lock responsibilities, consumers, authority, recovery surfaces,
+wiki pages, tests, and maturity. U1 establishes the catalog and promotion
+guard: all seven entries remain `candidate`. Attempts admission records the
+existing `Hive::Attempts::API` slice, while U2 owns reconciling direct daemon
+lifecycle construction of durable internals before it can become
+`boundary-ready`.
+
+**Enforcement:** Added a test-only contract that validates catalog metadata,
+repository-local paths, unique ownership, an acyclic dependency graph, bounded
+migration exceptions, forbidden upward requires, direct construction of named
+internals across production Ruby, and clean-process loading for boundary-ready
+entry points. Literal `require_relative` calls and all component-owned Ruby
+files participate in dependency checks. The static scan is explicitly an
+architecture regression guard, not a security sandbox; U1 does not overstate
+it as proof that the existing Attempts lifecycle is already fully routed
+through its admission facade.
+
+**Docs:** Added [[component-boundaries]], linked it from the wiki index, recorded
+the focused command in [[testing]], and updated ADR-038. No component was
+packaged, versioned, tagged, published, or moved to another repository.
+
+# 2026-07-25 — Record the Hive-first component boundary and future gem strategy
+
+**Why:** Hive contains reusable mechanisms with plausible value outside the product, but splitting repositories or creating gems before their contracts are proven would reduce agent navigability and freeze accidental coupling.
+
+**Decision:** Added ADR-038 and two implementation-ready plans. Hive remains the canonical monorepo and first consumer; `Hive::Attempts::API` is the reference boundary; UserService is the next internal extraction; later candidates proceed one component per PR and may remain internal. Standalone packaging is gated on a stable boundary, concrete non-Hive demand, independent artifact proof, and maintenance ownership. Any future component stays under `components/`, uses an independent version, and publishes only through an explicit component-scoped release that cannot match Hive's root tag trigger.
+
+**Plans:** `docs/plans/2026-07-25-001-refactor-internal-component-boundaries-plan.md` covers internal API, dependency, state, compatibility, consumer, testing, and wiki boundaries. `docs/plans/2026-07-25-002-feat-standalone-component-gems-plan.md` covers qualification, package layout, path dogfood, exact artifact proof, release authority, remote verification, and the publish-before-Hive-cutover sequence.
+
+**Scope:** This strategy record covers documentation and planning only. It
+does not imply a package directory, gemspec, public name, version, tag,
+publication, release, deployment, or compiled `wiki/log.md` change.
+
+## 2026-07-25 — Evidence-bound delivered and superseded closure
+
+**Action:** Added `Hive::TaskClosure` and the `hive-task-closure-input.v1` /
+`hive-task-closure.v1` contracts. Authorized CLI, web, and allowlisted-bot
+flows now verify canonical merged-PR or full-commit evidence, bind a preview to
+the current task/marker generation, recheck remote/owner/worktree facts at
+confirmation, persist a mode-0600 receipt, and archive through a private
+receipt-only StageAction guard. Supersession additionally requires one
+registered successor and bounded operator attestation. Corrupt, stale,
+unsupported, identity-mismatched, or noncanonical-link receipts are
+quarantined and never authorize transition; receipt-before-move crashes resume
+idempotently.
+
+**Surfaces:** Compatibility and operational status retain closure reason,
+authority, digest, and canonical evidence links; archived task pages explain
+delivery even when no worktree/diff remains. Operational actions advertise
+that operator confirmation is required but cannot execute closure with an
+observation token. Ordinary archive and attempt-journal authority remain
+unchanged.
+
+**Verification:** Focused tests cover schemas, same/cross-repository rules,
+unsafe input, authorization, live-owner/worktree blockers, marker races,
+quarantine, canonical-link rendering, crash resume, projection, transition
+guard, StageAction isolation, operational advertisement, bot message editing,
+and Rails authentication/CSRF. Live named-task dogfood remains recorded in
+[[gaps]].
+
+# Workflow publish review hardening
+
+- Packaged the pinned Honeycomb lint fixture and SafeYAML parity corpus as
+  runtime gem data.
+- Made authored descriptor `x-hive` declarations the sole source for package
+  tools, prompt assets, and optional inputs, while excluding authoring-only
+  metadata from immutable package assets.
+- Hardened publication recovery with no-follow state reads, complete PR
+  pagination, evidence-based metadata-less adoption, exact blob/mode and
+  retained commit-tree verification, fork-origin restoration, transaction-wide
+  identity locking, and atomic expected-absent pushes.
+- Aligned publish error/schema outcomes, post-effect ambiguity, configured
+  catalogue branches, cleanup warnings, and listed-bundle GC eligibility.
+
+## Unified durable recovery lifecycle
+
+- **Authority**: `RecoveryCoordinator` now owns every recoverable-marker
+  transition. Telegram, TUI, Rails, CLI/action, recorder, and daemon healing
+  submit a current observation and derived freshness token through the neutral
+  `Hive::Recovery::API` instead of clearing state independently.
+- **Durability**: Dispatch-request v4 persists canonical task and marker
+  identity across `admitted`, `cleared`, `dispatched`, and `terminal` phases.
+  Bounded, request-keyed lock shards serialize claims, phase updates, and
+  pruning; request IDs are filesystem-safe, and restart replay re-resolves
+  identity and reruns safety before mutation. A daemon crash after queue claim
+  but before attempt admission requeues the recovery transition instead of
+  deleting the only durable path out of a markerless state. Reobserving an
+  unchanged blocked transition is read-only, avoiding a per-tick queue rewrite.
+  Recoverable marker occurrences require a durable `marker_id`; `hive migrate`
+  upgrades old id-less rows once and runtime has no mtime/reason fallback. Task
+  IDs are backfilled before healer admission, post-clear launch failures defer
+  for one hour, and malformed claims are quarantined with byte-preserving
+  evidence.
+- **Surfaces**: Operational status exposes one canonical
+  queued/cooldown/running/blocked/terminal/unavailable receipt. Rails overlays
+  it without a second fleet scan and disables or hides Retry according to that
+  lifecycle. The real demo recorder now exercises the same queued path from a
+  sandbox instead of deleting `plan.md`. Recovery-aware agent contracts are
+  published only as operational-status v2 and act v2. A one-off migration
+  updated every in-repository producer, consumer, fixture, and operating skill;
+  the obsolete v1 recovery contracts were removed rather than retained as
+  compatibility code.
+- **Simplification**: The TUI signal-exit auto-healer, Telegram `clear_retry`
+  route, healer counters/exhaustion, and bespoke `3-plan` requeue path were
+  removed. Attempt loss is ledger-owned and no longer projects a compatibility
+  `ERROR`; a successor's ordinary failure enters the same coordinator only if
+  it writes a fresh recoverable marker.
+- **Verification**: Focused coordinator, queue, dispatcher, operational,
+  adapter-authority, bot, TUI, Rails, status-feed, schema, and recorder syntax
+  coverage pins the shared behavior.
+
+## Typed agent outcomes and Brainstorm artifact truth
+
+- **Action**: Classified Claude's structured per-run budget stop separately
+  from account/rate/quota limits, centralized the built-in Content workflow
+  budgets, and reconciled Brainstorm spawn/receipt outcomes with its required
+  artifact.
+- **Behavior**: `error_max_budget_usd` now yields typed
+  `budget_exhausted` details and an operator-facing stage-budget remedy.
+  Coding Brainstorm accepts only a numbered Round for WAITING or non-empty
+  Requirements for COMPLETE, ignores same-named generic workflow stages,
+  rejects unchanged stale output after a failed spawn, and admits one repair
+  per distinct request when a successful terminal receipt has no valid
+  artifact.
+- **Verification**: Focused Agent, Content workflow, Brainstorm runtime,
+  durable dispatcher, neighboring stage, and integration tests cover the new
+  outcomes and existing launch paths.
+
+---
+summary: Complete the per-stage routing launcher and operator contract
+type: implementation
+---
+
+- Rendered frozen execute, open-PR, review-fix, and review-CI routing metadata
+  through the selected profile at every headless and Claude/tmux launcher.
+- Moved open-PR routed validation ahead of branch publication and exercised
+  the effective-validation domain from production identity resolution.
+- Added deterministic mixed-provider fake-binary and registry-wide argv
+  acceptance suites, including Codex ordering, non-leakage, fallback, and
+  unscoped legacy behavior.
+- Documented the project template, built-in vocabulary, independent
+  inheritance, durable retries, profile capabilities, custom workflow
+  boundaries, validation timing, and migration-free fallback. Standalone
+  PRDigest remains outside Hive's routing vocabulary.
+
+---
+date: 2026-07-25
+summary: Validate effective implementation routing before stage effects
+---
+
+- Moved execute identity resolution ahead of reviews-directory, worktree,
+  pointer, and task-marker initialization for both first and continuation
+  passes.
+- Moved review-fix identity resolution ahead of the working marker, phase
+  event, Git status preparation, and pre-fix residue auto-commit.
+- Preserved the prior review marker and worktree state when effective routed
+  controls are unsupported.
+
+---
+date: 2026-07-25
+summary: Freeze per-stage model routing in durable implementation identities
+---
+
+- Composed execute, open-PR, review-fix, and review-CI public model routes with
+  the selected implementation identity while preserving its provider.
+- Persisted concrete effective routing values and field provenance, then
+  reconstructed typed profile-native arguments without rereading live config.
+- Made each generation-and-stage selection first-writer-wins across retries and
+  configuration drift, while retaining the flat-argument compatibility path
+  for historical journals.
+- Rejected invalid routed capability combinations before any identity event is
+  appended.
+
+---
+date: 2026-07-25
+summary: Add profile-native routed control validation and staged argv placement
+---
+
+- Added profile-owned validation and rendering for effective routed model and
+  effort controls, including native effort vocabularies and sentinel handling.
+- Added typed global/subcommand argument segments so routed Codex model and
+  reasoning controls precede `exec` and future subcommands.
+- Preserved the unscoped implementation-identity command path and reject
+  unsupported routed effort before version checks, warnings, or subprocesses.
+
+## [2026-07-24T23:25:06Z] workflow publish — close validation and recovery seams
+
+- Bound the local Honeycomb lint identity to the pinned upstream policy,
+  fixture corpus, expected findings, and immutable local contract. The analyzer
+  now mirrors pinned secret/PII, deny, command/network extraction, permission,
+  network-reason, suppression-request, and bounded-input rule IDs without
+  executing package content.
+- Rejected symlinked intermediate authoring paths, preserved high-risk packages
+  as reviewable submissions, and kept install/spawn runtime admission separate
+  from publication disclosure validation.
+- Made receipt progress, write-once remote authority, and lifecycle observations
+  monotonic. Exact PR recovery now verifies fork parent/owner, head
+  repository/branch/OID, commit parent, package tree, and PR base; a digest-
+  matching external branch is adoptable only after those checks.
+- Kept retained lifecycle evidence observable when a newer lint policy blocks
+  continuation, while stopping any new fork, push, or PR mutation. Rechecked
+  the immutable target path immediately before the first push.
+- Closed `hive-workflow-publish.v2` error variants so kind, process exit code,
+  retryability, and required remote recovery identity cannot contradict one
+  another. Added strict SemVer and structured lint fingerprint coverage.
+- Focused unit and integration tests cover each boundary with injected
+  transports and isolated state; no live GitHub mutation or release action was
+  performed.
+
+---
+date: 2026-07-25
+summary: Add the closed pure project model-routing domain
+---
+
+- Added one immutable registry for every public built-in model-routing key and
+  family parent. The removed in-process PR digest is intentionally outside the
+  registry and `models:` exists only in project config.
+- Added strict project `models:` parsing while preserving field absence and
+  the unchanged shape of configs with no routing section.
+- Added independent exact/coarse/current/legacy field resolution with
+  provenance and provider pass-through.
+- Added pure reachability filtering so disabled calls and shadowed coarse
+  controls do not trigger later profile capability checks.
+
+---
+title: Archive retention review fix pass 02
+date: 2026-07-24
+tags: [archive, retention, completed-at, status, tui]
+---
+
+- Made terminal run and approve mutations roll back filesystem, metadata, and
+  index state symmetrically, and reject malformed completion clocks.
+- Preserved archive membership across policy repins and used the membership
+  workflow for legacy history discovery.
+- Made legacy backfill deadline-bounded, restart-fair, generation-consistent,
+  and isolated from unrelated staged hive-state changes.
+- Captured all project workflow/config generations before status scanning and
+  made TUI hidden-pin and wall-clock retention changes converge on the next
+  normal poll.
+
+---
+date: 2026-07-24
+slug: archive-retention-review-fixes
+---
+
+- Made terminal run rollback restore the entire pre-run task folder and made
+  run/approve preserve a legacy task's earliest credible completion time.
+- Kept malformed, deleted, repinned, and dependency-error terminal tasks in
+  the lossless archive while freezing one workflow/config generation per
+  status refresh.
+- Bounded and rotated legacy completion backfill, prevented stale task-folder
+  recreation, and kept metadata rewrite guards out of hive/state history.
+- Propagated archive-source selection through every task child route and kept
+  TUI idle fingerprint work/cache independent of permanent archive size.
+
+---
+title: Workflow archive visibility retention
+date: 2026-07-24
+tags: [workflows, archive, retention, status, tui, web, daemon]
+---
+
+# Workflow archive visibility retention
+
+Workflow descriptors now declare `archive_visibility_retention_days` as a
+positive integer or exact lowercase `never`; legacy omission resolves to three
+days. Hive-owned built-ins and workflow scaffolds declare `3` explicitly, and
+descriptor/default/pin edits reproject on the next normal refresh.
+
+The first successful workflow-aware archive transition records an immutable UTC
+`completed_at`. A bounded, lock-aware legacy backfill prefers the first credible
+completion event, then terminal state-file and task-folder mtimes. Only a
+durably committed clock can hide a row; failures warn and keep it visible.
+
+One shared projection now supplies ordinary CLI/status JSON,
+operational/daemon snapshots, TUI, native web, and Hivebox. Ordinary payloads
+add only `hidden_archived_task_count`; task objects stay unchanged. Dedicated
+CLI, TUI, and web archive views remain unfiltered and workflow-aware.
+
+See [[modules/workflows]], [[commands/status]], [[commands/tui]],
+[[commands/web]], [[modules/daemon]], [[state-model]], and [[testing]].
+
+---
+title: Dogfood retry gaps close without scheduler churn
+date: 2026-07-24
+tags: [daemon, attempts, recovery, bugfix]
+---
+
+# Dogfood retry gaps close without scheduler churn
+
+The daemon now releases an `ERROR reason=attempt_lost` compatibility marker
+when its durable successor lineage has ended in an unambiguous terminal
+failure or cancellation. The release still requires the shared cooldown,
+current worktree safety, the task lock, and an exact marker-generation match.
+
+Previously, loss recovery stopped after admitting the first successor while
+generic error recovery skipped every `attempt_lost` marker. If that successor
+then failed, the task remained permanently parked even though ordinary
+admission correctly treated the ancestor loss as resolved.
+
+Live, unresolved, lost, successful, unreadable, and ambiguous successor
+lineages remain fail-closed.
+
+Architecture patrol now also treats
+`daily_architecture_review_spawn_limit` as a daily boundary. Partial jobs sleep
+until the next UTC day after exhausting that limit instead of launching a
+short-lived child every minute.
+
+See [[modules/attempts]], [[modules/daemon]], [[modules/patrol]], and
+[[testing]].
+
+---
+title: PRDigest ignores registered non-GitHub workspaces
+date: 2026-07-24
+tags: [digest, prdigest, registry, bugfix]
+---
+
+# PRDigest ignores registered non-GitHub workspaces
+
+`hive digest` now excludes well-formed registered projects that are
+demonstrably outside PRDigest's GitHub scope: local remotes, other Git hosts,
+and existing Git repositories with no `origin`.
+
+The adapter still fails closed for malformed registry rows, malformed GitHub
+identities, unavailable identity lookups, an empty GitHub scope, and
+unregistered `--repo` filters. This restores digest operation in normal mixed
+registries without allowing command input to expand the trusted repository
+set.
+
+Binary discovery also falls back to the installed `prdigest` gem executable
+when RubyGems installed the runtime dependency outside the service's `PATH`.
+`PRDIGEST_BIN` and an executable already on `PATH` keep their existing
+precedence.
+
+See [[commands/digest]], [[modules/digest]], and [[testing]].
+
+---
+title: PRDigest becomes the sole merged-PR digest engine
+date: 2026-07-24
+tags: [digest, prdigest, telegram, architecture]
+---
+
+# PRDigest becomes the sole merged-PR digest engine
+
+`hive digest` now resolves the registered `github.com/owner/name` scope and
+delegates an explicit date to the standalone PRDigest CLI. JSON is the unchanged
+`prdigest-result` v1 document and child exit codes are preserved.
+
+Removed Hive's collector, evidence model, agent generator, renderer, sender,
+delivery checkpoint, digest-specific GitHub transport, prompt, and
+`hive-digest` schemas/tests. PRDigest owns HTML rendering, chunk boundaries,
+stable payload persistence, next-unsent resume, and permanent/ambiguous
+Telegram policy.
+
+The Hive Telegram wrapper also dropped the digest-only chunk inspection,
+MarkdownV2 validator/converter, and checkpoint-oriented single-chunk API. Its
+ordinary bot-message splitter and parse-mode forwarding remain unchanged.
+
+Hive retains the Europe/London daemon cursor, registered-project subset gate,
+credential/config bridge, and permanent-result parking. The remaining digest
+configuration is only `enabled` plus `max_catchup_days`.
+
+See [[commands/digest]], [[modules/digest]], [[modules/daemon]],
+[[modules/config]], [[dependencies]], and [[testing]].
+
+## [2026-07-24T12:41:43Z] daemon - harden universal retry across crashes and unsafe state
+
+**Behavior:** Universal `ERROR` / `REVIEW_ERROR` retry now preserves the
+failed request result only for that request id; a later request creates a
+fresh attempt. Resolved lost ancestors no longer block successors, and orphan
+cleanup is paced by the shared cooldown and honors global/project retry
+enablement.
+
+`3-plan` recovery durably enqueues an identity-bound continuation before
+clearing its exact marker. The consumer verifies project, task id, stage,
+marker identity, and predicted post-clear task generation, so crashes and
+task-folder reuse cannot lose or misdeliver work. Config reload constructs the
+full replacement state before publishing any of it.
+
+Protected controller files are captured before agent phases and atomically
+restored on tamper, including `handoff.yml` and review completion artifacts.
+Retry safety blocks only when restoration failed, a credential is still
+present, or a persisted worktree pointer cannot prove the expected path,
+branch, registration, and repository ownership. Open-PR and finalize re-run
+secret scans before mutation.
+
+Operational status now distinguishes cooldown, in-flight, and safety-blocked
+retry states and exposes the exact retry deadline and safety reason. Marker
+clears take the task lock, closing the post-snapshot replacement race.
+
+**Tests:** Added focused regression coverage for request-scoped attempt replay,
+queue crash windows and generation binding, transactional reload, retry
+deadlines and ownership, protected-file restoration, secret rechecks,
+worktree-pointer forgery, project opt-outs, orphan pacing, and marker
+replacement races.
+
+## Digest delivery now resumes without replaying accepted Telegram chunks
+
+- Telegram MarkdownV2 chunking now selects only independently valid entity
+  boundaries and rejects an over-limit or malformed entity before sending.
+- Real digest delivery persists one stable redacted payload, its exact chunks,
+  and the next-unsent cursor per date before the first API call. Each
+  non-idempotent request also gets a durable in-flight marker, so an unknown
+  response outcome is parked instead of blindly replayed. Safe retries resume
+  the suffix, and a completed checkpoint makes a pre-cursor-advance retry a
+  no-op.
+- Telegram entity-parse HTTP 400 responses get one equivalent-HTML fallback.
+  The fallback representation is persisted before sending, so a transient HTML
+  rejection does not retry known-invalid MarkdownV2. Any deterministic 4xx or
+  ambiguous outcome is parked; the daemon leaves the date owed but blocks
+  repeated dispatch.
+- Regression coverage includes a long two-project/five-PR digest, every
+  section and footer, durable mid-stream recovery, no accepted-prefix
+  duplicates, structured chunk logging, and permanent failure classification.
+
+See [[modules/digest]], [[commands/digest]], [[modules/daemon]], and [[testing]].
+
+## [2026-07-24T09:30:00Z] daemon - make every error retryable
+
+**Behavior:** `ERROR` and `REVIEW_ERROR` are now durable diagnostic states,
+not permanent workflow terminals. Every reason uses the same shared
+marker-age cooldown. Clears
+remain generation-guarded and skip live controller/task-lock owners. Failed
+reruns write a fresh marker and restart the cooldown, with no exhaustion
+budget.
+
+This includes formerly manual-only preflight, tamper/integrity,
+dirty-worktree, unknown, and timeout reasons. Bot Autofix now offers the same
+guarded clear-and-rerun path. Durable attempt-loss recovery also remains
+pending across unverifiable process identity or missing-task observations, and
+`retry_charge` is lineage evidence rather than a three-attempt terminal cap.
+Successor admission is paced by a persisted shared cooldown rather than every
+daemon tick.
+
+**Why:** Hive cannot know whether files, configuration, credentials, provider
+state, or the configured agent binary changed after an error was written. The
+rerun is the universal health probe. Current operator input or dirty execute
+work temporarily defers a clear, and the new attempt still re-applies every
+ordinary stage validation.
+
+**Tests:** Updated stale-agent, dependency-recovery, attempt-loss, bot
+notification, and recovery-sequence coverage to pin repeated retries beyond
+the former budgets, one cooldown for every reason, preserved
+ownership/marker guards, and the absence of exhaustion events.
+Coverage also pins the global/project enable gates, non-expiring `3-plan`
+continuation across temporary project-config removal, enqueue-failure marker
+restoration, lost-successor cooldown, and scheduler-owned operational status
+while automatic retry is enabled.
+
+## [2026-07-24T08:28:32Z] CI — separate functional E2E from incident timing
+
+**Action:** Kept the real CLI harness as a functional merge gate by adding its
+result to the protected `rake test (Ruby 3.4)` aggregate. Moved the
+report-driven incident duration check into a downstream `continue-on-error`
+job that downloads the retained E2E artifact, so hosted-runner timing variance
+stays visible without blocking a functional change. Kept report-integrity
+checks in the functional E2E job.
+
+**Contract:** Functional harness/library/scenario failures still fail the
+protected aggregate, including missing enabled results, duplicate
+metadata/results, and invalid durations. The advisory check retains only the
+ten-second per-incident and thirty-second group targets, reuses the existing
+report artifact, and does not repeat the E2E run or install the root bundle.
+
+**Verification:** Added workflow-structure assertions for the required E2E
+dependency, blocking integrity mode, advisory timing mode, artifact handoff,
+and exclusion of timing from the protected aggregate.
+
+## [2026-07-24T07:23:55Z] Give real-subprocess incident budgets CI headroom
+
+**Action:** Raised the per-scenario incident-regression runtime ceiling from
+five seconds to ten seconds while retaining the thirty-second aggregate cap.
+The former threshold sat on the normal runtime boundary for the
+`incident_plan_only_dependency_gate` scenario and failed a hosted run at
+5.010 seconds despite all scenario assertions passing. The wider ceiling keeps
+material slowdowns bounded without treating ordinary hosted-runner variance as
+a functional regression.
+
+**Coverage:** Updated the incident-budget unit boundary assertion and the
+scenario, E2E, testing, and known-gap documentation. The real CLI scenario
+harness remains separate from the default `rake test` task.
+
+## 2026-07-24 — Workflow creator review hardening
+
+- Bound every human decision to the current `decision_id`, moved completion
+  artifact verification under the task/commit locks, rejected marker-only
+  artifacts, and separated completed-human status from archived tasks.
+- Made human-stage entry reject symlinked state files and copy a stable,
+  no-follow snapshot into the destination.
+- Made `workflow validate` strictly read-only for authored, built-in, and
+  managed workflows, including prepared managed journals, and gave malformed
+  JSON invocations their command-specific schema.
+- Made minimal-init collisions and failures machine-readable without replacing
+  an unrelated same-basename registration.
+- Serialized idempotent lookup, exclusive candidate creation, and commit so
+  same-slug contenders cannot share or overwrite a task directory.
+- Required the natural-language creator to commit its populated workflow graph
+  after validation, and synchronized the canonical/OpenClaw guidance, public
+  docs, wiki, schemas, and focused regressions.
+
+## 2026-07-24 — Workflow creator review fix pass 2
+
+- Preserved strict no-write workflow validation and minimal-init preview at
+  executable startup, kept minimal init free of scheduler timers, rejected
+  managed-path and scaffold symlink redirection, and added a locked
+  `hive workflow commit ID` path for populated owner-authored graphs.
+- Made human decisions reject non-local or symlinked completion artifacts,
+  record self-target outcomes with a fresh decision identity, and return
+  idempotent no-ops for matching concurrent retries.
+- Made task creation fingerprint owner-authored workflow bytes, fail closed on
+  corrupt metadata, use the canonical workflow-mutation/state-commit lock
+  order, and clean both owned candidates and staged index entries on failure.
+  Applied the same exact-path index rollback to failed workflow scaffold and
+  populated-graph commits.
+- Specified exact POSIX request quoting and deterministic retry-key derivation,
+  then expanded hermetic creator acceptance to cover version/confirmation
+  refusals and durable populated-graph commit evidence.
+
+---
+date: 2026-07-24
+summary: Put durable attempt admission behind one in-monorepo API
+---
+
+- Added `Hive::Attempts::API` as the stable admission boundary for foreground
+  task commands, bot-local delivery, daemon queue delivery, and loss-successor
+  recovery.
+- Kept `Entrypoint`, `ConfiguredDispatcher`, launchers, clients, and stores in
+  the Hive monorepo as internal collaborators, with Hive remaining the first
+  and primary API consumer.
+- Routed Hive's production admission consumers through the new boundary while
+  preserving the existing durable-attempt behavior and result contracts.
+- Separated the public result and unsupported-platform contracts from the
+  internal client, dispatcher, and launcher implementations.
+- Added focused coverage for API delegation, shared-store composition, and the
+  CLI, bot, and daemon construction paths.
+
+# Proxy host login gate
+
+- Removed the production hostname allowlist that returned Rails 403 responses
+  for unconfigured VPN, tunnel, and reverse-proxy names.
+- Restricted native no-auth access to requests whose socket peer and normalized
+  Host are both loopback; every other hostname now reaches the existing GitHub
+  device-flow owner gate.
+- Kept the policy vendor-neutral: `HIVE_WEB_ORIGIN` remains an optional extra
+  Action Cable origin rather than an HTTP Host authorization setting.
+- Added production middleware and controller regressions for arbitrary proxy
+  hosts, login redirects, and mutation refusal before side effects.
+- Hardened the bypass against spoofed `X-Forwarded-Host`, normalized bracketed
+  IPv6 Host authorities, and made proxied native login disclose first-owner
+  claiming instead of presenting GitHub as an optional repository connection.
+
+# Legacy root reviewers now have an upgrade-safe migration
+
+**Action:** Added a narrow read-through compatibility alias for project configs
+that place `reviewers` at the root. Hive promotes the value in memory to
+`review.reviewers`, validates it normally, and warns once per process and
+source path instead of failing every command immediately after a binary update.
+`hive migrate` now performs the durable comment-preserving rewrite. Configs
+that define both locations fail before mutation so Hive never chooses between
+two authored reviewer policies.
+
+**Boundary:** `hive update` continues to replace only the installed CLI; it
+does not silently edit or commit every registered project's tracked Hive state.
+All unrelated unsupported root keys remain strict exit-78 failures.
+
+**Validation:** Added unit and command-boundary coverage for compatibility,
+normal validation after promotion, conflict rejection, status/task strictness,
+and review execution. Added integration coverage for comment-preserving,
+idempotent project-state migration.
+
+Did not edit compiled [[log]].
+
+---
+title: Claude-compatible empty MCP isolation config
+date: 2026-07-23
+tags: [agents, claude, runtime-policy, digest]
+---
+
+Managed Claude launches now materialize their intentionally empty strict MCP
+configuration as an explicit `mcpServers: {}` object. This preserves complete
+MCP isolation while satisfying current Claude Code schema validation, allowing
+confidential digest generation and managed Honeycomb actors to start normally.
+
+Unit coverage pins the schema-valid empty configuration.
+
+**Links:** [[modules/agent_profile]], [[commands/digest]], [[testing]]
+
+## [2026-07-23T12:57:17Z] testing — isolate setup and babysitter outer proofs
+
+**Action:** Added `SetupAgentsIntegrationTest` to the canonical file-level
+CI-gate map and split the one large babysitter command-classification matrix
+into its own filtered gate. The normal local `rake test` and exhaustive coverage
+file set exclude the setup file, packaged-web proof, and TUI-scale proof. The
+other 66 fast/core `BabysitterDryRunEnvTest` cases remain local and
+coverage-included.
+
+**CI contract:** The workflow runs the new files as separately named
+`multi-agent setup integration` and `babysitter dry-run security matrix`
+matrix legs. The existing protected `rake test (Ruby 3.4)` aggregator remains
+fail-closed over exhaustive coverage and the complete expensive-gate matrix, so
+all four outer proofs must pass before merge without adding branch-protection
+contexts that older branches cannot produce. Each generated gate also requires
+at least one non-skipped test with an assertion, so an emptied file or stale
+filter fails instead of reporting a false green.
+
+**Agent workflow:** Run the setup-agents or babysitter gate locally only while
+diagnosing its CI check. During normal implementation, use the smallest focused
+tests for changed behavior and one broad default-suite checkpoint when
+warranted.
+
+**Focused verification:** The generated setup gate completed 5 runs and 26
+assertions in 56.123 seconds. The filtered babysitter gate completed its single
+matrix test with 1,376 assertions in 41.293 seconds; the remaining core file
+completed locally in 16.317 seconds with one intentional gate skip. Comparing
+the isolated before/after file timings removes about 111 seconds from the normal
+suite. A focused coverage run keeps all 108 executable
+`lib/hive/babysitter/dry_run_env.rb` lines covered; hosted exhaustive coverage
+remains authoritative for the whole repository.
+
+**Hosted coverage follow-up:** The first exact-head coverage run identified 25
+`AgentSkills::Inspector` lines that had been covered only incidentally by the
+setup integration file. Fast unit coverage now owns the native Codex/Pi
+inventory, marketplace-source conflict, and package-version paths explicitly;
+the setup integration proof remains isolated in its named gate.
+
+## [2026-07-23T08:36:08Z] testing — move expensive outer proofs to CI merge gates
+
+**Action:** Removed `WebPackagedBootstrapTest` and `TuiReactivityPerfTest`
+from the default local `rake test` / `rake coverage` file set and exposed each
+through an explicit Rake task. CI runs those tasks as the separately named
+`packaged Hive web bootstrap` and `TUI reactivity performance` checks. A
+fail-closed aggregator keeps the existing protected `rake test (Ruby 3.4)`
+context green only when exhaustive coverage and both outer proofs succeed,
+without charging every agent checkpoint for real gem/web bootstrap or the
+8-by-200 TUI scale fixture.
+
+**Agent workflow:** Added repository guidance to run focused test files while
+implementing, use the broad default suite once at an appropriate checkpoint,
+and leave exhaustive coverage plus packaging/performance proofs to CI unless
+diagnosing a corresponding CI failure. The packaged-web task remains
+commit-bound because it reproduces the release archive from `HEAD:web`.
+
+**Gate activation:** Keep `main` branch protection on the existing
+`rake test (Ruby 3.4)` context and verify that the new aggregator owns that exact
+name. Requiring the new contexts directly before this workflow reaches `main`
+would deadlock older pull-request branches that cannot produce them. Do not
+rely on the split until both named jobs and the fail-closed aggregator have run
+successfully on the pull request.
+
+**Measured follow-up:** After removing the two original hotspots, a diagnostic
+verbose default-suite profile took 561.565 seconds. It ended with one failure
+and one error, so its timings are inventory evidence rather than a green gate.
+The next clear candidates for future CI partitioning or focused internal
+optimization were multi-agent setup convergence, the babysitter subprocess
+security matrix, TUI attachment smoke, setup-orchestrator failure integration,
+and brainstorm/tmux integration.
+
+## [2026-07-23T04:01:32Z] test - isolate optional init skill preflights
+
+**Action:** Direct `Hive::Commands::Init` construction now defaults the optional post-init agent-skill preflight off when Minitest is loaded. Hundreds of disposable-project fixtures exercise init behavior unrelated to native skill discovery; repeating the same filesystem and CLI inventory made each CI-like init roughly two seconds slower. The focused doctor-preflight integration suite opts in explicitly. Real CLI subprocesses do not load Minitest and retain the production-on default, which a clean Ruby subprocess regression pins.
+
+**Coverage:** At a CI-like `PATH`, ten paired fresh-repository samples measured median init time at 2.020742s with the preflight and 0.062147s without it (1.958595s delta). The focused preflight/agent-skill tests pass at seed `23422` with 17 runs and 76 assertions; the broader init integration suite passes with 104 runs and 835 assertions. The first exact gate exposed one Inspector branch that the generic preflights had covered only incidentally, so `agent_skills/inspector_test.rb` now owns the available native-reviewer path and passes with 26 runs and 103 assertions. The exact seed-`23422` rerun passes with 10,130 runs, 141,952 assertions, 0 failures/errors, 7 skips, 1,126 process results, and 55,153/55,153 lines in 658.145470s. Updated [[testing]] with the test/production boundary. No operator behavior or uncertainty changed.
+
+## [2026-07-23T03:15:23Z] test - isolate dispatcher display-name backfills
+
+**Action:** Changed the generic `daemon/dispatcher_test.rb` construction helper to install an inert display-name backfiller. Missing display names are common incidental fixture state in this routing suite; the production collaborator turned 59 of those rows into detached `hive generate-name` subprocesses across 197 tests, creating unrelated process/agent work. The dedicated `display_name_backfiller_test.rb` suite and the dispatcher's explicit wiring and defensive-rescue cases still exercise the real collaborator contract.
+
+**Coverage:** The dispatcher suite passes at seed `45012` with 197 runs and 663 assertions, and the dedicated backfiller suite passes at the same seed with 18 runs and 71 assertions. Updated [[testing]] with the isolation boundary. No production behavior changed and no new uncertainty was introduced.
+
+---
+title: Isolated Rails agent-login polling resource
+date: 2026-07-22
+tags: [web, rails, turbo, agents, performance]
+---
+
+Agent login create/show/completion now enter dedicated resource controllers and
+an `AgentLogin` request snapshot instead of special actions on
+`AgentsController`. The public verbs and URLs remain unchanged, while a status
+refresh renders only its one PTY session and no longer reruns account checks,
+registered-project loading, or selected-project managed-skill inventory.
+
+Turbo frame requests omit a matching `src` that points back to the request URL;
+Turbo rejects that recursive response and otherwise empties the frame. The
+two-second poll controller is attached to replaceable inner content, with its
+frame lookup supporting both that lifecycle and existing frame-owned polls.
+When the CLI finishes, the completed server response replaces the controlled
+content and Stimulus disconnects the timer without a client-owned completion
+state.
+
+Model and integration coverage pins immutable snapshots, session/agent URL
+binding, route ownership, isolated rendering, and the non-recursive frame
+contract. A Capybara/Playwright flow proves the provider URL renders without
+the Agents inventory and that polling stops after completion.
+
+**Links:** [[commands/web]], [[architecture]], [[testing]], [[decisions]]
+
+---
 title: Audit queued Rails head and bounded web resources
 date: 2026-07-22T22:20:45Z
 tags: [wiki, web, rails, puma, stimulus, testing, provenance]
@@ -106,6 +4075,64 @@ standalone llm-wiki and the marketplace plugin. Mixed installations now share
 one machine-wide provider admission point instead of serializing only within
 each package. Queue retention, the 4 GiB/no-swap limit, and wiki-only
 publication to `llm-wiki/refresh` remain unchanged.
+
+---
+title: Bounded web polling and composer resources
+date: 2026-07-22
+tags: [web, stimulus, turbo, performance, uploads]
+---
+
+Timed Turbo-frame polling now treats the frame's `busy` / `aria-busy` state as
+an ownership boundary. Interval ticks remain observable but do not call
+`reload()` while an earlier request is in flight, preventing a slow log or
+agent-login response from being continually cancelled and restarted.
+
+The permanent new-idea composer now receives the server's eight-image and
+10 MB-per-image limits as rendered Stimulus values. Paste and picker batches
+accept only their bounded valid prefix, report oversize and overflow files in
+an accessible status message, and rebuild the multipart `FileList` once after
+the batch. The controller inspects at most 16 picker/clipboard entries even if
+a synthetic list claims millions, and renders a generic attachment glyph rather
+than decoding potentially gigantic image dimensions. This caps DOM, decoded
+image memory, retained `File` objects, and the previous per-file `DataTransfer`
+rebuild cost.
+
+Stimulus disconnect now schedules a short cancellable cleanup: the same
+`data-turbo-permanent` form can reconnect without losing staged files, while a
+genuinely abandoned form clears both its attachment map and browser-owned
+`FileList`. Puma's native `http_content_length_limit` rejects bodies above the
+complete valid 81 MiB idea envelope before Rack parses or spools multipart
+parameters. Hive's Puma hook rejects chunked request bodies at the parsed-header
+boundary because Puma's decoder otherwise spools them without an incremental
+limit, and closes that connection so unread chunks cannot be mistaken for a
+later request. Controller count/size validation remains authoritative inside
+the admitted envelope. The Puma-only hook lives in the Rails app's `web/lib`,
+leaving the CLI gem's Puma-free, 100%-coverage source set intact.
+
+Playwright coverage pins busy-frame pause/resume, mixed overflow/oversize
+batches, million-entry synthetic-list inspection bounds, non-decoding chips,
+preserved permanent reconnects, and true-disconnect cleanup. Rails integration
+coverage pins controller count/size limits and Puma's declared-length and
+chunked pre-Rack 413 boundaries. Validation completed with the full Rails suite
+(225 runs / 1,143 assertions), the full Playwright suite (52 runs / 353
+assertions), the final real-socket Puma suite (3 runs / 13 assertions), seven
+changed Ruby files clean under RuboCop, clean JavaScript syntax checks, and zero
+Brakeman warnings after the repository baseline.
+
+**Links:** [[commands/web]], [[testing]], [[architecture]]
+
+---
+date: 2026-07-22
+slug: isolate-llm-wiki-test-lock
+pages: [testing]
+---
+
+Isolated LLM-wiki integration fixtures from the operator's machine-wide refresh
+lock by assigning each fixture a private runtime directory. Concurrent real
+wiki refreshes can no longer suppress fixture agents or leave their test queues
+undrained. Explicit global-lock tests still provide their own shared runtime
+directory and retain the production serialization contract. Updated [[testing]]
+and did not edit compiled [[log]].
 
 ---
 title: Refresh queued managed-module, Rails filtering, and focused-test contracts
@@ -271,6 +4298,117 @@ parallelism with exact-head hosted evidence. No CI optimization is implemented
 by that commit.
 
 ---
+title: Durable dispatch-writer failure coverage
+date: 2026-07-22
+tags: [bot, daemon, attempts, testing]
+---
+
+Hosted CI on PR #833 completed 10,057 tests with zero failures but rejected the
+result at 99.99% line coverage. The six uncovered lines were the durable bot
+dispatch writer's generic admission-failure cleanup and real project/stage task
+resolution path.
+
+Focused tests now prove an unexpected admission error removes the still-
+unclaimed delivery and re-raises the identical exception, while capacity
+deferral continues leaving its request pending. A resolver-boundary test proves
+the slug is scoped by both project and `--from`/`--stage`, including the no-stage
+case. [[modules/bot]] now describes that durable foreground admission contract;
+the focused test remains the executable proof.
+
+**Verified:** Exact failing seed replay of `test/unit/bot/dispatch_request_writer_durable_test.rb` (4 runs, 13 assertions, 0 failures, 0 errors) and RuboCop (1 file, no offenses).
+
+**Links:** [[modules/bot]], [[testing]], [[state-model]], [[modules/daemon]]
+
+---
+title: URL-addressed server-rendered project filter
+date: 2026-07-22
+tags: [web, rails, turbo, stimulus, kanban]
+---
+
+The Board/Grid project rail now uses ordinary GET links. `StatusController`
+resolves `?project=`, renders only the selected project's markup, and redirects
+unknown project names to the same canonical route without the stale filter.
+Turbo refreshes that URL after a status broadcast, so HTTP remains the single
+filter authority and unrelated project markup never enters the document.
+
+The 96-line client filter controller is reduced to one progressive enhancement:
+before Turbo follows an explicit project link, it selects that project in the
+permanent composer so unfinished text and staged files retain the intended
+context. The MutationObserver, animation-frame reapplication, History API
+mutation, DOM hiding, active-class mutation, and view-form rewriting are gone.
+The enhancement reads the raw data attribute rather than Stimulus's decoded
+action parameter, keeping names such as `123` and `false` as strings, and
+ignores modified, non-primary, prevented, and non-current-target clicks so a
+new-tab gesture cannot retarget the current tab's unfinished idea. A bounded
+Back/Forward event seam realigns the permanent composer only when browser
+history restores a filtered URL, preventing the visible project and submission
+target from diverging without clobbering choices during live morphs.
+Rails renders active navigation state, deep-link composer selection, and
+view-switch parameters. `StatusBroadcaster` now sends one complete refresh plus
+composer-selector message and no longer maintains a separate project-rail
+replacement.
+
+Focused Rails, broadcaster, and Playwright validation is recorded in PR #833.
+The completed checkpoint passed the full Rails suite (221 runs, 1,123
+assertions), the full Playwright system suite on the former failing seed 20887
+(50 runs, 328 assertions), and
+three repeated Action Cable recovery runs at the hosted failing and boundary
+seeds (9 runs, 30 assertions). The recovery fixtures now keep their replacement
+socket alive until Rails observes the catch-up, and allow Action Cable's
+jittered 6–12 second reconnect poll instead of racing the generic 10-second
+Capybara wait. RuboCop and Brakeman remained clean.
+Playwright examples now reset the registered project fleet inside the guarded
+throwaway test root and prove Cable confirmation before one-shot filesystem
+mutations. This removes test-order-dependent status scans and missed-update
+races without changing production polling or reconnect intervals.
+The remaining multi-client live-daemon smoke is retained in [[gaps]].
+
+**Links:** [[commands/web]], [[architecture]], [[state-model]], [[testing]], [[gaps]]
+
+## Web: wait on the golden path's durable PR gate
+
+**Action:** Changed `web/test/e2e/golden_path_e2e.rb` to wait for the durable "Ready to open PR" result instead of first requiring a transient `execute` badge. The test still proves execute ran by inspecting the real implementation commit in the generated worktree.
+
+**Root cause:** Hosted CI on PR #833 observed the task at `open-pr` before Capybara sampled the `execute` badge. The daemon had successfully traversed execute; the browser assertion was racing a valid fast transition.
+
+**Verified:** `cd web && BUNDLE_PATH=/home/asterio/.local/share/gem /home/asterio/.local/share/gem/ruby/3.4.0/bin/bundle exec bin/rails test test/e2e/golden_path_e2e.rb` (1 run, 13 assertions, 0 failures, 0 errors).
+
+**Links:** [[testing]]
+
+---
+date: 2026-07-22
+slug: exact-coverage-gate
+pages: [testing]
+---
+
+Made the default 100% line-coverage gate compare exact covered and executable
+line counts instead of trusting the rounded display percentage. A report with
+54,789 covered lines out of 54,790 now fails even though its displayed value is
+`100.00%`, and the failure reports the honest `54789/54790` numerator and
+denominator. Configured thresholds below 100% retain percentage comparison
+semantics. Updated [[testing]] with the distinction; did not edit compiled
+[[log]].
+
+---
+date: 2026-07-22
+slug: installable-patrol-modules
+---
+
+- Added a strict reviewed `hive-module/v1` package contract while preserving
+  existing Honeycomb manifests and lifecycle commands through normalization.
+- Added project-local preview-bound lifecycle state, immutable active/previous
+  generations, explicit grants, activation rollback, durable module events,
+  decision receipts, first-class hook attempts, and one redacted status model
+  shared by CLI and Hive Web.
+- Packaged Patrol and Architecture Patrol as first-party declarative modules
+  around their existing engines and authoritative state stores.
+- Added fail-closed adoption, non-mutating shadow comparison, evidence-gated
+  mutator ownership cutover, and checkpoint-preserving rollback. The real
+  legacy capture producer, gateway-bound patrol capabilities, atomic
+  reservation handoff, native workflow-task admission, seven-day observation
+  window, hosted CI, and PR evidence remain explicit follow-up blockers.
+
+---
 title: Preserve bounded wiki scheduling in headless hooks
 date: 2026-07-22
 tags: [llm-wiki, systemd, scheduler, queue, release]
@@ -392,6 +4530,71 @@ compiled-log-only commits required no page contract change, and compiled
 - [[modules/config]]
 - [[modules/task]]
 - [[testing]]
+
+---
+title: Worthy patrol finding remediation
+date: 2026-07-22
+tags: [patrol, attempts, cli, babysitter, installer, e2e]
+---
+
+- Durable attempts now accept authenticated launching handoffs, preserve
+  predecessor outputs when a successor supplies no replacement, and drain
+  final frames after terminal/lost receipts. Display-name generation also
+  accumulates structured streaming text, Pi authentication honors
+  `PI_CODING_AGENT_DIR`, and dependent Codex package operations recognize the
+  config snapshot created by their prerequisite.
+- Install/lifecycle paths now keep rollback armed through staged launcher
+  construction and activation, restoring the exact previous `hive`, `hv`, and
+  RubyGems shim bytes and modes after gem, write, chmod, or swap failures;
+  uninstall Hive Web with the daemon and bot, restore the
+  original hive-bench checkout after submission attempts, normalize legacy
+  babysitter state paths, and avoid spending fork metadata calls for already
+  green PRs. Bench submission output now reports a repository-relative corpus
+  locator with the exact submission ref and commit SHA, rather than an absolute
+  path that disappears when the caller's checkout is restored. Its tests use a
+  real local push to a bare fixture while keeping `gh` and external GitHub
+  stubbed. The runtime gem explicitly declares `base64 >= 0.2`.
+- The main CLI and E2E harness share one JSON-option grammar. E2E version/help,
+  scenario dispatch, retention diagnostics, artifact paths, and schema
+  contracts are truthful; cleanup environment defaults are now namespaced,
+  while legacy generic retention variables remain a warning-backed fallback
+  that cannot override their namespaced replacements. Optional `asciinema`
+  failures degrade cast capture instead of becoming config errors. Generic
+  usage failures use `Hive::UsageError`, while `Hive::InvalidTaskPath` remains
+  where the public `invalid_task_path` contract requires it.
+  `hive-eval` documents repository-relative paths and exits 127 when Bundler
+  cannot be launched, while `hv` accepts semantic prerelease/build versions
+  and explains invalid candidates.
+- Babysitter dry-run launchers and stubs share one environment-scrubbing
+  definition, invoke the Ruby GitHub stub directly, preserve binary argv in
+  denied-command logging, and use shared skip-message/artifact helpers. Test
+  fixtures and acceptance seams were consolidated without weakening the
+  default-deny boundary.
+- Ordinary patrol findings now carry an exact target SHA, configured
+  validation key, and explicit active/resolved/rejected/superseded lifecycle.
+  A registry reconciles old records with PR/dismissal outcomes and performs
+  all-history semantic deduplication before persistence. Shipping cycles reuse
+  same-target active findings after dry runs or transient fixer failures,
+  while matching evidence on a newer target starts a recurrence lineage
+  instead of being suppressed forever by an older terminal record. PR and
+  dismissal ledgers now carry the target SHA so only the matching lineage is
+  dispositioned. Fix attempts reject a stale target and require a clean,
+  passing configured baseline before an agent starts; fixer proof must use the
+  reviewer-selected validation key.
+  These additions publish as `hive-patrol.v3` and
+  `hive-patrol-finding.v3`; the previously published v2 files remain byte-for-
+  byte compatible with their original contracts.
+- The sample systemd daemon unit no longer orders itself after the same
+  `default.target` that wants it, avoiding an ordering cycle.
+- Hive Web uninstall now derives service identity with an inert installer
+  config, so malformed global web settings cannot abort unit deregistration;
+  Linux and macOS service-manager failures continue through later cleanup.
+- The quality pass centralized validation-key discovery and structured-message
+  accumulation, bounded streamed message memory without exposing a truncated
+  structured prefix as a complete agent handoff, indexed semantic finding
+  history, eliminated repeated lifecycle reads/timestamps and Codex config
+  snapshots, reused GitOps default-branch discovery and shared dry-run env
+  scrubbing, and removed dead CLI/test aliases without weakening safety gates.
 
 ---
 title: Audit queued 9x committed contracts against current wiki
@@ -803,6 +5006,120 @@ first bootstrap. An integration test corrupts a linked copy deliberately and
 proves that the shared runner and config continue to match the primary.
 
 ---
+title: Subscriber-owned status feed
+date: 2026-07-22
+tags: [web, performance, turbo, action-cable]
+---
+
+Hive web no longer scans every registered project merely because the Rails
+server is running. A dedicated `StatusChannel` starts the shared
+`StatusBroadcaster` when the first status or task page connects and stops it
+after the last page disconnects. Multiple pages still share one poller.
+
+The synchronous page snapshot now primes that poller, so opening a page does
+not immediately repeat the same full-fleet scan when Action Cable connects.
+Only the first request may claim an idle baseline; a competing request cannot
+replace what that page rendered. Each render nevertheless receives a canonical
+SHA-256 token for its own semantic payload. After its Action Cable subscription
+is confirmed, a current page does nothing and a stale or competing page gets
+one targeted Turbo refresh. Tokens are stable across Puma workers and process
+restarts, while timestamp-only ticks leave them unchanged. That targeted
+stream names the page token; the permanent source carries the token and URL in
+a live-element property through the same-URL Turbo move, then consumes that
+handoff into the active connection. Because Turbo snapshot clones do not copy
+JavaScript properties, history restoration after a source-less route cannot
+revive an older attempt. Later confirmations cannot loop reconciliation GETs,
+navigation cannot revive a consumed handoff from another URL, and a real socket
+disconnect releases the connection-local attempt for later recovery.
+The feed retains only the payload and counters, avoiding an unused
+full-registry JSON serialization on each render. Baseline claims are released
+when a page never reaches Cable, and shutdown cannot erase a newer claim that
+wins while the detached poller is joining.
+
+While subscribers are present, the scan cadence is five seconds rather than
+one second; the full snapshot is still computed fresh for every HTTP render,
+and filesystem changes continue to trigger Turbo refreshes after polling.
+The poller carries its comparable key with each published payload and reuses
+the prior token for unchanged content, so each tick normalizes once and only
+changed semantic content pays canonical JSON serialization and SHA-256 work.
+
+The Cable stream source is a permanent, Hive-owned custom element backed by
+Turbo's signed stream contract. Its asynchronous connection is cancellation-
+safe: a handle whose owner detaches before confirmation is released from the
+confirmation callback, after server registration, so Action Cable's worker pool
+cannot reorder unsubscribe ahead of subscribe and strand a channel. Confirmation
+belongs to the current WebSocket transport rather than the subscription's
+lifetime: disconnect clears it, so teardown during a reconnect again waits for
+that transport's confirmation, rejection, or disconnect. If none arrives within
+five seconds, Hive closes the otherwise-unowned Cable transport to give the
+server an authoritative cleanup edge before forgetting the local handle. The
+channel fences Rails' deferred adapter registration before it starts and again
+when it confirms; a registration that finishes after socket teardown
+immediately unsubscribes itself instead of surviving the earlier cleanup. If
+the deferred adapter call raises, the channel releases its poller lease and
+closes the transport with reconnect enabled rather than remaining active but
+unconfirmed. A
+rejected subscription is forgotten by Action Cable and retried by Hive; a
+rejected asynchronous consumer setup likewise retries every five seconds
+without DOM churn. Hive first clears turbo-rails' cached rejected consumer
+promise so the retry can create a real consumer; disconnect clears the timer
+before it can create a subscription. A synchronous create failure also removes
+the partial Action Cable registration and replaces the failed consumer. The confirmed subscription
+performs the token handshake directly; the previous reconnect MutationObserver
+is gone, and a fresh Turbo
+navigation is pinned to one request. StatusBroadcaster renders the refresh and
+both targeted project surfaces into one message before one Cable send, so a
+partial render failure cannot deliver a refresh prefix and retry it into an
+HTTP loop. The same-URL handoff is scoped to the refresh cycle rather than the
+old rendered token, so a reconciliation GET that legitimately returns a new
+token still reports the prior attempt and remains bounded to one request.
+Failed broadcasts remain pending across last-subscriber shutdown. Broadcaster
+shutdown joins its owner thread before looking up and stopping the lazily
+installed nested feed, closing the rapid-connect race. If the first poller
+thread cannot be created, lease acquisition restores the prior subscriber count
+and the channel rejects the subscription so the browser can retry cleanly.
+Signed-stream verification and lease acquisition both finish before
+`stream_from` queues pub/sub registration, so that rejection cannot race a late
+handler into the adapter after Action Cable cleanup.
+Tests cover accepted/rejected subscriptions, first/last subscriber behavior,
+teardown during barrier-paused stream verification, idempotent concurrent
+cleanup while another channel remains active, unchanged-token reuse,
+competing snapshot priming, content-token late-page catch-up across independent
+feed instances, a one-refresh cross-worker lag bound with disconnect and
+cross-navigation release including pending, failed-send, and source-less
+history round trips, delayed/rejected client setup, poisoned-cache
+recovery, partial-registration cleanup, confirmation-ordered cancellation,
+transport-scoped reconnect teardown, bounded never-confirmed cleanup, server
+startup rejection recovery without queued stream work, retry cancellation,
+late adapter-registration cleanup, deferred adapter-failure reconnect,
+failed-send confirmation
+retry, shutdown overlap, all-or-nothing rendering, retry after
+broadcast failure and reconnect, server-latched one-request fresh navigation,
+and both status and task page wiring. Token equality is exercised in separate
+Ruby processes and remains bound to top-level SHA-256 even when another Hive
+component defines `Hive::Digest`; request-count assertions wait beyond Turbo's refresh debounce,
+and the browser lifecycle covers the real subscription callbacks plus a
+same-token Board/task/Board round trip plus Board/Repos/history restoration and
+a changing-token reconciliation cycle.
+The task status owner wraps all task mutation forms so the
+native submission guard cannot miss them. Admission begins at
+`turbo:submit-start`; cancelling a confirmation therefore cannot retain a
+phantom in-flight form and suppress later refreshes. Shared-scan tests use
+explicit barriers, bounded waits, exact scan counts, and prove recovery from an
+initial empty fallback. Live
+browser profiling against the real 15-project, 81-task registry showed zero
+DOM mutations and zero HTTP requests in every open status tab during each
+20-second idle window. Browser main-thread task time was 0.0048 seconds for one
+tab and 0.0017--0.0158 seconds per tab with four open. The shared server poller
+used 2.16 CPU seconds (10.8% of one core) for one tab and 1.56 seconds (7.8%)
+for four tabs, rather than scaling with tab count. With no subscriber it used
+0 CPU seconds over 10 seconds; after the last tab closed it used 0.01 seconds
+(0.1%), proving poller shutdown. Warm server RSS settled near 193 MiB and each
+Chromium page held roughly 2.5--3.3 MiB of JavaScript heap. This profile ran
+from the worktree on an isolated port and config; the installed service was not
+restarted or upgraded.
+
+---
 title: Publish rewritten PR branches at the rebase boundary
 date: 2026-07-22
 updated: 2026-07-22T10:43:54Z
@@ -857,6 +5174,16 @@ architecture backstop remains `96`.
   reconciliation continues.
 
 ---
+date: 2026-07-22
+slug: rails-resource-mutations
+---
+
+- Removed the web-only `Hive::Web::Dispatcher` orchestration layer. Filesystem-backed Rails resources now own their behavior: task mutations enter `Task`, idea capture enters `Project`, and daemon liveness/repair enters `Daemon`.
+- Kept the canonical Hive commands, daemon queue, guarded recovery sequence, and brainstorm writer as the mechanics beneath those resources; controllers now load one resource, invoke one domain method, and choose an HTTP response.
+- Made daemon repair a conventional resource `create` action while preserving `POST /daemon/repair` and its queue contract. Task lookup now distinguishes a degraded project snapshot from a genuinely missing task, preserving actionable operator errors instead of returning a false 404. Added model and integration coverage for stale submissions, custom workflows, recovery sidecar cleanup, queue failures, brainstorm writes, idea capture, and daemon repair.
+- Updated [[architecture]], [[commands/web]], [[commands/drop]], [[commands]], [[testing]], and [[gaps]] for the Rails resource boundary.
+
+---
 title: Release candidate verification no longer requires provider keys
 date: 2026-07-22
 tags: [release, agent-skills, packaging, ci]
@@ -898,6 +5225,13 @@ variables, and proves the public wrapper can still execute the private gem.
 - Blocked same-URL Turbo replace visits while a status mutation or redirect handoff is active, so a refresh accepted just before the native submit boundary cannot later win over the mutation redirect.
 - Delayed the redirect-handoff system-test refresh injection until after `turbo:submit-end` listeners return, covering the cross-controller race that intermittently pulled Board/Grid switches back to `/` in hosted CI.
 
+## 2026-07-22 — Hardened digest evidence and trust boundaries
+
+- Made merged-PR page traversal require stable consecutive snapshots, preserved valid UTF-8 transport text, and accepted independently quoted Git rename paths.
+- Kept redacted PR bodies and diffs file-backed through generation, with direct-to-file diff capture and cleanup on every orchestration exit.
+- Moved digest runtime policy outside the writable agent root, delete that root wholesale after each invocation, canonicalized secret-shaped fact IDs, and added a verified Telegram-boundary redaction pass.
+- Rejected the removed `digest.source` key, qualified private repository identities by GitHub host, and strengthened London-transition, forbidden-Hive-read, host-collision, and implementation/fix/release/migration coverage.
+
 ---
 title: Release v0.6.6
 date: 2026-07-22
@@ -914,6 +5248,31 @@ refresh-branch publication that does not dirty protected checkouts.
 The release also packages the managed agent draft-PR handoff, native Hive web
 and workflow-derived Kanban defaults, current multi-agent operating skill, and
 the latest workflow, patrol, mobile, and stage-approval fixes.
+
+## 2026-07-22 — Natural-language workflow creator
+
+- Added the `hive-workflow-creator` route inside the one canonical `/hive`
+  AgentSkill. It inventories the installed version/project/workflow IDs,
+  scaffolds only through Hive, validates the normalized graph, reports every
+  inferred default, and creates no task unless the original request asks.
+- Added durable descriptor-declared human outcomes and
+  `hive decide TARGET OUTCOME --from STAGE [--note TEXT] [--json]`. Human
+  stages remain `WAITING`, are never daemon-dispatched, record idempotent
+  decisions, and can complete with an artifact or return to a named stage.
+- Added read-only `hive workflow validate ID --json`, no-write
+  `hive init --new-workflow ID --minimal --preview --json`, and idempotent
+  machine-readable `hive new ... --idempotency-key KEY --json`.
+- The editorial acceptance path is exactly
+  `research -> draft -> approval`: approve records non-empty `draft.md` as
+  publish-ready and completes; reject records the decision and resets draft to
+  `WAITING`. No publish stage or external action is inferred.
+- Added hermetic AE1–AE5 acceptance coverage plus a separate protected OpenClaw
+  proof whose attestation binds the exact candidate skill, prompt, commands,
+  created files, validation graph, creation-only no-task result, explicit
+  create/run no-op retry, operational status, secret scan, and cleanup.
+- Updated manual/natural-language workflow docs and the canonical OpenClaw
+  projection. Hive-site `#23116` remains a non-blocking wording handoff; this
+  change does not select a release version, publish, tag, or deploy.
 
 ## [2026-07-21T22:25:58Z] fix — complete strict project config propagation
 
@@ -948,6 +5307,30 @@ invalid-path ordering, and workflow fingerprint reuse.
 - Published generated wiki commits to `llm-wiki/refresh` with fetched/merged remote history; push failures retain the generated commit and queue without opening the provider circuit or mutating protected `main`.
 - Added freshly fetched default-branch integration, crash-safe remote receipt reachability even after remote rewind/deletion, partitioned retained-commit publication, no-diff acknowledgement commits, and a durable publication-conflict marker that suppresses automatic retries until explicit recovery.
 - Added regression coverage for generated units, stale-unit migration and ownership, disabled schedules, systemctl failure recovery, publication retry/conflicts, and the Rails/E2E environment isolation contracts.
+
+## [2026-07-21T22:10:31Z] workflow publish — unify Honeycomb package v1 publication
+
+- Replaced the legacy mutable workflow submission with strict adjacent
+  authoring metadata, authored README review sections, one no-follow source
+  snapshot, canonical immutable `packages/NAME/VERSION/` bytes, permission
+  projection, complete file hashes, and distinct release/package digests.
+- Added the pinned Honeycomb lint v1 contract and hermetic redacted analyzer;
+  the existing registry manifest and consumer validator remain the package
+  compatibility oracle before any remote interaction.
+- Added owner-private digest bundles, canonical receipts, per-version locking,
+  intent-before-effect direct/fork publication, exact branch/commit/PR reuse,
+  current catalogue reconciliation, and explicitly cached offline evidence.
+- Upgraded `hive-workflow-publish` to schema v2 with a side-effect-free JSON
+  dry-run, exact `--expected-release-digest` confirmation binding, closed
+  lifecycle/freshness states, and retry-safe structured errors. The canonical
+  Hive operating skill and generated OpenClaw projection consume fields rather
+  than prose and forbid merge, approval, force-push, deletion, or catalogue
+  mutation.
+- Focused unit and integration evidence covers authoring, deterministic package
+  validation, lint redaction, retained-state tampering, lost-response resume,
+  catalogue/PR lifecycle, schema files, CLI dry-run state isolation, and
+  generated skill correspondence. No live GitHub publication, merge, listing,
+  Hive release, or ClawHub release was performed.
 
 ---
 title: Rails-native kanban board rebuild
@@ -1426,6 +5809,27 @@ instead of remaining `active (elapsed)` indefinitely.
 and daily cadence and to reject the stale boot-relative/persistent directives.
 
 ---
+title: Harden PR-only digest review boundaries
+type: change
+tags: [digest, security, github, schema, review]
+---
+
+The first review fix pass hardened the PR-only digest without changing its
+scope. Closed unmerged PR rows are ignored; Git C-quoted and space-containing
+paths validate against authoritative file identities; evidence limits now stop
+streaming `gh` output before oversized responses are materialized; malformed
+registry rows produce discovery warnings; and every v2 warning requires a
+repository scope.
+
+Confidential PR evidence now reaches only a fail-closed Claude runtime policy
+limited to private-run Read/Write access with isolated settings, MCP, and child
+environment. Raw provider streams are not retained for digest runs. Changelog
+validation also supports honest no-user-facing-change PRs, preserves Unicode
+title comparisons, and includes an explicit implementation/fix/release/
+migration acceptance proof. Unexpected runtime and delivery exceptions are
+wrapped in the canonical `hive-digest` v2 error envelope.
+
+---
 title: Native web mobile status layout
 date: 2026-07-20
 tags: [web, mobile, responsive, daemon]
@@ -1775,6 +6179,58 @@ timeouts. Live dogfood produced a concrete StreamLog torn-tail data-loss
 finding and a CLI contract-ownership architecture thesis. Normal patrol then
 proved the StreamLog regression fail-before/pass-after, passed the full
 configured validation command, opened PR #807, and handed it to `6-review`.
+
+---
+title: Unified PR-only daily digest
+date: 2026-07-20T00:00:00Z
+---
+
+Replaced the shipped-task digest and the separate merged-PR source with one
+canonical GitHub pipeline. Bare `hive digest` now selects every pull request
+merged during the requested Europe/London day across registered repositories;
+repeatable `--repo owner/name` values filter that registered scope. Hive task,
+stage, completion, ship-time, matching, and pairing state no longer influence
+digest selection or content.
+
+Collection now fetches complete repository metadata and each qualifying PR's
+body, raw diff, and paginated file identities through explicit-host GitHub REST
+calls. Repository-atomic outcomes distinguish successful empty queries from
+failures, partial results carry scoped warnings, and total collection failure
+sends nothing. Raw evidence is private and ephemeral, fixed evidence ceilings
+fail closed, and recognized secrets are redacted before agent-provider egress.
+
+The generator proves evidence-to-fact-to-bullet coverage before Hive accepts
+one significance sentence per project and concrete bullets for every PR.
+Generated text is redacted again before dry-run or Telegram delivery. Optional
+additions, deletions, and commit statistics preserve measured zeroes, label
+partial subtotals, omit wholly unknown totals, and use the same warnings in
+human and JSON output. Empty successful days skip generation but still render
+the normal `PRs 0` footer and deliver normally.
+
+The sole live JSON identity is now `hive-digest` v2. The old `--source` flag,
+`digest.source`, `hive-merged-pr-digest`, Hive match fields, categories,
+failed-notice success state, and compatibility aliases were removed;
+`schemas/hive-digest.v1.json` remains immutable historical documentation.
+Daemon scheduling retains the canonical `hive digest --date D --json` command,
+catch-up/cursor/backoff behavior, and one global slot, while date calculations
+now use Europe/London explicitly. `hive answer-digest` keeps its separate
+host-local calendar behavior.
+
+Migration: remove any source selector, migrate v1 consumers to the v2
+project/PR/bullet/warning shape, treat `--repo` as a registered-repository
+filter, and stop expecting task-derived or Hive-match fields. This work reused
+only the empty-scope and statistics-seam ideas from closed PR #752; its dual
+source, source propagation, matching, and alternate identity were not carried
+forward.
+
+Release-note-ready copy: "Hive's daily digest is now one complete PR-only
+changelist for each Europe/London day. It validates full GitHub body/diff
+evidence, reports partial repositories and metrics honestly, redacts recognized
+secrets at both outbound boundaries, and publishes the new `hive-digest` v2
+contract. Remove `--source` and migrate v1 JSON consumers before upgrading."
+
+This fragment is version-neutral. It does not select a release version, change
+release metadata, create a tag, publish a package, or deploy anything.
 
 ---
 title: Align patrol evidence prompts with source verification
@@ -11447,6 +15903,13 @@ future changes are guarded against broadening terminal agent-loss auto-retry bey
 - [[commands/wiki]]
 - [[index]]
 - [[testing]]
+
+# Preserve managed runner timeout errors during capture cleanup
+
+- Managed runner provenance probes now preserve their primary `Timeout::Error`
+  when closing stdout or stderr wakes a capture reader with `IOError`.
+- The runtime-policy test suite now deterministically covers Grok's
+  fail-closed behavior when bubblewrap is unavailable.
 
 ---
 date: 2026-07-19

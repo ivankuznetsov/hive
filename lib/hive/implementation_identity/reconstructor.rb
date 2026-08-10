@@ -176,7 +176,9 @@ module Hive
       def indexed_execute_attempt(current_attempt)
         return unless @attempt_store.respond_to?(:decision_index)
 
-        subject = current_attempt.subject.merge("intended_stage" => "4-execute")
+        subject = current_attempt.subject.merge(
+          "intended_stage" => "4-execute" # coding-scoped: legacy execute reconstruction
+        )
         attempt_id = @attempt_store.decision_index.successful_attempt_id(
           task_generation: current_attempt.task_generation,
           subject: subject

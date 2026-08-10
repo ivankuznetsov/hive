@@ -46,6 +46,48 @@ class ReviewersTest < Minitest::Test
     end
   end
 
+  def test_explicit_route_translates_native_codex_review_to_admitted_agent
+    with_tmp_dir do |dir|
+      spec = {
+        "name" => "native",
+        "kind" => "codex_review",
+        "agent" => "codex",
+        "output_basename" => "native",
+        "prompt_template" => "reviewer_codex_native_review.md.erb"
+      }
+      context = Object.new
+      context.define_singleton_method(:explicit_routing?) { true }
+      context.define_singleton_method(:adapter) { "grok" }
+
+      with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
+        reviewer = Hive::Reviewers.dispatch(spec, make_ctx(dir))
+
+        assert_instance_of Hive::Reviewers::Agent, reviewer
+        assert_equal "grok", reviewer.spec.fetch("agent")
+        assert_equal "ce-code-review", reviewer.spec.fetch("skill")
+        assert_equal "reviewer_grok_ce_code_review.md.erb",
+                     reviewer.spec.fetch("prompt_template")
+      end
+
+      assert_equal "codex_review", spec.fetch("kind"), "dispatch must not mutate frozen config"
+    end
+  end
+
+  def test_legacy_route_keeps_native_codex_review_adapter
+    with_tmp_dir do |dir|
+      spec = {
+        "name" => "native",
+        "kind" => "codex_review",
+        "agent" => "codex",
+        "output_basename" => "native",
+        "prompt_template" => "reviewer_codex_native_review.md.erb"
+      }
+
+      assert_instance_of Hive::Reviewers::CodexReview,
+                         Hive::Reviewers.dispatch(spec, make_ctx(dir))
+    end
+  end
+
   def test_dispatch_raises_helpfully_for_kind_linter
     # Linter reviewers are not a hive concept in v1; the helpful error
     # points the user at `review.ci.command` instead of silently

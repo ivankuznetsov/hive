@@ -1521,7 +1521,7 @@ module Hive
         when :terminal_replay then :attempt_terminal_replay
         when :deferred
           case result.reason
-          when "capacity" then :attempt_capacity
+          when "capacity", "capacity_saturated" then :attempt_capacity
           when "attempt_lost" then :attempt_lost
           when "launch_handoff_failed" then :launch_handoff_failed
           when "invalid_predecessor" then :invalid_predecessor

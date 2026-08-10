@@ -1785,6 +1785,12 @@ module Hive
               adapter.run!
             end
           rescue Hive::AgentError => e
+            # A trusted provider transport failure ends the enclosing durable
+            # attempt. Converting it into one failed reviewer would allow the
+            # same attempt to invoke another reviewer (or retry this one),
+            # bypassing RecoveryCoordinator's sole retry authority.
+            raise if e.is_a?(Hive::ProviderRouteFailed)
+
             # R7: tmux unavailable is a hard-fail for `claude.mode: tmux`,
             # not a per-reviewer infra error. Re-raise so the outer
             # `Stages::Review.run!` rescue lands the dedicated
@@ -1840,6 +1846,11 @@ module Hive
       end
 
       def shared_claude_reviewer_session?(cfg, specs)
+        # A shared session is keyed only by adapter/model flags and therefore
+        # cannot bind the selected provider account or its evidence channel.
+        # Explicit attempts use the ordinary headless spawn path instead.
+        return false if Hive::Attempts::Context.current&.explicit_routing?
+
         Hive::Config.claude_mode(cfg) == :tmux &&
           specs.any? { |spec| claude_tmux_reviewer?(cfg, spec) }
       end

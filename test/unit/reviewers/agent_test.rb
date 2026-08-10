@@ -105,6 +105,31 @@ class ReviewersAgentTest < Minitest::Test
     end
   end
 
+  def test_explicit_route_formats_prompt_with_admitted_adapter_profile
+    with_tmp_dir do |dir|
+      ctx = make_ctx(dir)
+      FileUtils.mkdir_p(ctx.task_folder)
+      reviewer = Hive::Reviewers::Agent.new(make_spec, ctx)
+      context = Object.new
+      context.define_singleton_method(:explicit_routing?) { true }
+      context.define_singleton_method(:adapter) { "pi" }
+      captured = nil
+      spawn = lambda do |_task, **options|
+        captured = options
+        { status: :ok }
+      end
+
+      with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+          assert reviewer.run!.ok?
+        end
+      end
+
+      assert_equal :pi, captured.fetch(:profile).name
+      assert_includes captured.fetch(:prompt), "Use the `/skill:ce-code-review` skill"
+    end
+  end
+
   # A8 fail-closed, REAL adapter path: a non-yolo permissions scope on a
   # reviewer whose runner can't enforce tool scoping (codex) must raise
   # Hive::ConfigError from the ACTUAL Reviewers::Agent#run! →

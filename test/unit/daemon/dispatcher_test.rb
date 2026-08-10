@@ -1163,6 +1163,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       [ :existing_live, nil, :in_flight, "agent" ],
       [ :terminal_replay, nil, :attempt_terminal_replay, "hive" ],
       [ :deferred, "capacity", :attempt_capacity, "scheduler" ],
+      [ :deferred, "capacity_saturated", :attempt_capacity, "scheduler" ],
       [ :deferred, "attempt_lost", :attempt_lost, "hive" ],
       [ :deferred, "launch_handoff_failed", :launch_handoff_failed, "hive" ],
       [ :deferred, "invalid_predecessor", :invalid_predecessor, "hive" ]

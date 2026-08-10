@@ -74,7 +74,9 @@ module Hive
       def run_with_spawn(deadline:)
         ensure_reviews_dir!
 
-        profile = Hive::AgentProfiles.lookup(spec.fetch("agent"), cfg: @cfg)
+        context = Hive::Attempts::Context.current
+        profile_name = context&.explicit_routing? ? context.adapter : spec.fetch("agent")
+        profile = Hive::AgentProfiles.lookup(profile_name, cfg: @cfg)
         skill = spec.fetch("skill")
         prompt = render_prompt(profile, skill)
         max_attempts = max_attempts_from_spec

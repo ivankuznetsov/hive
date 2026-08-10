@@ -342,6 +342,51 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
     end
   end
 
+  def test_terminal_recovery_does_not_overlay_a_different_live_attempt
+    with_tmp_dir do |dir|
+      path = File.join(dir, "private", "operational-snapshot.json")
+      _store, assembler, reader = build(path)
+      live = row(marker: "agent_working", marker_attrs: {})
+      live.attempt_id = "attempt-2"
+      receipt = {
+        "status" => "terminal",
+        "request_id" => "recovery-1",
+        "attempt_id" => "attempt-1",
+        "phase" => "terminal",
+        "terminal_outcome" => "failed"
+      }
+      recoveries = {
+        "coordinator" => {
+          "receipts" => [
+            {
+              "project" => "demo",
+              "slug" => "ship-it",
+              "stage" => "4-execute",
+              "recovery_phase" => "terminal",
+              "expected_marker_name" => "error",
+              "expected_marker_attrs" => { "reason" => "timeout" },
+              "receipt" => receipt
+            }
+          ]
+        }
+      }
+
+      assembler.begin_tick(now: T0)
+      assembler.observe(
+        live, decision: "in_flight", owner: "agent",
+        reason: "a newer durable attempt is running"
+      )
+      assembler.complete(
+        initial_rows: [ live ], final_rows: [ live ],
+        controller: {}, queue: {}, recoveries: recoveries, now: T0 + 1
+      )
+
+      disposition = reader.read(now: T0 + 2).dig("tasks", 0, "disposition")
+      assert_equal "in_flight", disposition.fetch("decision")
+      refute disposition.key?("recovery")
+    end
+  end
+
   def test_recovery_overlay_matches_the_exact_marker_generation_and_post_clear_state
     with_tmp_dir do |dir|
       _store, assembler, _reader = build(File.join(dir, "snapshot.json"))

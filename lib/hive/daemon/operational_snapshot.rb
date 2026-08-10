@@ -416,9 +416,16 @@ module Hive
           elsif phase == "terminal"
             # A completed attempt normally leaves a meaningful workflow marker
             # (WAITING, COMPLETE, REVIEW_COMPLETE, and similar). Preserve its
-            # terminal receipt unless a fresh recoverable failure now owns the
-            # task.
+            # terminal receipt unless a fresh recoverable failure or a
+            # different live attempt now owns the task.
             return if Hive::Recovery.recoverable_marker?(task["marker"])
+
+            receipt_attempt_id = identity.dig("receipt", "attempt_id").to_s
+            current_attempt_id = task["attempt_id"].to_s
+            if !receipt_attempt_id.empty? && !current_attempt_id.empty? &&
+                receipt_attempt_id != current_attempt_id
+              return
+            end
           end
 
           task

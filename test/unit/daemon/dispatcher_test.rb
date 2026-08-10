@@ -4753,9 +4753,13 @@ end
     end
   end
 
-  def test_unclaimed_terminal_and_lost_attempts_acknowledge_before_promotion
+  def test_attempts_finalize_when_terminal_baseline_refresh_fails
     Dir.mktmpdir("hive-unclaimed-attempt-delivery") do |state_home|
-      terminal = Struct.new(:attempt_id).new("terminal-1")
+      terminal = Struct.new(:attempt_id) do
+        def [](_key)
+          raise IOError, "state lookup unavailable"
+        end
+      end.new("terminal-1")
       lost = Struct.new(:attempt_id).new("lost-1")
       calls = []
       reconciler = Object.new
@@ -4796,6 +4800,73 @@ end
         [ :acknowledge, "lost-1", :request_delivery ],
         [ :promote, "lost-1" ]
       ], calls
+    end
+  end
+
+  def test_terminal_attempt_refreshes_its_write_but_preserves_a_later_user_edit
+    Dir.mktmpdir("hive-terminal-attempt-baseline") do |state_home|
+      hive_state_path = File.join(state_home, "project-state")
+      task_dir = File.join(hive_state_path, "stages", "2-brainstorm", "s1")
+      FileUtils.mkdir_p(task_dir)
+      state_file = File.join(task_dir, "brainstorm.md")
+      File.write(state_file, "<!-- WAITING reason=max_rounds -->\n")
+      File.utime(T0 - 1, T0 - 1, state_file)
+
+      attempt_class = Struct.new(:attempt_id) do
+        def [](key)
+          {
+            "project" => "p1", "task_slug" => "s1",
+            "ended_at" => HiveDaemonDispatcherTest::T0.iso8601(6)
+          }[key]
+        end
+      end
+      terminal = attempt_class.new("terminal-1")
+      reconciler = Object.new
+      reconciler.define_singleton_method(:acknowledge_finalization) { |_attempt, _consumer| }
+      reconciler.define_singleton_method(:promote_finalization) { |_attempt| }
+      dispatcher, _supervisor, controller = make_dispatcher(
+        rows: [], attempt_reconciler: reconciler,
+        dispatch_request_state_home: state_home
+      )
+      controller.observe_state_file_mtime(
+        project: "p1", slug: "s1", mtime: T0 - 600
+      )
+      dispatcher.instance_variable_set(
+        :@attempt_snapshot,
+        Hive::Attempts::ReconciliationSnapshot.new(
+          capacity: nil, attempts: [], lost_attempts: [],
+          newly_lost_attempts: [], terminal_attempts: [ terminal ], invalid_records: []
+        )
+      )
+
+      with_replaced_singleton_method(
+        Hive::Config, :find_project,
+        ->(project) { project == "p1" ? { "hive_state_path" => hive_state_path } : nil }
+      ) do
+        dispatcher.send(:reconcile_attempt_deliveries, now: T0)
+      end
+
+      assert_equal File.mtime(state_file),
+                   controller.last_dispatched_state_file_mtime_for(
+                     project: "p1", slug: "s1"
+                   )
+
+      previous_baseline = T0 - 600
+      controller.observe_state_file_mtime(
+        project: "p1", slug: "s1", mtime: previous_baseline
+      )
+      File.utime(T0 + 1, T0 + 1, state_file)
+      with_replaced_singleton_method(
+        Hive::Config, :find_project,
+        ->(project) { project == "p1" ? { "hive_state_path" => hive_state_path } : nil }
+      ) do
+        dispatcher.send(:reconcile_attempt_deliveries, now: T0 + 2)
+      end
+
+      assert_equal previous_baseline,
+                   controller.last_dispatched_state_file_mtime_for(
+                     project: "p1", slug: "s1"
+                   ), "a post-terminal user edit must remain newer than the baseline"
     end
   end
 

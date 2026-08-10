@@ -181,7 +181,8 @@ only an accepted attempt is `dispatched`; an already-live attempt is
 `in_flight`, while capacity deferral, terminal replay, lost attempts, invalid
 predecessors, and launch handoff failures keep distinct owner/reason evidence.
 Recovery retries do not exhaust. A terminal coordinator receipt remains visible
-only while no fresh recoverable marker has replaced the completed generation.
+only while no fresh recoverable marker or different live attempt has replaced
+the completed generation.
 
 Operational task capacity uses the same accounting as dispatch admission:
 task-kind internal runs plus reconciled external task runs. Patrol scans and
@@ -572,8 +573,8 @@ behind a sibling `.lock`, and a **fail-closed** load — a torn / partial /
 corrupt / newer-schema file degrades to an empty map and the daemon boots
 normally (worst case: one task is re-baselined once). The controller
 write-throughs on every baseline mutation — first-sight record, dispatch,
-terminal-attempt replay, post-completion refresh, AND prune — so there is no
-batched loss window for the critical value. A terminal replay means the
+terminal-attempt replay, local-child completion, durable-attempt completion,
+AND prune — so there is no batched loss window for the critical value. A terminal replay means the
 durable attempts layer already completed that exact task generation; recording
 the observed state-file mtime prevents the unchanged waiting marker from being
 readmitted on every daemon tick, while a later edit still becomes eligible.
@@ -720,11 +721,13 @@ controller frees patrol capacity without applying per-task CONFIG/drop state;
 the patrol scheduler is the sole owner of scan backoff. Patrol scans also run
 outside the ordinary per-project daily task quota.
 
-`reap_completed` always refreshes the controller's
-`last_dispatched_mtime` baseline (no longer just for daemon-spawned
-children — the bot doesn't spawn them anymore). The bug dissolves:
-the same code that observes the mtime is the only producer of the
-spawn.
+Both completion paths refresh the controller's `last_dispatched_mtime`
+baseline. `reap_completed` handles ancillary `ChildSupervisor` children;
+`reconcile_attempt_deliveries` handles detached task attempts before their
+terminal records are finalized. Durable refresh adopts only a state-file mtime
+at or before the attempt's validated `ended_at`; a later operator edit remains
+newer than the baseline and eligible for dispatch. The agent's own final marker
+write therefore cannot masquerade as operator input on the next tick.
 
 See [[architecture]] §"Dispatch flow" for the cross-layer picture.
 

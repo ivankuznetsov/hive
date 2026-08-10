@@ -22,3 +22,5 @@ tags: [attempts, storage, migration, operational-status, performance]
   proof or cold-log opens/scans, without relying on timing or RSS thresholds.
 - A separate deterministic 30,000-log fixture proves maintenance examines only
   one fixed-size page and persists its next cursor.
+- The durable CLI ownership replay now follows the public hot-scan and
+  point-fetch contract instead of reading a physical attempt-layout path.

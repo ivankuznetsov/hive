@@ -666,9 +666,10 @@ live in `test/e2e/scenarios/README.md`.
 
 `durable_attempt_1849_replay.yml` is the ownership acceptance replay. It starts
 a foreground develop attachment, makes three provider commits, kills the
-temporary caller group, asserts the execute lease remains running without a
-daemon, releases the provider, and validates exactly one successful terminal
-receipt. Focused attempt unit suites cover claim/expiry races, PID reuse,
+temporary caller group, asserts the execute lease remains in the public hot
+scan without a daemon, records its ID, releases the provider, and validates the
+same successful terminal receipt through `Store#fetch` whether it remains hot
+or has moved to permanent proof. Focused attempt unit suites cover claim/expiry races, PID reuse,
 framed logs, restart adoption, legacy backfill, dirty capture, and unbounded
 successor healing paced by the shared cooldown.
 

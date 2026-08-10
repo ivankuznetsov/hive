@@ -332,8 +332,9 @@ special attempt-loss branch.
 Focused tests are under `test/unit/attempts/` and
 `test/unit/daemon/attempt_loss_healer_test.rb`. The YAML subprocess replay
 `durable_attempt_1849_replay.yml` creates three commits, kills the temporary
-CLI group, verifies the execute lease remains running without a daemon, and
-accepts completion only from one wrapper receipt.
+CLI group, verifies the execute lease remains in the hot scan without a daemon,
+then point-fetches the same ID from hot or permanent proof and accepts
+completion only from its wrapper receipt.
 
 ## Backlinks
 

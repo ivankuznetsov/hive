@@ -38,13 +38,13 @@ steps:
     id: temporary-caller
   - kind: ruby_block
     block: |
-      records = Dir[File.join(run_home, "attempts", "v2", "records", "*.json")].filter_map do |path|
-        candidate = JSON.parse(File.binread(path))
-        candidate if candidate["intended_stage"] == "4-execute"
-      end
+      require "hive/attempts/store"
+      store = Hive::Attempts::Store.open_default(state_home: run_home)
+      records = store.scan.records.select { |candidate| candidate["intended_stage"] == "4-execute" }
       raise "expected one execute attempt, got #{records.size}" unless records.size == 1
       record = records.first
       raise "attempt was not still running after caller termination: #{record['state']}" unless record["state"] == "running"
+      File.write(File.join(run_home, "1849-attempt-id"), "#{record.attempt_id}\n")
       task_folder = File.join(sandbox, ".hive-state", "stages", "4-execute", slug)
       pointer = YAML.safe_load(File.read(File.join(task_folder, "worktree.yml")))
       worktree = pointer.fetch("path")
@@ -58,19 +58,22 @@ steps:
     timeout: 30
   - kind: ruby_block
     block: |
+      require "hive/attempts/store"
+      store = Hive::Attempts::Store.open_default(state_home: run_home)
+      attempt_id = File.read(File.join(run_home, "1849-attempt-id")).strip
       deadline = Time.now + 10
       record = nil
       loop do
-        records = Dir[File.join(run_home, "attempts", "v2", "records", "*.json")].filter_map do |path|
-          candidate = JSON.parse(File.binread(path))
-          candidate if candidate["intended_stage"] == "4-execute"
+        record = store.fetch(attempt_id)
+        raise "execute attempt disappeared" unless record
+        duplicates = store.scan.records.select do |candidate|
+          candidate["intended_stage"] == "4-execute" && candidate.attempt_id != attempt_id
         end
-        raise "duplicate execute attempt appeared: #{records.size}" unless records.size == 1
-        record = records.first
+        raise "duplicate execute attempt appeared: #{duplicates.size}" unless duplicates.empty?
         break if record["state"] == "terminal"
         raise "attempt did not terminalize" if Time.now >= deadline
         sleep 0.05
       end
-      receipt = record.fetch("receipt")
+      receipt = record["receipt"]
       raise "wrapper receipt did not succeed" unless receipt["outcome"] == "succeeded" && receipt["exit_status"] == 0
       raise "receipt identity mismatch" unless receipt["attempt_id"] == record["attempt_id"] && receipt["task_generation"] == record["task_generation"]

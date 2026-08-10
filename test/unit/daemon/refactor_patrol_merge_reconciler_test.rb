@@ -162,6 +162,18 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
     end
   end
 
+  def test_non_coding_default_workflow_never_starts_merge_intake
+    with_tmp_dir do |dir|
+      gh = FakeGh.new
+      cfg = enabled_cfg.merge("default_workflow" => "content")
+
+      assert_empty reconciler(dir, gh, cfg: cfg).tick(now: T0)
+      assert_empty gh.identity_calls
+      assert_empty gh.page_calls
+      refute File.exist?(state_path(dir))
+    end
+  end
+
   def test_first_enable_blocks_when_active_overlap_itself_exceeds_search_cap
     with_tmp_dir do |dir|
       gh = FakeGh.new

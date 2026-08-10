@@ -50,6 +50,11 @@ init can resolve the whole architecture-patrol choice before any project-state w
 with `hive init --refactor-patrol` or `hive init --no-refactor-patrol`;
 omitting both keeps the enabled default.
 
+Execution and merged-PR intake additionally require the project's resolved
+`default_workflow` to be `coding`. Non-coding defaults cannot discover or act
+even when stale configuration leaves `refactor_patrol.enabled: true`; read-only
+`--list` and `--show` history queries remain available.
+
 ```yaml
 refactor_patrol:
   enabled: true

@@ -9,6 +9,7 @@ require "hive/modules/migration/evidence_store"
 require "hive/modules/migration/patrols"
 require "hive/patrol/decision_projection"
 require "hive/patrol/state_store"
+require "hive/workflows"
 
 module Hive
   module Daemon
@@ -118,6 +119,10 @@ module Hive
 
           cfg = @config_loader.call(entry.fetch("path"))
           patrol = cfg.fetch("patrol", {})
+          unless Hive::Workflows.coding_id?(cfg["default_workflow"])
+            @next_check_at[project] = now + patrol.fetch("poll_interval_sec", 600).to_i
+            next
+          end
           # Throttle every project we evaluate, including opted-out ones:
           # each branch below commits `@next_check_at` once the project's
           # config has been loaded. Otherwise a disabled project would
@@ -165,6 +170,12 @@ module Hive
         return nil unless @migration_ownership.call(entry, "patrol", @migration_authority)
         return nil if pending?(project)
 
+        cfg = nil
+        unless candidate[:recovery_occurrence_id]
+          cfg = @config_loader.call(entry.fetch("path"))
+          return nil unless Hive::Workflows.coding_id?(cfg["default_workflow"])
+        end
+
         snapshot = @migration_snapshot.call(entry, "patrol")
         return nil unless reservation_owner?(snapshot)
 
@@ -172,8 +183,7 @@ module Hive
         capture = if candidate[:recovery_occurrence_id]
           state.occurrence_capture(candidate.fetch(:recovery_occurrence_id))
         else
-          interval = @config_loader.call(entry.fetch("path"))
-                                   .dig("patrol", "poll_interval_sec") || 600
+          interval = cfg.dig("patrol", "poll_interval_sec") || 600
           base_id = schedule_reservation_id(entry, now, interval)
           state.reserve_attempt_occurrence!(
             base_id,
@@ -266,7 +276,8 @@ module Hive
 
       def schedule_selection_input(entry, cfg, patrol, now)
         trigger = patrol.fetch("trigger", "continuous").to_s
-        unless patrol["enabled"] == true
+        unless patrol["enabled"] == true &&
+               Hive::Workflows.coding_id?(cfg["default_workflow"])
           return Hive::Patrol::DecisionProjection.schedule_input(
             enabled: false,
             trigger: trigger,

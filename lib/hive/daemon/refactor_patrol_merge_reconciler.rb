@@ -14,6 +14,7 @@ require "hive/refactor_patrol/job_store"
 require "hive/refactor_patrol/github_gateway"
 require "hive/refactor_patrol/policy"
 require "hive/refactor_patrol/pr_manifest_resolver"
+require "hive/workflows"
 
 module Hive
   module Daemon
@@ -635,7 +636,9 @@ module Hive
       end
 
       def intake_enabled?(cfg)
-        cfg.dig("daemon", "enabled") == true && cfg.dig("refactor_patrol", "enabled") == true
+        cfg.dig("daemon", "enabled") == true &&
+          Hive::Workflows.coding_id?(cfg["default_workflow"]) &&
+          cfg.dig("refactor_patrol", "enabled") == true
       end
 
       def default_branch(cfg)

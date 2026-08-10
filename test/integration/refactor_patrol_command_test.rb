@@ -1257,6 +1257,24 @@ class RefactorPatrolCommandTest < Minitest::Test
     end
   end
 
+  def test_non_coding_default_workflow_rejects_architecture_patrol_execution
+    with_refactor_patrol_project do |repo|
+      config_path = File.join(repo, ".hive-state", "config.yml")
+      cfg = YAML.safe_load(File.read(config_path))
+      cfg["default_workflow"] = "content"
+      File.write(config_path, cfg.to_yaml)
+
+      out, err, status = with_captured_exit do
+        command_for(features: []).call
+      end
+      payload = JSON.parse(out)
+
+      assert_equal Hive::ExitCodes::CONFIG, status
+      assert_match(/non-coding default_workflow "content"/, err)
+      assert_equal "config", payload.fetch("error_kind")
+    end
+  end
+
   def test_review_errors_do_not_advance_last_scanned_sha
     with_refactor_patrol_project do |repo|
       state_dir = File.join(repo, ".hive-state", "refactor_patrol")
@@ -1715,6 +1733,7 @@ class RefactorPatrolCommandTest < Minitest::Test
       config_path = File.join(repo, ".hive-state", "config.yml")
       raw = YAML.safe_load(File.read(config_path))
       raw.fetch("refactor_patrol")["enabled"] = false
+      raw["default_workflow"] = "content"
       File.write(config_path, raw.to_yaml)
       v2_root = File.join(repo, ".hive-state", "refactor_patrol", "v2")
       v2_jobs = File.join(v2_root, "jobs")

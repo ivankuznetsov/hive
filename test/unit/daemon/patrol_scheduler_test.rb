@@ -226,6 +226,34 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_non_coding_default_workflow_is_ineligible_even_when_patrol_is_enabled
+    with_tmp_dir do |dir|
+      cfg = enabled_cfg("default_workflow" => "content")
+      git = CountingGit.new
+
+      assert_empty scheduler(project_entry(dir), cfg, git: git).candidates(now: T0)
+      assert_equal 0, git.rev_parse_calls,
+                   "an ineligible workflow must stop before repository inspection"
+    end
+  end
+
+  def test_reservation_rechecks_non_coding_workflow_eligibility
+    with_tmp_dir do |dir|
+      entry = project_entry(dir)
+      cfg = enabled_cfg
+      sched = Hive::Daemon::PatrolScheduler.new(
+        registry: -> { [ entry ] },
+        config_loader: ->(_path) { cfg },
+        git: FakeGit.new
+      )
+      candidate = sched.candidates(now: T0).fetch(0)
+      cfg = enabled_cfg("default_workflow" => "content")
+
+      assert_nil sched.reserve(candidate, now: T0)
+      refute sched.pending?(entry.fetch("name"))
+    end
+  end
+
   def test_timer_mode_honors_interval
     with_tmp_dir do |dir|
       cfg = enabled_cfg("patrol" => {

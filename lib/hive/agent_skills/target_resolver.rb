@@ -1,5 +1,6 @@
 require "hive/agent_profiles"
 require "hive/agent_skills/manifest"
+require "hive/workflows"
 
 module Hive
   module AgentSkills
@@ -140,6 +141,8 @@ module Hive
       end
 
       def patrol_enabled?
+        return false unless Hive::Workflows.coding_id?(@config["default_workflow"])
+
         patrol = @config["patrol"]
         return false unless patrol.is_a?(Hash)
         return patrol["enabled"] unless patrol["enabled"].nil?

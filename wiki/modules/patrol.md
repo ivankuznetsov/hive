@@ -204,6 +204,15 @@ state as proof of completion.
 
 Patrol is **opt-in**. A project with **no patrol section at all** (or a patrol section that omits `mode:`) resolves to `enabled: false` — [[modules/config]] only derives mode knobs when `mode:` is **explicitly present** in the raw config. `medium` is the default offered by the `hive init` *prompt* (which writes an explicit `mode: "medium"` into the rendered template), never a config-resolution default, so legacy projects without a patrol block are never silently enabled.
 
+Repository patrol is also coding-workflow-only. Ordinary scheduling, merged-PR
+architecture intake, architecture discovery/action reservation, and direct
+execution all require the project's resolved `default_workflow` to be
+`coding`; a stale or hand-edited enable flag cannot launch either patrol for
+Writing, Architecture, Bench, or another non-coding default. Architecture
+Patrol's read-only `--list` and `--show` queries remain available so prior
+evidence is not hidden, and ordinary recovery can finish projecting an already
+reserved receipt without starting a new repository scan.
+
 Operators normally configure scheduling through `patrol.mode`, which [[modules/config]] resolves into cadence plus token, launch, native budget-equivalent, and per-launch token ceilings before the daemon sees the project config. `ultrapatrol`, `high`, `medium`, and `low` deliberately receive progressively smaller envelopes as cadence falls; `off` resolves to `enabled: false`. Measured input and output from both ordinary and architecture stages share the same project/day total; cached counts remain visible but uncharged. Ordinary fix stages apply `fix_budget_multiplier` (default `2`) only to their streamed per-agent cap so editing and proof do not consume review capacity; ordinary cycle/day token and launch limits remain unchanged. Architecture stages apply `architecture_budget_multiplier` (default `2`) to cycle token/launch limits and the streamed per-agent token cap, not the native budget-equivalent guard. Architecture stages ignore `max_agent_spawns_per_day`; reviews instead stop at `max_architecture_review_spawns_per_day` (default `8`) while architecture fixes remain eligible. Their multiplied per-cycle launch bound, shared daily token pool, per-agent cap, advisory lock, and native guard remain active. The two multipliers do not compound for architecture fixes. Unmetered architecture children also consume the separate `max_architecture_unmetered_spawns_per_day` safety ceiling (default `96`), preventing an accounting failure from bypassing durable limits across scheduler cycles. Explicit granular knobs always win over a set mode and survive the deep-merge even when no `mode:` is set.
 
 Each patrol launch also needs enough remaining allowance for its profile's

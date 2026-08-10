@@ -22,12 +22,14 @@ module Hive
         @dispatcher_class = dispatcher_class
       end
 
-      def dispatch_request(request, interactive: false, now: Time.now.utc)
+      def dispatch_request(request, interactive: false, now: Time.now.utc,
+                           admission_view: nil)
         task = Hive::TaskResolver.new(
           request.slug, project_filter: request.project
         ).resolve
         dispatcher_for(task, argv: request.argv).dispatch_request(
-          request, interactive: interactive, now: now
+          request, interactive: interactive, now: now,
+          admission_view: admission_view
         )
       end
 

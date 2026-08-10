@@ -1428,10 +1428,9 @@ module Hive
 
     def default_attempt_store
       root = ENV["HIVE_ATTEMPT_STORE_ROOT"].to_s
-      Hive::Attempts::Store.new(
-        root: root.empty? ? Hive::Paths.attempts_root : root,
-        create_directories: false
-      )
+      return Hive::Attempts::Store.new(create_directories: false) if root.empty?
+
+      Hive::Attempts::Store.new(root: root, create_directories: false)
     end
   end
 end

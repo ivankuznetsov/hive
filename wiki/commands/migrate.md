@@ -3,8 +3,8 @@ title: hive migrate
 type: command
 source: lib/hive/commands/migrate.rb, lib/hive/commands/migrate_all.rb, lib/hive/stages.rb
 created: 2026-05-21
-updated: 2026-08-03
-tags: [command, migration, config, reviewers, stages, task-id, display-name, recovery, update]
+updated: 2026-08-10
+tags: [command, migration, config, reviewers, stages, task-id, display-name, recovery, update, attempt-storage]
 ---
 
 **TLDR**: `hive migrate [PROJECT_PATH]` is the explicit, idempotent upgrade
@@ -34,8 +34,9 @@ cleanup commands while keeping the fleet result visibly incomplete.
 Before project-local changes, the command runs the owner-private recovery-state
 cutover for the current Hive state home. Daemon and bot startup run the same
 cutover before opening their stores or queues. A foreground default attempt
-store fails closed while `attempts/v1` remains, so an upgrade cannot silently
-bypass migration or create competing v2 ownership.
+store opens only the physical v3 layout after the cutover. An obsolete v1 root
+or competing material v2/v3 roots fail closed, so an upgrade cannot silently
+choose or create a second authority.
 
 ## Task-folder renames
 
@@ -115,24 +116,25 @@ restore the workflow, then rerun migrate.
 ## Durable recovery schema cutover
 
 Runtime recovery supports only the current shapes: attempt v3, dispatch request
-v4, and dispatch result v2. `Hive::Recovery::Migration` moves
-`$HIVE_HOME/attempts/v1` to `attempts/v2`, rewrites v1 generation fields, adds
-the explicit task subject required by attempt v3 to v1/v2 records, strips the
-obsolete compatibility flag, and migrates pending request v1-v3 and result v1
-documents. It writes `recovery-migration-v3.json` only after every active
-document is current, then removes the superseded v2 migration receipt.
+v4, and dispatch result v2. `Hive::Recovery::Migration` performs a forward-only
+physical cutover from `$HIVE_HOME/attempts/v2` to `attempts/v3`; attempt records
+remain schema v3. It takes the shared recovery lock and every source writer
+lock, rejects live attempts, validates the complete source tree, atomically
+renames it, and replaces the v2 path with an owner-private old-binary fence.
 
-Final compatibility leases are moved to
-`$HIVE_HOME/attempts/legacy-v1-records/` as audit history. A live compatibility
-lease, any other live attempt in the old tree, or simultaneous populated
-`attempts/v1` and `attempts/v2` trees fails closed with an actionable error. A
-pre-cutover reader can recreate only the empty v1 directory skeleton after v2
-is authoritative; migrate removes that inert tree with empty-directory-only
-`rmdir` operations. Any file, symlink, or concurrent writer preserves the
-fail-closed dual-root error. An old detached supervisor retains the explicit v1
-path until it terminalizes, so Hive never moves storage underneath live work or
-guesses which process owns it. The migration is idempotent; attempt v1/v2
-schemas and in-memory compatibility readers are removed after the cutover.
+The durable `.v3-cutover.json` checkpoint advances through `fenced`, `verified`,
+and `complete`. Before completion Hive compares the exact source corpus and
+scan counts, proves decision-index and capacity parity, and promotes historical
+final records into permanent proof. Only then does it write
+`recovery-migration-v4.json`, migrate pending request v1-v3 and result v1
+documents, and remove superseded recovery receipts.
+
+Runtime opens only v3: there is no dual reader, reverse migration, or hydration
+back into v2. An obsolete v1 tree, material v2/v3 collision, live writer or
+attempt, unsupported attempt schema, unsafe tree entry, changed corpus, or
+invalid checkpoint/fence fails closed with the evidence preserved. Re-running
+after a completed receipt validates the fence, v3 directory, and complete
+checkpoint, then returns the same receipt rather than repeating the cutover.
 
 ## Registered repository identity backfill
 
@@ -191,9 +193,10 @@ A rerun after successful migration prints that there is nothing to move and keep
   backfill, managed same-generation configuration rebinding and all-candidate
   preflight, repository-identity backfill, idempotency, null-id repair, and
   counter seeding.
-- `test/unit/recovery/migration_test.rb` covers the global schema cutover,
-  receipt idempotency, archived final compatibility records, queue upgrades,
-  empty post-cutover v1 skeleton cleanup, and live/ambiguous-state refusal.
+- `test/unit/recovery/migration_test.rb` covers the physical v2-to-v3 cutover,
+  exact parity and crash resume, real finalization obligations, v1 empty-skeleton
+  pruning, strict schema rejection, queue upgrades, and live/ambiguous-state
+  refusal.
 - Status integration scenarios prove hidden legacy tasks surface before migrate and disappear after migration.
 
 ## Backlinks

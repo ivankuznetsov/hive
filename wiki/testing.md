@@ -3,8 +3,8 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, bin/hive-patrol-installed-live-smoke, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release-candidate,release}.yml, packaging/{live_agent_skills,release_candidate,patrol_evidence}/, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-08-09
-tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, terminal-outcomes, release-proof]
+updated: 2026-08-10
+tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, terminal-outcomes, release-proof, bounded-storage]
 ---
 
 **TLDR**: Minitest covers unit/integration behavior; opt-in layers cover outer
@@ -126,6 +126,23 @@ Hive/package behavioral parity and the component release workflow contract.
 Parity covers non-default compilation, successful local probes, custom named
 capabilities, nested/missing usage variants, and observable redaction across
 Claude, Codex, Pi, and Grok.
+
+### Bounded attempt-storage gate
+
+`test/unit/attempts/reconciler_test.rb` contains a hard-coded 30,000-entry
+permanent-proof fixture and compares it with an empty history. Both cases must
+perform exactly one hot scan and zero cold opens/scans; the fixture also traps
+`File.open`, `File.binread`, `Dir.glob`, `Dir.children`, and `Dir.each_child`
+under proof and cold-log roots. This is a deterministic structural gate, not a
+wall-clock or RSS threshold.
+
+The focused rollover aggregate also covers forward-only migration and
+checkpoint restart, finalization consumer acknowledgements, raw-log retention,
+the fixed-size 30,000-log maintenance page and durable cold-sweep cursor,
+cached operational status and its single human warning, request terminal replay
+without rerun, task journal/projection, historical implementation identity,
+and evidence-bound task closure. These regressions keep point-addressed
+historical consumers working after their source attempt leaves the hot set.
 
 ## Component boundary contract
 
@@ -649,9 +666,10 @@ live in `test/e2e/scenarios/README.md`.
 
 `durable_attempt_1849_replay.yml` is the ownership acceptance replay. It starts
 a foreground develop attachment, makes three provider commits, kills the
-temporary caller group, asserts the execute lease remains running without a
-daemon, releases the provider, and validates exactly one successful terminal
-receipt. Focused attempt unit suites cover claim/expiry races, PID reuse,
+temporary caller group, asserts the execute lease remains in the public hot
+scan without a daemon, records its ID, releases the provider, and validates the
+same successful terminal receipt through `Store#fetch` whether it remains hot
+or has moved to permanent proof. Focused attempt unit suites cover claim/expiry races, PID reuse,
 framed logs, restart adoption, legacy backfill, dirty capture, and unbounded
 successor healing paced by the shared cooldown.
 

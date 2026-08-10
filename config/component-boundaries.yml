@@ -307,7 +307,7 @@ components:
     owned_paths:
       - lib/hive/attempts
     state_contracts:
-      - "$HIVE_HOME/attempts/v2 records, framed logs, outputs, generation locks, leases, receipts, and lost-outcome evidence"
+      - "$HIVE_HOME/attempts/v3 bounded hot records, permanent proofs and indexes, framed logs, outputs, generation locks, and finalization state"
     schema_contracts:
       - "hive-attempt v3 is the only runtime reader/writer; Hive::Recovery::Migration owns the one-off cutover"
     lock_contracts:
@@ -320,6 +320,7 @@ components:
       - hive/config
       - hive/dependency_snapshot
       - hive/lock
+      - hive/managed_directory
       - hive/markers
       - hive/paths
       - hive/stringify_keys
@@ -338,6 +339,14 @@ components:
       - Hive::Attempts::CapacitySnapshot
       - Hive::Attempts::LostOutcomeStore
       - Hive::Attempts::LostOutcomeProcessor
+      - Hive::Attempts::PermanentProofStore
+      - Hive::Attempts::DecisionIndex
+      - Hive::Attempts::PendingFinalizationStore
+      - Hive::Attempts::FinalizationMaintenance
+      - Hive::Attempts::LogArchive
+      - Hive::Attempts::StorageHealth
+      - Hive::Attempts::PointStorage
+      - Hive::Attempts::AdmissionView
     forbidden_constructions:
       - Hive::Attempts::Entrypoint
       - Hive::Attempts::ConfiguredDispatcher
@@ -351,6 +360,14 @@ components:
       - Hive::Attempts::CapacitySnapshot
       - Hive::Attempts::LostOutcomeStore
       - Hive::Attempts::LostOutcomeProcessor
+      - Hive::Attempts::PermanentProofStore
+      - Hive::Attempts::DecisionIndex
+      - Hive::Attempts::PendingFinalizationStore
+      - Hive::Attempts::FinalizationMaintenance
+      - Hive::Attempts::LogArchive
+      - Hive::Attempts::StorageHealth
+      - Hive::Attempts::PointStorage
+      - Hive::Attempts::AdmissionView
     authorized_internal_constructions:
       - constant: Hive::Attempts::Store
         files:
@@ -360,6 +377,7 @@ components:
           - lib/hive/conditions/execute_boundary.rb
           - lib/hive/implementation_identity/store.rb
           - lib/hive/modules/inspector.rb
+          - lib/hive/recovery/migration.rb
           - lib/hive/task_closure.rb
           - lib/hive/task_projection/store.rb
         reason: "Existing Hive composition, read-only consumers and previews, execution-boundary checks, and closure verification share the canonical durable store; they are not alternate admission producers."
@@ -383,6 +401,18 @@ components:
         files:
           - lib/hive/commands/daemon.rb
         reason: "The daemon composition root owns internal loss-policy wiring; it is not a public recovery operation."
+      - constant: Hive::Attempts::FinalizationMaintenance
+        files:
+          - lib/hive/commands/daemon.rb
+        reason: "The runtime factory and daemon composition root own finalization wiring; callers receive the composed service."
+      - constant: Hive::Attempts::StorageHealth
+        files:
+          - lib/hive/recovery/migration.rb
+        reason: "Store and the one-off migration publish the bounded storage-health cell."
+      - constant: Hive::Attempts::AdmissionView
+        files:
+          - lib/hive/recovery/migration.rb
+        reason: "Admission, reconciliation, and one-off migration are the only builders of the bounded decision view."
     hive_consumers:
       - lib/hive/commands/run.rb
       - lib/hive/commands/stage_action.rb

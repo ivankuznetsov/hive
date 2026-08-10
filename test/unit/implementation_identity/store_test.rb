@@ -347,6 +347,21 @@ class ImplementationIdentityStoreTest < Minitest::Test
     end
   end
 
+  def test_default_attempt_store_runs_layout_migration_without_an_override
+    with_tmp_dir do |root|
+      task = TaskStub.new(folder: root, state_file: File.join(root, "task.md"), slug: "task",
+                          id: 1, project_root: root)
+      with_env("HIVE_HOME" => root, "HIVE_ATTEMPT_STORE_ROOT" => nil) do
+        store = Hive::ImplementationIdentity::Store.new(
+          task: task, cfg: execute_config("codex", "gpt-5.6-sol")
+        )
+        assert_equal File.join(root, "attempts", "v3"),
+                     store.instance_variable_get(:@attempt_store).root
+      end
+      assert File.file?(File.join(root, "attempts", "v2"))
+    end
+  end
+
   private
 
   def with_identity_attempt(intended_stage: "4-execute", attempt_id: "execute-attempt")

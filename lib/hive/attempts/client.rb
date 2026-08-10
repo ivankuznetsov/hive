@@ -15,32 +15,34 @@ module Hive
       def attach(attempt_id, stdout: $stdout, stderr: $stderr)
         sequence = 0
         stdout_bytes = 0
+        output_status = :unavailable
         loop do
-          sequence, stdout_bytes = drain_frames(
+          sequence, stdout_bytes, output_status = drain_frames(
             attempt_id, sequence, stdout_bytes, stdout: stdout, stderr: stderr
           )
 
           record = @store.fetch(attempt_id)
           raise StoreError, "unknown attempt #{attempt_id}" unless record
           if record.state == "terminal"
-            sequence, stdout_bytes = drain_frames(
+            sequence, stdout_bytes, output_status = drain_frames(
               attempt_id, sequence, stdout_bytes, stdout: stdout, stderr: stderr
             )
+            report_expired_output(stderr, attempt_id) if output_status == :expired
             receipt = record.receipt
             return ClientResult.new(
               status: :terminal, exit_status: receipt.fetch("exit_status"),
               outcome: receipt.fetch("outcome"), receipt: receipt, attempt_id: attempt_id,
-              stdout_bytes: stdout_bytes
+              stdout_bytes: stdout_bytes, output_status: output_status
             )
           end
           if record.state == "lost"
-            sequence, stdout_bytes = drain_frames(
+            sequence, stdout_bytes, output_status = drain_frames(
               attempt_id, sequence, stdout_bytes, stdout: stdout, stderr: stderr
             )
             return ClientResult.new(
               status: :lost, exit_status: Hive::ExitCodes::TEMPFAIL,
               outcome: "lost", receipt: nil, attempt_id: attempt_id,
-              stdout_bytes: stdout_bytes
+              stdout_bytes: stdout_bytes, output_status: output_status
             )
           end
           sleep @poll_interval
@@ -48,21 +50,44 @@ module Hive
       rescue Interrupt
         ClientResult.new(
           status: :detached, exit_status: 130, outcome: nil,
-          receipt: nil, attempt_id: attempt_id, stdout_bytes: stdout_bytes
+          receipt: nil, attempt_id: attempt_id, stdout_bytes: stdout_bytes,
+          output_status: output_status
         )
       end
 
       private
 
       def drain_frames(attempt_id, sequence, stdout_bytes, stdout:, stderr:)
-        StreamLog.read(log_path(attempt_id), after_sequence: sequence).each do |frame|
+        result = read_frames(attempt_id, after_sequence: sequence)
+        result.fetch(:frames).each do |frame|
           target = frame.channel == "stdout" ? stdout : stderr
           target.write(frame.bytes)
           target.flush if target.respond_to?(:flush)
           stdout_bytes += frame.bytes.bytesize if frame.channel == "stdout"
           sequence = frame.sequence
         end
-        [ sequence, stdout_bytes ]
+        [ sequence, stdout_bytes, result.fetch(:availability) ]
+      end
+
+      def read_frames(attempt_id, after_sequence:)
+        if @store.respond_to?(:log_archive)
+          result = @store.log_archive.read(attempt_id, after_sequence: after_sequence)
+          return { frames: result.frames, availability: result.availability }
+        end
+
+        path = log_path(attempt_id)
+        {
+          frames: StreamLog.read(path, after_sequence: after_sequence),
+          availability: File.file?(path) ? :available : :unavailable
+        }
+      end
+
+      def report_expired_output(stderr, attempt_id)
+        stderr.write(
+          "hive: raw output for attempt #{attempt_id} expired; " \
+          "returning its preserved receipt without rerunning it\n"
+        )
+        stderr.flush if stderr.respond_to?(:flush)
       end
 
       def log_path(attempt_id)

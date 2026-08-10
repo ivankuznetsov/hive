@@ -158,13 +158,32 @@ module Hive
       end
 
       def execute_attempts(current_attempt)
-        @execute_attempts ||= @attempt_store.scan.records.select do |attempt|
-          attempt["task_slug"] == @task.slug.to_s &&
-            attempt["project"] == current_attempt["project"] &&
-            attempt["task_id"].to_s == current_attempt["task_id"].to_s &&
-            attempt.task_input_epoch == current_attempt.task_input_epoch &&
-            attempt["intended_stage"] == "4-execute" # coding-scoped: legacy execute reconstruction
-        end.sort_by { |attempt| attempt["accepted_at"].to_s }
+        @execute_attempts ||= begin
+          candidates = @attempt_store.scan.records.dup
+          if (indexed = indexed_execute_attempt(current_attempt))
+            candidates << indexed
+          end
+          candidates.uniq(&:attempt_id).select do |attempt|
+            attempt["task_slug"] == @task.slug.to_s &&
+              attempt["project"] == current_attempt["project"] &&
+              attempt["task_id"].to_s == current_attempt["task_id"].to_s &&
+              attempt.task_input_epoch == current_attempt.task_input_epoch &&
+              attempt["intended_stage"] == "4-execute" # coding-scoped: legacy execute reconstruction
+          end.sort_by { |attempt| attempt["accepted_at"].to_s }
+        end
+      end
+
+      def indexed_execute_attempt(current_attempt)
+        return unless @attempt_store.respond_to?(:decision_index)
+
+        subject = current_attempt.subject.merge(
+          "intended_stage" => "4-execute" # coding-scoped: legacy execute reconstruction
+        )
+        attempt_id = @attempt_store.decision_index.successful_attempt_id(
+          task_generation: current_attempt.task_generation,
+          subject: subject
+        )
+        @attempt_store.fetch(attempt_id) if attempt_id
       end
 
       def log_paths

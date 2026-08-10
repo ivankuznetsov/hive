@@ -40,16 +40,24 @@ class ComponentBoundariesTest < Minitest::Test
       Hive::Attempts::DispatchResult
     ], attempts.dig("public_contract", "values")
     expected_internal_collaborators = %w[
+      Hive::Attempts::AdmissionView
       Hive::Attempts::CapacitySnapshot
       Hive::Attempts::Client
       Hive::Attempts::ConfiguredDispatcher
+      Hive::Attempts::DecisionIndex
       Hive::Attempts::DetachedLauncher
       Hive::Attempts::Dispatcher
       Hive::Attempts::Entrypoint
+      Hive::Attempts::FinalizationMaintenance
+      Hive::Attempts::LogArchive
       Hive::Attempts::LostOutcomeProcessor
       Hive::Attempts::LostOutcomeStore
+      Hive::Attempts::PendingFinalizationStore
+      Hive::Attempts::PermanentProofStore
+      Hive::Attempts::PointStorage
       Hive::Attempts::ProcessIdentity
       Hive::Attempts::Reconciler
+      Hive::Attempts::StorageHealth
       Hive::Attempts::Store
       Hive::Attempts::Supervisor
     ]
@@ -59,10 +67,13 @@ class ComponentBoundariesTest < Minitest::Test
                  attempts.fetch("forbidden_constructions").sort
     assert_equal(
       {
+        "Hive::Attempts::AdmissionView" => [ "lib/hive/recovery/migration.rb" ],
+        "Hive::Attempts::FinalizationMaintenance" => [ "lib/hive/commands/daemon.rb" ],
         "Hive::Attempts::LostOutcomeProcessor" => [ "lib/hive/commands/daemon.rb" ],
         "Hive::Attempts::LostOutcomeStore" => [ "lib/hive/commands/daemon.rb" ],
         "Hive::Attempts::ProcessIdentity" => [ "lib/hive/commands/daemon.rb" ],
         "Hive::Attempts::Reconciler" => [ "lib/hive/commands/daemon.rb" ],
+        "Hive::Attempts::StorageHealth" => [ "lib/hive/recovery/migration.rb" ],
         "Hive::Attempts::Store" => [
           "lib/hive/commands/attempt_supervise.rb",
           "lib/hive/commands/daemon.rb",
@@ -70,6 +81,7 @@ class ComponentBoundariesTest < Minitest::Test
           "lib/hive/conditions/execute_boundary.rb",
           "lib/hive/implementation_identity/store.rb",
           "lib/hive/modules/inspector.rb",
+          "lib/hive/recovery/migration.rb",
           "lib/hive/task_closure.rb",
           "lib/hive/task_projection/store.rb"
         ],
@@ -1334,6 +1346,15 @@ class ComponentBoundariesTest < Minitest::Test
       syntax = ComponentBoundaryContract::RubySyntax.new(source, "construction-form.rb")
       assert_includes syntax.constructions, "Example::Internal", source
     end
+  end
+
+  def test_open_default_is_detected_as_a_construction_api
+    syntax = ComponentBoundaryContract::RubySyntax.new(
+      "Hive::Attempts::Store.open_default(state_home: root)\n",
+      "construction-form.rb"
+    )
+
+    assert_includes syntax.constructions, "Hive::Attempts::Store"
   end
 
   def test_lexically_resolved_internal_construction_cannot_evade_boundary

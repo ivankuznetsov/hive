@@ -371,6 +371,50 @@ class DaemonAttemptLossHealerTest < Minitest::Test
     end
   end
 
+  def test_successor_detection_uses_decision_index_without_scanning_hot_or_cold_history
+    with_task do |task|
+      with_tmp_dir do |root|
+        store = Hive::Attempts::Store.new(root: root)
+        lost = lost_attempt(store, retry_charge: 0, task_folder: task.folder)
+        successor = store.create_launching(
+          attempt_id: "successor-indexed", request_id: "successor-request",
+          predecessor_attempt_id: lost.attempt_id, task_id: lost["task_id"],
+          project: lost["project"], task_slug: lost["task_slug"],
+          intended_stage: lost["intended_stage"], task_generation: lost.task_generation,
+          ownership_generation: lost.ownership_generation,
+          task_input_epoch: lost.task_input_epoch, progress_token: lost["progress_token"],
+          provider: lost["provider"], worker_argv: lost["worker_argv"],
+          claim_capability_digest: Hive::Attempts::Capability.digest(CLAIM_CAPABILITY),
+          starting_revision: lost["starting_revision"], retry_charge: 1,
+          inherited_outputs: [], launch_timeout_sec: 30, now: NOW + 2
+        )
+        store.decision_index.record_unresolved_loss(lost)
+        store.decision_index.record_successor(successor)
+        store.define_singleton_method(:scan) { raise "unexpected hot scan" }
+        store.permanent_proofs.define_singleton_method(:fetch) do |_attempt_id|
+          raise "unexpected cold proof read"
+        end
+        outcomes = Hive::Attempts::LostOutcomeStore.new(store: store)
+        outcomes.ensure_for(lost, now: NOW + 1)
+        outcomes.update(
+          lost, now: NOW + 1, status: "ready", task_folder: task.folder,
+          cleanup: "absent", capture_references: []
+        )
+        dispatcher = FakeDispatcher.new
+
+        healer(
+          store, outcomes, FakeProcessor.new(outcomes, task.folder),
+          dispatcher, FakeLogger.new
+        ).heal_attempt_losses([ lost ], admission_view: :tick, now: RETRY_AT)
+
+        assert_empty dispatcher.calls
+        outcome = outcomes.fetch(lost.attempt_id)
+        assert_equal "successor_dispatched", outcome.fetch("status")
+        assert_equal successor.attempt_id, outcome.fetch("successor_attempt_id")
+      end
+    end
+  end
+
   private
 
   def healer(store, outcomes, processor, dispatcher, logger,

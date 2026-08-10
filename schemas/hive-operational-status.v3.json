@@ -12,7 +12,7 @@
       "additionalProperties": false,
       "required": [
         "schema", "schema_version", "ok", "generated_at", "completeness",
-        "source", "summary", "daemon", "scheduler", "archive", "issues", "tasks"
+        "source", "summary", "daemon", "attempt_storage", "scheduler", "archive", "issues", "tasks"
       ],
       "properties": {
     "schema": { "const": "hive-operational-status" },
@@ -83,6 +83,7 @@
       }
     },
     "daemon": { "$ref": "#/$defs/Daemon" },
+    "attempt_storage": { "$ref": "#/$defs/AttemptStorage" },
     "scheduler": { "$ref": "#/$defs/Scheduler" },
     "archive": {
       "type": "object",
@@ -167,6 +168,69 @@
         "process_start_time": { "type": ["string", "null"] },
         "phase": { "type": ["string", "null"], "enum": ["started", "failed", "complete", null] },
         "observed_at": { "type": ["string", "null"], "format": "date-time" }
+      }
+    },
+    "AttemptStorage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "layout", "hot", "maintenance", "last_error", "degraded_reason"],
+      "properties": {
+        "status": { "type": "string", "enum": ["healthy", "degraded", "unknown"] },
+        "layout": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["generation", "migration"],
+          "properties": {
+            "generation": { "const": 3 },
+            "migration": { "type": "string", "enum": ["complete", "failed", "unknown"] },
+            "last_migrated_at": { "type": ["string", "null"], "format": "date-time" },
+            "last_result": { "type": ["object", "null"], "additionalProperties": { "type": "integer", "minimum": 0 } }
+          }
+        },
+        "hot": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["records", "invalid"],
+          "properties": {
+            "records": { "type": ["integer", "null"], "minimum": 0 },
+            "invalid": { "type": ["integer", "null"], "minimum": 0 }
+          }
+        },
+        "maintenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["last_started_at", "last_completed_at", "last_result"],
+          "properties": {
+            "last_started_at": { "type": ["string", "null"], "format": "date-time" },
+            "last_completed_at": { "type": ["string", "null"], "format": "date-time" },
+            "last_result": {
+              "type": ["object", "null"],
+              "additionalProperties": false,
+              "required": ["promoted", "deleted", "cold_examined"],
+              "properties": {
+                "promoted": { "type": "integer", "minimum": 0 },
+                "deleted": { "type": "integer", "minimum": 0 },
+                "cold_examined": { "type": "integer", "minimum": 0 }
+              }
+            }
+          }
+        },
+        "last_error": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["operation", "class"],
+              "properties": {
+                "operation": { "type": "string", "enum": ["maintenance", "migration", "status"] },
+                "class": { "type": "string", "maxLength": 120 },
+                "observed_at": { "type": "string", "format": "date-time" }
+              }
+            }
+          ]
+        },
+        "degraded_reason": { "type": ["string", "null"] }
       }
     },
     "Scheduler": {

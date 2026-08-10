@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/attempts/context"
+require "hive/attempts/finalization_maintenance"
 require "hive/implementation_identity/reconstructor"
 
 class ImplementationIdentityReconstructorTest < Minitest::Test
@@ -39,6 +40,43 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
       assert_equal "historical-execute", selection.originating_attempt
       event = journal(task).find { |record| record["event_type"] == "implementation_identity_backfilled" }
       assert_equal "structured", event.dig("provenance", "recovery")
+    end
+  end
+
+  def test_structured_identity_reconstructs_from_permanent_point_proof
+    with_attempt_history do |task, store, current|
+      historical = running_attempt(store, "historical-execute", "4-execute", "codex")
+      historical = store.checkpoint(
+        historical,
+        checkpoint: {
+          "implementation_identity" => {
+            "provider" => "codex", "model" => "gpt-5.6-sol", "effort" => "xhigh"
+          }
+        },
+        now: Time.now.utc
+      )
+      terminal = store.terminalize(
+        historical,
+        outcome: "succeeded", exit_status: 0,
+        final_checkpoint: historical.checkpoint,
+        output_references: [],
+        log_reference: {
+          "path" => "logs/historical-execute.frames", "size" => 0,
+          "sha256" => Digest::SHA256.hexdigest("")
+        },
+        now: Time.now.utc
+      )
+      maintenance = Hive::Attempts::FinalizationMaintenance.new(store: store)
+      maintenance.prepare(terminal)
+      maintenance.acknowledge(terminal, :journal)
+      maintenance.acknowledge(terminal, :request_delivery)
+      assert maintenance.promote(terminal)
+      assert_nil store.fetch_hot(terminal.attempt_id)
+
+      selection = with_context(current) { described_class(task, store).reconstruct! }
+
+      assert_equal "codex", selection.provider
+      assert_equal terminal.attempt_id, selection.originating_attempt
     end
   end
 

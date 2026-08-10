@@ -3,8 +3,8 @@ title: State Model
 type: data-model
 source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/completed_at_backfiller.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/modules/migration/occurrence_*.rb, lib/hive/modules/migration/patrol_*.rb, lib/hive/modules/migration/shadow_*.rb, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
 created: 2026-04-25
-updated: 2026-08-09
-tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, retention, terminal-outcomes, dependencies, admission, web]
+updated: 2026-08-10
+tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, retention, terminal-outcomes, dependencies, admission, web, bounded-storage]
 ---
 
 **TLDR**: Hive's workflow state has no application database. Task/project state lives in `.hive-state` and feature worktrees; durable task execution ownership lives in versioned attempt records under the global state home. Evidence-bound delivered/superseded closure is a separate task-local authority retained with an archived task, never fabricated attempt success.
@@ -277,7 +277,7 @@ gesture; ordinary action, web, and bot retry surfaces cannot bypass it.
 
 ## Concurrency files
 
-Durable leases under `$HIVE_HOME/attempts/v2/records/` are the authoritative
+Durable leases under `$HIVE_HOME/attempts/v3/records/` are the authoritative
 execution owner. Records are `launching`, `running`, `terminal`, or `lost`;
 wrapper/worker PID start fingerprints and session/group IDs make adoption and
 cleanup PID-reuse safe. Each record also immutably stores the
@@ -385,6 +385,35 @@ requested/effective effort support. Credentials, arbitrary provider
 configuration, prompts, and raw environment values are excluded. Any
 compatibility snapshot is cursor/hash-validated and replaceable from the
 journal.
+
+## Attempt storage lifecycle
+
+`$HIVE_HOME/attempts/v3/records/` is the bounded hot authority for live,
+lost-without-a-safe-successor, and finalization-pending attempts. Reconciliation
+and admission scan this directory once per cycle. A terminal or safely resolved
+lost attempt leaves it only after its immutable proof, decision-index entries,
+and the accounting, journal, request-delivery, and (for loss) loss-consumer
+acknowledgements are durable. `Store#fetch(attempt_id)` preserves point access
+to that permanent proof after promotion; historical identity reconstruction
+uses the successful semantic decision index and never enumerates proof.
+
+Raw frames move from `logs/` to digest-sharded `cold-logs/` during promotion.
+Maintenance advances a durable round-robin cursor through at most 512 entries
+per hourly pass and deletes them when the owning task is archived or three days
+after `ended_at`, whichever is earlier, unless recovery remains pinned. This
+retention does not delete permanent proof or referenced output artifacts.
+
+The physical v2-to-v3 migration is forward-only. It quiesces the validated v2
+tree, rejects live attempts, renames it to v3, publishes a 0600 v2 old-binary
+fence, verifies corpus and decision parity, promotes historical finals, and
+advances a `fenced → verified → complete` checkpoint before publishing
+`recovery-migration-v4.json`. Runtime has no v2 reader or reverse hydration;
+any competing material root or changed corpus fails closed.
+
+One owner-private `maintenance/` status cell caches the latest migration and
+maintenance outcome. Operational status combines that cell with counts from
+the already-computed hot reconciliation snapshot. It does not traverse proof
+or cold logs and exposes last-run deltas rather than lifetime totals.
 
 ## Runtime dispatch queue and web snapshots
 

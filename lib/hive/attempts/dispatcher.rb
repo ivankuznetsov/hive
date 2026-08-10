@@ -29,7 +29,8 @@ module Hive
 
       def dispatch(task:, project:, intended_stage:, argv:, request_id:, provider:,
                    interactive: false, generation: nil, predecessor_attempt_id: nil,
-                   inherited_outputs: [], retry_charge: 0, now: @clock.call)
+                   inherited_outputs: [], retry_charge: 0, now: @clock.call,
+                   admission_view: nil)
         @launcher.preflight!
         generation = normalize_generation(
           generation, task: task, project: project, intended_stage: intended_stage
@@ -39,13 +40,13 @@ module Hive
           provider: provider, interactive: interactive,
           predecessor_attempt_id: predecessor_attempt_id,
           inherited_outputs: inherited_outputs, retry_charge: retry_charge,
-          successor_of: nil, now: now
+          successor_of: nil, now: now, admission_view: admission_view
         )
       end
 
       def dispatch_successor(predecessor:, task:, project:, argv:, request_id:, provider:,
                              inherited_outputs: nil, retry_charge: nil, interactive: false,
-                             now: @clock.call)
+                             now: @clock.call, admission_view: nil)
         @launcher.preflight!
         generation = Generation.resolve(
           task: task,
@@ -66,7 +67,8 @@ module Hive
           predecessor_attempt_id: predecessor.attempt_id,
           inherited_outputs: inherited,
           retry_charge: retry_charge.nil? ? predecessor["retry_charge"] : retry_charge,
-          successor_of: predecessor.attempt_id, now: now
+          successor_of: predecessor.attempt_id, now: now,
+          admission_view: admission_view
         )
       end
 
@@ -77,18 +79,20 @@ module Hive
       def dispatch_module_hook(generation:, subject:, argv:, request_id:, provider:,
                                interactive: false, predecessor_attempt_id: nil,
                                inherited_outputs: [], retry_charge: 0, now: @clock.call,
-                               project_root: nil)
+                               project_root: nil, admission_view: nil)
         @launcher.preflight!
         admit(
           task: nil, generation: generation, argv: argv, request_id: request_id,
           provider: provider, interactive: interactive,
           predecessor_attempt_id: predecessor_attempt_id,
           inherited_outputs: inherited_outputs, retry_charge: retry_charge,
-          successor_of: nil, subject: subject, now: now
+          successor_of: nil, subject: subject, now: now,
+          admission_view: admission_view
         )
       end
 
-      def dispatch_request(request, interactive: false, now: @clock.call)
+      def dispatch_request(request, interactive: false, now: @clock.call,
+                           admission_view: nil)
         task = @task_resolver.call(request)
         intended_stage = intended_stage_for(request.argv, task)
         generation = Generation.resolve(
@@ -101,7 +105,8 @@ module Hive
         return dispatch_successor(
           predecessor: predecessor, task: task, project: request.project, argv: request.argv,
           request_id: request.request_id, provider: provider_for(task),
-          inherited_outputs: request.inherited_outputs, interactive: interactive, now: now
+          inherited_outputs: request.inherited_outputs, interactive: interactive,
+          now: now, admission_view: admission_view
         ) if predecessor&.state == "lost"
 
         dispatch(
@@ -109,7 +114,7 @@ module Hive
           argv: request.argv, request_id: request.request_id, provider: provider_for(task),
           interactive: interactive, generation: generation,
           inherited_outputs: request.respond_to?(:inherited_outputs) ? request.inherited_outputs : [],
-          now: now
+          now: now, admission_view: admission_view
         )
       end
 
@@ -117,16 +122,18 @@ module Hive
 
       def admit(task:, generation:, argv:, request_id:, provider:, interactive:,
                 predecessor_attempt_id:, inherited_outputs:, retry_charge:, successor_of:, now:,
-                subject: nil)
+                subject: nil, admission_view: nil)
         result = nil
         created = nil
         claim_capability = nil
+        view = admission_view
         # Fixed lock order: global admission, then task generation. The outer
         # lock makes the capacity snapshot and reservation one host-wide
         # transaction even when concurrent requests have different generations.
         @store.with_admission_lock do
           @store.with_generation_lock(generation.task_generation) do
-            records = @store.scan.records
+            view ||= AdmissionView.new(store: @store, hot_scan: @store.scan)
+            records = view.refresh_for_admission
             semantic_owner = find_semantic_owner(records, generation)
             if semantic_owner&.live?
               result = live_result(semantic_owner, interactive: interactive)
@@ -134,7 +141,10 @@ module Hive
             end
 
             exact = records.select { |record| record.task_generation == generation.task_generation }
-            terminal = replayable_terminal(exact, request_id, task: task)
+            terminal = replayable_terminal(
+              exact, request_id, task: task, admission_view: view,
+              generation: generation, subject: subject
+            )
             if terminal
               result = DispatchResult.new(
                 status: :terminal_replay, attempt: terminal, receipt: terminal.receipt,
@@ -143,12 +153,25 @@ module Hive
               next
             end
 
-            lost = unresolved_lost_attempts(exact)
-            predecessor = successor_of && exact.find { |record| record.attempt_id == successor_of }
+            lost = unresolved_lost_attempts(
+              admission_view: view, generation: generation, subject: subject
+            )
+            predecessor = successor_of &&
+                          view.find(successor_of)
             if successor_of && (!predecessor || predecessor.state != "lost")
               result = DispatchResult.new(
                 status: :deferred, attempt: predecessor, receipt: nil,
                 attach_descriptor: nil, reason: "invalid_predecessor"
+              )
+              next
+            end
+            existing_successor = successor_of && view.successor(
+              predecessor_attempt_id: successor_of
+            )
+            if existing_successor
+              result = DispatchResult.new(
+                status: :deferred, attempt: existing_successor, receipt: nil,
+                attach_descriptor: nil, reason: "successor_exists"
               )
               next
             end
@@ -160,9 +183,10 @@ module Hive
               next
             end
 
-            snapshot = CapacitySnapshot.build(store: @store, now: now)
+            snapshot = view.capacity(now: now, records: records)
+            utc_date = now.utc.to_date
             if snapshot.at_limit?(
-              project: generation.project, task_slug: generation.task_slug, date: now.to_date,
+              project: generation.project, task_slug: generation.task_slug, date: utc_date,
               max_global: @limits.fetch(:max_global),
               max_per_project: @limits.fetch(:max_per_project),
               max_daily: @limits.fetch(:max_daily)
@@ -175,8 +199,14 @@ module Hive
             end
 
             claim_capability = @capability_generator.call
+            attempt_id = @id_generator.call
+            view.reserve_live(
+              attempt_id: attempt_id,
+              project: generation.project,
+              task_slug: generation.task_slug
+            )
             created = @store.create_launching(
-              attempt_id: @id_generator.call,
+              attempt_id: attempt_id,
               request_id: request_id,
               predecessor_attempt_id: predecessor_attempt_id,
               task_id: generation.task_id&.to_s,
@@ -197,6 +227,8 @@ module Hive
               launch_timeout_sec: @launch_timeout_sec,
               now: now
             )
+            view.confirm_live(created)
+            view.record(created)
           end
         end
 
@@ -208,20 +240,37 @@ module Hive
         end
 
         resolve_failed_handoff(
-          created, interactive: interactive, error: handoff.is_a?(Hash) ? handoff["error"] : nil
+          created, interactive: interactive,
+          error: handoff.is_a?(Hash) ? handoff["error"] : nil,
+          admission_view: view
         )
       rescue StandardError => e
         raise unless created
 
-        resolve_failed_handoff(created, interactive: interactive, error: "#{e.class}: #{e.message}")
+        resolve_failed_handoff(
+          created, interactive: interactive, error: "#{e.class}: #{e.message}",
+          admission_view: view
+        )
       end
 
       # Request IDs own delivery idempotency: replaying the same request must
       # keep returning its original receipt, including a failure. A different
       # request is a deliberate retry, so only a successful terminal receipt
       # remains the semantic owner of the unchanged generation.
-      def replayable_terminal(records, request_id, task:)
+      def replayable_terminal(records, request_id, task:, admission_view: nil,
+                              generation: nil, subject: nil)
         terminals = records.select { |record| record.state == "terminal" }
+        if admission_view
+          point_subject = subject || task_subject(generation)
+          terminals |= [
+            admission_view.terminal_attempt(request_id: request_id),
+            admission_view.successful_attempt(
+              task_generation: generation.task_generation,
+              subject: point_subject
+            )
+          ].compact
+        end
+        terminals = ordered_records(terminals)
         same_request = terminals.select { |record| record["request_id"] == request_id }
         if brainstorm_artifact_missing?(task, terminals)
           # A failed receipt remains idempotent for its request even before
@@ -264,11 +313,27 @@ module Hive
       # successor exists. Once that descendant terminalizes unsuccessfully, a
       # new error-retry request must not be trapped behind the older resolved
       # loss forever.
-      def unresolved_lost_attempts(records)
-        resolved = records.filter_map { |record| record["predecessor_attempt_id"] }.to_h do |attempt_id|
-          [ attempt_id, true ]
+      def unresolved_lost_attempts(admission_view:, generation:,
+                                   subject: nil)
+        unresolved = admission_view.unresolved_loss(
+          task_generation: generation.task_generation,
+          subject: subject || task_subject(generation)
+        )
+        unresolved ? [ unresolved ] : []
+      end
+
+      def task_subject(generation)
+        Record.task_stage_subject(
+          task_id: generation.task_id&.to_s,
+          task_slug: generation.task_slug,
+          intended_stage: generation.intended_stage
+        )
+      end
+
+      def ordered_records(records)
+        records.sort_by do |record|
+          [ record["accepted_at"], record.lease_version, record.attempt_id ]
         end
-        records.select { |record| record.state == "lost" && !resolved[record.attempt_id] }
       end
 
       def find_semantic_owner(records, generation)
@@ -302,8 +367,10 @@ module Hive
         )
       end
 
-      def resolve_failed_handoff(created, interactive:, error: nil)
-        current = @store.fetch(created.attempt_id)
+      def resolve_failed_handoff(created, interactive:, error: nil,
+                                 admission_view: nil)
+        current = @store.fetch_hot(created.attempt_id)
+        admission_view&.record(current) if current
         adopted = result_for_adopted_handoff(current, interactive: interactive)
         return adopted if adopted
         return deferred_handoff_result(current) if current&.state == "lost"
@@ -316,9 +383,11 @@ module Hive
           diagnostics: diagnostics,
           now: @clock.call
         )
+        admission_view&.record(lost)
         deferred_handoff_result(lost)
       rescue CompareAndSwapFailed
-        current = @store.fetch(created.attempt_id)
+        current = @store.fetch_hot(created.attempt_id)
+        admission_view&.record(current) if current
         result_for_adopted_handoff(current, interactive: interactive) || deferred_handoff_result(current)
       end
 

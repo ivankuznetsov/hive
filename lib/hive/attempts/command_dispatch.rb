@@ -17,6 +17,11 @@ module Hive
           argv: durable_worker_argv(task),
           interactive: true
         )
+        if @json && result.output_status == :expired
+          raise Hive::ConcurrentRunError,
+                "raw output for successful durable attempt #{result.attempt_id} expired; " \
+                "the canonical receipt is still available and the attempt was not rerun"
+        end
         handle_durable_failure!(result) unless result.exit_status.zero?
 
         result

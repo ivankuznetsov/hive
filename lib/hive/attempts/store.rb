@@ -21,14 +21,34 @@ module Hive
     Scan = Data.define(:records, :invalid_records)
 
     class Store
-      def initialize(root: Hive::Paths.attempts_root, create_directories: true)
+      DEFAULT_ROOT = Object.new.freeze
+
+      def self.open_default(state_home: Hive::Paths.state_home, create_directories: true)
+        root = prepare_default_root!(state_home)
+        new(root: root, create_directories: create_directories)
+      end
+
+      def self.prepare_default_root!(state_home)
+        require "hive/recovery/migration"
+        Hive::Recovery::Migration.ensure!(state_home: state_home)
+        File.join(File.expand_path(state_home), "attempts", "v3")
+      end
+      private_class_method :prepare_default_root!
+
+      def initialize(root: DEFAULT_ROOT, create_directories: true)
+        root = self.class.send(:prepare_default_root!, Hive::Paths.state_home) if root.equal?(DEFAULT_ROOT)
         @root = File.expand_path(root)
         @create_directories = create_directories
-        reject_legacy_default_store!
         @records_root = File.join(@root, "records")
         @logs_root = File.join(@root, "logs")
         @outputs_root = File.join(@root, "outputs")
         @generation_locks_root = File.join(@root, "generation-locks")
+        @proof_root = File.join(@root, "proof")
+        @decision_indexes_root = File.join(@root, "decision-indexes")
+        @pending_finalization_root = File.join(@root, "pending-finalization")
+        @cold_logs_root = File.join(@root, "cold-logs")
+        @log_state_root = File.join(@root, "log-state")
+        @maintenance_root = File.join(@root, "maintenance")
         ensure_private_directories! if create_directories
       end
 
@@ -50,6 +70,67 @@ module Hive
 
       def generation_locks_root
         managed_directory_path(@generation_locks_root, label: "generation-locks")
+      end
+
+      def proof_root
+        managed_directory_path(@proof_root, label: "proof")
+      end
+
+      def decision_indexes_root
+        managed_directory_path(@decision_indexes_root, label: "decision-indexes")
+      end
+
+      def pending_finalization_root
+        managed_directory_path(@pending_finalization_root, label: "pending-finalization")
+      end
+
+      def cold_logs_root
+        managed_directory_path(@cold_logs_root, label: "cold-logs")
+      end
+
+      def log_state_root
+        managed_directory_path(@log_state_root, label: "log-state")
+      end
+
+      def maintenance_root
+        managed_directory_path(@maintenance_root, label: "maintenance")
+      end
+
+      def log_archive
+        require "hive/attempts/log_archive"
+        @log_archive ||= LogArchive.new(store: self)
+      end
+
+      def permanent_proofs
+        require "hive/attempts/permanent_proof_store"
+        @permanent_proofs ||= PermanentProofStore.new(
+          root: @proof_root,
+          create_directories: @create_directories
+        )
+      end
+
+      def decision_index
+        require "hive/attempts/decision_index"
+        @decision_index ||= DecisionIndex.new(
+          root: @decision_indexes_root,
+          create_directories: @create_directories
+        )
+      end
+
+      def pending_finalizations
+        require "hive/attempts/pending_finalization_store"
+        @pending_finalizations ||= PendingFinalizationStore.new(
+          root: @pending_finalization_root,
+          create_directories: @create_directories
+        )
+      end
+
+      def storage_health
+        require "hive/attempts/storage_health"
+        @storage_health ||= StorageHealth.new(
+          root: @maintenance_root,
+          create_directories: @create_directories
+        )
       end
 
       def output_directory(attempt_id, *segments, create: false)
@@ -114,6 +195,13 @@ module Hive
       end
 
       def fetch(attempt_id)
+        hot = fetch_hot(attempt_id)
+        return hot if hot
+
+        permanent_proofs.fetch(attempt_id)
+      end
+
+      def fetch_hot(attempt_id)
         path = record_path(attempt_id)
         validate_regular_file!(path, label: "attempt record")
         Record.new(JSON.parse(File.binread(path)))
@@ -130,7 +218,7 @@ module Hive
           begin
             validate_regular_file!(path, label: "attempt record")
             records << Record.new(JSON.parse(File.binread(path)))
-          rescue JSON::ParserError, InvalidRecord, StoreError, SystemCallError => e
+          rescue JSON::ParserError, InvalidRecord, StoreError, SystemCallError, TypeError => e
             invalid << InvalidStoredRecord.new(path: path, error: e.message)
           end
         end
@@ -310,21 +398,25 @@ module Hive
         File.join(generation_locks_root, "#{digest}.lock")
       end
 
-      private
+      def remove_hot_final(observed)
+        with_generation_lock(observed.task_generation) do
+          current = fetch_hot(observed.attempt_id)
+          return false unless current
+          unless current.final? && current.to_h == observed.to_h
+            raise CompareAndSwapFailed, "attempt changed before hot removal"
+          end
 
-      def reject_legacy_default_store!
-        return unless @root == File.expand_path(Hive::Paths.attempts_root)
-        legacy_root = File.join(Hive::Paths.state_home, "attempts", "v1")
-        return unless File.exist?(legacy_root)
-
-        raise StoreError,
-              "legacy attempt state remains at #{legacy_root}; run `hive migrate` " \
-              "or restart the current Hive daemon before opening attempts/v2"
+          File.unlink(record_path(current.attempt_id))
+          Hive::AtomicFile.fsync_directory(records_root)
+          true
+        end
       end
+
+      private
 
       def mutate(observed, allowed_states:)
         with_generation_lock(observed.task_generation) do
-          current = fetch(observed.attempt_id)
+          current = fetch_hot(observed.attempt_id)
           verify_cas!(current, observed, allowed_states)
           replacement = Record.new(yield(current.to_h))
           verify_immutable!(current, replacement)
@@ -399,7 +491,13 @@ module Hive
           "records" => @records_root,
           "logs" => @logs_root,
           "outputs" => @outputs_root,
-          "generation-locks" => @generation_locks_root
+          "generation-locks" => @generation_locks_root,
+          "proof" => @proof_root,
+          "decision-indexes" => @decision_indexes_root,
+          "pending-finalization" => @pending_finalization_root,
+          "cold-logs" => @cold_logs_root,
+          "log-state" => @log_state_root,
+          "maintenance" => @maintenance_root
         }
       end
 

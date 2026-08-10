@@ -88,4 +88,20 @@ class CommandsStatusOperationalTest < Minitest::Test
     assert_equal "hive-operational-status", command.status_schema_for_call
     assert_equal "hive-status", Hive::Commands::Status.new(json: true).status_schema_for_call
   end
+
+  def test_degraded_attempt_storage_renders_one_concise_warning
+    issue = {
+      "code" => "attempt_storage_degraded",
+      "message" => "attempt storage is degraded: maintenance failed",
+      "remediation" => "inspect the daemon log, then retry the failed storage operation"
+    }
+
+    out, = capture_io do
+      Hive::Commands::Status.new.send(:render_operational_issues, [ issue ])
+    end
+
+    assert_equal 1, out.lines.size
+    assert_includes out, "maintenance failed"
+    assert_includes out, "inspect the daemon log"
+  end
 end

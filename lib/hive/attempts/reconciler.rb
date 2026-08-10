@@ -9,8 +9,14 @@ module Hive
     ReconciledAttempt = Data.define(:attempt, :classification, :owner_status, :evidence)
     ReconciliationSnapshot = Data.define(
       :capacity, :attempts, :lost_attempts, :newly_lost_attempts,
-      :terminal_attempts, :invalid_records
-    )
+      :terminal_attempts, :invalid_records, :hot_scan, :admission_view
+    ) do
+      def initialize(capacity:, attempts:, lost_attempts:, newly_lost_attempts:,
+                     terminal_attempts:, invalid_records:, hot_scan: nil,
+                     admission_view: nil)
+        super
+      end
+    end
 
     # Restart-safe observer. It adopts by identity, never wait2, and preserves
     # stale-but-matching owners as capacity-reserving suspects.
@@ -18,11 +24,12 @@ module Hive
       attr_reader :store
 
       def initialize(store:, process_identity: ProcessIdentity.new, logger: nil,
-                     condition_observer: nil)
+                     condition_observer: nil, finalization_maintenance: nil)
         @store = store
         @process_identity = process_identity
         @logger = logger
         @condition_observer = condition_observer
+        @finalization_maintenance = finalization_maintenance
         @logged = {}
       end
 
@@ -44,33 +51,85 @@ module Hive
         newly_lost = []
         all_lost = []
         terminals = []
+        effective_records = []
 
         scan.records.each do |record|
           reconciled = reconcile_record(record, now: now)
-          @condition_observer&.call(reconciled, now: now)
+          prepared = @finalization_maintenance&.prepare(reconciled.attempt)
+          observation = observe_condition(reconciled, now: now)
+          if prepared && %i[delivered acknowledged not_applicable].include?(observation)
+            @finalization_maintenance.acknowledge(reconciled.attempt, :journal)
+          end
           statuses << reconciled
           newly_lost << reconciled.attempt if reconciled.classification == :lost
           all_lost << reconciled.attempt if reconciled.attempt.state == "lost"
           terminals << reconciled.attempt if reconciled.classification == :terminal
+          effective_records << reconciled.attempt
           log_reconciliation(reconciled)
         rescue CompareAndSwapFailed
           # Another wrapper/reconciler won the transition. Re-read on the next
-          # scan; no duplicate loss/terminal outcome is emitted by this loser.
+          # point lookup; no duplicate loss/terminal outcome is emitted by
+          # this loser, and no second historical scan is needed for capacity.
+          current = @store.fetch_hot(record.attempt_id)
+          effective_records << current if current
           next
         end
         log_invalid_records(scan.invalid_records)
 
+        hot_scan = Scan.new(
+          records: effective_records.freeze,
+          invalid_records: scan.invalid_records.freeze
+        )
+        admission_view = AdmissionView.new(store: @store, hot_scan: hot_scan)
+        capacity = CapacitySnapshot.build(
+          store: @store,
+          scan: hot_scan,
+          now: now,
+          daily_counts: @store.decision_index.daily_counts(date: now.utc.to_date)
+        )
+
         ReconciliationSnapshot.new(
-          capacity: CapacitySnapshot.build(store: @store, now: now),
+          capacity: capacity,
           attempts: statuses.freeze,
           lost_attempts: all_lost.freeze,
           newly_lost_attempts: newly_lost.freeze,
           terminal_attempts: terminals.freeze,
-          invalid_records: scan.invalid_records.freeze
+          invalid_records: scan.invalid_records.freeze,
+          hot_scan: hot_scan,
+          admission_view: admission_view
+        )
+      end
+
+      def acknowledge_finalization(record, consumer)
+        @finalization_maintenance&.acknowledge(record, consumer)
+      end
+
+      def promote_finalization(record)
+        @finalization_maintenance&.promote(record) || false
+      end
+
+      def sweep_finalization_maintenance(now: Time.now.utc)
+        @finalization_maintenance&.sweep_if_due(now: now)
+      end
+
+      def operational_storage_status(snapshot)
+        scan = snapshot&.hot_scan
+        @store.storage_health.snapshot(
+          hot_count: scan&.records&.size,
+          invalid_hot_count: scan&.invalid_records&.size
         )
       end
 
       private
+
+      def observe_condition(status, now:)
+        return :pending unless @condition_observer
+        if @condition_observer.respond_to?(:observe)
+          @condition_observer.observe(status, now: now)
+        else
+          @condition_observer.call(status, now: now) ? :delivered : :pending
+        end
+      end
 
       def reconcile_record(record, now:)
         return reconciled(record, :terminal, :not_applicable, { receipt: "valid" }) if record.state == "terminal"

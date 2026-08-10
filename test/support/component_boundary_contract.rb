@@ -518,6 +518,8 @@ class ComponentBoundaryContract
   end
 
   class RubySyntax
+    CONSTRUCTION_METHODS = %w[new open_default].freeze
+
     attr_reader :requires, :constructions
 
     def initialize(source, path)
@@ -564,7 +566,7 @@ class ComponentBoundaryContract
 
     def construction_constants(node, namespace)
       return [] unless %i[call command_call].include?(node[0]) &&
-                       identifier(node[3]) == "new"
+                       CONSTRUCTION_METHODS.include?(identifier(node[3]))
 
       receiver = constant_path(node[1])
       return [] unless receiver

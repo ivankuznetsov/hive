@@ -22,17 +22,25 @@ module Hive
       end
 
       def call(status, now: Time.now.utc)
+        observe(status, now: now) == :delivered
+      end
+
+      # Explicit delivery result for finalization. `call` remains the legacy
+      # boolean "did this invocation append?" contract, while this seam
+      # distinguishes durable prior/not-applicable outcomes from retryable
+      # missing-task and I/O failures.
+      def observe(status, now: Time.now.utc)
         attempt = status.attempt
-        return false unless attempt["intended_stage"] == EXECUTE_STAGE
-        return false unless %w[terminal lost].include?(attempt.state)
+        return :not_applicable unless attempt["intended_stage"] == EXECUTE_STAGE
+        return :not_applicable unless %w[terminal lost].include?(attempt.state)
         key = delivery_key(attempt)
-        return false if @delivered.include?(key)
+        return :acknowledged if @delivered.include?(key)
 
         task = @task_locator.call(attempt)
-        return false unless task
+        return :pending unless task
         unless task.workflow.id.to_s == "coding"
           @delivered.add(key)
-          return false
+          return :not_applicable
         end
 
         writer = Hive::TaskJournal::Writer.new(
@@ -43,7 +51,7 @@ module Hive
         )
         if observed?(records, attempt)
           @delivered.add(key)
-          return false
+          return :acknowledged
         end
 
         writer.append(observation(task, attempt, status, records))
@@ -52,10 +60,10 @@ module Hive
           task_folder: task.folder, attempt_store: @store
         ).rebuild!(marker: marker)
         @delivered.add(key)
-        true
+        :delivered
       rescue Hive::Error, SystemCallError, IOError => e
         report_error(status&.attempt, e)
-        false
+        :pending
       end
 
       private

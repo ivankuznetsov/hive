@@ -43,9 +43,10 @@ module Hive
         []
       end
 
-      def initialize(path, clock: -> { Time.now.utc })
+      def initialize(path, clock: -> { Time.now.utc }, custody_io: nil)
         @path = File.expand_path(path)
         @clock = clock
+        @custody_io = custody_io
         prepare_directory!
         validate_log_file! if File.exist?(@path) || File.symlink?(@path)
         flags = File::WRONLY | File::CREAT | File::APPEND
@@ -55,7 +56,11 @@ module Hive
         seal_torn_tail
         @sequence = self.class.read(@path).last&.sequence.to_i
       rescue Errno::ELOOP
+        @custody_io&.close unless @custody_io&.closed?
         raise IOError, "attempt log path is a symlink"
+      rescue StandardError
+        @custody_io&.close unless @custody_io&.closed?
+        raise
       end
 
       def append(channel, bytes)
@@ -87,6 +92,8 @@ module Hive
         @io.flush
         @io.fsync
         @io.close
+        @custody_io&.flock(File::LOCK_UN)
+        @custody_io&.close unless @custody_io&.closed?
       end
 
       def closed? = @io.closed?

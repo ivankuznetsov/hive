@@ -41,10 +41,9 @@ module Hive
                          launch_timeout_sec:, ownership_generation: nil,
                          task_input_epoch: 0, subject: nil)
         timestamp = iso8601(now)
-        subject ||= {
-          "kind" => "task_stage", "task_id" => task_id,
-          "task_slug" => task_slug, "intended_stage" => intended_stage
-        }
+        subject ||= task_stage_subject(
+          task_id: task_id, task_slug: task_slug, intended_stage: intended_stage
+        )
         new(
           "schema" => SCHEMA,
           "schema_version" => SCHEMA_VERSION,
@@ -87,6 +86,13 @@ module Hive
           "loss" => nil,
           "diagnostics" => {}
         )
+      end
+
+      def self.task_stage_subject(task_id:, task_slug:, intended_stage:)
+        {
+          "kind" => "task_stage", "task_id" => task_id,
+          "task_slug" => task_slug, "intended_stage" => intended_stage
+        }
       end
 
       def self.validate_receipt!(receipt, attempt_id:, task_generation:, task_input_epoch: nil,

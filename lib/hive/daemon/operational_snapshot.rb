@@ -6,6 +6,7 @@ require "yaml"
 
 require "hive/agent_limit"
 require "hive/atomic_file"
+require "hive/attempts/storage_health"
 require "hive/lock"
 require "hive/paths"
 require "hive/recovery"
@@ -108,6 +109,7 @@ module Hive
           @started_at = nil
           @observations = {}
           @runtime_ready = false
+          @attempt_storage = Hive::Attempts::StorageHealth.unknown_snapshot
         end
 
         def reconfigure(poll_interval_sec:)
@@ -145,6 +147,10 @@ module Hive
             "owner" => owner.to_s,
             "reason" => reason.to_s
           }.merge(details.transform_keys(&:to_s))
+        end
+
+        def update_attempt_storage(status)
+          @attempt_storage = status
         end
 
         def fail(reason:, now: Time.now.utc)
@@ -234,7 +240,8 @@ module Hive
               "started_at" => (@started_at || instant).utc.iso8601(6),
               "completed_at" => phase == "started" ? nil : instant.iso8601(6)
             },
-            "hidden_archived_task_count" => nil
+            "hidden_archived_task_count" => nil,
+            "attempt_storage" => @attempt_storage
           }
         end
 

@@ -115,10 +115,10 @@ module Hive
 
     ObservableResult = Data.define(
       :provider, :launcher_identity, :exit_code, :timed_out, :status,
-      :usage, :final_message, :diagnostic
+      :usage, :final_message, :diagnostic, :provider_signal
     ) do
       def initialize(provider:, launcher_identity:, exit_code:, timed_out:,
-                     status:, usage:, final_message:, diagnostic:)
+                     status:, usage:, final_message:, diagnostic:, provider_signal: nil)
         super(
           provider: provider.to_sym,
           launcher_identity: Immutable.string(launcher_identity),
@@ -127,7 +127,8 @@ module Hive
           status: status&.to_sym,
           usage: usage&.dup&.freeze,
           final_message: final_message.nil? ? nil : Immutable.string(final_message),
-          diagnostic: diagnostic.nil? ? nil : Immutable.string(diagnostic)
+          diagnostic: diagnostic.nil? ? nil : Immutable.string(diagnostic),
+          provider_signal: provider_signal&.dup&.freeze
         )
       end
     end
@@ -215,9 +216,11 @@ module Hive
       compilation_error!(profile, :compilation, e)
     end
 
-    def prepare!(profile)
+    def prepare!(profile, launch_binding: nil)
       version = profile.check_version!
-      profile.preflight!
+      Hive::AgentProfiles::LaunchBindings.with_preflight_environment(launch_binding) do
+        profile.preflight!
+      end
       ProbeResult.new(
         provider: profile_name(profile),
         launcher_identity: launcher_identity(profile),
@@ -269,7 +272,8 @@ module Hive
         status: raw[:status],
         usage: normalize_usage(raw[:usage]),
         final_message: raw[:final_message],
-        diagnostic: safe_diagnostic(raw[:error_message] || raw[:limit_text])
+        diagnostic: safe_diagnostic(raw[:error_message] || raw[:limit_text]),
+        provider_signal: raw[:provider_signal]
       )
     end
 

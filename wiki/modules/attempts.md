@@ -302,6 +302,30 @@ compatibility/evidence records, not ownership truth. The internal log is
 append-only sequenced JSON frames with timestamp, channel, and base64 bytes;
 the CLI still presents ordinary stdout/stderr and the receipt exit status.
 
+## Explicit route evidence and finalization
+
+Supervisor gives an authenticated explicit Hive worker one additional
+write-only descriptor. `Attempts::Context` installs it only after the ordinary
+claim capability, worker argv, task binding, process identity, and released
+gate all match, then marks it close-on-exec before any provider child starts.
+The channel accepts at most one bounded strict safe signal. Empty, malformed,
+oversized, duplicate, broken-pipe, and wrong-route values become no signal;
+stdout and stderr are never parsed by Supervisor as provider evidence.
+
+After the worker exits, Supervisor binds a valid safe signal to the protected
+attempt log reference, derives its fingerprint only from canonical safe
+fields, forces a failed terminal outcome, and stores it in the immutable v1
+terminal receipt. Legacy workers receive no evidence descriptor and retain
+their existing invocation, marker, and `limits_reached` behavior.
+
+Explicit terminal and resolved-loss records add `provider_health` to the
+pending-finalization consumer ledger. The receipt remains hot and cannot be
+archived until `ProviderHealth::AttemptObserver` has idempotently applied or
+rejected the observation and the acknowledgement is durable. Reconciliation
+performs that observation before downstream condition/recovery publication;
+lost probe ownership is therefore reopened before a successor can use the
+route.
+
 ## Reconciliation and capacity
 
 At daemon startup and before each healer/admission tick, fresh heartbeat plus

@@ -1,6 +1,7 @@
 require "json"
 require "rbconfig"
 require "hive/attempts/capability"
+require "hive/attempts/evidence_channel"
 require "hive/attempts/store"
 require "hive/attempts/stream_log"
 require "hive/lock"
@@ -56,14 +57,24 @@ module Hive
         signal_ready("claimed" => true, "attempt_id" => record.attempt_id, "pid" => Process.pid)
         install_signal_handlers! if @install_signal_handlers
 
-        exit_status, outcome, record = run_worker(record, log)
+        exit_status, outcome, record, provider_signal = run_worker(record, log)
         log.close
         log_reference = OutputReference.build(log.path, root: @store.root)
+        if provider_signal
+          exit_status = Hive::ExitCodes::SOFTWARE if exit_status.zero?
+          outcome = "failed"
+        end
+        provider_evidence = EvidenceChannel.materialize(
+          provider_signal,
+          record: record,
+          source_reference: log_reference
+        )
         terminal = @store.terminalize(
           record, outcome: outcome, exit_status: exit_status,
           final_checkpoint: record.checkpoint,
           output_references: record["current_outputs"],
-          log_reference: log_reference, now: @clock.call
+          log_reference: log_reference, provider_evidence: provider_evidence,
+          now: @clock.call
         )
         terminal.receipt.fetch("exit_status")
       rescue CompareAndSwapFailed, StoreError => e
@@ -121,12 +132,19 @@ module Hive
           )
           spawn_options[gate_r.fileno] = gate_r.fileno
           spawn_options[context_r.fileno] = context_r.fileno
+          if record["routing"]["mode"] == "explicit"
+            evidence_r, evidence_w = IO.pipe
+            evidence_w.close_on_exec = false
+            env["HIVE_ATTEMPT_EVIDENCE_FD"] = evidence_w.fileno.to_s
+            spawn_options[evidence_w.fileno] = evidence_w.fileno
+          end
         end
         @worker_pid = Process.spawn(
           env, *resolved_worker_argv(record), spawn_options
         )
         gate_r&.close unless gate_r&.closed?
         context_r&.close unless context_r&.closed?
+        evidence_w&.close unless evidence_w&.closed?
         stdout_w.close
         stderr_w.close
         worker_identity = process_identity(@worker_pid)
@@ -213,9 +231,16 @@ module Hive
 
         exit_status = forced_exit || status_exit(status)
         outcome = @cancel_reason ? "cancelled" : (exit_status.zero? ? "succeeded" : "failed")
-        [ exit_status, outcome, record ]
+        provider_signal = EvidenceChannel.read(
+          evidence_r,
+          route: record["routing"].fetch("route")
+        ) if evidence_r
+        [ exit_status, outcome, record, provider_signal ]
       ensure
-        [ stdout_r, stdout_w, stderr_r, stderr_w, gate_r, gate_w, context_r, context_w ].compact.each do |io|
+        [
+          stdout_r, stdout_w, stderr_r, stderr_w, gate_r, gate_w,
+          context_r, context_w, evidence_r, evidence_w
+        ].compact.each do |io|
           io.close unless io.closed?
         end
       end

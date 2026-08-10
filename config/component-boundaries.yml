@@ -14,6 +14,7 @@ components:
     public_contract:
       values:
         - Hive::ProviderHealth::Audit::Receipt
+        - Hive::ProviderHealth::AttemptObserver
         - Hive::ProviderHealth::AttemptBinding
         - Hive::ProviderHealth::Circuit
         - Hive::ProviderHealth::CorruptionToken
@@ -34,6 +35,7 @@ components:
     owned_paths:
       - lib/hive/provider_health.rb
       - lib/hive/provider_health/audit.rb
+      - lib/hive/provider_health/attempt_observer.rb
       - lib/hive/provider_health/circuit.rb
       - lib/hive/provider_health/evidence.rb
       - lib/hive/provider_health/event.rb
@@ -69,6 +71,7 @@ components:
       - lib/hive.rb
       - lib/hive/paths.rb
       - lib/hive/attempts/dispatcher.rb
+      - lib/hive/attempts/finalization_maintenance.rb
     mutation_authority: "Scoped provider-health journals, rebuildable projections, probe intents, quarantine artifacts, and their typed audit receipts only."
     recovery_surface: "Conservative eligibility and attempt-fenced probe reconciliation only; RecoveryCoordinator remains the sole retry, charge, deadline, successor, and dispatch owner."
     wiki_page: wiki/modules/provider_health.md
@@ -460,6 +463,8 @@ components:
       - lib/hive/attempts
     state_contracts:
       - "$HIVE_HOME/attempts/v4 bounded hot records, permanent proofs and indexes, framed logs, outputs, generation locks, routing-policy snapshots, routing-decision projections, and finalization state"
+      - "Explicit workers alone receive a capability-bound write-once safe-evidence descriptor; stdout and stderr cannot populate provider evidence"
+      - "Provider health is a named terminal consumer and must durably acknowledge each explicit receipt before archival"
     schema_contracts:
       - "hive-attempt v4 is the only runtime reader/writer; Hive::Recovery::Migration exclusively converts schema-v3 state into explicit legacy routing mode"
       - "hive-routing-policy v1 is the admission-owned first-writer-wins task-generation policy snapshot"
@@ -585,6 +590,8 @@ components:
       - test/unit/attempts/api_test.rb
       - test/unit/attempts/contracts_test.rb
       - test/unit/attempts/decision_index_test.rb
+      - test/unit/attempts/evidence_channel_test.rb
+      - test/unit/attempts/finalization_maintenance_test.rb
     migration_exceptions: []
 
   - id: user-service
@@ -659,6 +666,8 @@ components:
         - Hive::AgentRuntime::ObservableResult
         - Hive::AgentProfile
         - Hive::AgentProfiles
+        - Hive::AgentProfiles::ErrorNormalizers
+        - Hive::AgentProfiles::LaunchBindings::Binding
       errors:
         - Hive::AgentError
         - Hive::AgentRuntime::UnsupportedCapability
@@ -671,6 +680,8 @@ components:
       - lib/hive/agent_profiles
     state_contracts:
       - "Provider executable, version, capability, and observable result evidence"
+      - "Named account bindings resolve to external adapter contexts only at launch; raw binding paths are not durable values"
+      - "Only allowlisted structured adapter transport envelopes can produce bounded provider signals"
     schema_contracts:
       - "Provider profile constructor and registry extension point remain compatible"
     lock_contracts:
@@ -701,6 +712,8 @@ components:
       - test/unit/agent_runtime_test.rb
       - test/unit/agent_profile_test.rb
       - test/unit/agent_profiles_test.rb
+      - test/unit/agent_profiles/error_normalizers_test.rb
+      - test/unit/agent_profiles/launch_bindings_test.rb
       - test/unit/agent_profile_modes_test.rb
       - test/unit/agent_test.rb
     migration_exceptions: []

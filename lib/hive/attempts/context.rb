@@ -1,4 +1,5 @@
 require "hive/attempts/capability"
+require "hive/attempts/evidence_channel"
 require "hive/attempts/store"
 require "hive/stringify_keys"
 
@@ -59,6 +60,12 @@ module Hive
           # is not privilege separation from hostile same-UID process state.
           record = Store.new.fetch(attempt_id)
           validate_record!(record, attempt_id: attempt_id, argv: argv, claim_capability: claim_capability)
+          evidence_writer = if record["routing"]["mode"] == "explicit"
+            EvidenceChannel::Writer.for_fd(
+              values["HIVE_ATTEMPT_EVIDENCE_FD"],
+              route: record["routing"].fetch("route")
+            )
+          end
           @installed = new(
             attempt_id: record.attempt_id,
             task_generation: record.task_input_epoch,
@@ -66,7 +73,8 @@ module Hive
             project: record["project"],
             task_slug: record["task_slug"],
             intended_stage: record["intended_stage"],
-            routing: record["routing"]
+            routing: record["routing"],
+            evidence_writer: evidence_writer
           )
         rescue Hive::Error, SystemCallError, IOError => e
           raise StoreError, "durable attempt context rejected: #{e.message}"
@@ -76,6 +84,7 @@ module Hive
 
         # Test isolation for the otherwise process-lifetime installation.
         def reset!
+          @installed&.close
           @installed = nil
         end
 
@@ -167,7 +176,7 @@ module Hive
 
       def initialize(attempt_id:, task_generation:, ownership_generation: nil,
                      project: nil, task_slug: nil, intended_stage: nil,
-                     routing: { "mode" => "legacy" })
+                     routing: { "mode" => "legacy" }, evidence_writer: nil)
         @attempt_id = attempt_id.to_s
         @task_generation, bridged_ownership = numeric_generation_or_legacy(task_generation)
         @legacy_opaque_generation = !bridged_ownership.nil? && ownership_generation.nil?
@@ -176,6 +185,7 @@ module Hive
         @task_slug = task_slug&.to_s
         @intended_stage = intended_stage&.to_s
         @routing = deep_freeze(Hive::StringifyKeys.call(routing))
+        @evidence_writer = evidence_writer
         raise ArgumentError, "attempt context requires an attempt ID" if @attempt_id.empty?
         raise ArgumentError, "attempt context task generation must be non-negative" if @task_generation.negative?
       rescue TypeError
@@ -193,6 +203,17 @@ module Hive
       def launch_binding_id = admitted_route&.fetch("launch_binding_id", nil)
       def model = admitted_route&.fetch("model", nil)
       def effort = admitted_route&.fetch("effort", nil)
+
+      def publish_provider_signal(signal)
+        return false unless explicit_routing? && @evidence_writer
+
+        @evidence_writer.write(signal)
+      end
+
+      def close
+        @evidence_writer&.close
+        true
+      end
 
       # Revalidate the admitted generation at the command's locked mutation
       # boundary. A dependency or task artifact may change after dispatch but

@@ -132,6 +132,9 @@ health mutation causes a bounded re-selection; only a still-current decision
 may be persisted with a launching attempt.
 
 Sanitized adapter-channel inventory lives under
-`test/fixtures/provider_errors/`. No retained real capture currently proves a
-stable explicit account/model scope for Claude, Codex, Pi, or Grok, so all
-listed provider/model classes remain task-local pending reviewed evidence.
+`test/fixtures/provider_errors/`. The allowlisted files are explicitly marked
+as sanitized adapter-contract fixtures, not upstream captures. Only those
+exact structured envelopes with matching configured account/model identity
+can become shared evidence; prose and other shapes remain task-local. The
+adjacent `real_capture_pending` files preserve the operational proof gap rather
+than overstating fixture provenance.

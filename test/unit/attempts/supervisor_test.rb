@@ -109,6 +109,43 @@ class AttemptsSupervisorTest < Minitest::Test
     end
   end
 
+  def test_explicit_worker_safe_evidence_pipe_binds_signal_to_failed_terminal_receipt
+    worker_argv = [ "hive", "run", "durable-task" ]
+    with_attempt(worker_argv: worker_argv, routing: explicit_routing) do |store, attempt|
+      signal = {
+        "failure_class" => "model_capacity",
+        "scope" => {
+          "kind" => "model", "provider_account_id" => "account-a", "model" => "model-a"
+        },
+        "provenance" => "codex_jsonl_transport",
+        "reset_hint_seconds" => 30
+      }
+      worker = <<~RUBY
+        evidence = IO.for_fd(Integer(ENV.fetch("HIVE_ATTEMPT_EVIDENCE_FD")), "w")
+        evidence.write(#{JSON.generate("#{JSON.generate(signal)}\n")})
+        evidence.close
+        puts "raw-provider-message=secret-canary"
+        exit 0
+      RUBY
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY),
+        heartbeat_sec: 0.01, stale_sec: 1, first_heartbeat_timeout_sec: 1
+      )
+      supervisor.define_singleton_method(:resolved_worker_argv) do |_record|
+        [ RbConfig.ruby, "-e", worker ]
+      end
+
+      assert_equal Hive::ExitCodes::SOFTWARE, Timeout.timeout(2) { supervisor.run }
+      terminal = store.fetch(attempt.attempt_id)
+      assert_equal "failed", terminal.outcome
+      assert_equal "model_capacity", terminal.receipt.dig("provider_evidence", "failure_class")
+      assert_equal terminal.receipt.fetch("log_reference"),
+                   terminal.receipt.dig("provider_evidence", "source_reference")
+      refute_includes JSON.generate(terminal.receipt), "secret-canary"
+    end
+  end
+
   def test_timeout_and_heartbeat_continue_while_descendant_holds_output_pipe
     worker_argv = [
       "/bin/sh", "-c",
@@ -314,7 +351,7 @@ class AttemptsSupervisorTest < Minitest::Test
 
   private
 
-  def with_attempt(worker_argv:)
+  def with_attempt(worker_argv:, routing: { "mode" => "legacy" })
     with_tmp_dir do |root|
       store = Hive::Attempts::Store.new(root: root)
       attempt = store.create_launching(
@@ -323,9 +360,36 @@ class AttemptsSupervisorTest < Minitest::Test
         intended_stage: "4-execute", task_generation: "generation-1",
         progress_token: "progress-1", provider: "codex", worker_argv: worker_argv,
         claim_capability_digest: Hive::Attempts::Capability.digest(CLAIM_CAPABILITY), starting_revision: nil,
-        retry_charge: 0, inherited_outputs: [], launch_timeout_sec: 30, now: Time.now.utc
+        retry_charge: 0, inherited_outputs: [], routing: routing,
+        launch_timeout_sec: 30, now: Time.now.utc
       )
       yield store, attempt
     end
+  end
+
+  def explicit_routing
+    account_scope = {
+      "kind" => "provider_account", "provider_account_id" => "account-a", "model" => nil
+    }
+    model_scope = {
+      "kind" => "model", "provider_account_id" => "account-a", "model" => "model-a"
+    }
+    {
+      "mode" => "explicit", "policy_digest" => "a" * 64,
+      "decision" => {
+        "decision_id" => "decision-1", "policy_digest" => "a" * 64,
+        "decided_at" => Time.now.utc.iso8601(6), "exclusions" => []
+      },
+      "route" => {
+        "route_id" => "account-a/model-a", "provider_account_id" => "account-a",
+        "adapter" => "codex", "launch_binding_id" => "default",
+        "model" => "model-a", "effort" => "high"
+      },
+      "circuit_generations" => [
+        { "scope" => account_scope, "journal_epoch" => 0, "observed_generation" => 0 },
+        { "scope" => model_scope, "journal_epoch" => 0, "observed_generation" => 0 }
+      ],
+      "probe_bindings" => []
+    }
   end
 end

@@ -1055,6 +1055,18 @@ on every channel, run one disposable installed upgrade for brew, AUR, and bash
 and retain the updater plus migration output. This gap does not weaken the
 local command contract or its deterministic tests.
 
+## Provider transport contracts still need sanitized real captures (2026-08-10)
+
+The explicit provider-health implementation accepts only exact structured
+adapter-contract envelopes and ships synthetic sanitized contract fixtures for
+Claude, Codex, Pi, and Grok. Those fixtures prove parser and channel behavior;
+they do not claim that a current upstream CLI emits every contract shape.
+Before enabling a transport class operationally, retain a sanitized real
+capture from that adapter's structured transport or separately authenticated
+provider-diagnostic channel, confirm stable account/model scope, and update
+`test/fixtures/provider_errors/inventory.yml`. Until then, unmatched provider
+output remains attempt-local and cannot open shared health.
+
 ## Live Workflow Creator still needs authorized exact-head evidence (2026-08-04)
 
 U1a2 makes the incumbent attestor and verifier require, retain, and

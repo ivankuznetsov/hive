@@ -43,6 +43,23 @@ module Hive
         raise InvalidEvidence, "provider evidence failed validation: #{e.class}"
       end
 
+      def self.from_receipt(data, route:, attempt_id:)
+        validated = from_h(data)
+        evidence = new(
+          scope: ProviderHealth.scope_from_h(validated.fetch("scope")),
+          failure_class: validated.fetch("failure_class"),
+          provenance: validated.fetch("provenance"),
+          route: route,
+          reset_hint_seconds: validated.fetch("reset_hint_seconds"),
+          source_reference: validated.fetch("source_reference"),
+          attempt_id: attempt_id
+        )
+        unless evidence.to_h == validated
+          raise InvalidEvidence, "provider evidence does not match its admitted route"
+        end
+        evidence
+      end
+
       def initialize(scope:, failure_class:, provenance:, route:, reset_hint_seconds: nil,
                      source_reference:, attempt_id:)
         raise InvalidEvidence, "provider evidence requires an explicit scope" unless scope.is_a?(Scope)

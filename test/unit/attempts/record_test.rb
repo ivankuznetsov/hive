@@ -161,7 +161,10 @@ class AttemptsRecordTest < Minitest::Test
   def test_terminal_receipt_accepts_only_compatible_sanitized_provider_evidence
     routing = explicit_routing
     evidence = provider_evidence(routing: routing)
-    valid = receipt("provider_evidence" => evidence)
+    valid = receipt(
+      "outcome" => "failed", "exit_status" => 1,
+      "provider_evidence" => evidence
+    )
     assert Hive::Attempts::Record.validate_receipt!(
       valid, attempt_id: "attempt-1", task_generation: "generation-1",
       task_input_epoch: 0, ownership_generation: "generation-1",
@@ -177,6 +180,15 @@ class AttemptsRecordTest < Minitest::Test
     )
     assert terminal["receipt"].frozen?
     assert terminal["receipt"].fetch("provider_evidence").frozen?
+
+    assert_raises(Hive::Attempts::InvalidReceipt) do
+      Hive::Attempts::Record.validate_receipt!(
+        valid.merge("outcome" => "succeeded", "exit_status" => 0),
+        attempt_id: "attempt-1", task_generation: "generation-1",
+        task_input_epoch: 0, ownership_generation: "generation-1",
+        terminal_lease_version: 0, routing: routing
+      )
+    end
 
     invalid_evidence = [
       evidence.merge("message" => "raw secret"),

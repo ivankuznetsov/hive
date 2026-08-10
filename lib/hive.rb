@@ -588,6 +588,12 @@ module Hive
     end
   end
 
+  # A trusted adapter transport failure ended the enclosing explicit-routed
+  # attempt. The safe signal is already handed to the attempt supervisor;
+  # only RecoveryCoordinator may decide when another attempt is admitted.
+  class ProviderRouteFailed < AgentError
+  end
+
   class TmuxError < AgentError
   end
 

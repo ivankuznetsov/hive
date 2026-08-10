@@ -2,26 +2,30 @@ schema: hive-provider-error-provenance-inventory/v1
 sanitization: raw prompts, messages, stdout, stderr, tool output, and credentials are excluded
 adapters:
   claude:
-    fixture: claude.json
+    fixture: claude_transport_contract.json
+    real_capture: claude.json
     trusted_channels: [stream_json_transport]
-    stable_explicit_scopes: []
+    stable_explicit_scopes: [provider_account, model]
     task_local_classes: [authentication, billing_configuration, exhausted_credits, account_quota, provider_rate_limit, provider_outage, model_unavailable, model_quota, model_rate, model_capacity]
-    note: No retained real capture proves a stable explicit account or model scope; structured errors remain task-local until one is captured and reviewed.
+    note: The allowlisted fixture is a sanitized adapter-contract envelope, not a claimed upstream capture. Upstream shapes outside it remain task-local; claude.json records the real-capture gap.
   codex:
-    fixture: codex.json
+    fixture: codex_transport_contract.json
+    real_capture: codex.json
     trusted_channels: [jsonl_transport]
-    stable_explicit_scopes: []
+    stable_explicit_scopes: [provider_account, model]
     task_local_classes: [authentication, billing_configuration, exhausted_credits, account_quota, provider_rate_limit, provider_outage, model_unavailable, model_quota, model_rate, model_capacity]
-    note: No retained real JSONL capture proves a stable explicit account or model scope; prose limit text is not trusted provenance.
+    note: The allowlisted fixture is a sanitized adapter-contract envelope, not a claimed upstream capture. Prose limit text and other JSONL shapes remain task-local; codex.json records the real-capture gap.
   pi:
-    fixture: pi.json
+    fixture: pi_transport_contract.json
+    real_capture: pi.json
     trusted_channels: [json_transport]
-    stable_explicit_scopes: []
+    stable_explicit_scopes: [provider_account, model]
     task_local_classes: [authentication, billing_configuration, exhausted_credits, account_quota, provider_rate_limit, provider_outage, model_unavailable, model_quota, model_rate, model_capacity]
-    note: Pi may multiplex upstream providers and no retained real capture binds an error to a configured Hive account or exact model.
+    note: The allowlisted fixture is a sanitized adapter-contract envelope, not a claimed upstream capture. Multiplexed or differently shaped Pi errors remain task-local; pi.json records the real-capture gap.
   grok:
-    fixture: grok.json
+    fixture: grok_transport_contract.json
+    real_capture: grok.json
     trusted_channels: [streaming_json_transport]
-    stable_explicit_scopes: []
+    stable_explicit_scopes: [provider_account, model]
     task_local_classes: [authentication, billing_configuration, exhausted_credits, account_quota, provider_rate_limit, provider_outage, model_unavailable, model_quota, model_rate, model_capacity]
-    note: No retained real streaming-json capture proves a stable explicit account or model scope; HTTP-like prose remains task-local.
+    note: The allowlisted fixture is a sanitized adapter-contract envelope, not a claimed upstream capture. HTTP-like prose and other streaming-json shapes remain task-local; grok.json records the real-capture gap.

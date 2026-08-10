@@ -105,5 +105,18 @@ attempt while the health lock remains innermost; multi-scope claims then use
 the existing intent protocol. A stale observation performs no attempt or
 health mutation and asks the dispatcher to select again.
 
-Terminal attempt observation remains a later integration unit; it must preserve
-the authority and lock contracts above.
+## Terminal attempt observation
+
+`AttemptObserver` consumes only immutable final explicit-attempt records. It
+reconstructs the exact route, ownership fence, circuit observation vector, and
+probe bindings from the record rather than mutable configuration. A terminal
+success closes only generation-matched probes; failure, cancellation, or
+proven loss reopens each owned probe conservatively. A following safe failure
+signal opens only its explicit provider-account or exact-model scope.
+
+The idempotency key binds attempt ID, immutable terminal receipt version,
+terminal lease version, route, and safe fingerprint. Duplicate replay is a
+no-op. Operator generation changes, stale epochs, late receipts, and fenced
+attempts cannot close, reopen, or release another attempt's probe. A valid
+task-local or absent signal still receives the named finalization
+acknowledgement without changing a generation, preventing recovery deadlock.

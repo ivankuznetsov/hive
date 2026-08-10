@@ -356,6 +356,7 @@ module Hive
     end
 
     autoload :Audit, File.expand_path("provider_health/audit.rb", __dir__)
+    autoload :AttemptObserver, File.expand_path("provider_health/attempt_observer.rb", __dir__)
     autoload :Circuit, File.expand_path("provider_health/circuit.rb", __dir__)
     autoload :Event, File.expand_path("provider_health/event.rb", __dir__)
     autoload :Evidence, File.expand_path("provider_health/evidence.rb", __dir__)

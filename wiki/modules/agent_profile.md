@@ -1,9 +1,9 @@
 ---
 title: Hive::AgentRuntime + Hive::AgentProfile + Hive::AgentProfiles
 type: module
-source: lib/hive/agent_runtime.rb, lib/hive/agent_profile.rb, lib/hive/agent_profiles.rb, lib/hive/agent_profiles/{claude,codex,pi,grok}.rb, lib/hive/agent_skills/
+source: lib/hive/agent_runtime.rb, lib/hive/agent_profile.rb, lib/hive/agent_profiles.rb, lib/hive/agent_profiles/{claude,codex,pi,grok,error_normalizers,launch_bindings}.rb, lib/hive/agent_skills/
 created: 2026-04-26
-updated: 2026-07-27
+updated: 2026-08-10
 tags: [agent, profile, registry, architecture, skills, provisioning, permissions, honeycomb]
 ---
 
@@ -247,6 +247,32 @@ installing in the background. Adapters do not alter the profile registry or
 make arbitrary custom profiles provisionable. See
 [[commands/doctor]] and [[commands/setup-agents]].
 
+## Explicit provider-account execution and evidence
+
+An admitted explicit route overrides mutable role/profile/model configuration
+at the final `Stages::Base.spawn_agent` seam. Every provider-backed invocation
+inside that durable attempt uses the persisted adapter, model, effort, and
+symbolic launch binding. Claude explicit routes are forced through the
+headless path so a persistent tmux session cannot escape the enclosing
+attempt's account identity.
+
+`launch_binding: default` preserves the adapter's existing external session.
+A named binding such as `team-a` resolves only at launch from
+`HIVE_PROVIDER_BINDING_<ADAPTER>_<BINDING>` (uppercased, with hyphens mapped to
+underscores), for example `HIVE_PROVIDER_BINDING_CODEX_TEAM_A`. Its value must
+be an existing absolute adapter configuration directory. Hive passes the
+corresponding `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `PI_CODING_AGENT_DIR`, or
+`GROK_HOME` only to preflight and the child process. The path and credential
+contents never enter routing policy, attempts, health state, status, or logs.
+
+`AgentProfiles::ErrorNormalizers` accepts only an exact allowlisted structured
+transport envelope from the selected adapter. It rejects final/assistant
+messages, prompt-derived stdout, tool output, vague 429/permission text,
+timeouts, network failures, missing scope, and mismatched account/model
+identity. The result contains only class, explicit scope, provenance, and a
+bounded reset hint; raw message fields are discarded before the attempt
+evidence channel.
+
 ## Tests
 
 - `test/unit/agent_runtime_test.rb` — immutable request/invocation/evidence
@@ -257,6 +283,11 @@ make arbitrary custom profiles provisionable. See
 - `test/unit/agent_profile_modes_test.rb` — `:state_file_marker` / `:exit_code_only` / `:output_file_exists` branching in `Hive::Agent#handle_exit`.
 - `test/unit/agent_profiles_test.rb` — registry register / lookup / unknown.
 - `test/unit/spawn_agent_test.rb` — preflight ordering, isolation-warning trigger, default-profile fallback.
+- `test/unit/agent_profiles/error_normalizers_test.rb` — exact trusted
+  envelopes, closed taxonomy, task-local adversarial channels, and raw-message
+  independence.
+- `test/unit/agent_profiles/launch_bindings_test.rb` — symbolic binding
+  resolution, distinct same-adapter contexts, and preflight restoration.
 - `test/unit/workflow_package/runtime_policy_test.rb` — exact policy files,
   deny/command/domain enforcement, and multi-actor admission failure.
 - `test/unit/pi_preflight_test.rb` — pi's auth.json preflight gate.

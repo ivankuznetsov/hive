@@ -310,7 +310,16 @@
         "provider_evidence": {
           "oneOf": [{ "$ref": "#/$defs/ProviderEvidence" }, { "type": "null" }]
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["provider_evidence"],
+            "properties": { "provider_evidence": { "$ref": "#/$defs/ProviderEvidence" } }
+          },
+          "then": { "properties": { "outcome": { "const": "failed" } } }
+        }
+      ]
     }
   },
   "allOf": [

@@ -120,6 +120,10 @@ module Hive
       # already prevented at config-load time by validate_role_agent_names!,
       # so callers see UnknownAgent only if they bypass Config.load.
       def stage_profile(cfg, stage_name, explicit_agent: nil)
+        if (context = Hive::Attempts::Context.current)&.explicit_routing?
+          return Hive::AgentProfiles.lookup(context.adapter, cfg: cfg)
+        end
+
         name = explicit_agent || cfg.dig(stage_name, "agent") || "claude"
         Hive::AgentProfiles.lookup(name, cfg: cfg)
       end
@@ -230,6 +234,9 @@ module Hive
                                  managed_slot: nil,
                                  managed_context: nil,
                                  managed_outputs: [])
+        if (context = Hive::Attempts::Context.current)&.explicit_routing?
+          profile = Hive::AgentProfiles.lookup(context.adapter, cfg: cfg)
+        end
         if task.respond_to?(:managed_workflow?) && task.managed_workflow?
           require "hive/workflow_package/runtime_policy"
           if explicit_permission_spec.equal?(MISSING_EXPLICIT_PERMISSION_SPEC)
@@ -705,6 +712,23 @@ module Hive
                       disallowed_tools: nil, cli_flags: nil,
                       model: nil, effort: nil, identity_arguments: nil, runtime_policy: nil,
                       routing_resolution: nil, routing_arguments: nil)
+        context = Hive::Attempts::Context.current
+        launch_binding = nil
+        provider_route = nil
+        if context&.explicit_routing?
+          profile = Hive::AgentProfiles.lookup(context.adapter, cfg: cfg)
+          launch_binding = Hive::AgentProfiles::LaunchBindings.resolve(
+            adapter: context.adapter,
+            binding_id: context.launch_binding_id
+          )
+          routing_arguments = admitted_routing_arguments(context, profile)
+          routing_resolution = nil
+          identity_arguments = nil
+          model = nil
+          effort = nil
+          cli_flags = []
+          provider_route = context.admitted_route
+        end
         profile ||= Hive::AgentProfiles.lookup(:claude)
         if routing_resolution && routing_arguments
           raise ArgumentError, "pass routing_resolution or routing_arguments, not both"
@@ -718,8 +742,15 @@ module Hive
         # instead of letting the exception escape and land
         # `reason="runner_exception"`.
         begin
-          Hive::AgentRuntime.prepare!(profile)
+          Hive::AgentRuntime.prepare!(profile, launch_binding: launch_binding)
         rescue Hive::AgentError => e
+          if context&.explicit_routing?
+            return {
+              status: :error,
+              error_reason: "provider_route_preflight_failed",
+              error_message: "preflight failed for admitted provider account #{context.provider_account_id}"
+            }
+          end
           return { status: :error,
                    error_message: "preflight failed: #{e.message}" }
         end
@@ -784,7 +815,9 @@ module Hive
           identity_arguments: identity_arguments || [],
           launch_arguments: launch_arguments,
           runtime_policy: runtime_policy,
-          routing_arguments: routing_arguments
+          routing_arguments: routing_arguments,
+          launch_environment: launch_binding&.environment || {},
+          provider_route: provider_route
         ).run!
         if result[:status] == :ok && runtime_policy&.host_outputs?
           begin
@@ -796,9 +829,40 @@ module Hive
           end
         end
         record_usage(task, profile, result, started_at)
+        if result[:provider_signal]
+          unless context.publish_provider_signal(result.fetch(:provider_signal))
+            raise Hive::ProviderRouteFailed, "admitted provider route failed without durable evidence delivery"
+          end
+          raise Hive::ProviderRouteFailed, "admitted provider route failed"
+        end
         result
       ensure
         runtime_policy&.cleanup!
+      end
+
+      def admitted_routing_arguments(context, profile)
+        stage = context.intended_stage.to_s.sub(/\A\d+-/, "").tr("-", "_")
+        provenance = Hive::ModelRouting::FIELDS.to_h do |field|
+          value = context.public_send(field)
+          kind = value.nil? ? :absent : :exact
+          [
+            field,
+            Hive::ModelRouting::Provenance.new(
+              kind: kind,
+              key: value.nil? ? nil : "admitted_route"
+            )
+          ]
+        end
+        profile.routing_arguments(
+          Hive::ModelRouting::Resolution.new(
+            stage: stage,
+            provider: profile.name,
+            model: context.model,
+            effort: context.effort,
+            provenance: provenance
+          ),
+          source: "durable admitted route"
+        )
       end
 
       def stage_resource_limits(cfg, stage)
@@ -823,6 +887,30 @@ module Hive
                          routing_arguments: nil, runtime_policy: nil)
         require "hive/claude_launcher"
 
+        context = Hive::Attempts::Context.current
+        if context&.explicit_routing? && context.adapter != "claude"
+          return spawn_agent(
+            task,
+            prompt: prompt,
+            max_budget_usd: max_budget_usd,
+            timeout_sec: timeout_sec,
+            add_dirs: add_dirs,
+            cwd: cwd,
+            log_label: log_label,
+            profile: Hive::AgentProfiles.lookup(context.adapter, cfg: cfg),
+            expected_output: expected_output,
+            status_mode: status_mode,
+            cfg: cfg,
+            permission_mode: permission_mode,
+            allowed_tools: allowed_tools,
+            disallowed_tools: disallowed_tools,
+            identity_arguments: identity_arguments,
+            routing_arguments: routing_arguments,
+            runtime_policy: runtime_policy
+          )
+        end
+
+        profile = Hive::AgentProfiles.lookup(:claude, cfg: cfg) if context&.explicit_routing?
         profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
         unless profile.name == :claude
           raise Hive::AgentError,
@@ -878,6 +966,8 @@ module Hive
       def spawn_claude_with_tmux_marker!(task, cfg, **kwargs)
         spawn_claude!(task, cfg, **kwargs)
       rescue Hive::AgentError => e
+        raise if e.is_a?(Hive::ProviderRouteFailed)
+
         if Hive::Config.claude_mode(cfg) == :tmux &&
            Hive::ClaudeLauncher.tmux_unavailable_error?(e)
           warn "[hive] claude tmux mode is unavailable: #{e.message}"

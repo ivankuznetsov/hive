@@ -49,7 +49,7 @@ class RecoveryMigrationTest < Minitest::Test
     end
   end
 
-  def test_default_store_cuts_over_and_compacts_terminal_records
+  def test_default_store_cuts_over_and_keeps_terminal_hot_until_journal_delivery
     with_tmp_dir do |state_home|
       record = terminal_attempt(current_attempt(attempt_id: "terminal"))
       write_v2_record(state_home, record)
@@ -60,9 +60,12 @@ class RecoveryMigrationTest < Minitest::Test
       with_env("HIVE_HOME" => state_home) do
         store = Hive::Attempts::Store.new
         assert_equal record, store.fetch("terminal").to_h
-        assert_nil store.fetch_hot("terminal")
+        assert_equal record, store.fetch_hot("terminal").to_h
         assert_path_exists store.permanent_proofs.path_for("terminal")
-        assert_equal "frame\n", File.binread(store.log_archive.cold_path("terminal"))
+        assert_equal "frame\n", File.binread(store.log_archive.hot_path("terminal"))
+        refute_path_exists store.log_archive.cold_path("terminal")
+        status = store.storage_health.snapshot(hot_count: 1, invalid_hot_count: 0)
+        assert_equal 0, status.dig("layout", "last_result", "promoted")
       end
 
       assert File.file?(File.join(state_home, "attempts", "v2"))
@@ -165,6 +168,19 @@ class RecoveryMigrationTest < Minitest::Test
     end
   end
 
+  def test_prunes_an_empty_v1_skeleton_before_v2_cutover
+    with_tmp_dir do |state_home|
+      FileUtils.mkdir_p(File.join(state_home, "attempts", "v1", "records", "empty"))
+      write_v2_record(state_home, terminal_attempt(current_attempt(attempt_id: "terminal")))
+
+      result = migrate(state_home)
+
+      assert_equal 1, result.dig("attempts", "promoted")
+      refute_path_exists File.join(state_home, "attempts", "v1")
+      assert_equal fence_payload, read_json(File.join(state_home, "attempts", "v2"))
+    end
+  end
+
   def test_rejects_old_attempt_record_schemas_without_rewriting_them
     [ 1, 2 ].each do |version|
       with_tmp_dir do |state_home|
@@ -177,6 +193,47 @@ class RecoveryMigrationTest < Minitest::Test
           File.join(state_home, "attempts", "v2", "records", "schema-#{version}.json")
         ).fetch("schema_version")
       end
+    end
+  end
+
+  def test_rejects_valid_json_that_is_not_an_attempt_record
+    with_tmp_dir do |state_home|
+      path = File.join(state_home, "attempts", "v2", "records", "not-record.json")
+      write_json(path, [ "not", "an", "attempt" ])
+
+      error = assert_raises(Hive::Recovery::Migration::Error) { migrate(state_home) }
+
+      assert_includes error.message, "not an attempt record object"
+      assert_equal [ "not", "an", "attempt" ], read_json(path)
+    end
+  end
+
+  def test_incomplete_journal_delivery_keeps_historical_final_hot
+    with_tmp_dir do |state_home|
+      write_v2_record(state_home, terminal_attempt(current_attempt(attempt_id: "terminal")))
+      observer = Object.new
+      observer.define_singleton_method(:observe) { |_status, now:| :pending }
+      factory = lambda do |store:, state_home:|
+        Hive::Attempts::FinalizationMaintenance.new(
+          store: store, condition_observer: observer,
+          delivery_pending: ->(_record) { false }
+        )
+      end
+
+      result = with_replaced_singleton_method(
+        Hive::Attempts::FinalizationMaintenance, :runtime, factory
+      ) do
+        Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW)
+      end
+      store = Hive::Attempts::Store.new(
+        root: File.join(state_home, "attempts", "v3"), create_directories: false
+      )
+
+      assert_equal 0, result.dig("attempts", "promoted")
+      assert store.fetch_hot("terminal")
+      pending = store.pending_finalizations.fetch("terminal")
+      assert_equal false, pending.dig("consumers", "journal")
+      assert_equal true, pending.dig("consumers", "request_delivery")
     end
   end
 
@@ -250,6 +307,17 @@ class RecoveryMigrationTest < Minitest::Test
 
       assert_path_exists File.join(state_home, "attempts", "v3", "records", "terminal.json")
       refute_path_exists File.join(state_home, "recovery-migration-v4.json")
+      failed_store = Hive::Attempts::Store.new(
+        root: File.join(state_home, "attempts", "v3"), create_directories: false
+      )
+      failed = failed_store.storage_health.snapshot(hot_count: 1, invalid_hot_count: 0)
+      assert_equal "degraded", failed.fetch("status")
+      assert_equal "migration_failed", failed.fetch("degraded_reason")
+
+      migrate(state_home)
+      recovered = failed_store.storage_health.snapshot(hot_count: 0, invalid_hot_count: 0)
+      assert_equal "healthy", recovered.fetch("status")
+      assert_nil recovered.fetch("degraded_reason")
     end
   end
 
@@ -264,6 +332,7 @@ class RecoveryMigrationTest < Minitest::Test
         result = migrate(state_home)
         store = Hive::Attempts::Store.new(root: File.join(state_home, "attempts", "v3"))
         assert_equal 1, result.dig("attempts", "source_count"), boundary
+        assert_equal 1, result.dig("attempts", "promoted"), boundary
         assert store.permanent_proofs.fetch("terminal"), boundary
         assert_nil store.fetch_hot("terminal"), boundary
         assert_equal fence_payload, read_json(File.join(state_home, "attempts", "v2")), boundary
@@ -290,7 +359,19 @@ class RecoveryMigrationTest < Minitest::Test
   private
 
   def migrate(state_home)
-    Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW)
+    observer = Object.new
+    observer.define_singleton_method(:observe) { |_status, now:| :not_applicable }
+    factory = lambda do |store:, state_home:|
+      Hive::Attempts::FinalizationMaintenance.new(
+        store: store, condition_observer: observer,
+        delivery_pending: ->(_record) { false }
+      )
+    end
+    with_replaced_singleton_method(
+      Hive::Attempts::FinalizationMaintenance, :runtime, factory
+    ) do
+      Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW)
+    end
   end
 
   def fence_payload

@@ -86,8 +86,9 @@ explicit `task_stage` subject, while module hook attempts use a first-class
 `module_hook` subject containing the project, module, hook, event/decision
 identity, generation, configuration, and grant digests. Module hooks do not
 fabricate task folders merely to reuse the supervisor. Runtime readers accept
-v3 only; the one-off recovery migration rewrites retained v1/v2 task attempts
-before the attempt store opens.
+v3 only. The one-off recovery migration moves only schema-v3 records from the
+physical v2 tree into the v3 layout; it rejects older record schemas instead
+of retaining a compatibility reader or rewrite.
 
 Both subjects share the same CAS record store, leases, capabilities,
 heartbeats, detached ownership, bounded retry accounting, receipts, output
@@ -115,7 +116,7 @@ $HIVE_HOME/attempts/v3/
 ├── decision-indexes/...                   # semantic/request/successor point indexes
 ├── pending-finalization/...               # consumer acknowledgements
 ├── logs/<attempt-id>.frames               # active raw stream
-├── cold-logs/...                          # finalized raw stream awaiting expiry
+├── cold-logs/<digest-shard>/...           # finalized raw stream awaiting expiry
 ├── log-state/...                          # archive/expiry state
 ├── maintenance/...                        # one cached health/status cell
 ├── outputs/<attempt-id>/...
@@ -127,9 +128,12 @@ indexes, or cold logs. `Store#fetch` first checks the hot record and then uses a
 point lookup in permanent proof, so historical consumers do not force a global
 history scan. Final records leave the hot set only after permanent proof,
 decision indexes, and every required consumer acknowledgement are durable.
-Raw logs move cold at promotion and expire when the task is archived or three
-days after the attempt ended, whichever comes first; canonical proof and
-referenced output artifacts are not deleted by raw-log retention.
+Raw logs move into digest-sharded cold storage at promotion and expire when the
+task is archived or three days after the attempt ended, whichever comes first.
+An hourly persisted cursor examines at most 512 cold logs per pass, so archive
+history cannot turn maintenance into a scheduler-sized directory walk;
+canonical proof and referenced output artifacts are not deleted by raw-log
+retention.
 
 Operational status reads one bounded maintenance cell plus counts already
 produced by the current hot reconciliation. It reports only the latest

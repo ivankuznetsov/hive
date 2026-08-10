@@ -40,6 +40,7 @@ class ComponentBoundariesTest < Minitest::Test
       Hive::Attempts::DispatchResult
     ], attempts.dig("public_contract", "values")
     expected_internal_collaborators = %w[
+      Hive::Attempts::AdmissionView
       Hive::Attempts::CapacitySnapshot
       Hive::Attempts::Client
       Hive::Attempts::ConfiguredDispatcher
@@ -47,12 +48,16 @@ class ComponentBoundariesTest < Minitest::Test
       Hive::Attempts::DetachedLauncher
       Hive::Attempts::Dispatcher
       Hive::Attempts::Entrypoint
+      Hive::Attempts::FinalizationMaintenance
+      Hive::Attempts::LogArchive
       Hive::Attempts::LostOutcomeProcessor
       Hive::Attempts::LostOutcomeStore
       Hive::Attempts::PendingFinalizationStore
       Hive::Attempts::PermanentProofStore
+      Hive::Attempts::PointStorage
       Hive::Attempts::ProcessIdentity
       Hive::Attempts::Reconciler
+      Hive::Attempts::StorageHealth
       Hive::Attempts::Store
       Hive::Attempts::Supervisor
     ]
@@ -62,10 +67,13 @@ class ComponentBoundariesTest < Minitest::Test
                  attempts.fetch("forbidden_constructions").sort
     assert_equal(
       {
+        "Hive::Attempts::AdmissionView" => [ "lib/hive/recovery/migration.rb" ],
+        "Hive::Attempts::FinalizationMaintenance" => [ "lib/hive/commands/daemon.rb" ],
         "Hive::Attempts::LostOutcomeProcessor" => [ "lib/hive/commands/daemon.rb" ],
         "Hive::Attempts::LostOutcomeStore" => [ "lib/hive/commands/daemon.rb" ],
         "Hive::Attempts::ProcessIdentity" => [ "lib/hive/commands/daemon.rb" ],
         "Hive::Attempts::Reconciler" => [ "lib/hive/commands/daemon.rb" ],
+        "Hive::Attempts::StorageHealth" => [ "lib/hive/recovery/migration.rb" ],
         "Hive::Attempts::Store" => [
           "lib/hive/commands/attempt_supervise.rb",
           "lib/hive/commands/daemon.rb",

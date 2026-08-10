@@ -482,6 +482,30 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
+  def test_existing_successor_prevents_a_second_successor_for_the_same_loss
+    with_dispatcher do |dispatcher, launcher, task, store|
+      first = dispatch(dispatcher, task, request_id: "request-one")
+      lost = store.mark_lost(first.attempt, reason: "owner_gone", now: NOW + 1)
+      successor = dispatcher.dispatch_successor(
+        predecessor: lost, task: task, project: "demo",
+        argv: [ "hive", "run", task.slug ], request_id: "request-two",
+        provider: "codex", now: NOW + 2
+      )
+      store.mark_lost(successor.attempt, reason: "handoff_failed", now: NOW + 3)
+
+      duplicate = dispatcher.dispatch_successor(
+        predecessor: lost, task: task, project: "demo",
+        argv: [ "hive", "run", task.slug ], request_id: "request-three",
+        provider: "codex", now: NOW + 4
+      )
+
+      assert_equal :deferred, duplicate.status
+      assert_equal "successor_exists", duplicate.reason
+      assert_equal successor.attempt.attempt_id, duplicate.attempt.attempt_id
+      assert_equal 2, launcher.launched.size
+    end
+  end
+
   def test_empty_successor_outputs_fall_back_to_all_predecessor_outputs
     with_dispatcher do |dispatcher, _launcher, task, store|
       first = dispatch(dispatcher, task, request_id: "request-one")

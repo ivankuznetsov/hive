@@ -78,7 +78,8 @@ from missing evidence.
 
 `hive-operational-status.v3` includes summary/state counts, daemon identity and
 phase, scheduler capacity/queue/provider holds, archive counts, typed issues,
-per-task liveness/freshness, blocker ownership and reasons, nullable retry
+the required bounded `attempt_storage` cell, per-task liveness/freshness,
+blocker ownership and reasons, nullable retry
 evidence (`due`, `retry_at`, `safe`, `safety_reason`), and an optional closed
 action descriptor plus the canonical durable recovery receipt. It never embeds
 a shell command or argv. A routine,
@@ -90,7 +91,11 @@ hive act workflow.advance PROJECT:SLUG --observation TOKEN --json
 ```
 
 Recoverable rows instead recommend `workflow.retry` with the same token
-contract. `hive-act.v2` returns the canonical queued/cooldown/running/blocked/
+contract. Agents must treat `attempt_storage.status: degraded` and its
+`degraded_reason` (`migration_failed` or `maintenance_failed`) as a current
+Hive-owned storage fault, report the last error operation, and avoid inferring
+health from task rows alone. The human view renders the same condition once as
+an `attempt_storage_degraded` warning. `hive-act.v2` returns the canonical queued/cooldown/running/blocked/
 terminal recovery receipt. The one-off recovery-contract migration moved every
 in-repository producer, consumer, fixture, and operating skill to v2; v1 is no
 longer published or supported.

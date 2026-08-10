@@ -1039,6 +1039,28 @@ class CommandsRunTest < Minitest::Test
     assert_includes payload.fetch("message"), "attempt-empty"
   end
 
+  def test_successful_durable_json_replay_with_expired_output_emits_error_document
+    result = Hive::Attempts::ClientResult.new(
+      status: :terminal, exit_status: 0, outcome: "succeeded",
+      receipt: {}, attempt_id: "attempt-expired", stdout_bytes: 0,
+      output_status: :expired
+    )
+    entrypoint = Object.new
+    entrypoint.define_singleton_method(:dispatch) { |**_kwargs| result }
+    run = command(durable: true, json: true, attempt_entrypoint: entrypoint)
+    resolved = task(folder: "/tmp/task-folder", stage_name: "execute", stage_index: 4)
+    run.define_singleton_method(:resolve_task) { resolved }
+
+    out, = capture_io do
+      assert_raises(Hive::ConcurrentRunError) { run.call }
+    end
+
+    payload = JSON.parse(out)
+    assert_equal "hive-run", payload.fetch("schema")
+    assert_equal "concurrent_run", payload.fetch("error_kind")
+    assert_includes payload.fetch("message"), "attempt-expired"
+  end
+
   def test_failed_durable_json_attempt_with_worker_stdout_does_not_duplicate_it
     result = Hive::Attempts::ClientResult.new(
       status: :terminal, exit_status: Hive::ExitCodes::SOFTWARE, outcome: "failed",

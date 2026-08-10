@@ -62,4 +62,29 @@ class AttemptsLogArchiveTest < Minitest::Test
       assert_equal archive.hot_path("attempt-1"), resolved.path
     end
   end
+
+  def test_cold_pages_are_sharded_bounded_and_resume_from_the_cursor
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Store.new(root: root)
+      archive = store.log_archive
+      %w[attempt-1 attempt-2 attempt-3].each do |attempt_id|
+        writer = archive.open_writer(attempt_id, clock: -> { NOW })
+        writer.append(:stdout, "done\n")
+        writer.close
+        assert_equal :archived, archive.archive(attempt_id)
+        assert_equal Digest::SHA256.hexdigest(attempt_id)[0, 2],
+                     File.basename(File.dirname(archive.cold_path(attempt_id)))
+      end
+
+      first = archive.cold_attempt_ids_page(
+        cursor: { "shard" => 0, "after" => nil }, limit: 2
+      )
+      second = archive.cold_attempt_ids_page(cursor: first.cursor, limit: 2)
+
+      assert_equal 2, first.attempt_ids.size
+      assert_equal 2, second.attempt_ids.size
+      assert_empty(%w[attempt-1 attempt-2 attempt-3] -
+                   (first.attempt_ids + second.attempt_ids))
+    end
+  end
 end

@@ -87,6 +87,35 @@ class AttemptsEntrypointTest < Minitest::Test
     assert_equal [ [ :maintenance, Time.utc(2026, 8, 10, 12, 0, 0) ], :dispatch ], order
   end
 
+  def test_foreground_dispatch_continues_when_opportunistic_maintenance_fails
+    task = FakeTask.new(slug: "task", project_root: "/tmp/project", project_name: "demo")
+    result = Hive::Attempts::DispatchResult.new(
+      status: :existing_live, attempt: Struct.new(:attempt_id).new("attempt-1"),
+      receipt: nil, attach_descriptor: nil, reason: nil
+    )
+    maintenance = Object.new
+    maintenance.define_singleton_method(:run_if_due) do |now:|
+      raise Hive::Attempts::StoreError, "maintenance failed at #{now}"
+    end
+    dispatched = false
+    dispatcher = Object.new
+    dispatcher.define_singleton_method(:dispatch) do |**_kwargs|
+      dispatched = true
+      result
+    end
+
+    value = Hive::Attempts::Entrypoint.new(
+      store: Object.new, dispatcher: dispatcher, maintenance: maintenance,
+      config_loader: ->(_root) { Hive::Config.merge_defaults({}) }
+    ).dispatch(
+      task: task, intended_stage: "4-execute", argv: [ "hive", "run", "task" ],
+      interactive: false, now: Time.utc(2026, 8, 10, 12, 0, 0)
+    )
+
+    assert dispatched
+    assert_same result, value
+  end
+
   def test_deferred_admission_is_a_retryable_error
     task = FakeTask.new(slug: "task", project_root: "/tmp/project", project_name: "demo")
     result = Hive::Attempts::DispatchResult.new(

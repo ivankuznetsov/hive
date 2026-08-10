@@ -397,10 +397,11 @@ acknowledgements are durable. `Store#fetch(attempt_id)` preserves point access
 to that permanent proof after promotion; historical identity reconstruction
 uses the successful semantic decision index and never enumerates proof.
 
-Raw frames move from `logs/` to `cold-logs/` during promotion. Maintenance
-deletes them when the owning task is archived or three days after `ended_at`,
-whichever is earlier, unless recovery remains pinned. This retention does not
-delete permanent proof or referenced output artifacts.
+Raw frames move from `logs/` to digest-sharded `cold-logs/` during promotion.
+Maintenance advances a durable round-robin cursor through at most 512 entries
+per hourly pass and deletes them when the owning task is archived or three days
+after `ended_at`, whichever is earlier, unless recovery remains pinned. This
+retention does not delete permanent proof or referenced output artifacts.
 
 The physical v2-to-v3 migration is forward-only. It quiesces the validated v2
 tree, rejects live attempts, renames it to v3, publishes a 0600 v2 old-binary

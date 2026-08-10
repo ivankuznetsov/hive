@@ -166,6 +166,16 @@ module Hive
               )
               next
             end
+            existing_successor = successor_of && view.successor(
+              predecessor_attempt_id: successor_of
+            )
+            if existing_successor
+              result = DispatchResult.new(
+                status: :deferred, attempt: existing_successor, receipt: nil,
+                attach_descriptor: nil, reason: "successor_exists"
+              )
+              next
+            end
             if successor_of.nil? && lost.any?
               result = DispatchResult.new(
                 status: :deferred, attempt: lost.last, receipt: nil,

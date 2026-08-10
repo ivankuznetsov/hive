@@ -150,8 +150,22 @@ class AttemptsStorageFoundationTest < Minitest::Test
 
       index.record_successor(successor)
       index.record_successor(successor)
-      assert_equal successor.attempt_id,
-                   index.successor_attempt_id(predecessor_attempt_id: lost.attempt_id)
+      advanced = source.claim(
+        successor, owner: owner, claim_capability: CLAIM_CAPABILITY,
+        first_heartbeat_timeout_sec: 30, now: NOW + 3
+      )
+      index.record_successor(advanced)
+      competing = source.create_launching(
+        **identity(
+          attempt_id: "newer-successor", request_id: "newer-request",
+          predecessor_attempt_id: lost.attempt_id
+        ),
+        launch_timeout_sec: 30, now: NOW + 4
+      )
+      index.record_successor(competing)
+      assert_equal competing.attempt_id,
+                   index.successor_attempt_id(predecessor_attempt_id: lost.attempt_id),
+                   "a legacy duplicate converges on the deterministic newest successor"
       assert_nil index.unresolved_loss_attempt_id(
         task_generation: lost.task_generation,
         subject: lost.subject
@@ -260,6 +274,8 @@ class AttemptsStorageFoundationTest < Minitest::Test
       refute pending.complete?("attempt-1")
       acknowledged = pending.acknowledge("attempt-1", consumer: "journal")
       assert acknowledged["consumers"]["journal"]
+      assert_equal acknowledged,
+                   pending.create(attempt_id: "attempt-1", consumers: consumers)
       assert_equal acknowledged,
                    pending.acknowledge("attempt-1", consumer: "journal")
       assert_equal acknowledged, pending.fetch("attempt-1")

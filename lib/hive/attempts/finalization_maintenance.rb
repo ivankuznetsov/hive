@@ -14,7 +14,24 @@ module Hive
       LOST_CONSUMERS = (TERMINAL_CONSUMERS + [ "loss" ]).freeze
       MAINTENANCE_INTERVAL_SEC = 60 * 60
       LOG_RETENTION_SEC = 3 * 24 * 60 * 60
+      COLD_SWEEP_LIMIT = 512
       MaintenanceStatus = Data.define(:attempt, :classification, :owner_status, :evidence)
+
+      def self.runtime(store:, state_home: Hive::Paths.state_home, **options)
+        require "hive/conditions/attempt_observer"
+        require "hive/daemon/dispatch_request_queue"
+        observer = Hive::Conditions::AttemptObserver.new(store: store)
+        new(
+          store: store,
+          condition_observer: observer,
+          delivery_pending: lambda do |record|
+            Hive::Daemon::DispatchRequestQueue.claimed(state_home: state_home).any? do |delivery|
+              delivery.claim["attempt_id"].to_s == record.attempt_id
+            end
+          end,
+          **options
+        )
+      end
 
       def initialize(store:, condition_observer: nil, delivery_pending: nil,
                      task_archived: nil, logger: nil)
@@ -73,16 +90,20 @@ module Hive
         true
       end
 
+      def finalize(record, now: Time.now.utc)
+        return false unless prepare(record)
+
+        acknowledge_journal(record, now: now)
+        acknowledge(record, :request_delivery) unless delivery_pending?(record)
+        promote(record)
+      end
+
       def run_if_due(now: Time.now.utc)
         return { ran: false, promoted: 0, deleted: 0, cold_examined: 0 } unless claim_due(now)
 
         promoted = 0
         @store.scan.records.each do |record|
-          next unless prepare(record)
-
-          acknowledge_journal(record, now: now)
-          acknowledge(record, :request_delivery) unless delivery_pending?(record)
-          promoted += 1 if promote(record)
+          promoted += 1 if finalize(record, now: now)
         end
         result = sweep_logs(now: now).merge(ran: true, promoted: promoted)
         @storage_health.complete_maintenance(now: now, result: result)
@@ -105,9 +126,11 @@ module Hive
 
       def sweep_logs(now: Time.now.utc)
         deleted = 0
-        cold_examined = 0
-        @store.log_archive.each_cold_attempt_id do |attempt_id|
-          cold_examined += 1
+        page = @store.log_archive.cold_attempt_ids_page(
+          cursor: @storage_health.cold_sweep_cursor,
+          limit: COLD_SWEEP_LIMIT
+        )
+        page.attempt_ids.each do |attempt_id|
           record = @store.fetch(attempt_id)
           next unless record&.final?
           next if recovery_pinned?(record)
@@ -115,7 +138,8 @@ module Hive
 
           deleted += 1 if @store.log_archive.expire(attempt_id, now: now) == :expired
         end
-        { deleted: deleted, cold_examined: cold_examined }
+        @storage_health.advance_cold_sweep(page.cursor)
+        { deleted: deleted, cold_examined: page.attempt_ids.size }
       end
 
       private

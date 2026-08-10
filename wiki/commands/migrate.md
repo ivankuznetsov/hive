@@ -193,9 +193,10 @@ A rerun after successful migration prints that there is nothing to move and keep
   backfill, managed same-generation configuration rebinding and all-candidate
   preflight, repository-identity backfill, idempotency, null-id repair, and
   counter seeding.
-- `test/unit/recovery/migration_test.rb` covers the global schema cutover,
-  receipt idempotency, archived final compatibility records, queue upgrades,
-  empty post-cutover v1 skeleton cleanup, and live/ambiguous-state refusal.
+- `test/unit/recovery/migration_test.rb` covers the physical v2-to-v3 cutover,
+  exact parity and crash resume, real finalization obligations, v1 empty-skeleton
+  pruning, strict schema rejection, queue upgrades, and live/ambiguous-state
+  refusal.
 - Status integration scenarios prove hidden legacy tasks surface before migrate and disappear after migration.
 
 ## Backlinks

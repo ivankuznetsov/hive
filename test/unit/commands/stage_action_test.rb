@@ -246,6 +246,30 @@ class CommandsStageActionTest < Minitest::Test
     assert_includes payload.fetch("message"), "attempt-empty"
   end
 
+  def test_successful_durable_json_replay_with_expired_output_emits_error_document
+    task = Struct.new(:folder).new("/tmp/task-folder")
+    result = Hive::Attempts::ClientResult.new(
+      status: :terminal, exit_status: 0, outcome: "succeeded",
+      receipt: {}, attempt_id: "attempt-expired", stdout_bytes: 0,
+      output_status: :expired
+    )
+    entrypoint = Object.new
+    entrypoint.define_singleton_method(:dispatch) { |**_kwargs| result }
+    command = Hive::Commands::StageAction.new(
+      "plan", "some-slug", json: true, durable: true, attempt_entrypoint: entrypoint
+    )
+    command.define_singleton_method(:resolve_task) { task }
+
+    out, = capture_io do
+      assert_raises(Hive::ConcurrentRunError) { command.call }
+    end
+
+    payload = JSON.parse(out)
+    assert_equal "hive-stage-action", payload.fetch("schema")
+    assert_equal "error", payload.fetch("error_kind")
+    assert_includes payload.fetch("message"), "attempt-expired"
+  end
+
   def test_lost_durable_json_attempt_with_worker_stdout_does_not_duplicate_it
     task = Struct.new(:folder).new("/tmp/task-folder")
     result = Hive::Attempts::ClientResult.new(

@@ -218,7 +218,7 @@ module Hive
           begin
             validate_regular_file!(path, label: "attempt record")
             records << Record.new(JSON.parse(File.binread(path)))
-          rescue JSON::ParserError, InvalidRecord, StoreError, SystemCallError => e
+          rescue JSON::ParserError, InvalidRecord, StoreError, SystemCallError, TypeError => e
             invalid << InvalidStoredRecord.new(path: path, error: e.message)
           end
         end

@@ -199,8 +199,10 @@ rather than either crashing Hive or presenting old scheduler state as current.
 After attempt reconciliation, the daemon publishes one `attempt_storage` cell
 from the already-computed hot snapshot and the store's bounded cached health
 record. It never scans permanent proof or cold logs to render status. The
-hourly finalization pass records only its latest promoted/deleted/cold-examined
-deltas and refreshes the snapshot if it ran. Migration or maintenance failure
+hourly finalization pass uses a persisted cursor to inspect at most 512
+digest-sharded cold logs, records only its latest
+promoted/deleted/cold-examined deltas, and refreshes the snapshot if it ran.
+Migration or maintenance failure
 degrades daemon status and renders one remediation-bearing human warning;
 failure to publish this advisory cell is logged and cannot stop reconciliation
 or dispatch.

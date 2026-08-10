@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/attempts/finalization_maintenance"
+require "hive/attempts/log_archive"
 require "hive/task_action"
 
 class AttemptsFinalizationMaintenanceTest < Minitest::Test
@@ -231,6 +232,61 @@ class AttemptsFinalizationMaintenanceTest < Minitest::Test
       assert_equal "healthy", status.fetch("status")
       assert_equal 1, status.dig("maintenance", "last_result", "promoted")
       assert_equal 1, status.dig("maintenance", "last_result", "cold_examined")
+    end
+  end
+
+  def test_due_cold_sweep_is_fixed_size_even_with_thirty_thousand_logs
+    attempt_ids = 30_000.times.map { |index| "cold-#{index}" }
+    cursor = { "shard" => 0, "after" => nil }
+    archive = Object.new
+    archive.define_singleton_method(:cold_attempt_ids_page) do |cursor:, limit:|
+      raise "unexpected cursor" unless cursor == { "shard" => 0, "after" => nil }
+
+      Hive::Attempts::LogArchive::ColdPage.new(
+        attempt_ids: attempt_ids.first(limit),
+        cursor: { "shard" => 4, "after" => attempt_ids.fetch(limit - 1) }
+      )
+    end
+    health = Object.new
+    health.define_singleton_method(:cold_sweep_cursor) { cursor }
+    health.define_singleton_method(:advance_cold_sweep) { |value| cursor = value }
+    store = Object.new
+    store.define_singleton_method(:log_archive) { archive }
+    store.define_singleton_method(:storage_health) { health }
+    store.define_singleton_method(:fetch) { |_attempt_id| nil }
+    maintenance = Hive::Attempts::FinalizationMaintenance.new(store: store)
+
+    result = maintenance.sweep_logs(now: NOW)
+
+    assert_equal Hive::Attempts::FinalizationMaintenance::COLD_SWEEP_LIMIT,
+                 result.fetch(:cold_examined)
+    assert_equal "cold-511", cursor.fetch("after")
+  end
+
+  def test_failed_maintenance_degrades_health_and_a_later_success_clears_it
+    with_store do |store|
+      archive = store.log_archive
+      original = archive.method(:cold_attempt_ids_page)
+      archive.define_singleton_method(:cold_attempt_ids_page) do |**|
+        raise Hive::Attempts::StoreError, "cold archive unavailable"
+      end
+      maintenance = maintenance(store)
+
+      assert_raises(Hive::Attempts::StoreError) do
+        maintenance.run_if_due(now: NOW)
+      end
+      failed = store.storage_health.snapshot(hot_count: 0, invalid_hot_count: 0)
+      assert_equal "degraded", failed.fetch("status")
+      assert_equal "maintenance_failed", failed.fetch("degraded_reason")
+
+      archive.define_singleton_method(:cold_attempt_ids_page, original)
+      result = maintenance.run_if_due(
+        now: NOW + Hive::Attempts::FinalizationMaintenance::MAINTENANCE_INTERVAL_SEC
+      )
+      assert result.fetch(:ran)
+      recovered = store.storage_health.snapshot(hot_count: 0, invalid_hot_count: 0)
+      assert_equal "healthy", recovered.fetch("status")
+      assert_nil recovered.fetch("degraded_reason")
     end
   end
 

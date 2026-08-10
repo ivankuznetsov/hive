@@ -101,10 +101,8 @@ module Hive
         key = predecessor_key(predecessor)
         value = ordered_value(record)
         update_entry(SUCCESSOR, key) do |current|
-          if current && current.fetch("value") != value
-            raise StoreError, "attempt predecessor has conflicting successors"
-          end
-          value
+          existing = current && current.fetch("value")
+          existing && (order(existing) <=> order(value)) >= 0 ? existing : value
         end
 
         loss_key = semantic_key(record.task_generation, record.subject)

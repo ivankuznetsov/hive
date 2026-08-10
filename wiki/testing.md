@@ -138,6 +138,7 @@ wall-clock or RSS threshold.
 
 The focused rollover aggregate also covers forward-only migration and
 checkpoint restart, finalization consumer acknowledgements, raw-log retention,
+the fixed-size 30,000-log maintenance page and durable cold-sweep cursor,
 cached operational status and its single human warning, request terminal replay
 without rerun, task journal/projection, historical implementation identity,
 and evidence-bound task closure. These regressions keep point-addressed

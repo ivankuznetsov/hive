@@ -181,7 +181,10 @@ module Hive
         return nil if attempt_id.to_s.empty?
 
         record = @store.fetch(attempt_id)
-        record ? self.record(record) : @records.delete(attempt_id)
+        return self.record(record) if record
+
+        @records.delete(attempt_id)
+        nil
       end
 
       def terminal_attempt(request_id:)
@@ -298,13 +301,7 @@ module Hive
             decision_index.record_unresolved_loss(record) unless successor_id
           end
           if record["predecessor_attempt_id"]
-            existing_id = decision_index.successor_attempt_id(
-              predecessor_attempt_id: record["predecessor_attempt_id"]
-            )
-            if existing_id && existing_id != record.attempt_id
-              raise StoreError, "attempt predecessor has conflicting successors"
-            end
-            decision_index.record_successor(record) unless existing_id
+            decision_index.record_successor(record)
           end
           if record.state == "terminal"
             decision_index.record_terminal(record)

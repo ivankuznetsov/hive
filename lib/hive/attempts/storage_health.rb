@@ -15,6 +15,7 @@ module Hive
       MAX_BYTES = 16 * 1024
       RESULT_KEYS = %w[promoted deleted cold_examined].freeze
       MIGRATION_RESULT_KEYS = %w[source_count promoted hot invalid].freeze
+      COLD_SWEEP_SHARDS = 256
 
       def self.unknown_snapshot
         {
@@ -104,6 +105,16 @@ module Hive
         end
       end
 
+      def cold_sweep_cursor
+        read.fetch("cold_sweep_cursor").dup.freeze
+      end
+
+      def advance_cold_sweep(cursor)
+        normalized = normalize_cold_sweep_cursor(cursor)
+        update { |current| current.merge("cold_sweep_cursor" => normalized) }
+        normalized
+      end
+
       def snapshot(hot_count:, invalid_hot_count:)
         current = read
         current.merge(
@@ -183,6 +194,7 @@ module Hive
           data["schema_version"] == SCHEMA_VERSION &&
           data["scope"] == "attempt-storage" &&
           data["layout"].is_a?(Hash) && data["maintenance"].is_a?(Hash) &&
+          normalize_cold_sweep_cursor(data["cold_sweep_cursor"]) &&
           bytes == StorageKey.dump(data)
         raise StoreError, "attempt storage health is corrupt" unless valid
 
@@ -195,7 +207,8 @@ module Hive
         self.class.unknown_snapshot.except("status", "hot").merge(
           "schema" => SCHEMA,
           "schema_version" => SCHEMA_VERSION,
-          "scope" => "attempt-storage"
+          "scope" => "attempt-storage",
+          "cold_sweep_cursor" => { "shard" => 0, "after" => nil }
         )
       end
 
@@ -220,6 +233,20 @@ module Hive
         return value if value.is_a?(Integer) && value >= 0
 
         raise StoreError, "attempt storage health count is invalid"
+      end
+
+      def normalize_cold_sweep_cursor(cursor)
+        value = cursor.to_h
+        shard = value.fetch("shard")
+        after = value["after"]
+        valid = value.keys.sort == %w[after shard] &&
+          shard.is_a?(Integer) && shard.between?(0, COLD_SWEEP_SHARDS - 1) &&
+          (after.nil? || StorageKey.string(after) == after)
+        raise StoreError, "attempt cold sweep cursor is invalid" unless valid
+
+        { "shard" => shard, "after" => after }
+      rescue KeyError, NoMethodError
+        raise StoreError, "attempt cold sweep cursor is invalid"
       end
     end
   end

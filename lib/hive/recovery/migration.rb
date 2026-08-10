@@ -165,11 +165,11 @@ module Hive
           )
         end
 
-        promoted = promote_historical_finals!(store)
+        promote_historical_finals!(store, now: now)
         remaining = store.scan
         checkpoint = write_checkpoint!(checkpoint.merge(
           "phase" => "complete",
-          "promoted_count" => checkpoint.fetch("promoted_count", 0) + promoted,
+          "promoted_count" => checkpoint.fetch("source_valid_count") - remaining.records.size,
           "hot_count" => remaining.records.size,
           "invalid_count" => remaining.invalid_records.size
         ))
@@ -281,24 +281,12 @@ module Hive
               "live attempt #{live.attempt_id} in attempts/v2 must finish before cutover"
       end
 
-      def promote_historical_finals!(store)
-        maintenance = Hive::Attempts::FinalizationMaintenance.new(store: store)
-        ordered_records(store.scan.records).count do |record|
-          consumers = record.state == "lost" ?
-            Hive::Attempts::FinalizationMaintenance::LOST_CONSUMERS :
-            Hive::Attempts::FinalizationMaintenance::TERMINAL_CONSUMERS
-          pending = store.pending_finalizations.fetch(record.attempt_id)
-          unless pending
-            next false unless maintenance.prepare(record)
-            pending = store.pending_finalizations.fetch(record.attempt_id)
-          end
-          unless pending.fetch("consumers").keys.sort == consumers.sort
-            raise Error, "historical finalization obligations conflict for #{record.attempt_id}"
-          end
-          pending.fetch("consumers").each do |consumer, acknowledged|
-            maintenance.acknowledge(record, consumer) unless acknowledged
-          end
-          maintenance.promote(record)
+      def promote_historical_finals!(store, now:)
+        maintenance = Hive::Attempts::FinalizationMaintenance.runtime(
+          store: store, state_home: state_home
+        )
+        ordered_records(store.scan.records).each do |record|
+          maintenance.finalize(record, now: now)
         end
       end
 
@@ -405,10 +393,14 @@ module Hive
             count += 1
             begin
               data = JSON.parse(bytes)
-              if data.is_a?(Hash) && data["schema"] == Hive::Attempts::Record::SCHEMA &&
-                 data["schema_version"] != CURRENT_ATTEMPT_VERSION
+              unless data.is_a?(Hash)
+                raise Error, "#{path} is valid JSON but not an attempt record object"
+              end
+              unless data["schema"] == Hive::Attempts::Record::SCHEMA &&
+                     data["schema_version"] == CURRENT_ATTEMPT_VERSION
                 raise Error,
-                      "#{path} has unsupported attempt schema #{data['schema_version'].inspect}; " \
+                      "#{path} has unsupported attempt schema " \
+                      "#{data['schema'].inspect}/#{data['schema_version'].inspect}; " \
                       "only schema v3 can move to attempts/v3"
               end
               Hive::Attempts::Record.new(data)
@@ -591,9 +583,27 @@ module Hive
         status = optional_lstat(obsolete_attempt_root)
         return unless status
 
+        if status.directory? && !status.symlink?
+          validate_owner!(status, obsolete_attempt_root)
+          entries = safe_tree_entries(obsolete_attempt_root)
+          if entries.all? do |path, entry|
+               validate_owner!(entry, path)
+               entry.directory?
+             end
+            entries.sort_by { |path, _entry| -path.count(File::SEPARATOR) }
+                   .each { |path, _entry| Dir.rmdir(path) }
+            Dir.rmdir(obsolete_attempt_root)
+            Hive::AtomicFile.fsync_directory(attempts_parent)
+            return
+          end
+        end
+
         raise Error,
               "unsupported attempts/v1 state remains at #{obsolete_attempt_root}; " \
               "this forward-only cutover accepts schema-v3 records from attempts/v2 only"
+      rescue Errno::ENOTEMPTY
+        raise Error,
+              "unsupported attempts/v1 state changed while it was being checked; retry safely"
       end
 
       def migrate_dispatch_requests!

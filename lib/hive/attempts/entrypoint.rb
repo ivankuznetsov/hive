@@ -29,7 +29,7 @@ module Hive
         store = @store || Store.new
         maintenance = @maintenance
         maintenance ||= foreground_maintenance(store) unless @store
-        maintenance&.run_if_due(now: now)
+        run_opportunistic_maintenance(maintenance, now: now)
         dispatcher = @dispatcher || build_dispatcher(
           store, cfg, @daemon_config_loader.call, argv
         )
@@ -55,19 +55,17 @@ module Hive
 
       private
 
+      # Storage upkeep must never become an admission outage. The concrete
+      # maintenance service records degraded health before raising, then the
+      # next due run retries while this request continues to dispatch.
+      def run_opportunistic_maintenance(maintenance, now:)
+        maintenance&.run_if_due(now: now)
+      rescue StandardError
+        nil
+      end
+
       def foreground_maintenance(store)
-        require "hive/conditions/attempt_observer"
-        require "hive/daemon/dispatch_request_queue"
-        observer = Hive::Conditions::AttemptObserver.new(store: store)
-        @maintenance = FinalizationMaintenance.new(
-          store: store,
-          condition_observer: observer,
-          delivery_pending: lambda do |record|
-            Hive::Daemon::DispatchRequestQueue.claimed.any? do |delivery|
-              delivery.claim["attempt_id"].to_s == record.attempt_id
-            end
-          end
-        )
+        @maintenance = FinalizationMaintenance.runtime(store: store)
       end
 
       def build_dispatcher(store, cfg, daemon, argv)

@@ -34,10 +34,10 @@ module Hive
         candidate = payload(id, names.to_h { |consumer| [ consumer, false ] })
 
         update(id) do |current|
-          if current && current != candidate
+          if current && current.fetch("consumers").keys.sort != names
             raise StoreError, "pending finalization conflicts with existing obligations"
           end
-          candidate
+          current || candidate
         end
       end
 

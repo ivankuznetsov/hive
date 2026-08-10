@@ -114,6 +114,18 @@ class AttemptsCapacitySnapshotTest < Minitest::Test
     end
   end
 
+  def test_find_forgets_a_cached_record_when_point_authority_is_missing
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Store.new(root: root)
+      record = create(store, attempt_id: "gone", project: "p1", task_slug: "s1")
+      view = Hive::Attempts::AdmissionView.new(store: store, hot_scan: store.scan)
+      File.unlink(store.record_path(record.attempt_id))
+
+      assert_nil view.find(record.attempt_id)
+      assert_nil view.find(record.attempt_id)
+    end
+  end
+
   private
 
   def create(store, attempt_id:, project:, task_slug:, generation: "g1")

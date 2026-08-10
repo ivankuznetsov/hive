@@ -460,8 +460,8 @@ task default: :test
   `HiveTestTmpCleanup` in `ensure`. The cleanup is restricted to direct
   children with test-shaped names owned by the current uid, handles read-only
   managed-package trees, removes the exact root's known `-worktrees`,
-  `.origin.git`, and Patrol-lock siblings, and verifies that every path is
-  actually gone.
+  `.worktrees`, managed-worktree, strict/agent origin-repository, and
+  Patrol-lock siblings, and verifies that every path is actually gone.
 - `tracked_tmp_dir(prefix)` — registers a statement-spanning fixture for the
   current test's teardown hook. Use this instead of assigning `Dir.mktmpdir`
   directly when a helper must return the path.
@@ -480,6 +480,11 @@ removal counts only after the path is absent, and any retained candidate makes
 the task fail instead of printing a false success. Production `hive-*` temp
 families remain the responsibility of their owning lifecycle and the system
 tmp reaper.
+
+Suite-level fake-HOME and generated worktree-base cleanup uses one aggregate
+shutdown hook. It attempts every registered root before reporting cleanup
+failures. Block helpers also preserve an active assertion or test exception if
+cleanup fails, while a cleanup failure still fails an otherwise-green test.
 
 ## Fixtures
 

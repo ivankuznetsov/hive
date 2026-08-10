@@ -11,6 +11,15 @@ The cleanup family also removes only the root's exact `-worktrees`,
 siblings from refactor-Patrol tests, and focused fixer/token-budget reruns now
 leave none.
 
+Review then found additional real sibling shapes used by worktree tests. The
+allowlist now includes exact `.worktrees`, `.managed-worktrees`,
+`.strict-origin.git`, and `.agent-worktree-origin.git` forms, with regression
+coverage for every accepted suffix. Suite roots share one aggregate shutdown
+hook so one removal failure cannot skip the other root. Helper cleanup keeps an
+already-active assertion as the primary failure, and private-TMPDIR, symlink,
+direct-child, production-name refusal, and invalid-prefix boundaries are
+covered explicitly.
+
 **Recovery broom:** Hardened `rake test:clean_tmp` around exact test-shaped
 names, current-uid ownership, a 24-hour age floor, and creator-PID liveness.
 The task still recognizes the legacy `~/Dev/hive-test*.worktrees` shape, but

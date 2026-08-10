@@ -14,7 +14,10 @@ module HiveTestTmpCleanup
     hive-noapp |
     hive-pairing-command
   )(?<date>\d{8})-(?<pid>\d+)-[a-z0-9]+/x.source.freeze
-  TMP_RELATED_SUFFIX_SOURCE = /(?:-worktrees|\.origin\.git|\.patrol-[0-9a-f]+\.lock)/.source.freeze
+  # Test helpers create a small set of sibling repositories/worktree roots
+  # beside their generated project root. Keep this list explicit: the cleanup
+  # boundary must grow only when a concrete test fixture shape needs it.
+  TMP_RELATED_SUFFIX_SOURCE = /(?:-worktrees|\.(?:managed-)?worktrees|\.(?:strict-|agent-worktree-)?origin\.git|\.patrol-[0-9a-f]+\.lock)/.source.freeze
   TMP_BASE_PATTERN = /\A#{TMP_BASE_SOURCE}\z/x.freeze
   TMP_ENTRY_PATTERN = /\A#{TMP_BASE_SOURCE}(?:#{TMP_RELATED_SUFFIX_SOURCE})?\z/x.freeze
   LEGACY_WORKTREE_PATTERN = /\Ahive-test[a-z0-9_-]*\d{8}-(?<pid>\d+)-[a-z0-9]+\.worktrees\z/.freeze
@@ -150,7 +153,7 @@ module HiveTestTmpCleanup
   def process_alive?(pid)
     Process.kill(0, Integer(pid))
     true
-  rescue ArgumentError, TypeError, Errno::ESRCH
+  rescue ArgumentError, TypeError, RangeError, Errno::ESRCH
     false
   rescue Errno::EPERM
     true

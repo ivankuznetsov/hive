@@ -22,6 +22,8 @@ require "shellwords"
 require "English"
 require_relative "support/tmp_cleanup"
 
+HIVE_TEST_SUITE_TMP_DIRS = []
+
 # Never let a normal test subprocess inherit the operator's Hive state, home,
 # XDG roots, agent configuration, GitHub configuration, or global Git config.
 # Set only HOME and remove the optional overrides so production defaults keep
@@ -29,6 +31,7 @@ require_relative "support/tmp_cleanup"
 # opt out explicitly because they exercise the operator's real agent login.
 unless ENV["HIVE_TEST_ALLOW_REAL_USER_ENV"] == "1"
   HIVE_TEST_USER_ROOT = Dir.mktmpdir("hive-test-user").freeze
+  HIVE_TEST_SUITE_TMP_DIRS << HIVE_TEST_USER_ROOT
   test_home = File.join(HIVE_TEST_USER_ROOT, "home")
   FileUtils.mkdir_p(test_home)
   ENV["HOME"] = test_home
@@ -46,9 +49,6 @@ unless ENV["HIVE_TEST_ALLOW_REAL_USER_ENV"] == "1"
     GH_CONFIG_DIR
     GIT_CONFIG_GLOBAL
   ].each { |key| ENV.delete(key) }
-  Minitest.after_run do
-    HiveTestTmpCleanup.remove_with_related!(HIVE_TEST_USER_ROOT)
-  end
 end
 
 require "hive"
@@ -98,8 +98,9 @@ HIVE_TEST_WORKTREE_BASE = if ENV["HIVE_WORKTREE_BASE"]
 else
   Dir.mktmpdir("hive-test-wtbase").tap { |path| ENV["HIVE_WORKTREE_BASE"] = path }
 end
+HIVE_TEST_SUITE_TMP_DIRS << HIVE_TEST_WORKTREE_BASE if HIVE_TEST_WORKTREE_BASE
 Minitest.after_run do
-  HiveTestTmpCleanup.remove_with_related!(HIVE_TEST_WORKTREE_BASE) if HIVE_TEST_WORKTREE_BASE
+  HiveTestTmpCleanup.remove_all!(HIVE_TEST_SUITE_TMP_DIRS)
 end
 
 if ENV["HIVE_COVERAGE"]
@@ -180,9 +181,26 @@ module HiveTestHelper
   # teardown hook removes it securely after the current test, including trees
   # whose subject changed nested directories/files to 0555/0444.
   def tracked_tmp_dir(prefix = "hive-test")
-    Dir.mktmpdir(prefix).tap do |path|
-      (@hive_tracked_tmp_dirs ||= []) << path
+    path = Dir.mktmpdir(prefix)
+    unless HiveTestTmpCleanup::TMP_BASE_PATTERN.match?(File.basename(path))
+      FileUtils.remove_entry(path)
+      raise ArgumentError, "tracked_tmp_dir prefix is not a recognized Hive test tmp shape: #{prefix}"
     end
+
+    (@hive_tracked_tmp_dirs ||= []) << path
+    path
+  end
+
+  # A cleanup failure should fail an otherwise-green test, but it must not
+  # replace the assertion or exception that made the test fail in the first
+  # place. `$!` still carries that active exception when an ensure calls here.
+  def cleanup_tmp_dir!(path)
+    active_error = $!
+    HiveTestTmpCleanup.remove_with_related!(path)
+  rescue StandardError => cleanup_error
+    raise cleanup_error unless active_error
+
+    warn "Hive test tmp cleanup also failed: #{cleanup_error.class}: #{cleanup_error.message}"
   end
 
   # Temporarily replace `receiver.name` with `replacement` for the duration
@@ -292,7 +310,7 @@ module HiveTestHelper
     dir = Dir.mktmpdir("hive-test")
     yield dir
   ensure
-    HiveTestTmpCleanup.remove_with_related!(dir) if dir
+    cleanup_tmp_dir!(dir) if dir
   end
 
   def with_tmp_git_repo
@@ -335,7 +353,7 @@ module HiveTestHelper
       end
     ensure
       # Same verified cleanup as `with_tmp_dir`.
-      HiveTestTmpCleanup.remove_with_related!(dir) if dir
+      cleanup_tmp_dir!(dir) if dir
     end
   end
 
@@ -364,7 +382,7 @@ module HiveTestHelper
       old_hive_home.nil? ? ENV.delete("HIVE_HOME") : ENV["HIVE_HOME"] = old_hive_home
       old_home.nil? ? ENV.delete("HOME") : ENV["HOME"] = old_home
       # Same verified cleanup as `with_tmp_dir`.
-      HiveTestTmpCleanup.remove_with_related!(dir) if dir
+      cleanup_tmp_dir!(dir) if dir
     end
   end
 

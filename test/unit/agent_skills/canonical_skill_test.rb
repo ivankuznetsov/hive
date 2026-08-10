@@ -13,7 +13,7 @@ class AgentSkillsCanonicalSkillTest < Minitest::Test
     skill = Hive::AgentSkills::CanonicalSkill.new
 
     assert_equal "hive", skill.name
-    assert_equal "0.1.3", skill.version
+    assert_equal "0.1.4", skill.version
     assert_match(/\A[0-9a-f]{64}\z/, skill.canonical_digest)
     assert_equal %w[description name], skill.frontmatter.keys.sort
     assert_operator skill.body.lines.size, :<, 120

@@ -32,7 +32,7 @@ class BrainstormAnsweringSkillContractTest < Minitest::Test
     refute_match(/chat[_ -]?id|message[_ -]?id|username|@[a-z0-9_]+|telegram/i, serialized)
 
     skill = Hive::AgentSkills::CanonicalSkill.new
-    assert_equal "0.1.3", skill.version
+    assert_equal "0.1.4", skill.version
     assert_includes skill.reference_paths, SCENARIO_REFERENCE
     canonical = skill.rendered_canonical_files.fetch(SCENARIO_REFERENCE)
     scenarios.each { |scenario| assert_includes canonical, scenario.fetch("id") }

@@ -1,7 +1,7 @@
 ---
 name: hive
 description: "Operate Hive task pipelines and pre-release QA through its native CLI. Use when an agent needs to answer current Hive or Hive-bench status, identify the exact active task and blocker owner, discover or answer waiting brainstorm questions in Guided or explicit YOLO mode, follow work through bounded transitions, create a new project-local workflow from an ordinary-language request, inspect candidate QA evidence, advance a fresh routine recommendation, diagnose recovery state, initialize or configure Hive, or explain what requires operator action across registered projects."
-version: "0.1.3"
+version: "0.1.4"
 user-invocable: true
 metadata:
   openclaw:
@@ -16,8 +16,8 @@ metadata:
 <!-- hive-managed: canonical-skill-projection/v1
 platform: openclaw
 invocation: /hive
-skill-version: 0.1.3
-canonical-digest: 1c4f9adc5ca2bdfc3fd9b937dcf1e96aa9243a43938816bfffa7a1f1340dfa9d
+skill-version: 0.1.4
+canonical-digest: 70925a289750d8ef848d05b5b1ad40c1ee38a1934b10a23b0336dd9045dfd9d5
 hive-version: 0.7.0
 -->
 

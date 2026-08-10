@@ -19,6 +19,11 @@ hive patrol my-project --json
 
 `PROJECT` is a registered project name from the global config. The project must opt in through `<project>/.hive-state/config.yml`:
 
+The project's resolved `default_workflow` must also be `coding`. Patrol opens
+code-fix PRs and synthetic coding review tasks, so Hive rejects manual runs and
+daemon scheduling for non-coding defaults even if their stale configuration
+still says Patrol is enabled.
+
 ```yaml
 patrol:
   enabled: true

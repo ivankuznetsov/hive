@@ -2,6 +2,7 @@ require "hive/config"
 require "hive/gh"
 require "hive/refactor_patrol/job_store"
 require "hive/refactor_patrol/publication_attempt"
+require "hive/workflows"
 require "uri"
 
 module Hive
@@ -150,7 +151,9 @@ module Hive
           )
         end
 
-        if cfg.dig("refactor_patrol", "enabled") == true
+        if !Hive::Workflows.coding_id?(cfg.dig("default_workflow"))
+          decision(:blocked, "architecture_patrol_disabled")
+        elsif cfg.dig("refactor_patrol", "enabled") == true
           decision(:full)
         elsif continuation
           decision(:continuation_only, "architecture_patrol_disabled")
@@ -210,7 +213,10 @@ module Hive
           unresolved << registration_evidence(entry).merge("error" => "#{e.class}: #{e.message}")
           nil
         end
-        enabled = configured.select { |_entry, cfg| cfg.dig("refactor_patrol", "enabled") == true }
+        enabled = configured.select do |_entry, cfg|
+          Hive::Workflows.coding_id?(cfg.dig("default_workflow")) &&
+            cfg.dig("refactor_patrol", "enabled") == true
+        end
         [ enabled, unresolved, registered, configured ]
       rescue StandardError => e
         unresolved << registration_evidence(target).merge("error" => "#{e.class}: #{e.message}")

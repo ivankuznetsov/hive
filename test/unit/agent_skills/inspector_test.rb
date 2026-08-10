@@ -548,6 +548,25 @@ class AgentSkillsInspectorTest < Minitest::Test
     assert_raises(Hive::ConfigError) { resolver.resolve(skills: [ "ghost-skill" ]) }
   end
 
+  def test_target_resolver_omits_patrol_reviewers_for_non_coding_workflows
+    cfg = config
+    cfg["default_workflow"] = "content"
+    cfg["patrol"] = {
+      "enabled" => true,
+      "review" => {
+        "reviewers" => [
+          { "name" => "native", "kind" => "codex_review", "agent" => "codex", "skill" => "" }
+        ]
+      }
+    }
+
+    targets = Hive::AgentSkills::TargetResolver.new(
+      config: cfg, project_root: "/tmp/project"
+    ).resolve
+
+    refute targets.any? { |target| target.surfaces.any? { |surface| surface.start_with?("patrol.") } }
+  end
+
   def test_target_resolver_rejects_a_prerequisite_without_an_agent_capability
     package = Struct.new(:prerequisites).new([ "missing-package" ])
     manifest = Object.new

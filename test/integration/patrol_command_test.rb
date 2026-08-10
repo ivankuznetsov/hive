@@ -1207,6 +1207,25 @@ class PatrolCommandTest < Minitest::Test
     end
   end
 
+  def test_non_coding_default_workflow_rejects_manual_patrol
+    with_patrol_project do |repo|
+      config_path = File.join(repo, ".hive-state", "config.yml")
+      cfg = YAML.safe_load(File.read(config_path))
+      cfg["default_workflow"] = "content"
+      File.write(config_path, cfg.to_yaml)
+
+      out, err, status = with_captured_exit do
+        command_for(dry_run: true).call
+      end
+      payload = JSON.parse(out)
+
+      assert_equal Hive::ExitCodes::CONFIG, status
+      assert_match(/non-coding default_workflow "content"/, err)
+      assert_equal "config", payload.fetch("error_kind")
+      refute Dir.exist?(File.join(repo, ".hive-state", "patrol", "runs"))
+    end
+  end
+
   def test_non_json_success_and_internal_error_payload
     with_patrol_project do
       out, _err, status = with_captured_exit do

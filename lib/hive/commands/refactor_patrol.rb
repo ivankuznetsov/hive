@@ -32,6 +32,7 @@ require "hive/refactor_patrol/reviewer"
 require "hive/refactor_patrol/discovery_transitions"
 require "hive/refactor_patrol/state_store"
 require "hive/refactor_patrol/thesis"
+require "hive/workflows"
 require "hive/worktree"
 
 module Hive
@@ -282,6 +283,11 @@ module Hive
 
         project_root = entry.fetch("path")
         cfg = @config_loader.call(project_root)
+        unless query_mode? || Hive::Workflows.coding_id?(cfg["default_workflow"])
+          raise Hive::ConfigError,
+                "hive refactor-patrol: project #{entry.fetch('name').inspect} uses non-coding " \
+                "default_workflow #{cfg['default_workflow'].inspect}"
+        end
         unless query_mode? || @actions || (cfg["refactor_patrol"] || {})["enabled"]
           raise Hive::ConfigError, "hive refactor-patrol: project #{entry.fetch('name').inspect} must opt in with refactor_patrol.enabled: true"
         end

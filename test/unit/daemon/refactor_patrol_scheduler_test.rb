@@ -963,6 +963,27 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_non_coding_default_workflow_blocks_discovery_and_reservation
+    with_project do |_dir, entry, store|
+      enqueue(store)
+      cfg = enabled_cfg.merge("default_workflow" => "content")
+      scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
+        registry: -> { [ entry ] }, config_loader: ->(_path) { cfg },
+        job_store_factory: ->(_path) { store },
+        repository_resolver: ->(_entry, _cfg) { repository_identity },
+        checkout_guard_factory: ->(*) { Guard.new }, owner: "daemon-a"
+      )
+
+      assert_empty scheduler.candidates(now: T0)
+      aggregate = store.read_job("job-7")
+      candidate = scheduler.send(:candidate_for, entry, aggregate, phase: :discovery)
+      error = assert_raises(Hive::Daemon::RefactorPatrolScheduler::ReservationBlocked) do
+        scheduler.reserve(candidate, now: T0)
+      end
+      assert_equal "architecture_patrol_disabled", error.reason
+    end
+  end
+
   def test_candidate_store_failure_is_reported_as_scheduler_error
     with_tmp_dir do |dir|
       entry = entry(dir, "demo")

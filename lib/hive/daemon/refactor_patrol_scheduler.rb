@@ -24,6 +24,7 @@ require "hive/modules/migration/evidence_store"
 require "hive/modules/migration/patrols"
 require "hive/patrol/token_budget"
 require "hive/workflow_package/canonical_json"
+require "hive/workflows"
 
 module Hive
   module Daemon
@@ -248,6 +249,7 @@ module Hive
           raise ReservationBlocked.new("project_config_unavailable", evidence)
         end
         enabled = cfg.dig("daemon", "enabled") == true &&
+                  Hive::Workflows.coding_id?(cfg["default_workflow"]) &&
                   (phase == :action || cfg.dig("refactor_patrol", "enabled") == true)
         unless enabled
           raise ReservationBlocked.new("architecture_patrol_disabled")
@@ -515,6 +517,7 @@ module Hive
 
           cfg = @config_loader.call(entry.fetch("path"))
           next unless cfg.dig("daemon", "enabled") == true
+          next unless Hive::Workflows.coding_id?(cfg["default_workflow"])
 
           entry.merge("_refactor_patrol_cfg" => cfg)
         rescue StandardError => e

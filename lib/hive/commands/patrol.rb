@@ -20,6 +20,7 @@ require "hive/patrol/decision_projection"
 require "hive/patrol/state_store"
 require "hive/patrol/token_budget"
 require "hive/patrol/validator"
+require "hive/workflows"
 require "hive/worktree"
 
 module Hive
@@ -91,6 +92,11 @@ module Hive
 
         project_root = entry.fetch("path")
         cfg = @config_loader.call(project_root)
+        unless Hive::Workflows.coding_id?(cfg["default_workflow"])
+          raise Hive::ConfigError,
+                "hive patrol: project #{entry.fetch('name').inspect} uses non-coding " \
+                "default_workflow #{cfg['default_workflow'].inspect}"
+        end
         require_module_observation_capabilities!
         require_module_mutation_capabilities! unless @dry_run
         ensure_validation_configured!(cfg) unless @dry_run

@@ -14,6 +14,7 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
 
   def recovery_payload(phase: "admitted", terminal_at: nil, marker_generation: "a" * 64)
     {
+      "variant" => "marker",
       "phase" => phase,
       "observed_marker_generation" => marker_generation,
       "expected_marker_attrs" => { "marker_id" => "marker-a", "reason" => "timeout" },
@@ -25,6 +26,9 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
       "owner" => "scheduler",
       "blocked_reason" => nil,
       "blocked_remediation" => nil,
+      "policy_digest" => nil,
+      "source_receipt" => nil,
+      "admission_observation" => nil,
       "terminal_outcome" => phase == "terminal" ? "succeeded" : nil,
       "terminal_at" => terminal_at
     }
@@ -135,19 +139,7 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
 
   def test_v4_recovery_transition_round_trips_and_phase_updates_are_compare_and_swap
     Dir.mktmpdir("hive-dispatch-queue") do |dir|
-      recovery = {
-        "phase" => "admitted",
-        "observed_marker_generation" => "a" * 64,
-        "expected_marker_attrs" => { "marker_id" => "marker-a", "reason" => "timeout" },
-        "canonical_task_folder" => "/tmp/retry-task",
-        "expected_post_clear_progress_fingerprint" => "b" * 64,
-        "dispatch_generation" => "c" * 64,
-        "failure_origin" => "timeout",
-        "next_eligible_at" => Time.utc(2026, 7, 25, 12).iso8601(6),
-        "owner" => "scheduler",
-        "blocked_reason" => nil,
-        "blocked_remediation" => nil
-      }
+      recovery = recovery_payload
       request_id = Q.write_request!(
         project: "hive",
         slug: "retry-task",
@@ -166,7 +158,7 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
       )
 
       parsed = Q.pending(state_home: dir).fetch(0)
-      assert_equal 4, parsed.schema_version
+      assert_equal 5, parsed.schema_version
       assert_equal recovery, parsed.recovery
       assert Q.update_recovery!(
         request_id,
@@ -280,6 +272,120 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
       )
 
       assert_empty schema.validate(payload).to_a
+    end
+  end
+
+  def test_v5_markerless_admission_recovery_round_trips_and_has_exact_lookup
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      observation = {
+        "decision_id" => "d" * 64,
+        "decided_at" => Time.utc(2026, 8, 10, 12).iso8601(6),
+        "policy_digest" => "e" * 64,
+        "status" => "no_route",
+        "reason" => "no_eligible_provider_route",
+        "next_action_owner" => "retry_authority",
+        "candidates" => [
+          {
+            "route_id" => "account-a/model-a",
+            "capacity" => { "observed" => 0, "max" => 1 },
+            "exclusions" => [
+              {
+                "route_id" => "account-a/model-a", "reason" => "manual_block",
+                "detail" => nil,
+                "scope" => {
+                  "kind" => "provider_account",
+                  "provider_account_id" => "account-a", "model" => nil
+                },
+                "observation" => { "generation" => 2, "journal_epoch" => 0 }
+              }
+            ]
+          }
+        ]
+      }
+      recovery = recovery_payload.merge(
+        "variant" => "admission_failure",
+        "observed_marker_generation" => nil,
+        "expected_marker_attrs" => {},
+        "failure_origin" => "no_eligible_provider_route",
+        "policy_digest" => "e" * 64,
+        "admission_observation" => observation
+      )
+      Q.write_request!(
+        project: "hive", slug: "retry-task",
+        argv: %w[hive run retry-task --stage 4-execute --project hive --json],
+        requestor: "daemon", trigger: "recovery/admission_failure",
+        request_id: "markerless-v5", task_generation: "c" * 64,
+        task_id: 817, expected_stage: "4-execute", recovery: recovery,
+        state_home: dir, now: Time.utc(2026, 8, 10, 12)
+      )
+
+      parsed = Q.fetch("markerless-v5", state_home: dir)
+      assert_equal 5, parsed.schema_version
+      assert_equal recovery, parsed.recovery
+      schema = JSONSchemer.schema(
+        JSON.parse(File.read(Hive::Schemas.schema_path("hive-dispatch-request")))
+      )
+      assert_empty schema.validate(JSON.parse(File.read(parsed.path))).to_a
+      assert_equal parsed, Q.find_admission_recovery(
+        project: "hive", slug: "retry-task", task_generation: "c" * 64,
+        policy_digest: "e" * 64, state_home: dir
+      )
+      assert_nil Q.find_admission_recovery(
+        project: "hive", slug: "retry-task", task_generation: "f" * 64,
+        policy_digest: "e" * 64, state_home: dir
+      )
+    end
+  end
+
+  def test_v5_recovery_rejects_cross_variant_identity_and_unsafe_observations
+    admission = recovery_payload.merge(
+      "variant" => "admission_failure",
+      "observed_marker_generation" => nil,
+      "expected_marker_attrs" => {},
+      "policy_digest" => "e" * 64,
+      "admission_observation" => {
+        "decision_id" => "d" * 64,
+        "decided_at" => Time.utc(2026, 8, 10, 12).iso8601(6),
+        "policy_digest" => "e" * 64,
+        "status" => "no_route", "reason" => "no_eligible_provider_route",
+        "next_action_owner" => "retry_authority",
+        "candidates" => [
+          { "route_id" => "account/model", "capacity" => nil, "exclusions" => [] }
+        ]
+      }
+    )
+    invalid = [
+      admission.merge("observed_marker_generation" => "a" * 64),
+      admission.merge("expected_marker_attrs" => { "marker_id" => "invented" }),
+      admission.merge("policy_digest" => nil),
+      recovery_payload.merge("policy_digest" => "e" * 64),
+      admission.merge(
+        "admission_observation" => admission.fetch("admission_observation").merge(
+          "raw_message" => "credential-shaped provider output"
+        )
+      )
+    ]
+
+    invalid.each do |payload|
+      assert_raises(ArgumentError) { Q.send(:validate_recovery!, payload) }
+    end
+  end
+
+  def test_v5_source_receipt_has_a_closed_positive_identity
+    valid = recovery_payload.merge(
+      "source_receipt" => {
+        "attempt_id" => "attempt-1", "receipt_version" => 1,
+        "terminal_lease_version" => 3
+      }
+    )
+    Q.send(:validate_recovery!, valid)
+
+    [
+      valid.merge("source_receipt" => valid.fetch("source_receipt").merge("raw" => "secret")),
+      valid.merge("source_receipt" => valid.fetch("source_receipt").merge("terminal_lease_version" => 0)),
+      valid.merge("source_receipt" => valid.fetch("source_receipt").except("receipt_version"))
+    ].each do |payload|
+      assert_raises(ArgumentError) { Q.send(:validate_recovery!, payload) }
     end
   end
 
@@ -1393,7 +1499,7 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
       v4 = pending.fetch(0)
       assert_equal "generation-1", v4.task_generation
       assert_equal "attempt-zero", v4.predecessor_attempt_id
-      assert_equal 4, v4.schema_version
+      assert_equal 5, v4.schema_version
       assert_nil v4.recovery
       assert_equal 1, v4.inherited_outputs.size
     end

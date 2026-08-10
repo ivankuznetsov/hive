@@ -1,0 +1,294 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-dispatch-request.v5.json",
+  "title": "hive dispatch request (v5)",
+  "description": "Delivery request for the shared durable task-attempt dispatcher. v5 distinguishes marker-bound and markerless admission-failure recovery and carries only bounded provider-routing admission observations and terminal-receipt identity.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schema_version", "request_id", "created_at", "project", "slug",
+    "argv", "requestor", "chat_id", "update_id", "trigger", "task_generation",
+    "predecessor_attempt_id", "inherited_outputs", "recovery"
+  ],
+  "properties": {
+    "schema": { "const": "hive-dispatch-request" },
+    "schema_version": { "const": 5 },
+    "request_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
+    "created_at": { "type": "string", "format": "date-time" },
+    "project": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "minLength": 1 },
+    "slug": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,62}[a-z0-9]$" },
+    "argv": { "type": "array", "minItems": 2, "items": { "type": "string", "minLength": 1 } },
+    "requestor": {
+      "type": "string",
+      "enum": ["bot", "healer", "web", "tui", "cli", "action", "daemon", "recorder", "operator"]
+    },
+    "chat_id": { "type": ["integer", "null"] },
+    "update_id": { "type": ["integer", "null"] },
+    "trigger": { "type": ["string", "null"] },
+    "task_generation": { "type": ["string", "null"] },
+    "predecessor_attempt_id": { "type": ["string", "null"] },
+    "task_id": { "type": ["string", "integer", "null"] },
+    "expected_stage": { "type": ["string", "null"] },
+    "expected_marker_name": {
+      "type": ["string", "null"],
+      "enum": ["error", "review_error", "review_stale", "review_ci_stale", null]
+    },
+    "expected_marker_id": { "type": ["string", "null"] },
+    "inherited_outputs": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/OutputReference" }
+    },
+    "recovery": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/RecoveryTransition" }
+      ]
+    }
+  },
+  "$defs": {
+    "OutputReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "size", "sha256"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "size": { "type": "integer", "minimum": 0 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "SourceReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["attempt_id", "receipt_version", "terminal_lease_version"],
+      "properties": {
+        "attempt_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "receipt_version": { "type": "integer", "minimum": 1 },
+        "terminal_lease_version": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "Scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "provider_account_id", "model"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["provider_account", "model"] },
+        "provider_account_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "model": { "type": ["string", "null"], "maxLength": 128 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "provider_account" } } },
+          "then": { "properties": { "model": { "type": "null" } } },
+          "else": { "properties": { "model": { "type": "string", "minLength": 1 } } }
+        }
+      ]
+    },
+    "AdmissionExclusion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["route_id", "reason", "detail", "scope", "observation"],
+      "properties": {
+        "route_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "hard_pin_mismatch", "requirements_incompatible", "manual_block",
+            "circuit_open", "circuit_cooldown", "half_open_probe_owned",
+            "provider_concurrency_saturated", "health_state_unavailable"
+          ]
+        },
+        "detail": { "type": ["string", "null"], "maxLength": 240 },
+        "scope": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/Scope" }]
+        },
+        "observation": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "generation": { "type": "integer", "minimum": 0 },
+                "journal_epoch": { "type": "integer", "minimum": 0 },
+                "observed": { "type": "integer", "minimum": 0 },
+                "max": { "type": "integer", "minimum": 0 }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "AdmissionCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["route_id", "exclusions", "capacity"],
+      "properties": {
+        "route_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "exclusions": {
+          "type": "array",
+          "maxItems": 128,
+          "items": { "$ref": "#/$defs/AdmissionExclusion" }
+        },
+        "capacity": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["observed", "max"],
+              "properties": {
+                "observed": { "type": "integer", "minimum": 0 },
+                "max": { "type": "integer", "minimum": 0 }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "AdmissionObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decision_id", "decided_at", "policy_digest", "status", "reason",
+        "next_action_owner", "candidates"
+      ],
+      "properties": {
+        "decision_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "decided_at": { "type": "string", "format": "date-time" },
+        "policy_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "status": { "type": "string", "enum": ["capacity_saturated", "no_route"] },
+        "reason": {
+          "type": "string",
+          "enum": ["capacity_saturated", "health_state_unavailable", "no_eligible_provider_route"]
+        },
+        "next_action_owner": {
+          "type": "string",
+          "enum": ["scheduler", "retry_authority", "operator"]
+        },
+        "candidates": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/AdmissionCandidate" }
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "capacity_saturated" } } },
+          "then": { "properties": { "reason": { "const": "capacity_saturated" } } },
+          "else": {
+            "properties": {
+              "reason": {
+                "enum": ["health_state_unavailable", "no_eligible_provider_route"]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "RecoveryTransition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "variant", "phase", "observed_marker_generation", "expected_marker_attrs",
+        "canonical_task_folder", "expected_post_clear_progress_fingerprint",
+        "dispatch_generation", "failure_origin", "next_eligible_at", "owner",
+        "blocked_reason", "blocked_remediation", "policy_digest", "source_receipt",
+        "admission_observation"
+      ],
+      "properties": {
+        "variant": { "type": "string", "enum": ["marker", "admission_failure"] },
+        "phase": {
+          "type": "string",
+          "enum": ["admitted", "cleared", "dispatched", "terminal"]
+        },
+        "observed_marker_generation": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "expected_marker_attrs": {
+          "type": "object",
+          "additionalProperties": { "type": ["string", "number", "boolean", "null"] }
+        },
+        "canonical_task_folder": { "type": "string", "minLength": 1 },
+        "expected_post_clear_progress_fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "dispatch_generation": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "failure_origin": { "type": "string", "minLength": 1 },
+        "next_eligible_at": { "type": ["string", "null"], "format": "date-time" },
+        "owner": {
+          "type": ["string", "null"],
+          "enum": ["agent", "operator", "provider", "scheduler", "hive", "none", "unknown", null]
+        },
+        "blocked_reason": { "type": ["string", "null"] },
+        "blocked_remediation": { "type": ["string", "null"] },
+        "retry_count": { "type": "integer", "minimum": 0 },
+        "provider_hint": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["retry_after", "display_only"],
+          "properties": {
+            "retry_after": { "type": "string", "minLength": 1 },
+            "display_only": { "const": true }
+          }
+        },
+        "attempt_id": { "type": ["string", "null"] },
+        "terminal_outcome": { "type": ["string", "null"] },
+        "terminal_at": { "type": ["string", "null"], "format": "date-time" },
+        "policy_digest": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "source_receipt": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/SourceReceipt" }]
+        },
+        "admission_observation": {
+          "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/AdmissionObservation" }]
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "variant": { "const": "marker" } } },
+          "then": {
+            "properties": {
+              "observed_marker_generation": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+              "expected_marker_attrs": {
+                "required": ["marker_id"],
+                "properties": { "marker_id": { "type": "string", "minLength": 1 } }
+              },
+              "policy_digest": { "type": "null" }
+            }
+          },
+          "else": {
+            "properties": {
+              "observed_marker_generation": { "type": "null" },
+              "expected_marker_attrs": { "maxProperties": 0 },
+              "policy_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+              "source_receipt": { "type": "null" },
+              "admission_observation": { "$ref": "#/$defs/AdmissionObservation" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "variant": { "const": "marker" },
+              "failure_origin": { "const": "provider_route_failed" }
+            },
+            "required": ["variant", "failure_origin"]
+          },
+          "then": {
+            "properties": {
+              "source_receipt": { "$ref": "#/$defs/SourceReceipt" }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

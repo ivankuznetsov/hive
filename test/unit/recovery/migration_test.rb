@@ -24,7 +24,7 @@ class RecoveryMigrationTest < Minitest::Test
 
       assert_equal fence_payload, read_json(File.join(state_home, "attempts", "v3"))
       assert_equal 0o600, File.stat(File.join(state_home, "attempts", "v3")).mode & 0o777
-      assert_path_exists File.join(state_home, "recovery-migration-v5.json")
+      assert_path_exists File.join(state_home, "recovery-migration-v6.json")
     end
   end
 
@@ -98,7 +98,7 @@ class RecoveryMigrationTest < Minitest::Test
         assert_equal custom, Hive::Attempts::Store.new(root: custom).root
       end
       refute_path_exists File.join(state_home, "attempts")
-      refute_path_exists File.join(state_home, "recovery-migration-v5.json")
+      refute_path_exists File.join(state_home, "recovery-migration-v6.json")
     end
   end
 
@@ -507,7 +507,7 @@ class RecoveryMigrationTest < Minitest::Test
           Hive::Attempts::StorageKey.relative("attempt", "attempt_id" => "corrupt-proof")
         )
       )
-      refute_path_exists File.join(state_home, "recovery-migration-v5.json")
+      refute_path_exists File.join(state_home, "recovery-migration-v6.json")
     end
   end
 
@@ -559,7 +559,7 @@ class RecoveryMigrationTest < Minitest::Test
       Hive::Attempts::DecisionIndex.define_method(:terminal_attempt_id, original)
 
       assert_path_exists File.join(state_home, "attempts", "v4", "records", "terminal.json")
-      refute_path_exists File.join(state_home, "recovery-migration-v5.json")
+      refute_path_exists File.join(state_home, "recovery-migration-v6.json")
       failed_store = Hive::Attempts::Store.new(
         root: File.join(state_home, "attempts", "v4"), create_directories: false
       )
@@ -602,16 +602,18 @@ class RecoveryMigrationTest < Minitest::Test
       File.write(File.join(state_home, "recovery-migration-v2.json"), "superseded")
       File.write(File.join(state_home, "recovery-migration-v3.json"), "superseded")
       File.write(File.join(state_home, "recovery-migration-v4.json"), "superseded")
+      File.write(File.join(state_home, "recovery-migration-v5.json"), "superseded")
 
       result = migrate(state_home)
 
       assert_equal 1, result.dig("dispatch_requests", "migrated")
       assert_equal 1, result.dig("dispatch_results", "migrated")
-      assert_equal 4, read_json(File.join(state_home, "dispatch_requests", "legacy.json"))["schema_version"]
+      assert_equal 5, read_json(File.join(state_home, "dispatch_requests", "legacy.json"))["schema_version"]
       assert_equal 2, read_json(File.join(state_home, "dispatch_results", "legacy.json"))["schema_version"]
       refute_path_exists File.join(state_home, "recovery-migration-v2.json")
       refute_path_exists File.join(state_home, "recovery-migration-v3.json")
       refute_path_exists File.join(state_home, "recovery-migration-v4.json")
+      refute_path_exists File.join(state_home, "recovery-migration-v5.json")
     end
   end
 
@@ -702,7 +704,7 @@ class RecoveryMigrationTest < Minitest::Test
   end
 
   def write_receipt_marker(state_home)
-    write_json(File.join(state_home, "recovery-migration-v5.json"), {})
+    write_json(File.join(state_home, "recovery-migration-v6.json"), {})
   end
 
   def write_checkpoint(state_home, phase:, source_count: 0, source_valid_count: 0,

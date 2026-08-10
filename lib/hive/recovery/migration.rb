@@ -23,10 +23,11 @@ module Hive
       class Error < Hive::Error; end
 
       RECEIPT_SCHEMA = "hive-recovery-migration".freeze
-      RECEIPT_VERSION = 5
-      RECEIPT_BASENAME = "recovery-migration-v5.json".freeze
+      RECEIPT_VERSION = 6
+      RECEIPT_BASENAME = "recovery-migration-v6.json".freeze
       PRIOR_RECEIPT_BASENAMES = %w[
         recovery-migration-v2.json recovery-migration-v3.json recovery-migration-v4.json
+        recovery-migration-v5.json
       ].freeze
       # Keep the historic lock name: released recovery migrations and this
       # layout cutover must never mutate the same state home concurrently.
@@ -45,7 +46,7 @@ module Hive
       CHECKPOINT_PHASES = { "fenced" => 1, "verified" => 2, "complete" => 3 }.freeze
 
       CURRENT_ATTEMPT_VERSION = Hive::Attempts::Record::SCHEMA_VERSION
-      CURRENT_REQUEST_VERSION = 4
+      CURRENT_REQUEST_VERSION = 5
       CURRENT_RESULT_VERSION = 2
       MAX_RECORD_BYTES = 4 * 1024 * 1024
       ATTEMPT_ROOT_ENTRIES = %w[
@@ -756,9 +757,9 @@ module Hive
       def migrate_dispatch_requests!
         migrate_queue(
           dispatch_requests_root, "hive-dispatch-request",
-          current: CURRENT_REQUEST_VERSION, legacy: [ 1, 2, 3 ],
+          current: CURRENT_REQUEST_VERSION, legacy: [ 1, 2, 3, 4 ],
           defaults: REQUEST_DEFAULTS, include_claimed: true
-        )
+        ) { |data| migrate_dispatch_request_recovery!(data) }
       end
 
       def migrate_dispatch_results!
@@ -782,6 +783,7 @@ module Hive
           next false unless legacy.include?(data["schema_version"])
 
           defaults.each { |key, value| data[key] = value unless data.key?(key) }
+          yield data if block_given?
           data["schema_version"] = current
           write_json!(path, data)
           true
@@ -789,6 +791,16 @@ module Hive
         { "migrated" => migrated }
       rescue Errno::ENOENT
         { "migrated" => 0 }
+      end
+
+      def migrate_dispatch_request_recovery!(data)
+        recovery = data["recovery"]
+        return unless recovery.is_a?(Hash)
+
+        recovery["variant"] ||= "marker"
+        recovery["policy_digest"] = nil unless recovery.key?("policy_digest")
+        recovery["source_receipt"] = nil unless recovery.key?("source_receipt")
+        recovery["admission_observation"] = nil unless recovery.key?("admission_observation")
       end
 
       def parse_queue_object(path)

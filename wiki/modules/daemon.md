@@ -47,7 +47,7 @@ Valid snapshots keep polling cheap. See [[modules/conditions]].
 | `Hive::Conditions::AttemptObserver` | `lib/hive/conditions/attempt_observer.rb` | Observes reconciled terminal/lost durable attempts. For coding execute attempts it idempotently journals the current `AgentHealthy` fact and rebuilds the projection: only a terminal `succeeded` receipt is satisfied; failed/cancelled/lost outcomes fail closed. Confirmed deliveries are memoized in-process before task lookup/journal parsing; restart rechecks the durable journal once. |
 | `Hive::Daemon::Dispatcher` | `lib/hive/daemon/dispatcher.rb` | The poll-classify-dispatch loop. Glues all of the above. Public `tick(now:)` for tests, `run_forever` for production with TERM/INT/HUP signal traps. |
 | `Hive::Daemon::Logger` | `lib/hive/daemon/logger.rb` | One-JSON-line-per-event structured logger. Closed event enum (unknown name raises). Size-rotated. |
-| `Hive::Daemon::RecoveryCoordinator` | `lib/hive/daemon/recovery_coordinator.rb` | Sole destructive authority for `ERROR`, `REVIEW_ERROR`, `REVIEW_STALE`, and `REVIEW_CI_STALE` recovery. It re-resolves task identity under the task lock, rechecks cooldown and safety, persists a generation-bound v4 request before clearing, and resumes `admitted → cleared → dispatched → terminal` after restart. User-facing adapters only submit observations and render its receipt. |
+| `Hive::Daemon::RecoveryCoordinator` | `lib/hive/daemon/recovery_coordinator.rb` | Sole destructive authority for marker-bound and explicit-route admission recovery. It re-resolves task identity under the task lock, rechecks cooldown and safety, persists a generation-bound v5 request before clearing (or a markerless policy-bound request), and resumes `admitted → cleared → dispatched → terminal` after restart. User-facing adapters only submit observations and render its receipt. |
 | `Hive::Recovery::API` | `lib/hive/recovery/api.rb` | Neutral adapter for CLI/action, TUI, Rails, recorder, Telegram, and healer observations. It normalizes each surface's row shape and derives the freshness token; `RecoveryCoordinator` still owns every policy decision and mutation. |
 | `Hive::Daemon::PlanApproval` | `lib/hive/daemon/plan_approval.rb` | Safely turns daemon-enabled `3-plan` approval pauses into `hive develop ... --from 3-plan` dispatches by validating command shape and flipping `WAITING` to `COMPLETE`. |
 | `Hive::Daemon::StaleAgentHealer` | `lib/hive/daemon/stale_agent_healer.rb` | Repairs stale `AGENT_WORKING` / `REVIEW_WORKING` ownership and is the sole automatic scheduler that submits cooled `ERROR` / `REVIEW_ERROR` observations to `RecoveryCoordinator`. Lease-backed attempt loss is ledger-only and dispatches successors through `Attempts::Dispatcher`; it does not project or clear a compatibility marker. |
@@ -627,8 +627,8 @@ stopped spawning competing task children. Current task execution goes one step
 further: queue consumption, CLI calls, auto-advance, and recovery all resolve
 through `Attempts::Dispatcher`. The claim records the attempt ID/generation;
 the detached wrapper receipt completes delivery. The daemon never registers
-that task wrapper in `ChildSupervisor`. Current writers emit request v4;
-runtime readers accept v4 only after the one-off queue migration. See
+that task wrapper in `ChildSupervisor`. Current writers emit request v5;
+runtime readers accept v5 only after the one-off queue migration. See
 [[modules/attempts]].
 
 Before plan 2026-05-28-002, both the daemon AND the Telegram bot
@@ -653,12 +653,15 @@ allowlist, and resolves task verbs through durable admission. Request IDs stay
 on the delivery while attempt IDs own execution; receipt reconciliation
 unlinks the claim and logs completion.
 
-Current request schema is v4. It carries generation intent, predecessor
+Current request schema is v5. It carries generation intent, predecessor
 attempt, inherited output references, and a restartable recovery object with
 canonical task, stage, marker ID, expected attrs, dispatch generation,
-owner/remediation, phase, retry count, and terminal outcome/time. The one-off
-recovery migration upgrades pending v1-v3 deliveries before the runtime queue
-opens; queue readers accept v4 only and contain no inferred-generation
+owner/remediation, phase, retry count, terminal outcome/time, bounded routing
+admission observation, and immutable source terminal-receipt identity. Its
+closed recovery union distinguishes ordinary marker recovery from markerless
+initial route exhaustion keyed by task generation and frozen policy digest.
+The one-off recovery migration upgrades pending v1-v4 deliveries before the runtime queue
+opens; queue readers accept v5 only and contain no inferred-generation
 compatibility path. Identity-bound recovery requests do not expire; the
 consumer rejects them if the task, stage, post-clear generation, or marker
 history no longer matches.
@@ -697,13 +700,26 @@ Lifecycle gates inside `process_dispatch_requests`:
 7. Otherwise → preclaim the delivery and resolve task-stage work through
    durable attempt admission. Capacity/loss deferral returns the claim to
    pending; accepted/live/receipt outcomes retain an attempt reference until
-   terminal delivery. Marker repair and global daemon maintenance continue
-   through the ancillary child-supervisor path.
+   terminal delivery. Explicit account-capacity saturation is neutral: it
+   releases the claim without changing a recovery deadline. Explicit no-route
+   admission either creates one markerless recovery request or updates the
+   already-active recovery request. Marker repair and global daemon
+   maintenance continue through the ancillary child-supervisor path.
 
 For a recovery request already in `cleared`, a launch/preflight deferral first
 persists a new `next_eligible_at` through `RecoveryCoordinator`, then releases
 the claim. The same durable request is therefore retried on the universal
 cooldown instead of being re-admitted on every daemon tick.
+
+Provider-route failures add one stricter barrier. Recovery records the exact
+failed attempt receipt and may be admitted, but it cannot clear the marker or
+select a successor until the pending-finalization ledger durably acknowledges
+the `provider_health` consumer. The later dispatch is an explicit successor of
+that failed routed attempt, preserving its task generation and frozen policy
+while allowing a different eligible route. A later no-route decision is stored
+on that same request and advances only the coordinator-owned universal
+cooldown; it does not create or charge a second request. Initial all-route
+capacity saturation creates no recovery request or deadline.
 
 Lease reconciliation refreshes capacity and completion before another
 admission. A different request ID for the same live task generation resolves

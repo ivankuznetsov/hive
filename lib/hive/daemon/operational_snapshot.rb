@@ -399,7 +399,15 @@ module Hive
           return unless task
 
           phase = identity["recovery_phase"].to_s
-          if phase == "admitted"
+          markerless = identity["recovery_variant"].to_s == "admission_failure"
+          if markerless
+            expected_generation = identity["task_generation"].to_s
+            current_generation = task["task_generation"].to_s
+            return if !expected_generation.empty? &&
+                      !current_generation.empty? &&
+                      expected_generation != current_generation
+            return if Hive::Recovery.recoverable_marker?(task["marker"])
+          elsif phase == "admitted"
             return unless task["marker"].to_s == identity["expected_marker_name"].to_s
 
             expected = identity["expected_marker_attrs"]

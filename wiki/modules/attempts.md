@@ -211,6 +211,15 @@ charge. An omitted or empty successor-output override inherits the
 predecessor's complete output set; only a non-empty explicit override replaces
 it.
 
+A terminal explicit attempt with a trusted provider-evidence receipt is also a
+valid, narrowly scoped successor predecessor. `RecoveryCoordinator` alone puts
+that immutable predecessor ID on the v5 recovery delivery after provider
+health acknowledges the receipt. Admission then skips terminal replay for
+that explicit successor request, preserves the predecessor generation and
+frozen routing policy, and records the new attempt in the ordinary successor
+index. Arbitrary terminal failures and untrusted or legacy failures cannot use
+this path.
+
 Condition projection adds an explicit numeric `task_input_epoch` to attempt
 records/context while retaining the prerequisite's opaque ownership generation
 as `ownership_generation`. `hive-attempt` v4 remains the sole runtime record
@@ -218,7 +227,7 @@ shape. `Hive::Recovery::Migration` performs the physical v3-to-v4 cutover and
 also accepts a still-supported v2 source: it refuses live writers and attempts,
 renames the validated tree, converts valid v3 records/proofs, publishes old-
 binary fences, verifies the converted corpus and decision parity, promotes
-historical finals, and writes the v5 recovery receipt only after its durable
+historical finals, and writes the v6 recovery receipt only after its durable
 checkpoint reaches `complete`. Runtime code opens v4 only; there is no reverse
 migration and no dual reader. A material competing-root collision, obsolete v1 tree,
 unsupported record schema, symlink, ownership mismatch, or changed corpus fails
@@ -247,9 +256,9 @@ worker.
 ## Admission and execution
 
 Public `hive run` and workflow verbs enter `Attempts::API`, which delegates to
-its foreground adapter. Bot/web v4 requests, daemon queue/auto-advance, and
-recovery use the same API boundary. Runtime queue readers accept v4 only; the
-same one-off migration upgrades pending v1-v3 files before they are opened. The
+its foreground adapter. Bot/web v5 requests, daemon queue/auto-advance, and
+recovery use the same API boundary. Runtime queue readers accept v5 only; the
+same one-off migration upgrades pending v1-v4 files before they are opened. The
 launcher double-forks into a distinct session. The dispatcher gives the wrapper
 a one-time random capability through an inherited pipe; the private
 `__attempt-supervise` route accepts no worker command argv and can claim only

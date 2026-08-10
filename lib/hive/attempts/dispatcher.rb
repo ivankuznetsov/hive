@@ -120,7 +120,7 @@ module Hive
           request_id: request.request_id, provider: provider_for(task),
           inherited_outputs: request.inherited_outputs, interactive: interactive,
           now: now, admission_view: admission_view
-        ) if predecessor&.state == "lost"
+        ) if successor_predecessor?(predecessor)
 
         dispatch(
           task: task, project: request.project, intended_stage: intended_stage,
@@ -155,10 +155,12 @@ module Hive
             end
 
             exact = records.select { |record| record.task_generation == generation.task_generation }
-            terminal = replayable_terminal(
-              exact, request_id, task: task, admission_view: view,
-              generation: generation, subject: subject
-            )
+            terminal = if successor_of.nil?
+              replayable_terminal(
+                exact, request_id, task: task, admission_view: view,
+                generation: generation, subject: subject
+              )
+            end
             if terminal
               result = DispatchResult.new(
                 status: :terminal_replay, attempt: terminal, receipt: terminal.receipt,
@@ -172,7 +174,7 @@ module Hive
             )
             predecessor = successor_of &&
                           view.find(successor_of)
-            if successor_of && (!predecessor || predecessor.state != "lost")
+            if successor_of && !successor_predecessor?(predecessor)
               result = DispatchResult.new(
                 status: :deferred, attempt: predecessor, receipt: nil,
                 attach_descriptor: nil, reason: "invalid_predecessor"
@@ -410,6 +412,15 @@ module Hive
           subject: subject || task_subject(generation)
         )
         unresolved ? [ unresolved ] : []
+      end
+
+      def successor_predecessor?(record)
+        return false unless record
+        return true if record.state == "lost"
+        return false unless record.state == "terminal" && record.outcome == "failed"
+        return false unless record.explicit_routing?
+
+        record.receipt&.fetch("provider_evidence", nil).is_a?(Hash)
       end
 
       def task_subject(generation)

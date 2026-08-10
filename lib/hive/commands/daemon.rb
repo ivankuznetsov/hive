@@ -272,9 +272,8 @@ module Hive
         condition_observer = Hive::Conditions::AttemptObserver.new(
           store: attempt_store, logger: logger
         )
-        finalization_maintenance = Hive::Attempts::FinalizationMaintenance.new(
-          store: attempt_store, condition_observer: condition_observer,
-          logger: logger
+        finalization_maintenance = Hive::Attempts::FinalizationMaintenance.runtime(
+          store: attempt_store, state_home: @hive_home, logger: logger
         )
         attempt_reconciler = Hive::Attempts::Reconciler.new(
           store: attempt_store,

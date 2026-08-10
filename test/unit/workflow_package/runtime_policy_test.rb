@@ -664,7 +664,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
     reset_codex_executable_cache
   end
 
-  def test_scoped_codex_actor_adds_trusted_caller_roots_as_read_only_without_expanding_outputs
+  def test_scoped_codex_actor_uses_only_descriptor_declared_read_roots
     with_tmp_dir do |dir|
       task = File.join(dir, "task")
       package = File.join(dir, "package")
@@ -687,10 +687,28 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
       end
 
       resolved_worktree = File.realpath(worktree)
-      assert_includes policy.directories, resolved_worktree
+      refute_includes policy.directories, resolved_worktree
       filesystem_flag = policy.cli_flags.find { |flag| flag.include?("filesystem=") }
-      assert_includes filesystem_flag, "#{JSON.generate(resolved_worktree)}=\"read\""
+      refute_includes filesystem_flag, JSON.generate(resolved_worktree)
       assert_equal({ "article.md" => output }, policy.output_paths)
+
+      declared = with_env("HIVE_CODEX_BIN" => "/bin/true") do
+        Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+          {
+            "preset" => "scoped",
+            "tools" => [ "Read", "Edit(./article.md)" ],
+            "dirs" => [ worktree ]
+          },
+          task_folder: task,
+          package_root: package,
+          profile: Hive::AgentProfiles.lookup(:codex),
+          base_add_dirs: [ worktree ],
+          managed_outputs: [ output ]
+        )
+      end
+      assert_includes declared.directories, resolved_worktree
+      declared_flag = declared.cli_flags.find { |flag| flag.include?("filesystem=") }
+      assert_includes declared_flag, "#{JSON.generate(resolved_worktree)}=\"read\""
 
       error = assert_raises(Hive::ConfigError) do
         with_env("HIVE_CODEX_BIN" => "/bin/true") do
@@ -710,6 +728,36 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
       assert_includes error.message, "escapes the task folder"
     ensure
       policy&.cleanup!
+      declared&.cleanup!
+    end
+  end
+
+  def test_networked_bounded_portable_actors_do_not_inherit_project_root
+    with_tmp_dir do |dir|
+      task = File.join(dir, "task")
+      package = File.join(dir, "package")
+      project = File.join(dir, "project")
+      FileUtils.mkdir_p([ task, package, project ])
+      spec = {
+        "preset" => "scoped",
+        "tools" => [ "Read", "Edit(./web-research.md)", "WebSearch", "WebFetch" ]
+      }
+
+      %i[codex grok].each do |profile_name|
+        policy = Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+          spec,
+          task_folder: task,
+          package_root: package,
+          profile: Hive::AgentProfiles.lookup(profile_name),
+          base_add_dirs: [ project ],
+          managed_outputs: [ File.join(task, "web-research.md") ],
+          prepare: false
+        )
+
+        assert_equal [ File.realpath(task), File.realpath(package) ], policy.directories,
+                     profile_name
+        refute_includes policy.directories, File.realpath(project), profile_name
+      end
     end
   end
 
@@ -736,7 +784,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
     end
   end
 
-  def test_portable_actor_rejects_unavailable_or_non_directory_trusted_caller_roots
+  def test_yolo_actor_rejects_unavailable_or_non_directory_trusted_caller_roots
     with_tmp_dir do |dir|
       task = File.join(dir, "task")
       package = File.join(dir, "package")
@@ -748,7 +796,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
         error = assert_raises(Hive::ConfigError) do
           with_env("HIVE_CODEX_BIN" => "/bin/true") do
             Hive::WorkflowPackage::RuntimePolicy.compile_actor(
-              "read-only",
+              "yolo",
               task_folder: task,
               package_root: package,
               profile: Hive::AgentProfiles.lookup(:codex),
@@ -945,7 +993,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
     end
   end
 
-  def test_portable_admission_and_trusted_roots_fail_closed_without_preparing_a_runtime
+  def test_portable_admission_and_yolo_roots_fail_closed_without_preparing_a_runtime
     with_tmp_dir do |dir|
       task = File.join(dir, "task")
       package = File.join(dir, "package")
@@ -968,7 +1016,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
       [ "not-an-array", [ "" ], [ "bad\0root" ] ].each do |roots|
         error = assert_raises(Hive::ConfigError) do
           Hive::WorkflowPackage::RuntimePolicy.compile_actor(
-            "read-only",
+            "yolo",
             task_folder: task,
             package_root: package,
             profile: Hive::AgentProfiles.lookup(:codex),
@@ -1019,6 +1067,22 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
         )
       end
       assert_includes error.message, "path-qualified Edit"
+
+      %i[codex grok].each do |profile_name|
+        error = assert_raises(Hive::ConfigError) do
+          Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+            {
+              "preset" => "scoped",
+              "tools" => [ "Read(./brief.md)", "WebSearch", "WebFetch", "Edit(./result.md)" ]
+            },
+            task_folder: task,
+            package_root: package,
+            profile: Hive::AgentProfiles.lookup(profile_name),
+            prepare: false
+          )
+        end
+        assert_includes error.message, "cannot enforce path-qualified Read", profile_name
+      end
     end
   end
 
@@ -1311,7 +1375,8 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
           Hive::WorkflowPackage::RuntimePolicy.compile_actor(
             {
               "preset" => "scoped",
-              "tools" => [ "Read", "LS", "Grep", "Glob", "Edit(./reviews/**)" ]
+              "tools" => [ "Read", "LS", "Grep", "Glob", "Edit(./reviews/**)" ],
+              "dirs" => [ worktree ]
             },
             task_folder: task,
             package_root: package,

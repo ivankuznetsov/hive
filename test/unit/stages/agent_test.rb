@@ -958,7 +958,7 @@ class StagesAgentTest < Minitest::Test
     end
   end
 
-  def test_managed_worktree_base_dirs_reach_portable_runtime_read_policy
+  def test_managed_worktree_base_dirs_do_not_widen_bounded_portable_runtime_policy
     with_tmp_git_repo do |project|
       package_root = File.join(
         project, ".hive-state", "workflows", "demo", "versions", "a" * 40
@@ -1005,9 +1005,9 @@ class StagesAgentTest < Minitest::Test
       end
 
       resolved_worktree = File.realpath(project)
-      assert_includes policy.directories, resolved_worktree
+      refute_includes policy.directories, resolved_worktree
       filesystem_flag = policy.cli_flags.find { |flag| flag.include?("filesystem=") }
-      assert_includes filesystem_flag, "#{JSON.generate(resolved_worktree)}=\"read\""
+      refute_includes filesystem_flag, JSON.generate(resolved_worktree)
     ensure
       policy&.cleanup!
     end

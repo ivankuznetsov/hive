@@ -4,6 +4,82 @@ schema_version: 1
 # its test-only contract enforce declared source boundaries; they are not a
 # runtime security sandbox and cannot prevent reflection or monkeypatching.
 components:
+  - id: provider-health
+    name: Provider Health
+    state: candidate
+    entrypoint:
+      file: lib/hive/provider_health.rb
+      require: hive/provider_health
+      constant: Hive::ProviderHealth
+    public_contract:
+      values:
+        - Hive::ProviderHealth::Audit::Receipt
+        - Hive::ProviderHealth::AttemptBinding
+        - Hive::ProviderHealth::Circuit
+        - Hive::ProviderHealth::CorruptionToken
+        - Hive::ProviderHealth::Evidence
+        - Hive::ProviderHealth::Inspection
+        - Hive::ProviderHealth::ProbeBinding
+        - Hive::ProviderHealth::ProbeIntent
+        - Hive::ProviderHealth::ProbeRequirement
+        - Hive::ProviderHealth::RouteEvaluation
+        - Hive::ProviderHealth::RouteIdentity
+        - Hive::ProviderHealth::Store
+      errors:
+        - Hive::ProviderHealth::Error
+        - Hive::ProviderHealth::InvalidEvidence
+        - Hive::ProviderHealth::InvalidMutation
+        - Hive::ProviderHealth::StaleGeneration
+        - Hive::ProviderHealth::Unavailable
+    owned_paths:
+      - lib/hive/provider_health.rb
+      - lib/hive/provider_health/audit.rb
+      - lib/hive/provider_health/circuit.rb
+      - lib/hive/provider_health/evidence.rb
+      - lib/hive/provider_health/event.rb
+      - lib/hive/provider_health/reconciler.rb
+      - lib/hive/provider_health/store.rb
+      - schemas/hive-provider-health.v1.json
+      - schemas/hive-provider-health-event.v1.json
+    state_contracts:
+      - "Provider-account and exact-model circuits are independent scoped journals composed only at read time"
+      - "The authoritative journal event contains its sanitized operator audit; current.json is a rebuildable projection"
+      - "Evidence, probe, and operator mutations use scoped generation CAS under one host-global health lock"
+      - "Probe intents bind only to durable attempt identity and ownership fences; no timer, lease, retry, successor, or dispatch owner exists here"
+      - "Only a malformed torn final suffix is automatically repaired; interior corruption and gaps fail the affected scope closed"
+    schema_contracts:
+      - "Projection and event schemas are recursively closed against raw prompts, messages, stdout, stderr, tool output, tokens, and credentials"
+      - "Evidence fingerprints derive only from canonical allowlisted class, scope, provenance, route ID, and bounded reset hint"
+      - "Corrupt-scope reset requires a fresh epoch, fingerprint, and last-verified-generation token and quarantines exact owner-private bytes"
+    lock_contracts:
+      - "The host-global provider-health mutation lock is innermost after admission and task-generation locks"
+      - "Store code holding the health lock must not acquire admission or task-generation locks"
+    component_dependencies: []
+    allowed_hive_dependencies:
+      - hive
+      - hive/attempts/output_reference
+      - hive/managed_directory
+      - hive/paths
+    internal_collaborators:
+      - Hive::Attempts::OutputReference
+      - Hive::ManagedDirectory
+    forbidden_constructions: []
+    authorized_internal_constructions: []
+    hive_consumers:
+      - lib/hive.rb
+      - lib/hive/paths.rb
+    mutation_authority: "Scoped provider-health journals, rebuildable projections, probe intents, quarantine artifacts, and their typed audit receipts only."
+    recovery_surface: "Conservative eligibility and attempt-fenced probe reconciliation only; RecoveryCoordinator remains the sole retry, charge, deadline, successor, and dispatch owner."
+    wiki_page: wiki/modules/provider_health.md
+    focused_tests:
+      - test/unit/provider_health/audit_test.rb
+      - test/unit/provider_health/circuit_test.rb
+      - test/unit/provider_health/evidence_test.rb
+      - test/unit/provider_health/schema_test.rb
+      - test/unit/provider_health/store_test.rb
+      - test/integration/provider_health_replay_test.rb
+    migration_exceptions: []
+
   - id: provider-routing-policy
     name: Provider Routing Policy
     state: candidate

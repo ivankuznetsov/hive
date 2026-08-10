@@ -91,6 +91,12 @@ eligible ordered routes. Later admission/health work consumes these values; it
 must not add retries, deadlines, queues, leases, provider-specific fallback, or
 another recovery owner.
 
+Shared circuit state is a separate `Hive::ProviderHealth` component described
+in [[modules/provider_health]]. Its account and exact-model journals are
+consulted only for an explicit pool; the structural legacy policy never opens
+that store. Health cooldown controls half-open route eligibility only and does
+not schedule a retry.
+
 Sanitized adapter-channel inventory lives under
 `test/fixtures/provider_errors/`. No retained real capture currently proves a
 stable explicit account/model scope for Claude, Codex, Pi, or Grok, so all

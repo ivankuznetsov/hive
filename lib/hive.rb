@@ -110,6 +110,10 @@ module Hive
       "hive-dispatch-result" => 2,
       # Internal source-of-truth record for durable task-stage ownership.
       "hive-attempt" => 3,
+      # Owner-private provider-account and exact-model circuit projection and
+      # its authoritative scoped journal events.
+      "hive-provider-health" => 1,
+      "hive-provider-health-event" => 1,
       # Dedicated operator-confirmed task closure input/receipt. These are
       # task-local authorities, not agent-callable command envelopes.
       "hive-task-closure-input" => 1,

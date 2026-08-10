@@ -19,6 +19,7 @@ class ComponentBoundariesTest < Minitest::Test
       agent-artifact-firewall
       attempts
       patrol-effects
+      provider-health
       provider-routing-policy
       safe-agent-git-gate
       skillpack
@@ -29,6 +30,14 @@ class ComponentBoundariesTest < Minitest::Test
       workflow-creator-live
       workflow-creator-values
     ], contract.components.map { |component| component.fetch("id") }.sort
+
+    provider_health = contract.component("provider-health")
+    assert_equal "candidate", provider_health.fetch("state")
+    assert_equal "hive/provider_health", provider_health.dig("entrypoint", "require")
+    assert_equal "Hive::ProviderHealth", provider_health.dig("entrypoint", "constant")
+    assert_includes provider_health.dig("public_contract", "values"),
+                    "Hive::ProviderHealth::Store"
+    assert_empty provider_health.fetch("migration_exceptions")
 
     provider_routing = contract.component("provider-routing-policy")
     assert_equal "candidate", provider_routing.fetch("state")
@@ -450,7 +459,7 @@ class ComponentBoundariesTest < Minitest::Test
     remaining_candidates = contract.components.reject do |component|
       ready_components.include?(component)
     end
-    assert_equal %w[attempts patrol-effects provider-routing-policy],
+    assert_equal %w[attempts patrol-effects provider-health provider-routing-policy],
                  remaining_candidates.map { |entry| entry.fetch("id") }.sort
     assert remaining_candidates.all? { |component| component.fetch("state") == "candidate" }
 

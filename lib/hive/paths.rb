@@ -68,6 +68,12 @@ module Hive
       File.join(attempts_root, "pending-finalization")
     end
 
+    # Owner-private, host-global provider-account and exact-model health.
+    # Explicit routing alone consults this state; legacy attempts bypass it.
+    def provider_health_root
+      File.join(state_home, "provider-health", "v1")
+    end
+
     def workflow_publish_root
       File.join(state_home, "workflow-publish", "v1")
     end

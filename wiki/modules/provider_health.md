@@ -1,0 +1,101 @@
+---
+title: Hive::ProviderHealth
+type: module
+source: lib/hive/provider_health.rb, lib/hive/provider_health/*.rb, schemas/hive-provider-health*.json
+created: 2026-08-10
+updated: 2026-08-10
+tags: [provider-accounts, models, circuits, journals, probes, audit]
+---
+
+**TLDR**: `Hive::ProviderHealth` is Hive's owner-private, host-global
+eligibility store for explicitly routed provider accounts and exact models. It
+accepts only typed evidence from allowlisted structured adapter channels,
+serializes scoped generation-CAS mutations under one health lock, and rebuilds
+`current.json` from authoritative per-scope journals. It never schedules a
+retry, charges a budget, creates a successor, dispatches work, or owns a task
+marker.
+
+## Scope and composition
+
+Each provider-account scope and each exact provider/model scope has its own
+journal. Route eligibility composes both enclosing scopes at read time:
+
+- an account block or open circuit excludes every model on that account;
+- an exact-model block or open circuit excludes only that route;
+- reset or unblock changes only its target and does not erase the other scope;
+- a manual block is orthogonal to automatic open/closed health;
+- half-open is a read-time view once `eligible_at` is reached and does not
+  itself write an event or advance generation.
+
+The closed provider-account classes are authentication,
+billing/configuration, exhausted credits, account/session quota,
+provider-wide rate limit, and provider outage. Exact-model classes are
+unavailable, disabled, deprecated, model quota, model rate, and model capacity.
+Class and scope must be compatible.
+
+## Sanitized evidence
+
+`Evidence` can be constructed only with an explicit scope, one allowlisted
+provenance tag, the admitted typed route, a bounded reset hint, an attempt ID,
+and an integrity-bearing protected output reference. Its persisted form is
+smaller: class, explicit scope, provenance, configured route ID, bounded reset
+hint, safe fingerprint, and protected reference. Adapter identity, launch
+binding, attempt fence, raw diagnostic text, prompt, stdout/stderr, final
+message, tool output, tokens, and credentials are not persisted as evidence.
+
+The fingerprint is SHA-256 over canonical safe fields only. Changing a raw
+message or artifact path cannot create a new shared-health identity. Untrusted,
+ambiguous, wrongly scoped, stale-generation, late, or fenced evidence cannot
+advance a circuit generation.
+
+## Storage and replay
+
+State lives below `provider-health/v1` with owner-only directory and file
+modes:
+
+```text
+provider-health/v1/
+├── mutation.lock
+├── scopes/provider-account/<scope-digest>/{journal.jsonl,current.json}
+├── scopes/model/<scope-digest>/{journal.jsonl,current.json}
+├── intents/<intent-digest>.json
+└── quarantine/<scope-kind>/<scope-digest>/...
+```
+
+Every authoritative event embeds the unhashed scope, journal epoch, sequence,
+idempotency key, expected/previous/resulting generation, and a recursively
+closed sanitized payload. Operator block, unblock, and reset events embed the
+audit receipt in the same journal write; audit is not a best-effort second
+append. `current.json` is disposable and repaired from replay.
+
+Only a malformed, unterminated final suffix is trimmed automatically. An
+interior parse failure, schema-invalid event, sequence or generation gap,
+duplicate event identity, or impossible transition returns the scoped
+`health_state_unavailable` blocker without parser content. Inspection exposes
+a bounded repair token containing scope, journal epoch, corruption
+fingerprint, and last verified generation.
+
+A corrupt reset must match that fresh token. It copies the exact corrupt bytes
+to owner-private quarantine, starts a new scoped epoch above the last verified
+generation, preserves the last verified manual block, clears automatic health
+and stale probe state, and journals one audited reset with the quarantine
+reference. Old probe results are fenced by epoch and generation.
+
+## Probe intent and ownership boundary
+
+When an ordinary attempt needs one or both half-open scopes, callers create one
+typed multi-scope `ProbeIntent`. The store validates the full observed
+generation vector, persists the intent, yields immutable probe bindings while
+the caller durably writes the launching attempt, journals each claim, and then
+removes the intent. The intended lock order is admission lock, task-generation
+lock, then health lock.
+
+An unresolved intent makes its scopes unavailable to another selector.
+Restart reconciliation consults the durable attempt reader: it finalizes
+missing claims for the exact live attempt, rolls back an intent with no
+admitted attempt, or conservatively reopens claims for terminal/lost/fenced
+ownership. There is no probe timer or second lease store.
+
+`ProviderHealth` is not yet wired into durable admission or terminal attempt
+observation on this unit alone; those consumers must preserve the authority
+and lock contracts above.

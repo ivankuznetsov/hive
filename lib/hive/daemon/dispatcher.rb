@@ -2,6 +2,7 @@ require "digest"
 require "fileutils"
 require "json"
 require "shellwords"
+require "time"
 require "hive/config"
 require "hive/stages"
 require "hive/workflows"
@@ -1063,6 +1064,32 @@ module Hive
         )
       rescue StandardError
         # Stat failure is non-fatal; just don't update.
+      end
+
+      # Durable task attempts are not ChildSupervisor children, so their
+      # terminal receipts never pass through +record_completed+. Refresh the
+      # same edit-resume baseline before finalization; otherwise an agent's
+      # own terminal/WAITING write looks like operator input on the next tick.
+      def refresh_post_attempt_completion_mtime(attempt)
+        project = attempt["project"].to_s
+        slug = attempt["task_slug"].to_s
+        return if project.empty? || slug.empty?
+
+        project_entry = Hive::Config.find_project(project)
+        return unless project_entry
+
+        path = find_post_advance_state_file(project_entry["hive_state_path"], slug)
+        return unless path && File.exist?(path)
+
+        state_file_mtime = File.mtime(path)
+        attempt_ended_at = Time.iso8601(attempt["ended_at"].to_s)
+        return if state_file_mtime > attempt_ended_at
+
+        @controller.observe_state_file_mtime(
+          project: project, slug: slug, mtime: state_file_mtime
+        )
+      rescue StandardError
+        # Stat/config lookup failure is non-fatal; just don't update.
       end
 
       # Resolution order:
@@ -2603,6 +2630,9 @@ module Hive
       end
 
       def reconcile_attempt_deliveries(now:)
+        terminal_attempts = Array(@attempt_snapshot&.terminal_attempts)
+        terminal_attempts.each { |attempt| refresh_post_attempt_completion_mtime(attempt) }
+
         claimed = Hive::Daemon::DispatchRequestQueue.claimed(
           state_home: dispatch_request_state_home
         )
@@ -2669,12 +2699,12 @@ module Hive
           acknowledge_attempt_finalization(attempt, :request_delivery)
         end
 
-        Array(@attempt_snapshot&.terminal_attempts).each do |attempt|
+        terminal_attempts.each do |attempt|
           unless claimed_attempt_ids.key?(attempt.attempt_id)
             acknowledge_attempt_finalization(attempt, :request_delivery)
           end
         end
-        Array(@attempt_snapshot&.terminal_attempts).each do |attempt|
+        terminal_attempts.each do |attempt|
           promote_attempt_finalization(attempt)
         end
       end

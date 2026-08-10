@@ -20,6 +20,7 @@ require "stringio"
 require "yaml"
 require "shellwords"
 require "English"
+require_relative "support/tmp_cleanup"
 
 # Never let a normal test subprocess inherit the operator's Hive state, home,
 # XDG roots, agent configuration, GitHub configuration, or global Git config.
@@ -46,7 +47,7 @@ unless ENV["HIVE_TEST_ALLOW_REAL_USER_ENV"] == "1"
     GIT_CONFIG_GLOBAL
   ].each { |key| ENV.delete(key) }
   Minitest.after_run do
-    FileUtils.rm_rf(HIVE_TEST_USER_ROOT)
+    HiveTestTmpCleanup.remove_with_related!(HIVE_TEST_USER_ROOT)
   end
 end
 
@@ -89,12 +90,16 @@ end
 
 # Route the default worktree base (`<base>/<project>.worktrees`) into a
 # tmp sandbox so tests that exercise worktree creation never seed the
-# developer's real ~/Dev. `||=` lets an explicit outer override win, and
-# the `hive-test-wtbase*` name lives under Dir.tmpdir so `rake test:clean_tmp`
-# also sweeps it. Cleaned on suite exit.
-ENV["HIVE_WORKTREE_BASE"] ||= Dir.mktmpdir("hive-test-wtbase")
+# developer's real ~/Dev. An explicit outer override wins and is never added
+# to the cleanup registry. The generated `hive-test-wtbase*` name lives under
+# Dir.tmpdir so `rake test:clean_tmp` also recognizes it after a crashed suite.
+HIVE_TEST_WORKTREE_BASE = if ENV["HIVE_WORKTREE_BASE"]
+  nil
+else
+  Dir.mktmpdir("hive-test-wtbase").tap { |path| ENV["HIVE_WORKTREE_BASE"] = path }
+end
 Minitest.after_run do
-  FileUtils.rm_rf(ENV["HIVE_WORKTREE_BASE"]) if ENV["HIVE_WORKTREE_BASE"]&.include?("hive-test-wtbase")
+  HiveTestTmpCleanup.remove_with_related!(HIVE_TEST_WORKTREE_BASE) if HIVE_TEST_WORKTREE_BASE
 end
 
 if ENV["HIVE_COVERAGE"]
@@ -119,30 +124,43 @@ module HiveTestStdinIsolation
   end
 
   def after_teardown
-    super
-  ensure
-    if defined?(@hive_original_skip_llm_wiki_scheduler)
-      if @hive_original_skip_llm_wiki_scheduler.nil?
-        ENV.delete("HIVE_SKIP_LLM_WIKI_SCHEDULER")
-      else
-        ENV["HIVE_SKIP_LLM_WIKI_SCHEDULER"] = @hive_original_skip_llm_wiki_scheduler
+    teardown_error = nil
+    begin
+      super
+    rescue StandardError => e
+      teardown_error = e
+    ensure
+      begin
+        HiveTestTmpCleanup.remove_all!(@hive_tracked_tmp_dirs)
+      rescue StandardError => e
+        teardown_error ||= e
+      ensure
+        @hive_tracked_tmp_dirs = nil
+        if defined?(@hive_original_skip_llm_wiki_scheduler)
+          if @hive_original_skip_llm_wiki_scheduler.nil?
+            ENV.delete("HIVE_SKIP_LLM_WIKI_SCHEDULER")
+          else
+            ENV["HIVE_SKIP_LLM_WIKI_SCHEDULER"] = @hive_original_skip_llm_wiki_scheduler
+          end
+        end
+        if defined?(@hive_original_skip_llm_wiki_post_commit)
+          if @hive_original_skip_llm_wiki_post_commit.nil?
+            ENV.delete("HIVE_SKIP_LLM_WIKI_POST_COMMIT")
+          else
+            ENV["HIVE_SKIP_LLM_WIKI_POST_COMMIT"] = @hive_original_skip_llm_wiki_post_commit
+          end
+        end
+        if defined?(@hive_original_skip_llm_wiki_systemctl)
+          if @hive_original_skip_llm_wiki_systemctl.nil?
+            ENV.delete("HIVE_SKIP_LLM_WIKI_SYSTEMCTL")
+          else
+            ENV["HIVE_SKIP_LLM_WIKI_SYSTEMCTL"] = @hive_original_skip_llm_wiki_systemctl
+          end
+        end
+        $stdin = @hive_original_stdin if defined?(@hive_original_stdin)
       end
     end
-    if defined?(@hive_original_skip_llm_wiki_post_commit)
-      if @hive_original_skip_llm_wiki_post_commit.nil?
-        ENV.delete("HIVE_SKIP_LLM_WIKI_POST_COMMIT")
-      else
-        ENV["HIVE_SKIP_LLM_WIKI_POST_COMMIT"] = @hive_original_skip_llm_wiki_post_commit
-      end
-    end
-    if defined?(@hive_original_skip_llm_wiki_systemctl)
-      if @hive_original_skip_llm_wiki_systemctl.nil?
-        ENV.delete("HIVE_SKIP_LLM_WIKI_SYSTEMCTL")
-      else
-        ENV["HIVE_SKIP_LLM_WIKI_SYSTEMCTL"] = @hive_original_skip_llm_wiki_systemctl
-      end
-    end
-    $stdin = @hive_original_stdin if defined?(@hive_original_stdin)
+    raise teardown_error if teardown_error
   end
 end
 
@@ -157,6 +175,15 @@ FAKE_CLAUDE_FIXTURE = File.expand_path("fixtures/fake-claude", __dir__).freeze
 
 module HiveTestHelper
   UNSET_ENV = Object.new.freeze
+
+  # Register a tmpdir that must outlive its creating statement. The global
+  # teardown hook removes it securely after the current test, including trees
+  # whose subject changed nested directories/files to 0555/0444.
+  def tracked_tmp_dir(prefix = "hive-test")
+    Dir.mktmpdir(prefix).tap do |path|
+      (@hive_tracked_tmp_dirs ||= []) << path
+    end
+  end
 
   # Temporarily replace `receiver.name` with `replacement` for the duration
   # of the block; restore the original singleton method in `ensure`. Used
@@ -259,13 +286,13 @@ module HiveTestHelper
   # state like `bitmap-ref-tips_*` between scan and unlink, so `Dir.mktmpdir`'s
   # built-in cleanup (which uses `FileUtils.remove_entry`) intermittently
   # raises `Errno::ENOENT` under CI load. Replace the block form with an
-  # explicit ensure that uses `FileUtils.rm_rf`, which tolerates concurrent
-  # disappearance instead of raising.
+  # explicit ensure with verified, race-tolerant cleanup. This also handles
+  # subjects that make managed-package fixture trees read-only.
   def with_tmp_dir
     dir = Dir.mktmpdir("hive-test")
     yield dir
   ensure
-    FileUtils.rm_rf(dir) if dir
+    HiveTestTmpCleanup.remove_with_related!(dir) if dir
   end
 
   def with_tmp_git_repo
@@ -307,10 +334,8 @@ module HiveTestHelper
         yield(dir)
       end
     ensure
-      # Same race-tolerant cleanup as `with_tmp_dir`: tests inside this
-      # tmpdir invoke `hive`/git subprocesses that can leave the tree
-      # mid-rename.
-      FileUtils.rm_rf(dir) if dir
+      # Same verified cleanup as `with_tmp_dir`.
+      HiveTestTmpCleanup.remove_with_related!(dir) if dir
     end
   end
 
@@ -338,10 +363,8 @@ module HiveTestHelper
     ensure
       old_hive_home.nil? ? ENV.delete("HIVE_HOME") : ENV["HIVE_HOME"] = old_hive_home
       old_home.nil? ? ENV.delete("HOME") : ENV["HOME"] = old_home
-      # Same race-tolerant cleanup as `with_tmp_dir`: tests inside this
-      # tmpdir invoke `hive`/git subprocesses that can leave the tree
-      # mid-rename.
-      FileUtils.rm_rf(dir) if dir
+      # Same verified cleanup as `with_tmp_dir`.
+      HiveTestTmpCleanup.remove_with_related!(dir) if dir
     end
   end
 

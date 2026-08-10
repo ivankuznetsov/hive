@@ -456,10 +456,30 @@ task default: :test
   `rake smoke` task explicitly opts out because it exists to exercise real
   operator logins; direct smoke-file runs must set
   `HIVE_TEST_ALLOW_REAL_USER_ENV=1` deliberately.
-- `with_tmp_dir` — `Dir.mktmpdir("hive-test", &block)`.
+- `with_tmp_dir` — creates a `hive-test*` directory and removes it through
+  `HiveTestTmpCleanup` in `ensure`. The cleanup is restricted to direct
+  children with test-shaped names owned by the current uid, handles read-only
+  managed-package trees, removes the exact root's known `-worktrees`,
+  `.origin.git`, and Patrol-lock siblings, and verifies that every path is
+  actually gone.
+- `tracked_tmp_dir(prefix)` — registers a statement-spanning fixture for the
+  current test's teardown hook. Use this instead of assigning `Dir.mktmpdir`
+  directly when a helper must return the path.
 - `with_tmp_git_repo` — `git init -b master`, configures user/email and disables GPG signing, makes one initial commit, yields the path.
 - `with_tmp_global_config(home: nil)` — overrides `ENV["HIVE_HOME"]` to a tmp dir, writes an empty `registered_projects: []` YAML, and defaults `HOME` to the same tmp dir so subprocesses and service-installer tests do not touch the operator's real home. Pass `home:` when a test intentionally installs fake user-level skills or plugins under a separate fake HOME.
 - `run!(*cmd)` — shells out and raises on non-zero exit (used in setup helpers; not for testing the CLI itself).
+
+`rake test:clean_tmp` is the crash-recovery broom, not a generic `/tmp`
+cleaner. It recognizes only the test-helper families plus the historically
+leaked `~/Dev/hive-test*.worktrees` shape and known test-root sibling shapes.
+By default it removes entries older than 24 hours whose encoded creator PID is
+no longer alive; recent, live, and other-uid entries are reported and left
+alone. Set
+`HIVE_TEST_TMP_MIN_AGE_SECONDS=0` for an immediate inactive-only sweep. A
+removal counts only after the path is absent, and any retained candidate makes
+the task fail instead of printing a false success. Production `hive-*` temp
+families remain the responsibility of their owning lifecycle and the system
+tmp reaper.
 
 ## Fixtures
 

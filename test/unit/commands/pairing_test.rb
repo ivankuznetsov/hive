@@ -622,7 +622,7 @@ class HiveCommandsPairingTest < Minitest::Test
       args: args,
       json: json,
       output: output,
-      store: store || self.store(Dir.mktmpdir("hive-pairing-command")),
+      store: store || self.store(tracked_tmp_dir("hive-pairing-command")),
       process: process,
       now: now
     }

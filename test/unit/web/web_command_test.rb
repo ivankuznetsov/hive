@@ -9,16 +9,18 @@ class WebCommandTest < Minitest::Test
   # a source checkout (no web/ dir, no HIVE_WEB_APP_DIR) it must fail
   # loudly with guidance instead of exec-ing into a missing app.
   def test_missing_rails_app_exits_with_guidance
-    with_tmp_global_config do
-      with_env("HIVE_WEB_APP_DIR" => File.join(Dir.mktmpdir("hive-noapp"), "nope")) do
-        command = Hive::Commands::Web.new
-        # Singleton override instead of minitest/mock (not bundled): the
-        # checkout itself contains web/, so the fallback path would resolve.
-        command.define_singleton_method(:rails_app_dir) { |**| nil }
-        err = assert_raises(SystemExit) do
-          capture_io { command.call }
+    Dir.mktmpdir("hive-noapp") do |root|
+      with_tmp_global_config do
+        with_env("HIVE_WEB_APP_DIR" => File.join(root, "nope")) do
+          command = Hive::Commands::Web.new
+          # Singleton override instead of minitest/mock (not bundled): the
+          # checkout itself contains web/, so the fallback path would resolve.
+          command.define_singleton_method(:rails_app_dir) { |**| nil }
+          err = assert_raises(SystemExit) do
+            capture_io { command.call }
+          end
+          assert_equal 1, err.status, "a missing web app must exit 1"
         end
-        assert_equal 1, err.status, "a missing web app must exit 1"
       end
     end
   end

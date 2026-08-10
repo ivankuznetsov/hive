@@ -408,7 +408,7 @@ class WebAppBundleTest < Minitest::Test
     with_hive_home do
       # A source dir with content but no config/application.rb (and no nested
       # wrapper that contains one) must be rejected rather than installed.
-      src = Dir.mktmpdir("hive-web-bad")
+      src = tracked_tmp_dir("hive-web-bad")
       FileUtils.mkdir_p(File.join(src, "lib"))
       File.write(File.join(src, "lib", "thing.rb"), "# not the app\n")
 
@@ -422,7 +422,7 @@ class WebAppBundleTest < Minitest::Test
 
   def test_ensure_raises_when_bundle_lacks_gemfile
     with_hive_home do
-      src = Dir.mktmpdir("hive-web-no-gemfile")
+      src = tracked_tmp_dir("hive-web-no-gemfile")
       FileUtils.mkdir_p(File.join(src, "config"))
       File.write(File.join(src, "config", "application.rb"), "# app\n")
 
@@ -938,7 +938,7 @@ class WebAppBundleTest < Minitest::Test
   # top-level versioned directory — the shape `tar -czf` produces for a
   # GitHub release. Exercises ensure!'s nested-unwrap branch.
   def seed_nested_source_app
-    src = Dir.mktmpdir("hive-web-nested")
+    src = tracked_tmp_dir("hive-web-nested")
     wrapped = File.join(src, "hive-web-#{Hive::VERSION}")
     FileUtils.mkdir_p(File.join(wrapped, "config"))
     File.write(File.join(wrapped, "config", "application.rb"), "# app\n")
@@ -950,7 +950,7 @@ class WebAppBundleTest < Minitest::Test
   # fetch_and_extract copies verbatim, including a Gemfile so prepare!
   # invokes the injected runner.
   def seed_source_app
-    src = Dir.mktmpdir("hive-web-src")
+    src = tracked_tmp_dir("hive-web-src")
     FileUtils.mkdir_p(File.join(src, "config"))
     File.write(File.join(src, "config", "application.rb"), "# app\n")
     File.write(File.join(src, "Gemfile"), "source 'https://rubygems.org'\n")

@@ -191,7 +191,7 @@ module Hive
 
       def default_attempt_store
         root = ENV["HIVE_ATTEMPT_STORE_ROOT"].to_s
-        Hive::Attempts::Store.new(root: root.empty? ? Hive::Paths.attempts_root : root)
+        root.empty? ? Hive::Attempts::Store.new : Hive::Attempts::Store.new(root: root)
       end
     end
   end

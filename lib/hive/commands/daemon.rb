@@ -257,9 +257,7 @@ module Hive
           logger: logger
         )
 
-        attempt_store = Hive::Attempts::Store.new(
-          root: File.join(@hive_home, "attempts", "v2")
-        )
+        attempt_store = Hive::Attempts::Store.open_default(state_home: @hive_home)
         attempts_api = Hive::Attempts::API.new(
           store: attempt_store
         )

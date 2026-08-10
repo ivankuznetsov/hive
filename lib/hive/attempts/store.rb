@@ -21,10 +21,24 @@ module Hive
     Scan = Data.define(:records, :invalid_records)
 
     class Store
-      def initialize(root: Hive::Paths.attempts_root, create_directories: true)
+      DEFAULT_ROOT = Object.new.freeze
+
+      def self.open_default(state_home: Hive::Paths.state_home, create_directories: true)
+        root = prepare_default_root!(state_home)
+        new(root: root, create_directories: create_directories)
+      end
+
+      def self.prepare_default_root!(state_home)
+        require "hive/recovery/migration"
+        Hive::Recovery::Migration.ensure!(state_home: state_home)
+        File.join(File.expand_path(state_home), "attempts", "v3")
+      end
+      private_class_method :prepare_default_root!
+
+      def initialize(root: DEFAULT_ROOT, create_directories: true)
+        root = self.class.send(:prepare_default_root!, Hive::Paths.state_home) if root.equal?(DEFAULT_ROOT)
         @root = File.expand_path(root)
         @create_directories = create_directories
-        reject_legacy_default_store!
         @records_root = File.join(@root, "records")
         @logs_root = File.join(@root, "logs")
         @outputs_root = File.join(@root, "outputs")
@@ -393,16 +407,6 @@ module Hive
       end
 
       private
-
-      def reject_legacy_default_store!
-        return unless @root == File.expand_path(Hive::Paths.attempts_root)
-        legacy_root = File.join(Hive::Paths.state_home, "attempts", "v1")
-        return unless File.exist?(legacy_root)
-
-        raise StoreError,
-              "legacy attempt state remains at #{legacy_root}; run `hive migrate` " \
-              "or restart the current Hive daemon before opening attempts/v2"
-      end
 
       def mutate(observed, allowed_states:)
         with_generation_lock(observed.task_generation) do

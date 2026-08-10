@@ -73,6 +73,7 @@ class ComponentBoundariesTest < Minitest::Test
           "lib/hive/conditions/execute_boundary.rb",
           "lib/hive/implementation_identity/store.rb",
           "lib/hive/modules/inspector.rb",
+          "lib/hive/recovery/migration.rb",
           "lib/hive/task_closure.rb",
           "lib/hive/task_projection/store.rb"
         ],
@@ -1337,6 +1338,15 @@ class ComponentBoundariesTest < Minitest::Test
       syntax = ComponentBoundaryContract::RubySyntax.new(source, "construction-form.rb")
       assert_includes syntax.constructions, "Example::Internal", source
     end
+  end
+
+  def test_open_default_is_detected_as_a_construction_api
+    syntax = ComponentBoundaryContract::RubySyntax.new(
+      "Hive::Attempts::Store.open_default(state_home: root)\n",
+      "construction-form.rb"
+    )
+
+    assert_includes syntax.constructions, "Hive::Attempts::Store"
   end
 
   def test_lexically_resolved_internal_construction_cannot_evade_boundary

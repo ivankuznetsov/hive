@@ -8,6 +8,18 @@ require "hive/workflows/coding"
 class ConditionsExecuteBoundaryTest < Minitest::Test
   include HiveTestHelper
 
+  def test_default_attempt_store_runs_layout_migration_without_an_override
+    with_tmp_dir do |root|
+      with_env("HIVE_HOME" => root, "HIVE_ATTEMPT_STORE_ROOT" => nil) do
+        boundary = Hive::Conditions::ExecuteBoundary.allocate
+        boundary.instance_variable_set(:@context, Object.new)
+        store = boundary.send(:default_attempt_store)
+        assert_equal File.join(root, "attempts", "v3"), store.root
+      end
+      assert File.file?(File.join(root, "attempts", "v2"))
+    end
+  end
+
   TaskStub = Struct.new(
     :folder, :state_file, :slug, :id, :worktree_path, :workflow,
     :stage_index, :stage_name, :project_root,

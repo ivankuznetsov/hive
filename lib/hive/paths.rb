@@ -35,10 +35,9 @@ module Hive
     end
 
     # Owner-private, versioned durable task-attempt state. RecoveryMigration
-    # moves the pre-cutover v1 tree here once and rewrites every retained
-    # record before current readers are allowed to open it.
+    # moves the physical v2 tree here before current readers may open it.
     def attempts_root
-      File.join(state_home, "attempts", "v2")
+      File.join(state_home, "attempts", "v3")
     end
 
     def attempt_records_root

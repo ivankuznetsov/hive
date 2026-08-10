@@ -6,6 +6,17 @@ require "json_schemer"
 class TaskClosureTest < Minitest::Test
   include HiveTestHelper
 
+  def test_default_attempt_store_runs_layout_migration_without_an_override
+    with_tmp_dir do |root|
+      with_env("HIVE_HOME" => root, "HIVE_ATTEMPT_STORE_ROOT" => nil) do
+        closure = Hive::TaskClosure.new
+        assert_equal File.join(root, "attempts", "v3"),
+                     closure.instance_variable_get(:@attempt_store).root
+      end
+      assert File.file?(File.join(root, "attempts", "v2"))
+    end
+  end
+
   FakeGh = Struct.new(
     :repository, :state, :reachable, :merge_oid, :remote_default_branch,
     :head_oid,

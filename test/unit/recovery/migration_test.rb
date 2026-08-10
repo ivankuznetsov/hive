@@ -1,4 +1,5 @@
 require "test_helper"
+require "digest"
 require "json"
 require "hive/attempts/store"
 require "hive/daemon/dispatch_request_queue"
@@ -10,413 +11,313 @@ class RecoveryMigrationTest < Minitest::Test
 
   NOW = Time.utc(2026, 7, 25, 12, 0, 0)
 
-  def test_migrates_all_recovery_state_once_and_leaves_only_current_schemas
+  def test_new_default_store_creates_v3_and_the_v2_fence
     with_tmp_dir do |state_home|
-      records = File.join(state_home, "attempts", "v1", "records")
-      FileUtils.mkdir_p(records)
-      write_json(File.join(records, "v1.json"), legacy_v1_attempt)
-      write_json(
-        File.join(records, "current.json"),
-        lost_attempt(current_attempt(attempt_id: "current")).merge("compatibility" => false)
-      )
-      write_json(File.join(records, "compat.json"), final_compatibility_attempt)
-      write_legacy_request(state_home)
-      write_legacy_result(state_home)
-      File.write(File.join(state_home, "dispatch_requests", "malformed.json"), "{")
-
-      result = Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW)
-
-      refute_path_exists File.join(state_home, "attempts", "v1")
-      assert_path_exists File.join(state_home, "attempts", "v2", "records")
-      assert_equal(
-        { "migrated" => 1, "normalized" => 1, "archived_legacy_compatibility" => 1 },
-        result.fetch("attempts")
-      )
-
-      migrated = JSON.parse(
-        File.binread(File.join(state_home, "attempts", "v2", "records", "v1.json"))
-      )
-      assert_equal Hive::Attempts::Record::SCHEMA_VERSION, migrated.fetch("schema_version")
-      assert_equal "generation-v1", migrated.fetch("ownership_generation")
-      assert_equal 0, migrated.fetch("task_input_epoch")
-      assert_equal "generation-v1", migrated.dig("receipt", "ownership_generation")
-      assert_equal 0, migrated.dig("receipt", "task_input_epoch")
-      refute migrated.key?("compatibility")
-      assert Hive::Attempts::Record.new(migrated)
-
-      normalized = JSON.parse(
-        File.binread(File.join(state_home, "attempts", "v2", "records", "current.json"))
-      )
-      refute normalized.key?("compatibility")
-      assert Hive::Attempts::Record.new(normalized)
-      assert_path_exists File.join(
-        state_home, "attempts", "legacy-v1-records", "compat.json"
-      )
-
-      rejected = []
-      request = Hive::Daemon::DispatchRequestQueue.pending(
-        state_home: state_home,
-        bad_handler: ->(path:, reason:) { rejected << reason }
-      ).fetch(0)
-      assert_equal 4, request.schema_version
-      assert_nil request.task_generation
-      assert_empty request.inherited_outputs
-      assert_nil request.recovery
-      assert_equal [ "malformed_json" ], rejected
-
-      notice = Hive::Daemon::DispatchResultQueue.pending(state_home: state_home).fetch(0)
-      assert_equal 2, notice.schema_version
-      assert_nil notice.attempt_id
-      assert_nil notice.receipt
-
-      receipt_path = File.join(state_home, "recovery-migration-v3.json")
-      assert_path_exists receipt_path
-      assert_equal result, Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW + 60)
-    end
-  end
-
-  def test_explicit_cutover_prepares_the_default_store
-    with_tmp_dir do |state_home|
-      records = File.join(state_home, "attempts", "v1", "records")
-      FileUtils.mkdir_p(records)
-      write_json(File.join(records, "v1.json"), legacy_v1_attempt)
-
       with_env("HIVE_HOME" => state_home) do
-        Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW)
         store = Hive::Attempts::Store.new
-
-        assert_equal Hive::Attempts::Record::SCHEMA_VERSION, store.fetch("v1")["schema_version"]
-        assert_equal File.join(state_home, "attempts", "v2"), store.root
-      end
-      refute_path_exists File.join(state_home, "attempts", "v1")
-      assert_path_exists File.join(state_home, "recovery-migration-v3.json")
-    end
-  end
-
-  def test_replaces_the_prior_receipt_and_migrates_v2_attempts_to_v3
-    with_tmp_dir do |state_home|
-      records = File.join(state_home, "attempts", "v2", "records")
-      FileUtils.mkdir_p(records)
-      write_json(File.join(records, "prior.json"), legacy_v2_attempt("prior"))
-      write_json(
-        File.join(state_home, "recovery-migration-v2.json"),
-        {
-          "schema" => "hive-recovery-migration",
-          "schema_version" => 2,
-          "completed_at" => NOW.iso8601(6),
-          "attempts" => {},
-          "dispatch_requests" => {},
-          "dispatch_results" => {}
-        }
-      )
-
-      result = Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW + 60)
-
-      assert_equal 1, result.dig("attempts", "migrated")
-      migrated = JSON.parse(File.binread(File.join(records, "prior.json")))
-      assert_equal 3, migrated.fetch("schema_version")
-      assert_equal(
-        {
-          "kind" => "task_stage",
-          "task_id" => "42",
-          "task_slug" => "durable-task",
-          "intended_stage" => "4-execute"
-        },
-        migrated.fetch("subject")
-      )
-      assert Hive::Attempts::Record.new(migrated)
-      assert_path_exists File.join(state_home, "recovery-migration-v3.json")
-      refute_path_exists File.join(state_home, "recovery-migration-v2.json")
-    end
-  end
-
-  def test_default_store_fails_closed_until_legacy_state_is_migrated
-    with_tmp_dir do |state_home|
-      FileUtils.mkdir_p(File.join(state_home, "attempts", "v1"))
-
-      with_env("HIVE_HOME" => state_home) do
-        error = assert_raises(Hive::Attempts::StoreError) do
-          Hive::Attempts::Store.new
-        end
-        assert_includes error.message, "run `hive migrate`"
-      end
-      refute_path_exists File.join(state_home, "attempts", "v2")
-    end
-  end
-
-  def test_refuses_to_cut_over_a_live_compatibility_record
-    with_tmp_dir do |state_home|
-      records = File.join(state_home, "attempts", "v1", "records")
-      FileUtils.mkdir_p(records)
-      live = current_attempt(attempt_id: "compat-live").merge(
-        "compatibility" => true,
-        "worker_argv" => [],
-        "claim_capability_digest" => nil,
-        "state" => "running",
-        "claim_deadline" => nil,
-        "heartbeat_deadline" => (NOW + 30).iso8601(6),
-        "wrapper" => owner,
-        "heartbeat_at" => NOW.iso8601(6),
-        "started_at" => NOW.iso8601(6)
-      )
-      write_json(File.join(records, "compat-live.json"), live)
-
-      error = assert_raises(Hive::Recovery::Migration::Error) do
-        Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW)
+        assert_equal File.join(state_home, "attempts", "v3"), store.root
+        assert File.directory?(store.records_root)
       end
 
-      assert_includes error.message, "must finish before the recovery cutover"
-      refute_path_exists File.join(state_home, "recovery-migration-v3.json")
+      assert_equal fence_payload, read_json(File.join(state_home, "attempts", "v2"))
+      assert_equal 0o600, File.stat(File.join(state_home, "attempts", "v2")).mode & 0o777
+      assert_path_exists File.join(state_home, "recovery-migration-v4.json")
     end
   end
 
-  def test_refuses_to_move_a_live_durable_attempt_owned_by_an_old_supervisor
+  def test_completed_default_store_reopens_without_enumerating_cold_state
     with_tmp_dir do |state_home|
-      records = File.join(state_home, "attempts", "v1", "records")
-      FileUtils.mkdir_p(records)
-      live = current_attempt(attempt_id: "durable-live").merge("compatibility" => false)
-      write_json(File.join(records, "durable-live.json"), live)
+      with_env("HIVE_HOME" => state_home) { Hive::Attempts::Store.new }
+      attempts_root = File.join(state_home, "attempts", "v3")
+      original = Dir.method(:children)
+      Dir.singleton_class.define_method(:children) do |path|
+        raise "enumerated cold attempt state" if File.expand_path(path).start_with?(attempts_root)
 
-      error = assert_raises(Hive::Recovery::Migration::Error) do
-        Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW)
-      end
-
-      assert_includes error.message, "live attempt in the legacy root"
-      assert_path_exists File.join(state_home, "attempts", "v1")
-      refute_path_exists File.join(state_home, "attempts", "v2")
-    end
-  end
-
-  def test_refuses_ambiguous_attempt_roots
-    with_tmp_dir do |state_home|
-      legacy_root = File.join(state_home, "attempts", "v1")
-      FileUtils.mkdir_p(legacy_root)
-      File.write(File.join(legacy_root, "unknown-state"), "preserve me")
-      FileUtils.mkdir_p(File.join(state_home, "attempts", "v2"))
-
-      error = assert_raises(Hive::Recovery::Migration::Error) do
-        Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW)
-      end
-
-      assert_includes error.message, "both legacy and current attempt roots exist"
-      assert_equal "preserve me", File.read(File.join(legacy_root, "unknown-state"))
-    end
-  end
-
-  def test_prunes_an_empty_legacy_skeleton_recreated_after_cutover
-    with_tmp_dir do |state_home|
-      current_records = File.join(state_home, "attempts", "v2", "records")
-      FileUtils.mkdir_p(current_records)
-      write_json(
-        File.join(current_records, "current.json"),
-        lost_attempt(current_attempt(attempt_id: "current"))
-      )
-      Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW)
-
-      legacy_root = File.join(state_home, "attempts", "v1")
-      %w[records logs outputs generation-locks].each do |entry|
-        FileUtils.mkdir_p(File.join(legacy_root, entry))
-      end
-
-      result = Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW + 60)
-
-      refute_path_exists legacy_root
-      assert_path_exists File.join(current_records, "current.json")
-      assert_equal (NOW + 60).iso8601(6), result.fetch("completed_at")
-    end
-  end
-
-  def test_refuses_a_legacy_root_symlink_beside_the_current_root
-    with_tmp_dir do |state_home|
-      attempts = File.join(state_home, "attempts")
-      legacy_target = File.join(state_home, "legacy-target")
-      FileUtils.mkdir_p(legacy_target)
-      FileUtils.mkdir_p(File.join(attempts, "v2"))
-      File.symlink(legacy_target, File.join(attempts, "v1"))
-
-      error = assert_raises(Hive::Recovery::Migration::Error) do
-        Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW)
-      end
-
-      assert_includes error.message, "both legacy and current attempt roots exist"
-      assert File.symlink?(File.join(attempts, "v1"))
-    end
-  end
-
-  def test_refuses_an_empty_legacy_skeleton_that_gains_state_during_prune
-    with_tmp_dir do |state_home|
-      legacy_records = File.join(state_home, "attempts", "v1", "records")
-      FileUtils.mkdir_p(legacy_records)
-      FileUtils.mkdir_p(File.join(state_home, "attempts", "v2"))
-
-      original = Dir.method(:rmdir)
-      injected = false
-      Dir.define_singleton_method(:rmdir) do |path|
-        unless injected
-          File.write(File.join(path, "late-state"), "preserve me")
-          injected = true
-        end
         original.call(path)
       end
+
       begin
-        error = assert_raises(Hive::Recovery::Migration::Error) do
-          Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW)
+        with_env("HIVE_HOME" => state_home) do
+          assert_equal attempts_root, Hive::Attempts::Store.new.root
         end
       ensure
-        Dir.define_singleton_method(:rmdir, original)
+        Dir.singleton_class.define_method(:children, original)
       end
-
-      assert_includes error.message, "both legacy and current attempt roots exist"
-      assert_equal "preserve me", File.read(File.join(legacy_records, "late-state"))
     end
   end
 
-  def test_rejects_an_incomplete_current_completion_receipt
+  def test_default_store_cuts_over_and_compacts_terminal_records
     with_tmp_dir do |state_home|
-      write_json(
-        File.join(state_home, "recovery-migration-v3.json"),
-        {
-          "schema" => "hive-recovery-migration",
-          "schema_version" => 3
-        }
-      )
+      record = terminal_attempt(current_attempt(attempt_id: "terminal"))
+      write_v2_record(state_home, record)
+      hot_log = File.join(state_home, "attempts", "v2", "logs", "terminal.frames")
+      FileUtils.mkdir_p(File.dirname(hot_log))
+      File.binwrite(hot_log, "frame\n")
 
+      with_env("HIVE_HOME" => state_home) do
+        store = Hive::Attempts::Store.new
+        assert_equal record, store.fetch("terminal").to_h
+        assert_nil store.fetch_hot("terminal")
+        assert_path_exists store.permanent_proofs.path_for("terminal")
+        assert_equal "frame\n", File.binread(store.log_archive.cold_path("terminal"))
+      end
+
+      assert File.file?(File.join(state_home, "attempts", "v2"))
+      assert File.directory?(File.join(state_home, "attempts", "v3"))
+    end
+  end
+
+  def test_explicit_custom_store_root_does_not_migrate
+    with_tmp_dir do |state_home|
+      custom = File.join(state_home, "custom-attempts")
+      with_env("HIVE_HOME" => state_home) do
+        assert_equal custom, Hive::Attempts::Store.new(root: custom).root
+      end
+      refute_path_exists File.join(state_home, "attempts")
+      refute_path_exists File.join(state_home, "recovery-migration-v4.json")
+    end
+  end
+
+  def test_open_default_uses_the_supplied_state_home
+    with_tmp_dir do |root|
+      state_home = File.join(root, "daemon-home")
+      store = Hive::Attempts::Store.open_default(state_home: state_home)
+
+      assert_equal File.join(state_home, "attempts", "v3"), store.root
+      assert_equal fence_payload, read_json(File.join(state_home, "attempts", "v2"))
+    end
+  end
+
+  def test_refuses_a_live_attempt_or_held_writer_lock
+    with_tmp_dir do |state_home|
+      write_v2_record(state_home, current_attempt(attempt_id: "live"))
       error = assert_raises(Hive::Recovery::Migration::Error) do
-        Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW)
+        migrate(state_home)
       end
-      assert_includes error.message, "receipt is invalid"
-    end
-  end
-
-  def test_wraps_a_malformed_attempt_parse_error
-    with_tmp_dir do |state_home|
-      records = File.join(state_home, "attempts", "v2", "records")
-      FileUtils.mkdir_p(records)
-      File.write(File.join(records, "malformed.json"), "{")
-
-      error = assert_raises(Hive::Recovery::Migration::Error) do
-        Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW)
-      end
-
-      assert_includes error.message, "recovery migration failed"
-      assert_includes error.message, "expected object key"
-    end
-  end
-
-  def test_rejects_a_non_attempt_record
-    with_tmp_dir do |state_home|
-      records = File.join(state_home, "attempts", "v2", "records")
-      FileUtils.mkdir_p(records)
-      write_json(
-        File.join(records, "other.json"),
-        { "schema" => "other-record", "schema_version" => 2 }
-      )
-
-      error = assert_raises(Hive::Recovery::Migration::Error) do
-        Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW)
-      end
-
-      assert_includes error.message, "is not a hive-attempt record"
-    end
-  end
-
-  def test_refuses_a_live_compatibility_record_already_in_the_current_root
-    with_tmp_dir do |state_home|
-      records = File.join(state_home, "attempts", "v2", "records")
-      FileUtils.mkdir_p(records)
-      write_json(
-        File.join(records, "compat-live.json"),
-        current_attempt(attempt_id: "compat-live").merge("compatibility" => true)
-      )
-
-      error = assert_raises(Hive::Recovery::Migration::Error) do
-        Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW)
-      end
-
-      assert_includes error.message, "live legacy compatibility attempt"
-    end
-  end
-
-  def test_rejects_an_unknown_attempt_schema_version
-    with_tmp_dir do |state_home|
-      records = File.join(state_home, "attempts", "v2", "records")
-      FileUtils.mkdir_p(records)
-      write_json(
-        File.join(records, "future.json"),
-        current_attempt(attempt_id: "future").merge("schema_version" => 99)
-      )
-
-      error = assert_raises(Hive::Recovery::Migration::Error) do
-        Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW)
-      end
-
-      assert_includes error.message, "unsupported attempt schema 99"
-    end
-  end
-
-  def test_tolerates_the_legacy_records_directory_disappearing_during_preflight
-    with_tmp_dir do |state_home|
-      FileUtils.mkdir_p(File.join(state_home, "attempts", "v1", "records"))
-
-      original = Dir.method(:children)
-      Dir.define_singleton_method(:children) { |*| raise Errno::ENOENT }
-      begin
-        result = Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW)
-      ensure
-        Dir.define_singleton_method(:children, original)
-      end
-
-      assert_equal 0, result.dig("attempts", "migrated")
+      assert_includes error.message, "live attempt live"
       assert_path_exists File.join(state_home, "attempts", "v2")
+      refute_path_exists File.join(state_home, "attempts", "v3")
+    end
+
+    with_tmp_dir do |state_home|
+      write_v2_record(state_home, lost_attempt(current_attempt(attempt_id: "lost")))
+      lock_path = File.join(state_home, "attempts", "v2", "generation-locks", "admission.lock")
+      FileUtils.mkdir_p(File.dirname(lock_path))
+      File.open(lock_path, File::RDWR | File::CREAT, 0o600) do |lock|
+        lock.flock(File::LOCK_EX)
+        error = assert_raises(Hive::Recovery::Migration::Error) { migrate(state_home) }
+        assert_includes error.message, "active attempt writer"
+      end
+      assert_path_exists File.join(state_home, "attempts", "v2", "records", "lost.json")
     end
   end
 
-  def test_tolerates_a_queue_directory_disappearing_during_enumeration
+  def test_refuses_mixed_roots_symlinks_and_fence_collisions
     with_tmp_dir do |state_home|
-      FileUtils.mkdir_p(File.join(state_home, "dispatch_requests"))
+      write_v2_record(state_home, lost_attempt(current_attempt(attempt_id: "old")))
+      current = File.join(state_home, "attempts", "v3", "records")
+      FileUtils.mkdir_p(current)
+      write_json(File.join(current, "current.json"), lost_attempt(current_attempt(attempt_id: "current")))
 
-      original = Dir.method(:children)
-      Dir.define_singleton_method(:children) { |*| raise Errno::ENOENT }
-      begin
-        result = Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW)
-      ensure
-        Dir.define_singleton_method(:children, original)
-      end
+      error = assert_raises(Hive::Recovery::Migration::Error) { migrate(state_home) }
+      assert_includes error.message, "both attempts/v2 and attempts/v3 contain material state"
+      assert_path_exists File.join(state_home, "attempts", "v2", "records", "old.json")
+      assert_path_exists File.join(current, "current.json")
+    end
 
-      assert_equal 0, result.dig("dispatch_requests", "migrated")
-      assert_path_exists File.join(state_home, "recovery-migration-v3.json")
+    with_tmp_dir do |state_home|
+      attempts = File.join(state_home, "attempts")
+      target = File.join(state_home, "target")
+      FileUtils.mkdir_p([ attempts, target ])
+      File.symlink(target, File.join(attempts, "v2"))
+      error = assert_raises(Hive::Recovery::Migration::Error) { migrate(state_home) }
+      assert_includes error.message, "fence is not a real regular file"
+      assert File.symlink?(File.join(attempts, "v2"))
+    end
+
+    with_tmp_dir do |state_home|
+      FileUtils.mkdir_p(File.join(state_home, "attempts", "v3"))
+      collision = File.join(state_home, "attempts", "v2")
+      File.binwrite(collision, "operator data")
+      File.chmod(0o600, collision)
+      error = assert_raises(Hive::Recovery::Migration::Error) { migrate(state_home) }
+      assert_includes error.message, "fence is invalid or colliding"
+      assert_equal "operator data", File.binread(File.join(state_home, "attempts", "v2"))
     end
   end
 
-  def test_refuses_to_overwrite_an_archived_compatibility_record
+  def test_prunes_an_empty_old_skeleton_and_normalizes_private_modes
     with_tmp_dir do |state_home|
-      records = File.join(state_home, "attempts", "v2", "records")
-      archive = File.join(state_home, "attempts", "legacy-v1-records")
-      FileUtils.mkdir_p(records)
-      FileUtils.mkdir_p(archive)
-      write_json(File.join(records, "compat.json"), final_compatibility_attempt)
-      write_json(File.join(archive, "compat.json"), final_compatibility_attempt)
+      current = File.join(state_home, "attempts", "v3")
+      FileUtils.mkdir_p(File.join(current, "records"))
+      FileUtils.mkdir_p(File.join(state_home, "attempts", "v2", "records"))
+      File.chmod(0o755, current)
+      File.chmod(0o755, File.join(current, "records"))
 
-      error = assert_raises(Hive::Recovery::Migration::Error) do
-        Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW)
+      migrate(state_home)
+
+      assert_equal fence_payload, read_json(File.join(state_home, "attempts", "v2"))
+      assert_equal 0o700, File.stat(current).mode & 0o777
+      assert_equal 0o700, File.stat(File.join(current, "records")).mode & 0o777
+    end
+  end
+
+  def test_rejects_old_attempt_record_schemas_without_rewriting_them
+    [ 1, 2 ].each do |version|
+      with_tmp_dir do |state_home|
+        data = current_attempt(attempt_id: "schema-#{version}").merge("schema_version" => version)
+        write_v2_record(state_home, data)
+
+        error = assert_raises(Hive::Recovery::Migration::Error) { migrate(state_home) }
+        assert_includes error.message, "only schema v3"
+        assert_equal version, read_json(
+          File.join(state_home, "attempts", "v2", "records", "schema-#{version}.json")
+        ).fetch("schema_version")
+      end
+    end
+  end
+
+  def test_keeps_unresolved_and_invalid_records_hot_but_promotes_resolved_history
+    with_tmp_dir do |state_home|
+      terminal = terminal_attempt(current_attempt(attempt_id: "terminal"))
+      unresolved = lost_attempt(current_attempt(attempt_id: "unresolved"))
+      resolved = lost_attempt(current_attempt(attempt_id: "resolved", generation: "lineage"))
+      successor = terminal_attempt(current_attempt(
+        attempt_id: "successor", generation: "lineage", predecessor_attempt_id: "resolved"
+      ), outcome: "failed", exit_status: 1)
+      [ terminal, unresolved, resolved, successor ].each { |record| write_v2_record(state_home, record) }
+      write_resolved_outcome(state_home, resolved, successor)
+      invalid = File.join(state_home, "attempts", "v2", "records", "invalid.json")
+      File.binwrite(invalid, "{")
+
+      migrate(state_home)
+      store = Hive::Attempts::Store.new(
+        root: File.join(state_home, "attempts", "v3"), create_directories: false
+      )
+
+      assert_nil store.fetch_hot("terminal")
+      assert_nil store.fetch_hot("resolved")
+      assert_nil store.fetch_hot("successor")
+      assert_equal "lost", store.fetch_hot("unresolved").state
+      assert_path_exists File.join(store.records_root, "invalid.json")
+      assert_equal 1, store.scan.invalid_records.size
+      %w[terminal resolved successor].each { |id| assert store.permanent_proofs.fetch(id) }
+    end
+  end
+
+  def test_small_deterministic_corpus_records_exact_parity_receipt
+    with_tmp_dir do |state_home|
+      48.times do |index|
+        id = format("attempt-%02d", index)
+        record = current_attempt(
+          attempt_id: id, generation: "generation-#{index % 12}",
+          accepted_at: NOW + index
+        )
+        record = if (index % 4).zero?
+          lost_attempt(record)
+        else
+          terminal_attempt(record, outcome: index.even? ? "failed" : "succeeded", exit_status: index.even? ? 1 : 0)
+        end
+        write_v2_record(state_home, record)
       end
 
-      assert_includes error.message, "legacy compatibility archive collision"
+      result = migrate(state_home)
+      checkpoint = read_json(File.join(state_home, "attempts", ".v3-cutover.json"))
+
+      assert_equal 48, result.dig("attempts", "source_count")
+      assert_operator result.dig("attempts", "decision_count"), :>, 0
+      assert_match(/\A[0-9a-f]{64}\z/, result.dig("attempts", "decision_digest"))
+      assert_equal result.dig("attempts", "decision_digest"), checkpoint.fetch("decision_digest")
+      assert_equal 12, result.dig("attempts", "hot")
+    end
+  end
+
+  def test_blocks_hot_removal_when_generated_indexes_do_not_match_the_scan
+    with_tmp_dir do |state_home|
+      write_v2_record(state_home, terminal_attempt(current_attempt(attempt_id: "terminal")))
+      original = Hive::Attempts::DecisionIndex.instance_method(:terminal_attempt_id)
+      with_replaced_instance_method(
+        Hive::Attempts::DecisionIndex, :terminal_attempt_id,
+        ->(**) { "wrong-attempt" }
+      ) do
+        error = assert_raises(Hive::Recovery::Migration::Error) { migrate(state_home) }
+        assert_includes error.message, "index parity mismatch"
+      end
+      Hive::Attempts::DecisionIndex.define_method(:terminal_attempt_id, original)
+
+      assert_path_exists File.join(state_home, "attempts", "v3", "records", "terminal.json")
+      refute_path_exists File.join(state_home, "recovery-migration-v4.json")
+    end
+  end
+
+  def test_crash_boundaries_resume_without_losing_the_source
+    %i[rename fence index proof log hot_removal].each do |boundary|
+      with_tmp_dir do |state_home|
+        write_v2_record(state_home, terminal_attempt(current_attempt(attempt_id: "terminal")))
+        inject_after(boundary, state_home) do
+          assert_raises(Hive::Recovery::Migration::Error) { migrate(state_home) }
+        end
+
+        result = migrate(state_home)
+        store = Hive::Attempts::Store.new(root: File.join(state_home, "attempts", "v3"))
+        assert_equal 1, result.dig("attempts", "source_count"), boundary
+        assert store.permanent_proofs.fetch("terminal"), boundary
+        assert_nil store.fetch_hot("terminal"), boundary
+        assert_equal fence_payload, read_json(File.join(state_home, "attempts", "v2")), boundary
+      rescue Hive::Recovery::Migration::Error => error
+        flunk "#{boundary}: #{error.message}"
+      end
+    end
+  end
+
+  def test_queue_schema_migration_remains_unchanged
+    with_tmp_dir do |state_home|
+      write_legacy_request(state_home)
+      write_legacy_result(state_home)
+
+      result = migrate(state_home)
+
+      assert_equal 1, result.dig("dispatch_requests", "migrated")
+      assert_equal 1, result.dig("dispatch_results", "migrated")
+      assert_equal 4, read_json(File.join(state_home, "dispatch_requests", "legacy.json"))["schema_version"]
+      assert_equal 2, read_json(File.join(state_home, "dispatch_results", "legacy.json"))["schema_version"]
     end
   end
 
   private
 
-  def current_attempt(attempt_id:)
+  def migrate(state_home)
+    Hive::Recovery::Migration.ensure!(state_home: state_home, now: NOW)
+  end
+
+  def fence_payload
+    { "schema" => "hive-attempt-layout-fence", "schema_version" => 1, "target" => "v3" }
+  end
+
+  def write_v2_record(state_home, data)
+    path = File.join(state_home, "attempts", "v2", "records", "#{data.fetch('attempt_id')}.json")
+    write_json(path, data)
+  end
+
+  def read_json(path)
+    JSON.parse(File.binread(path))
+  end
+
+  def write_json(path, data)
+    FileUtils.mkdir_p(File.dirname(path))
+    File.binwrite(path, JSON.generate(data) + "\n")
+  end
+
+  def current_attempt(attempt_id:, generation: nil, predecessor_attempt_id: nil, accepted_at: NOW)
     Hive::Attempts::Record.launching(
       attempt_id: attempt_id,
       request_id: "request-#{attempt_id}",
-      predecessor_attempt_id: nil,
+      predecessor_attempt_id: predecessor_attempt_id,
       task_id: "42",
       project: "demo",
       task_slug: "durable-task",
       intended_stage: "4-execute",
-      task_generation: "generation-#{attempt_id}",
+      task_generation: generation || "generation-#{attempt_id}",
       progress_token: "progress-#{attempt_id}",
       provider: "codex",
       worker_argv: [ "hive", "run", "durable-task" ],
@@ -425,129 +326,125 @@ class RecoveryMigrationTest < Minitest::Test
       retry_charge: 0,
       inherited_outputs: [],
       launch_timeout_sec: 30,
-      now: NOW
+      now: accepted_at
     ).to_h
-  end
-
-  def legacy_v1_attempt
-    terminal_attempt(current_attempt(attempt_id: "v1")).merge(
-      "schema_version" => 1,
-      "compatibility" => false
-    ).tap do |data|
-      data.delete("subject")
-      data.delete("ownership_generation")
-      data.delete("task_input_epoch")
-      data.fetch("receipt").delete("ownership_generation")
-      data.fetch("receipt").delete("task_input_epoch")
-    end
-  end
-
-  def legacy_v2_attempt(attempt_id)
-    current_attempt(attempt_id: attempt_id).merge("schema_version" => 2).tap do |data|
-      data.delete("subject")
-    end
-  end
-
-  def final_compatibility_attempt
-    lost_attempt(current_attempt(attempt_id: "compat")).merge(
-      "compatibility" => true,
-      "worker_argv" => [],
-      "claim_capability_digest" => nil
-    )
   end
 
   def lost_attempt(data)
     data.merge(
-      "state" => "lost",
-      "claim_deadline" => nil,
+      "state" => "lost", "claim_deadline" => nil,
       "ended_at" => NOW.iso8601(6),
       "loss" => { "reason" => "owner_gone", "at" => NOW.iso8601(6) }
     )
   end
 
-  def terminal_attempt(data)
+  def terminal_attempt(data, outcome: "succeeded", exit_status: 0)
     checkpoint = { "progress_token" => data.fetch("progress_token") }
     log_reference = {
-      "path" => "logs/#{data.fetch('attempt_id')}.frames",
-      "size" => 4,
-      "sha256" => "1" * 64
+      "path" => "logs/#{data.fetch('attempt_id')}.frames", "size" => 4, "sha256" => "1" * 64
     }
     receipt = {
       "attempt_id" => data.fetch("attempt_id"),
       "task_generation" => data.fetch("task_generation"),
       "ownership_generation" => data.fetch("ownership_generation"),
       "task_input_epoch" => data.fetch("task_input_epoch"),
-      "outcome" => "succeeded",
-      "exit_status" => 0,
-      "started_at" => NOW.iso8601(6),
-      "ended_at" => (NOW + 5).iso8601(6),
-      "final_checkpoint" => checkpoint,
-      "output_references" => [],
+      "outcome" => outcome, "exit_status" => exit_status,
+      "started_at" => NOW.iso8601(6), "ended_at" => (NOW + 5).iso8601(6),
+      "final_checkpoint" => checkpoint, "output_references" => [],
       "log_reference" => log_reference
     }
     data.merge(
-      "state" => "terminal",
-      "outcome" => "succeeded",
-      "claim_deadline" => nil,
-      "started_at" => NOW.iso8601(6),
-      "ended_at" => (NOW + 5).iso8601(6),
-      "checkpoint" => checkpoint,
-      "log_reference" => log_reference,
-      "receipt" => receipt
+      "state" => "terminal", "outcome" => outcome, "claim_deadline" => nil,
+      "started_at" => NOW.iso8601(6), "ended_at" => (NOW + 5).iso8601(6),
+      "checkpoint" => checkpoint, "log_reference" => log_reference, "receipt" => receipt
     )
+  end
+
+  def write_resolved_outcome(state_home, lost, successor)
+    path = File.join(
+      state_home, "attempts", "v2", "outputs", lost.fetch("attempt_id"), "lost-outcome.json"
+    )
+    write_json(path, {
+      "status" => "successor_dispatched", "cleanup" => "absent",
+      "successor_attempt_id" => successor.fetch("attempt_id")
+    })
+  end
+
+  def with_replaced_instance_method(klass, name, replacement)
+    original = klass.instance_method(name)
+    klass.define_method(name, replacement)
+    yield
+  ensure
+    klass.define_method(name, original)
+  end
+
+  def inject_after(boundary, state_home, &block)
+    case boundary
+    when :rename
+      original = File.method(:rename)
+      source = File.join(state_home, "attempts", "v2")
+      target = File.join(state_home, "attempts", "v3")
+      with_replaced_singleton_method(File, :rename, lambda { |from, to|
+        result = original.call(from, to)
+        raise IOError, "injected rename crash" if from == source && to == target
+        result
+      }, &block)
+    when :fence
+      original = Hive::AtomicFile.method(:write)
+      fence = File.join(state_home, "attempts", "v2")
+      with_replaced_singleton_method(Hive::AtomicFile, :write, lambda { |path, *args, **kwargs|
+        result = original.call(path, *args, **kwargs)
+        raise IOError, "injected fence crash" if path == fence
+        result
+      }, &block)
+    when :index
+      original = Hive::Attempts::DecisionIndex.instance_method(:record_terminal)
+      fired = false
+      with_replaced_instance_method(Hive::Attempts::DecisionIndex, :record_terminal, lambda { |record|
+        result = original.bind_call(self, record)
+        unless fired
+          fired = true
+          raise Hive::Attempts::StoreError, "injected index crash"
+        end
+        result
+      }, &block)
+    when :proof
+      inject_instance_after(Hive::Attempts::PermanentProofStore, :publish, &block)
+    when :log
+      inject_instance_after(Hive::Attempts::LogArchive, :archive, &block)
+    when :hot_removal
+      inject_instance_after(Hive::Attempts::Store, :remove_hot_final, &block)
+    end
+  end
+
+  def inject_instance_after(klass, name)
+    original = klass.instance_method(name)
+    fired = false
+    with_replaced_instance_method(klass, name, lambda { |*args, **kwargs|
+      result = original.bind_call(self, *args, **kwargs)
+      unless fired
+        fired = true
+        raise Hive::Attempts::StoreError, "injected #{name} crash"
+      end
+      result
+    }) { yield }
   end
 
   def write_legacy_request(state_home)
-    root = File.join(state_home, "dispatch_requests")
-    FileUtils.mkdir_p(root)
-    write_json(
-      File.join(root, "legacy.json"),
-      {
-        "schema" => "hive-dispatch-request",
-        "schema_version" => 2,
-        "request_id" => "legacy-request",
-        "created_at" => NOW.iso8601(6),
-        "project" => "demo",
-        "slug" => "durable-task",
-        "argv" => [ "hive", "run", "durable-task" ],
-        "requestor" => "healer",
-        "chat_id" => nil,
-        "update_id" => nil,
-        "trigger" => "retry"
-      }
-    )
+    write_json(File.join(state_home, "dispatch_requests", "legacy.json"), {
+      "schema" => "hive-dispatch-request", "schema_version" => 2,
+      "request_id" => "legacy-request", "created_at" => NOW.iso8601(6),
+      "project" => "demo", "slug" => "durable-task",
+      "argv" => [ "hive", "run", "durable-task" ], "requestor" => "healer",
+      "chat_id" => nil, "update_id" => nil, "trigger" => "retry"
+    })
   end
 
   def write_legacy_result(state_home)
-    root = File.join(state_home, "dispatch_results")
-    FileUtils.mkdir_p(root)
-    write_json(
-      File.join(root, "legacy.json"),
-      {
-        "schema" => "hive-dispatch-result",
-        "schema_version" => 1,
-        "result_id" => "abcd1234",
-        "created_at" => NOW.iso8601,
-        "chat_id" => 42,
-        "project" => "demo",
-        "slug" => "durable-task",
-        "request_id" => "legacy-request",
-        "exit_code" => 1,
-        "command" => "hive run durable-task"
-      }
-    )
-  end
-
-  def write_json(path, data)
-    File.write(path, JSON.generate(data))
-  end
-
-  def owner
-    {
-      "pid" => Process.pid,
-      "start_fingerprint" => "start",
-      "session_id" => Process.getsid(0),
-      "process_group_id" => Process.getpgrp
-    }
+    write_json(File.join(state_home, "dispatch_results", "legacy.json"), {
+      "schema" => "hive-dispatch-result", "schema_version" => 1,
+      "request_id" => "legacy-request", "completed_at" => NOW.iso8601(6),
+      "status" => "accepted", "reason" => nil
+    })
   end
 end

@@ -26,6 +26,7 @@ require "hive/commands/patrol"
 require "hive/commands/refactor_patrol"
 require "hive/commands/pairing"
 require "hive/commands/answer_digest"
+require "hive/commands/answer"
 require "hive/commands/markers"
 require "hive/commands/daemon"
 require "hive/commands/bot"
@@ -811,6 +812,15 @@ class HiveCliTest < Minitest::Test
       Hive::CLI.start([ "answer-digest", "--date", "2026-06-27", "--dry-run", "--json" ])
       assert_equal [], calls.first.fetch(:args)
       assert_equal({ date: "2026-06-27", json: true, dry_run: true }, calls.first.fetch(:kwargs))
+    end
+
+    with_command_new_stub(Hive::Commands::Answer) do |calls|
+      Hive::CLI.start([
+        "answer", "task-1", "--project", "demo", "--binding", "opaque-token", "--json"
+      ])
+      assert_equal [ "task-1" ], calls.first.fetch(:args)
+      assert_equal({ project: "demo", binding: "opaque-token", json: true }, calls.first.fetch(:kwargs))
+      assert_equal :call, calls.last
     end
 
     with_command_new_stub(Hive::Commands::Markers) do |calls|

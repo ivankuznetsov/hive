@@ -83,6 +83,45 @@ module Hive
         result
       end
 
+      # Exact-slot counterpart used by the identity-bound CLI. The caller must
+      # already hold this task's lock; keeping lock acquisition outside this
+      # method lets identity, stage, generation, and fingerprint validation live
+      # in the same critical section as the atomic write.
+      #
+      # Ordinals are one-based physical document positions, so a later round's
+      # Q1 can be selected without first filling an earlier round's Q1.
+      def write_at_ordinal_under_lock!(brainstorm_path:, ordinal:, answer_text:)
+        ordinal = Integer(ordinal)
+        return :question_not_found unless ordinal.positive?
+
+        content = File.read(brainstorm_path, encoding: "UTF-8")
+        parsed = Hive::Bot::BrainstormParser.parse_text(content)
+        target = parsed[ordinal - 1]
+        return :question_not_found unless target
+        return :already_answered if target.answered?
+
+        lines = content.lines
+        question_line_index = question_line_index_for_ordinal(lines, ordinal)
+        return :question_not_found unless question_line_index
+
+        slot = find_empty_answer_slot_after(lines, question_line_index)
+        new_lines = if slot
+          fill_answer_slot(lines, slot, answer_text, content)
+        else
+          insert_answer_slot_after(
+            lines, question_line_index, target.n, answer_text, content
+          )
+        end
+        return :answer_slot_missing unless new_lines
+
+        Hive::Markers.write_atomic(brainstorm_path, new_lines.join)
+        :written
+      rescue ArgumentError, TypeError
+        :question_not_found
+      rescue Errno::ENOENT
+        :question_not_found
+      end
+
       # Returns [result_symbol, holder_metadata_or_nil].
       #
       # Result symbol is the terminal RESULTS value when the write was
@@ -157,6 +196,11 @@ module Hive
         q_idx = target_question_line_index(lines, parsed, question_n)
         return nil unless q_idx
 
+        insert_answer_slot_after(lines, q_idx, question_n, answer_text, content)
+      end
+      private_class_method :insert_answer_slot
+
+      def insert_answer_slot_after(lines, q_idx, question_n, answer_text, content)
         newline = newline_for(content)
         insert_idx = q_idx + 1
         insert_idx += 1 while insert_idx < lines.length && !block_boundary?(lines[insert_idx])
@@ -170,7 +214,7 @@ module Hive
                      answer_body(answer_text, newline).lines
         lines[0...insert_idx] + slot_lines + lines[insert_idx..].to_a
       end
-      private_class_method :insert_answer_slot
+      private_class_method :insert_answer_slot_after
 
       # Locate the empty A-section to fill for question_n. Q-context-
       # aware: walks forward from the Q{n} header that the parser
@@ -194,6 +238,11 @@ module Hive
         q_idx = target_question_line_index(lines, parsed, question_n)
         return nil unless q_idx
 
+        find_empty_answer_slot_after(lines, q_idx)
+      end
+      private_class_method :find_empty_answer_slot
+
+      def find_empty_answer_slot_after(lines, q_idx)
         scan = q_idx + 1
         while scan < lines.length
           stripped = lines[scan].chomp
@@ -204,7 +253,19 @@ module Hive
         end
         nil
       end
-      private_class_method :find_empty_answer_slot
+      private_class_method :find_empty_answer_slot_after
+
+      def question_line_index_for_ordinal(lines, ordinal)
+        seen = 0
+        lines.each_with_index do |line, idx|
+          next unless QUESTION_RE.match?(line.chomp)
+
+          seen += 1
+          return idx if seen == ordinal
+        end
+        nil
+      end
+      private_class_method :question_line_index_for_ordinal
 
       # Map the parser's view of "first unanswered Q with this number"
       # back to a line index in the raw file. Multiple Q{n} can exist

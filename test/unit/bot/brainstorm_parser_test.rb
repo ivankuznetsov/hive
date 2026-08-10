@@ -162,7 +162,7 @@ class HiveBotBrainstormParserTest < Minitest::Test
     assert_nil question.round
   end
 
-  def test_questions_are_sorted_by_round_and_number
+  def test_questions_preserve_physical_document_order
     text = <<~MARKDOWN
       ## Round 2
 
@@ -177,8 +177,18 @@ class HiveBotBrainstormParserTest < Minitest::Test
 
     questions = Hive::Bot::BrainstormParser.parse_text(text)
 
-    assert_equal [ 2, 3 ], questions.map(&:n)
-    assert_equal 2, Hive::Bot::BrainstormParser.next_unanswered_question(questions).n
+    assert_equal [ 3, 2 ], questions.map(&:n)
+    assert_equal 3, Hive::Bot::BrainstormParser.next_unanswered_question(questions).n
+  end
+
+  def test_question_fingerprint_normalizes_unicode_and_layout_but_not_wording
+    compact = Hive::BrainstormParser.question_fingerprint("Use the café path?")
+    reformatted = Hive::BrainstormParser.question_fingerprint("  Use\tthe cafe\u0301\npath?  ")
+    changed = Hive::BrainstormParser.question_fingerprint("Use the other café path?")
+
+    assert_equal compact, reformatted
+    refute_equal compact, changed
+    assert_match(/\A[0-9a-f]{64}\z/, compact)
   end
 
   def test_unanswered_questions_and_question_lookup_helpers

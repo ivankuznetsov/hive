@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "digest"
+
 module Hive
   # Pure parser for the brainstorm Q&A file format (`brainstorm.md`):
   # `## Round N` sections containing `### Q{n}.` / `### A{n}.` pairs.
@@ -95,7 +97,11 @@ module Hive
       end
 
       finalize(questions, current)
-      questions.sort_by { |question| [ question.round || 0, question.n ] }
+      # Preserve the file's physical order. Question numbers restart between
+      # rounds and malformed-but-recoverable files can contain non-monotonic
+      # numbering; callers that bind a user reply need the actual document
+      # position rather than a synthetic sort order.
+      questions
     end
 
     def next_unanswered_question(parsed)
@@ -108,6 +114,21 @@ module Hive
 
     def question_for(parsed, question_n)
       parsed.find { |question| question.n == question_n }
+    end
+
+    # Normalize layout-only differences before binding a presented question to
+    # a durable fingerprint. NFKC closes canonically-equivalent Unicode forms;
+    # whitespace collapsing lets harmless markdown reflow relocate a reply.
+    # Wording and case remain significant so a materially edited question fails
+    # closed instead of receiving a stale answer.
+    def normalize_question_text(text)
+      text.to_s.scrub.unicode_normalize(:nfkc).gsub(/[[:space:]]+/, " ").strip
+    end
+
+    def question_fingerprint(text)
+      Digest::SHA256.hexdigest(
+        [ "hive-brainstorm-question-v1", normalize_question_text(text) ].join("\0")
+      )
     end
 
     # Canonical heading strings. Centralized here so supervisor copy,

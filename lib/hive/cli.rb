@@ -997,6 +997,39 @@ module Hive
       ).call
     end
 
+    desc "answer TARGET", "Inventory or persist one identity-bound brainstorm answer"
+    long_desc <<~DESC, wrap: false
+      With no --binding, reads TARGET at 2-brainstorm and returns every question
+      slot in physical document order. Each slot includes its task-local ordinal,
+      round, source question number, answered state, normalized fingerprint, and
+      opaque binding. This inventory path is read-only and publishes no task lock.
+
+      With --binding TOKEN, reads the final literal answer from stdin, re-resolves
+      the exact project/task/stage/generation under a creation-disabled task lock,
+      and writes only the bound slot. A renumbered slot relocates only when exactly
+      one unanswered normalized-text fingerprint matches. Stale, ambiguous,
+      conflicting, idempotent, and lock-busy outcomes are closed JSON values.
+
+      The command never recommends an answer and never dispatches or advances a
+      stage. Callers should take a fresh status snapshot after a successful write
+      and leave advancement to normal Hive/daemon policy.
+
+      Examples:
+        hive answer TASK --project PROJECT --json
+        printf '%s' "$ANSWER" | hive answer TASK --project PROJECT --binding TOKEN --json
+    DESC
+    option :project, type: :string, desc: "scope task lookup to one registered project"
+    option :binding, type: :string, desc: "opaque slot binding returned by a fresh inventory"
+    def answer(target)
+      require "hive/commands/answer"
+      Hive::Commands::Answer.new(
+        target,
+        project: options[:project],
+        binding: options[:binding],
+        json: options[:json]
+      ).call
+    end
+
     desc "answer-digest", "Send a daily digest of tasks waiting on human input"
     # wrap: false so the Examples / Exit codes blocks keep their line breaks.
     long_desc <<~DESC, wrap: false
@@ -1023,10 +1056,9 @@ module Hive
       it purely to READ the waiting set (count / tasks[]). Omitting --dry-run
       SENDS a Telegram message as a side effect.
 
-      There is no `hive answer` verb for the brainstorm "answer" button an agent
-      sees as an answer-waiting task: to clear one, an agent fills the matching
-      `### A` slot in that task's brainstorm.md — the same edit the bot/web
-      "Answer" button performs via BrainstormAnswerWriter.
+      To persist an exact brainstorm answer safely, use the separate `hive answer`
+      inventory/binding command. Native bot/web Answer buttons remain literal
+      surfaces backed by BrainstormAnswerWriter.
 
       Examples:
         hive answer-digest

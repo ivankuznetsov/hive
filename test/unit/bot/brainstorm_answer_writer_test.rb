@@ -312,6 +312,31 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
     end
   end
 
+  def test_write_at_ordinal_under_existing_lock_targets_later_same_number
+    content = <<~MARKDOWN
+      ## Round 1
+      ### Q1. Earlier?
+      ### A1.
+      ## Round 2
+      ### Q1. Later?
+      ### A1.
+      <!-- WAITING -->
+    MARKDOWN
+
+    with_brainstorm(content) do |path|
+      result = Hive::Lock.with_task_lock(File.dirname(path), op: "test") do
+        Hive::Bot::BrainstormAnswerWriter.write_at_ordinal_under_lock!(
+          brainstorm_path: path, ordinal: 2, answer_text: "later only"
+        )
+      end
+
+      assert_equal :written, result
+      parsed = Hive::BrainstormParser.parse(path)
+      assert_nil parsed.fetch(0).answer
+      assert_equal "later only", parsed.fetch(1).answer
+    end
+  end
+
   # Boundary coverage (#269): the slot-creation scan must STOP at a
   # `## Round N` header before any A-line — the created A1 slot belongs to
   # Round 1's Q1, so it is inserted BEFORE the Round 2 boundary, never

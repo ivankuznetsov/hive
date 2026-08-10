@@ -92,6 +92,10 @@ module Hive
       # error envelope via JSON_USAGE_ERROR_CONTRACTS, and a bad --date / status
       # outage emit the in-command error envelope.
       "hive-answer-digest" => 1,
+      # Exact-slot brainstorm inventory/write boundary used by canonical-skill
+      # conversations. Bindings are revalidated under a creation-disabled task
+      # lock; the command never advances a workflow stage.
+      "hive-answer" => 1,
       "hive-bot-status" => 1,
       "hive-bot-stop" => 1,
       "hive-bot-reload" => 1,

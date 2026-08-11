@@ -63,12 +63,12 @@ class E2ECoverageCatalogTest < Minitest::Test
   end
 
   def test_checked_in_catalog_maps_every_scenario_once_and_release_profile_is_runnable
-    assert_equal 24, catalog.entries.size
+    assert_equal 25, catalog.entries.size
     assert_equal scenarios.map(&:name).sort, catalog.primary_scenarios.map(&:name).sort
 
     selection = catalog.select_profile("release")
-    assert_equal 21, selection.fetch("coverage_ids").size
-    assert_equal 21, selection.fetch("scenarios").size
+    assert_equal 22, selection.fetch("coverage_ids").size
+    assert_equal 22, selection.fetch("scenarios").size
     assert_equal 3, selection.fetch("planned").size
   end
 
@@ -77,7 +77,7 @@ class E2ECoverageCatalogTest < Minitest::Test
 
     assert_same checked, checked.validate!
     assert_equal scenarios.map(&:name).sort, checked.primary_scenarios.map(&:name).sort
-    assert_equal 21, checked.select_profile("release").fetch("scenarios").size
+    assert_equal 22, checked.select_profile("release").fetch("scenarios").size
   end
 
   def test_exact_id_wins_and_substring_results_are_lexical

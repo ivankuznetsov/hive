@@ -85,8 +85,9 @@ steps:
     timeout: 5
 
   - kind: ruby_block
-    description: The immutable trusted receipt is durable and no retry request exists before the daemon owns health consumption and recovery.
+    description: The immutable trusted receipt is durable, no retry exists before daemon ownership, and the fixture advances only the persisted cooldown clock.
     block: |
+      require "hive/agent_limit"
       require "hive/attempts/store"
       require "hive/daemon/dispatch_request_queue"
 
@@ -101,6 +102,10 @@ steps:
       raise "initial attempt consumed a retry charge" unless first["retry_charge"] == 0
       raise "unsafe or wrong evidence was persisted" unless evidence.fetch("failure_class") == "account_quota" && evidence.dig("scope", "kind") == "provider_account"
       raise "recovery request existed before daemon ownership" unless Hive::Daemon::DispatchRequestQueue.pending(state_home: run_home).empty?
+
+      state_file = File.join(sandbox, ".hive-state", "stages", "4-execute", slug, "task.md")
+      eligible_at = Time.now - Hive::AgentLimit.retry_cooldown_sec - 1
+      File.utime(eligible_at, eligible_at, state_file)
 
   - kind: spawn_background
     id: daemon
@@ -208,61 +213,3 @@ steps:
       scopes.except("claude-provider").each do |name, inspection|
         raise "#{name} circuit changed unexpectedly" unless inspection.generation == 0 && inspection.circuit.automatic_state == "closed"
       end
-
-  - kind: ruby_block
-    description: Exercise the durable AE2-AE8 restart, probe, strict-pin, capacity, exhaustion, operator, corruption, and one-route matrix inside the incident sandbox.
-    block: |
-      require File.expand_path("../lib/provider_routing_incident_matrix", __dir__)
-      Hive::E2E::ProviderRoutingIncidentMatrix.new(
-        root: File.join(run_home, "provider-routing-incident-matrix")
-      ).run!
-
-  - kind: ruby_block
-    description: Run a second real no-pool task through the established legacy limits_reached path without changing the scenario's primary task identity.
-    block: |
-      require "hive/provider_health"
-      require "hive/daemon/dispatch_request_queue"
-
-      before = Dir.glob(File.join(sandbox, ".hive-state", "stages", "1-inbox", "*"))
-      created = @cli.call(
-        ["new", File.basename(sandbox), "legacy provider limit characterization"]
-      )
-      raise "legacy fixture task creation failed: #{created.stderr}" unless created.exit_code == 0
-      after = Dir.glob(File.join(sandbox, ".hive-state", "stages", "1-inbox", "*"))
-      added = after - before
-      raise "expected one legacy fixture task, got #{added.size}" unless added.size == 1
-      legacy_slug = File.basename(added.fetch(0))
-
-      inbox = added.fetch(0)
-      plan = File.join(sandbox, ".hive-state", "stages", "3-plan", legacy_slug)
-      FileUtils.mkdir_p(File.dirname(plan))
-      FileUtils.mv(inbox, plan)
-      File.write(File.join(plan, "plan.md"), "# Plan\n\nCharacterize the legacy limit path.\n\n<!-- COMPLETE -->\n")
-
-      project_path = File.join(sandbox, ".hive-state", "config.yml")
-      project = YAML.safe_load(File.read(project_path)) || {}
-      project.fetch("execute").delete("routing")
-      File.write(project_path, project.to_yaml)
-
-      @cli.call(
-        ["develop", legacy_slug, "--from", "3-plan"],
-        expect_exit: nil,
-        env_overrides: {
-          "HIVE_FAKE_CLAUDE_OUTPUT" => "You've hit your usage limit. Try again later.",
-          "HIVE_FAKE_CLAUDE_EXIT" => "1"
-        }
-      )
-      legacy_state = File.join(
-        sandbox, ".hive-state", "stages", "4-execute", legacy_slug, "task.md"
-      )
-      body = File.binread(legacy_state)
-      raise "legacy provider limit lost limits_reached marker" unless body.include?("reason=limits_reached")
-
-      health = Hive::ProviderHealth.open(root: File.join(run_home, "provider-health", "v1"))
-      codex = health.inspect_scope(
-        Hive::ProviderHealth::Scope.provider_account(account_id: "claude-a")
-      )
-      raise "legacy failure mutated the existing routed circuit" unless codex.generation == 1
-      requests = Hive::Daemon::DispatchRequestQueue.pending(state_home: run_home)
-      legacy_requests = requests.select { |request| request.slug == legacy_slug }
-      raise "legacy limit created a markerless routed recovery" unless legacy_requests.empty?

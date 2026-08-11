@@ -1,0 +1,62 @@
+name: provider_routing_durable_matrix
+description: Proves the durable AE2-AE8 provider-routing matrix and isolates the legacy no-pool subscription-limit path from provider health.
+tags: [provider-routing]
+coverage:
+  primary: routing.provider_health_durability
+  supporting: []
+
+steps:
+  - kind: cli
+    args: [new, "{project}", "legacy provider limit isolation"]
+
+  - kind: ruby_block
+    description: Exercise durable restart, probe, strict-pin, capacity, exhaustion, operator, corruption, and implicit-versus-explicit one-route behavior.
+    block: |
+      require File.expand_path("../lib/provider_routing_incident_matrix", __dir__)
+      Hive::E2E::ProviderRoutingIncidentMatrix.new(
+        root: File.join(run_home, "provider-routing-incident-matrix")
+      ).run!
+
+  - kind: ruby_block
+    description: Seed a real implementation-ready task while explicitly preserving legacy no-pool execution.
+    block: |
+      inbox = File.join(sandbox, ".hive-state", "stages", "1-inbox", slug)
+      plan = File.join(sandbox, ".hive-state", "stages", "3-plan", slug)
+      FileUtils.mkdir_p(File.dirname(plan))
+      FileUtils.mv(inbox, plan)
+      File.write(
+        File.join(plan, "plan.md"),
+        "# Plan\n\nCharacterize the legacy subscription-limit path.\n\n<!-- COMPLETE -->\n"
+      )
+
+      project_path = File.join(sandbox, ".hive-state", "config.yml")
+      project = YAML.safe_load(File.read(project_path)) || {}
+      project.fetch("execute").delete("routing")
+      File.write(project_path, project.to_yaml)
+
+  - kind: cli
+    description: The no-pool path retains its established task-local limits_reached behavior.
+    args: [develop, "{slug}", --from, 3-plan]
+    expect_exit: null
+    env:
+      HIVE_FAKE_CLAUDE_OUTPUT: "You've hit your usage limit. Try again later."
+      HIVE_FAKE_CLAUDE_EXIT: "1"
+
+  - kind: state_assert
+    path: "{task_dir:4-execute}/task.md"
+    contains: "reason=limits_reached"
+
+  - kind: ruby_block
+    description: Legacy task-local failure creates neither provider-health evidence nor a routed recovery request.
+    block: |
+      require "hive/daemon/dispatch_request_queue"
+
+      health_root = File.join(run_home, "provider-health", "v1")
+      durable_health_files = Dir.glob(
+        File.join(health_root, "**", "*"), File::FNM_DOTMATCH
+      ).select { |path| File.file?(path) }
+      raise "legacy limit mutated provider health: #{durable_health_files.inspect}" unless durable_health_files.empty?
+
+      requests = Hive::Daemon::DispatchRequestQueue.pending(state_home: run_home)
+      legacy_requests = requests.select { |request| request.slug == slug }
+      raise "legacy limit created a markerless routed recovery" unless legacy_requests.empty?

@@ -60,6 +60,34 @@ class ProviderHealthReplayTest < Minitest::Test
     assert_equal 0, unavailable.corruption_token.last_verified_generation
   end
 
+  def test_duplicate_identity_corruption_preserves_only_the_verified_prefix
+    open_scope(provider_scope, evidence(provider_scope))
+    @store.block(
+      scope: provider_scope,
+      expected_generation: 1,
+      actor: "uid:1000",
+      reason: "planned maintenance"
+    )
+    path = journal_file(provider_scope)
+    events = File.readlines(path).map { |line| JSON.parse(line) }
+    events.fetch(1)["idempotency_key"] = events.fetch(0).fetch("idempotency_key")
+    File.binwrite(path, events.map { |event| "#{JSON.generate(event)}\n" }.join)
+
+    unavailable = store.inspect_scope(provider_scope)
+
+    assert unavailable.unavailable?
+    assert_equal 1, unavailable.corruption_token.last_verified_generation
+
+    repaired = store.reset(
+      scope: provider_scope,
+      corruption_token: unavailable.corruption_token,
+      actor: "uid:1000",
+      reason: "repair duplicate journal identity"
+    )
+    assert_equal 2, repaired.generation
+    refute repaired.current.blocked?
+  end
+
   def test_corruption_token_reset_quarantines_exact_bytes_preserves_block_and_fences_old_token
     unrelated_before = store.inspect_scope(model_scope).circuit.to_h
     blocked = @store.block(

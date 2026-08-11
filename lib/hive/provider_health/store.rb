@@ -498,6 +498,8 @@ module Hive
         end
 
         events = []
+        event_ids = {}
+        idempotency_keys = {}
         circuit = nil
         bytes.each_line.with_index(1) do |line, sequence|
           begin
@@ -505,6 +507,10 @@ module Hive
             event = Event.from_h(data)
             raise Unavailable, "scope mismatch" unless event.scope == scope
             raise Unavailable, "sequence gap" unless event.sequence == sequence
+            if events.length >= MAX_JOURNAL_EVENTS || event_ids.key?(event.event_id) ||
+               idempotency_keys.key?(event.idempotency_key)
+              raise Unavailable, "duplicate or excessive journal event"
+            end
             if circuit.nil?
               if event.kind != "reset" && (event.journal_epoch != 0 || event.previous_generation != 0)
                 raise Unavailable, "invalid journal genesis"
@@ -517,6 +523,8 @@ module Hive
             end
             circuit = event.apply(circuit)
             events << event
+            event_ids[event.event_id] = true
+            idempotency_keys[event.idempotency_key] = true
           rescue JSON::ParserError, Error, KeyError, TypeError, ArgumentError
             raise JournalCorruption.new(
               scope: scope,
@@ -524,15 +532,6 @@ module Hive
               last_circuit: circuit || Circuit.closed(scope: scope)
             )
           end
-        end
-        if events.length > MAX_JOURNAL_EVENTS ||
-           events.map(&:event_id).uniq.length != events.length ||
-           events.map(&:idempotency_key).uniq.length != events.length
-          raise JournalCorruption.new(
-            scope: scope,
-            bytes: original,
-            last_circuit: circuit || Circuit.closed(scope: scope)
-          )
         end
         circuit ||= Circuit.closed(scope: scope)
         replay = Replay.new(

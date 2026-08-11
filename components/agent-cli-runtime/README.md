@@ -73,6 +73,9 @@ profile = AgentCliRuntime::Profile.new(
   min_version: "1.2.0",
   prompt_style: :stdin,
   read_only_flags: ["--sandbox", "read-only"],
+  credential_environment_keys: ["ACME_API_KEY", "ACME_OAUTH_TOKEN"],
+  configuration_environment_key: "ACME_HOME",
+  default_configuration_directory: ".acme",
   cli_capabilities: {
     safe_mode: ["--safe-mode"]
   },
@@ -97,6 +100,13 @@ AgentCliRuntime.compile(request)
 Custom capability names cannot shadow the standard capability vocabulary.
 Capability checks use discrete argv, inspect the installed CLI's help, and
 fail closed when a declared option is not advertised.
+`credential_environment_keys` is an immutable compatibility inventory for
+orchestrators that isolate a named CLI session; it contains variable names,
+never their values.
+`configuration_environment_key` and `default_configuration_directory` describe
+where the CLI owns its subscription/session state. `configuration_directory`
+resolves that location from a caller-supplied home and environment without
+reading credentials or deciding authentication policy.
 
 ## Inspect local prerequisites
 
@@ -154,7 +164,10 @@ result.usage  # => the normalized usage hash
 
 Malformed or unrelated events return `nil` from `extract_usage`; they do not
 invent zero-token usage. `observe` returns a frozen
-`AgentCliRuntime::ObservableResult` with bounded, redacted diagnostics.
+`AgentCliRuntime::ObservableResult` with bounded, redacted diagnostics. A
+trusted caller may also supply an already-normalized `provider_signal`; the
+runtime carries that optional immutable value but does not classify failures or
+own provider-health policy.
 
 ## Compatibility
 

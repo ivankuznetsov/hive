@@ -154,7 +154,7 @@ class HiveCommandsDaemonTest < Minitest::Test
     attempts_api = captured.fetch(:attempt_dispatcher)
     assert_instance_of Hive::Attempts::API, attempts_api
     assert_equal(
-      File.join(@home, "attempts", "v3"),
+      File.join(@home, "attempts", "v4"),
       attempts_api.instance_variable_get(:@store).root
     )
     assert File.file?(File.join(@home, "attempts", "v2")),

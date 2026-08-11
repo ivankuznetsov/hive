@@ -47,7 +47,7 @@ Valid snapshots keep polling cheap. See [[modules/conditions]].
 | `Hive::Conditions::AttemptObserver` | `lib/hive/conditions/attempt_observer.rb` | Observes reconciled terminal/lost durable attempts. For coding execute attempts it idempotently journals the current `AgentHealthy` fact and rebuilds the projection: only a terminal `succeeded` receipt is satisfied; failed/cancelled/lost outcomes fail closed. Confirmed deliveries are memoized in-process before task lookup/journal parsing; restart rechecks the durable journal once. |
 | `Hive::Daemon::Dispatcher` | `lib/hive/daemon/dispatcher.rb` | The poll-classify-dispatch loop. Glues all of the above. Public `tick(now:)` for tests, `run_forever` for production with TERM/INT/HUP signal traps. |
 | `Hive::Daemon::Logger` | `lib/hive/daemon/logger.rb` | One-JSON-line-per-event structured logger. Closed event enum (unknown name raises). Size-rotated. |
-| `Hive::Daemon::RecoveryCoordinator` | `lib/hive/daemon/recovery_coordinator.rb` | Sole destructive authority for `ERROR`, `REVIEW_ERROR`, `REVIEW_STALE`, and `REVIEW_CI_STALE` recovery. It re-resolves task identity under the task lock, rechecks cooldown and safety, persists a generation-bound v4 request before clearing, and resumes `admitted → cleared → dispatched → terminal` after restart. User-facing adapters only submit observations and render its receipt. |
+| `Hive::Daemon::RecoveryCoordinator` | `lib/hive/daemon/recovery_coordinator.rb` | Sole destructive authority for marker-bound and explicit-route admission recovery. It re-resolves task identity under the task lock, rechecks cooldown and safety, persists a generation-bound v5 request before clearing (or a markerless policy-bound request), and resumes `admitted → cleared → dispatched → terminal` after restart. User-facing adapters only submit observations and render its receipt. |
 | `Hive::Recovery::API` | `lib/hive/recovery/api.rb` | Neutral adapter for CLI/action, TUI, Rails, recorder, Telegram, and healer observations. It normalizes each surface's row shape and derives the freshness token; `RecoveryCoordinator` still owns every policy decision and mutation. |
 | `Hive::Daemon::PlanApproval` | `lib/hive/daemon/plan_approval.rb` | Safely turns daemon-enabled `3-plan` approval pauses into `hive develop ... --from 3-plan` dispatches by validating command shape and flipping `WAITING` to `COMPLETE`. |
 | `Hive::Daemon::StaleAgentHealer` | `lib/hive/daemon/stale_agent_healer.rb` | Repairs stale `AGENT_WORKING` / `REVIEW_WORKING` ownership and is the sole automatic scheduler that submits cooled `ERROR` / `REVIEW_ERROR` observations to `RecoveryCoordinator`. Lease-backed attempt loss is ledger-only and dispatches successors through `Attempts::Dispatcher`; it does not project or clear a compatibility marker. |
@@ -62,7 +62,7 @@ Valid snapshots keep polling cheap. See [[modules/conditions]].
 | `Hive::Daemon::PatrolArbiter` | `lib/hive/daemon/patrol_arbiter.rb` | Shares each project's patrol-scan capacity between ordinary and architecture patrol and persists alternation state so either ready kind eventually runs. |
 | `Hive::Daemon::DigestSchedulerBase` | `lib/hive/daemon/digest_scheduler_base.rb` | Shared daily-digest lifecycle: one pending date, cancellation, bounded failure backoff, dispatch envelope construction, observable tolerant state reads, and atomic cursor persistence. Concrete schedulers retain their cadence and cursor rules. |
 | `Hive::Daemon::AnswerDigestScheduler` | `lib/hive/daemon/answer_digest_scheduler.rb` | Host-local daily answer reminder cadence. Persists `last_fired_date` in `<state_home>/answer_digest_state.json` and emits at most one `hive answer-digest --date D --json` child per day after the configured hour. |
-| `Hive::Daemon::DispatchRequestQueue` | `lib/hive/daemon/dispatch_request_queue.rb` | File-backed delivery queue for all adapters. Runtime readers accept only current v4; the one-off state migration upgrades pending v1-v3 files before opening the queue. V4 adds restartable recovery phases, canonical task/marker/generation identity, owner/remediation, and terminal outcome/time. Requestors are validated against one closed adapter enum, including the explicit `operator` source. Nonterminal recovery requests do not expire; bounded request-keyed lock shards serialize claim, phase CAS, and pruning without accumulating one lock file per request. The dispatcher shares one pending/claimed scan between queue accounting and recovery projection per tick, and runs terminal recovery pruning at most hourly. Request IDs are bounded filesystem-safe identifiers. The single-dispatcher invariant remains: producers write, the daemon dispatches. |
+| `Hive::Daemon::DispatchRequestQueue` | `lib/hive/daemon/dispatch_request_queue.rb` | File-backed delivery queue for all adapters. Runtime readers accept only current v5; the one-off state migration upgrades pending v1-v4 files before opening the queue. V5 adds markerless provider-admission recovery observations to the restartable recovery phases, canonical task/marker/generation identity, owner/remediation, and terminal outcome/time. Requestors are validated against one closed adapter enum, including the explicit `operator` source. Nonterminal recovery requests do not expire; bounded request-keyed lock shards serialize claim, phase CAS, and pruning without accumulating one lock file per request. The dispatcher shares one pending/claimed scan between queue accounting and recovery projection per tick, and runs terminal recovery pruning at most hourly. Request IDs are bounded filesystem-safe identifiers. The single-dispatcher invariant remains: producers write, the daemon dispatches. |
 | `Hive::Daemon::QueueDirectory` | `lib/hive/daemon/queue_directory.rb` | Shared `directory_for(dirname:, state_home:)` helper used by both dispatch queues so the owner-only (0700) per-queue directory invariant — the de-facto auth boundary for the dispatch channel — lives in one place (#253). |
 | `Hive::Commands::Daemon` | `lib/hive/commands/daemon.rb` | Thor subcommand surface (`start` / `stop` / `status` / `reload` / `tail` / `install` / `enable` / `disable` / `queue`). Owns PID/signal lifecycle, service installation, per-project enrollment, and read-only dispatch-request queue inspection. Start takes `ActivationLock` before its single-instance check and releases it only through Dispatcher's runtime-ready callback (or fail-closed cleanup). A manual foreground or detached start fills an absent `HIVE_BIN` from `Hive::InvokedBinary`, keeping status probes, backfillers, and dispatched children on the same checkout/package as the daemon itself; an explicit operator/service override still wins. `queue` delegates to `Hive::Commands::Daemon::QueueCommand`. |
 | `Hive::Commands::Daemon::QueueCommand` | `lib/hive/commands/daemon/queue_command.rb` | Extracted read-only queue-inspection surface (`hive daemon queue list/show/prune`) — touches only `queue_args`/`json`/`hive_home`, orthogonal to the daemon lifecycle, mirroring the `ServiceInstaller` extraction (#254). Internal IO/parse failures are wrapped in `Hive::InternalError` (exit 70). |
@@ -161,6 +161,12 @@ authoritative after a change between the completed daemon tick and a later
 status read. The record also carries daemon generation/PID/start identity,
 sequence and validity window, capacity, queue counters, provider holds,
 coordinator recovery receipts, and per-task owner/reason.
+An explicit admission also contributes its exact sanitized routing decision to
+that row's in-memory disposition. The completed snapshot keeps that value only
+when the same coherence checks pass; operational status renders it directly
+and never reruns the selector. A markerless or later recovery no-route request
+projects its durable `admission_observation` through the same field. Legacy
+rows carry no routing value and keep their prior rendering.
 Retry dispositions additionally carry the exact marker-age `retry_at`,
 whether the boundary is due, the current safety verdict, and its reason.
 `retry_cooldown` is scheduler-owned, `retry_in_flight` is agent-owned, and
@@ -413,7 +419,7 @@ advances a workflow stage directly:
 
    `RecoveryCoordinator` is the sole destructive owner. Under the task lock it
    re-resolves the canonical task, requires the same `marker_id`, rechecks
-   ownership and work-area safety, persists one generation-bound v4 request,
+   ownership and work-area safety, persists one generation-bound v5 request,
    then resumes the crash-safe
    `admitted → cleared → dispatched → terminal` lifecycle. An old id-less
    marker fails with `recovery_migration_required` and must be upgraded once
@@ -627,8 +633,8 @@ stopped spawning competing task children. Current task execution goes one step
 further: queue consumption, CLI calls, auto-advance, and recovery all resolve
 through `Attempts::Dispatcher`. The claim records the attempt ID/generation;
 the detached wrapper receipt completes delivery. The daemon never registers
-that task wrapper in `ChildSupervisor`. Current writers emit request v4;
-runtime readers accept v4 only after the one-off queue migration. See
+that task wrapper in `ChildSupervisor`. Current writers emit request v5;
+runtime readers accept v5 only after the one-off queue migration. See
 [[modules/attempts]].
 
 Before plan 2026-05-28-002, both the daemon AND the Telegram bot
@@ -653,12 +659,15 @@ allowlist, and resolves task verbs through durable admission. Request IDs stay
 on the delivery while attempt IDs own execution; receipt reconciliation
 unlinks the claim and logs completion.
 
-Current request schema is v4. It carries generation intent, predecessor
+Current request schema is v5. It carries generation intent, predecessor
 attempt, inherited output references, and a restartable recovery object with
 canonical task, stage, marker ID, expected attrs, dispatch generation,
-owner/remediation, phase, retry count, and terminal outcome/time. The one-off
-recovery migration upgrades pending v1-v3 deliveries before the runtime queue
-opens; queue readers accept v4 only and contain no inferred-generation
+owner/remediation, phase, retry count, terminal outcome/time, bounded routing
+admission observation, and immutable source terminal-receipt identity. Its
+closed recovery union distinguishes ordinary marker recovery from markerless
+initial route exhaustion keyed by task generation and frozen policy digest.
+The one-off recovery migration upgrades pending v1-v4 deliveries before the runtime queue
+opens; queue readers accept v5 only and contain no inferred-generation
 compatibility path. Identity-bound recovery requests do not expire; the
 consumer rejects them if the task, stage, post-clear generation, or marker
 history no longer matches.
@@ -697,13 +706,26 @@ Lifecycle gates inside `process_dispatch_requests`:
 7. Otherwise → preclaim the delivery and resolve task-stage work through
    durable attempt admission. Capacity/loss deferral returns the claim to
    pending; accepted/live/receipt outcomes retain an attempt reference until
-   terminal delivery. Marker repair and global daemon maintenance continue
-   through the ancillary child-supervisor path.
+   terminal delivery. Explicit account-capacity saturation is neutral: it
+   releases the claim without changing a recovery deadline. Explicit no-route
+   admission either creates one markerless recovery request or updates the
+   already-active recovery request. Marker repair and global daemon
+   maintenance continue through the ancillary child-supervisor path.
 
 For a recovery request already in `cleared`, a launch/preflight deferral first
 persists a new `next_eligible_at` through `RecoveryCoordinator`, then releases
 the claim. The same durable request is therefore retried on the universal
 cooldown instead of being re-admitted on every daemon tick.
+
+Provider-route failures add one stricter barrier. Recovery records the exact
+failed attempt receipt and may be admitted, but it cannot clear the marker or
+select a successor until the pending-finalization ledger durably acknowledges
+the `provider_health` consumer. The later dispatch is an explicit successor of
+that failed routed attempt, preserving its task generation and frozen policy
+while allowing a different eligible route. A later no-route decision is stored
+on that same request and advances only the coordinator-owned universal
+cooldown; it does not create or charge a second request. Initial all-route
+capacity saturation creates no recovery request or deadline.
 
 Lease reconciliation refreshes capacity and completion before another
 admission. A different request ID for the same live task generation resolves
@@ -739,7 +761,7 @@ restart — re-running work that may already have completed. The fix
 (`DispatchRequestQueue.claim`) renames the file to
 `<id>.json.claimed` before the daemon admits work. The claimed JSON
 stays schema-valid for the dispatch-request version the producer wrote
-(current writers emit `hive-dispatch-request.v4`); mutable claim metadata
+(current writers emit `hive-dispatch-request.v5`); mutable claim metadata
 (`pid`, `process_start_time`, `claimed_at`, `attempt_id`, `task_generation`) lives in a sibling
 `<id>.json.claimed.claim` sidecar that is updated after spawn. Claimed
 files are invisible to `pending` (the glob matches `*.json`, not
@@ -861,7 +883,7 @@ Legacy non-recovery callers may still express a multi-command queue operation
 with `<request_id>.sequence`: on successful reap (`exit_code == 0`),
 `Dispatcher#promote_dispatch_sequence` writes the next request with the
 original routing metadata; on non-zero or nil exit it discards the sidecar.
-Recoverable marker flows do not use sequences. They persist one v4 recovery
+Recoverable marker flows do not use sequences. They persist one v5 recovery
 request whose coordinator-owned phases are `admitted`, `cleared`, `dispatched`,
 and `terminal`, so a crash cannot separate marker mutation from its only retry
 continuation.

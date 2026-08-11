@@ -90,7 +90,8 @@ module Hive
                 :routed_effort_values, :routing_argument_placement,
                 :routed_model_argument_builder, :routed_effort_argument_builder,
                 :tool_scope_flags,
-                :structured_output_protocol
+                :structured_output_protocol, :credential_environment_keys,
+                :configuration_environment_key, :default_configuration_directory
 
     # Public API — do not break.
     #
@@ -145,6 +146,15 @@ module Hive
     #                          into a provider stream shape that can replace
     #                          ordinary assistant text. Today only
     #                          :grok_end is supported.
+    #   credential_environment_keys: default []. Agent-compatibility inventory
+    #                          of ambient credential/token variables that an
+    #                          orchestrator must remove for a named isolated
+    #                          subscription/session binding.
+    #   configuration_environment_key: default nil. Environment variable that
+    #                          relocates the CLI-owned subscription/session
+    #                          configuration directory.
+    #   default_configuration_directory: default nil. Home-relative fallback
+    #                          used when the relocation variable is absent.
     #   prompt_style:          default :stdin for a profile named :codex,
     #                          otherwise :positional (backward compatible
     #                          with pre-profile-style custom registrations)
@@ -187,7 +197,10 @@ module Hive
                    routed_effort_argument_builder: nil,
                    tool_scope_flags: TOOL_SCOPE_FLAGS_UNSET,
                    raw_cli_arguments_supported: false,
-                   structured_output_protocol: nil)
+                   structured_output_protocol: nil,
+                   credential_environment_keys: [],
+                   configuration_environment_key: nil,
+                   default_configuration_directory: nil)
       prompt_style ||= name.to_sym == :codex ? :stdin : :positional
       unless PROMPT_STYLES.include?(prompt_style)
         raise ArgumentError,
@@ -251,8 +264,35 @@ module Hive
       )
       @raw_cli_arguments_supported = raw_cli_arguments_supported == true
       @structured_output_protocol = structured_output_protocol&.to_sym
+      @credential_environment_keys = normalize_credential_environment_keys(
+        credential_environment_keys
+      )
+      @configuration_environment_key = normalize_configuration_environment_key(
+        configuration_environment_key
+      )
+      @default_configuration_directory = normalize_default_configuration_directory(
+        default_configuration_directory
+      )
 
       freeze
+    end
+
+    def configuration_directory(home: nil, environment: ENV)
+      if @configuration_environment_key
+        configured = environment[@configuration_environment_key].to_s
+        unless configured.empty?
+          unless File.absolute_path?(configured)
+            raise ArgumentError,
+                  "#{@configuration_environment_key} must be an absolute directory"
+          end
+          return File.expand_path(configured)
+        end
+      end
+      return nil unless @default_configuration_directory
+
+      base = home || environment["HOME"]
+      base = Dir.home if base.to_s.empty?
+      File.expand_path(@default_configuration_directory, base)
     end
 
     # Verifies whether `invocation` (e.g. "/plan",
@@ -658,6 +698,35 @@ module Hive
       end.freeze
     end
 
+    def normalize_credential_environment_keys(values)
+      keys = Array(values).map(&:to_s)
+      invalid = keys.find { |key| !key.match?(/\A[A-Z][A-Z0-9_]*\z/) }
+      raise ArgumentError, "invalid credential environment key #{invalid.inspect}" if invalid
+      raise ArgumentError, "credential environment keys must be unique" if keys.uniq.length != keys.length
+
+      keys.map(&:freeze).freeze
+    end
+
+    def normalize_configuration_environment_key(value)
+      return nil if value.nil?
+
+      key = value.to_s
+      unless key.match?(/\A[A-Z][A-Z0-9_]*\z/)
+        raise ArgumentError, "invalid configuration environment key #{key.inspect}"
+      end
+      key.freeze
+    end
+
+    def normalize_default_configuration_directory(value)
+      return nil if value.nil?
+
+      path = value.to_s
+      if path.empty? || File.absolute_path?(path)
+        raise ArgumentError, "default configuration directory must be relative"
+      end
+      path.freeze
+    end
+
     def normalize_tool_scope_flags(flags)
       unless flags.is_a?(Hash)
         raise ArgumentError, "tool_scope_flags must be a Hash; got #{flags.class}"
@@ -829,7 +898,8 @@ module Hive
         routed_effort_argument_builder: @routed_effort_argument_builder,
         tool_scope_flags: @tool_scope_flags.dup,
         raw_cli_arguments_supported: @raw_cli_arguments_supported,
-        structured_output_protocol: @structured_output_protocol
+        structured_output_protocol: @structured_output_protocol,
+        credential_environment_keys: @credential_environment_keys.dup
       }
     end
 

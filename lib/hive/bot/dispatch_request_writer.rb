@@ -68,6 +68,15 @@ module Hive
           interactive: false,
           now: now.utc
         )
+        unless result.attempt
+          return DispatchReference.new(
+            request_id: request_id.to_s,
+            attempt_id: nil,
+            state: "queued",
+            status: :queued,
+            argv: argv
+          )
+        end
         Hive::Daemon::DispatchRequestQueue.claim(
           request_id,
           pid: nil,

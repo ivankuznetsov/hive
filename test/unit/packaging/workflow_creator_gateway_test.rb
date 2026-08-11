@@ -269,7 +269,7 @@ class WorkflowCreatorGatewayTest < Minitest::Test
           slug = mode == "operational-wrong-slug" ? "another-created-task" : #{CREATED_SLUG.inspect}
           stage = mode == "operational-wrong-stage" ? "2-draft" : "1-research"
           puts JSON.generate(
-            "schema" => "hive-operational-status", "schema_version" => 3, "ok" => true,
+            "schema" => "hive-operational-status", "schema_version" => 4, "ok" => true,
             "tasks" => [
               { "identity" => { "slug" => slug }, "workflow" => "editorial",
                 "position" => { "stage" => stage } }

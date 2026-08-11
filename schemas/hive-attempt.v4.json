@@ -1,0 +1,343 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-attempt.v4.json",
+  "title": "hive durable attempt (v4)",
+  "description": "Owner-private lease, immutable provider routing identity, and terminal receipt for task-stage or module-hook execution.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schema_version", "attempt_id", "request_id", "predecessor_attempt_id",
+    "task_id", "project", "task_slug", "intended_stage", "task_generation",
+    "ownership_generation", "task_input_epoch", "progress_token", "provider", "routing",
+    "worker_argv", "claim_capability_digest", "starting_revision", "retry_charge", "subject",
+    "created_at", "accepted_at", "state", "outcome", "lease_version", "claim_deadline",
+    "first_heartbeat_deadline", "heartbeat_deadline", "wrapper", "worker", "heartbeat_at",
+    "started_at", "ended_at", "latest_revision", "checkpoint", "log_reference",
+    "inherited_outputs", "current_outputs", "receipt", "loss", "diagnostics"
+  ],
+  "properties": {
+    "schema": { "const": "hive-attempt" },
+    "schema_version": { "const": 4 },
+    "attempt_id": { "type": "string", "minLength": 1 },
+    "request_id": { "type": ["string", "null"] },
+    "predecessor_attempt_id": { "type": ["string", "null"] },
+    "task_id": { "type": ["string", "integer", "null"] },
+    "project": { "type": "string", "minLength": 1 },
+    "task_slug": { "type": "string", "minLength": 1 },
+    "intended_stage": { "type": "string", "minLength": 1 },
+    "task_generation": { "type": "string", "minLength": 1 },
+    "ownership_generation": { "type": "string", "minLength": 1 },
+    "task_input_epoch": { "type": "integer", "minimum": 0 },
+    "progress_token": { "type": "string", "minLength": 1 },
+    "provider": { "type": "string", "minLength": 1 },
+    "routing": { "$ref": "#/$defs/Routing" },
+    "worker_argv": {
+      "type": "array", "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "claim_capability_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "starting_revision": { "type": ["string", "null"] },
+    "retry_charge": { "type": "integer", "minimum": 0 },
+    "subject": { "$ref": "#/$defs/Subject" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "accepted_at": { "type": "string", "format": "date-time" },
+    "state": { "enum": ["launching", "running", "terminal", "lost"] },
+    "outcome": { "type": ["string", "null"], "enum": ["succeeded", "failed", "cancelled", null] },
+    "lease_version": { "type": "integer", "minimum": 0 },
+    "claim_deadline": { "$ref": "#/$defs/NullableTimestamp" },
+    "first_heartbeat_deadline": { "$ref": "#/$defs/NullableTimestamp" },
+    "heartbeat_deadline": { "$ref": "#/$defs/NullableTimestamp" },
+    "wrapper": { "anyOf": [{ "$ref": "#/$defs/ProcessIdentity" }, { "type": "null" }] },
+    "worker": { "anyOf": [{ "$ref": "#/$defs/ProcessIdentity" }, { "type": "null" }] },
+    "heartbeat_at": { "$ref": "#/$defs/NullableTimestamp" },
+    "started_at": { "$ref": "#/$defs/NullableTimestamp" },
+    "ended_at": { "$ref": "#/$defs/NullableTimestamp" },
+    "latest_revision": { "type": ["string", "null"] },
+    "checkpoint": { "type": "object" },
+    "log_reference": { "anyOf": [{ "$ref": "#/$defs/OutputReference" }, { "type": "null" }] },
+    "inherited_outputs": { "type": "array", "items": { "$ref": "#/$defs/OutputReference" } },
+    "current_outputs": { "type": "array", "items": { "$ref": "#/$defs/OutputReference" } },
+    "receipt": { "anyOf": [{ "$ref": "#/$defs/Receipt" }, { "type": "null" }] },
+    "loss": { "type": ["object", "null"] },
+    "diagnostics": { "type": "object" }
+  },
+  "$defs": {
+    "NullableTimestamp": { "type": ["string", "null"], "format": "date-time" },
+    "Identifier": {
+      "type": "string", "minLength": 1, "maxLength": 128,
+      "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+    },
+    "RoutingExclusionReason": {
+      "type": "string",
+      "enum": [
+        "hard_pin_mismatch", "requirements_incompatible", "manual_block",
+        "circuit_open", "circuit_cooldown", "half_open_probe_owned",
+        "provider_concurrency_saturated", "health_state_unavailable"
+      ]
+    },
+    "Sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "ProcessIdentity": {
+      "type": "object",
+      "required": ["pid", "start_fingerprint", "session_id", "process_group_id"],
+      "properties": {
+        "pid": { "type": "integer", "minimum": 1 },
+        "start_fingerprint": { "type": ["string", "null"] },
+        "session_id": { "type": ["integer", "null"] },
+        "process_group_id": { "type": ["integer", "null"] }
+      }
+    },
+    "OutputReference": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "size", "sha256"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "size": { "type": "integer", "minimum": 0 },
+        "sha256": { "$ref": "#/$defs/Sha256" }
+      }
+    },
+    "EvidenceReference": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "size", "sha256"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "size": { "type": "integer", "minimum": 0 },
+        "sha256": { "$ref": "#/$defs/Sha256" }
+      }
+    },
+    "ProviderAccountScope": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "provider_account_id", "model"],
+      "properties": {
+        "kind": { "const": "provider_account" },
+        "provider_account_id": { "$ref": "#/$defs/Identifier" },
+        "model": { "type": "null" }
+      }
+    },
+    "ModelScope": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "provider_account_id", "model"],
+      "properties": {
+        "kind": { "const": "model" },
+        "provider_account_id": { "$ref": "#/$defs/Identifier" },
+        "model": { "$ref": "#/$defs/Identifier" }
+      }
+    },
+    "ProviderScope": {
+      "oneOf": [
+        { "$ref": "#/$defs/ProviderAccountScope" },
+        { "$ref": "#/$defs/ModelScope" }
+      ]
+    },
+    "LegacyRouting": {
+      "type": "object", "additionalProperties": false,
+      "required": ["mode"],
+      "properties": { "mode": { "const": "legacy" } }
+    },
+    "RoutingDecisionExclusion": {
+      "type": "object", "additionalProperties": false,
+      "required": ["route_id", "reason", "detail"],
+      "properties": {
+        "route_id": { "$ref": "#/$defs/Identifier" },
+        "reason": { "$ref": "#/$defs/RoutingExclusionReason" },
+        "detail": {
+          "oneOf": [
+            {
+              "type": "string", "minLength": 1, "maxLength": 240,
+              "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+            },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "RoutingDecision": {
+      "type": "object", "additionalProperties": false,
+      "required": ["decision_id", "policy_digest", "decided_at", "exclusions"],
+      "properties": {
+        "decision_id": { "$ref": "#/$defs/Identifier" },
+        "policy_digest": { "$ref": "#/$defs/Sha256" },
+        "decided_at": { "type": "string", "format": "date-time" },
+        "exclusions": {
+          "type": "array", "maxItems": 1024,
+          "items": { "$ref": "#/$defs/RoutingDecisionExclusion" }
+        }
+      }
+    },
+    "ProviderRoute": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "route_id", "provider_account_id", "adapter", "launch_binding_id", "model", "effort"
+      ],
+      "properties": {
+        "route_id": { "$ref": "#/$defs/Identifier" },
+        "provider_account_id": { "$ref": "#/$defs/Identifier" },
+        "adapter": { "$ref": "#/$defs/Identifier" },
+        "launch_binding_id": { "$ref": "#/$defs/Identifier" },
+        "model": { "$ref": "#/$defs/Identifier" },
+        "effort": {
+          "oneOf": [{ "$ref": "#/$defs/Identifier" }, { "type": "null" }]
+        }
+      }
+    },
+    "CircuitGeneration": {
+      "type": "object", "additionalProperties": false,
+      "required": ["scope", "journal_epoch", "observed_generation"],
+      "properties": {
+        "scope": { "$ref": "#/$defs/ProviderScope" },
+        "journal_epoch": { "type": "integer", "minimum": 0 },
+        "observed_generation": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "ProbeBinding": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "scope", "journal_epoch", "observed_generation", "claim_generation",
+        "attempt_id", "task_generation", "ownership_fence"
+      ],
+      "properties": {
+        "scope": { "$ref": "#/$defs/ProviderScope" },
+        "journal_epoch": { "type": "integer", "minimum": 0 },
+        "observed_generation": { "type": "integer", "minimum": 0 },
+        "claim_generation": { "type": "integer", "minimum": 1 },
+        "attempt_id": { "$ref": "#/$defs/Identifier" },
+        "task_generation": { "$ref": "#/$defs/Identifier" },
+        "ownership_fence": { "$ref": "#/$defs/Identifier" }
+      }
+    },
+    "ExplicitRouting": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "mode", "policy_digest", "decision", "route", "circuit_generations", "probe_bindings"
+      ],
+      "properties": {
+        "mode": { "const": "explicit" },
+        "policy_digest": { "$ref": "#/$defs/Sha256" },
+        "decision": { "$ref": "#/$defs/RoutingDecision" },
+        "route": { "$ref": "#/$defs/ProviderRoute" },
+        "circuit_generations": {
+          "type": "array", "minItems": 2, "maxItems": 2,
+          "items": { "$ref": "#/$defs/CircuitGeneration" }
+        },
+        "probe_bindings": {
+          "type": "array", "maxItems": 2,
+          "items": { "$ref": "#/$defs/ProbeBinding" }
+        }
+      }
+    },
+    "Routing": {
+      "oneOf": [
+        { "$ref": "#/$defs/LegacyRouting" },
+        { "$ref": "#/$defs/ExplicitRouting" }
+      ]
+    },
+    "ProviderEvidence": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "failure_class", "scope", "provenance", "route_id", "reset_hint_seconds",
+        "fingerprint", "source_reference"
+      ],
+      "properties": {
+        "failure_class": {
+          "enum": [
+            "authentication", "billing_configuration", "exhausted_credits", "account_quota",
+            "provider_rate_limit", "provider_outage", "unavailable", "disabled", "deprecated",
+            "model_quota", "model_rate", "model_capacity"
+          ]
+        },
+        "scope": { "$ref": "#/$defs/ProviderScope" },
+        "provenance": {
+          "enum": [
+            "claude_stream_json_transport", "codex_jsonl_transport",
+            "grok_streaming_json_transport", "pi_json_transport", "provider_diagnostic"
+          ]
+        },
+        "route_id": { "$ref": "#/$defs/Identifier" },
+        "reset_hint_seconds": {
+          "type": ["integer", "null"], "minimum": 0, "maximum": 604800
+        },
+        "fingerprint": { "$ref": "#/$defs/Sha256" },
+        "source_reference": { "$ref": "#/$defs/EvidenceReference" }
+      }
+    },
+    "Subject": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "task_id", "task_slug", "intended_stage"],
+          "properties": {
+            "kind": { "const": "task_stage" },
+            "task_id": { "type": ["string", "integer", "null"] },
+            "task_slug": { "type": "string", "minLength": 1 },
+            "intended_stage": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": [
+            "kind", "project_id", "module", "hook", "event_id", "occurrence_id",
+            "event_name", "module_generation", "configuration_digest", "grant_digest"
+          ],
+          "properties": {
+            "kind": { "const": "module_hook" },
+            "project_id": { "type": "string", "minLength": 1 },
+            "module": { "type": "string", "minLength": 1 },
+            "hook": { "type": "string", "minLength": 1 },
+            "event_id": { "type": "string", "minLength": 1 },
+            "occurrence_id": { "type": "string", "minLength": 1 },
+            "event_name": { "type": "string", "minLength": 1 },
+            "module_generation": { "type": "string", "minLength": 1 },
+            "configuration_digest": { "$ref": "#/$defs/Sha256" },
+            "grant_digest": { "$ref": "#/$defs/Sha256" }
+          }
+        }
+      ]
+    },
+    "Receipt": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "receipt_version", "terminal_lease_version", "attempt_id", "task_generation",
+        "ownership_generation", "task_input_epoch", "outcome", "exit_status", "started_at",
+        "ended_at", "final_checkpoint", "output_references", "log_reference", "provider_evidence"
+      ],
+      "properties": {
+        "receipt_version": { "const": 1 },
+        "terminal_lease_version": { "type": "integer", "minimum": 0 },
+        "attempt_id": { "type": "string", "minLength": 1 },
+        "task_generation": { "type": "string", "minLength": 1 },
+        "ownership_generation": { "type": "string", "minLength": 1 },
+        "task_input_epoch": { "type": "integer", "minimum": 0 },
+        "outcome": { "enum": ["succeeded", "failed", "cancelled"] },
+        "exit_status": { "type": "integer" },
+        "started_at": { "type": "string", "format": "date-time" },
+        "ended_at": { "type": "string", "format": "date-time" },
+        "final_checkpoint": { "type": "object", "minProperties": 1 },
+        "output_references": {
+          "type": "array", "items": { "$ref": "#/$defs/OutputReference" }
+        },
+        "log_reference": { "$ref": "#/$defs/OutputReference" },
+        "provider_evidence": {
+          "oneOf": [{ "$ref": "#/$defs/ProviderEvidence" }, { "type": "null" }]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["provider_evidence"],
+            "properties": { "provider_evidence": { "$ref": "#/$defs/ProviderEvidence" } }
+          },
+          "then": { "properties": { "outcome": { "const": "failed" } } }
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "state": { "const": "terminal" } } },
+      "then": { "required": ["receipt"], "properties": { "receipt": { "$ref": "#/$defs/Receipt" } } }
+    },
+    {
+      "if": { "properties": { "state": { "const": "lost" } } },
+      "then": { "required": ["loss"], "properties": { "loss": { "type": "object" } } }
+    }
+  ]
+}

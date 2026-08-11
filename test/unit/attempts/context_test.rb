@@ -40,6 +40,38 @@ class AttemptsContextTest < Minitest::Test
     refute Hive::Attempts::Context.active?
   end
 
+  def test_explicit_context_exposes_only_the_persisted_admitted_route
+    routing = explicit_routing
+    context = Hive::Attempts::Context.send(
+      :new,
+      attempt_id: "attempt-1",
+      task_generation: 7,
+      ownership_generation: "generation-1",
+      routing: routing
+    )
+    routing.fetch("route")["model"] = "changed-after-admission"
+
+    assert context.explicit_routing?
+    assert_equal "a" * 64, context.routing_policy_digest
+    assert_equal "decision-1", context.routing_decision.fetch("decision_id")
+    assert_equal "codex-account-a", context.provider_account_id
+    assert_equal "codex", context.adapter
+    assert_equal "codex-home-a", context.launch_binding_id
+    assert_equal "gpt-5.6-sol", context.model
+    assert_equal "high", context.effort
+    assert_equal 2, context.circuit_generations.length
+    assert_equal 1, context.probe_bindings.length
+    assert_raises(FrozenError) { context.admitted_route["model"].replace("other") }
+
+    legacy = Hive::Attempts::Context.send(
+      :new, attempt_id: "legacy", task_generation: 0
+    )
+    refute legacy.explicit_routing?
+    assert_nil legacy.admitted_route
+    assert_empty legacy.circuit_generations
+    assert legacy.circuit_generations.frozen?
+  end
+
   def test_environment_context_is_authenticated_bound_and_scrubbed
     with_running_attempt do |store, _record|
       resolver = Struct.new(:task) { def resolve = task }.new(
@@ -60,6 +92,45 @@ class AttemptsContextTest < Minitest::Test
           assert_equal "4-execute", context.intended_stage
           assert_empty ENV.keys.grep(/\AHIVE_ATTEMPT_/)
         end
+      end
+    end
+  end
+
+  def test_explicit_environment_context_installs_the_dedicated_evidence_writer
+    routing = explicit_routing
+    routing["probe_bindings"] = []
+    with_running_attempt(routing: routing) do |store, _record|
+      resolver = Struct.new(:task) { def resolve = task }.new(
+        FakeTask.new(id: 42, slug: "task", stage_index: 4, stage_name: "execute")
+      )
+      evidence_reader, evidence_writer = IO.pipe
+      with_replaced_singleton_method(
+        Hive::TaskResolver, :new, ->(*_args, **_kwargs) { resolver }
+      ) do
+        with_env("HIVE_ATTEMPT_EVIDENCE_FD" => evidence_writer.fileno.to_s) do
+          with_context_environment(store, capability: CLAIM_CAPABILITY) do
+            context = Hive::Attempts::Context.install_from_env!(argv: WORKER_ARGV)
+            signal = {
+              "failure_class" => "model_capacity",
+              "scope" => {
+                "kind" => "model", "provider_account_id" => "codex-account-a",
+                "model" => "gpt-5.6-sol"
+              },
+              "provenance" => "codex_jsonl_transport",
+              "reset_hint_seconds" => 30
+            }
+            assert context.publish_provider_signal(signal)
+            assert_equal signal, Hive::Attempts::EvidenceChannel.read(
+              evidence_reader, route: routing.fetch("route")
+            )
+          end
+        end
+      end
+    ensure
+      [ evidence_reader, evidence_writer ].compact.each do |io|
+        io.close unless io.closed?
+      rescue Errno::EBADF
+        nil
       end
     end
   end
@@ -167,6 +238,43 @@ class AttemptsContextTest < Minitest::Test
     with_replaced_singleton_method(Hive::Attempts::Generation, :resolve, ->(**) { current_epoch }) do
       assert_raises(Hive::ConcurrentRunError) { epoch_stale.validate_generation!(task) }
     end
+
+    successor = Hive::Attempts::Context.send(
+      :new,
+      attempt_id: "attempt-successor",
+      task_generation: 2,
+      ownership_generation: "generation-predecessor",
+      project: "demo",
+      intended_stage: "4-execute",
+      progress_token: "post-clear-progress",
+      predecessor_attempt_id: "attempt-predecessor"
+    )
+    current_successor = Struct.new(
+      :ownership_generation, :task_input_epoch, :progress_token
+    ).new("generation-after-marker-clear", 2, "post-clear-progress")
+    with_replaced_singleton_method(
+      Hive::Attempts::Generation, :resolve, ->(**) { current_successor }
+    ) do
+      assert successor.validate_generation!(task)
+    end
+
+    stale_successor = Hive::Attempts::Context.send(
+      :new,
+      attempt_id: "attempt-successor-stale",
+      task_generation: 2,
+      ownership_generation: "generation-predecessor",
+      project: "demo",
+      intended_stage: "4-execute",
+      progress_token: "admitted-progress",
+      predecessor_attempt_id: "attempt-predecessor"
+    )
+    with_replaced_singleton_method(
+      Hive::Attempts::Generation, :resolve, ->(**) { current_successor }
+    ) do
+      assert_raises(Hive::ConcurrentRunError) do
+        stale_successor.validate_generation!(task)
+      end
+    end
   end
 
   def test_workflow_task_binding_and_invalid_inherited_descriptor_are_checked
@@ -269,7 +377,41 @@ class AttemptsContextTest < Minitest::Test
 
   private
 
-  def with_running_attempt
+  def explicit_routing
+    account_scope = {
+      "kind" => "provider_account", "provider_account_id" => "codex-account-a", "model" => nil
+    }
+    model_scope = {
+      "kind" => "model", "provider_account_id" => "codex-account-a", "model" => "gpt-5.6-sol"
+    }
+    {
+      "mode" => "explicit",
+      "policy_digest" => "a" * 64,
+      "decision" => {
+        "decision_id" => "decision-1", "policy_digest" => "a" * 64,
+        "decided_at" => Time.utc(2026, 8, 10, 12).iso8601(6), "exclusions" => []
+      },
+      "route" => {
+        "route_id" => "codex-account-a/gpt-5.6-sol",
+        "provider_account_id" => "codex-account-a", "adapter" => "codex",
+        "launch_binding_id" => "codex-home-a", "model" => "gpt-5.6-sol", "effort" => "high"
+      },
+      "circuit_generations" => [
+        { "scope" => account_scope, "journal_epoch" => 1, "observed_generation" => 4 },
+        { "scope" => model_scope, "journal_epoch" => 1, "observed_generation" => 7 }
+      ],
+      "probe_bindings" => [
+        {
+          "scope" => model_scope, "journal_epoch" => 1,
+          "observed_generation" => 7, "claim_generation" => 8,
+          "attempt_id" => "attempt-1", "task_generation" => "generation-1",
+          "ownership_fence" => "generation-1"
+        }
+      ]
+    }
+  end
+
+  def with_running_attempt(routing: { "mode" => "legacy" })
     with_tmp_dir do |root|
       store = Hive::Attempts::Store.new(root: root)
       record = store.create_launching(
@@ -279,7 +421,7 @@ class AttemptsContextTest < Minitest::Test
         progress_token: "progress", provider: "codex",
         worker_argv: WORKER_ARGV,
         claim_capability_digest: Hive::Attempts::Capability.digest(CLAIM_CAPABILITY),
-        starting_revision: nil, retry_charge: 0, inherited_outputs: [],
+        starting_revision: nil, retry_charge: 0, inherited_outputs: [], routing: routing,
         launch_timeout_sec: 30, now: Time.now.utc
       )
       identity = {

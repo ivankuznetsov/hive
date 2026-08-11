@@ -1,0 +1,244 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hive.local/schemas/hive-provider-health-event.v1.json",
+  "title": "Hive Provider Health Journal Event v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "event_id", "sequence", "scope", "journal_epoch", "kind", "occurred_at", "idempotency_key", "expected_generation", "previous_generation", "resulting_generation", "payload"],
+  "properties": {
+    "schema": { "const": "hive-provider-health-event" },
+    "schema_version": { "const": 1 },
+    "event_id": { "$ref": "#/$defs/identifier" },
+    "sequence": { "type": "integer", "minimum": 1 },
+    "scope": { "$ref": "#/$defs/scope" },
+    "journal_epoch": { "type": "integer", "minimum": 0 },
+    "kind": { "enum": ["evidence_opened", "evidence_rejected", "probe_claimed", "probe_closed", "probe_reopened", "probe_reconciled", "manual_blocked", "manual_unblocked", "reset", "snapshot"] },
+    "occurred_at": { "type": "string", "format": "date-time" },
+    "idempotency_key": { "$ref": "#/$defs/sha256" },
+    "expected_generation": { "type": "integer", "minimum": 0 },
+    "previous_generation": { "type": "integer", "minimum": 0 },
+    "resulting_generation": { "type": "integer", "minimum": 0 },
+    "payload": { "type": "object", "maxProperties": 3 }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "kind": { "const": "evidence_opened" } } },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/evidence_opened" } } }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "evidence_rejected" } } },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/rejected" } } }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "probe_claimed" } } },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/probe_claimed" } } }
+    },
+    {
+      "if": { "properties": { "kind": { "enum": ["probe_closed"] } } },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/probe_closed" } } }
+    },
+    {
+      "if": { "properties": { "kind": { "enum": ["probe_reopened", "probe_reconciled"] } } },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/probe_reopened" } } }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "manual_blocked" } } },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/manual_blocked" } } }
+    },
+    {
+      "if": { "properties": { "kind": { "enum": ["manual_unblocked", "reset"] } } },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/manual_unblocked" } } }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "snapshot" } } },
+      "then": { "properties": { "payload": { "$ref": "#/$defs/snapshot" } } }
+    }
+  ],
+  "$defs": {
+    "identifier": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[^\\u0000-\\u001f\\u007f]+$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "provider_scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "provider_account_id", "model"],
+      "properties": {
+        "kind": { "const": "provider_account" },
+        "provider_account_id": { "$ref": "#/$defs/identifier" },
+        "model": { "type": "null" }
+      }
+    },
+    "model_scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "provider_account_id", "model"],
+      "properties": {
+        "kind": { "const": "model" },
+        "provider_account_id": { "$ref": "#/$defs/identifier" },
+        "model": { "$ref": "#/$defs/identifier" }
+      }
+    },
+    "scope": { "oneOf": [{ "$ref": "#/$defs/provider_scope" }, { "$ref": "#/$defs/model_scope" }] },
+    "route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["route_id", "provider_account_id", "adapter", "launch_binding_id", "model"],
+      "properties": {
+        "route_id": { "$ref": "#/$defs/identifier" },
+        "provider_account_id": { "$ref": "#/$defs/identifier" },
+        "adapter": { "$ref": "#/$defs/identifier" },
+        "launch_binding_id": { "$ref": "#/$defs/identifier" },
+        "model": { "$ref": "#/$defs/identifier" }
+      }
+    },
+    "reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "size", "sha256"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "size": { "type": "integer", "minimum": 0 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["failure_class", "scope", "provenance", "route_id", "reset_hint_seconds", "fingerprint", "source_reference"],
+      "properties": {
+        "failure_class": { "enum": ["authentication", "billing_configuration", "exhausted_credits", "account_quota", "provider_rate_limit", "provider_outage", "unavailable", "disabled", "deprecated", "model_quota", "model_rate", "model_capacity"] },
+        "scope": { "$ref": "#/$defs/scope" },
+        "provenance": { "enum": ["claude_stream_json_transport", "codex_jsonl_transport", "grok_streaming_json_transport", "pi_json_transport", "provider_diagnostic"] },
+        "route_id": { "$ref": "#/$defs/identifier" },
+        "reset_hint_seconds": { "type": ["integer", "null"], "minimum": 0, "maximum": 604800 },
+        "fingerprint": { "$ref": "#/$defs/sha256" },
+        "source_reference": { "$ref": "#/$defs/reference" }
+      }
+    },
+    "manual_block": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["actor", "reason", "blocked_at"],
+      "properties": {
+        "actor": { "$ref": "#/$defs/identifier" },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 240, "pattern": "^[^\\u0000-\\u001f\\u007f]+$" },
+        "blocked_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "probe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "journal_epoch", "observed_generation", "claim_generation", "attempt_id", "task_generation", "ownership_fence"],
+      "properties": {
+        "scope": { "$ref": "#/$defs/scope" },
+        "journal_epoch": { "type": "integer", "minimum": 0 },
+        "observed_generation": { "type": "integer", "minimum": 0 },
+        "claim_generation": { "type": "integer", "minimum": 1 },
+        "attempt_id": { "$ref": "#/$defs/identifier" },
+        "task_generation": { "$ref": "#/$defs/identifier" },
+        "ownership_fence": { "$ref": "#/$defs/identifier" }
+      }
+    },
+    "audit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["actor", "reason", "target", "action", "occurred_at", "previous_state", "new_state", "generation", "event_id", "artifact_reference"],
+      "properties": {
+        "actor": { "$ref": "#/$defs/identifier" },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "target": { "$ref": "#/$defs/scope" },
+        "action": { "enum": ["block", "unblock", "reset"] },
+        "occurred_at": { "type": "string", "format": "date-time" },
+        "previous_state": { "$ref": "#/$defs/audit_state" },
+        "new_state": { "$ref": "#/$defs/audit_state" },
+        "generation": { "type": "integer", "minimum": 1 },
+        "event_id": { "$ref": "#/$defs/identifier" },
+        "artifact_reference": { "oneOf": [{ "$ref": "#/$defs/reference" }, { "type": "null" }] }
+      }
+    },
+    "audit_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["automatic_state", "manual_blocked", "probe_owned", "generation", "journal_epoch"],
+      "properties": {
+        "automatic_state": { "enum": ["closed", "open"] },
+        "manual_blocked": { "type": "boolean" },
+        "probe_owned": { "type": "boolean" },
+        "generation": { "type": "integer", "minimum": 0 },
+        "journal_epoch": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "evidence_opened": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidence", "eligible_at"],
+      "properties": {
+        "evidence": { "$ref": "#/$defs/evidence" },
+        "eligible_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "rejected": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason"],
+      "properties": { "reason": { "enum": ["stale_generation", "fenced_attempt", "superseded_generation", "late_receipt"] } }
+    },
+    "probe_claimed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["probe"],
+      "properties": { "probe": { "$ref": "#/$defs/probe" } }
+    },
+    "probe_closed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["receipt_identity"],
+      "properties": { "receipt_identity": { "$ref": "#/$defs/sha256" } }
+    },
+    "probe_reopened": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["eligible_at", "receipt_identity"],
+      "properties": {
+        "eligible_at": { "type": "string", "format": "date-time" },
+        "receipt_identity": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "manual_blocked": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["audit", "manual_block"],
+      "properties": {
+        "audit": { "$ref": "#/$defs/audit" },
+        "manual_block": { "$ref": "#/$defs/manual_block" }
+      }
+    },
+    "manual_unblocked": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["audit", "manual_block"],
+      "properties": {
+        "audit": { "$ref": "#/$defs/audit" },
+        "manual_block": { "oneOf": [{ "$ref": "#/$defs/manual_block" }, { "type": "null" }] }
+      }
+    },
+    "snapshot_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["automatic_state", "eligible_at", "evidence", "last_event_id", "manual_block", "probe"],
+      "properties": {
+        "automatic_state": { "enum": ["closed", "open"] },
+        "eligible_at": { "oneOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }] },
+        "evidence": { "oneOf": [{ "$ref": "#/$defs/evidence" }, { "type": "null" }] },
+        "last_event_id": { "oneOf": [{ "$ref": "#/$defs/identifier" }, { "type": "null" }] },
+        "manual_block": { "oneOf": [{ "$ref": "#/$defs/manual_block" }, { "type": "null" }] },
+        "probe": { "oneOf": [{ "$ref": "#/$defs/probe" }, { "type": "null" }] }
+      }
+    },
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state"],
+      "properties": { "state": { "$ref": "#/$defs/snapshot_state" } }
+    }
+  }
+}

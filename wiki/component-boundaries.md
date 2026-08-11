@@ -3,7 +3,7 @@ title: Component boundaries
 type: reference
 source: config/component-boundaries.yml, test/support/component_boundary_contract.rb
 created: 2026-07-25
-updated: 2026-08-05
+updated: 2026-08-10
 tags: [architecture, components, boundaries, monorepo]
 ---
 
@@ -17,6 +17,9 @@ the first and primary consumer.
 
 | Component | State | Current entry point | Narrative context |
 |-----------|-------|---------------------|-------------------|
+| Provider Health | `candidate` | `require "hive/provider_health"` → `Hive::ProviderHealth` | [[modules/provider_health]] |
+| Provider Routing Policy | `candidate` | `require "hive/provider_routing"` → `Hive::ProviderRouting` | [[modules/provider_routing]] |
+| Provider Routing Operations | `candidate` | `require "hive/provider_routing/operational_projection"` → `Hive::ProviderRouting::OperationalProjection` | [[modules/provider_routing]] |
 | Patrol Effect Evidence | `candidate` (U3a protocol complete; reduced installed/live smoke source-pinned; full U3b/U3c proof pending) | `require "hive/modules/migration/patrol_evidence"` → `Hive::Modules::Migration::PatrolEvidence` | [[modules/patrol]] |
 | Attempts admission / future RunReceipt | `candidate` (guarded reference) | `require "hive/attempts/api"` → `Hive::Attempts::API` | [[modules/attempts]] |
 | Workflow Creator Values | `boundary-ready` | `require "./packaging/live_agent_skills/workflow_creator_text_safety"` → `HiveLiveAgentProof::WorkflowCreator::TextSafety` | [[component-boundaries]] |
@@ -38,8 +41,9 @@ has earned a gem, version, repository, or release.
 
 ## Final graph audit
 
-The catalog on 2026-08-04 retains twelve components: ten are
-`boundary-ready`; Attempts and Patrol Effect Evidence remain `candidate`.
+The catalog retains fifteen components: ten are `boundary-ready`; Provider
+Health, Provider Routing Policy, Provider Routing Operations, Attempts, and
+Patrol Effect Evidence remain `candidate`.
 Patrol retains one bounded U3 exception for deterministic public-path and
 independently authorized installed/live proof. Workflow Creator is composed
 through its U1b typed publication facade, Workflow Creator Execution supplies
@@ -49,7 +53,7 @@ Every retained entry point has focused clean-process load proof, every
 catalog-owned path and focused test resolves inside this repository, and the
 direct-construction guards pass against all production Ruby sources.
 
-The component dependency graph has five edges:
+The component dependency graph has ten edges:
 
 ```mermaid
 flowchart LR
@@ -59,7 +63,11 @@ flowchart LR
   workflow_live --> workflow_core
   workflow_core[Workflow Creator] --> workflow_values[Workflow Creator Values]
   patrol_effects[Patrol Effect Evidence - candidate]
-  attempts[Attempts admission - candidate]
+  attempts[Attempts admission - candidate] --> provider_health[Provider Health - candidate]
+  attempts --> provider_routing[Provider Routing Policy - candidate]
+  routing_operations[Provider Routing Operations - candidate] --> attempts
+  routing_operations --> provider_health
+  routing_operations --> provider_routing
   user_service[UserService]
   artifact_firewall[Agent Artifact Firewall]
   git_gate[Safe Agent Git Gate]
@@ -67,9 +75,16 @@ flowchart LR
 ```
 
 All other cataloged components depend only on explicitly allowed lower-level
-Hive primitives. The source audit found no retained experimental facade outside
+Hive primitives. Provider Health uses `Hive::OutputReference`, while Provider
+Routing Policy uses `Hive::PointStorage`; their compatibility names under
+`Hive::Attempts` remain for existing Attempts callers but do not create upward
+component edges. `Hive::PointStorage` requires its caller-supplied domain error
+class to inherit from `StandardError`; invalid boundary configuration raises
+`ArgumentError` before managed-directory failures can be translated through it.
+The source audit found no retained experimental facade outside
 the catalog: each promoted facade is owned by a catalog row and used by Hive,
-while Attempts and Patrol Effect Evidence are deliberately retained as guarded
+while Provider Health, Provider Routing Policy, Provider Routing Operations,
+Attempts, and Patrol Effect Evidence are deliberately retained as guarded
 candidates rather than being promoted ahead of their remaining lifecycle or
 qualification proof.
 

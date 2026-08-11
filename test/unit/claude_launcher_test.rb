@@ -2,6 +2,7 @@ require "test_helper"
 require "time"
 require "hive/claude_launcher"
 require "hive/agent_limit"
+require "hive/attempts/context"
 require "hive/stages/base"
 require "hive/task"
 
@@ -40,6 +41,38 @@ class ClaudeLauncherTest < Minitest::Test
         assert_equal "auto", captured.fetch(1).fetch(:permission_mode)
         assert_equal %w[Read LS], captured.fetch(1).fetch(:allowed_tools)
         assert_equal %w[Write Bash], captured.fetch(1).fetch(:disallowed_tools)
+      end
+    end
+  end
+
+  def test_explicit_routing_forces_headless_even_when_mutable_config_requests_tmux
+    with_tmp_task do |task|
+      context = Object.new
+      context.define_singleton_method(:explicit_routing?) { true }
+      captured = nil
+      spawn = lambda do |_task, **kwargs|
+        captured = kwargs
+        { status: :complete }
+      end
+
+      with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+          result = Hive::ClaudeLauncher.launch!(
+            task: task,
+            cfg: { "claude" => { "mode" => "tmux", "permission_mode" => "auto" } },
+            prompt: "prompt",
+            add_dirs: [ task.folder ],
+            cwd: task.folder,
+            max_budget_usd: 1,
+            timeout_sec: 1,
+            log_label: "test",
+            session_name: "hive-test-session",
+            status_mode: :state_file_marker
+          )
+
+          assert_equal({ status: :complete }, result)
+          assert_equal :claude, captured.fetch(:profile).name
+        end
       end
     end
   end

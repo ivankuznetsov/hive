@@ -8,7 +8,7 @@ class TaskProjectionStoreTest < Minitest::Test
     with_tmp_dir do |root|
       with_env("HIVE_HOME" => root, "HIVE_ATTEMPT_STORE_ROOT" => nil) do
         store = Hive::TaskProjection::Store.new(task_folder: root)
-        assert_equal File.join(root, "attempts", "v3"), store.attempt_store.root
+        assert_equal File.join(root, "attempts", "v4"), store.attempt_store.root
       end
       assert File.file?(File.join(root, "attempts", "v2"))
     end

@@ -10,7 +10,7 @@ class TaskClosureTest < Minitest::Test
     with_tmp_dir do |root|
       with_env("HIVE_HOME" => root, "HIVE_ATTEMPT_STORE_ROOT" => nil) do
         closure = Hive::TaskClosure.new
-        assert_equal File.join(root, "attempts", "v3"),
+        assert_equal File.join(root, "attempts", "v4"),
                      closure.instance_variable_get(:@attempt_store).root
       end
       assert File.file?(File.join(root, "attempts", "v2"))

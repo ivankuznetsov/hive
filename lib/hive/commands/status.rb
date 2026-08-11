@@ -298,7 +298,14 @@ module Hive
         marker = terminal_safe(row.dig("position", "marker"))
         owner = terminal_safe(row["blocker_owner"] || "unknown")
         reason = terminal_safe(row["reason"] || "status reason unavailable")
-        "  #{target} · #{stage}/#{marker} · #{owner} — #{reason}"
+        routing = row["routing"]
+        route = if routing.is_a?(Hash)
+          selected = terminal_safe(routing["selected_route"])
+          selected.empty? ? " · routing #{terminal_safe(routing['reason'])}" : " · route #{selected}"
+        else
+          ""
+        end
+        "  #{target} · #{stage}/#{marker}#{route} · #{owner} — #{reason}"
       end
 
       def terminal_safe(value)

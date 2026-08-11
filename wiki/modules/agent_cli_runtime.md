@@ -3,7 +3,7 @@ title: Agent CLI Runtime component
 type: module
 source: components/agent-cli-runtime, components/agent-cli-runtime/mirror, .github/workflows/agent-cli-runtime-release.yml
 created: 2026-07-26
-updated: 2026-07-26
+updated: 2026-08-11
 tags: [agent, runtime, component, gem, cli]
 ---
 
@@ -20,6 +20,15 @@ The package lives at `components/agent-cli-runtime/`, loads with
 Its built-in profiles are ordered `claude`, `codex`, `pi`, `grok`. Callers
 construct immutable requests and receive immutable compiled invocations,
 capability evidence, probe results, and observable results.
+Each profile also exposes an immutable `credential_environment_keys`
+inventory. This is compatibility metadata for an orchestrator that needs to
+remove ambient credentials when selecting a named subscription/session; it
+contains names only and does not move credential values into the package.
+The companion `configuration_environment_key`,
+`default_configuration_directory`, and `configuration_directory` contract
+describes the CLI-owned subscription/session directory. The extracted package
+owns these provider-specific names; it does not provision API keys or choose an
+authentication mode.
 
 Compilation returns argv and optional stdin without executing a process.
 Requested controls fail closed with `UnsupportedCapability` when a profile
@@ -33,7 +42,9 @@ or custom `Profile` objects, preserves `UnknownProvider` as a typed caller
 error, exposes custom CLI capabilities in static probe evidence, and rejects
 custom names that collide with the standard capability vocabulary. Missing
 usage stays `nil`; terminal events without counters do not become measured
-zero-token events.
+zero-token events. Observable results also carry an optional immutable
+`provider_signal` supplied by a trusted caller. The component does not classify
+that signal or own provider-health policy.
 
 For compatibility with Hive's trusted headless launches,
 `permission_mode: nil` still selects a provider's bypass flag. Independent
@@ -66,6 +77,10 @@ inside Hive and focused parity tests compare the package against it. This
 temporary duplication is bounded to the publish-first window; the held cutover
 will preserve promised Hive constants as forwarding adapters and remove the
 internal copy only after RubyGems verification and separate merge authority.
+The parity boundary includes the built-in credential-environment inventories
+and configuration-directory metadata, so Hive launch binding isolation and
+session-alias detection cannot drift from the extracted compatibility profiles
+during that window.
 
 ## Development and release
 

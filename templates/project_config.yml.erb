@@ -105,6 +105,27 @@ plan:
   #   tools: [Read, Write, Edit]
 execute:
   agent: <%= development_agent %>
+  # Provider routing is a separate explicit opt-in from `models:`. Accounts
+  # must exist in the global providers registry. Pool entries cannot override
+  # their account's adapter, and route metadata is the sole input to hard
+  # compatibility filtering. Omitting `routing.pool` keeps the exact legacy
+  # agent/model/effort and limits_reached paths.
+  # routing:
+  #   pool:
+  #     - provider: codex-primary
+  #       model: gpt-5.6-sol
+  #       effort: xhigh
+  #       capabilities:
+  #         context: large
+  #         quality: high
+  #         tools: [shell, filesystem]
+  #         permissions: [read, write]
+  #   required:
+  #     quality: high
+  #     tools: [filesystem]
+  #   pin:
+  #     provider: codex-primary
+  #     model: gpt-5.6-sol
   # Scoped dirs extend the task folder add-dir list; relative paths are
   # resolved from the task folder. Non-yolo scopes are claude-only: to
   # uncomment this you must also set `agent: claude` here, since the

@@ -6,7 +6,7 @@ module Hive
   module Modules
     # Immutable admission identity for one module hook and occurrence. It has
     # the shape consumed by Attempts::Dispatcher, while carrying an explicit
-    # module-hook subject in attempt schema v3.
+    # module-hook subject in attempt schema v4.
     HookAttempt = Data.define(
       :task_id, :project, :task_slug, :intended_stage, :task_locator,
       :progress_token, :task_generation, :ownership_generation,

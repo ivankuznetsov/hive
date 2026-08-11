@@ -3,7 +3,7 @@ title: Interaction Surface
 type: commands
 source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/, skills/hive/, lib/hive/agent_skills/, config/agent-skills.yml, lib/hive/web/, web/, public/, hive.gemspec, packaging/, .github/workflows/{live-agent-skills,release}.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
-updated: 2026-07-22
+updated: 2026-08-10
 tags: [commands, api, skills, agents, operational, provisioning]
 ---
 
@@ -13,8 +13,9 @@ documented in [[commands/web]], `hive connect screenote` as the Screenote OAuth
 setup surface for artifacts MCP uploads, `hive bench submit` as the hive-bench
 corpus producer,
 `hive pairing` as the Telegram first-contact approval surface, the read-only
-agent-first `hive status --operational --json`, bounded `hive watch`, closed
-`hive act`, the `hive doctor` / consent-safe setup split for one canonical Hive
+agent-first `hive status --operational --json`, explicit `hive circuits`
+inspection/administration, bounded `hive watch`, closed `hive act`, the
+`hive doctor` / consent-safe setup split for one canonical Hive
 operating skill projected to OpenClaw, Claude, Codex, and Pi, and the single
 ClawHub `hive-cli` listing whose installed slash command is `/hive`.
 The Ruby command/API contract lives in [[cli]] and the
@@ -35,6 +36,7 @@ one ClawHub listing per Hive verb.
 - `lib/hive/commands/setup_agents.rb`
 - `lib/hive/commands/watch.rb`
 - `lib/hive/commands/act.rb`
+- `lib/hive/commands/circuits.rb`
 - `lib/hive/operational_status.rb`
 - `lib/hive/operational_action.rb`
 - `skills/hive/`
@@ -72,10 +74,12 @@ its legacy on-demand v1 mode is reporting-only; merged-PR v2 can take separately
 authorized actions), and
 [[commands/doctor]] read-only managed health reporting,
 [[commands/setup-agents]] consent-safe native provisioning,
+[[commands/circuits]] as the generation-fenced provider-health surface,
 `--json` envelopes where the command page says they exist.
 The default human `hive status` is the concise operational projection;
-`--full` retains the detailed table, bare `--json` retains the complete v6
-graph, and `--operational --json` selects the additive agent document.
+`--full` retains the detailed table, bare `--json` retains the complete v7
+graph, and `--operational --json` selects the v4 agent document with a required
+nullable exact routing decision.
 [[commands/watch]] emits bounded semantic JSON Lines without shell polling.
 `hive act` accepts only a fresh observation token for the one closed routine
 workflow-advance action and recomputes the verb under the task lock.

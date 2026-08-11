@@ -6,6 +6,12 @@ class AttemptsEntrypointTest < Minitest::Test
 
   FakeTask = Struct.new(:slug, :project_root, :project_name, keyword_init: true)
 
+  def test_state_home_falls_back_when_an_injected_store_has_no_root
+    entrypoint = Hive::Attempts::Entrypoint.new(store: Object.new)
+
+    assert_equal Hive::Paths.state_home, entrypoint.send(:state_home_for, Object.new)
+  end
+
   def test_dispatch_attaches_to_resolved_attempt
     task = FakeTask.new(slug: "task", project_root: "/tmp/project", project_name: "demo")
     attempt = Struct.new(:attempt_id).new("attempt-1")
@@ -39,6 +45,7 @@ class AttemptsEntrypointTest < Minitest::Test
     assert_equal "demo", calls.first.fetch(:project)
     assert_equal "4-execute", calls.first.fetch(:intended_stage)
     assert_equal true, calls.first.fetch(:interactive)
+    assert calls.first.fetch(:routing_policy).legacy?
   end
 
   def test_noninteractive_dispatch_returns_attempt_reference_without_attaching
@@ -175,6 +182,44 @@ class AttemptsEntrypointTest < Minitest::Test
       entrypoint.dispatch(task: task, intended_stage: "4-execute", argv: [ "hive", "run", "task" ])
     end
     assert_equal Hive::ExitCodes::TEMPFAIL, error.exit_code
+  end
+
+  def test_initial_no_route_is_admitted_to_markerless_recovery_before_returning
+    task = FakeTask.new(slug: "task", project_root: "/tmp/project", project_name: "demo")
+    decision = Object.new
+    result = Hive::Attempts::DispatchResult.new(
+      status: :no_route, attempt: nil, receipt: nil,
+      attach_descriptor: nil, reason: "no_eligible_provider_route", decision: decision
+    )
+    dispatcher = Object.new
+    dispatcher.define_singleton_method(:dispatch) { |**_kwargs| result }
+    calls = []
+    receipt = Struct.new(:human_summary).new("Retry available later")
+    coordinator = Object.new
+    coordinator.define_singleton_method(:request_admission_failure) do |**kwargs|
+      calls << kwargs
+      receipt
+    end
+    entrypoint = Hive::Attempts::Entrypoint.new(
+      store: Object.new, dispatcher: dispatcher,
+      recovery_coordinator: coordinator,
+      config_loader: ->(_root) { Hive::Config.merge_defaults({}) }
+    )
+
+    assert_same result, entrypoint.dispatch(
+      task: task, intended_stage: "4-execute", argv: %w[hive run task],
+      request_id: "request-no-route", interactive: false, now: Time.utc(2026, 8, 11)
+    )
+    assert_equal decision, calls.fetch(0).fetch(:decision)
+    assert_equal "request-no-route", calls.fetch(0).fetch(:request).request_id
+
+    error = assert_raises(Hive::ConcurrentRunError) do
+      entrypoint.dispatch(
+        task: task, intended_stage: "4-execute", argv: %w[hive run task],
+        request_id: "request-no-route", interactive: true, now: Time.utc(2026, 8, 11)
+      )
+    end
+    assert_includes error.message, "Retry available later"
   end
 
   def test_lost_attachment_preserves_output_metadata_for_the_command_boundary

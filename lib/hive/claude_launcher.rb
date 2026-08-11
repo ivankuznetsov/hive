@@ -163,7 +163,12 @@ module Hive
       profile.validate_routing_arguments!(routing_arguments) if routing_arguments
       routed_flags = routing_arguments&.native_arguments
       cli_flags = routed_flags || identity_arguments || (cfg ? Hive::Config.claude_cli_flags(cfg) : [])
-      launch_mode = Hive::Config.claude_mode(cfg)
+      launch_mode = if defined?(Hive::Attempts::Context) &&
+                       Hive::Attempts::Context.current&.explicit_routing?
+        :headless
+      else
+        Hive::Config.claude_mode(cfg)
+      end
 
       if launch_mode == :headless
         require "hive/stages/base"

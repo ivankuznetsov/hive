@@ -28,12 +28,16 @@ class SpawnAgentTest < Minitest::Test
 
   def setup
     @prev_bin = ENV["HIVE_CLAUDE_BIN"]
+    @prev_codex_bin = ENV["HIVE_CODEX_BIN"]
+    @prev_codex_binding = ENV["HIVE_PROVIDER_BINDING_CODEX_TEAM_A"]
     ENV["HIVE_CLAUDE_BIN"] = FAKE_BIN
     Hive::AgentProfile.reset_version_cache!
   end
 
   def teardown
     ENV["HIVE_CLAUDE_BIN"] = @prev_bin
+    ENV["HIVE_CODEX_BIN"] = @prev_codex_bin
+    ENV["HIVE_PROVIDER_BINDING_CODEX_TEAM_A"] = @prev_codex_binding
     %w[HIVE_FAKE_CLAUDE_OUTPUT HIVE_FAKE_CLAUDE_EXIT
        HIVE_FAKE_CLAUDE_WRITE_FILE HIVE_FAKE_CLAUDE_WRITE_CONTENT
        HIVE_FAKE_CLAUDE_HANG HIVE_FAKE_CLAUDE_LOG_DIR
@@ -1297,5 +1301,251 @@ class SpawnAgentTest < Minitest::Test
         assert_match(/claude only/, marker.attrs["message"].to_s)
       end
     end
+  end
+
+  def test_explicit_attempt_route_overrides_mutable_profile_model_and_account_context
+    with_tmp_dir do |dir|
+      task = make_task(dir, "4-execute")
+      binding_root = File.join(dir, "codex-team-a")
+      FileUtils.mkdir_p(binding_root)
+      argv_log = File.join(dir, "argv.log")
+      env_log = File.join(dir, "env.log")
+      fake = File.join(dir, "codex")
+      File.write(fake, <<~SH)
+        #!/usr/bin/env bash
+        if [ "$1" = "--version" ]; then echo "codex-cli 1.0.0"; exit 0; fi
+        printf '%s\n' "$@" > "#{argv_log}"
+        printf '%s\n' "$CODEX_HOME" > "#{env_log}"
+        cat > /dev/null
+        exit 0
+      SH
+      File.chmod(0o755, fake)
+      ENV["HIVE_CODEX_BIN"] = fake
+      ENV["HIVE_PROVIDER_BINDING_CODEX_TEAM_A"] = binding_root
+      context = explicit_context(binding: "team-a")
+
+      with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
+        assert_equal :codex, Hive::Stages::Base.stage_profile(
+          { "execute" => { "agent" => "claude" } }, "execute"
+        ).name
+        result = Hive::Stages::Base.spawn_agent(
+          task,
+          prompt: "prompt",
+          max_budget_usd: nil,
+          timeout_sec: 5,
+          profile: Hive::AgentProfiles.lookup(:claude),
+          model: "mutable-wrong-model",
+          effort: "low",
+          cfg: {},
+          status_mode: :exit_code_only
+        )
+        assert_equal :ok, result.fetch(:status)
+      end
+
+      argv = File.readlines(argv_log, chomp: true)
+      assert_includes argv, "model-a"
+      assert_includes argv, "model_reasoning_effort=high"
+      refute_includes argv, "mutable-wrong-model"
+      assert_equal binding_root, File.read(env_log).strip
+    end
+  end
+
+  def test_explicit_attempt_route_without_effort_uses_only_its_persisted_model
+    with_tmp_dir do |dir|
+      task = make_task(dir, "4-execute")
+      argv_log = File.join(dir, "argv.log")
+      fake = File.join(dir, "codex")
+      File.write(fake, <<~SH)
+        #!/usr/bin/env bash
+        if [ "$1" = "--version" ]; then echo "codex-cli 1.0.0"; exit 0; fi
+        printf '%s\n' "$@" > "#{argv_log}"
+        cat > /dev/null
+        exit 0
+      SH
+      File.chmod(0o755, fake)
+      ENV["HIVE_CODEX_BIN"] = fake
+      context = explicit_context(effort: nil)
+
+      with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
+        result = Hive::Stages::Base.spawn_agent(
+          task,
+          prompt: "prompt",
+          max_budget_usd: nil,
+          timeout_sec: 5,
+          cfg: { "models" => { "execute" => { "effort" => "xhigh" } } },
+          status_mode: :exit_code_only
+        )
+        assert_equal :ok, result.fetch(:status)
+      end
+
+      argv = File.readlines(argv_log, chomp: true)
+      assert_includes argv, "model-a"
+      refute argv.any? { |argument| argument.start_with?("model_reasoning_effort=") }
+    end
+  end
+
+  def test_explicit_transport_failure_publishes_once_and_escapes_embedded_loop
+    with_tmp_dir do |dir|
+      task = make_task(dir, "4-execute")
+      event = {
+        "type" => "rate_limit_event",
+        "rate_limit_info" => {
+          "status" => "rejected", "rateLimitType" => "five_hour"
+        }
+      }
+      event["message"] = "secret-canary"
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT"] = JSON.generate(event)
+      ENV["HIVE_FAKE_CLAUDE_LOG_DIR"] = dir
+      published = []
+      writer = Object.new
+      writer.define_singleton_method(:write) { |signal| published << signal; true }
+      writer.define_singleton_method(:close) { true }
+      context = explicit_context(adapter: "claude", evidence_writer: writer)
+
+      error = with_replaced_singleton_method(
+        Hive::Attempts::Context, :current, -> { context }
+      ) do
+        assert_raises(Hive::ProviderRouteFailed) do
+          Hive::Stages::Base.spawn_agent(
+            task,
+            prompt: "prompt",
+            max_budget_usd: nil,
+            timeout_sec: 5,
+            cfg: {},
+            status_mode: :state_file_marker
+          )
+        end
+      end
+
+      assert_equal "admitted provider route failed", error.message
+      assert_equal 1, published.length
+      assert_equal "account_quota", published.first.fetch("failure_class")
+      assert_equal "provider_account", published.first.dig("scope", "kind")
+      refute_includes JSON.generate(published), "secret-canary"
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, marker.name
+      assert_equal "provider_route_failed", marker.attrs.fetch("reason")
+    end
+  end
+
+  def test_explicit_route_preflight_failure_is_account_attributed
+    with_tmp_dir do |dir|
+      task = make_task(dir, "4-execute")
+      context = explicit_context
+
+      with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
+        with_replaced_singleton_method(
+          Hive::AgentRuntime, :prepare!, ->(*) { raise Hive::AgentError, "unavailable" }
+        ) do
+          result = Hive::Stages::Base.spawn_agent(
+            task,
+            prompt: "prompt",
+            max_budget_usd: nil,
+            timeout_sec: 5,
+            cfg: {},
+            status_mode: :exit_code_only
+          )
+
+          assert_equal :error, result.fetch(:status)
+          assert_equal "provider_route_preflight_failed", result.fetch(:error_reason)
+          assert_includes result.fetch(:error_message), "account-a"
+        end
+      end
+    end
+  end
+
+  def test_explicit_route_failure_requires_durable_evidence_delivery
+    with_tmp_dir do |dir|
+      task = make_task(dir, "4-execute")
+      writer = Object.new
+      writer.define_singleton_method(:write) { |_signal| false }
+      writer.define_singleton_method(:close) { true }
+      context = explicit_context(evidence_writer: writer)
+      agent = Object.new
+      agent.define_singleton_method(:run!) do
+        { status: :error, provider_signal: { "failure_class" => "model_capacity" } }
+      end
+
+      with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
+        with_replaced_singleton_method(Hive::AgentRuntime, :prepare!, ->(*) { true }) do
+          with_replaced_singleton_method(Hive::Agent, :new, ->(**) { agent }) do
+            error = assert_raises(Hive::ProviderRouteFailed) do
+              Hive::Stages::Base.spawn_agent(
+                task,
+                prompt: "prompt",
+                max_budget_usd: nil,
+                timeout_sec: 5,
+                cfg: {},
+                status_mode: :exit_code_only
+              )
+            end
+
+            assert_includes error.message, "without durable evidence delivery"
+          end
+        end
+      end
+    end
+  end
+
+  def test_explicit_non_claude_route_bypasses_the_claude_launcher
+    with_tmp_dir do |dir|
+      task = make_task(dir, "4-execute")
+      context = explicit_context
+      captured = nil
+      spawn = lambda do |_task, **kwargs|
+        captured = kwargs
+        { status: :ok }
+      end
+
+      with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+          result = Hive::Stages::Base.spawn_claude!(
+            task,
+            {},
+            prompt: "prompt",
+            max_budget_usd: nil,
+            timeout_sec: 5,
+            session_name: "unused"
+          )
+
+          assert_equal :ok, result.fetch(:status)
+          assert_equal :codex, captured.fetch(:profile).name
+        end
+      end
+    end
+  end
+
+  def explicit_context(binding: "default", evidence_writer: nil, effort: "high", adapter: "codex")
+    provider_scope = {
+      "kind" => "provider_account", "provider_account_id" => "account-a", "model" => nil
+    }
+    model_scope = {
+      "kind" => "model", "provider_account_id" => "account-a", "model" => "model-a"
+    }
+    Hive::Attempts::Context.send(
+      :new,
+      attempt_id: "attempt-1",
+      task_generation: 1,
+      ownership_generation: "generation-1",
+      intended_stage: "4-execute",
+      evidence_writer: evidence_writer,
+      routing: {
+        "mode" => "explicit", "policy_digest" => "a" * 64,
+        "decision" => {
+          "decision_id" => "decision-1", "policy_digest" => "a" * 64,
+          "decided_at" => Time.utc(2026, 8, 10, 12).iso8601(6), "exclusions" => []
+        },
+        "route" => {
+          "route_id" => "account-a/model-a", "provider_account_id" => "account-a",
+          "adapter" => adapter, "launch_binding_id" => binding,
+          "model" => "model-a", "effort" => effort
+        },
+        "circuit_generations" => [
+          { "scope" => provider_scope, "journal_epoch" => 0, "observed_generation" => 0 },
+          { "scope" => model_scope, "journal_epoch" => 0, "observed_generation" => 0 }
+        ],
+        "probe_bindings" => []
+      }
+    )
   end
 end

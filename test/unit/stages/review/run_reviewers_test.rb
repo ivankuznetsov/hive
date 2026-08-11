@@ -764,6 +764,39 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
+  def test_explicit_route_never_uses_shared_claude_session
+    with_tmp_dir do |dir|
+      cfg = {
+        "claude" => { "mode" => "tmux" },
+        "review" => {
+          "reviewers" => [
+            { "name" => "claude-a", "output_basename" => "claude-a",
+              "kind" => "agent", "agent" => "claude" }
+          ]
+        }
+      }
+      ctx = make_ctx(dir)
+      adapter = SharedSessionReviewer.new(cfg.dig("review", "reviewers", 0), ctx)
+      attempt_context = Object.new
+      attempt_context.define_singleton_method(:explicit_routing?) { true }
+
+      with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { attempt_context }) do
+        with_stubbed_dispatch([ adapter ]) do
+          with_stubbed_claude_session do |sessions|
+            result = Hive::Stages::Review.run_reviewers(
+              cfg, ctx, Task.new(dir, File.join(dir, "task.md"))
+            )
+
+            assert_equal :ok, result
+            assert_empty sessions
+            assert_equal 1, adapter.headless_runs
+            assert_equal 0, adapter.session_runs
+          end
+        end
+      end
+    end
+  end
+
   def test_shared_claude_sessions_receive_their_group_route
     with_tmp_dir do |dir|
       cfg = {
@@ -2080,6 +2113,41 @@ class RunReviewersTest < Minitest::Test
   class TmuxUnavailableReviewer < Hive::Reviewers::Base
     def run!(deadline: nil)
       raise Hive::AgentError, "tmux binary not runnable: tmux"
+    end
+  end
+
+  class ProviderRouteFailureReviewer < Hive::Reviewers::Base
+    def run!(deadline: nil)
+      raise Hive::ProviderRouteFailed, "admitted provider route failed"
+    end
+  end
+
+  def test_provider_route_failure_terminates_reviewer_phase
+    with_tmp_dir do |dir|
+      cfg = {
+        "claude" => { "mode" => "headless" },
+        "review" => {
+          "reviewers" => [
+            { "name" => "failed-route", "output_basename" => "failed-route" },
+            { "name" => "must-not-run", "output_basename" => "must-not-run" }
+          ]
+        }
+      }
+      ctx = make_ctx(dir)
+      adapters = [
+        ProviderRouteFailureReviewer.new(cfg.dig("review", "reviewers", 0), ctx),
+        OkReviewer.new(cfg.dig("review", "reviewers", 1), ctx)
+      ]
+
+      with_stubbed_dispatch(adapters) do
+        assert_raises(Hive::ProviderRouteFailed) do
+          Hive::Stages::Review.run_reviewers(
+            cfg, ctx, Task.new(dir, File.join(dir, "task.md"))
+          )
+        end
+      end
+
+      refute File.exist?(File.join(dir, "reviews", "must-not-run-01.md"))
     end
   end
 

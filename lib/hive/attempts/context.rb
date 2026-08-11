@@ -1,5 +1,7 @@
 require "hive/attempts/capability"
+require "hive/attempts/evidence_channel"
 require "hive/attempts/store"
+require "hive/stringify_keys"
 
 module Hive
   module Attempts
@@ -9,9 +11,11 @@ module Hive
     # fingerprint. Transport environment is scrubbed immediately afterwards.
     class Context
       ENV_PREFIX = "HIVE_ATTEMPT_"
+      EMPTY_ROUTING_VALUES = [].freeze
 
       attr_reader :attempt_id, :task_generation, :ownership_generation,
-                  :project, :task_slug, :intended_stage
+                  :project, :task_slug, :intended_stage, :routing,
+                  :progress_token, :predecessor_attempt_id
 
       class << self
         def current
@@ -57,13 +61,23 @@ module Hive
           # is not privilege separation from hostile same-UID process state.
           record = Store.new.fetch(attempt_id)
           validate_record!(record, attempt_id: attempt_id, argv: argv, claim_capability: claim_capability)
+          evidence_writer = if record["routing"]["mode"] == "explicit"
+            EvidenceChannel::Writer.for_fd(
+              values["HIVE_ATTEMPT_EVIDENCE_FD"],
+              route: record["routing"].fetch("route")
+            )
+          end
           @installed = new(
             attempt_id: record.attempt_id,
             task_generation: record.task_input_epoch,
             ownership_generation: record.ownership_generation,
             project: record["project"],
             task_slug: record["task_slug"],
-            intended_stage: record["intended_stage"]
+            intended_stage: record["intended_stage"],
+            progress_token: record["progress_token"],
+            predecessor_attempt_id: record["predecessor_attempt_id"],
+            routing: record["routing"],
+            evidence_writer: evidence_writer
           )
         rescue Hive::Error, SystemCallError, IOError => e
           raise StoreError, "durable attempt context rejected: #{e.message}"
@@ -73,6 +87,7 @@ module Hive
 
         # Test isolation for the otherwise process-lifetime installation.
         def reset!
+          @installed&.close
           @installed = nil
         end
 
@@ -163,7 +178,9 @@ module Hive
       end
 
       def initialize(attempt_id:, task_generation:, ownership_generation: nil,
-                     project: nil, task_slug: nil, intended_stage: nil)
+                     project: nil, task_slug: nil, intended_stage: nil,
+                     routing: { "mode" => "legacy" }, evidence_writer: nil,
+                     progress_token: nil, predecessor_attempt_id: nil)
         @attempt_id = attempt_id.to_s
         @task_generation, bridged_ownership = numeric_generation_or_legacy(task_generation)
         @legacy_opaque_generation = !bridged_ownership.nil? && ownership_generation.nil?
@@ -171,10 +188,37 @@ module Hive
         @project = project&.to_s
         @task_slug = task_slug&.to_s
         @intended_stage = intended_stage&.to_s
+        @progress_token = progress_token&.to_s
+        @predecessor_attempt_id = predecessor_attempt_id&.to_s
+        @routing = deep_freeze(Hive::StringifyKeys.call(routing))
+        @evidence_writer = evidence_writer
         raise ArgumentError, "attempt context requires an attempt ID" if @attempt_id.empty?
         raise ArgumentError, "attempt context task generation must be non-negative" if @task_generation.negative?
       rescue TypeError
         raise ArgumentError, "attempt context requires a numeric task generation"
+      end
+
+      def explicit_routing? = routing["mode"] == "explicit"
+      def routing_policy_digest = explicit_routing? ? routing.fetch("policy_digest") : nil
+      def routing_decision = explicit_routing? ? routing.fetch("decision") : nil
+      def admitted_route = explicit_routing? ? routing.fetch("route") : nil
+      def circuit_generations = explicit_routing? ? routing.fetch("circuit_generations") : EMPTY_ROUTING_VALUES
+      def probe_bindings = explicit_routing? ? routing.fetch("probe_bindings") : EMPTY_ROUTING_VALUES
+      def provider_account_id = admitted_route&.fetch("provider_account_id", nil)
+      def adapter = admitted_route&.fetch("adapter", nil)
+      def launch_binding_id = admitted_route&.fetch("launch_binding_id", nil)
+      def model = admitted_route&.fetch("model", nil)
+      def effort = admitted_route&.fetch("effort", nil)
+
+      def publish_provider_signal(signal)
+        return false unless explicit_routing? && @evidence_writer
+
+        @evidence_writer.write(signal)
+      end
+
+      def close
+        @evidence_writer&.close
+        true
       end
 
       # Revalidate the admitted generation at the command's locked mutation
@@ -189,8 +233,12 @@ module Hive
           task: task, project: project, intended_stage: intended_stage
         )
         ownership_matches = current.ownership_generation == ownership_generation
+        successor_progress_matches = !predecessor_attempt_id.to_s.empty? &&
+                                     !progress_token.to_s.empty? &&
+                                     current.respond_to?(:progress_token) &&
+                                     current.progress_token == progress_token
         epoch_matches = @legacy_opaque_generation || current.task_input_epoch == task_generation
-        unless ownership_matches && epoch_matches
+        unless (ownership_matches || successor_progress_matches) && epoch_matches
           raise Hive::ConcurrentRunError,
                 "durable attempt #{attempt_id} generation is stale; redispatch the current task state"
         end
@@ -199,6 +247,18 @@ module Hive
       end
 
       private
+
+      def deep_freeze(value)
+        case value
+        when Hash
+          value.each { |key, child| key.freeze; deep_freeze(child) }
+        when Array
+          value.each { |child| deep_freeze(child) }
+        when String
+          value.freeze
+        end
+        value.freeze
+      end
 
       def numeric_generation_or_legacy(value)
         return [ Integer(value), nil ] if value.is_a?(Integer) || value.to_s.match?(/\A\d+\z/)

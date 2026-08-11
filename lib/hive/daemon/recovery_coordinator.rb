@@ -4,10 +4,12 @@ require "shellwords"
 require "time"
 require "hive/agent_limit"
 require "hive/attempts/generation"
+require "hive/attempts/store"
 require "hive/daemon/auto_retry_safety"
 require "hive/daemon/dispatch_request_queue"
 require "hive/lock"
 require "hive/markers"
+require "hive/provider_routing/decision"
 require "hive/recovery"
 require "hive/recovery/retry_policy"
 require "hive/task"
@@ -127,12 +129,17 @@ module Hive
                      request_queue: Hive::Daemon::DispatchRequestQueue,
                      task_resolver: nil,
                      safety: Hive::Daemon::AutoRetrySafety.method(:safe_to_retry?),
-                     generation_resolver: nil)
+                     generation_resolver: nil, attempt_store: nil,
+                     attempt_store_factory: nil)
         @state_home = state_home
         @request_queue = request_queue
         @task_resolver = task_resolver || method(:resolve_task)
         @safety = safety.respond_to?(:call) ? safety : safety.method(:safe_to_retry?)
         @generation_resolver = generation_resolver || method(:resolve_generation)
+        @attempt_store = attempt_store
+        @attempt_store_factory = attempt_store_factory || lambda do
+          Hive::Attempts::Store.open_default(state_home: @state_home)
+        end
       end
 
       def assessment(row, now: Time.now.utc)
@@ -225,6 +232,17 @@ module Hive
               retry_count: retry_count, provider_hint: provider_hint(row)
             )
           end
+          source_receipt = source_receipt_for(
+            marker: current, task: locked_task, project: value(row, :project)
+          )
+          if failure_origin == "provider_route_failed" && source_receipt.nil?
+            return receipt(
+              "blocked", failure_origin: failure_origin, owner: "hive",
+              reason: "provider_receipt_unavailable",
+              remediation: "wait for the immutable provider attempt receipt and retry from fresh status",
+              retry_count: retry_count
+            )
+          end
           locked_safe, locked_safety_reason = @safety.call(
             safety_observation(row, locked_task, current)
           )
@@ -282,14 +300,24 @@ module Hive
             intended_stage: value(row, :stage),
             state_file_content: markerless_body
           )
-          canonical_request_id = request_id.to_s
-          canonical_request_id = deterministic_request_id(
-            row, locked_task, expected_generation, generation.task_generation
-          ) if canonical_request_id.empty?
+          canonical_request_id = if source_receipt
+            deterministic_request_id(
+              row, locked_task, expected_generation, generation.task_generation,
+              source_receipt: source_receipt
+            )
+          else
+            request_id.to_s
+          end
+          if canonical_request_id.empty?
+            canonical_request_id = deterministic_request_id(
+              row, locked_task, expected_generation, generation.task_generation
+            )
+          end
           attrs = current.attrs.to_h.transform_keys(&:to_s)
           marker_id = marker_identity(current)
           next_eligible_at = assessment[:retry_at].utc.iso8601(6)
           recovery = {
+            "variant" => "marker",
             "phase" => "admitted",
             "observed_marker_generation" => expected_generation,
             "expected_marker_attrs" => attrs,
@@ -302,7 +330,10 @@ module Hive
             "blocked_reason" => nil,
             "blocked_remediation" => nil,
             "retry_count" => retry_count + 1,
-            "provider_hint" => provider_hint(row)
+            "provider_hint" => provider_hint(row),
+            "policy_digest" => nil,
+            "source_receipt" => source_receipt,
+            "admission_observation" => nil
           }
           @request_queue.write_request!(
             project: value(row, :project),
@@ -314,6 +345,7 @@ module Hive
             trigger: "recovery",
             request_id: canonical_request_id,
             task_generation: generation.task_generation,
+            predecessor_attempt_id: source_receipt&.fetch("attempt_id", nil),
             task_id: locked_task.id,
             expected_stage: value(row, :stage),
             expected_marker_name: current.name.to_s,
@@ -353,6 +385,163 @@ module Hive
         )
       end
 
+      # Admit the first explicit-pool exhaustion into the ordinary recovery
+      # ledger without fabricating a task marker. The immutable task
+      # generation plus frozen policy digest is the idempotency identity; the
+      # RecoveryCoordinator remains the owner of the retry charge and cadence.
+      def request_admission_failure(request:, decision:, now: Time.now.utc)
+        now = now.utc
+        validate_admission_decision!(decision, expected_status: :no_route)
+        project = request.project.to_s
+        slug = request.slug.to_s
+        task = resolve_admission_task(project: project, slug: slug)
+
+        Hive::Lock.with_task_lock(task.folder, "operation" => "recovery_admission_failure") do
+          locked_task = resolve_admission_task(project: project, slug: slug)
+          unless same_task_identity?(task, locked_task) &&
+                 admission_request_identity_matches?(request, locked_task)
+            return receipt(
+              "blocked", failure_origin: decision.reason, owner: "operator",
+              reason: "task_identity_conflict",
+              remediation: "refresh status; the canonical task changed before recovery admission"
+            )
+          end
+
+          marker = Hive::Markers.current(locked_task.state_file)
+          if recoverable_marker?(marker)
+            return receipt(
+              "blocked", failure_origin: decision.reason, owner: "operator",
+              reason: "generation_conflict",
+              remediation: "refresh status; a recoverable marker now owns this task"
+            )
+          end
+          if locked_task.id.to_s.empty?
+            return receipt(
+              "blocked", failure_origin: decision.reason, owner: "hive",
+              reason: "missing_task_id",
+              remediation: "wait for Hive to assign the task id, then retry admission"
+            )
+          end
+
+          generation = current_generation(
+            locked_task, project: project, intended_stage: task_stage(locked_task)
+          )
+          unless admission_decision_matches?(decision, generation)
+            return receipt(
+              "blocked", failure_origin: decision.reason, owner: "operator",
+              reason: "generation_conflict",
+              remediation: "retry admission from the current task generation and routing policy"
+            )
+          end
+
+          existing = @request_queue.find_admission_recovery(
+            project: project, slug: slug,
+            task_generation: generation.task_generation,
+            policy_digest: decision.policy_digest,
+            state_home: @state_home
+          )
+          return receipt_for_request(existing, now: now) if existing
+
+          request_id = deterministic_admission_request_id(
+            project: project, task: locked_task,
+            dispatch_generation: generation.task_generation,
+            policy_digest: decision.policy_digest
+          )
+          observation = admission_observation(decision)
+          operator_blocked = decision.reason == "health_state_unavailable"
+          recovery = {
+            "variant" => "admission_failure",
+            "phase" => "admitted",
+            "observed_marker_generation" => nil,
+            "expected_marker_attrs" => {},
+            "canonical_task_folder" => canonical_path(locked_task.folder),
+            "expected_post_clear_progress_fingerprint" => generation.progress_token,
+            "dispatch_generation" => generation.task_generation,
+            "failure_origin" => decision.reason,
+            "next_eligible_at" => (now + Hive::AgentLimit.retry_cooldown_sec).iso8601(6),
+            "owner" => operator_blocked ? "operator" : "scheduler",
+            "blocked_reason" => operator_blocked ? "health_state_unavailable" : nil,
+            "blocked_remediation" => operator_blocked ?
+              "inspect and repair the unavailable provider-health scope" : nil,
+            "retry_count" => durable_retry_count_for(project: project, slug: slug) + 1,
+            "provider_hint" => nil,
+            "policy_digest" => decision.policy_digest,
+            "source_receipt" => nil,
+            "admission_observation" => observation
+          }
+          @request_queue.write_request!(
+            project: project, slug: slug, argv: request.argv,
+            requestor: request.requestor || "daemon",
+            chat_id: request.chat_id, update_id: request.update_id,
+            trigger: "recovery/admission_failure", request_id: request_id,
+            task_generation: generation.task_generation,
+            predecessor_attempt_id: request.predecessor_attempt_id,
+            inherited_outputs: request.inherited_outputs || [],
+            task_id: locked_task.id, expected_stage: task_stage(locked_task),
+            expected_marker_name: nil, expected_marker_id: nil,
+            recovery: recovery, state_home: @state_home, now: now
+          )
+          @request_queue.remove_terminal_recoveries(
+            project: project, slug: slug, except_request_id: request_id,
+            state_home: @state_home
+          )
+          persisted = @request_queue.fetch(request_id, state_home: @state_home)
+          persisted ? receipt_for_request(persisted, now: now) :
+            unavailable_request(request, "request_disappeared_after_admission")
+        end
+      rescue Hive::ConcurrentRunError => e
+        holder = e.respond_to?(:holder) ? e.holder : nil
+        receipt(
+          "running", attempt_id: holder && holder["attempt_id"],
+          failure_origin: decision&.reason, owner: "agent", reason: "existing_live",
+          remediation: "attach to the current owner and wait for its terminal receipt"
+        )
+      rescue Hive::Error, SystemCallError, IOError, ArgumentError => e
+        receipt(
+          "unavailable", failure_origin: decision&.reason, owner: "hive",
+          reason: "recovery_unavailable", remediation: "#{e.class}: #{e.message}"
+        )
+      end
+
+      # Attach a routed admission result to the same durable recovery request.
+      # Capacity remains neutral (no deadline change); exhaustion uses the
+      # coordinator's existing cadence without another request or charge.
+      def observe_admission_result(request:, result:, now: Time.now.utc)
+        decision = result.respond_to?(:decision) ? result.decision : nil
+        expected = result.status == :deferred ? :capacity_saturated : :no_route
+        validate_admission_decision!(decision, expected_status: expected)
+        @request_queue.with_request_lock(request.request_id, state_home: @state_home) do
+          current = @request_queue.fetch(request.request_id, state_home: @state_home) || request
+          recovery = current.recovery || {}
+          unless %w[admitted cleared].include?(recovery["phase"])
+            return receipt_for_request(current, now: now)
+          end
+
+          operator_blocked = decision.reason == "health_state_unavailable"
+          changes = {
+            "admission_observation" => admission_observation(decision),
+            "owner" => operator_blocked ? "operator" : "scheduler",
+            "blocked_reason" => operator_blocked ? "health_state_unavailable" : nil,
+            "blocked_remediation" => operator_blocked ?
+              "inspect and repair the unavailable provider-health scope" : nil
+          }
+          unless decision.capacity_saturated?
+            changes["next_eligible_at"] =
+              (now.utc + Hive::AgentLimit.retry_cooldown_sec).iso8601(6)
+          end
+          transitioned = @request_queue.update_recovery!(
+            current.request_id, expected_phase: recovery["phase"], changes: changes,
+            state_home: @state_home, request_locked: true
+          )
+          refreshed = @request_queue.fetch(current.request_id, state_home: @state_home)
+          return unavailable_request(current, "transition_conflict") unless transitioned && refreshed
+
+          receipt_for_request(refreshed, now: now)
+        end
+      rescue Hive::Error, SystemCallError, IOError, ArgumentError => e
+        unavailable_request(request, "#{e.class}: #{e.message}")
+      end
+
       # Resume the admitted/cleared transition. This method is called by the
       # daemon immediately before ordinary attempt admission. It can recover a
       # crash after the marker rewrite because the expected markerless
@@ -385,6 +574,17 @@ module Hive
               )
             end
 
+            unless source_health_acknowledged?(recovery["source_receipt"])
+              return receipt(
+                "queued", request_id: current_request.request_id,
+                phase: recovery["phase"],
+                failure_origin: recovery["failure_origin"], owner: "hive",
+                reason: "provider_health_pending",
+                remediation: "wait for provider health to acknowledge the terminal receipt",
+                retry_count: recovery["retry_count"]
+              )
+            end
+
             marker = Hive::Markers.current(locked_task.state_file)
             safety_marker = recovery_safety_marker(current_request, marker)
             locked_safe, locked_safety_reason = @safety.call(
@@ -403,7 +603,12 @@ module Hive
 
             generation = generation_for_current(locked_task, current_request)
             if recovery["phase"] == "admitted"
-              if marker.none?
+              if admission_failure_recovery?(recovery)
+                return block_request(
+                  current_request, "generation_conflict",
+                  owner: "operator", request_locked: true
+                ) if recoverable_marker?(marker) || !generation_matches?(generation, recovery)
+              elsif marker.none?
                 return block_request(
                   current_request, "generation_conflict",
                   owner: "operator", request_locked: true
@@ -472,7 +677,7 @@ module Hive
               owner: "operator", request_locked: true
             ) unless
               recovery["phase"] == "cleared" &&
-              marker.none? &&
+              cleared_marker_state_valid?(marker, recovery) &&
               generation_matches?(generation, recovery)
 
             refreshed = clear_resolved_block(current_request, request_locked: true)
@@ -577,6 +782,7 @@ module Hive
           else "unavailable"
           end
         end
+        observation_reason = recovery.dig("admission_observation", "reason")
         receipt(
           status,
           request_id: request.request_id,
@@ -590,7 +796,7 @@ module Hive
                  when "cooldown" then "scheduler"
                  else recovery["owner"]
                  end,
-          reason: blocked.empty? ? (replay ? "terminal_replay" : nil) : blocked,
+          reason: blocked.empty? ? (replay ? "terminal_replay" : observation_reason) : blocked,
           remediation: blocked.empty? ? nil :
             (recovery["blocked_remediation"] || remediation_for(blocked)),
           retry_count: recovery["retry_count"],
@@ -612,10 +818,116 @@ module Hive
       private
 
       def durable_retry_count(row)
+        durable_retry_count_for(
+          project: value(row, :project), slug: value(row, :slug)
+        )
+      end
+
+      def durable_retry_count_for(project:, slug:)
         @request_queue.recovery_retry_count(
-          project: value(row, :project),
-          slug: value(row, :slug),
-          state_home: @state_home
+          project: project, slug: slug, state_home: @state_home
+        )
+      end
+
+      def source_receipt_for(marker:, task:, project:)
+        return nil unless marker.attrs["reason"].to_s == "provider_route_failed"
+
+        attempt_id = marker.attrs["attempt_id"].to_s
+        return nil if attempt_id.empty?
+
+        record = attempts_store.fetch(attempt_id)
+        return nil unless record&.state == "terminal" && record.explicit_routing?
+        return nil unless record["project"].to_s == project.to_s
+        return nil unless record["task_slug"].to_s == task.slug.to_s
+        return nil unless record["task_id"].to_s == task.id.to_s
+        return nil unless record["intended_stage"].to_s == task_stage(task)
+        return nil unless record.task_generation.to_s == marker.attrs["task_generation"].to_s
+        return nil unless record.ownership_generation.to_s ==
+                          marker.attrs["ownership_generation"].to_s
+
+        routing = record["routing"] || {}
+        route = routing["route"] || {}
+        return nil unless route["provider_account_id"].to_s ==
+                          marker.attrs["provider_account_id"].to_s
+        return nil unless route["route_id"].to_s == marker.attrs["route_id"].to_s
+
+        terminal = record.receipt || {}
+        return nil unless terminal["outcome"] == "failed" && terminal["provider_evidence"].is_a?(Hash)
+
+        identity = {
+          "attempt_id" => attempt_id,
+          "receipt_version" => terminal["receipt_version"],
+          "terminal_lease_version" => terminal["terminal_lease_version"]
+        }
+        source_receipt_matches?(record, identity) ? identity.freeze : nil
+      rescue Hive::Attempts::StoreError
+        nil
+      end
+
+      def source_health_acknowledged?(source_receipt)
+        return true if source_receipt.nil?
+
+        hot = attempts_store.fetch_hot(source_receipt.fetch("attempt_id"))
+        if hot
+          return false unless source_receipt_matches?(hot, source_receipt)
+
+          pending = attempts_store.pending_finalizations.fetch(hot.attempt_id)
+          return pending&.dig("consumers", "provider_health") == true
+        end
+
+        proof = attempts_store.permanent_proofs.fetch(source_receipt.fetch("attempt_id"))
+        source_receipt_matches?(proof, source_receipt)
+      rescue KeyError, Hive::Attempts::StoreError
+        false
+      end
+
+      def source_receipt_matches?(record, source_receipt)
+        return false unless record&.final?
+
+        terminal = record.receipt || {}
+        record.attempt_id.to_s == source_receipt["attempt_id"].to_s &&
+          terminal["receipt_version"] == source_receipt["receipt_version"] &&
+          terminal["terminal_lease_version"] == source_receipt["terminal_lease_version"]
+      end
+
+      def attempts_store
+        @attempt_store ||= @attempt_store_factory.call
+      end
+
+      def validate_admission_decision!(decision, expected_status:)
+        unless decision.is_a?(Hive::ProviderRouting::Decision) &&
+               decision.status == expected_status &&
+               %w[
+                 capacity_saturated health_state_unavailable no_eligible_provider_route
+               ].include?(decision.reason)
+          raise ArgumentError, "invalid provider-routing admission decision"
+        end
+      end
+
+      def admission_observation(decision)
+        Hive::ProviderRouting.deep_copy(decision.to_h)
+      end
+
+      def resolve_admission_task(project:, slug:)
+        @task_resolver.call(project: project, slug: slug, folder: nil, stage: nil)
+      end
+
+      def admission_request_identity_matches?(request, task)
+        return false unless request.slug.to_s == task.slug.to_s
+        return true if request.task_id.to_s.empty?
+
+        request.task_id.to_s == task.id.to_s
+      end
+
+      def admission_decision_matches?(decision, generation)
+        decision.request.task_generation.to_s == generation.task_generation.to_s &&
+          decision.policy_digest.to_s == decision.request.policy.digest.to_s
+      end
+
+      def current_generation(task, project:, intended_stage:)
+        @generation_resolver.call(
+          task, project: project, intended_stage: intended_stage,
+          state_file_content: File.binread(task.state_file)
         )
       end
 
@@ -765,6 +1077,7 @@ module Hive
       # bypassed merely by restarting the daemon.
       def recovery_safety_marker(request, marker)
         recovery = request.recovery || {}
+        return marker if admission_failure_recovery?(recovery)
         return marker unless marker.none?
         return marker unless %w[admitted cleared].include?(recovery["phase"].to_s)
 
@@ -820,6 +1133,18 @@ module Hive
           generation.task_generation.to_s == recovery["dispatch_generation"].to_s
       end
 
+      def admission_failure_recovery?(recovery)
+        recovery["variant"].to_s == "admission_failure"
+      end
+
+      def cleared_marker_state_valid?(marker, recovery)
+        if admission_failure_recovery?(recovery)
+          !recoverable_marker?(marker)
+        else
+          marker.none?
+        end
+      end
+
       def expected_attrs_match?(marker, expected)
         expected.to_h.all? do |key, expected_value|
           marker.attrs[key.to_s].to_s == expected_value.to_s
@@ -848,11 +1173,30 @@ module Hive
         raise Hive::Error, "invalid retry command for #{value(row, :slug)}"
       end
 
-      def deterministic_request_id(row, task, marker_generation, dispatch_generation)
+      def deterministic_request_id(row, task, marker_generation, dispatch_generation,
+                                   source_receipt: nil)
+        identity = if source_receipt
+          [
+            source_receipt["attempt_id"], source_receipt["receipt_version"],
+            source_receipt["terminal_lease_version"]
+          ]
+        else
+          [ marker_generation, dispatch_generation ]
+        end
         ::Digest::SHA256.hexdigest(
           [
             "hive-recovery-request-v2", value(row, :project), task.id || task.slug,
-            value(row, :stage), marker_generation, dispatch_generation
+            value(row, :stage), *identity
+          ].join("\0")
+        )[0, 32]
+      end
+
+      def deterministic_admission_request_id(project:, task:, dispatch_generation:,
+                                             policy_digest:)
+        ::Digest::SHA256.hexdigest(
+          [
+            "hive-admission-recovery-v1", project, task.id || task.slug,
+            task_stage(task), dispatch_generation, policy_digest
           ].join("\0")
         )[0, 32]
       end

@@ -4,12 +4,13 @@ require "fileutils"
 require "hive/atomic_file"
 require "hive/attempts/capability"
 require "hive/attempts/record"
+require "hive/point_storage"
 require "hive/stringify_keys"
 require "hive/paths"
 
 module Hive
   module Attempts
-    class StoreError < Hive::Error; end
+    class StoreError < Hive::PointStorageError; end
     class CompareAndSwapFailed < StoreError; end
 
     # Invalid records are deliberately retained by scans and count as a
@@ -31,7 +32,7 @@ module Hive
       def self.prepare_default_root!(state_home)
         require "hive/recovery/migration"
         Hive::Recovery::Migration.ensure!(state_home: state_home)
-        File.join(File.expand_path(state_home), "attempts", "v3")
+        File.join(File.expand_path(state_home), "attempts", "v4")
       end
       private_class_method :prepare_default_root!
 
@@ -49,6 +50,7 @@ module Hive
         @cold_logs_root = File.join(@root, "cold-logs")
         @log_state_root = File.join(@root, "log-state")
         @maintenance_root = File.join(@root, "maintenance")
+        @routing_policies_root = File.join(@root, "routing-policies")
         ensure_private_directories! if create_directories
       end
 
@@ -96,6 +98,10 @@ module Hive
         managed_directory_path(@maintenance_root, label: "maintenance")
       end
 
+      def routing_policies_root
+        managed_directory_path(@routing_policies_root, label: "routing-policies")
+      end
+
       def log_archive
         require "hive/attempts/log_archive"
         @log_archive ||= LogArchive.new(store: self)
@@ -129,6 +135,14 @@ module Hive
         require "hive/attempts/storage_health"
         @storage_health ||= StorageHealth.new(
           root: @maintenance_root,
+          create_directories: @create_directories
+        )
+      end
+
+      def routing_policies
+        require "hive/provider_routing/policy_store"
+        @routing_policies ||= Hive::ProviderRouting::PolicyStore.new(
+          root: File.join(@routing_policies_root, "v1"),
           create_directories: @create_directories
         )
       end
@@ -292,8 +306,11 @@ module Hive
       end
 
       def terminalize(observed, outcome:, exit_status:, final_checkpoint:, output_references:,
-                      log_reference:, now:)
+                      log_reference:, now:, provider_evidence: nil)
+        terminal_lease_version = observed.lease_version + 1
         receipt = {
+          "receipt_version" => Record::RECEIPT_VERSION,
+          "terminal_lease_version" => terminal_lease_version,
           "attempt_id" => observed.attempt_id,
           "task_generation" => observed.task_generation,
           "ownership_generation" => observed.ownership_generation,
@@ -304,19 +321,22 @@ module Hive
           "ended_at" => Record.iso8601(now),
           "final_checkpoint" => Hive::StringifyKeys.call(final_checkpoint),
           "output_references" => Hive::StringifyKeys.call(output_references),
-          "log_reference" => Hive::StringifyKeys.call(log_reference)
+          "log_reference" => Hive::StringifyKeys.call(log_reference),
+          "provider_evidence" => Hive::StringifyKeys.call(provider_evidence)
         }
         Record.validate_receipt!(
           receipt, attempt_id: observed.attempt_id,
           task_generation: observed.task_generation,
           ownership_generation: observed.ownership_generation,
-          task_input_epoch: observed.task_input_epoch
+          task_input_epoch: observed.task_input_epoch,
+          terminal_lease_version: terminal_lease_version,
+          routing: observed["routing"]
         )
         mutate(observed, allowed_states: [ "running" ]) do |data|
           data.merge(
             "state" => "terminal",
             "outcome" => outcome,
-            "lease_version" => data.fetch("lease_version") + 1,
+            "lease_version" => terminal_lease_version,
             "heartbeat_deadline" => nil,
             "ended_at" => Record.iso8601(now),
             "latest_revision" => final_checkpoint["revision"] || final_checkpoint[:revision] || data["latest_revision"],
@@ -497,7 +517,8 @@ module Hive
           "pending-finalization" => @pending_finalization_root,
           "cold-logs" => @cold_logs_root,
           "log-state" => @log_state_root,
-          "maintenance" => @maintenance_root
+          "maintenance" => @maintenance_root,
+          "routing-policies" => @routing_policies_root
         }
       end
 

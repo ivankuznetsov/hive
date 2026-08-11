@@ -25,7 +25,9 @@ module AgentCliRuntime
                 :budget_flag, :output_format_flags, :version_flag,
                 :min_version, :prompt_style, :model_argument_builder,
                 :effort_argument_builder, :launcher_identity,
-                :cli_capabilities, :declared_capability_support
+                :cli_capabilities, :declared_capability_support,
+                :credential_environment_keys, :configuration_environment_key,
+                :default_configuration_directory
 
     def initialize(name:, bin_default:, headless_flag:, version_flag:,
                    env_bin_override_keys: [], permission_skip_flag: nil,
@@ -35,7 +37,9 @@ module AgentCliRuntime
                    prompt_style: :positional, model_argument_builder: nil,
                    effort_argument_builder: nil, launcher_identity: nil,
                    usage_extractor: nil, auth_configuration_probe: nil,
-                   cli_capabilities: {}, raw_cli_arguments_supported: false)
+                   cli_capabilities: {}, raw_cli_arguments_supported: false,
+                   credential_environment_keys: [], configuration_environment_key: nil,
+                   default_configuration_directory: nil)
       normalized_prompt_style = prompt_style.to_sym
       unless PROMPT_STYLES.include?(normalized_prompt_style)
         raise ArgumentError,
@@ -65,6 +69,15 @@ module AgentCliRuntime
       @auth_configuration_probe = auth_configuration_probe
       @cli_capabilities = normalize_cli_capabilities(cli_capabilities)
       @raw_cli_arguments_supported = raw_cli_arguments_supported == true
+      @credential_environment_keys = immutable_environment_keys(
+        credential_environment_keys
+      )
+      @configuration_environment_key = optional_environment_key(
+        configuration_environment_key
+      )
+      @default_configuration_directory = optional_relative_directory(
+        default_configuration_directory
+      )
       @declared_capability_support = build_declared_capability_support
       freeze
     end
@@ -200,6 +213,24 @@ module AgentCliRuntime
       nil
     end
 
+    def configuration_directory(home: nil, env: ENV)
+      if @configuration_environment_key
+        configured = env[@configuration_environment_key].to_s
+        unless configured.empty?
+          unless File.absolute_path?(configured)
+            raise ArgumentError,
+                  "#{@configuration_environment_key} must be an absolute directory"
+          end
+          return File.expand_path(configured)
+        end
+      end
+      return nil unless @default_configuration_directory
+
+      base = home || env["HOME"]
+      base = Dir.home if base.to_s.empty?
+      File.expand_path(@default_configuration_directory, base)
+    end
+
     def require_cli_capability!(capability)
       capability_name = capability.to_sym
       flags = @cli_capabilities[capability_name]
@@ -227,6 +258,35 @@ module AgentCliRuntime
 
     def immutable_strings(values)
       Array(values).map { |value| immutable_string(value) }.freeze
+    end
+
+    def immutable_environment_keys(values)
+      keys = immutable_strings(values)
+      invalid = keys.find { |key| !key.match?(/\A[A-Z][A-Z0-9_]*\z/) }
+      raise ArgumentError, "invalid credential environment key #{invalid.inspect}" if invalid
+      raise ArgumentError, "credential environment keys must be unique" if keys.uniq.length != keys.length
+
+      keys
+    end
+
+    def optional_environment_key(value)
+      return nil if value.nil?
+
+      key = immutable_string(value)
+      unless key.match?(/\A[A-Z][A-Z0-9_]*\z/)
+        raise ArgumentError, "invalid configuration environment key #{key.inspect}"
+      end
+      key
+    end
+
+    def optional_relative_directory(value)
+      return nil if value.nil?
+
+      path = immutable_string(value)
+      if path.empty? || File.absolute_path?(path)
+        raise ArgumentError, "default configuration directory must be relative"
+      end
+      path
     end
 
     def normalize_tool_scope_flags(flags)

@@ -332,6 +332,107 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
+  def test_run_pass_marks_admitted_provider_failure_before_propagating_it
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      write_pointer(
+        task,
+        "path" => File.join(dir, "worktree"),
+        "branch" => task.slug,
+        "execute_base_head" => "base"
+      )
+      git = FakeGit.new(
+        head: "base", branch: task.slug, dirty: false, ancestor_result: true
+      )
+      routing = {
+        "mode" => "explicit",
+        "policy_digest" => "a" * 64,
+        "decision" => {},
+        "route" => {
+          "route_id" => "codex-a/codex-e2e-model",
+          "provider_account_id" => "codex-a",
+          "adapter" => "codex",
+          "launch_binding_id" => "default",
+          "model" => "codex-e2e-model",
+          "effort" => "high"
+        },
+        "circuit_generations" => [],
+        "probe_bindings" => []
+      }
+      context = Hive::Attempts::Context.send(
+        :new,
+        attempt_id: "attempt-route-failed",
+        task_generation: 1,
+        ownership_generation: "owner-route-failed",
+        routing: routing
+      )
+
+      with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
+        with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { git }) do
+          with_replaced_singleton_method(
+            Hive::Stages::Execute, :spawn_implementation,
+            lambda { |_task, _cfg, _path, **_kwargs|
+              raise Hive::ProviderRouteFailed, "admitted provider route failed"
+            }
+          ) do
+            assert_raises(Hive::ProviderRouteFailed) do
+              Hive::Stages::Execute.run_pass(
+                task, {}, File.join(dir, "worktree"), Object.new
+              )
+            end
+          end
+        end
+      end
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, marker.name
+      assert_equal "provider_route_failed", marker.attrs.fetch("reason")
+      assert_equal "codex-a", marker.attrs.fetch("provider_account_id")
+      assert_equal "codex-a/codex-e2e-model", marker.attrs.fetch("route_id")
+      assert_equal "attempt-route-failed", marker.attrs.fetch("attempt_id")
+      assert_equal "owner-route-failed", marker.attrs.fetch("task_generation")
+      assert_equal "owner-route-failed", marker.attrs.fetch("ownership_generation")
+      assert_equal "1", marker.attrs.fetch("task_input_epoch")
+    end
+  end
+
+  def test_run_pass_reports_restored_custody_tampering_before_provider_failure
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      original_plan = File.binread(File.join(task.folder, "plan.md"))
+      write_pointer(
+        task,
+        "path" => File.join(dir, "worktree"),
+        "branch" => task.slug,
+        "execute_base_head" => "base"
+      )
+      git = FakeGit.new(
+        head: "base", branch: task.slug, dirty: false, ancestor_result: true
+      )
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { git }) do
+        with_replaced_singleton_method(
+          Hive::Stages::Execute, :spawn_implementation,
+          lambda { |_task, _cfg, _path, **_kwargs|
+            File.write(File.join(task.folder, "plan.md"), "forged\n")
+            raise Hive::ProviderRouteFailed, "admitted provider route failed"
+          }
+        ) do
+          assert_raises(Hive::ProviderRouteFailed) do
+            Hive::Stages::Execute.run_pass(task, {}, File.join(dir, "worktree"))
+          end
+        end
+      end
+
+      assert_equal original_plan, File.binread(File.join(task.folder, "plan.md"))
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, marker.name
+      assert_equal "implementer_tampered", marker.attrs.fetch("reason")
+    end
+  end
+
   # `agent_failed?` is true for :timeout as well as :error, and the
   # non-limit branch records `status: impl_result[:status]` verbatim — so a
   # timeout (e.g. the exit_code_only "stop hook did not signal completion"

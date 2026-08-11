@@ -14,7 +14,13 @@ module Hive
       def stdout_emitted? = stdout_bytes.to_i.positive?
     end
 
-    DispatchResult = Data.define(:status, :attempt, :receipt, :attach_descriptor, :reason) do
+    DispatchResult = Data.define(
+      :status, :attempt, :receipt, :attach_descriptor, :reason, :decision
+    ) do
+      def initialize(status:, attempt:, receipt:, attach_descriptor:, reason:, decision: nil)
+        super
+      end
+
       def accepted? = status == :accepted
       def live? = %i[accepted existing_live].include?(status)
     end

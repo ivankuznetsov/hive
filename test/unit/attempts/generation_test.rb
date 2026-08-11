@@ -17,7 +17,7 @@ class AttemptsGenerationTest < Minitest::Test
     with_tmp_dir do |state_home|
       with_env("HIVE_HOME" => state_home, "HIVE_ATTEMPT_STORE_ROOT" => nil) do
         store = Hive::Attempts::Generation.send(:default_attempt_store)
-        assert_equal File.join(state_home, "attempts", "v3"), store.root
+        assert_equal File.join(state_home, "attempts", "v4"), store.root
       end
       assert File.file?(File.join(state_home, "attempts", "v2"))
     end

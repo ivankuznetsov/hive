@@ -46,8 +46,10 @@ module Hive
       issues.concat(scheduler.fetch("issues"))
       attempt_storage = attempt_storage_payload
       issues.concat(attempt_storage_issues(attempt_storage))
+      @routing_issues = []
       tasks = active.map { |project, row| project_row(project, row, scheduler) }
       issues.concat(@scheduler_join_issues)
+      issues.concat(@routing_issues)
       completeness = combined_completeness(
         task_source_status,
         scheduler.fetch("status"),
@@ -386,6 +388,11 @@ module Hive
         "reason" => reasons.first.fetch("message"),
         "reasons" => reasons,
         "provider" => provider_payload(row),
+        "routing" => routing_payload(
+          scheduler_disposition,
+          row,
+          project_name: project.fetch("name")
+        ),
         "retry" => retry_payload(scheduler_disposition),
         "recovery" => recovery_payload(row, scheduler_disposition, scheduler_freshness),
         "closure" => closure_payload(project, row),
@@ -538,7 +545,8 @@ module Hive
         [ "waiting_on_provider_or_scheduler", "provider" ]
       when "global_cap", "project_cap", "daily_cap", "cooldown", "in_flight",
            "dispatched", "wait_for_debounce", "record_baseline", "poll_for_merge",
-           "merge_watch", "blocked_on_dependency", "retry_cooldown", "retry_pending"
+           "merge_watch", "blocked_on_dependency", "retry_cooldown", "retry_pending",
+           "attempt_capacity"
         [ "waiting_on_provider_or_scheduler", "scheduler" ]
       when "retry_in_flight"
         [ "running", "agent" ]
@@ -589,6 +597,76 @@ module Hive
         "safe" => disposition["retry_safe"] == true,
         "safety_reason" => disposition["safety_reason"]
       }
+    end
+
+    def routing_payload(disposition, row, project_name:)
+      raw = disposition["routing"] if disposition.is_a?(Hash)
+      return nil if raw.nil? || (raw.respond_to?(:empty?) && raw.empty?)
+      return malformed_routing_payload(row, project_name) unless raw.is_a?(Hash)
+      return malformed_routing_payload(row, project_name) unless routing_value_safe?(raw)
+
+      keys = %w[
+        candidates circuit_generations decided_at decision_id exclusions next_action_owner
+        policy policy_digest probe_requirements reason selected_route status task_generation
+      ]
+      return malformed_routing_payload(row, project_name) unless raw.keys.sort == keys.sort
+      core = %w[
+        decision_id decided_at task_generation policy_digest status reason next_action_owner
+      ]
+      return malformed_routing_payload(row, project_name) unless core.all? do |key|
+        !raw[key].to_s.empty?
+      end
+
+      {
+        "decision_id" => raw.fetch("decision_id"),
+        "decided_at" => raw.fetch("decided_at"),
+        "task_generation" => raw.fetch("task_generation"),
+        "policy_digest" => raw.fetch("policy_digest"),
+        "status" => raw.fetch("status"),
+        "reason" => raw.fetch("reason"),
+        "next_action_owner" => raw.fetch("next_action_owner"),
+        "policy" => raw["policy"],
+        "selected_route" => raw["selected_route"],
+        "candidates" => Array(raw["candidates"]),
+        "exclusions" => Array(raw["exclusions"]),
+        "circuit_generations" => Array(raw["circuit_generations"]),
+        "probe_requirements" => Array(raw["probe_requirements"])
+      }
+    rescue KeyError
+      malformed_routing_payload(row, project_name)
+    end
+
+    def malformed_routing_payload(row, project_name)
+      @routing_issues << issue(
+        code: "routing_projection_invalid",
+        source: "scheduler",
+        project: project_name,
+        task: row["slug"],
+        message: "routing explainability data was present but failed validation",
+        remediation: "request a fresh status after the next daemon reconciliation tick"
+      )
+      nil
+    end
+
+    def routing_value_safe?(value, depth = 0)
+      return false if depth > 12
+
+      case value
+      when Hash
+        return false if value.size > 128
+        forbidden = /(?:credential|prompt|raw|stderr|stdout|token|tool_output|message)/i
+        value.all? do |key, child|
+          key.is_a?(String) && !key.match?(forbidden) && routing_value_safe?(child, depth + 1)
+        end
+      when Array
+        value.length <= 1_024 && value.all? { |child| routing_value_safe?(child, depth + 1) }
+      when String
+        value.valid_encoding? && value.bytesize <= 4_096 && !value.match?(/[\u0000-\u001f\u007f]/)
+      when Integer, TrueClass, FalseClass, NilClass
+        true
+      else
+        false
+      end
     end
 
     def recovery_payload(row, disposition, scheduler_freshness)

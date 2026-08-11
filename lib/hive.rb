@@ -20,7 +20,8 @@ module Hive
     # Single source of truth so the two emit sites can't drift.
     SCHEMA_VERSIONS = {
       "hive-status" => 7,
-      "hive-operational-status" => 3,
+      "hive-operational-status" => 4,
+      "hive-circuits" => 1,
       "hive-watch-event" => 1,
       "hive-act" => 2,
       "hive-init" => 2,
@@ -103,13 +104,19 @@ module Hive
       # `dispatch_requests/` directory. See
       # `Hive::Daemon::DispatchRequestQueue` and
       # `Hive::Bot::DispatchRequestWriter`.
-      "hive-dispatch-request" => 4,
+      "hive-dispatch-request" => 5,
       # Reverse-direction notice the daemon writes for the bot to relay a
       # non-zero, bot-originated dispatch back to the originating Telegram
       # chat. See `Hive::Daemon::DispatchResultQueue` (ADV-1).
       "hive-dispatch-result" => 2,
       # Internal source-of-truth record for durable task-stage ownership.
-      "hive-attempt" => 3,
+      "hive-attempt" => 4,
+      # Admission-owned immutable provider-routing policy snapshots.
+      "hive-routing-policy" => 1,
+      # Owner-private provider-account and exact-model circuit projection and
+      # its authoritative scoped journal events.
+      "hive-provider-health" => 1,
+      "hive-provider-health-event" => 1,
       # Dedicated operator-confirmed task closure input/receipt. These are
       # task-local authorities, not agent-callable command envelopes.
       "hive-task-closure-input" => 1,
@@ -580,6 +587,12 @@ module Hive
     def exit_code
       ExitCodes::SOFTWARE
     end
+  end
+
+  # A trusted adapter transport failure ended the enclosing explicit-routed
+  # attempt. The safe signal is already handed to the attempt supervisor;
+  # only RecoveryCoordinator may decide when another attempt is admitted.
+  class ProviderRouteFailed < AgentError
   end
 
   class TmuxError < AgentError

@@ -3,7 +3,7 @@ title: Hive::ModelRouting
 type: module
 source: lib/hive/model_routing.rb
 created: 2026-07-25
-updated: 2026-07-27
+updated: 2026-08-10
 tags: [config, models, routing, validation]
 ---
 
@@ -12,6 +12,14 @@ closed built-in model/effort vocabulary. It owns registry enumeration,
 project ownership, structural parsing, independent field
 precedence, provenance, and reachability filtering. It never selects a
 provider or renders provider CLI arguments.
+
+Explicit provider-account pools reuse this field-wise resolver independently
+for every candidate through `resolve_candidate`. That stricter seam validates
+candidate fallback values as routed controls, materializes a concrete model,
+and preserves the chosen account's adapter as `Resolution#provider`; model
+routing still cannot switch providers. Provider-account order, pins,
+compatibility metadata, and policy digests belong to
+[[modules/provider_routing]], not this module.
 
 ## Registry
 

@@ -154,10 +154,11 @@ module AgentCliRuntime
 
   ObservableResult = Data.define(
     :provider, :launcher_identity, :exit_code, :timed_out, :status,
-    :usage, :final_message, :diagnostic
+    :usage, :final_message, :diagnostic, :provider_signal
   ) do
     def initialize(provider:, launcher_identity:, exit_code:, timed_out:,
-                   status:, usage:, final_message:, diagnostic:)
+                   status:, usage:, final_message:, diagnostic:,
+                   provider_signal: nil)
       super(
         provider: provider.to_sym,
         launcher_identity: Immutable.string(launcher_identity),
@@ -167,7 +168,8 @@ module AgentCliRuntime
         usage: usage&.dup&.freeze,
         final_message:
           final_message.nil? ? nil : Immutable.string(final_message),
-        diagnostic: diagnostic.nil? ? nil : Immutable.string(diagnostic)
+        diagnostic: diagnostic.nil? ? nil : Immutable.string(diagnostic),
+        provider_signal: provider_signal&.dup&.freeze
       )
     end
   end

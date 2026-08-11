@@ -4,6 +4,9 @@ require "hive/attempts/detached_launcher"
 require "hive/attempts/dispatcher"
 require "hive/attempts/launch_policy"
 require "hive/attempts/finalization_maintenance"
+require "hive/daemon/dispatch_request_queue"
+require "hive/daemon/recovery_coordinator"
+require "hive/provider_routing"
 
 module Hive
   module Attempts
@@ -12,13 +15,15 @@ module Hive
     # command implementation runs later inside the wrapper.
     class Entrypoint
       def initialize(store: nil, dispatcher: nil, client: nil,
-                     maintenance: nil,
+                     maintenance: nil, recovery_coordinator: nil, state_home: nil,
                      config_loader: Hive::Config.method(:load),
                      daemon_config_loader: Hive::Config.method(:load_global_daemon))
         @store = store
         @dispatcher = dispatcher
         @client = client
         @maintenance = maintenance
+        @recovery_coordinator = recovery_coordinator
+        @state_home = state_home
         @config_loader = config_loader
         @daemon_config_loader = daemon_config_loader
       end
@@ -40,6 +45,7 @@ module Hive
           argv: argv,
           request_id: request_id,
           provider: provider || provider_for(cfg, intended_stage),
+          routing_policy: routing_policy_for(cfg, intended_stage),
           interactive: interactive,
           now: now
         )
@@ -47,13 +53,54 @@ module Hive
           raise Hive::ConcurrentRunError,
                 "durable attempt deferred for #{task.slug}: #{result.reason}"
         end
-        return result unless interactive
+        if result.status == :no_route
+          receipt = request_admission_recovery(
+            result: result,
+            task: task,
+            argv: argv,
+            request_id: request_id,
+            store: store,
+            now: now
+          )
+          if interactive
+            raise Hive::ConcurrentRunError,
+                  "provider route unavailable for #{task.slug}: #{receipt.human_summary}"
+          end
+          return result
+        end
+        return result unless interactive && result.attempt
 
         attached = (@client || Client.new(store: store)).attach(result.attempt.attempt_id)
         attached
       end
 
       private
+
+      def request_admission_recovery(result:, task:, argv:, request_id:, store:, now:)
+        coordinator = @recovery_coordinator || Hive::Daemon::RecoveryCoordinator.new(
+          state_home: @state_home || state_home_for(store)
+        )
+        request = Hive::Daemon::DispatchRequestQueue::Request.new(
+          request_id: request_id.to_s,
+          project: project_name_for(task),
+          slug: task.slug,
+          argv: argv,
+          requestor: "cli",
+          predecessor_attempt_id: nil,
+          inherited_outputs: []
+        )
+        coordinator.request_admission_failure(
+          request: request,
+          decision: result.decision,
+          now: now
+        )
+      end
+
+      def state_home_for(store)
+        File.dirname(File.dirname(store.root))
+      rescue NoMethodError
+        Hive::Paths.state_home
+      end
 
       # Storage upkeep must never become an admission outage. The concrete
       # maintenance service records degraded health before raising, then the
@@ -95,6 +142,14 @@ module Hive
       def provider_for(cfg, intended_stage)
         stage = intended_stage.to_s.sub(/\A\d+-/, "").tr("-", "_")
         cfg.dig(stage, "agent") || Hive::Config::DEFAULTS.dig(stage, "agent") || "claude"
+      end
+
+      def routing_policy_for(cfg, intended_stage)
+        stage = intended_stage.to_s.sub(/\A\d+-/, "").tr("-", "_")
+        Hive::ProviderRouting::Configuration.from(
+          cfg: cfg,
+          stage_name: stage
+        ).policy
       end
     end
   end

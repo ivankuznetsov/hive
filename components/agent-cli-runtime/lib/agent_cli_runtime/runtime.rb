@@ -116,7 +116,8 @@ module AgentCliRuntime
         final_message: raw[:final_message],
         diagnostic: Redactor.diagnostic(
           raw[:error_message] || raw[:limit_text]
-        )
+        ),
+        provider_signal: raw[:provider_signal]
       )
     end
 

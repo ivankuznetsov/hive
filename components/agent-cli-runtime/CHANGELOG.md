@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Expose each profile's immutable credential-environment key inventory so
+  orchestrators can isolate named subscription/session bindings without
+  embedding provider-specific compatibility tables.
+- Expose each profile's configuration-directory override and home-relative
+  default so orchestrators can detect subscription-session aliases without
+  maintaining a second provider-specific table.
+- Include Claude's ambient auth-token override in the isolation inventory so a
+  named subscription binding cannot be silently replaced by caller state.
+
 ## 0.1.0 - 2026-07-26
 
 - Add immutable profiles for Claude Code, Codex CLI, Pi, and Grok CLI.

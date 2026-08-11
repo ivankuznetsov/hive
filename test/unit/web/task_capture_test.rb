@@ -308,7 +308,6 @@ class WebTaskCaptureTest < Minitest::Test
       provider_path = File.join(source, "bin", "hive-capture")
       File.write(provider_path, <<~'RUBY')
         #!/usr/bin/env ruby
-        require "base64"
         require "digest"
         require "json"
 
@@ -316,9 +315,7 @@ class WebTaskCaptureTest < Minitest::Test
         path = File.join(request.fetch("staging_root"), "provider.png")
         File.binwrite(
           path,
-          Base64.decode64(
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
-          )
+          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=".unpack1("m0")
         )
         puts JSON.generate(
           "schema" => "hive-project-capture-result",

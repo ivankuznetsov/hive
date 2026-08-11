@@ -1,0 +1,22 @@
+{
+  "schema": "hive-provider-error-capture/v1",
+  "adapter": "claude",
+  "channel": "stream_json_transport",
+  "adapter_version": "2.1.220",
+  "capture_status": "sanitized_real_capture",
+  "observed_at": "2026-08-11T10:54:17Z",
+  "source_artifact_sha256": "e0426bfb68f9bf97b7b5e32078332fc580b96a861054d3ee69d15d39f42004e2",
+  "scenario": "subscription_rate_limit",
+  "observed_event": {
+    "type": "rate_limit_event",
+    "rate_limit_info": {
+      "status": "rejected",
+      "rateLimitType": "five_hour"
+    }
+  },
+  "trusted_scope": "provider_account",
+  "trusted_class": "account_quota",
+  "scope_source": "admitted_launch_binding",
+  "retained_fields": ["type", "rate_limit_info.status", "rate_limit_info.rateLimitType"],
+  "classification": "shared_health"
+}

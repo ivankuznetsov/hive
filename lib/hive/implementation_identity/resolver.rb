@@ -3,6 +3,7 @@ require "hive/config"
 require "hive/implementation_identity"
 require "hive/implementation_identity/utility_models"
 require "hive/model_routing"
+require "hive/provider_routing/route"
 
 module Hive
   module ImplementationIdentity
@@ -24,7 +25,16 @@ module Hive
         @cfg = cfg || {}
       end
 
-      def resolve_execute(generation:, attempt_id:, source: "persisted_execute")
+      def resolve_execute(generation:, attempt_id:, source: "persisted_execute", route: nil)
+        if route
+          return resolve_execute_route(
+            route,
+            generation: generation,
+            attempt_id: attempt_id,
+            source: source
+          )
+        end
+
         fields = Hive::Config.implementation_identity_fields(@cfg, "execute")
         provider = identity_field(fields, "agent") || @cfg.dig("execute", "agent")
         if provider.to_s.strip.empty?
@@ -115,6 +125,38 @@ module Hive
       end
 
       private
+
+      # Project an admitted provider-account route into the existing durable
+      # identity. The provider field deliberately remains the adapter/profile;
+      # the account and launch binding belong to the attempt route context.
+      def resolve_execute_route(route, generation:, attempt_id:, source:)
+        unless route.is_a?(Hive::ProviderRouting::Route)
+          raise ResolutionError, "explicit execute route must be a ProviderRouting::Route"
+        end
+
+        profile = Hive::AgentProfiles.lookup(route.adapter, cfg: @cfg)
+        arguments = profile.identity_arguments(
+          model: route.model,
+          effort: route.effort,
+          pin_model: true
+        )
+        Selection.new(
+          stage: "execute",
+          provider: profile.name,
+          model: arguments.model,
+          profile_name: profile.name,
+          launcher_identity: profile.launcher_identity,
+          source: source,
+          generation: generation,
+          originating_attempt: attempt_id,
+          requested_effort: arguments.requested_effort,
+          effective_effort: arguments.effective_effort,
+          effort_supported: arguments.effort_supported,
+          model_pinned: true,
+          native_arguments: arguments.native_arguments,
+          routing: Hive::ImplementationIdentity.routing_metadata(route.model_routing)
+        )
+      end
 
       def downstream_model(stage, fields:, profile:, provider_changed:, execute_identity:)
         if fields.key?("model")

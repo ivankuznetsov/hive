@@ -35,6 +35,40 @@ class AgentProfileTest < Minitest::Test
     assert_raises(ArgumentError) { make_profile(structured_output_protocol: :unknown) }
   end
 
+  def test_credential_environment_keys_are_optional_validated_and_frozen
+    assert_empty make_profile.credential_environment_keys
+
+    profile = make_profile(credential_environment_keys: %w[CUSTOM_TOKEN])
+    assert_equal %w[CUSTOM_TOKEN], profile.credential_environment_keys
+    assert_predicate profile.credential_environment_keys, :frozen?
+
+    assert_raises(ArgumentError) do
+      make_profile(credential_environment_keys: [ "not-valid" ])
+    end
+    assert_raises(ArgumentError) do
+      make_profile(credential_environment_keys: %w[CUSTOM_TOKEN CUSTOM_TOKEN])
+    end
+  end
+
+  def test_configuration_directory_metadata_is_optional_and_validated
+    profile = make_profile(
+      configuration_environment_key: "CUSTOM_HOME",
+      default_configuration_directory: ".custom"
+    )
+    assert_equal "/runtime/.custom",
+                 profile.configuration_directory(home: "/runtime", environment: {})
+    assert_equal "/configured", profile.configuration_directory(
+      home: "/runtime", environment: { "CUSTOM_HOME" => "/configured" }
+    )
+
+    assert_raises(ArgumentError) do
+      make_profile(configuration_environment_key: "bad-key")
+    end
+    assert_raises(ArgumentError) do
+      make_profile(default_configuration_directory: "/absolute")
+    end
+  end
+
   include HiveTestHelper
 
   FAKE_BIN = File.expand_path("../fixtures/fake-claude", __dir__)

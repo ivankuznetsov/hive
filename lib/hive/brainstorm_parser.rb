@@ -1,5 +1,6 @@
 # frozen_string_literal: true
 
+require "base64"
 require "digest"
 
 module Hive
@@ -16,10 +17,12 @@ module Hive
       end
     end
 
-    ROUND_RE = /\A##\s+Round\s+(\d+)\b/i
-    QUESTION_RE = /\A###\s+Q(\d+)\.\s*(.*)\z/
-    ANSWER_RE = /\A###\s+A(\d+)\.\s*\z/
+    ROUND_RE = /\A##\s+Round\s+([1-9]\d*)\b/i
+    QUESTION_RE = /\A###\s+Q([1-9]\d*)\.\s*(.*)\z/
+    ANSWER_ENCODING_V1 = "<!-- hive-answer:v1 -->".freeze
+    ANSWER_RE = /\A###\s+A([1-9]\d*)\.\s*(#{Regexp.escape(ANSWER_ENCODING_V1)})?\s*\z/
     MARKER_RE = /\A<!--\s*[A-Z_]+(?:\s+[^<>]*?)?\s*-->\s*\z/
+    ANSWER_ESCAPE_PREFIX = "\\hive-answer-v1:".freeze
 
     module_function
 
@@ -83,6 +86,7 @@ module Hive
           # actual slot on disk.
           if current && current[:answer_lines].nil?
             current[:answer_lines] = []
+            current[:answer_encoding] = :v1 if match[2]
             mode = :answer
           end
           next
@@ -123,12 +127,14 @@ module Hive
     end
 
     # Normalize layout-only differences before binding a presented question to
-    # a durable fingerprint. NFKC closes canonically-equivalent Unicode forms;
+    # a durable fingerprint. NFC closes canonically-equivalent Unicode forms
+    # without compatibility-folding distinct glyphs such as ①/1 or x²/x2;
     # whitespace collapsing lets harmless markdown reflow relocate a reply.
-    # Wording and case remain significant so a materially edited question fails
-    # closed instead of receiving a stale answer.
+    # Wording, compatibility characters, and case remain significant so a
+    # materially edited question fails closed instead of receiving a stale
+    # answer.
     def normalize_question_text(text)
-      text.to_s.scrub.unicode_normalize(:nfkc).gsub(/[[:space:]]+/, " ").strip
+      text.to_s.scrub.unicode_normalize(:nfc).gsub(/[[:space:]]+/, " ").strip
     end
 
     def question_fingerprint(text)
@@ -150,6 +156,10 @@ module Hive
       "### A#{n}."
     end
 
+    def encoded_answer_header(n)
+      "#{answer_header(n)} #{ANSWER_ENCODING_V1}"
+    end
+
     def finalize(out, current)
       return unless current
 
@@ -157,7 +167,7 @@ module Hive
         round: current[:round],
         n: current[:n],
         text: clean_body(current[:question_lines]),
-        answer: clean_answer(current[:answer_lines])
+        answer: clean_answer(current[:answer_lines], encoding: current[:answer_encoding])
       )
     end
     private_class_method :finalize
@@ -167,36 +177,31 @@ module Hive
     end
     private_class_method :clean_body
 
-    def clean_answer(lines)
+    def clean_answer(lines, encoding: nil)
       return nil if lines.nil?
 
       body_lines = Array(lines).dup
       body_lines.pop while (last = body_lines.last) && (last.strip.empty? || MARKER_RE.match?(last))
-      body = body_lines.map { |line| restore_answer_line(line) }.join("\n").strip
+      body_lines.map! { |line| restore_answer_line(line) } if encoding == :v1
+      body = body_lines.join("\n").strip
       body.empty? ? nil : body
     end
     private_class_method :clean_answer
 
-    # Answer persistence prefixes parser-significant lines with a backslash so
-    # literal user text cannot create Q/A slots, rounds, or stage markers. Undo
-    # that encoding for callers, including a doubled leading backslash used to
-    # preserve an answer that already began with one.
+    # Only decode the explicit v1 envelope written by BrainstormAnswerWriter.
+    # Older brainstorm files stored literal answer text, including doubled
+    # backslashes and strings such as `\&lt;!--`; treating those as an implicit
+    # escape format changes settled answers and can create false idempotency
+    # conflicts.
     def restore_answer_line(line)
-      structural_escape = line.start_with?("\\") && !line.start_with?("\\\\") &&
-                          structural_heading?(line.delete_prefix("\\"))
-      restored = line.gsub(/\\\\|\\&lt;!--/) do |encoded|
-        encoded == "\\\\" ? "\\" : "<!--"
-      end
-      return restored.delete_prefix("\\") if structural_escape
+      return line unless line.start_with?(ANSWER_ESCAPE_PREFIX)
 
-      restored
+      encoded = line.delete_prefix(ANSWER_ESCAPE_PREFIX)
+      Base64.urlsafe_decode64(encoded)
+    rescue ArgumentError
+      line
     end
     private_class_method :restore_answer_line
-
-    def structural_heading?(line)
-      ROUND_RE.match?(line) || QUESTION_RE.match?(line) || ANSWER_RE.match?(line)
-    end
-    private_class_method :structural_heading?
 
     def normalize_newlines(text)
       text.to_s.gsub("\r\n", "\n").gsub("\r", "\n")

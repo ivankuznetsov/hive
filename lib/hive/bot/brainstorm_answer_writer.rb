@@ -1,3 +1,4 @@
+require "base64"
 require "hive/lock"
 require "hive/markers"
 require "hive/bot/brainstorm_parser"
@@ -28,6 +29,7 @@ module Hive
 
       LOCK_RETRY_DEADLINE_SEC = 5
       LOCK_RETRY_SLEEP_SEC = 0.05
+      MARKER_LOCK_TIMEOUT_SEC = 5
 
       def append!(brainstorm_path:, question_n:, answer_text:, logger: nil)
         task_folder = File.dirname(brainstorm_path)
@@ -98,8 +100,10 @@ module Hive
         end
         return :question_not_found unless ordinal.positive?
 
-        Hive::Markers.with_markers_lock(brainstorm_path, create: false) do
-          content = File.read(brainstorm_path, encoding: "UTF-8").scrub
+        Hive::Markers.with_markers_lock(
+          brainstorm_path, create: false, timeout: MARKER_LOCK_TIMEOUT_SEC
+        ) do
+          content = normalize_lone_cr(File.read(brainstorm_path, encoding: "UTF-8").scrub)
           parsed = Hive::Bot::BrainstormParser.parse_text(content)
           target = parsed[ordinal - 1]
           next :question_not_found unless target
@@ -117,8 +121,6 @@ module Hive
               lines, question_line_index, target.n, answer_text, content
             )
           end
-          next :answer_slot_missing unless new_lines
-
           Hive::Markers.write_atomic(brainstorm_path, new_lines.join)
           :written
         end
@@ -180,9 +182,8 @@ module Hive
       # Write `answer_text` into an existing empty `### A` slot.
       def fill_answer_slot(lines, slot, answer_text, content)
         newline = newline_for(content)
-        if slot[:answer_line_index] >= 0 && !lines[slot[:answer_line_index]].to_s.end_with?(newline)
-          lines[slot[:answer_line_index]] = "#{lines[slot[:answer_line_index]]}#{newline}"
-        end
+        lines[slot[:answer_line_index]] =
+          "#{Hive::Bot::BrainstormParser.encoded_answer_header(slot.fetch(:question_n))}#{newline}"
 
         answer_lines = answer_body(answer_text, newline).lines
         lines[0..slot[:answer_line_index]] + answer_lines + lines[slot[:body_end_index]..].to_a
@@ -214,7 +215,7 @@ module Hive
           lines[insert_idx - 1] = "#{lines[insert_idx - 1]}#{newline}"
         end
 
-        slot_lines = [ "#{Hive::Bot::BrainstormParser.answer_header(question_n)}#{newline}" ] +
+        slot_lines = [ "#{Hive::Bot::BrainstormParser.encoded_answer_header(question_n)}#{newline}" ] +
                      answer_body(answer_text, newline).lines
         lines[0...insert_idx] + slot_lines + lines[insert_idx..].to_a
       end
@@ -303,7 +304,12 @@ module Hive
         end
         return nil unless body.join.strip.empty?
 
-        { answer_line_index: idx, body_end_index: body_end }
+        match = ANSWER_RE.match(lines[idx].chomp)
+        {
+          answer_line_index: idx,
+          body_end_index: body_end,
+          question_n: match[1].to_i
+        }
       end
       private_class_method :empty_slot_starting_at
 
@@ -318,12 +324,23 @@ module Hive
         return newline if text.empty?
 
         text.lines(chomp: true).map do |line|
-          encoded = line.gsub("\\") { "\\\\" }.gsub("<!--") { "\\&lt;!--" }
-          encoded = "\\#{encoded}" if structural_heading?(line)
+          encoded = escape_answer_line?(line) ? encode_answer_line(line) : line
           "#{encoded}#{newline}"
         end.join
       end
       private_class_method :answer_body
+
+      def escape_answer_line?(line)
+        line.start_with?(Hive::Bot::BrainstormParser::ANSWER_ESCAPE_PREFIX) ||
+          line.include?("\\") || line.include?("<!--") || structural_heading?(line)
+      end
+      private_class_method :escape_answer_line?
+
+      def encode_answer_line(line)
+        encoded = Base64.urlsafe_encode64(line, padding: false)
+        "#{Hive::Bot::BrainstormParser::ANSWER_ESCAPE_PREFIX}#{encoded}"
+      end
+      private_class_method :encode_answer_line
 
       def structural_heading?(line)
         ROUND_RE.match?(line) || QUESTION_RE.match?(line) || ANSWER_RE.match?(line)
@@ -334,6 +351,11 @@ module Hive
         content.include?("\r\n") ? "\r\n" : "\n"
       end
       private_class_method :newline_for
+
+      def normalize_lone_cr(content)
+        content.to_s.gsub(/\r(?!\n)/, "\n")
+      end
+      private_class_method :normalize_lone_cr
     end
   end
 end

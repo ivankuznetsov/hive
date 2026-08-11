@@ -3,7 +3,7 @@ title: hive answer
 type: command
 source: lib/hive/commands/answer.rb, lib/hive/brainstorm_parser.rb, lib/hive/bot/brainstorm_answer_writer.rb, schemas/hive-answer.v1.json
 created: 2026-08-10
-updated: 2026-08-10
+updated: 2026-08-11
 tags: [command, brainstorm, answers, bindings, concurrency, json, agents]
 ---
 
@@ -62,6 +62,12 @@ multiline UTF-8 up to 64 KiB, rejects blank or invalid UTF-8 input, and never
 interpolates answer text into a shell command. A binding is an opaque
 Base64url token; callers must not decode, edit, or synthesize it.
 
+The token is canonicalized but not authenticated: its safety comes from the
+same-user local trust model plus the live under-lock identity, generation, and
+slot re-observation below. It must not cross a trust boundary. If bindings are
+ever accepted from a mutually untrusted process or remote principal, the
+format must gain an HMAC (or equivalent authenticated envelope) first.
+
 Before mutation, Hive re-resolves the exact registered project and task. It
 then acquires the existing task folder with `create: false` and rechecks:
 
@@ -78,12 +84,16 @@ zero matches are stale. The shared writer preserves atomic replacement and
 repairs a missing `### A<n>.` header only inside the selected question block.
 
 Literal answer lines that would otherwise parse as a round, Q/A header, or
-stage marker are reversibly neutralized on disk and restored by the shared
-parser. This preserves the operator's answer in inventories and idempotency
-checks without letting it create slots or forge `WAITING` / `COMPLETE` state.
-The writer scrubs invalid UTF-8 consistently with the parser and serializes its
-read/replace cycle on both the task lock and the state file's marker sidecar
-lock, so a concurrent marker update cannot be lost.
+stage marker are reversibly neutralized under an explicit
+`<!-- hive-answer:v1 -->` answer-header marker and restored by the shared
+parser. Unmarked legacy answers are never decoded, so their existing
+backslashes and escaped-looking text remain literal. This preserves the
+operator's answer in inventories and idempotency checks without letting it
+create slots or forge `WAITING` / `COMPLETE` state. The writer scrubs invalid
+UTF-8 consistently with the parser and serializes its read/replace cycle on
+both the task lock and the state file's marker sidecar lock. The identity-bound
+path bounds marker-lock acquisition and returns the retryable `lock_busy`
+outcome instead of holding the task lock indefinitely.
 
 An occupied slot is never overwritten. Repeating the identical canonical
 answer is idempotent success; a different answer is a conflict. Moving the
@@ -123,6 +133,11 @@ Bindings enforce the same positive id/round and non-empty folder constraints
 as the public v1 schema. An unreadable or corrupt task journal is reported as
 `invalid_task_path`, while genuinely unexpected failures are wrapped as an
 `internal` error with the software-error exit code.
+
+Question fingerprints use NFC plus whitespace collapsing. Canonically
+equivalent Unicode spellings match, while compatibility forms such as `①`/`1`,
+`x²`/`x2`, full-width text, and ligatures remain distinct so a compatibility-
+equivalent rewording fails closed.
 
 ## Lifecycle boundary
 

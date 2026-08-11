@@ -843,8 +843,10 @@ class TasksTest < ActionDispatch::IntegrationTest
 
     assert_redirected_to "/tasks/#{@project}/#{@slug}"
     content = folder.join("brainstorm.md").read
-    assert_match(/### A1\.\nHeader only/, content, "answer 1 must land under its header")
-    assert_match(/### A2\.\nGreen tests/, content, "answer 2 must land under its header")
+    answer_1_header = Regexp.escape(Hive::BrainstormParser.encoded_answer_header(1))
+    answer_2_header = Regexp.escape(Hive::BrainstormParser.encoded_answer_header(2))
+    assert_match(/#{answer_1_header}\nHeader only/, content, "answer 1 must land under its header")
+    assert_match(/#{answer_2_header}\nGreen tests/, content, "answer 2 must land under its header")
   end
 
   test "answering an already-closed question is a readable 422" do

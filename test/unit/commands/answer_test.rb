@@ -122,7 +122,8 @@ class HiveCommandsAnswerTest < Minitest::Test
       payload = call_answer(binding: token, answer: "Repaired")
 
       assert_equal "written", payload.fetch("outcome")
-      assert_includes File.read(path), "### Q1. Missing slot?\n### A1.\nRepaired\n### Q2."
+      assert_includes File.read(path),
+                      "### Q1. Missing slot?\n#{Hive::BrainstormParser.encoded_answer_header(1)}\nRepaired\n### Q2."
       assert_nil Hive::BrainstormParser.parse(path).fetch(1).answer
     end
   end
@@ -168,6 +169,51 @@ class HiveCommandsAnswerTest < Minitest::Test
       rejected = call_answer(binding: token, answer: "unsafe")
       assert_equal "stale", rejected.fetch("outcome")
       assert_equal "question_changed", rejected.fetch("reason")
+      assert_equal before, File.binread(path)
+      assert_schema(rejected)
+    end
+  end
+
+  def test_duplicate_fingerprint_matches_are_ambiguous_and_never_write
+    content = "## Round 1\n### Q1. Keep?\n### A1.\n<!-- WAITING -->\n"
+    with_project(content) do |_project, _folder, path|
+      token = inventory.fetch("slots").first.fetch("binding")
+      File.write(path, <<~MARKDOWN)
+        ## Round 2
+        ### Q7. Keep?
+        ### A7.
+        ### Q8. Keep?
+        ### A8.
+        <!-- WAITING -->
+      MARKDOWN
+      before = File.binread(path)
+
+      rejected = call_answer(binding: token, answer: "unsafe")
+
+      assert_equal "ambiguous", rejected.fetch("outcome")
+      assert_equal "multiple_matches", rejected.fetch("reason")
+      assert_equal before, File.binread(path)
+      assert_schema(rejected)
+    end
+
+    with_project(content) do |_project, _folder, path|
+      token = inventory.fetch("slots").first.fetch("binding")
+      File.write(path, <<~MARKDOWN)
+        ## Round 2
+        ### Q7. Keep?
+        ### A7.
+        first
+        ### Q8. Keep?
+        ### A8.
+        second
+        <!-- WAITING -->
+      MARKDOWN
+      before = File.binread(path)
+
+      rejected = call_answer(binding: token, answer: "unsafe")
+
+      assert_equal "ambiguous", rejected.fetch("outcome")
+      assert_equal "multiple_matches", rejected.fetch("reason")
       assert_equal before, File.binread(path)
       assert_schema(rejected)
     end
@@ -238,6 +284,20 @@ class HiveCommandsAnswerTest < Minitest::Test
       assert_equal "stale", rejected.fetch("outcome")
       assert_equal "generation_changed", rejected.fetch("reason")
       assert_equal before, File.binread(path)
+    end
+  end
+
+  def test_missing_task_returns_the_distinct_task_missing_reason
+    with_project do |_project, folder, _path|
+      token = inventory.fetch("slots").first.fetch("binding")
+      FileUtils.remove_entry(folder)
+
+      rejected = call_answer(binding: token, answer: "too late")
+
+      assert_equal "stale", rejected.fetch("outcome")
+      assert_equal "task_missing", rejected.fetch("reason")
+      refute Dir.exist?(folder)
+      assert_schema(rejected)
     end
   end
 
@@ -325,7 +385,8 @@ class HiveCommandsAnswerTest < Minitest::Test
       assert_equal 1, parsed.length
       assert_equal answer, parsed.first.answer
       assert_equal :waiting, Hive::Markers.current(path).name
-      assert_includes File.read(path), "\\&lt;!-- COMPLETE -->"
+      assert_includes File.read(path), Hive::BrainstormParser::ANSWER_ESCAPE_PREFIX
+      refute_includes File.read(path), "\n<!-- COMPLETE -->\n"
     end
   end
 
@@ -352,6 +413,27 @@ class HiveCommandsAnswerTest < Minitest::Test
       assert_equal "identity_changed", rejected.fetch("reason")
       assert_equal before, File.binread(path)
       assert_schema(rejected)
+    end
+  end
+
+  def test_reobserved_task_id_and_workflow_must_match_the_binding
+    with_project do |_project, _folder, _path|
+      token = inventory.fetch("slots").first.fetch("binding")
+      binding = JSON.parse(Base64.urlsafe_decode64(token)).merge("task_id" => nil)
+      command = Hive::Commands::Answer.new(SLUG, project: "demo")
+      task = command.send(:resolve_task, SLUG, "demo")
+      task.define_singleton_method(:id) { 99 }
+      command.define_singleton_method(:resolve_task) { |_target, _project| task }
+
+      changed_id = command.send(:observe_bound_task, binding)
+
+      assert_equal({ outcome: "stale", reason: "identity_changed" }, changed_id)
+
+      task.define_singleton_method(:id) { nil }
+      task.define_singleton_method(:workflow) { Struct.new(:id).new(:research) }
+      changed_workflow = command.send(:observe_bound_task, binding)
+
+      assert_equal({ outcome: "stale", reason: "identity_changed" }, changed_workflow)
     end
   end
 
@@ -460,15 +542,24 @@ class HiveCommandsAnswerTest < Minitest::Test
 
     with_project(content) do |_project, _folder, _path|
       token = inventory.fetch("slots").first.fetch("binding")
-      replacement = ->(**_kwargs) { :answer_slot_missing }
+      replacement = ->(**_kwargs) { :question_not_found }
       with_replaced_singleton_method(
         Hive::Bot::BrainstormAnswerWriter, :write_at_ordinal_under_lock!, replacement
       ) do
         payload = call_answer(binding: token, answer: "same")
         assert_equal "stale", payload.fetch("outcome")
-        assert_equal "answer_slot_missing", payload.fetch("reason")
+        assert_equal "question_missing", payload.fetch("reason")
+        assert_schema(payload)
       end
     end
+  end
+
+  def test_programmatic_write_requires_a_nonempty_binding
+    error = assert_raises(Hive::Commands::Answer::InvalidBinding) do
+      Hive::Commands::Answer.write(SLUG, project: "demo", binding: "", answer: "unsafe")
+    end
+
+    assert_match(/binding is required/, error.message)
   end
 
   def test_text_mode_emits_inventory_and_write_acknowledgements

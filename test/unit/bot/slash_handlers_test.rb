@@ -321,23 +321,35 @@ class HiveBotSlashHandlersTest < Minitest::Test
       result = handlers.answer(Update.new(text: "/answer #{target}", chat_id: 1), nil)
 
       assert_equal :start_answer, result.action
+      assert_equal "hive", result.project
       assert_equal "stuck-260525-abcd", result.slug
       assert_equal :path_b, result.mode
       assert_nil result.text, "a resolved numeric id starts the answer flow — no operator reply text"
     end
   end
 
-  def test_answer_with_slug_starts_answer_verbatim_without_snapshot_lookup
-    handlers = Hive::Bot::Handlers::SlashHandlers.new(
-      projects_provider: -> { [] }, pending_ideas: {}, last_project: -> { nil },
-      result_class: Result, status_snapshot_provider: -> { raise "unexpected lookup" }
-    )
+  def test_answer_with_slug_preserves_the_resolved_project
+    row = REVIEW_ERROR_ROW.with(slug: "answer-me-260525-abcd", project: "other")
+    handlers = autofix_handlers([ row ])
 
     result = handlers.answer(Update.new(text: "/answer answer-me-260525-abcd", chat_id: 1), nil)
 
     assert_equal :start_answer, result.action
+    assert_equal "other", result.project
     assert_equal "answer-me-260525-abcd", result.slug
     assert_equal :path_b, result.mode
+  end
+
+  def test_answer_with_duplicate_slug_refuses_cross_project_ambiguity
+    first = REVIEW_ERROR_ROW.with(slug: "same-task-260525-abcd")
+    second = REVIEW_ERROR_ROW.with(slug: first.slug, project: "other")
+    handlers = autofix_handlers([ first, second ])
+
+    result = handlers.answer(Update.new(text: "/answer #{first.slug}", chat_id: 1), nil)
+
+    assert_equal :reply, result.action
+    assert_match(/Multiple active tasks match/, result.text)
+    assert_nil result.slug
   end
 
   def test_answer_with_missing_numeric_id_replies_with_archive_hint

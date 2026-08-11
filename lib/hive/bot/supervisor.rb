@@ -1238,31 +1238,39 @@ module Hive
       end
 
       def execute_answer_write(result, update)
-        resolved_project = result.project || brainstorm_project_for(result.slug)
-        result.project = resolved_project
         binding = result.respond_to?(:binding) ? result.binding : nil
-        unless binding
-          slot = next_unanswered_answer_slot(result.slug, project: resolved_project)
-          binding = slot&.fetch("binding", nil)
-          result.question_n ||= slot&.fetch("question_number", nil)
-        end
-        unless binding
-          safe_send_message(chat_id: update.chat_id, text: "No unanswered questions remain for #{result.slug}.")
+        if binding.to_s.empty?
+          safe_send_message(
+            chat_id: update.chat_id,
+            text: "That answer context expired. Send /answer #{result.slug} to reopen the current question."
+          )
           return
         end
 
         payload = Hive::Commands::Answer.write(
           result.slug,
-          project: resolved_project,
+          project: result.project,
           binding: binding,
           answer: result.answer_text
         )
+        resolved_project = result.project || payload.dig("task", "project")
+        result.project = resolved_project
         question_n = payload.dig("slot", "question_number") || result.question_n
         case payload.fetch("outcome")
         when "written", "idempotent"
           @logger.event(:answer_written, slug: result.slug, question_n: question_n,
                                          project: resolved_project)
-          inventory = answer_inventory(result.slug, project: resolved_project)
+          inventory = post_write_answer_inventory(result.slug, project: resolved_project)
+          unless inventory
+            @conversation_store.clear(chat_id: update.chat_id, slug: result.slug)
+            text = if payload["complete"]
+              "Got Q#{question_n}.\n\n✅ All questions answered — brainstorm Q&A complete. The task has already moved on."
+            else
+              "Recorded Q#{question_n}. The task moved on before I could present the next question."
+            end
+            safe_send_message(chat_id: update.chat_id, text: text)
+            return
+          end
           advance_conversation_after_write(result, update, inventory)
           prompt_next_question_or_complete(result, update, inventory, question_n)
         when "conflict"
@@ -1356,12 +1364,7 @@ module Hive
       end
 
       def start_answer(result, update)
-        # Backfill project from the on-disk brainstorm path. The
-        # `/answer <slug>` slash command doesn't carry project (slugs
-        # are unique enough in practice), but downstream the queue
-        # writer needs project for `find_project` lookup, so we infer
-        # it once here and stash it on the conversation state.
-        resolved_project = result.project || brainstorm_project_for(result.slug)
+        resolved_project = result.project
         question = next_unanswered_answer_slot(result.slug, project: resolved_project)
 
         unless question
@@ -1734,14 +1737,14 @@ module Hive
         fetch_result.warning
       end
 
-      def next_unanswered_question_n(brainstorm_path)
-        Hive::Bot::BrainstormParser.next_unanswered_question(
-          Hive::Bot::BrainstormParser.parse(brainstorm_path)
-        )&.n
-      end
-
       def answer_inventory(slug, project:)
         Hive::Commands::Answer.inventory(slug, project: project)
+      end
+
+      def post_write_answer_inventory(slug, project:)
+        answer_inventory(slug, project: project)
+      rescue Hive::WrongStage, Hive::StaleOperationalObservation, Hive::InvalidTaskPath
+        nil
       end
 
       def next_unanswered_answer_slot(slug, project:)
@@ -1766,30 +1769,6 @@ module Hive
         return nil unless project_name
 
         Hive::Config.find_project(project_name)&.fetch("path", nil)
-      end
-
-      def brainstorm_path_for(slug, project: nil)
-        entry = brainstorm_project_entry_for(slug, project: project)
-        entry ? File.join(entry["hive_state_path"], "stages", "2-brainstorm", slug, "brainstorm.md") : nil # coding-scoped: Telegram answer flow edits coding brainstorm.md
-      end
-
-      # Resolve the project name a brainstorm slug currently lives in.
-      # Returns nil when nothing matches. Used by `start_answer` to
-      # backfill `state.project` so the daemon's dispatch-request
-      # consumer can `Hive::Config.find_project(project)` on `/done`
-      # — the answer flow's slash handlers don't carry project but
-      # the on-disk brainstorm file does.
-      def brainstorm_project_for(slug, project: nil)
-        brainstorm_project_entry_for(slug, project: project)&.fetch("name", nil)
-      end
-
-      def brainstorm_project_entry_for(slug, project: nil)
-        projects = Hive::Config.registered_projects
-        projects = projects.select { |entry| entry["name"] == project } if project && !project.empty?
-        projects.find do |entry|
-          path = File.join(entry["hive_state_path"], "stages", "2-brainstorm", slug, "brainstorm.md") # coding-scoped: Telegram answer flow edits coding brainstorm.md
-          File.exist?(path)
-        end
       end
 
       def chat_ids

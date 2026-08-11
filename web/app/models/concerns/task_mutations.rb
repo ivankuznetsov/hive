@@ -112,6 +112,7 @@ module TaskMutations
   def intervene!(message, binding:)
     text = message.to_s.strip
     raise Hive::Error, "intervene message is required" if text.empty?
+    raise Hive::Error, "question binding is required — reload the page" if binding.to_s.empty?
 
     brainstorm_path!
     receipt = write_bound_answer!(binding, text)
@@ -125,6 +126,15 @@ module TaskMutations
                               .transform_values { |value| value.to_s.strip }
                               .reject { |binding, text| binding.empty? || text.empty? }
     raise Hive::Error, "no answers provided" if provided.empty?
+
+    inventory = Hive::Commands::Answer.inventory(slug, project: project.name)
+    open_bindings = inventory.fetch("slots").reject { |slot| slot.fetch("answered") }
+                             .map { |slot| slot.fetch("binding") }
+    stale = provided.keys - open_bindings
+    if stale.any?
+      raise Hive::Error,
+            "one or more questions changed while you were answering — reload the page"
+    end
 
     answered = provided.map do |binding, text|
       write_bound_answer!(binding, text).dig("slot", "question_number")
@@ -174,6 +184,10 @@ module TaskMutations
       answer: text
     )
     return receipt if %w[written idempotent].include?(receipt.fetch("outcome"))
+
+    if receipt.fetch("reason") == "task_lock_busy"
+      raise Hive::Error, receipt.fetch("acknowledgement")
+    end
 
     raise Hive::Error,
           "question changed while you were answering it (#{receipt.fetch('reason')}) — reload the page"

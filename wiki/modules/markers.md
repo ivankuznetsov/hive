@@ -3,7 +3,7 @@ title: Hive::Markers
 type: module
 source: lib/hive/markers.rb
 created: 2026-04-25
-updated: 2026-08-02
+updated: 2026-08-11
 tags: [marker, protocol, flock, recovery, migration, binary, filesystem-safety]
 ---
 
@@ -114,6 +114,13 @@ State = Struct.new(:name, :attrs, :raw, keyword_init: true)
   installed inode after rename. This prevents a predictable temporary-path
   symlink from redirecting controller writes outside the task folder.
 - This locking is what makes concurrent writes from `Hive::Agent` (during a run) and `Markers.set` (from tests or recovery) safe.
+
+`with_markers_lock(path, create: false)` still opens the sticky sidecar lock but
+never creates a missing task directory. Callers may also provide `timeout:`;
+that form polls `LOCK_NB` against a monotonic deadline and raises the retryable
+`Hive::ConcurrentRunError` when the deadline expires. The identity-bound
+brainstorm writer uses both options, preventing a stalled marker holder from
+keeping the task lock and hanging CLI, web, or Telegram writes indefinitely.
 
 ## `parse_attrs`
 

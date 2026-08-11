@@ -217,6 +217,28 @@ class TaskMutationsTest < ActiveSupport::TestCase
     end
   end
 
+  test "rejects a stale answer batch before writing any answer" do
+    with_seeded_brainstorm_task(
+      "### Q1. Scope?\n\n### A1.\n\n### Q2. Acceptance?\n\n### A2.\n\n"
+    ) do |subject, brainstorm|
+      questions = subject.open_questions
+      File.write(
+        brainstorm,
+        "### Q1. Scope?\n\n### A1.\n\n### Q2. Changed acceptance?\n\n### A2.\n\n"
+      )
+
+      error = assert_raises(Hive::Error) do
+        subject.answer_questions!(
+          questions.first.binding => "must not land",
+          questions.last.binding => "stale"
+        )
+      end
+
+      assert_match(/reload the page/, error.message)
+      assert_equal [ nil, nil ], Hive::BrainstormParser.parse(brainstorm).map(&:answer)
+    end
+  end
+
   test "records an intervention as the next brainstorm answer" do
     with_seeded_brainstorm_task("### Q1. What is the goal?\n\n### A1.\n\n") do |subject, brainstorm|
       binding = subject.open_questions.first.binding
@@ -226,6 +248,47 @@ class TaskMutationsTest < ActiveSupport::TestCase
       assert_equal 1, result[:question_n]
       assert_equal "Ship the box", Hive::Bot::BrainstormParser.parse(brainstorm).first.answer.to_s.strip
     end
+  end
+
+  test "intervention requires the presented question binding" do
+    with_seeded_brainstorm_task("### Q1. What is the goal?\n\n### A1.\n\n") do |subject, brainstorm|
+      error = assert_raises(Hive::Error) do
+        subject.intervene!("Ship the box", binding: "")
+      end
+
+      assert_match(/binding is required/, error.message)
+      assert_nil Hive::BrainstormParser.parse(brainstorm).first.answer
+    end
+  end
+
+  test "lock contention asks for a retry without claiming the question changed" do
+    with_seeded_brainstorm_task("### Q1. What is the goal?\n\n### A1.\n\n") do |subject, _brainstorm|
+      binding = subject.open_questions.first.binding
+      receipt = {
+        "outcome" => "lock_busy",
+        "reason" => "task_lock_busy",
+        "acknowledgement" => "Q1 is locked by another Hive operation; retry later."
+      }
+
+      error = with_replaced_singleton_method(
+        Hive::Commands::Answer, :write, ->(*_args, **_kwargs) { receipt }
+      ) do
+        assert_raises(Hive::Error) { subject.intervene!("Ship it", binding: binding) }
+      end
+
+      assert_match(/locked by another Hive operation; retry later/, error.message)
+      refute_match(/question changed/, error.message)
+    end
+  end
+
+  test "non-brainstorm task pages skip answer inventory" do
+    subject = task("stage" => "6-review", "workflow" => "coding")
+
+    questions = with_replaced_singleton_method(
+      Hive::Commands::Answer, :inventory, ->(*_args, **_kwargs) { flunk "inventory should be skipped" }
+    ) { subject.open_questions }
+
+    assert_empty questions
   end
 
   test "rejects a same-number question from a replacement round" do

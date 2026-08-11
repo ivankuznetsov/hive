@@ -37,6 +37,10 @@ module Hive
       end
 
       def self.write(target, project: nil, binding:, answer:)
+        if binding.to_s.empty?
+          raise InvalidBinding, "brainstorm answer binding is required for writes"
+        end
+
         new(
           target,
           project: project,
@@ -264,17 +268,16 @@ module Hive
           )
         end
 
-        reason = result == :answer_slot_missing ? "answer_slot_missing" : "question_missing"
         return write_outcome(
           binding,
           outcome: "stale",
-          reason: reason,
+          reason: "question_missing",
           task: task,
           generation: generation,
           questions: questions,
           relocated: resolution.fetch(:relocated),
           answer_text: answer_text
-        ) if %i[answer_slot_missing question_not_found].include?(result)
+        ) if result == :question_not_found
 
         raise Hive::InternalError, "brainstorm answer writer returned #{result.inspect}"
       end

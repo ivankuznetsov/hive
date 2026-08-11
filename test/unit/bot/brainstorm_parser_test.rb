@@ -98,6 +98,20 @@ class HiveBotBrainstormParserTest < Minitest::Test
     assert_equal "Answered.", questions.first.answer
   end
 
+  def test_zero_numbered_rounds_questions_and_answers_are_not_slots
+    questions = Hive::BrainstormParser.parse_text(<<~MARKDOWN)
+      ## Round 0
+      ### Q0. Invalid zero slot?
+      ### A0.
+      ignored
+      ## Round 1
+      ### Q1. Valid slot?
+      ### A1.
+    MARKDOWN
+
+    assert_equal [ [ 1, 1 ] ], questions.map { |question| [ question.round, question.n ] }
+  end
+
   def test_question_text_spans_multiple_lines
     text = <<~MARKDOWN
       ## Round 3
@@ -198,6 +212,28 @@ class HiveBotBrainstormParserTest < Minitest::Test
     assert_equal compact, reformatted
     refute_equal compact, changed
     assert_match(/\A[0-9a-f]{64}\z/, compact)
+  end
+
+  def test_question_fingerprint_preserves_unicode_compatibility_distinctions
+    {
+      "Choose ①?" => "Choose 1?",
+      "Use x²?" => "Use x2?",
+      "Use ＵＲＬ?" => "Use URL?",
+      "Use ﬁle?" => "Use file?"
+    }.each do |left, right|
+      refute_equal Hive::BrainstormParser.question_fingerprint(left),
+                   Hive::BrainstormParser.question_fingerprint(right)
+    end
+  end
+
+  def test_legacy_answer_backslashes_and_escaped_text_are_preserved_verbatim
+    answer = "\\\\server\\share\n\\&lt;!-- COMPLETE -->\n\\### Q9. literal heading\n" \
+             "#{Hive::BrainstormParser::ANSWER_ESCAPE_PREFIX}bGVnYWN5"
+    parsed = Hive::BrainstormParser.parse_text(
+      "## Round 1\n### Q1. Legacy?\n### A1.\n#{answer}\n"
+    ).first
+
+    assert_equal answer, parsed.answer
   end
 
   def test_unanswered_questions_and_question_lookup_helpers

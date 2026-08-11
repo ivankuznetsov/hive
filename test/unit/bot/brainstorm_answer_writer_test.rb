@@ -81,7 +81,9 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
 
       assert_equal :written, result
       assert_equal "One", Hive::Bot::BrainstormParser.parse(path).first.answer
-      assert_equal "## Round 1\n\n### Q1. First?\n\n### A1.\nOne\n", File.read(path)
+      assert_equal "## Round 1\n\n### Q1. First?\n\n" \
+                   "#{Hive::BrainstormParser.encoded_answer_header(1)}\nOne\n",
+                   File.read(path)
     end
   end
 
@@ -165,7 +167,8 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
 
       assert_equal :written, result
       after = File.read(path)
-      assert_includes after, "### Q1. Identify OpenClawd.\n### A2.\nOpenClawd.ai\n",
+      assert_includes after,
+                      "### Q1. Identify OpenClawd.\n#{Hive::BrainstormParser.encoded_answer_header(2)}\nOpenClawd.ai\n",
                       "answer must be written into the mis-numbered A-slot that " \
                       "follows Q1 (the by-position fallback)"
       # Round-trip verify: the parser must read back the answer as Q1's.
@@ -188,7 +191,8 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
 
       assert_equal :written, result
       after = File.read(path)
-      assert_includes after, "### Q1. First?\n### A1.\nOne\n### Q2. Second?",
+      assert_includes after,
+                      "### Q1. First?\n#{Hive::BrainstormParser.encoded_answer_header(1)}\nOne\n### Q2. Second?",
                       "the created A1 slot must sit between Q1 and Q2"
       parsed = Hive::Bot::BrainstormParser.parse(path)
       assert_equal "One", parsed[0].answer
@@ -219,7 +223,8 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
       )
 
       assert_equal :written, result, "by-position fallback must skip prose lines"
-      assert_includes File.read(path), "### A2.\nFilled\n"
+      assert_includes File.read(path),
+                      "#{Hive::BrainstormParser.encoded_answer_header(2)}\nFilled\n"
     end
   end
 
@@ -358,7 +363,8 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
       )
 
       assert_equal :written, result
-      assert_includes File.read(path), "### Q1. First?\n### A1.\nx\n## Round 2",
+      assert_includes File.read(path),
+                      "### Q1. First?\n#{Hive::BrainstormParser.encoded_answer_header(1)}\nx\n## Round 2",
                       "the created A1 slot must sit before the Round 2 boundary"
     end
   end
@@ -376,7 +382,8 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
       )
 
       assert_equal :written, result
-      assert_includes File.read(path), "### Q1. First?\n### A1.\nx\n<!-- WAITING -->",
+      assert_includes File.read(path),
+                      "### Q1. First?\n#{Hive::BrainstormParser.encoded_answer_header(1)}\nx\n<!-- WAITING -->",
                       "the created A1 slot must sit before the WAITING marker"
     end
   end
@@ -409,7 +416,8 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
       )
 
       assert_equal :written, result
-      assert_includes File.read(path), "### Q1. First?\n### A1.\nOne\n",
+      assert_includes File.read(path),
+                      "### Q1. First?\n#{Hive::BrainstormParser.encoded_answer_header(1)}\nOne\n",
                       "the question line must be newline-terminated before the created A header"
       assert_equal "One", Hive::Bot::BrainstormParser.parse(path)[0].answer
     end
@@ -575,10 +583,21 @@ class HiveBotBrainstormAnswerWriterTest < Minitest::Test
       assert_equal answer, Hive::BrainstormParser.parse(path).first.answer
       assert_equal :waiting, Hive::Markers.current(path).name
       raw = File.read(path)
-      assert_includes raw, "\\### Q99. Not a slot"
-      assert_includes raw, "\\&lt;!-- COMPLETE -->"
-      assert_includes raw, "Inline \\&lt;!-- ERROR reason=spoofed --> marker"
-      assert_includes raw, "\\\\### Q7. Preserve slash"
+      assert_includes raw, Hive::BrainstormParser::ANSWER_ESCAPE_PREFIX
+      refute_includes raw, "\n### Q99. Not a slot\n"
+      refute_includes raw, "\n<!-- COMPLETE -->\n"
+    end
+  end
+
+  def test_exact_writer_maps_ordinals_in_lone_cr_files
+    content = "## Round 1\r### Q1. First?\r### A1.\r### Q2. Second?\r### A2.\r<!-- WAITING -->\r"
+    with_brainstorm(content) do |path|
+      result = Hive::Bot::BrainstormAnswerWriter.write_at_ordinal_under_lock!(
+        brainstorm_path: path, ordinal: 2, answer_text: "second answer"
+      )
+
+      assert_equal :written, result
+      assert_equal [ nil, "second answer" ], Hive::BrainstormParser.parse(path).map(&:answer)
     end
   end
 

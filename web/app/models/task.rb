@@ -149,6 +149,8 @@ class Task
   end
 
   def open_questions
+    return [] unless self["stage"] == "2-brainstorm"
+
     Hive::Commands::Answer.inventory(slug, project: project.name)
                           .fetch("slots")
                           .reject { |slot| slot.fetch("answered") }

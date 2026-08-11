@@ -2856,18 +2856,39 @@ class HiveBotSupervisorTest < Minitest::Test
     end
   end
 
-  def test_execute_answer_write_handles_missing_slug_and_no_unanswered_question
+  def test_execute_answer_write_refuses_unbound_restart_or_ttl_replies
     result = FakeRouter::Result.new(
       action: :write_answer_then_reply, slug: "missing", project: "hive", answer_text: "answer"
     )
     @supervisor.send(:execute_answer_write, result, Update.new(chat_id: 42, update_id: 14))
-    assert_equal "No unanswered questions remain for missing.", @telegram.messages.last.fetch(:text)
+    assert_match(/answer context expired/, @telegram.messages.last.fetch(:text))
+    assert_match(%r{/answer missing}, @telegram.messages.last.fetch(:text))
+  end
 
+  def test_execute_answer_write_acknowledges_completion_after_stage_movement
     result = FakeRouter::Result.new(
-      action: :write_answer_then_reply, slug: "done", project: "hive", answer_text: "answer"
+      action: :write_answer_then_reply, slug: "task", project: "hive",
+      question_n: 1, binding: "bound", answer_text: "done"
     )
-    @supervisor.send(:execute_answer_write, result, Update.new(chat_id: 42, update_id: 15))
-    assert_equal "No unanswered questions remain for done.", @telegram.messages.last.fetch(:text)
+    @conversation_store.start(
+      chat_id: 42, slug: "task", question_n: 1,
+      binding: "bound", mode: :path_b, project: "hive"
+    )
+    receipt = {
+      "outcome" => "written", "reason" => "exact_match", "complete" => true,
+      "slot" => { "question_number" => 1 }, "task" => { "project" => "hive" }
+    }
+    inventory = ->(*_args, **_kwargs) { raise Hive::WrongStage.new("moved") }
+
+    with_replaced_singleton_method(Hive::Commands::Answer, :write, ->(*_args, **_kwargs) { receipt }) do
+      with_replaced_singleton_method(Hive::Commands::Answer, :inventory, inventory) do
+        @supervisor.send(:execute_answer_write, result, Update.new(chat_id: 42, update_id: 15))
+      end
+    end
+
+    assert_match(/All questions answered/, @telegram.messages.last.fetch(:text))
+    assert_match(/already moved on/, @telegram.messages.last.fetch(:text))
+    assert_nil @conversation_store.get(chat_id: 42, slug: "task")
   end
   def test_request_shutdown_and_reload_set_loop_flags
     @supervisor.request_shutdown!
@@ -2975,10 +2996,9 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_equal false, ok
   end
 
-  def test_project_and_brainstorm_paths_resolve_registered_project
-    with_brainstorm_file(content: "## Round 1\n### Q1. Scope?\n### A1.\n") do |path, project|
+  def test_project_path_resolves_registered_project
+    with_brainstorm_file(content: "## Round 1\n### Q1. Scope?\n### A1.\n") do |_path, project|
       assert_equal project, @supervisor.send(:project_path_for, "hive")
-      assert_equal path, @supervisor.send(:brainstorm_path_for, "bot-task-260522-aa", project: "hive")
     end
   end
 
@@ -3148,7 +3168,7 @@ class HiveBotSupervisorTest < Minitest::Test
         answer_text: "new answer"
       )
       @supervisor.send(:execute_answer_write, missing, Update.new(chat_id: 42, update_id: 22))
-      assert_equal "No unanswered questions remain for task.", @telegram.messages.last.fetch(:text)
+      assert_match(/answer context expired/, @telegram.messages.last.fetch(:text))
     end
   end
 
@@ -3337,12 +3357,6 @@ class HiveBotSupervisorTest < Minitest::Test
 
 
 
-
-  def test_next_unanswered_question_n_parses_brainstorm_file
-    with_brainstorm_file(content: "## Round 1\n### Q1. Scope?\n### A1.\n") do |path, _project|
-      assert_equal 1, @supervisor.send(:next_unanswered_question_n, path)
-    end
-  end
 
   def with_registered_projects(projects)
     original = Hive::Config.method(:registered_projects)

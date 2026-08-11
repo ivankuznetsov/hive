@@ -256,10 +256,12 @@ module Hive
           target = update.text.to_s.split(/\s+/, 2)[1].to_s.strip
           return @result_class.new(action: :reply, text: "Use /answer <id|slug>.") if target.empty?
 
-          slug, error = resolve_numeric_target_slug(target)
+          row, error = resolve_status_row(target)
           return @result_class.new(action: :reply, text: error) if error
 
-          @result_class.new(action: :start_answer, slug: slug, mode: :path_b)
+          @result_class.new(
+            action: :start_answer, project: row.project, slug: row.slug, mode: :path_b
+          )
         end
 
         def approve(update)

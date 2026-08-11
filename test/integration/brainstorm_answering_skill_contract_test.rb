@@ -240,7 +240,8 @@ class BrainstormAnsweringSkillContractTest < Minitest::Test
         binding: missing_slot.fetch("binding"), answer: "Repair only this slot."
       )
       assert_equal "written", repaired.fetch("outcome")
-      assert_match(/Q1.*\n+### A1\.\nRepair only this slot\.\n### Q2/m,
+      answer_header = Regexp.escape(Hive::BrainstormParser.encoded_answer_header(1))
+      assert_match(/Q1.*\n+#{answer_header}\nRepair only this slot\.\n### Q2/m,
                    File.read(missing.fetch(:path)))
       assert_nil parsed_answers(missing.fetch(:path)).fetch(1)
 

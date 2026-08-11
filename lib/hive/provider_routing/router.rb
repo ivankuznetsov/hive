@@ -37,7 +37,7 @@ module Hive
           request.policy.pin_allows?(candidate.route) &&
             request.policy.requirements_satisfied?(candidate.route)
         end
-        if !in_boundary.empty? && in_boundary.all?(&:capacity_only?)
+        if request.policy.pin.nil? && !in_boundary.empty? && in_boundary.all?(&:capacity_only?)
           return Decision.capacity_saturated(
             request: request,
             considered: considered,

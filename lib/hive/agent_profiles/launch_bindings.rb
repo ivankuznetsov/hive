@@ -14,7 +14,7 @@ module Hive
         "grok" => "GROK_HOME"
       }.freeze
       CLEARED_CREDENTIAL_KEYS = {
-        "claude" => %w[ANTHROPIC_API_KEY],
+        "claude" => %w[ANTHROPIC_API_KEY CLAUDE_API_KEY],
         "codex" => %w[OPENAI_API_KEY],
         "pi" => [],
         "grok" => %w[GROK_AUTH_PATH XAI_API_KEY GROK_CODE_XAI_API_KEY]

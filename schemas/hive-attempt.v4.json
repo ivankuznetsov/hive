@@ -67,6 +67,14 @@
       "type": "string", "minLength": 1, "maxLength": 128,
       "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
     },
+    "RoutingExclusionReason": {
+      "type": "string",
+      "enum": [
+        "hard_pin_mismatch", "requirements_incompatible", "manual_block",
+        "circuit_cooldown", "half_open_probe_owned",
+        "provider_concurrency_saturated", "health_state_unavailable"
+      ]
+    },
     "Sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "ProcessIdentity": {
       "type": "object",
@@ -130,7 +138,7 @@
       "required": ["route_id", "reason", "detail"],
       "properties": {
         "route_id": { "$ref": "#/$defs/Identifier" },
-        "reason": { "$ref": "#/$defs/Identifier" },
+        "reason": { "$ref": "#/$defs/RoutingExclusionReason" },
         "detail": {
           "oneOf": [
             {

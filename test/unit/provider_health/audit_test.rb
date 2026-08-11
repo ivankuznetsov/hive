@@ -29,6 +29,7 @@ class ProviderHealthAuditTest < Minitest::Test
       "control\u0000byte",
       "api_key=secret-canary",
       "Bearer secret-canary",
+      "sk-ant-abcdefghijklmnopqrstuvwx",
       "x" * (Hive::ProviderHealth::MAX_REASON_BYTES + 1)
     ]
 

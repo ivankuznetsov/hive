@@ -106,7 +106,18 @@ module Hive
       end
 
       def decision_projection(_scan)
-        rows = attempt_store.decision_index.routing_decisions(limit: DECISION_LIMIT).map do |entry|
+        route_ids = @accounts.values.flat_map do |account|
+          account.models.map { |model| "#{account.id}/#{model}" }
+        end
+        entries = attempt_store.decision_index.routing_decisions(limit: DECISION_LIMIT)
+        entries.select! do |entry|
+          decision = entry.fetch("decision")
+          selected = decision["selected_route"]
+          selected_id = selected.is_a?(Hash) ? selected["route_id"] : selected
+          candidate_ids = Array(decision["candidates"]).map { |candidate| candidate["route_id"] }
+          route_ids.include?(selected_id) || !(candidate_ids & route_ids).empty?
+        end
+        rows = entries.map do |entry|
           subject = entry.fetch("subject")
           {
             "identity" => {
@@ -127,6 +138,10 @@ module Hive
 
       def account_projection(account, observed)
         provider_scope = Hive::ProviderHealth::Scope.provider_account(account_id: account.id)
+        model_scopes = account.models.sort.map do |model|
+          Hive::ProviderHealth::Scope.model(account_id: account.id, model_id: model)
+        end
+        inspections = health_store.inspect_scopes([ provider_scope, *model_scopes ], now: @now)
         {
           "provider_account_id" => account.id,
           "adapter" => account.adapter,
@@ -135,15 +150,12 @@ module Hive
             "observed" => observed,
             "max" => account.max_concurrent
           },
-          "circuit" => inspection_projection(health_store.inspect_scope(provider_scope)),
-          "models" => account.models.sort.map do |model|
-            model_scope = Hive::ProviderHealth::Scope.model(
-              account_id: account.id, model_id: model
-            )
+          "circuit" => inspection_projection(inspections.first),
+          "models" => account.models.sort.each_with_index.map do |model, index|
             {
               "model" => model,
               "route_id" => "#{account.id}/#{model}",
-              "circuit" => inspection_projection(health_store.inspect_scope(model_scope))
+              "circuit" => inspection_projection(inspections.fetch(index + 1))
             }
           end
         }
@@ -172,17 +184,10 @@ module Hive
 
         circuit = inspection.circuit
         evidence = circuit.evidence
-        {
-          "status" => "available",
-          "scope" => inspection.scope.to_h,
-          "state" => circuit.effective_state(now: @now),
+        Hive::ProviderHealth.circuit_observation(inspection, now: @now).merge(
           "automatic_state" => circuit.automatic_state,
           "reason" => circuit_reason(circuit),
-          "generation" => circuit.generation,
-          "journal_epoch" => circuit.journal_epoch,
-          "eligible_at" => circuit.eligible_at,
           "manual_block" => circuit.manual_block,
-          "probe_owner" => circuit.probe,
           "evidence" => evidence && {
             "failure_class" => evidence["failure_class"],
             "provenance" => evidence["provenance"],
@@ -191,25 +196,18 @@ module Hive
           },
           "corruption_token" => nil,
           "artifact_reference" => nil
-        }
+        )
       end
 
       def unavailable_inspection_projection(inspection)
-        {
-          "status" => "unavailable",
-          "scope" => inspection.scope.to_h,
-          "state" => "health_state_unavailable",
+        Hive::ProviderHealth.circuit_observation(inspection, now: @now).merge(
           "automatic_state" => nil,
           "reason" => inspection.unavailable_reason || "health_state_unavailable",
-          "generation" => inspection.generation,
-          "journal_epoch" => inspection.journal_epoch,
-          "eligible_at" => nil,
           "manual_block" => nil,
-          "probe_owner" => nil,
           "evidence" => nil,
           "corruption_token" => inspection.corruption_token&.to_h,
           "artifact_reference" => inspection.artifact_reference
-        }
+        )
       end
 
       def unavailable_scope(scope)

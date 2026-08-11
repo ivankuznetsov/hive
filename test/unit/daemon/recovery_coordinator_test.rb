@@ -730,6 +730,42 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
 
+  def test_provider_and_marker_recovery_charge_once_with_the_same_due_time
+    provider = nil
+    with_fixture(marker_name: "WAITING", marker_attrs: {}) do |coordinator, row, state_home|
+      coordinator.request_admission_failure(
+        request: admission_request(row),
+        decision: routing_decision(row, status: :no_route),
+        now: NOW
+      )
+      request = Q.pending(state_home: state_home).fetch(0)
+      provider = {
+        count: Q.pending(state_home: state_home).size,
+        retry_count: request.recovery.fetch("retry_count"),
+        due_at: request.recovery.fetch("next_eligible_at")
+      }
+    end
+
+    marker = nil
+    with_fixture(mtime: NOW) do |coordinator, row, state_home|
+      coordinator.request(
+        row: row,
+        requestor: "healer",
+        request_id: "equivalent-marker-recovery",
+        now: NOW + Hive::AgentLimit.retry_cooldown_sec
+      )
+      request = Q.pending(state_home: state_home).fetch(0)
+      marker = {
+        count: Q.pending(state_home: state_home).size,
+        retry_count: request.recovery.fetch("retry_count"),
+        due_at: request.recovery.fetch("next_eligible_at")
+      }
+    end
+
+    assert_equal({ count: 1, retry_count: 1 }, provider.except(:due_at))
+    assert_equal provider, marker
+  end
+
   def test_existing_recovery_records_no_route_without_a_second_charge
     with_fixture(marker_name: "WAITING", marker_attrs: {}) do |coordinator, row, state_home|
       request = admission_request(row)

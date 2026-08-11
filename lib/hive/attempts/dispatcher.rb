@@ -227,7 +227,7 @@ module Hive
 
             if frozen_policy.explicit?
               health = provider_health_store
-              health.reconcile!
+              health_available = reconcile_provider_health(health)
               stale_retries = 0
               loop do
                 route_decision = select_provider_route(
@@ -236,7 +236,8 @@ module Hive
                   snapshot: snapshot,
                   records: records,
                   generation: generation,
-                  now: now
+                  now: now,
+                  health_available: health_available
                 )
                 unless route_decision.selected?
                   view.record_routing_decision(
@@ -305,7 +306,7 @@ module Hive
                 stale_retries += 1
                 raise if stale_retries >= 3
 
-                health.reconcile!
+                health_available = reconcile_provider_health(health)
               end
               next if result
             else
@@ -582,6 +583,13 @@ module Hive
         @health_store ||= @health_store_factory.call
       end
 
+      def reconcile_provider_health(health)
+        health.reconcile!
+        true
+      rescue Hive::ProviderHealth::Unavailable, Hive::ManagedDirectory::UnsafeError
+        false
+      end
+
       def open_health_store
         Hive::ProviderHealth.open(attempt_reader: method(:health_attempt_state))
       end
@@ -601,15 +609,20 @@ module Hive
         nil
       end
 
-      def select_provider_route(policy:, health:, snapshot:, records:, generation:, now:)
+      def select_provider_route(policy:, health:, snapshot:, records:, generation:, now:,
+                                health_available: true)
         evaluations = policy.eligible_routes.to_h do |route|
           [
             route.id,
-            health.evaluate_route(
-              account_id: route.account,
-              model_id: route.model,
-              now: now
-            )
+            if health_available
+              health.evaluate_route(
+                account_id: route.account,
+                model_id: route.model,
+                now: now
+              )
+            else
+              unavailable_route_evaluation(route)
+            end
           ]
         end
         capacity = snapshot.provider_account_capacity(
@@ -626,6 +639,33 @@ module Hive
           request: request,
           decision_id: @decision_id_generator.call,
           decided_at: now
+        )
+      end
+
+      def unavailable_route_evaluation(route)
+        scopes = [
+          Hive::ProviderHealth::Scope.provider_account(account_id: route.account),
+          Hive::ProviderHealth::Scope.model(account_id: route.account, model_id: route.model)
+        ]
+        inspections = scopes.map do |scope|
+          Hive::ProviderHealth::Inspection.new(
+            status: "unavailable", scope: scope, circuit: nil,
+            generation: 0, journal_epoch: 0,
+            unavailable_reason: "health_state_unavailable"
+          )
+        end
+        Hive::ProviderHealth::RouteEvaluation.new(
+          status: "excluded",
+          inspections: inspections,
+          blockers: inspections.map do |inspection|
+            {
+              "scope" => inspection.scope.to_h,
+              "reason" => "health_state_unavailable",
+              "generation" => 0,
+              "journal_epoch" => 0
+            }
+          end,
+          probe_requirements: []
         )
       end
 

@@ -55,28 +55,32 @@ module Hive
       end
 
       def inspect_scope(scope, now: current_time)
-        require_scope!(scope)
+        inspect_scopes([ scope ], now: now).first
+      end
+
+      # Pure reporting snapshot. All requested scopes are sampled under one
+      # host-global lock without repairing journals or publishing projections.
+      def inspect_scopes(scopes, now: current_time)
+        values = Array(scopes)
+        values.each { |scope| require_scope!(scope) }
         with_mutation_lock do
-          replay = load_replay(scope, recover_torn: true, publish_projection: true)
-          Inspection.new(
-            status: "available",
-            scope: scope,
-            circuit: replay.circuit,
-            generation: replay.circuit.generation,
-            journal_epoch: replay.circuit.journal_epoch
-          )
-        rescue JournalCorruption => corruption
-          unavailable_inspection(corruption)
+          values.map do |scope|
+            begin
+              replay = load_replay(scope, recover_torn: false, publish_projection: false)
+              Inspection.new(
+                status: "available",
+                scope: scope,
+                circuit: replay.circuit,
+                generation: replay.circuit.generation,
+                journal_epoch: replay.circuit.journal_epoch
+              )
+            rescue JournalCorruption => corruption
+              unavailable_inspection(corruption)
+            end
+          end.freeze
         end
-      rescue Hive::ManagedDirectory::UnsafeError
-        Inspection.new(
-          status: "unavailable",
-          scope: scope,
-          circuit: nil,
-          generation: 0,
-          journal_epoch: 0,
-          unavailable_reason: "health_state_unavailable"
-        )
+      rescue Unavailable, Hive::ManagedDirectory::UnsafeError
+        values.map { |scope| unavailable_scope_inspection(scope) }.freeze
       end
 
       def evaluate_route(account_id:, model_id:, now: current_time)
@@ -88,7 +92,7 @@ module Hive
           intents = load_intents
           inspections = scopes.map do |scope|
             begin
-              replay = load_replay(scope, recover_torn: true, publish_projection: true)
+              replay = load_replay(scope, recover_torn: false, publish_projection: false)
               Inspection.new(
                 status: "available",
                 scope: scope,
@@ -293,6 +297,8 @@ module Hive
             block.call([].freeze)
           end
         end
+      rescue Unavailable, Hive::ManagedDirectory::UnsafeError
+        raise StaleGeneration, "provider-health route observation is unavailable"
       end
 
       def reconcile!
@@ -342,6 +348,8 @@ module Hive
             raise StaleGeneration, "corruption token does not target unavailable health state"
           end
           enforce_generation!(replay.circuit, expected_generation)
+          reconcile_intents_for_scope(scope)
+          replay = load_replay(scope, recover_torn: true, publish_projection: true)
           append_operator_transition(
             replay,
             action: "reset",
@@ -430,7 +438,7 @@ module Hive
 
       def with_mutation_lock(&block)
         @directory.with_lock("mutation.lock", &block)
-      rescue JournalCorruption
+      rescue JournalCorruption, Hive::ManagedDirectory::UnsafeError
         raise Unavailable, "health_state_unavailable"
       end
 
@@ -468,32 +476,27 @@ module Hive
         return fresh_replay(scope, publish_projection: publish_projection) if bytes.nil? || bytes.empty?
 
         original = bytes
+        corrupt_suffix = false
         unless bytes.end_with?("\n")
           prefix_end = bytes.rindex("\n")
           suffix = prefix_end ? bytes.byteslice((prefix_end + 1)..) : bytes
           begin
             JSON.parse(suffix)
-            raise JournalCorruption.new(
-              scope: scope,
-              bytes: original,
-              last_circuit: Circuit.closed(scope: scope)
-            )
-          rescue JSON::ParserError
-            unless recover_torn
-              raise JournalCorruption.new(
-                scope: scope,
-                bytes: original,
-                last_circuit: Circuit.closed(scope: scope)
-              )
-            end
+            corrupt_suffix = true
             bytes = prefix_end ? bytes.byteslice(0..prefix_end) : "".b
-            @directory.atomic_write(
-              relative,
-              bytes,
-              mode: 0o600,
-              expected_digest: ProviderHealth.digest(original),
-              max_existing_bytes: MAX_JOURNAL_BYTES
-            )
+          rescue JSON::ParserError
+            bytes = prefix_end ? bytes.byteslice(0..prefix_end) : "".b
+            if recover_torn
+              @directory.atomic_write(
+                relative,
+                bytes,
+                mode: 0o600,
+                expected_digest: ProviderHealth.digest(original),
+                max_existing_bytes: MAX_JOURNAL_BYTES
+              )
+            else
+              corrupt_suffix = true
+            end
           end
         end
 
@@ -534,6 +537,13 @@ module Hive
           end
         end
         circuit ||= Circuit.closed(scope: scope)
+        if corrupt_suffix
+          raise JournalCorruption.new(
+            scope: scope,
+            bytes: original,
+            last_circuit: circuit
+          )
+        end
         replay = Replay.new(
           circuit: circuit,
           events: events.freeze,
@@ -612,6 +622,9 @@ module Hive
       end
 
       def persist_event(replay, event, status: "accepted", reason: nil)
+        if replay.sequence >= MAX_JOURNAL_EVENTS
+          raise Unavailable, "provider-health journal is full"
+        end
         circuit = event.apply(replay.circuit)
         line = "#{ProviderHealth.canonical_json(event.to_h)}\n"
         bytes = replay.bytes + line
@@ -751,6 +764,17 @@ module Hive
         )
       end
 
+      def unavailable_scope_inspection(scope)
+        Inspection.new(
+          status: "unavailable",
+          scope: scope,
+          circuit: nil,
+          generation: 0,
+          journal_epoch: 0,
+          unavailable_reason: "health_state_unavailable"
+        )
+      end
+
       def operator_mutation(scope:, expected_generation:, actor:, reason:, action:)
         require_scope!(scope)
         actor_value = Audit.validate_actor(actor)
@@ -758,6 +782,8 @@ module Hive
         with_mutation_lock do
           replay = load_replay(scope, recover_torn: true, publish_projection: true)
           enforce_generation!(replay.circuit, expected_generation)
+          reconcile_intents_for_scope(scope)
+          replay = load_replay(scope, recover_torn: true, publish_projection: true)
           append_operator_transition(
             replay,
             action: action,
@@ -782,8 +808,10 @@ module Hive
           raise InvalidMutation, "unknown operator health mutation"
         end
         predicted = case action
-        when "block" then circuit.with(generation: circuit.generation + 1, manual_block: manual_block)
-        when "unblock" then circuit.with(generation: circuit.generation + 1, manual_block: nil)
+        when "block"
+          circuit.with(generation: circuit.generation + 1, manual_block: manual_block, probe: nil)
+        when "unblock"
+          circuit.with(generation: circuit.generation + 1, manual_block: nil, probe: nil)
         when "reset"
           circuit.with(
             generation: circuit.generation + 1,
@@ -1049,6 +1077,12 @@ module Hive
         end
       end
 
+      def reconcile_intents_for_scope(scope)
+        load_intents.select do |stored|
+          stored.fetch(:bindings).any? { |binding| binding.scope == scope }
+        end.each { |stored| reconcile_intent(stored) }
+      end
+
       def probe_claim_key(intent_id, binding)
         ProviderHealth.digest("intent_id" => intent_id, "probe_binding" => binding.to_h)
       end
@@ -1079,7 +1113,13 @@ module Hive
                 payload: { "probe" => binding.to_h }
               )
             else
-              raise Unavailable, "provider-health probe intent cannot be reconciled"
+              MutationResult.new(
+                status: "accepted",
+                reason: "probe_intent_fenced",
+                previous: replay.circuit,
+                current: replay.circuit,
+                generation: replay.circuit.generation
+              )
             end
           elsif matching_probe?(replay.circuit, binding)
             append_transition(

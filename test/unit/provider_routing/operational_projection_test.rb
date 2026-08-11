@@ -84,7 +84,7 @@ class ProviderRoutingOperationalProjectionTest < Minitest::Test
     assert_includes payload.fetch("issues"), "attempt_storage_unavailable"
 
     failing_health = Object.new
-    failing_health.define_singleton_method(:inspect_scope) do |_scope|
+    failing_health.define_singleton_method(:inspect_scopes) do |_scopes, now:|
       raise Hive::ProviderHealth::Unavailable, "unavailable"
     end
     payload = Hive::ProviderRouting::OperationalProjection.new(
@@ -140,6 +140,23 @@ class ProviderRoutingOperationalProjectionTest < Minitest::Test
     assert_empty payload.fetch("decisions")
   end
 
+  def test_decisions_are_filtered_to_the_projected_account_routes
+    matching = decision_entry("account-a/model-a")
+    unrelated = decision_entry("account-b/model-b")
+    attempts = AttemptStore.new(
+      scan_result: Hive::Attempts::Scan.new(records: [], invalid_records: []),
+      decision_index: DecisionIndex.new([ matching, unrelated ])
+    )
+
+    payload = Hive::ProviderRouting::OperationalProjection.new(
+      accounts: { "account-a" => account }, attempt_store: attempts,
+      health_store: @health, now: NOW
+    ).to_h
+
+    assert_equal [ "account-a/model-a" ],
+                 payload.fetch("decisions").map { |row| row.dig("decision", "selected_route") }
+  end
+
   private
 
   def projection
@@ -160,5 +177,20 @@ class ProviderRoutingOperationalProjectionTest < Minitest::Test
       max_concurrent: 2,
       cooldown_sec: Hive::ProviderRouting::DEFAULT_COOLDOWN_SEC
     )
+  end
+
+  def decision_entry(route_id)
+    {
+      "project" => "demo",
+      "attempt_id" => "attempt-#{route_id}",
+      "subject" => {
+        "kind" => "task_stage", "task_id" => "task-1", "task_slug" => "task",
+        "intended_stage" => "4-execute"
+      },
+      "decision" => {
+        "selected_route" => route_id,
+        "candidates" => [ { "route_id" => route_id } ]
+      }
+    }
   end
 end

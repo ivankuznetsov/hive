@@ -15,15 +15,21 @@ class ProviderHealthReplayTest < Minitest::Test
     FileUtils.remove_entry(@tmp)
   end
 
-  def test_torn_final_record_recovers_but_interior_corruption_fails_closed
+  def test_read_only_inspection_does_not_repair_torn_or_interior_corruption
     open_scope(provider_scope, evidence(provider_scope))
     path = journal_file(provider_scope)
     valid = File.binread(path)
     File.binwrite(path, valid + %({"message":"secret-canary"))
 
-    recovered = store.inspect_scope(provider_scope)
-    assert recovered.available?
-    assert_equal 1, recovered.generation
+    unavailable_tail = store.inspect_scope(provider_scope)
+    assert unavailable_tail.unavailable?
+    assert_includes File.binread(path), "secret-canary"
+
+    repaired = store.block(
+      scope: provider_scope, expected_generation: 1,
+      actor: "uid:1000", reason: "repair torn suffix while mutating"
+    )
+    assert_equal 2, repaired.generation
     refute_includes File.binread(path), "secret-canary"
 
     File.binwrite(path, "not-json\n#{valid}")
@@ -34,7 +40,7 @@ class ProviderHealthReplayTest < Minitest::Test
     refute_includes unavailable.unavailable_reason, "not-json"
   end
 
-  def test_projection_is_rebuilt_from_authoritative_journal
+  def test_read_only_inspection_does_not_rebuild_projection
     open_scope(provider_scope, evidence(provider_scope))
     projection = projection_file(provider_scope)
     File.binwrite(projection, %({"message":"secret-canary"}\n))
@@ -42,8 +48,8 @@ class ProviderHealthReplayTest < Minitest::Test
     inspected = store.inspect_scope(provider_scope)
 
     assert inspected.available?
-    assert_equal inspected.circuit.to_h, JSON.parse(File.read(projection))
-    refute_includes File.read(projection), "secret-canary"
+    assert inspected.available?
+    assert_equal({ "message" => "secret-canary" }, JSON.parse(File.read(projection)))
   end
 
   def test_sequence_or_generation_gap_is_unavailable_without_parser_content
@@ -354,7 +360,7 @@ class ProviderHealthReplayTest < Minitest::Test
     assert_equal 2, store.inspect_scope(provider_scope).generation
   end
 
-  def test_restart_fails_closed_when_a_live_intent_scope_advanced_without_its_claim
+  def test_operator_mutation_reconciles_and_retires_a_live_probe_intent
     open_scope(provider_scope, evidence(provider_scope, reset_hint_seconds: 0))
     evaluation = @store.evaluate_route(
       account_id: "codex-primary", model_id: "gpt-5.6-sol", now: @clock
@@ -370,12 +376,16 @@ class ProviderHealthReplayTest < Minitest::Test
     end
     bindings = store.send(:load_intents).fetch(0).fetch(:bindings)
     @attempts[intent.attempt_id] = build_attempt(probe_bindings: bindings)
-    @store.block(
+    blocked = @store.block(
       scope: provider_scope, expected_generation: 1,
       actor: "uid:1000", reason: "advance scope before replay"
     )
 
-    assert_raises(Hive::ProviderHealth::Unavailable) { store.reconcile! }
+    assert blocked.current.blocked?
+    assert_nil blocked.current.probe
+    assert_equal 3, blocked.generation
+    assert_equal [], store.reconcile!
+    assert_empty Dir.glob(File.join(@root, "intents", "*.json"))
   end
 
   private

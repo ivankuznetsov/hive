@@ -26,7 +26,7 @@ module Hive
         entry.reason == "provider_concurrency_saturated"
       end
 
-      def to_h
+      def to_h(now: Time.now.utc)
         {
           "route_id" => route.id,
           "provider_account_id" => route.account,
@@ -40,16 +40,7 @@ module Hive
             "max" => max_concurrency
           },
           "circuits" => Array(health&.inspections).map do |inspection|
-            {
-              "scope" => inspection.scope.to_h,
-              "status" => inspection.status,
-              "generation" => inspection.generation,
-              "journal_epoch" => inspection.journal_epoch,
-              "state" => inspection.circuit&.automatic_state,
-              "manual_block" => inspection.circuit&.blocked?,
-              "eligible_at" => inspection.circuit&.eligible_at,
-              "probe_owner" => inspection.circuit&.probe
-            }
+            Hive::ProviderHealth.circuit_observation(inspection, now: now)
           end
         }.freeze
       end

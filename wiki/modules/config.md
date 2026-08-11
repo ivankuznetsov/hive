@@ -95,6 +95,21 @@ overrides stay distinguishable. This structural pass runs before the legacy
 top-level-reviewers warning. Reachable-profile capability validation remains a
 separate, pure routing-domain step after exact/coarse shadowing is known.
 
+## Explicit provider-routing validation
+
+Provider pools are discovered at the enclosing durable stage boundary,
+including top-level `review.routing`; nested review-role routing remains a
+separate configuration surface and cannot substitute for the route used by the
+durable `6-review` attempt. Route metadata must fit both Hive's closed
+vocabulary and the selected agent profile's hard tool and permission limits.
+Impossible declarations therefore fail during configuration loading instead
+of appearing eligible to the router and failing only after launch.
+
+Named launch bindings are compared by effective identity. Credential-directory
+bindings are expanded and canonicalized, including symlink resolution when the
+target exists, so two symbolic aliases cannot silently share one billing
+context while claiming separate account concurrency and fallback.
+
 ## Project artifact capture provider
 
 Hive checkouts need no declaration: the complete locked Hivebox web layout

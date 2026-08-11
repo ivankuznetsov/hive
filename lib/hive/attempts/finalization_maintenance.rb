@@ -29,6 +29,7 @@ module Hive
           provider_health_observer_factory: lambda do
             health_store = Hive::ProviderHealth::Store.new(
               root: File.join(state_home, "provider-health", "v1"),
+              cooldown_resolver: cooldown_resolver(store),
               attempt_reader: lambda do |attempt_id|
                 attempt = store.fetch(attempt_id)
                 attempt && {
@@ -48,6 +49,20 @@ module Hive
           end,
           **options
         )
+      end
+
+      def self.cooldown_resolver(store)
+        lambda do |evidence|
+          record = store.fetch(evidence.attempt_id)
+          policy = record && store.routing_policies.fetch_snapshot(
+            ownership_generation: record.ownership_generation,
+            subject: record.subject
+          )
+          policy&.account_policy&.dig(evidence.route.account_id, "cooldown_sec", evidence.failure_class) ||
+            Hive::ProviderHealth::Store::DEFAULT_COOLDOWN_SECONDS
+        rescue Hive::Attempts::StoreError
+          Hive::ProviderHealth::Store::DEFAULT_COOLDOWN_SECONDS
+        end
       end
 
       def initialize(store:, condition_observer: nil, delivery_pending: nil,
@@ -99,6 +114,8 @@ module Hive
           pending.acknowledge(record.attempt_id, consumer: "provider_health")
         end
         true
+      rescue Hive::ProviderHealth::Error, Hive::ManagedDirectory::UnsafeError
+        false
       end
 
       def promote(record)

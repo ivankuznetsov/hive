@@ -449,7 +449,7 @@ expected_marker_id:
 recovery: null
 ```
 
-Current producers write `hive-dispatch-request.v4`. Ordinary requests leave
+Current producers write `hive-dispatch-request.v5`. Ordinary requests leave
 `recovery` null. Coordinator requests persist canonical task/marker/generation
 identity, owner/remediation, retry count, terminal outcome/time, and the
 `admitted → cleared → dispatched → terminal` phase. Consumers accept v4 only.

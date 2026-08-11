@@ -697,10 +697,9 @@ class RecoveryMigrationTest < Minitest::Test
       write_json(File.join(root, "records", "legacy.json"), record)
       migration = Hive::Recovery::Migration.new(state_home: state_home)
 
-      error = assert_raises(Hive::Recovery::Migration::Error) do
-        migration.send(:corpus_summary, root)
-      end
-      assert_includes error.message, "only schema v4 can remain"
+      summary = migration.send(:corpus_summary, root)
+      assert_equal 0, summary.fetch("source_valid_count")
+      assert_equal 1, summary.fetch("source_invalid_count")
 
       scan = Struct.new(:records, :invalid_records).new([], [])
       error = assert_raises(Hive::Recovery::Migration::Error) do
@@ -711,6 +710,25 @@ class RecoveryMigrationTest < Minitest::Test
         )
       end
       assert_includes error.message, "source corpus changed"
+    end
+  end
+
+  def test_corpus_summary_counts_leftover_unconvertible_legacy_records_as_invalid
+    with_tmp_dir do |root|
+      records = File.join(root, "records")
+      FileUtils.mkdir_p(records)
+      legacy = legacy_v3(
+        lost_attempt(current_attempt(attempt_id: "a" * 129))
+      )
+      write_json(File.join(records, "leftover.json"), legacy)
+
+      summary = Hive::Recovery::Migration.new(
+        state_home: File.dirname(root)
+      ).send(:corpus_summary, root)
+
+      assert_equal 1, summary.fetch("source_count")
+      assert_equal 0, summary.fetch("source_valid_count")
+      assert_equal 1, summary.fetch("source_invalid_count")
     end
   end
 

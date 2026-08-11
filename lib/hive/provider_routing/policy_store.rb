@@ -39,6 +39,15 @@ module Hive
         bytes && parse(bytes, expected_key: key)
       end
 
+      # Point-read an already frozen explicit policy when the original
+      # configuration candidate is no longer in scope (for example, terminal
+      # provider-health acknowledgement).
+      def fetch_snapshot(ownership_generation:, subject:)
+        key = storage_key(ownership_generation, subject)
+        bytes = storage.read(KIND, key, max_bytes: MAX_SNAPSHOT_BYTES)
+        bytes && parse(bytes, expected_key: key)
+      end
+
       # Atomically installs the first explicit policy for this ownership point
       # and always returns that winner. A changed candidate for the same point
       # never overwrites the original snapshot.

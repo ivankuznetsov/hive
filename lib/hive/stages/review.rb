@@ -754,6 +754,19 @@ module Hive
                           reason: "config_error",
                           message: e.message)
         raise
+      rescue Hive::ProviderRouteFailed => e
+        route = Hive::Attempts::Context.current&.admitted_route
+        attrs = {
+          phase: @current_phase || :pre_flight,
+          reason: "provider_route_failed",
+          message: truncate_marker_message(e.message)
+        }
+        if route
+          attrs[:provider_account_id] = route.fetch("provider_account_id")
+          attrs[:route_id] = route.fetch("route_id")
+        end
+        Hive::Markers.set(task.state_file, :review_error, attrs)
+        raise
       rescue Hive::AgentError => e
         raise unless Hive::ClaudeLauncher.tmux_unavailable_error?(e)
 

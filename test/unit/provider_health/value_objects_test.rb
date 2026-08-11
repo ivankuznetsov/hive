@@ -1,5 +1,6 @@
 require_relative "../../test_helper"
-require "hive/provider_health/reconciler"
+require "hive/provider_health/store"
+require "hive/provider_routing"
 
 class ProviderHealthValueObjectsTest < Minitest::Test
   def test_scope_and_route_identity_reject_invalid_composition
@@ -94,17 +95,16 @@ class ProviderHealthValueObjectsTest < Minitest::Test
     at = Time.utc(2026, 8, 11, 2)
     assert_equal %({"at":"#{at.iso8601(6)}","kind":"probe"}),
                  Hive::ProviderHealth.canonical_json(at: at, kind: :probe)
+    assert_equal Hive::ProviderHealth.digest("raw-bytes"),
+                 Hive::ProviderRouting.digest("raw-bytes")
   end
 
-  def test_default_factory_and_reconciler_use_the_typed_store
+  def test_default_factory_uses_the_typed_store
     Dir.mktmpdir("provider-health-values") do |root|
       store = Hive::ProviderHealth.open(root: File.join(root, "health"))
 
       assert_instance_of Hive::ProviderHealth::Store, store
-      assert_equal [], Hive::ProviderHealth::Reconciler.new(store: store).call
-      assert_raises(Hive::ProviderHealth::InvalidMutation) do
-        Hive::ProviderHealth::Reconciler.new(store: Object.new)
-      end
+      assert_equal [], store.reconcile!
     end
   end
 

@@ -3,10 +3,11 @@
 ## Choose the status surface
 
 - Use `hive status` for a concise human snapshot.
-- Use `hive status --operational --json` for agent decisions. It emits `hive-operational-status.v3`.
+- Use `hive status --operational --json` for agent decisions. It emits `hive-operational-status.v4`.
 - Use `hive status --json` only when a consumer needs the complete `hive-status.v7` task graph.
 - Use `hive status --full` for the detailed human table.
 - Use `hive daemon status --json` for daemon process health. Do not substitute daemon health for task or scheduler truth.
+- Use `hive circuits inspect --json` for the shared provider-account/model health, capacity, and routing-decision projection. Add `--provider ACCOUNT` or `--model MODEL` to keep accounts and decisions in the same scope.
 
 Operational status is a projection over one full task graph. A current daemon observation may add scheduler ownership, capacity, queue, provider-hold, cooldown, and recovery facts. Only a complete, unexpired observation from the live daemon generation is current. Missing, stale, invalid, or mismatched scheduler evidence lowers completeness and must not become a confident blocker claim.
 

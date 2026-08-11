@@ -3,7 +3,7 @@ title: Hive::ProviderHealth
 type: module
 source: lib/hive/provider_health.rb, lib/hive/provider_health/*.rb, schemas/hive-provider-health*.json
 created: 2026-08-10
-updated: 2026-08-10
+updated: 2026-08-11
 tags: [provider-accounts, models, circuits, journals, probes, audit]
 ---
 
@@ -11,7 +11,8 @@ tags: [provider-accounts, models, circuits, journals, probes, audit]
 eligibility store for explicitly routed provider accounts and exact models. It
 accepts only typed evidence from allowlisted structured adapter channels,
 serializes scoped generation-CAS mutations under one health lock, and rebuilds
-`current.json` from authoritative per-scope journals. It never schedules a
+`current.json` from authoritative per-scope journals only on mutation paths.
+Read-only inspection samples journals without repair or projection writes. It never schedules a
 retry, charges a budget, creates a successor, dispatches work, or owns a task
 marker.
 
@@ -66,9 +67,11 @@ Every authoritative event embeds the unhashed scope, journal epoch, sequence,
 idempotency key, expected/previous/resulting generation, and a recursively
 closed sanitized payload. Operator block, unblock, and reset events embed the
 audit receipt in the same journal write; audit is not a best-effort second
-append. `current.json` is disposable and repaired from replay.
+append. `current.json` is disposable and repaired from replay by mutation paths.
 
-Only a malformed, unterminated final suffix is trimmed automatically. An
+Only a malformed, unterminated final suffix encountered by a mutation is
+trimmed automatically. Inspection and route evaluation never trim a journal or
+publish a projection. An
 interior parse failure, schema-invalid event, sequence or generation gap,
 duplicate event identity, or impossible transition returns the scoped
 `health_state_unavailable` blocker without parser content. Inspection exposes
@@ -95,6 +98,12 @@ Restart reconciliation consults the durable attempt reader: it finalizes
 missing claims for the exact live attempt, rolls back an intent with no
 admitted attempt, or conservatively reopens claims for terminal/lost/fenced
 ownership. There is no probe timer or second lease store.
+
+Operator block, unblock, and reset first reconcile an unresolved intent at the
+operator's observed generation, then apply the operator transition to the
+current generation and retire any probe on the target scope. An already
+advanced live-intent scope is treated as a fenced rollback rather than making
+the whole health store unavailable.
 
 `Store#with_route_admission` is the admission-side CAS seam. It replays and
 checks every enclosing scope against the router's immutable observation while
@@ -129,10 +138,15 @@ explicit `--yes`, a bounded validated reason, trusted local actor identity, and
 either the fresh healthy generation or the complete scoped corruption token.
 The mutation and typed audit receipt are one journal operation.
 
-Unblock removes only the manual block. Ordinary reset clears automatic health
+Unblock removes the manual block and any probe ownership fenced by the operator
+generation change. Ordinary reset clears automatic health
 and stale probe state while preserving the manual block. Corrupt reset
 quarantines exact bytes into a new epoch and likewise preserves the last
 verified block. All accepted actions advance the target generation; stale
 inputs do nothing. None of these actions touches attempts, markers, recovery
 receipts, retry counts, deadlines, successors, or dispatch. See
 [[commands/circuits]].
+
+No-hint evidence uses the frozen account policy's failure-class cooldown when
+terminal finalization opens the circuit; missing or unavailable frozen policy
+falls back to the conservative store default.

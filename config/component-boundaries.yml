@@ -28,6 +28,7 @@ components:
         - Hive::ProviderHealth::Store
       errors:
         - Hive::ProviderHealth::Error
+        - Hive::ProviderHealth::InvalidScope
         - Hive::ProviderHealth::InvalidEvidence
         - Hive::ProviderHealth::InvalidMutation
         - Hive::ProviderHealth::StaleGeneration
@@ -39,7 +40,6 @@ components:
       - lib/hive/provider_health/circuit.rb
       - lib/hive/provider_health/evidence.rb
       - lib/hive/provider_health/event.rb
-      - lib/hive/provider_health/reconciler.rb
       - lib/hive/provider_health/store.rb
       - schemas/hive-provider-health.v1.json
       - schemas/hive-provider-health-event.v1.json
@@ -60,8 +60,10 @@ components:
     allowed_hive_dependencies:
       - hive
       - hive/attempts/output_reference
+      - hive/canonical_json
       - hive/managed_directory
       - hive/paths
+      - hive/secret_patterns
     internal_collaborators:
       - Hive::Attempts::OutputReference
       - Hive::ManagedDirectory
@@ -71,6 +73,7 @@ components:
       - lib/hive.rb
       - lib/hive/paths.rb
       - lib/hive/attempts/dispatcher.rb
+      - lib/hive/attempts/evidence_channel.rb
       - lib/hive/attempts/finalization_maintenance.rb
       - lib/hive/commands/circuits.rb
       - lib/hive/provider_routing/operational_projection.rb
@@ -135,7 +138,9 @@ components:
     allowed_hive_dependencies:
       - hive
       - hive/agent_profiles
+      - hive/agent_profiles/launch_bindings
       - hive/attempts/point_storage
+      - hive/canonical_json
       - hive/implementation_identity
       - hive/model_routing
     internal_collaborators:
@@ -146,9 +151,12 @@ components:
       - lib/hive/config.rb
       - lib/hive/attempts/configured_dispatcher.rb
       - lib/hive/attempts/dispatcher.rb
+      - lib/hive/attempts/decision_index.rb
       - lib/hive/attempts/entrypoint.rb
       - lib/hive/attempts/store.rb
       - lib/hive/commands/circuits.rb
+      - lib/hive/daemon/dispatch_request_queue.rb
+      - lib/hive/daemon/recovery_coordinator.rb
       - lib/hive/implementation_identity/resolver.rb
       - lib/hive/provider_routing/operational_projection.rb
     mutation_authority: "None; configuration normalization and decisions are pure immutable values."
@@ -537,6 +545,12 @@ components:
       - hive/managed_directory
       - hive/markers
       - hive/paths
+      - hive/provider_health
+      - hive/provider_health/attempt_observer
+      - hive/provider_health/evidence
+      - hive/provider_health/store
+      - hive/provider_routing
+      - hive/provider_routing/decision
       - hive/provider_routing/policy_store
       - hive/stringify_keys
       - hive/task

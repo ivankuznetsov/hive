@@ -1,7 +1,6 @@
-require "digest"
-require "json"
 require "time"
 require "hive"
+require "hive/canonical_json"
 
 module Hive
   # Host-global provider-account and exact-model health. The domain owns only
@@ -62,6 +61,9 @@ module Hive
     MAX_ACTOR_BYTES = 128
     MAX_RESET_HINT_SECONDS = 7 * 24 * 60 * 60
     SHA256_PATTERN = /\A[0-9a-f]{64}\z/
+    CIRCUIT_OBSERVATION_KEYS = %w[
+      eligible_at generation journal_epoch manual_block probe_owner scope state status
+    ].freeze
 
     Scope = Data.define(:kind, :account_id, :model_id) do
       def self.provider_account(account_id:)
@@ -360,7 +362,6 @@ module Hive
     autoload :Circuit, File.expand_path("provider_health/circuit.rb", __dir__)
     autoload :Event, File.expand_path("provider_health/event.rb", __dir__)
     autoload :Evidence, File.expand_path("provider_health/evidence.rb", __dir__)
-    autoload :Reconciler, File.expand_path("provider_health/reconciler.rb", __dir__)
     autoload :Store, File.expand_path("provider_health/store.rb", __dir__)
 
     module_function
@@ -405,11 +406,28 @@ module Hive
     end
 
     def canonical_json(value)
-      JSON.generate(canonical_value(value))
+      Hive::CanonicalJSON.generate(value)
     end
 
     def digest(value)
-      Digest::SHA256.hexdigest(value.is_a?(String) ? value : canonical_json(value))
+      Hive::CanonicalJSON.digest(value)
+    end
+
+    def circuit_observation(inspection, now: Time.now.utc)
+      unless inspection.is_a?(Inspection)
+        raise InvalidMutation, "circuit observation requires a provider-health inspection"
+      end
+      circuit = inspection.circuit
+      {
+        "scope" => inspection.scope.to_h,
+        "status" => inspection.status,
+        "generation" => inspection.generation,
+        "journal_epoch" => inspection.journal_epoch,
+        "state" => circuit&.effective_state(now: now) || "health_state_unavailable",
+        "manual_block" => circuit&.blocked?,
+        "eligible_at" => circuit&.eligible_at,
+        "probe_owner" => circuit&.probe
+      }.freeze
     end
 
     def deep_freeze(value)
@@ -453,24 +471,5 @@ module Hive
         **options
       )
     end
-
-    def canonical_value(value)
-      case value
-      when Hash
-        value.keys.map(&:to_s).sort.to_h do |key|
-          original = value.key?(key) ? key : value.keys.find { |candidate| candidate.to_s == key }
-          [ key, canonical_value(value.fetch(original)) ]
-        end
-      when Array
-        value.map { |child| canonical_value(child) }
-      when Symbol
-        value.to_s
-      when Time
-        value.utc.iso8601(6)
-      else
-        value
-      end
-    end
-    private_class_method :canonical_value
   end
 end

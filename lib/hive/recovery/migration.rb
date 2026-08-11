@@ -528,10 +528,8 @@ module Hive
               ensure_supported_attempt_object!(data, path: path)
               unless data["schema"] == Hive::Attempts::Record::SCHEMA &&
                      data["schema_version"] == CURRENT_ATTEMPT_VERSION
-                raise Error,
-                      "#{path} has unsupported attempt schema " \
-                      "#{data['schema'].inspect}/#{data['schema_version'].inspect}; " \
-                      "only schema v4 can remain in attempts/v4 after conversion"
+                invalid += 1
+                next
               end
               Hive::Attempts::Record.new(data)
               valid += 1

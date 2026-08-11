@@ -46,8 +46,10 @@ module Hive
       issues.concat(scheduler.fetch("issues"))
       attempt_storage = attempt_storage_payload
       issues.concat(attempt_storage_issues(attempt_storage))
+      @routing_issues = []
       tasks = active.map { |project, row| project_row(project, row, scheduler) }
       issues.concat(@scheduler_join_issues)
+      issues.concat(@routing_issues)
       completeness = combined_completeness(
         task_source_status,
         scheduler.fetch("status"),
@@ -386,7 +388,11 @@ module Hive
         "reason" => reasons.first.fetch("message"),
         "reasons" => reasons,
         "provider" => provider_payload(row),
-        "routing" => routing_payload(scheduler_disposition, row),
+        "routing" => routing_payload(
+          scheduler_disposition,
+          row,
+          project_name: project.fetch("name")
+        ),
         "retry" => retry_payload(scheduler_disposition),
         "recovery" => recovery_payload(row, scheduler_disposition, scheduler_freshness),
         "closure" => closure_payload(project, row),
@@ -592,20 +598,23 @@ module Hive
       }
     end
 
-    def routing_payload(disposition, _row)
+    def routing_payload(disposition, row, project_name:)
       raw = disposition["routing"] if disposition.is_a?(Hash)
-      return nil unless raw.is_a?(Hash)
-      return nil unless routing_value_safe?(raw)
+      return nil if raw.nil? || (raw.respond_to?(:empty?) && raw.empty?)
+      return malformed_routing_payload(row, project_name) unless raw.is_a?(Hash)
+      return malformed_routing_payload(row, project_name) unless routing_value_safe?(raw)
 
       keys = %w[
         candidates circuit_generations decided_at decision_id exclusions next_action_owner
         policy policy_digest probe_requirements reason selected_route status task_generation
       ]
-      return nil unless raw.keys.sort == keys.sort
+      return malformed_routing_payload(row, project_name) unless raw.keys.sort == keys.sort
       core = %w[
         decision_id decided_at task_generation policy_digest status reason next_action_owner
       ]
-      return nil unless core.all? { |key| !raw[key].to_s.empty? }
+      return malformed_routing_payload(row, project_name) unless core.all? do |key|
+        !raw[key].to_s.empty?
+      end
 
       {
         "decision_id" => raw.fetch("decision_id"),
@@ -623,6 +632,18 @@ module Hive
         "probe_requirements" => Array(raw["probe_requirements"])
       }
     rescue KeyError
+      malformed_routing_payload(row, project_name)
+    end
+
+    def malformed_routing_payload(row, project_name)
+      @routing_issues << issue(
+        code: "routing_projection_invalid",
+        source: "scheduler",
+        project: project_name,
+        task: row["slug"],
+        message: "routing explainability data was present but failed validation",
+        remediation: "request a fresh status after the next daemon reconciliation tick"
+      )
       nil
     end
 

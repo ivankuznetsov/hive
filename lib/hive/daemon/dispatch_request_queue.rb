@@ -8,6 +8,7 @@ require "hive/atomic_file"
 require "hive/paths"
 require "hive/attempts/output_reference"
 require "hive/daemon/queue_directory"
+require "hive/provider_health"
 require "hive/provider_routing"
 require "hive/recovery"
 
@@ -70,9 +71,7 @@ module Hive
         adapter capacity circuits effort eligible exclusions model provider_account_id route_id
       ].freeze
       ADMISSION_EXCLUSION_KEYS = %w[detail observation reason route_id scope].freeze
-      ADMISSION_CIRCUIT_KEYS = %w[
-        eligible_at generation journal_epoch manual_block probe_owner scope state status
-      ].freeze
+      ADMISSION_CIRCUIT_KEYS = Hive::ProviderHealth::CIRCUIT_OBSERVATION_KEYS
       ADMISSION_PROBE_KEYS = %w[
         attempt_id claim_generation journal_epoch observed_generation ownership_fence scope
         task_generation
@@ -81,7 +80,7 @@ module Hive
         capacity_saturated health_state_unavailable no_eligible_provider_route
       ].freeze
       ADMISSION_EXCLUSIONS = %w[
-        hard_pin_mismatch requirements_incompatible manual_block circuit_open
+        hard_pin_mismatch requirements_incompatible manual_block
         circuit_cooldown half_open_probe_owned provider_concurrency_saturated
         health_state_unavailable
       ].freeze
@@ -1190,7 +1189,9 @@ module Hive
             raise ArgumentError, "admission circuit observation is invalid"
           end
           validate_scope!(circuit["scope"])
-          unless circuit["state"].nil? || %w[closed open].include?(circuit["state"])
+          unless %w[
+            closed open half_open manual_block probe_owned health_state_unavailable
+          ].include?(circuit["state"])
             raise ArgumentError, "admission circuit state is invalid"
           end
           unless circuit["manual_block"].nil? || [ true, false ].include?(circuit["manual_block"])

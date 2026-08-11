@@ -1,6 +1,5 @@
-require "digest"
-require "json"
 require "hive"
+require "hive/canonical_json"
 
 module Hive
   # Pure configuration and value-object boundary for opt-in provider-account
@@ -42,6 +41,24 @@ module Hive
       "quality" => "standard",
       "tools" => [].freeze,
       "permissions" => [].freeze
+    }.freeze
+    PROFILE_CAPABILITY_LIMITS = {
+      "claude" => {
+        "tools" => TOOL_CAPABILITIES,
+        "permissions" => PERMISSION_CAPABILITIES
+      },
+      "codex" => {
+        "tools" => %w[filesystem mcp shell web].freeze,
+        "permissions" => PERMISSION_CAPABILITIES
+      },
+      "pi" => {
+        "tools" => %w[filesystem shell web].freeze,
+        "permissions" => PERMISSION_CAPABILITIES
+      },
+      "grok" => {
+        "tools" => %w[filesystem shell web].freeze,
+        "permissions" => PERMISSION_CAPABILITIES
+      }
     }.freeze
 
     Account = Data.define(
@@ -87,20 +104,19 @@ module Hive
       end
     end
 
-    Pin = Data.define(:provider, :model) do
-      def initialize(provider:, model: nil)
+    Pin = Data.define(:account, :model) do
+      def initialize(account: nil, provider: nil, model: nil)
+        account ||= provider
         super(
-          provider: ProviderRouting.frozen_string(provider),
+          account: ProviderRouting.frozen_string(account),
           model: model && ProviderRouting.frozen_string(model)
         )
         freeze
       end
 
-      alias account provider
+      alias provider account
 
-      def to_h
-        { "provider" => provider, "model" => model }
-      end
+      def to_h = { "provider" => account, "model" => model }
     end
 
     autoload :Configuration, File.expand_path("provider_routing/configuration.rb", __dir__)
@@ -144,29 +160,18 @@ module Hive
       end
     end
 
-    def canonical_json(value)
-      JSON.generate(canonical_value(value))
-    end
-
-    def canonical_value(value)
-      case value
-      when Hash
-        value.keys.map(&:to_s).sort.to_h do |key|
-          original_key = value.key?(key) ? key : value.keys.find { |candidate| candidate.to_s == key }
-          [ key, canonical_value(value.fetch(original_key)) ]
-        end
-      when Array
-        value.map { |child| canonical_value(child) }
-      when Symbol
-        value.to_s
-      else
-        value
+    def profile_capability_limits(name)
+      PROFILE_CAPABILITY_LIMITS.fetch(name.to_s) do
+        { "tools" => [].freeze, "permissions" => [].freeze }.freeze
       end
     end
-    private_class_method :canonical_value
+
+    def canonical_json(value)
+      Hive::CanonicalJSON.generate(value)
+    end
 
     def digest(value)
-      Digest::SHA256.hexdigest(canonical_json(value)).freeze
+      Hive::CanonicalJSON.digest(value).freeze
     end
   end
 end

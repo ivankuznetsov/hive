@@ -180,7 +180,9 @@ module Hive
             "requirements" => request.policy.requirements.to_h
           },
           "selected_route" => route&.id,
-          "candidates" => candidates.map { |candidate| candidate.respond_to?(:to_h) ? candidate.to_h : candidate },
+          "candidates" => candidates.map do |candidate|
+            candidate.respond_to?(:to_h) ? candidate.to_h(now: Time.iso8601(decided_at)) : candidate
+          end,
           "exclusions" => exclusions.map(&:to_h),
           "circuit_generations" => circuit_generations,
           "probe_requirements" => probe_requirements.map(&:to_h)

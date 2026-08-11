@@ -408,6 +408,14 @@
       "maxLength": 4096,
       "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
     },
+    "RoutingExclusionReason": {
+      "type": "string",
+      "enum": [
+        "hard_pin_mismatch", "requirements_incompatible", "manual_block",
+        "circuit_cooldown", "half_open_probe_owned",
+        "provider_concurrency_saturated", "health_state_unavailable"
+      ]
+    },
     "RoutingScope": {
       "type": "object",
       "additionalProperties": false,
@@ -468,7 +476,7 @@
       "required": ["route_id", "reason", "detail", "scope", "observation"],
       "properties": {
         "route_id": { "$ref": "#/$defs/RoutingIdentifier" },
-        "reason": { "$ref": "#/$defs/RoutingIdentifier" },
+        "reason": { "$ref": "#/$defs/RoutingExclusionReason" },
         "detail": { "type": ["string", "null"] },
         "scope": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/RoutingScope" }] },
         "observation": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/RoutingObservation" }] }
@@ -483,7 +491,7 @@
         "status": { "type": "string", "enum": ["available", "unavailable"] },
         "generation": { "type": "integer", "minimum": 0 },
         "journal_epoch": { "type": "integer", "minimum": 0 },
-        "state": { "type": ["string", "null"], "enum": ["closed", "open", null] },
+        "state": { "type": "string", "enum": ["closed", "open", "half_open", "manual_block", "probe_owned", "health_state_unavailable"] },
         "manual_block": { "type": ["boolean", "null"] },
         "eligible_at": { "type": ["string", "null"], "format": "date-time" },
         "probe_owner": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/RoutingProbe" }] }

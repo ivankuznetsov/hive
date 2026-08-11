@@ -396,10 +396,25 @@ class ProviderHealthStoreTest < Minitest::Test
       evidence: evidence(provider_scope), attempt: attempt,
       terminal_receipt: receipt, expected_generation: 0
     )
+    @store.block(
+      scope: provider_scope, expected_generation: 1,
+      actor: "uid:1000", reason: "preserve verified block"
+    )
+    @store.unblock(
+      scope: provider_scope, expected_generation: 2,
+      actor: "uid:1000", reason: "create parseable final record"
+    )
     valid = File.binread(journal_file(provider_scope))
 
     File.binwrite(journal_file(provider_scope), valid.chomp)
-    assert @store.inspect_scope(provider_scope).unavailable?
+    unavailable = @store.inspect_scope(provider_scope)
+    assert unavailable.unavailable?
+    assert_equal 2, unavailable.corruption_token.last_verified_generation
+    repaired = @store.reset(
+      scope: provider_scope, corruption_token: unavailable.corruption_token,
+      actor: "uid:1000", reason: "repair parseable torn record"
+    )
+    assert repaired.current.blocked?
 
     File.binwrite(journal_file(provider_scope), valid + "{")
     corruption_class = Hive::ProviderHealth::Store.const_get(:JournalCorruption, false)
@@ -409,7 +424,7 @@ class ProviderHealthStoreTest < Minitest::Test
       )
     end
 
-    event = JSON.parse(valid)
+    event = JSON.parse(valid.lines.first)
     event["journal_epoch"] = 1
     File.binwrite(journal_file(provider_scope), "#{JSON.generate(event)}\n")
     assert @store.inspect_scope(provider_scope).unavailable?
@@ -540,6 +555,35 @@ class ProviderHealthStoreTest < Minitest::Test
       )
     end
     assert_equal "health_state_unavailable", error.message
+  end
+
+  def test_writer_rejects_the_event_after_the_reader_limit
+    replay_class = Hive::ProviderHealth::Store.const_get(:Replay, false)
+    existing = Struct.new(:idempotency_key).new("b" * 64)
+    replay = replay_class.new(
+      circuit: Hive::ProviderHealth::Circuit.closed(scope: provider_scope),
+      events: Array.new(Hive::ProviderHealth::Store::MAX_JOURNAL_EVENTS, existing),
+      bytes: "".b,
+      existed: false
+    )
+
+    event = Hive::ProviderHealth::Event.new(
+      event_id: "event-over-limit",
+      sequence: Hive::ProviderHealth::Store::MAX_JOURNAL_EVENTS + 1,
+      scope: provider_scope,
+      journal_epoch: 0,
+      kind: "evidence_rejected",
+      occurred_at: @clock,
+      idempotency_key: "a" * 64,
+      expected_generation: 0,
+      previous_generation: 0,
+      resulting_generation: 0,
+      payload: { "reason" => "stale_generation" }
+    )
+    error = assert_raises(Hive::ProviderHealth::Unavailable) do
+      @store.send(:persist_event, replay, event)
+    end
+    assert_equal "provider-health journal is full", error.message
   end
 
   private

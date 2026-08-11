@@ -181,6 +181,26 @@ class ProviderRoutingAdmissionTest < Minitest::Test
     assert_empty @launcher.launched
   end
 
+  def test_preselection_reconciliation_failure_is_a_typed_no_route_decision
+    failing_health = Object.new
+    failing_health.define_singleton_method(:reconcile!) do
+      raise Hive::ProviderHealth::Unavailable, "health_state_unavailable"
+    end
+    failing_health.define_singleton_method(:evaluate_route) { |**| raise "must not evaluate" }
+    dispatcher = build_dispatcher(health_store: failing_health)
+
+    result = dispatcher.dispatch(
+      **dispatch_attributes(task("health-unavailable", 13)),
+      routing_policy: policy
+    )
+
+    assert_equal :no_route, result.status
+    assert_equal "health_state_unavailable", result.reason
+    assert_equal "operator", result.decision.next_action_owner
+    assert_equal [ "health_state_unavailable" ], result.decision.exclusions.map(&:reason).uniq
+    assert_nil result.attempt
+  end
+
   def test_one_admission_claims_both_half_open_scopes_and_concurrent_work_uses_b
     open_scope(provider_scope("account-a"), failure_class: "account_quota")
     open_scope(model_scope("account-a", "model-a"), failure_class: "model_capacity")

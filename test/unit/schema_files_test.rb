@@ -25,6 +25,8 @@ require "hive/commands/setup_agents"
 require "hive/tui/snapshot"
 require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/dispatch_result_queue"
+require "hive/attempts/record"
+require "hive/provider_health"
 require "hive/modules/migration/patrol_decision_projection"
 require "hive/modules/migration/patrol_evidence"
 require "tmpdir"
@@ -36,6 +38,30 @@ require "tmpdir"
 #   3. Pin the same required-key set the producer code emits, so a producer
 #      change without a schema update fails at test time.
 class SchemaFilesTest < Minitest::Test
+  def test_provider_routing_exclusion_reason_vocabularies_do_not_drift
+    expected = Hive::Daemon::DispatchRequestQueue::ADMISSION_EXCLUSIONS.sort
+    %w[
+      hive-dispatch-request.v5.json
+      hive-attempt.v4.json
+      hive-circuits.v1.json
+      hive-operational-status.v4.json
+    ].each do |name|
+      document = JSON.parse(File.read(File.join(Hive::Schemas.schema_dir, name)))
+      assert_equal expected,
+                   document.dig("$defs", "RoutingExclusionReason", "enum").sort,
+                   name
+    end
+  end
+
+  def test_provider_failure_and_provenance_vocabularies_do_not_drift
+    assert_equal Hive::ProviderHealth::PROVIDER_FAILURE_CLASSES,
+                 Hive::Attempts::Record::PROVIDER_FAILURE_CLASSES
+    assert_equal Hive::ProviderHealth::MODEL_FAILURE_CLASSES,
+                 Hive::Attempts::Record::MODEL_FAILURE_CLASSES
+    assert_equal Hive::ProviderHealth::TRUSTED_PROVENANCE,
+                 Hive::Attempts::Record::TRUSTED_PROVENANCE
+  end
+
   def test_hive_decide_schema_matches_success_payload_contract
     path = Hive::Schemas.schema_path("hive-decide")
     assert File.exist?(path)

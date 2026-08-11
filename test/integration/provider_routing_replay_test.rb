@@ -43,25 +43,31 @@ class ProviderRoutingReplayTest < Minitest::Test
     assert_equal after_failure.to_h, replay.to_h
   end
 
-  def test_ae4_strict_pin_reports_every_candidate_without_crossing_boundary
-    open_scope(
-      model_scope("account-a", "model-a"),
-      failure_class: "model_capacity",
-      attempt_id: "attempt-model-a"
-    )
-    pinned = policy(
-      pin: Hive::ProviderRouting::Pin.new(provider: "account-a", model: "model-a")
-    )
+  def test_ae4_strict_pin_reports_each_required_exclusion_without_crossing_boundary
+    %w[
+      circuit_cooldown manual_block requirements_incompatible
+      half_open_probe_owned provider_concurrency_saturated
+    ].each do |reason|
+      @health = health_store(root_suffix: reason)
+      pinned = pinned_policy_for(reason)
+      decision = decide(
+        policy: pinned,
+        decision_id: "strict-pin-#{reason}",
+        capacity: reason == "provider_concurrency_saturated" ?
+          capacity("account-a" => 1) : capacity
+      )
 
-    decision = decide(policy: pinned, decision_id: "strict-pin")
-
-    refute decision.selected?
-    assert_equal "no_eligible_provider_route", decision.reason
-    assert_equal "retry_authority", decision.next_action_owner
-    assert_equal %w[account-a/model-a account-b/model-b],
-                 decision.candidates.map { |candidate| candidate.route.id }
-    assert_equal %w[circuit_cooldown hard_pin_mismatch],
-                 decision.exclusions.map(&:reason)
+      refute decision.selected?, reason
+      assert_equal "no_eligible_provider_route", decision.reason, reason
+      pinned_candidate = decision.candidates.find { |candidate| candidate.route.account == "account-a" }
+      assert_equal [ reason ], pinned_candidate.exclusions.map(&:reason), reason
+      assert_includes(
+        decision.candidates.find { |candidate| candidate.route.account == "account-b" }
+          .exclusions.map(&:reason),
+        "hard_pin_mismatch",
+        reason
+      )
+    end
   end
 
   def test_ae5_partial_capacity_falls_through_and_total_capacity_is_neutral
@@ -142,10 +148,10 @@ class ProviderRoutingReplayTest < Minitest::Test
 
   private
 
-  def health_store
+  def health_store(root_suffix: nil)
     Hive::ProviderHealth::Store.new(
-      root: File.join(@root, "health"),
-      clock: -> { NOW },
+      root: File.join(@root, [ "health", root_suffix ].compact.join("-")),
+      clock: -> { @clock || NOW },
       attempt_reader: ->(attempt_id) { @attempts[attempt_id] }
     )
   end
@@ -190,6 +196,57 @@ class ProviderRoutingReplayTest < Minitest::Test
         ]
       end
     )
+  end
+
+  def pinned_policy_for(reason)
+    scope = model_scope("account-a", "model-a")
+    case reason
+    when "circuit_cooldown"
+      open_scope(scope, failure_class: "model_capacity", attempt_id: "attempt-cooldown")
+    when "manual_block"
+      @health.block(
+        scope: scope, expected_generation: 0,
+        actor: "uid:1000", reason: "strict pin maintenance"
+      )
+    when "half_open_probe_owned"
+      open_scope(
+        scope, failure_class: "model_capacity", attempt_id: "attempt-half-open"
+      )
+      @clock = NOW + 301
+      evaluation = @health.evaluate_route(
+        account_id: "account-a", model_id: "model-a", now: @clock
+      )
+      intent = Hive::ProviderHealth::ProbeIntent.new(
+        intent_id: "intent-half-open",
+        attempt_id: "attempt-probe",
+        task_generation: "generation-1",
+        ownership_fence: "fence-1",
+        requirements: evaluation.probe_requirements
+      )
+      @health.with_probe_intent(intent: intent) do |bindings|
+        @attempts[intent.attempt_id] = Hive::ProviderHealth::AttemptBinding.new(
+          attempt_id: intent.attempt_id,
+          task_generation: intent.task_generation,
+          ownership_fence: intent.ownership_fence,
+          route: route_identity("account-a"),
+          probe_bindings: bindings
+        )
+      end
+    end
+    requirements = if reason == "requirements_incompatible"
+      Hive::ProviderRouting::Requirements.new(tools: %w[browser])
+    else
+      Hive::ProviderRouting::Requirements.empty
+    end
+    Hive::ProviderRouting::Policy.explicit(
+      stage: "execute",
+      routes: routes,
+      requirements: requirements,
+      pin: Hive::ProviderRouting::Pin.new(account: "account-a", model: "model-a"),
+      account_policy: policy.account_policy
+    )
+  ensure
+    @clock = NOW
   end
 
   def routes

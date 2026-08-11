@@ -79,4 +79,17 @@ class AgentProfilesLaunchBindingsTest < Minitest::Test
       end
     end
   end
+
+  def test_named_claude_binding_clears_both_ambient_api_key_aliases
+    with_tmp_dir do |root|
+      binding = Hive::AgentProfiles::LaunchBindings.resolve(
+        adapter: "claude",
+        binding_id: "team",
+        environment: { "HIVE_PROVIDER_BINDING_CLAUDE_TEAM" => root }
+      )
+
+      assert_nil binding.environment.fetch("ANTHROPIC_API_KEY")
+      assert_nil binding.environment.fetch("CLAUDE_API_KEY")
+    end
+  end
 end

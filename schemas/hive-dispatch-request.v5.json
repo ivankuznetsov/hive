@@ -75,6 +75,14 @@
       "maxLength": 128,
       "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
     },
+    "RoutingExclusionReason": {
+      "type": "string",
+      "enum": [
+        "hard_pin_mismatch", "requirements_incompatible", "manual_block",
+        "circuit_cooldown", "half_open_probe_owned",
+        "provider_concurrency_saturated", "health_state_unavailable"
+      ]
+    },
     "Scope": {
       "type": "object",
       "additionalProperties": false,
@@ -136,14 +144,7 @@
       "required": ["route_id", "reason", "detail", "scope", "observation"],
       "properties": {
         "route_id": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "reason": {
-          "type": "string",
-          "enum": [
-            "hard_pin_mismatch", "requirements_incompatible", "manual_block",
-            "circuit_open", "circuit_cooldown", "half_open_probe_owned",
-            "provider_concurrency_saturated", "health_state_unavailable"
-          ]
-        },
+        "reason": { "$ref": "#/$defs/RoutingExclusionReason" },
         "detail": { "type": ["string", "null"], "maxLength": 240 },
         "scope": {
           "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/Scope" }]
@@ -237,7 +238,7 @@
         "status": { "type": "string", "enum": ["available", "unavailable"] },
         "generation": { "type": "integer", "minimum": 0 },
         "journal_epoch": { "type": "integer", "minimum": 0 },
-        "state": { "type": ["string", "null"], "enum": ["closed", "open", null] },
+        "state": { "type": "string", "enum": ["closed", "open", "half_open", "manual_block", "probe_owned", "health_state_unavailable"] },
         "manual_block": { "type": ["boolean", "null"] },
         "eligible_at": { "type": ["string", "null"], "format": "date-time" },
         "probe_owner": {

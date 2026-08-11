@@ -3,7 +3,7 @@ title: Hive::ProviderRouting policy
 type: module
 source: lib/hive/provider_routing.rb, lib/hive/provider_routing/*.rb
 created: 2026-08-10
-updated: 2026-08-10
+updated: 2026-08-11
 tags: [config, provider-accounts, routing, policy, validation]
 ---
 
@@ -37,7 +37,9 @@ providers:
 `launch_binding` is a bounded symbolic identity resolved by the adapter layer;
 it is never a token, credential path, or environment value. Account IDs are
 normalized. Models are an explicit allowlist. Two accounts using one adapter
-must have distinct launch bindings, and only one can therefore use `default`.
+must resolve to distinct launch-binding identities, including after named
+credential-directory paths are canonicalized, and only one can therefore use
+`default`.
 Cooldown values are bounded and keyed by the closed account-health taxonomy.
 
 The registry is dormant unless a project declares an explicit pool. A malformed
@@ -96,10 +98,13 @@ another recovery owner.
 `Router` evaluates every configured candidate in stable order. It applies the
 hard pin and requirements first, then enclosing provider/model health, then the
 provider-account concurrency observation. A saturated preferred account is
-skipped for a later eligible route. If every statically compatible route is
-saturated, the decision is scheduler-owned `capacity_saturated`; health or
-policy exhaustion is `no_eligible_provider_route`, while unavailable health
-fails closed with an operator owner. Decisions retain ordered candidates,
+skipped for a later eligible route. If every statically compatible unpinned
+route is saturated, the decision is scheduler-owned `capacity_saturated`. A
+strict pin excluded by saturation is instead `no_eligible_provider_route` with
+the exact `provider_concurrency_saturated` exclusion, like every other
+strict-pin exclusion. Health or policy exhaustion is also
+`no_eligible_provider_route`, while unavailable health fails closed with an
+operator owner. Decisions retain ordered candidates,
 typed exclusions, observed/max capacity, both circuit generations, optional
 probe requirements, and a caller-supplied observation identity/time.
 
@@ -138,6 +143,12 @@ routing policy, Attempts, and Provider Health. It joins bounded current
 decision cells, durable live-attempt account counts, and authoritative scoped
 health inspection. It does not call `Router`, select a route, or acquire an
 admission/task-generation lock.
+
+Account and model circuits for one route are sampled under one provider-health
+lock hold, without repairing journals or publishing projections. Provider and
+model filters apply to both account rows and decision rows, so the resulting
+payload is one coherent scoped explanation rather than two differently scoped
+views.
 
 Each decision cell durably retains the project, task generation, strict subject,
 optional admitted attempt ID, and complete sanitized `Decision#to_h`. This

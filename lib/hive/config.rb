@@ -2178,6 +2178,7 @@ module Hive
 
       review = cfg["review"]
       if review.is_a?(Hash)
+        entries << { label: "review", stage: "review", routing: review["routing"] }
         {
           "ci" => "review.ci",
           "triage" => "review.triage",

@@ -1,5 +1,6 @@
 require "hive/provider_health"
 require "hive/attempts/output_reference"
+require "hive/secret_patterns"
 
 module Hive
   module ProviderHealth
@@ -94,7 +95,7 @@ module Hive
         if string.match?(/[\u0000-\u001f\u007f]/) || string.include?("\n") || string.include?("\r")
           raise InvalidMutation, "operator reason must be one line without control characters"
         end
-        if SECRET_PATTERN.match?(string)
+        if SECRET_PATTERN.match?(string) || Hive::SecretPatterns.match?(string)
           raise InvalidMutation, "operator reason resembles credential material"
         end
         string.dup.freeze

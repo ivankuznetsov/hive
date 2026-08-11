@@ -921,7 +921,30 @@ class OperationalStatusTest < Minitest::Test
     )
 
     assert_nil result.dig("tasks", 0, "routing")
+    issue = result.fetch("issues").find { |entry| entry["code"] == "routing_projection_invalid" }
+    refute_nil issue
+    assert_equal "demo", issue.fetch("project")
+    assert_equal "routed", issue.fetch("task")
     refute_includes JSON.generate(result), "secret-canary"
+  end
+
+  def test_non_object_routing_metadata_is_reported_as_degraded
+    source = task(action: "ready_to_run", slug: "routed", stage: "4-execute")
+    scheduler = scheduler_snapshot_for(
+      source, decision: "dispatched", reason: "child dispatch was accepted"
+    )
+    scheduler.dig("tasks", 0, "disposition")["routing"] = "version-skewed"
+
+    result = project(
+      status_payload(source),
+      project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: scheduler
+    )
+
+    assert_nil result.dig("tasks", 0, "routing")
+    issue = result.fetch("issues").find { |entry| entry["code"] == "routing_projection_invalid" }
+    refute_nil issue
+    assert_equal "routed", issue.fetch("task")
   end
 
   def test_routing_projection_fails_closed_on_missing_fetch_and_unknown_values
@@ -932,8 +955,14 @@ class OperationalStatusTest < Minitest::Test
       super(key, *defaults)
     end
     status = Hive::OperationalStatus.new(status_payload: status_payload)
+    status.instance_variable_set(:@routing_issues, [])
 
-    assert_nil status.send(:routing_payload, { "routing" => raw }, nil)
+    assert_nil status.send(
+      :routing_payload,
+      { "routing" => raw },
+      { "slug" => "routed" },
+      project_name: "demo"
+    )
     refute status.send(:routing_value_safe?, Object.new)
   end
 

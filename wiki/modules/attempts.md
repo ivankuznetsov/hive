@@ -3,7 +3,7 @@ title: Durable task attempts
 type: module
 source: lib/hive/attempts/
 created: 2026-07-16
-updated: 2026-08-10
+updated: 2026-08-11
 tags: [attempts, ownership, leases, daemon, recovery, bounded-storage]
 ---
 
@@ -277,6 +277,15 @@ reports the authenticated wrapper in its durable `launching` state. A
 false/malformed handoff or launcher exception marks the unclaimed reservation
 `lost` and returns a retryable deferral; if the wrapper won the claim race, the
 dispatcher re-reads and adopts it instead of creating an overlapping owner.
+
+An explicit-policy initial admission that returns no route has no attempt to
+attach. The foreground adapter therefore hands that markerless result directly
+to `RecoveryCoordinator`, which creates the same single pending request and
+retry charge used by daemon recovery. Interactive callers receive a concise
+deferred error containing the recovery receipt; bot delivery leaves the queued
+request pending instead of dereferencing a nonexistent attempt or deleting its
+only retry authority.
+
 Capacity scan and reservation creation take the shared admission lock before
 the generation lock. That fixed order makes the limit decision atomic across
 different tasks and projects, rather than only among duplicates of one

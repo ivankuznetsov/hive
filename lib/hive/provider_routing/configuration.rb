@@ -1,6 +1,7 @@
 require "hive/provider_routing"
 require "hive/provider_routing/policy"
 require "hive/agent_profiles"
+require "hive/agent_profiles/launch_bindings"
 require "hive/model_routing"
 
 module Hive
@@ -99,7 +100,9 @@ module Hive
             )
           end
 
-          bindings = normalized.values.group_by { |account| [ account.adapter, account.launch_binding ] }
+          bindings = normalized.values.group_by do |account|
+            [ account.adapter, effective_binding_identity(account) ]
+          end
           duplicate = bindings.find { |_identity, values| values.length > 1 }
           if duplicate
             identity, values = duplicate
@@ -112,6 +115,19 @@ module Hive
         end
 
         private
+
+        def effective_binding_identity(account)
+          return "default" if account.launch_binding == "default"
+
+          binding = Hive::AgentProfiles::LaunchBindings.resolve(
+            adapter: account.adapter,
+            binding_id: account.launch_binding
+          )
+          key = Hive::AgentProfiles::LaunchBindings::ENVIRONMENT_KEYS.fetch(account.adapter)
+          File.realpath(binding.environment.fetch(key))
+        rescue Hive::ConfigError, Errno::ENOENT, Errno::EACCES
+          account.launch_binding
+        end
 
         def build_explicit(cfg:, stage:, routing:, accounts:, source:)
           models = cfg.fetch("models", Hive::ModelRouting::EMPTY_MODELS)
@@ -210,6 +226,7 @@ module Hive
           end
 
           capabilities = normalize_capabilities(entry["capabilities"], "#{path}.capabilities")
+          validate_profile_capabilities!(profile, capabilities, "#{path}.capabilities")
           Route.new(
             id: route_id,
             account: account_id,
@@ -248,6 +265,18 @@ module Hive
               "#{path}.permissions"
             )
           }.freeze
+        end
+
+        def validate_profile_capabilities!(profile, capabilities, path)
+          limits = ProviderRouting.profile_capability_limits(profile.name)
+          %w[tools permissions].each do |kind|
+            unsupported = capabilities.fetch(kind) - limits.fetch(kind)
+            next if unsupported.empty?
+
+            raise ConfigError,
+                  "#{path}.#{kind} #{unsupported.inspect} cannot be enforced by " \
+                  "agent profile #{profile.name.inspect}"
+          end
         end
 
         def normalize_requirements(raw, path)

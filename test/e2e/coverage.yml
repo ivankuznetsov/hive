@@ -85,7 +85,7 @@ coverage:
     code: [test/e2e/scenarios/incident_plan_only_dependency_gate.yml]
   - id: recovery.provider_limit
     title: Provider retry ownership
-    description: Provider retry cooldown and ownership prevent repeated daemon ticks from creating a retry storm.
+    description: Provider retry ownership plus the AE2-AE8 durable incident matrix prevent routing, probe, capacity, operator, corruption, and legacy regressions.
     maturity: required
     profiles: [release]
     constraints: { platforms: [], providers: [codex] }

@@ -18,6 +18,18 @@ class ProviderRoutingConfigurationTest < Minitest::Test
     assert_nil configuration.digest
   end
 
+  def test_enclosing_review_stage_discovers_its_own_routing_pool
+    routing = { "pool" => [ route("codex-primary", model: "gpt-5.6-sol") ] }
+    cfg = Hive::Config.merge_defaults("review" => { "routing" => routing })
+
+    entry = Hive::Config.send(:provider_routing_entries, cfg).find do |candidate|
+      candidate.fetch(:stage) == "review"
+    end
+
+    refute_nil entry
+    assert_equal routing, entry.fetch(:routing)
+  end
+
   def test_explicit_pool_resolves_model_routing_per_candidate_without_changing_account
     cfg = routed_config(
       "models" => {
@@ -158,6 +170,40 @@ class ProviderRoutingConfigurationTest < Minitest::Test
 
     assert_equal %w[default team-b], accounts.values.map(&:launch_binding)
     assert accounts.frozen?
+  end
+
+  def test_effective_launch_binding_aliases_are_rejected
+    with_tmp_dir do |root|
+      real = File.join(root, "real")
+      alias_path = File.join(root, "alias")
+      FileUtils.mkdir_p(real)
+      File.symlink(real, alias_path)
+      with_env(
+        "HIVE_PROVIDER_BINDING_CODEX_TEAM_A" => real,
+        "HIVE_PROVIDER_BINDING_CODEX_TEAM_B" => alias_path
+      ) do
+        error = assert_raises(Hive::ConfigError) do
+          Hive::ProviderRouting::Configuration.normalize_accounts(
+            {
+              "codex-a" => account("codex", binding: "team-a", models: %w[gpt-5.6-sol]),
+              "codex-b" => account("codex", binding: "team-b", models: %w[gpt-5.6-terra])
+            },
+            source: "global providers"
+          )
+        end
+        assert_match(/indistinguishable launch binding/, error.message)
+      end
+    end
+  end
+
+  def test_route_capabilities_cannot_exceed_profile_hard_limits
+    error = assert_raises(Hive::ConfigError) do
+      configuration_for(
+        pool: [ route("codex-primary", model: "gpt-5.6-sol", tools: %w[browser]) ]
+      )
+    end
+
+    assert_match(/cannot be enforced by agent profile :codex/, error.message)
   end
 
   def test_route_identity_is_bounded_before_policy_persistence

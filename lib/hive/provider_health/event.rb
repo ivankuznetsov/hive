@@ -97,9 +97,9 @@ module Hive
             probe: nil
           )
         when "manual_blocked"
-          changes[:manual_block] = payload.fetch("manual_block")
+          changes.merge!(manual_block: payload.fetch("manual_block"), probe: nil)
         when "manual_unblocked"
-          changes[:manual_block] = nil
+          changes.merge!(manual_block: nil, probe: nil)
         when "reset"
           changes.merge!(
             automatic_state: "closed",
